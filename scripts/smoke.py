@@ -102,6 +102,14 @@ def main() -> None:
     assert float(filled["leaves_qty"]) == 7.0, filled
     print("PASS: partial fill round-tripped through the live WS path")
 
+    # Market-data replay: subscribe to a small pair and read the first 2 trades.
+    ticks = ws_roundtrip({"type": "Subscribe", "symbols": ["KEUR"]}, expect=2)
+    for t in ticks:
+        print("tick:    ", t)
+        assert t["type"] == "Trade", t
+        assert t["symbol"] == "KEUR", t
+    print("PASS: historical trades replayed over the live WS path")
+
 
 if __name__ == "__main__":
     main()

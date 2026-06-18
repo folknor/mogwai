@@ -3,11 +3,13 @@
 //! Hosts the native JSON-over-WS gateway (`/ws`) that the nautilus-piners adapter
 //! connects to, plus an out-of-band control plane (`/control/divergence`) for
 //! arming deterministic divergences from tests. The exchange logic lives in
-//! [`mogwai_engine`]; this binary owns sockets and the clock.
+//! [`mogwai_engine`]; market data is replayed from the Kraken dump by
+//! [`mogwai_data`]; this binary owns sockets, the clock and replay pacing.
 
 use std::{
+    path::PathBuf,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -20,13 +22,39 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use futures_util::{SinkExt, StreamExt};
+use mogwai_data::{KrakenCsvSource, MergeSource, TickEvent, TickSource};
 use mogwai_engine::Engine;
-use mogwai_protocol::{control::Divergence, ClientMessage};
-use tokio::sync::Mutex;
+use mogwai_protocol::{control::Divergence, ClientMessage, ServerMessage};
+use tokio::sync::{mpsc, Mutex};
+
+/// Replay/runtime configuration, sourced from the environment at startup.
+#[derive(Clone)]
+struct Config {
+    /// Directory of `<SYMBOL>.csv` Kraken pair files.
+    data_dir: PathBuf,
+    /// Replay speed multiplier. `0.0` ⇒ unthrottled (stream as fast as the client
+    /// drains); otherwise inter-tick wall delay = (tick gap) / speed.
+    speed: f64,
+}
+
+impl Config {
+    fn from_env() -> Self {
+        let data_dir = std::env::var("MOGWAI_DATA_DIR")
+            .unwrap_or_else(|_| "/media/folk/Banan/Kraken_Trading_History".into())
+            .into();
+        let speed = std::env::var("MOGWAI_REPLAY_SPEED")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0);
+        Self { data_dir, speed }
+    }
+}
 
 #[derive(Clone)]
 struct AppState {
     engine: Arc<Mutex<Engine>>,
+    cfg: Config,
 }
 
 /// Nanoseconds since the Unix epoch — the server's clock, fed into the engine.
@@ -46,8 +74,12 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    let cfg = Config::from_env();
+    tracing::info!(data_dir = %cfg.data_dir.display(), speed = cfg.speed, "config");
+
     let state = AppState {
         engine: Arc::new(Mutex::new(Engine::new())),
+        cfg,
     };
 
     let app = Router::new()
@@ -77,10 +109,26 @@ async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
-/// One client session: decode [`ClientMessage`]s, feed the engine, stream back
-/// [`ServerMessage`]s. Market-data fan-out from the replay engine wires in next.
-async fn handle_socket(mut socket: WebSocket, state: AppState) {
-    while let Some(Ok(msg)) = socket.recv().await {
+/// One client session.
+///
+/// The socket is split so order events and replayed market data can be written
+/// concurrently: every outbound [`ServerMessage`] funnels through one mpsc
+/// channel drained by a single writer task. Order commands are processed inline
+/// against the engine; `Subscribe` spawns a replay feeding the same channel.
+async fn handle_socket(socket: WebSocket, state: AppState) {
+    let (mut sink, mut stream) = socket.split();
+    let (tx, mut rx) = mpsc::channel::<ServerMessage>(1024);
+
+    let writer = tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            let payload = serde_json::to_string(&msg).expect("serialize ServerMessage");
+            if sink.send(Message::Text(payload)).await.is_err() {
+                break; // client gone
+            }
+        }
+    });
+
+    while let Some(Ok(msg)) = stream.next().await {
         let Message::Text(text) = msg else { continue };
 
         let client_msg: ClientMessage = match serde_json::from_str(&text) {
@@ -91,12 +139,67 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             }
         };
 
-        let events = state.engine.lock().await.process(client_msg, now_ns());
-        for ev in events {
-            let payload = serde_json::to_string(&ev).expect("serialize ServerMessage");
-            if socket.send(Message::Text(payload)).await.is_err() {
-                return; // client gone
+        match client_msg {
+            ClientMessage::Subscribe { symbols } => {
+                spawn_replay(symbols, state.cfg.clone(), tx.clone());
+            }
+            order_cmd => {
+                let events = state.engine.lock().await.process(order_cmd, now_ns());
+                for ev in events {
+                    if tx.send(ev).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     }
+
+    drop(tx);
+    let _ = writer.await;
+}
+
+/// Stream historical trades for `symbols` as market data into `tx`.
+///
+/// CSV reads are blocking, so the replay runs on a dedicated OS thread and uses
+/// [`mpsc::Sender::blocking_send`] — which also applies backpressure, pacing the
+/// reader to however fast the client drains.
+fn spawn_replay(symbols: Vec<String>, cfg: Config, tx: mpsc::Sender<ServerMessage>) {
+    std::thread::spawn(move || {
+        let mut sources: Vec<Box<dyn TickSource>> = Vec::new();
+        for sym in &symbols {
+            let path = cfg.data_dir.join(format!("{sym}.csv"));
+            match KrakenCsvSource::open(&path) {
+                Ok(s) => sources.push(Box::new(s)),
+                Err(e) => tracing::warn!(symbol = %sym, path = %path.display(), %e, "no data file"),
+            }
+        }
+        if sources.is_empty() {
+            return;
+        }
+        tracing::info!(?symbols, "replay started");
+
+        let mut merged = MergeSource::new(sources);
+        let mut prev_ts: Option<u64> = None;
+        while let Some(tick) = merged.next_tick() {
+            if cfg.speed > 0.0 {
+                if let Some(prev) = prev_ts {
+                    let gap_ns = tick.ts_event().saturating_sub(prev);
+                    let wait = (gap_ns as f64 / cfg.speed) as u64;
+                    if wait > 0 {
+                        std::thread::sleep(Duration::from_nanos(wait));
+                    }
+                }
+                prev_ts = Some(tick.ts_event());
+            }
+
+            let msg = match tick {
+                TickEvent::Trade(t) => ServerMessage::Trade(t),
+                TickEvent::Quote(q) => ServerMessage::Quote(q),
+            };
+            if tx.blocking_send(msg).is_err() {
+                break; // client gone
+            }
+        }
+        tracing::info!(?symbols, "replay finished");
+    });
 }
