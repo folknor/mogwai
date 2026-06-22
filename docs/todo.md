@@ -3,9 +3,10 @@
 A fake broker/exchange that plugs into **broadarrow** to exercise the *live*
 trading path: it replays Kraken trade history as market data and emits the messy,
 realistic execution divergences (partials, rejects, delays, drops, blackouts) an
-in-process sandbox structurally cannot produce. mogwai never imports nautilus; the
-client-side `ExecutionClient`/`DataClient` impls live in broadarrow and speak this
-crate's protocol over the wire.
+in-process sandbox structurally cannot produce. The four broker crates never
+import nautilus; the lone exception is the `mogwai-adapter` crate, which path-deps
+nautilus to ship the `ExecutionClient`/`DataClient` pair that lets broadarrow
+drive the `MOGWAI` venue over this workspace's native protocol.
 
 ## Status
 
@@ -51,6 +52,20 @@ Done and verified end-to-end (`scripts/smoke.py`, 43 unit tests):
   Optional tick-rule aggressor inference (the `TickRuleAggressor` `Permutation`,
   opt-in via `MOGWAI_INFER_AGGRESSOR`, applied over the merged stream so each
   symbol's rule sees its trades in replay order; `Identity` stays the default).
+- `mogwai-adapter` - the crate skeleton: `MogwaiDataClientFactory` /
+  `MogwaiExecutionClientFactory`, their `MogwaiDataClientConfig` /
+  `MogwaiExecClientConfig` (serde, `ClientConfig`-downcastable, carrying the
+  mogwai-server URL plus the exec identity the core needs), and a minimal client
+  pair that satisfies the nautilus `DataClient` / `ExecutionClient` trait bounds.
+  Only the required (non-defaulted) trait methods are implemented - identity,
+  lifecycle flags and the no-op `generate_account_state`; every subscribe /
+  request / submit / modify / cancel handler and every reconciliation report
+  keeps its trait default. The factories downcast, validate and construct
+  (exec building an `ExecutionClientCore` at `OmsType::Netting`), reporting the
+  `MOGWAI` name. No live behavior yet - no socket, no stream drain, no order
+  send. This is the one crate that path-deps the sibling `../nautilus_trader`
+  checkout (default-features off, no pyo3); the other four stay nautilus-free
+  (see git history for the landing).
 
 ## Next
 
@@ -101,23 +116,25 @@ WS carries streaming (market data, order events, order commands); a small HTTP
 surface on mogwai-server answers the request/response calls (`request_instruments`,
 the reconciliation reports, account snapshot) and fits its existing axum routes.
 
-- [ ] `mogwai-adapter` crate: `MogwaiDataClientFactory` + `MogwaiExecutionClient`
-      `Factory` and their `ClientConfig`s, returning the client pair.
-- [ ] `DataClient` impl: required lifecycle (`client_id`, `venue`, `start` /
-      `stop` / `reset` / `dispose`, `is_connected`) plus only the `subscribe_` /
-      `request_` handlers mogwai serves (trades, quotes, bars, instruments); the
-      rest keep the trait defaults. Borrow databento's replay idiom (a start
-      timestamp replays history then switches to live), passing the start
-      instant on the already-landed `Subscribe.start_ts` wire field.
-- [ ] `ExecutionClient` impl: required identity + lifecycle, `submit` / `modify` /
-      `cancel` mapped onto `mogwai-protocol` order commands, and the
+- [ ] `DataClient` handlers: the skeleton's required lifecycle (`client_id`,
+      `venue`, `start` / `stop` / `reset` / `dispose`, `is_connected`) is landed;
+      this adds only the `subscribe_` / `request_` handlers mogwai serves (trades,
+      quotes, bars, instruments), with the rest keeping the trait defaults. Borrow
+      databento's replay idiom (a start timestamp replays history then switches to
+      live), passing the start instant on the already-landed `Subscribe.start_ts`
+      wire field. `start` is where the egress sink is grabbed, so it grows from
+      the skeleton's bare `Ok(())`.
+- [ ] `ExecutionClient` handlers: the skeleton's required identity + lifecycle is
+      landed (including a no-op `generate_account_state`); this adds `submit` /
+      `modify` / `cancel` mapped onto `mogwai-protocol` order commands, and the
       reconciliation report generators (`generate_order_status_reports`,
       `generate_fill_reports`, `generate_position_status_reports`).
-      `generate_account_state` is REQUIRED here; its hard dependency on engine
-      account state is now satisfied - the engine tracks balances/positions and
-      pushes `AccountState` (with positions) on fills and reservation-freeing
-      cancels (see git history for the landing). The adapter consumes that
-      pushed snapshot; account state is push-only, with no client-driven query.
+      `generate_account_state` graduates from the skeleton's no-op to real
+      emission; its hard dependency on engine account state is already satisfied -
+      the engine tracks balances/positions and pushes `AccountState` (with
+      positions) on fills and reservation-freeing cancels (see git history for the
+      landing). The adapter consumes that pushed snapshot; account state is
+      push-only, with no client-driven query.
 - [ ] `transport_profile` knob: because mogwai owns both ends, the adapter can
       behave like different archetypes (orders over WS vs HTTP-only the bybit-demo
       way, push-stream vs request/response data) so broadarrow exercises each of

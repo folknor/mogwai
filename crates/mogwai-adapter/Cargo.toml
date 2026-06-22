@@ -1,0 +1,25 @@
+[package]
+name = "mogwai-adapter"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# This is the sole mogwai crate that imports nautilus. The broker core crates
+# stay protocol-native; this adapter is the broadarrow-facing client pair and
+# path-depends the sibling checkout, not the read-only research snapshot.
+[dependencies]
+mogwai-protocol.workspace = true
+serde.workspace = true
+anyhow.workspace = true
+async-trait = "=0.1.89"
+
+nautilus-common = { path = "../../../nautilus_trader/crates/common", default-features = false }
+nautilus-core = { path = "../../../nautilus_trader/crates/core", default-features = false }
+nautilus-live = { path = "../../../nautilus_trader/crates/live", default-features = false }
+nautilus-model = { path = "../../../nautilus_trader/crates/model", default-features = false }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

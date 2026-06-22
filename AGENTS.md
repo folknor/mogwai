@@ -6,13 +6,15 @@ mogwai is a fake broker/exchange that plugs into broadarrow to exercise the
 *live* trading path. It replays Kraken trade history as market data and injects
 the messy, realistic execution divergences (partial fills, rejects, delays,
 duplicate fills, dropped account updates, venue blackouts) that an in-process
-backtest sandbox structurally cannot produce. mogwai never imports nautilus; the
-client-side `ExecutionClient`/`DataClient` adapters live in broadarrow and speak
-this workspace's native JSON-over-WS protocol over the wire.
+backtest sandbox structurally cannot produce. The broker core never imports
+nautilus; the `mogwai-adapter` crate is the lone, deliberate exception - it
+path-deps nautilus to ship the `ExecutionClient`/`DataClient` pair broadarrow
+constructs to drive the `MOGWAI` venue over this workspace's native JSON-over-WS
+protocol.
 
 ## Workspace
 
-A Cargo workspace, four crates under `crates/`:
+A Cargo workspace, five crates under `crates/`:
 
 - `mogwai-protocol` - the wire types (`ClientMessage`, `ServerMessage`) plus
   `control::Divergence`. The single source of truth both ends serialize against;
@@ -24,6 +26,11 @@ A Cargo workspace, four crates under `crates/`:
   time-ordered stream.
 - `mogwai-server` - the axum binary that owns the sockets, the clock and replay
   pacing, exposing `/health`, `/ws` and `/control/divergence`.
+- `mogwai-adapter` - the nautilus venue adapter: the `MogwaiDataClientFactory` /
+  `MogwaiExecutionClientFactory`, their configs, and the client pair broadarrow
+  registers for the `MOGWAI` venue. The only crate that path-deps the sibling
+  `../nautilus_trader` checkout (default-features off, no pyo3); the other four
+  build nautilus-free.
 
 `scripts/` holds the end-to-end smoke test and the orchestration codex wrappers;
 `docs/` is transient TODO and notes; `reference/` is durable process docs.
