@@ -8,7 +8,7 @@ use nautilus_model::{
 };
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_BASE_URL: &str = "ws://127.0.0.1:8080";
+const DEFAULT_BASE_URL: &str = "ws://127.0.0.1:8787";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -37,6 +37,14 @@ impl MogwaiDataClientConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         ensure!(!self.base_url.trim().is_empty(), "base_url cannot be empty");
         Ok(())
+    }
+
+    pub fn ws_url(&self) -> String {
+        self.base_url.clone()
+    }
+
+    pub fn http_base_url(&self) -> String {
+        http_base_url(&self.base_url)
     }
 }
 
@@ -78,10 +86,51 @@ impl MogwaiExecClientConfig {
         ensure!(!self.base_url.trim().is_empty(), "base_url cannot be empty");
         Ok(())
     }
+
+    pub fn ws_url(&self) -> String {
+        self.base_url.clone()
+    }
+
+    pub fn http_base_url(&self) -> String {
+        http_base_url(&self.base_url)
+    }
 }
 
 impl ClientConfig for MogwaiExecClientConfig {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+fn http_base_url(base_url: &str) -> String {
+    if let Some(rest) = base_url.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else if let Some(rest) = base_url.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else {
+        base_url.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_base_url_uses_server_port() {
+        let cfg = MogwaiDataClientConfig::default();
+
+        assert_eq!(cfg.ws_url(), "ws://127.0.0.1:8787");
+        assert_eq!(cfg.http_base_url(), "http://127.0.0.1:8787");
+    }
+
+    #[test]
+    fn http_base_url_normalizes_secure_ws_scheme() {
+        let cfg = MogwaiDataClientConfig {
+            base_url: "wss://example.test:9443".into(),
+        };
+
+        assert_eq!(cfg.ws_url(), "wss://example.test:9443");
+        assert_eq!(cfg.http_base_url(), "https://example.test:9443");
     }
 }

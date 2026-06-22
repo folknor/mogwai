@@ -10,16 +10,22 @@ license.workspace = true
 [dependencies]
 mogwai-protocol.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 anyhow.workspace = true
 async-trait = "=0.1.89"
+chrono = "0.4.45"
+futures-util.workspace = true
+rust_decimal.workspace = true
+tokio.workspace = true
+tokio-tungstenite = "0.29"
 
 nautilus-common = { path = "../../../nautilus_trader/crates/common", default-features = false }
 nautilus-core = { path = "../../../nautilus_trader/crates/core", default-features = false }
 nautilus-live = { path = "../../../nautilus_trader/crates/live", default-features = false }
 nautilus-model = { path = "../../../nautilus_trader/crates/model", default-features = false }
+nautilus-network = { path = "../../../nautilus_trader/crates/network", default-features = false }
 
 [dev-dependencies]
-serde_json.workspace = true
 
 [lints]
 workspace = true

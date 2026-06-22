@@ -11,6 +11,7 @@ use nautilus_model::identifiers::Venue;
 
 mod client;
 mod config;
+mod convert;
 mod factories;
 
 pub use client::{MogwaiDataClient, MogwaiExecutionClient};

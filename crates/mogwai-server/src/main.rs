@@ -31,8 +31,13 @@ use mogwai_data::{
     Identity, KrakenCsvSource, MergeSource, Permutation, TickEvent, TickRuleAggressor, TickSource,
 };
 use mogwai_engine::Engine;
-use mogwai_protocol::{ClientMessage, ServerMessage, control::Divergence};
+use mogwai_protocol::{
+    ClientMessage, InstrumentDef, QuoteTick, ServerMessage, TradeTick, control::Divergence,
+};
+use serde::Deserialize;
 use tokio::sync::{Mutex, mpsc};
+
+const MAX_HISTORY_LIMIT: usize = 10_000;
 
 /// Replay/runtime configuration, sourced from the environment at startup.
 #[derive(Clone)]
@@ -113,6 +118,9 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route("/instruments", get(instruments))
+        .route("/trades", get(trades))
+        .route("/quotes", get(quotes))
         .route("/ws", get(ws_upgrade))
         .route("/control/divergence", post(arm_divergence))
         .with_state(state);
@@ -141,6 +149,85 @@ async fn arm_divergence(
         engine_div => state.engine.lock().await.arm(engine_div),
     }
     StatusCode::ACCEPTED
+}
+
+async fn instruments(State(state): State<AppState>) -> Json<Vec<InstrumentDef>> {
+    Json(state.engine.lock().await.instrument_defs())
+}
+
+#[derive(Debug, Deserialize)]
+struct HistoryQuery {
+    symbol: String,
+    start: Option<u64>,
+    end: Option<u64>,
+    limit: Option<usize>,
+}
+
+async fn trades(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
+) -> Result<Json<Vec<TradeTick>>, StatusCode> {
+    let limit = query
+        .limit
+        .unwrap_or(MAX_HISTORY_LIMIT)
+        .min(MAX_HISTORY_LIMIT);
+    let ticks = bounded_trades(&state.cfg, &query.symbol, query.start, query.end, limit)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(ticks))
+}
+
+async fn quotes(
+    axum::extract::Query(_query): axum::extract::Query<HistoryQuery>,
+) -> Json<Vec<QuoteTick>> {
+    // The Kraken history mogwai replays is trades-only, so a bounded historical
+    // quote fetch is always empty by construction (not a bug). If a
+    // quote-bearing dump or synthesized top-of-book is ever wired in, this route
+    // grows the same seek-and-bound scan as `trades`.
+    Json(Vec::new())
+}
+
+fn bounded_trades(
+    cfg: &Config,
+    symbol: &str,
+    start: Option<u64>,
+    end: Option<u64>,
+    limit: usize,
+) -> anyhow::Result<Vec<TradeTick>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let path = cfg.data_dir.join(format!("{symbol}.csv"));
+    let source = KrakenCsvSource::open(&path)?;
+    let mut merged = MergeSource::starting_at(vec![Box::new(source)], start);
+    // Mirror the live /ws path: aggressor inference runs over the time-ordered
+    // stream so a historical request_trades sees the same aggressor sides a
+    // subscribe_trades would, rather than the raw NoAggressor the dump carries.
+    let mut perm: Box<dyn Permutation> = if cfg.infer_aggressor {
+        Box::new(TickRuleAggressor::new())
+    } else {
+        Box::new(Identity)
+    };
+    let mut out = Vec::new();
+
+    while let Some(tick) = merged.next_tick() {
+        let tick = perm.apply(tick);
+        if let Some(end) = end
+            && tick.ts_event() > end
+        {
+            break;
+        }
+
+        let TickEvent::Trade(trade) = tick else {
+            continue;
+        };
+        out.push(trade);
+        if out.len() >= limit {
+            break;
+        }
+    }
+
+    Ok(out)
 }
 
 async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {

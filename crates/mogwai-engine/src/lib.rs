@@ -10,8 +10,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use mogwai_protocol::{
-    AccountState, Balance, ClientMessage, ClientOrderId, OrderFilled, Position, ServerMessage,
-    Side, SubmitOrder, Symbol, VenueOrderId, control::Divergence,
+    AccountState, Balance, ClientMessage, ClientOrderId, InstrumentDef, OrderFilled, Position,
+    ServerMessage, Side, SubmitOrder, Symbol, VenueOrderId, control::Divergence,
 };
 use rust_decimal::Decimal;
 
@@ -29,6 +29,24 @@ pub struct Instrument {
     pub symbol: Symbol,
     pub base: String,
     pub quote: String,
+    pub price_precision: u8,
+    pub size_precision: u8,
+    pub price_increment: Decimal,
+    pub size_increment: Decimal,
+}
+
+impl From<&Instrument> for InstrumentDef {
+    fn from(instrument: &Instrument) -> Self {
+        Self {
+            symbol: instrument.symbol.clone(),
+            base: instrument.base.clone(),
+            quote: instrument.quote.clone(),
+            price_precision: instrument.price_precision,
+            size_precision: instrument.size_precision,
+            price_increment: instrument.price_increment,
+            size_increment: instrument.size_increment,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -75,6 +93,10 @@ impl Engine {
             symbol: "BTCUSDT".into(),
             base: "BTC".into(),
             quote: "USDT".into(),
+            price_precision: 2,
+            size_precision: 8,
+            price_increment: Decimal::new(1, 2),
+            size_increment: Decimal::new(1, 8),
         }])
     }
 
@@ -92,6 +114,12 @@ impl Engine {
             seq: 0,
             warned: Warned::default(),
         }
+    }
+
+    pub fn instrument_defs(&self) -> Vec<InstrumentDef> {
+        let mut defs: Vec<_> = self.instruments.values().map(InstrumentDef::from).collect();
+        defs.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        defs
     }
 
     /// Arm a divergence to fire on the next matching trigger (control plane).

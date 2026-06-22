@@ -10,7 +10,8 @@ drive the `MOGWAI` venue over this workspace's native protocol.
 
 ## Status
 
-Done and verified end-to-end (`scripts/smoke.py`, 43 unit tests):
+Done and verified end-to-end (`scripts/smoke.py` plus the workspace unit and
+integration tests):
 
 - `mogwai-protocol` - native JSON-over-WS wire types + `control::Divergence`,
   including the `Position` type and an `AccountState` that carries balances
@@ -25,7 +26,12 @@ Done and verified end-to-end (`scripts/smoke.py`, 43 unit tests):
   extend the `armed`-queue seam alongside `PartialFillNext`/`RejectNextSubmit`;
   the two temporal, connection-scoped divergences (`DelayAcks`, `GoDark`) are
   filtered out of the engine queue and applied in the server's outbound writer
-  (see git history for the landing). Maintains per-currency
+  (see git history for the landing). The instrument table now carries precision
+  and increments (price/size precision plus tick/lot size, exposed as the shared
+  `InstrumentDef` wire type) so the adapter can translate mogwai `Decimal` ticks
+  into nautilus `Price`/`Quantity` at a stable per-symbol precision and the
+  server can serve the table over `GET /instruments` (see git history for the
+  landing). Maintains per-currency
   balances and per-symbol VWAP positions off an instrument-decomposition table,
   and pushes `AccountState` after fills and reservation-freeing cancels
   (free/locked derived from resting-order reservations; pure delta ledger off
@@ -41,7 +47,15 @@ Done and verified end-to-end (`scripts/smoke.py`, 43 unit tests):
 - `mogwai-data` - streaming Kraken CSV loader (O(1) memory over multi-GB files),
   seconds→ns, k-way `MergeSource`; verified on the real 43GB dump.
 - `mogwai-server` - axum `/health`, `/ws` (orders + market-data replay),
-  `/control/divergence`. Replay runs on a blocking thread with backpressure;
+  `/control/divergence`, plus the request/response data surface the adapter's
+  `request_` handlers hit: `GET /instruments` (the engine's precision-bearing
+  instrument table as JSON), `GET /trades` and `GET /quotes` (a bounded,
+  seek-and-scan historical fetch keyed by `symbol`/`start`/`end`/`limit`, with a
+  hard `MAX_HISTORY_LIMIT` row ceiling so neither the response body nor the
+  client's materialized vector grows unbounded over a multi-GB dump; `/quotes`
+  is always empty because the Kraken dump is trades-only, and `/trades` mirrors
+  the live path's optional aggressor inference). Replay runs on a blocking
+  thread with backpressure;
   speed via `MOGWAI_REPLAY_SPEED`. Per-subscription windowing (`start_ts` on
   `Subscribe`, seeking each source's prefix), `Unsubscribe` cancellation (a
   shared atomic flag the replay loop polls), and a paced inter-tick sleep cap
@@ -52,20 +66,36 @@ Done and verified end-to-end (`scripts/smoke.py`, 43 unit tests):
   Optional tick-rule aggressor inference (the `TickRuleAggressor` `Permutation`,
   opt-in via `MOGWAI_INFER_AGGRESSOR`, applied over the merged stream so each
   symbol's rule sees its trades in replay order; `Identity` stays the default).
-- `mogwai-adapter` - the crate skeleton: `MogwaiDataClientFactory` /
-  `MogwaiExecutionClientFactory`, their `MogwaiDataClientConfig` /
-  `MogwaiExecClientConfig` (serde, `ClientConfig`-downcastable, carrying the
-  mogwai-server URL plus the exec identity the core needs), and a minimal client
-  pair that satisfies the nautilus `DataClient` / `ExecutionClient` trait bounds.
-  Only the required (non-defaulted) trait methods are implemented - identity,
-  lifecycle flags and the no-op `generate_account_state`; every subscribe /
-  request / submit / modify / cancel handler and every reconciliation report
-  keeps its trait default. The factories downcast, validate and construct
-  (exec building an `ExecutionClientCore` at `OmsType::Netting`), reporting the
-  `MOGWAI` name. No live behavior yet - no socket, no stream drain, no order
-  send. This is the one crate that path-deps the sibling `../nautilus_trader`
-  checkout (default-features off, no pyo3); the other four stay nautilus-free
-  (see git history for the landing).
+- `mogwai-adapter` - `MogwaiDataClientFactory` / `MogwaiExecutionClientFactory`,
+  their `MogwaiDataClientConfig` / `MogwaiExecClientConfig` (serde,
+  `ClientConfig`-downcastable, carrying the mogwai-server URL plus the exec
+  identity the core needs; the shared default base now points at the server's
+  real `8787` port, and the config derives an `http://` base from the `ws://`
+  one so the WS and HTTP transports speak the right scheme off one field).
+  The factories downcast, validate and construct (exec building an
+  `ExecutionClientCore` at `OmsType::Netting`), reporting the `MOGWAI` name.
+  This is the one crate that path-deps the sibling `../nautilus_trader` checkout
+  (default-features off, no pyo3); the other four stay nautilus-free.
+  The `DataClient` is live (see git history for the landing): `start` grabs the
+  runner's thread-local egress sink, `connect` seeds the instrument cache off
+  `GET /instruments`, opens the `/ws` socket and spawns the reader/writer drain
+  pair, and `disconnect`/`stop` tear them down. `subscribe_trades`/`_quotes`/
+  `_bars`/`_instruments`/`_instrument` and their `unsubscribe_` partners are
+  implemented: an adapter-owned per-symbol refcount table only sends
+  `Subscribe`/`Unsubscribe` on the 0<->1 transition (so trades/quotes/bars for
+  one symbol no longer clobber the server's set-keyed replay), keeps the
+  earliest `start_ts` on conflict, and the drain task filters each frame by the
+  subscribed data type. Bars are venue-delivered: the adapter aggregates the
+  drained trade stream into time-based `Bar` values (live and for `request_bars`)
+  rather than relying on nautilus's internal aggregator, which never reaches an
+  external-bar client. The `request_` handlers follow the databento spawn-and-
+  respond idiom over the server's HTTP surface, with a mandatory limit ceiling
+  bounding the materialized response vector. A pure `convert` module maps mogwai
+  `Decimal` ticks to nautilus `Price`/`Quantity`/`TradeTick`/`QuoteTick`/
+  `InstrumentAny` at the instrument's declared precision. The `ExecutionClient`
+  is still the skeleton - identity, lifecycle flags, and the no-op
+  `generate_account_state`; every submit / modify / cancel handler and every
+  reconciliation report keeps its trait default (section 2 below).
 
 ## Next
 
@@ -104,7 +134,12 @@ Every stock adapter wires the same way, so mogwai copies it:
 - The runtime shape is a spawned task draining `transport.stream()`, parsing into
   nautilus types, and pushing to the sink. The stock CEX adapters build on
   `nautilus_network`'s `HttpClient` / `WebSocketClient` (reconnect, backoff,
-  heartbeat, rate-limit quotas for free); mogwai can reuse the same.
+  heartbeat, rate-limit quotas for free). The landed data client reuses
+  `nautilus_network::http::HttpClient` for the request/response surface but
+  drives the `/ws` stream over `tokio-tungstenite` directly (a reader/writer task
+  pair), since mogwai owns the protocol and the heavier WS client's quotas and
+  reconnect policy buy little against a local server (see git history for the
+  landing).
 
 #### Chosen shape: lean standard-CEX, with a transport selector
 The survey found four archetypes (heavy CEX = binance pool/SBE; standard CEX =
@@ -116,14 +151,6 @@ WS carries streaming (market data, order events, order commands); a small HTTP
 surface on mogwai-server answers the request/response calls (`request_instruments`,
 the reconciliation reports, account snapshot) and fits its existing axum routes.
 
-- [ ] `DataClient` handlers: the skeleton's required lifecycle (`client_id`,
-      `venue`, `start` / `stop` / `reset` / `dispose`, `is_connected`) is landed;
-      this adds only the `subscribe_` / `request_` handlers mogwai serves (trades,
-      quotes, bars, instruments), with the rest keeping the trait defaults. Borrow
-      databento's replay idiom (a start timestamp replays history then switches to
-      live), passing the start instant on the already-landed `Subscribe.start_ts`
-      wire field. `start` is where the egress sink is grabbed, so it grows from
-      the skeleton's bare `Ok(())`.
 - [ ] `ExecutionClient` handlers: the skeleton's required identity + lifecycle is
       landed (including a no-op `generate_account_state`); this adds `submit` /
       `modify` / `cancel` mapped onto `mogwai-protocol` order commands, and the

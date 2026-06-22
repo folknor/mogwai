@@ -14,6 +14,17 @@ pub type ClientOrderId = String;
 /// Venue-assigned order id (mogwai-assigned `VenueOrderId`).
 pub type VenueOrderId = String;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstrumentDef {
+    pub symbol: Symbol,
+    pub base: String,
+    pub quote: String,
+    pub price_precision: u8,
+    pub size_precision: u8,
+    pub price_increment: Decimal,
+    pub size_increment: Decimal,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Side {
     Buy,
@@ -141,6 +152,24 @@ mod tests {
         assert_eq!(decoded.positions[0].quantity, state.positions[0].quantity);
         assert_eq!(decoded.positions[0].avg_px, state.positions[0].avg_px);
         assert_eq!(decoded.ts_event, state.ts_event);
+    }
+
+    #[test]
+    fn instrument_def_round_trips() {
+        let def = InstrumentDef {
+            symbol: "BTCUSDT".into(),
+            base: "BTC".into(),
+            quote: "USDT".into(),
+            price_precision: 2,
+            size_precision: 8,
+            price_increment: Decimal::new(1, 2),
+            size_increment: Decimal::new(1, 8),
+        };
+
+        let json = serde_json::to_string(&def).unwrap();
+        let decoded: InstrumentDef = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, def);
     }
 
     #[test]
