@@ -7,3 +7,6 @@ license.workspace = true
 [dependencies]
 mogwai-protocol.workspace = true
 rust_decimal.workspace = true
+
+[lints]
+workspace = true

@@ -4,7 +4,7 @@
 //! Backed by the Kraken trade-history CSV dump: one file per pair (symbol taken
 //! from the file stem), no header, three columns `time,price,volume` where time
 //! is unix **seconds** (optionally fractional). Files reach multiple GB, so
-//! [`KrakenCsvSource`] streams one buffered line at a time — O(1) memory — and
+//! [`KrakenCsvSource`] streams one buffered line at a time - O(1) memory - and
 //! [`MergeSource`] k-way merges several symbols into one time-ordered stream.
 
 use std::{
@@ -48,13 +48,13 @@ pub trait Permutation {
     }
 }
 
-/// Identity permutation — replays the data verbatim.
+/// Identity permutation - replays the data verbatim.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Identity;
 impl Permutation for Identity {}
 
 // ----------------------------------------------------------------------------
-// Kraken CSV parsing (pure, IO-free — unit tested directly)
+// Kraken CSV parsing (pure, IO-free - unit tested directly)
 // ----------------------------------------------------------------------------
 
 /// Parse a Kraken `time` field (unix seconds, optionally fractional) to unix ns.
@@ -134,7 +134,7 @@ impl TickSource for KrakenCsvSource {
             if let Some(t) = parse_kraken_line(&self.symbol, &self.buf) {
                 return Some(TickEvent::Trade(t));
             }
-            // malformed line — skip and keep reading
+            // malformed line - skip and keep reading
         }
     }
 }
@@ -147,7 +147,7 @@ pub struct MemorySource {
 impl MemorySource {
     /// Build from a tick list, sorted into replay (timestamp) order.
     pub fn new(mut ticks: Vec<TickEvent>) -> Self {
-        ticks.sort_by_key(|t| t.ts_event());
+        ticks.sort_by_key(TickEvent::ts_event);
         Self {
             ticks: ticks.into_iter(),
         }
@@ -225,8 +225,14 @@ mod tests {
 
     #[test]
     fn parses_integer_and_fractional_timestamps() {
-        assert_eq!(parse_kraken_ts("1743439968"), Some(1_743_439_968_000_000_000));
-        assert_eq!(parse_kraken_ts("1660044887.5"), Some(1_660_044_887_500_000_000));
+        assert_eq!(
+            parse_kraken_ts("1743439968"),
+            Some(1_743_439_968_000_000_000)
+        );
+        assert_eq!(
+            parse_kraken_ts("1660044887.5"),
+            Some(1_660_044_887_500_000_000)
+        );
         assert_eq!(parse_kraken_ts("1.123456789"), Some(1_123_456_789));
         assert_eq!(parse_kraken_ts("notanumber"), None);
     }
@@ -253,11 +259,17 @@ mod tests {
     #[test]
     fn merge_interleaves_symbols_by_timestamp() {
         let a = Box::new(MemorySource::new(vec![trade("A", 10), trade("A", 40)]));
-        let b = Box::new(MemorySource::new(vec![trade("B", 20), trade("B", 30), trade("B", 50)]));
+        let b = Box::new(MemorySource::new(vec![
+            trade("B", 20),
+            trade("B", 30),
+            trade("B", 50),
+        ]));
         let mut m = MergeSource::new(vec![a, b]);
         let mut seen = Vec::new();
         while let Some(t) = m.next_tick() {
-            let TickEvent::Trade(tt) = t else { unreachable!() };
+            let TickEvent::Trade(tt) = t else {
+                unreachable!()
+            };
             seen.push((tt.symbol, tt.ts_event));
         }
         assert_eq!(

@@ -10,8 +10,8 @@
 use std::collections::VecDeque;
 
 use mogwai_protocol::{
-    control::Divergence, ClientMessage, ClientOrderId, OrderFilled, ServerMessage, SubmitOrder,
-    VenueOrderId,
+    ClientMessage, ClientOrderId, OrderFilled, ServerMessage, SubmitOrder, VenueOrderId,
+    control::Divergence,
 };
 use rust_decimal::Decimal;
 
@@ -64,7 +64,10 @@ impl Engine {
 
     fn on_submit(&mut self, order: SubmitOrder, ts: u64) -> Vec<ServerMessage> {
         // Divergence: reject the next submit outright.
-        if matches!(self.armed.front(), Some(Divergence::RejectNextSubmit { .. })) {
+        if matches!(
+            self.armed.front(),
+            Some(Divergence::RejectNextSubmit { .. })
+        ) {
             let Some(Divergence::RejectNextSubmit { reason }) = self.armed.pop_front() else {
                 unreachable!()
             };
@@ -84,9 +87,10 @@ impl Engine {
 
         // Divergence: partial-fill the next order, leaving the remainder resting.
         let fill_fraction = match self.armed.front() {
-            Some(Divergence::PartialFillNext { client_order_id, fraction })
-                if *client_order_id == order.client_order_id =>
-            {
+            Some(Divergence::PartialFillNext {
+                client_order_id,
+                fraction,
+            }) if *client_order_id == order.client_order_id => {
                 let f = *fraction;
                 self.armed.pop_front();
                 f

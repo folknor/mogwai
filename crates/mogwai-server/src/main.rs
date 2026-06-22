@@ -1,6 +1,6 @@
 //! mogwai fake-broker server.
 //!
-//! Hosts the native JSON-over-WS gateway (`/ws`) that the nautilus-piners adapter
+//! Hosts the native JSON-over-WS gateway (`/ws`) that the broadarrow adapter
 //! connects to, plus an out-of-band control plane (`/control/divergence`) for
 //! arming deterministic divergences from tests. The exchange logic lives in
 //! [`mogwai_engine`]; market data is replayed from the Kraken dump by
@@ -13,20 +13,20 @@ use std::{
 };
 
 use axum::{
+    Json, Router,
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
 };
 use futures_util::{SinkExt, StreamExt};
 use mogwai_data::{KrakenCsvSource, MergeSource, TickEvent, TickSource};
 use mogwai_engine::Engine;
-use mogwai_protocol::{control::Divergence, ClientMessage, ServerMessage};
-use tokio::sync::{mpsc, Mutex};
+use mogwai_protocol::{ClientMessage, ServerMessage, control::Divergence};
+use tokio::sync::{Mutex, mpsc};
 
 /// Replay/runtime configuration, sourced from the environment at startup.
 #[derive(Clone)]
@@ -57,7 +57,7 @@ struct AppState {
     cfg: Config,
 }
 
-/// Nanoseconds since the Unix epoch — the server's clock, fed into the engine.
+/// Nanoseconds since the Unix epoch - the server's clock, fed into the engine.
 fn now_ns() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -122,7 +122,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let writer = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             let payload = serde_json::to_string(&msg).expect("serialize ServerMessage");
-            if sink.send(Message::Text(payload)).await.is_err() {
+            if sink.send(Message::Text(payload.into())).await.is_err() {
                 break; // client gone
             }
         }
@@ -155,13 +155,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     }
 
     drop(tx);
-    let _ = writer.await;
+    if let Err(e) = writer.await {
+        tracing::warn!(%e, "writer task did not shut down cleanly");
+    }
 }
 
 /// Stream historical trades for `symbols` as market data into `tx`.
 ///
 /// CSV reads are blocking, so the replay runs on a dedicated OS thread and uses
-/// [`mpsc::Sender::blocking_send`] — which also applies backpressure, pacing the
+/// [`mpsc::Sender::blocking_send`] - which also applies backpressure, pacing the
 /// reader to however fast the client drains.
 fn spawn_replay(symbols: Vec<String>, cfg: Config, tx: mpsc::Sender<ServerMessage>) {
     std::thread::spawn(move || {

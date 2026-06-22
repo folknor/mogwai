@@ -1,7 +1,7 @@
-//! Wire protocol shared by the mogwai fake broker and its nautilus-piners adapter.
+//! Wire protocol shared by the mogwai fake broker and its broadarrow adapter.
 //!
 //! This is the single source of truth for the native JSON-over-WS protocol. The
-//! piners-side adapter path-deps this crate so both ends serialize identical types.
+//! broadarrow-side adapter path-deps this crate so both ends serialize identical types.
 //! mogwai never imports nautilus; nautilus types are mirrored here only as far as
 //! the wire needs them.
 
@@ -47,8 +47,12 @@ pub enum TimeInForce {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ClientMessage {
-    Subscribe { symbols: Vec<Symbol> },
-    Unsubscribe { symbols: Vec<Symbol> },
+    Subscribe {
+        symbols: Vec<Symbol>,
+    },
+    Unsubscribe {
+        symbols: Vec<Symbol>,
+    },
     SubmitOrder(SubmitOrder),
     CancelOrder {
         client_order_id: ClientOrderId,
@@ -150,9 +154,9 @@ pub struct QuoteTick {
 
 /// Out-of-band control plane: arm deterministic divergences for tests.
 ///
-/// This is the reason mogwai exists as an external process — it can emit ugly,
+/// This is the reason mogwai exists as an external process - it can emit ugly,
 /// realistic event streams an in-process matching engine never would, to drive
-/// piners' `classify` → brake/quarantine/restart layer.
+/// broadarrow's `classify` → brake/quarantine/restart layer.
 pub mod control {
     use super::{ClientOrderId, Decimal, Deserialize, Serialize};
 

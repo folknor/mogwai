@@ -1,10 +1,13 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
 license = "MIT"
+rust-version = "1.96"
+authors = ["folk <folk@folk.wtf>"]
+repository = "https://github.com/folknor/piners"
 
 [workspace.dependencies]
 mogwai-protocol = { path = "crates/mogwai-protocol" }
@@ -15,8 +18,58 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rust_decimal = { version = "1", features = ["serde-with-str"] }
 tokio = { version = "1", features = ["full"] }
-axum = { version = "0.7", features = ["ws"] }
+axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[workspace.lints.rust]
+future_incompatible = "deny"
+non_ascii_idents = "deny"
+rust_2018_idioms = "deny"
+single_use_lifetimes = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unreachable_pub = "deny"
+unused = "deny"
+variant_size_differences = "deny"
+
+[workspace.lints.clippy]
+disallowed_methods = "deny"
+uninlined_format_args = "deny"
+cloned_instead_of_copied = "deny"
+redundant_closure_for_method_calls = "deny"
+semicolon_if_nothing_returned = "deny"
+manual_string_new = "deny"
+explicit_iter_loop = "deny"
+implicit_clone = "deny"
+needless_pass_by_value = "deny"
+unnecessary_sort_by = "deny"
+collapsible_match = "deny"
+if_same_then_else = "deny"
+needless_borrow = "deny"
+ptr_arg = "deny"
+redundant_locals = "deny"
+regex_creation_in_loops = "deny"
+unnecessary_unwrap = "deny"
+wrong_self_convention = "deny"
+let_underscore_must_use = "deny"
+unwrap_in_result = "deny"
+ok_expect = "deny"
+too_many_arguments = "deny"
+large_enum_variant = "deny"
+clone_on_ref_ptr = "deny"
+match_same_arms = "deny"
+redundant_else = "deny"
+unnested_or_patterns = "deny"
+map_unwrap_or = "deny"
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
+dbg_macro = "deny"
+todo = "deny"
