@@ -22,25 +22,25 @@ Done and verified end-to-end (`scripts/smoke.py`, 12 unit tests):
   `Subscribe`, seeking each source's prefix), `Unsubscribe` cancellation (a
   shared atomic flag the replay loop polls), and a paced inter-tick sleep cap
   (`MOGWAI_GAP_CAP_MS`, default 1000) are all wired and pinned by `smoke.py`.
+  Optional tick-rule aggressor inference (the `TickRuleAggressor` `Permutation`,
+  opt-in via `MOGWAI_INFER_AGGRESSOR`, applied over the merged stream so each
+  symbol's rule sees its trades in replay order; `Identity` stays the default).
 
 ## Next
 
-### 1. Replay realism
-- [ ] Optional aggressor inference via tick rule, as a `Permutation`.
-
-### 2. Remaining divergences (server-side; timer/socket layer now exists)
+### 1. Remaining divergences (server-side; timer/socket layer now exists)
 - [ ] `DelayAcks { ms }` - delay outbound execution events.
 - [ ] `DuplicateNextFill` - emit the next fill twice.
 - [ ] `DropNextAccountUpdate` - induce account drift.
 - [ ] `GoDark { ms }` - venue blackout.
 
-### 3. Engine depth
+### 2. Engine depth
 - [ ] `generate_account_state` - track balances/positions, not just orders
       (needed before the broadarrow adapter can reconcile).
 - [ ] Real matching against an order book (today: immediate fill, no book).
 - [ ] `ModifyOrder` handling (today: no-op).
 
-### 4. broadarrow integration: the mogwai venue adapter
+### 3. broadarrow integration: the mogwai venue adapter
 broadarrow drives strategies live through a nautilus `LiveNode`, registering one
 venue adapter per exchange (the stock `nautilus-binance` / `-kraken` / `-bybit`
 factories, picked by the symbol's exchange prefix in `run-prep/src/venue.rs`).
@@ -97,7 +97,7 @@ the reconciliation reports, account snapshot) and fits its existing axum routes.
       reconciliation report generators (`generate_order_status_reports`,
       `generate_fill_reports`, `generate_position_status_reports`).
       `generate_account_state` is REQUIRED here and depends on engine account
-      state (section 3) - that ordering is a hard dependency.
+      state (section 2) - that ordering is a hard dependency.
 - [ ] `transport_profile` knob: because mogwai owns both ends, the adapter can
       behave like different archetypes (orders over WS vs HTTP-only the bybit-demo
       way, push-stream vs request/response data) so broadarrow exercises each of
@@ -116,7 +116,7 @@ at adapter-build time (in `venue.rs`); the adapter splits it:
   nanos in `execution/src/models/latency.rs`, a backtest construct never wired
   live) for the latency field.
 - Server-side (mogwai-server's `control::Divergence` engine): the execution
-  divergences from section 2 (partial, reject, duplicate fill, drop account
+  divergences from section 1 (partial, reject, duplicate fill, drop account
   update, blackout, delayed acks). The adapter forwards the server-side part of
   the `HavocSpec` to mogwai-server on connect, so broadarrow never makes a
   separate control-plane call - one config object, the adapter relays it.
@@ -132,5 +132,6 @@ at adapter-build time (in `venue.rs`); the adapter splits it:
 ## Notes / gotchas
 - Kraken history is **trades only** - no quotes, no L2, no aggressor side
   (`AggressorSide::NoAggressor`). Symbol comes from the filename (`XBT` = BTC).
+  Set `MOGWAI_INFER_AGGRESSOR=1` to infer it via the tick rule at replay time.
 - Data dir: `MOGWAI_DATA_DIR` (default `/media/folk/Banan/Kraken_Trading_History`).
 - `research/` (nautilus clone, ~413MB) is gitignored.

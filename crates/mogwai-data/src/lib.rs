@@ -53,8 +53,12 @@ pub trait TickSource {
 
 /// Permutation applied to ticks as they are replayed (price jitter, time scaling,
 /// aggressor inference). A no-op by default; real permutations slot in here.
+///
+/// `apply` takes `&mut self` because realistic permutations are stateful: the
+/// tick rule, for instance, must remember the prior trade's price and the last
+/// inferred side per symbol to classify the current trade.
 pub trait Permutation {
-    fn apply(&self, tick: TickEvent) -> TickEvent {
+    fn apply(&mut self, tick: TickEvent) -> TickEvent {
         tick
     }
 }
@@ -63,6 +67,54 @@ pub trait Permutation {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Identity;
 impl Permutation for Identity {}
+
+/// Infers each trade's aggressor side from the tick rule: a price uptick versus
+/// the prior trade of the same symbol is buyer-initiated, a downtick is
+/// seller-initiated, and an unchanged price inherits the prior classification.
+///
+/// State is per symbol because the replay stream interleaves pairs (see
+/// [`MergeSource`]); a single global "prior price" would cross-contaminate
+/// symbols whose price levels are unrelated. The first trade of each symbol has
+/// no predecessor, so it stays [`AggressorSide::NoAggressor`] until a direction
+/// is established. Quotes pass through untouched.
+#[derive(Debug, Default, Clone)]
+pub struct TickRuleAggressor {
+    /// Per-symbol carried state: the last trade price and the last non-neutral
+    /// aggressor side inferred for it (used to resolve unchanged-price ticks).
+    state: std::collections::HashMap<String, (Decimal, AggressorSide)>,
+}
+
+impl TickRuleAggressor {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Permutation for TickRuleAggressor {
+    fn apply(&mut self, tick: TickEvent) -> TickEvent {
+        let TickEvent::Trade(mut trade) = tick else {
+            return tick;
+        };
+        let aggressor = match self.state.get(&trade.symbol) {
+            None => AggressorSide::NoAggressor,
+            Some(&(prior_price, prior_side)) => {
+                use std::cmp::Ordering;
+                match trade.price.cmp(&prior_price) {
+                    Ordering::Greater => AggressorSide::Buyer,
+                    Ordering::Less => AggressorSide::Seller,
+                    Ordering::Equal => prior_side,
+                }
+            }
+        };
+        trade.aggressor = aggressor;
+        // Carry forward this trade's price; carry forward a *resolved* side so an
+        // unchanged-price run after a neutral first trade stays neutral until a
+        // real uptick/downtick establishes direction.
+        self.state
+            .insert(trade.symbol.clone(), (trade.price, aggressor));
+        TickEvent::Trade(trade)
+    }
+}
 
 // ----------------------------------------------------------------------------
 // Kraken CSV parsing (pure, IO-free - unit tested directly)
@@ -235,6 +287,23 @@ mod tests {
         })
     }
 
+    fn trade_at(sym: &str, ts: u64, price: i64) -> TickEvent {
+        TickEvent::Trade(TradeTick {
+            symbol: sym.into(),
+            price: Decimal::from(price),
+            size: Decimal::from(1),
+            aggressor: AggressorSide::NoAggressor,
+            ts_event: ts,
+        })
+    }
+
+    fn aggressor_of(tick: &TickEvent) -> AggressorSide {
+        match tick {
+            TickEvent::Trade(t) => t.aggressor,
+            TickEvent::Quote(_) => unreachable!("test only feeds trades"),
+        }
+    }
+
     #[test]
     fn memory_source_replays_in_time_order() {
         let mut src = MemorySource::new(vec![trade("A", 30), trade("A", 10), trade("A", 20)]);
@@ -328,6 +397,78 @@ mod tests {
         ]);
 
         assert!(src.seek_to(999).is_none());
+    }
+
+    #[test]
+    fn identity_permutation_leaves_aggressor_untouched() {
+        let mut perm = Identity;
+        let out = perm.apply(trade_at("XBTUSD", 10, 100));
+        assert_eq!(aggressor_of(&out), AggressorSide::NoAggressor);
+    }
+
+    #[test]
+    fn tick_rule_first_trade_is_neutral() {
+        let mut perm = TickRuleAggressor::new();
+        let out = perm.apply(trade_at("XBTUSD", 10, 100));
+        assert_eq!(aggressor_of(&out), AggressorSide::NoAggressor);
+    }
+
+    #[test]
+    fn tick_rule_classifies_up_and_down_ticks() {
+        let mut perm = TickRuleAggressor::new();
+        perm.apply(trade_at("XBTUSD", 10, 100)); // first, neutral
+        assert_eq!(
+            aggressor_of(&perm.apply(trade_at("XBTUSD", 20, 101))),
+            AggressorSide::Buyer
+        );
+        assert_eq!(
+            aggressor_of(&perm.apply(trade_at("XBTUSD", 30, 100))),
+            AggressorSide::Seller
+        );
+    }
+
+    #[test]
+    fn tick_rule_unchanged_price_inherits_prior_side() {
+        let mut perm = TickRuleAggressor::new();
+        perm.apply(trade_at("XBTUSD", 10, 100)); // neutral
+        perm.apply(trade_at("XBTUSD", 20, 101)); // buyer (uptick)
+        // unchanged price inherits the prior (buyer) classification
+        assert_eq!(
+            aggressor_of(&perm.apply(trade_at("XBTUSD", 30, 101))),
+            AggressorSide::Buyer
+        );
+        perm.apply(trade_at("XBTUSD", 40, 100)); // seller (downtick)
+        assert_eq!(
+            aggressor_of(&perm.apply(trade_at("XBTUSD", 50, 100))),
+            AggressorSide::Seller
+        );
+    }
+
+    #[test]
+    fn tick_rule_unchanged_price_after_neutral_first_stays_neutral() {
+        let mut perm = TickRuleAggressor::new();
+        perm.apply(trade_at("XBTUSD", 10, 100)); // neutral, no predecessor
+        // second trade at the same price has no direction to inherit yet
+        assert_eq!(
+            aggressor_of(&perm.apply(trade_at("XBTUSD", 20, 100))),
+            AggressorSide::NoAggressor
+        );
+    }
+
+    #[test]
+    fn tick_rule_tracks_symbols_independently() {
+        let mut perm = TickRuleAggressor::new();
+        perm.apply(trade_at("XBTUSD", 10, 100));
+        perm.apply(trade_at("ETHUSD", 15, 50));
+        // XBT upticks while ETH downticks - neither price level bleeds into the other
+        assert_eq!(
+            aggressor_of(&perm.apply(trade_at("XBTUSD", 20, 101))),
+            AggressorSide::Buyer
+        );
+        assert_eq!(
+            aggressor_of(&perm.apply(trade_at("ETHUSD", 25, 49))),
+            AggressorSide::Seller
+        );
     }
 
     #[test]

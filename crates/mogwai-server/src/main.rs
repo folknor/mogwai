@@ -27,7 +27,9 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::{SinkExt, StreamExt};
-use mogwai_data::{KrakenCsvSource, MergeSource, TickEvent, TickSource};
+use mogwai_data::{
+    Identity, KrakenCsvSource, MergeSource, Permutation, TickEvent, TickRuleAggressor, TickSource,
+};
 use mogwai_engine::Engine;
 use mogwai_protocol::{ClientMessage, ServerMessage, control::Divergence};
 use tokio::sync::{Mutex, mpsc};
@@ -43,6 +45,9 @@ struct Config {
     /// Maximum wall-clock sleep between two ticks under paced replay, in
     /// milliseconds. `0` disables the cap.
     gap_cap_ms: u64,
+    /// When set, infer each trade's aggressor side from the tick rule as ticks
+    /// replay; otherwise ticks keep the dump's `NoAggressor` (the default).
+    infer_aggressor: bool,
 }
 
 impl Config {
@@ -58,10 +63,13 @@ impl Config {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(1000);
+        let infer_aggressor = std::env::var("MOGWAI_INFER_AGGRESSOR")
+            .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes"));
         Self {
             data_dir,
             speed,
             gap_cap_ms,
+            infer_aggressor,
         }
     }
 }
@@ -225,8 +233,17 @@ fn spawn_replay(
         tracing::info!(?symbols, ?start_ts, "replay started");
 
         let mut merged = MergeSource::starting_at(sources, start_ts);
+        // Aggressor inference runs over the merged, time-ordered stream so each
+        // symbol's tick rule sees its own trades in replay order. Opt-in: the
+        // default is the dump's verbatim NoAggressor.
+        let mut perm: Box<dyn Permutation> = if cfg.infer_aggressor {
+            Box::new(TickRuleAggressor::new())
+        } else {
+            Box::new(Identity)
+        };
         let mut prev_ts: Option<u64> = None;
         while let Some(tick) = merged.next_tick() {
+            let tick = perm.apply(tick);
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
