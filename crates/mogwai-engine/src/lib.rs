@@ -7,11 +7,11 @@
 //! owns sockets, timers and the clock; the engine owns matching and state. This
 //! keeps the divergence behaviour deterministic and unit-testable.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use mogwai_protocol::{
-    ClientMessage, ClientOrderId, OrderFilled, ServerMessage, SubmitOrder, VenueOrderId,
-    control::Divergence,
+    AccountState, Balance, ClientMessage, ClientOrderId, OrderFilled, Position, ServerMessage,
+    Side, SubmitOrder, Symbol, VenueOrderId, control::Divergence,
 };
 use rust_decimal::Decimal;
 
@@ -23,17 +23,75 @@ pub struct OpenOrder {
     pub leaves_qty: Decimal,
 }
 
+/// Static instrument definition used to split a symbol fill into balance legs.
+#[derive(Debug, Clone)]
+pub struct Instrument {
+    pub symbol: Symbol,
+    pub base: String,
+    pub quote: String,
+}
+
 #[derive(Debug, Default)]
+struct Account {
+    balances: HashMap<String, Decimal>,
+    positions: HashMap<Symbol, PositionState>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct PositionState {
+    qty: Decimal,
+    avg_px: Decimal,
+}
+
+#[derive(Debug, Default)]
+struct Warned {
+    missing_instrument: HashSet<Symbol>,
+    zero_px: HashSet<Symbol>,
+    priceless_reservation: HashSet<Symbol>,
+}
+
+#[derive(Debug)]
 pub struct Engine {
     open: Vec<OpenOrder>,
+    account: Account,
+    instruments: HashMap<Symbol, Instrument>,
     /// Armed divergences, consumed as their trigger fires.
     armed: VecDeque<Divergence>,
     seq: u64,
+    warned: Warned,
 }
 
 impl Engine {
+    // No `Default`: per spec, `new()` is the sole constructor so the instrument
+    // table is always seeded. A derived `Default` would yield an empty table
+    // whose fill accounting silently diverges (every fill warns, books
+    // position-only); a delegating `Default` is dead surface nothing calls.
+    #[expect(
+        clippy::new_without_default,
+        reason = "new() seeds the instrument table; a Default impl would diverge or be dead surface"
+    )]
     pub fn new() -> Self {
-        Self::default()
+        Self::with_instruments(vec![Instrument {
+            symbol: "BTCUSDT".into(),
+            base: "BTC".into(),
+            quote: "USDT".into(),
+        }])
+    }
+
+    pub fn with_instruments(instruments: Vec<Instrument>) -> Self {
+        let instruments = instruments
+            .into_iter()
+            .map(|instrument| (instrument.symbol.clone(), instrument))
+            .collect();
+
+        Self {
+            open: Vec::new(),
+            account: Account::default(),
+            instruments,
+            armed: VecDeque::new(),
+            seq: 0,
+            warned: Warned::default(),
+        }
     }
 
     /// Arm a divergence to fire on the next matching trigger (control plane).
@@ -103,7 +161,7 @@ impl Engine {
         let leaves_qty = order.quantity - last_qty;
         let last_px = order.price.unwrap_or(Decimal::ZERO);
 
-        out.push(ServerMessage::OrderFilled(OrderFilled {
+        let fill = OrderFilled {
             client_order_id: order.client_order_id.clone(),
             venue_order_id: venue_order_id.clone(),
             trade_id: self.next_id("T"),
@@ -114,9 +172,13 @@ impl Engine {
             leaves_qty,
             commission: Decimal::ZERO,
             ts_event: ts,
-        }));
+        };
+
+        self.apply_fill(&fill);
+        out.push(ServerMessage::OrderFilled(fill));
 
         if leaves_qty > Decimal::ZERO {
+            self.warn_priceless_reservation(&order);
             self.open.push(OpenOrder {
                 venue_order_id,
                 submit: order,
@@ -124,6 +186,7 @@ impl Engine {
             });
         }
 
+        out.push(ServerMessage::AccountState(self.snapshot(ts)));
         out
     }
 
@@ -134,11 +197,14 @@ impl Engine {
             .position(|o| o.submit.client_order_id == client_order_id)
         {
             let o = self.open.remove(pos);
-            vec![ServerMessage::OrderCanceled {
-                client_order_id,
-                venue_order_id: o.venue_order_id,
-                ts_event: ts,
-            }]
+            vec![
+                ServerMessage::OrderCanceled {
+                    client_order_id,
+                    venue_order_id: o.venue_order_id,
+                    ts_event: ts,
+                },
+                ServerMessage::AccountState(self.snapshot(ts)),
+            ]
         } else {
             vec![ServerMessage::OrderRejected {
                 client_order_id,
@@ -148,9 +214,203 @@ impl Engine {
         }
     }
 
+    fn apply_fill(&mut self, fill: &OrderFilled) {
+        self.apply_position(fill);
+
+        if fill.last_px == Decimal::ZERO {
+            self.warn_zero_px(&fill.symbol);
+        }
+
+        let Some(instrument) = self.instruments.get(&fill.symbol) else {
+            self.warn_missing_instrument(&fill.symbol);
+            return;
+        };
+
+        let base = instrument.base.clone();
+        let quote = instrument.quote.clone();
+        let notional = fill.last_qty * fill.last_px;
+        match fill.side {
+            Side::Buy => {
+                *self.account.balances.entry(base).or_default() += fill.last_qty;
+                *self.account.balances.entry(quote).or_default() -= notional + fill.commission;
+            }
+            Side::Sell => {
+                *self.account.balances.entry(base).or_default() -= fill.last_qty;
+                *self.account.balances.entry(quote).or_default() += notional - fill.commission;
+            }
+        }
+    }
+
+    fn apply_position(&mut self, fill: &OrderFilled) {
+        let delta = match fill.side {
+            Side::Buy => fill.last_qty,
+            Side::Sell => -fill.last_qty,
+        };
+        let current = self
+            .account
+            .positions
+            .get(&fill.symbol)
+            .cloned()
+            .unwrap_or_default();
+
+        let next = next_position(&current, delta, fill.last_px);
+        if next.qty == Decimal::ZERO {
+            self.account.positions.remove(&fill.symbol);
+        } else {
+            self.account.positions.insert(fill.symbol.clone(), next);
+        }
+    }
+
+    fn snapshot(&self, ts: u64) -> AccountState {
+        let locked = self.locked_balances();
+        let mut currencies: Vec<String> = self.account.balances.keys().cloned().collect();
+        for currency in locked.keys() {
+            if !currencies.contains(currency) {
+                currencies.push(currency.clone());
+            }
+        }
+        currencies.sort();
+
+        let balances = currencies
+            .into_iter()
+            .map(|currency| {
+                let total = *self
+                    .account
+                    .balances
+                    .get(&currency)
+                    .unwrap_or(&Decimal::ZERO);
+                let locked = *locked.get(&currency).unwrap_or(&Decimal::ZERO);
+                Balance {
+                    currency,
+                    total,
+                    free: total - locked,
+                    locked,
+                }
+            })
+            .collect();
+
+        AccountState {
+            balances,
+            positions: self.positions(),
+            ts_event: ts,
+        }
+    }
+
+    fn locked_balances(&self) -> HashMap<String, Decimal> {
+        let mut locked = HashMap::new();
+
+        for order in &self.open {
+            let Some(instrument) = self.instruments.get(&order.submit.symbol) else {
+                continue;
+            };
+
+            match order.submit.side {
+                Side::Buy => {
+                    let reservation = order
+                        .submit
+                        .price
+                        .map_or(Decimal::ZERO, |price| order.leaves_qty * price);
+                    *locked.entry(instrument.quote.clone()).or_default() += reservation;
+                }
+                Side::Sell => {
+                    *locked.entry(instrument.base.clone()).or_default() += order.leaves_qty;
+                }
+            }
+        }
+
+        locked
+    }
+
+    fn warn_missing_instrument(&mut self, symbol: &str) {
+        if self.warned.missing_instrument.insert(symbol.into()) {
+            tracing::warn!(%symbol, "account balance leg skipped for unknown instrument");
+        }
+    }
+
+    fn warn_zero_px(&mut self, symbol: &str) {
+        if self.warned.zero_px.insert(symbol.into()) {
+            tracing::warn!(%symbol, "account fill booked with zero price");
+        }
+    }
+
+    fn warn_priceless_reservation(&mut self, order: &SubmitOrder) {
+        if order.side == Side::Buy
+            && order.price.is_none()
+            && self
+                .warned
+                .priceless_reservation
+                .insert(order.symbol.clone())
+        {
+            let symbol = order.symbol.as_str();
+            tracing::warn!(%symbol, "resting buy order has no price to reserve");
+        }
+    }
+
+    pub fn account_snapshot(&self, ts: u64) -> AccountState {
+        self.snapshot(ts)
+    }
+
+    pub fn positions(&self) -> Vec<Position> {
+        let mut positions: Vec<Position> = self
+            .account
+            .positions
+            .iter()
+            .map(|(symbol, state)| Position {
+                symbol: symbol.clone(),
+                quantity: state.qty,
+                avg_px: state.avg_px,
+            })
+            .collect();
+        positions.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        positions
+    }
+
     pub fn open_orders(&self) -> &[OpenOrder] {
         &self.open
     }
+}
+
+fn next_position(current: &PositionState, delta: Decimal, px: Decimal) -> PositionState {
+    if current.qty == Decimal::ZERO {
+        return PositionState {
+            qty: delta,
+            avg_px: px,
+        };
+    }
+
+    if same_sign(current.qty, delta) {
+        let current_abs = abs(current.qty);
+        let delta_abs = abs(delta);
+        return PositionState {
+            qty: current.qty + delta,
+            avg_px: ((current_abs * current.avg_px) + (delta_abs * px)) / (current_abs + delta_abs),
+        };
+    }
+
+    let current_abs = abs(current.qty);
+    let delta_abs = abs(delta);
+    let qty = current.qty + delta;
+    if delta_abs < current_abs {
+        PositionState {
+            qty,
+            avg_px: current.avg_px,
+        }
+    } else if delta_abs == current_abs {
+        PositionState {
+            qty: Decimal::ZERO,
+            avg_px: Decimal::ZERO,
+        }
+    } else {
+        PositionState { qty, avg_px: px }
+    }
+}
+
+fn same_sign(a: Decimal, b: Decimal) -> bool {
+    (a > Decimal::ZERO && b > Decimal::ZERO) || (a < Decimal::ZERO && b < Decimal::ZERO)
+}
+
+fn abs(value: Decimal) -> Decimal {
+    if value < Decimal::ZERO { -value } else { value }
 }
 
 #[cfg(test)]
@@ -160,26 +420,65 @@ mod tests {
     use rust_decimal::prelude::FromPrimitive;
 
     fn order(id: &str, qty: i64) -> SubmitOrder {
+        order_with(id, Side::Buy, "BTCUSDT", qty, Some(Decimal::from(100)))
+    }
+
+    fn order_with(
+        id: &str,
+        side: Side,
+        symbol: &str,
+        qty: i64,
+        price: Option<Decimal>,
+    ) -> SubmitOrder {
         SubmitOrder {
             client_order_id: id.into(),
-            symbol: "BTCUSDT".into(),
-            side: Side::Buy,
-            order_type: OrderType::Limit,
+            symbol: symbol.into(),
+            side,
+            order_type: if price.is_some() {
+                OrderType::Limit
+            } else {
+                OrderType::Market
+            },
             quantity: Decimal::from(qty),
-            price: Some(Decimal::from(100)),
+            price,
             time_in_force: TimeInForce::Gtc,
         }
+    }
+
+    fn account(out: &[ServerMessage], index: usize) -> &AccountState {
+        let ServerMessage::AccountState(state) = &out[index] else {
+            panic!("expected account state")
+        };
+        state
+    }
+
+    fn balance<'a>(state: &'a AccountState, currency: &str) -> &'a Balance {
+        state
+            .balances
+            .iter()
+            .find(|balance| balance.currency == currency)
+            .unwrap()
+    }
+
+    fn position<'a>(state: &'a AccountState, symbol: &str) -> &'a Position {
+        state
+            .positions
+            .iter()
+            .find(|position| position.symbol == symbol)
+            .unwrap()
     }
 
     #[test]
     fn submit_fully_fills_by_default() {
         let mut e = Engine::new();
         let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        assert_eq!(out.len(), 3);
         assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
         let ServerMessage::OrderFilled(f) = &out[1] else {
             panic!("expected fill")
         };
         assert_eq!(f.leaves_qty, Decimal::ZERO);
+        assert!(matches!(out[2], ServerMessage::AccountState(_)));
         assert!(e.open_orders().is_empty());
     }
 
@@ -191,11 +490,13 @@ mod tests {
             fraction: Decimal::from_f64(0.3).unwrap(),
         });
         let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        assert_eq!(out.len(), 3);
         let ServerMessage::OrderFilled(f) = &out[1] else {
             panic!("expected fill")
         };
         assert_eq!(f.last_qty, Decimal::from(3));
         assert_eq!(f.leaves_qty, Decimal::from(7));
+        assert!(matches!(out[2], ServerMessage::AccountState(_)));
         assert_eq!(e.open_orders().len(), 1);
     }
 
@@ -208,5 +509,160 @@ mod tests {
         let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
         assert_eq!(out.len(), 1);
         assert!(matches!(out[0], ServerMessage::OrderRejected { .. }));
+    }
+
+    #[test]
+    fn buy_fill_moves_base_and_quote_balances() {
+        let mut e = Engine::new();
+        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let state = account(&out, 2);
+
+        let btc = balance(state, "BTC");
+        assert_eq!(btc.total, Decimal::from(10));
+        assert_eq!(btc.locked, Decimal::ZERO);
+        assert_eq!(btc.free, Decimal::from(10));
+
+        let usdt = balance(state, "USDT");
+        assert_eq!(usdt.total, Decimal::from(-1000));
+        assert_eq!(usdt.locked, Decimal::ZERO);
+        assert_eq!(usdt.free, Decimal::from(-1000));
+    }
+
+    #[test]
+    fn sell_fill_moves_balances_opposite() {
+        let mut e = Engine::new();
+        let order = order_with("O1", Side::Sell, "BTCUSDT", 10, Some(Decimal::from(100)));
+        let out = e.process(ClientMessage::SubmitOrder(order), 1);
+        let state = account(&out, 2);
+
+        let btc = balance(state, "BTC");
+        assert_eq!(btc.total, Decimal::from(-10));
+        assert_eq!(btc.locked, Decimal::ZERO);
+        assert_eq!(btc.free, Decimal::from(-10));
+
+        let usdt = balance(state, "USDT");
+        assert_eq!(usdt.total, Decimal::from(1000));
+        assert_eq!(usdt.locked, Decimal::ZERO);
+        assert_eq!(usdt.free, Decimal::from(1000));
+    }
+
+    #[test]
+    fn position_vwap_averages_same_direction_adds() {
+        let mut e = Engine::new();
+        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let second = order_with("O2", Side::Buy, "BTCUSDT", 10, Some(Decimal::from(200)));
+        let out = e.process(ClientMessage::SubmitOrder(second), 2);
+        let pos = position(account(&out, 2), "BTCUSDT");
+
+        assert_eq!(pos.quantity, Decimal::from(20));
+        assert_eq!(pos.avg_px, Decimal::from(150));
+    }
+
+    #[test]
+    fn position_reduce_keeps_avg_px_and_shrinks_qty() {
+        let mut e = Engine::new();
+        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let reduce = order_with("O2", Side::Sell, "BTCUSDT", 4, Some(Decimal::from(150)));
+        let out = e.process(ClientMessage::SubmitOrder(reduce), 2);
+        let pos = position(account(&out, 2), "BTCUSDT");
+
+        assert_eq!(pos.quantity, Decimal::from(6));
+        assert_eq!(pos.avg_px, Decimal::from(100));
+    }
+
+    #[test]
+    fn position_flip_reopens_at_fill_price() {
+        let mut e = Engine::new();
+        e.process(ClientMessage::SubmitOrder(order("O1", 5)), 1);
+        let flip = order_with("O2", Side::Sell, "BTCUSDT", 8, Some(Decimal::from(120)));
+        let out = e.process(ClientMessage::SubmitOrder(flip), 2);
+        let pos = position(account(&out, 2), "BTCUSDT");
+
+        assert_eq!(pos.quantity, Decimal::from(-3));
+        assert_eq!(pos.avg_px, Decimal::from(120));
+    }
+
+    #[test]
+    fn partial_fill_books_only_filled_portion_and_locks_remainder() {
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "O1".into(),
+            fraction: Decimal::from_f64(0.3).unwrap(),
+        });
+        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let state = account(&out, 2);
+
+        let btc = balance(state, "BTC");
+        assert_eq!(btc.total, Decimal::from(3));
+        assert_eq!(btc.locked, Decimal::ZERO);
+        assert_eq!(btc.free, Decimal::from(3));
+
+        let usdt = balance(state, "USDT");
+        assert_eq!(usdt.total, Decimal::from(-300));
+        assert_eq!(usdt.locked, Decimal::from(700));
+        assert_eq!(usdt.free, Decimal::from(-1000));
+
+        let pos = position(state, "BTCUSDT");
+        assert_eq!(pos.quantity, Decimal::from(3));
+        assert_eq!(pos.avg_px, Decimal::from(100));
+    }
+
+    #[test]
+    fn cancel_frees_reservation_and_emits_account_state() {
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "O1".into(),
+            fraction: Decimal::from_f64(0.3).unwrap(),
+        });
+        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+
+        let out = e.process(
+            ClientMessage::CancelOrder {
+                client_order_id: "O1".into(),
+            },
+            2,
+        );
+        assert_eq!(out.len(), 2);
+        assert!(matches!(out[0], ServerMessage::OrderCanceled { .. }));
+        let state = account(&out, 1);
+
+        let usdt = balance(state, "USDT");
+        assert_eq!(usdt.total, Decimal::from(-300));
+        assert_eq!(usdt.locked, Decimal::ZERO);
+        assert_eq!(usdt.free, Decimal::from(-300));
+    }
+
+    #[test]
+    fn missing_instrument_books_position_only_no_panic() {
+        let mut e = Engine::new();
+        let order = order_with("O1", Side::Buy, "ETHUSDT", 10, Some(Decimal::from(100)));
+        let out = e.process(ClientMessage::SubmitOrder(order), 1);
+        let state = account(&out, 2);
+
+        assert!(state.balances.is_empty());
+        let pos = position(state, "ETHUSDT");
+        assert_eq!(pos.quantity, Decimal::from(10));
+        assert_eq!(pos.avg_px, Decimal::from(100));
+    }
+
+    #[test]
+    fn priceless_partial_market_buy_reserves_zero_quote() {
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "O1".into(),
+            fraction: Decimal::from_f64(0.5).unwrap(),
+        });
+        let order = order_with("O1", Side::Buy, "BTCUSDT", 10, None);
+        let out = e.process(ClientMessage::SubmitOrder(order), 1);
+        let state = account(&out, 2);
+
+        let usdt = balance(state, "USDT");
+        assert_eq!(usdt.total, Decimal::ZERO);
+        assert_eq!(usdt.locked, Decimal::ZERO);
+        assert_eq!(usdt.free, Decimal::ZERO);
+
+        let pos = position(state, "BTCUSDT");
+        assert_eq!(pos.quantity, Decimal::from(5));
+        assert_eq!(pos.avg_px, Decimal::ZERO);
     }
 }

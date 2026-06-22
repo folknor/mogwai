@@ -9,11 +9,17 @@ crate's protocol over the wire.
 
 ## Status
 
-Done and verified end-to-end (`scripts/smoke.py`, 12 unit tests):
+Done and verified end-to-end (`scripts/smoke.py`, 28 unit tests):
 
-- `mogwai-protocol` - native JSON-over-WS wire types + `control::Divergence`.
+- `mogwai-protocol` - native JSON-over-WS wire types + `control::Divergence`,
+  including the `Position` type and an `AccountState` that carries balances
+  *and* positions.
 - `mogwai-engine` - venue-agnostic core with the divergence-injection seam
-  (`PartialFillNext`, `RejectNextSubmit` implemented).
+  (`PartialFillNext`, `RejectNextSubmit` implemented). Maintains per-currency
+  balances and per-symbol VWAP positions off an instrument-decomposition table,
+  and pushes `AccountState` after fills and reservation-freeing cancels
+  (free/locked derived from resting-order reservations; pure delta ledger off
+  zero, so an unfunded buy drives the quote leg negative).
 - `mogwai-data` - streaming Kraken CSV loader (O(1) memory over multi-GB files),
   seconds→ns, k-way `MergeSource`; verified on the real 43GB dump.
 - `mogwai-server` - axum `/health`, `/ws` (orders + market-data replay),
@@ -35,8 +41,6 @@ Done and verified end-to-end (`scripts/smoke.py`, 12 unit tests):
 - [ ] `GoDark { ms }` - venue blackout.
 
 ### 2. Engine depth
-- [ ] `generate_account_state` - track balances/positions, not just orders
-      (needed before the broadarrow adapter can reconcile).
 - [ ] Real matching against an order book (today: immediate fill, no book).
 - [ ] `ModifyOrder` handling (today: no-op).
 
@@ -96,8 +100,11 @@ the reconciliation reports, account snapshot) and fits its existing axum routes.
       `cancel` mapped onto `mogwai-protocol` order commands, and the
       reconciliation report generators (`generate_order_status_reports`,
       `generate_fill_reports`, `generate_position_status_reports`).
-      `generate_account_state` is REQUIRED here and depends on engine account
-      state (section 2) - that ordering is a hard dependency.
+      `generate_account_state` is REQUIRED here; its hard dependency on engine
+      account state is now satisfied - the engine tracks balances/positions and
+      pushes `AccountState` (with positions) on fills and reservation-freeing
+      cancels (see git history for the landing). The adapter consumes that
+      pushed snapshot; account state is push-only, with no client-driven query.
 - [ ] `transport_profile` knob: because mogwai owns both ends, the adapter can
       behave like different archetypes (orders over WS vs HTTP-only the bybit-demo
       way, push-stream vs request/response data) so broadarrow exercises each of

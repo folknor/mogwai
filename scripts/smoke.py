@@ -42,6 +42,20 @@ def ws_roundtrip(send_obj: dict, expect: int) -> list:
     return out
 
 
+def find_balance(account: dict, currency: str) -> dict:
+    for balance in account["balances"]:
+        if balance["currency"] == currency:
+            return balance
+    raise AssertionError(f"missing balance {currency}: {account}")
+
+
+def find_position(account: dict, symbol: str) -> dict:
+    for position in account["positions"]:
+        if position["symbol"] == symbol:
+            return position
+    raise AssertionError(f"missing position {symbol}: {account}")
+
+
 class WsClient:
     def __init__(self, timeout: float | None = None) -> None:
         self.s = socket.create_connection((HOST, PORT))
@@ -124,16 +138,32 @@ def main() -> None:
             "price": "100",
             "time_in_force": "Gtc",
         },
-        expect=2,
+        expect=3,
     )
-    accepted, filled = msgs
+    accepted, filled, account = msgs
     print("accepted:", accepted)
     print("filled:  ", filled)
+    print("account: ", account)
 
     assert accepted["type"] == "OrderAccepted", accepted
     assert filled["type"] == "OrderFilled", filled
     assert float(filled["last_qty"]) == 3.0, filled
     assert float(filled["leaves_qty"]) == 7.0, filled
+    assert account["type"] == "AccountState", account
+
+    pos = find_position(account, "BTCUSDT")
+    assert float(pos["quantity"]) == 3.0, pos
+    assert float(pos["avg_px"]) == 100.0, pos
+
+    btc = find_balance(account, "BTC")
+    assert float(btc["total"]) == 3.0, btc
+    assert float(btc["locked"]) == 0.0, btc
+    assert float(btc["free"]) == 3.0, btc
+
+    usdt = find_balance(account, "USDT")
+    assert float(usdt["total"]) == -300.0, usdt
+    assert float(usdt["locked"]) == 700.0, usdt
+    assert float(usdt["free"]) == -1000.0, usdt
     print("PASS: partial fill round-tripped through the live WS path")
 
     # Market-data replay: subscribe to a small pair and read the first 2 trades.

@@ -112,6 +112,36 @@ mod tests {
             } if symbols == vec!["X"]
         ));
     }
+
+    #[test]
+    fn account_state_with_positions_round_trips() {
+        let state = AccountState {
+            balances: vec![Balance {
+                currency: "USDT".into(),
+                total: Decimal::from(-300),
+                free: Decimal::from(-1000),
+                locked: Decimal::from(700),
+            }],
+            positions: vec![Position {
+                symbol: "BTCUSDT".into(),
+                quantity: Decimal::from(3),
+                avg_px: Decimal::from(100),
+            }],
+            ts_event: 123,
+        };
+
+        let json = serde_json::to_string(&state).unwrap();
+        let decoded: AccountState = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.balances[0].currency, state.balances[0].currency);
+        assert_eq!(decoded.balances[0].total, state.balances[0].total);
+        assert_eq!(decoded.balances[0].free, state.balances[0].free);
+        assert_eq!(decoded.balances[0].locked, state.balances[0].locked);
+        assert_eq!(decoded.positions[0].symbol, state.positions[0].symbol);
+        assert_eq!(decoded.positions[0].quantity, state.positions[0].quantity);
+        assert_eq!(decoded.positions[0].avg_px, state.positions[0].avg_px);
+        assert_eq!(decoded.ts_event, state.ts_event);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,6 +202,7 @@ pub struct OrderFilled {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountState {
     pub balances: Vec<Balance>,
+    pub positions: Vec<Position>,
     pub ts_event: u64,
 }
 
@@ -181,6 +212,15 @@ pub struct Balance {
     pub total: Decimal,
     pub free: Decimal,
     pub locked: Decimal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Position {
+    pub symbol: Symbol,
+    /// Signed net quantity: positive is long, negative is short, zero is flat.
+    pub quantity: Decimal,
+    /// Volume-weighted average entry price of the open quantity. Zero when flat.
+    pub avg_px: Decimal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
