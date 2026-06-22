@@ -96,7 +96,14 @@ impl Engine {
 
     /// Arm a divergence to fire on the next matching trigger (control plane).
     pub fn arm(&mut self, d: Divergence) {
-        self.armed.push_back(d);
+        match d {
+            // Temporal, connection-scoped divergences are owned by the server's
+            // outbound layer, not the synchronous clock-free engine. Dropping
+            // them here keeps stale temporal settings from blocking the next
+            // engine-side divergence at front().
+            Divergence::DelayAcks { .. } | Divergence::GoDark { .. } => {}
+            other => self.armed.push_back(other),
+        }
     }
 
     /// Monotonic id source; the server stamps real timestamps.
@@ -175,6 +182,11 @@ impl Engine {
         };
 
         self.apply_fill(&fill);
+        let duplicate = matches!(self.armed.front(), Some(Divergence::DuplicateNextFill));
+        if duplicate {
+            self.armed.pop_front();
+            out.push(ServerMessage::OrderFilled(fill.clone()));
+        }
         out.push(ServerMessage::OrderFilled(fill));
 
         if leaves_qty > Decimal::ZERO {
@@ -186,7 +198,12 @@ impl Engine {
             });
         }
 
-        out.push(ServerMessage::AccountState(self.snapshot(ts)));
+        let drop_update = matches!(self.armed.front(), Some(Divergence::DropNextAccountUpdate));
+        if drop_update {
+            self.armed.pop_front();
+        } else {
+            out.push(ServerMessage::AccountState(self.snapshot(ts)));
+        }
         out
     }
 
@@ -452,6 +469,13 @@ mod tests {
         state
     }
 
+    fn fill(out: &[ServerMessage], index: usize) -> &OrderFilled {
+        let ServerMessage::OrderFilled(fill) = &out[index] else {
+            panic!("expected fill")
+        };
+        fill
+    }
+
     fn balance<'a>(state: &'a AccountState, currency: &str) -> &'a Balance {
         state
             .balances
@@ -509,6 +533,86 @@ mod tests {
         let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
         assert_eq!(out.len(), 1);
         assert!(matches!(out[0], ServerMessage::OrderRejected { .. }));
+    }
+
+    #[test]
+    fn duplicate_next_fill_doubles_the_wire_event() {
+        let mut e = Engine::new();
+        e.arm(Divergence::DuplicateNextFill);
+
+        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+
+        assert_eq!(out.len(), 4);
+        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        let first = fill(&out, 1);
+        let second = fill(&out, 2);
+        assert_eq!(first.trade_id, second.trade_id);
+        assert_eq!(first.last_qty, second.last_qty);
+        assert_eq!(first.last_px, second.last_px);
+        assert_eq!(first.leaves_qty, second.leaves_qty);
+        let state = account(&out, 3);
+        assert_eq!(balance(state, "BTC").total, Decimal::from(10));
+        assert_eq!(balance(state, "USDT").total, Decimal::from(-1000));
+    }
+
+    #[test]
+    fn drop_next_account_update_swallows_the_snapshot() {
+        let mut e = Engine::new();
+        e.arm(Divergence::DropNextAccountUpdate);
+
+        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+
+        assert_eq!(out.len(), 2);
+        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(out[1], ServerMessage::OrderFilled(_)));
+        let state = e.account_snapshot(2);
+        assert_eq!(balance(&state, "BTC").total, Decimal::from(10));
+    }
+
+    #[test]
+    fn duplicate_and_drop_compose_on_one_submit() {
+        let mut e = Engine::new();
+        e.arm(Divergence::DuplicateNextFill);
+        e.arm(Divergence::DropNextAccountUpdate);
+
+        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+
+        assert_eq!(out.len(), 3);
+        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(out[1], ServerMessage::OrderFilled(_)));
+        assert!(matches!(out[2], ServerMessage::OrderFilled(_)));
+    }
+
+    #[test]
+    fn drop_skips_rejected_submit_and_fires_on_next_fill() {
+        let mut e = Engine::new();
+        e.arm(Divergence::RejectNextSubmit {
+            reason: "risk".into(),
+        });
+        e.arm(Divergence::DropNextAccountUpdate);
+
+        let rejected = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        assert_eq!(rejected.len(), 1);
+        assert!(matches!(rejected[0], ServerMessage::OrderRejected { .. }));
+
+        let filled = e.process(ClientMessage::SubmitOrder(order("O2", 10)), 2);
+        assert_eq!(filled.len(), 2);
+        assert!(matches!(filled[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(filled[1], ServerMessage::OrderFilled(_)));
+    }
+
+    #[test]
+    fn arm_drops_temporal_variants_without_blocking_engine_divergences() {
+        let mut e = Engine::new();
+        e.arm(Divergence::DelayAcks { ms: 100 });
+        e.arm(Divergence::GoDark { ms: 100 });
+        e.arm(Divergence::DuplicateNextFill);
+
+        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+
+        assert_eq!(out.len(), 4);
+        assert!(matches!(out[1], ServerMessage::OrderFilled(_)));
+        assert!(matches!(out[2], ServerMessage::OrderFilled(_)));
     }
 
     #[test]

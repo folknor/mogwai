@@ -264,7 +264,7 @@ pub mod control {
         DelayAcks { ms: u64 },
         /// Emit the next fill event twice.
         DuplicateNextFill,
-        /// Swallow the next account-state update (induce account drift).
+        /// Swallow the next fill-driven account-state update (induce account drift).
         DropNextAccountUpdate,
         /// Stop sending anything for `ms` (simulate a venue blackout).
         GoDark { ms: u64 },

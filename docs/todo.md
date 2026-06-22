@@ -9,13 +9,17 @@ crate's protocol over the wire.
 
 ## Status
 
-Done and verified end-to-end (`scripts/smoke.py`, 28 unit tests):
+Done and verified end-to-end (`scripts/smoke.py`, 34 unit tests):
 
 - `mogwai-protocol` - native JSON-over-WS wire types + `control::Divergence`,
   including the `Position` type and an `AccountState` that carries balances
   *and* positions.
-- `mogwai-engine` - venue-agnostic core with the divergence-injection seam
-  (`PartialFillNext`, `RejectNextSubmit` implemented). Maintains per-currency
+- `mogwai-engine` - venue-agnostic core with the divergence-injection seam.
+  The two engine-side divergences (`DuplicateNextFill`, `DropNextAccountUpdate`)
+  extend the `armed`-queue seam alongside `PartialFillNext`/`RejectNextSubmit`;
+  the two temporal, connection-scoped divergences (`DelayAcks`, `GoDark`) are
+  filtered out of the engine queue and applied in the server's outbound writer
+  (see git history for the landing). Maintains per-currency
   balances and per-symbol VWAP positions off an instrument-decomposition table,
   and pushes `AccountState` after fills and reservation-freeing cancels
   (free/locked derived from resting-order reservations; pure delta ledger off
@@ -28,23 +32,20 @@ Done and verified end-to-end (`scripts/smoke.py`, 28 unit tests):
   `Subscribe`, seeking each source's prefix), `Unsubscribe` cancellation (a
   shared atomic flag the replay loop polls), and a paced inter-tick sleep cap
   (`MOGWAI_GAP_CAP_MS`, default 1000) are all wired and pinned by `smoke.py`.
+  The outbound writer also owns the two temporal divergences: `DelayAcks` holds
+  each execution event (market data untouched) and `GoDark` drops everything for
+  the blackout window, both armed over `/control/divergence` via shared atomics.
   Optional tick-rule aggressor inference (the `TickRuleAggressor` `Permutation`,
   opt-in via `MOGWAI_INFER_AGGRESSOR`, applied over the merged stream so each
   symbol's rule sees its trades in replay order; `Identity` stays the default).
 
 ## Next
 
-### 1. Remaining divergences (server-side; timer/socket layer now exists)
-- [ ] `DelayAcks { ms }` - delay outbound execution events.
-- [ ] `DuplicateNextFill` - emit the next fill twice.
-- [ ] `DropNextAccountUpdate` - induce account drift.
-- [ ] `GoDark { ms }` - venue blackout.
-
-### 2. Engine depth
+### 1. Engine depth
 - [ ] Real matching against an order book (today: immediate fill, no book).
 - [ ] `ModifyOrder` handling (today: no-op).
 
-### 3. broadarrow integration: the mogwai venue adapter
+### 2. broadarrow integration: the mogwai venue adapter
 broadarrow drives strategies live through a nautilus `LiveNode`, registering one
 venue adapter per exchange (the stock `nautilus-binance` / `-kraken` / `-bybit`
 factories, picked by the symbol's exchange prefix in `run-prep/src/venue.rs`).
@@ -123,10 +124,11 @@ at adapter-build time (in `venue.rs`); the adapter splits it:
   nanos in `execution/src/models/latency.rs`, a backtest construct never wired
   live) for the latency field.
 - Server-side (mogwai-server's `control::Divergence` engine): the execution
-  divergences from section 1 (partial, reject, duplicate fill, drop account
-  update, blackout, delayed acks). The adapter forwards the server-side part of
-  the `HavocSpec` to mogwai-server on connect, so broadarrow never makes a
-  separate control-plane call - one config object, the adapter relays it.
+  divergences (partial, reject, duplicate fill, drop account update, blackout,
+  delayed acks), all six now landed and verified end-to-end. The adapter
+  forwards the server-side part of the `HavocSpec` to mogwai-server on connect,
+  so broadarrow never makes a separate control-plane call - one config object,
+  the adapter relays it.
 
 - [ ] `HavocSpec` type in `mogwai-protocol` (so both ends share it), carrying the
       client-side knobs and the server-side `Divergence` arming set.

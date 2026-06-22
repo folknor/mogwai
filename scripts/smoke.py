@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """End-to-end smoke test of the mogwai fake broker.
 
-Arms a partial-fill divergence over the control plane, then submits an order over
-the native WS gateway and checks the engine emits Accepted + a partial Filled
-(leaves_qty > 0). Uses only the stdlib so there's nothing to install.
+Arms divergences over the control plane, then submits orders over the native WS
+gateway and checks the resulting execution events. Also exercises replay timing
+so DelayAcks and GoDark are verified at the socket writer. Uses only the stdlib
+so there's nothing to install.
 
 Connects to a server at 127.0.0.1:8787; it does not start one. The windowing,
-Unsubscribe-stop, and gap-cap steps need PACED replay against the bundled
-fixture, so launch the server with a non-zero speed (at the default speed 0.0
-those steps race and fail spuriously):
+Unsubscribe-stop, gap-cap, DelayAcks, and GoDark steps need PACED replay against
+the bundled fixture, so launch the server with a non-zero speed (at the default
+speed 0.0 those steps race and fail spuriously):
 
     MOGWAI_DATA_DIR=scripts/fixtures/replay MOGWAI_REPLAY_SPEED=1 brokkr run -p mogwai-server
 
@@ -16,6 +17,7 @@ then run this script.
 """
 import json
 import socket
+import time
 import urllib.request
 
 HOST, PORT = "127.0.0.1", 8787
@@ -40,6 +42,19 @@ def ws_roundtrip(send_obj: dict, expect: int) -> list:
     out = [ws.read() for _ in range(expect)]
     ws.close()
     return out
+
+
+def submit_order(client_order_id: str) -> dict:
+    return {
+        "type": "SubmitOrder",
+        "client_order_id": client_order_id,
+        "symbol": "BTCUSDT",
+        "side": "Buy",
+        "order_type": "Limit",
+        "quantity": "10",
+        "price": "100",
+        "time_in_force": "Gtc",
+    }
 
 
 def find_balance(account: dict, currency: str) -> dict:
@@ -127,19 +142,7 @@ def main() -> None:
     ) == 202
     print("armed PartialFillNext(O1, 0.3)")
 
-    msgs = ws_roundtrip(
-        {
-            "type": "SubmitOrder",
-            "client_order_id": "O1",
-            "symbol": "BTCUSDT",
-            "side": "Buy",
-            "order_type": "Limit",
-            "quantity": "10",
-            "price": "100",
-            "time_in_force": "Gtc",
-        },
-        expect=3,
-    )
+    msgs = ws_roundtrip(submit_order("O1"), expect=3)
     accepted, filled, account = msgs
     print("accepted:", accepted)
     print("filled:  ", filled)
@@ -165,6 +168,34 @@ def main() -> None:
     assert float(usdt["locked"]) == 700.0, usdt
     assert float(usdt["free"]) == -1000.0, usdt
     print("PASS: partial fill round-tripped through the live WS path")
+
+    assert post_divergence({"type": "DuplicateNextFill"}) == 202
+    dup_msgs = ws_roundtrip(submit_order("DUP1"), expect=4)
+    for msg in dup_msgs:
+        print("dup:     ", msg)
+    assert [msg["type"] for msg in dup_msgs] == [
+        "OrderAccepted",
+        "OrderFilled",
+        "OrderFilled",
+        "AccountState",
+    ], dup_msgs
+    assert dup_msgs[1]["trade_id"] == dup_msgs[2]["trade_id"], dup_msgs
+    print("PASS: DuplicateNextFill doubled the live fill event")
+
+    assert post_divergence({"type": "DropNextAccountUpdate"}) == 202
+    ws = WsClient(timeout=0.2)
+    ws.send(submit_order("DROP1"))
+    drop_msgs = [ws.read() for _ in range(2)]
+    for msg in drop_msgs:
+        print("drop:    ", msg)
+    try:
+        extra = ws.read()
+    except socket.timeout:
+        extra = None
+    ws.close()
+    assert [msg["type"] for msg in drop_msgs] == ["OrderAccepted", "OrderFilled"], drop_msgs
+    assert extra is None, extra
+    print("PASS: DropNextAccountUpdate swallowed the live account update")
 
     # Market-data replay: subscribe to a small pair and read the first 2 trades.
     ticks = ws_roundtrip({"type": "Subscribe", "symbols": ["KEUR"]}, expect=2)
@@ -207,6 +238,70 @@ def main() -> None:
         assert t["type"] == "Trade", t
         assert t["symbol"] == "KEUR", t
     print("PASS: capped paced replay crosses a large historical gap")
+
+    assert post_divergence({"type": "DelayAcks", "ms": 300}) == 202
+    ws = WsClient(timeout=2.0)
+    ws.send(submit_order("D1"))
+    delay_msgs = []
+    gaps = []
+    for _ in range(3):
+        start = time.monotonic()
+        delay_msgs.append(ws.read())
+        gaps.append(time.monotonic() - start)
+    ws.close()
+    for msg in delay_msgs:
+        print("delay:   ", msg)
+    assert [msg["type"] for msg in delay_msgs] == [
+        "OrderAccepted",
+        "OrderFilled",
+        "AccountState",
+    ], delay_msgs
+    for gap in gaps:
+        assert gap >= 0.25, gaps
+
+    ws = WsClient(timeout=1.0)
+    ws.send({"type": "Subscribe", "symbols": ["KEUR"]})
+    start = time.monotonic()
+    trade = ws.read()
+    elapsed = time.monotonic() - start
+    ws.close()
+    print("delay-md:", trade)
+    assert trade["type"] == "Trade", trade
+    assert elapsed < 0.2, elapsed
+
+    assert post_divergence({"type": "DelayAcks", "ms": 0}) == 202
+    ws = WsClient(timeout=1.0)
+    ws.send(submit_order("D2"))
+    start = time.monotonic()
+    prompt = ws.read()
+    elapsed = time.monotonic() - start
+    ws.close()
+    print("prompt:  ", prompt)
+    assert prompt["type"] == "OrderAccepted", prompt
+    assert elapsed < 0.2, elapsed
+    print("PASS: DelayAcks delays only execution events and disarms")
+
+    assert post_divergence({"type": "GoDark", "ms": 500}) == 202
+    ws = WsClient(timeout=0.3)
+    ws.send({"type": "Subscribe", "symbols": ["KEUR"]})
+    try:
+        dark = ws.read()
+    except socket.timeout:
+        dark = None
+    assert dark is None, dark
+    time.sleep(0.6)
+    # The blackout has lifted; the recovered frame is a post-window tick that
+    # the paced replay only produces ~1s in (the fixture's large gap), so give
+    # this read a generous timeout - the short 0.3s above was only to prove the
+    # window was silent, not to bound the recovery wait.
+    ws.s.settimeout(3.0)
+    recovered = ws.read()
+    ws.close()
+    print("recovered:", recovered)
+    assert recovered["type"] == "Trade", recovered
+    assert recovered["symbol"] == "KEUR", recovered
+    assert recovered["ts_event"] >= WINDOW_START_TS, recovered
+    print("PASS: GoDark drops blackout frames instead of buffering them")
 
 
 if __name__ == "__main__":

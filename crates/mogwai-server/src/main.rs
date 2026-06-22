@@ -11,7 +11,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -78,6 +78,10 @@ impl Config {
 struct AppState {
     engine: Arc<Mutex<Engine>>,
     cfg: Config,
+    /// Execution-event delay in milliseconds, shared by all live writers.
+    delay_ms: Arc<AtomicU64>,
+    /// Wall-clock unix-ns instant before which writers drop all outbound frames.
+    dark_until_ns: Arc<AtomicU64>,
 }
 
 /// Nanoseconds since the Unix epoch - the server's clock, fed into the engine.
@@ -103,6 +107,8 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         engine: Arc::new(Mutex::new(Engine::new())),
         cfg,
+        delay_ms: Arc::new(AtomicU64::new(0)),
+        dark_until_ns: Arc::new(AtomicU64::new(0)),
     };
 
     let app = Router::new()
@@ -124,7 +130,16 @@ async fn arm_divergence(
     Json(div): Json<Divergence>,
 ) -> impl IntoResponse {
     tracing::info!(?div, "arming divergence");
-    state.engine.lock().await.arm(div);
+    match div {
+        Divergence::DelayAcks { ms } => {
+            state.delay_ms.store(ms, Ordering::Relaxed);
+        }
+        Divergence::GoDark { ms } => {
+            let until = now_ns().saturating_add(ms.saturating_mul(1_000_000));
+            state.dark_until_ns.store(until, Ordering::Relaxed);
+        }
+        engine_div => state.engine.lock().await.arm(engine_div),
+    }
     StatusCode::ACCEPTED
 }
 
@@ -142,9 +157,20 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::channel::<ServerMessage>(1024);
     let mut replays: HashMap<Vec<String>, Arc<AtomicBool>> = HashMap::new();
+    let delay_ms = Arc::clone(&state.delay_ms);
+    let dark_until_ns = Arc::clone(&state.dark_until_ns);
 
     let writer = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
+            if is_execution_event(&msg) {
+                let delay = delay_ms.load(Ordering::Relaxed);
+                if delay > 0 {
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
+            }
+            if now_ns() < dark_until_ns.load(Ordering::Relaxed) {
+                continue;
+            }
             let payload = serde_json::to_string(&msg).expect("serialize ServerMessage");
             if sink.send(Message::Text(payload.into())).await.is_err() {
                 break; // client gone
@@ -204,6 +230,10 @@ fn sub_key(symbols: &[String]) -> Vec<String> {
     key.sort();
     key.dedup();
     key
+}
+
+fn is_execution_event(msg: &ServerMessage) -> bool {
+    !matches!(msg, ServerMessage::Trade(_) | ServerMessage::Quote(_))
 }
 
 /// Stream historical trades for `symbols` as market data into `tx`.
