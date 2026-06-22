@@ -9,7 +9,7 @@ crate's protocol over the wire.
 
 ## Status
 
-Done and verified end-to-end (`scripts/smoke.py`, 8 unit tests):
+Done and verified end-to-end (`scripts/smoke.py`, 12 unit tests):
 
 - `mogwai-protocol` - native JSON-over-WS wire types + `control::Divergence`.
 - `mogwai-engine` - venue-agnostic core with the divergence-injection seam
@@ -18,17 +18,14 @@ Done and verified end-to-end (`scripts/smoke.py`, 8 unit tests):
   seconds→ns, k-way `MergeSource`; verified on the real 43GB dump.
 - `mogwai-server` - axum `/health`, `/ws` (orders + market-data replay),
   `/control/divergence`. Replay runs on a blocking thread with backpressure;
-  speed via `MOGWAI_REPLAY_SPEED`.
+  speed via `MOGWAI_REPLAY_SPEED`. Per-subscription windowing (`start_ts` on
+  `Subscribe`, seeking each source's prefix), `Unsubscribe` cancellation (a
+  shared atomic flag the replay loop polls), and a paced inter-tick sleep cap
+  (`MOGWAI_GAP_CAP_MS`, default 1000) are all wired and pinned by `smoke.py`.
 
 ## Next
 
 ### 1. Replay realism
-- [ ] Start-time / windowing control - replay from a given date, not epoch start
-      (otherwise the full history floods instantly when unthrottled).
-- [ ] `Unsubscribe` actually stops a running replay (today it's a no-op; the
-      replay thread has no cancellation path).
-- [ ] Cap or document pathological inter-tick gaps under paced replay (multi-year
-      gaps → multi-day sleeps at low speed).
 - [ ] Optional aggressor inference via tick rule, as a `Permutation`.
 
 ### 2. Remaining divergences (server-side; timer/socket layer now exists)
@@ -43,18 +40,96 @@ Done and verified end-to-end (`scripts/smoke.py`, 8 unit tests):
 - [ ] Real matching against an order book (today: immediate fill, no book).
 - [ ] `ModifyOrder` handling (today: no-op).
 
-### 4. Protocol gateways
-- [ ] Strategy A: `mogwai-proto-binance` - Binance-shaped REST+WS over the same
-      engine, so nautilus's existing Binance adapter connects via its
-      `base_url_*` overrides (zero new adapter).
+### 4. broadarrow integration: the mogwai venue adapter
+broadarrow drives strategies live through a nautilus `LiveNode`, registering one
+venue adapter per exchange (the stock `nautilus-binance` / `-kraken` / `-bybit`
+factories, picked by the symbol's exchange prefix in `run-prep/src/venue.rs`).
+mogwai is just another venue: broadarrow points a `MOGWAI` venue at a running
+mogwai-server instead of a real exchange. No protocol impersonation - mogwai is
+queried on purpose, so it speaks its own native protocol and ships its own
+nautilus adapter. Nautilus exposes this as a plugin point: `add_data_client` /
+`add_exec_client` take a `Box<dyn DataClientFactory>` / `Box<dyn
+ExecutionClientFactory>`, and adapters implement those traits in their own crate.
 
-### 5. broadarrow side (separate workspace)
-- [ ] `ExecutionClient` + `DataClient` impls consuming this protocol.
-- [ ] `venue.rs` adapter arm + `core::venue` PROFILES row (build-time guarded).
+The adapter is the one deliberate exception to "the broker crates never import
+nautilus": a `DataClient` + `ExecutionClient` pair plus their factories, each a
+client of mogwai-server that translates nautilus commands to and from
+`mogwai-protocol` messages. It lives here as a new crate so mogwai owns both ends
+of its protocol; the cost is that the nautilus path-deps enter this workspace's
+build graph (the broker crates themselves stay nautilus-free).
+
+#### How events flow (resolved from the nautilus adapter survey)
+Every stock adapter wires the same way, so mogwai copies it:
+- Market data egress: the data client pushes `DataEvent` into a process-global
+  `UnboundedSender<DataEvent>` fetched via
+  `nautilus_common::live::runner::get_data_event_sender()` (grabbed in `start`,
+  NOT passed at construction).
+- Order-event egress: an `ExecutionEventEmitter` (built with the clock plus
+  trader / account ids), or `msgbus::send_order_event`.
+- Cache: the exec factory hands the client a read-only `CacheView`; only the
+  in-process sandbox path gets a mutable `Rc<RefCell<Cache>>`, which mogwai does
+  NOT use (mogwai is out-of-process, so it is a live adapter, not a sim client).
+- The runtime shape is a spawned task draining `transport.stream()`, parsing into
+  nautilus types, and pushing to the sink. The stock CEX adapters build on
+  `nautilus_network`'s `HttpClient` / `WebSocketClient` (reconnect, backoff,
+  heartbeat, rate-limit quotas for free); mogwai can reuse the same.
+
+#### Chosen shape: lean standard-CEX, with a transport selector
+The survey found four archetypes (heavy CEX = binance pool/SBE; standard CEX =
+kraken/bybit WS-primary with HTTP fallback; data-only streaming = databento with
+built-in historical replay; in-process sim = sandbox). mogwai follows the
+standard-CEX shape stripped to the bone: it owns the protocol, so no SBE, no
+product-type split, no auth signing, no rate-limit honoring, no connection pool.
+WS carries streaming (market data, order events, order commands); a small HTTP
+surface on mogwai-server answers the request/response calls (`request_instruments`,
+the reconciliation reports, account snapshot) and fits its existing axum routes.
+
+- [ ] `mogwai-adapter` crate: `MogwaiDataClientFactory` + `MogwaiExecutionClient`
+      `Factory` and their `ClientConfig`s, returning the client pair.
+- [ ] `DataClient` impl: required lifecycle (`client_id`, `venue`, `start` /
+      `stop` / `reset` / `dispose`, `is_connected`) plus only the `subscribe_` /
+      `request_` handlers mogwai serves (trades, quotes, bars, instruments); the
+      rest keep the trait defaults. Borrow databento's replay idiom (a start
+      timestamp replays history then switches to live), passing the start
+      instant on the already-landed `Subscribe.start_ts` wire field.
+- [ ] `ExecutionClient` impl: required identity + lifecycle, `submit` / `modify` /
+      `cancel` mapped onto `mogwai-protocol` order commands, and the
+      reconciliation report generators (`generate_order_status_reports`,
+      `generate_fill_reports`, `generate_position_status_reports`).
+      `generate_account_state` is REQUIRED here and depends on engine account
+      state (section 3) - that ordering is a hard dependency.
+- [ ] `transport_profile` knob: because mogwai owns both ends, the adapter can
+      behave like different archetypes (orders over WS vs HTTP-only the bybit-demo
+      way, push-stream vs request/response data) so broadarrow exercises each of
+      its own integration code paths against one backend. A selector, not cosmetic.
+- [ ] broadarrow side (must live in broadarrow, not here): a `MOGWAI` arm in
+      `run-prep/src/venue.rs` and a `core::venue` PROFILES row; a profile-guard
+      test enforces that every wired venue has a PROFILES row.
+
+#### Havoc knobs: one `HavocSpec`, two surfaces
+The point of mogwai. broadarrow sets a single `HavocSpec` in the `MogwaiClientConfig`
+at adapter-build time (in `venue.rs`); the adapter splits it:
+- Client-side (the adapter itself, per connection): latency, drop, duplicate,
+  reorder, injected in the spawned task between `transport.stream()` and the sink.
+  Tests broadarrow's resilience with the server none the wiser. Mirror nautilus's
+  own `StaticLatencyModel` shape (`base` / `insert` / `update` / `delete` latency
+  nanos in `execution/src/models/latency.rs`, a backtest construct never wired
+  live) for the latency field.
+- Server-side (mogwai-server's `control::Divergence` engine): the execution
+  divergences from section 2 (partial, reject, duplicate fill, drop account
+  update, blackout, delayed acks). The adapter forwards the server-side part of
+  the `HavocSpec` to mogwai-server on connect, so broadarrow never makes a
+  separate control-plane call - one config object, the adapter relays it.
+
+- [ ] `HavocSpec` type in `mogwai-protocol` (so both ends share it), carrying the
+      client-side knobs and the server-side `Divergence` arming set.
+- [ ] Adapter applies client-side knobs locally and ships the server-side set over
+      the existing `/control/divergence` channel on connect.
+- [ ] Prior art to mirror for knob vocabulary: existing nautilus config that
+      already behaves like havoc (`ws_idle_timeout_ms`, `ws_request_timeout_secs`,
+      `heartbeat_interval_secs`, retry/backoff/jitter, rate-limit quotas).
 
 ## Notes / gotchas
-- Build target is redirected to `/media/folk/Banan/cargo`; `cargo test` does not
-  emit the runnable binary - use `cargo build --bin mogwai-server`.
 - Kraken history is **trades only** - no quotes, no L2, no aggressor side
   (`AggressorSide::NoAggressor`). Symbol comes from the filename (`XBT` = BTC).
 - Data dir: `MOGWAI_DATA_DIR` (default `/media/folk/Banan/Kraken_Trading_History`).

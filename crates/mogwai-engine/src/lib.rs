@@ -55,7 +55,8 @@ impl Engine {
         match msg {
             ClientMessage::SubmitOrder(order) => self.on_submit(order, ts),
             ClientMessage::CancelOrder { client_order_id } => self.on_cancel(client_order_id, ts),
-            // Subscriptions and modifies are gateway/replay concerns; wired next.
+            // Subscriptions are intercepted by the server for replay control.
+            // Modifies are not wired yet. This keeps the match exhaustive.
             ClientMessage::Subscribe { .. }
             | ClientMessage::Unsubscribe { .. }
             | ClientMessage::ModifyOrder { .. } => Vec::new(),

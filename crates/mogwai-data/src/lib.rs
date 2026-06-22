@@ -38,6 +38,17 @@ impl TickEvent {
 pub trait TickSource {
     /// Next tick in replay order, or `None` at end of stream.
     fn next_tick(&mut self) -> Option<TickEvent>;
+
+    /// Advance past ticks before `start_ts`, returning the first tick in the
+    /// window. The default drains one tick at a time and keeps O(1) memory.
+    fn seek_to(&mut self, start_ts: u64) -> Option<TickEvent> {
+        loop {
+            let tick = self.next_tick()?;
+            if tick.ts_event() >= start_ts {
+                return Some(tick);
+            }
+        }
+    }
 }
 
 /// Permutation applied to ticks as they are replayed (price jitter, time scaling,
@@ -175,10 +186,19 @@ pub struct MergeSource {
 
 impl MergeSource {
     pub fn new(sources: Vec<Box<dyn TickSource>>) -> Self {
+        Self::starting_at(sources, None)
+    }
+
+    /// Build a merge that begins at `start_ts`, seeking each child before the
+    /// first merge head is buffered.
+    pub fn starting_at(sources: Vec<Box<dyn TickSource>>, start_ts: Option<u64>) -> Self {
         let heads = sources.iter().map(|_| None).collect();
         let mut s = Self { sources, heads };
         for i in 0..s.sources.len() {
-            s.heads[i] = s.sources[i].next_tick();
+            s.heads[i] = match start_ts {
+                Some(ts) => s.sources[i].seek_to(ts),
+                None => s.sources[i].next_tick(),
+            };
         }
         s
     }
@@ -282,5 +302,45 @@ mod tests {
                 ("B".into(), 50),
             ]
         );
+    }
+
+    #[test]
+    fn seek_to_skips_prefix_and_returns_first_in_window() {
+        let mut src = MemorySource::new(vec![
+            trade("A", 10),
+            trade("A", 20),
+            trade("A", 30),
+            trade("A", 40),
+        ]);
+
+        assert_eq!(src.seek_to(25).map(|t| t.ts_event()), Some(30));
+        assert_eq!(src.next_tick().map(|t| t.ts_event()), Some(40));
+        assert!(src.next_tick().is_none());
+    }
+
+    #[test]
+    fn seek_to_past_end_returns_none() {
+        let mut src = MemorySource::new(vec![
+            trade("A", 10),
+            trade("A", 20),
+            trade("A", 30),
+            trade("A", 40),
+        ]);
+
+        assert!(src.seek_to(999).is_none());
+    }
+
+    #[test]
+    fn merge_starting_at_windows_each_source() {
+        let a = Box::new(MemorySource::new(vec![trade("A", 10), trade("A", 40)]));
+        let b = Box::new(MemorySource::new(vec![
+            trade("B", 20),
+            trade("B", 30),
+            trade("B", 50),
+        ]));
+        let mut m = MergeSource::starting_at(vec![a, b], Some(25));
+        let order: Vec<u64> = std::iter::from_fn(|| m.next_tick().map(|t| t.ts_event())).collect();
+
+        assert_eq!(order, vec![30, 40, 50]);
     }
 }

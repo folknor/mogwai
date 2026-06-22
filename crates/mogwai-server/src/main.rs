@@ -7,8 +7,12 @@
 //! [`mogwai_data`]; this binary owns sockets, the clock and replay pacing.
 
 use std::{
+    collections::HashMap,
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -36,6 +40,9 @@ struct Config {
     /// Replay speed multiplier. `0.0` ⇒ unthrottled (stream as fast as the client
     /// drains); otherwise inter-tick wall delay = (tick gap) / speed.
     speed: f64,
+    /// Maximum wall-clock sleep between two ticks under paced replay, in
+    /// milliseconds. `0` disables the cap.
+    gap_cap_ms: u64,
 }
 
 impl Config {
@@ -47,7 +54,15 @@ impl Config {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0.0);
-        Self { data_dir, speed }
+        let gap_cap_ms = std::env::var("MOGWAI_GAP_CAP_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1000);
+        Self {
+            data_dir,
+            speed,
+            gap_cap_ms,
+        }
     }
 }
 
@@ -118,6 +133,7 @@ async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
 async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::channel::<ServerMessage>(1024);
+    let mut replays: HashMap<Vec<String>, Arc<AtomicBool>> = HashMap::new();
 
     let writer = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
@@ -140,8 +156,20 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         };
 
         match client_msg {
-            ClientMessage::Subscribe { symbols } => {
-                spawn_replay(symbols, state.cfg.clone(), tx.clone());
+            ClientMessage::Subscribe { symbols, start_ts } => {
+                let key = sub_key(&symbols);
+                if let Some(flag) = replays.remove(&key) {
+                    flag.store(true, Ordering::Relaxed);
+                }
+                let cancel = Arc::new(AtomicBool::new(false));
+                replays.insert(key, Arc::clone(&cancel));
+                spawn_replay(symbols, start_ts, state.cfg.clone(), tx.clone(), cancel);
+            }
+            ClientMessage::Unsubscribe { symbols } => {
+                let key = sub_key(&symbols);
+                if let Some(flag) = replays.remove(&key) {
+                    flag.store(true, Ordering::Relaxed);
+                }
             }
             order_cmd => {
                 let events = state.engine.lock().await.process(order_cmd, now_ns());
@@ -154,10 +182,20 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     }
 
+    for flag in replays.values() {
+        flag.store(true, Ordering::Relaxed);
+    }
     drop(tx);
     if let Err(e) = writer.await {
         tracing::warn!(%e, "writer task did not shut down cleanly");
     }
+}
+
+fn sub_key(symbols: &[String]) -> Vec<String> {
+    let mut key = symbols.to_vec();
+    key.sort();
+    key.dedup();
+    key
 }
 
 /// Stream historical trades for `symbols` as market data into `tx`.
@@ -165,7 +203,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 /// CSV reads are blocking, so the replay runs on a dedicated OS thread and uses
 /// [`mpsc::Sender::blocking_send`] - which also applies backpressure, pacing the
 /// reader to however fast the client drains.
-fn spawn_replay(symbols: Vec<String>, cfg: Config, tx: mpsc::Sender<ServerMessage>) {
+fn spawn_replay(
+    symbols: Vec<String>,
+    start_ts: Option<u64>,
+    cfg: Config,
+    tx: mpsc::Sender<ServerMessage>,
+    cancel: Arc<AtomicBool>,
+) {
     std::thread::spawn(move || {
         let mut sources: Vec<Box<dyn TickSource>> = Vec::new();
         for sym in &symbols {
@@ -178,22 +222,31 @@ fn spawn_replay(symbols: Vec<String>, cfg: Config, tx: mpsc::Sender<ServerMessag
         if sources.is_empty() {
             return;
         }
-        tracing::info!(?symbols, "replay started");
+        tracing::info!(?symbols, ?start_ts, "replay started");
 
-        let mut merged = MergeSource::new(sources);
+        let mut merged = MergeSource::starting_at(sources, start_ts);
         let mut prev_ts: Option<u64> = None;
         while let Some(tick) = merged.next_tick() {
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
             if cfg.speed > 0.0 {
                 if let Some(prev) = prev_ts {
                     let gap_ns = tick.ts_event().saturating_sub(prev);
-                    let wait = (gap_ns as f64 / cfg.speed) as u64;
-                    if wait > 0 {
-                        std::thread::sleep(Duration::from_nanos(wait));
+                    let mut wait_ms = (gap_ns as f64 / cfg.speed) as u64 / 1_000_000;
+                    if cfg.gap_cap_ms > 0 {
+                        wait_ms = wait_ms.min(cfg.gap_cap_ms);
+                    }
+                    if wait_ms > 0 {
+                        std::thread::sleep(Duration::from_millis(wait_ms));
                     }
                 }
                 prev_ts = Some(tick.ts_event());
             }
 
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
             let msg = match tick {
                 TickEvent::Trade(t) => ServerMessage::Trade(t),
                 TickEvent::Quote(q) => ServerMessage::Quote(q),

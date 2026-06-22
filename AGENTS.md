@@ -40,6 +40,23 @@ A Cargo workspace, four crates under `crates/`:
 - In general ./docs/**/*, try to refrain from referencing direct line numbers in the rust source. You can use line numbers, but they drift fast.
 - When asked to write a plan or a specification, read `reference/technical-implementation-spec.md` first; it defines what such a document must contain.
 
+### Reading vs depending on nautilus_trader and broadarrow
+
+The broadarrow adapter (and any spec or implementation that touches the nautilus
+or broadarrow APIs) has two distinct access paths - never conflate them:
+
+- Read the source from the in-tree copies `research/nautilus_trader` and
+  `research/broadarrow`. Agents cannot read anything outside this repo, so these
+  copies are the only place to study those APIs.
+- Cargo path-dependencies point at the sibling checkouts `../nautilus_trader` and
+  `../broadarrow` (nautilus with default-features off, so no pyo3 or Python
+  linkage is pulled in), mirroring the split broadarrow itself uses. `research/`
+  is read-only reference, never a build input; `members = ["crates/*"]` already
+  excludes it, so no workspace `exclude` is needed.
+
+Every implementation spec that references these APIs states both paths, so the
+implementer reads from `research/` and depends on `../`.
+
 ### Bash rules
 
 - Never chain commands with `&&`.

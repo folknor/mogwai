@@ -49,6 +49,10 @@ pub enum TimeInForce {
 pub enum ClientMessage {
     Subscribe {
         symbols: Vec<Symbol>,
+        /// Replay from this unix-nanosecond instant forward. `None` starts at
+        /// the beginning of available history.
+        #[serde(default)]
+        start_ts: Option<u64>,
     },
     Unsubscribe {
         symbols: Vec<Symbol>,
@@ -62,6 +66,52 @@ pub enum ClientMessage {
         price: Option<Decimal>,
         quantity: Option<Decimal>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subscribe_start_ts_round_trips_and_legacy_payloads_default() {
+        let with_start = ClientMessage::Subscribe {
+            symbols: vec!["X".into()],
+            start_ts: Some(123),
+        };
+        let json = serde_json::to_string(&with_start).unwrap();
+        let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            decoded,
+            ClientMessage::Subscribe {
+                symbols,
+                start_ts: Some(123)
+            } if symbols == vec!["X"]
+        ));
+
+        let without_start = ClientMessage::Subscribe {
+            symbols: vec!["X".into()],
+            start_ts: None,
+        };
+        let json = serde_json::to_string(&without_start).unwrap();
+        let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            decoded,
+            ClientMessage::Subscribe {
+                symbols,
+                start_ts: None
+            } if symbols == vec!["X"]
+        ));
+
+        let legacy = r#"{"type":"Subscribe","symbols":["X"]}"#;
+        let decoded: ClientMessage = serde_json::from_str(legacy).unwrap();
+        assert!(matches!(
+            decoded,
+            ClientMessage::Subscribe {
+                symbols,
+                start_ts: None
+            } if symbols == vec!["X"]
+        ));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
