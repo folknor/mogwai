@@ -120,11 +120,13 @@ impl Engine {
         match msg {
             ClientMessage::SubmitOrder(order) => self.on_submit(order, ts),
             ClientMessage::CancelOrder { client_order_id } => self.on_cancel(client_order_id, ts),
+            ClientMessage::ModifyOrder {
+                client_order_id,
+                price,
+                quantity,
+            } => self.on_modify(client_order_id, price, quantity, ts),
             // Subscriptions are intercepted by the server for replay control.
-            // Modifies are not wired yet. This keeps the match exhaustive.
-            ClientMessage::Subscribe { .. }
-            | ClientMessage::Unsubscribe { .. }
-            | ClientMessage::ModifyOrder { .. } => Vec::new(),
+            ClientMessage::Subscribe { .. } | ClientMessage::Unsubscribe { .. } => Vec::new(),
         }
     }
 
@@ -229,6 +231,99 @@ impl Engine {
                 ts_event: ts,
             }]
         }
+    }
+
+    fn on_modify(
+        &mut self,
+        client_order_id: ClientOrderId,
+        price: Option<Decimal>,
+        quantity: Option<Decimal>,
+        ts: u64,
+    ) -> Vec<ServerMessage> {
+        let Some(pos) = self
+            .open
+            .iter()
+            .position(|o| o.submit.client_order_id == client_order_id)
+        else {
+            return vec![ServerMessage::OrderModifyRejected {
+                client_order_id,
+                venue_order_id: None,
+                reason: "unknown order".into(),
+                ts_event: ts,
+            }];
+        };
+
+        let venue_order_id = self.open[pos].venue_order_id.clone();
+        if price.is_none() && quantity.is_none() {
+            return vec![ServerMessage::OrderModifyRejected {
+                client_order_id,
+                venue_order_id: Some(venue_order_id),
+                reason: "empty modify (no price or quantity)".into(),
+                ts_event: ts,
+            }];
+        }
+
+        let order = &self.open[pos];
+        let new_total = quantity.unwrap_or(order.submit.quantity);
+        let filled = order.submit.quantity - order.leaves_qty;
+
+        if quantity.is_some() && new_total <= Decimal::ZERO {
+            return vec![ServerMessage::OrderModifyRejected {
+                client_order_id,
+                venue_order_id: Some(venue_order_id),
+                reason: "modify to non-positive quantity".into(),
+                ts_event: ts,
+            }];
+        }
+
+        if quantity.is_some() && new_total <= filled {
+            return vec![ServerMessage::OrderModifyRejected {
+                client_order_id,
+                venue_order_id: Some(venue_order_id),
+                reason: "modify below already-filled quantity".into(),
+                ts_event: ts,
+            }];
+        }
+
+        if let Some(new_price) = price
+            && new_price <= Decimal::ZERO
+        {
+            return vec![ServerMessage::OrderModifyRejected {
+                client_order_id,
+                venue_order_id: Some(venue_order_id),
+                reason: "modify to non-positive price".into(),
+                ts_event: ts,
+            }];
+        }
+
+        let (quantity, price, leaves_qty, submit_for_warning) = {
+            let order = &mut self.open[pos];
+            if price.is_some() {
+                order.submit.price = price;
+            }
+            order.submit.quantity = new_total;
+            order.leaves_qty = new_total - filled;
+            (
+                order.submit.quantity,
+                order.submit.price,
+                order.leaves_qty,
+                order.submit.clone(),
+            )
+        };
+
+        self.warn_priceless_reservation(&submit_for_warning);
+
+        vec![
+            ServerMessage::OrderUpdated {
+                client_order_id,
+                venue_order_id,
+                quantity,
+                price,
+                leaves_qty,
+                ts_event: ts,
+            },
+            ServerMessage::AccountState(self.snapshot(ts)),
+        ]
     }
 
     fn apply_fill(&mut self, fill: &OrderFilled) {
@@ -474,6 +569,13 @@ mod tests {
             panic!("expected fill")
         };
         fill
+    }
+
+    fn updated(out: &[ServerMessage], index: usize) -> &ServerMessage {
+        let ServerMessage::OrderUpdated { .. } = &out[index] else {
+            panic!("expected order updated")
+        };
+        &out[index]
     }
 
     fn balance<'a>(state: &'a AccountState, currency: &str) -> &'a Balance {
@@ -734,6 +836,247 @@ mod tests {
         assert_eq!(usdt.total, Decimal::from(-300));
         assert_eq!(usdt.locked, Decimal::ZERO);
         assert_eq!(usdt.free, Decimal::from(-300));
+    }
+
+    #[test]
+    fn modify_unknown_order_is_rejected_without_venue_id() {
+        let mut e = Engine::new();
+
+        let out = e.process(
+            ClientMessage::ModifyOrder {
+                client_order_id: "ghost".into(),
+                price: Some(Decimal::from(200)),
+                quantity: None,
+            },
+            1,
+        );
+
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            &out[0],
+            ServerMessage::OrderModifyRejected {
+                client_order_id,
+                venue_order_id: None,
+                reason,
+                ts_event: 1,
+            } if client_order_id == "ghost" && reason == "unknown order"
+        ));
+        assert!(e.open_orders().is_empty());
+    }
+
+    #[test]
+    fn modify_price_reprices_resting_reservation() {
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "O1".into(),
+            fraction: Decimal::from_f64(0.3).unwrap(),
+        });
+        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+
+        let out = e.process(
+            ClientMessage::ModifyOrder {
+                client_order_id: "O1".into(),
+                price: Some(Decimal::from(200)),
+                quantity: None,
+            },
+            2,
+        );
+
+        assert_eq!(out.len(), 2);
+        assert!(matches!(
+            updated(&out, 0),
+            ServerMessage::OrderUpdated {
+                price: Some(price),
+                leaves_qty,
+                ..
+            } if *price == Decimal::from(200) && *leaves_qty == Decimal::from(7)
+        ));
+        let usdt = balance(account(&out, 1), "USDT");
+        assert_eq!(usdt.locked, Decimal::from(1400));
+        assert_eq!(usdt.free, Decimal::from(-1700));
+    }
+
+    #[test]
+    fn modify_quantity_grows_leaves_and_relocks() {
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "O1".into(),
+            fraction: Decimal::from_f64(0.3).unwrap(),
+        });
+        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+
+        let out = e.process(
+            ClientMessage::ModifyOrder {
+                client_order_id: "O1".into(),
+                price: None,
+                quantity: Some(Decimal::from(20)),
+            },
+            2,
+        );
+
+        assert_eq!(out.len(), 2);
+        assert!(matches!(
+            updated(&out, 0),
+            ServerMessage::OrderUpdated {
+                quantity,
+                leaves_qty,
+                ..
+            } if *quantity == Decimal::from(20) && *leaves_qty == Decimal::from(17)
+        ));
+        let usdt = balance(account(&out, 1), "USDT");
+        assert_eq!(usdt.locked, Decimal::from(1700));
+    }
+
+    #[test]
+    fn modify_quantity_shrinks_to_remaining_filled_is_rejected() {
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "O1".into(),
+            fraction: Decimal::from_f64(0.3).unwrap(),
+        });
+        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+
+        let out = e.process(
+            ClientMessage::ModifyOrder {
+                client_order_id: "O1".into(),
+                price: None,
+                quantity: Some(Decimal::from(3)),
+            },
+            2,
+        );
+
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            &out[0],
+            ServerMessage::OrderModifyRejected {
+                venue_order_id: Some(_),
+                reason,
+                ..
+            } if reason == "modify below already-filled quantity"
+        ));
+        assert_eq!(e.open_orders()[0].submit.quantity, Decimal::from(10));
+        assert_eq!(e.open_orders()[0].leaves_qty, Decimal::from(7));
+    }
+
+    #[test]
+    fn modify_to_zero_quantity_is_rejected() {
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "O1".into(),
+            fraction: Decimal::from_f64(0.3).unwrap(),
+        });
+        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+
+        let out = e.process(
+            ClientMessage::ModifyOrder {
+                client_order_id: "O1".into(),
+                price: None,
+                quantity: Some(Decimal::ZERO),
+            },
+            2,
+        );
+
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            &out[0],
+            ServerMessage::OrderModifyRejected {
+                venue_order_id: Some(_),
+                reason,
+                ..
+            } if reason == "modify to non-positive quantity"
+        ));
+        assert_eq!(e.open_orders()[0].submit.quantity, Decimal::from(10));
+        assert_eq!(e.open_orders()[0].leaves_qty, Decimal::from(7));
+    }
+
+    #[test]
+    fn modify_to_non_positive_price_is_rejected() {
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "O1".into(),
+            fraction: Decimal::from_f64(0.3).unwrap(),
+        });
+        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+
+        let out = e.process(
+            ClientMessage::ModifyOrder {
+                client_order_id: "O1".into(),
+                price: Some(Decimal::ZERO),
+                quantity: None,
+            },
+            2,
+        );
+
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            &out[0],
+            ServerMessage::OrderModifyRejected {
+                venue_order_id: Some(_),
+                reason,
+                ..
+            } if reason == "modify to non-positive price"
+        ));
+        assert_eq!(e.open_orders()[0].submit.price, Some(Decimal::from(100)));
+        assert_eq!(e.open_orders()[0].leaves_qty, Decimal::from(7));
+    }
+
+    #[test]
+    fn modify_with_no_price_or_quantity_is_rejected() {
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "O1".into(),
+            fraction: Decimal::from_f64(0.3).unwrap(),
+        });
+        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+
+        let out = e.process(
+            ClientMessage::ModifyOrder {
+                client_order_id: "O1".into(),
+                price: None,
+                quantity: None,
+            },
+            2,
+        );
+
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            &out[0],
+            ServerMessage::OrderModifyRejected {
+                venue_order_id: Some(_),
+                reason,
+                ..
+            } if reason == "empty modify (no price or quantity)"
+        ));
+        assert_eq!(e.open_orders()[0].submit.quantity, Decimal::from(10));
+        assert_eq!(e.open_orders()[0].leaves_qty, Decimal::from(7));
+    }
+
+    #[test]
+    fn modify_does_not_consume_armed_drop() {
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "O1".into(),
+            fraction: Decimal::from_f64(0.3).unwrap(),
+        });
+        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+
+        e.arm(Divergence::DropNextAccountUpdate);
+        let modified = e.process(
+            ClientMessage::ModifyOrder {
+                client_order_id: "O1".into(),
+                price: Some(Decimal::from(200)),
+                quantity: None,
+            },
+            2,
+        );
+        assert_eq!(modified.len(), 2);
+        assert!(matches!(modified[0], ServerMessage::OrderUpdated { .. }));
+        assert!(matches!(modified[1], ServerMessage::AccountState(_)));
+
+        let filled = e.process(ClientMessage::SubmitOrder(order("O2", 10)), 3);
+        assert_eq!(filled.len(), 2);
+        assert!(matches!(filled[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(filled[1], ServerMessage::OrderFilled(_)));
     }
 
     #[test]

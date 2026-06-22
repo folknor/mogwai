@@ -142,6 +142,73 @@ mod tests {
         assert_eq!(decoded.positions[0].avg_px, state.positions[0].avg_px);
         assert_eq!(decoded.ts_event, state.ts_event);
     }
+
+    #[test]
+    fn order_updated_and_modify_rejected_round_trip() {
+        let updated = ServerMessage::OrderUpdated {
+            client_order_id: "O1".into(),
+            venue_order_id: "V1".into(),
+            quantity: Decimal::from(20),
+            price: Some(Decimal::from(200)),
+            leaves_qty: Decimal::from(17),
+            ts_event: 123,
+        };
+        let json = serde_json::to_string(&updated).unwrap();
+        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            decoded,
+            ServerMessage::OrderUpdated {
+                client_order_id,
+                venue_order_id,
+                quantity,
+                price: Some(price),
+                leaves_qty,
+                ts_event: 123,
+            } if client_order_id == "O1"
+                && venue_order_id == "V1"
+                && quantity == Decimal::from(20)
+                && price == Decimal::from(200)
+                && leaves_qty == Decimal::from(17)
+        ));
+
+        let known_reject = ServerMessage::OrderModifyRejected {
+            client_order_id: "O2".into(),
+            venue_order_id: Some("V2".into()),
+            reason: "modify to non-positive price".into(),
+            ts_event: 456,
+        };
+        let json = serde_json::to_string(&known_reject).unwrap();
+        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            decoded,
+            ServerMessage::OrderModifyRejected {
+                client_order_id,
+                venue_order_id: Some(venue_order_id),
+                reason,
+                ts_event: 456,
+            } if client_order_id == "O2"
+                && venue_order_id == "V2"
+                && reason == "modify to non-positive price"
+        ));
+
+        let unknown_reject = ServerMessage::OrderModifyRejected {
+            client_order_id: "GHOST".into(),
+            venue_order_id: None,
+            reason: "unknown order".into(),
+            ts_event: 789,
+        };
+        let json = serde_json::to_string(&unknown_reject).unwrap();
+        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            decoded,
+            ServerMessage::OrderModifyRejected {
+                client_order_id,
+                venue_order_id: None,
+                reason,
+                ts_event: 789,
+            } if client_order_id == "GHOST" && reason == "unknown order"
+        ));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,6 +243,25 @@ pub enum ServerMessage {
     OrderCanceled {
         client_order_id: ClientOrderId,
         venue_order_id: VenueOrderId,
+        ts_event: u64,
+    },
+    OrderUpdated {
+        client_order_id: ClientOrderId,
+        venue_order_id: VenueOrderId,
+        /// New total order quantity after the amend.
+        quantity: Decimal,
+        /// New price after the amend. `None` for a still-priceless order.
+        price: Option<Decimal>,
+        /// Remaining quantity after the amend.
+        leaves_qty: Decimal,
+        ts_event: u64,
+    },
+    OrderModifyRejected {
+        client_order_id: ClientOrderId,
+        /// Present when the order is known but the amend is illegal; absent
+        /// when the order id is unknown to the venue.
+        venue_order_id: Option<VenueOrderId>,
+        reason: String,
         ts_event: u64,
     },
     OrderFilled(OrderFilled),

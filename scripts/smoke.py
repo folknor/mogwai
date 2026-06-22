@@ -57,6 +57,15 @@ def submit_order(client_order_id: str) -> dict:
     }
 
 
+def modify_order(client_order_id: str, price: str | None = None, quantity: str | None = None) -> dict:
+    return {
+        "type": "ModifyOrder",
+        "client_order_id": client_order_id,
+        "price": price,
+        "quantity": quantity,
+    }
+
+
 def find_balance(account: dict, currency: str) -> dict:
     for balance in account["balances"]:
         if balance["currency"] == currency:
@@ -196,6 +205,36 @@ def main() -> None:
     assert [msg["type"] for msg in drop_msgs] == ["OrderAccepted", "OrderFilled"], drop_msgs
     assert extra is None, extra
     print("PASS: DropNextAccountUpdate swallowed the live account update")
+
+    assert post_divergence(
+        {"type": "PartialFillNext", "client_order_id": "M1", "fraction": "0.3"}
+    ) == 202
+    modify_submit = ws_roundtrip(submit_order("M1"), expect=3)
+    for msg in modify_submit:
+        print("modify: ", msg)
+    assert [msg["type"] for msg in modify_submit] == [
+        "OrderAccepted",
+        "OrderFilled",
+        "AccountState",
+    ], modify_submit
+    before_reprice = float(find_balance(modify_submit[2], "USDT")["locked"])
+
+    modify_msgs = ws_roundtrip(modify_order("M1", price="200"), expect=2)
+    for msg in modify_msgs:
+        print("modify: ", msg)
+    assert modify_msgs[0]["type"] == "OrderUpdated", modify_msgs
+    assert float(modify_msgs[0]["leaves_qty"]) == 7.0, modify_msgs
+    assert float(modify_msgs[0]["price"]) == 200.0, modify_msgs
+    assert modify_msgs[1]["type"] == "AccountState", modify_msgs
+    after_reprice = float(find_balance(modify_msgs[1], "USDT")["locked"])
+    assert after_reprice == before_reprice + 700.0, modify_msgs
+
+    reject_msgs = ws_roundtrip(modify_order("GHOST", price="1"), expect=1)
+    for msg in reject_msgs:
+        print("modify: ", msg)
+    assert reject_msgs[0]["type"] == "OrderModifyRejected", reject_msgs
+    assert reject_msgs[0]["venue_order_id"] is None, reject_msgs
+    print("PASS: ModifyOrder reprices the resting reservation")
 
     # Market-data replay: subscribe to a small pair and read the first 2 trades.
     ticks = ws_roundtrip({"type": "Subscribe", "symbols": ["KEUR"]}, expect=2)

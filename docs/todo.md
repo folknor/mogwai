@@ -9,11 +9,16 @@ crate's protocol over the wire.
 
 ## Status
 
-Done and verified end-to-end (`scripts/smoke.py`, 34 unit tests):
+Done and verified end-to-end (`scripts/smoke.py`, 43 unit tests):
 
 - `mogwai-protocol` - native JSON-over-WS wire types + `control::Divergence`,
   including the `Position` type and an `AccountState` that carries balances
-  *and* positions.
+  *and* positions. The amend lifecycle has its own acknowledgement
+  (`OrderUpdated`, carrying the post-amend price, total quantity and leaves) and
+  its own rejection (`OrderModifyRejected`, whose `venue_order_id` is absent only
+  when the order id is unknown), kept distinct from the submit-side
+  `OrderAccepted`/`OrderRejected` so the adapter can tell a submit reject from a
+  modify reject (see git history for the landing).
 - `mogwai-engine` - venue-agnostic core with the divergence-injection seam.
   The two engine-side divergences (`DuplicateNextFill`, `DropNextAccountUpdate`)
   extend the `armed`-queue seam alongside `PartialFillNext`/`RejectNextSubmit`;
@@ -23,7 +28,15 @@ Done and verified end-to-end (`scripts/smoke.py`, 34 unit tests):
   balances and per-symbol VWAP positions off an instrument-decomposition table,
   and pushes `AccountState` after fills and reservation-freeing cancels
   (free/locked derived from resting-order reservations; pure delta ledger off
-  zero, so an unfunded buy drives the quote leg negative).
+  zero, so an unfunded buy drives the quote leg negative). `ModifyOrder` is a
+  real amend of a resting order: it reprices and/or resizes the open order in
+  place (the new wire `quantity` is the order's total, so leaves is re-derived as
+  total minus already-filled), re-derives the reservation that backs it, and
+  emits `OrderUpdated` plus a fresh `AccountState`; an amend of an unknown order,
+  an empty amend, a non-positive price, or a quantity at or below the filled
+  amount is rejected on the wire and leaves the order untouched. The amend never
+  touches the armed-divergence queue, so an interleaved modify cannot consume a
+  divergence armed for a fill (see git history for the landing).
 - `mogwai-data` - streaming Kraken CSV loader (O(1) memory over multi-GB files),
   seconds→ns, k-way `MergeSource`; verified on the real 43GB dump.
 - `mogwai-server` - axum `/health`, `/ws` (orders + market-data replay),
@@ -43,7 +56,6 @@ Done and verified end-to-end (`scripts/smoke.py`, 34 unit tests):
 
 ### 1. Engine depth
 - [ ] Real matching against an order book (today: immediate fill, no book).
-- [ ] `ModifyOrder` handling (today: no-op).
 
 ### 2. broadarrow integration: the mogwai venue adapter
 broadarrow drives strategies live through a nautilus `LiveNode`, registering one
