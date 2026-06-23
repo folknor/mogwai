@@ -93,9 +93,21 @@ integration tests):
   bounding the materialized response vector. A pure `convert` module maps mogwai
   `Decimal` ticks to nautilus `Price`/`Quantity`/`TradeTick`/`QuoteTick`/
   `InstrumentAny` at the instrument's declared precision. The `ExecutionClient`
-  is still the skeleton - identity, lifecycle flags, and the no-op
-  `generate_account_state`; every submit / modify / cancel handler and every
-  reconciliation report keeps its trait default (section 2 below).
+  is live (see git history for the landing): `submit`/`modify`/`cancel` translate
+  the nautilus trading commands into `mogwai-protocol` order commands over an
+  exec-owned `/ws` socket, a reader task drains the `ServerMessage` order-event
+  stream and dispatches each variant through an `ExecutionEventEmitter` into the
+  live runner's execution-event channel, and `generate_account_state` graduated
+  from no-op to real emission of the pushed `AccountState` snapshots. Because the
+  global runtime is multi-thread and the `CacheView` is not `Send`, the reader
+  thread never touches the cache: it builds accepted / filled / updated / canceled
+  events from raw wire fields plus an `Arc<Mutex<ExecState>>` reconciliation
+  mirror seeded at `submit` time, and resolves a fill's quote currency and
+  precision from the `GET /instruments` table rather than from an order lookup.
+  The three reconciliation report generators
+  (`generate_order_status_reports`/`_fill_reports`/`_position_status_reports`)
+  reconstruct their reports from that mirror, filtered by the request's
+  `start`/`end` bounds so open-order reconciliation sees no false conflicts.
 
 ## Next
 
@@ -151,17 +163,6 @@ WS carries streaming (market data, order events, order commands); a small HTTP
 surface on mogwai-server answers the request/response calls (`request_instruments`,
 the reconciliation reports, account snapshot) and fits its existing axum routes.
 
-- [ ] `ExecutionClient` handlers: the skeleton's required identity + lifecycle is
-      landed (including a no-op `generate_account_state`); this adds `submit` /
-      `modify` / `cancel` mapped onto `mogwai-protocol` order commands, and the
-      reconciliation report generators (`generate_order_status_reports`,
-      `generate_fill_reports`, `generate_position_status_reports`).
-      `generate_account_state` graduates from the skeleton's no-op to real
-      emission; its hard dependency on engine account state is already satisfied -
-      the engine tracks balances/positions and pushes `AccountState` (with
-      positions) on fills and reservation-freeing cancels (see git history for the
-      landing). The adapter consumes that pushed snapshot; account state is
-      push-only, with no client-driven query.
 - [ ] `transport_profile` knob: because mogwai owns both ends, the adapter can
       behave like different archetypes (orders over WS vs HTTP-only the bybit-demo
       way, push-stream vs request/response data) so broadarrow exercises each of

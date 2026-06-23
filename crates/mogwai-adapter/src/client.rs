@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    str::FromStr,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -10,10 +11,10 @@ use std::{
 use anyhow::{Context, ensure};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
-use mogwai_protocol::{ClientMessage, InstrumentDef, ServerMessage, Symbol};
+use mogwai_protocol::{ClientMessage, InstrumentDef, ServerMessage, Side, Symbol};
 use nautilus_common::{
     clients::{DataClient, ExecutionClient},
-    live::{get_data_event_sender, get_runtime},
+    live::{get_data_event_sender, get_runtime, try_get_exec_event_sender},
     messages::{
         DataEvent,
         data::{
@@ -23,19 +24,25 @@ use nautilus_common::{
             SubscribeTrades, TradesResponse, UnsubscribeBars, UnsubscribeInstrument,
             UnsubscribeInstruments, UnsubscribeQuotes, UnsubscribeTrades,
         },
+        execution::{
+            CancelOrder, GenerateFillReports, GenerateOrderStatusReports,
+            GeneratePositionStatusReports, ModifyOrder, SubmitOrder,
+        },
     },
 };
-use nautilus_core::{Params, UnixNanos};
-use nautilus_live::ExecutionClientCore;
+use nautilus_core::{Params, UUID4, UnixNanos, time::get_atomic_clock_realtime};
+use nautilus_live::{ExecutionClientCore, ExecutionEventEmitter};
 use nautilus_model::{
     accounts::AccountAny,
     data::{Bar, BarType, Data, bar::get_bar_interval_ns},
-    enums::OmsType,
-    identifiers::{AccountId, ClientId, InstrumentId, Venue},
-    types::{AccountBalance, MarginBalance},
+    enums::{LiquiditySide, OmsType, OrderSide, OrderStatus, OrderType, PositionSideSpecified},
+    events::{OrderAccepted, OrderCanceled, OrderEventAny, OrderFilled, OrderUpdated},
+    identifiers::{AccountId, ClientId, ClientOrderId, InstrumentId, TradeId, Venue, VenueOrderId},
+    reports::{FillReport, OrderStatusReport, PositionStatusReport},
+    types::{AccountBalance, MarginBalance, Money, currency::Currency},
 };
 use nautilus_network::http::HttpClient;
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, prelude::ToPrimitive};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -871,6 +878,13 @@ fn now_unix_nanos() -> UnixNanos {
 pub struct MogwaiExecutionClient {
     core: ExecutionClientCore,
     config: MogwaiExecClientConfig,
+    emitter: ExecutionEventEmitter,
+    connected: Arc<AtomicBool>,
+    http: HttpClient,
+    ws_cmd: Option<UnboundedSender<ExecWsCommand>>,
+    state: Arc<Mutex<ExecState>>,
+    instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
+    task_handles: Vec<JoinHandle<()>>,
 }
 
 impl MogwaiExecutionClient {
@@ -881,7 +895,26 @@ impl MogwaiExecutionClient {
     /// Returns an error if the supplied config is invalid.
     pub fn new(core: ExecutionClientCore, config: MogwaiExecClientConfig) -> anyhow::Result<Self> {
         config.validate()?;
-        Ok(Self { core, config })
+        let emitter = ExecutionEventEmitter::new(
+            get_atomic_clock_realtime(),
+            config.trader_id,
+            config.account_id,
+            config.account_type,
+            None,
+        );
+        let http = HttpClient::new(HashMap::new(), Vec::new(), Vec::new(), None, Some(30), None)
+            .context("create HTTP client")?;
+        Ok(Self {
+            core,
+            config,
+            emitter,
+            connected: Arc::new(AtomicBool::new(false)),
+            http,
+            ws_cmd: None,
+            state: Arc::new(Mutex::new(ExecState::default())),
+            instruments: Arc::new(Mutex::new(HashMap::new())),
+            task_handles: Vec::new(),
+        })
     }
 
     #[cfg(test)]
@@ -893,12 +926,20 @@ impl MogwaiExecutionClient {
     fn is_stopped(&self) -> bool {
         self.core.is_stopped()
     }
+
+    fn send_ws(&self, cmd: ExecWsCommand) -> anyhow::Result<()> {
+        let tx = self
+            .ws_cmd
+            .as_ref()
+            .context("mogwai execution client is not connected")?;
+        tx.send(cmd).context("send execution websocket command")
+    }
 }
 
 #[async_trait(?Send)]
 impl ExecutionClient for MogwaiExecutionClient {
     fn is_connected(&self) -> bool {
-        self.core.is_connected()
+        self.connected.load(Ordering::Relaxed)
     }
 
     fn client_id(&self) -> ClientId {
@@ -923,14 +964,13 @@ impl ExecutionClient for MogwaiExecutionClient {
 
     fn generate_account_state(
         &self,
-        _balances: Vec<AccountBalance>,
-        _margins: Vec<MarginBalance>,
-        _reported: bool,
-        _ts_event: UnixNanos,
+        balances: Vec<AccountBalance>,
+        margins: Vec<MarginBalance>,
+        reported: bool,
+        ts_event: UnixNanos,
     ) -> anyhow::Result<()> {
-        // The trait requires this surface before account snapshot emission is
-        // implemented. Later handlers will consume mogwai AccountState messages
-        // and emit real nautilus account events here.
+        self.emitter
+            .emit_account_state(balances, margins, reported, ts_event);
         Ok(())
     }
 
@@ -939,6 +979,9 @@ impl ExecutionClient for MogwaiExecutionClient {
             return Ok(());
         }
 
+        if let Some(sender) = try_get_exec_event_sender() {
+            self.emitter.set_sender(sender);
+        }
         self.core.set_started();
         Ok(())
     }
@@ -948,10 +991,709 @@ impl ExecutionClient for MogwaiExecutionClient {
             return Ok(());
         }
 
+        self.connected.store(false, Ordering::Relaxed);
+        self.ws_cmd = None;
+        for handle in &self.task_handles {
+            handle.abort();
+        }
+        self.task_handles.clear();
         self.core.set_stopped();
         self.core.set_disconnected();
         Ok(())
     }
+
+    async fn connect(&mut self) -> anyhow::Result<()> {
+        let http_base_url = self.config.http_base_url();
+        seed_instruments(&self.http, &http_base_url, &self.instruments).await?;
+
+        let ws_url = join_url(&self.config.ws_url(), "ws");
+        let (ws, _) = connect_async(&ws_url)
+            .await
+            .with_context(|| format!("connect websocket {ws_url}"))?;
+        let (mut writer, mut reader) = ws.split();
+        let (cmd_tx, mut cmd_rx) = unbounded_channel::<ExecWsCommand>();
+        self.ws_cmd = Some(cmd_tx);
+
+        let connected = Arc::clone(&self.connected);
+        let writer_connected = Arc::clone(&self.connected);
+        let writer_handle = tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                let msg = exec_command_to_client_message(cmd);
+                let Ok(payload) = serde_json::to_string(&msg) else {
+                    continue;
+                };
+                if writer.send(Message::Text(payload.into())).await.is_err() {
+                    break;
+                }
+            }
+            writer_connected.store(false, Ordering::Relaxed);
+        });
+
+        let ctx = ExecContext {
+            emitter: self.emitter.clone(),
+            state: Arc::clone(&self.state),
+            instruments: Arc::clone(&self.instruments),
+            trader_id: self.core.trader_id,
+            account_id: self.core.account_id,
+        };
+        let reader_handle = tokio::spawn(async move {
+            while let Some(Ok(msg)) = reader.next().await {
+                let Message::Text(text) = msg else {
+                    continue;
+                };
+                let Ok(server_msg) = serde_json::from_str::<ServerMessage>(&text) else {
+                    continue;
+                };
+                handle_exec_message(server_msg, &ctx);
+            }
+            connected.store(false, Ordering::Relaxed);
+        });
+
+        self.task_handles.push(writer_handle);
+        self.task_handles.push(reader_handle);
+        self.connected.store(true, Ordering::Relaxed);
+        self.core.set_connected();
+        Ok(())
+    }
+
+    async fn disconnect(&mut self) -> anyhow::Result<()> {
+        self.stop()
+    }
+
+    fn submit_order(&self, cmd: SubmitOrder) -> anyhow::Result<()> {
+        let order = self.core.get_order(&cmd.client_order_id)?;
+        self.emitter.emit_order_submitted(&order);
+
+        let wire = mogwai_protocol::SubmitOrder {
+            client_order_id: cmd.client_order_id.to_string(),
+            symbol: symbol_from_instrument(cmd.instrument_id),
+            side: wire_side(cmd.order_init.order_side)?,
+            order_type: wire_order_type(cmd.order_init.order_type)?,
+            quantity: cmd.order_init.quantity.as_decimal(),
+            price: cmd.order_init.price.map(|p| p.as_decimal()),
+            time_in_force: wire_time_in_force(cmd.order_init.time_in_force)?,
+        };
+
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("execution state mutex poisoned"))?;
+        state.orders.insert(
+            cmd.client_order_id,
+            OrderRecord {
+                strategy_id: cmd.strategy_id,
+                instrument_id: cmd.instrument_id,
+                order_side: cmd.order_init.order_side,
+                order_type: cmd.order_init.order_type,
+                time_in_force: cmd.order_init.time_in_force,
+                status: OrderStatus::Submitted,
+                quantity: cmd.order_init.quantity.as_decimal(),
+                price: cmd.order_init.price.map(|p| p.as_decimal()),
+                filled_qty: Decimal::ZERO,
+                avg_px: None,
+                venue_order_id: None,
+                ts_accepted: cmd.ts_init,
+                ts_last: cmd.ts_init,
+            },
+        );
+        drop(state);
+
+        self.send_ws(ExecWsCommand::Submit(wire))
+    }
+
+    fn modify_order(&self, cmd: ModifyOrder) -> anyhow::Result<()> {
+        self.send_ws(ExecWsCommand::Modify {
+            client_order_id: cmd.client_order_id.to_string(),
+            price: cmd.price.map(|p| p.as_decimal()),
+            quantity: cmd.quantity.map(|q| q.as_decimal()),
+        })
+    }
+
+    fn cancel_order(&self, cmd: CancelOrder) -> anyhow::Result<()> {
+        self.send_ws(ExecWsCommand::Cancel {
+            client_order_id: cmd.client_order_id.to_string(),
+        })
+    }
+
+    async fn generate_order_status_reports(
+        &self,
+        cmd: &GenerateOrderStatusReports,
+    ) -> anyhow::Result<Vec<OrderStatusReport>> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("execution state mutex poisoned"))?;
+        let reports = state
+            .orders
+            .iter()
+            .filter(|(_, record)| !cmd.open_only || record.status.is_open())
+            .filter(|(_, record)| {
+                cmd.instrument_id
+                    .is_none_or(|id| id == record.instrument_id)
+            })
+            .filter(|(_, record)| in_time_range(record.ts_last, cmd.start, cmd.end))
+            .map(|(client_order_id, record)| {
+                OrderStatusReport::new(
+                    self.core.account_id,
+                    record.instrument_id,
+                    Some(*client_order_id),
+                    record
+                        .venue_order_id
+                        .unwrap_or_else(|| VenueOrderId::from("")),
+                    record.order_side,
+                    record.order_type,
+                    record.time_in_force,
+                    record.status,
+                    record.quantity_for_report(&self.instruments),
+                    record.filled_quantity_for_report(&self.instruments),
+                    record.ts_accepted,
+                    record.ts_last,
+                    now_unix_nanos(),
+                    None,
+                )
+            })
+            .collect();
+        Ok(reports)
+    }
+
+    async fn generate_fill_reports(
+        &self,
+        cmd: GenerateFillReports,
+    ) -> anyhow::Result<Vec<FillReport>> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("execution state mutex poisoned"))?;
+        let reports = state
+            .fills
+            .iter()
+            .filter(|fill| cmd.instrument_id.is_none_or(|id| id == fill.instrument_id))
+            .filter(|fill| {
+                cmd.venue_order_id
+                    .is_none_or(|id| id == fill.venue_order_id)
+            })
+            .filter(|fill| in_time_range(fill.ts_event, cmd.start, cmd.end))
+            .map(|fill| {
+                FillReport::new(
+                    self.core.account_id,
+                    fill.instrument_id,
+                    fill.venue_order_id,
+                    fill.trade_id,
+                    fill.order_side,
+                    fill.last_qty,
+                    fill.last_px,
+                    Money::new(
+                        fill.commission.to_f64().expect("decimal fits f64"),
+                        fill.quote_currency,
+                    ),
+                    LiquiditySide::Taker,
+                    Some(fill.client_order_id),
+                    None,
+                    fill.ts_event,
+                    now_unix_nanos(),
+                    None,
+                )
+            })
+            .collect();
+        Ok(reports)
+    }
+
+    async fn generate_position_status_reports(
+        &self,
+        cmd: &GeneratePositionStatusReports,
+    ) -> anyhow::Result<Vec<PositionStatusReport>> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("execution state mutex poisoned"))?;
+        let reports = state
+            .positions
+            .values()
+            .filter(|position| {
+                cmd.instrument_id
+                    .is_none_or(|id| id == position.instrument_id)
+            })
+            .filter(|position| in_time_range(position.ts_last, cmd.start, cmd.end))
+            .filter_map(|position| {
+                let def = instrument_def(&self.instruments, &position.symbol)?;
+                Some(PositionStatusReport::new(
+                    self.core.account_id,
+                    position.instrument_id,
+                    position_side(position.quantity),
+                    convert::quantity(position.quantity.abs(), def.size_precision),
+                    position.ts_last,
+                    now_unix_nanos(),
+                    None,
+                    None,
+                    Some(position.avg_px),
+                ))
+            })
+            .collect();
+        Ok(reports)
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ExecWsCommand {
+    Submit(mogwai_protocol::SubmitOrder),
+    Cancel {
+        client_order_id: String,
+    },
+    Modify {
+        client_order_id: String,
+        price: Option<Decimal>,
+        quantity: Option<Decimal>,
+    },
+}
+
+fn exec_command_to_client_message(cmd: ExecWsCommand) -> ClientMessage {
+    match cmd {
+        ExecWsCommand::Submit(order) => ClientMessage::SubmitOrder(order),
+        ExecWsCommand::Cancel { client_order_id } => ClientMessage::CancelOrder { client_order_id },
+        ExecWsCommand::Modify {
+            client_order_id,
+            price,
+            quantity,
+        } => ClientMessage::ModifyOrder {
+            client_order_id,
+            price,
+            quantity,
+        },
+    }
+}
+
+#[derive(Clone)]
+struct ExecContext {
+    emitter: ExecutionEventEmitter,
+    state: Arc<Mutex<ExecState>>,
+    instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
+    trader_id: nautilus_model::identifiers::TraderId,
+    account_id: AccountId,
+}
+
+#[derive(Debug, Default)]
+struct ExecState {
+    orders: HashMap<ClientOrderId, OrderRecord>,
+    fills: Vec<FillRecord>,
+    positions: HashMap<Symbol, PositionRecord>,
+}
+
+#[derive(Debug, Clone)]
+struct OrderRecord {
+    strategy_id: nautilus_model::identifiers::StrategyId,
+    instrument_id: InstrumentId,
+    order_side: OrderSide,
+    order_type: OrderType,
+    time_in_force: nautilus_model::enums::TimeInForce,
+    status: OrderStatus,
+    quantity: Decimal,
+    price: Option<Decimal>,
+    filled_qty: Decimal,
+    avg_px: Option<Decimal>,
+    venue_order_id: Option<VenueOrderId>,
+    ts_accepted: UnixNanos,
+    ts_last: UnixNanos,
+}
+
+impl OrderRecord {
+    fn quantity_for_report(
+        &self,
+        instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
+    ) -> nautilus_model::types::Quantity {
+        let precision = instrument_def(instruments, &symbol_from_instrument(self.instrument_id))
+            .map_or(8, |def| def.size_precision);
+        convert::quantity(self.quantity, precision)
+    }
+
+    fn filled_quantity_for_report(
+        &self,
+        instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
+    ) -> nautilus_model::types::Quantity {
+        let precision = instrument_def(instruments, &symbol_from_instrument(self.instrument_id))
+            .map_or(8, |def| def.size_precision);
+        convert::quantity(self.filled_qty, precision)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FillRecord {
+    client_order_id: ClientOrderId,
+    instrument_id: InstrumentId,
+    venue_order_id: VenueOrderId,
+    trade_id: TradeId,
+    order_side: OrderSide,
+    last_qty: nautilus_model::types::Quantity,
+    last_px: nautilus_model::types::Price,
+    commission: Decimal,
+    quote_currency: Currency,
+    ts_event: UnixNanos,
+}
+
+#[derive(Debug, Clone)]
+struct PositionRecord {
+    symbol: Symbol,
+    instrument_id: InstrumentId,
+    quantity: Decimal,
+    avg_px: Decimal,
+    ts_last: UnixNanos,
+}
+
+fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
+    match msg {
+        ServerMessage::OrderAccepted {
+            client_order_id,
+            venue_order_id,
+            ts_event,
+        } => {
+            let client_order_id = ClientOrderId::from(client_order_id);
+            let venue_order_id = VenueOrderId::from(venue_order_id);
+            let Some(record) = with_order_record(&ctx.state, client_order_id, |record| {
+                record.status = OrderStatus::Accepted;
+                record.venue_order_id = Some(venue_order_id);
+                record.ts_accepted = UnixNanos::from(ts_event);
+                record.ts_last = UnixNanos::from(ts_event);
+                record.clone()
+            }) else {
+                return;
+            };
+            let event = OrderAccepted::new(
+                ctx.trader_id,
+                record.strategy_id,
+                record.instrument_id,
+                client_order_id,
+                venue_order_id,
+                ctx.account_id,
+                UUID4::new(),
+                UnixNanos::from(ts_event),
+                now_unix_nanos(),
+                false,
+            );
+            ctx.emitter.send_order_event(OrderEventAny::Accepted(event));
+        }
+        ServerMessage::OrderRejected {
+            client_order_id,
+            reason,
+            ts_event,
+        } => {
+            let client_order_id = ClientOrderId::from(client_order_id);
+            let Some(record) = with_order_record(&ctx.state, client_order_id, |record| {
+                record.status = OrderStatus::Rejected;
+                record.ts_last = UnixNanos::from(ts_event);
+                record.clone()
+            }) else {
+                return;
+            };
+            ctx.emitter.emit_order_rejected_event(
+                record.strategy_id,
+                record.instrument_id,
+                client_order_id,
+                &reason,
+                UnixNanos::from(ts_event),
+                false,
+            );
+        }
+        ServerMessage::OrderCanceled {
+            client_order_id,
+            venue_order_id,
+            ts_event,
+        } => {
+            let client_order_id = ClientOrderId::from(client_order_id);
+            let venue_order_id = VenueOrderId::from(venue_order_id);
+            let Some(record) = with_order_record(&ctx.state, client_order_id, |record| {
+                record.status = OrderStatus::Canceled;
+                record.venue_order_id = Some(venue_order_id);
+                record.ts_last = UnixNanos::from(ts_event);
+                record.clone()
+            }) else {
+                return;
+            };
+            let event = OrderCanceled::new(
+                ctx.trader_id,
+                record.strategy_id,
+                record.instrument_id,
+                client_order_id,
+                UUID4::new(),
+                UnixNanos::from(ts_event),
+                now_unix_nanos(),
+                false,
+                Some(venue_order_id),
+                Some(ctx.account_id),
+            );
+            ctx.emitter.send_order_event(OrderEventAny::Canceled(event));
+        }
+        ServerMessage::OrderUpdated {
+            client_order_id,
+            venue_order_id,
+            quantity,
+            price,
+            ts_event,
+            ..
+        } => {
+            let client_order_id = ClientOrderId::from(client_order_id);
+            let venue_order_id = VenueOrderId::from(venue_order_id);
+            // Resolve the instrument before touching the mirror so a missing def
+            // does not leave the mirror amended with no matching event emitted.
+            let Some(def) = order_record(&ctx.state, client_order_id).and_then(|record| {
+                instrument_def(
+                    &ctx.instruments,
+                    &symbol_from_instrument(record.instrument_id),
+                )
+            }) else {
+                return;
+            };
+            let Some(record) = with_order_record(&ctx.state, client_order_id, |record| {
+                // An amend never reverses an in-progress fill: a partially filled
+                // order that is re-priced or re-sized stays PARTIALLY_FILLED so the
+                // mirror does not report Accepted alongside a non-zero filled_qty.
+                if record.status != OrderStatus::PartiallyFilled {
+                    record.status = OrderStatus::Accepted;
+                }
+                record.venue_order_id = Some(venue_order_id);
+                record.quantity = quantity;
+                record.price = price;
+                record.ts_last = UnixNanos::from(ts_event);
+                record.clone()
+            }) else {
+                return;
+            };
+            let event = OrderUpdated::new(
+                ctx.trader_id,
+                record.strategy_id,
+                record.instrument_id,
+                client_order_id,
+                convert::quantity(quantity, def.size_precision),
+                UUID4::new(),
+                UnixNanos::from(ts_event),
+                now_unix_nanos(),
+                false,
+                Some(venue_order_id),
+                Some(ctx.account_id),
+                price.map(|p| convert::price(p, def.price_precision)),
+                None,
+                None,
+                false,
+            );
+            ctx.emitter.send_order_event(OrderEventAny::Updated(event));
+        }
+        ServerMessage::OrderModifyRejected {
+            client_order_id,
+            venue_order_id,
+            reason,
+            ts_event,
+        } => {
+            let client_order_id = ClientOrderId::from(client_order_id);
+            let Some(record) = order_record(&ctx.state, client_order_id) else {
+                return;
+            };
+            ctx.emitter.emit_order_modify_rejected_event(
+                record.strategy_id,
+                record.instrument_id,
+                client_order_id,
+                venue_order_id.map(VenueOrderId::from),
+                &reason,
+                UnixNanos::from(ts_event),
+            );
+        }
+        ServerMessage::OrderFilled(fill) => handle_order_filled(fill, ctx),
+        ServerMessage::AccountState(state) => handle_account_state(state, ctx),
+        ServerMessage::Trade(_) | ServerMessage::Quote(_) => {}
+    }
+}
+
+fn handle_order_filled(fill: mogwai_protocol::OrderFilled, ctx: &ExecContext) {
+    let client_order_id = ClientOrderId::from(fill.client_order_id);
+    let Some(def) = instrument_def(&ctx.instruments, &fill.symbol) else {
+        return;
+    };
+    let Ok(quote_currency) = Currency::from_str(&def.quote) else {
+        return;
+    };
+    let venue_order_id = VenueOrderId::from(fill.venue_order_id);
+    let trade_id = TradeId::from(fill.trade_id);
+    let last_qty = convert::quantity(fill.last_qty, def.size_precision);
+    let last_px = convert::price(fill.last_px, def.price_precision);
+    let Some(record) = with_order_record(&ctx.state, client_order_id, |record| {
+        record.status = if fill.leaves_qty.is_zero() {
+            OrderStatus::Filled
+        } else {
+            OrderStatus::PartiallyFilled
+        };
+        record.venue_order_id = Some(venue_order_id);
+        let previous_notional = record
+            .avg_px
+            .unwrap_or(Decimal::ZERO)
+            .checked_mul(record.filled_qty)
+            .unwrap_or(Decimal::ZERO);
+        record.filled_qty += fill.last_qty;
+        let total_notional = previous_notional
+            .checked_add(
+                fill.last_px
+                    .checked_mul(fill.last_qty)
+                    .unwrap_or(Decimal::ZERO),
+            )
+            .unwrap_or(previous_notional);
+        if !record.filled_qty.is_zero() {
+            record.avg_px = total_notional.checked_div(record.filled_qty);
+        }
+        record.ts_last = UnixNanos::from(fill.ts_event);
+        record.clone()
+    }) else {
+        return;
+    };
+
+    {
+        let mut state = ctx.state.lock().expect("execution state mutex poisoned");
+        state.fills.push(FillRecord {
+            client_order_id,
+            instrument_id: record.instrument_id,
+            venue_order_id,
+            trade_id,
+            order_side: record.order_side,
+            last_qty,
+            last_px,
+            commission: fill.commission,
+            quote_currency,
+            ts_event: UnixNanos::from(fill.ts_event),
+        });
+    }
+
+    let commission = if fill.commission.is_zero() {
+        None
+    } else {
+        Some(Money::new(
+            fill.commission.to_f64().expect("decimal fits f64"),
+            quote_currency,
+        ))
+    };
+    // mogwai does not report a liquidity side on the wire. The engine fills
+    // immediately against replayed history, which is taker-equivalent, so every
+    // fill is reported as Taker. This is a deliberate, lossy mapping: the wire
+    // carries no maker/taker flag to preserve.
+    let event = OrderFilled::new(
+        ctx.trader_id,
+        record.strategy_id,
+        record.instrument_id,
+        client_order_id,
+        venue_order_id,
+        ctx.account_id,
+        trade_id,
+        record.order_side,
+        record.order_type,
+        last_qty,
+        last_px,
+        quote_currency,
+        LiquiditySide::Taker,
+        UUID4::new(),
+        UnixNanos::from(fill.ts_event),
+        now_unix_nanos(),
+        false,
+        None,
+        commission,
+    );
+    ctx.emitter.send_order_event(OrderEventAny::Filled(event));
+}
+
+fn handle_account_state(state: mogwai_protocol::AccountState, ctx: &ExecContext) {
+    let ts_event = UnixNanos::from(state.ts_event);
+    let balances = state
+        .balances
+        .iter()
+        .filter_map(|balance| {
+            let currency = Currency::from_str(&balance.currency).ok()?;
+            Some(AccountBalance::new(
+                Money::new(balance.total.to_f64().expect("decimal fits f64"), currency),
+                Money::new(balance.locked.to_f64().expect("decimal fits f64"), currency),
+                Money::new(balance.free.to_f64().expect("decimal fits f64"), currency),
+            ))
+        })
+        .collect();
+
+    {
+        let mut mirror = ctx.state.lock().expect("execution state mutex poisoned");
+        for position in state.positions {
+            let Some(def) = instrument_def(&ctx.instruments, &position.symbol) else {
+                continue;
+            };
+            mirror.positions.insert(
+                position.symbol.clone(),
+                PositionRecord {
+                    symbol: position.symbol,
+                    instrument_id: convert::instrument_id(&def),
+                    quantity: position.quantity,
+                    avg_px: position.avg_px,
+                    ts_last: ts_event,
+                },
+            );
+        }
+    }
+    ctx.emitter
+        .emit_account_state(balances, Vec::new(), true, ts_event);
+}
+
+fn with_order_record<T>(
+    state: &Arc<Mutex<ExecState>>,
+    client_order_id: ClientOrderId,
+    f: impl FnOnce(&mut OrderRecord) -> T,
+) -> Option<T> {
+    state
+        .lock()
+        .expect("execution state mutex poisoned")
+        .orders
+        .get_mut(&client_order_id)
+        .map(f)
+}
+
+fn order_record(
+    state: &Arc<Mutex<ExecState>>,
+    client_order_id: ClientOrderId,
+) -> Option<OrderRecord> {
+    state
+        .lock()
+        .expect("execution state mutex poisoned")
+        .orders
+        .get(&client_order_id)
+        .cloned()
+}
+
+fn wire_side(side: OrderSide) -> anyhow::Result<Side> {
+    match side {
+        OrderSide::Buy => Ok(Side::Buy),
+        OrderSide::Sell => Ok(Side::Sell),
+        other => anyhow::bail!("unsupported order side {other:?}"),
+    }
+}
+
+fn wire_order_type(order_type: OrderType) -> anyhow::Result<mogwai_protocol::OrderType> {
+    match order_type {
+        OrderType::Market => Ok(mogwai_protocol::OrderType::Market),
+        OrderType::Limit => Ok(mogwai_protocol::OrderType::Limit),
+        other => anyhow::bail!("unsupported order type {other:?}"),
+    }
+}
+
+fn wire_time_in_force(
+    tif: nautilus_model::enums::TimeInForce,
+) -> anyhow::Result<mogwai_protocol::TimeInForce> {
+    match tif {
+        nautilus_model::enums::TimeInForce::Gtc => Ok(mogwai_protocol::TimeInForce::Gtc),
+        nautilus_model::enums::TimeInForce::Ioc => Ok(mogwai_protocol::TimeInForce::Ioc),
+        nautilus_model::enums::TimeInForce::Fok => Ok(mogwai_protocol::TimeInForce::Fok),
+        other => anyhow::bail!("unsupported time in force {other:?}"),
+    }
+}
+
+fn position_side(quantity: Decimal) -> PositionSideSpecified {
+    if quantity.is_sign_positive() && !quantity.is_zero() {
+        PositionSideSpecified::Long
+    } else if quantity.is_sign_negative() {
+        PositionSideSpecified::Short
+    } else {
+        PositionSideSpecified::Flat
+    }
+}
+
+fn in_time_range(ts: UnixNanos, start: Option<UnixNanos>, end: Option<UnixNanos>) -> bool {
+    start.is_none_or(|start| ts >= start) && end.is_none_or(|end| ts <= end)
 }
 
 #[cfg(test)]
@@ -1289,11 +2031,11 @@ mod data_client_tests {
 mod tests {
     use std::{cell::RefCell, rc::Rc};
 
-    use nautilus_common::{cache::Cache, clients::ExecutionClient};
-    use nautilus_live::ExecutionClientCore;
+    use nautilus_common::{cache::Cache, clients::ExecutionClient, messages::ExecutionEvent};
+    use nautilus_live::{ExecutionClientCore, ExecutionEventEmitter};
     use nautilus_model::{
-        enums::OmsType,
-        identifiers::{ClientId, TraderId},
+        enums::{OmsType, TimeInForce},
+        identifiers::{ClientId, StrategyId, TraderId},
     };
 
     use super::*;
@@ -1315,6 +2057,78 @@ mod tests {
         MogwaiExecutionClient::new(core, config).expect("valid execution client")
     }
 
+    fn instrument_id() -> InstrumentId {
+        InstrumentId::new(
+            nautilus_model::identifiers::Symbol::from("BTCUSDT"),
+            *MOGWAI_VENUE,
+        )
+    }
+
+    fn def() -> InstrumentDef {
+        InstrumentDef {
+            symbol: "BTCUSDT".into(),
+            base: "BTC".into(),
+            quote: "USDT".into(),
+            price_precision: 2,
+            size_precision: 8,
+            price_increment: Decimal::new(1, 2),
+            size_increment: Decimal::new(1, 8),
+        }
+    }
+
+    fn instruments_map() -> Arc<Mutex<HashMap<Symbol, InstrumentDef>>> {
+        Arc::new(Mutex::new(HashMap::from([("BTCUSDT".to_string(), def())])))
+    }
+
+    fn seed_order(state: &Arc<Mutex<ExecState>>) {
+        state.lock().expect("execution state mutex").orders.insert(
+            ClientOrderId::from("O-1"),
+            OrderRecord {
+                strategy_id: StrategyId::from("S-001"),
+                instrument_id: instrument_id(),
+                order_side: OrderSide::Buy,
+                order_type: OrderType::Limit,
+                time_in_force: TimeInForce::Gtc,
+                status: OrderStatus::Submitted,
+                quantity: Decimal::new(1, 0),
+                price: Some(Decimal::new(10_000, 2)),
+                filled_qty: Decimal::ZERO,
+                avg_px: None,
+                venue_order_id: None,
+                ts_accepted: UnixNanos::from(1),
+                ts_last: UnixNanos::from(1),
+            },
+        );
+    }
+
+    fn exec_context() -> (
+        ExecContext,
+        tokio::sync::mpsc::UnboundedReceiver<ExecutionEvent>,
+    ) {
+        let (tx, rx) = unbounded_channel();
+        let config = MogwaiExecClientConfig::default();
+        let mut emitter = ExecutionEventEmitter::new(
+            get_atomic_clock_realtime(),
+            config.trader_id,
+            config.account_id,
+            config.account_type,
+            None,
+        );
+        emitter.set_sender(tx);
+        let state = Arc::new(Mutex::new(ExecState::default()));
+        seed_order(&state);
+        (
+            ExecContext {
+                emitter,
+                state,
+                instruments: instruments_map(),
+                trader_id: config.trader_id,
+                account_id: config.account_id,
+            },
+            rx,
+        )
+    }
+
     #[test]
     fn mogwai_exec_client_start_stop_are_idempotent() {
         let mut client = execution_client();
@@ -1332,5 +2146,202 @@ mod tests {
         assert!(client.is_stopped());
         assert!(!client.is_started());
         assert!(!client.is_connected());
+    }
+
+    #[test]
+    fn submit_modify_cancel_emit_wire_commands() {
+        let submit = ExecWsCommand::Submit(mogwai_protocol::SubmitOrder {
+            client_order_id: "O-1".into(),
+            symbol: "BTCUSDT".into(),
+            side: Side::Buy,
+            order_type: mogwai_protocol::OrderType::Limit,
+            quantity: Decimal::new(1, 0),
+            price: Some(Decimal::new(10_000, 2)),
+            time_in_force: mogwai_protocol::TimeInForce::Gtc,
+        });
+
+        assert!(matches!(
+            exec_command_to_client_message(submit),
+            ClientMessage::SubmitOrder(order)
+                if order.client_order_id == "O-1"
+                    && order.symbol == "BTCUSDT"
+                    && order.side == Side::Buy
+        ));
+        assert!(matches!(
+            exec_command_to_client_message(ExecWsCommand::Modify {
+                client_order_id: "O-1".into(),
+                price: Some(Decimal::new(12_000, 2)),
+                quantity: Some(Decimal::new(2, 0)),
+            }),
+            ClientMessage::ModifyOrder {
+                client_order_id,
+                price: Some(price),
+                quantity: Some(quantity),
+            } if client_order_id == "O-1"
+                && price == Decimal::new(12_000, 2)
+                && quantity == Decimal::new(2, 0)
+        ));
+        assert!(matches!(
+            exec_command_to_client_message(ExecWsCommand::Cancel {
+                client_order_id: "O-1".into(),
+            }),
+            ClientMessage::CancelOrder { client_order_id } if client_order_id == "O-1"
+        ));
+    }
+
+    #[test]
+    fn accepted_then_filled_then_account_drive_exec_events() {
+        let (ctx, mut rx) = exec_context();
+
+        handle_exec_message(
+            ServerMessage::OrderAccepted {
+                client_order_id: "O-1".into(),
+                venue_order_id: "V-1".into(),
+                ts_event: 10,
+            },
+            &ctx,
+        );
+        handle_exec_message(
+            ServerMessage::OrderFilled(mogwai_protocol::OrderFilled {
+                client_order_id: "O-1".into(),
+                venue_order_id: "V-1".into(),
+                trade_id: "T-1".into(),
+                symbol: "BTCUSDT".into(),
+                side: Side::Buy,
+                last_qty: Decimal::new(1, 0),
+                last_px: Decimal::new(10_000, 2),
+                leaves_qty: Decimal::ZERO,
+                commission: Decimal::ZERO,
+                ts_event: 11,
+            }),
+            &ctx,
+        );
+        handle_exec_message(
+            ServerMessage::AccountState(mogwai_protocol::AccountState {
+                balances: vec![mogwai_protocol::Balance {
+                    currency: "USDT".into(),
+                    total: Decimal::new(10_000, 0),
+                    free: Decimal::new(9_900, 0),
+                    locked: Decimal::new(100, 0),
+                }],
+                positions: vec![mogwai_protocol::Position {
+                    symbol: "BTCUSDT".into(),
+                    quantity: Decimal::new(1, 0),
+                    avg_px: Decimal::new(10_000, 2),
+                }],
+                ts_event: 12,
+            }),
+            &ctx,
+        );
+
+        assert!(matches!(
+            rx.try_recv().expect("accepted event"),
+            ExecutionEvent::Order(OrderEventAny::Accepted(_))
+        ));
+        assert!(matches!(
+            rx.try_recv().expect("filled event"),
+            ExecutionEvent::Order(OrderEventAny::Filled(_))
+        ));
+        assert!(matches!(
+            rx.try_recv().expect("account event"),
+            ExecutionEvent::Account(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn reports_reconstruct_from_mirror() {
+        let mut client = execution_client();
+        client.instruments = instruments_map();
+        seed_order(&client.state);
+        let (ctx, _rx) = exec_context();
+        let ctx = ExecContext {
+            emitter: ctx.emitter,
+            state: Arc::clone(&client.state),
+            instruments: Arc::clone(&client.instruments),
+            trader_id: ctx.trader_id,
+            account_id: ctx.account_id,
+        };
+
+        handle_exec_message(
+            ServerMessage::OrderAccepted {
+                client_order_id: "O-1".into(),
+                venue_order_id: "V-1".into(),
+                ts_event: 10,
+            },
+            &ctx,
+        );
+        handle_exec_message(
+            ServerMessage::OrderFilled(mogwai_protocol::OrderFilled {
+                client_order_id: "O-1".into(),
+                venue_order_id: "V-1".into(),
+                trade_id: "T-1".into(),
+                symbol: "BTCUSDT".into(),
+                side: Side::Buy,
+                last_qty: Decimal::new(1, 0),
+                last_px: Decimal::new(10_000, 2),
+                leaves_qty: Decimal::ZERO,
+                commission: Decimal::ZERO,
+                ts_event: 11,
+            }),
+            &ctx,
+        );
+        handle_exec_message(
+            ServerMessage::AccountState(mogwai_protocol::AccountState {
+                balances: Vec::new(),
+                positions: vec![mogwai_protocol::Position {
+                    symbol: "BTCUSDT".into(),
+                    quantity: Decimal::new(1, 0),
+                    avg_px: Decimal::new(10_000, 2),
+                }],
+                ts_event: 12,
+            }),
+            &ctx,
+        );
+
+        let orders = client
+            .generate_order_status_reports(&GenerateOrderStatusReports::new(
+                UUID4::new(),
+                UnixNanos::from(20),
+                false,
+                Some(instrument_id()),
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("order reports");
+        let fills = client
+            .generate_fill_reports(GenerateFillReports::new(
+                UUID4::new(),
+                UnixNanos::from(20),
+                Some(instrument_id()),
+                Some(VenueOrderId::from("V-1")),
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("fill reports");
+        let positions = client
+            .generate_position_status_reports(&GeneratePositionStatusReports::new(
+                UUID4::new(),
+                UnixNanos::from(20),
+                Some(instrument_id()),
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("position reports");
+
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].order_status, OrderStatus::Filled);
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].trade_id, TradeId::from("T-1"));
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions[0].position_side, PositionSideSpecified::Long);
     }
 }
