@@ -27,14 +27,14 @@ const STUDENT_T_DF: f64 = 4.0;
 // The high/low bounce regime jointly controls negative lag-1 return ACF
 // (target -0.197 .. -0.057), zero_change_frac (0.336 .. 0.751) and the
 // absolute-return ACF decay (lag1 0.152 .. 0.307, lag10 .. 0.156, lag50 ..
-// 0.123). The regime's MEAN ACTIVE LENGTH (1 / BOUNCE_HIGH_TO_LOW_PROB ~ 50
+// 0.123). The regime's MEAN ACTIVE LENGTH (1 / BOUNCE_HIGH_TO_LOW_PROB ~ 33
 // trades) sets the abs-return ACF timescale: too long flattens the lag1->lag10
 // decay above the lag10 ceiling, too short starves the lag50 floor, so these
 // two transition probabilities are pinned together with the flip contrast.
 const BOUNCE_LOW_FLIP_PROB: f64 = 0.02;
 const BOUNCE_HIGH_FLIP_PROB: f64 = 0.58;
 const BOUNCE_LOW_TO_HIGH_PROB: f64 = 0.004;
-const BOUNCE_HIGH_TO_LOW_PROB: f64 = 0.020;
+const BOUNCE_HIGH_TO_LOW_PROB: f64 = 0.030;
 const HALF_SPREAD_TICKS: f64 = 0.5;
 // High-regime drift adds same-direction on-grid movement so volatility clusters
 // are not only alternating bid-ask moves.
@@ -61,7 +61,32 @@ impl Fingerprint {
             env!("CARGO_MANIFEST_DIR"),
             "/../../analysis/fingerprint.json"
         ));
-        serde_json::from_str(bytes).expect("committed fingerprint parses")
+        let fingerprint: Self = serde_json::from_str(bytes).expect("committed fingerprint parses");
+        // Fail loud on a non-positive session share. arrival_mult divides the
+        // drawn duration by arr_hour[h] * arr_dow[d], which are these shares
+        // scaled by 24 and 7; a zero or negative entry would make the divisor
+        // zero or negative, yielding infinite/negative durations that saturate
+        // to u64::MAX. Rather than a silent clamp masking a broken fingerprint,
+        // panic here - consistent with the parse-on-malformed contract above -
+        // so a bad fingerprint is caught at load, not in the hot path.
+        for (h, share) in fingerprint
+            .session_profile
+            .intensity_hour
+            .iter()
+            .enumerate()
+        {
+            assert!(
+                *share > 0.0,
+                "fingerprint session_profile.intensity_hour[{h}] must be strictly positive, got {share}"
+            );
+        }
+        for (d, share) in fingerprint.session_profile.dow_weight.iter().enumerate() {
+            assert!(
+                *share > 0.0,
+                "fingerprint session_profile.dow_weight[{d}] must be strictly positive, got {share}"
+            );
+        }
+        fingerprint
     }
 }
 
@@ -101,6 +126,69 @@ pub struct SessionProfile {
     pub intensity_hour: [f64; 24],
     pub vol_hour: [f64; 24],
     pub dow_weight: [f64; 7],
+}
+
+// Civil UTC fields the session profile is keyed on. Derived purely from the
+// nanosecond wall clock with no chrono dependency: the session curves only need
+// hour-of-day and day-of-week, both of which fall out of integer division on the
+// unix-epoch second. Day-of-week uses the (days_since_epoch + 4) % 7 convention
+// that puts Sun=0 (1970-01-01 was a Thursday), matching the fingerprint.
+fn utc_hour_dow(clock_ns: u64) -> (usize, usize) {
+    let secs = clock_ns / 1_000_000_000;
+    let days = secs / 86_400;
+    let hour = ((secs % 86_400) / 3_600) as usize;
+    let dow = ((days + 4) % 7) as usize;
+    (hour, dow)
+}
+
+// Precomputed session multipliers. Built once from the fingerprint's
+// SessionProfile so the per-tick hot path is two array indexes and a multiply,
+// not a re-normalization. The arrival multiplier centers each share on 1.0 by
+// dividing out the uniform share (24 hours, 7 days); the vol multiplier is the
+// fingerprint's per-mean ratio used as-is.
+struct SessionModulator {
+    // intensity_hour[h] * 24.0: arrival-rate multiplier from the hour share,
+    // centered on 1.0 (uniform hour share is 1/24).
+    arr_hour: [f64; 24],
+    // dow_weight[d] * 7.0: arrival-rate multiplier from the day share, centered
+    // on 1.0 (uniform day share is 1/7). Sun=0 .. Sat=6.
+    arr_dow: [f64; 7],
+    // vol_hour[h]: per-mean per-trade RMS-return multiplier, used directly.
+    vol_hour: [f64; 24],
+}
+
+impl SessionModulator {
+    fn new(profile: &SessionProfile) -> Self {
+        let mut arr_hour = [0.0; 24];
+        for (h, mult) in arr_hour.iter_mut().enumerate() {
+            *mult = profile.intensity_hour[h] * 24.0;
+        }
+        let mut arr_dow = [0.0; 7];
+        for (d, mult) in arr_dow.iter_mut().enumerate() {
+            *mult = profile.dow_weight[d] * 7.0;
+        }
+        Self {
+            arr_hour,
+            arr_dow,
+            vol_hour: profile.vol_hour,
+        }
+    }
+
+    // Arrival-rate multiplier at this wall-clock instant: hour-of-day times
+    // day-of-week, both centered on 1.0. A duration is divided by this so a
+    // high-activity instant produces shorter inter-arrivals.
+    fn arrival_mult(&self, clock_ns: u64) -> f64 {
+        let (hour, dow) = utc_hour_dow(clock_ns);
+        self.arr_hour[hour] * self.arr_dow[dow]
+    }
+
+    // Volatility multiplier at this wall-clock instant: the fingerprint's
+    // per-mean hour ratio. A formed return is multiplied by this, scaling the
+    // innovation standard deviation rather than the variance.
+    fn vol_mult(&self, clock_ns: u64) -> f64 {
+        let (hour, _dow) = utc_hour_dow(clock_ns);
+        self.vol_hour[hour]
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -187,6 +275,7 @@ pub struct GeneratedSource {
     clock_ns: u64,
     acd: AcdClock,
     vol: GarchVol,
+    session: SessionModulator,
     bounce: BounceState,
     duration_dist: Weibull<f64>,
     normal: Normal<f64>,
@@ -222,6 +311,7 @@ impl GeneratedSource {
                 eps_mean: weibull_mean(ACD_WEIBULL_SHAPE),
             },
             vol,
+            session: SessionModulator::new(&fp.session_profile),
             bounce: BounceState {
                 prev_side: AggressorSide::Buyer,
                 high_regime: false,
@@ -244,7 +334,12 @@ impl GeneratedSource {
             + self.acd.alpha * self.acd.prev_duration_s
             + self.acd.beta * self.acd.psi;
         let duration_s = (self.acd.psi * eps).max(0.000_000_001);
+        // ACD feedback sees the un-modulated duration so clustering dynamics are
+        // unchanged; the session envelope only stretches or compresses the
+        // realized gap.
         self.acd.prev_duration_s = duration_s;
+        let arr_mult = self.session.arrival_mult(self.clock_ns);
+        let duration_s = (duration_s / arr_mult).max(0.000_000_001);
         (duration_s * 1_000_000_000.0).round().max(1.0) as u64
     }
 
@@ -256,8 +351,14 @@ impl GeneratedSource {
             + self.vol.a1 * self.vol.prev_return.powi(2)
             + self.vol.b1 * self.vol.sigma2;
         self.vol.sigma2 = self.vol.sigma2.min(GARCH_SIGMA_CAP.powi(2));
-        let return_n = (self.vol.sigma2.sqrt() * student_t).clamp(-MAX_ABS_RETURN, MAX_ABS_RETURN);
-        self.vol.prev_return = return_n;
+        let base_return =
+            (self.vol.sigma2.sqrt() * student_t).clamp(-MAX_ABS_RETURN, MAX_ABS_RETURN);
+        // GARCH feedback sees the un-modulated return so volatility clustering
+        // is unchanged; the session envelope scales the realized RMS on top,
+        // then the hard clamp still bounds the mid update.
+        self.vol.prev_return = base_return;
+        let vol_mult = self.session.vol_mult(self.clock_ns);
+        let return_n = (base_return * vol_mult).clamp(-MAX_ABS_RETURN, MAX_ABS_RETURN);
         self.vol.mid = (self.vol.mid * return_n.exp())
             .max(self.tick_f64)
             .min(1_000_000_000.0);
@@ -291,6 +392,13 @@ impl GeneratedSource {
 impl TickSource for GeneratedSource {
     fn next_tick(&mut self) -> Option<TickEvent> {
         let dt_ns = self.next_duration_ns();
+        // Order is load-bearing: next_duration_ns reads the arrival multiplier at
+        // the START of the gap (the clock has not advanced yet), then the clock
+        // steps, then next_latent_mid reads the volatility multiplier at the
+        // instant the trade PRINTS. A duration belongs to the session window it
+        // opens in; a trade's volatility belongs to the window it prints in. Do
+        // not reorder these three lines to "tidy" them - it silently shifts which
+        // session window each tick is attributed to.
         self.clock_ns = self.clock_ns.saturating_add(dt_ns);
         let mid = self.next_latent_mid();
         let (price, aggressor) = self.next_price(mid);
@@ -465,6 +573,20 @@ mod tests {
     use super::*;
 
     const DRAW: usize = 2_000_000;
+    const SESSION_DRAW: usize = 5_000_000;
+    // Unlike the return/abs-return/dispersion targets, duration_acf has no
+    // committed cross-pair min/median/max band in the fingerprint - only the
+    // anchor lag vector (duration_acf_anchor). With no band to inherit, 0.14 is
+    // a principled absolute choice rather than a fitted one: the seeded duration
+    // ACF lands within a few hundredths of the anchor at lags 1 and 5, so 0.14
+    // gives margin for seed-to-seed sampling wobble while staying tight enough
+    // that a flattened ACF (the failure mode the after-the-recursion session
+    // envelope is designed to prevent) - which collapses these lags toward zero,
+    // an order of magnitude past 0.14 from the anchor - is still caught.
+    const DURATION_ACF_ABS_TOL: f64 = 0.14;
+    const INTENSITY_SHARE_ABS_TOL: f64 = 0.006;
+    const DOW_SHARE_ABS_TOL: f64 = 0.01;
+    const SESSION_START_TS: u64 = 1_700_438_400_000_000_000;
 
     #[test]
     fn fingerprint_parses() {
@@ -547,6 +669,18 @@ mod tests {
             measured.duration_dispersion_index,
             &fp.golden_targets.duration_dispersion_index.range,
         );
+        assert_near(
+            "duration_acf_lag1",
+            measured.duration_acf_lag1,
+            fp.golden_targets.duration_acf_anchor[0],
+            DURATION_ACF_ABS_TOL,
+        );
+        assert_near(
+            "duration_acf_lag5",
+            measured.duration_acf_lag5,
+            fp.golden_targets.duration_acf_anchor[4],
+            DURATION_ACF_ABS_TOL,
+        );
         assert_in_range(
             "return_acf_lag1",
             measured.return_acf_lag1,
@@ -582,9 +716,83 @@ mod tests {
         assert_eq!(measured.neutral_aggressors, 0);
     }
 
+    #[test]
+    #[ignore]
+    fn session_modulation_reproduces_curves() {
+        assert_eq!(utc_hour_dow(0), (0, 4));
+        assert_eq!(utc_hour_dow(1_700_000_000_000_000_000), (22, 2));
+        assert_eq!(utc_hour_dow(SESSION_START_TS), (0, 1));
+
+        let fp = Fingerprint::from_repo_json();
+        let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+        let mut src = GeneratedSource::new(scalars, 42, SESSION_START_TS, &fp);
+        let measured = measure_session_curves(&mut src, SESSION_DRAW);
+
+        for h in 0..24 {
+            assert_near(
+                "intensity_hour",
+                measured.intensity_hour[h],
+                fp.session_profile.intensity_hour[h],
+                INTENSITY_SHARE_ABS_TOL,
+            );
+        }
+        let max_intensity_hour = argmax(&measured.intensity_hour);
+        let min_intensity_hour = argmin(&measured.intensity_hour);
+        assert!(
+            (14..=16).contains(&max_intensity_hour),
+            "max_intensity_hour={max_intensity_hour}"
+        );
+        assert!(
+            (3..=6).contains(&min_intensity_hour),
+            "min_intensity_hour={min_intensity_hour}"
+        );
+
+        let max_vol_hour = argmax(&measured.vol_hour);
+        assert_eq!(max_vol_hour, 14);
+        assert!(
+            measured.vol_hour[14] > 1.8,
+            "vol_hour[14]={}",
+            measured.vol_hour[14]
+        );
+        assert!(
+            measured.vol_hour[1] < 1.0,
+            "vol_hour[1]={}",
+            measured.vol_hour[1]
+        );
+        let vol_corr = pearson(&measured.vol_hour, &fp.session_profile.vol_hour);
+        assert!(vol_corr > 0.9, "vol_corr={vol_corr}");
+
+        for d in 0..7 {
+            assert_near(
+                "dow_weight",
+                measured.dow_weight[d],
+                fp.session_profile.dow_weight[d],
+                DOW_SHARE_ABS_TOL,
+            );
+        }
+        for weekday in 1..=5 {
+            assert!(
+                measured.dow_weight[0] < measured.dow_weight[weekday],
+                "sun={} weekday{}={}",
+                measured.dow_weight[0],
+                weekday,
+                measured.dow_weight[weekday]
+            );
+            assert!(
+                measured.dow_weight[6] < measured.dow_weight[weekday],
+                "sat={} weekday{}={}",
+                measured.dow_weight[6],
+                weekday,
+                measured.dow_weight[weekday]
+            );
+        }
+    }
+
     #[derive(Default)]
     struct Measured {
         duration_dispersion_index: f64,
+        duration_acf_lag1: f64,
+        duration_acf_lag5: f64,
         return_acf_lag1: f64,
         abs_return_acf_lag1: f64,
         abs_return_acf_lag10: f64,
@@ -634,6 +842,8 @@ mod tests {
 
         Measured {
             duration_dispersion_index: variance(&durations) / mean(&durations),
+            duration_acf_lag1: acf(&durations, 1),
+            duration_acf_lag5: acf(&durations, 5),
             return_acf_lag1: acf(&returns, 1),
             abs_return_acf_lag1: acf(&abs_returns, 1),
             abs_return_acf_lag10: acf(&abs_returns, 10),
@@ -643,6 +853,75 @@ mod tests {
             size_cv: variance(&sizes_f64).sqrt() / mean(&sizes_f64),
             off_grid_prices,
             neutral_aggressors,
+        }
+    }
+
+    struct SessionCurves {
+        intensity_hour: [f64; 24],
+        vol_hour: [f64; 24],
+        dow_weight: [f64; 7],
+    }
+
+    fn measure_session_curves(src: &mut GeneratedSource, draw: usize) -> SessionCurves {
+        let mut hour_count = [0_u64; 24];
+        let mut ret_count_hour = [0_u64; 24];
+        let mut sumsq_ret_hour = [0.0; 24];
+        let mut dow_count = [0_u64; 7];
+        let mut prev_price: Option<f64> = None;
+
+        for _ in 0..draw {
+            let TickEvent::Trade(trade) = src.next_tick().expect("unbounded generated source")
+            else {
+                unreachable!("generated source emits trades")
+            };
+            let (hour, dow) = utc_hour_dow(trade.ts_event);
+            hour_count[hour] += 1;
+            dow_count[dow] += 1;
+
+            let price = decimal_to_f64(trade.price);
+            if let Some(prev) = prev_price {
+                let ret = (price / prev).ln();
+                sumsq_ret_hour[hour] += ret.powi(2);
+                // The RMS divisor counts only return-contributing trades. The
+                // very first trade of the whole draw has no predecessor and
+                // contributes no squared return, so dividing sumsq by hour_count
+                // (which includes it) would deflate that one hour's RMS by one
+                // trade. ret_count_hour tracks exactly the trades that added a
+                // squared return.
+                ret_count_hour[hour] += 1;
+            }
+            prev_price = Some(price);
+        }
+
+        let total_hour = hour_count.iter().sum::<u64>() as f64;
+        let total_dow = dow_count.iter().sum::<u64>() as f64;
+        let mut intensity_hour = [0.0; 24];
+        let mut rms_hour = [0.0; 24];
+        let mut populated_hours = 0;
+        for h in 0..24 {
+            intensity_hour[h] = hour_count[h] as f64 / total_hour;
+            if ret_count_hour[h] > 0 {
+                rms_hour[h] = (sumsq_ret_hour[h] / ret_count_hour[h] as f64).sqrt();
+                populated_hours += 1;
+            }
+        }
+
+        let rms_mean =
+            rms_hour.iter().filter(|value| **value > 0.0).sum::<f64>() / populated_hours as f64;
+        let mut vol_hour = [0.0; 24];
+        for h in 0..24 {
+            vol_hour[h] = rms_hour[h] / rms_mean;
+        }
+
+        let mut dow_weight = [0.0; 7];
+        for d in 0..7 {
+            dow_weight[d] = dow_count[d] as f64 / total_dow;
+        }
+
+        SessionCurves {
+            intensity_hour,
+            vol_hour,
+            dow_weight,
         }
     }
 
@@ -685,5 +964,46 @@ mod tests {
             range.min,
             range.max
         );
+    }
+
+    fn assert_near(label: &str, value: f64, expected: f64, tolerance: f64) {
+        assert!(
+            (value - expected).abs() <= tolerance,
+            "{label}={value} outside {expected} +/- {tolerance}"
+        );
+    }
+
+    fn argmax<const N: usize>(values: &[f64; N]) -> usize {
+        values
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(idx, _)| idx)
+            .expect("non-empty array")
+    }
+
+    fn argmin<const N: usize>(values: &[f64; N]) -> usize {
+        values
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(idx, _)| idx)
+            .expect("non-empty array")
+    }
+
+    fn pearson<const N: usize>(a: &[f64; N], b: &[f64; N]) -> f64 {
+        let mean_a = a.iter().sum::<f64>() / N as f64;
+        let mean_b = b.iter().sum::<f64>() / N as f64;
+        let mut numerator = 0.0;
+        let mut denom_a = 0.0;
+        let mut denom_b = 0.0;
+        for i in 0..N {
+            let da = a[i] - mean_a;
+            let db = b[i] - mean_b;
+            numerator += da * db;
+            denom_a += da.powi(2);
+            denom_b += db.powi(2);
+        }
+        numerator / (denom_a.sqrt() * denom_b.sqrt())
     }
 }

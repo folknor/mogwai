@@ -66,9 +66,20 @@ integration tests):
   measured stylized fact lands inside the fingerprint's cross-pair tolerance band
   (never against live CSV), plus focused determinism, monotonic-clock, on-grid,
   native-aggressor, scalar-validate and fingerprint-parse unit tests. The
-  fingerprint's `session_profile` block is parsed and held but not yet applied to
-  the arrival/vol path (that is the session modulator, the next remaining item).
-  `KrakenCsvSource`
+  fingerprint's `session_profile` block is now applied (see git history for the
+  landing): a `SessionModulator` makes the generated stream non-stationary in
+  wall-clock time, multiplying the arrival intensity by the UTC hour-of-day and
+  day-of-week shares and the latent-mid volatility by the hour vol curve, so a
+  generated stream reproduces the fingerprint's intraday intensity, intraday
+  volatility and day-of-week split. The envelope is a deterministic outer factor
+  applied to the realized duration and return after the ACD and GARCH recursions,
+  which keep running on the un-modulated values so their clustering dynamics are
+  preserved; the fingerprint loader now also fails loud on a non-positive session
+  share. No constructor or fingerprint-schema change. An ignored 5M-tick test
+  asserts the generated stream reproduces the session curves (intensity argmax in
+  the London-NY overlap, the NY-open vol spike, weekend thinning, vol correlation
+  above 0.9), and the realism gate gained a duration-ACF assertion confirming the
+  envelope leaves duration clustering intact. `KrakenCsvSource`
   and the two server replay sites are untouched - the landing is purely additive.
 - `mogwai-server` - axum `/health`, `/ws` (orders + market-data replay),
   `/control/divergence`, plus the request/response data surface the adapter's
@@ -348,20 +359,14 @@ sharp NY-open edge (hour 14 at 2.46x the per-pair mean), and day-of-week weights
 that thin on weekends (~0.11 vs ~0.15 weekday).
 
 #### Remaining work items (ordered, one landing each)
-The `GeneratedSource` kernel is landed (see the `mogwai-data` Done entry above
-and git history). The follow-on landings, each a coherent keep/revert, tree green
-at every boundary:
-1. The session modulator layered onto the kernel: a UTC wall-clock function over
-   the fingerprint's intensity and volatility curves, with the session edges
-   modeled with care. Reads the `session_profile` block the kernel landing already
-   parses and holds, with no constructor or fingerprint-schema change. Gated by a
-   test asserting the generated stream reproduces the session intensity and
-   volatility curves within tolerance.
-2. Wiring `GeneratedSource` into `mogwai-server` as the selected source in place
+The `GeneratedSource` kernel and the session modulator layered onto it are both
+landed (see the `mogwai-data` Done entry above and git history). The follow-on
+landings, each a coherent keep/revert, tree green at every boundary:
+1. Wiring `GeneratedSource` into `mogwai-server` as the selected source in place
    of `KrakenCsvSource`, so the running server opens no CSV. Hands the replay
    window's start to the kernel's `start_ts` anchor rather than leaning on the
    default draining `seek_to` to skip a multi-year prefix.
-3. (Later, separate) the market-regime havoc axis over the generator parameters,
+2. (Later, separate) the market-regime havoc axis over the generator parameters,
    including session-closing reopen-gaps.
 
 ### 2. broadarrow integration: the mogwai venue adapter
