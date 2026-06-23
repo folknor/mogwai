@@ -7,6 +7,10 @@ license.workspace = true
 [dependencies]
 mogwai-protocol.workspace = true
 rust_decimal.workspace = true
+rand.workspace = true
+rand_distr.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

@@ -45,7 +45,31 @@ integration tests):
   touches the armed-divergence queue, so an interleaved modify cannot consume a
   divergence armed for a fill (see git history for the landing).
 - `mogwai-data` - streaming Kraken CSV loader (O(1) memory over multi-GB files),
-  seconds→ns, k-way `MergeSource`; verified on the real 43GB dump.
+  seconds→ns, k-way `MergeSource`; verified on the real 43GB dump. Now also
+  carries the `GeneratedSource` kernel (see git history for the landing): a new
+  `TickSource` that loads the committed `analysis/fingerprint.json` (embedded at
+  compile time via `include_str!`, so the network-isolated implementer and the
+  running server open no file) and emits a deterministic, seedable, single-symbol
+  trade stream. Four composed layers off one seeded `StdRng` reproduce the
+  stylized facts: an ACD-style arrival clock (bursty, far-from-Poisson durations
+  with clustering), a GARCH(1,1) stochastic-volatility latent mid (fat tails plus
+  volatility clustering), a tick-grid bid-ask-bounce overlay (negative lag-1
+  return ACF, flat-run zero-change fraction, on-grid prices) and a heavy-tailed
+  lognormal size draw with round-lot mass. Because the bounce decides the side,
+  every emitted trade carries a native `Buyer`/`Seller` aggressor, where the CSV
+  path needs `TickRuleAggressor` to infer one. `GeneratorScalars` is the
+  per-instrument knob vector (a mutable struct, leaving room for the later
+  market-regime havoc axis) with `from_fingerprint_medians`, `xbtusd_anchor` and
+  a range-checking `validate`; `new` takes an explicit `start_ts` epoch anchor so
+  determinism is caller-set rather than wall-clock "now". Gated by a
+  self-contained Rust realism test that draws a long stream and asserts each
+  measured stylized fact lands inside the fingerprint's cross-pair tolerance band
+  (never against live CSV), plus focused determinism, monotonic-clock, on-grid,
+  native-aggressor, scalar-validate and fingerprint-parse unit tests. The
+  fingerprint's `session_profile` block is parsed and held but not yet applied to
+  the arrival/vol path (that is the session modulator, the next remaining item).
+  `KrakenCsvSource`
+  and the two server replay sites are untouched - the landing is purely additive.
 - `mogwai-server` - axum `/health`, `/ws` (orders + market-data replay),
   `/control/divergence`, plus the request/response data surface the adapter's
   `request_` handlers hit: `GET /instruments` (the engine's precision-bearing
@@ -324,21 +348,20 @@ sharp NY-open edge (hour 14 at 2.46x the per-pair mean), and day-of-week weights
 that thin on weekends (~0.11 vs ~0.15 weekday).
 
 #### Remaining work items (ordered, one landing each)
-Each is a coherent keep/revert landing, tree green at every boundary:
-1. The `GeneratedSource` kernel: a new `TickSource` in `mogwai-data` that loads
-   `analysis/fingerprint.json` and generates a deterministic, seedable stream -
-   Hawkes/ACD arrivals, tick-grid stochastic-volatility price with a bid-ask-
-   bounce overlay, heavy-tailed sizes, native aggressor side. Gated by the
-   self-contained Rust realism test described above (generate, then assert the
-   golden targets within tolerance). The session modulator and server wiring are
-   out of scope for this item.
-2. The session modulator layered onto the kernel: a UTC wall-clock function over
+The `GeneratedSource` kernel is landed (see the `mogwai-data` Done entry above
+and git history). The follow-on landings, each a coherent keep/revert, tree green
+at every boundary:
+1. The session modulator layered onto the kernel: a UTC wall-clock function over
    the fingerprint's intensity and volatility curves, with the session edges
-   modeled with care. Gated by a test asserting the generated stream reproduces
-   the session intensity and volatility curves within tolerance.
-3. Wiring `GeneratedSource` into `mogwai-server` as the selected source in place
-   of `KrakenCsvSource`, so the running server opens no CSV.
-4. (Later, separate) the market-regime havoc axis over the generator parameters,
+   modeled with care. Reads the `session_profile` block the kernel landing already
+   parses and holds, with no constructor or fingerprint-schema change. Gated by a
+   test asserting the generated stream reproduces the session intensity and
+   volatility curves within tolerance.
+2. Wiring `GeneratedSource` into `mogwai-server` as the selected source in place
+   of `KrakenCsvSource`, so the running server opens no CSV. Hands the replay
+   window's start to the kernel's `start_ts` anchor rather than leaning on the
+   default draining `seek_to` to skip a multi-year prefix.
+3. (Later, separate) the market-regime havoc axis over the generator parameters,
    including session-closing reopen-gaps.
 
 ### 2. broadarrow integration: the mogwai venue adapter

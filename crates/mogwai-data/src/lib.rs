@@ -7,6 +7,8 @@
 //! [`KrakenCsvSource`] streams one buffered line at a time - O(1) memory - and
 //! [`MergeSource`] k-way merges several symbols into one time-ordered stream.
 
+mod generated;
+
 use std::{
     fs::File,
     io::{self, BufRead, BufReader},
@@ -16,6 +18,11 @@ use std::{
 
 use mogwai_protocol::{AggressorSide, QuoteTick, TradeTick};
 use rust_decimal::Decimal;
+
+pub use generated::{
+    AbsReturnAcf, AnchorRange, Fingerprint, GeneratedSource, GeneratorScalars, GoldenTargets,
+    MinMedianMax, ScalarError, ScalarRanges, SessionProfile,
+};
 
 /// One replayable market-data event.
 #[derive(Debug, Clone)]
