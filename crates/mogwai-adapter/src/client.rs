@@ -54,7 +54,6 @@ use crate::{
     lifecycle::{HttpQuota, WsConnectionConfig, run_ws_connection},
 };
 
-const HISTORY_LIMIT_CAP: usize = 10_000;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug)]
@@ -1496,8 +1495,11 @@ async fn sleep_havoc_delay(delay: Duration) {
 /// response `Vec` can grow unbounded over a multi-GB dump.
 fn capped_limit(limit: Option<std::num::NonZeroUsize>) -> usize {
     limit
-        .map_or(HISTORY_LIMIT_CAP, std::num::NonZeroUsize::get)
-        .min(HISTORY_LIMIT_CAP)
+        .map_or(
+            mogwai_protocol::MAX_HISTORY_LIMIT,
+            std::num::NonZeroUsize::get,
+        )
+        .min(mogwai_protocol::MAX_HISTORY_LIMIT)
 }
 
 fn join_url(base: &str, path: &str) -> String {
@@ -3094,10 +3096,10 @@ mod data_client_tests {
     // bounded over a multi-GB dump.
     #[test]
     fn history_limit_is_capped_at_the_ceiling() {
-        assert_eq!(capped_limit(None), HISTORY_LIMIT_CAP);
+        assert_eq!(capped_limit(None), mogwai_protocol::MAX_HISTORY_LIMIT);
         assert_eq!(
-            capped_limit(NonZeroUsize::new(HISTORY_LIMIT_CAP * 100)),
-            HISTORY_LIMIT_CAP
+            capped_limit(NonZeroUsize::new(mogwai_protocol::MAX_HISTORY_LIMIT * 100)),
+            mogwai_protocol::MAX_HISTORY_LIMIT
         );
         assert_eq!(capped_limit(NonZeroUsize::new(5)), 5);
     }

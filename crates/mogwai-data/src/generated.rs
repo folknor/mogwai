@@ -143,6 +143,17 @@ pub struct MinMedianMax {
     pub max: f64,
 }
 
+impl MinMedianMax {
+    /// Inclusive range-membership over the fitted band. The single source of
+    /// truth for "is this scalar inside the fingerprint range" - `validate_f64`
+    /// and the realism tests both route through it so the two cannot drift on
+    /// the inclusive-vs-exclusive convention.
+    #[must_use]
+    pub fn contains(&self, v: f64) -> bool {
+        (self.min..=self.max).contains(&v)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionProfile {
     pub intensity_hour: [f64; 24],
@@ -161,6 +172,13 @@ fn utc_hour_dow(clock_ns: u64) -> (usize, usize) {
     let hour = ((secs % 86_400) / 3_600) as usize;
     let dow = ((days + 4) % 7) as usize;
     (hour, dow)
+}
+
+// Hour-of-day only, for the sites that key on the hour and discard the
+// day-of-week. Wraps utc_hour_dow so the civil-time derivation lives in exactly
+// one place.
+fn utc_hour(clock_ns: u64) -> usize {
+    utc_hour_dow(clock_ns).0
 }
 
 // Precomputed session multipliers. Built once from the fingerprint's
@@ -208,8 +226,7 @@ impl SessionModulator {
     // per-mean hour ratio. A formed return is multiplied by this, scaling the
     // innovation standard deviation rather than the variance.
     fn vol_mult(&self, clock_ns: u64) -> f64 {
-        let (hour, _dow) = utc_hour_dow(clock_ns);
-        self.vol_hour[hour]
+        self.vol_hour[utc_hour(clock_ns)]
     }
 }
 
@@ -424,6 +441,15 @@ impl GeneratedSource {
         // is unchanged; the session envelope scales the realized RMS on top,
         // then the hard clamp still bounds the mid update.
         self.vol.prev_return = base_return;
+        // Vol composition convention (see also RegimeState::vol_mult): the
+        // session envelope and the regime envelope COMPOSE MULTIPLICATIVELY here
+        // (session 1.0 = no session bias, regime 1.0 = no regime bias, so the
+        // product is the combined RMS scale). Inside the regime envelope a
+        // SessionEdgeSpike instead composes ADDITIVELY onto the storm baseline
+        // (vol_mult + edge_mult). The two conventions are intentional and rely on
+        // both neutral values being 1.0; do NOT restructure either into the other
+        // (a future regime that set both vol_mult and an edge spike would want the
+        // add re-examined - today the match is exclusive so only one is non-unit).
         let vol_mult = self.session.vol_mult(self.clock_ns) * self.regime.vol_mult(self.clock_ns);
         let return_n = (base_return * vol_mult).clamp(-return_cap, return_cap);
         self.vol.mid = (self.vol.mid * return_n.exp())
@@ -439,6 +465,14 @@ impl GeneratedSource {
         let price_ticks = match side {
             AggressorSide::Buyer => (mid_ticks + self.bounce.half_spread_ticks).ceil(),
             AggressorSide::Seller => (mid_ticks - self.bounce.half_spread_ticks).floor(),
+            // Invariant-protected, not a runtime check: `side` is the return of
+            // `BounceState::next_side` directly above, whose every branch yields
+            // Buyer or Seller (its flip match collapses NoAggressor into Buyer).
+            // The generator never produces a neutral aggressor - that side exists
+            // only for the CSV/tick-rule lineage - so this arm is dead by
+            // construction. It stays as a guard so a future edit to next_side that
+            // started emitting NoAggressor would fail loudly here rather than
+            // silently quoting a mid-priced trade.
             AggressorSide::NoAggressor => unreachable!("bounce only emits buyer or seller"),
         };
         let price = decimal_from_f64(price_ticks * self.tick_f64);
@@ -515,6 +549,13 @@ impl RegimeState {
             reopen: None,
         };
 
+        // LOCKSTEP with mogwai_protocol::validate_market_regime: these arms
+        // destructure the same MarketRegime variants that validator range-checks,
+        // one crate away, with no compiler link forcing the two to agree. A new
+        // variant or a renamed field must be mirrored in BOTH - add the arm here
+        // and the matching guard there. Notably SessionEdgeSpike's
+        // `start_hour < end_hour` invariant is enforced only in the validator and
+        // trusted at runtime by EdgeSpike's window comparison below.
         match regime {
             Some(MarketRegime::VolStorm { vol_mult }) => {
                 state.vol_mult = vol_mult;
@@ -561,13 +602,19 @@ impl RegimeState {
 
     fn vol_mult(&self, clock_ns: u64) -> f64 {
         let edge_mult = self.edge.as_ref().map_or(0.0, |edge| {
-            let (hour, _dow) = utc_hour_dow(clock_ns);
+            let hour = utc_hour(clock_ns);
             if usize::from(edge.start_hour) <= hour && hour < usize::from(edge.end_hour) {
                 edge.extra_vol_mult
             } else {
                 0.0
             }
         });
+        // ADDITIVE within the regime envelope: the neutral value is 1.0 (set in
+        // `new`), and a SessionEdgeSpike layers its extra_vol_mult on top by
+        // addition (out of window edge_mult is 0.0, leaving the baseline). The
+        // RESULT is then composed MULTIPLICATIVELY with the session envelope in
+        // next_latent_mid - see the convention note there. The mix is deliberate
+        // and load-bearing on both neutral values being 1.0.
         self.vol_mult + edge_mult
     }
 
@@ -676,7 +723,7 @@ impl BounceState {
 }
 
 fn validate_f64(field: &'static str, value: f64, range: &MinMedianMax) -> Result<(), ScalarError> {
-    if (range.min..=range.max).contains(&value) {
+    if range.contains(value) {
         Ok(())
     } else {
         Err(ScalarError { field })
@@ -715,11 +762,28 @@ fn round_lot_size(base: f64) -> Decimal {
     }
 }
 
+// Mean of a Weibull(scale = 1, shape = k): scale * gamma(1 + 1/k). The ACD clock
+// divides each duration innovation by this so the latent process targets a unit
+// mean. The sole live caller is the construction-time `weibull_mean(0.60)` (with
+// scale fixed to 1.0 in the duration distribution), giving the constant value
+// ~1.504575 = gamma(1 + 1/0.6) = gamma(2.6666...) below. `rand_distr 0.4`'s
+// Weibull exposes no `mean()` accessor, so the mean is computed here.
 fn weibull_mean(shape: f64) -> f64 {
     gamma(1.0 + 1.0 / shape)
 }
 
+// gamma(z) via the Lanczos approximation (g = 7, n = 9), accurate to ~15 digits.
+// Only ever called with z = 1 + 1/0.6 = 2.6666... (>= 0.5), so the classic
+// reflection branch for z < 0.5 is dead by construction and has been dropped -
+// every live argument lands in the direct series below. The result feeds the
+// byte-identical golden test (`clean_regime_is_byte_identical`), so this must
+// reproduce the same f64 the series produced before the dead branch was removed;
+// dropping a never-taken branch does not change the value on the taken path.
 fn gamma(z: f64) -> f64 {
+    debug_assert!(
+        z >= 0.5,
+        "gamma is only called with z >= 0.5 (the reflection branch was removed as dead)"
+    );
     const COEFFS: [f64; 9] = [
         0.999_999_999_999_809_9,
         676.520_368_121_885_1,
@@ -731,17 +795,13 @@ fn gamma(z: f64) -> f64 {
         0.000_009_984_369_578_019_572,
         0.000_000_150_563_273_514_931_16,
     ];
-    if z < 0.5 {
-        std::f64::consts::PI / ((std::f64::consts::PI * z).sin() * gamma(1.0 - z))
-    } else {
-        let z = z - 1.0;
-        let mut x = COEFFS[0];
-        for (i, coeff) in COEFFS.iter().enumerate().skip(1) {
-            x += coeff / (z + i as f64);
-        }
-        let t = z + 7.5;
-        (2.0 * std::f64::consts::PI).sqrt() * t.powf(z + 0.5) * (-t).exp() * x
+    let z = z - 1.0;
+    let mut x = COEFFS[0];
+    for (i, coeff) in COEFFS.iter().enumerate().skip(1) {
+        x += coeff / (z + i as f64);
     }
+    let t = z + 7.5;
+    (2.0 * std::f64::consts::PI).sqrt() * t.powf(z + 0.5) * (-t).exp() * x
 }
 
 #[cfg(test)]
@@ -827,6 +887,56 @@ mod tests {
                 unreachable!("generated source emits trades")
             };
             assert_eq!((trade.price / scalars.modal_tick).fract(), Decimal::ZERO);
+            assert!(matches!(
+                trade.aggressor,
+                AggressorSide::Buyer | AggressorSide::Seller
+            ));
+        }
+    }
+
+    #[test]
+    fn weibull_mean_matches_known_constant() {
+        // Pin the construction-time constant the ACD clock divides by. The true
+        // value of gamma(1 + 1/0.6) = gamma(2.6666...) is ~1.5045754867. The
+        // Lanczos series reproduces it to ~8 digits (its inherent approximation
+        // error is ~1.5e-8); a 1e-7 tolerance catches a coefficient typo or a
+        // branch regression without asserting an exact f64 bit pattern (the
+        // byte-exact guard is the golden test).
+        let mean = weibull_mean(ACD_WEIBULL_SHAPE);
+        assert!(
+            (mean - 1.504_575_486_7).abs() < 1e-7,
+            "weibull_mean(0.60)={mean}"
+        );
+    }
+
+    #[test]
+    fn fine_grid_prices_stay_on_grid() {
+        // C.4 coverage: the realism/anchor on-grid checks only run xbtusd_anchor
+        // (tick 0.1, 1 decimal). The from_fingerprint_medians path pins the
+        // fingerprint medians - modal_tick 0.0001, price_decimals 4 - a 4-decimal
+        // fine grid where next_price accumulates f64 error in
+        // `price_ticks * tick_f64` before round_dp(4) snaps it back. Exercise that
+        // multi-decimal path and assert the same on-grid invariant the anchor test
+        // asserts: every emitted price divides evenly by the modal tick.
+        let fp = Fingerprint::from_repo_json();
+        let scalars = GeneratorScalars::from_fingerprint_medians("ETHUSD", &fp);
+        // Guard the precondition this test is about: a genuinely fine, multi-decimal
+        // grid (so a future fingerprint edit that coarsened the median tick would
+        // not silently turn this back into a 1-decimal duplicate of the anchor test).
+        assert_eq!(scalars.price_decimals, 4);
+        assert_eq!(scalars.modal_tick, Decimal::new(1, 4));
+        let mut src = GeneratedSource::new(scalars.clone(), 42, 0, &fp, None);
+        for _ in 0..10_000 {
+            let TickEvent::Trade(trade) = src.next_tick().expect("trade") else {
+                unreachable!("generated source emits trades")
+            };
+            assert_eq!(
+                (trade.price / scalars.modal_tick).fract(),
+                Decimal::ZERO,
+                "off-grid price {} for tick {}",
+                trade.price,
+                scalars.modal_tick
+            );
             assert!(matches!(
                 trade.aggressor,
                 AggressorSide::Buyer | AggressorSide::Seller
@@ -1062,6 +1172,14 @@ mod tests {
         assert_eq!(measured.neutral_aggressors, 0);
     }
 
+    // NOTE: this test asserts the RAW fingerprint shares (intensity_hour,
+    // dow_weight) directly against measured occupancy fractions. That only holds
+    // because SessionModulator centers each arrival multiplier on 1.0 (the share
+    // times 24 or 7), so occupancy converges back to the underlying share. If the
+    // centering convention in SessionModulator::new ever changes, these
+    // assertions break in a non-obvious way - and because the test is #[ignore]d
+    // (it draws 5M ticks), `brokkr check` will not catch the regression. Re-derive
+    // the expected curves alongside any centering change.
     #[test]
     #[ignore]
     fn session_modulation_reproduces_curves() {
@@ -1238,7 +1356,7 @@ mod tests {
         for _ in 0..draw {
             let _tick = src.next_tick().expect("unbounded generated source");
             let ret = (src.vol.mid / prior_mid).ln();
-            let (hour, _dow) = utc_hour_dow(src.clock_ns);
+            let hour = utc_hour(src.clock_ns);
             if usize::from(start_hour) <= hour && hour < usize::from(end_hour) {
                 in_window.push(ret);
             } else {
@@ -1356,7 +1474,7 @@ mod tests {
 
     fn assert_in_range(label: &str, value: f64, range: &MinMedianMax) {
         assert!(
-            (range.min..=range.max).contains(&value),
+            range.contains(value),
             "{label}={value} outside [{}, {}]",
             range.min,
             range.max

@@ -31,13 +31,11 @@ use futures_util::{SinkExt, StreamExt};
 use mogwai_data::TickEvent;
 use mogwai_engine::Engine;
 use mogwai_protocol::{
-    ClientMessage, InstrumentDef, MarketRegime, QuoteTick, ServerMessage, TradeTick,
-    control::Divergence, validate_divergence, validate_market_regime,
+    ClientMessage, InstrumentDef, MAX_HISTORY_LIMIT, MarketRegime, QuoteTick, ServerMessage,
+    TradeTick, control::Divergence, validate_divergence, validate_market_regime,
 };
 use serde::Deserialize;
 use tokio::sync::{Mutex, mpsc};
-
-const MAX_HISTORY_LIMIT: usize = 1_000;
 
 /// Replay/runtime configuration, sourced from the environment at startup.
 #[derive(Clone, serde::Deserialize)]

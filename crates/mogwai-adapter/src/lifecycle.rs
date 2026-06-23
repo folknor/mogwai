@@ -44,10 +44,19 @@ impl ReconnectPolicy {
     pub(crate) fn backoff(&self, attempt: u32, rng: &mut StdRng) -> Duration {
         let initial_ms = self.initial.as_millis() as f64;
         let max_ms = self.max.as_millis() as f64;
-        let base_ms = if initial_ms == 0.0 || max_ms == 0.0 {
-            0.0
+        // `max_ms == 0` means "no ceiling": clamp only when a positive max is
+        // configured. The old code collapsed the delay to zero whenever either
+        // bound was zero, so a nonzero initial paired with a zero max busy-spun
+        // the reconnect loop (D.3). The protocol validator now rejects that
+        // combination, but this guard is belt-and-suspenders: a zero max never
+        // floors the delay, and an exponential base never drops below the
+        // configured initial. With both bounds zero the delay is genuinely
+        // zero, which is fine - there is no backoff to spin against.
+        let uncapped = initial_ms * self.factor.powi(attempt as i32);
+        let base_ms = if max_ms == 0.0 {
+            uncapped
         } else {
-            (initial_ms * self.factor.powi(attempt as i32)).min(max_ms)
+            uncapped.min(max_ms)
         };
         let jitter = if self.jitter_ms == 0 {
             0
@@ -72,7 +81,14 @@ impl HttpQuota {
     pub(crate) fn from_conn(conn: &ConnHavoc) -> Self {
         Self {
             min_interval: conn.max_requests_per_second.map(|max| {
-                let nanos = 1_000_000_000u64 / u64::from(max);
+                // Round the per-request spacing UP (ceil-divide) so a rate that
+                // does not evenly divide one second (e.g. 3/s -> 333_333_334ns,
+                // not the floored 333_333_333 that ships a hair fast) never
+                // undershoots the spacing and ships marginally above the cap
+                // (D.9). Ceil keeps the effective rate at or below the
+                // configured ceiling.
+                let max = u64::from(max);
+                let nanos = 1_000_000_000u64.div_ceil(max);
                 Duration::from_nanos(nanos.max(1))
             }),
             last_send: Arc::new(Mutex::new(None)),
@@ -139,6 +155,10 @@ pub(crate) async fn run_ws_connection<
         connected,
     } = config;
     let policy = ReconnectPolicy::from_conn(&conn);
+    // The reconnect-jitter RNG is seeded from the configured havoc seed when one
+    // is set, so jitter is reproducible (D.6). Both client.rs construction sites
+    // pass `seed: client_havoc.seed` into `WsConnectionConfig`, so a configured
+    // seed reaches here; absent a seed we fall back to entropy.
     let mut rng = seed.map_or_else(StdRng::from_entropy, StdRng::seed_from_u64);
     let mut attempt = 0u32;
 
@@ -187,8 +207,13 @@ pub(crate) async fn run_ws_connection<
         }
 
         let mut heartbeat = (conn.heartbeat_interval_ms > 0).then(|| {
-            let mut interval =
-                tokio::time::interval(Duration::from_millis(conn.heartbeat_interval_ms));
+            // `interval` starts ready, so its first `tick()` resolves
+            // immediately. Anchoring the period one interval out keeps the
+            // first Ping from firing right after connect (D.8): the cadence
+            // should be one `heartbeat_interval_ms` after the socket comes up,
+            // not at t=0.
+            let period = Duration::from_millis(conn.heartbeat_interval_ms);
+            let mut interval = tokio::time::interval_at(Instant::now() + period, period);
             interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
             interval
         });
@@ -211,15 +236,27 @@ pub(crate) async fn run_ws_connection<
                     match inbound.expect("inbound close and errors returned above") {
                         Ok(Message::Text(text)) => {
                             reset_idle(&mut idle_sleep, conn.idle_timeout_ms);
-                            if let Ok(server_msg) = serde_json::from_str::<ServerMessage>(&text) {
-                                handler(server_msg).await;
+                            // Surface deserialization failures: a version-skewed
+                            // or malformed frame would otherwise be swallowed
+                            // while the idle clock was just reset, so the
+                            // connection looks healthy while data silently drops
+                            // (D.5).
+                            match serde_json::from_str::<ServerMessage>(&text) {
+                                Ok(server_msg) => handler(server_msg).await,
+                                Err(error) => tracing::warn!(
+                                    %error,
+                                    "dropping unparseable text server frame"
+                                ),
                             }
                         }
                         Ok(Message::Binary(bytes)) => {
                             reset_idle(&mut idle_sleep, conn.idle_timeout_ms);
-                            if let Ok(server_msg) = serde_json::from_slice::<ServerMessage>(&bytes)
-                            {
-                                handler(server_msg).await;
+                            match serde_json::from_slice::<ServerMessage>(&bytes) {
+                                Ok(server_msg) => handler(server_msg).await,
+                                Err(error) => tracing::warn!(
+                                    %error,
+                                    "dropping unparseable binary server frame"
+                                ),
                             }
                         }
                         Ok(Message::Ping(payload)) => {
@@ -248,8 +285,16 @@ pub(crate) async fn run_ws_connection<
             }
         }
 
+        // Abort then join: aborting only requests cancellation, so awaiting the
+        // handles makes the writer/reader tasks observably quiesced before the
+        // next reconnect iteration spins up a fresh socket and a new pair of
+        // tasks (D.12). Without the join an in-flight writer send could still be
+        // racing the teardown. A `JoinError` here is expected - the task was
+        // just aborted - so it is intentionally ignored.
         writer_handle.abort();
         reader_handle.abort();
+        drop(writer_handle.await);
+        drop(reader_handle.await);
         on_disconnect().await;
         connected.store(false, Ordering::Relaxed);
     }
@@ -357,6 +402,55 @@ mod tests {
                 .iter()
                 .all(|d| { *d >= Duration::from_millis(100) && *d <= Duration::from_millis(150) })
         );
+    }
+
+    #[test]
+    fn reconnect_policy_zero_max_does_not_clamp_to_zero() {
+        // D.3: a nonzero initial paired with a zero ceiling used to collapse to
+        // a zero delay (a busy-spin). `max == 0` now means "no clamp", so the
+        // exponential base grows from the configured initial instead.
+        let conn = ConnHavoc {
+            reconnect_delay_initial_ms: 100,
+            reconnect_delay_max_ms: 0,
+            reconnect_backoff_factor: 2.0,
+            ..Default::default()
+        };
+        let policy = ReconnectPolicy::from_conn(&conn);
+        let mut rng = StdRng::seed_from_u64(3);
+
+        assert_eq!(policy.backoff(0, &mut rng), Duration::from_millis(100));
+        assert_eq!(policy.backoff(1, &mut rng), Duration::from_millis(200));
+        assert_eq!(policy.backoff(3, &mut rng), Duration::from_millis(800));
+    }
+
+    #[test]
+    fn reconnect_policy_zero_initial_stays_zero() {
+        // With a zero initial there is genuinely no backoff to spin against, so
+        // the delay stays zero regardless of the ceiling.
+        let conn = ConnHavoc {
+            reconnect_delay_initial_ms: 0,
+            reconnect_delay_max_ms: 0,
+            reconnect_backoff_factor: 2.0,
+            ..Default::default()
+        };
+        let policy = ReconnectPolicy::from_conn(&conn);
+        let mut rng = StdRng::seed_from_u64(3);
+
+        assert_eq!(policy.backoff(0, &mut rng), Duration::ZERO);
+        assert_eq!(policy.backoff(5, &mut rng), Duration::ZERO);
+    }
+
+    #[test]
+    fn http_quota_rate_three_rounds_spacing_up() {
+        // D.9: 3 requests/sec does not divide one second evenly. Ceil-dividing
+        // 1e9 / 3 yields 333_333_334ns (>= 333_333_333), so the spacing never
+        // undershoots and the effective rate stays at or below the cap.
+        let quota = HttpQuota::from_conn(&ConnHavoc {
+            max_requests_per_second: Some(3),
+            ..Default::default()
+        });
+
+        assert_eq!(quota.min_interval, Some(Duration::from_nanos(333_333_334)));
     }
 
     #[test]

@@ -20,6 +20,12 @@ pub type VenueOrderId = String;
 /// honest-transport default lives in exactly one spot.
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 
+/// Maximum number of trades a single `/trades` history page returns. The server
+/// enforces this cap (it clamps every request to it), and the adapter requests
+/// within it - sourcing both from here keeps the two in lockstep, so the adapter
+/// never advertises a ceiling larger than the server will honor.
+pub const MAX_HISTORY_LIMIT: usize = 1_000;
+
 /// Saturating UNIX-nanoseconds clock reader: the single source of truth for
 /// "now" on the wire's `ts_event` axis, shared by the server (its `now_ns`) and
 /// the adapter (its `now_unix_nanos`, which wraps the result in `UnixNanos`).
