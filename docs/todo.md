@@ -188,10 +188,6 @@ Deferred engineering (clear-cut, just larger than a one-wave fix):
       real blackout), but an absurd `ms` saturates `dark_until_ns` and bricks all
       output until restart, and there is no way to clear an armed delay/dark
       window. Add a clear/reset path and bound `ms`.
-- [ ] **Lanczos `gamma` -> literal constant (C.8, partial).** Dead reflection
-      branch is gone and the value is pinned by a tolerance test; replacing the
-      series with a hard-coded constant needs a one-time
-      `clean_regime_is_byte_identical` run to confirm bit-equality.
 - [ ] **Fallible `http_base_url` (D.13).** Currently infallible with an
       http-prefix fallback; a stricter `Result` contract would ripple through ~13
       `client.rs` call sites. Low priority now that `validate` rejects non-ws

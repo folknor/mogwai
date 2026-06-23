@@ -378,7 +378,7 @@ impl GeneratedSource {
                 beta,
                 psi: mean_duration_s,
                 prev_duration_s: mean_duration_s,
-                eps_mean: weibull_mean(ACD_WEIBULL_SHAPE),
+                eps_mean: WEIBULL_MEAN_SHAPE_060,
             },
             vol,
             session: SessionModulator::new(&fp.session_profile),
@@ -762,47 +762,18 @@ fn round_lot_size(base: f64) -> Decimal {
     }
 }
 
-// Mean of a Weibull(scale = 1, shape = k): scale * gamma(1 + 1/k). The ACD clock
-// divides each duration innovation by this so the latent process targets a unit
-// mean. The sole live caller is the construction-time `weibull_mean(0.60)` (with
-// scale fixed to 1.0 in the duration distribution), giving the constant value
-// ~1.504575 = gamma(1 + 1/0.6) = gamma(2.6666...) below. `rand_distr 0.4`'s
-// Weibull exposes no `mean()` accessor, so the mean is computed here.
-fn weibull_mean(shape: f64) -> f64 {
-    gamma(1.0 + 1.0 / shape)
-}
-
-// gamma(z) via the Lanczos approximation (g = 7, n = 9), accurate to ~15 digits.
-// Only ever called with z = 1 + 1/0.6 = 2.6666... (>= 0.5), so the classic
-// reflection branch for z < 0.5 is dead by construction and has been dropped -
-// every live argument lands in the direct series below. The result feeds the
-// byte-identical golden test (`clean_regime_is_byte_identical`), so this must
-// reproduce the same f64 the series produced before the dead branch was removed;
-// dropping a never-taken branch does not change the value on the taken path.
-fn gamma(z: f64) -> f64 {
-    debug_assert!(
-        z >= 0.5,
-        "gamma is only called with z >= 0.5 (the reflection branch was removed as dead)"
-    );
-    const COEFFS: [f64; 9] = [
-        0.999_999_999_999_809_9,
-        676.520_368_121_885_1,
-        -1_259.139_216_722_402_8,
-        771.323_428_777_653_1,
-        -176.615_029_162_140_6,
-        12.507_343_278_686_905,
-        -0.138_571_095_265_720_12,
-        0.000_009_984_369_578_019_572,
-        0.000_000_150_563_273_514_931_16,
-    ];
-    let z = z - 1.0;
-    let mut x = COEFFS[0];
-    for (i, coeff) in COEFFS.iter().enumerate().skip(1) {
-        x += coeff / (z + i as f64);
-    }
-    let t = z + 7.5;
-    (2.0 * std::f64::consts::PI).sqrt() * t.powf(z + 0.5) * (-t).exp() * x
-}
+// Mean of a Weibull(scale = 1, shape = 0.60): gamma(1 + 1/0.60) = gamma(2.6666...).
+// The ACD clock divides each duration innovation by this so the latent process
+// targets a unit mean; the sole consumer is the construction-time `eps_mean` below.
+// This was computed by a Lanczos approximation (g = 7, n = 9) of the gamma function,
+// but gamma was only ever called with this one argument, so the series has been
+// replaced by its result as a literal. The literal is the shortest decimal that
+// round-trips to the exact f64 the series produced (bits 0x3ff812bdbf467568,
+// identical in debug and release - no FP-contraction divergence), so it reproduces
+// the byte-identical golden stream (`clean_regime_is_byte_identical`); the tolerance
+// test below guards the magnitude against a typo. `rand_distr 0.4`'s Weibull exposes
+// no `mean()` accessor, which is why the mean lives here as a constant.
+const WEIBULL_MEAN_SHAPE_060: f64 = 1.504_575_488_251_555_6;
 
 #[cfg(test)]
 mod tests {
@@ -897,15 +868,15 @@ mod tests {
     #[test]
     fn weibull_mean_matches_known_constant() {
         // Pin the construction-time constant the ACD clock divides by. The true
-        // value of gamma(1 + 1/0.6) = gamma(2.6666...) is ~1.5045754867. The
-        // Lanczos series reproduces it to ~8 digits (its inherent approximation
-        // error is ~1.5e-8); a 1e-7 tolerance catches a coefficient typo or a
-        // branch regression without asserting an exact f64 bit pattern (the
-        // byte-exact guard is the golden test).
-        let mean = weibull_mean(ACD_WEIBULL_SHAPE);
+        // value of gamma(1 + 1/0.6) = gamma(2.6666...) is ~1.5045754867; the
+        // hard-coded WEIBULL_MEAN_SHAPE_060 literal is the f64 the former Lanczos
+        // series produced for that argument (~1.5e-8 from the true value, the
+        // series' inherent approximation error). A 1e-7 tolerance catches a typo in
+        // the literal without asserting an exact f64 bit pattern (the byte-exact
+        // guard is the golden test, clean_regime_is_byte_identical).
         assert!(
-            (mean - 1.504_575_486_7).abs() < 1e-7,
-            "weibull_mean(0.60)={mean}"
+            (WEIBULL_MEAN_SHAPE_060 - 1.504_575_486_7).abs() < 1e-7,
+            "WEIBULL_MEAN_SHAPE_060={WEIBULL_MEAN_SHAPE_060}"
         );
     }
 
