@@ -23,11 +23,13 @@ A Cargo workspace, five crates under `crates/`:
   it never imports nautilus.
 - `mogwai-engine` - the venue-agnostic exchange core, with the seam that injects
   armed divergences into the event stream.
-- `mogwai-data` - the streaming Kraken CSV loader (O(1) memory over multi-GB
-  files) and the k-way `MergeSource` that merges several pairs into one
-  time-ordered stream.
+- `mogwai-data` - the `TickSource` seam and the k-way `MergeSource`. Carries the
+  `GeneratedSource` synthetic generator the running server uses (fitted to the
+  committed fingerprint) plus the `KrakenCsvSource` streaming loader kept as the
+  offline-analysis lineage.
 - `mogwai-server` - the axum binary that owns the sockets, the clock and replay
-  pacing, exposing `/health`, `/ws` and `/control/divergence`.
+  pacing, synthesizing market data per subscription; exposes `/health`, `/ws`,
+  `/control/divergence`, `/orders`, `/instruments` and `/trades`.
 - `mogwai-adapter` - the nautilus venue adapter: the `MogwaiDataClientFactory` /
   `MogwaiExecutionClientFactory`, their configs, and the client pair broadarrow
   registers for the `MOGWAI` venue. The only crate that path-deps the sibling
@@ -35,7 +37,9 @@ A Cargo workspace, five crates under `crates/`:
   build nautilus-free.
 
 `scripts/` holds the end-to-end smoke test and the orchestration codex wrappers;
-`docs/` is transient TODO and notes; `reference/` is durable process docs.
+`analysis/` is the offline Python that fits the fingerprint; `docs/` is the
+transient TODO; `reference/` is durable docs - `architecture.md` describes how
+the system works, the others are process docs.
 
 ## Rules
 
