@@ -1,25 +1,33 @@
 use std::str::FromStr;
 
 use anyhow::Context;
-use mogwai_protocol::{AggressorSide as MogwaiAggressorSide, InstrumentDef};
+use mogwai_protocol::{AggressorSide as MogwaiAggressorSide, InstrumentDef, Side};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{QuoteTick as NautilusQuoteTick, TradeTick as NautilusTradeTick},
-    enums::AggressorSide,
+    enums::{AggressorSide, OrderSide, OrderType, TimeInForce},
     identifiers::{InstrumentId, Symbol as NautilusSymbol, TradeId},
     instruments::{InstrumentAny, currency_pair::CurrencyPair},
-    types::{Price, Quantity, currency::Currency},
+    types::{Money, Price, Quantity, currency::Currency},
 };
-use rust_decimal::{Decimal, prelude::ToPrimitive};
+use rust_decimal::Decimal;
 
 use crate::MOGWAI_VENUE;
 
 pub(crate) fn price(d: Decimal, precision: u8) -> Price {
-    Price::new(d.to_f64().expect("decimal fits f64"), precision)
+    Price::new(mogwai_protocol::decimal_to_f64(d), precision)
 }
 
 pub(crate) fn quantity(d: Decimal, precision: u8) -> Quantity {
-    Quantity::new(d.to_f64().expect("decimal fits f64"), precision)
+    Quantity::new(mogwai_protocol::decimal_to_f64(d), precision)
+}
+
+/// Converts a wire `Decimal` amount into a nautilus `Money` of `currency`
+/// without panicking: a pathological magnitude (the hostile values mogwai
+/// exists to inject) saturates through `mogwai_protocol::decimal_to_f64`
+/// rather than crashing the exec task that books commissions and balances.
+pub(crate) fn money(d: Decimal, currency: Currency) -> Money {
+    Money::new(mogwai_protocol::decimal_to_f64(d), currency)
 }
 
 pub(crate) fn aggressor(a: MogwaiAggressorSide) -> AggressorSide {
@@ -27,6 +35,31 @@ pub(crate) fn aggressor(a: MogwaiAggressorSide) -> AggressorSide {
         MogwaiAggressorSide::NoAggressor => AggressorSide::NoAggressor,
         MogwaiAggressorSide::Buyer => AggressorSide::Buyer,
         MogwaiAggressorSide::Seller => AggressorSide::Seller,
+    }
+}
+
+pub(crate) fn wire_side(side: OrderSide) -> anyhow::Result<Side> {
+    match side {
+        OrderSide::Buy => Ok(Side::Buy),
+        OrderSide::Sell => Ok(Side::Sell),
+        other => anyhow::bail!("unsupported order side {other:?}"),
+    }
+}
+
+pub(crate) fn wire_order_type(order_type: OrderType) -> anyhow::Result<mogwai_protocol::OrderType> {
+    match order_type {
+        OrderType::Market => Ok(mogwai_protocol::OrderType::Market),
+        OrderType::Limit => Ok(mogwai_protocol::OrderType::Limit),
+        other => anyhow::bail!("unsupported order type {other:?}"),
+    }
+}
+
+pub(crate) fn wire_time_in_force(tif: TimeInForce) -> anyhow::Result<mogwai_protocol::TimeInForce> {
+    match tif {
+        TimeInForce::Gtc => Ok(mogwai_protocol::TimeInForce::Gtc),
+        TimeInForce::Ioc => Ok(mogwai_protocol::TimeInForce::Ioc),
+        TimeInForce::Fok => Ok(mogwai_protocol::TimeInForce::Fok),
+        other => anyhow::bail!("unsupported time in force {other:?}"),
     }
 }
 

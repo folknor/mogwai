@@ -38,6 +38,33 @@ The adapter, its `transport_profile` selector, and its full four-surface
       `data` market-regime and `conn` connection-lifecycle fields) and picks the
       `transport_profile`.
 
+### 2. Author `reference/havoc.md`
+
+Durable reference doc for the divergence/havoc surfaces. Covers the four-surface
+`HavocSpec` (client / server / data / connection-lifecycle), every `Divergence`
+variant and its trigger/semantics, the `MarketRegime` axis, how the server arms
+and applies them vs what the engine owns, and the validation boundaries
+(`validate_divergence`, `validate_market_regime`, `validate_conn_havoc`). Read
+`reference/technical-implementation-spec.md` first for what such a doc must
+contain.
+
+### 3. Remove remaining runtime env vars - knobs belong in TOML / `HavocSpec`
+
+Run knobs should be explicit input (TOML or havoc knobs), not ambient
+environment. The replay-speed / gap-cap env vars were already moved to
+`mogwai.toml` (commit ca7bc66). Remaining audit:
+
+- [ ] `tracing_subscriber::EnvFilter::try_from_default_env()` in
+      `mogwai-server/src/main.rs` reads `RUST_LOG` - decide whether log level
+      stays env-driven (standard) or moves to config.
+- [ ] `scripts/smoke.py` and any shell scripts - audit for `os.environ` /
+      `$VAR` runtime knobs (the Rust-side `grep` is clean: only CLI `args()` and
+      the compile-time `env!("CARGO_MANIFEST_DIR")` fingerprint-path macro
+      remain, neither a runtime env var).
+- [ ] `MOGWAI_DATA_DIR` is offline-analysis-only (see gotcha below) - confirm it
+      is not read anywhere on the server runtime path before considering it out
+      of scope.
+
 ## Notes / gotchas
 
 - The offline Kraken corpus is trades only - no quotes, no L2, no aggressor side.

@@ -14,7 +14,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use axum::{
@@ -32,7 +32,7 @@ use mogwai_data::TickEvent;
 use mogwai_engine::Engine;
 use mogwai_protocol::{
     ClientMessage, InstrumentDef, MarketRegime, QuoteTick, ServerMessage, TradeTick,
-    control::Divergence, validate_market_regime,
+    control::Divergence, validate_divergence, validate_market_regime,
 };
 use serde::Deserialize;
 use tokio::sync::{Mutex, mpsc};
@@ -98,15 +98,14 @@ struct AppState {
 
 /// Nanoseconds since the Unix epoch - the server's clock, fed into the engine.
 ///
-/// Non-panicking: a backward clock step (NTP/leap) that puts `now` before the
-/// epoch saturates to 0 rather than panicking every order path and divergence
-/// arm, and the `u128` nanosecond count is clamped to `u64::MAX` rather than
-/// silently truncated. A shared protocol helper is planned to fold this with
-/// the adapter's identical clock reader.
+/// Thin local alias over [`mogwai_protocol::now_unix_nanos`], the shared
+/// saturating clock reader the adapter also uses: a backward clock step
+/// (NTP/leap) that puts `now` before the epoch saturates to 0 rather than
+/// panicking every order path and divergence arm, and the `u128` nanosecond
+/// count is clamped to `u64::MAX` rather than silently truncated. Kept as a
+/// local name so the call sites below stay unchanged.
 fn now_ns() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+    mogwai_protocol::now_unix_nanos()
 }
 
 #[tokio::main]
@@ -151,6 +150,15 @@ async fn arm_divergence(
     Json(div): Json<Divergence>,
 ) -> impl IntoResponse {
     tracing::info!(?div, "arming divergence");
+    // Validate at the arming boundary so an out-of-range knob (e.g. a
+    // `PartialFillNext.fraction` outside `(0, 1]`) is rejected before it is
+    // stored into server state or armed on the engine, rather than surfacing
+    // as a degenerate fill downstream. Mirrors the `validate_market_regime`
+    // gate on the subscription/history paths.
+    if let Err(err) = validate_divergence(&div) {
+        tracing::warn!(?div, err, "rejecting out-of-range divergence");
+        return (StatusCode::BAD_REQUEST, err.to_string());
+    }
     match div {
         Divergence::DelayAcks { ms } => {
             state.delay_ms.store(ms, Ordering::Relaxed);
@@ -161,7 +169,7 @@ async fn arm_divergence(
         }
         engine_div => state.engine.lock().await.arm(engine_div),
     }
-    StatusCode::ACCEPTED
+    (StatusCode::ACCEPTED, String::new())
 }
 
 async fn instruments(State(state): State<AppState>) -> Json<Vec<InstrumentDef>> {

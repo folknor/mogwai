@@ -5,14 +5,14 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use anyhow::{Context, ensure};
 use async_trait::async_trait;
 use mogwai_protocol::{
     ClientHavoc, ClientMessage, ConnHavoc, EventKind, HavocLatency, HavocSpec, InstrumentDef,
-    MarketRegime, ServerMessage, Side, Symbol, TradeTick,
+    MarketRegime, ServerMessage, Symbol, TradeTick,
 };
 use nautilus_common::{
     clients::{DataClient, ExecutionClient},
@@ -41,11 +41,11 @@ use nautilus_model::{
     events::{OrderAccepted, OrderCanceled, OrderEventAny, OrderFilled, OrderUpdated},
     identifiers::{AccountId, ClientId, ClientOrderId, InstrumentId, TradeId, Venue, VenueOrderId},
     reports::{FillReport, OrderStatusReport, PositionStatusReport},
-    types::{AccountBalance, MarginBalance, Money, currency::Currency},
+    types::{AccountBalance, MarginBalance, currency::Currency},
 };
 use nautilus_network::http::HttpClient;
 use rand::{Rng, SeedableRng, rngs::StdRng};
-use rust_decimal::{Decimal, prelude::ToPrimitive};
+use rust_decimal::Decimal;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 
@@ -82,8 +82,15 @@ impl MogwaiDataClient {
     /// Returns an error if the supplied config is invalid.
     pub fn new(client_id: ClientId, config: MogwaiDataClientConfig) -> anyhow::Result<Self> {
         config.validate()?;
-        let http = HttpClient::new(HashMap::new(), Vec::new(), Vec::new(), None, Some(30), None)
-            .context("create HTTP client")?;
+        let http = HttpClient::new(
+            HashMap::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            Some(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS),
+            None,
+        )
+        .context("create HTTP client")?;
         Ok(Self {
             client_id,
             http_quota: HttpQuota::from_conn(&conn_havoc(&config.havoc)),
@@ -1155,7 +1162,13 @@ async fn fetch_instruments(
 ) -> anyhow::Result<Vec<InstrumentDef>> {
     quota.wait().await;
     let response = http
-        .get(join_url(base, "instruments"), None, None, Some(30), None)
+        .get(
+            join_url(base, "instruments"),
+            None,
+            None,
+            Some(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS),
+            None,
+        )
         .await
         .context("fetch instruments")?;
     ensure!(
@@ -1193,7 +1206,7 @@ async fn fetch_trades(
             join_url(base, "trades"),
             Some(&params),
             None,
-            Some(30),
+            Some(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS),
             None,
         )
         .await
@@ -1272,7 +1285,14 @@ async fn ship_server_havoc(
         let mut headers = HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
         let response = http
-            .post(url.clone(), None, Some(headers), Some(body), Some(30), None)
+            .post(
+                url.clone(),
+                None,
+                Some(headers),
+                Some(body),
+                Some(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS),
+                None,
+            )
             .await
             .context("post divergence")?;
         ensure!(
@@ -1372,7 +1392,11 @@ fn conn_havoc(spec: &Option<HavocSpec>) -> ConnHavoc {
 
 fn request_timeout_secs(spec: &Option<HavocSpec>) -> u64 {
     let configured = conn_havoc(spec).request_timeout_secs;
-    if configured == 0 { 30 } else { configured }
+    if configured == 0 {
+        mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS
+    } else {
+        configured
+    }
 }
 
 fn client_havoc_for_dispatch(spec: &Option<HavocSpec>, counter: u64) -> ClientHavoc {
@@ -1432,17 +1456,12 @@ fn date_to_unix_nanos(date: Option<chrono::DateTime<chrono::Utc>>) -> Option<Uni
 }
 
 fn now_unix_nanos() -> UnixNanos {
-    // Must not panic on the hot reader/dispatch task: a backward clock step
-    // (NTP correction, leap-second smear) makes `duration_since(UNIX_EPOCH)`
-    // an `Err`, and a far-future instant overflows `u64` nanos. Saturate a
-    // pre-epoch instant to 0 and clamp the `u128` nanos to `u64::MAX` rather
-    // than panicking the spawned task (which has no supervisor) or silently
-    // truncating. A shared mogwai-protocol helper is planned to fold this
-    // together with the server's `now_ns`.
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |dur| u64::try_from(dur.as_nanos()).unwrap_or(u64::MAX));
-    UnixNanos::from(nanos)
+    // Thin typed wrapper over the shared, saturating `mogwai_protocol::
+    // now_unix_nanos`: a backward clock step (NTP correction, leap-second
+    // smear) or a far-future instant degrades to a clamped `u64` rather than
+    // panicking the spawned reader/dispatch task (which has no supervisor) or
+    // silently truncating. Callers stay unchanged - they want the `UnixNanos`.
+    UnixNanos::from(mogwai_protocol::now_unix_nanos())
 }
 
 async fn wait_connected(connected: &Arc<AtomicBool>, ws_url: &str) -> anyhow::Result<()> {
@@ -1487,8 +1506,15 @@ impl MogwaiExecutionClient {
             config.account_type,
             None,
         );
-        let http = HttpClient::new(HashMap::new(), Vec::new(), Vec::new(), None, Some(30), None)
-            .context("create HTTP client")?;
+        let http = HttpClient::new(
+            HashMap::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            Some(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS),
+            None,
+        )
+        .context("create HTTP client")?;
         Ok(Self {
             core,
             http_quota: HttpQuota::from_conn(&conn_havoc(&config.havoc)),
@@ -1714,11 +1740,11 @@ impl ExecutionClient for MogwaiExecutionClient {
         let wire = mogwai_protocol::SubmitOrder {
             client_order_id: cmd.client_order_id.to_string(),
             symbol: symbol_from_instrument(cmd.instrument_id),
-            side: wire_side(cmd.order_init.order_side)?,
-            order_type: wire_order_type(cmd.order_init.order_type)?,
+            side: convert::wire_side(cmd.order_init.order_side)?,
+            order_type: convert::wire_order_type(cmd.order_init.order_type)?,
             quantity: cmd.order_init.quantity.as_decimal(),
             price: cmd.order_init.price.map(|p| p.as_decimal()),
-            time_in_force: wire_time_in_force(cmd.order_init.time_in_force)?,
+            time_in_force: convert::wire_time_in_force(cmd.order_init.time_in_force)?,
         };
 
         let mut state = self
@@ -1830,10 +1856,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                     fill.order_side,
                     fill.last_qty,
                     fill.last_px,
-                    Money::new(
-                        fill.commission.to_f64().expect("decimal fits f64"),
-                        fill.quote_currency,
-                    ),
+                    convert::money(fill.commission, fill.quote_currency),
                     LiquiditySide::Taker,
                     Some(fill.client_order_id),
                     None,
@@ -2288,10 +2311,7 @@ fn handle_order_filled(fill: mogwai_protocol::OrderFilled, ctx: &ExecContext) {
     let commission = if fill.commission.is_zero() {
         None
     } else {
-        Some(Money::new(
-            fill.commission.to_f64().expect("decimal fits f64"),
-            quote_currency,
-        ))
+        Some(convert::money(fill.commission, quote_currency))
     };
     // mogwai does not report a liquidity side on the wire. The engine fills
     // immediately against replayed history, which is taker-equivalent, so every
@@ -2329,9 +2349,9 @@ fn handle_account_state(state: mogwai_protocol::AccountState, ctx: &ExecContext)
         .filter_map(|balance| {
             let currency = Currency::from_str(&balance.currency).ok()?;
             Some(AccountBalance::new(
-                Money::new(balance.total.to_f64().expect("decimal fits f64"), currency),
-                Money::new(balance.locked.to_f64().expect("decimal fits f64"), currency),
-                Money::new(balance.free.to_f64().expect("decimal fits f64"), currency),
+                convert::money(balance.total, currency),
+                convert::money(balance.locked, currency),
+                convert::money(balance.free, currency),
             ))
         })
         .collect();
@@ -2381,33 +2401,6 @@ fn order_record(
         .orders
         .get(&client_order_id)
         .cloned()
-}
-
-fn wire_side(side: OrderSide) -> anyhow::Result<Side> {
-    match side {
-        OrderSide::Buy => Ok(Side::Buy),
-        OrderSide::Sell => Ok(Side::Sell),
-        other => anyhow::bail!("unsupported order side {other:?}"),
-    }
-}
-
-fn wire_order_type(order_type: OrderType) -> anyhow::Result<mogwai_protocol::OrderType> {
-    match order_type {
-        OrderType::Market => Ok(mogwai_protocol::OrderType::Market),
-        OrderType::Limit => Ok(mogwai_protocol::OrderType::Limit),
-        other => anyhow::bail!("unsupported order type {other:?}"),
-    }
-}
-
-fn wire_time_in_force(
-    tif: nautilus_model::enums::TimeInForce,
-) -> anyhow::Result<mogwai_protocol::TimeInForce> {
-    match tif {
-        nautilus_model::enums::TimeInForce::Gtc => Ok(mogwai_protocol::TimeInForce::Gtc),
-        nautilus_model::enums::TimeInForce::Ioc => Ok(mogwai_protocol::TimeInForce::Ioc),
-        nautilus_model::enums::TimeInForce::Fok => Ok(mogwai_protocol::TimeInForce::Fok),
-        other => anyhow::bail!("unsupported time in force {other:?}"),
-    }
 }
 
 fn position_side(quantity: Decimal) -> PositionSideSpecified {
@@ -2945,7 +2938,7 @@ mod data_client_tests {
 mod tests {
     use std::{cell::RefCell, rc::Rc};
 
-    use mogwai_protocol::TransportProfile;
+    use mogwai_protocol::{Side, TransportProfile};
     use nautilus_common::{cache::Cache, clients::ExecutionClient, messages::ExecutionEvent};
     use nautilus_live::{ExecutionClientCore, ExecutionEventEmitter};
     use nautilus_model::{

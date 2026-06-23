@@ -57,10 +57,27 @@ clear/reset path), the `/quotes` stub (E.12 / G.bug9), and the `ServerMessage::c
 consolidation (item 3 - forces a decision on whether `AccountState` is an exec or data
 event, classified oppositely on the two ends today).
 
-**Planned next (caller rewiring + tests):** adapter and server adopt the new protocol
-helpers (`now_unix_nanos`, the saturating decimal conversion replacing the `to_f64().expect`
-panic sites, `validate_divergence` at the config/arming sites, `DEFAULT_REQUEST_TIMEOUT_SECS`,
-`default_instruments`), and the test-suite hardening (F).
+**Fix wave 3 (landed)** - both ends adopt the shared protocol helpers, validated with
+`brokkr check`:
+
+- adapter `src/*`: `now_unix_nanos` wraps the shared reader; the `to_f64().expect` panic
+  sites (commission, balances, price/qty conversion) now route through the saturating
+  `decimal_to_f64` via a new `convert::money` helper (closes A.8 / D.1 hot-path panic);
+  the 30s request timeout uses `DEFAULT_REQUEST_TIMEOUT_SECS`; both config `validate`
+  blocks collapse to one `validate_havoc` helper that also runs `validate_divergence` over
+  the armed divergences; `MOGWAI_VENUE_STR` single-sources the venue string; and
+  `wire_side`/`wire_order_type`/`wire_time_in_force` move next to `convert::aggressor`.
+- server: `now_ns` delegates to the shared reader; `validate_divergence` gates
+  `/control/divergence` (out-of-range knobs now return 400 instead of arming); the BTCUSDT
+  grid in `scalars_for` is sourced from `default_instruments()`, and the lockstep test now
+  guards that single source.
+- The deeper `Price::new`/`Quantity::new` range/precision hardening (D.1/D.2 beyond the
+  Decimal->f64 step) remains a deliberate follow-up - it ripples through `convert`
+  signatures and wants its own pass.
+
+**Planned next:** the adapter test-suite hardening (F) and de-triplicating the stub
+harness, then the remaining smaller smells/nits. Separately queued (see `docs/todo.md`):
+authoring `reference/havoc.md` and the runtime env-var audit.
 
 ---
 

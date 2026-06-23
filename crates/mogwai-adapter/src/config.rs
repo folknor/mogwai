@@ -2,7 +2,8 @@ use std::any::Any;
 
 use anyhow::ensure;
 use mogwai_protocol::{
-    ClientHavoc, HavocSpec, TransportProfile, validate_conn_havoc, validate_market_regime,
+    ClientHavoc, HavocSpec, TransportProfile, validate_conn_havoc, validate_divergence,
+    validate_market_regime,
 };
 use nautilus_common::factories::ClientConfig;
 use nautilus_model::{
@@ -47,14 +48,7 @@ impl MogwaiDataClientConfig {
     /// Returns an error if the mogwai-server URL is empty.
     pub fn validate(&self) -> anyhow::Result<()> {
         ensure!(!self.base_url.trim().is_empty(), "base_url cannot be empty");
-        if let Some(havoc) = &self.havoc {
-            validate_client_havoc(&havoc.client)?;
-            validate_conn_havoc(&havoc.conn).map_err(anyhow::Error::msg)?;
-            if let Some(regime) = &havoc.data {
-                validate_market_regime(regime).map_err(anyhow::Error::msg)?;
-            }
-        }
-        Ok(())
+        validate_havoc(&self.havoc)
     }
 
     pub fn ws_url(&self) -> String {
@@ -110,14 +104,7 @@ impl MogwaiExecClientConfig {
     /// Returns an error if the mogwai-server URL is empty.
     pub fn validate(&self) -> anyhow::Result<()> {
         ensure!(!self.base_url.trim().is_empty(), "base_url cannot be empty");
-        if let Some(havoc) = &self.havoc {
-            validate_client_havoc(&havoc.client)?;
-            validate_conn_havoc(&havoc.conn).map_err(anyhow::Error::msg)?;
-            if let Some(regime) = &havoc.data {
-                validate_market_regime(regime).map_err(anyhow::Error::msg)?;
-            }
-        }
-        Ok(())
+        validate_havoc(&self.havoc)
     }
 
     pub fn ws_url(&self) -> String {
@@ -143,6 +130,26 @@ fn http_base_url(base_url: &str) -> String {
     } else {
         base_url.to_string()
     }
+}
+
+/// Runs the full havoc validation both adapter configs share: the client-side
+/// probabilities, the connection-lifecycle knobs, the optional market regime,
+/// and every armed server `Divergence`. Single-sourcing this here keeps the
+/// two configs from drifting and means an out-of-range knob (an unbounded
+/// `PartialFillNext.fraction`, a degenerate regime, a zeroed rate limit) is
+/// rejected at config time rather than detonating later on the live path.
+fn validate_havoc(havoc: &Option<HavocSpec>) -> anyhow::Result<()> {
+    if let Some(havoc) = havoc {
+        validate_client_havoc(&havoc.client)?;
+        validate_conn_havoc(&havoc.conn).map_err(anyhow::Error::msg)?;
+        if let Some(regime) = &havoc.data {
+            validate_market_regime(regime).map_err(anyhow::Error::msg)?;
+        }
+        for divergence in &havoc.server {
+            validate_divergence(divergence).map_err(anyhow::Error::msg)?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_client_havoc(client: &ClientHavoc) -> anyhow::Result<()> {

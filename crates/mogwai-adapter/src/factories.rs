@@ -11,8 +11,8 @@ use nautilus_live::ExecutionClientCore;
 use nautilus_model::{enums::OmsType, identifiers::ClientId};
 
 use crate::{
-    MOGWAI_VENUE, MogwaiDataClient, MogwaiDataClientConfig, MogwaiExecClientConfig,
-    MogwaiExecutionClient,
+    MOGWAI_VENUE, MOGWAI_VENUE_STR, MogwaiDataClient, MogwaiDataClientConfig,
+    MogwaiExecClientConfig, MogwaiExecutionClient,
 };
 
 #[derive(Debug, Clone)]
@@ -56,7 +56,7 @@ impl DataClientFactory for MogwaiDataClientFactory {
     }
 
     fn name(&self) -> &'static str {
-        "MOGWAI"
+        MOGWAI_VENUE_STR
     }
 
     fn config_type(&self) -> &'static str {
@@ -114,7 +114,7 @@ impl ExecutionClientFactory for MogwaiExecutionClientFactory {
     }
 
     fn name(&self) -> &'static str {
-        "MOGWAI"
+        MOGWAI_VENUE_STR
     }
 
     fn config_type(&self) -> &'static str {

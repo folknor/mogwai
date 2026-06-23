@@ -8,8 +8,7 @@ use std::sync::OnceLock;
 use mogwai_data::{
     Fingerprint, GeneratedSource, GeneratorScalars, MergeSource, TickEvent, TickSource,
 };
-use mogwai_protocol::MarketRegime;
-use rust_decimal::Decimal;
+use mogwai_protocol::{InstrumentDef, MarketRegime, default_instruments};
 
 const ORIGIN_TS: u64 = 1_700_438_400_000_000_000;
 const MAX_HISTORY_SEEK_TICKS: usize = 50_000;
@@ -28,13 +27,27 @@ fn seed_for(symbol: &str) -> u64 {
     })
 }
 
+/// Look up the canonical [`InstrumentDef`] for `symbol` among the shared
+/// protocol defaults, if one is defined there.
+fn default_instrument(symbol: &str) -> Option<InstrumentDef> {
+    default_instruments()
+        .into_iter()
+        .find(|def| def.symbol == symbol)
+}
+
 fn scalars_for(symbol: &str, fp: &Fingerprint) -> GeneratorScalars {
     match symbol {
         "XBTUSD" => GeneratorScalars::xbtusd_anchor(fp),
+        // BTCUSDT must generate on the exact price grid the engine fills on, so
+        // its tick/precision are sourced from the single protocol definition
+        // (`default_instruments`) rather than hand-pinned here - one source of
+        // truth shared with the engine seed.
         "BTCUSDT" => {
             let mut scalars = GeneratorScalars::from_fingerprint_medians(symbol, fp);
-            scalars.modal_tick = Decimal::new(1, 2);
-            scalars.price_decimals = 2;
+            if let Some(def) = default_instrument(symbol) {
+                scalars.modal_tick = def.price_increment;
+                scalars.price_decimals = u32::from(def.price_precision);
+            }
             scalars
         }
         _ => GeneratorScalars::from_fingerprint_medians(symbol, fp),
@@ -142,9 +155,10 @@ mod tests {
     fn btcusdt_uses_engine_price_grid() {
         let fp = fingerprint();
         let scalars = scalars_for("BTCUSDT", fp);
+        let def = default_instrument("BTCUSDT").expect("BTCUSDT is a default instrument");
 
-        assert_eq!(scalars.modal_tick, Decimal::new(1, 2));
-        assert_eq!(scalars.price_decimals, 2);
+        assert_eq!(scalars.modal_tick, def.price_increment);
+        assert_eq!(scalars.price_decimals, u32::from(def.price_precision));
         assert!(scalars.validate(fp).is_ok());
     }
 
