@@ -8,7 +8,7 @@ use nautilus_common::{
     factories::{ClientConfig, DataClientFactory, ExecutionClientFactory},
 };
 use nautilus_live::ExecutionClientCore;
-use nautilus_model::{enums::OmsType, identifiers::ClientId};
+use nautilus_model::identifiers::ClientId;
 
 use crate::{
     MOGWAI_VENUE, MOGWAI_VENUE_STR, MogwaiDataClient, MogwaiDataClientConfig,
@@ -103,7 +103,7 @@ impl ExecutionClientFactory for MogwaiExecutionClientFactory {
             config.trader_id,
             ClientId::from(name),
             *MOGWAI_VENUE,
-            OmsType::Netting,
+            config.oms_type,
             config.account_id,
             config.account_type,
             None,
@@ -218,6 +218,25 @@ mod tests {
         assert_eq!(client.client_id(), ClientId::from("MOGWAI-TEST"));
         assert_eq!(client.account_id(), config.account_id);
         assert_eq!(client.oms_type(), OmsType::Netting);
+    }
+
+    #[test]
+    fn mogwai_exec_factory_threads_configured_oms_through_to_client() {
+        // D.7: the OMS type was hard-coded to `Netting`; broadarrow must be able
+        // to override it per-venue. A config that asks for `Hedging` reaches the
+        // exec client core unchanged.
+        let factory = MogwaiExecutionClientFactory::new();
+        let config = MogwaiExecClientConfig {
+            oms_type: OmsType::Hedging,
+            ..Default::default()
+        };
+        let cache = cache();
+
+        let client = factory
+            .create("MOGWAI-TEST", &config, cache.into())
+            .expect("factory creates execution client");
+
+        assert_eq!(client.oms_type(), OmsType::Hedging);
     }
 
     #[test]

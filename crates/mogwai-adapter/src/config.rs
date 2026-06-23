@@ -7,7 +7,7 @@ use mogwai_protocol::{
 };
 use nautilus_common::factories::ClientConfig;
 use nautilus_model::{
-    enums::AccountType,
+    enums::{AccountType, OmsType},
     identifiers::{AccountId, TraderId},
 };
 use serde::{Deserialize, Serialize};
@@ -85,12 +85,26 @@ pub struct MogwaiExecClientConfig {
     pub base_url: String,
     /// Account type reported to nautilus.
     pub account_type: AccountType,
+    /// Order-management-system type the venue presents to nautilus. Defaults to
+    /// `Netting` (one position per instrument). broadarrow can override this
+    /// per-venue without an adapter change - `Unspecified` defers to the venue
+    /// OMS, `Hedging` allows multiple positions per instrument (D.7).
+    #[serde(default = "default_oms_type")]
+    pub oms_type: OmsType,
     /// Selects the transport archetype this execution client presents.
     #[serde(default)]
     pub transport_profile: TransportProfile,
     /// Havoc to arm on connect. `None` is a clean adapter.
     #[serde(default)]
     pub havoc: Option<HavocSpec>,
+}
+
+/// Default OMS type for an exec client config field that is absent from the
+/// deserialized payload. `OmsType::default()` is `Unspecified`, but mogwai's
+/// venue has historically run as a netting OMS (the former hard-coded value,
+/// D.7), so a config that omits the field keeps that behavior.
+fn default_oms_type() -> OmsType {
+    OmsType::Netting
 }
 
 impl Default for MogwaiExecClientConfig {
@@ -100,6 +114,7 @@ impl Default for MogwaiExecClientConfig {
             account_id: AccountId::from("MOGWAI-001"),
             base_url: DEFAULT_BASE_URL.to_string(),
             account_type: AccountType::Cash,
+            oms_type: default_oms_type(),
             transport_profile: TransportProfile::default(),
             havoc: None,
         }

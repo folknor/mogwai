@@ -3205,7 +3205,7 @@ mod tests {
     use nautilus_common::{cache::Cache, clients::ExecutionClient, messages::ExecutionEvent};
     use nautilus_live::{ExecutionClientCore, ExecutionEventEmitter};
     use nautilus_model::{
-        enums::{OmsType, TimeInForce},
+        enums::TimeInForce,
         identifiers::{ClientId, StrategyId, TraderId},
     };
 
@@ -3221,7 +3221,7 @@ mod tests {
             TraderId::from("MOGWAI-001"),
             ClientId::from("MOGWAI-TEST"),
             *MOGWAI_VENUE,
-            OmsType::Netting,
+            config.oms_type,
             config.account_id,
             config.account_type,
             None,
