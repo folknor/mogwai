@@ -35,6 +35,18 @@ def post_divergence(payload: dict) -> int:
         return r.status
 
 
+def post_order(payload: dict) -> list:
+    req = urllib.request.Request(
+        f"http://{HOST}:{PORT}/orders",
+        data=json.dumps(payload).encode(),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req) as r:
+        assert r.status == 200, r.status
+        return json.loads(r.read().decode())
+
+
 def ws_roundtrip(send_obj: dict, expect: int) -> list:
     """Minimal RFC6455 client: handshake, send one text frame, read `expect` frames."""
     ws = WsClient()
@@ -190,6 +202,18 @@ def main() -> None:
     ], dup_msgs
     assert dup_msgs[1]["trade_id"] == dup_msgs[2]["trade_id"], dup_msgs
     print("PASS: DuplicateNextFill doubled the live fill event")
+
+    http_msgs = post_order(submit_order("HTTP1"))
+    for msg in http_msgs:
+        print("http:    ", msg)
+    assert [msg["type"] for msg in http_msgs] == [
+        "OrderAccepted",
+        "OrderFilled",
+        "AccountState",
+    ], http_msgs
+    assert http_msgs[0]["client_order_id"] == "HTTP1", http_msgs
+    assert http_msgs[1]["client_order_id"] == "HTTP1", http_msgs
+    print("PASS: SubmitOrder round-tripped through the HTTP order path")
 
     assert post_divergence({"type": "DropNextAccountUpdate"}) == 202
     ws = WsClient(timeout=0.2)

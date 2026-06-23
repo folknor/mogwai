@@ -6,17 +6,27 @@
 //! nautilus runner thread-local, then asserts that:
 //!
 //! - a live `subscribe_trades` drives the stub-pushed `ServerMessage::Trade`
-//!   into the sink as a `DataEvent::Data(Data::Trade)`, and
-//! - a `request_trades` fetch returns a matching `DataResponse::Trades`.
+//!   into the sink as a `DataEvent::Data(Data::Trade)`,
+//! - a `request_trades` fetch returns a matching `DataResponse::Trades`, and
+//! - under the `HttpPolling` profile, a `subscribe_trades` drives a polled
+//!   `GET /trades` row into the sink with NO `/ws` socket ever opened.
 //!
-//! This is the spec's brick-2/brick-3/brick-4 integration gate. It is marked
+//! This is the transport-profile integration gate (the polling case is the
+//! behavior neither the engine tests nor the smoke path reach). It is marked
 //! `#[ignore]` because it binds a real TCP listener, which the CI sandbox may
 //! refuse; run it explicitly in a socket-capable environment with
 //! `brokkr test -p mogwai-adapter data_client --debug`.
 
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use mogwai_adapter::{MogwaiDataClient, MogwaiDataClientConfig};
+use mogwai_protocol::TransportProfile;
 use nautilus_common::{
     clients::DataClient,
     live::runner::replace_data_event_sender,
@@ -42,6 +52,10 @@ const TRADES_JSON: &str = r#"[{"symbol":"BTCUSDT","price":"100.00","size":"1","a
 
 /// Serves one HTTP request or one WS upgrade per connection, on `listener`.
 async fn run_stub(listener: TcpListener) {
+    run_stub_with_ws_counter(listener, None).await;
+}
+
+async fn run_stub_with_ws_counter(listener: TcpListener, ws_hits: Option<Arc<AtomicUsize>>) {
     loop {
         let Ok((mut stream, _)) = listener.accept().await else {
             return;
@@ -57,6 +71,9 @@ async fn run_stub(listener: TcpListener) {
         let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
 
         if path.starts_with("/ws") {
+            if let Some(ws_hits) = &ws_hits {
+                ws_hits.fetch_add(1, Ordering::Relaxed);
+            }
             tokio::spawn(serve_ws(stream, head));
         } else if path.starts_with("/instruments") {
             respond_json(&mut stream, INSTRUMENTS_JSON).await;
@@ -139,6 +156,7 @@ async fn subscribe_and_request_drive_data_events() {
 
     let config = MogwaiDataClientConfig {
         base_url: format!("ws://127.0.0.1:{port}"),
+        ..MogwaiDataClientConfig::default()
     };
     let mut client =
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
@@ -193,4 +211,56 @@ async fn subscribe_and_request_drive_data_events() {
             break;
         }
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn http_polling_subscribe_fetches_trades_without_ws() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind stub");
+    let port = listener.local_addr().expect("addr").port();
+    let ws_hits = Arc::new(AtomicUsize::new(0));
+    tokio::spawn(run_stub_with_ws_counter(
+        listener,
+        Some(Arc::clone(&ws_hits)),
+    ));
+
+    let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
+    replace_data_event_sender(sink_tx);
+
+    let config = MogwaiDataClientConfig {
+        base_url: format!("ws://127.0.0.1:{port}"),
+        transport_profile: TransportProfile::HttpPolling,
+    };
+    let mut client =
+        MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
+
+    client.start().expect("start grabs the sink");
+    client.connect().await.expect("connect starts polling");
+    client
+        .subscribe_trades(SubscribeTrades::new(
+            instrument_id(),
+            Some(ClientId::from("MOGWAI-DATA")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        ))
+        .expect("subscribe trades");
+
+    let event = tokio::time::timeout(Duration::from_secs(2), sink_rx.recv())
+        .await
+        .expect("a data event arrives")
+        .expect("sink open");
+    assert!(
+        matches!(event, DataEvent::Data(Data::Trade(t)) if t.instrument_id == instrument_id()),
+        "expected a polled trade data event"
+    );
+    assert_eq!(
+        ws_hits.load(Ordering::Relaxed),
+        0,
+        "polling must not open /ws"
+    );
+
+    client.disconnect().await.expect("disconnect stops polling");
 }

@@ -126,6 +126,7 @@ impl ExecutionClientFactory for MogwaiExecutionClientFactory {
 mod tests {
     use std::{any::Any, cell::RefCell, rc::Rc};
 
+    use mogwai_protocol::TransportProfile;
     use nautilus_common::{
         cache::Cache,
         clock::TestClock,
@@ -233,6 +234,7 @@ mod tests {
         let data_factory = MogwaiDataClientFactory::new();
         let data_config = MogwaiDataClientConfig {
             base_url: "   ".to_string(),
+            ..MogwaiDataClientConfig::default()
         };
         let cache = cache();
         let clock = Rc::new(RefCell::new(TestClock::new()));
@@ -262,15 +264,21 @@ mod tests {
     fn mogwai_configs_round_trip_json() {
         let data_config = MogwaiDataClientConfig {
             base_url: "ws://example.invalid:9999".to_string(),
+            transport_profile: TransportProfile::HttpPolling,
         };
         let data_json = serde_json::to_string(&data_config).expect("serialize data client config");
         let data_round_trip: MogwaiDataClientConfig =
             serde_json::from_str(&data_json).expect("deserialize data client config");
         assert_eq!(data_round_trip.base_url, data_config.base_url);
+        assert_eq!(
+            data_round_trip.transport_profile,
+            data_config.transport_profile
+        );
 
         let exec_config = MogwaiExecClientConfig {
             trader_id: TraderId::from("MOGWAI-042"),
             base_url: "ws://example.invalid:9999".to_string(),
+            transport_profile: TransportProfile::HttpOrders,
             ..Default::default()
         };
         let exec_json =
@@ -281,6 +289,10 @@ mod tests {
         assert_eq!(exec_round_trip.account_id, exec_config.account_id);
         assert_eq!(exec_round_trip.base_url, exec_config.base_url);
         assert_eq!(exec_round_trip.account_type, exec_config.account_type);
+        assert_eq!(
+            exec_round_trip.transport_profile,
+            exec_config.transport_profile
+        );
     }
 
     #[test]
@@ -292,6 +304,7 @@ mod tests {
         let data: MogwaiDataClientConfig =
             serde_json::from_str("{}").expect("partial data config deserializes");
         assert_eq!(data.base_url, MogwaiDataClientConfig::default().base_url);
+        assert_eq!(data.transport_profile, TransportProfile::WsStreaming);
 
         let exec: MogwaiExecClientConfig =
             serde_json::from_str(r#"{"base_url":"ws://example.invalid:9999"}"#)
@@ -301,5 +314,6 @@ mod tests {
         assert_eq!(exec.trader_id, defaults.trader_id);
         assert_eq!(exec.account_id, defaults.account_id);
         assert_eq!(exec.account_type, defaults.account_type);
+        assert_eq!(exec.transport_profile, TransportProfile::WsStreaming);
     }
 }

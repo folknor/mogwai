@@ -5,13 +5,13 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, ensure};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
-use mogwai_protocol::{ClientMessage, InstrumentDef, ServerMessage, Side, Symbol};
+use mogwai_protocol::{ClientMessage, InstrumentDef, ServerMessage, Side, Symbol, TradeTick};
 use nautilus_common::{
     clients::{DataClient, ExecutionClient},
     live::{get_data_event_sender, get_runtime, try_get_exec_event_sender},
@@ -50,6 +50,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use crate::{MOGWAI_VENUE, MogwaiDataClientConfig, MogwaiExecClientConfig, convert};
 
 const HISTORY_LIMIT_CAP: usize = 10_000;
+const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -63,6 +64,7 @@ pub struct MogwaiDataClient {
     instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     subs: Arc<Mutex<HashMap<Symbol, SubState>>>,
     bars: Arc<Mutex<HashMap<BarType, BarSubState>>>,
+    poll_cursor: Arc<Mutex<HashMap<Symbol, PollCursor>>>,
     task_handles: Vec<JoinHandle<()>>,
 }
 
@@ -86,6 +88,7 @@ impl MogwaiDataClient {
             instruments: Arc::new(Mutex::new(HashMap::new())),
             subs: Arc::new(Mutex::new(HashMap::new())),
             bars: Arc::new(Mutex::new(HashMap::new())),
+            poll_cursor: Arc::new(Mutex::new(HashMap::new())),
             task_handles: Vec::new(),
         })
     }
@@ -112,7 +115,7 @@ impl MogwaiDataClient {
             (emit, state.start_ts)
         };
 
-        if emit {
+        if emit && !self.config.transport_profile.data_by_polling() {
             self.send_ws(WsCommand::Subscribe {
                 symbols: vec![symbol],
                 start_ts: active_start_ts,
@@ -138,6 +141,13 @@ impl MogwaiDataClient {
         }
 
         if emit {
+            self.poll_cursor
+                .lock()
+                .map_err(|_| anyhow::anyhow!("poll cursor mutex poisoned"))?
+                .remove(&symbol);
+        }
+
+        if emit && !self.config.transport_profile.data_by_polling() {
             self.send_ws(WsCommand::Unsubscribe {
                 symbols: vec![symbol],
             })?;
@@ -196,6 +206,10 @@ impl DataClient for MogwaiDataClient {
             .lock()
             .map_err(|_| anyhow::anyhow!("bar mutex poisoned"))?
             .clear();
+        self.poll_cursor
+            .lock()
+            .map_err(|_| anyhow::anyhow!("poll cursor mutex poisoned"))?
+            .clear();
         Ok(())
     }
 
@@ -215,6 +229,31 @@ impl DataClient for MogwaiDataClient {
         let sink = self.sink()?;
         let http_base_url = self.config.http_base_url();
         seed_instruments(&self.http, &http_base_url, &self.instruments).await?;
+
+        if self.config.transport_profile.data_by_polling() {
+            let connected = Arc::clone(&self.connected);
+            connected.store(true, Ordering::Relaxed);
+            let http = self.http.clone();
+            let instruments = Arc::clone(&self.instruments);
+            let subs = Arc::clone(&self.subs);
+            let bars = Arc::clone(&self.bars);
+            let cursor = Arc::clone(&self.poll_cursor);
+            let poll_handle = tokio::spawn(async move {
+                poll_market_data(DataPollContext {
+                    http,
+                    base: http_base_url,
+                    sink,
+                    instruments,
+                    subs,
+                    bars,
+                    cursor,
+                    connected,
+                })
+                .await;
+            });
+            self.task_handles.push(poll_handle);
+            return Ok(());
+        }
 
         let ws_url = join_url(&self.config.ws_url(), "ws");
         let (ws, _) = connect_async(&ws_url)
@@ -560,6 +599,46 @@ struct BarSubState {
     active: Option<ActiveBar>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PollCursor {
+    last_ts: u64,
+    emitted_at_last_ts: usize,
+}
+
+impl PollCursor {
+    fn new(start_ts: Option<u64>) -> Self {
+        Self {
+            last_ts: start_ts.unwrap_or(0),
+            emitted_at_last_ts: 0,
+        }
+    }
+
+    fn unseen_from_batch(&mut self, batch: Vec<TradeTick>) -> Vec<TradeTick> {
+        let mut skipped = 0;
+        let mut out = Vec::new();
+        for trade in batch {
+            if trade.ts_event == self.last_ts && skipped < self.emitted_at_last_ts {
+                skipped += 1;
+                continue;
+            }
+            out.push(trade);
+        }
+
+        if let Some(last_ts) = out.iter().map(|trade| trade.ts_event).max() {
+            let old_last_ts = self.last_ts;
+            let emitted_at_last_ts = out.iter().filter(|trade| trade.ts_event == last_ts).count();
+            self.last_ts = last_ts;
+            self.emitted_at_last_ts = if last_ts == old_last_ts {
+                self.emitted_at_last_ts + emitted_at_last_ts
+            } else {
+                emitted_at_last_ts
+            };
+        }
+
+        out
+    }
+}
+
 #[derive(Debug)]
 struct ActiveBar {
     open: Decimal,
@@ -602,18 +681,7 @@ async fn handle_market_message(
 ) {
     match msg {
         ServerMessage::Trade(trade) => {
-            let Some(def) = instrument_def(instruments, &trade.symbol) else {
-                return;
-            };
-            let state = sub_state(subs, &trade.symbol);
-            let id = convert::instrument_id(&def);
-            if state.as_ref().is_some_and(|s| s.trades > 0) {
-                let tick = convert::trade_tick(&trade, id, &def, now_unix_nanos());
-                drop(sink.send(DataEvent::Data(Data::Trade(tick))));
-            }
-            if state.as_ref().is_some_and(|s| s.bars > 0) {
-                emit_live_bars(&trade, &def, sink, bars);
-            }
+            emit_trade(&trade, sink, instruments, subs, bars);
         }
         ServerMessage::Quote(quote) => {
             let Some(def) = instrument_def(instruments, &quote.symbol) else {
@@ -628,6 +696,78 @@ async fn handle_market_message(
         }
         _ => {}
     }
+}
+
+fn emit_trade(
+    trade: &TradeTick,
+    sink: &UnboundedSender<DataEvent>,
+    instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
+    subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
+    bars: &Arc<Mutex<HashMap<BarType, BarSubState>>>,
+) {
+    let Some(def) = instrument_def(instruments, &trade.symbol) else {
+        return;
+    };
+    let state = sub_state(subs, &trade.symbol);
+    let id = convert::instrument_id(&def);
+    if state.as_ref().is_some_and(|s| s.trades > 0) {
+        let tick = convert::trade_tick(trade, id, &def, now_unix_nanos());
+        drop(sink.send(DataEvent::Data(Data::Trade(tick))));
+    }
+    if state.as_ref().is_some_and(|s| s.bars > 0) {
+        emit_live_bars(trade, &def, sink, bars);
+    }
+}
+
+struct DataPollContext {
+    http: HttpClient,
+    base: String,
+    sink: UnboundedSender<DataEvent>,
+    instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
+    subs: Arc<Mutex<HashMap<Symbol, SubState>>>,
+    bars: Arc<Mutex<HashMap<BarType, BarSubState>>>,
+    cursor: Arc<Mutex<HashMap<Symbol, PollCursor>>>,
+    connected: Arc<AtomicBool>,
+}
+
+async fn poll_market_data(ctx: DataPollContext) {
+    while ctx.connected.load(Ordering::Relaxed) {
+        let symbols = poll_symbols(&ctx.subs);
+        for (symbol, start_ts) in symbols {
+            let start = {
+                let mut cursors = ctx.cursor.lock().expect("poll cursor mutex poisoned");
+                let entry = cursors
+                    .entry(symbol.clone())
+                    .or_insert_with(|| PollCursor::new(start_ts));
+                UnixNanos::from(entry.last_ts)
+            };
+            let Ok(batch) =
+                fetch_trades(&ctx.http, &ctx.base, &symbol, Some(start), None, None).await
+            else {
+                continue;
+            };
+            let trades = {
+                let mut cursors = ctx.cursor.lock().expect("poll cursor mutex poisoned");
+                let entry = cursors
+                    .entry(symbol.clone())
+                    .or_insert_with(|| PollCursor::new(start_ts));
+                entry.unseen_from_batch(batch)
+            };
+            for trade in trades {
+                emit_trade(&trade, &ctx.sink, &ctx.instruments, &ctx.subs, &ctx.bars);
+            }
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+fn poll_symbols(subs: &Arc<Mutex<HashMap<Symbol, SubState>>>) -> Vec<(Symbol, Option<u64>)> {
+    subs.lock()
+        .expect("subscription mutex poisoned")
+        .iter()
+        .filter(|(_, state)| state.trades > 0 || state.bars > 0)
+        .map(|(symbol, state)| (symbol.clone(), state.start_ts))
+        .collect()
 }
 
 fn emit_live_bars(
@@ -836,6 +976,33 @@ async fn fetch_trades(
     serde_json::from_slice(&response.body).context("decode trades")
 }
 
+async fn post_order(
+    http: &HttpClient,
+    url: &str,
+    msg: &ClientMessage,
+) -> anyhow::Result<Vec<ServerMessage>> {
+    let body = serde_json::to_vec(msg).context("encode order")?;
+    let mut headers = HashMap::new();
+    headers.insert("content-type".to_string(), "application/json".to_string());
+    let response = http
+        .post(
+            url.to_string(),
+            None,
+            Some(headers),
+            Some(body),
+            Some(30),
+            None,
+        )
+        .await
+        .context("post order")?;
+    ensure!(
+        response.status.is_success(),
+        "post order returned {}",
+        response.status.as_u16()
+    );
+    serde_json::from_slice(&response.body).context("decode order events")
+}
+
 /// Resolves the effective row limit sent to the server's bounded `/trades`
 /// scan. A missing limit defaults to the ceiling, and any requested limit is
 /// clamped to it so neither the response body nor the materialized nautilus
@@ -934,6 +1101,40 @@ impl MogwaiExecutionClient {
             .context("mogwai execution client is not connected")?;
         tx.send(cmd).context("send execution websocket command")
     }
+
+    fn exec_context(&self) -> ExecContext {
+        ExecContext {
+            emitter: self.emitter.clone(),
+            state: Arc::clone(&self.state),
+            instruments: Arc::clone(&self.instruments),
+            trader_id: self.core.trader_id,
+            account_id: self.core.account_id,
+        }
+    }
+
+    fn dispatch_order(&self, cmd: ExecWsCommand) -> anyhow::Result<()> {
+        if self.config.transport_profile.orders_over_http() {
+            let msg = exec_command_to_client_message(cmd.clone());
+            let http = self.http.clone();
+            let url = join_url(&self.config.http_base_url(), "orders");
+            let ctx = self.exec_context();
+            drop(get_runtime().spawn(async move {
+                match post_order(&http, &url, &msg).await {
+                    Ok(events) => {
+                        for event in events {
+                            handle_exec_message(event, &ctx);
+                        }
+                    }
+                    Err(err) => {
+                        handle_exec_message(reject_for(&cmd, &err), &ctx);
+                    }
+                }
+            }));
+            Ok(())
+        } else {
+            self.send_ws(cmd)
+        }
+    }
 }
 
 #[async_trait(?Send)]
@@ -1006,6 +1207,12 @@ impl ExecutionClient for MogwaiExecutionClient {
         let http_base_url = self.config.http_base_url();
         seed_instruments(&self.http, &http_base_url, &self.instruments).await?;
 
+        if self.config.transport_profile.orders_over_http() {
+            self.connected.store(true, Ordering::Relaxed);
+            self.core.set_connected();
+            return Ok(());
+        }
+
         let ws_url = join_url(&self.config.ws_url(), "ws");
         let (ws, _) = connect_async(&ws_url)
             .await
@@ -1029,13 +1236,7 @@ impl ExecutionClient for MogwaiExecutionClient {
             writer_connected.store(false, Ordering::Relaxed);
         });
 
-        let ctx = ExecContext {
-            emitter: self.emitter.clone(),
-            state: Arc::clone(&self.state),
-            instruments: Arc::clone(&self.instruments),
-            trader_id: self.core.trader_id,
-            account_id: self.core.account_id,
-        };
+        let ctx = self.exec_context();
         let reader_handle = tokio::spawn(async move {
             while let Some(Ok(msg)) = reader.next().await {
                 let Message::Text(text) = msg else {
@@ -1098,11 +1299,11 @@ impl ExecutionClient for MogwaiExecutionClient {
         );
         drop(state);
 
-        self.send_ws(ExecWsCommand::Submit(wire))
+        self.dispatch_order(ExecWsCommand::Submit(wire))
     }
 
     fn modify_order(&self, cmd: ModifyOrder) -> anyhow::Result<()> {
-        self.send_ws(ExecWsCommand::Modify {
+        self.dispatch_order(ExecWsCommand::Modify {
             client_order_id: cmd.client_order_id.to_string(),
             price: cmd.price.map(|p| p.as_decimal()),
             quantity: cmd.quantity.map(|q| q.as_decimal()),
@@ -1110,7 +1311,7 @@ impl ExecutionClient for MogwaiExecutionClient {
     }
 
     fn cancel_order(&self, cmd: CancelOrder) -> anyhow::Result<()> {
-        self.send_ws(ExecWsCommand::Cancel {
+        self.dispatch_order(ExecWsCommand::Cancel {
             client_order_id: cmd.client_order_id.to_string(),
         })
     }
@@ -1258,6 +1459,31 @@ fn exec_command_to_client_message(cmd: ExecWsCommand) -> ClientMessage {
             client_order_id,
             price,
             quantity,
+        },
+    }
+}
+
+fn reject_for(cmd: &ExecWsCommand, err: &anyhow::Error) -> ServerMessage {
+    let reason = err.to_string();
+    let ts_event = now_unix_nanos().as_u64();
+    match cmd {
+        ExecWsCommand::Submit(order) => ServerMessage::OrderRejected {
+            client_order_id: order.client_order_id.clone(),
+            reason,
+            ts_event,
+        },
+        ExecWsCommand::Cancel { client_order_id } => ServerMessage::OrderRejected {
+            client_order_id: client_order_id.clone(),
+            reason,
+            ts_event,
+        },
+        ExecWsCommand::Modify {
+            client_order_id, ..
+        } => ServerMessage::OrderModifyRejected {
+            client_order_id: client_order_id.clone(),
+            venue_order_id: None,
+            reason,
+            ts_event,
         },
     }
 }
@@ -1700,7 +1926,7 @@ fn in_time_range(ts: UnixNanos, start: Option<UnixNanos>, end: Option<UnixNanos>
 mod data_client_tests {
     use std::num::NonZeroUsize;
 
-    use mogwai_protocol::AggressorSide;
+    use mogwai_protocol::{AggressorSide, TransportProfile};
     use nautilus_core::{Params, UUID4};
     use nautilus_model::{
         data::BarSpecification,
@@ -1770,6 +1996,17 @@ mod data_client_tests {
         .expect("valid data client")
     }
 
+    fn polling_data_client() -> MogwaiDataClient {
+        MogwaiDataClient::new(
+            ClientId::from("MOGWAI-DATA"),
+            MogwaiDataClientConfig {
+                transport_profile: TransportProfile::HttpPolling,
+                ..MogwaiDataClientConfig::default()
+            },
+        )
+        .expect("valid polling data client")
+    }
+
     // Drain-side seam: a parsed `ServerMessage` with a live subscription must
     // drive the matching `DataEvent::Data` into the egress sink. This is the
     // brick-2 gate's intent exercised in-process (no socket) by calling the
@@ -1798,6 +2035,27 @@ mod data_client_tests {
                 assert_eq!(t.instrument_id, instrument_id());
                 assert_eq!(t.ts_event, UnixNanos::from(42));
                 assert_eq!(t.price.precision, 2);
+            }
+            other => panic!("expected trade data event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn emit_trade_shared_body_drives_data_event_into_sink() {
+        let (tx, mut rx) = unbounded_channel();
+        let instruments = instruments_map();
+        let subs = subs_with(SubState {
+            trades: 1,
+            ..SubState::default()
+        });
+        let bars = Arc::new(Mutex::new(HashMap::new()));
+
+        emit_trade(&trade(42, 12_345, 1), &tx, &instruments, &subs, &bars);
+
+        match rx.try_recv().expect("a data event was emitted") {
+            DataEvent::Data(Data::Trade(t)) => {
+                assert_eq!(t.instrument_id, instrument_id());
+                assert_eq!(t.ts_event, UnixNanos::from(42));
             }
             other => panic!("expected trade data event, got {other:?}"),
         }
@@ -1887,6 +2145,29 @@ mod data_client_tests {
             rx.try_recv().is_err(),
             "second subscribe must not re-issue a Subscribe"
         );
+    }
+
+    #[test]
+    fn polling_subscribe_updates_refs_without_ws_channel() {
+        let mut client = polling_data_client();
+
+        client
+            .subscribe_trades(SubscribeTrades::new(
+                instrument_id(),
+                Some(client.client_id),
+                None,
+                UUID4::new(),
+                UnixNanos::default(),
+                None,
+                start_ts_params(100),
+            ))
+            .expect("subscribe trades without websocket");
+
+        let subs = client.subs.lock().expect("subscription mutex");
+        let state = subs.get("BTCUSDT").expect("symbol subscribed");
+        assert_eq!(state.trades, 1);
+        assert_eq!(state.start_ts, Some(100));
+        assert!(client.ws_cmd.is_none());
     }
 
     // Brick-3 unsubscribe: only the 1->0 transition emits an Unsubscribe.
@@ -2025,12 +2306,82 @@ mod data_client_tests {
         );
         assert_eq!(capped_limit(NonZeroUsize::new(5)), 5);
     }
+
+    #[test]
+    fn poll_cursor_overlaps_unique_boundary_without_duplicates() {
+        let mut cursor = PollCursor::new(Some(10));
+        let first = cursor.unseen_from_batch(vec![trade(10, 10_000, 1), trade(20, 20_000, 1)]);
+        assert_eq!(
+            first.iter().map(|trade| trade.ts_event).collect::<Vec<_>>(),
+            vec![10, 20]
+        );
+        assert_eq!(
+            cursor,
+            PollCursor {
+                last_ts: 20,
+                emitted_at_last_ts: 1,
+            }
+        );
+
+        let second = cursor.unseen_from_batch(vec![trade(20, 20_000, 1), trade(30, 30_000, 1)]);
+        assert_eq!(
+            second
+                .iter()
+                .map(|trade| trade.ts_event)
+                .collect::<Vec<_>>(),
+            vec![30]
+        );
+        assert_eq!(
+            cursor,
+            PollCursor {
+                last_ts: 30,
+                emitted_at_last_ts: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn poll_cursor_handles_cap_boundary_inside_same_timestamp() {
+        let mut cursor = PollCursor::new(None);
+        let first = cursor.unseen_from_batch(vec![trade(10, 10_000, 1), trade(20, 20_000, 1)]);
+        assert_eq!(first.len(), 2);
+        assert_eq!(
+            cursor,
+            PollCursor {
+                last_ts: 20,
+                emitted_at_last_ts: 1,
+            }
+        );
+
+        let second = cursor.unseen_from_batch(vec![
+            trade(20, 20_000, 1),
+            trade(20, 21_000, 1),
+            trade(20, 22_000, 1),
+            trade(30, 30_000, 1),
+        ]);
+        assert_eq!(
+            second.iter().map(|trade| trade.price).collect::<Vec<_>>(),
+            vec![
+                Decimal::new(21_000, 2),
+                Decimal::new(22_000, 2),
+                Decimal::new(30_000, 2)
+            ]
+        );
+        assert_eq!(
+            cursor,
+            PollCursor {
+                last_ts: 30,
+                emitted_at_last_ts: 1,
+            }
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::{cell::RefCell, rc::Rc};
 
+    use mogwai_protocol::TransportProfile;
     use nautilus_common::{cache::Cache, clients::ExecutionClient, messages::ExecutionEvent};
     use nautilus_live::{ExecutionClientCore, ExecutionEventEmitter};
     use nautilus_model::{
@@ -2041,7 +2392,10 @@ mod tests {
     use super::*;
 
     fn execution_client() -> MogwaiExecutionClient {
-        let config = MogwaiExecClientConfig::default();
+        execution_client_with_config(MogwaiExecClientConfig::default())
+    }
+
+    fn execution_client_with_config(config: MogwaiExecClientConfig) -> MogwaiExecutionClient {
         let cache = Rc::new(RefCell::new(Cache::default()));
         let core = ExecutionClientCore::new(
             TraderId::from("MOGWAI-001"),
@@ -2189,6 +2543,21 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn http_orders_dispatch_does_not_require_ws_channel() {
+        let client = execution_client_with_config(MogwaiExecClientConfig {
+            transport_profile: TransportProfile::HttpOrders,
+            ..MogwaiExecClientConfig::default()
+        });
+
+        client
+            .dispatch_order(ExecWsCommand::Cancel {
+                client_order_id: "O-1".into(),
+            })
+            .expect("HTTP dispatch accepts command without websocket");
+        assert!(client.ws_cmd.is_none());
+    }
+
     #[test]
     fn accepted_then_filled_then_account_drive_exec_events() {
         let (ctx, mut rx) = exec_context();
@@ -2246,6 +2615,70 @@ mod tests {
             rx.try_recv().expect("account event"),
             ExecutionEvent::Account(_)
         ));
+    }
+
+    #[test]
+    fn http_response_events_use_same_exec_drain() {
+        let (ctx, mut rx) = exec_context();
+        let events = vec![
+            ServerMessage::OrderAccepted {
+                client_order_id: "O-1".into(),
+                venue_order_id: "V-1".into(),
+                ts_event: 10,
+            },
+            ServerMessage::OrderFilled(mogwai_protocol::OrderFilled {
+                client_order_id: "O-1".into(),
+                venue_order_id: "V-1".into(),
+                trade_id: "T-1".into(),
+                symbol: "BTCUSDT".into(),
+                side: Side::Buy,
+                last_qty: Decimal::new(1, 0),
+                last_px: Decimal::new(10_000, 2),
+                leaves_qty: Decimal::ZERO,
+                commission: Decimal::ZERO,
+                ts_event: 11,
+            }),
+        ];
+
+        for event in events {
+            handle_exec_message(event, &ctx);
+        }
+
+        assert!(matches!(
+            rx.try_recv().expect("accepted event"),
+            ExecutionEvent::Order(OrderEventAny::Accepted(_))
+        ));
+        assert!(matches!(
+            rx.try_recv().expect("filled event"),
+            ExecutionEvent::Order(OrderEventAny::Filled(_))
+        ));
+    }
+
+    #[test]
+    fn http_post_failure_rejects_submitted_order() {
+        let (ctx, mut rx) = exec_context();
+        let cmd = ExecWsCommand::Submit(mogwai_protocol::SubmitOrder {
+            client_order_id: "O-1".into(),
+            symbol: "BTCUSDT".into(),
+            side: Side::Buy,
+            order_type: mogwai_protocol::OrderType::Limit,
+            quantity: Decimal::new(1, 0),
+            price: Some(Decimal::new(10_000, 2)),
+            time_in_force: mogwai_protocol::TimeInForce::Gtc,
+        });
+        let err = anyhow::anyhow!("connection refused");
+
+        handle_exec_message(reject_for(&cmd, &err), &ctx);
+
+        match rx.try_recv().expect("rejected event") {
+            ExecutionEvent::Order(OrderEventAny::Rejected(event)) => {
+                assert_eq!(event.client_order_id, ClientOrderId::from("O-1"));
+                assert_eq!(event.reason.as_str(), "connection refused");
+            }
+            other => panic!("expected rejected event, got {other:?}"),
+        }
+        let record = order_record(&ctx.state, ClientOrderId::from("O-1")).expect("order record");
+        assert_eq!(record.status, OrderStatus::Rejected);
     }
 
     #[tokio::test]

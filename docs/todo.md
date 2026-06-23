@@ -54,8 +54,14 @@ integration tests):
   hard `MAX_HISTORY_LIMIT` row ceiling so neither the response body nor the
   client's materialized vector grows unbounded over a multi-GB dump; `/quotes`
   is always empty because the Kraken dump is trades-only, and `/trades` mirrors
-  the live path's optional aggressor inference). Replay runs on a blocking
-  thread with backpressure;
+  the live path's optional aggressor inference), plus a `POST /orders` route that
+  accepts an order-bearing `ClientMessage` and returns the engine's resulting
+  `ServerMessage` events as a JSON array. That route drives the identical
+  `engine.process` call the `/ws` order arm makes, so order semantics are
+  byte-identical across the two carriers; only the connection-scoped temporal
+  divergences (`DelayAcks`/`GoDark`, which model a streaming writer) do not apply
+  to the request/response response. It rejects `Subscribe`/`Unsubscribe` bodies,
+  which belong on `/ws`. Replay runs on a blocking thread with backpressure;
   speed via `MOGWAI_REPLAY_SPEED`. Per-subscription windowing (`start_ts` on
   `Subscribe`, seeking each source's prefix), `Unsubscribe` cancellation (a
   shared atomic flag the replay loop polls), and a paced inter-tick sleep cap
@@ -108,6 +114,20 @@ integration tests):
   (`generate_order_status_reports`/`_fill_reports`/`_position_status_reports`)
   reconstruct their reports from that mirror, filtered by the request's
   `start`/`end` bounds so open-order reconciliation sees no false conflicts.
+  Both client configs now carry a `transport_profile` field (`WsStreaming`
+  default, `HttpOrders`, `HttpPolling`) shared as the `TransportProfile` enum in
+  `mogwai-protocol`, and `connect` branches on it (see git history for the
+  landing). Under an orders-over-HTTP profile the exec client opens no `/ws`
+  socket: the three order methods POST to `/orders` and drain the returned events
+  through the same `handle_exec_message` dispatch the WS reader uses, and a failed
+  POST synthesizes the matching reject so the order reaches a terminal state
+  instead of wedging in Submitted. Under the polling profile the data client opens
+  no `/ws` socket either: it polls `GET /trades` per subscribed symbol on a fixed
+  interval, advancing an inclusive overlap-and-skip cursor (re-fetch the boundary
+  `ts_event`, skip the already-emitted prefix) so a response capped mid-timestamp
+  by `MAX_HISTORY_LIMIT` neither drops nor duplicates a trade, and emits through
+  the same per-symbol `SubState` filter the WS drain uses. The default profile is
+  byte-identical to the pre-selector adapter.
 
 ## Next
 
@@ -159,14 +179,18 @@ kraken/bybit WS-primary with HTTP fallback; data-only streaming = databento with
 built-in historical replay; in-process sim = sandbox). mogwai follows the
 standard-CEX shape stripped to the bone: it owns the protocol, so no SBE, no
 product-type split, no auth signing, no rate-limit honoring, no connection pool.
-WS carries streaming (market data, order events, order commands); a small HTTP
-surface on mogwai-server answers the request/response calls (`request_instruments`,
-the reconciliation reports, account snapshot) and fits its existing axum routes.
+Under the default profile WS carries streaming (market data, order events, order
+commands); a small HTTP surface on mogwai-server answers the request/response
+calls (`request_instruments`, the reconciliation reports, account snapshot) and
+fits its existing axum routes. The transport selector (landed, see git history)
+lets a non-default profile move order entry onto HTTP and market data onto a
+polling loop, so one backend can drive each of broadarrow's integration paths.
 
-- [ ] `transport_profile` knob: because mogwai owns both ends, the adapter can
-      behave like different archetypes (orders over WS vs HTTP-only the bybit-demo
-      way, push-stream vs request/response data) so broadarrow exercises each of
-      its own integration code paths against one backend. A selector, not cosmetic.
+The `transport_profile` selector that drives the adapter down each archetype is
+landed (see git history): one mogwai-server can present as WS-for-everything,
+HTTP-orders-with-pushed-data, or fully request/response. Only the broadarrow-side
+wiring that picks a profile per venue remains:
+
 - [ ] broadarrow side (must live in broadarrow, not here): a `MOGWAI` arm in
       `run-prep/src/venue.rs` and a `core::venue` PROFILES row; a profile-guard
       test enforces that every wired venue has a PROFILES row.

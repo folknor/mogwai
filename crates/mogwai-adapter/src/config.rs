@@ -1,6 +1,7 @@
 use std::any::Any;
 
 use anyhow::ensure;
+use mogwai_protocol::TransportProfile;
 use nautilus_common::factories::ClientConfig;
 use nautilus_model::{
     enums::AccountType,
@@ -18,12 +19,16 @@ pub struct MogwaiDataClientConfig {
     /// Later data handlers derive the `/ws` market-data path from this value.
     /// The skeleton stores and validates the URL without opening a transport.
     pub base_url: String,
+    /// Selects the transport archetype this data client presents.
+    #[serde(default)]
+    pub transport_profile: TransportProfile,
 }
 
 impl Default for MogwaiDataClientConfig {
     fn default() -> Self {
         Self {
             base_url: DEFAULT_BASE_URL.to_string(),
+            transport_profile: TransportProfile::default(),
         }
     }
 }
@@ -63,6 +68,9 @@ pub struct MogwaiExecClientConfig {
     pub base_url: String,
     /// Account type reported to nautilus.
     pub account_type: AccountType,
+    /// Selects the transport archetype this execution client presents.
+    #[serde(default)]
+    pub transport_profile: TransportProfile,
 }
 
 impl Default for MogwaiExecClientConfig {
@@ -72,6 +80,7 @@ impl Default for MogwaiExecClientConfig {
             account_id: AccountId::from("MOGWAI-001"),
             base_url: DEFAULT_BASE_URL.to_string(),
             account_type: AccountType::Cash,
+            transport_profile: TransportProfile::default(),
         }
     }
 }
@@ -128,6 +137,7 @@ mod tests {
     fn http_base_url_normalizes_secure_ws_scheme() {
         let cfg = MogwaiDataClientConfig {
             base_url: "wss://example.test:9443".into(),
+            ..MogwaiDataClientConfig::default()
         };
 
         assert_eq!(cfg.ws_url(), "wss://example.test:9443");

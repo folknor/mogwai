@@ -121,6 +121,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/instruments", get(instruments))
         .route("/trades", get(trades))
         .route("/quotes", get(quotes))
+        .route("/orders", post(submit_order_http))
         .route("/ws", get(ws_upgrade))
         .route("/control/divergence", post(arm_divergence))
         .with_state(state);
@@ -153,6 +154,22 @@ async fn arm_divergence(
 
 async fn instruments(State(state): State<AppState>) -> Json<Vec<InstrumentDef>> {
     Json(state.engine.lock().await.instrument_defs())
+}
+
+/// HTTP order-entry surface for profiles that do not use `/ws` for orders.
+async fn submit_order_http(
+    State(state): State<AppState>,
+    Json(msg): Json<ClientMessage>,
+) -> Result<Json<Vec<ServerMessage>>, StatusCode> {
+    match msg {
+        ClientMessage::Subscribe { .. } | ClientMessage::Unsubscribe { .. } => {
+            Err(StatusCode::BAD_REQUEST)
+        }
+        order_cmd => {
+            let events = state.engine.lock().await.process(order_cmd, now_ns());
+            Ok(Json(events))
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -391,4 +408,61 @@ fn spawn_replay(
         }
         tracing::info!(?symbols, "replay finished");
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mogwai_protocol::{OrderType, Side, SubmitOrder, TimeInForce};
+
+    fn state() -> AppState {
+        AppState {
+            engine: Arc::new(Mutex::new(Engine::new())),
+            cfg: Config {
+                data_dir: PathBuf::from("scripts/fixtures/replay"),
+                speed: 0.0,
+                gap_cap_ms: 0,
+                infer_aggressor: false,
+            },
+            delay_ms: Arc::new(AtomicU64::new(0)),
+            dark_until_ns: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    #[tokio::test]
+    async fn http_orders_route_processes_order_commands() {
+        let response = submit_order_http(
+            State(state()),
+            Json(ClientMessage::SubmitOrder(SubmitOrder {
+                client_order_id: "HTTP1".into(),
+                symbol: "BTCUSDT".into(),
+                side: Side::Buy,
+                order_type: OrderType::Limit,
+                quantity: "1".parse().expect("decimal"),
+                price: Some("100".parse().expect("decimal")),
+                time_in_force: TimeInForce::Gtc,
+            })),
+        )
+        .await
+        .expect("order accepted");
+
+        assert!(matches!(response.0[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(response.0[1], ServerMessage::OrderFilled(_)));
+        assert!(matches!(response.0[2], ServerMessage::AccountState(_)));
+    }
+
+    #[tokio::test]
+    async fn http_orders_route_rejects_subscription_messages() {
+        let err = submit_order_http(
+            State(state()),
+            Json(ClientMessage::Subscribe {
+                symbols: vec!["BTCUSDT".into()],
+                start_ts: None,
+            }),
+        )
+        .await
+        .expect_err("subscribe rejected");
+
+        assert_eq!(err, StatusCode::BAD_REQUEST);
+    }
 }
