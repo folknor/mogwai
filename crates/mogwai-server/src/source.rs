@@ -108,6 +108,15 @@ impl TickSource for BoundedSeek {
             tick = self.inner.next_tick()?;
             drained += 1;
         }
+        // If the cap was reached before any tick caught up to `start_ts`, the
+        // seek failed within its bound: returning the still-pre-`start` tick
+        // would leak trades earlier than the requested window and break the
+        // `/trades` cursor contract (the next page must begin at the cursor,
+        // never before it). Report the failed seek as `None` so the caller
+        // yields a correct/empty page instead.
+        if tick.ts_event() < start_ts {
+            return None;
+        }
         Some(tick)
     }
 }

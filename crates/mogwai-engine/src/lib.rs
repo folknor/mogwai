@@ -129,9 +129,12 @@ impl Engine {
     pub fn arm(&mut self, d: Divergence) {
         match d {
             // Temporal, connection-scoped divergences are owned by the server's
-            // outbound layer, not the synchronous clock-free engine. Dropping
-            // them here keeps stale temporal settings from blocking the next
-            // engine-side divergence at front().
+            // outbound layer, not the synchronous clock-free engine. They have
+            // no engine-side trigger, so `take_armed` would never consume them;
+            // dropping them here keeps them from accumulating as dead entries in
+            // the armed queue. (Engine-side consumption no longer head-of-line
+            // blocks regardless - see `take_armed` - but these still have no
+            // home here.)
             Divergence::DelayAcks { .. } | Divergence::GoDark { .. } => {}
             other => self.armed.push_back(other),
         }
@@ -141,6 +144,24 @@ impl Engine {
     fn next_id(&mut self, prefix: &str) -> String {
         self.seq += 1;
         format!("{prefix}-{}", self.seq)
+    }
+
+    /// Consume the first armed divergence that *applies* to the current event,
+    /// leaving every non-matching entry in place and still armed.
+    ///
+    /// Consumption used to peek only `front()`, which head-of-line-blocked the
+    /// whole queue: a `PartialFillNext` targeted at an order other than the one
+    /// being processed sat at `front()` forever (its target may never arrive),
+    /// silently disarming every engine-side divergence queued behind it
+    /// (`DuplicateNextFill`, `DropNextAccountUpdate`, another `PartialFillNext`).
+    /// Scanning for the first *applicable* entry instead lets a still-waiting
+    /// targeted `PartialFillNext` stay armed until its order shows up without
+    /// stalling the divergences behind it. Order is otherwise preserved: the
+    /// first applicable entry wins, so two divergences that both apply to the
+    /// same event still fire in arm order.
+    fn take_armed(&mut self, applies: impl Fn(&Divergence) -> bool) -> Option<Divergence> {
+        let pos = self.armed.iter().position(applies)?;
+        self.armed.remove(pos)
     }
 
     /// Process one client message, emitting the resulting execution events.
@@ -162,14 +183,11 @@ impl Engine {
     }
 
     fn on_submit(&mut self, order: SubmitOrder, ts: u64) -> Vec<ServerMessage> {
-        // Divergence: reject the next submit outright.
-        if matches!(
-            self.armed.front(),
-            Some(Divergence::RejectNextSubmit { .. })
-        ) {
-            let Some(Divergence::RejectNextSubmit { reason }) = self.armed.pop_front() else {
-                unreachable!()
-            };
+        // Divergence: reject the next submit outright. `RejectNextSubmit`
+        // carries no target, so it applies to whatever submit arrives next.
+        if let Some(Divergence::RejectNextSubmit { reason }) =
+            self.take_armed(|d| matches!(d, Divergence::RejectNextSubmit { .. }))
+        {
             return vec![ServerMessage::OrderRejected {
                 client_order_id: order.client_order_id,
                 reason,
@@ -184,20 +202,48 @@ impl Engine {
             ts_event: ts,
         }];
 
-        // Divergence: partial-fill the next order, leaving the remainder resting.
-        let fill_fraction = match self.armed.front() {
-            Some(Divergence::PartialFillNext {
-                client_order_id,
-                fraction,
-            }) if *client_order_id == order.client_order_id => {
-                let f = *fraction;
-                self.armed.pop_front();
-                f
-            }
+        // Divergence: partial-fill the next order, leaving the remainder
+        // resting. `PartialFillNext` is targeted: it applies only to the order
+        // whose id it names, so a divergence for a different order is left
+        // armed (it may match a later submit) and does not block the rest of
+        // the queue.
+        let order_id = order.client_order_id.clone();
+        let fill_fraction = match self.take_armed(|d| {
+            matches!(
+                d,
+                Divergence::PartialFillNext { client_order_id, .. }
+                    if *client_order_id == order_id
+            )
+        }) {
+            Some(Divergence::PartialFillNext { fraction, .. }) => fraction,
             _ => Decimal::ONE,
         };
 
-        let last_qty = order.quantity * fill_fraction;
+        // Defensive guard against an unvalidated `PartialFillNext.fraction`
+        // (there is no protocol-level `validate_divergence` yet). A real venue
+        // never reports a zero-qty fill, and a negative `last_qty` would book a
+        // bogus position/balance leg and emit an `OrderFilled` downstream
+        // nautilus may double-count or choke on. So:
+        //   * `fraction > 1` is clamped to a full fill (`last_qty` never
+        //     exceeds the order quantity);
+        //   * `fraction <= 0` (or any rounding that lands on a non-positive
+        //     quantity) drops the partial-fill behaviour entirely and treats
+        //     the order as a normal, unmodified submission - a full fill at its
+        //     own price.
+        // The legitimate `0 < fraction <= 1` path is untouched.
+        let last_qty = {
+            let candidate = (order.quantity * fill_fraction).min(order.quantity);
+            if candidate <= Decimal::ZERO {
+                let symbol = order.symbol.as_str();
+                tracing::warn!(
+                    %symbol,
+                    "PartialFillNext produced non-positive last_qty; treating as a normal full fill"
+                );
+                order.quantity
+            } else {
+                candidate
+            }
+        };
         let leaves_qty = order.quantity - last_qty;
         let last_px = order.price.unwrap_or(Decimal::ZERO);
 
@@ -215,9 +261,13 @@ impl Engine {
         };
 
         self.apply_fill(&fill);
-        let duplicate = matches!(self.armed.front(), Some(Divergence::DuplicateNextFill));
+        // Untargeted: applies to the fill just produced. Scanned (not peeked at
+        // `front()`) so a non-matching targeted `PartialFillNext` parked ahead
+        // of it in the queue cannot block it - see `take_armed`.
+        let duplicate = self
+            .take_armed(|d| matches!(d, Divergence::DuplicateNextFill))
+            .is_some();
         if duplicate {
-            self.armed.pop_front();
             out.push(ServerMessage::OrderFilled(fill.clone()));
         }
         out.push(ServerMessage::OrderFilled(fill));
@@ -231,10 +281,12 @@ impl Engine {
             });
         }
 
-        let drop_update = matches!(self.armed.front(), Some(Divergence::DropNextAccountUpdate));
-        if drop_update {
-            self.armed.pop_front();
-        } else {
+        // Untargeted: applies to this submit's account-state snapshot. Scanned
+        // for the same head-of-line-blocking reason as the duplicate divergence.
+        let drop_update = self
+            .take_armed(|d| matches!(d, Divergence::DropNextAccountUpdate))
+            .is_some();
+        if !drop_update {
             out.push(ServerMessage::AccountState(self.snapshot(ts)));
         }
         out
@@ -522,16 +574,16 @@ fn next_position(current: &PositionState, delta: Decimal, px: Decimal) -> Positi
     }
 
     if same_sign(current.qty, delta) {
-        let current_abs = abs(current.qty);
-        let delta_abs = abs(delta);
+        let current_abs = current.qty.abs();
+        let delta_abs = delta.abs();
         return PositionState {
             qty: current.qty + delta,
             avg_px: ((current_abs * current.avg_px) + (delta_abs * px)) / (current_abs + delta_abs),
         };
     }
 
-    let current_abs = abs(current.qty);
-    let delta_abs = abs(delta);
+    let current_abs = current.qty.abs();
+    let delta_abs = delta.abs();
     let qty = current.qty + delta;
     if delta_abs < current_abs {
         PositionState {
@@ -550,10 +602,6 @@ fn next_position(current: &PositionState, delta: Decimal, px: Decimal) -> Positi
 
 fn same_sign(a: Decimal, b: Decimal) -> bool {
     (a > Decimal::ZERO && b > Decimal::ZERO) || (a < Decimal::ZERO && b < Decimal::ZERO)
-}
-
-fn abs(value: Decimal) -> Decimal {
-    if value < Decimal::ZERO { -value } else { value }
 }
 
 #[cfg(test)]
@@ -746,6 +794,106 @@ mod tests {
         assert_eq!(out.len(), 4);
         assert!(matches!(out[1], ServerMessage::OrderFilled(_)));
         assert!(matches!(out[2], ServerMessage::OrderFilled(_)));
+    }
+
+    #[test]
+    fn mistargeted_partial_fill_does_not_block_later_divergences() {
+        // B.1: a `PartialFillNext` aimed at an order that is not the one being
+        // processed must stay armed (its target may arrive later) without
+        // head-of-line-blocking the divergences queued behind it.
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "O2".into(),
+            fraction: Decimal::from_f64(0.3).unwrap(),
+        });
+        e.arm(Divergence::DuplicateNextFill);
+
+        // O1 is submitted first; the O2-targeted partial must NOT apply to it,
+        // but the duplicate behind it must still fire (was silently disarmed).
+        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        assert_eq!(
+            out.len(),
+            4,
+            "duplicate fill should still fire behind the parked partial"
+        );
+        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        let first = fill(&out, 1);
+        let second = fill(&out, 2);
+        assert_eq!(
+            first.last_qty,
+            Decimal::from(10),
+            "O1 fills fully, untouched by the O2 partial"
+        );
+        assert_eq!(first.trade_id, second.trade_id);
+        assert!(matches!(out[3], ServerMessage::AccountState(_)));
+
+        // The O2-targeted partial is still armed and now applies to O2.
+        let out = e.process(ClientMessage::SubmitOrder(order("O2", 10)), 2);
+        let f = fill(&out, 1);
+        assert_eq!(f.last_qty, Decimal::from(3));
+        assert_eq!(f.leaves_qty, Decimal::from(7));
+        assert_eq!(e.open_orders().len(), 1);
+    }
+
+    #[test]
+    fn zero_fraction_partial_fill_falls_back_to_full_fill() {
+        // B.2: an unvalidated `fraction == 0` would compute `last_qty == 0` and
+        // emit a spurious zero-qty fill. The guard treats it as a normal full
+        // fill instead.
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "O1".into(),
+            fraction: Decimal::ZERO,
+        });
+        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+
+        assert_eq!(out.len(), 3);
+        let f = fill(&out, 1);
+        assert_eq!(
+            f.last_qty,
+            Decimal::from(10),
+            "zero fraction must not emit a zero-qty fill"
+        );
+        assert_eq!(f.leaves_qty, Decimal::ZERO);
+        assert!(e.open_orders().is_empty());
+    }
+
+    #[test]
+    fn negative_fraction_partial_fill_falls_back_to_full_fill() {
+        // B.2: a negative fraction would book a negative position/balance leg.
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "O1".into(),
+            fraction: Decimal::from(-1),
+        });
+        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+
+        let f = fill(&out, 1);
+        assert_eq!(f.last_qty, Decimal::from(10));
+        assert_eq!(f.leaves_qty, Decimal::ZERO);
+        let state = account(&out, 2);
+        assert_eq!(balance(state, "BTC").total, Decimal::from(10));
+    }
+
+    #[test]
+    fn over_one_fraction_partial_fill_clamps_to_full_fill() {
+        // B.2: `fraction > 1` would over-fill (`last_qty > quantity`, negative
+        // leaves). Clamp to a full fill.
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "O1".into(),
+            fraction: Decimal::from(3),
+        });
+        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+
+        let f = fill(&out, 1);
+        assert_eq!(
+            f.last_qty,
+            Decimal::from(10),
+            "over-unit fraction clamps to full quantity"
+        );
+        assert_eq!(f.leaves_qty, Decimal::ZERO);
+        assert!(e.open_orders().is_empty());
     }
 
     #[test]

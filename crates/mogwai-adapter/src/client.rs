@@ -339,7 +339,18 @@ impl DataClient for MogwaiDataClient {
         });
 
         self.task_handles.push(reader_handle);
-        wait_connected(&self.connected, &ws_url).await?;
+        // A timed-out connect must not orphan the reader task: it is already in
+        // task_handles and would keep looping/reconnecting on the shared
+        // `connected` flag, so a retry would spawn a second reader racing the
+        // first. Abort the task and clear the stale handle and ws_cmd before
+        // propagating, leaving the client cleanly disconnected for retry.
+        if let Err(err) = wait_connected(&self.connected, &ws_url).await {
+            if let Some(handle) = self.task_handles.pop() {
+                handle.abort();
+            }
+            self.ws_cmd = None;
+            return Err(err);
+        }
         Ok(())
     }
 
@@ -863,6 +874,15 @@ fn emit_trade(
     let Some(def) = instrument_def(instruments, &trade.symbol) else {
         return;
     };
+    // Advance this subscription's resume cursor to just past the delivered tick.
+    // On the WS path a reconnect re-issues `Subscribe { start_ts }`; pinning
+    // start_ts at the original subscription instant made the server replay the
+    // whole history on every reconnect (the connection-lifecycle havoc surface
+    // floods duplicate ticks). Advancing to `ts_event + 1` (exclusive of the
+    // delivered ts) mirrors the polling path's PollCursor so a reconnect resumes
+    // instead of replaying. The first subscribe still uses the originally
+    // requested instant because this only moves the cursor forward.
+    advance_sub_start_ts(subs, &trade.symbol, trade.ts_event);
     let state = sub_state(subs, &trade.symbol);
     let id = convert::instrument_id(&def);
     if state.as_ref().is_some_and(|s| s.trades > 0) {
@@ -1041,6 +1061,19 @@ fn active_to_bar(bar_type: BarType, active: &ActiveBar, def: &InstrumentDef) -> 
         UnixNanos::from(active.close_ts),
         now_unix_nanos(),
     )
+}
+
+/// Advances a subscription's `start_ts` resume cursor to just past `ts_event`
+/// (exclusive) so a WS reconnect resumes after the last delivered tick rather
+/// than replaying from the original subscription instant. Only ever moves the
+/// cursor forward; same-ns ticks already delivered before the reconnect are not
+/// re-requested. Saturates at `u64::MAX` to never wrap.
+fn advance_sub_start_ts(subs: &Arc<Mutex<HashMap<Symbol, SubState>>>, symbol: &str, ts_event: u64) {
+    let next = ts_event.saturating_add(1);
+    let mut subs = subs.lock().expect("subscription mutex poisoned");
+    if let Some(state) = subs.get_mut(symbol) {
+        state.start_ts = Some(state.start_ts.map_or(next, |existing| existing.max(next)));
+    }
 }
 
 fn sub_state(
@@ -1399,12 +1432,17 @@ fn date_to_unix_nanos(date: Option<chrono::DateTime<chrono::Utc>>) -> Option<Uni
 }
 
 fn now_unix_nanos() -> UnixNanos {
-    UnixNanos::from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos() as u64,
-    )
+    // Must not panic on the hot reader/dispatch task: a backward clock step
+    // (NTP correction, leap-second smear) makes `duration_since(UNIX_EPOCH)`
+    // an `Err`, and a far-future instant overflows `u64` nanos. Saturate a
+    // pre-epoch instant to 0 and clamp the `u128` nanos to `u64::MAX` rather
+    // than panicking the spawned task (which has no supervisor) or silently
+    // truncating. A shared mogwai-protocol helper is planned to fold this
+    // together with the server's `now_ns`.
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |dur| u64::try_from(dur.as_nanos()).unwrap_or(u64::MAX));
+    UnixNanos::from(nanos)
 }
 
 async fn wait_connected(connected: &Arc<AtomicBool>, ws_url: &str) -> anyhow::Result<()> {
@@ -1651,7 +1689,16 @@ impl ExecutionClient for MogwaiExecutionClient {
         });
 
         self.task_handles.push(reader_handle);
-        wait_connected(&self.connected, &ws_url).await?;
+        // See MogwaiDataClient::connect: a timed-out connect must abort the
+        // just-spawned reader and clear the stale handle/ws_cmd so a retry does
+        // not orphan the first task racing on the shared `connected` flag.
+        if let Err(err) = wait_connected(&self.connected, &ws_url).await {
+            if let Some(handle) = self.task_handles.pop() {
+                handle.abort();
+            }
+            self.ws_cmd = None;
+            return Err(err);
+        }
         self.core.set_connected();
         Ok(())
     }
@@ -1694,6 +1741,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                 venue_order_id: None,
                 ts_accepted: cmd.ts_init,
                 ts_last: cmd.ts_init,
+                seen_trades: std::collections::HashSet::new(),
             },
         );
         drop(state);
@@ -1946,6 +1994,13 @@ struct OrderRecord {
     venue_order_id: Option<VenueOrderId>,
     ts_accepted: UnixNanos,
     ts_last: UnixNanos,
+    /// `trade_id`s already applied to this order's reconciliation mirror. The
+    /// duplicate-fill divergence (`DuplicateNextFill`) and client-side
+    /// `duplicate_prob` deliberately deliver the same `OrderFilled` twice; the
+    /// duplicate wire event is forwarded downstream (the intended divergence),
+    /// but it must not double-apply to the mirror, so the second sighting of a
+    /// `trade_id` skips the filled_qty/avg_px/fills mutation.
+    seen_trades: std::collections::HashSet<TradeId>,
 }
 
 impl OrderRecord {
@@ -2079,8 +2134,8 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
             venue_order_id,
             quantity,
             price,
+            leaves_qty,
             ts_event,
-            ..
         } => {
             let client_order_id = ClientOrderId::from(client_order_id);
             let venue_order_id = VenueOrderId::from(venue_order_id);
@@ -2095,15 +2150,28 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 return;
             };
             let Some(record) = with_order_record(&ctx.state, client_order_id, |record| {
-                // An amend never reverses an in-progress fill: a partially filled
-                // order that is re-priced or re-sized stays PARTIALLY_FILLED so the
-                // mirror does not report Accepted alongside a non-zero filled_qty.
-                if record.status != OrderStatus::PartiallyFilled {
-                    record.status = OrderStatus::Accepted;
-                }
                 record.venue_order_id = Some(venue_order_id);
                 record.quantity = quantity;
                 record.price = price;
+                // The venue's `leaves_qty` is authoritative for the remaining
+                // size after the amend. Reconcile `filled_qty` so the mirror
+                // invariant `quantity - filled_qty == leaves_qty` holds even
+                // after a downsizing amend (which the bare `quantity` overwrite
+                // used to leave stale, drifting from the venue). Clamp at zero
+                // so a `leaves_qty` exceeding the new total cannot push
+                // `filled_qty` negative.
+                record.filled_qty = (quantity - leaves_qty).max(Decimal::ZERO);
+                // An amend never reverses an in-progress fill: an order with a
+                // non-zero filled_qty stays PARTIALLY_FILLED (or flips to FILLED
+                // when the amend leaves nothing outstanding) so the mirror does
+                // not report Accepted alongside a non-zero filled_qty.
+                record.status = if record.filled_qty.is_zero() {
+                    OrderStatus::Accepted
+                } else if leaves_qty.is_zero() {
+                    OrderStatus::Filled
+                } else {
+                    OrderStatus::PartiallyFilled
+                };
                 record.ts_last = UnixNanos::from(ts_event);
                 record.clone()
             }) else {
@@ -2165,36 +2233,43 @@ fn handle_order_filled(fill: mogwai_protocol::OrderFilled, ctx: &ExecContext) {
     let trade_id = TradeId::from(fill.trade_id);
     let last_qty = convert::quantity(fill.last_qty, def.size_precision);
     let last_px = convert::price(fill.last_px, def.price_precision);
-    let Some(record) = with_order_record(&ctx.state, client_order_id, |record| {
-        record.status = if fill.leaves_qty.is_zero() {
-            OrderStatus::Filled
-        } else {
-            OrderStatus::PartiallyFilled
-        };
-        record.venue_order_id = Some(venue_order_id);
-        let previous_notional = record
-            .avg_px
-            .unwrap_or(Decimal::ZERO)
-            .checked_mul(record.filled_qty)
-            .unwrap_or(Decimal::ZERO);
-        record.filled_qty += fill.last_qty;
-        let total_notional = previous_notional
-            .checked_add(
-                fill.last_px
-                    .checked_mul(fill.last_qty)
-                    .unwrap_or(Decimal::ZERO),
-            )
-            .unwrap_or(previous_notional);
-        if !record.filled_qty.is_zero() {
-            record.avg_px = total_notional.checked_div(record.filled_qty);
+    // A repeated `trade_id` for this order is a duplicate fill: the duplicate
+    // OrderFilled wire event is still forwarded below (the intended divergence),
+    // but the reconciliation mirror (filled_qty/avg_px/fills) must apply each
+    // economic fill exactly once, so the second sighting skips the mutation.
+    let Some((record, is_duplicate)) = with_order_record(&ctx.state, client_order_id, |record| {
+        let is_duplicate = !record.seen_trades.insert(trade_id);
+        if !is_duplicate {
+            record.status = if fill.leaves_qty.is_zero() {
+                OrderStatus::Filled
+            } else {
+                OrderStatus::PartiallyFilled
+            };
+            record.venue_order_id = Some(venue_order_id);
+            let previous_notional = record
+                .avg_px
+                .unwrap_or(Decimal::ZERO)
+                .checked_mul(record.filled_qty)
+                .unwrap_or(Decimal::ZERO);
+            record.filled_qty += fill.last_qty;
+            let total_notional = previous_notional
+                .checked_add(
+                    fill.last_px
+                        .checked_mul(fill.last_qty)
+                        .unwrap_or(Decimal::ZERO),
+                )
+                .unwrap_or(previous_notional);
+            if !record.filled_qty.is_zero() {
+                record.avg_px = total_notional.checked_div(record.filled_qty);
+            }
+            record.ts_last = UnixNanos::from(fill.ts_event);
         }
-        record.ts_last = UnixNanos::from(fill.ts_event);
-        record.clone()
+        (record.clone(), is_duplicate)
     }) else {
         return;
     };
 
-    {
+    if !is_duplicate {
         let mut state = ctx.state.lock().expect("execution state mutex poisoned");
         state.fills.push(FillRecord {
             client_order_id,
@@ -2940,6 +3015,7 @@ mod tests {
                 venue_order_id: None,
                 ts_accepted: UnixNanos::from(1),
                 ts_last: UnixNanos::from(1),
+                seen_trades: std::collections::HashSet::new(),
             },
         );
     }

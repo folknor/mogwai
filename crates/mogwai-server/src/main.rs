@@ -97,11 +97,16 @@ struct AppState {
 }
 
 /// Nanoseconds since the Unix epoch - the server's clock, fed into the engine.
+///
+/// Non-panicking: a backward clock step (NTP/leap) that puts `now` before the
+/// epoch saturates to 0 rather than panicking every order path and divergence
+/// arm, and the `u128` nanosecond count is clamped to `u64::MAX` rather than
+/// silently truncated. A shared protocol helper is planned to fold this with
+/// the adapter's identical clock reader.
 fn now_ns() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("clock before epoch")
-        .as_nanos() as u64
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
 }
 
 #[tokio::main]
@@ -292,7 +297,16 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             if now_ns() < dark_until_ns.load(Ordering::Relaxed) {
                 continue;
             }
-            let payload = serde_json::to_string(&msg).expect("serialize ServerMessage");
+            // Skip an un-serializable frame rather than panicking the writer
+            // task: this runs in a detached `tokio::spawn`, so an `expect` here
+            // would silently tear down the whole connection's outbound stream.
+            let payload = match serde_json::to_string(&msg) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::error!(%e, "dropping un-serializable ServerMessage");
+                    continue;
+                }
+            };
             if sink.send(Message::Text(payload.into())).await.is_err() {
                 break; // client gone
             }
@@ -392,12 +406,17 @@ fn spawn_replay(
             if speed > 0.0 {
                 if let Some(prev) = prev_ts {
                     let gap_ns = tick.ts_event().saturating_sub(prev);
-                    let mut wait_ms = (gap_ns as f64 / speed) as u64 / 1_000_000;
+                    // Pace at nanosecond resolution: integer-dividing the scaled
+                    // gap down to whole milliseconds collapses any sub-ms
+                    // inter-tick gap to a zero-delay send, so micros-apart bursts
+                    // (which the generator emits) wouldn't be paced at all and the
+                    // realized timeline would not track original_timeline / speed.
+                    let mut wait_ns = (gap_ns as f64 / speed) as u64;
                     if gap_cap_ms > 0 {
-                        wait_ms = wait_ms.min(gap_cap_ms);
+                        wait_ns = wait_ns.min(gap_cap_ms.saturating_mul(1_000_000));
                     }
-                    if wait_ms > 0 {
-                        std::thread::sleep(Duration::from_millis(wait_ms));
+                    if wait_ns > 0 {
+                        std::thread::sleep(Duration::from_nanos(wait_ns));
                     }
                 }
                 prev_ts = Some(tick.ts_event());

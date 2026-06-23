@@ -16,6 +16,36 @@ and those links are called out inline.
 
 ---
 
+## Fix progress
+
+**Fix wave 1 (landed)** - clearly-correct, self-contained bugs, one agent per crate,
+validated with `brokkr check`:
+
+- adapter `client.rs`: A.1 (mirror dedups fills by `trade_id`; the duplicate wire event
+  is still forwarded), A.2 (WS subscription `start_ts` advances as trades arrive, so
+  reconnect resumes instead of replaying), A.3 (connect-timeout aborts the leaked reader
+  task and clears `ws_cmd`), A.4 (`OrderUpdated` reconciles `filled_qty` from `leaves_qty`),
+  A.6 (`now_unix_nanos` saturates instead of panicking/truncating).
+- server `main.rs`/`source.rs`: E.3 (`BoundedSeek` returns `None` at the cap instead of a
+  pre-`start` tick), E.4 (replay paces at nanosecond resolution; sub-ms gaps no longer
+  collapse to zero), E.9 (writer logs+skips an un-serializable frame instead of panicking),
+  E.10 (`now_ns` saturates).
+- engine `lib.rs`: B.1 (armed-divergence consumption now scans for the first *applicable*
+  entry via `take_armed`, so a mistargeted `PartialFillNext` no longer head-of-line-blocks
+  the queue), B.2 (zero/negative `fraction` falls back to a full fill with a warning;
+  `fraction > 1` clamps to full - defensive pending the protocol `validate_divergence`),
+  plus the `abs(Decimal)` -> `Decimal::abs()` nit. Four regression tests added.
+
+**Held for the user (design decisions, not bugs to silently fix):** B.3 (what price a
+market order fills at), E.1/E.2/E.15 (`GoDark` per-session vs global, hold-vs-drop, and a
+clear/reset path), the `/quotes` stub (E.12 / G.bug9).
+
+**Planned next:** the cross-crate consolidations (validate_divergence, the
+`now`/`decimal`/`category` protocol helpers, deleting `engine::Instrument`), the data-crate
+fixes (C.1 `vol_hour`, C.7), and the test-suite hardening (F).
+
+---
+
 ## Most serious, across all waves (triage shortlist)
 
 These are the findings most likely to cause a real failure on the live-path / havoc
