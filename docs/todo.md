@@ -172,11 +172,6 @@ messages. What genuinely remains open:
 
 Deferred engineering (clear-cut, just larger than a one-wave fix):
 
-- [ ] **`GoDark` clear/reset control + bound `ms`.** The drop-not-hold and
-      process-global semantics are correct and endorsed (they are faithful to a
-      real blackout), but an absurd `ms` saturates `dark_until_ns` and bricks all
-      output until restart, and there is no way to clear an armed delay/dark
-      window. Add a clear/reset path and bound `ms`.
 - [ ] **Fallible `http_base_url` (D.13).** Currently infallible with an
       http-prefix fallback; a stricter `Result` contract would ripple through ~13
       `client.rs` call sites. Low priority now that `validate` rejects non-ws

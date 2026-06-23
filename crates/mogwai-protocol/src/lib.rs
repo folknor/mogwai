@@ -322,10 +322,12 @@ pub fn validate_market_regime(regime: &MarketRegime) -> Result<(), &'static str>
 /// API-boundary guard for an armed divergence, mirroring `validate_conn_havoc`
 /// and `validate_market_regime` in style and message convention.
 ///
-/// The only constrained variant is `PartialFillNext`: its `fraction` must lie
-/// in the half-open `(0, 1]` - a fill must move some quantity (`> 0`) and cannot
-/// exceed the order (`<= 1`). All other variants carry no constrainable numeric
-/// field and are always valid.
+/// `PartialFillNext.fraction` must lie in the half-open `(0, 1]`: a fill must
+/// move some quantity (`> 0`) and cannot exceed the order (`<= 1`).
+/// `DelayAcks.ms` and `GoDark.ms` are bounded by `MAX_DIVERGENCE_MS` so a
+/// control-plane request cannot arm an effectively permanent window.
+/// `ClearDivergences` and the engine-side single-shot variants are otherwise
+/// unconstrained.
 ///
 /// The engine also applies a defensive runtime clamp (a `fraction > 1` becomes a
 /// full fill, a `fraction <= 0` becomes a full fill with a warning), but that is
@@ -339,11 +341,16 @@ pub fn validate_divergence(div: &control::Divergence) -> Result<(), &'static str
             }
             Ok(())
         }
+        control::Divergence::DelayAcks { ms } | control::Divergence::GoDark { ms } => {
+            if *ms > control::MAX_DIVERGENCE_MS {
+                return Err("DelayAcks/GoDark ms must be <= 3600000 (one hour)");
+            }
+            Ok(())
+        }
         control::Divergence::RejectNextSubmit { .. }
-        | control::Divergence::DelayAcks { .. }
         | control::Divergence::DuplicateNextFill
         | control::Divergence::DropNextAccountUpdate
-        | control::Divergence::GoDark { .. } => Ok(()),
+        | control::Divergence::ClearDivergences => Ok(()),
     }
 }
 
@@ -769,6 +776,7 @@ mod tests {
                     fraction: Decimal::new(5, 1),
                 },
                 control::Divergence::GoDark { ms: 250 },
+                control::Divergence::ClearDivergences,
             ],
             data: Some(MarketRegime::LiquidityDrought { thin_factor: 5.0 }),
             conn: ConnHavoc {
@@ -788,6 +796,11 @@ mod tests {
         let decoded: HavocSpec = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded, spec);
+
+        let clear_json = serde_json::to_string(&control::Divergence::ClearDivergences).unwrap();
+        assert_eq!(clear_json, r#"{"type":"ClearDivergences"}"#);
+        let clear: control::Divergence = serde_json::from_str(&clear_json).unwrap();
+        assert_eq!(clear, control::Divergence::ClearDivergences);
 
         let clean = HavocSpec::default();
         let json = serde_json::to_string(&clean).unwrap();
@@ -1100,17 +1113,44 @@ mod tests {
             );
         }
 
-        // Every other variant is unconditionally valid.
+        // Server-owned delay/dark windows are bounded, while `0` remains valid
+        // as the disarm value.
+        for div in [
+            control::Divergence::DelayAcks {
+                ms: control::MAX_DIVERGENCE_MS,
+            },
+            control::Divergence::GoDark {
+                ms: control::MAX_DIVERGENCE_MS,
+            },
+            control::Divergence::DelayAcks { ms: 0 },
+            control::Divergence::GoDark { ms: 0 },
+        ] {
+            validate_divergence(&div).expect("bounded ms value is valid");
+        }
+        for div in [
+            control::Divergence::DelayAcks {
+                ms: control::MAX_DIVERGENCE_MS + 1,
+            },
+            control::Divergence::GoDark {
+                ms: control::MAX_DIVERGENCE_MS + 1,
+            },
+        ] {
+            assert_eq!(
+                validate_divergence(&div),
+                Err("DelayAcks/GoDark ms must be <= 3600000 (one hour)")
+            );
+        }
+
+        // Every non-numeric variant is unconditionally valid.
         for div in [
             control::Divergence::RejectNextSubmit {
                 reason: "nope".into(),
             },
-            control::Divergence::DelayAcks { ms: 5 },
             control::Divergence::DuplicateNextFill,
             control::Divergence::DropNextAccountUpdate,
-            control::Divergence::GoDark { ms: 25 },
+            control::Divergence::ClearDivergences,
         ] {
-            validate_divergence(&div).expect("non-PartialFill variants are always valid");
+            validate_divergence(&div).expect("non-numeric variants are always valid");
         }
     }
 
@@ -1292,6 +1332,14 @@ pub struct QuoteTick {
 pub mod control {
     use super::{ClientOrderId, Decimal, Deserialize, Serialize};
 
+    /// Upper bound on any single divergence's `ms` window, enforced by
+    /// `validate_divergence`.
+    ///
+    /// One hour is far longer than any test blackout or ack-delay scenario
+    /// needs, and `3_600_000 * 1_000_000` ns is well below `u64::MAX`, so a
+    /// validated `GoDark` cannot saturate `dark_until_ns` and brick the writer.
+    pub const MAX_DIVERGENCE_MS: u64 = 3_600_000;
+
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     #[serde(tag = "type")]
     pub enum Divergence {
@@ -1302,13 +1350,25 @@ pub mod control {
         },
         /// Reject the next submitted order with `reason`.
         RejectNextSubmit { reason: String },
-        /// Delay every outbound execution event by `ms`.
+        /// Delay every outbound execution event by `ms`, bounded by
+        /// `MAX_DIVERGENCE_MS`. Arm with `ms: 0` to clear, or post
+        /// `ClearDivergences`.
         DelayAcks { ms: u64 },
         /// Emit the next fill event twice.
         DuplicateNextFill,
         /// Swallow the next fill-driven account-state update (induce account drift).
         DropNextAccountUpdate,
-        /// Stop sending anything for `ms` (simulate a venue blackout).
+        /// Stop sending anything for `ms` (simulate a venue blackout), bounded
+        /// by `MAX_DIVERGENCE_MS`. Frames produced during the window are
+        /// dropped, not buffered. Post `ClearDivergences` to lift the window
+        /// early.
         GoDark { ms: u64 },
+        /// Clear the server-owned temporal windows: cancel any armed
+        /// `DelayAcks` and any armed `GoDark`.
+        ///
+        /// This does not flush engine-side single-shot divergences
+        /// (`PartialFillNext`, `RejectNextSubmit`, `DuplicateNextFill`,
+        /// `DropNextAccountUpdate`), which self-disarm on their own trigger.
+        ClearDivergences,
     }
 }

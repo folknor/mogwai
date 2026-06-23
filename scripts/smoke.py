@@ -19,6 +19,7 @@ then run this script.
 import json
 import socket
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -33,8 +34,11 @@ def post_divergence(payload: dict) -> int:
         headers={"content-type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req) as r:
-        return r.status
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
 
 
 def post_order(payload: dict) -> list:
@@ -397,6 +401,45 @@ def main() -> None:
     assert recovered["symbol"] == "KEUR", recovered
     assert recovered["ts_event"] >= WINDOW_START_TS, recovered
     print("PASS: GoDark drops blackout frames instead of buffering them")
+
+    assert post_divergence({"type": "GoDark", "ms": 3_600_001}) == 400
+    assert post_divergence({"type": "DelayAcks", "ms": 3_600_001}) == 400
+
+    assert post_divergence({"type": "GoDark", "ms": 60_000}) == 202
+    ws = WsClient(timeout=0.3)
+    ws.send({"type": "Subscribe", "symbols": ["KEUR"], "start_ts": WINDOW_START_TS})
+    try:
+        dark = ws.read()
+    except socket.timeout:
+        dark = None
+    ws.close()
+    assert dark is None, dark
+
+    assert post_divergence({"type": "ClearDivergences"}) == 202
+    ws = WsClient(timeout=3.0)
+    ws.send({"type": "Subscribe", "symbols": ["KEUR"], "start_ts": WINDOW_START_TS})
+    recovered = ws.read()
+    ws.close()
+    print("cleared:  ", recovered)
+    assert recovered["type"] == "Trade", recovered
+    assert recovered["symbol"] == "KEUR", recovered
+    assert recovered["ts_event"] >= WINDOW_START_TS, recovered
+
+    assert post_divergence({"type": "DelayAcks", "ms": 60_000}) == 202
+    assert post_divergence({"type": "ClearDivergences"}) == 202
+    ws = WsClient(timeout=1.0)
+    ws.send(submit_order("D3"))
+    start = time.monotonic()
+    prompt = ws.read()
+    elapsed = time.monotonic() - start
+    ws.close()
+    print("cleared-delay:", prompt)
+    assert prompt["type"] == "OrderAccepted", prompt
+    assert elapsed < 0.2, elapsed
+    print(
+        "PASS: ClearDivergences lifts a live dark/delay window "
+        "and over-bound ms is rejected"
+    )
 
 
 if __name__ == "__main__":

@@ -170,22 +170,31 @@ async fn arm_divergence(
             let until = now_ns().saturating_add(ms.saturating_mul(1_000_000));
             state.dark_until_ns.store(until, Ordering::Relaxed);
         }
-        // Server-ownership contract (pins B.4 / E.11): `DelayAcks` and `GoDark`
-        // are temporal, connection-scoped divergences with no synchronous
+        Divergence::ClearDivergences => {
+            // Lift both server-owned temporal windows process-wide. `0` is the
+            // cleared sentinel: `delay_ms == 0` skips the writer's delay sleep,
+            // and `now_ns() < 0` is never true so the dark guard is off. There
+            // is no backlog to replay because blackout frames are dropped.
+            state.delay_ms.store(0, Ordering::Relaxed);
+            state.dark_until_ns.store(0, Ordering::Relaxed);
+        }
+        // Server-ownership contract (pins B.4 / E.11): `DelayAcks`, `GoDark`,
+        // and `ClearDivergences` are server-owned controls with no synchronous
         // engine-side trigger. The server owns them - they are applied here via
-        // `delay_ms` / `dark_until_ns` and must NEVER reach `engine.arm()`, which
-        // silently drops both variants (`Engine::arm`). The two arms above
-        // intercept them before this catch-all, so `engine_div` can only be one
-        // of the four engine-side variants. The assert makes a future refactor
-        // that forwards a whole `HavocSpec.server` vec straight to `engine.arm()`
-        // fail loudly rather than silently losing the blackout/delay knobs.
+        // `delay_ms` / `dark_until_ns` and must NEVER reach `engine.arm()`.
+        // The arms above intercept them before this catch-all, so `engine_div`
+        // can only be one of the four engine-side variants. The assert makes a
+        // future refactor that forwards a whole `HavocSpec.server` vec straight
+        // to `engine.arm()` fail loudly rather than silently losing these knobs.
         engine_div => {
             debug_assert!(
                 !matches!(
                     engine_div,
-                    Divergence::DelayAcks { .. } | Divergence::GoDark { .. }
+                    Divergence::DelayAcks { .. }
+                        | Divergence::GoDark { .. }
+                        | Divergence::ClearDivergences
                 ),
-                "DelayAcks/GoDark are server-owned and must not be forwarded to engine.arm()",
+                "DelayAcks/GoDark/ClearDivergences are server-owned and must not be forwarded to engine.arm()",
             );
             state.engine.lock().await.arm(engine_div);
         }

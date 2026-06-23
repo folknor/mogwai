@@ -109,14 +109,13 @@ impl Engine {
     /// Arm a divergence to fire on the next matching trigger (control plane).
     pub fn arm(&mut self, d: Divergence) {
         match d {
-            // Temporal, connection-scoped divergences are owned by the server's
-            // outbound layer, not the synchronous clock-free engine. They have
-            // no engine-side trigger, so `take_armed` would never consume them;
-            // dropping them here keeps them from accumulating as dead entries in
-            // the armed queue. (Engine-side consumption no longer head-of-line
-            // blocks regardless - see `take_armed` - but these still have no
-            // home here.)
-            Divergence::DelayAcks { .. } | Divergence::GoDark { .. } => {}
+            // Server-owned temporal/control divergences have no engine-side
+            // trigger, so `take_armed` would never consume them. Dropping them
+            // here keeps them from accumulating as dead entries in the armed
+            // queue.
+            Divergence::DelayAcks { .. }
+            | Divergence::GoDark { .. }
+            | Divergence::ClearDivergences => {}
             other => self.armed.push_back(other),
         }
     }
@@ -768,6 +767,7 @@ mod tests {
         let mut e = Engine::new();
         e.arm(Divergence::DelayAcks { ms: 100 });
         e.arm(Divergence::GoDark { ms: 100 });
+        e.arm(Divergence::ClearDivergences);
         e.arm(Divergence::DuplicateNextFill);
 
         let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
@@ -775,6 +775,19 @@ mod tests {
         assert_eq!(out.len(), 4);
         assert!(matches!(out[1], ServerMessage::OrderFilled(_)));
         assert!(matches!(out[2], ServerMessage::OrderFilled(_)));
+    }
+
+    #[test]
+    fn clear_divergences_is_dropped_not_queued() {
+        let mut e = Engine::new();
+        e.arm(Divergence::ClearDivergences);
+
+        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+
+        assert_eq!(out.len(), 3);
+        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(out[1], ServerMessage::OrderFilled(_)));
+        assert!(matches!(out[2], ServerMessage::AccountState(_)));
     }
 
     #[test]
