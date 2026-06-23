@@ -4,8 +4,11 @@
 //!
 //! The engine is intentionally synchronous and side-effect free: `process` takes
 //! a [`ClientMessage`] and returns the [`ServerMessage`]s to send. The server
-//! owns sockets, timers and the clock; the engine owns matching and state. This
-//! keeps the divergence behaviour deterministic and unit-testable.
+//! owns sockets, timers and the clock; the engine owns order and account state.
+//! Fills are synthetic - mogwai never matches against a book or a market - so
+//! the fill an order gets is whatever the armed divergences dictate, defaulting
+//! to an immediate full fill at the order's own price. This keeps the divergence
+//! behaviour deterministic and unit-testable.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
