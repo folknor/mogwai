@@ -3457,6 +3457,70 @@ mod tests {
     }
 
     #[test]
+    fn draw_at_intermediate_probability_is_seeded_and_mixed() {
+        // F.6: every other havoc test pins the probability to 1.0 or 0.0, so the
+        // `> 0.0` short-circuit (false) or the always-true `r#gen::<f64>() < 1.0`
+        // arm (true) decides every draw and the seeded RNG is never consulted.
+        // A regression in the seeding (wrong seed plumbed in, `from_entropy`
+        // taken instead) or the draw arithmetic (`<=` vs `<`) would slip through
+        // silently. This pins a mid-range probability against a fixed seed and
+        // asserts the exact fire/no-fire sequence over several draws, so it is
+        // sensitive to both the seed and the comparison and is robust to nothing
+        // but a real behavior change.
+        //
+        // The expected sequence below is the literal output of `StdRng`
+        // seed_from_u64(SEED) drawing `gen::<f64> < 0.5` ten times. It is a
+        // genuine mix of true and false (asserted), so a draw that ignored the
+        // RNG and returned a constant could not reproduce it. The same SEED on a
+        // second filter must reproduce the run bit for bit (determinism); a
+        // different seed must diverge somewhere (the seed is actually consulted).
+        const SEED: u64 = 0xC0FF_EE12_3456_789A;
+        const PROBABILITY: f64 = 0.5;
+
+        let havoc = ClientHavoc {
+            seed: Some(SEED),
+            ..ClientHavoc::default()
+        };
+
+        let mut filter = HavocFilter::from_client(&havoc);
+        let actual: Vec<bool> = (0..10).map(|_| filter.draw(PROBABILITY)).collect();
+
+        let expected = [
+            true, true, true, false, true, true, false, false, true, true,
+        ];
+        assert_eq!(
+            actual, expected,
+            "seeded draw sequence drifted: seeding or draw arithmetic changed"
+        );
+
+        // Guard against the sequence degenerating to all-one-way, which would
+        // make the test pass even if the draw ignored its argument or its RNG.
+        assert!(
+            expected.iter().any(|&b| b) && expected.iter().any(|&b| !b),
+            "the pinned sequence must mix fire and no-fire to exercise the draw"
+        );
+
+        // Same seed reproduces the run exactly (determinism), so the outcome is a
+        // function of the seed and not of process entropy.
+        let mut twin = HavocFilter::from_client(&havoc);
+        let twin_seq: Vec<bool> = (0..10).map(|_| twin.draw(PROBABILITY)).collect();
+        assert_eq!(twin_seq, expected, "identical seed must replay identically");
+
+        // A different seed must change the sequence somewhere; if it did not, the
+        // seed would not be reaching the RNG at all.
+        let other = ClientHavoc {
+            seed: Some(SEED ^ 1),
+            ..ClientHavoc::default()
+        };
+        let mut other_filter = HavocFilter::from_client(&other);
+        let other_seq: Vec<bool> = (0..10).map(|_| other_filter.draw(PROBABILITY)).collect();
+        assert_ne!(
+            other_seq, expected,
+            "a different seed must produce a different draw sequence"
+        );
+    }
+
+    #[test]
     fn accepted_then_filled_then_account_drive_exec_events() {
         let (ctx, mut rx) = exec_context();
 

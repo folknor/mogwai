@@ -172,9 +172,14 @@ messages. What genuinely remains open:
 
 Deferred engineering (clear-cut, just larger than a one-wave fix):
 
-- [ ] **Seeded-RNG determinism test (F.6).** All probabilistic havoc tests use
-      `prob` 1.0/0.0, so the seed is never load-bearing. Add a `draw`-level test
-      at an intermediate probability with a pinned seed.
+- [ ] **Per-dispatch seed-decorrelation test (F.6 follow-up).** F.6 closed: a
+      seeded-draw test at an intermediate probability now locks `HavocFilter::draw`.
+      The adjacent seam is still untested - `client_havoc_for_dispatch` XORs the
+      configured seed with a per-dispatch counter (`*seed ^= counter`) so each
+      dispatched order gets a distinct-but-deterministic havoc stream. A regression
+      that dropped the XOR would silently make every order share one stream; add a
+      test that pins the seed and asserts two successive dispatches draw different
+      (but individually reproducible) sequences.
 - [ ] **Generic havoc dispatch/flush (dup #12).** Four near-identical
       `dispatch_*`/`flush_*` wrappers in `mogwai-adapter` `client.rs` (market vs
       exec) could collapse into one generic pair (~50 lines).
