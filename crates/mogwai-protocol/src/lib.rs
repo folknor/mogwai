@@ -392,6 +392,20 @@ pub struct HavocLatency {
     pub data_nanos: u64,
 }
 
+/// Always-on baseline inbound network latency for the honest default feed.
+///
+/// A modest one-way delay carried by every inbound event regardless of armed
+/// havoc, so the no-havoc path still has realistic network delay. Armed
+/// `ClientHavoc.latency`, when present, adds on top of this baseline instead of
+/// replacing it: the network's own latency is always present, and havoc latency
+/// is an additional perturbation above the honest floor.
+pub const BASELINE_LATENCY: HavocLatency = HavocLatency {
+    base_nanos: 30_000_000,
+    exec_event_nanos: 0,
+    fill_nanos: 0,
+    data_nanos: 0,
+};
+
 impl HavocLatency {
     /// Effective delay for an inbound event, composing base into the category.
     #[must_use]

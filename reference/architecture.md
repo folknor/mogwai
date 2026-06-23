@@ -175,10 +175,11 @@ Owns the sockets, the clock, and replay pacing.
   via shared atomics.
 - **Run config** comes from a `mogwai.toml` read at startup - overridable with
   `--config <path>`, built-in defaults when absent - carrying the replay `speed`
-  multiplier (1.0 paces to real wall-clock gaps, the live-venue default; 0.0 is
-  unthrottled) and the `gap_cap_ms` paced-sleep cap. This replaced the former
-  `MOGWAI_REPLAY_SPEED` / `MOGWAI_GAP_CAP_MS` environment variables: run knobs
-  belong in explicit input, not ambient environment.
+  multiplier (the built-in default is 1.0, which paces to real wall-clock gaps;
+  0.0 is an explicit unthrottled firehose) and the `gap_cap_ms` paced-sleep cap.
+  This replaced the former `MOGWAI_REPLAY_SPEED` / `MOGWAI_GAP_CAP_MS`
+  environment variables: run knobs belong in explicit input, not ambient
+  environment.
 
 ## mogwai-adapter - the nautilus venue adapter
 
@@ -244,8 +245,11 @@ at factory `create` time) arms all four surfaces of the havoc:
 - **Client half.** A seeded `HavocFilter` that corrupts the inbound stream in
   flight - latency, drop, duplicate, adjacent-reorder - threaded through every
   drain path (the data and exec WS readers, the polling loop, and the
-  per-dispatch exec-over-HTTP path). A clean `None` spec is a byte-identical
-  passthrough.
+  per-dispatch exec-over-HTTP path). A clean `None` spec has no opt-in
+  corruption, but still carries the honest baseline inbound network latency: 30
+  ms one-way on every inbound event. Armed `ClientHavoc.latency` adds on top of
+  that baseline rather than replacing it; drop, duplicate, and reorder remain
+  opt-in.
 - **Data half.** A `MarketRegime` on `HavocSpec.data` that corrupts the *market
   before it is produced*, perturbing the generator's parameters at
   source-construction time rather than corrupting events after they exist. Four

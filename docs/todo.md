@@ -115,24 +115,7 @@ spec or code until the nautilus seam exists.
 - [ ] Then write the spec per `reference/technical-implementation-spec.md`
       before any mogwai/adapter code (this item is the TODO source it cites).
 
-### 3. Honest default: a realistically-paced live feed
-
-Per the Direction note the honest default should *be* a realistic live feed; it
-currently is not (a zero-latency firehose). This is NOT a new non-havoc surface -
-`speed` and `ClientHavoc.latency` already ARE the knobs; the work is choosing
-honest *default values* for them, on top of which the havoc layers extra:
-
-- [ ] Server pacing defaults to `speed = 0.0` (unthrottled - dumps ticks as fast
-      as the client drains). Flip the honest default to wall-clock pacing, i.e.
-      respect the generator's inter-arrival gaps in real time (the `speed = 1.0`
-      baseline). Until the coherent clock (item 2) lands this is a `mogwai.toml`
-      default change; afterwards it is the 1x point of the acceleration axis.
-- [ ] `ClientHavoc.latency` defaults to `null` (zero injected delay). Give it a
-      modest non-null default so the honest baseline carries realistic network
-      latency; arming additional havoc latency then layers on top of that
-      default. Same knob, honest default value - not a separate surface.
-
-### 4. Havoc expansion: acked-but-silent data stall (4255-shaped)
+### 3. Havoc expansion: acked-but-silent data stall (4255-shaped)
 
 Direction: more havoc. `GoDark` is all-or-nothing and time-bounded - it stops
 *everything*, so a frame-level idle timeout catches it (the easy-to-detect
@@ -143,8 +126,9 @@ exactly why that issue argues for a per-subscription data watchdog.
 
 - [ ] New `control::Divergence` (e.g. `StallData` / `GoQuiet { ms }`) that
       suppresses only market-data (`Trade` / `Quote`) frames while leaving
-      execution frames alive. Cleanly additive: a 7th `Divergence` variant plus a
-      writer rule, and it needs `validate_divergence` coverage.
+      execution frames alive. Cleanly additive: a new `Divergence` variant plus a
+      writer rule, and it needs `validate_divergence` coverage (and the same
+      `ms` bound as `GoDark` / `DelayAcks` if it carries an `ms`).
 - [ ] Optional server-originated heartbeat so the connection has a liveness
       signal that survives the stall - the full 4255 reproduction. mogwai's
       server has none today (the `heartbeat_interval_ms` knob is the *client*
@@ -152,7 +136,7 @@ exactly why that issue argues for a per-subscription data watchdog.
       stall is invisible to any frame-level idle timeout and only a data watchdog
       can catch it.
 
-### 5. Author `reference/havoc.md`
+### 4. Author `reference/havoc.md`
 
 Durable reference doc for the divergence/havoc surfaces. Covers the four-surface
 `HavocSpec` (client / server / data / connection-lifecycle), every `Divergence`
@@ -161,21 +145,15 @@ and applies them vs what the engine owns, the validation boundaries
 (`validate_divergence`, `validate_market_regime`, `validate_conn_havoc`), and -
 per the Direction note - the honest default vs the opt-in havoc surfaces. Read
 `reference/technical-implementation-spec.md` first for what such a doc must
-contain. Best written after items 3 and 4 settle the default and the stall
-divergence, so the doc describes the real surface.
+contain. The honest default has landed; best written after item 3 (the stall
+divergence) settles, so the doc describes the real surface.
 
-### 6. Bug-hunt follow-ups - the residual tail
+### 5. Bug-hunt follow-ups - the residual tail
 
-The fix waves are done; the scope conversation above resolved most of what was
-parked here. Tags (`B.8`, `C.2`, etc.) cross-reference the fix-wave commit
-messages. What genuinely remains open:
-
-Deferred engineering (clear-cut, just larger than a one-wave fix):
-
-- [ ] **Fallible `http_base_url` (D.13).** Currently infallible with an
-      http-prefix fallback; a stricter `Result` contract would ripple through ~13
-      `client.rs` call sites. Low priority now that `validate` rejects non-ws
-      `base_url` up front.
+The fix waves are done, and every follow-up that was open here has now landed
+or been closed - nothing in this section remains open. The lists below record
+the closed and wontfix decisions so they are not re-flagged. Tags (`B.8`,
+`C.2`, etc.) cross-reference the fix-wave commit messages.
 
 Resolved by the scope conversation - closed, NOT to be re-flagged as bugs:
 
@@ -223,6 +201,13 @@ Wontfix / accepted as-is (recorded so they are not re-flagged):
   the current havoc model; revisit only if the model changes.
 - The adapter test suite is `#[ignore]`d so CI only compiles it (F.20) - a
   deliberate socket-sandbox tradeoff.
+- `http_base_url` stays infallible (D.13) - `validate_base_url` rejects any
+  non-ws/wss `base_url` up front (D.4), so the helper's non-ws fallback is
+  unreachable defensive code, already pinned by a test. Making it fallible would
+  thread `Result` through ~13 call sites to surface an error that cannot occur,
+  and would contradict the authoritative-gate-plus-total-function-downstream
+  pattern used elsewhere (the GoDark saturating arithmetic, `validate_divergence`).
+  Kept total by design.
 
 ## Notes / gotchas
 

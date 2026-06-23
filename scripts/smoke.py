@@ -8,9 +8,9 @@ so there's nothing to install.
 
 Connects to a server at 127.0.0.1:8787; it does not start one. The windowing,
 Unsubscribe-stop, gap-cap, DelayAcks, and GoDark steps need PACED replay against
-the generated stream. The committed mogwai.toml sets speed = 1.0, so a plain
-launch paces correctly (unthrottled speed 0.0 makes those steps race and fail
-spuriously):
+the generated stream. The built-in default and the committed mogwai.toml both
+set speed = 1.0, so a plain launch paces correctly (unthrottled speed 0.0 makes
+those steps race and fail spuriously):
 
     brokkr run -p mogwai-server
 

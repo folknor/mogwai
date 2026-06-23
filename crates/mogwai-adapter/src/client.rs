@@ -1409,8 +1409,12 @@ impl HavocFilter {
     }
 
     fn delay_for(&self, msg: &ServerMessage) -> Duration {
-        self.latency
-            .map_or(Duration::ZERO, |latency| latency.delay_for(msg.category()))
+        let category = msg.category();
+        let baseline = mogwai_protocol::BASELINE_LATENCY.delay_for(category);
+        let armed = self
+            .latency
+            .map_or(Duration::ZERO, |latency| latency.delay_for(category));
+        baseline + armed
     }
 
     fn draw(&mut self, probability: f64) -> bool {
@@ -3376,10 +3380,11 @@ mod tests {
     #[test]
     fn account_state_buckets_into_exec_latency_not_data() {
         // Distinct knobs so a misbucket is observable: base 5ns, exec +20,
-        // fill +30, data +40. The bug this pins had `AccountState` riding the
-        // data knob; it is an account/execution event and must take exec
-        // latency. Both ends key off `ServerMessage::category`, so this asserts
-        // the adapter side of that shared classification.
+        // fill +30, data +40. The always-on 30ms baseline adds on top of those
+        // armed values. The bug this pins had `AccountState` riding the data
+        // knob; it is an account/execution event and must take exec latency.
+        // Both ends key off `ServerMessage::category`, so this asserts the
+        // adapter side of that shared classification.
         let havoc = ClientHavoc {
             latency: Some(HavocLatency {
                 base_nanos: 5,
@@ -3398,8 +3403,8 @@ mod tests {
         });
         assert_eq!(
             filter.delay_for(&account),
-            Duration::from_nanos(25),
-            "AccountState takes base + exec latency, not data"
+            Duration::from_nanos(30_000_025),
+            "AccountState takes baseline + armed base + exec latency, not data"
         );
 
         let trade = ServerMessage::Trade(TradeTick {
@@ -3411,8 +3416,8 @@ mod tests {
         });
         assert_eq!(
             filter.delay_for(&trade),
-            Duration::from_nanos(45),
-            "trades still take base + data latency"
+            Duration::from_nanos(30_000_045),
+            "trades still take baseline + armed base + data latency"
         );
 
         let fill = ServerMessage::OrderFilled(mogwai_protocol::OrderFilled {
@@ -3429,8 +3434,40 @@ mod tests {
         });
         assert_eq!(
             filter.delay_for(&fill),
-            Duration::from_nanos(35),
-            "fills still take base + fill latency"
+            Duration::from_nanos(30_000_035),
+            "fills still take baseline + armed base + fill latency"
+        );
+    }
+
+    #[test]
+    fn no_armed_latency_still_carries_baseline() {
+        // `ClientHavoc` with no latency covers both no-havoc and an explicit
+        // client object without a latency key. It must still carry the honest
+        // baseline, and armed latency must add on top rather than replace it.
+        let filter = HavocFilter::from_client(&ClientHavoc::default());
+        let trade = ServerMessage::Trade(TradeTick {
+            symbol: "BTCUSDT".into(),
+            price: Decimal::new(1, 0),
+            size: Decimal::new(1, 0),
+            aggressor: mogwai_protocol::AggressorSide::NoAggressor,
+            ts_event: 1,
+        });
+        assert_eq!(
+            filter.delay_for(&trade),
+            mogwai_protocol::BASELINE_LATENCY.delay_for(mogwai_protocol::EventKind::Data)
+        );
+
+        let armed = HavocFilter::from_client(&ClientHavoc {
+            latency: Some(HavocLatency {
+                base_nanos: 7,
+                ..Default::default()
+            }),
+            ..ClientHavoc::default()
+        });
+        assert_eq!(
+            armed.delay_for(&trade),
+            mogwai_protocol::BASELINE_LATENCY.delay_for(mogwai_protocol::EventKind::Data)
+                + Duration::from_nanos(7)
         );
     }
 

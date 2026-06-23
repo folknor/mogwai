@@ -43,7 +43,8 @@ use tokio::sync::{Mutex, mpsc};
 #[serde(default)]
 struct Config {
     /// Replay speed multiplier. `0.0` means unthrottled (stream as fast as the client
-    /// drains); otherwise inter-tick wall delay = (tick gap) / speed.
+    /// drains). `1.0` is the default and paces to real wall-clock gaps; otherwise
+    /// inter-tick wall delay = (tick gap) / speed.
     speed: f64,
     /// Maximum wall-clock sleep between two ticks under paced replay, in
     /// milliseconds. `0` disables the cap.
@@ -53,7 +54,13 @@ struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            speed: 0.0,
+            // Honest-by-default: wall-clock pace the generator's inter-arrival
+            // gaps so a no-config server serves a realistic live feed, matching
+            // the committed mogwai.toml. 0.0 remains available as an explicit
+            // firehose for fast local iteration. Until the coherent simulated
+            // clock lands this is the 1x baseline; afterwards it is the 1x point
+            // of the acceleration axis.
+            speed: 1.0,
             gap_cap_ms: 1000,
         }
     }
