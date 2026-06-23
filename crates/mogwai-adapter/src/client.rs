@@ -3,7 +3,7 @@ use std::{
     str::FromStr,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -11,7 +11,10 @@ use std::{
 use anyhow::{Context, ensure};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
-use mogwai_protocol::{ClientMessage, InstrumentDef, ServerMessage, Side, Symbol, TradeTick};
+use mogwai_protocol::{
+    ClientHavoc, ClientMessage, EventKind, HavocLatency, HavocSpec, InstrumentDef, ServerMessage,
+    Side, Symbol, TradeTick,
+};
 use nautilus_common::{
     clients::{DataClient, ExecutionClient},
     live::{get_data_event_sender, get_runtime, try_get_exec_event_sender},
@@ -42,6 +45,7 @@ use nautilus_model::{
     types::{AccountBalance, MarginBalance, Money, currency::Currency},
 };
 use nautilus_network::http::HttpClient;
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
@@ -229,6 +233,9 @@ impl DataClient for MogwaiDataClient {
         let sink = self.sink()?;
         let http_base_url = self.config.http_base_url();
         seed_instruments(&self.http, &http_base_url, &self.instruments).await?;
+        // Server-side divergences are execution-owned. The data client accepts
+        // the same config object but only applies its client-side transport half.
+        let client_havoc = client_havoc(&self.config.havoc);
 
         if self.config.transport_profile.data_by_polling() {
             let connected = Arc::clone(&self.connected);
@@ -238,6 +245,7 @@ impl DataClient for MogwaiDataClient {
             let subs = Arc::clone(&self.subs);
             let bars = Arc::clone(&self.bars);
             let cursor = Arc::clone(&self.poll_cursor);
+            let havoc_filter = HavocFilter::from_client(&client_havoc);
             let poll_handle = tokio::spawn(async move {
                 poll_market_data(DataPollContext {
                     http,
@@ -248,6 +256,7 @@ impl DataClient for MogwaiDataClient {
                     bars,
                     cursor,
                     connected,
+                    havoc_filter,
                 })
                 .await;
             });
@@ -281,6 +290,7 @@ impl DataClient for MogwaiDataClient {
         let instruments = Arc::clone(&self.instruments);
         let subs = Arc::clone(&self.subs);
         let bars = Arc::clone(&self.bars);
+        let mut havoc_filter = HavocFilter::from_client(&client_havoc);
         let reader_handle = tokio::spawn(async move {
             while let Some(Ok(msg)) = reader.next().await {
                 let Message::Text(text) = msg else {
@@ -289,8 +299,17 @@ impl DataClient for MogwaiDataClient {
                 let Ok(server_msg) = serde_json::from_str::<ServerMessage>(&text) else {
                     continue;
                 };
-                handle_market_message(server_msg, &sink, &instruments, &subs, &bars).await;
+                dispatch_market_havoc(
+                    &mut havoc_filter,
+                    server_msg,
+                    &sink,
+                    &instruments,
+                    &subs,
+                    &bars,
+                )
+                .await;
             }
+            flush_market_havoc(&mut havoc_filter, &sink, &instruments, &subs, &bars).await;
             connected.store(false, Ordering::Relaxed);
         });
 
@@ -672,6 +691,33 @@ fn ws_command_to_client_message(cmd: WsCommand) -> ClientMessage {
     }
 }
 
+async fn dispatch_market_havoc(
+    filter: &mut HavocFilter,
+    msg: ServerMessage,
+    sink: &UnboundedSender<DataEvent>,
+    instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
+    subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
+    bars: &Arc<Mutex<HashMap<BarType, BarSubState>>>,
+) {
+    for (msg, delay) in filter.apply(msg) {
+        sleep_havoc_delay(delay).await;
+        handle_market_message(msg, sink, instruments, subs, bars).await;
+    }
+}
+
+async fn flush_market_havoc(
+    filter: &mut HavocFilter,
+    sink: &UnboundedSender<DataEvent>,
+    instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
+    subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
+    bars: &Arc<Mutex<HashMap<BarType, BarSubState>>>,
+) {
+    for (msg, delay) in filter.flush() {
+        sleep_havoc_delay(delay).await;
+        handle_market_message(msg, sink, instruments, subs, bars).await;
+    }
+}
+
 async fn handle_market_message(
     msg: ServerMessage,
     sink: &UnboundedSender<DataEvent>,
@@ -728,9 +774,10 @@ struct DataPollContext {
     bars: Arc<Mutex<HashMap<BarType, BarSubState>>>,
     cursor: Arc<Mutex<HashMap<Symbol, PollCursor>>>,
     connected: Arc<AtomicBool>,
+    havoc_filter: HavocFilter,
 }
 
-async fn poll_market_data(ctx: DataPollContext) {
+async fn poll_market_data(mut ctx: DataPollContext) {
     while ctx.connected.load(Ordering::Relaxed) {
         let symbols = poll_symbols(&ctx.subs);
         for (symbol, start_ts) in symbols {
@@ -754,11 +801,27 @@ async fn poll_market_data(ctx: DataPollContext) {
                 entry.unseen_from_batch(batch)
             };
             for trade in trades {
-                emit_trade(&trade, &ctx.sink, &ctx.instruments, &ctx.subs, &ctx.bars);
+                dispatch_market_havoc(
+                    &mut ctx.havoc_filter,
+                    ServerMessage::Trade(trade),
+                    &ctx.sink,
+                    &ctx.instruments,
+                    &ctx.subs,
+                    &ctx.bars,
+                )
+                .await;
             }
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
+    flush_market_havoc(
+        &mut ctx.havoc_filter,
+        &ctx.sink,
+        &ctx.instruments,
+        &ctx.subs,
+        &ctx.bars,
+    )
+    .await;
 }
 
 fn poll_symbols(subs: &Arc<Mutex<HashMap<Symbol, SubState>>>) -> Vec<(Symbol, Option<u64>)> {
@@ -1003,6 +1066,134 @@ async fn post_order(
     serde_json::from_slice(&response.body).context("decode order events")
 }
 
+async fn ship_server_havoc(
+    http: &HttpClient,
+    http_base: &str,
+    spec: &HavocSpec,
+) -> anyhow::Result<()> {
+    let url = join_url(http_base, "control/divergence");
+    for divergence in &spec.server {
+        let body = serde_json::to_vec(divergence).context("encode divergence")?;
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "application/json".to_string());
+        let response = http
+            .post(url.clone(), None, Some(headers), Some(body), Some(30), None)
+            .await
+            .context("post divergence")?;
+        ensure!(
+            response.status.is_success(),
+            "post divergence returned {}",
+            response.status.as_u16()
+        );
+    }
+    Ok(())
+}
+
+struct HavocFilter {
+    latency: Option<HavocLatency>,
+    drop_prob: f64,
+    duplicate_prob: f64,
+    reorder_prob: f64,
+    rng: StdRng,
+    held: Option<ServerMessage>,
+}
+
+impl HavocFilter {
+    fn from_client(client: &ClientHavoc) -> Self {
+        Self {
+            latency: client.latency,
+            drop_prob: client.drop_prob,
+            duplicate_prob: client.duplicate_prob,
+            reorder_prob: client.reorder_prob,
+            rng: client
+                .seed
+                .map_or_else(StdRng::from_entropy, StdRng::seed_from_u64),
+            held: None,
+        }
+    }
+
+    fn apply(&mut self, msg: ServerMessage) -> Vec<(ServerMessage, Duration)> {
+        let mut candidates = Vec::new();
+        if let Some(held) = self.held.take() {
+            candidates.push(msg);
+            candidates.push(held);
+        } else if self.draw(self.reorder_prob) {
+            self.held = Some(msg);
+            return Vec::new();
+        } else {
+            candidates.push(msg);
+        }
+        self.emit_candidates(candidates)
+    }
+
+    fn flush(&mut self) -> Vec<(ServerMessage, Duration)> {
+        let Some(held) = self.held.take() else {
+            return Vec::new();
+        };
+        self.emit_candidates(vec![held])
+    }
+
+    fn emit_candidates(
+        &mut self,
+        candidates: Vec<ServerMessage>,
+    ) -> Vec<(ServerMessage, Duration)> {
+        let mut out = Vec::new();
+        for msg in candidates {
+            if self.draw(self.drop_prob) {
+                continue;
+            }
+            let delay = self.delay_for(&msg);
+            out.push((msg.clone(), delay));
+            if self.draw(self.duplicate_prob) {
+                out.push((msg, delay));
+            }
+        }
+        out
+    }
+
+    fn delay_for(&self, msg: &ServerMessage) -> Duration {
+        self.latency
+            .map_or(Duration::ZERO, |latency| latency.delay_for(event_kind(msg)))
+    }
+
+    fn draw(&mut self, probability: f64) -> bool {
+        probability > 0.0 && self.rng.r#gen::<f64>() < probability
+    }
+}
+
+fn client_havoc(spec: &Option<HavocSpec>) -> ClientHavoc {
+    spec.as_ref()
+        .map_or_else(ClientHavoc::default, |spec| spec.client.clone())
+}
+
+fn client_havoc_for_dispatch(spec: &Option<HavocSpec>, counter: u64) -> ClientHavoc {
+    let mut client = client_havoc(spec);
+    if let Some(seed) = client.seed.as_mut() {
+        *seed ^= counter;
+    }
+    client
+}
+
+fn event_kind(msg: &ServerMessage) -> EventKind {
+    match msg {
+        ServerMessage::OrderFilled(_) => EventKind::Fill,
+        ServerMessage::Trade(_) | ServerMessage::Quote(_) | ServerMessage::AccountState(_) => {
+            EventKind::Data
+        }
+        ServerMessage::OrderAccepted { .. }
+        | ServerMessage::OrderRejected { .. }
+        | ServerMessage::OrderCanceled { .. }
+        | ServerMessage::OrderUpdated { .. }
+        | ServerMessage::OrderModifyRejected { .. } => EventKind::Exec,
+    }
+}
+
+async fn sleep_havoc_delay(delay: Duration) {
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
+}
+
 /// Resolves the effective row limit sent to the server's bounded `/trades`
 /// scan. A missing limit defaults to the ceiling, and any requested limit is
 /// clamped to it so neither the response body nor the materialized nautilus
@@ -1051,6 +1242,7 @@ pub struct MogwaiExecutionClient {
     ws_cmd: Option<UnboundedSender<ExecWsCommand>>,
     state: Arc<Mutex<ExecState>>,
     instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
+    http_dispatch_counter: Arc<AtomicU64>,
     task_handles: Vec<JoinHandle<()>>,
 }
 
@@ -1080,6 +1272,7 @@ impl MogwaiExecutionClient {
             ws_cmd: None,
             state: Arc::new(Mutex::new(ExecState::default())),
             instruments: Arc::new(Mutex::new(HashMap::new())),
+            http_dispatch_counter: Arc::new(AtomicU64::new(0)),
             task_handles: Vec::new(),
         })
     }
@@ -1118,15 +1311,20 @@ impl MogwaiExecutionClient {
             let http = self.http.clone();
             let url = join_url(&self.config.http_base_url(), "orders");
             let ctx = self.exec_context();
+            let counter = self.http_dispatch_counter.fetch_add(1, Ordering::Relaxed);
+            let client_havoc = client_havoc_for_dispatch(&self.config.havoc, counter);
             drop(get_runtime().spawn(async move {
+                let mut filter = HavocFilter::from_client(&client_havoc);
                 match post_order(&http, &url, &msg).await {
                     Ok(events) => {
                         for event in events {
-                            handle_exec_message(event, &ctx);
+                            dispatch_exec_havoc(&mut filter, event, &ctx).await;
                         }
+                        flush_exec_havoc(&mut filter, &ctx).await;
                     }
                     Err(err) => {
-                        handle_exec_message(reject_for(&cmd, &err), &ctx);
+                        dispatch_exec_havoc(&mut filter, reject_for(&cmd, &err), &ctx).await;
+                        flush_exec_havoc(&mut filter, &ctx).await;
                     }
                 }
             }));
@@ -1206,6 +1404,10 @@ impl ExecutionClient for MogwaiExecutionClient {
     async fn connect(&mut self) -> anyhow::Result<()> {
         let http_base_url = self.config.http_base_url();
         seed_instruments(&self.http, &http_base_url, &self.instruments).await?;
+        if let Some(havoc) = &self.config.havoc {
+            ship_server_havoc(&self.http, &http_base_url, havoc).await?;
+        }
+        let client_havoc = client_havoc(&self.config.havoc);
 
         if self.config.transport_profile.orders_over_http() {
             self.connected.store(true, Ordering::Relaxed);
@@ -1237,6 +1439,7 @@ impl ExecutionClient for MogwaiExecutionClient {
         });
 
         let ctx = self.exec_context();
+        let mut havoc_filter = HavocFilter::from_client(&client_havoc);
         let reader_handle = tokio::spawn(async move {
             while let Some(Ok(msg)) = reader.next().await {
                 let Message::Text(text) = msg else {
@@ -1245,8 +1448,9 @@ impl ExecutionClient for MogwaiExecutionClient {
                 let Ok(server_msg) = serde_json::from_str::<ServerMessage>(&text) else {
                     continue;
                 };
-                handle_exec_message(server_msg, &ctx);
+                dispatch_exec_havoc(&mut havoc_filter, server_msg, &ctx).await;
             }
+            flush_exec_havoc(&mut havoc_filter, &ctx).await;
             connected.store(false, Ordering::Relaxed);
         });
 
@@ -1502,6 +1706,20 @@ struct ExecState {
     orders: HashMap<ClientOrderId, OrderRecord>,
     fills: Vec<FillRecord>,
     positions: HashMap<Symbol, PositionRecord>,
+}
+
+async fn dispatch_exec_havoc(filter: &mut HavocFilter, msg: ServerMessage, ctx: &ExecContext) {
+    for (msg, delay) in filter.apply(msg) {
+        sleep_havoc_delay(delay).await;
+        handle_exec_message(msg, ctx);
+    }
+}
+
+async fn flush_exec_havoc(filter: &mut HavocFilter, ctx: &ExecContext) {
+    for (msg, delay) in filter.flush() {
+        sleep_havoc_delay(delay).await;
+        handle_exec_message(msg, ctx);
+    }
 }
 
 #[derive(Debug, Clone)]

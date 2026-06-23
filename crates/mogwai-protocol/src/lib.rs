@@ -41,6 +41,75 @@ impl TransportProfile {
     }
 }
 
+/// One config object that arms both halves of mogwai's havoc.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct HavocSpec {
+    /// Transport-level corruption the adapter applies to its own inbound stream.
+    #[serde(default)]
+    pub client: ClientHavoc,
+    /// Execution divergences the adapter relays to mogwai-server on connect.
+    #[serde(default)]
+    pub server: Vec<control::Divergence>,
+}
+
+/// Client-side, in-adapter havoc knobs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ClientHavoc {
+    /// Added delay before each inbound event reaches the sink.
+    #[serde(default)]
+    pub latency: Option<HavocLatency>,
+    /// Probability in [0.0, 1.0] that an inbound event is dropped.
+    #[serde(default)]
+    pub drop_prob: f64,
+    /// Probability in [0.0, 1.0] that an inbound event is emitted twice.
+    #[serde(default)]
+    pub duplicate_prob: f64,
+    /// Probability in [0.0, 1.0] that adjacent inbound events are transposed.
+    #[serde(default)]
+    pub reorder_prob: f64,
+    /// Optional deterministic RNG seed.
+    #[serde(default)]
+    pub seed: Option<u64>,
+}
+
+/// Static inbound-latency knobs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HavocLatency {
+    /// Base delay added to every inbound event.
+    #[serde(default)]
+    pub base_nanos: u64,
+    /// Extra delay for order-lifecycle execution events.
+    #[serde(default)]
+    pub exec_event_nanos: u64,
+    /// Extra delay for fill events.
+    #[serde(default)]
+    pub fill_nanos: u64,
+    /// Extra delay for market-data events and account-state snapshots.
+    #[serde(default)]
+    pub data_nanos: u64,
+}
+
+impl HavocLatency {
+    /// Effective delay for an inbound event, composing base into the category.
+    #[must_use]
+    pub fn delay_for(&self, kind: EventKind) -> std::time::Duration {
+        let extra = match kind {
+            EventKind::Exec => self.exec_event_nanos,
+            EventKind::Fill => self.fill_nanos,
+            EventKind::Data => self.data_nanos,
+        };
+        std::time::Duration::from_nanos(self.base_nanos.saturating_add(extra))
+    }
+}
+
+/// Inbound-event categories the client-side latency knob distinguishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventKind {
+    Exec,
+    Fill,
+    Data,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstrumentDef {
     pub symbol: Symbol,
@@ -229,6 +298,61 @@ mod tests {
         assert!(!TransportProfile::WsStreaming.data_by_polling());
         assert!(!TransportProfile::HttpOrders.data_by_polling());
         assert!(TransportProfile::HttpPolling.data_by_polling());
+    }
+
+    #[test]
+    fn havoc_spec_round_trips() {
+        let spec = HavocSpec {
+            client: ClientHavoc {
+                latency: Some(HavocLatency {
+                    base_nanos: 10,
+                    exec_event_nanos: 20,
+                    fill_nanos: 30,
+                    data_nanos: 40,
+                }),
+                drop_prob: 0.1,
+                duplicate_prob: 0.2,
+                reorder_prob: 0.3,
+                seed: Some(42),
+            },
+            server: vec![
+                control::Divergence::PartialFillNext {
+                    client_order_id: "O-1".into(),
+                    fraction: Decimal::new(5, 1),
+                },
+                control::Divergence::GoDark { ms: 250 },
+            ],
+        };
+
+        let json = serde_json::to_string(&spec).unwrap();
+        let decoded: HavocSpec = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, spec);
+    }
+
+    #[test]
+    fn havoc_spec_defaults_from_empty_object() {
+        let decoded: HavocSpec = serde_json::from_str("{}").unwrap();
+        assert_eq!(decoded.client, ClientHavoc::default());
+        assert!(decoded.server.is_empty());
+
+        let decoded: HavocSpec = serde_json::from_str(r#"{"server":[]}"#).unwrap();
+        assert_eq!(decoded.client, ClientHavoc::default());
+        assert!(decoded.server.is_empty());
+    }
+
+    #[test]
+    fn havoc_latency_composes_base() {
+        let latency = HavocLatency {
+            base_nanos: 10,
+            exec_event_nanos: 1,
+            fill_nanos: 2,
+            data_nanos: 3,
+        };
+
+        assert_eq!(latency.delay_for(EventKind::Exec).as_nanos(), 11);
+        assert_eq!(latency.delay_for(EventKind::Fill).as_nanos(), 12);
+        assert_eq!(latency.delay_for(EventKind::Data).as_nanos(), 13);
     }
 
     #[test]
@@ -424,7 +548,7 @@ pub struct QuoteTick {
 pub mod control {
     use super::{ClientOrderId, Decimal, Deserialize, Serialize};
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     #[serde(tag = "type")]
     pub enum Divergence {
         /// Fill the next matching order only `fraction` of the way, leaving the rest open.

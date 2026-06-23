@@ -230,6 +230,7 @@ async fn http_polling_subscribe_fetches_trades_without_ws() {
     let config = MogwaiDataClientConfig {
         base_url: format!("ws://127.0.0.1:{port}"),
         transport_profile: TransportProfile::HttpPolling,
+        ..MogwaiDataClientConfig::default()
     };
     let mut client =
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");

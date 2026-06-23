@@ -1,7 +1,7 @@
 use std::any::Any;
 
 use anyhow::ensure;
-use mogwai_protocol::TransportProfile;
+use mogwai_protocol::{ClientHavoc, HavocSpec, TransportProfile};
 use nautilus_common::factories::ClientConfig;
 use nautilus_model::{
     enums::AccountType,
@@ -22,6 +22,9 @@ pub struct MogwaiDataClientConfig {
     /// Selects the transport archetype this data client presents.
     #[serde(default)]
     pub transport_profile: TransportProfile,
+    /// Havoc to arm on connect. `None` is a clean adapter.
+    #[serde(default)]
+    pub havoc: Option<HavocSpec>,
 }
 
 impl Default for MogwaiDataClientConfig {
@@ -29,6 +32,7 @@ impl Default for MogwaiDataClientConfig {
         Self {
             base_url: DEFAULT_BASE_URL.to_string(),
             transport_profile: TransportProfile::default(),
+            havoc: None,
         }
     }
 }
@@ -41,6 +45,9 @@ impl MogwaiDataClientConfig {
     /// Returns an error if the mogwai-server URL is empty.
     pub fn validate(&self) -> anyhow::Result<()> {
         ensure!(!self.base_url.trim().is_empty(), "base_url cannot be empty");
+        if let Some(havoc) = &self.havoc {
+            validate_client_havoc(&havoc.client)?;
+        }
         Ok(())
     }
 
@@ -71,6 +78,9 @@ pub struct MogwaiExecClientConfig {
     /// Selects the transport archetype this execution client presents.
     #[serde(default)]
     pub transport_profile: TransportProfile,
+    /// Havoc to arm on connect. `None` is a clean adapter.
+    #[serde(default)]
+    pub havoc: Option<HavocSpec>,
 }
 
 impl Default for MogwaiExecClientConfig {
@@ -81,6 +91,7 @@ impl Default for MogwaiExecClientConfig {
             base_url: DEFAULT_BASE_URL.to_string(),
             account_type: AccountType::Cash,
             transport_profile: TransportProfile::default(),
+            havoc: None,
         }
     }
 }
@@ -93,6 +104,9 @@ impl MogwaiExecClientConfig {
     /// Returns an error if the mogwai-server URL is empty.
     pub fn validate(&self) -> anyhow::Result<()> {
         ensure!(!self.base_url.trim().is_empty(), "base_url cannot be empty");
+        if let Some(havoc) = &self.havoc {
+            validate_client_havoc(&havoc.client)?;
+        }
         Ok(())
     }
 
@@ -119,6 +133,26 @@ fn http_base_url(base_url: &str) -> String {
     } else {
         base_url.to_string()
     }
+}
+
+fn validate_client_havoc(client: &ClientHavoc) -> anyhow::Result<()> {
+    ensure!(
+        valid_probability(client.drop_prob),
+        "havoc drop_prob must be in [0.0, 1.0]"
+    );
+    ensure!(
+        valid_probability(client.duplicate_prob),
+        "havoc duplicate_prob must be in [0.0, 1.0]"
+    );
+    ensure!(
+        valid_probability(client.reorder_prob),
+        "havoc reorder_prob must be in [0.0, 1.0]"
+    );
+    Ok(())
+}
+
+fn valid_probability(value: f64) -> bool {
+    (0.0..=1.0).contains(&value)
 }
 
 #[cfg(test)]

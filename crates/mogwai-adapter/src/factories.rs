@@ -126,7 +126,7 @@ impl ExecutionClientFactory for MogwaiExecutionClientFactory {
 mod tests {
     use std::{any::Any, cell::RefCell, rc::Rc};
 
-    use mogwai_protocol::TransportProfile;
+    use mogwai_protocol::{ClientHavoc, HavocLatency, HavocSpec, TransportProfile};
     use nautilus_common::{
         cache::Cache,
         clock::TestClock,
@@ -150,6 +150,24 @@ mod tests {
 
     fn cache() -> Rc<RefCell<Cache>> {
         Rc::new(RefCell::new(Cache::default()))
+    }
+
+    fn havoc_spec() -> HavocSpec {
+        HavocSpec {
+            client: ClientHavoc {
+                latency: Some(HavocLatency {
+                    base_nanos: 10,
+                    exec_event_nanos: 20,
+                    fill_nanos: 30,
+                    data_nanos: 40,
+                }),
+                drop_prob: 0.1,
+                duplicate_prob: 0.2,
+                reorder_prob: 0.3,
+                seed: Some(7),
+            },
+            server: Vec::new(),
+        }
     }
 
     #[test]
@@ -265,6 +283,7 @@ mod tests {
         let data_config = MogwaiDataClientConfig {
             base_url: "ws://example.invalid:9999".to_string(),
             transport_profile: TransportProfile::HttpPolling,
+            havoc: Some(havoc_spec()),
         };
         let data_json = serde_json::to_string(&data_config).expect("serialize data client config");
         let data_round_trip: MogwaiDataClientConfig =
@@ -274,11 +293,13 @@ mod tests {
             data_round_trip.transport_profile,
             data_config.transport_profile
         );
+        assert_eq!(data_round_trip.havoc, data_config.havoc);
 
         let exec_config = MogwaiExecClientConfig {
             trader_id: TraderId::from("MOGWAI-042"),
             base_url: "ws://example.invalid:9999".to_string(),
             transport_profile: TransportProfile::HttpOrders,
+            havoc: Some(havoc_spec()),
             ..Default::default()
         };
         let exec_json =
@@ -293,6 +314,7 @@ mod tests {
             exec_round_trip.transport_profile,
             exec_config.transport_profile
         );
+        assert_eq!(exec_round_trip.havoc, exec_config.havoc);
     }
 
     #[test]
@@ -305,6 +327,7 @@ mod tests {
             serde_json::from_str("{}").expect("partial data config deserializes");
         assert_eq!(data.base_url, MogwaiDataClientConfig::default().base_url);
         assert_eq!(data.transport_profile, TransportProfile::WsStreaming);
+        assert_eq!(data.havoc, None);
 
         let exec: MogwaiExecClientConfig =
             serde_json::from_str(r#"{"base_url":"ws://example.invalid:9999"}"#)
@@ -315,5 +338,49 @@ mod tests {
         assert_eq!(exec.account_id, defaults.account_id);
         assert_eq!(exec.account_type, defaults.account_type);
         assert_eq!(exec.transport_profile, TransportProfile::WsStreaming);
+        assert_eq!(exec.havoc, None);
+    }
+
+    #[test]
+    fn mogwai_config_rejects_out_of_range_probability() {
+        let data_factory = MogwaiDataClientFactory::new();
+        let cache = cache();
+        let clock = Rc::new(RefCell::new(TestClock::new()));
+        let data_config = MogwaiDataClientConfig {
+            havoc: Some(HavocSpec {
+                client: ClientHavoc {
+                    drop_prob: 1.1,
+                    ..ClientHavoc::default()
+                },
+                server: Vec::new(),
+            }),
+            ..MogwaiDataClientConfig::default()
+        };
+
+        let data_err =
+            match data_factory.create("MOGWAI-TEST", &data_config, Rc::clone(&cache).into(), clock)
+            {
+                Ok(_) => panic!("data factory accepted invalid havoc probability"),
+                Err(error) => error.to_string(),
+            };
+
+        let exec_factory = MogwaiExecutionClientFactory::new();
+        let exec_config = MogwaiExecClientConfig {
+            havoc: Some(HavocSpec {
+                client: ClientHavoc {
+                    reorder_prob: -0.1,
+                    ..ClientHavoc::default()
+                },
+                server: Vec::new(),
+            }),
+            ..MogwaiExecClientConfig::default()
+        };
+        let exec_err = match exec_factory.create("MOGWAI-TEST", &exec_config, cache.into()) {
+            Ok(_) => panic!("execution factory accepted invalid havoc probability"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(data_err.contains("drop_prob"));
+        assert!(exec_err.contains("reorder_prob"));
     }
 }

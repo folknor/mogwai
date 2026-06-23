@@ -128,6 +128,21 @@ integration tests):
   by `MAX_HISTORY_LIMIT` neither drops nor duplicates a trade, and emits through
   the same per-symbol `SubState` filter the WS drain uses. The default profile is
   byte-identical to the pre-selector adapter.
+  The `HavocSpec` knobs are live (see git history for the landing): one
+  `HavocSpec` (shared in `mogwai-protocol` as `HavocSpec`/`ClientHavoc`/
+  `HavocLatency`/`EventKind`, with `delay_for` mirroring nautilus's
+  `StaticLatencyModel` `base + op` composition) arms both halves of the havoc
+  from a single `havoc: Option<HavocSpec>` field on both client configs, range-
+  checked at factory `create` time. The exec client `connect` ships the server-
+  side `Vec<control::Divergence>` to `/control/divergence` on connect (one POST
+  per divergence, so broadarrow makes no separate control-plane call); the data
+  client carries the same field but ships nothing server-side, applying only its
+  client half. The client half is a seeded `HavocFilter` that corrupts the
+  inbound stream in flight - latency, drop, duplicate and adjacent-reorder -
+  threaded through every drain path (the data and exec WS readers, the polling
+  loop, and the per-dispatch exec-over-HTTP path), with a clean `None` spec a
+  byte-identical passthrough. Only the broadarrow-side value that constructs a
+  per-venue `HavocSpec` remains, and it lives in broadarrow, not here.
 
 ## Next
 
@@ -196,28 +211,22 @@ wiring that picks a profile per venue remains:
       test enforces that every wired venue has a PROFILES row.
 
 #### Havoc knobs: one `HavocSpec`, two surfaces
-The point of mogwai. broadarrow sets a single `HavocSpec` in the `MogwaiClientConfig`
-at adapter-build time (in `venue.rs`); the adapter splits it:
-- Client-side (the adapter itself, per connection): latency, drop, duplicate,
-  reorder, injected in the spawned task between `transport.stream()` and the sink.
-  Tests broadarrow's resilience with the server none the wiser. Mirror nautilus's
-  own `StaticLatencyModel` shape (`base` / `insert` / `update` / `delete` latency
-  nanos in `execution/src/models/latency.rs`, a backtest construct never wired
-  live) for the latency field.
-- Server-side (mogwai-server's `control::Divergence` engine): the execution
-  divergences (partial, reject, duplicate fill, drop account update, blackout,
-  delayed acks), all six now landed and verified end-to-end. The adapter
-  forwards the server-side part of the `HavocSpec` to mogwai-server on connect,
-  so broadarrow never makes a separate control-plane call - one config object,
-  the adapter relays it.
+The point of mogwai. The `HavocSpec` type and the adapter's split/apply/ship are
+landed (see the adapter Done entry above and git history): one config object
+arms both halves of the havoc, the adapter applying its client half (latency,
+drop, duplicate, reorder) to its own inbound stream and shipping the server half
+to `/control/divergence` on connect. broadarrow sets a single `HavocSpec` in the
+`MogwaiClientConfig` at adapter-build time (in `venue.rs`); only that
+broadarrow-side value remains, and it lives in broadarrow, not here.
 
-- [ ] `HavocSpec` type in `mogwai-protocol` (so both ends share it), carrying the
-      client-side knobs and the server-side `Divergence` arming set.
-- [ ] Adapter applies client-side knobs locally and ships the server-side set over
-      the existing `/control/divergence` channel on connect.
-- [ ] Prior art to mirror for knob vocabulary: existing nautilus config that
-      already behaves like havoc (`ws_idle_timeout_ms`, `ws_request_timeout_secs`,
-      `heartbeat_interval_secs`, retry/backoff/jitter, rate-limit quotas).
+This landing mirrored only nautilus's `StaticLatencyModel` (the latency field).
+The wider knob vocabulary stays open as a follow-up `HavocSpec` extension:
+
+- [ ] Connection-lifecycle and quota knobs to mirror from existing nautilus
+      config that already behaves like havoc (`ws_idle_timeout_ms`,
+      `ws_request_timeout_secs`, `heartbeat_interval_secs`, retry/backoff/jitter,
+      rate-limit quotas). These corrupt the transport's connect/reconnect
+      behavior rather than the inbound event stream the first landing targeted.
 
 ## Notes / gotchas
 - Kraken history is **trades only** - no quotes, no L2, no aggressor side
