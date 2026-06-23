@@ -27,6 +27,7 @@ nautilus-model = { path = "../../../nautilus_trader/crates/model", default-featu
 nautilus-network = { path = "../../../nautilus_trader/crates/network", default-features = false }
 
 [dev-dependencies]
+serde_urlencoded = "0.7"
 
 [lints]
 workspace = true

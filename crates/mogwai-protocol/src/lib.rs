@@ -50,6 +50,86 @@ pub struct HavocSpec {
     /// Execution divergences the adapter relays to mogwai-server on connect.
     #[serde(default)]
     pub server: Vec<control::Divergence>,
+    /// Generator-level market regime applied before market-data ticks exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<MarketRegime>,
+}
+
+/// Market-regime havoc: perturbs the generator before ticks are produced.
+///
+/// This is distinct from server divergences and client-side transport havoc,
+/// which corrupt events after production. It is carried per subscription on
+/// `Subscribe` and per request on `GET /trades`; it never travels the
+/// `/control/divergence` control plane.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum MarketRegime {
+    /// Multiply the GARCH return RMS by `vol_mult` and lift clamps with it.
+    VolStorm { vol_mult: f64 },
+    /// Divide arrival intensity by `thin_factor`, stretching inter-arrivals.
+    LiquidityDrought { thin_factor: f64 },
+    /// Inside the UTC half-open hour window `[start_hour, end_hour)`, scale the
+    /// session vol curve by `1.0 + extra_vol_mult` (the extra rides the same
+    /// multiplicative envelope as `VolStorm`'s `vol_mult`, so the spike is an
+    /// amplification of the fitted session curve, not an additive shift of it).
+    SessionEdgeSpike {
+        start_hour: u8,
+        end_hour: u8,
+        extra_vol_mult: f64,
+    },
+    /// Halt once at `at_ts`, then resume with a signed latent log-return gap.
+    ReopenGap {
+        at_ts: u64,
+        halt_secs: u64,
+        gap_frac: f64,
+    },
+}
+
+pub fn validate_market_regime(regime: &MarketRegime) -> Result<(), &'static str> {
+    match *regime {
+        MarketRegime::VolStorm { vol_mult } => {
+            if vol_mult.is_finite() && (0.0..=100.0).contains(&vol_mult) && vol_mult > 0.0 {
+                Ok(())
+            } else {
+                Err("vol_mult must be in (0.0, 100.0]")
+            }
+        }
+        MarketRegime::LiquidityDrought { thin_factor } => {
+            if thin_factor.is_finite() && (1.0..=1000.0).contains(&thin_factor) {
+                Ok(())
+            } else {
+                Err("thin_factor must be in [1.0, 1000.0]")
+            }
+        }
+        MarketRegime::SessionEdgeSpike {
+            start_hour,
+            end_hour,
+            extra_vol_mult,
+        } => {
+            if start_hour >= end_hour || end_hour > 24 {
+                return Err("session edge window must satisfy start_hour < end_hour <= 24");
+            }
+            if extra_vol_mult.is_finite() && (0.0..=100.0).contains(&extra_vol_mult) {
+                Ok(())
+            } else {
+                Err("extra_vol_mult must be in [0.0, 100.0]")
+            }
+        }
+        MarketRegime::ReopenGap {
+            halt_secs,
+            gap_frac,
+            ..
+        } => {
+            if halt_secs > 86_400 {
+                return Err("halt_secs must be <= 86400");
+            }
+            if gap_frac.is_finite() && (-1.0..=1.0).contains(&gap_frac) {
+                Ok(())
+            } else {
+                Err("gap_frac must be in [-1.0, 1.0]")
+            }
+        }
+    }
 }
 
 /// Client-side, in-adapter havoc knobs.
@@ -158,8 +238,11 @@ pub enum ClientMessage {
         symbols: Vec<Symbol>,
         /// Replay from this unix-nanosecond instant forward. `None` starts at
         /// the beginning of available history.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         start_ts: Option<u64>,
+        /// Optional generator-level market regime for this subscription.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        regime: Option<MarketRegime>,
     },
     Unsubscribe {
         symbols: Vec<Symbol>,
@@ -184,6 +267,7 @@ mod tests {
         let with_start = ClientMessage::Subscribe {
             symbols: vec!["X".into()],
             start_ts: Some(123),
+            regime: None,
         };
         let json = serde_json::to_string(&with_start).unwrap();
         let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -191,21 +275,25 @@ mod tests {
             decoded,
             ClientMessage::Subscribe {
                 symbols,
-                start_ts: Some(123)
+                start_ts: Some(123),
+                regime: None
             } if symbols == vec!["X"]
         ));
 
         let without_start = ClientMessage::Subscribe {
             symbols: vec!["X".into()],
             start_ts: None,
+            regime: None,
         };
         let json = serde_json::to_string(&without_start).unwrap();
+        assert_eq!(json, r#"{"type":"Subscribe","symbols":["X"]}"#);
         let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
         assert!(matches!(
             decoded,
             ClientMessage::Subscribe {
                 symbols,
-                start_ts: None
+                start_ts: None,
+                regime: None
             } if symbols == vec!["X"]
         ));
 
@@ -215,9 +303,56 @@ mod tests {
             decoded,
             ClientMessage::Subscribe {
                 symbols,
-                start_ts: None
+                start_ts: None,
+                regime: None
             } if symbols == vec!["X"]
         ));
+    }
+
+    #[test]
+    fn market_regime_round_trips_and_validates() {
+        let regimes = [
+            MarketRegime::VolStorm { vol_mult: 10.0 },
+            MarketRegime::LiquidityDrought { thin_factor: 5.0 },
+            MarketRegime::SessionEdgeSpike {
+                start_hour: 13,
+                end_hour: 15,
+                extra_vol_mult: 4.0,
+            },
+            MarketRegime::ReopenGap {
+                at_ts: 123,
+                halt_secs: 60,
+                gap_frac: -0.2,
+            },
+        ];
+
+        for regime in regimes {
+            validate_market_regime(&regime).expect("regime in range");
+            let json = serde_json::to_string(&regime).unwrap();
+            let decoded: MarketRegime = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, regime);
+        }
+
+        assert!(validate_market_regime(&MarketRegime::VolStorm { vol_mult: 0.0 }).is_err());
+        assert!(
+            validate_market_regime(&MarketRegime::LiquidityDrought { thin_factor: 0.5 }).is_err()
+        );
+        assert!(
+            validate_market_regime(&MarketRegime::SessionEdgeSpike {
+                start_hour: 24,
+                end_hour: 24,
+                extra_vol_mult: 1.0,
+            })
+            .is_err()
+        );
+        assert!(
+            validate_market_regime(&MarketRegime::ReopenGap {
+                at_ts: 0,
+                halt_secs: 86_401,
+                gap_frac: 0.0,
+            })
+            .is_err()
+        );
     }
 
     #[test]
@@ -322,12 +457,20 @@ mod tests {
                 },
                 control::Divergence::GoDark { ms: 250 },
             ],
+            data: Some(MarketRegime::LiquidityDrought { thin_factor: 5.0 }),
         };
 
         let json = serde_json::to_string(&spec).unwrap();
         let decoded: HavocSpec = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded, spec);
+
+        let clean = HavocSpec::default();
+        let json = serde_json::to_string(&clean).unwrap();
+        assert_eq!(
+            json,
+            r#"{"client":{"latency":null,"drop_prob":0.0,"duplicate_prob":0.0,"reorder_prob":0.0,"seed":null},"server":[]}"#
+        );
     }
 
     #[test]
@@ -335,10 +478,12 @@ mod tests {
         let decoded: HavocSpec = serde_json::from_str("{}").unwrap();
         assert_eq!(decoded.client, ClientHavoc::default());
         assert!(decoded.server.is_empty());
+        assert_eq!(decoded.data, None);
 
         let decoded: HavocSpec = serde_json::from_str(r#"{"server":[]}"#).unwrap();
         assert_eq!(decoded.client, ClientHavoc::default());
         assert!(decoded.server.is_empty());
+        assert_eq!(decoded.data, None);
     }
 
     #[test]

@@ -23,6 +23,7 @@ pub use generated::{
     AbsReturnAcf, AnchorRange, Fingerprint, GeneratedSource, GeneratorScalars, GoldenTargets,
     MinMedianMax, ScalarError, ScalarRanges, SessionProfile,
 };
+pub use mogwai_protocol::MarketRegime;
 
 /// One replayable market-data event.
 #[derive(Debug, Clone)]

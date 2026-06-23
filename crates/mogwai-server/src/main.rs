@@ -31,7 +31,8 @@ use futures_util::{SinkExt, StreamExt};
 use mogwai_data::TickEvent;
 use mogwai_engine::Engine;
 use mogwai_protocol::{
-    ClientMessage, InstrumentDef, QuoteTick, ServerMessage, TradeTick, control::Divergence,
+    ClientMessage, InstrumentDef, MarketRegime, QuoteTick, ServerMessage, TradeTick,
+    control::Divergence, validate_market_regime,
 };
 use serde::Deserialize;
 use tokio::sync::{Mutex, mpsc};
@@ -184,6 +185,8 @@ struct HistoryQuery {
     start: Option<u64>,
     end: Option<u64>,
     limit: Option<usize>,
+    #[serde(default)]
+    regime: Option<String>,
 }
 
 async fn trades(
@@ -194,7 +197,8 @@ async fn trades(
         .limit
         .unwrap_or(MAX_HISTORY_LIMIT)
         .min(MAX_HISTORY_LIMIT);
-    let ticks = bounded_trades(&query.symbol, query.start, query.end, limit);
+    let regime = parse_history_regime(query.regime.as_deref());
+    let ticks = bounded_trades(&query.symbol, query.start, query.end, limit, regime);
     Ok(Json(ticks))
 }
 
@@ -212,12 +216,13 @@ fn bounded_trades(
     start: Option<u64>,
     end: Option<u64>,
     limit: usize,
+    regime: Option<MarketRegime>,
 ) -> Vec<TradeTick> {
     if limit == 0 {
         return Vec::new();
     }
 
-    let mut merged = source::build_history_source(symbol, start);
+    let mut merged = source::build_history_source(symbol, start, regime);
     let mut out = Vec::new();
 
     while let Some(tick) = merged.next_tick() {
@@ -237,6 +242,26 @@ fn bounded_trades(
     }
 
     out
+}
+
+fn parse_history_regime(raw: Option<&str>) -> Option<MarketRegime> {
+    let raw = raw?;
+    let Ok(regime) = serde_json::from_str::<MarketRegime>(raw) else {
+        tracing::warn!(raw, "dropping malformed market regime");
+        return None;
+    };
+    validate_regime_or_clean(Some(regime))
+}
+
+fn validate_regime_or_clean(regime: Option<MarketRegime>) -> Option<MarketRegime> {
+    let regime = regime?;
+    match validate_market_regime(&regime) {
+        Ok(()) => Some(regime),
+        Err(err) => {
+            tracing::warn!(?regime, err, "dropping out-of-range market regime");
+            None
+        }
+    }
 }
 
 async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
@@ -286,14 +311,19 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         };
 
         match client_msg {
-            ClientMessage::Subscribe { symbols, start_ts } => {
+            ClientMessage::Subscribe {
+                symbols,
+                start_ts,
+                regime,
+            } => {
+                let regime = validate_regime_or_clean(regime);
                 let key = sub_key(&symbols);
                 if let Some(flag) = replays.remove(&key) {
                     flag.store(true, Ordering::Relaxed);
                 }
                 let cancel = Arc::new(AtomicBool::new(false));
                 replays.insert(key, Arc::clone(&cancel));
-                spawn_replay(symbols, start_ts, &state.cfg, tx.clone(), cancel);
+                spawn_replay(symbols, start_ts, regime, &state.cfg, tx.clone(), cancel);
             }
             ClientMessage::Unsubscribe { symbols } => {
                 let key = sub_key(&symbols);
@@ -340,6 +370,7 @@ fn is_execution_event(msg: &ServerMessage) -> bool {
 fn spawn_replay(
     symbols: Vec<String>,
     start_ts: Option<u64>,
+    regime: Option<MarketRegime>,
     cfg: &Config,
     tx: mpsc::Sender<ServerMessage>,
     cancel: Arc<AtomicBool>,
@@ -348,10 +379,10 @@ fn spawn_replay(
     let speed = cfg.speed;
     let gap_cap_ms = cfg.gap_cap_ms;
     std::thread::spawn(move || {
-        let Some(mut merged) = source::build_live_source(&symbols, start_ts) else {
+        let Some(mut merged) = source::build_live_source(&symbols, start_ts, regime) else {
             return;
         };
-        tracing::info!(?symbols, ?start_ts, "replay started");
+        tracing::info!(?symbols, ?start_ts, ?regime, "replay started");
 
         let mut prev_ts: Option<u64> = None;
         while let Some(tick) = merged.next_tick() {
@@ -434,6 +465,7 @@ mod tests {
             Json(ClientMessage::Subscribe {
                 symbols: vec!["BTCUSDT".into()],
                 start_ts: None,
+                regime: None,
             }),
         )
         .await
@@ -445,7 +477,7 @@ mod tests {
     #[test]
     fn generated_history_default_limit_is_bounded_and_fast() {
         let start = Instant::now();
-        let ticks = bounded_trades("KEUR", None, None, MAX_HISTORY_LIMIT);
+        let ticks = bounded_trades("KEUR", None, None, MAX_HISTORY_LIMIT, None);
         let elapsed = start.elapsed();
 
         println!("default /trades synthesis elapsed: {elapsed:?}");
@@ -459,12 +491,12 @@ mod tests {
 
     #[test]
     fn generated_history_is_replayable_and_cursorable() {
-        let first = bounded_trades("KEUR", None, None, 8);
-        let replay = bounded_trades("KEUR", None, None, 8);
+        let first = bounded_trades("KEUR", None, None, 8, None);
+        let replay = bounded_trades("KEUR", None, None, 8, None);
         assert_eq!(trade_signatures(&first), trade_signatures(&replay));
 
         let cursor = first.last().expect("first page has trades").ts_event;
-        let second = bounded_trades("KEUR", Some(cursor), None, 8);
+        let second = bounded_trades("KEUR", Some(cursor), None, 8, None);
 
         assert_eq!(
             second.first().expect("second page has trades").ts_event,
@@ -472,6 +504,32 @@ mod tests {
         );
         assert!(second.iter().skip(1).all(|trade| trade.ts_event > cursor));
         assert_ne!(trade_signatures(&first), trade_signatures(&second));
+    }
+
+    #[test]
+    fn out_of_range_regime_replays_clean() {
+        let clean = bounded_trades("KEUR", Some(86_401_000_000_000), None, 8, None);
+        let invalid =
+            parse_history_regime(Some(r#"{"type":"LiquidityDrought","thin_factor":0.5}"#));
+        assert_eq!(invalid, None);
+        let fallback = bounded_trades("KEUR", Some(86_401_000_000_000), None, 8, invalid);
+
+        assert_eq!(trade_signatures(&clean), trade_signatures(&fallback));
+    }
+
+    #[test]
+    fn subscribe_out_of_range_regime_is_dropped_to_clean() {
+        let regime =
+            validate_regime_or_clean(Some(MarketRegime::LiquidityDrought { thin_factor: 0.5 }));
+
+        assert_eq!(regime, None);
+    }
+
+    #[test]
+    fn malformed_history_regime_replays_clean() {
+        let regime = parse_history_regime(Some(r#"{"type":"Bogus"}"#));
+
+        assert_eq!(regime, None);
     }
 
     fn trade_signatures(trades: &[TradeTick]) -> Vec<(String, String, String, u64)> {

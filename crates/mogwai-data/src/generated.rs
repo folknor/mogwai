@@ -1,4 +1,4 @@
-use mogwai_protocol::{AggressorSide, TradeTick};
+use mogwai_protocol::{AggressorSide, MarketRegime, TradeTick};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use rand_distr::{ChiSquared, Distribution, LogNormal, Normal, Weibull};
 use rust_decimal::{Decimal, prelude::FromPrimitive, prelude::ToPrimitive};
@@ -282,11 +282,29 @@ pub struct GeneratedSource {
     chi_squared: ChiSquared<f64>,
     size_dist: LogNormal<f64>,
     tick_f64: f64,
+    regime: RegimeState,
 }
 
 impl GeneratedSource {
     #[must_use]
-    pub fn new(scalars: GeneratorScalars, seed: u64, start_ts: u64, fp: &Fingerprint) -> Self {
+    pub fn new(
+        scalars: GeneratorScalars,
+        seed: u64,
+        start_ts: u64,
+        fp: &Fingerprint,
+        regime: Option<MarketRegime>,
+    ) -> Self {
+        Self::with_clamp_override(scalars, seed, start_ts, fp, regime, None)
+    }
+
+    fn with_clamp_override(
+        scalars: GeneratorScalars,
+        seed: u64,
+        start_ts: u64,
+        fp: &Fingerprint,
+        regime: Option<MarketRegime>,
+        clamp_override: Option<f64>,
+    ) -> Self {
         scalars
             .validate(fp)
             .expect("generated source scalars are inside fingerprint ranges");
@@ -324,7 +342,20 @@ impl GeneratedSource {
             normal: Normal::new(0.0, 1.0).expect("valid normal"),
             chi_squared: ChiSquared::new(STUDENT_T_DF).expect("valid chi-squared"),
             size_dist,
+            regime: RegimeState::new(regime, clamp_override),
         }
+    }
+
+    #[cfg(test)]
+    fn new_with_clamp_override(
+        scalars: GeneratorScalars,
+        seed: u64,
+        start_ts: u64,
+        fp: &Fingerprint,
+        regime: Option<MarketRegime>,
+        clamp_mult: f64,
+    ) -> Self {
+        Self::with_clamp_override(scalars, seed, start_ts, fp, regime, Some(clamp_mult))
     }
 
     fn next_duration_ns(&mut self) -> u64 {
@@ -339,7 +370,7 @@ impl GeneratedSource {
         // realized gap.
         self.acd.prev_duration_s = duration_s;
         let arr_mult = self.session.arrival_mult(self.clock_ns);
-        let duration_s = (duration_s / arr_mult).max(0.000_000_001);
+        let duration_s = ((duration_s / arr_mult) * self.regime.arrival_thin).max(0.000_000_001);
         (duration_s * 1_000_000_000.0).round().max(1.0) as u64
     }
 
@@ -350,15 +381,16 @@ impl GeneratedSource {
         self.vol.sigma2 = self.vol.a0
             + self.vol.a1 * self.vol.prev_return.powi(2)
             + self.vol.b1 * self.vol.sigma2;
-        self.vol.sigma2 = self.vol.sigma2.min(GARCH_SIGMA_CAP.powi(2));
-        let base_return =
-            (self.vol.sigma2.sqrt() * student_t).clamp(-MAX_ABS_RETURN, MAX_ABS_RETURN);
+        let sigma_cap = (GARCH_SIGMA_CAP * self.regime.clamp_mult).powi(2);
+        self.vol.sigma2 = self.vol.sigma2.min(sigma_cap);
+        let return_cap = MAX_ABS_RETURN * self.regime.clamp_mult;
+        let base_return = (self.vol.sigma2.sqrt() * student_t).clamp(-return_cap, return_cap);
         // GARCH feedback sees the un-modulated return so volatility clustering
         // is unchanged; the session envelope scales the realized RMS on top,
         // then the hard clamp still bounds the mid update.
         self.vol.prev_return = base_return;
-        let vol_mult = self.session.vol_mult(self.clock_ns);
-        let return_n = (base_return * vol_mult).clamp(-MAX_ABS_RETURN, MAX_ABS_RETURN);
+        let vol_mult = self.session.vol_mult(self.clock_ns) * self.regime.vol_mult(self.clock_ns);
+        let return_n = (base_return * vol_mult).clamp(-return_cap, return_cap);
         self.vol.mid = (self.vol.mid * return_n.exp())
             .max(self.tick_f64)
             .min(1_000_000_000.0);
@@ -399,7 +431,14 @@ impl TickSource for GeneratedSource {
         // opens in; a trade's volatility belongs to the window it prints in. Do
         // not reorder these three lines to "tidy" them - it silently shifts which
         // session window each tick is attributed to.
+        let old_clock_ns = self.clock_ns;
         self.clock_ns = self.clock_ns.saturating_add(dt_ns);
+        if let Some(reopen) = self.regime.take_reopen_crossed(old_clock_ns, self.clock_ns) {
+            self.clock_ns = self.clock_ns.saturating_add(reopen.halt_ns);
+            self.vol.mid = (self.vol.mid * reopen.gap_frac.exp())
+                .max(self.tick_f64)
+                .min(1_000_000_000.0);
+        }
         let mid = self.next_latent_mid();
         let (price, aggressor) = self.next_price(mid);
         let size = self.next_size();
@@ -420,6 +459,108 @@ struct AcdClock {
     psi: f64,
     prev_duration_s: f64,
     eps_mean: f64,
+}
+
+#[derive(Debug, Clone)]
+struct RegimeState {
+    arrival_thin: f64,
+    vol_mult: f64,
+    clamp_mult: f64,
+    edge: Option<EdgeSpike>,
+    reopen: Option<Reopen>,
+}
+
+impl RegimeState {
+    fn new(regime: Option<MarketRegime>, clamp_override: Option<f64>) -> Self {
+        let mut state = Self {
+            arrival_thin: 1.0,
+            vol_mult: 1.0,
+            clamp_mult: 1.0,
+            edge: None,
+            reopen: None,
+        };
+
+        match regime {
+            Some(MarketRegime::VolStorm { vol_mult }) => {
+                state.vol_mult = vol_mult;
+                // Default the clamp lift to the storm multiplier; the test-only
+                // clamp_override below uniformly replaces it when present (it is
+                // how the pricing instrument pins the clamp to disprove the bare
+                // multiply), so there is no need to fold the override in here.
+                state.clamp_mult = vol_mult;
+            }
+            Some(MarketRegime::LiquidityDrought { thin_factor }) => {
+                state.arrival_thin = thin_factor;
+            }
+            Some(MarketRegime::SessionEdgeSpike {
+                start_hour,
+                end_hour,
+                extra_vol_mult,
+            }) => {
+                state.edge = Some(EdgeSpike {
+                    start_hour,
+                    end_hour,
+                    extra_vol_mult,
+                });
+            }
+            Some(MarketRegime::ReopenGap {
+                at_ts,
+                halt_secs,
+                gap_frac,
+            }) => {
+                state.reopen = Some(Reopen {
+                    at_ts,
+                    halt_ns: halt_secs.saturating_mul(1_000_000_000),
+                    gap_frac,
+                });
+            }
+            None => {}
+        }
+
+        if let Some(clamp_mult) = clamp_override {
+            state.clamp_mult = clamp_mult;
+        }
+
+        state
+    }
+
+    fn vol_mult(&self, clock_ns: u64) -> f64 {
+        let edge_mult = self.edge.as_ref().map_or(0.0, |edge| {
+            let (hour, _dow) = utc_hour_dow(clock_ns);
+            if usize::from(edge.start_hour) <= hour && hour < usize::from(edge.end_hour) {
+                edge.extra_vol_mult
+            } else {
+                0.0
+            }
+        });
+        self.vol_mult + edge_mult
+    }
+
+    fn take_reopen_crossed(&mut self, old_clock_ns: u64, new_clock_ns: u64) -> Option<Reopen> {
+        if self
+            .reopen
+            .as_ref()
+            .is_some_and(|reopen| old_clock_ns < reopen.at_ts && reopen.at_ts <= new_clock_ns)
+        {
+            self.reopen.take()
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct EdgeSpike {
+    start_hour: u8,
+    end_hour: u8,
+    extra_vol_mult: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Reopen {
+    at_ts: u64,
+    halt_ns: u64,
+    gap_frac: f64,
 }
 
 struct GarchVol {
@@ -617,9 +758,9 @@ mod tests {
     fn determinism() {
         let fp = Fingerprint::from_repo_json();
         let scalars = GeneratorScalars::xbtusd_anchor(&fp);
-        let mut a = GeneratedSource::new(scalars.clone(), 42, 1_000, &fp);
-        let mut b = GeneratedSource::new(scalars.clone(), 42, 1_000, &fp);
-        let mut c = GeneratedSource::new(scalars, 43, 1_000, &fp);
+        let mut a = GeneratedSource::new(scalars.clone(), 42, 1_000, &fp, None);
+        let mut b = GeneratedSource::new(scalars.clone(), 42, 1_000, &fp, None);
+        let mut c = GeneratedSource::new(scalars, 43, 1_000, &fp, None);
         for _ in 0..1_000 {
             let ta = a.next_tick();
             let tb = b.next_tick();
@@ -632,7 +773,7 @@ mod tests {
     #[test]
     fn monotonic_clock() {
         let fp = Fingerprint::from_repo_json();
-        let mut src = GeneratedSource::new(GeneratorScalars::xbtusd_anchor(&fp), 42, 0, &fp);
+        let mut src = GeneratedSource::new(GeneratorScalars::xbtusd_anchor(&fp), 42, 0, &fp, None);
         let mut prior = 0;
         for _ in 0..10_000 {
             let tick = src.next_tick().expect("unbounded generated source");
@@ -645,7 +786,7 @@ mod tests {
     fn on_grid_prices_and_native_aggressor() {
         let fp = Fingerprint::from_repo_json();
         let scalars = GeneratorScalars::xbtusd_anchor(&fp);
-        let mut src = GeneratedSource::new(scalars.clone(), 42, 0, &fp);
+        let mut src = GeneratedSource::new(scalars.clone(), 42, 0, &fp, None);
         for _ in 0..10_000 {
             let TickEvent::Trade(trade) = src.next_tick().expect("trade") else {
                 unreachable!("generated source emits trades")
@@ -659,10 +800,180 @@ mod tests {
     }
 
     #[test]
+    fn clean_regime_is_byte_identical() {
+        let fp = Fingerprint::from_repo_json();
+        let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+        let mut src = GeneratedSource::new(scalars, 42, 1_000, &fp, None);
+        let expected = [
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.12498350, aggressor: Buyer, ts_event: 1932367546 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.10200766, aggressor: Buyer, ts_event: 14404949050 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.1, aggressor: Buyer, ts_event: 63395677414 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.08673040, aggressor: Buyer, ts_event: 70348510297 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.01819669, aggressor: Buyer, ts_event: 70444232828 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.09715509, aggressor: Buyer, ts_event: 70448615756 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.08202765, aggressor: Buyer, ts_event: 70701257715 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.08319530, aggressor: Buyer, ts_event: 80028550942 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.09242684, aggressor: Buyer, ts_event: 98575731579 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.09712421, aggressor: Buyer, ts_event: 98783459004 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.02064065, aggressor: Buyer, ts_event: 105144479491 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.29393977, aggressor: Buyer, ts_event: 105970801177 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.57435314, aggressor: Buyer, ts_event: 118332552074 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.18559909, aggressor: Buyer, ts_event: 126200221174 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.01540320, aggressor: Buyer, ts_event: 141379233446 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.07153911, aggressor: Buyer, ts_event: 155104805884 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.9, aggressor: Buyer, ts_event: 178963716674 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.1, aggressor: Buyer, ts_event: 215566810133 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.07602495, aggressor: Buyer, ts_event: 236005084772 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.22289688, aggressor: Buyer, ts_event: 240701378904 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.31333162, aggressor: Buyer, ts_event: 246071332070 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.47843512, aggressor: Buyer, ts_event: 263375527056 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.3, aggressor: Buyer, ts_event: 267600259492 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.17390790, aggressor: Buyer, ts_event: 298777679331 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.17095568, aggressor: Buyer, ts_event: 299630805098 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.1, aggressor: Buyer, ts_event: 315966784358 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.19798447, aggressor: Buyer, ts_event: 319016030880 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.76061526, aggressor: Buyer, ts_event: 348635836996 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.05957004, aggressor: Buyer, ts_event: 397060998713 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.06491765, aggressor: Buyer, ts_event: 406213679341 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.12519947, aggressor: Buyer, ts_event: 408886805844 }))"#,
+            r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.32332866, aggressor: Buyer, ts_event: 408913781393 }))"#,
+        ];
+
+        for expected_tick in expected {
+            assert_eq!(format!("{:?}", src.next_tick()), expected_tick);
+        }
+    }
+
+    #[test]
+    fn vol_storm_lifts_realized_rms() {
+        let fp = Fingerprint::from_repo_json();
+        let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+        let regime = Some(MarketRegime::VolStorm { vol_mult: 500.0 });
+        let mut clean = GeneratedSource::new(scalars.clone(), 42, 0, &fp, None);
+        let mut lifted = GeneratedSource::new(scalars.clone(), 42, 0, &fp, regime);
+        let mut pinned = GeneratedSource::new_with_clamp_override(scalars, 42, 0, &fp, regime, 1.0);
+
+        let clean_rms = rms(&latent_returns(&mut clean, 50_000));
+        let lifted_rms = rms(&latent_returns(&mut lifted, 50_000));
+        let pinned_returns = latent_returns(&mut pinned, 50_000);
+        let pinned_rms = rms(&pinned_returns);
+        let pinned_max = pinned_returns
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0_f64, f64::max);
+
+        assert!(
+            lifted_rms > clean_rms * 50.0,
+            "clean_rms={clean_rms} lifted_rms={lifted_rms}"
+        );
+        assert!(
+            pinned_max <= MAX_ABS_RETURN * 1.01,
+            "pinned_max={pinned_max}"
+        );
+        assert!(
+            lifted_rms > pinned_rms * 5.0,
+            "lifted_rms={lifted_rms} pinned_rms={pinned_rms}"
+        );
+    }
+
+    #[test]
+    fn liquidity_drought_stretches_durations() {
+        let fp = Fingerprint::from_repo_json();
+        let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+        let mut clean = GeneratedSource::new(scalars.clone(), 42, 0, &fp, None);
+        let mut drought = GeneratedSource::new(
+            scalars,
+            42,
+            0,
+            &fp,
+            Some(MarketRegime::LiquidityDrought { thin_factor: 5.0 }),
+        );
+
+        let clean_mean = mean(&durations(&mut clean, 20_000));
+        let drought_mean = mean(&durations(&mut drought, 20_000));
+        assert!(
+            drought_mean >= clean_mean * 4.0,
+            "clean_mean={clean_mean} drought_mean={drought_mean}"
+        );
+    }
+
+    #[test]
+    fn session_edge_spike_localizes() {
+        let fp = Fingerprint::from_repo_json();
+        let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+        let mut src = GeneratedSource::new(
+            scalars,
+            42,
+            SESSION_START_TS,
+            &fp,
+            Some(MarketRegime::SessionEdgeSpike {
+                start_hour: 14,
+                end_hour: 16,
+                extra_vol_mult: 6.0,
+            }),
+        );
+
+        let (in_window, out_window) = windowed_latent_returns(&mut src, 250_000, 14, 16);
+        let in_rms = rms(&in_window);
+        let out_rms = rms(&out_window);
+        assert!(in_rms >= out_rms * 2.0, "in_rms={in_rms} out_rms={out_rms}");
+    }
+
+    #[test]
+    fn reopen_gap_halts_and_gaps() {
+        let fp = Fingerprint::from_repo_json();
+        let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+        let at_ts = 400_000_000_000;
+        let halt_ns = 86_400_000_000_000;
+        let gap_frac = 0.05;
+        let mut src = GeneratedSource::new(
+            scalars,
+            42,
+            0,
+            &fp,
+            Some(MarketRegime::ReopenGap {
+                at_ts,
+                halt_secs: halt_ns / 1_000_000_000,
+                gap_frac,
+            }),
+        );
+
+        let mut prior_ts = 0;
+        let mut prior_mid = src.vol.mid;
+        let mut gap_return = None;
+        let mut straddling_gap = None;
+        let mut large_gaps = 0;
+        for _ in 0..10_000 {
+            let _tick = src.next_tick().expect("unbounded generated source");
+            let dt = src.clock_ns - prior_ts;
+            if dt >= halt_ns {
+                large_gaps += 1;
+            }
+            if prior_ts < at_ts && at_ts <= src.clock_ns {
+                straddling_gap = Some(dt);
+                gap_return = Some((src.vol.mid / prior_mid).ln());
+            }
+            prior_ts = src.clock_ns;
+            prior_mid = src.vol.mid;
+        }
+
+        assert_eq!(large_gaps, 1, "large_gaps={large_gaps}");
+        assert!(
+            straddling_gap.expect("gap straddles at_ts") >= halt_ns,
+            "straddling_gap={straddling_gap:?}"
+        );
+        let gap_return = gap_return.expect("gap return measured");
+        assert!(
+            (gap_return - gap_frac).abs() <= 0.001,
+            "gap_return={gap_return} gap_frac={gap_frac}"
+        );
+    }
+
+    #[test]
     fn realism() {
         let fp = Fingerprint::from_repo_json();
         let scalars = GeneratorScalars::xbtusd_anchor(&fp);
-        let mut src = GeneratedSource::new(scalars.clone(), 42, 0, &fp);
+        let mut src = GeneratedSource::new(scalars.clone(), 42, 0, &fp, None);
         let measured = measure(&mut src, &scalars, DRAW);
         assert_in_range(
             "duration_dispersion_index",
@@ -725,7 +1036,7 @@ mod tests {
 
         let fp = Fingerprint::from_repo_json();
         let scalars = GeneratorScalars::xbtusd_anchor(&fp);
-        let mut src = GeneratedSource::new(scalars, 42, SESSION_START_TS, &fp);
+        let mut src = GeneratedSource::new(scalars, 42, SESSION_START_TS, &fp, None);
         let measured = measure_session_curves(&mut src, SESSION_DRAW);
 
         for h in 0..24 {
@@ -854,6 +1165,57 @@ mod tests {
             off_grid_prices,
             neutral_aggressors,
         }
+    }
+
+    fn durations(src: &mut GeneratedSource, draw: usize) -> Vec<f64> {
+        let mut out = Vec::with_capacity(draw.saturating_sub(1));
+        let mut prior_ts = None;
+        for _ in 0..draw {
+            let tick = src.next_tick().expect("unbounded generated source");
+            if let Some(prior) = prior_ts {
+                out.push((tick.ts_event() - prior) as f64 / 1_000_000_000.0);
+            }
+            prior_ts = Some(tick.ts_event());
+        }
+        out
+    }
+
+    fn latent_returns(src: &mut GeneratedSource, draw: usize) -> Vec<f64> {
+        let mut out = Vec::with_capacity(draw.saturating_sub(1));
+        let mut prior_mid = src.vol.mid;
+        for _ in 0..draw {
+            let _tick = src.next_tick().expect("unbounded generated source");
+            out.push((src.vol.mid / prior_mid).ln());
+            prior_mid = src.vol.mid;
+        }
+        out
+    }
+
+    fn windowed_latent_returns(
+        src: &mut GeneratedSource,
+        draw: usize,
+        start_hour: u8,
+        end_hour: u8,
+    ) -> (Vec<f64>, Vec<f64>) {
+        let mut in_window = Vec::new();
+        let mut out_window = Vec::new();
+        let mut prior_mid = src.vol.mid;
+        for _ in 0..draw {
+            let _tick = src.next_tick().expect("unbounded generated source");
+            let ret = (src.vol.mid / prior_mid).ln();
+            let (hour, _dow) = utc_hour_dow(src.clock_ns);
+            if usize::from(start_hour) <= hour && hour < usize::from(end_hour) {
+                in_window.push(ret);
+            } else {
+                out_window.push(ret);
+            }
+            prior_mid = src.vol.mid;
+        }
+        (in_window, out_window)
+    }
+
+    fn rms(values: &[f64]) -> f64 {
+        (values.iter().map(|value| value.powi(2)).sum::<f64>() / values.len() as f64).sqrt()
     }
 
     struct SessionCurves {

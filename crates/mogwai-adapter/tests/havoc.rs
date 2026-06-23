@@ -222,6 +222,7 @@ fn data_havoc(client: ClientHavoc) -> HavocSpec {
     HavocSpec {
         client,
         server: Vec::new(),
+        data: None,
     }
 }
 
@@ -249,6 +250,7 @@ async fn ships_server_havoc() {
             },
             Divergence::GoDark { ms: 25 },
         ],
+        data: None,
     };
 
     let cache = Rc::new(RefCell::new(Cache::default()));

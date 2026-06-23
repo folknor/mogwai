@@ -1,7 +1,7 @@
 use std::any::Any;
 
 use anyhow::ensure;
-use mogwai_protocol::{ClientHavoc, HavocSpec, TransportProfile};
+use mogwai_protocol::{ClientHavoc, HavocSpec, TransportProfile, validate_market_regime};
 use nautilus_common::factories::ClientConfig;
 use nautilus_model::{
     enums::AccountType,
@@ -47,6 +47,9 @@ impl MogwaiDataClientConfig {
         ensure!(!self.base_url.trim().is_empty(), "base_url cannot be empty");
         if let Some(havoc) = &self.havoc {
             validate_client_havoc(&havoc.client)?;
+            if let Some(regime) = &havoc.data {
+                validate_market_regime(regime).map_err(anyhow::Error::msg)?;
+            }
         }
         Ok(())
     }
@@ -106,6 +109,9 @@ impl MogwaiExecClientConfig {
         ensure!(!self.base_url.trim().is_empty(), "base_url cannot be empty");
         if let Some(havoc) = &self.havoc {
             validate_client_havoc(&havoc.client)?;
+            if let Some(regime) = &havoc.data {
+                validate_market_regime(regime).map_err(anyhow::Error::msg)?;
+            }
         }
         Ok(())
     }

@@ -41,6 +41,10 @@ never imports nautilus.
 - `HavocSpec` / `ClientHavoc` / `HavocLatency` / `EventKind` are the havoc config
   (see the havoc model below); `HavocLatency::delay_for` mirrors nautilus's
   `StaticLatencyModel` base-plus-op composition.
+- `MarketRegime` is the data-path havoc surface (`HavocSpec.data`): a generator
+  perturbation carried per subscription on `Subscribe` and per request on
+  `GET /trades`, range-checked by the free `validate_market_regime` (see the
+  havoc model below).
 
 ## mogwai-engine - the exchange core
 
@@ -104,10 +108,16 @@ sources into one time-ordered stream.
   infer one. The f64-to-Decimal conversions saturate rather than panic.
 
 - `GeneratorScalars` is the per-instrument knob vector - price level, tick size,
-  typical size, volatility, activity - a mutable struct that leaves room for the
-  later market-regime havoc axis. `from_fingerprint_medians` and `xbtusd_anchor`
-  construct it; `validate` range-checks it. The model is symbol-agnostic: the
-  shape is universal, only these scalars differ per instrument.
+  typical size, volatility, activity. `from_fingerprint_medians` and
+  `xbtusd_anchor` construct it; `validate` range-checks it. The model is
+  symbol-agnostic: the shape is universal, only these scalars differ per
+  instrument. The market-regime havoc axis does NOT route through these validated
+  scalars (a drought is deliberately out of band): `GeneratedSource::new` takes an
+  optional `MarketRegime` and decomposes it into a private `RegimeState`, layering
+  the perturbation onto the realized output at the same point the session envelope
+  attaches (after the ACD and GARCH recursions consume their un-modulated
+  feedback), so the clustering dynamics survive and the clean `None` path is
+  byte-identical. See the havoc model below.
 
 - The `SessionModulator` makes the stream non-stationary in wall-clock time. It
   multiplies the arrival intensity by the UTC hour-of-day and day-of-week shares
@@ -217,10 +227,10 @@ messages. The only crate that path-deps the sibling `../nautilus_trader` checkou
   neither drops nor duplicates a trade. The default `WsStreaming` profile is
   byte-identical to the pre-selector adapter.
 
-## The havoc model - one HavocSpec, two surfaces
+## The havoc model - one HavocSpec, three surfaces
 
 The point of mogwai. A single `HavocSpec` on both client configs (range-checked
-at factory `create` time) arms both halves of the havoc:
+at factory `create` time) arms all three surfaces of the havoc:
 
 - **Server half.** A `Vec<control::Divergence>` the exec client `connect` ships to
   `/control/divergence` (one POST per divergence, so broadarrow makes no separate
@@ -231,12 +241,28 @@ at factory `create` time) arms both halves of the havoc:
   drain path (the data and exec WS readers, the polling loop, and the
   per-dispatch exec-over-HTTP path). A clean `None` spec is a byte-identical
   passthrough.
+- **Data half.** A `MarketRegime` on `HavocSpec.data` that corrupts the *market
+  before it is produced*, perturbing the generator's parameters at
+  source-construction time rather than corrupting events after they exist. Four
+  regimes: `VolStorm` cranks the GARCH volatility past its fitted RMS (and lifts
+  the per-update and sigma2 clamps with it so the storm is realized, not clamped);
+  `LiquidityDrought` stretches inter-arrival durations into a thin tape;
+  `SessionEdgeSpike` amplifies the session vol curve inside a UTC hour window; and
+  `ReopenGap` injects a halt-then-gap discontinuity (silent halt, then a resume at
+  a price gapped off the pre-halt mid) - the one stylized fact a 24/7 spot tape
+  structurally never shows. The regime is venue-wide, not per-symbol, and rides
+  per subscription on `Subscribe` and per request on `GET /trades`; it never
+  travels the `/control/divergence` control plane (that plane arms global
+  connection-scoped state, while market regime must be baked into the
+  `GeneratedSource` a subscription spins up). It is decomposed into a private
+  `RegimeState` at construction, never mutating the validated `GeneratorScalars`,
+  so a deliberately out-of-band regime layers an explicit perturbation on top
+  while `validate` keeps gating the in-band per-instrument scalars. A parseable
+  but out-of-band regime is dropped to a clean replay (fail-closed), never a
+  panic. A `None` regime is a byte-identical clean draw.
 
 The per-venue `HavocSpec` value that broadarrow constructs lives in broadarrow,
-not here. A planned extension turns the generator's `GeneratorScalars` into a
-*market-regime* havoc axis (crank volatility, thin the arrival intensity, inject
-session-edge spikes or reopen gaps) - corrupting the market before it is produced,
-distinct from this transport-corruption axis.
+not here.
 
 ## The offline analysis pipeline - analysis/
 

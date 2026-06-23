@@ -126,7 +126,7 @@ impl ExecutionClientFactory for MogwaiExecutionClientFactory {
 mod tests {
     use std::{any::Any, cell::RefCell, rc::Rc};
 
-    use mogwai_protocol::{ClientHavoc, HavocLatency, HavocSpec, TransportProfile};
+    use mogwai_protocol::{ClientHavoc, HavocLatency, HavocSpec, MarketRegime, TransportProfile};
     use nautilus_common::{
         cache::Cache,
         clock::TestClock,
@@ -167,6 +167,7 @@ mod tests {
                 seed: Some(7),
             },
             server: Vec::new(),
+            data: None,
         }
     }
 
@@ -353,6 +354,7 @@ mod tests {
                     ..ClientHavoc::default()
                 },
                 server: Vec::new(),
+                data: None,
             }),
             ..MogwaiDataClientConfig::default()
         };
@@ -372,6 +374,7 @@ mod tests {
                     ..ClientHavoc::default()
                 },
                 server: Vec::new(),
+                data: None,
             }),
             ..MogwaiExecClientConfig::default()
         };
@@ -382,5 +385,42 @@ mod tests {
 
         assert!(data_err.contains("drop_prob"));
         assert!(exec_err.contains("reorder_prob"));
+    }
+
+    #[test]
+    fn mogwai_config_rejects_out_of_range_data_regime() {
+        let data_factory = MogwaiDataClientFactory::new();
+        let cache = cache();
+        let clock = Rc::new(RefCell::new(TestClock::new()));
+        let data_config = MogwaiDataClientConfig {
+            havoc: Some(HavocSpec {
+                data: Some(MarketRegime::LiquidityDrought { thin_factor: 0.5 }),
+                ..HavocSpec::default()
+            }),
+            ..MogwaiDataClientConfig::default()
+        };
+
+        let data_err =
+            match data_factory.create("MOGWAI-TEST", &data_config, Rc::clone(&cache).into(), clock)
+            {
+                Ok(_) => panic!("data factory accepted invalid data regime"),
+                Err(error) => error.to_string(),
+            };
+
+        let exec_factory = MogwaiExecutionClientFactory::new();
+        let exec_config = MogwaiExecClientConfig {
+            havoc: Some(HavocSpec {
+                data: Some(MarketRegime::VolStorm { vol_mult: 0.0 }),
+                ..HavocSpec::default()
+            }),
+            ..MogwaiExecClientConfig::default()
+        };
+        let exec_err = match exec_factory.create("MOGWAI-TEST", &exec_config, cache.into()) {
+            Ok(_) => panic!("execution factory accepted invalid data regime"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(data_err.contains("thin_factor"));
+        assert!(exec_err.contains("vol_mult"));
     }
 }

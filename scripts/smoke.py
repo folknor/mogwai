@@ -19,6 +19,7 @@ then run this script.
 import json
 import socket
 import time
+import urllib.parse
 import urllib.request
 
 HOST, PORT = "127.0.0.1", 8787
@@ -44,6 +45,16 @@ def post_order(payload: dict) -> list:
         method="POST",
     )
     with urllib.request.urlopen(req) as r:
+        assert r.status == 200, r.status
+        return json.loads(r.read().decode())
+
+
+def fetch_trades(symbol: str, start: int, limit: int, regime: dict | None = None) -> list:
+    params = {"symbol": symbol, "start": start, "limit": limit}
+    if regime is not None:
+        params["regime"] = json.dumps(regime)
+    url = f"http://{HOST}:{PORT}/trades?{urllib.parse.urlencode(params)}"
+    with urllib.request.urlopen(url) as r:
         assert r.status == 200, r.status
         return json.loads(r.read().decode())
 
@@ -91,6 +102,14 @@ def find_position(account: dict, symbol: str) -> dict:
         if position["symbol"] == symbol:
             return position
     raise AssertionError(f"missing position {symbol}: {account}")
+
+
+def mean_event_gap(trades: list) -> float:
+    gaps = [
+        trades[i]["ts_event"] - trades[i - 1]["ts_event"]
+        for i in range(1, len(trades))
+    ]
+    return sum(gaps) / len(gaps)
 
 
 class WsClient:
@@ -278,6 +297,19 @@ def main() -> None:
     assert windowed["symbol"] == "KEUR", windowed
     assert windowed["ts_event"] >= WINDOW_START_TS, windowed
     print("PASS: Subscribe.start_ts is wired through live replay")
+
+    clean_trades = fetch_trades("KEUR", WINDOW_START_TS, 200)
+    drought_trades = fetch_trades(
+        "KEUR",
+        WINDOW_START_TS,
+        200,
+        {"type": "LiquidityDrought", "thin_factor": 5.0},
+    )
+    clean_gap = mean_event_gap(clean_trades)
+    drought_gap = mean_event_gap(drought_trades)
+    print("regime: ", {"clean_gap": clean_gap, "drought_gap": drought_gap})
+    assert drought_gap >= clean_gap * 3.0, (clean_gap, drought_gap)
+    print("PASS: LiquidityDrought stretches event-time market data gaps")
 
     ws = WsClient(timeout=1.5)
     ws.send({"type": "Subscribe", "symbols": ["KEUR"]})

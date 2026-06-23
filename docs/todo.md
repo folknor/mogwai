@@ -24,21 +24,7 @@ the summary).
 
 ## Next
 
-### 1. Market-regime havoc axis (the generated data path)
-
-The generated data path is landed. The open follow-up turns the generator's
-`GeneratorScalars` into a second havoc surface, distinct from the existing
-transport-corruption havoc: instead of corrupting events after they are produced
-(latency, drop, duplicate, reorder), corrupt the *market* before it is produced.
-The generator parameterization already leaves room for it; broadarrow sets the
-per-venue value. See the havoc model in `reference/architecture.md`.
-
-- [ ] Market-regime knobs over the generator parameters: crank the volatility
-      state, thin the arrival intensity (a liquidity drought), inject a
-      session-edge vol spike, or a session-closing reopen gap (the
-      halt-then-gap discontinuity a 24/7 spot tape never shows).
-
-### 2. broadarrow integration: point a MOGWAI venue at the server
+### 1. broadarrow integration: point a MOGWAI venue at the server
 
 The adapter, its `transport_profile` selector, and its `HavocSpec` split are
 landed (see `reference/architecture.md`). What remains lives in broadarrow, not
@@ -47,10 +33,10 @@ this repo:
 - [ ] broadarrow side (lives in broadarrow, not here): a `MOGWAI` arm in
       `run-prep/src/venue.rs` and a `core::venue` PROFILES row, with a
       profile-guard test enforcing that every wired venue has a PROFILES row.
-      This is where broadarrow sets the per-venue `HavocSpec` and picks the
-      `transport_profile`.
+      This is where broadarrow sets the per-venue `HavocSpec` (including its
+      `data` market-regime field) and picks the `transport_profile`.
 
-### 3. HavocSpec connection-lifecycle extension
+### 2. HavocSpec connection-lifecycle extension
 
 The landed `HavocSpec` mirrors only nautilus's `StaticLatencyModel` (the latency
 field). The wider knob vocabulary stays open:

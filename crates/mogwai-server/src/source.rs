@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 use mogwai_data::{
     Fingerprint, GeneratedSource, GeneratorScalars, MergeSource, TickEvent, TickSource,
 };
+use mogwai_protocol::MarketRegime;
 use rust_decimal::Decimal;
 
 const ORIGIN_TS: u64 = 1_700_438_400_000_000_000;
@@ -43,6 +44,7 @@ fn scalars_for(symbol: &str, fp: &Fingerprint) -> GeneratorScalars {
 pub(crate) fn build_live_source(
     symbols: &[String],
     start_ts: Option<u64>,
+    regime: Option<MarketRegime>,
 ) -> Option<Box<dyn TickSource>> {
     let fp = fingerprint();
     let anchor = start_ts.unwrap_or(ORIGIN_TS);
@@ -50,8 +52,13 @@ pub(crate) fn build_live_source(
         .iter()
         .map(|sym| {
             let scalars = scalars_for(sym, fp);
-            let source: Box<dyn TickSource> =
-                Box::new(GeneratedSource::new(scalars, seed_for(sym), anchor, fp));
+            let source: Box<dyn TickSource> = Box::new(GeneratedSource::new(
+                scalars,
+                seed_for(sym),
+                anchor,
+                fp,
+                regime,
+            ));
             source
         })
         .collect();
@@ -63,7 +70,11 @@ pub(crate) fn build_live_source(
     Some(Box::new(MergeSource::new(sources)))
 }
 
-pub(crate) fn build_history_source(symbol: &str, start: Option<u64>) -> Box<dyn TickSource> {
+pub(crate) fn build_history_source(
+    symbol: &str,
+    start: Option<u64>,
+    regime: Option<MarketRegime>,
+) -> Box<dyn TickSource> {
     let fp = fingerprint();
     let scalars = scalars_for(symbol, fp);
     let source: Box<dyn TickSource> = Box::new(GeneratedSource::new(
@@ -71,6 +82,7 @@ pub(crate) fn build_history_source(symbol: &str, start: Option<u64>) -> Box<dyn 
         seed_for(symbol),
         ORIGIN_TS,
         fp,
+        regime,
     ));
     let bounded: Box<dyn TickSource> = Box::new(BoundedSeek {
         inner: source,
@@ -107,7 +119,8 @@ mod tests {
     #[test]
     fn live_source_honors_symbol_and_window_anchor() {
         let symbols = vec!["KEUR".to_string()];
-        let mut source = build_live_source(&symbols, Some(86_401_000_000_000)).expect("source");
+        let mut source =
+            build_live_source(&symbols, Some(86_401_000_000_000), None).expect("source");
         let TickEvent::Trade(trade) = source.next_tick().expect("first tick") else {
             panic!("generated source emits trades");
         };
@@ -124,5 +137,35 @@ mod tests {
         assert_eq!(scalars.modal_tick, Decimal::new(1, 2));
         assert_eq!(scalars.price_decimals, 2);
         assert!(scalars.validate(fp).is_ok());
+    }
+
+    #[test]
+    fn live_source_applies_regime() {
+        let symbols = vec!["KEUR".to_string()];
+        let mut clean = build_live_source(&symbols, Some(ORIGIN_TS), None).expect("clean source");
+        let mut drought = build_live_source(
+            &symbols,
+            Some(ORIGIN_TS),
+            Some(MarketRegime::LiquidityDrought { thin_factor: 5.0 }),
+        )
+        .expect("drought source");
+
+        let clean_mean = mean_duration(&mut clean, 2_000);
+        let drought_mean = mean_duration(&mut drought, 2_000);
+        assert!(
+            drought_mean >= clean_mean * 4.0,
+            "clean_mean={clean_mean} drought_mean={drought_mean}"
+        );
+    }
+
+    fn mean_duration(source: &mut Box<dyn TickSource>, draw: usize) -> f64 {
+        let mut prior = source.next_tick().expect("first tick").ts_event();
+        let mut total = 0.0;
+        for _ in 1..draw {
+            let ts = source.next_tick().expect("next tick").ts_event();
+            total += (ts - prior) as f64 / 1_000_000_000.0;
+            prior = ts;
+        }
+        total / (draw - 1) as f64
     }
 }

@@ -12,8 +12,8 @@ use anyhow::{Context, ensure};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use mogwai_protocol::{
-    ClientHavoc, ClientMessage, EventKind, HavocLatency, HavocSpec, InstrumentDef, ServerMessage,
-    Side, Symbol, TradeTick,
+    ClientHavoc, ClientMessage, EventKind, HavocLatency, HavocSpec, InstrumentDef, MarketRegime,
+    ServerMessage, Side, Symbol, TradeTick,
 };
 use nautilus_common::{
     clients::{DataClient, ExecutionClient},
@@ -123,6 +123,7 @@ impl MogwaiDataClient {
             self.send_ws(WsCommand::Subscribe {
                 symbols: vec![symbol],
                 start_ts: active_start_ts,
+                regime: data_regime(&self.config.havoc),
             })?;
         }
         Ok(())
@@ -236,6 +237,7 @@ impl DataClient for MogwaiDataClient {
         // Server-side divergences are execution-owned. The data client accepts
         // the same config object but only applies its client-side transport half.
         let client_havoc = client_havoc(&self.config.havoc);
+        let regime = data_regime(&self.config.havoc);
 
         if self.config.transport_profile.data_by_polling() {
             let connected = Arc::clone(&self.connected);
@@ -257,6 +259,7 @@ impl DataClient for MogwaiDataClient {
                     cursor,
                     connected,
                     havoc_filter,
+                    regime,
                 })
                 .await;
             });
@@ -427,6 +430,7 @@ impl DataClient for MogwaiDataClient {
         let sink = self.sink()?;
         let http = self.http.clone();
         let base = self.config.http_base_url();
+        let regime = data_regime(&self.config.havoc);
         let instruments = Arc::clone(&self.instruments);
         let client_id = request.client_id.unwrap_or(self.client_id);
         drop(get_runtime().spawn(async move {
@@ -435,7 +439,7 @@ impl DataClient for MogwaiDataClient {
             let end = date_to_unix_nanos(request.end);
             if let Ok(def) = ensure_instrument(&http, &base, &instruments, &symbol).await
                 && let Ok(trades) =
-                    fetch_trades(&http, &base, &symbol, start, end, request.limit).await
+                    fetch_trades(&http, &base, &symbol, start, end, request.limit, regime).await
             {
                 let data = trades
                     .iter()
@@ -484,6 +488,7 @@ impl DataClient for MogwaiDataClient {
         let sink = self.sink()?;
         let http = self.http.clone();
         let base = self.config.http_base_url();
+        let regime = data_regime(&self.config.havoc);
         let instruments = Arc::clone(&self.instruments);
         let client_id = request.client_id.unwrap_or(self.client_id);
         drop(get_runtime().spawn(async move {
@@ -493,7 +498,7 @@ impl DataClient for MogwaiDataClient {
             let end = date_to_unix_nanos(request.end);
             if let Ok(def) = ensure_instrument(&http, &base, &instruments, &symbol).await
                 && let Ok(trades) =
-                    fetch_trades(&http, &base, &symbol, start, end, request.limit).await
+                    fetch_trades(&http, &base, &symbol, start, end, request.limit, regime).await
             {
                 let bars = aggregate_bars(&request.bar_type, &trades, &def);
                 let response = BarsResponse::new(
@@ -668,11 +673,12 @@ struct ActiveBar {
     close_ts: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum WsCommand {
     Subscribe {
         symbols: Vec<Symbol>,
         start_ts: Option<u64>,
+        regime: Option<MarketRegime>,
     },
     Unsubscribe {
         symbols: Vec<Symbol>,
@@ -684,9 +690,15 @@ enum WsCommand {
 /// unit-testable without a live socket.
 fn ws_command_to_client_message(cmd: WsCommand) -> ClientMessage {
     match cmd {
-        WsCommand::Subscribe { symbols, start_ts } => {
-            ClientMessage::Subscribe { symbols, start_ts }
-        }
+        WsCommand::Subscribe {
+            symbols,
+            start_ts,
+            regime,
+        } => ClientMessage::Subscribe {
+            symbols,
+            start_ts,
+            regime,
+        },
         WsCommand::Unsubscribe { symbols } => ClientMessage::Unsubscribe { symbols },
     }
 }
@@ -775,6 +787,7 @@ struct DataPollContext {
     cursor: Arc<Mutex<HashMap<Symbol, PollCursor>>>,
     connected: Arc<AtomicBool>,
     havoc_filter: HavocFilter,
+    regime: Option<MarketRegime>,
 }
 
 async fn poll_market_data(mut ctx: DataPollContext) {
@@ -788,8 +801,16 @@ async fn poll_market_data(mut ctx: DataPollContext) {
                     .or_insert_with(|| PollCursor::new(start_ts));
                 UnixNanos::from(entry.last_ts)
             };
-            let Ok(batch) =
-                fetch_trades(&ctx.http, &ctx.base, &symbol, Some(start), None, None).await
+            let Ok(batch) = fetch_trades(
+                &ctx.http,
+                &ctx.base,
+                &symbol,
+                Some(start),
+                None,
+                None,
+                ctx.regime,
+            )
+            .await
             else {
                 continue;
             };
@@ -1011,16 +1032,9 @@ async fn fetch_trades(
     start: Option<UnixNanos>,
     end: Option<UnixNanos>,
     limit: Option<std::num::NonZeroUsize>,
+    regime: Option<MarketRegime>,
 ) -> anyhow::Result<Vec<mogwai_protocol::TradeTick>> {
-    let mut params = HashMap::new();
-    params.insert("symbol".to_string(), vec![symbol.to_string()]);
-    if let Some(start) = start {
-        params.insert("start".to_string(), vec![start.as_u64().to_string()]);
-    }
-    if let Some(end) = end {
-        params.insert("end".to_string(), vec![end.as_u64().to_string()]);
-    }
-    params.insert("limit".to_string(), vec![capped_limit(limit).to_string()]);
+    let params = trade_query_params(symbol, start, end, limit, regime)?;
     let response = http
         .get(
             join_url(base, "trades"),
@@ -1037,6 +1051,31 @@ async fn fetch_trades(
         response.status.as_u16()
     );
     serde_json::from_slice(&response.body).context("decode trades")
+}
+
+fn trade_query_params(
+    symbol: &str,
+    start: Option<UnixNanos>,
+    end: Option<UnixNanos>,
+    limit: Option<std::num::NonZeroUsize>,
+    regime: Option<MarketRegime>,
+) -> anyhow::Result<HashMap<String, Vec<String>>> {
+    let mut params = HashMap::new();
+    params.insert("symbol".to_string(), vec![symbol.to_string()]);
+    if let Some(start) = start {
+        params.insert("start".to_string(), vec![start.as_u64().to_string()]);
+    }
+    if let Some(end) = end {
+        params.insert("end".to_string(), vec![end.as_u64().to_string()]);
+    }
+    params.insert("limit".to_string(), vec![capped_limit(limit).to_string()]);
+    if let Some(regime) = regime {
+        params.insert(
+            "regime".to_string(),
+            vec![serde_json::to_string(&regime).context("encode market regime")?],
+        );
+    }
+    Ok(params)
 }
 
 async fn post_order(
@@ -1164,6 +1203,10 @@ impl HavocFilter {
 fn client_havoc(spec: &Option<HavocSpec>) -> ClientHavoc {
     spec.as_ref()
         .map_or_else(ClientHavoc::default, |spec| spec.client.clone())
+}
+
+fn data_regime(spec: &Option<HavocSpec>) -> Option<MarketRegime> {
+    spec.as_ref().and_then(|spec| spec.data)
 }
 
 fn client_havoc_for_dispatch(spec: &Option<HavocSpec>, counter: u64) -> ClientHavoc {
@@ -2144,7 +2187,7 @@ fn in_time_range(ts: UnixNanos, start: Option<UnixNanos>, end: Option<UnixNanos>
 mod data_client_tests {
     use std::num::NonZeroUsize;
 
-    use mogwai_protocol::{AggressorSide, TransportProfile};
+    use mogwai_protocol::{AggressorSide, MarketRegime, TransportProfile};
     use nautilus_core::{Params, UUID4};
     use nautilus_model::{
         data::BarSpecification,
@@ -2343,6 +2386,7 @@ mod data_client_tests {
             ClientMessage::Subscribe {
                 symbols,
                 start_ts: Some(100),
+                regime: None,
             } if symbols == vec!["BTCUSDT".to_string()]
         ));
 
@@ -2363,6 +2407,44 @@ mod data_client_tests {
             rx.try_recv().is_err(),
             "second subscribe must not re-issue a Subscribe"
         );
+    }
+
+    #[test]
+    fn subscribe_command_carries_data_regime() {
+        let mut client = MogwaiDataClient::new(
+            ClientId::from("MOGWAI-DATA"),
+            MogwaiDataClientConfig {
+                havoc: Some(HavocSpec {
+                    data: Some(MarketRegime::LiquidityDrought { thin_factor: 5.0 }),
+                    ..HavocSpec::default()
+                }),
+                ..MogwaiDataClientConfig::default()
+            },
+        )
+        .expect("valid data client");
+        let (tx, mut rx) = unbounded_channel::<WsCommand>();
+        client.ws_cmd = Some(tx);
+
+        client
+            .subscribe_trades(SubscribeTrades::new(
+                instrument_id(),
+                Some(client.client_id),
+                None,
+                UUID4::new(),
+                UnixNanos::default(),
+                None,
+                None,
+            ))
+            .expect("subscribe trades");
+
+        let cmd = rx.try_recv().expect("subscribe emits a command");
+        assert!(matches!(
+            ws_command_to_client_message(cmd),
+            ClientMessage::Subscribe {
+                regime: Some(MarketRegime::LiquidityDrought { thin_factor: 5.0 }),
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2523,6 +2605,29 @@ mod data_client_tests {
             HISTORY_LIMIT_CAP
         );
         assert_eq!(capped_limit(NonZeroUsize::new(5)), 5);
+    }
+
+    #[test]
+    fn trade_query_regime_round_trips_through_url_encoding() {
+        let regime = MarketRegime::VolStorm { vol_mult: 10.0 };
+        let params = trade_query_params("BTCUSDT", None, None, NonZeroUsize::new(5), Some(regime))
+            .expect("params build");
+        let pairs: Vec<(&str, &str)> = params
+            .iter()
+            .flat_map(|(key, values)| {
+                values
+                    .iter()
+                    .map(move |value| (key.as_str(), value.as_str()))
+            })
+            .collect();
+        let encoded = serde_urlencoded::to_string(pairs).expect("query encodes");
+        let decoded: HashMap<String, String> =
+            serde_urlencoded::from_str(&encoded).expect("query decodes");
+        let decoded_regime: MarketRegime =
+            serde_json::from_str(decoded.get("regime").expect("regime param"))
+                .expect("regime decodes");
+
+        assert_eq!(decoded_regime, regime);
     }
 
     #[test]
