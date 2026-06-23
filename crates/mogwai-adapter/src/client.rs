@@ -321,24 +321,31 @@ impl DataClient for MogwaiDataClient {
                 move || subscribe_commands(&connect_subs, regime),
                 move |server_msg| {
                     let handler_filter = Arc::clone(&handler_filter);
-                    dispatch_market_havoc_shared(
-                        handler_filter,
-                        server_msg,
-                        handler_sink.clone(),
-                        Arc::clone(&handler_instruments),
-                        Arc::clone(&handler_subs),
-                        Arc::clone(&handler_bars),
-                    )
+                    let sink = handler_sink.clone();
+                    let instruments = Arc::clone(&handler_instruments);
+                    let subs = Arc::clone(&handler_subs);
+                    let bars = Arc::clone(&handler_bars);
+                    async move {
+                        let mut filter = handler_filter.lock().await;
+                        dispatch_havoc(&mut filter, server_msg, |msg| {
+                            handle_market_message(msg, &sink, &instruments, &subs, &bars)
+                        })
+                        .await;
+                    }
                 },
                 move || {
                     let disconnect_filter = Arc::clone(&disconnect_filter);
-                    flush_market_havoc_shared(
-                        disconnect_filter,
-                        disconnect_sink.clone(),
-                        Arc::clone(&disconnect_instruments),
-                        Arc::clone(&disconnect_subs),
-                        Arc::clone(&disconnect_bars),
-                    )
+                    let sink = disconnect_sink.clone();
+                    let instruments = Arc::clone(&disconnect_instruments);
+                    let subs = Arc::clone(&disconnect_subs);
+                    let bars = Arc::clone(&disconnect_bars);
+                    async move {
+                        let mut filter = disconnect_filter.lock().await;
+                        flush_havoc(&mut filter, |msg| {
+                            handle_market_message(msg, &sink, &instruments, &subs, &bars)
+                        })
+                        .await;
+                    }
                 },
             )
             .await;
@@ -800,54 +807,33 @@ fn ws_command_to_client_message(cmd: WsCommand) -> ClientMessage {
     }
 }
 
-async fn dispatch_market_havoc(
-    filter: &mut HavocFilter,
-    msg: ServerMessage,
-    sink: &UnboundedSender<DataEvent>,
-    instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
-    subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
-    bars: &Arc<Mutex<HashMap<BarType, BarSubState>>>,
-) {
+/// Drains the havoc-mangled expansion of one inbound `msg` and routes each
+/// resulting wire message through `handle`, sleeping the per-message delay
+/// first. Generic over the per-message sink so the market path (which forwards
+/// to `handle_market_message`, async) and the exec path (which forwards to
+/// `handle_exec_message`, wrapped in an async block) share one control flow.
+/// `flush_havoc` is the same loop over `filter.flush()` for the disconnect
+/// teardown that emits any divergence-held events.
+async fn dispatch_havoc<F, Fut>(filter: &mut HavocFilter, msg: ServerMessage, mut handle: F)
+where
+    F: FnMut(ServerMessage) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
     for (msg, delay) in filter.apply(msg) {
         sleep_havoc_delay(delay).await;
-        handle_market_message(msg, sink, instruments, subs, bars).await;
+        handle(msg).await;
     }
 }
 
-async fn flush_market_havoc(
-    filter: &mut HavocFilter,
-    sink: &UnboundedSender<DataEvent>,
-    instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
-    subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
-    bars: &Arc<Mutex<HashMap<BarType, BarSubState>>>,
-) {
+async fn flush_havoc<F, Fut>(filter: &mut HavocFilter, mut handle: F)
+where
+    F: FnMut(ServerMessage) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
     for (msg, delay) in filter.flush() {
         sleep_havoc_delay(delay).await;
-        handle_market_message(msg, sink, instruments, subs, bars).await;
+        handle(msg).await;
     }
-}
-
-async fn dispatch_market_havoc_shared(
-    filter: Arc<tokio::sync::Mutex<HavocFilter>>,
-    msg: ServerMessage,
-    sink: UnboundedSender<DataEvent>,
-    instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
-    subs: Arc<Mutex<HashMap<Symbol, SubState>>>,
-    bars: Arc<Mutex<HashMap<BarType, BarSubState>>>,
-) {
-    let mut filter = filter.lock().await;
-    dispatch_market_havoc(&mut filter, msg, &sink, &instruments, &subs, &bars).await;
-}
-
-async fn flush_market_havoc_shared(
-    filter: Arc<tokio::sync::Mutex<HavocFilter>>,
-    sink: UnboundedSender<DataEvent>,
-    instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
-    subs: Arc<Mutex<HashMap<Symbol, SubState>>>,
-    bars: Arc<Mutex<HashMap<BarType, BarSubState>>>,
-) {
-    let mut filter = filter.lock().await;
-    flush_market_havoc(&mut filter, &sink, &instruments, &subs, &bars).await;
 }
 
 fn subscribe_commands(
@@ -987,26 +973,20 @@ async fn poll_market_data(mut ctx: DataPollContext) {
                 entry.unseen_from_batch(batch)
             };
             for trade in trades {
-                dispatch_market_havoc(
-                    &mut ctx.havoc_filter,
-                    ServerMessage::Trade(trade),
-                    &ctx.sink,
-                    &ctx.instruments,
-                    &ctx.subs,
-                    &ctx.bars,
-                )
+                let (sink, instruments, subs, bars) =
+                    (&ctx.sink, &ctx.instruments, &ctx.subs, &ctx.bars);
+                dispatch_havoc(&mut ctx.havoc_filter, ServerMessage::Trade(trade), |msg| {
+                    handle_market_message(msg, sink, instruments, subs, bars)
+                })
                 .await;
             }
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
-    flush_market_havoc(
-        &mut ctx.havoc_filter,
-        &ctx.sink,
-        &ctx.instruments,
-        &ctx.subs,
-        &ctx.bars,
-    )
+    let (sink, instruments, subs, bars) = (&ctx.sink, &ctx.instruments, &ctx.subs, &ctx.bars);
+    flush_havoc(&mut ctx.havoc_filter, |msg| {
+        handle_market_message(msg, sink, instruments, subs, bars)
+    })
     .await;
 }
 
@@ -1624,13 +1604,25 @@ impl MogwaiExecutionClient {
                 match post_order(&http, &http_quota, &url, &msg, timeout_secs).await {
                     Ok(events) => {
                         for event in events {
-                            dispatch_exec_havoc(&mut filter, event, &ctx).await;
+                            dispatch_havoc(&mut filter, event, |msg| async {
+                                handle_exec_message(msg, &ctx);
+                            })
+                            .await;
                         }
-                        flush_exec_havoc(&mut filter, &ctx).await;
+                        flush_havoc(&mut filter, |msg| async {
+                            handle_exec_message(msg, &ctx);
+                        })
+                        .await;
                     }
                     Err(err) => {
-                        dispatch_exec_havoc(&mut filter, reject_for(&cmd, &err), &ctx).await;
-                        flush_exec_havoc(&mut filter, &ctx).await;
+                        dispatch_havoc(&mut filter, reject_for(&cmd, &err), |msg| async {
+                            handle_exec_message(msg, &ctx);
+                        })
+                        .await;
+                        flush_havoc(&mut filter, |msg| async {
+                            handle_exec_message(msg, &ctx);
+                        })
+                        .await;
                     }
                 }
             }));
@@ -1770,11 +1762,25 @@ impl ExecutionClient for MogwaiExecutionClient {
                 Vec::new,
                 move |server_msg| {
                     let handler_filter = Arc::clone(&handler_filter);
-                    dispatch_exec_havoc_shared(handler_filter, server_msg, handler_ctx.clone())
+                    let ctx = handler_ctx.clone();
+                    async move {
+                        let mut filter = handler_filter.lock().await;
+                        dispatch_havoc(&mut filter, server_msg, |msg| async {
+                            handle_exec_message(msg, &ctx);
+                        })
+                        .await;
+                    }
                 },
                 move || {
                     let disconnect_filter = Arc::clone(&disconnect_filter);
-                    flush_exec_havoc_shared(disconnect_filter, disconnect_ctx.clone())
+                    let ctx = disconnect_ctx.clone();
+                    async move {
+                        let mut filter = disconnect_filter.lock().await;
+                        flush_havoc(&mut filter, |msg| async {
+                            handle_exec_message(msg, &ctx);
+                        })
+                        .await;
+                    }
                 },
             )
             .await;
@@ -2082,34 +2088,6 @@ struct ExecState {
     orders: HashMap<ClientOrderId, OrderRecord>,
     fills: Vec<FillRecord>,
     positions: HashMap<Symbol, PositionRecord>,
-}
-
-async fn dispatch_exec_havoc(filter: &mut HavocFilter, msg: ServerMessage, ctx: &ExecContext) {
-    for (msg, delay) in filter.apply(msg) {
-        sleep_havoc_delay(delay).await;
-        handle_exec_message(msg, ctx);
-    }
-}
-
-async fn flush_exec_havoc(filter: &mut HavocFilter, ctx: &ExecContext) {
-    for (msg, delay) in filter.flush() {
-        sleep_havoc_delay(delay).await;
-        handle_exec_message(msg, ctx);
-    }
-}
-
-async fn dispatch_exec_havoc_shared(
-    filter: Arc<tokio::sync::Mutex<HavocFilter>>,
-    msg: ServerMessage,
-    ctx: ExecContext,
-) {
-    let mut filter = filter.lock().await;
-    dispatch_exec_havoc(&mut filter, msg, &ctx).await;
-}
-
-async fn flush_exec_havoc_shared(filter: Arc<tokio::sync::Mutex<HavocFilter>>, ctx: ExecContext) {
-    let mut filter = filter.lock().await;
-    flush_exec_havoc(&mut filter, &ctx).await;
 }
 
 #[derive(Debug, Clone)]
@@ -3517,6 +3495,89 @@ mod tests {
         assert_ne!(
             other_seq, expected,
             "a different seed must produce a different draw sequence"
+        );
+    }
+
+    #[test]
+    fn per_dispatch_seed_decorrelates_yet_stays_reproducible() {
+        // F.6 follow-up: `client_havoc_for_dispatch` XORs the configured client
+        // seed with the per-dispatch counter (`*seed ^= counter`) so each
+        // dispatched order draws a distinct havoc stream instead of every order
+        // replaying one. A regression dropping the XOR would silently collapse
+        // all dispatches onto the same sequence; that bug is invisible to the
+        // single-stream `draw` test above. This pins a configured seed plus a
+        // mid-range probability, builds the filter the way `dispatch_order`
+        // does (derive a per-dispatch ClientHavoc, then HavocFilter::from_client),
+        // and asserts adjacent counters DECORRELATE while each counter stays
+        // reproducible under the same configured seed.
+        const SEED: u64 = 0xC0FF_EE12_3456_789A;
+        const PROBABILITY: f64 = 0.5;
+
+        let spec = Some(HavocSpec {
+            client: ClientHavoc {
+                seed: Some(SEED),
+                drop_prob: PROBABILITY,
+                ..ClientHavoc::default()
+            },
+            ..HavocSpec::default()
+        });
+
+        // The seam under test: a per-dispatch ClientHavoc whose seed is the
+        // configured seed XORed with the dispatch counter.
+        let draw_dispatch = |counter: u64| -> Vec<bool> {
+            let client = client_havoc_for_dispatch(&spec, counter);
+            let mut filter = HavocFilter::from_client(&client);
+            (0..10).map(|_| filter.draw(PROBABILITY)).collect()
+        };
+
+        // Confirm the XOR actually moved the seed off the configured value for a
+        // non-zero counter (counter 0 leaves it untouched, which is intended).
+        assert_eq!(
+            client_havoc_for_dispatch(&spec, 0).seed,
+            Some(SEED),
+            "counter 0 must leave the configured seed untouched"
+        );
+        assert_eq!(
+            client_havoc_for_dispatch(&spec, 1).seed,
+            Some(SEED ^ 1),
+            "counter 1 must XOR the configured seed with the counter"
+        );
+
+        let first = draw_dispatch(0);
+        let second = draw_dispatch(1);
+
+        // Decorrelation: two successive dispatches must draw different sequences.
+        // If the XOR were dropped, both would replay the configured seed and
+        // these would be identical.
+        assert_ne!(
+            first, second,
+            "successive dispatches must draw decorrelated havoc streams; \
+             the per-dispatch seed XOR was dropped if these match"
+        );
+
+        // Each must mix fire and no-fire so the comparison exercises the draw
+        // rather than passing on a degenerate all-one-way run.
+        assert!(
+            first.iter().any(|&b| b) && first.iter().any(|&b| !b),
+            "dispatch 0 must mix fire and no-fire"
+        );
+        assert!(
+            second.iter().any(|&b| b) && second.iter().any(|&b| !b),
+            "dispatch 1 must mix fire and no-fire"
+        );
+
+        // Individual reproducibility: the SAME configured seed must replay each
+        // per-dispatch stream bit for bit, so the decorrelation is deterministic
+        // and not process entropy. Re-deriving from the same `spec` reproduces.
+        assert_eq!(
+            draw_dispatch(0),
+            first,
+            "same configured seed must replay dispatch 0 identically"
+        );
+        assert_eq!(
+            draw_dispatch(1),
+            second,
+            "same configured seed must replay dispatch 1 identically"
         );
     }
 
