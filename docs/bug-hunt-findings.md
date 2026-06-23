@@ -125,7 +125,50 @@ intermediate probability) and F.20 (the suite is `#[ignore]`d so CI only compile
 it) are noted but unaddressed - F.6 wants a `draw`-level test and F.20 is a
 deliberate socket-sandbox tradeoff.
 
-**Planned next:** the remaining smaller smells/nits. Separately queued (see
+**Fix wave 5 (landed)** - the remaining meaty open bugs, validated with `brokkr
+check` and the adapter socket groups (`divergence_`/`havoc_`/`conn_`/`drive`/
+`http_polling`) all PASS:
+
+- adapter `client.rs`/`convert.rs`: A.7 (missing-def drops now `warn!` so the
+  legitimate-miss case is visible, divergence behavior unchanged), A.9 (a
+  `lock_recover` helper recovers poisoned locks instead of `expect`-panicking the
+  spawned reader/poll tasks), A.12 (`MogwaiExecutionClient::reset` clears
+  `ExecState`), D.1/D.2 (`convert::price`/`quantity`/`money` use `new_checked` and
+  are now fallible; bad/hostile/over-precise ticks are dropped with a `warn!`
+  through every call site instead of panicking), A.15 (PollCursor ordering coupling
+  documented). Adapter crate gained a `tracing` dep.
+- protocol `lib.rs`: B.5 (`SessionEdgeSpike` now enforces `start_hour <= 23 <
+  end_hour <= 24`), B.6 (`ReopenGap` rejects `at_ts == 0`), B.7 (`reconnect_delay_
+  max_ms == 0` with nonzero initial is rejected at validation), B.10 (`VolStorm`
+  redundancy removed), dup #17 (`finite_in`/`finite_in_excl_lo` helpers fold the
+  `is_finite` guard and the validators route through them).
+- server `main.rs`: E.5/E.6/E.7 (replay tracking moved from per-sorted-symbol-set
+  to per-symbol `HashMap<String, Replay>` with a joinable handle; overlapping subs
+  no longer double-feed a shared symbol, resubscribe cancels-and-joins the old
+  stream before the new one emits, and a `send_cancellable` loop makes cancellation
+  observable so threads cannot pile up under churn), E.11 (a `debug_assert!` pins
+  the `DelayAcks`/`GoDark` server-ownership contract), E.13 (`/trades` synthesis
+  moved to `spawn_blocking`), E.14 (`normalize_limit` dedups the clamp). Behavior
+  change: resubscribe is now per-symbol (strictly more correct). `send_cancellable`
+  adds a <=5ms worst-case latency only when a client lets the 1024-deep channel
+  fill.
+
+**Newly surfaced - need your call (added to the held list):**
+- **A.11** - surfacing `OrderRejected`/`OrderModifyRejected` for an order the mirror
+  doesn't know cannot be done from the mirror alone: nautilus validates the event's
+  `strategy_id`/`instrument_id` against its own cache and silently drops a mismatch,
+  so synthesized identifiers guarantee the drop. The drops now `warn!` (visible,
+  including the `venue_order_id: None` case), but correctly surfacing the reject
+  needs a non-mirror identifier source (the nautilus cache, which `ExecContext` does
+  not hold). Decide how to source the real identifiers.
+- **`AccountBalance::new` panic** - it `assert!`s `total == locked + free`, which a
+  hostile wire snapshot can violate independently of the (now-fixed) money
+  conversion. Same hostile-input panic surface as D.1/D.2; fixing it is a behavior
+  call (drop the balance vs clamp).
+
+**Planned next (Wave 6):** the support-file / engine / data cleanups (D.3-D.13 in
+`config.rs`/`lifecycle.rs`/`factories.rs`, B.11/B.12 in the engine, C.4/C.8/C.9 and
+dup #20/#21 in data, plus dup #7/#9/#12 consolidations). Separately queued (see
 `docs/todo.md`): authoring `reference/havoc.md` and the runtime env-var audit.
 
 ---

@@ -167,7 +167,25 @@ async fn arm_divergence(
             let until = now_ns().saturating_add(ms.saturating_mul(1_000_000));
             state.dark_until_ns.store(until, Ordering::Relaxed);
         }
-        engine_div => state.engine.lock().await.arm(engine_div),
+        // Server-ownership contract (pins B.4 / E.11): `DelayAcks` and `GoDark`
+        // are temporal, connection-scoped divergences with no synchronous
+        // engine-side trigger. The server owns them - they are applied here via
+        // `delay_ms` / `dark_until_ns` and must NEVER reach `engine.arm()`, which
+        // silently drops both variants (`Engine::arm`). The two arms above
+        // intercept them before this catch-all, so `engine_div` can only be one
+        // of the four engine-side variants. The assert makes a future refactor
+        // that forwards a whole `HavocSpec.server` vec straight to `engine.arm()`
+        // fail loudly rather than silently losing the blackout/delay knobs.
+        engine_div => {
+            debug_assert!(
+                !matches!(
+                    engine_div,
+                    Divergence::DelayAcks { .. } | Divergence::GoDark { .. }
+                ),
+                "DelayAcks/GoDark are server-owned and must not be forwarded to engine.arm()",
+            );
+            state.engine.lock().await.arm(engine_div);
+        }
     }
     (StatusCode::ACCEPTED, String::new())
 }
@@ -206,12 +224,27 @@ async fn trades(
     State(_state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
 ) -> Result<Json<Vec<TradeTick>>, StatusCode> {
-    let limit = query
-        .limit
-        .unwrap_or(MAX_HISTORY_LIMIT)
-        .min(MAX_HISTORY_LIMIT);
+    let limit = normalize_limit(query.limit);
     let regime = parse_history_regime(query.regime.as_deref());
-    let ticks = bounded_trades(&query.symbol, query.start, query.end, limit, regime);
+    // Synthesizing up to `MAX_HISTORY_LIMIT` ticks is pure CPU work against the
+    // generator (the source never blocks on IO), and `next_tick` never returns
+    // `None`, so a no-`end` request always grinds out the full `limit`. Run it on
+    // a blocking thread rather than inline on the tokio worker, so a burst of
+    // `/trades` requests cannot stall the async runtime's worker pool.
+    let HistoryQuery {
+        symbol, start, end, ..
+    } = query;
+    let ticks = match tokio::task::spawn_blocking(move || {
+        bounded_trades(&symbol, start, end, limit, regime)
+    })
+    .await
+    {
+        Ok(ticks) => ticks,
+        Err(e) => {
+            tracing::error!(%e, "history synthesis task failed");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
     Ok(Json(ticks))
 }
 
@@ -222,6 +255,17 @@ async fn quotes(
     // fetch is empty by construction. If synthesized top-of-book is wired in,
     // this route grows the same seek-and-bound scan as `trades`.
     Json(Vec::new())
+}
+
+/// The single owner of `/trades` page-size policy: a missing `limit` requests a
+/// full page, and any requested size is clamped to `MAX_HISTORY_LIMIT`. Folding
+/// the `unwrap_or` + `.min()` here (rather than splitting the clamp into the
+/// handler and an empty-vec guard into `bounded_trades`) keeps the page-size
+/// contract in one place. A normalized `0` still flows through to the early
+/// return in `bounded_trades`, which the synthesis loop relies on (the
+/// `out.len() >= limit` break would otherwise yield one tick for `limit == 0`).
+fn normalize_limit(limit: Option<usize>) -> usize {
+    limit.unwrap_or(MAX_HISTORY_LIMIT).min(MAX_HISTORY_LIMIT)
 }
 
 fn bounded_trades(
@@ -290,7 +334,17 @@ async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
 async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::channel::<ServerMessage>(1024);
-    let mut replays: HashMap<Vec<String>, Arc<AtomicBool>> = HashMap::new();
+    // One replay stream PER SYMBOL, not per sorted symbol-set. Keying per set let
+    // overlapping subscriptions (`[A,B]` then `[B,C]`) spawn two independent
+    // replays both emitting `B` from independent generators/clocks, so the client
+    // saw duplicated, interleaved, out-of-order-per-symbol `B` trades - breaking
+    // the ascending-`ts_event` ordering the adapter's `PollCursor` relies on
+    // (E.5). With a per-symbol map a given symbol is fed by exactly one stream:
+    // re-subscribing a symbol already in flight quiesces (cancels + joins) the old
+    // stream before the replacement emits, so no stale tick interleaves at the
+    // seam (E.6); the handles are tracked and reaped so threads cannot pile up
+    // under connect/subscribe/disconnect churn (E.7).
+    let mut replays: HashMap<String, Replay> = HashMap::new();
     let delay_ms = Arc::clone(&state.delay_ms);
     let dark_until_ns = Arc::clone(&state.dark_until_ns);
 
@@ -339,18 +393,34 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 regime,
             } => {
                 let regime = validate_regime_or_clean(regime);
-                let key = sub_key(&symbols);
-                if let Some(flag) = replays.remove(&key) {
-                    flag.store(true, Ordering::Relaxed);
+                for symbol in dedup_symbols(symbols) {
+                    // Quiesce any in-flight stream for this symbol BEFORE the
+                    // replacement emits: cancel the old thread and join it (off
+                    // the async worker) so it cannot land one last tick into the
+                    // shared channel after the new generator starts. Without the
+                    // join the old thread - blocked in a send or mid-`next_tick`
+                    // - could deliver an out-of-order/duplicate tick at the seam
+                    // (E.6).
+                    if let Some(old) = replays.remove(&symbol) {
+                        quiesce_replay(old).await;
+                    }
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    let handle = spawn_replay(
+                        symbol.clone(),
+                        start_ts,
+                        regime,
+                        &state.cfg,
+                        tx.clone(),
+                        Arc::clone(&cancel),
+                    );
+                    replays.insert(symbol, Replay { cancel, handle });
                 }
-                let cancel = Arc::new(AtomicBool::new(false));
-                replays.insert(key, Arc::clone(&cancel));
-                spawn_replay(symbols, start_ts, regime, &state.cfg, tx.clone(), cancel);
             }
             ClientMessage::Unsubscribe { symbols } => {
-                let key = sub_key(&symbols);
-                if let Some(flag) = replays.remove(&key) {
-                    flag.store(true, Ordering::Relaxed);
+                for symbol in dedup_symbols(symbols) {
+                    if let Some(old) = replays.remove(&symbol) {
+                        quiesce_replay(old).await;
+                    }
                 }
             }
             order_cmd => {
@@ -364,8 +434,17 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     }
 
-    for flag in replays.values() {
-        flag.store(true, Ordering::Relaxed);
+    // Cancel every replay first so the threads stop generating, then join them
+    // (the writer task is still draining `rx`, so a thread blocked in a send
+    // unblocks and observes the cancel promptly). Reaping the handles here means
+    // a disconnect leaves no detached replay thread parked in `next_tick`/send
+    // (E.7). Only after the threads are joined do we drop the last `tx` and let
+    // the writer task finish.
+    for replay in replays.values() {
+        replay.cancel.store(true, Ordering::Relaxed);
+    }
+    for (_, replay) in replays.drain() {
+        quiesce_replay(replay).await;
     }
     drop(tx);
     if let Err(e) = writer.await {
@@ -373,38 +452,70 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     }
 }
 
-fn sub_key(symbols: &[String]) -> Vec<String> {
-    let mut key = symbols.to_vec();
-    key.sort();
-    key.dedup();
-    key
+/// A live per-symbol replay stream: the cancel flag the handler raises to stop
+/// it, plus the OS-thread handle so the stream can be joined (reaped) rather than
+/// detached and left to linger.
+struct Replay {
+    cancel: Arc<AtomicBool>,
+    handle: std::thread::JoinHandle<()>,
+}
+
+/// Maximum wall time a replay thread parks while the outbound channel is full
+/// before it re-checks its cancel flag. Bounds how long a cancelled stream can
+/// stay parked in backpressure, so a quiesce/join completes promptly (E.7).
+const REPLAY_SEND_POLL: Duration = Duration::from_millis(5);
+
+/// Cancel a replay and join its thread, off the async worker.
+///
+/// The join can block briefly (until the thread observes the cancel between
+/// generated ticks or within one [`REPLAY_SEND_POLL`] of a full-channel park),
+/// so it runs on a blocking thread rather than stalling the tokio worker driving
+/// this connection. Returning only once the thread has exited is what guarantees
+/// quiescence: callers rely on it so a replaced stream cannot interleave a stale
+/// tick after its successor begins (E.6), and so disconnect reaps every thread.
+async fn quiesce_replay(replay: Replay) {
+    replay.cancel.store(true, Ordering::Relaxed);
+    if let Err(e) = tokio::task::spawn_blocking(move || replay.handle.join()).await {
+        tracing::warn!(%e, "replay join task panicked");
+    }
+}
+
+/// Sort + dedup the requested symbols so a single subscription naming a symbol
+/// twice does not spawn (then immediately quiesce) two streams for it.
+fn dedup_symbols(mut symbols: Vec<String>) -> Vec<String> {
+    symbols.sort();
+    symbols.dedup();
+    symbols
 }
 
 fn is_execution_event(msg: &ServerMessage) -> bool {
     !matches!(msg, ServerMessage::Trade(_) | ServerMessage::Quote(_))
 }
 
-/// Stream generated trades for `symbols` as market data into `tx`.
+/// Stream generated trades for a single `symbol` as market data into `tx`,
+/// returning the joinable thread handle so the caller can reap it.
 ///
-/// The replay runs on a dedicated OS thread and uses
-/// [`mpsc::Sender::blocking_send`], which also applies backpressure, pacing the
-/// generator to however fast the client drains.
+/// The replay runs on a dedicated OS thread. It applies backpressure by retrying
+/// a `try_send` whenever the channel is full, sleeping at most
+/// [`REPLAY_SEND_POLL`] between attempts and re-checking `cancel` each time, so a
+/// stream blocked behind a slow/stalled client still observes cancellation
+/// promptly instead of parking indefinitely in a plain `blocking_send` (E.7).
 fn spawn_replay(
-    symbols: Vec<String>,
+    symbol: String,
     start_ts: Option<u64>,
     regime: Option<MarketRegime>,
     cfg: &Config,
     tx: mpsc::Sender<ServerMessage>,
     cancel: Arc<AtomicBool>,
-) {
-    let symbols = symbols.into_boxed_slice();
+) -> std::thread::JoinHandle<()> {
     let speed = cfg.speed;
     let gap_cap_ms = cfg.gap_cap_ms;
     std::thread::spawn(move || {
+        let symbols = [symbol.clone()];
         let Some(mut merged) = source::build_live_source(&symbols, start_ts, regime) else {
             return;
         };
-        tracing::info!(?symbols, ?start_ts, ?regime, "replay started");
+        tracing::info!(%symbol, ?start_ts, ?regime, "replay started");
 
         let mut prev_ts: Option<u64> = None;
         while let Some(tick) = merged.next_tick() {
@@ -437,12 +548,42 @@ fn spawn_replay(
                 TickEvent::Trade(t) => ServerMessage::Trade(t),
                 TickEvent::Quote(q) => ServerMessage::Quote(q),
             };
-            if tx.blocking_send(msg).is_err() {
-                break; // client gone
+            if send_cancellable(&tx, msg, &cancel).is_err() {
+                break; // client gone or stream cancelled
             }
         }
-        tracing::info!(?symbols, "replay finished");
-    });
+        tracing::info!(%symbol, "replay finished");
+    })
+}
+
+/// Send `msg` into `tx`, applying backpressure without parking indefinitely.
+///
+/// `Sender::blocking_send` would block until the channel drains, and the replay
+/// thread would only re-check `cancel` at the next loop top - so a stream behind
+/// a stalled client could sit unkillable in a full channel. Instead this retries
+/// `try_send`, sleeping at most [`REPLAY_SEND_POLL`] when the channel is full and
+/// re-checking `cancel` between attempts. `Err(())` means the stream should stop
+/// (client gone, or cancelled while parked).
+fn send_cancellable(
+    tx: &mpsc::Sender<ServerMessage>,
+    msg: ServerMessage,
+    cancel: &AtomicBool,
+) -> Result<(), ()> {
+    use mpsc::error::TrySendError;
+    let mut msg = msg;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(());
+        }
+        match tx.try_send(msg) {
+            Ok(()) => return Ok(()),
+            Err(TrySendError::Full(returned)) => {
+                msg = returned;
+                std::thread::sleep(REPLAY_SEND_POLL);
+            }
+            Err(TrySendError::Closed(_)) => return Err(()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -571,5 +712,93 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn dedup_symbols_sorts_and_dedups() {
+        assert_eq!(
+            dedup_symbols(vec!["B".into(), "A".into(), "B".into()]),
+            vec!["A".to_string(), "B".to_string()],
+        );
+    }
+
+    #[test]
+    fn normalize_limit_defaults_and_clamps() {
+        assert_eq!(normalize_limit(None), MAX_HISTORY_LIMIT);
+        assert_eq!(normalize_limit(Some(0)), 0);
+        assert_eq!(normalize_limit(Some(10)), 10);
+        assert_eq!(
+            normalize_limit(Some(MAX_HISTORY_LIMIT + 5)),
+            MAX_HISTORY_LIMIT
+        );
+    }
+
+    #[test]
+    fn zero_limit_yields_empty_page() {
+        assert!(bounded_trades("KEUR", None, None, normalize_limit(Some(0)), None).is_empty());
+    }
+
+    /// A replay drains into the channel and is cancellable + joinable. Pins E.7:
+    /// once cancelled, the thread exits promptly and the handle joins clean (no
+    /// detached thread left parked).
+    #[tokio::test]
+    async fn replay_is_cancellable_and_joins() {
+        let cfg = Config {
+            speed: 0.0,
+            gap_cap_ms: 0,
+        };
+        let (tx, mut rx) = mpsc::channel::<ServerMessage>(8);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let handle = spawn_replay(
+            "KEUR".to_string(),
+            None,
+            None,
+            &cfg,
+            tx,
+            Arc::clone(&cancel),
+        );
+        // First tick arrives, confirming the stream is live and feeding `KEUR`.
+        let first = rx.recv().await.expect("a tick");
+        assert!(matches!(
+            first,
+            ServerMessage::Trade(_) | ServerMessage::Quote(_)
+        ));
+
+        // Cancel + join must complete: the thread, even if parked behind the
+        // bounded channel, observes the flag within one send-poll and exits.
+        quiesce_replay(Replay { cancel, handle }).await;
+    }
+
+    /// Re-subscribing a symbol whose stream is parked behind a full channel still
+    /// quiesces promptly. Drives the E.6 seam: the old stream is gone before the
+    /// caller would spawn its replacement.
+    #[tokio::test]
+    async fn parked_replay_quiesces_promptly() {
+        let cfg = Config {
+            speed: 0.0,
+            gap_cap_ms: 0,
+        };
+        // Capacity 1 so the generator fills the channel and parks in
+        // `send_cancellable` almost immediately, never draining.
+        let (tx, _rx) = mpsc::channel::<ServerMessage>(1);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let handle = spawn_replay(
+            "KEUR".to_string(),
+            None,
+            None,
+            &cfg,
+            tx,
+            Arc::clone(&cancel),
+        );
+
+        let started = Instant::now();
+        quiesce_replay(Replay { cancel, handle }).await;
+        // A few send-poll intervals of slack; a plain `blocking_send` would have
+        // parked forever here because `_rx` never drains.
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "parked replay took {:?} to quiesce",
+            started.elapsed(),
+        );
     }
 }

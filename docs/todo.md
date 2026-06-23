@@ -65,6 +65,45 @@ environment. The replay-speed / gap-cap env vars were already moved to
       is not read anywhere on the server runtime path before considering it out
       of scope.
 
+### 4. Bug-hunt follow-ups - open decisions and deferred work
+
+The project-wide bug/duplication hunt landed four fix waves (see git log and
+`docs/bug-hunt-findings.md` for the full catalogue with line refs). What remains
+is recorded here so it survives that transient doc.
+
+Open design decisions (deliberately not changed - they alter intended havoc
+semantics, so they are yours to call):
+
+- [ ] **Market-order fill price (B.3).** A market order currently fills at price
+      zero, crediting base for free and booking zero quote notional. Decide:
+      synthesize a mid from the generator, or reject market orders outright.
+- [ ] **`GoDark` semantics (E.1 / E.2 / E.15).** Today it is process-global (one
+      arm blacks out every connected client), it *drops* frames rather than
+      holding them (execution events are lost, not delayed), and there is no
+      clear/reset path (an absurd `ms` bricks all output until restart). Decide
+      per-session scoping, hold-and-replay vs drop, and a clear control.
+- [ ] **`ServerMessage::category()` consolidation (Wave-3 item 3).** The server
+      classifies `AccountState` as an execution event (delayed by `DelayAcks`)
+      while the adapter buckets it as data latency - opposite views of one enum.
+      Consolidating into a shared classifier forces deciding which is correct.
+- [ ] **`/quotes` stub (E.12 / G.bug9).** Always returns `200 []`. Leave as the
+      documented trades-only stub, or signal "unsupported" instead of empty-OK.
+
+Deferred engineering (clear-cut, just larger than a one-wave fix):
+
+- [ ] **`Price::new` / `Quantity::new` hardening (D.1 / D.2).** The `to_f64`
+      panic was closed via the saturating `decimal_to_f64`, but the nautilus
+      constructors still `assert!` on out-of-range / negative / over-precise
+      values. Move to `new_checked` and drop/log the offending tick; this ripples
+      through the `convert` signatures, so it wants its own pass.
+- [ ] **Seeded-RNG determinism test (F.6).** All probabilistic havoc tests use
+      `prob` 1.0/0.0, so the seed is never load-bearing. Add a `draw`-level test
+      at an intermediate probability with a pinned seed.
+- [ ] **Remaining smells/nits.** The findings doc still lists assorted
+      `smell`/`nit` items across all five crates that were not worth a dedicated
+      wave (e.g. the additive-vs-multiplicative vol composition, the reorder
+      no-op-over-HTTP asymmetry, `is_execution_event` defined by exclusion).
+
 ## Notes / gotchas
 
 - The offline Kraken corpus is trades only - no quotes, no L2, no aggressor side.

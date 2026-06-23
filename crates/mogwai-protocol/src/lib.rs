@@ -176,9 +176,38 @@ impl Default for ConnHavoc {
     }
 }
 
+/// `value` is finite and lies in the inclusive range `[lo, hi]`.
+///
+/// The finite-range idiom (`is_finite() && (lo..=hi).contains(&value)`) was
+/// open-coded across every numeric validator below; this names the bounds and
+/// makes the `NaN`/inf guard uniform, so a non-finite input can never slip
+/// through a forgotten `is_finite()`.
+#[must_use]
+pub fn finite_in(value: f64, lo: f64, hi: f64) -> bool {
+    value.is_finite() && (lo..=hi).contains(&value)
+}
+
+/// `value` is finite and lies in the half-open range `(lo, hi]` - the
+/// exclusive-lower variant of [`finite_in`], for knobs (e.g. `vol_mult`) where
+/// the lower bound is a degenerate "no effect" or "divide by zero" value that
+/// must be rejected.
+#[must_use]
+pub fn finite_in_excl_lo(value: f64, lo: f64, hi: f64) -> bool {
+    value.is_finite() && value > lo && value <= hi
+}
+
 pub fn validate_conn_havoc(conn: &ConnHavoc) -> Result<(), &'static str> {
     if !conn.reconnect_backoff_factor.is_finite() || conn.reconnect_backoff_factor < 1.0 {
         return Err("reconnect_backoff_factor must be finite and >= 1.0");
+    }
+    // A zero ceiling has no defined meaning: only `reconnect_max_attempts:
+    // None` / `max_requests_per_second: None` are the documented "unlimited"
+    // knobs. Reject `max == 0` whenever a real initial backoff is set, so the
+    // lifecycle backoff never has to disambiguate "no clamp" from "clamp to
+    // zero" (which collapses into a CPU-spinning reconnect loop). This is the
+    // authoritative gate; the lifecycle layer's guard is belt-and-suspenders.
+    if conn.reconnect_delay_initial_ms > 0 && conn.reconnect_delay_max_ms == 0 {
+        return Err("reconnect_delay_max_ms must be > 0 when reconnect_delay_initial_ms > 0");
     }
     if conn.reconnect_delay_initial_ms > 0
         && conn.reconnect_delay_max_ms > 0
@@ -225,14 +254,14 @@ pub enum MarketRegime {
 pub fn validate_market_regime(regime: &MarketRegime) -> Result<(), &'static str> {
     match *regime {
         MarketRegime::VolStorm { vol_mult } => {
-            if vol_mult.is_finite() && (0.0..=100.0).contains(&vol_mult) && vol_mult > 0.0 {
+            if finite_in_excl_lo(vol_mult, 0.0, 100.0) {
                 Ok(())
             } else {
                 Err("vol_mult must be in (0.0, 100.0]")
             }
         }
         MarketRegime::LiquidityDrought { thin_factor } => {
-            if thin_factor.is_finite() && (1.0..=1000.0).contains(&thin_factor) {
+            if finite_in(thin_factor, 1.0, 1000.0) {
                 Ok(())
             } else {
                 Err("thin_factor must be in [1.0, 1000.0]")
@@ -243,24 +272,39 @@ pub fn validate_market_regime(regime: &MarketRegime) -> Result<(), &'static str>
             end_hour,
             extra_vol_mult,
         } => {
-            if start_hour >= end_hour || end_hour > 24 {
-                return Err("session edge window must satisfy start_hour < end_hour <= 24");
+            // Half-open window `[start_hour, end_hour)`: a consumer may index a
+            // 24-element session curve by either edge, so both must stay in
+            // bounds. `start_hour <= 23` keeps the lower edge a valid index;
+            // `start_hour < end_hour <= 24` keeps the window non-empty and the
+            // upper (exclusive) edge no larger than the curve length.
+            if start_hour > 23 || start_hour >= end_hour || end_hour > 24 {
+                return Err(
+                    "session edge window must satisfy start_hour <= 23 and start_hour < end_hour <= 24",
+                );
             }
-            if extra_vol_mult.is_finite() && (0.0..=100.0).contains(&extra_vol_mult) {
+            if finite_in(extra_vol_mult, 0.0, 100.0) {
                 Ok(())
             } else {
                 Err("extra_vol_mult must be in [0.0, 100.0]")
             }
         }
         MarketRegime::ReopenGap {
+            at_ts,
             halt_secs,
             gap_frac,
-            ..
         } => {
+            // `at_ts` is a forward-replay UNIX-nanosecond instant. `0` is the
+            // degenerate "halt at epoch" - a halt that, on any real forward
+            // replay, has already passed before the first tick, so the regime
+            // never actually fires. Reject it the way every sibling rejects its
+            // degenerate field, rather than arm a silently inert divergence.
+            if at_ts == 0 {
+                return Err("at_ts must be > 0 (a forward-replay instant, not the epoch)");
+            }
             if halt_secs > 86_400 {
                 return Err("halt_secs must be <= 86400");
             }
-            if gap_frac.is_finite() && (-1.0..=1.0).contains(&gap_frac) {
+            if finite_in(gap_frac, -1.0, 1.0) {
                 Ok(())
             } else {
                 Err("gap_frac must be in [-1.0, 1.0]")
@@ -499,9 +543,29 @@ mod tests {
         }
 
         assert!(validate_market_regime(&MarketRegime::VolStorm { vol_mult: 0.0 }).is_err());
+        // VolStorm rejects non-finite and the inclusive upper edge round-trips.
+        assert!(validate_market_regime(&MarketRegime::VolStorm { vol_mult: f64::NAN }).is_err());
+        assert!(
+            validate_market_regime(&MarketRegime::VolStorm {
+                vol_mult: f64::INFINITY
+            })
+            .is_err()
+        );
+        validate_market_regime(&MarketRegime::VolStorm { vol_mult: 100.0 })
+            .expect("100.0 is the inclusive upper bound");
+        assert!(
+            validate_market_regime(&MarketRegime::VolStorm { vol_mult: 100.1 }).is_err(),
+            "above the inclusive upper bound"
+        );
+
         assert!(
             validate_market_regime(&MarketRegime::LiquidityDrought { thin_factor: 0.5 }).is_err()
         );
+
+        // SessionEdgeSpike: the half-open window must be [start, end) with
+        // start <= 23, start < end <= 24. The previous validator let
+        // start_hour=24/end_hour=24 through the `>=` gate only because they
+        // were equal; an empty/degenerate or out-of-bounds start must reject.
         assert!(
             validate_market_regime(&MarketRegime::SessionEdgeSpike {
                 start_hour: 24,
@@ -510,14 +574,76 @@ mod tests {
             })
             .is_err()
         );
+        // The tightened bound: start_hour at 24 with a larger end_hour would
+        // still index past a 24-element curve. (The old check `start_hour >=
+        // end_hour || end_hour > 24` would have ACCEPTED start_hour=24 had
+        // end_hour been representable above it - here we make start_hour=24
+        // reject outright.)
+        assert!(
+            validate_market_regime(&MarketRegime::SessionEdgeSpike {
+                start_hour: 24,
+                end_hour: 25,
+                extra_vol_mult: 1.0,
+            })
+            .is_err(),
+            "start_hour must be <= 23"
+        );
+        // A boundary-valid window: last full hour as a half-open [23, 24).
+        validate_market_regime(&MarketRegime::SessionEdgeSpike {
+            start_hour: 23,
+            end_hour: 24,
+            extra_vol_mult: 0.0,
+        })
+        .expect("[23, 24) with extra_vol_mult at the inclusive lower bound is valid");
+
+        // ReopenGap now validates at_ts: epoch (0) is rejected as a halt that
+        // can never fire on a forward replay.
         assert!(
             validate_market_regime(&MarketRegime::ReopenGap {
                 at_ts: 0,
+                halt_secs: 60,
+                gap_frac: 0.0,
+            })
+            .is_err(),
+            "at_ts == 0 is a halt at the epoch"
+        );
+        assert!(
+            validate_market_regime(&MarketRegime::ReopenGap {
+                at_ts: 123,
                 halt_secs: 86_401,
                 gap_frac: 0.0,
             })
             .is_err()
         );
+        assert!(
+            validate_market_regime(&MarketRegime::ReopenGap {
+                at_ts: 123,
+                halt_secs: 60,
+                gap_frac: 1.5,
+            })
+            .is_err(),
+            "gap_frac outside [-1.0, 1.0]"
+        );
+    }
+
+    #[test]
+    fn finite_range_helpers_reject_non_finite_and_respect_bounds() {
+        // Inclusive variant: both edges included, non-finite always rejected.
+        assert!(finite_in(0.0, 0.0, 1.0));
+        assert!(finite_in(1.0, 0.0, 1.0));
+        assert!(!finite_in(-0.001, 0.0, 1.0));
+        assert!(!finite_in(1.001, 0.0, 1.0));
+        assert!(!finite_in(f64::NAN, 0.0, 1.0));
+        assert!(!finite_in(f64::INFINITY, 0.0, 1.0));
+        assert!(!finite_in(f64::NEG_INFINITY, 0.0, 1.0));
+
+        // Exclusive-lower variant: lower edge excluded, upper included.
+        assert!(!finite_in_excl_lo(0.0, 0.0, 100.0));
+        assert!(finite_in_excl_lo(0.000_1, 0.0, 100.0));
+        assert!(finite_in_excl_lo(100.0, 0.0, 100.0));
+        assert!(!finite_in_excl_lo(100.001, 0.0, 100.0));
+        assert!(!finite_in_excl_lo(f64::NAN, 0.0, 100.0));
+        assert!(!finite_in_excl_lo(f64::INFINITY, 0.0, 100.0));
     }
 
     #[test]
@@ -705,6 +831,26 @@ mod tests {
             validate_conn_havoc(&invalid),
             Err("max_requests_per_second must be > 0")
         );
+
+        // B.7: a zero ceiling with a nonzero initial backoff is ambiguous
+        // (max == 0 is not a documented "unlimited" sentinel) and would
+        // collapse the lifecycle backoff to a CPU-spinning zero delay. The
+        // old guard fired only when BOTH were > 0, so this slipped through.
+        invalid = conn;
+        invalid.reconnect_delay_initial_ms = 5_000;
+        invalid.reconnect_delay_max_ms = 0;
+        assert_eq!(
+            validate_conn_havoc(&invalid),
+            Err("reconnect_delay_max_ms must be > 0 when reconnect_delay_initial_ms > 0")
+        );
+
+        // But a zero initial with a zero max is still fine (backoff disabled),
+        // as is the honest default.
+        let mut both_zero = conn;
+        both_zero.reconnect_delay_initial_ms = 0;
+        both_zero.reconnect_delay_max_ms = 0;
+        assert_eq!(validate_conn_havoc(&both_zero), Ok(()));
+        assert_eq!(validate_conn_havoc(&ConnHavoc::default()), Ok(()));
     }
 
     #[test]

@@ -1356,6 +1356,7 @@ dependencies = [
  "serde_urlencoded",
  "tokio",
  "tokio-tungstenite",
+ "tracing",
 ]
 
 [[package]]

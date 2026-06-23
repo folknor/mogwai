@@ -19,6 +19,7 @@ rand = "0.8"
 rust_decimal.workspace = true
 tokio.workspace = true
 tokio-tungstenite = "0.29"
+tracing.workspace = true
 
 nautilus-common = { path = "../../../nautilus_trader/crates/common", default-features = false }
 nautilus-core = { path = "../../../nautilus_trader/crates/core", default-features = false }

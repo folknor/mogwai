@@ -14,20 +14,37 @@ use rust_decimal::Decimal;
 
 use crate::MOGWAI_VENUE;
 
-pub(crate) fn price(d: Decimal, precision: u8) -> Price {
-    Price::new(mogwai_protocol::decimal_to_f64(d), precision)
+/// Converts a wire `Decimal` price into a nautilus `Price` at `precision`,
+/// returning an error rather than panicking on a hostile wire value.
+///
+/// `Price::new` (and the `Quantity`/`Money` twins) `assert!`-panic when the
+/// f64 is NaN/inf or outside `[PRICE_MIN, PRICE_MAX]`, or when `precision`
+/// exceeds nautilus `FIXED_PRECISION`. The whole point of mogwai is feeding
+/// ugly data, so the `decimal_to_f64` saturation alone is not enough: an
+/// over-precise `price_precision` advertised by a havoc'd instrument, or a
+/// magnitude past the fixed-point range, still trips the constructor. Routing
+/// through `new_checked` lets the call sites drop the offending tick with a
+/// warning instead of downing the spawned reader/exec task that has no
+/// supervisor.
+pub(crate) fn price(d: Decimal, precision: u8) -> anyhow::Result<Price> {
+    Price::new_checked(mogwai_protocol::decimal_to_f64(d), precision).context("convert price")
 }
 
-pub(crate) fn quantity(d: Decimal, precision: u8) -> Quantity {
-    Quantity::new(mogwai_protocol::decimal_to_f64(d), precision)
+/// Converts a wire `Decimal` size into a nautilus `Quantity` at `precision`.
+/// Fallible for the same reason as [`price`]: `Quantity::new` also rejects
+/// negatives, so any negative `size`/`leaves_qty`/`bid_sz` off the wire would
+/// otherwise panic the whole adapter task.
+pub(crate) fn quantity(d: Decimal, precision: u8) -> anyhow::Result<Quantity> {
+    Quantity::new_checked(mogwai_protocol::decimal_to_f64(d), precision).context("convert quantity")
 }
 
-/// Converts a wire `Decimal` amount into a nautilus `Money` of `currency`
-/// without panicking: a pathological magnitude (the hostile values mogwai
-/// exists to inject) saturates through `mogwai_protocol::decimal_to_f64`
-/// rather than crashing the exec task that books commissions and balances.
-pub(crate) fn money(d: Decimal, currency: Currency) -> Money {
-    Money::new(mogwai_protocol::decimal_to_f64(d), currency)
+/// Converts a wire `Decimal` amount into a nautilus `Money` of `currency`.
+/// Fallible for the same reason as [`price`]: the `decimal_to_f64` saturation
+/// caps the magnitude, but `Money::new` still `assert!`-panics on a NaN/inf or
+/// out-of-range f64, so the exec task that books commissions and balances must
+/// be able to drop a pathological amount rather than crash.
+pub(crate) fn money(d: Decimal, currency: Currency) -> anyhow::Result<Money> {
+    Money::new_checked(mogwai_protocol::decimal_to_f64(d), currency).context("convert money")
 }
 
 pub(crate) fn aggressor(a: MogwaiAggressorSide) -> AggressorSide {
@@ -72,16 +89,16 @@ pub(crate) fn trade_tick(
     id: InstrumentId,
     def: &InstrumentDef,
     ts_init: UnixNanos,
-) -> NautilusTradeTick {
-    NautilusTradeTick::new(
+) -> anyhow::Result<NautilusTradeTick> {
+    Ok(NautilusTradeTick::new(
         id,
-        price(t.price, def.price_precision),
-        quantity(t.size, def.size_precision),
+        price(t.price, def.price_precision)?,
+        quantity(t.size, def.size_precision)?,
         aggressor(t.aggressor),
         TradeId::from(format!("{}-{}", t.symbol, t.ts_event)),
         UnixNanos::from(t.ts_event),
         ts_init,
-    )
+    ))
 }
 
 pub(crate) fn quote_tick(
@@ -89,16 +106,16 @@ pub(crate) fn quote_tick(
     id: InstrumentId,
     def: &InstrumentDef,
     ts_init: UnixNanos,
-) -> NautilusQuoteTick {
-    NautilusQuoteTick::new(
+) -> anyhow::Result<NautilusQuoteTick> {
+    Ok(NautilusQuoteTick::new(
         id,
-        price(q.bid_px, def.price_precision),
-        price(q.ask_px, def.price_precision),
-        quantity(q.bid_sz, def.size_precision),
-        quantity(q.ask_sz, def.size_precision),
+        price(q.bid_px, def.price_precision)?,
+        price(q.ask_px, def.price_precision)?,
+        quantity(q.bid_sz, def.size_precision)?,
+        quantity(q.ask_sz, def.size_precision)?,
         UnixNanos::from(q.ts_event),
         ts_init,
-    )
+    ))
 }
 
 pub(crate) fn instrument_any(
@@ -117,8 +134,8 @@ pub(crate) fn instrument_any(
         quote,
         def.price_precision,
         def.size_precision,
-        price(def.price_increment, def.price_precision),
-        quantity(def.size_increment, def.size_precision),
+        price(def.price_increment, def.price_precision)?,
+        quantity(def.size_increment, def.size_precision)?,
         None,
         None,
         None,
@@ -166,12 +183,30 @@ mod tests {
             ts_event: 42,
         };
 
-        let tick = trade_tick(&trade, instrument_id(&def), &def, UnixNanos::from(7));
+        let tick = trade_tick(&trade, instrument_id(&def), &def, UnixNanos::from(7))
+            .expect("well-formed trade converts");
 
         assert_eq!(tick.price.precision, 2);
         assert_eq!(tick.size.precision, 8);
         assert_eq!(tick.trade_id, TradeId::from("BTCUSDT-42"));
         assert_eq!(tick.ts_event, UnixNanos::from(42));
         assert_eq!(tick.ts_init, UnixNanos::from(7));
+    }
+
+    #[test]
+    fn price_rejects_precision_beyond_fixed_precision() {
+        // A havoc'd instrument advertising an over-fine precision would panic
+        // the bare `Price::new`; `new_checked` must surface it as an error so
+        // the call site can drop the offending tick instead.
+        let err = price(Decimal::new(1, 0), 50);
+        assert!(err.is_err(), "over-precise price must be rejected");
+    }
+
+    #[test]
+    fn quantity_rejects_negative_size() {
+        // `Quantity::new` panics on negatives; the wire can carry a negative
+        // size/leaves_qty under market-regime havoc.
+        let err = quantity(Decimal::new(-1, 0), 8);
+        assert!(err.is_err(), "negative quantity must be rejected");
     }
 }

@@ -497,7 +497,18 @@ impl DataClient for MogwaiDataClient {
             {
                 let data = trades
                     .iter()
-                    .map(|t| convert::trade_tick(t, request.instrument_id, &def, now_unix_nanos()))
+                    .filter_map(|t| {
+                        convert::trade_tick(t, request.instrument_id, &def, now_unix_nanos())
+                            .map_err(|err| {
+                                tracing::warn!(
+                                    symbol = %t.symbol,
+                                    ts_event = t.ts_event,
+                                    error = %err,
+                                    "dropping historical trade: unrepresentable tick"
+                                );
+                            })
+                            .ok()
+                    })
                     .collect();
                 let response = TradesResponse::new(
                     request.request_id,
@@ -694,6 +705,19 @@ struct BarSubState {
     active: Option<ActiveBar>,
 }
 
+/// Per-symbol resume cursor for the HTTP-polling data path.
+///
+/// COUPLING: this dedup is correct only if the server's `/trades` scan returns
+/// trades in ascending `ts_event` with a stable order among same-`ts_event`
+/// trades across consecutive batches. `unseen_from_batch` resumes by skipping
+/// the first `emitted_at_last_ts` trades at `last_ts` (the count already
+/// delivered at that timestamp) before forwarding the rest, then re-derives
+/// `last_ts`/`emitted_at_last_ts` from the batch maximum. If the server ever
+/// returned descending or unstably-ordered same-ns trades, the skip would drop
+/// the wrong trades (under-deliver) or fail to skip duplicates (over-deliver).
+/// The server contract that backs this lives in `mogwai-server`'s bounded
+/// `/trades` seek (and is asserted by its replay-cursor test); this cursor
+/// depends on it but cannot enforce it here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PollCursor {
     last_ts: u64,
@@ -708,6 +732,9 @@ impl PollCursor {
         }
     }
 
+    /// Returns the trades in `batch` not already delivered, advancing the
+    /// cursor. Assumes `batch` is ascending by `ts_event` (see the type-level
+    /// COUPLING note).
     fn unseen_from_batch(&mut self, batch: Vec<TradeTick>) -> Vec<TradeTick> {
         let mut skipped = 0;
         let mut out = Vec::new();
@@ -828,9 +855,7 @@ fn subscribe_commands(
     subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
     regime: Option<MarketRegime>,
 ) -> Vec<WsCommand> {
-    let symbols = subs
-        .lock()
-        .expect("subscription mutex poisoned")
+    let symbols = lock_recover(subs, "subscription")
         .iter()
         .filter(|(_, state)| state.total() > 0)
         .map(|(symbol, state)| (symbol.clone(), state.start_ts))
@@ -863,8 +888,14 @@ async fn handle_market_message(
             let state = sub_state(subs, &quote.symbol);
             if state.as_ref().is_some_and(|s| s.quotes > 0) {
                 let id = convert::instrument_id(&def);
-                let tick = convert::quote_tick(&quote, id, &def, now_unix_nanos());
-                drop(sink.send(DataEvent::Data(Data::Quote(tick))));
+                match convert::quote_tick(&quote, id, &def, now_unix_nanos()) {
+                    Ok(tick) => drop(sink.send(DataEvent::Data(Data::Quote(tick)))),
+                    Err(err) => tracing::warn!(
+                        symbol = %quote.symbol,
+                        error = %err,
+                        "dropping quote: unrepresentable tick"
+                    ),
+                }
             }
         }
         _ => {}
@@ -893,8 +924,15 @@ fn emit_trade(
     let state = sub_state(subs, &trade.symbol);
     let id = convert::instrument_id(&def);
     if state.as_ref().is_some_and(|s| s.trades > 0) {
-        let tick = convert::trade_tick(trade, id, &def, now_unix_nanos());
-        drop(sink.send(DataEvent::Data(Data::Trade(tick))));
+        match convert::trade_tick(trade, id, &def, now_unix_nanos()) {
+            Ok(tick) => drop(sink.send(DataEvent::Data(Data::Trade(tick)))),
+            Err(err) => tracing::warn!(
+                symbol = %trade.symbol,
+                ts_event = trade.ts_event,
+                error = %err,
+                "dropping trade: unrepresentable tick"
+            ),
+        }
     }
     if state.as_ref().is_some_and(|s| s.bars > 0) {
         emit_live_bars(trade, &def, sink, bars);
@@ -920,7 +958,7 @@ async fn poll_market_data(mut ctx: DataPollContext) {
         let symbols = poll_symbols(&ctx.subs);
         for (symbol, start_ts) in symbols {
             let start = {
-                let mut cursors = ctx.cursor.lock().expect("poll cursor mutex poisoned");
+                let mut cursors = lock_recover(&ctx.cursor, "poll cursor");
                 let entry = cursors
                     .entry(symbol.clone())
                     .or_insert_with(|| PollCursor::new(start_ts));
@@ -943,7 +981,7 @@ async fn poll_market_data(mut ctx: DataPollContext) {
                 continue;
             };
             let trades = {
-                let mut cursors = ctx.cursor.lock().expect("poll cursor mutex poisoned");
+                let mut cursors = lock_recover(&ctx.cursor, "poll cursor");
                 let entry = cursors
                     .entry(symbol.clone())
                     .or_insert_with(|| PollCursor::new(start_ts));
@@ -974,8 +1012,7 @@ async fn poll_market_data(mut ctx: DataPollContext) {
 }
 
 fn poll_symbols(subs: &Arc<Mutex<HashMap<Symbol, SubState>>>) -> Vec<(Symbol, Option<u64>)> {
-    subs.lock()
-        .expect("subscription mutex poisoned")
+    lock_recover(subs, "subscription")
         .iter()
         .filter(|(_, state)| state.trades > 0 || state.bars > 0)
         .map(|(symbol, state)| (symbol.clone(), state.start_ts))
@@ -990,7 +1027,7 @@ fn emit_live_bars(
 ) {
     let mut ready = Vec::new();
     {
-        let mut bars = bars.lock().expect("bar mutex poisoned");
+        let mut bars = lock_recover(bars, "bar");
         for (bar_type, state) in bars.iter_mut() {
             if bar_type.instrument_id() != convert::instrument_id(def) || state.refs == 0 {
                 continue;
@@ -1015,9 +1052,20 @@ fn update_bar_state(
     let close_ts = ((trade.ts_event / interval) + 1) * interval;
     if let Some(active) = &mut state.active {
         if trade.ts_event >= active.close_ts {
-            let bar = active_to_bar(bar_type, active, def);
+            // Build the closed window's bar before rotating to the new one. A
+            // hostile open/high/low/close/volume that overflows nautilus
+            // Price/Quantity drops just this bar with a warning rather than
+            // panicking the reader/poll task; the window still rotates so a
+            // single bad bar does not wedge aggregation.
+            let bar = match active_to_bar(bar_type, active, def) {
+                Ok(bar) => Some(bar),
+                Err(err) => {
+                    tracing::warn!(%bar_type, error = %err, "dropping unrepresentable bar");
+                    None
+                }
+            };
             state.active = Some(new_active_bar(trade, close_ts));
-            Some(bar)
+            bar
         } else {
             active.high = active.high.max(trade.price);
             active.low = active.low.min(trade.price);
@@ -1057,17 +1105,21 @@ fn new_active_bar(trade: &mogwai_protocol::TradeTick, close_ts: u64) -> ActiveBa
     }
 }
 
-fn active_to_bar(bar_type: BarType, active: &ActiveBar, def: &InstrumentDef) -> Bar {
-    Bar::new(
+fn active_to_bar(
+    bar_type: BarType,
+    active: &ActiveBar,
+    def: &InstrumentDef,
+) -> anyhow::Result<Bar> {
+    Ok(Bar::new(
         bar_type,
-        convert::price(active.open, def.price_precision),
-        convert::price(active.high, def.price_precision),
-        convert::price(active.low, def.price_precision),
-        convert::price(active.close, def.price_precision),
-        convert::quantity(active.volume, def.size_precision),
+        convert::price(active.open, def.price_precision)?,
+        convert::price(active.high, def.price_precision)?,
+        convert::price(active.low, def.price_precision)?,
+        convert::price(active.close, def.price_precision)?,
+        convert::quantity(active.volume, def.size_precision)?,
         UnixNanos::from(active.close_ts),
         now_unix_nanos(),
-    )
+    ))
 }
 
 /// Advances a subscription's `start_ts` resume cursor to just past `ts_event`
@@ -1077,18 +1129,33 @@ fn active_to_bar(bar_type: BarType, active: &ActiveBar, def: &InstrumentDef) -> 
 /// re-requested. Saturates at `u64::MAX` to never wrap.
 fn advance_sub_start_ts(subs: &Arc<Mutex<HashMap<Symbol, SubState>>>, symbol: &str, ts_event: u64) {
     let next = ts_event.saturating_add(1);
-    let mut subs = subs.lock().expect("subscription mutex poisoned");
+    let mut subs = lock_recover(subs, "subscription");
     if let Some(state) = subs.get_mut(symbol) {
         state.start_ts = Some(state.start_ts.map_or(next, |existing| existing.max(next)));
     }
+}
+
+/// Locks a `Mutex` from a spawned reader/poll/dispatch task, recovering from a
+/// poisoned lock instead of panicking. The `&mut self` subscription methods
+/// propagate poison as `anyhow::Err`, but these free functions run in
+/// `tokio::spawn`ed tasks with no supervisor, so a bare `.expect("... poisoned")`
+/// here would cascade one upstream panic into killing the whole reader/poll
+/// task (and with it the data/exec stream). Poison only signals that some other
+/// holder panicked mid-mutation; the guarded map is still structurally sound, so
+/// we log once at `warn` and proceed with the recovered guard, matching the
+/// recoverable-error style the instance methods already use.
+fn lock_recover<'a, T>(mutex: &'a Mutex<T>, label: &str) -> std::sync::MutexGuard<'a, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        tracing::warn!(lock = label, "recovering from poisoned mutex");
+        poisoned.into_inner()
+    })
 }
 
 fn sub_state(
     subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
     symbol: &str,
 ) -> Option<SubStateSnapshot> {
-    subs.lock()
-        .expect("subscription mutex poisoned")
+    lock_recover(subs, "subscription")
         .get(symbol)
         .map(SubStateSnapshot::from)
 }
@@ -1113,11 +1180,7 @@ fn instrument_def(
     instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     symbol: &str,
 ) -> Option<InstrumentDef> {
-    instruments
-        .lock()
-        .expect("instrument mutex poisoned")
-        .get(symbol)
-        .cloned()
+    lock_recover(instruments, "instrument").get(symbol).cloned()
 }
 
 async fn seed_instruments(
@@ -1149,7 +1212,7 @@ fn cache_instruments(
     instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     defs: Vec<InstrumentDef>,
 ) {
-    let mut cache = instruments.lock().expect("instrument mutex poisoned");
+    let mut cache = lock_recover(instruments, "instrument");
     for def in defs {
         cache.insert(def.symbol.clone(), def);
     }
@@ -1656,6 +1719,21 @@ impl ExecutionClient for MogwaiExecutionClient {
         Ok(())
     }
 
+    fn reset(&mut self) -> anyhow::Result<()> {
+        // Mirror MogwaiDataClient::reset: stop first (abort tasks, drop the WS
+        // command channel), then clear the reconciliation mirror. Without this
+        // the default no-op `reset` leaves ExecState.orders/fills/positions
+        // populated across a stop/start, so a prior session's orders leak into
+        // the next session's status/fill/position reports.
+        self.stop()?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("execution state mutex poisoned"))?;
+        *state = ExecState::default();
+        Ok(())
+    }
+
     async fn connect(&mut self) -> anyhow::Result<()> {
         let http_base_url = self.config.http_base_url();
         seed_instruments(
@@ -1806,8 +1884,32 @@ impl ExecutionClient for MogwaiExecutionClient {
                     .is_none_or(|id| id == record.instrument_id)
             })
             .filter(|(_, record)| in_time_range(record.ts_last, cmd.start, cmd.end))
-            .map(|(client_order_id, record)| {
-                OrderStatusReport::new(
+            .filter_map(|(client_order_id, record)| {
+                // A record whose mirrored quantity/filled_qty cannot represent
+                // as a nautilus Quantity (hostile magnitude/precision off the
+                // wire) is dropped from the report set with a warning rather
+                // than panicking the report generator.
+                let quantity = record
+                    .quantity_for_report(&self.instruments)
+                    .map_err(|err| {
+                        tracing::warn!(
+                            order = %client_order_id,
+                            error = %err,
+                            "dropping order status report: unrepresentable quantity"
+                        );
+                    })
+                    .ok()?;
+                let filled = record
+                    .filled_quantity_for_report(&self.instruments)
+                    .map_err(|err| {
+                        tracing::warn!(
+                            order = %client_order_id,
+                            error = %err,
+                            "dropping order status report: unrepresentable filled quantity"
+                        );
+                    })
+                    .ok()?;
+                Some(OrderStatusReport::new(
                     self.core.account_id,
                     record.instrument_id,
                     Some(*client_order_id),
@@ -1818,13 +1920,13 @@ impl ExecutionClient for MogwaiExecutionClient {
                     record.order_type,
                     record.time_in_force,
                     record.status,
-                    record.quantity_for_report(&self.instruments),
-                    record.filled_quantity_for_report(&self.instruments),
+                    quantity,
+                    filled,
                     record.ts_accepted,
                     record.ts_last,
                     now_unix_nanos(),
                     None,
-                )
+                ))
             })
             .collect();
         Ok(reports)
@@ -1847,8 +1949,19 @@ impl ExecutionClient for MogwaiExecutionClient {
                     .is_none_or(|id| id == fill.venue_order_id)
             })
             .filter(|fill| in_time_range(fill.ts_event, cmd.start, cmd.end))
-            .map(|fill| {
-                FillReport::new(
+            .filter_map(|fill| {
+                // A commission that cannot represent as nautilus Money drops
+                // just this fill report with a warning; the rest still report.
+                let commission = convert::money(fill.commission, fill.quote_currency)
+                    .map_err(|err| {
+                        tracing::warn!(
+                            trade = %fill.trade_id,
+                            error = %err,
+                            "dropping fill report: unrepresentable commission"
+                        );
+                    })
+                    .ok()?;
+                Some(FillReport::new(
                     self.core.account_id,
                     fill.instrument_id,
                     fill.venue_order_id,
@@ -1856,14 +1969,14 @@ impl ExecutionClient for MogwaiExecutionClient {
                     fill.order_side,
                     fill.last_qty,
                     fill.last_px,
-                    convert::money(fill.commission, fill.quote_currency),
+                    commission,
                     LiquiditySide::Taker,
                     Some(fill.client_order_id),
                     None,
                     fill.ts_event,
                     now_unix_nanos(),
                     None,
-                )
+                ))
             })
             .collect();
         Ok(reports)
@@ -1887,11 +2000,20 @@ impl ExecutionClient for MogwaiExecutionClient {
             .filter(|position| in_time_range(position.ts_last, cmd.start, cmd.end))
             .filter_map(|position| {
                 let def = instrument_def(&self.instruments, &position.symbol)?;
+                let quantity = convert::quantity(position.quantity.abs(), def.size_precision)
+                    .map_err(|err| {
+                        tracing::warn!(
+                            symbol = %position.symbol,
+                            error = %err,
+                            "dropping position report: unrepresentable quantity"
+                        );
+                    })
+                    .ok()?;
                 Some(PositionStatusReport::new(
                     self.core.account_id,
                     position.instrument_id,
                     position_side(position.quantity),
-                    convert::quantity(position.quantity.abs(), def.size_precision),
+                    quantity,
                     position.ts_last,
                     now_unix_nanos(),
                     None,
@@ -2030,7 +2152,7 @@ impl OrderRecord {
     fn quantity_for_report(
         &self,
         instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
-    ) -> nautilus_model::types::Quantity {
+    ) -> anyhow::Result<nautilus_model::types::Quantity> {
         let precision = instrument_def(instruments, &symbol_from_instrument(self.instrument_id))
             .map_or(8, |def| def.size_precision);
         convert::quantity(self.quantity, precision)
@@ -2039,7 +2161,7 @@ impl OrderRecord {
     fn filled_quantity_for_report(
         &self,
         instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
-    ) -> nautilus_model::types::Quantity {
+    ) -> anyhow::Result<nautilus_model::types::Quantity> {
         let precision = instrument_def(instruments, &symbol_from_instrument(self.instrument_id))
             .map_or(8, |def| def.size_precision);
         convert::quantity(self.filled_qty, precision)
@@ -2112,6 +2234,22 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 record.ts_last = UnixNanos::from(ts_event);
                 record.clone()
             }) else {
+                // The local mirror does not know this order, so we lack the
+                // real strategy_id/instrument_id the emit requires. We cannot
+                // synthesize them: nautilus `Order.apply` hard-validates the
+                // event's strategy_id against the cached order and silently
+                // drops the event on mismatch, so a placeholder would guarantee
+                // the drop rather than surface the reject. Surfacing it
+                // correctly (e.g. resolving the order from the nautilus cache,
+                // which ExecContext does not hold) is a design change tracked
+                // as bug-hunt A.11; for now make the drop visible instead of
+                // silent.
+                tracing::warn!(
+                    order = %client_order_id,
+                    reason = %reason,
+                    "order rejected for an order the mirror does not know; \
+                     reject not surfaced to nautilus (A.11)"
+                );
                 return;
             };
             ctx.emitter.emit_order_rejected_event(
@@ -2172,6 +2310,36 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
             }) else {
                 return;
             };
+            // Convert the amend's quantity/price before touching the mirror,
+            // same as the missing-def guard above: a hostile amend value that
+            // cannot represent as nautilus Price/Quantity must not leave the
+            // mirror amended with no event emitted, and must not panic the
+            // exec task. Drop the amend with a warning instead.
+            let updated_quantity = match convert::quantity(quantity, def.size_precision) {
+                Ok(quantity) => quantity,
+                Err(err) => {
+                    tracing::warn!(
+                        order = %client_order_id,
+                        error = %err,
+                        "dropping order update: unrepresentable quantity"
+                    );
+                    return;
+                }
+            };
+            let updated_price = match price
+                .map(|p| convert::price(p, def.price_precision))
+                .transpose()
+            {
+                Ok(price) => price,
+                Err(err) => {
+                    tracing::warn!(
+                        order = %client_order_id,
+                        error = %err,
+                        "dropping order update: unrepresentable price"
+                    );
+                    return;
+                }
+            };
             let Some(record) = with_order_record(&ctx.state, client_order_id, |record| {
                 record.venue_order_id = Some(venue_order_id);
                 record.quantity = quantity;
@@ -2205,14 +2373,14 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 record.strategy_id,
                 record.instrument_id,
                 client_order_id,
-                convert::quantity(quantity, def.size_precision),
+                updated_quantity,
                 UUID4::new(),
                 UnixNanos::from(ts_event),
                 now_unix_nanos(),
                 false,
                 Some(venue_order_id),
                 Some(ctx.account_id),
-                price.map(|p| convert::price(p, def.price_precision)),
+                updated_price,
                 None,
                 None,
                 false,
@@ -2227,6 +2395,21 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
         } => {
             let client_order_id = ClientOrderId::from(client_order_id);
             let Some(record) = order_record(&ctx.state, client_order_id) else {
+                // Same limitation as OrderRejected (A.11): the mirror lacks the
+                // order, so we have no real strategy_id/instrument_id, and a
+                // placeholder would be silently dropped by nautilus
+                // `Order.apply` strategy-id validation. The `venue_order_id:
+                // None` case (protocol's explicit "id unknown to venue") is
+                // exactly when surfacing this matters most, but doing so
+                // correctly needs a non-mirror order source (a design change).
+                // Make the drop visible rather than silent.
+                tracing::warn!(
+                    order = %client_order_id,
+                    venue_order_id = ?venue_order_id,
+                    reason = %reason,
+                    "modify rejected for an order the mirror does not know; \
+                     reject not surfaced to nautilus (A.11)"
+                );
                 return;
             };
             ctx.emitter.emit_order_modify_rejected_event(
@@ -2247,15 +2430,58 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
 fn handle_order_filled(fill: mogwai_protocol::OrderFilled, ctx: &ExecContext) {
     let client_order_id = ClientOrderId::from(fill.client_order_id);
     let Some(def) = instrument_def(&ctx.instruments, &fill.symbol) else {
+        // A missing instrument def here is a legitimate miss (the instrument
+        // cache has not been seeded yet), not a divergence: dropping a real
+        // fill silently strands the order in Submitted/Accepted forever, so
+        // surface it. (The DropNextAccountUpdate divergence drops account
+        // snapshots, not fills, so warning here does not mask it.)
+        tracing::warn!(
+            symbol = %fill.symbol,
+            order = %client_order_id,
+            trade = %fill.trade_id,
+            "dropping order fill: no instrument def (cache not seeded?)"
+        );
         return;
     };
     let Ok(quote_currency) = Currency::from_str(&def.quote) else {
+        tracing::warn!(
+            symbol = %fill.symbol,
+            quote = %def.quote,
+            order = %client_order_id,
+            "dropping order fill: unknown quote currency"
+        );
         return;
     };
     let venue_order_id = VenueOrderId::from(fill.venue_order_id);
     let trade_id = TradeId::from(fill.trade_id);
-    let last_qty = convert::quantity(fill.last_qty, def.size_precision);
-    let last_px = convert::price(fill.last_px, def.price_precision);
+    // Convert the wire price/qty before mutating the mirror so a hostile fill
+    // value that overflows nautilus Price/Quantity drops the whole fill with a
+    // warning rather than panicking the exec task or leaving the mirror
+    // advanced with no event emitted.
+    let last_qty = match convert::quantity(fill.last_qty, def.size_precision) {
+        Ok(last_qty) => last_qty,
+        Err(err) => {
+            tracing::warn!(
+                order = %client_order_id,
+                trade = %trade_id,
+                error = %err,
+                "dropping order fill: unrepresentable last_qty"
+            );
+            return;
+        }
+    };
+    let last_px = match convert::price(fill.last_px, def.price_precision) {
+        Ok(last_px) => last_px,
+        Err(err) => {
+            tracing::warn!(
+                order = %client_order_id,
+                trade = %trade_id,
+                error = %err,
+                "dropping order fill: unrepresentable last_px"
+            );
+            return;
+        }
+    };
     // A repeated `trade_id` for this order is a duplicate fill: the duplicate
     // OrderFilled wire event is still forwarded below (the intended divergence),
     // but the reconciliation mirror (filled_qty/avg_px/fills) must apply each
@@ -2293,7 +2519,7 @@ fn handle_order_filled(fill: mogwai_protocol::OrderFilled, ctx: &ExecContext) {
     };
 
     if !is_duplicate {
-        let mut state = ctx.state.lock().expect("execution state mutex poisoned");
+        let mut state = lock_recover(&ctx.state, "execution state");
         state.fills.push(FillRecord {
             client_order_id,
             instrument_id: record.instrument_id,
@@ -2311,7 +2537,22 @@ fn handle_order_filled(fill: mogwai_protocol::OrderFilled, ctx: &ExecContext) {
     let commission = if fill.commission.is_zero() {
         None
     } else {
-        Some(convert::money(fill.commission, quote_currency))
+        // The mirror is already advanced and the fill event must still emit; a
+        // commission that cannot represent as nautilus Money degrades to no
+        // reported commission (with a warning) rather than panicking or
+        // dropping the whole fill.
+        match convert::money(fill.commission, quote_currency) {
+            Ok(money) => Some(money),
+            Err(err) => {
+                tracing::warn!(
+                    order = %client_order_id,
+                    trade = %trade_id,
+                    error = %err,
+                    "reporting fill without commission: unrepresentable amount"
+                );
+                None
+            }
+        }
     };
     // mogwai does not report a liquidity side on the wire. The engine fills
     // immediately against replayed history, which is taker-equivalent, so every
@@ -2348,18 +2589,42 @@ fn handle_account_state(state: mogwai_protocol::AccountState, ctx: &ExecContext)
         .iter()
         .filter_map(|balance| {
             let currency = Currency::from_str(&balance.currency).ok()?;
+            // A hostile balance amount that cannot represent as nautilus Money
+            // drops just this currency's balance with a warning rather than
+            // panicking the exec task that books the account snapshot.
+            let convert_amount = |amount, label| {
+                convert::money(amount, currency)
+                    .map_err(|err| {
+                        tracing::warn!(
+                            currency = %balance.currency,
+                            field = label,
+                            error = %err,
+                            "dropping account balance: unrepresentable amount"
+                        );
+                    })
+                    .ok()
+            };
             Some(AccountBalance::new(
-                convert::money(balance.total, currency),
-                convert::money(balance.locked, currency),
-                convert::money(balance.free, currency),
+                convert_amount(balance.total, "total")?,
+                convert_amount(balance.locked, "locked")?,
+                convert_amount(balance.free, "free")?,
             ))
         })
         .collect();
 
     {
-        let mut mirror = ctx.state.lock().expect("execution state mutex poisoned");
+        let mut mirror = lock_recover(&ctx.state, "execution state");
         for position in state.positions {
             let Some(def) = instrument_def(&ctx.instruments, &position.symbol) else {
+                // A legitimate missing def (instrument cache not yet seeded)
+                // silently drops a real position from the account snapshot,
+                // leaving the mirror inconsistent. The DropNextAccountUpdate
+                // divergence drops the whole snapshot upstream, not individual
+                // positions here, so warning does not mask it.
+                tracing::warn!(
+                    symbol = %position.symbol,
+                    "dropping account position: no instrument def (cache not seeded?)"
+                );
                 continue;
             };
             mirror.positions.insert(
@@ -2383,9 +2648,7 @@ fn with_order_record<T>(
     client_order_id: ClientOrderId,
     f: impl FnOnce(&mut OrderRecord) -> T,
 ) -> Option<T> {
-    state
-        .lock()
-        .expect("execution state mutex poisoned")
+    lock_recover(state, "execution state")
         .orders
         .get_mut(&client_order_id)
         .map(f)
@@ -2395,9 +2658,7 @@ fn order_record(
     state: &Arc<Mutex<ExecState>>,
     client_order_id: ClientOrderId,
 ) -> Option<OrderRecord> {
-    state
-        .lock()
-        .expect("execution state mutex poisoned")
+    lock_recover(state, "execution state")
         .orders
         .get(&client_order_id)
         .cloned()
@@ -3058,6 +3319,36 @@ mod tests {
         assert!(client.is_stopped());
         assert!(!client.is_started());
         assert!(!client.is_connected());
+    }
+
+    #[test]
+    fn reset_clears_exec_state_so_orders_do_not_leak_across_sessions() {
+        let mut client = execution_client();
+        seed_order(&client.state);
+        client
+            .state
+            .lock()
+            .expect("execution state mutex")
+            .fills
+            .push(FillRecord {
+                client_order_id: ClientOrderId::from("O-1"),
+                instrument_id: instrument_id(),
+                venue_order_id: VenueOrderId::from("V-1"),
+                trade_id: TradeId::from("T-1"),
+                order_side: OrderSide::Buy,
+                last_qty: nautilus_model::types::Quantity::new(1.0, 8),
+                last_px: nautilus_model::types::Price::new(100.0, 2),
+                commission: Decimal::ZERO,
+                quote_currency: Currency::from_str("USDT").expect("usdt"),
+                ts_event: UnixNanos::from(1),
+            });
+
+        client.reset().expect("reset succeeds");
+
+        let state = client.state.lock().expect("execution state mutex");
+        assert!(state.orders.is_empty(), "orders cleared on reset");
+        assert!(state.fills.is_empty(), "fills cleared on reset");
+        assert!(state.positions.is_empty(), "positions cleared on reset");
     }
 
     #[test]
