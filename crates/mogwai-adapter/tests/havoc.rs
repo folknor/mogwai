@@ -1,18 +1,27 @@
 //! Ignored havoc tests for the mogwai adapter.
 //!
 //! These bind a real TCP listener and exercise behavior that unit tests cannot
-//! reach: server-side divergence shipping and client-side inbound corruption.
+//! reach: server-side divergence shipping, client-side inbound corruption,
+//! connection-lifecycle havoc, and the end-to-end divergence surfaces the suite
+//! claims (partial fills, duplicate fills, dropped account updates, blackouts).
+//! They share the stub harness in `tests/common`.
+//!
+//! Run a focused case in a socket-capable environment with e.g.
+//! `brokkr test -p mogwai-adapter ships_server_havoc --debug`.
+
+mod common;
 
 use std::{
     cell::RefCell,
     rc::Rc,
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+        atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
 
+use common::{StubState, bound_stub, cached_order, instrument_id, next_exec_event, trade_json};
 use mogwai_adapter::{
     MOGWAI_VENUE, MogwaiDataClient, MogwaiDataClientConfig, MogwaiExecClientConfig,
     MogwaiExecutionClient,
@@ -23,8 +32,6 @@ use mogwai_protocol::{
 use nautilus_common::{
     cache::Cache,
     clients::{DataClient, ExecutionClient},
-    clock::TestClock,
-    factories::OrderFactory,
     live::runner::{replace_data_event_sender, replace_exec_event_sender},
     messages::{DataEvent, ExecutionEvent, data::SubscribeTrades, execution::SubmitOrder},
 };
@@ -32,212 +39,13 @@ use nautilus_core::{UUID4, UnixNanos};
 use nautilus_live::ExecutionClientCore;
 use nautilus_model::{
     data::Data,
-    enums::{AccountType, OmsType, OrderSide, TimeInForce},
+    enums::{AccountType, OmsType},
     events::OrderEventAny,
-    identifiers::{ClientId, ClientOrderId, InstrumentId, StrategyId, Symbol, TraderId, Venue},
+    identifiers::{ClientId, StrategyId, TraderId},
     orders::Order,
-    types::{Price, Quantity},
+    types::Quantity,
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    sync::mpsc::{UnboundedReceiver, unbounded_channel},
-};
-use tokio_tungstenite::tungstenite::Message;
-
-const INSTRUMENTS_JSON: &str = r#"[{"symbol":"BTCUSDT","base":"BTC","quote":"USDT","price_precision":2,"size_precision":8,"price_increment":"0.01","size_increment":"0.00000001"}]"#;
-
-#[derive(Default)]
-struct StubState {
-    control_hits: AtomicUsize,
-    control_bodies: Mutex<Vec<String>>,
-    ws_trades: Mutex<Vec<String>>,
-    /// WS upgrade attempts (handshakes the stub started serving). Used by the
-    /// idle-reconnect and max-attempts tests to count (re)connections.
-    ws_handshakes: AtomicUsize,
-    /// WS `Ping` frames received from the client (heartbeat probes).
-    ws_pings: AtomicUsize,
-    /// Timestamps of each HTTP request to `/orders` and `/trades`. The quota
-    /// tests assert the gaps between consecutive entries.
-    http_request_times: Mutex<Vec<Instant>>,
-    /// When true, `serve_ws` drops the connection before completing the
-    /// WebSocket upgrade, modelling a venue that refuses the socket. The
-    /// handshake is still counted so the attempt-cap test can pin the count.
-    refuse_ws: AtomicBool,
-    /// When true, the order POST handler accepts the request but never replies,
-    /// so the client's per-request timeout must turn the order into a reject.
-    hang_orders: AtomicBool,
-}
-
-async fn run_stub(listener: TcpListener, state: Arc<StubState>) {
-    loop {
-        let Ok((mut stream, _)) = listener.accept().await else {
-            return;
-        };
-        let state = Arc::clone(&state);
-        tokio::spawn(async move {
-            handle_connection(&mut stream, state).await;
-        });
-    }
-}
-
-async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
-    let Some((head, body)) = read_request(stream).await else {
-        return;
-    };
-    let path = head.split_whitespace().nth(1).unwrap_or("/");
-
-    if path.starts_with("/ws") {
-        serve_ws(stream, head, state).await;
-    } else if path.starts_with("/instruments") {
-        respond_json(stream, "200 OK", INSTRUMENTS_JSON).await;
-    } else if path.starts_with("/trades") {
-        state
-            .http_request_times
-            .lock()
-            .expect("http request times mutex")
-            .push(Instant::now());
-        respond_json(stream, "200 OK", "[]").await;
-    } else if path.starts_with("/orders") {
-        state
-            .http_request_times
-            .lock()
-            .expect("http request times mutex")
-            .push(Instant::now());
-        if state.hang_orders.load(Ordering::Relaxed) {
-            // Accept the POST but never respond: the client's per-request
-            // timeout must elapse and surface the order as a reject. Hold the
-            // socket so the request does not fail with a connection reset.
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            return;
-        }
-        respond_json(stream, "200 OK", "[]").await;
-    } else if path.starts_with("/control/divergence") {
-        state.control_hits.fetch_add(1, Ordering::Relaxed);
-        state
-            .control_bodies
-            .lock()
-            .expect("control bodies mutex")
-            .push(String::from_utf8_lossy(&body).to_string());
-        respond_json(stream, "202 Accepted", "").await;
-    } else {
-        respond_json(stream, "200 OK", "[]").await;
-    }
-}
-
-async fn read_request(stream: &mut TcpStream) -> Option<(String, Vec<u8>)> {
-    let mut buf = vec![0u8; 4096];
-    let n = stream.read(&mut buf).await.ok()?;
-    if n == 0 {
-        return None;
-    }
-    let mut bytes = buf[..n].to_vec();
-    let header_end = find_header_end(&bytes)?;
-    let head = String::from_utf8_lossy(&bytes[..header_end]).to_string();
-    let content_length = content_length(&head);
-    let body_start = header_end + 4;
-    while bytes.len().saturating_sub(body_start) < content_length {
-        let n = stream.read(&mut buf).await.ok()?;
-        if n == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&buf[..n]);
-    }
-    let body_end = body_start.saturating_add(content_length).min(bytes.len());
-    Some((head, bytes[body_start..body_end].to_vec()))
-}
-
-fn find_header_end(bytes: &[u8]) -> Option<usize> {
-    bytes.windows(4).position(|window| window == b"\r\n\r\n")
-}
-
-fn content_length(head: &str) -> usize {
-    head.lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim())
-        })
-        .and_then(|value| value.trim().parse().ok())
-        .unwrap_or(0)
-}
-
-async fn respond_json(stream: &mut TcpStream, status: &str, body: &str) {
-    let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    drop(stream.write_all(response.as_bytes()).await);
-    drop(stream.flush().await);
-}
-
-async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState>) {
-    use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
-
-    state.ws_handshakes.fetch_add(1, Ordering::Relaxed);
-
-    // Model a venue that refuses the socket: the TCP dial succeeded (counted
-    // above) but the WebSocket upgrade never completes, so the client treats
-    // the dial as failed and backs off into its reconnect loop.
-    if state.refuse_ws.load(Ordering::Relaxed) {
-        return;
-    }
-
-    let key = head
-        .lines()
-        .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
-        .map(str::trim)
-        .unwrap_or_default();
-    let accept = derive_accept_key(key.as_bytes());
-    let upgrade = format!(
-        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
-    );
-    if stream.write_all(upgrade.as_bytes()).await.is_err() {
-        return;
-    }
-    drop(stream.flush().await);
-
-    let mut ws = tokio_tungstenite::WebSocketStream::from_raw_socket(
-        stream,
-        tokio_tungstenite::tungstenite::protocol::Role::Server,
-        None,
-    )
-    .await;
-
-    use futures_util::{SinkExt, StreamExt};
-    while let Some(Ok(msg)) = ws.next().await {
-        match msg {
-            Message::Ping(_) => {
-                state.ws_pings.fetch_add(1, Ordering::Relaxed);
-            }
-            Message::Text(text) if text.contains("Subscribe") => {
-                let trades = state.ws_trades.lock().expect("ws trades mutex").clone();
-                for trade in trades {
-                    drop(ws.send(Message::Text(trade.into())).await);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-async fn bound_stub(state: Arc<StubState>) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind stub");
-    let port = listener.local_addr().expect("addr").port();
-    tokio::spawn(run_stub(listener, state));
-    format!("ws://127.0.0.1:{port}")
-}
-
-fn instrument_id() -> InstrumentId {
-    InstrumentId::new(Symbol::from("BTCUSDT"), Venue::from("MOGWAI"))
-}
-
-fn trade_json(ts_event: u64, price: &str) -> String {
-    format!(
-        r#"{{"type":"Trade","symbol":"BTCUSDT","price":"{price}","size":"1","aggressor":"Buyer","ts_event":{ts_event}}}"#
-    )
-}
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 async fn subscribed_data_client(
     state: Arc<StubState>,
@@ -256,6 +64,11 @@ async fn subscribed_data_client(
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
     client.start().expect("start grabs sink");
     client.connect().await.expect("connect opens transports");
+    subscribe(&mut client);
+    sink_rx
+}
+
+fn subscribe(client: &mut MogwaiDataClient) {
     client
         .subscribe_trades(SubscribeTrades::new(
             instrument_id(),
@@ -267,15 +80,12 @@ async fn subscribed_data_client(
             None,
         ))
         .expect("subscribe trades");
-    sink_rx
 }
 
 fn data_havoc(client: ClientHavoc) -> HavocSpec {
     HavocSpec {
         client,
-        server: Vec::new(),
-        data: None,
-        conn: ConnHavoc::default(),
+        ..HavocSpec::default()
     }
 }
 
@@ -306,17 +116,7 @@ async fn connect_data_client(
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
     client.start().expect("start grabs sink");
     client.connect().await.expect("connect opens transports");
-    client
-        .subscribe_trades(SubscribeTrades::new(
-            instrument_id(),
-            Some(ClientId::from("MOGWAI-DATA")),
-            None,
-            UUID4::new(),
-            UnixNanos::default(),
-            None,
-            None,
-        ))
-        .expect("subscribe trades");
+    subscribe(&mut client);
     (client, sink_rx)
 }
 
@@ -329,6 +129,67 @@ async fn next_trade(rx: &mut UnboundedReceiver<DataEvent>) -> nautilus_model::da
         DataEvent::Data(Data::Trade(trade)) => trade,
         other => panic!("expected trade event, got {other:?}"),
     }
+}
+
+/// Waits up to `timeout` for `count` to reach at least `target`, polling on a
+/// short interval. Returns the final observed value.
+async fn wait_for_at_least(count: &AtomicUsize, target: usize, timeout: Duration) -> usize {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let value = count.load(Ordering::Relaxed);
+        if value >= target || Instant::now() >= deadline {
+            return value;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Builds, starts, connects and submits an order against a stub on the exec WS
+/// leg, returning the live exec client and its sink. The stub replies to the
+/// `SubmitOrder` with whatever frames the caller seeded into `ws_exec_frames`.
+async fn submit_exec_client(
+    state: Arc<StubState>,
+) -> (MogwaiExecutionClient, UnboundedReceiver<ExecutionEvent>) {
+    let base_url = bound_stub(state).await;
+    let (sink_tx, sink_rx) = unbounded_channel::<ExecutionEvent>();
+    replace_exec_event_sender(sink_tx);
+
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    let order = cached_order(&cache);
+    let config = MogwaiExecClientConfig {
+        base_url,
+        ..MogwaiExecClientConfig::default()
+    };
+    let core = ExecutionClientCore::new(
+        config.trader_id,
+        ClientId::from("MOGWAI-EXEC"),
+        *MOGWAI_VENUE,
+        OmsType::Netting,
+        config.account_id,
+        config.account_type,
+        None,
+        cache,
+    );
+    let mut client = MogwaiExecutionClient::new(core, config).expect("client builds");
+    client.start().expect("start grabs sink");
+    client.connect().await.expect("connect opens transports");
+    client
+        .submit_order(SubmitOrder::new(
+            TraderId::from("MOGWAI-001"),
+            Some(ClientId::from("MOGWAI-EXEC")),
+            StrategyId::from("S-001"),
+            instrument_id(),
+            order.client_order_id(),
+            order.init_event().clone(),
+            None,
+            None,
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+        ))
+        .expect("submit order");
+    (client, sink_rx)
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -373,15 +234,29 @@ async fn ships_server_havoc() {
         .expect("exec connect ships havoc");
 
     assert_eq!(state.control_hits.load(Ordering::Relaxed), 2);
-    let (saw_reject, saw_dark) = {
+    // The control bodies must round-trip the actual payload values, not merely
+    // contain the type-name: a serialization bug shipping an empty reason or the
+    // wrong duration would pass a substring-only check.
+    {
         let bodies = state.control_bodies.lock().expect("control bodies mutex");
-        (
-            bodies.iter().any(|body| body.contains("RejectNextSubmit")),
-            bodies.iter().any(|body| body.contains("GoDark")),
-        )
-    };
-    assert!(saw_reject);
-    assert!(saw_dark);
+        let reject: Vec<Divergence> = bodies
+            .iter()
+            .filter_map(|body| serde_json::from_str(body).ok())
+            .collect();
+        assert!(
+            reject.iter().any(|d| matches!(
+                d,
+                Divergence::RejectNextSubmit { reason } if reason == "nope"
+            )),
+            "RejectNextSubmit did not round-trip its reason"
+        );
+        assert!(
+            reject
+                .iter()
+                .any(|d| matches!(d, Divergence::GoDark { ms } if *ms == 25)),
+            "GoDark did not round-trip its ms"
+        );
+    }
 
     let data_config = MogwaiDataClientConfig {
         base_url,
@@ -420,19 +295,20 @@ async fn havoc_latency_delays_inbound_event() {
         ..ClientHavoc::default()
     });
 
-    // The clock starts before connect: the reader task that owns the latency
-    // sleep is not spawned until inside `connect`, so its timer cannot begin
-    // before this instant and the lower bound stays sound. The generous upper
-    // bound (the spec asks for one) catches a runaway delay without coupling to
-    // the unbounded connect/subscribe handshake time folded into the interval.
-    let start = Instant::now();
+    // Connect + subscribe FIRST, then start the clock, so the lower bound
+    // measures only the latency filter's contribution and not the unbounded
+    // connect/subscribe/handshake setup. The reader task that owns the latency
+    // sleep does not see the trade until the stub pushes it after the Subscribe;
+    // the stub pushes immediately on Subscribe, so the only material delay
+    // between this instant and delivery is the composed latency.
     let mut rx = subscribed_data_client(state, Some(havoc)).await;
+    let start = Instant::now();
     let _trade = next_trade(&mut rx).await;
 
     let elapsed = start.elapsed();
     assert!(
         elapsed >= delay,
-        "inbound trade arrived before the composed delay"
+        "inbound trade arrived {elapsed:?} after subscribe, before the composed {delay:?} delay"
     );
     assert!(
         elapsed < Duration::from_secs(5),
@@ -443,12 +319,16 @@ async fn havoc_latency_delays_inbound_event() {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn havoc_drop_prob_one_drops_all() {
+    // Push N trades and assert zero arrive. A single trade + assert-nothing
+    // cannot distinguish "drop applied" from "never delivered"; pushing several
+    // and observing none reach the sink pins the drop to the filter.
     let state = Arc::new(StubState::default());
-    state
-        .ws_trades
-        .lock()
-        .expect("ws trades mutex")
-        .push(trade_json(10, "100.00"));
+    {
+        let mut trades = state.ws_trades.lock().expect("ws trades mutex");
+        for ts in [10u64, 20, 30, 40, 50] {
+            trades.push(trade_json(ts, "100.00"));
+        }
+    }
     let havoc = data_havoc(ClientHavoc {
         drop_prob: 1.0,
         seed: Some(1),
@@ -457,13 +337,20 @@ async fn havoc_drop_prob_one_drops_all() {
 
     let mut rx = subscribed_data_client(state, Some(havoc)).await;
 
-    let result = tokio::time::timeout(Duration::from_millis(250), rx.recv()).await;
-    assert!(result.is_err(), "dropped trade must not reach the sink");
+    let result = tokio::time::timeout(Duration::from_millis(400), rx.recv()).await;
+    assert!(
+        result.is_err(),
+        "none of the five dropped trades may reach the sink"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn havoc_duplicate_prob_one_doubles() {
+    // One trade in, with duplicate_prob 1.0: exactly two identical trades out,
+    // then nothing. Asserting "exactly two" (with a tail drain) rules out a
+    // triple-emit; matching every field rules out two independently-synthesized
+    // trades masquerading as a duplicate.
     let state = Arc::new(StubState::default());
     state
         .ws_trades
@@ -481,6 +368,11 @@ async fn havoc_duplicate_prob_one_doubles() {
     let first = next_trade(&mut rx).await;
     let second = next_trade(&mut rx).await;
     assert_eq!(first.ts_event, second.ts_event);
+    assert_eq!(first.price, second.price);
+    assert_eq!(first.size, second.size);
+    assert_eq!(first.aggressor_side, second.aggressor_side);
+    let tail = tokio::time::timeout(Duration::from_millis(250), rx.recv()).await;
+    assert!(tail.is_err(), "duplicate must emit exactly two, not more");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -504,11 +396,25 @@ async fn havoc_clean_is_passthrough() {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn havoc_reorder_swaps_adjacent() {
+    // Feed an ODD count (three trades). The reorder filter holds one message and
+    // releases it on the next; with three frames the third is left dangling and
+    // must be released by `HavocFilter::flush`. A two-trade feed always pairs and
+    // never exercises the flush/held-message path - if flush dropped the dangling
+    // held message, this catches it.
+    //
+    // The flush only runs from the reader loop's on-disconnect callback, which
+    // fires when the socket closes (peer close / EOF) - NOT during a live
+    // mid-stream read, and NOT on a client-side `stop()` (that just aborts the
+    // reader task: finding A.5, the held message starves until a peer close). So
+    // the stub closes the socket after pushing the three trades, modelling a
+    // clean stream end; the close drives the flush that releases the third.
     let state = Arc::new(StubState::default());
+    state.close_after_trades.store(true, Ordering::Relaxed);
     {
         let mut trades = state.ws_trades.lock().expect("ws trades mutex");
         trades.push(trade_json(10, "100.00"));
         trades.push(trade_json(20, "101.00"));
+        trades.push(trade_json(30, "102.00"));
     }
     let havoc = data_havoc(ClientHavoc {
         reorder_prob: 1.0,
@@ -518,34 +424,36 @@ async fn havoc_reorder_swaps_adjacent() {
 
     let mut rx = subscribed_data_client(state, Some(havoc)).await;
 
+    // First two are transposed mid-stream; the third is the dangling held
+    // message, released by the flush the stub's close triggers.
     let first = next_trade(&mut rx).await;
     let second = next_trade(&mut rx).await;
+    let third = next_trade(&mut rx).await;
     assert_eq!(first.ts_event, UnixNanos::from(20));
     assert_eq!(second.ts_event, UnixNanos::from(10));
-}
-
-/// Waits up to `timeout` for `count` to reach at least `target`, polling on a
-/// short interval. Returns the final observed value.
-async fn wait_for_at_least(count: &AtomicUsize, target: usize, timeout: Duration) -> usize {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let value = count.load(Ordering::Relaxed);
-        if value >= target || Instant::now() >= deadline {
-            return value;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    assert_eq!(
+        third.ts_event,
+        UnixNanos::from(30),
+        "the odd dangling trade must be released by the flush-on-close path, not lost"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn conn_idle_timeout_triggers_reconnect() {
     // Silent server: the socket opens but never sends an application frame, so
-    // the idle clock must fire and force a reconnect. The stub accepts each
-    // fresh dial, so the handshake count climbs past one.
+    // the idle clock must fire and force a reconnect. After the reconnect the
+    // stub serves a trade, so we can assert the client recovered into a usable
+    // subscription rather than merely counting handshakes (a reconnect storm
+    // also satisfies >= 2 handshakes).
     let state = Arc::new(StubState::default());
+    state
+        .ws_trades
+        .lock()
+        .expect("ws trades mutex")
+        .push(trade_json(99, "100.00"));
     let base_url = bound_stub(Arc::clone(&state)).await;
-    let (_client, _rx) = connect_data_client(
+    let (_client, mut rx) = connect_data_client(
         base_url,
         Some(conn_havoc(ConnHavoc {
             idle_timeout_ms: 100,
@@ -561,14 +469,25 @@ async fn conn_idle_timeout_triggers_reconnect() {
         handshakes >= 2,
         "idle timeout did not trigger a reconnect (handshakes={handshakes})"
     );
+    // The re-subscribe after reconnect must drive the trade through: recovery,
+    // not just a flap.
+    let trade = next_trade(&mut rx).await;
+    assert_eq!(
+        trade.ts_event,
+        UnixNanos::from(99),
+        "client did not re-subscribe and recover after the idle reconnect"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn conn_reconnect_respects_max_attempts() {
     // The stub refuses the WebSocket upgrade on every dial. With a three-attempt
-    // cap the client must dial exactly three times (one initial plus two
-    // retries) and then give up disconnected - never a fourth.
+    // cap the client must dial at least three times (one initial plus two
+    // retries) and then give up disconnected - and never dial a fifth. The exact
+    // contract is "disconnected after the cap"; pin the count with a robust
+    // lower+upper bound rather than a brittle exact-count under scheduler delay,
+    // and assert `is_disconnected`.
     let state = Arc::new(StubState::default());
     state.refuse_ws.store(true, Ordering::Relaxed);
     let base_url = bound_stub(Arc::clone(&state)).await;
@@ -587,17 +506,20 @@ async fn conn_reconnect_respects_max_attempts() {
     };
     let mut client =
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
-    client.start().expect("start grabs sink");
+    // `connect` resolves the sink first, so the client must be started or it
+    // errors out before ever dialing the WS (no handshake would reach the stub).
+    client.start().expect("start grabs the data-event sink");
     // The dials all fail, so the loop exhausts the cap and the connect helper's
     // readiness wait never succeeds; bound the await rather than block on it.
     drop(tokio::time::timeout(Duration::from_secs(2), client.connect()).await);
 
-    // Give any erroneous fourth dial time to land before pinning the count.
+    // Give any erroneous extra dial time to land before pinning the count.
     tokio::time::sleep(Duration::from_millis(300)).await;
     let handshakes = state.ws_handshakes.load(Ordering::Relaxed);
-    assert_eq!(
-        handshakes, 3,
-        "max-attempts cap admitted the wrong number of dials"
+    assert!(
+        (3..=4).contains(&handshakes),
+        "a three-attempt cap must dial three times (initial plus two retries), \
+         tolerating one racing extra at most; saw {handshakes}"
     );
     assert!(
         client.is_disconnected(),
@@ -610,6 +532,8 @@ async fn conn_reconnect_respects_max_attempts() {
 async fn conn_heartbeat_pings_when_enabled() {
     // A live but silent socket: with the heartbeat enabled the client must emit
     // WS Ping frames the stub observes, even though no application data flows.
+    // The interval is 50ms; over a ~600ms window we expect several, so we assert
+    // the pacing produced more than one rather than a single accidental probe.
     let state = Arc::new(StubState::default());
     let base_url = bound_stub(Arc::clone(&state)).await;
     let (_client, _rx) = connect_data_client(
@@ -621,10 +545,35 @@ async fn conn_heartbeat_pings_when_enabled() {
     )
     .await;
 
-    let pings = wait_for_at_least(&state.ws_pings, 1, Duration::from_secs(2)).await;
+    let pings = wait_for_at_least(&state.ws_pings, 3, Duration::from_secs(2)).await;
     assert!(
-        pings >= 1,
-        "heartbeat did not send a Ping within the window (pings={pings})"
+        pings >= 3,
+        "heartbeat did not pace several Pings in the window (pings={pings})"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn conn_handles_inbound_server_ping() {
+    // The stub sends an unsolicited WS Ping after the subscribe. The client's
+    // reader must answer it with a Pong (lifecycle Ping -> Pong path); the stub
+    // counts the Pong. This proves the inbound control-frame reply path that the
+    // heartbeat test (client-initiated Ping) never reaches.
+    let state = Arc::new(StubState::default());
+    state.ws_server_pings.store(1, Ordering::Relaxed);
+    // Keep the socket lively with one trade so the reader loop runs.
+    state
+        .ws_trades
+        .lock()
+        .expect("ws trades mutex")
+        .push(trade_json(10, "100.00"));
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (_client, _rx) = connect_data_client(base_url, None).await;
+
+    let pongs = wait_for_at_least(&state.ws_pongs, 1, Duration::from_secs(2)).await;
+    assert!(
+        pongs >= 1,
+        "client did not Pong the server's inbound Ping (pongs={pongs})"
     );
 }
 
@@ -694,7 +643,9 @@ async fn conn_http_quota_spaces_data_requests() {
         ))
         .expect("subscribe trades");
 
-    // Let the poll loop issue several /trades GETs through the quota gate.
+    // Let the poll loop issue several /trades GETs through the quota gate. Bound
+    // the wait so a silently stalled poll fails clearly instead of hanging.
+    let deadline = Instant::now() + Duration::from_secs(5);
     let times = loop {
         let times = state
             .http_request_times
@@ -704,58 +655,24 @@ async fn conn_http_quota_spaces_data_requests() {
         if times.len() >= 3 {
             break times;
         }
+        assert!(
+            Instant::now() < deadline,
+            "polling stalled before issuing three quota-gated /trades GETs"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
 
+    // 2 requests/sec means a 500ms minimum interval. The gap must be AT LEAST
+    // 500ms - tolerance belongs on the slow side (scheduler jitter lengthens
+    // gaps), never below the true interval, or a throttle shipping at 460ms
+    // (faster than 2/sec) would pass.
     for pair in times.windows(2) {
         let gap = pair[1].duration_since(pair[0]);
         assert!(
-            gap >= Duration::from_millis(450),
-            "data HTTP requests spaced only {gap:?} apart under a 2/sec quota"
+            gap >= Duration::from_millis(500),
+            "data HTTP requests spaced only {gap:?} apart under a 2/sec (>=500ms) quota"
         );
     }
-}
-
-fn cached_order(cache: &Rc<RefCell<Cache>>) -> nautilus_model::orders::OrderAny {
-    let trader_id = TraderId::from("MOGWAI-001");
-    let strategy_id = StrategyId::from("S-001");
-    let clock = Rc::new(RefCell::new(TestClock::new()));
-    let mut factory = OrderFactory::new(trader_id, strategy_id, None, None, clock, false, false);
-    let order = factory.limit(
-        instrument_id(),
-        OrderSide::Buy,
-        Quantity::from("1"),
-        Price::from("100.00"),
-        Some(TimeInForce::Gtc),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(ClientOrderId::from("O-1")),
-    );
-    cache
-        .borrow_mut()
-        .add_order(
-            order.clone(),
-            None,
-            Some(ClientId::from("MOGWAI-EXEC")),
-            false,
-        )
-        .expect("cache order");
-    order
-}
-
-async fn next_exec_event(rx: &mut UnboundedReceiver<ExecutionEvent>) -> ExecutionEvent {
-    tokio::time::timeout(Duration::from_secs(3), rx.recv())
-        .await
-        .expect("execution event arrives")
-        .expect("sink open")
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -763,7 +680,9 @@ async fn next_exec_event(rx: &mut UnboundedReceiver<ExecutionEvent>) -> Executio
 async fn conn_http_request_timeout_rejects_order() {
     // The order POST is accepted but never answered. With a short per-request
     // timeout the dispatch must elapse and surface the order as a reject via the
-    // existing reject path, rather than hanging on the default 30s timeout.
+    // existing reject path, rather than hanging on the default 30s timeout. The
+    // reject must correlate to the timed-out order (right client_order_id), not
+    // some other order.
     let state = Arc::new(StubState::default());
     state.hang_orders.store(true, Ordering::Relaxed);
     let base_url = bound_stub(Arc::clone(&state)).await;
@@ -812,16 +731,191 @@ async fn conn_http_request_timeout_rejects_order() {
         ))
         .expect("submit order");
 
+    let timeout = Duration::from_secs(3);
     // The submitted event arrives first, then the timeout-driven reject.
     assert!(matches!(
-        next_exec_event(&mut sink_rx).await,
+        next_exec_event(&mut sink_rx, timeout).await,
         ExecutionEvent::Order(OrderEventAny::Submitted(_))
     ));
+    match next_exec_event(&mut sink_rx, timeout).await {
+        ExecutionEvent::Order(OrderEventAny::Rejected(reject)) => {
+            assert_eq!(
+                reject.client_order_id,
+                order.client_order_id(),
+                "the timeout reject must name the order that timed out"
+            );
+        }
+        other => panic!("a request that timed out must surface as an order reject, got {other:?}"),
+    }
+}
+
+// --- F.13: end-to-end divergence behavioral tests ------------------------------
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn divergence_partial_fill_reports_partial_qty() {
+    // A `PartialFillNext` divergence has the venue fill only part of the order.
+    // The stub models the resulting wire frame: an `OrderFilled` moving 0.4 of a
+    // qty-1 order with leaves_qty 0.6. The adapter must report a fill of exactly
+    // 0.4 (the partial), not the full quantity.
+    let state = Arc::new(StubState::default());
+    {
+        let mut frames = state.ws_exec_frames.lock().expect("ws exec frames mutex");
+        frames.push(
+            r#"{"type":"OrderAccepted","client_order_id":"O-1","venue_order_id":"V-1","ts_event":10}"#
+                .to_string(),
+        );
+        frames.push(
+            r#"{"type":"OrderFilled","client_order_id":"O-1","venue_order_id":"V-1","trade_id":"T-1","symbol":"BTCUSDT","side":"Buy","last_qty":"0.4","last_px":"100.00","leaves_qty":"0.6","commission":"0","ts_event":11}"#
+                .to_string(),
+        );
+    }
+    let (_client, mut rx) = submit_exec_client(state).await;
+
+    let timeout = Duration::from_secs(3);
+    assert!(matches!(
+        next_exec_event(&mut rx, timeout).await,
+        ExecutionEvent::Order(OrderEventAny::Submitted(_))
+    ));
+    assert!(matches!(
+        next_exec_event(&mut rx, timeout).await,
+        ExecutionEvent::Order(OrderEventAny::Accepted(_))
+    ));
+    match next_exec_event(&mut rx, timeout).await {
+        ExecutionEvent::Order(OrderEventAny::Filled(fill)) => {
+            assert_eq!(
+                fill.last_qty,
+                Quantity::from("0.4"),
+                "a partial fill must report the partial last_qty, not the full order"
+            );
+        }
+        other => panic!("expected a partial OrderFilled, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn divergence_duplicate_fill_forwards_both_wire_events() {
+    // A `DuplicateNextFill` divergence emits the same OrderFilled (same
+    // trade_id) twice. Per the A.1 contract, the adapter's reconciliation mirror
+    // dedups the fill by trade_id (so filled_qty is not double-counted), but the
+    // duplicate wire event is STILL forwarded downstream - that is the intended
+    // divergence broadarrow's classify layer must see. So two identical Filled
+    // events must reach the sink. (The mirror's internal dedup is not observable
+    // from the egress sink; it is covered by the client.rs unit tests. This test
+    // pins the wire-forwarding half of A.1.)
+    let state = Arc::new(StubState::default());
+    {
+        let mut frames = state.ws_exec_frames.lock().expect("ws exec frames mutex");
+        frames.push(
+            r#"{"type":"OrderAccepted","client_order_id":"O-1","venue_order_id":"V-1","ts_event":10}"#
+                .to_string(),
+        );
+        let fill = r#"{"type":"OrderFilled","client_order_id":"O-1","venue_order_id":"V-1","trade_id":"T-1","symbol":"BTCUSDT","side":"Buy","last_qty":"1","last_px":"100.00","leaves_qty":"0","commission":"0","ts_event":11}"#;
+        frames.push(fill.to_string());
+        frames.push(fill.to_string());
+    }
+    let (_client, mut rx) = submit_exec_client(state).await;
+
+    let timeout = Duration::from_secs(3);
+    assert!(matches!(
+        next_exec_event(&mut rx, timeout).await,
+        ExecutionEvent::Order(OrderEventAny::Submitted(_))
+    ));
+    assert!(matches!(
+        next_exec_event(&mut rx, timeout).await,
+        ExecutionEvent::Order(OrderEventAny::Accepted(_))
+    ));
+    let first = match next_exec_event(&mut rx, timeout).await {
+        ExecutionEvent::Order(OrderEventAny::Filled(fill)) => fill,
+        other => panic!("expected first OrderFilled, got {other:?}"),
+    };
+    let second = match next_exec_event(&mut rx, timeout).await {
+        ExecutionEvent::Order(OrderEventAny::Filled(fill)) => fill,
+        other => panic!("expected the duplicate OrderFilled to be forwarded, got {other:?}"),
+    };
+    assert_eq!(
+        first.trade_id, second.trade_id,
+        "both forwarded fills are the same economic trade"
+    );
+    assert_eq!(first.last_qty, second.last_qty);
+    assert_eq!(first.last_px, second.last_px);
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn divergence_dropped_account_update_leaves_fill_without_snapshot() {
+    // `DropNextAccountUpdate` swallows the account-state snapshot that would
+    // normally follow a fill. The stub models the result: it pushes the fill but
+    // NO AccountState. The adapter must forward the fill and emit no Account
+    // event - the deliberate account drift the divergence exists to inject.
+    let state = Arc::new(StubState::default());
+    {
+        let mut frames = state.ws_exec_frames.lock().expect("ws exec frames mutex");
+        frames.push(
+            r#"{"type":"OrderAccepted","client_order_id":"O-1","venue_order_id":"V-1","ts_event":10}"#
+                .to_string(),
+        );
+        frames.push(
+            r#"{"type":"OrderFilled","client_order_id":"O-1","venue_order_id":"V-1","trade_id":"T-1","symbol":"BTCUSDT","side":"Buy","last_qty":"1","last_px":"100.00","leaves_qty":"0","commission":"0","ts_event":11}"#
+                .to_string(),
+        );
+        // Deliberately no AccountState frame.
+    }
+    let (_client, mut rx) = submit_exec_client(state).await;
+
+    let timeout = Duration::from_secs(3);
+    assert!(matches!(
+        next_exec_event(&mut rx, timeout).await,
+        ExecutionEvent::Order(OrderEventAny::Submitted(_))
+    ));
+    assert!(matches!(
+        next_exec_event(&mut rx, timeout).await,
+        ExecutionEvent::Order(OrderEventAny::Accepted(_))
+    ));
+    assert!(matches!(
+        next_exec_event(&mut rx, timeout).await,
+        ExecutionEvent::Order(OrderEventAny::Filled(_))
+    ));
+    // No account snapshot follows the dropped update.
+    let tail = tokio::time::timeout(Duration::from_millis(400), rx.recv()).await;
     assert!(
-        matches!(
-            next_exec_event(&mut sink_rx).await,
-            ExecutionEvent::Order(OrderEventAny::Rejected(_))
-        ),
-        "a request that timed out must surface as an order reject"
+        tail.is_err(),
+        "a dropped account update must leave no AccountState event after the fill"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn divergence_go_dark_suppresses_stream_during_window() {
+    // `GoDark { ms }` blacks the venue out for a window. The stub models the
+    // blackout on the data WS leg: after the Subscribe it holds (suppresses) all
+    // application frames for `dark_ms`, then resumes. The client must see NO
+    // trade during the dark window, and the trade only after it lifts.
+    let dark_ms = 300usize;
+    let state = Arc::new(StubState::default());
+    state.dark_ms.store(dark_ms, Ordering::Relaxed);
+    state
+        .ws_trades
+        .lock()
+        .expect("ws trades mutex")
+        .push(trade_json(10, "100.00"));
+
+    let start = Instant::now();
+    let mut rx = subscribed_data_client(state, None).await;
+
+    // Within the dark window nothing arrives.
+    let during = tokio::time::timeout(Duration::from_millis(150), rx.recv()).await;
+    assert!(
+        during.is_err(),
+        "the stream must be suppressed during the GoDark window"
+    );
+
+    // After the window lifts, the held trade is delivered.
+    let trade = next_trade(&mut rx).await;
+    assert_eq!(trade.ts_event, UnixNanos::from(10));
+    assert!(
+        start.elapsed() >= Duration::from_millis(dark_ms as u64),
+        "the trade must not arrive before the dark window elapsed"
     );
 }

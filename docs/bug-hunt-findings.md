@@ -75,9 +75,58 @@ event, classified oppositely on the two ends today).
   Decimal->f64 step) remains a deliberate follow-up - it ripples through `convert`
   signatures and wants its own pass.
 
-**Planned next:** the adapter test-suite hardening (F) and de-triplicating the stub
-harness, then the remaining smaller smells/nits. Separately queued (see `docs/todo.md`):
-authoring `reference/havoc.md` and the runtime env-var audit.
+**Fix wave 4 (test-only, landed)** - the adapter test-suite hardening (F) and
+de-triplicating the stub harness. Validated by actually running every group
+(`brokkr test -p mogwai-adapter <group> --debug`): `divergence_`, `havoc_`,
+`conn_`, the smoke/transport `drive` tests, and `http_polling` all PASS:
+
+- New `crates/mogwai-adapter/tests/common/mod.rs` owns the single most-capable
+  HTTP/WS stub (`StubState`, `run_stub`, `read_request`/`content_length`,
+  `respond_json(status, body)`, `serve_ws`, `INSTRUMENTS_JSON`, `instrument_id`,
+  `cached_order`, `trade_json`, `next_exec_event`/`next_data_event`). All three
+  files adopt it (F.14/F.15/F.22/F.23/item 10). The WS leg now matches on a
+  parsed `ClientMessage` (not a type-name substring) and serves both data
+  (`ws_trades`) and exec (`ws_exec_frames`) scenarios from `StubState`. The two
+  `Venue::from("MOGWAI")` literals are gone (item 14).
+- Strengthened assertions: smoke asserts the fill's order-id/venue-id/instrument/
+  qty/price and the account USDT balance (F.1); the subscribe and request_trades
+  tests assert price/size/aggressor/ts and the two-trade ascending order (F.2/F.3);
+  `ships_server_havoc` deserializes the control bodies and asserts `reason:"nope"`
+  and `ms:25` round-tripped (F.12).
+- Tolerances/measurements: the latency clock starts AFTER connect+subscribe so the
+  lower bound measures only the filter (F.4); the quota gap is now `>= 500ms` for a
+  2/sec quota with slack only on the slow side (F.5); the quota wait loop has a
+  timeout (F.18); the max-attempts assertion is a robust 3..=4 bound plus
+  `is_disconnected` (F.7).
+- Coverage gaps: the drop test pushes five trades and asserts zero arrive (F.8);
+  the polling test asserts `trades_hits >= 2` (F.9); the idle-reconnect test
+  asserts the client re-subscribes and recovers a post-reconnect trade (F.10); a
+  new `conn_handles_inbound_server_ping` exercises the server-`Ping` -> client-`Pong`
+  reply path and the heartbeat test asserts pacing (`>= 3`) (F.11); the duplicate
+  test asserts exactly two with a tail drain (F.16); the reorder test feeds an ODD
+  count so the dangling held message must be released by `flush` (F.17) - this
+  confirmed A.5: the reorder filter's held message is released only by
+  `flush_market_havoc`, which runs from the reader loop's on-close callback, NOT
+  on a client-side `stop()` (which only aborts the task), so the test drives a
+  server-initiated WS close (`StubState::close_after_trades`) to reach it; the
+  timeout-reject test correlates the reject's `client_order_id` to the timed-out
+  order (F.19).
+- New divergence behavioral tests (F.13): `divergence_partial_fill_reports_partial_qty`,
+  `divergence_duplicate_fill_forwards_both_wire_events` (pins the A.1 wire-forwarding
+  contract), `divergence_dropped_account_update_leaves_fill_without_snapshot`, and
+  `divergence_go_dark_suppresses_stream_during_window`. The doc-comment `brokkr test`
+  invocation now names a real test (F.21).
+
+No product bug surfaced: every hardened and new test passes against the current
+adapter behavior on inspection (the A.1 dedup forwards the duplicate wire event,
+partial `last_qty` maps through, the dropped-update path emits no account event,
+the GoDark suppression is modelled stub-side). F.6 (seeded-RNG determinism at an
+intermediate probability) and F.20 (the suite is `#[ignore]`d so CI only compiles
+it) are noted but unaddressed - F.6 wants a `draw`-level test and F.20 is a
+deliberate socket-sandbox tradeoff.
+
+**Planned next:** the remaining smaller smells/nits. Separately queued (see
+`docs/todo.md`): authoring `reference/havoc.md` and the runtime env-var audit.
 
 ---
 

@@ -1,30 +1,30 @@
 //! End-to-end transport test for the mogwai `DataClient`.
 //!
-//! Exercises the public adapter surface against a self-contained stub that
-//! speaks the mogwai HTTP (`/instruments`, `/trades`) and WebSocket (`/ws`)
-//! protocol on a single bound port. It installs its own egress sink via the
-//! nautilus runner thread-local, then asserts that:
+//! Exercises the public adapter surface against the shared self-contained stub
+//! (`tests/common`) that speaks the mogwai HTTP (`/instruments`, `/trades`) and
+//! WebSocket (`/ws`) protocol on a single bound port. It installs its own egress
+//! sink via the nautilus runner thread-local, then asserts that:
 //!
 //! - a live `subscribe_trades` drives the stub-pushed `ServerMessage::Trade`
-//!   into the sink as a `DataEvent::Data(Data::Trade)`,
-//! - a `request_trades` fetch returns a matching `DataResponse::Trades`, and
+//!   into the sink as a `DataEvent::Data(Data::Trade)` with the right
+//!   price/size/aggressor/ts,
+//! - a `request_trades` fetch returns a matching `DataResponse::Trades` with the
+//!   two distinct trades in order, and
 //! - under the `HttpPolling` profile, a `subscribe_trades` drives a polled
-//!   `GET /trades` row into the sink with NO `/ws` socket ever opened.
+//!   `GET /trades` row into the sink, the poll actually repeats, and NO `/ws`
+//!   socket is ever opened.
 //!
 //! This is the transport-profile integration gate (the polling case is the
 //! behavior neither the engine tests nor the smoke path reach). It is marked
 //! `#[ignore]` because it binds a real TCP listener, which the CI sandbox may
 //! refuse; run it explicitly in a socket-capable environment with
-//! `brokkr test -p mogwai-adapter data_client --debug`.
+//! `brokkr test -p mogwai-adapter subscribe_and_request_drive_data_events --debug`.
 
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+mod common;
 
+use std::{sync::Arc, time::Duration};
+
+use common::{StubState, bound_stub, instrument_id, next_data_event};
 use mogwai_adapter::{MogwaiDataClient, MogwaiDataClientConfig};
 use mogwai_protocol::TransportProfile;
 use nautilus_common::{
@@ -38,124 +38,32 @@ use nautilus_common::{
 use nautilus_core::{UUID4, UnixNanos};
 use nautilus_model::{
     data::Data,
-    identifiers::{ClientId, InstrumentId, Symbol, Venue},
+    enums::AggressorSide,
+    identifiers::ClientId,
+    types::{Price, Quantity},
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    sync::mpsc::unbounded_channel,
-};
-use tokio_tungstenite::tungstenite::Message;
+use tokio::sync::mpsc::unbounded_channel;
 
-const INSTRUMENTS_JSON: &str = r#"[{"symbol":"BTCUSDT","base":"BTC","quote":"USDT","price_precision":2,"size_precision":8,"price_increment":"0.01","size_increment":"0.00000001"}]"#;
 const TRADES_JSON: &str = r#"[{"symbol":"BTCUSDT","price":"100.00","size":"1","aggressor":"Buyer","ts_event":10},{"symbol":"BTCUSDT","price":"101.00","size":"2","aggressor":"Seller","ts_event":20}]"#;
-
-/// Serves one HTTP request or one WS upgrade per connection, on `listener`.
-async fn run_stub(listener: TcpListener) {
-    run_stub_with_ws_counter(listener, None).await;
-}
-
-async fn run_stub_with_ws_counter(listener: TcpListener, ws_hits: Option<Arc<AtomicUsize>>) {
-    loop {
-        let Ok((mut stream, _)) = listener.accept().await else {
-            return;
-        };
-
-        // Peek the request head so we can route by path.
-        let mut buf = vec![0u8; 4096];
-        let n = match stream.read(&mut buf).await {
-            Ok(0) | Err(_) => continue,
-            Ok(n) => n,
-        };
-        let head = String::from_utf8_lossy(&buf[..n]).to_string();
-        let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
-
-        if path.starts_with("/ws") {
-            if let Some(ws_hits) = &ws_hits {
-                ws_hits.fetch_add(1, Ordering::Relaxed);
-            }
-            tokio::spawn(serve_ws(stream, head));
-        } else if path.starts_with("/instruments") {
-            respond_json(&mut stream, INSTRUMENTS_JSON).await;
-        } else if path.starts_with("/trades") {
-            respond_json(&mut stream, TRADES_JSON).await;
-        } else {
-            respond_json(&mut stream, "[]").await;
-        }
-    }
-}
-
-async fn respond_json(stream: &mut TcpStream, body: &str) {
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    drop(stream.write_all(response.as_bytes()).await);
-    drop(stream.flush().await);
-}
-
-/// Completes a tungstenite server handshake against an already-read request
-/// head, then pushes one `ServerMessage::Trade` after the client subscribes.
-async fn serve_ws(stream: TcpStream, head: String) {
-    use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
-
-    // Re-implement the minimal server handshake by hand because the request
-    // head was already consumed above.
-    let key = head
-        .lines()
-        .find_map(|l| l.strip_prefix("Sec-WebSocket-Key: "))
-        .map(str::trim)
-        .unwrap_or_default();
-    let accept = derive_accept_key(key.as_bytes());
-    let mut stream = stream;
-    let upgrade = format!(
-        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
-    );
-    if stream.write_all(upgrade.as_bytes()).await.is_err() {
-        return;
-    }
-    drop(stream.flush().await);
-
-    let mut ws = tokio_tungstenite::WebSocketStream::from_raw_socket(
-        stream,
-        tokio_tungstenite::tungstenite::protocol::Role::Server,
-        None,
-    )
-    .await;
-
-    use futures_util::{SinkExt, StreamExt};
-    // Wait for the client's Subscribe, then push a trade frame.
-    while let Some(Ok(msg)) = ws.next().await {
-        if let Message::Text(text) = msg
-            && text.contains("Subscribe")
-        {
-            let trade = r#"{"type":"Trade","symbol":"BTCUSDT","price":"100.00","size":"1","aggressor":"Buyer","ts_event":10}"#;
-            drop(ws.send(Message::Text(trade.to_string().into())).await);
-            break;
-        }
-    }
-    // Keep the socket open briefly so the drain task can read.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-}
-
-fn instrument_id() -> InstrumentId {
-    InstrumentId::new(Symbol::from("BTCUSDT"), Venue::from("MOGWAI"))
-}
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn subscribe_and_request_drive_data_events() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind stub");
-    let port = listener.local_addr().expect("addr").port();
-    tokio::spawn(run_stub(listener));
+    let state = Arc::new(StubState::default());
+    state
+        .ws_trades
+        .lock()
+        .expect("ws trades mutex")
+        .push(r#"{"type":"Trade","symbol":"BTCUSDT","price":"100.00","size":"1","aggressor":"Buyer","ts_event":10}"#.to_string());
+    *state.trades_body.lock().expect("trades body mutex") = Some(TRADES_JSON.to_string());
+    let base_url = bound_stub(Arc::clone(&state)).await;
 
     // Install our own egress sink on this thread; start() grabs it.
     let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
     replace_data_event_sender(sink_tx);
 
     let config = MogwaiDataClientConfig {
-        base_url: format!("ws://127.0.0.1:{port}"),
+        base_url,
         ..MogwaiDataClientConfig::default()
     };
     let mut client =
@@ -176,17 +84,23 @@ async fn subscribe_and_request_drive_data_events() {
         ))
         .expect("subscribe trades");
 
-    // The stub pushes a trade after the Subscribe; it must reach the sink.
-    let event = tokio::time::timeout(Duration::from_secs(2), sink_rx.recv())
-        .await
-        .expect("a data event arrives")
-        .expect("sink open");
-    assert!(
-        matches!(event, DataEvent::Data(Data::Trade(t)) if t.instrument_id == instrument_id()),
-        "expected a trade data event"
-    );
+    // The stub pushes a trade after the Subscribe; it must reach the sink with
+    // every field round-tripped (a wrong scaling, flipped aggressor or dropped
+    // ts would still be a Trade variant but is caught here).
+    let timeout = Duration::from_secs(2);
+    match next_data_event(&mut sink_rx, timeout).await {
+        DataEvent::Data(Data::Trade(trade)) => {
+            assert_eq!(trade.instrument_id, instrument_id());
+            assert_eq!(trade.price, Price::from("100.00"));
+            assert_eq!(trade.size, Quantity::from("1"));
+            assert_eq!(trade.aggressor_side, AggressorSide::Buyer);
+            assert_eq!(trade.ts_event, UnixNanos::from(10));
+        }
+        other => panic!("expected a trade data event, got {other:?}"),
+    }
 
-    // request_trades drives an HTTP fetch returning a Trades response.
+    // request_trades drives an HTTP fetch returning the two distinct trades, in
+    // order. Asserting only `len == 2` would pass two copies of one wrong trade.
     use nautilus_common::messages::data::RequestTrades;
     client
         .request_trades(RequestTrades::new(
@@ -202,12 +116,24 @@ async fn subscribe_and_request_drive_data_events() {
         .expect("request trades");
 
     loop {
-        let event = tokio::time::timeout(Duration::from_secs(2), sink_rx.recv())
-            .await
-            .expect("a response arrives")
-            .expect("sink open");
-        if let DataEvent::Response(DataResponse::Trades(resp)) = event {
+        if let DataEvent::Response(DataResponse::Trades(resp)) =
+            next_data_event(&mut sink_rx, timeout).await
+        {
             assert_eq!(resp.data.len(), 2, "stub returns two trades");
+            let first = &resp.data[0];
+            assert_eq!(first.price, Price::from("100.00"));
+            assert_eq!(first.size, Quantity::from("1"));
+            assert_eq!(first.aggressor_side, AggressorSide::Buyer);
+            assert_eq!(first.ts_event, UnixNanos::from(10));
+            let second = &resp.data[1];
+            assert_eq!(second.price, Price::from("101.00"));
+            assert_eq!(second.size, Quantity::from("2"));
+            assert_eq!(second.aggressor_side, AggressorSide::Seller);
+            assert_eq!(second.ts_event, UnixNanos::from(20));
+            assert!(
+                first.ts_event < second.ts_event,
+                "trades must arrive in ascending ts order"
+            );
             break;
         }
     }
@@ -216,19 +142,22 @@ async fn subscribe_and_request_drive_data_events() {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn http_polling_subscribe_fetches_trades_without_ws() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind stub");
-    let port = listener.local_addr().expect("addr").port();
-    let ws_hits = Arc::new(AtomicUsize::new(0));
-    tokio::spawn(run_stub_with_ws_counter(
-        listener,
-        Some(Arc::clone(&ws_hits)),
-    ));
+    use std::sync::atomic::Ordering;
+
+    let state = Arc::new(StubState::default());
+    // A single trade in the polled body; the polling profile fetches it over
+    // `GET /trades` rather than the WS leg.
+    *state.trades_body.lock().expect("trades body mutex") = Some(
+        r#"[{"symbol":"BTCUSDT","price":"100.00","size":"1","aggressor":"Buyer","ts_event":10}]"#
+            .to_string(),
+    );
+    let base_url = bound_stub(Arc::clone(&state)).await;
 
     let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
     replace_data_event_sender(sink_tx);
 
     let config = MogwaiDataClientConfig {
-        base_url: format!("ws://127.0.0.1:{port}"),
+        base_url,
         transport_profile: TransportProfile::HttpPolling,
         ..MogwaiDataClientConfig::default()
     };
@@ -249,16 +178,32 @@ async fn http_polling_subscribe_fetches_trades_without_ws() {
         ))
         .expect("subscribe trades");
 
-    let event = tokio::time::timeout(Duration::from_secs(2), sink_rx.recv())
-        .await
-        .expect("a data event arrives")
-        .expect("sink open");
-    assert!(
-        matches!(event, DataEvent::Data(Data::Trade(t)) if t.instrument_id == instrument_id()),
-        "expected a polled trade data event"
-    );
+    let timeout = Duration::from_secs(2);
+    match next_data_event(&mut sink_rx, timeout).await {
+        DataEvent::Data(Data::Trade(trade)) => {
+            assert_eq!(trade.instrument_id, instrument_id());
+            assert_eq!(trade.price, Price::from("100.00"));
+            assert_eq!(trade.ts_event, UnixNanos::from(10));
+        }
+        other => panic!("expected a polled trade data event, got {other:?}"),
+    }
+
+    // Repeated polling is the polling profile's defining behavior - a one-shot
+    // poll that fired once and stopped would still deliver the first row above.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if state.trades_hits.load(Ordering::Relaxed) >= 2 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "polling did not repeat a second /trades GET"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
     assert_eq!(
-        ws_hits.load(Ordering::Relaxed),
+        state.ws_hits.load(Ordering::Relaxed),
         0,
         "polling must not open /ws"
     );
