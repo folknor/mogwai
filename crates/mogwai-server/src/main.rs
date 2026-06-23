@@ -37,7 +37,8 @@ use mogwai_protocol::{
 use serde::Deserialize;
 use tokio::sync::{Mutex, mpsc};
 
-/// Replay/runtime configuration, sourced from the environment at startup.
+/// Replay/runtime configuration, loaded from a TOML config file at startup
+/// (see `load`); never from ambient environment variables.
 #[derive(Clone, serde::Deserialize)]
 #[serde(default)]
 struct Config {
@@ -108,6 +109,10 @@ fn now_ns() -> u64 {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // RUST_LOG is the one deliberate exception to the no-ambient-environment
+    // rule that governs run knobs (those live in mogwai.toml): log level is the
+    // universally-expected env var and is not a run knob. Falls back to
+    // mogwai_server=info when RUST_LOG is unset or unparseable.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

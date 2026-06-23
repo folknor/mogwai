@@ -164,26 +164,7 @@ per the Direction note - the honest default vs the opt-in havoc surfaces. Read
 contain. Best written after items 3 and 4 settle the default and the stall
 divergence, so the doc describes the real surface.
 
-### 6. Remove remaining runtime env vars - knobs belong in TOML / `HavocSpec`
-
-Run knobs should be explicit input (TOML or havoc knobs), not ambient
-environment. The replay-speed / gap-cap env vars were already moved to
-`mogwai.toml` (commit ca7bc66). Remaining audit:
-
-- `RUST_LOG` (server only, `mogwai-server/src/main.rs`
-  `EnvFilter::try_from_default_env`) stays env-driven - DECIDED. It is the one
-  standard, universally-expected logging env var; the adapter reads no `RUST_LOG`
-  at all. This is the deliberate exception to the TOML-knobs rule, not an open
-  item.
-- [ ] `scripts/smoke.py` and any shell scripts - audit for `os.environ` /
-      `$VAR` runtime knobs (the Rust-side `grep` is clean: only CLI `args()` and
-      the compile-time `env!("CARGO_MANIFEST_DIR")` fingerprint-path macro
-      remain, neither a runtime env var).
-- [ ] `MOGWAI_DATA_DIR` is offline-analysis-only (see gotcha below) - confirm it
-      is not read anywhere on the server runtime path before considering it out
-      of scope.
-
-### 7. Bug-hunt follow-ups - the residual tail
+### 6. Bug-hunt follow-ups - the residual tail
 
 The fix waves are done; the scope conversation above resolved most of what was
 parked here. Tags (`B.8`, `C.2`, etc.) cross-reference the fix-wave commit
