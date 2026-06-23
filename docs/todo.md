@@ -189,18 +189,6 @@ The fix waves are done; the scope conversation above resolved most of what was
 parked here. Tags (`B.8`, `C.2`, etc.) cross-reference the fix-wave commit
 messages. What genuinely remains open:
 
-- [ ] **`AccountState` exec-vs-data classification (E.8 / A.14).** The server
-      delays `AccountState` as an execution event (`DelayAcks`) while the adapter
-      buckets it as data latency - opposite views of one enum. Recommendation:
-      `AccountState` is an account/execution event, so classify it as exec on
-      both ends via a shared `ServerMessage::category()` in `mogwai-protocol`.
-      Confirm before consolidating (it changes which latency knob delays it).
-- [ ] **Lognormal size: median vs mean (C.2).** `typical_size` is the lognormal
-      *median*, not the mean. Likely a non-issue - verify how `analysis/` fit
-      `typical_size` (if it was fit as a median, this is correct as-is and closes;
-      if as a mean, it is ~2x off). Changing it would shift the size distribution
-      and break the byte-exact golden test, so confirm the fit first.
-
 Deferred engineering (clear-cut, just larger than a one-wave fix):
 
 - [ ] **Seeded-RNG determinism test (F.6).** All probabilistic havoc tests use
@@ -225,6 +213,15 @@ Deferred engineering (clear-cut, just larger than a one-wave fix):
 
 Resolved by the scope conversation - closed, NOT to be re-flagged as bugs:
 
+- **Lognormal size: median vs mean (C.2)** - closed: correct as-is. `typical_size`
+  is not fit from the corpus at all - it is a hand-set constant
+  (`TYPICAL_SIZE_MANTISSA` / `TYPICAL_SIZE_SCALE` in `mogwai-data` `generated.rs`),
+  like `start_price` and `vol_scalar`. Only `modal_tick`, `price_decimals`,
+  `mean_duration_s` and `size_round_frac` come from fingerprint medians; the
+  corpus `size_log10_hist` is emitted to the `char_*.json` files but never folded
+  into the fingerprint. So there is no mean-fit to be ~2x off from: using the
+  author-chosen typical size as the lognormal median is the natural reading and
+  is correct.
 - **Market-order fill price (B.3)** - fills at zero, "free base". Closed: the
   fake venue's balances are not consumed as truth, so the accounting need not be
   economically correct.

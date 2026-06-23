@@ -11,8 +11,8 @@ use std::{
 use anyhow::{Context, ensure};
 use async_trait::async_trait;
 use mogwai_protocol::{
-    ClientHavoc, ClientMessage, ConnHavoc, EventKind, HavocLatency, HavocSpec, InstrumentDef,
-    MarketRegime, ServerMessage, Symbol, TradeTick,
+    ClientHavoc, ClientMessage, ConnHavoc, HavocLatency, HavocSpec, InstrumentDef, MarketRegime,
+    ServerMessage, Symbol, TradeTick,
 };
 use nautilus_common::{
     clients::{DataClient, ExecutionClient},
@@ -1430,7 +1430,7 @@ impl HavocFilter {
 
     fn delay_for(&self, msg: &ServerMessage) -> Duration {
         self.latency
-            .map_or(Duration::ZERO, |latency| latency.delay_for(event_kind(msg)))
+            .map_or(Duration::ZERO, |latency| latency.delay_for(msg.category()))
     }
 
     fn draw(&mut self, probability: f64) -> bool {
@@ -1467,20 +1467,6 @@ fn client_havoc_for_dispatch(spec: &Option<HavocSpec>, counter: u64) -> ClientHa
         *seed ^= counter;
     }
     client
-}
-
-fn event_kind(msg: &ServerMessage) -> EventKind {
-    match msg {
-        ServerMessage::OrderFilled(_) => EventKind::Fill,
-        ServerMessage::Trade(_) | ServerMessage::Quote(_) | ServerMessage::AccountState(_) => {
-            EventKind::Data
-        }
-        ServerMessage::OrderAccepted { .. }
-        | ServerMessage::OrderRejected { .. }
-        | ServerMessage::OrderCanceled { .. }
-        | ServerMessage::OrderUpdated { .. }
-        | ServerMessage::OrderModifyRejected { .. } => EventKind::Exec,
-    }
 }
 
 async fn sleep_havoc_delay(delay: Duration) {
@@ -3407,6 +3393,67 @@ mod tests {
             })
             .expect("HTTP dispatch accepts command without websocket");
         assert!(client.ws_cmd.is_none());
+    }
+
+    #[test]
+    fn account_state_buckets_into_exec_latency_not_data() {
+        // Distinct knobs so a misbucket is observable: base 5ns, exec +20,
+        // fill +30, data +40. The bug this pins had `AccountState` riding the
+        // data knob; it is an account/execution event and must take exec
+        // latency. Both ends key off `ServerMessage::category`, so this asserts
+        // the adapter side of that shared classification.
+        let havoc = ClientHavoc {
+            latency: Some(HavocLatency {
+                base_nanos: 5,
+                exec_event_nanos: 20,
+                fill_nanos: 30,
+                data_nanos: 40,
+            }),
+            ..ClientHavoc::default()
+        };
+        let filter = HavocFilter::from_client(&havoc);
+
+        let account = ServerMessage::AccountState(mogwai_protocol::AccountState {
+            balances: Vec::new(),
+            positions: Vec::new(),
+            ts_event: 1,
+        });
+        assert_eq!(
+            filter.delay_for(&account),
+            Duration::from_nanos(25),
+            "AccountState takes base + exec latency, not data"
+        );
+
+        let trade = ServerMessage::Trade(TradeTick {
+            symbol: "BTCUSDT".into(),
+            price: Decimal::new(1, 0),
+            size: Decimal::new(1, 0),
+            aggressor: mogwai_protocol::AggressorSide::NoAggressor,
+            ts_event: 1,
+        });
+        assert_eq!(
+            filter.delay_for(&trade),
+            Duration::from_nanos(45),
+            "trades still take base + data latency"
+        );
+
+        let fill = ServerMessage::OrderFilled(mogwai_protocol::OrderFilled {
+            client_order_id: "O-1".into(),
+            venue_order_id: "V-1".into(),
+            trade_id: "T-1".into(),
+            symbol: "BTCUSDT".into(),
+            side: Side::Buy,
+            last_qty: Decimal::new(1, 0),
+            last_px: Decimal::new(10_000, 2),
+            leaves_qty: Decimal::ZERO,
+            commission: Decimal::ZERO,
+            ts_event: 1,
+        });
+        assert_eq!(
+            filter.delay_for(&fill),
+            Duration::from_nanos(35),
+            "fills still take base + fill latency"
+        );
     }
 
     #[test]

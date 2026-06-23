@@ -487,7 +487,13 @@ fn dedup_symbols(mut symbols: Vec<String>) -> Vec<String> {
 }
 
 fn is_execution_event(msg: &ServerMessage) -> bool {
-    !matches!(msg, ServerMessage::Trade(_) | ServerMessage::Quote(_))
+    // Delegates to the protocol's shared classifier (`ServerMessage::category`)
+    // so the server's `DelayAcks` delay path and the adapter's inbound latency
+    // bucketing decide exec-vs-data from one source of truth. Execution traffic
+    // is everything but market data - notably `AccountState`, an account event
+    // that reports balances and positions moved by fills, which both ends now
+    // agree rides the execution path.
+    msg.category().is_execution()
 }
 
 /// Stream generated trades for a single `symbol` as market data into `tx`,
@@ -622,6 +628,37 @@ mod tests {
         assert!(matches!(response.0[0], ServerMessage::OrderAccepted { .. }));
         assert!(matches!(response.0[1], ServerMessage::OrderFilled(_)));
         assert!(matches!(response.0[2], ServerMessage::AccountState(_)));
+    }
+
+    #[test]
+    fn account_state_is_delayed_as_an_execution_event() {
+        // The `DelayAcks` writer path delays everything `is_execution_event`
+        // accepts. `AccountState` is an account/execution event, so it must be
+        // delayed alongside fills and order-lifecycle events - not treated as
+        // market data the way trades and quotes are. This is the server side of
+        // the shared `ServerMessage::category` classification; the adapter buckets
+        // the same frame into exec latency from the same source of truth.
+        let account = ServerMessage::AccountState(mogwai_protocol::AccountState {
+            balances: Vec::new(),
+            positions: Vec::new(),
+            ts_event: 1,
+        });
+        assert!(
+            is_execution_event(&account),
+            "AccountState rides the execution-delay path"
+        );
+
+        let trade = ServerMessage::Trade(TradeTick {
+            symbol: "BTCUSDT".into(),
+            price: "1".parse().expect("decimal"),
+            size: "1".parse().expect("decimal"),
+            aggressor: mogwai_protocol::AggressorSide::NoAggressor,
+            ts_event: 1,
+        });
+        assert!(
+            !is_execution_event(&trade),
+            "trades are market data, not delayed by DelayAcks"
+        );
     }
 
     #[tokio::test]

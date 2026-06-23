@@ -379,7 +379,8 @@ pub struct HavocLatency {
     /// Extra delay for fill events.
     #[serde(default)]
     pub fill_nanos: u64,
-    /// Extra delay for market-data events and account-state snapshots.
+    /// Extra delay for market-data events (trades and quotes). Account-state
+    /// snapshots are execution traffic and ride `exec_event_nanos`, not this.
     #[serde(default)]
     pub data_nanos: u64,
 }
@@ -403,6 +404,21 @@ pub enum EventKind {
     Exec,
     Fill,
     Data,
+}
+
+impl EventKind {
+    /// Whether this category is an account/execution event rather than market
+    /// data. `Exec` and `Fill` are both order-lifecycle (execution) traffic;
+    /// only `Data` is market data. The server's outbound delay path keys off
+    /// this two-way split, while the adapter's latency bucketing uses the full
+    /// three-way `EventKind` - both consult [`ServerMessage::category`] so the
+    /// two ends can never disagree about which side of the seam a variant sits
+    /// on (the split-brain that classified `AccountState` as data on one end
+    /// and execution on the other).
+    #[must_use]
+    pub fn is_execution(self) -> bool {
+        !matches!(self, EventKind::Data)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -874,6 +890,98 @@ mod tests {
     }
 
     #[test]
+    fn server_message_category_is_shared_source_of_truth() {
+        // The classifier both ends consult. `AccountState` is exec, not data:
+        // the split-brain this test pins is the adapter once bucketing it as
+        // data while the server delayed it as execution. Trades and quotes are
+        // the only `Data`; fills are `Fill`; every order-lifecycle event and
+        // the account snapshot are `Exec`.
+        let exec = [
+            ServerMessage::AccountState(AccountState {
+                balances: Vec::new(),
+                positions: Vec::new(),
+                ts_event: 1,
+            }),
+            ServerMessage::OrderAccepted {
+                client_order_id: "O".into(),
+                venue_order_id: "V".into(),
+                ts_event: 1,
+            },
+            ServerMessage::OrderRejected {
+                client_order_id: "O".into(),
+                reason: "no".into(),
+                ts_event: 1,
+            },
+            ServerMessage::OrderCanceled {
+                client_order_id: "O".into(),
+                venue_order_id: "V".into(),
+                ts_event: 1,
+            },
+            ServerMessage::OrderUpdated {
+                client_order_id: "O".into(),
+                venue_order_id: "V".into(),
+                quantity: Decimal::from(1),
+                price: None,
+                leaves_qty: Decimal::from(1),
+                ts_event: 1,
+            },
+            ServerMessage::OrderModifyRejected {
+                client_order_id: "O".into(),
+                venue_order_id: None,
+                reason: "no".into(),
+                ts_event: 1,
+            },
+        ];
+        for msg in &exec {
+            assert_eq!(msg.category(), EventKind::Exec, "{msg:?} is execution");
+            assert!(msg.category().is_execution(), "{msg:?} delays as execution");
+        }
+
+        let fill = ServerMessage::OrderFilled(OrderFilled {
+            client_order_id: "O".into(),
+            venue_order_id: "V".into(),
+            trade_id: "T".into(),
+            symbol: "BTCUSDT".into(),
+            side: Side::Buy,
+            last_qty: Decimal::from(1),
+            last_px: Decimal::from(1),
+            leaves_qty: Decimal::ZERO,
+            commission: Decimal::ZERO,
+            ts_event: 1,
+        });
+        assert_eq!(fill.category(), EventKind::Fill);
+        assert!(
+            fill.category().is_execution(),
+            "fills delay as execution too"
+        );
+
+        let data = [
+            ServerMessage::Trade(TradeTick {
+                symbol: "BTCUSDT".into(),
+                price: Decimal::from(1),
+                size: Decimal::from(1),
+                aggressor: AggressorSide::NoAggressor,
+                ts_event: 1,
+            }),
+            ServerMessage::Quote(QuoteTick {
+                symbol: "BTCUSDT".into(),
+                bid_px: Decimal::from(1),
+                ask_px: Decimal::from(1),
+                bid_sz: Decimal::from(1),
+                ask_sz: Decimal::from(1),
+                ts_event: 1,
+            }),
+        ];
+        for msg in &data {
+            assert_eq!(msg.category(), EventKind::Data, "{msg:?} is market data");
+            assert!(
+                !msg.category().is_execution(),
+                "{msg:?} is not delayed as execution"
+            );
+        }
+    }
+
+    #[test]
     fn order_updated_and_modify_rejected_round_trip() {
         let updated = ServerMessage::OrderUpdated {
             client_order_id: "O1".into(),
@@ -1087,6 +1195,35 @@ pub enum ServerMessage {
     AccountState(AccountState),
     Trade(TradeTick),
     Quote(QuoteTick),
+}
+
+impl ServerMessage {
+    /// The single source of truth for how each wire variant is classified into
+    /// the exec / fill / data buckets that both ends key their havoc off.
+    ///
+    /// The server's outbound delay path (`DelayAcks`) delays every execution
+    /// event ([`EventKind::is_execution`], i.e. everything but `Data`), and the
+    /// adapter's inbound latency knob buckets each variant with the full
+    /// three-way split. Both consult this one classifier, so a variant can
+    /// never be data on one end and execution on the other.
+    ///
+    /// `AccountState` is an account/execution event: it reports balances and
+    /// positions that move only as orders fill, so it rides the execution path
+    /// on both ends. Classifying it as `Data` (as the adapter once did) split
+    /// the two ends' views of the same frame.
+    #[must_use]
+    pub fn category(&self) -> EventKind {
+        match self {
+            ServerMessage::OrderFilled(_) => EventKind::Fill,
+            ServerMessage::Trade(_) | ServerMessage::Quote(_) => EventKind::Data,
+            ServerMessage::AccountState(_)
+            | ServerMessage::OrderAccepted { .. }
+            | ServerMessage::OrderRejected { .. }
+            | ServerMessage::OrderCanceled { .. }
+            | ServerMessage::OrderUpdated { .. }
+            | ServerMessage::OrderModifyRejected { .. } => EventKind::Exec,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
