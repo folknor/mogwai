@@ -240,8 +240,11 @@ messages. The only crate that path-deps the sibling `../nautilus_trader` checkou
 
 ## The havoc model - one HavocSpec, four surfaces
 
-The point of mogwai. A single `HavocSpec` on both client configs (range-checked
-at factory `create` time) arms all four surfaces of the havoc:
+The point of mogwai. This is the one-page summary; `reference/havoc.md` is the
+long form (every divergence variant and its semantics, the server/engine split,
+the heartbeat and the issue-4255 reproduction, the `MarketRegime` axis, and the
+validation boundaries). A single `HavocSpec` on both client configs
+(range-checked at factory `create` time) arms all four surfaces of the havoc:
 
 - **Server half.** A `Vec<control::Divergence>` the exec client `connect` ships to
   `/control/divergence` (one POST per divergence, so broadarrow makes no separate

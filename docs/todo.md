@@ -115,20 +115,7 @@ spec or code until the nautilus seam exists.
 - [ ] Then write the spec per `reference/technical-implementation-spec.md`
       before any mogwai/adapter code (this item is the TODO source it cites).
 
-### 3. Author `reference/havoc.md`
-
-Durable reference doc for the divergence/havoc surfaces. Covers the four-surface
-`HavocSpec` (client / server / data / connection-lifecycle), every `Divergence`
-variant and its trigger/semantics (including `StallData` and the server
-heartbeat), the `MarketRegime` axis, how the server arms and applies them vs
-what the engine owns, the validation boundaries (`validate_divergence`,
-`validate_market_regime`, `validate_conn_havoc`), and - per the Direction note -
-the honest default vs the opt-in havoc surfaces. Read
-`reference/technical-implementation-spec.md` first for what such a doc must
-contain. The honest default and the acked-but-silent stall divergence have both
-landed, so this is now unblocked and describes the real, settled surface.
-
-### 4. Bug-hunt follow-ups - the residual tail
+### 3. Bug-hunt follow-ups - the residual tail
 
 The fix waves are done, and every follow-up that was open here has now landed
 or been closed - nothing in this section remains open. The lists below record
