@@ -41,7 +41,7 @@ impl TransportProfile {
     }
 }
 
-/// One config object that arms both halves of mogwai's havoc.
+/// One config object that arms mogwai's havoc surfaces.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct HavocSpec {
     /// Transport-level corruption the adapter applies to its own inbound stream.
@@ -53,6 +53,72 @@ pub struct HavocSpec {
     /// Generator-level market regime applied before market-data ticks exist.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<MarketRegime>,
+    /// Connection-lifecycle corruption applied to adapter transport machinery.
+    #[serde(default)]
+    pub conn: ConnHavoc,
+}
+
+/// Connection-lifecycle havoc: corrupts the transport's connect / reconnect /
+/// heartbeat / quota machinery rather than the event stream the other havoc
+/// surfaces target. Each field mirrors a nautilus adapter config knob
+/// (`WebSocketConfig` reconnect/idle/heartbeat fields and per-adapter
+/// heartbeat / idle / request-timeout / quota fields). A clean default is a
+/// production-shaped reconnecting transport; hostile values drive realistic
+/// transport pathologies.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ConnHavoc {
+    /// Idle read timeout in ms. If no inbound application-data frame arrives
+    /// within this window, the socket is declared dead and reconnected. Ping
+    /// and Pong frames do not reset the idle clock. `0` disables detection.
+    pub idle_timeout_ms: u64,
+    /// Heartbeat ping interval in ms. `0` disables heartbeat.
+    pub heartbeat_interval_ms: u64,
+    /// Initial reconnect backoff in ms.
+    pub reconnect_delay_initial_ms: u64,
+    /// Reconnect backoff ceiling in ms.
+    pub reconnect_delay_max_ms: u64,
+    /// Exponential backoff growth factor.
+    pub reconnect_backoff_factor: f64,
+    /// Max uniform jitter in ms added to each reconnect backoff.
+    pub reconnect_jitter_ms: u64,
+    /// Reconnect attempt cap. `None` is unlimited.
+    pub reconnect_max_attempts: Option<u32>,
+    /// HTTP request quota in requests per second. `None` is unlimited.
+    pub max_requests_per_second: Option<u32>,
+    /// Per-request timeout in secs for HTTP order entry. `0` keeps 30s.
+    pub request_timeout_secs: u64,
+}
+
+impl Default for ConnHavoc {
+    fn default() -> Self {
+        Self {
+            idle_timeout_ms: 0,
+            heartbeat_interval_ms: 0,
+            reconnect_delay_initial_ms: 1_000,
+            reconnect_delay_max_ms: 10_000,
+            reconnect_backoff_factor: 2.0,
+            reconnect_jitter_ms: 0,
+            reconnect_max_attempts: None,
+            max_requests_per_second: None,
+            request_timeout_secs: 0,
+        }
+    }
+}
+
+pub fn validate_conn_havoc(conn: &ConnHavoc) -> Result<(), &'static str> {
+    if !conn.reconnect_backoff_factor.is_finite() || conn.reconnect_backoff_factor < 1.0 {
+        return Err("reconnect_backoff_factor must be finite and >= 1.0");
+    }
+    if conn.reconnect_delay_initial_ms > 0
+        && conn.reconnect_delay_max_ms > 0
+        && conn.reconnect_delay_max_ms < conn.reconnect_delay_initial_ms
+    {
+        return Err("reconnect_delay_max_ms must be >= reconnect_delay_initial_ms");
+    }
+    if conn.max_requests_per_second == Some(0) {
+        return Err("max_requests_per_second must be > 0");
+    }
+    Ok(())
 }
 
 /// Market-regime havoc: perturbs the generator before ticks are produced.
@@ -458,6 +524,17 @@ mod tests {
                 control::Divergence::GoDark { ms: 250 },
             ],
             data: Some(MarketRegime::LiquidityDrought { thin_factor: 5.0 }),
+            conn: ConnHavoc {
+                idle_timeout_ms: 25,
+                heartbeat_interval_ms: 50,
+                reconnect_delay_initial_ms: 100,
+                reconnect_delay_max_ms: 1_000,
+                reconnect_backoff_factor: 1.5,
+                reconnect_jitter_ms: 7,
+                reconnect_max_attempts: Some(3),
+                max_requests_per_second: Some(2),
+                request_timeout_secs: 1,
+            },
         };
 
         let json = serde_json::to_string(&spec).unwrap();
@@ -467,9 +544,11 @@ mod tests {
 
         let clean = HavocSpec::default();
         let json = serde_json::to_string(&clean).unwrap();
+        // `conn` is always serialized because its default is the honest
+        // connection lifecycle, so an omitted key decodes to this object.
         assert_eq!(
             json,
-            r#"{"client":{"latency":null,"drop_prob":0.0,"duplicate_prob":0.0,"reorder_prob":0.0,"seed":null},"server":[]}"#
+            r#"{"client":{"latency":null,"drop_prob":0.0,"duplicate_prob":0.0,"reorder_prob":0.0,"seed":null},"server":[],"conn":{"idle_timeout_ms":0,"heartbeat_interval_ms":0,"reconnect_delay_initial_ms":1000,"reconnect_delay_max_ms":10000,"reconnect_backoff_factor":2.0,"reconnect_jitter_ms":0,"reconnect_max_attempts":null,"max_requests_per_second":null,"request_timeout_secs":0}}"#
         );
     }
 
@@ -479,11 +558,54 @@ mod tests {
         assert_eq!(decoded.client, ClientHavoc::default());
         assert!(decoded.server.is_empty());
         assert_eq!(decoded.data, None);
+        assert_eq!(decoded.conn, ConnHavoc::default());
 
         let decoded: HavocSpec = serde_json::from_str(r#"{"server":[]}"#).unwrap();
         assert_eq!(decoded.client, ClientHavoc::default());
         assert!(decoded.server.is_empty());
         assert_eq!(decoded.data, None);
+        assert_eq!(decoded.conn, ConnHavoc::default());
+    }
+
+    #[test]
+    fn conn_havoc_round_trips_and_validates() {
+        let conn = ConnHavoc {
+            idle_timeout_ms: 10,
+            heartbeat_interval_ms: 20,
+            reconnect_delay_initial_ms: 30,
+            reconnect_delay_max_ms: 300,
+            reconnect_backoff_factor: 1.25,
+            reconnect_jitter_ms: 5,
+            reconnect_max_attempts: Some(4),
+            max_requests_per_second: Some(8),
+            request_timeout_secs: 2,
+        };
+
+        let json = serde_json::to_string(&conn).unwrap();
+        let decoded: ConnHavoc = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, conn);
+        assert_eq!(validate_conn_havoc(&conn), Ok(()));
+
+        let mut invalid = conn;
+        invalid.reconnect_backoff_factor = 0.5;
+        assert_eq!(
+            validate_conn_havoc(&invalid),
+            Err("reconnect_backoff_factor must be finite and >= 1.0")
+        );
+
+        invalid = conn;
+        invalid.reconnect_delay_max_ms = 1;
+        assert_eq!(
+            validate_conn_havoc(&invalid),
+            Err("reconnect_delay_max_ms must be >= reconnect_delay_initial_ms")
+        );
+
+        invalid = conn;
+        invalid.max_requests_per_second = Some(0);
+        assert_eq!(
+            validate_conn_havoc(&invalid),
+            Err("max_requests_per_second must be > 0")
+        );
     }
 
     #[test]

@@ -13,6 +13,7 @@ mod client;
 mod config;
 mod convert;
 mod factories;
+mod lifecycle;
 
 pub use client::{MogwaiDataClient, MogwaiExecutionClient};
 pub use config::{MogwaiDataClientConfig, MogwaiExecClientConfig};

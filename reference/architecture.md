@@ -45,6 +45,11 @@ never imports nautilus.
   perturbation carried per subscription on `Subscribe` and per request on
   `GET /trades`, range-checked by the free `validate_market_regime` (see the
   havoc model below).
+- `ConnHavoc` is the connection-lifecycle havoc surface (`HavocSpec.conn`):
+  reconnect backoff / jitter / attempt cap, heartbeat interval, idle-timeout
+  death detection and HTTP request quota / order-request timeout, mirroring
+  nautilus's `WebSocketConfig` and per-adapter lifecycle knobs and range-checked
+  by the free `validate_conn_havoc` (see the havoc model below).
 
 ## mogwai-engine - the exchange core
 
@@ -227,10 +232,10 @@ messages. The only crate that path-deps the sibling `../nautilus_trader` checkou
   neither drops nor duplicates a trade. The default `WsStreaming` profile is
   byte-identical to the pre-selector adapter.
 
-## The havoc model - one HavocSpec, three surfaces
+## The havoc model - one HavocSpec, four surfaces
 
 The point of mogwai. A single `HavocSpec` on both client configs (range-checked
-at factory `create` time) arms all three surfaces of the havoc:
+at factory `create` time) arms all four surfaces of the havoc:
 
 - **Server half.** A `Vec<control::Divergence>` the exec client `connect` ships to
   `/control/divergence` (one POST per divergence, so broadarrow makes no separate
@@ -260,6 +265,12 @@ at factory `create` time) arms all three surfaces of the havoc:
   while `validate` keeps gating the in-band per-instrument scalars. A parseable
   but out-of-band regime is dropped to a clean replay (fail-closed), never a
   panic. A `None` regime is a byte-identical clean draw.
+- **Connection-lifecycle half.** A `ConnHavoc` on `HavocSpec.conn` that perturbs
+  the adapter's own transport machinery rather than event payloads: reconnect
+  backoff and attempt caps, heartbeat pings, idle-timeout death detection, HTTP
+  request quotas, and order-request timeouts. A clean default is still a real
+  reconnecting transport; hostile values make the adapter behave like a venue
+  connection with broken lifecycle settings.
 
 The per-venue `HavocSpec` value that broadarrow constructs lives in broadarrow,
 not here.

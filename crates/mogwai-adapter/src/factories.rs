@@ -168,6 +168,7 @@ mod tests {
             },
             server: Vec::new(),
             data: None,
+            conn: Default::default(),
         }
     }
 
@@ -355,6 +356,7 @@ mod tests {
                 },
                 server: Vec::new(),
                 data: None,
+                conn: Default::default(),
             }),
             ..MogwaiDataClientConfig::default()
         };
@@ -375,6 +377,7 @@ mod tests {
                 },
                 server: Vec::new(),
                 data: None,
+                conn: Default::default(),
             }),
             ..MogwaiExecClientConfig::default()
         };
@@ -422,5 +425,48 @@ mod tests {
 
         assert!(data_err.contains("thin_factor"));
         assert!(exec_err.contains("vol_mult"));
+    }
+
+    #[test]
+    fn mogwai_config_rejects_out_of_range_conn_havoc() {
+        let data_factory = MogwaiDataClientFactory::new();
+        let cache = cache();
+        let clock = Rc::new(RefCell::new(TestClock::new()));
+        let data_config = MogwaiDataClientConfig {
+            havoc: Some(HavocSpec {
+                conn: mogwai_protocol::ConnHavoc {
+                    reconnect_backoff_factor: 0.5,
+                    ..Default::default()
+                },
+                ..HavocSpec::default()
+            }),
+            ..MogwaiDataClientConfig::default()
+        };
+
+        let data_err =
+            match data_factory.create("MOGWAI-TEST", &data_config, Rc::clone(&cache).into(), clock)
+            {
+                Ok(_) => panic!("data factory accepted invalid connection havoc"),
+                Err(error) => error.to_string(),
+            };
+
+        let exec_factory = MogwaiExecutionClientFactory::new();
+        let exec_config = MogwaiExecClientConfig {
+            havoc: Some(HavocSpec {
+                conn: mogwai_protocol::ConnHavoc {
+                    max_requests_per_second: Some(0),
+                    ..Default::default()
+                },
+                ..HavocSpec::default()
+            }),
+            ..MogwaiExecClientConfig::default()
+        };
+        let exec_err = match exec_factory.create("MOGWAI-TEST", &exec_config, cache.into()) {
+            Ok(_) => panic!("execution factory accepted invalid connection havoc"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(data_err.contains("reconnect_backoff_factor"));
+        assert!(exec_err.contains("max_requests_per_second"));
     }
 }

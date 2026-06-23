@@ -10,10 +10,9 @@ use std::{
 
 use anyhow::{Context, ensure};
 use async_trait::async_trait;
-use futures_util::{SinkExt, StreamExt};
 use mogwai_protocol::{
-    ClientHavoc, ClientMessage, EventKind, HavocLatency, HavocSpec, InstrumentDef, MarketRegime,
-    ServerMessage, Side, Symbol, TradeTick,
+    ClientHavoc, ClientMessage, ConnHavoc, EventKind, HavocLatency, HavocSpec, InstrumentDef,
+    MarketRegime, ServerMessage, Side, Symbol, TradeTick,
 };
 use nautilus_common::{
     clients::{DataClient, ExecutionClient},
@@ -49,9 +48,11 @@ use rand::{Rng, SeedableRng, rngs::StdRng};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-use crate::{MOGWAI_VENUE, MogwaiDataClientConfig, MogwaiExecClientConfig, convert};
+use crate::{
+    MOGWAI_VENUE, MogwaiDataClientConfig, MogwaiExecClientConfig, convert,
+    lifecycle::{HttpQuota, WsConnectionConfig, run_ws_connection},
+};
 
 const HISTORY_LIMIT_CAP: usize = 10_000;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -64,6 +65,7 @@ pub struct MogwaiDataClient {
     connected: Arc<AtomicBool>,
     sink: Option<UnboundedSender<DataEvent>>,
     http: HttpClient,
+    http_quota: HttpQuota,
     ws_cmd: Option<UnboundedSender<WsCommand>>,
     instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     subs: Arc<Mutex<HashMap<Symbol, SubState>>>,
@@ -84,6 +86,7 @@ impl MogwaiDataClient {
             .context("create HTTP client")?;
         Ok(Self {
             client_id,
+            http_quota: HttpQuota::from_conn(&conn_havoc(&config.havoc)),
             config,
             connected: Arc::new(AtomicBool::new(false)),
             sink: None,
@@ -233,16 +236,24 @@ impl DataClient for MogwaiDataClient {
     async fn connect(&mut self) -> anyhow::Result<()> {
         let sink = self.sink()?;
         let http_base_url = self.config.http_base_url();
-        seed_instruments(&self.http, &http_base_url, &self.instruments).await?;
+        seed_instruments(
+            &self.http,
+            &self.http_quota,
+            &http_base_url,
+            &self.instruments,
+        )
+        .await?;
         // Server-side divergences are execution-owned. The data client accepts
         // the same config object but only applies its client-side transport half.
         let client_havoc = client_havoc(&self.config.havoc);
         let regime = data_regime(&self.config.havoc);
+        let conn = conn_havoc(&self.config.havoc);
 
         if self.config.transport_profile.data_by_polling() {
             let connected = Arc::clone(&self.connected);
             connected.store(true, Ordering::Relaxed);
             let http = self.http.clone();
+            let http_quota = self.http_quota.clone();
             let instruments = Arc::clone(&self.instruments);
             let subs = Arc::clone(&self.subs);
             let bars = Arc::clone(&self.bars);
@@ -251,6 +262,7 @@ impl DataClient for MogwaiDataClient {
             let poll_handle = tokio::spawn(async move {
                 poll_market_data(DataPollContext {
                     http,
+                    http_quota,
                     base: http_base_url,
                     sink,
                     instruments,
@@ -268,57 +280,66 @@ impl DataClient for MogwaiDataClient {
         }
 
         let ws_url = join_url(&self.config.ws_url(), "ws");
-        let (ws, _) = connect_async(&ws_url)
-            .await
-            .with_context(|| format!("connect websocket {ws_url}"))?;
-        let (mut writer, mut reader) = ws.split();
-        let (cmd_tx, mut cmd_rx) = unbounded_channel::<WsCommand>();
+        let (cmd_tx, cmd_rx) = unbounded_channel::<WsCommand>();
         self.ws_cmd = Some(cmd_tx);
 
         let connected = Arc::clone(&self.connected);
-        let writer_connected = Arc::clone(&self.connected);
-        let writer_handle = tokio::spawn(async move {
-            while let Some(cmd) = cmd_rx.recv().await {
-                let msg = ws_command_to_client_message(cmd);
-                let Ok(payload) = serde_json::to_string(&msg) else {
-                    continue;
-                };
-                if writer.send(Message::Text(payload.into())).await.is_err() {
-                    break;
-                }
-            }
-            writer_connected.store(false, Ordering::Relaxed);
-        });
-
         let instruments = Arc::clone(&self.instruments);
         let subs = Arc::clone(&self.subs);
         let bars = Arc::clone(&self.bars);
-        let mut havoc_filter = HavocFilter::from_client(&client_havoc);
+        let havoc_filter = Arc::new(tokio::sync::Mutex::new(HavocFilter::from_client(
+            &client_havoc,
+        )));
+        let handler_filter = Arc::clone(&havoc_filter);
+        let disconnect_filter = Arc::clone(&havoc_filter);
+        let handler_sink = sink.clone();
+        let handler_instruments = Arc::clone(&instruments);
+        let handler_subs = Arc::clone(&subs);
+        let handler_bars = Arc::clone(&bars);
+        let disconnect_sink = sink;
+        let disconnect_instruments = Arc::clone(&instruments);
+        let disconnect_subs = Arc::clone(&subs);
+        let disconnect_bars = Arc::clone(&bars);
+        let connect_subs = Arc::clone(&subs);
+        let task_ws_url = ws_url.clone();
         let reader_handle = tokio::spawn(async move {
-            while let Some(Ok(msg)) = reader.next().await {
-                let Message::Text(text) = msg else {
-                    continue;
-                };
-                let Ok(server_msg) = serde_json::from_str::<ServerMessage>(&text) else {
-                    continue;
-                };
-                dispatch_market_havoc(
-                    &mut havoc_filter,
-                    server_msg,
-                    &sink,
-                    &instruments,
-                    &subs,
-                    &bars,
-                )
-                .await;
-            }
-            flush_market_havoc(&mut havoc_filter, &sink, &instruments, &subs, &bars).await;
-            connected.store(false, Ordering::Relaxed);
+            run_ws_connection(
+                WsConnectionConfig {
+                    ws_url: task_ws_url,
+                    conn,
+                    seed: client_havoc.seed,
+                    connected,
+                },
+                cmd_rx,
+                ws_command_to_client_message,
+                move || subscribe_commands(&connect_subs, regime),
+                move |server_msg| {
+                    let handler_filter = Arc::clone(&handler_filter);
+                    dispatch_market_havoc_shared(
+                        handler_filter,
+                        server_msg,
+                        handler_sink.clone(),
+                        Arc::clone(&handler_instruments),
+                        Arc::clone(&handler_subs),
+                        Arc::clone(&handler_bars),
+                    )
+                },
+                move || {
+                    let disconnect_filter = Arc::clone(&disconnect_filter);
+                    flush_market_havoc_shared(
+                        disconnect_filter,
+                        disconnect_sink.clone(),
+                        Arc::clone(&disconnect_instruments),
+                        Arc::clone(&disconnect_subs),
+                        Arc::clone(&disconnect_bars),
+                    )
+                },
+            )
+            .await;
         });
 
-        self.task_handles.push(writer_handle);
         self.task_handles.push(reader_handle);
-        self.connected.store(true, Ordering::Relaxed);
+        wait_connected(&self.connected, &ws_url).await?;
         Ok(())
     }
 
@@ -329,10 +350,11 @@ impl DataClient for MogwaiDataClient {
     fn subscribe_instruments(&mut self, _cmd: SubscribeInstruments) -> anyhow::Result<()> {
         let sink = self.sink()?;
         let http = self.http.clone();
+        let http_quota = self.http_quota.clone();
         let base = self.config.http_base_url();
         let instruments = Arc::clone(&self.instruments);
         drop(get_runtime().spawn(async move {
-            if let Ok(defs) = fetch_instruments(&http, &base).await {
+            if let Ok(defs) = fetch_instruments(&http, &http_quota, &base).await {
                 cache_instruments(&instruments, defs.clone());
                 let ts_init = now_unix_nanos();
                 for def in defs {
@@ -349,10 +371,11 @@ impl DataClient for MogwaiDataClient {
         let symbol = symbol_from_instrument(cmd.instrument_id);
         let sink = self.sink()?;
         let http = self.http.clone();
+        let http_quota = self.http_quota.clone();
         let base = self.config.http_base_url();
         let instruments = Arc::clone(&self.instruments);
         drop(get_runtime().spawn(async move {
-            if let Ok(defs) = fetch_instruments(&http, &base).await {
+            if let Ok(defs) = fetch_instruments(&http, &http_quota, &base).await {
                 cache_instruments(&instruments, defs.clone());
                 let ts_init = now_unix_nanos();
                 for def in defs {
@@ -429,6 +452,7 @@ impl DataClient for MogwaiDataClient {
     fn request_trades(&self, request: RequestTrades) -> anyhow::Result<()> {
         let sink = self.sink()?;
         let http = self.http.clone();
+        let http_quota = self.http_quota.clone();
         let base = self.config.http_base_url();
         let regime = data_regime(&self.config.havoc);
         let instruments = Arc::clone(&self.instruments);
@@ -437,9 +461,21 @@ impl DataClient for MogwaiDataClient {
             let symbol = symbol_from_instrument(request.instrument_id);
             let start = date_to_unix_nanos(request.start);
             let end = date_to_unix_nanos(request.end);
-            if let Ok(def) = ensure_instrument(&http, &base, &instruments, &symbol).await
-                && let Ok(trades) =
-                    fetch_trades(&http, &base, &symbol, start, end, request.limit, regime).await
+            if let Ok(def) =
+                ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await
+                && let Ok(trades) = fetch_trades(
+                    &http,
+                    &http_quota,
+                    &base,
+                    TradeFetch {
+                        symbol: &symbol,
+                        start,
+                        end,
+                        limit: request.limit,
+                        regime,
+                    },
+                )
+                .await
             {
                 let data = trades
                     .iter()
@@ -487,6 +523,7 @@ impl DataClient for MogwaiDataClient {
         );
         let sink = self.sink()?;
         let http = self.http.clone();
+        let http_quota = self.http_quota.clone();
         let base = self.config.http_base_url();
         let regime = data_regime(&self.config.havoc);
         let instruments = Arc::clone(&self.instruments);
@@ -496,9 +533,21 @@ impl DataClient for MogwaiDataClient {
             let symbol = symbol_from_instrument(instrument_id);
             let start = date_to_unix_nanos(request.start);
             let end = date_to_unix_nanos(request.end);
-            if let Ok(def) = ensure_instrument(&http, &base, &instruments, &symbol).await
-                && let Ok(trades) =
-                    fetch_trades(&http, &base, &symbol, start, end, request.limit, regime).await
+            if let Ok(def) =
+                ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await
+                && let Ok(trades) = fetch_trades(
+                    &http,
+                    &http_quota,
+                    &base,
+                    TradeFetch {
+                        symbol: &symbol,
+                        start,
+                        end,
+                        limit: request.limit,
+                        regime,
+                    },
+                )
+                .await
             {
                 let bars = aggregate_bars(&request.bar_type, &trades, &def);
                 let response = BarsResponse::new(
@@ -520,11 +569,12 @@ impl DataClient for MogwaiDataClient {
     fn request_instruments(&self, request: RequestInstruments) -> anyhow::Result<()> {
         let sink = self.sink()?;
         let http = self.http.clone();
+        let http_quota = self.http_quota.clone();
         let base = self.config.http_base_url();
         let instruments = Arc::clone(&self.instruments);
         let client_id = request.client_id.unwrap_or(self.client_id);
         drop(get_runtime().spawn(async move {
-            if let Ok(defs) = fetch_instruments(&http, &base).await {
+            if let Ok(defs) = fetch_instruments(&http, &http_quota, &base).await {
                 cache_instruments(&instruments, defs.clone());
                 let ts_init = now_unix_nanos();
                 let data = defs
@@ -550,12 +600,15 @@ impl DataClient for MogwaiDataClient {
     fn request_instrument(&self, request: RequestInstrument) -> anyhow::Result<()> {
         let sink = self.sink()?;
         let http = self.http.clone();
+        let http_quota = self.http_quota.clone();
         let base = self.config.http_base_url();
         let instruments = Arc::clone(&self.instruments);
         let client_id = request.client_id.unwrap_or(self.client_id);
         drop(get_runtime().spawn(async move {
             let symbol = symbol_from_instrument(request.instrument_id);
-            if let Ok(def) = ensure_instrument(&http, &base, &instruments, &symbol).await {
+            if let Ok(def) =
+                ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await
+            {
                 let ts_init = now_unix_nanos();
                 if let Ok(data) = convert::instrument_any(&def, ts_init) {
                     let response = InstrumentResponse::new(
@@ -730,6 +783,50 @@ async fn flush_market_havoc(
     }
 }
 
+async fn dispatch_market_havoc_shared(
+    filter: Arc<tokio::sync::Mutex<HavocFilter>>,
+    msg: ServerMessage,
+    sink: UnboundedSender<DataEvent>,
+    instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
+    subs: Arc<Mutex<HashMap<Symbol, SubState>>>,
+    bars: Arc<Mutex<HashMap<BarType, BarSubState>>>,
+) {
+    let mut filter = filter.lock().await;
+    dispatch_market_havoc(&mut filter, msg, &sink, &instruments, &subs, &bars).await;
+}
+
+async fn flush_market_havoc_shared(
+    filter: Arc<tokio::sync::Mutex<HavocFilter>>,
+    sink: UnboundedSender<DataEvent>,
+    instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
+    subs: Arc<Mutex<HashMap<Symbol, SubState>>>,
+    bars: Arc<Mutex<HashMap<BarType, BarSubState>>>,
+) {
+    let mut filter = filter.lock().await;
+    flush_market_havoc(&mut filter, &sink, &instruments, &subs, &bars).await;
+}
+
+fn subscribe_commands(
+    subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
+    regime: Option<MarketRegime>,
+) -> Vec<WsCommand> {
+    let symbols = subs
+        .lock()
+        .expect("subscription mutex poisoned")
+        .iter()
+        .filter(|(_, state)| state.total() > 0)
+        .map(|(symbol, state)| (symbol.clone(), state.start_ts))
+        .collect::<Vec<_>>();
+    symbols
+        .into_iter()
+        .map(|(symbol, start_ts)| WsCommand::Subscribe {
+            symbols: vec![symbol],
+            start_ts,
+            regime,
+        })
+        .collect()
+}
+
 async fn handle_market_message(
     msg: ServerMessage,
     sink: &UnboundedSender<DataEvent>,
@@ -779,6 +876,7 @@ fn emit_trade(
 
 struct DataPollContext {
     http: HttpClient,
+    http_quota: HttpQuota,
     base: String,
     sink: UnboundedSender<DataEvent>,
     instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
@@ -803,12 +901,15 @@ async fn poll_market_data(mut ctx: DataPollContext) {
             };
             let Ok(batch) = fetch_trades(
                 &ctx.http,
+                &ctx.http_quota,
                 &ctx.base,
-                &symbol,
-                Some(start),
-                None,
-                None,
-                ctx.regime,
+                TradeFetch {
+                    symbol: &symbol,
+                    start: Some(start),
+                    end: None,
+                    limit: None,
+                    regime: ctx.regime,
+                },
             )
             .await
             else {
@@ -981,16 +1082,18 @@ fn instrument_def(
 
 async fn seed_instruments(
     http: &HttpClient,
+    quota: &HttpQuota,
     base: &str,
     instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
 ) -> anyhow::Result<()> {
-    let defs = fetch_instruments(http, base).await?;
+    let defs = fetch_instruments(http, quota, base).await?;
     cache_instruments(instruments, defs);
     Ok(())
 }
 
 async fn ensure_instrument(
     http: &HttpClient,
+    quota: &HttpQuota,
     base: &str,
     instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     symbol: &str,
@@ -998,7 +1101,7 @@ async fn ensure_instrument(
     if let Some(def) = instrument_def(instruments, symbol) {
         return Ok(def);
     }
-    seed_instruments(http, base, instruments).await?;
+    seed_instruments(http, quota, base, instruments).await?;
     instrument_def(instruments, symbol).with_context(|| format!("unknown instrument {symbol}"))
 }
 
@@ -1012,7 +1115,12 @@ fn cache_instruments(
     }
 }
 
-async fn fetch_instruments(http: &HttpClient, base: &str) -> anyhow::Result<Vec<InstrumentDef>> {
+async fn fetch_instruments(
+    http: &HttpClient,
+    quota: &HttpQuota,
+    base: &str,
+) -> anyhow::Result<Vec<InstrumentDef>> {
+    quota.wait().await;
     let response = http
         .get(join_url(base, "instruments"), None, None, Some(30), None)
         .await
@@ -1025,16 +1133,28 @@ async fn fetch_instruments(http: &HttpClient, base: &str) -> anyhow::Result<Vec<
     serde_json::from_slice(&response.body).context("decode instruments")
 }
 
-async fn fetch_trades(
-    http: &HttpClient,
-    base: &str,
-    symbol: &str,
+struct TradeFetch<'a> {
+    symbol: &'a str,
     start: Option<UnixNanos>,
     end: Option<UnixNanos>,
     limit: Option<std::num::NonZeroUsize>,
     regime: Option<MarketRegime>,
+}
+
+async fn fetch_trades(
+    http: &HttpClient,
+    quota: &HttpQuota,
+    base: &str,
+    fetch: TradeFetch<'_>,
 ) -> anyhow::Result<Vec<mogwai_protocol::TradeTick>> {
-    let params = trade_query_params(symbol, start, end, limit, regime)?;
+    let params = trade_query_params(
+        fetch.symbol,
+        fetch.start,
+        fetch.end,
+        fetch.limit,
+        fetch.regime,
+    )?;
+    quota.wait().await;
     let response = http
         .get(
             join_url(base, "trades"),
@@ -1080,19 +1200,22 @@ fn trade_query_params(
 
 async fn post_order(
     http: &HttpClient,
+    quota: &HttpQuota,
     url: &str,
     msg: &ClientMessage,
+    timeout_secs: u64,
 ) -> anyhow::Result<Vec<ServerMessage>> {
     let body = serde_json::to_vec(msg).context("encode order")?;
     let mut headers = HashMap::new();
     headers.insert("content-type".to_string(), "application/json".to_string());
+    quota.wait().await;
     let response = http
         .post(
             url.to_string(),
             None,
             Some(headers),
             Some(body),
-            Some(30),
+            Some(timeout_secs),
             None,
         )
         .await
@@ -1209,6 +1332,16 @@ fn data_regime(spec: &Option<HavocSpec>) -> Option<MarketRegime> {
     spec.as_ref().and_then(|spec| spec.data)
 }
 
+fn conn_havoc(spec: &Option<HavocSpec>) -> ConnHavoc {
+    spec.as_ref()
+        .map_or_else(ConnHavoc::default, |spec| spec.conn)
+}
+
+fn request_timeout_secs(spec: &Option<HavocSpec>) -> u64 {
+    let configured = conn_havoc(spec).request_timeout_secs;
+    if configured == 0 { 30 } else { configured }
+}
+
 fn client_havoc_for_dispatch(spec: &Option<HavocSpec>, counter: u64) -> ClientHavoc {
     let mut client = client_havoc(spec);
     if let Some(seed) = client.seed.as_mut() {
@@ -1274,6 +1407,17 @@ fn now_unix_nanos() -> UnixNanos {
     )
 }
 
+async fn wait_connected(connected: &Arc<AtomicBool>, ws_url: &str) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        if connected.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    anyhow::bail!("connect websocket {ws_url} timed out")
+}
+
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct MogwaiExecutionClient {
@@ -1282,6 +1426,7 @@ pub struct MogwaiExecutionClient {
     emitter: ExecutionEventEmitter,
     connected: Arc<AtomicBool>,
     http: HttpClient,
+    http_quota: HttpQuota,
     ws_cmd: Option<UnboundedSender<ExecWsCommand>>,
     state: Arc<Mutex<ExecState>>,
     instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
@@ -1308,6 +1453,7 @@ impl MogwaiExecutionClient {
             .context("create HTTP client")?;
         Ok(Self {
             core,
+            http_quota: HttpQuota::from_conn(&conn_havoc(&config.havoc)),
             config,
             emitter,
             connected: Arc::new(AtomicBool::new(false)),
@@ -1352,13 +1498,15 @@ impl MogwaiExecutionClient {
         if self.config.transport_profile.orders_over_http() {
             let msg = exec_command_to_client_message(cmd.clone());
             let http = self.http.clone();
+            let http_quota = self.http_quota.clone();
             let url = join_url(&self.config.http_base_url(), "orders");
             let ctx = self.exec_context();
             let counter = self.http_dispatch_counter.fetch_add(1, Ordering::Relaxed);
             let client_havoc = client_havoc_for_dispatch(&self.config.havoc, counter);
+            let timeout_secs = request_timeout_secs(&self.config.havoc);
             drop(get_runtime().spawn(async move {
                 let mut filter = HavocFilter::from_client(&client_havoc);
-                match post_order(&http, &url, &msg).await {
+                match post_order(&http, &http_quota, &url, &msg, timeout_secs).await {
                     Ok(events) => {
                         for event in events {
                             dispatch_exec_havoc(&mut filter, event, &ctx).await;
@@ -1446,11 +1594,18 @@ impl ExecutionClient for MogwaiExecutionClient {
 
     async fn connect(&mut self) -> anyhow::Result<()> {
         let http_base_url = self.config.http_base_url();
-        seed_instruments(&self.http, &http_base_url, &self.instruments).await?;
+        seed_instruments(
+            &self.http,
+            &self.http_quota,
+            &http_base_url,
+            &self.instruments,
+        )
+        .await?;
         if let Some(havoc) = &self.config.havoc {
             ship_server_havoc(&self.http, &http_base_url, havoc).await?;
         }
         let client_havoc = client_havoc(&self.config.havoc);
+        let conn = conn_havoc(&self.config.havoc);
 
         if self.config.transport_profile.orders_over_http() {
             self.connected.store(true, Ordering::Relaxed);
@@ -1459,47 +1614,44 @@ impl ExecutionClient for MogwaiExecutionClient {
         }
 
         let ws_url = join_url(&self.config.ws_url(), "ws");
-        let (ws, _) = connect_async(&ws_url)
-            .await
-            .with_context(|| format!("connect websocket {ws_url}"))?;
-        let (mut writer, mut reader) = ws.split();
-        let (cmd_tx, mut cmd_rx) = unbounded_channel::<ExecWsCommand>();
+        let (cmd_tx, cmd_rx) = unbounded_channel::<ExecWsCommand>();
         self.ws_cmd = Some(cmd_tx);
 
         let connected = Arc::clone(&self.connected);
-        let writer_connected = Arc::clone(&self.connected);
-        let writer_handle = tokio::spawn(async move {
-            while let Some(cmd) = cmd_rx.recv().await {
-                let msg = exec_command_to_client_message(cmd);
-                let Ok(payload) = serde_json::to_string(&msg) else {
-                    continue;
-                };
-                if writer.send(Message::Text(payload.into())).await.is_err() {
-                    break;
-                }
-            }
-            writer_connected.store(false, Ordering::Relaxed);
-        });
-
         let ctx = self.exec_context();
-        let mut havoc_filter = HavocFilter::from_client(&client_havoc);
+        let havoc_filter = Arc::new(tokio::sync::Mutex::new(HavocFilter::from_client(
+            &client_havoc,
+        )));
+        let handler_filter = Arc::clone(&havoc_filter);
+        let disconnect_filter = Arc::clone(&havoc_filter);
+        let handler_ctx = ctx.clone();
+        let disconnect_ctx = ctx;
+        let task_ws_url = ws_url.clone();
         let reader_handle = tokio::spawn(async move {
-            while let Some(Ok(msg)) = reader.next().await {
-                let Message::Text(text) = msg else {
-                    continue;
-                };
-                let Ok(server_msg) = serde_json::from_str::<ServerMessage>(&text) else {
-                    continue;
-                };
-                dispatch_exec_havoc(&mut havoc_filter, server_msg, &ctx).await;
-            }
-            flush_exec_havoc(&mut havoc_filter, &ctx).await;
-            connected.store(false, Ordering::Relaxed);
+            run_ws_connection(
+                WsConnectionConfig {
+                    ws_url: task_ws_url,
+                    conn,
+                    seed: client_havoc.seed,
+                    connected,
+                },
+                cmd_rx,
+                exec_command_to_client_message,
+                Vec::new,
+                move |server_msg| {
+                    let handler_filter = Arc::clone(&handler_filter);
+                    dispatch_exec_havoc_shared(handler_filter, server_msg, handler_ctx.clone())
+                },
+                move || {
+                    let disconnect_filter = Arc::clone(&disconnect_filter);
+                    flush_exec_havoc_shared(disconnect_filter, disconnect_ctx.clone())
+                },
+            )
+            .await;
         });
 
-        self.task_handles.push(writer_handle);
         self.task_handles.push(reader_handle);
-        self.connected.store(true, Ordering::Relaxed);
+        wait_connected(&self.connected, &ws_url).await?;
         self.core.set_connected();
         Ok(())
     }
@@ -1763,6 +1915,20 @@ async fn flush_exec_havoc(filter: &mut HavocFilter, ctx: &ExecContext) {
         sleep_havoc_delay(delay).await;
         handle_exec_message(msg, ctx);
     }
+}
+
+async fn dispatch_exec_havoc_shared(
+    filter: Arc<tokio::sync::Mutex<HavocFilter>>,
+    msg: ServerMessage,
+    ctx: ExecContext,
+) {
+    let mut filter = filter.lock().await;
+    dispatch_exec_havoc(&mut filter, msg, &ctx).await;
+}
+
+async fn flush_exec_havoc_shared(filter: Arc<tokio::sync::Mutex<HavocFilter>>, ctx: ExecContext) {
+    let mut filter = filter.lock().await;
+    flush_exec_havoc(&mut filter, &ctx).await;
 }
 
 #[derive(Debug, Clone)]

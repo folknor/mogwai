@@ -17,8 +17,9 @@ end (`scripts/smoke.py` plus the workspace unit and integration tests). The
 running server opens no Kraken CSV: market data is synthesized by
 `mogwai_data::GeneratedSource` from the committed `analysis/fingerprint.json`,
 with the UTC session modulator layered on. The adapter ships the `DataClient` /
-`ExecutionClient` pair, the `transport_profile` selector, and the `HavocSpec`
-split. Subsystem detail is in `reference/architecture.md`; the offline analysis
+`ExecutionClient` pair, the `transport_profile` selector, and the full
+four-surface `HavocSpec` (client / server / data / connection-lifecycle).
+Subsystem detail is in `reference/architecture.md`; the offline analysis
 that produced the fingerprint is under `analysis/` (`analysis/findings.md` is
 the summary).
 
@@ -26,27 +27,16 @@ the summary).
 
 ### 1. broadarrow integration: point a MOGWAI venue at the server
 
-The adapter, its `transport_profile` selector, and its `HavocSpec` split are
-landed (see `reference/architecture.md`). What remains lives in broadarrow, not
-this repo:
+The adapter, its `transport_profile` selector, and its full four-surface
+`HavocSpec` (client / server / data / connection-lifecycle) are landed (see
+`reference/architecture.md`). What remains lives in broadarrow, not this repo:
 
 - [ ] broadarrow side (lives in broadarrow, not here): a `MOGWAI` arm in
       `run-prep/src/venue.rs` and a `core::venue` PROFILES row, with a
       profile-guard test enforcing that every wired venue has a PROFILES row.
       This is where broadarrow sets the per-venue `HavocSpec` (including its
-      `data` market-regime field) and picks the `transport_profile`.
-
-### 2. HavocSpec connection-lifecycle extension
-
-The landed `HavocSpec` mirrors only nautilus's `StaticLatencyModel` (the latency
-field). The wider knob vocabulary stays open:
-
-- [ ] Connection-lifecycle and quota knobs to mirror from existing nautilus
-      config that already behaves like havoc (`ws_idle_timeout_ms`,
-      `ws_request_timeout_secs`, `heartbeat_interval_secs`, retry/backoff/jitter,
-      rate-limit quotas). These corrupt the transport's connect/reconnect
-      behaviour rather than the inbound event stream the first havoc landing
-      targeted.
+      `data` market-regime and `conn` connection-lifecycle fields) and picks the
+      `transport_profile`.
 
 ## Notes / gotchas
 

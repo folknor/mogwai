@@ -8,7 +8,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -18,20 +18,25 @@ use mogwai_adapter::{
     MogwaiExecutionClient,
 };
 use mogwai_protocol::{
-    ClientHavoc, HavocLatency, HavocSpec, TransportProfile, control::Divergence,
+    ClientHavoc, ConnHavoc, HavocLatency, HavocSpec, TransportProfile, control::Divergence,
 };
 use nautilus_common::{
     cache::Cache,
     clients::{DataClient, ExecutionClient},
-    live::runner::replace_data_event_sender,
-    messages::{DataEvent, data::SubscribeTrades},
+    clock::TestClock,
+    factories::OrderFactory,
+    live::runner::{replace_data_event_sender, replace_exec_event_sender},
+    messages::{DataEvent, ExecutionEvent, data::SubscribeTrades, execution::SubmitOrder},
 };
 use nautilus_core::{UUID4, UnixNanos};
 use nautilus_live::ExecutionClientCore;
 use nautilus_model::{
     data::Data,
-    enums::{AccountType, OmsType},
-    identifiers::{ClientId, InstrumentId, Symbol, TraderId, Venue},
+    enums::{AccountType, OmsType, OrderSide, TimeInForce},
+    events::OrderEventAny,
+    identifiers::{ClientId, ClientOrderId, InstrumentId, StrategyId, Symbol, TraderId, Venue},
+    orders::Order,
+    types::{Price, Quantity},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -47,6 +52,21 @@ struct StubState {
     control_hits: AtomicUsize,
     control_bodies: Mutex<Vec<String>>,
     ws_trades: Mutex<Vec<String>>,
+    /// WS upgrade attempts (handshakes the stub started serving). Used by the
+    /// idle-reconnect and max-attempts tests to count (re)connections.
+    ws_handshakes: AtomicUsize,
+    /// WS `Ping` frames received from the client (heartbeat probes).
+    ws_pings: AtomicUsize,
+    /// Timestamps of each HTTP request to `/orders` and `/trades`. The quota
+    /// tests assert the gaps between consecutive entries.
+    http_request_times: Mutex<Vec<Instant>>,
+    /// When true, `serve_ws` drops the connection before completing the
+    /// WebSocket upgrade, modelling a venue that refuses the socket. The
+    /// handshake is still counted so the attempt-cap test can pin the count.
+    refuse_ws: AtomicBool,
+    /// When true, the order POST handler accepts the request but never replies,
+    /// so the client's per-request timeout must turn the order into a reject.
+    hang_orders: AtomicBool,
 }
 
 async fn run_stub(listener: TcpListener, state: Arc<StubState>) {
@@ -71,6 +91,27 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
         serve_ws(stream, head, state).await;
     } else if path.starts_with("/instruments") {
         respond_json(stream, "200 OK", INSTRUMENTS_JSON).await;
+    } else if path.starts_with("/trades") {
+        state
+            .http_request_times
+            .lock()
+            .expect("http request times mutex")
+            .push(Instant::now());
+        respond_json(stream, "200 OK", "[]").await;
+    } else if path.starts_with("/orders") {
+        state
+            .http_request_times
+            .lock()
+            .expect("http request times mutex")
+            .push(Instant::now());
+        if state.hang_orders.load(Ordering::Relaxed) {
+            // Accept the POST but never respond: the client's per-request
+            // timeout must elapse and surface the order as a reject. Hold the
+            // socket so the request does not fail with a connection reset.
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            return;
+        }
+        respond_json(stream, "200 OK", "[]").await;
     } else if path.starts_with("/control/divergence") {
         state.control_hits.fetch_add(1, Ordering::Relaxed);
         state
@@ -134,6 +175,15 @@ async fn respond_json(stream: &mut TcpStream, status: &str, body: &str) {
 async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState>) {
     use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 
+    state.ws_handshakes.fetch_add(1, Ordering::Relaxed);
+
+    // Model a venue that refuses the socket: the TCP dial succeeded (counted
+    // above) but the WebSocket upgrade never completes, so the client treats
+    // the dial as failed and backs off into its reconnect loop.
+    if state.refuse_ws.load(Ordering::Relaxed) {
+        return;
+    }
+
     let key = head
         .lines()
         .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
@@ -157,17 +207,19 @@ async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState>) {
 
     use futures_util::{SinkExt, StreamExt};
     while let Some(Ok(msg)) = ws.next().await {
-        if let Message::Text(text) = msg
-            && text.contains("Subscribe")
-        {
-            let trades = state.ws_trades.lock().expect("ws trades mutex").clone();
-            for trade in trades {
-                drop(ws.send(Message::Text(trade.into())).await);
+        match msg {
+            Message::Ping(_) => {
+                state.ws_pings.fetch_add(1, Ordering::Relaxed);
             }
-            break;
+            Message::Text(text) if text.contains("Subscribe") => {
+                let trades = state.ws_trades.lock().expect("ws trades mutex").clone();
+                for trade in trades {
+                    drop(ws.send(Message::Text(trade.into())).await);
+                }
+            }
+            _ => {}
         }
     }
-    tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
 async fn bound_stub(state: Arc<StubState>) -> String {
@@ -223,7 +275,49 @@ fn data_havoc(client: ClientHavoc) -> HavocSpec {
         client,
         server: Vec::new(),
         data: None,
+        conn: ConnHavoc::default(),
     }
+}
+
+fn conn_havoc(conn: ConnHavoc) -> HavocSpec {
+    HavocSpec {
+        conn,
+        ..HavocSpec::default()
+    }
+}
+
+/// Builds, starts, connects and subscribes a `WsStreaming` data client against
+/// the given stub, returning the live client (kept alive by the caller so its
+/// reconnect task is not detached) and its event sink. The stub may serve no
+/// trades, in which case the socket is application-silent.
+async fn connect_data_client(
+    base_url: String,
+    havoc: Option<HavocSpec>,
+) -> (MogwaiDataClient, UnboundedReceiver<DataEvent>) {
+    let (sink_tx, sink_rx) = unbounded_channel::<DataEvent>();
+    replace_data_event_sender(sink_tx);
+
+    let config = MogwaiDataClientConfig {
+        base_url,
+        havoc,
+        ..MogwaiDataClientConfig::default()
+    };
+    let mut client =
+        MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
+    client.start().expect("start grabs sink");
+    client.connect().await.expect("connect opens transports");
+    client
+        .subscribe_trades(SubscribeTrades::new(
+            instrument_id(),
+            Some(ClientId::from("MOGWAI-DATA")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        ))
+        .expect("subscribe trades");
+    (client, sink_rx)
 }
 
 async fn next_trade(rx: &mut UnboundedReceiver<DataEvent>) -> nautilus_model::data::TradeTick {
@@ -251,6 +345,7 @@ async fn ships_server_havoc() {
             Divergence::GoDark { ms: 25 },
         ],
         data: None,
+        conn: ConnHavoc::default(),
     };
 
     let cache = Rc::new(RefCell::new(Cache::default()));
@@ -427,4 +522,306 @@ async fn havoc_reorder_swaps_adjacent() {
     let second = next_trade(&mut rx).await;
     assert_eq!(first.ts_event, UnixNanos::from(20));
     assert_eq!(second.ts_event, UnixNanos::from(10));
+}
+
+/// Waits up to `timeout` for `count` to reach at least `target`, polling on a
+/// short interval. Returns the final observed value.
+async fn wait_for_at_least(count: &AtomicUsize, target: usize, timeout: Duration) -> usize {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let value = count.load(Ordering::Relaxed);
+        if value >= target || Instant::now() >= deadline {
+            return value;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn conn_idle_timeout_triggers_reconnect() {
+    // Silent server: the socket opens but never sends an application frame, so
+    // the idle clock must fire and force a reconnect. The stub accepts each
+    // fresh dial, so the handshake count climbs past one.
+    let state = Arc::new(StubState::default());
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (_client, _rx) = connect_data_client(
+        base_url,
+        Some(conn_havoc(ConnHavoc {
+            idle_timeout_ms: 100,
+            reconnect_delay_initial_ms: 50,
+            reconnect_delay_max_ms: 50,
+            ..ConnHavoc::default()
+        })),
+    )
+    .await;
+
+    let handshakes = wait_for_at_least(&state.ws_handshakes, 2, Duration::from_secs(2)).await;
+    assert!(
+        handshakes >= 2,
+        "idle timeout did not trigger a reconnect (handshakes={handshakes})"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn conn_reconnect_respects_max_attempts() {
+    // The stub refuses the WebSocket upgrade on every dial. With a three-attempt
+    // cap the client must dial exactly three times (one initial plus two
+    // retries) and then give up disconnected - never a fourth.
+    let state = Arc::new(StubState::default());
+    state.refuse_ws.store(true, Ordering::Relaxed);
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (sink_tx, _sink_rx) = unbounded_channel::<DataEvent>();
+    replace_data_event_sender(sink_tx);
+
+    let config = MogwaiDataClientConfig {
+        base_url,
+        havoc: Some(conn_havoc(ConnHavoc {
+            reconnect_max_attempts: Some(3),
+            reconnect_delay_initial_ms: 30,
+            reconnect_delay_max_ms: 30,
+            ..ConnHavoc::default()
+        })),
+        ..MogwaiDataClientConfig::default()
+    };
+    let mut client =
+        MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
+    client.start().expect("start grabs sink");
+    // The dials all fail, so the loop exhausts the cap and the connect helper's
+    // readiness wait never succeeds; bound the await rather than block on it.
+    drop(tokio::time::timeout(Duration::from_secs(2), client.connect()).await);
+
+    // Give any erroneous fourth dial time to land before pinning the count.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let handshakes = state.ws_handshakes.load(Ordering::Relaxed);
+    assert_eq!(
+        handshakes, 3,
+        "max-attempts cap admitted the wrong number of dials"
+    );
+    assert!(
+        client.is_disconnected(),
+        "client must end disconnected once attempts are exhausted"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn conn_heartbeat_pings_when_enabled() {
+    // A live but silent socket: with the heartbeat enabled the client must emit
+    // WS Ping frames the stub observes, even though no application data flows.
+    let state = Arc::new(StubState::default());
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (_client, _rx) = connect_data_client(
+        base_url,
+        Some(conn_havoc(ConnHavoc {
+            heartbeat_interval_ms: 50,
+            ..ConnHavoc::default()
+        })),
+    )
+    .await;
+
+    let pings = wait_for_at_least(&state.ws_pings, 1, Duration::from_secs(2)).await;
+    assert!(
+        pings >= 1,
+        "heartbeat did not send a Ping within the window (pings={pings})"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn conn_clean_default_is_single_connection() {
+    // The honest default transport against a stub that serves one trade and
+    // holds the socket open: exactly one message, exactly one connection - no
+    // spurious reconnect from the default reconnect-on-EOF loop.
+    let state = Arc::new(StubState::default());
+    state
+        .ws_trades
+        .lock()
+        .expect("ws trades mutex")
+        .push(trade_json(10, "100.00"));
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (_client, mut rx) = connect_data_client(base_url, None).await;
+
+    let trade = next_trade(&mut rx).await;
+    assert_eq!(trade.ts_event, UnixNanos::from(10));
+    let result = tokio::time::timeout(Duration::from_millis(250), rx.recv()).await;
+    assert!(result.is_err(), "clean default emits exactly one trade");
+    assert_eq!(
+        state.ws_handshakes.load(Ordering::Relaxed),
+        1,
+        "clean default must not reconnect a held-open socket"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn conn_http_quota_spaces_data_requests() {
+    // The data client polls trades over HTTP; the quota gate must space those
+    // GETs at least 1/n seconds apart. The quota is per-client (Section 3.2),
+    // so this exercises the data client's own throttle.
+    let state = Arc::new(StubState::default());
+    state
+        .ws_trades
+        .lock()
+        .expect("ws trades mutex")
+        .push(trade_json(10, "100.00"));
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (sink_tx, _sink_rx) = unbounded_channel::<DataEvent>();
+    replace_data_event_sender(sink_tx);
+
+    let config = MogwaiDataClientConfig {
+        base_url,
+        transport_profile: TransportProfile::HttpPolling,
+        havoc: Some(conn_havoc(ConnHavoc {
+            max_requests_per_second: Some(2),
+            ..ConnHavoc::default()
+        })),
+    };
+    let mut client =
+        MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
+    client.start().expect("start grabs sink");
+    client.connect().await.expect("connect opens transports");
+    client
+        .subscribe_trades(SubscribeTrades::new(
+            instrument_id(),
+            Some(ClientId::from("MOGWAI-DATA")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        ))
+        .expect("subscribe trades");
+
+    // Let the poll loop issue several /trades GETs through the quota gate.
+    let times = loop {
+        let times = state
+            .http_request_times
+            .lock()
+            .expect("http request times mutex")
+            .clone();
+        if times.len() >= 3 {
+            break times;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    for pair in times.windows(2) {
+        let gap = pair[1].duration_since(pair[0]);
+        assert!(
+            gap >= Duration::from_millis(450),
+            "data HTTP requests spaced only {gap:?} apart under a 2/sec quota"
+        );
+    }
+}
+
+fn cached_order(cache: &Rc<RefCell<Cache>>) -> nautilus_model::orders::OrderAny {
+    let trader_id = TraderId::from("MOGWAI-001");
+    let strategy_id = StrategyId::from("S-001");
+    let clock = Rc::new(RefCell::new(TestClock::new()));
+    let mut factory = OrderFactory::new(trader_id, strategy_id, None, None, clock, false, false);
+    let order = factory.limit(
+        instrument_id(),
+        OrderSide::Buy,
+        Quantity::from("1"),
+        Price::from("100.00"),
+        Some(TimeInForce::Gtc),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(ClientOrderId::from("O-1")),
+    );
+    cache
+        .borrow_mut()
+        .add_order(
+            order.clone(),
+            None,
+            Some(ClientId::from("MOGWAI-EXEC")),
+            false,
+        )
+        .expect("cache order");
+    order
+}
+
+async fn next_exec_event(rx: &mut UnboundedReceiver<ExecutionEvent>) -> ExecutionEvent {
+    tokio::time::timeout(Duration::from_secs(3), rx.recv())
+        .await
+        .expect("execution event arrives")
+        .expect("sink open")
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn conn_http_request_timeout_rejects_order() {
+    // The order POST is accepted but never answered. With a short per-request
+    // timeout the dispatch must elapse and surface the order as a reject via the
+    // existing reject path, rather than hanging on the default 30s timeout.
+    let state = Arc::new(StubState::default());
+    state.hang_orders.store(true, Ordering::Relaxed);
+    let base_url = bound_stub(Arc::clone(&state)).await;
+
+    let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
+    replace_exec_event_sender(sink_tx);
+
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    let order = cached_order(&cache);
+    let config = MogwaiExecClientConfig {
+        base_url,
+        transport_profile: TransportProfile::HttpOrders,
+        havoc: Some(conn_havoc(ConnHavoc {
+            request_timeout_secs: 1,
+            ..ConnHavoc::default()
+        })),
+        ..MogwaiExecClientConfig::default()
+    };
+    let core = ExecutionClientCore::new(
+        config.trader_id,
+        ClientId::from("MOGWAI-EXEC"),
+        *MOGWAI_VENUE,
+        OmsType::Netting,
+        config.account_id,
+        config.account_type,
+        None,
+        cache,
+    );
+    let mut client = MogwaiExecutionClient::new(core, config).expect("client builds");
+    client.start().expect("start grabs sink");
+    client.connect().await.expect("connect opens transports");
+    client
+        .submit_order(SubmitOrder::new(
+            TraderId::from("MOGWAI-001"),
+            Some(ClientId::from("MOGWAI-EXEC")),
+            StrategyId::from("S-001"),
+            instrument_id(),
+            order.client_order_id(),
+            order.init_event().clone(),
+            None,
+            None,
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+        ))
+        .expect("submit order");
+
+    // The submitted event arrives first, then the timeout-driven reject.
+    assert!(matches!(
+        next_exec_event(&mut sink_rx).await,
+        ExecutionEvent::Order(OrderEventAny::Submitted(_))
+    ));
+    assert!(
+        matches!(
+            next_exec_event(&mut sink_rx).await,
+            ExecutionEvent::Order(OrderEventAny::Rejected(_))
+        ),
+        "a request that timed out must surface as an order reject"
+    );
 }
