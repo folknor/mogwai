@@ -8,10 +8,11 @@ so there's nothing to install.
 
 Connects to a server at 127.0.0.1:8787; it does not start one. The windowing,
 Unsubscribe-stop, gap-cap, DelayAcks, and GoDark steps need PACED replay against
-the bundled fixture, so launch the server with a non-zero speed (at the default
-speed 0.0 those steps race and fail spuriously):
+the generated stream. The committed mogwai.toml sets speed = 1.0, so a plain
+launch paces correctly (unthrottled speed 0.0 makes those steps race and fail
+spuriously):
 
-    MOGWAI_DATA_DIR=scripts/fixtures/replay MOGWAI_REPLAY_SPEED=1 brokkr run -p mogwai-server
+    brokkr run -p mogwai-server
 
 then run this script.
 """
@@ -260,7 +261,7 @@ def main() -> None:
     assert reject_msgs[0]["venue_order_id"] is None, reject_msgs
     print("PASS: ModifyOrder reprices the resting reservation")
 
-    # Market-data replay: subscribe to a small pair and read the first 2 trades.
+    # Market-data replay: subscribe to an arbitrary pair name and read the first 2 trades.
     ticks = ws_roundtrip({"type": "Subscribe", "symbols": ["KEUR"]}, expect=2)
     for t in ticks:
         print("tick:    ", t)
@@ -292,7 +293,7 @@ def main() -> None:
     assert extra is None, extra
     print("PASS: Unsubscribe stops the live replay")
 
-    ws = WsClient(timeout=3.0)
+    ws = WsClient(timeout=5.0)
     ws.send({"type": "Subscribe", "symbols": ["KEUR"]})
     capped = [ws.read() for _ in range(4)]
     ws.close()
@@ -300,7 +301,7 @@ def main() -> None:
         print("capped:  ", t)
         assert t["type"] == "Trade", t
         assert t["symbol"] == "KEUR", t
-    print("PASS: capped paced replay crosses a large historical gap")
+    print("PASS: capped paced replay delivers generated trades")
 
     assert post_divergence({"type": "DelayAcks", "ms": 300}) == 202
     ws = WsClient(timeout=2.0)
@@ -353,10 +354,9 @@ def main() -> None:
         dark = None
     assert dark is None, dark
     time.sleep(0.6)
-    # The blackout has lifted; the recovered frame is a post-window tick that
-    # the paced replay only produces ~1s in (the fixture's large gap), so give
-    # this read a generous timeout - the short 0.3s above was only to prove the
-    # window was silent, not to bound the recovery wait.
+    # The blackout has lifted; ticks produced while dark were dropped, so the
+    # recovered frame is the next generated tick delivered after the blackout.
+    # The short 0.3s above only proves the window was silent.
     ws.s.settimeout(3.0)
     recovered = ws.read()
     ws.close()

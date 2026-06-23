@@ -1,9 +1,11 @@
 # mogwai - TODO
 
 A fake broker/exchange that plugs into **broadarrow** to exercise the *live*
-trading path: it replays Kraken trade history as market data and emits the messy,
-realistic execution divergences (partials, rejects, delays, drops, blackouts) an
-in-process sandbox structurally cannot produce. The four broker crates never
+trading path: it synthesizes market data from a committed fingerprint fitted
+offline to Kraken trade history (the running server opens no CSV) and emits the
+messy, realistic execution divergences (partials, rejects, delays, drops,
+blackouts) an in-process sandbox structurally cannot produce. The four broker
+crates never
 import nautilus; the lone exception is the `mogwai-adapter` crate, which path-deps
 nautilus to ship the `ExecutionClient`/`DataClient` pair that lets broadarrow
 drive the `MOGWAI` venue over this workspace's native protocol.
@@ -87,26 +89,46 @@ integration tests):
   instrument table as JSON), `GET /trades` and `GET /quotes` (a bounded,
   seek-and-scan historical fetch keyed by `symbol`/`start`/`end`/`limit`, with a
   hard `MAX_HISTORY_LIMIT` row ceiling so neither the response body nor the
-  client's materialized vector grows unbounded over a multi-GB dump; `/quotes`
-  is always empty because the Kraken dump is trades-only, and `/trades` mirrors
-  the live path's optional aggressor inference), plus a `POST /orders` route that
+  client's materialized vector grows unbounded; `/quotes` is always empty because
+  the generated history is trades-only), plus a `POST /orders` route that
   accepts an order-bearing `ClientMessage` and returns the engine's resulting
   `ServerMessage` events as a JSON array. That route drives the identical
   `engine.process` call the `/ws` order arm makes, so order semantics are
   byte-identical across the two carriers; only the connection-scoped temporal
   divergences (`DelayAcks`/`GoDark`, which model a streaming writer) do not apply
   to the request/response response. It rejects `Subscribe`/`Unsubscribe` bodies,
-  which belong on `/ws`. Replay runs on a blocking thread with backpressure;
-  speed via `MOGWAI_REPLAY_SPEED`. Per-subscription windowing (`start_ts` on
-  `Subscribe`, seeking each source's prefix), `Unsubscribe` cancellation (a
-  shared atomic flag the replay loop polls), and a paced inter-tick sleep cap
-  (`MOGWAI_GAP_CAP_MS`, default 1000) are all wired and pinned by `smoke.py`.
-  The outbound writer also owns the two temporal divergences: `DelayAcks` holds
-  each execution event (market data untouched) and `GoDark` drops everything for
-  the blackout window, both armed over `/control/divergence` via shared atomics.
-  Optional tick-rule aggressor inference (the `TickRuleAggressor` `Permutation`,
-  opt-in via `MOGWAI_INFER_AGGRESSOR`, applied over the merged stream so each
-  symbol's rule sees its trades in replay order; `Identity` stays the default).
+  which belong on `/ws`. Replay runs on a blocking thread with backpressure.
+  Run config comes from a `mogwai.toml` read at startup (overridable with
+  `--config <path>`, built-in defaults when absent) carrying the replay `speed`
+  multiplier and the paced inter-tick sleep cap `gap_cap_ms` (default 1000),
+  replacing the former environment variables. Per-subscription windowing
+  (`start_ts` on `Subscribe`), `Unsubscribe` cancellation (a shared atomic flag
+  the replay loop polls), and the gap cap are all wired and pinned by
+  `smoke.py`. The outbound writer also owns the two
+  temporal divergences: `DelayAcks` holds each execution event (market data
+  untouched) and `GoDark` drops everything for the blackout window, both armed
+  over `/control/divergence` via shared atomics.
+  The running server now opens no Kraken CSV (see git history for the landing):
+  every subscribed symbol's market data is synthesized by
+  `mogwai_data::GeneratedSource`, seeded deterministically from the committed
+  `analysis/fingerprint.json`, fed into the same `MergeSource` and the same
+  outbound writer the CSV path used. A server-owned `source` module owns the two
+  carriers - `build_live_source` (the `/ws` `Subscribe` path) anchors each
+  generator directly at the requested window `start_ts`, so a windowed subscribe
+  is O(1) with no draining `seek_to` over a multi-year prefix, while
+  `build_history_source` (the `GET /trades` path) anchors every generator at a
+  fixed per-symbol `ORIGIN_TS` and `seek_to(start)`s into that one append-only
+  tape, so the same tick always lands at the same `ts_event` and the adapter's
+  poll cursor slices one stable timeline rather than restarting a fresh prefix.
+  The history seek is bounded by a server-side `BoundedSeek` wrapper
+  (`MAX_HISTORY_SEEK_TICKS`), and `MAX_HISTORY_LIMIT` is `1_000`, so a
+  default-`limit` `/trades` call synthesizes a bounded number of ticks and
+  returns well inside the adapter's poll interval. Every generated trade carries
+  a native `Buyer`/`Seller` aggressor, so the server no longer constructs a
+  `Permutation`: the `MOGWAI_DATA_DIR` and `MOGWAI_INFER_AGGRESSOR` env knobs and
+  the `data_dir`/`infer_aggressor` config fields are torn out. `KrakenCsvSource`
+  and the tick-rule aggressor stay compiled and unit-tested in `mogwai-data` as
+  the offline-analysis lineage; only the server's use of them is removed.
 - `mogwai-adapter` - `MogwaiDataClientFactory` / `MogwaiExecutionClientFactory`,
   their `MogwaiDataClientConfig` / `MogwaiExecClientConfig` (serde,
   `ClientConfig`-downcastable, carrying the mogwai-server URL plus the exec
@@ -183,17 +205,18 @@ integration tests):
 
 ### 1. Synthetic tick generation: a generated tick source that looks real
 
-#### The goal
-mogwai stops reading Kraken CSVs at runtime entirely. Today the only thing that
-produces market data is `KrakenCsvSource`, which reads a real CSV line by line;
-the running server opens those files and replays them (see the `mogwai-data`
-`TickSource` trait and the two replay paths in `mogwai-server`). The end goal is
-the opposite: no CSV is ever opened by the running server. Every tick is
-generated by a self-contained stochastic model, and the generated stream is
-realistic enough that broadarrow's live classify/brake/quarantine layer cannot
-tell it from a real feed. The 45GB Kraken dump is consumed exactly once, offline,
-to fit that model; the running server ships only the fitted parameters, never the
-data.
+#### The goal (achieved for the data path; the havoc axis remains)
+mogwai stops reading Kraken CSVs at runtime entirely. Originally the only thing
+that produced market data was `KrakenCsvSource`, which read a real CSV line by
+line, and the running server opened those files and replayed them. That is now
+reversed (see git history for the landing): no CSV is ever opened by the running
+server. Every tick is generated by a self-contained stochastic model, and the
+generated stream is realistic enough that broadarrow's live
+classify/brake/quarantine layer cannot tell it from a real feed. The 45GB Kraken
+dump is consumed exactly once, offline, to fit that model; the running server
+ships only the fitted parameters, never the data. What remains under this
+heading is the market-regime havoc axis below, which builds on the generator the
+data-path landing wired in.
 
 This is the point of mogwai restated for market data: just as the execution path
 emits synthetic-but-realistic divergences instead of matching a real book, the
@@ -359,14 +382,11 @@ sharp NY-open edge (hour 14 at 2.46x the per-pair mean), and day-of-week weights
 that thin on weekends (~0.11 vs ~0.15 weekday).
 
 #### Remaining work items (ordered, one landing each)
-The `GeneratedSource` kernel and the session modulator layered onto it are both
-landed (see the `mogwai-data` Done entry above and git history). The follow-on
-landings, each a coherent keep/revert, tree green at every boundary:
-1. Wiring `GeneratedSource` into `mogwai-server` as the selected source in place
-   of `KrakenCsvSource`, so the running server opens no CSV. Hands the replay
-   window's start to the kernel's `start_ts` anchor rather than leaning on the
-   default draining `seek_to` to skip a multi-year prefix.
-2. (Later, separate) the market-regime havoc axis over the generator parameters,
+The `GeneratedSource` kernel, the session modulator layered onto it, and the
+server wiring that selects it in place of `KrakenCsvSource` are all landed (see
+the `mogwai-data` and `mogwai-server` Done entries above and git history). The
+follow-on landing, a coherent keep/revert, tree green at every boundary:
+1. (Later, separate) the market-regime havoc axis over the generator parameters,
    including session-closing reopen-gaps.
 
 ### 2. broadarrow integration: the mogwai venue adapter
@@ -451,6 +471,12 @@ The wider knob vocabulary stays open as a follow-up `HavocSpec` extension:
 ## Notes / gotchas
 - Kraken history is **trades only** - no quotes, no L2, no aggressor side
   (`AggressorSide::NoAggressor`). Symbol comes from the filename (`XBT` = BTC).
-  Set `MOGWAI_INFER_AGGRESSOR=1` to infer it via the tick rule at replay time.
-- Data dir: `MOGWAI_DATA_DIR` (default `/media/folk/Banan/Kraken_Trading_History`).
+  This is the shape of the offline corpus only; the running server no longer
+  reads it. Every generated trade carries a native `Buyer`/`Seller` aggressor, so
+  the server needs no tick-rule inference; `KrakenCsvSource` and
+  `TickRuleAggressor` survive in `mogwai-data` for the offline-analysis lineage
+  and its unit tests.
+- `MOGWAI_DATA_DIR` (default `/media/folk/Banan/Kraken_Trading_History`) is now
+  an offline-analysis input only (`analysis/`), never a server runtime knob - the
+  running server opens no CSV.
 - `research/` (nautilus clone, ~413MB) is gitignored.

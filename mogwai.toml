@@ -1,0 +1,16 @@
+# mogwai-server run configuration.
+#
+# Replaces the former MOGWAI_REPLAY_SPEED and MOGWAI_GAP_CAP_MS environment
+# variables: run knobs are explicit input, not ambient environment. The server
+# reads this file from the working directory at startup; pass --config <path> to
+# point it elsewhere, or delete the file to fall back to built-in defaults.
+
+# Replay speed multiplier. 1.0 paces inter-tick wall delay to the real gaps
+# between ticks (the realistic default for a live venue, and the setting the
+# end-to-end smoke test needs). 0.0 streams unthrottled - fast local iteration,
+# but the paced steps in scripts/smoke.py race and fail spuriously under it.
+speed = 1.0
+
+# Maximum wall-clock sleep between two ticks under paced replay, milliseconds.
+# 0 disables the cap.
+gap_cap_ms = 1000

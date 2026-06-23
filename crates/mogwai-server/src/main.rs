@@ -3,12 +3,13 @@
 //! Hosts the native JSON-over-WS gateway (`/ws`) that the broadarrow adapter
 //! connects to, plus an out-of-band control plane (`/control/divergence`) for
 //! arming deterministic divergences from tests. The exchange logic lives in
-//! [`mogwai_engine`]; market data is replayed from the Kraken dump by
-//! [`mogwai_data`]; this binary owns sockets, the clock and replay pacing.
+//! [`mogwai_engine`]; market data is synthesized from the committed fingerprint
+//! by [`mogwai_data`]; this binary owns sockets, the clock and replay pacing.
+
+mod source;
 
 use std::{
     collections::HashMap,
-    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -27,9 +28,7 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::{SinkExt, StreamExt};
-use mogwai_data::{
-    Identity, KrakenCsvSource, MergeSource, Permutation, TickEvent, TickRuleAggressor, TickSource,
-};
+use mogwai_data::TickEvent;
 use mogwai_engine::Engine;
 use mogwai_protocol::{
     ClientMessage, InstrumentDef, QuoteTick, ServerMessage, TradeTick, control::Divergence,
@@ -37,44 +36,51 @@ use mogwai_protocol::{
 use serde::Deserialize;
 use tokio::sync::{Mutex, mpsc};
 
-const MAX_HISTORY_LIMIT: usize = 10_000;
+const MAX_HISTORY_LIMIT: usize = 1_000;
 
 /// Replay/runtime configuration, sourced from the environment at startup.
-#[derive(Clone)]
+#[derive(Clone, serde::Deserialize)]
+#[serde(default)]
 struct Config {
-    /// Directory of `<SYMBOL>.csv` Kraken pair files.
-    data_dir: PathBuf,
-    /// Replay speed multiplier. `0.0` ⇒ unthrottled (stream as fast as the client
+    /// Replay speed multiplier. `0.0` means unthrottled (stream as fast as the client
     /// drains); otherwise inter-tick wall delay = (tick gap) / speed.
     speed: f64,
     /// Maximum wall-clock sleep between two ticks under paced replay, in
     /// milliseconds. `0` disables the cap.
     gap_cap_ms: u64,
-    /// When set, infer each trade's aggressor side from the tick rule as ticks
-    /// replay; otherwise ticks keep the dump's `NoAggressor` (the default).
-    infer_aggressor: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            speed: 0.0,
+            gap_cap_ms: 1000,
+        }
+    }
 }
 
 impl Config {
-    fn from_env() -> Self {
-        let data_dir = std::env::var("MOGWAI_DATA_DIR")
-            .unwrap_or_else(|_| "/media/folk/Banan/Kraken_Trading_History".into())
-            .into();
-        let speed = std::env::var("MOGWAI_REPLAY_SPEED")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0.0);
-        let gap_cap_ms = std::env::var("MOGWAI_GAP_CAP_MS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(1000);
-        let infer_aggressor = std::env::var("MOGWAI_INFER_AGGRESSOR")
-            .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes"));
-        Self {
-            data_dir,
-            speed,
-            gap_cap_ms,
-            infer_aggressor,
+    /// Load run config from a TOML file. The path is the `--config <path>`
+    /// argument when passed, otherwise `mogwai.toml` in the working directory.
+    /// A missing file yields built-in defaults so the server still starts with
+    /// no config present; a malformed file is a hard error rather than a silent
+    /// fallback. Replaces the former MOGWAI_REPLAY_SPEED and MOGWAI_GAP_CAP_MS
+    /// environment variables - run knobs belong in explicit input, not ambient
+    /// environment.
+    fn load() -> anyhow::Result<Self> {
+        let mut path = std::path::PathBuf::from("mogwai.toml");
+        let mut args = std::env::args().skip(1);
+        while let Some(arg) = args.next() {
+            if arg == "--config"
+                && let Some(p) = args.next()
+            {
+                path = std::path::PathBuf::from(p);
+            }
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Ok(toml::from_str(&text)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e.into()),
         }
     }
 }
@@ -106,8 +112,8 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let cfg = Config::from_env();
-    tracing::info!(data_dir = %cfg.data_dir.display(), speed = cfg.speed, "config");
+    let cfg = Config::load()?;
+    tracing::info!(speed = cfg.speed, gap_cap_ms = cfg.gap_cap_ms, "config");
 
     let state = AppState {
         engine: Arc::new(Mutex::new(Engine::new())),
@@ -181,54 +187,40 @@ struct HistoryQuery {
 }
 
 async fn trades(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
 ) -> Result<Json<Vec<TradeTick>>, StatusCode> {
     let limit = query
         .limit
         .unwrap_or(MAX_HISTORY_LIMIT)
         .min(MAX_HISTORY_LIMIT);
-    let ticks = bounded_trades(&state.cfg, &query.symbol, query.start, query.end, limit)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let ticks = bounded_trades(&query.symbol, query.start, query.end, limit);
     Ok(Json(ticks))
 }
 
 async fn quotes(
     axum::extract::Query(_query): axum::extract::Query<HistoryQuery>,
 ) -> Json<Vec<QuoteTick>> {
-    // The Kraken history mogwai replays is trades-only, so a bounded historical
-    // quote fetch is always empty by construction (not a bug). If a
-    // quote-bearing dump or synthesized top-of-book is ever wired in, this route
-    // grows the same seek-and-bound scan as `trades`.
+    // Mogwai's generated history is trades-only, so a bounded historical quote
+    // fetch is empty by construction. If synthesized top-of-book is wired in,
+    // this route grows the same seek-and-bound scan as `trades`.
     Json(Vec::new())
 }
 
 fn bounded_trades(
-    cfg: &Config,
     symbol: &str,
     start: Option<u64>,
     end: Option<u64>,
     limit: usize,
-) -> anyhow::Result<Vec<TradeTick>> {
+) -> Vec<TradeTick> {
     if limit == 0 {
-        return Ok(Vec::new());
+        return Vec::new();
     }
 
-    let path = cfg.data_dir.join(format!("{symbol}.csv"));
-    let source = KrakenCsvSource::open(&path)?;
-    let mut merged = MergeSource::starting_at(vec![Box::new(source)], start);
-    // Mirror the live /ws path: aggressor inference runs over the time-ordered
-    // stream so a historical request_trades sees the same aggressor sides a
-    // subscribe_trades would, rather than the raw NoAggressor the dump carries.
-    let mut perm: Box<dyn Permutation> = if cfg.infer_aggressor {
-        Box::new(TickRuleAggressor::new())
-    } else {
-        Box::new(Identity)
-    };
+    let mut merged = source::build_history_source(symbol, start);
     let mut out = Vec::new();
 
     while let Some(tick) = merged.next_tick() {
-        let tick = perm.apply(tick);
         if let Some(end) = end
             && tick.ts_event() > end
         {
@@ -244,7 +236,7 @@ fn bounded_trades(
         }
     }
 
-    Ok(out)
+    out
 }
 
 async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
@@ -301,7 +293,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
                 let cancel = Arc::new(AtomicBool::new(false));
                 replays.insert(key, Arc::clone(&cancel));
-                spawn_replay(symbols, start_ts, state.cfg.clone(), tx.clone(), cancel);
+                spawn_replay(symbols, start_ts, &state.cfg, tx.clone(), cancel);
             }
             ClientMessage::Unsubscribe { symbols } => {
                 let key = sub_key(&symbols);
@@ -340,53 +332,38 @@ fn is_execution_event(msg: &ServerMessage) -> bool {
     !matches!(msg, ServerMessage::Trade(_) | ServerMessage::Quote(_))
 }
 
-/// Stream historical trades for `symbols` as market data into `tx`.
+/// Stream generated trades for `symbols` as market data into `tx`.
 ///
-/// CSV reads are blocking, so the replay runs on a dedicated OS thread and uses
-/// [`mpsc::Sender::blocking_send`] - which also applies backpressure, pacing the
-/// reader to however fast the client drains.
+/// The replay runs on a dedicated OS thread and uses
+/// [`mpsc::Sender::blocking_send`], which also applies backpressure, pacing the
+/// generator to however fast the client drains.
 fn spawn_replay(
     symbols: Vec<String>,
     start_ts: Option<u64>,
-    cfg: Config,
+    cfg: &Config,
     tx: mpsc::Sender<ServerMessage>,
     cancel: Arc<AtomicBool>,
 ) {
+    let symbols = symbols.into_boxed_slice();
+    let speed = cfg.speed;
+    let gap_cap_ms = cfg.gap_cap_ms;
     std::thread::spawn(move || {
-        let mut sources: Vec<Box<dyn TickSource>> = Vec::new();
-        for sym in &symbols {
-            let path = cfg.data_dir.join(format!("{sym}.csv"));
-            match KrakenCsvSource::open(&path) {
-                Ok(s) => sources.push(Box::new(s)),
-                Err(e) => tracing::warn!(symbol = %sym, path = %path.display(), %e, "no data file"),
-            }
-        }
-        if sources.is_empty() {
+        let Some(mut merged) = source::build_live_source(&symbols, start_ts) else {
             return;
-        }
+        };
         tracing::info!(?symbols, ?start_ts, "replay started");
 
-        let mut merged = MergeSource::starting_at(sources, start_ts);
-        // Aggressor inference runs over the merged, time-ordered stream so each
-        // symbol's tick rule sees its own trades in replay order. Opt-in: the
-        // default is the dump's verbatim NoAggressor.
-        let mut perm: Box<dyn Permutation> = if cfg.infer_aggressor {
-            Box::new(TickRuleAggressor::new())
-        } else {
-            Box::new(Identity)
-        };
         let mut prev_ts: Option<u64> = None;
         while let Some(tick) = merged.next_tick() {
-            let tick = perm.apply(tick);
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
-            if cfg.speed > 0.0 {
+            if speed > 0.0 {
                 if let Some(prev) = prev_ts {
                     let gap_ns = tick.ts_event().saturating_sub(prev);
-                    let mut wait_ms = (gap_ns as f64 / cfg.speed) as u64 / 1_000_000;
-                    if cfg.gap_cap_ms > 0 {
-                        wait_ms = wait_ms.min(cfg.gap_cap_ms);
+                    let mut wait_ms = (gap_ns as f64 / speed) as u64 / 1_000_000;
+                    if gap_cap_ms > 0 {
+                        wait_ms = wait_ms.min(gap_cap_ms);
                     }
                     if wait_ms > 0 {
                         std::thread::sleep(Duration::from_millis(wait_ms));
@@ -414,15 +391,14 @@ fn spawn_replay(
 mod tests {
     use super::*;
     use mogwai_protocol::{OrderType, Side, SubmitOrder, TimeInForce};
+    use std::time::Instant;
 
     fn state() -> AppState {
         AppState {
             engine: Arc::new(Mutex::new(Engine::new())),
             cfg: Config {
-                data_dir: PathBuf::from("scripts/fixtures/replay"),
                 speed: 0.0,
                 gap_cap_ms: 0,
-                infer_aggressor: false,
             },
             delay_ms: Arc::new(AtomicU64::new(0)),
             dark_until_ns: Arc::new(AtomicU64::new(0)),
@@ -464,5 +440,51 @@ mod tests {
         .expect_err("subscribe rejected");
 
         assert_eq!(err, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn generated_history_default_limit_is_bounded_and_fast() {
+        let start = Instant::now();
+        let ticks = bounded_trades("KEUR", None, None, MAX_HISTORY_LIMIT);
+        let elapsed = start.elapsed();
+
+        println!("default /trades synthesis elapsed: {elapsed:?}");
+        assert_eq!(ticks.len(), MAX_HISTORY_LIMIT);
+        assert!(ticks.len() <= 1_000);
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "default /trades synthesis took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn generated_history_is_replayable_and_cursorable() {
+        let first = bounded_trades("KEUR", None, None, 8);
+        let replay = bounded_trades("KEUR", None, None, 8);
+        assert_eq!(trade_signatures(&first), trade_signatures(&replay));
+
+        let cursor = first.last().expect("first page has trades").ts_event;
+        let second = bounded_trades("KEUR", Some(cursor), None, 8);
+
+        assert_eq!(
+            second.first().expect("second page has trades").ts_event,
+            cursor
+        );
+        assert!(second.iter().skip(1).all(|trade| trade.ts_event > cursor));
+        assert_ne!(trade_signatures(&first), trade_signatures(&second));
+    }
+
+    fn trade_signatures(trades: &[TradeTick]) -> Vec<(String, String, String, u64)> {
+        trades
+            .iter()
+            .map(|trade| {
+                (
+                    trade.symbol.clone(),
+                    trade.price.to_string(),
+                    trade.size.to_string(),
+                    trade.ts_event,
+                )
+            })
+            .collect()
     }
 }

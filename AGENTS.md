@@ -3,8 +3,10 @@
 ## Project
 
 mogwai is a fake broker/exchange that plugs into broadarrow to exercise the
-*live* trading path. It replays Kraken trade history as market data and injects
-the messy, realistic execution divergences (partial fills, rejects, delays,
+*live* trading path. It synthesizes market data from a committed fingerprint
+fitted offline to Kraken trade history (the running server opens no CSV) and
+injects the messy, realistic execution divergences (partial fills, rejects,
+delays,
 duplicate fills, dropped account updates, venue blackouts) that an in-process
 backtest sandbox structurally cannot produce. The broker core never imports
 nautilus; the `mogwai-adapter` crate is the lone, deliberate exception - it
