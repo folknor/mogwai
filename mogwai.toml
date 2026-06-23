@@ -14,3 +14,8 @@ speed = 1.0
 # Maximum wall-clock sleep between two ticks under paced replay, milliseconds.
 # 0 disables the cap.
 gap_cap_ms = 1000
+
+# Optional server-originated websocket heartbeat cadence, milliseconds. 0 keeps
+# the honest default off. Enable in a separate config when testing liveness
+# frames that survive StallData.
+server_heartbeat_ms = 0

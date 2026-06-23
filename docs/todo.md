@@ -115,40 +115,20 @@ spec or code until the nautilus seam exists.
 - [ ] Then write the spec per `reference/technical-implementation-spec.md`
       before any mogwai/adapter code (this item is the TODO source it cites).
 
-### 3. Havoc expansion: acked-but-silent data stall (4255-shaped)
-
-Direction: more havoc. `GoDark` is all-or-nothing and time-bounded - it stops
-*everything*, so a frame-level idle timeout catches it (the easy-to-detect
-blackout). It cannot express the nastier, realistic nautilus_trader issue 4255
-variant: subscription acked, socket healthy, liveness signal still flowing, only
-the channel data withheld - undetectable by a frame-level idle timeout, which is
-exactly why that issue argues for a per-subscription data watchdog.
-
-- [ ] New `control::Divergence` (e.g. `StallData` / `GoQuiet { ms }`) that
-      suppresses only market-data (`Trade` / `Quote`) frames while leaving
-      execution frames alive. Cleanly additive: a new `Divergence` variant plus a
-      writer rule, and it needs `validate_divergence` coverage (and the same
-      `ms` bound as `GoDark` / `DelayAcks` if it carries an `ms`).
-- [ ] Optional server-originated heartbeat so the connection has a liveness
-      signal that survives the stall - the full 4255 reproduction. mogwai's
-      server has none today (the `heartbeat_interval_ms` knob is the *client*
-      pinging). With a server heartbeat flowing through a `StallData` window, the
-      stall is invisible to any frame-level idle timeout and only a data watchdog
-      can catch it.
-
-### 4. Author `reference/havoc.md`
+### 3. Author `reference/havoc.md`
 
 Durable reference doc for the divergence/havoc surfaces. Covers the four-surface
 `HavocSpec` (client / server / data / connection-lifecycle), every `Divergence`
-variant and its trigger/semantics, the `MarketRegime` axis, how the server arms
-and applies them vs what the engine owns, the validation boundaries
-(`validate_divergence`, `validate_market_regime`, `validate_conn_havoc`), and -
-per the Direction note - the honest default vs the opt-in havoc surfaces. Read
+variant and its trigger/semantics (including `StallData` and the server
+heartbeat), the `MarketRegime` axis, how the server arms and applies them vs
+what the engine owns, the validation boundaries (`validate_divergence`,
+`validate_market_regime`, `validate_conn_havoc`), and - per the Direction note -
+the honest default vs the opt-in havoc surfaces. Read
 `reference/technical-implementation-spec.md` first for what such a doc must
-contain. The honest default has landed; best written after item 3 (the stall
-divergence) settles, so the doc describes the real surface.
+contain. The honest default and the acked-but-silent stall divergence have both
+landed, so this is now unblocked and describes the real, settled surface.
 
-### 5. Bug-hunt follow-ups - the residual tail
+### 4. Bug-hunt follow-ups - the residual tail
 
 The fix waves are done, and every follow-up that was open here has now landed
 or been closed - nothing in this section remains open. The lists below record

@@ -115,6 +115,7 @@ impl Engine {
             // queue.
             Divergence::DelayAcks { .. }
             | Divergence::GoDark { .. }
+            | Divergence::StallData { .. }
             | Divergence::ClearDivergences => {}
             other => self.armed.push_back(other),
         }
@@ -767,6 +768,7 @@ mod tests {
         let mut e = Engine::new();
         e.arm(Divergence::DelayAcks { ms: 100 });
         e.arm(Divergence::GoDark { ms: 100 });
+        e.arm(Divergence::StallData { ms: 100 });
         e.arm(Divergence::ClearDivergences);
         e.arm(Divergence::DuplicateNextFill);
 

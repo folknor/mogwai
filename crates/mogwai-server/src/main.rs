@@ -49,6 +49,10 @@ struct Config {
     /// Maximum wall-clock sleep between two ticks under paced replay, in
     /// milliseconds. `0` disables the cap.
     gap_cap_ms: u64,
+    /// Optional server-originated heartbeat cadence in milliseconds. `0`
+    /// disables it. When enabled, each websocket session receives liveness
+    /// frames that survive `StallData` but not `GoDark`.
+    server_heartbeat_ms: u64,
 }
 
 impl Default for Config {
@@ -62,6 +66,7 @@ impl Default for Config {
             // of the acceleration axis.
             speed: 1.0,
             gap_cap_ms: 1000,
+            server_heartbeat_ms: 0,
         }
     }
 }
@@ -100,6 +105,8 @@ struct AppState {
     delay_ms: Arc<AtomicU64>,
     /// Wall-clock unix-ns instant before which writers drop all outbound frames.
     dark_until_ns: Arc<AtomicU64>,
+    /// Wall-clock unix-ns instant before which writers drop market-data frames.
+    stall_until_ns: Arc<AtomicU64>,
 }
 
 /// Nanoseconds since the Unix epoch - the server's clock, fed into the engine.
@@ -112,6 +119,11 @@ struct AppState {
 /// local name so the call sites below stay unchanged.
 fn now_ns() -> u64 {
     mogwai_protocol::now_unix_nanos()
+}
+
+/// Convert a millisecond window into an absolute wall-clock unix-ns deadline.
+fn window_until_ns(now: u64, ms: u64) -> u64 {
+    now.saturating_add(ms.saturating_mul(1_000_000))
 }
 
 #[tokio::main]
@@ -128,13 +140,19 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cfg = Config::load()?;
-    tracing::info!(speed = cfg.speed, gap_cap_ms = cfg.gap_cap_ms, "config");
+    tracing::info!(
+        speed = cfg.speed,
+        gap_cap_ms = cfg.gap_cap_ms,
+        server_heartbeat_ms = cfg.server_heartbeat_ms,
+        "config"
+    );
 
     let state = AppState {
         engine: Arc::new(Mutex::new(Engine::new())),
         cfg,
         delay_ms: Arc::new(AtomicU64::new(0)),
         dark_until_ns: Arc::new(AtomicU64::new(0)),
+        stall_until_ns: Arc::new(AtomicU64::new(0)),
     };
 
     let app = Router::new()
@@ -174,21 +192,29 @@ async fn arm_divergence(
             state.delay_ms.store(ms, Ordering::Relaxed);
         }
         Divergence::GoDark { ms } => {
-            let until = now_ns().saturating_add(ms.saturating_mul(1_000_000));
-            state.dark_until_ns.store(until, Ordering::Relaxed);
+            state
+                .dark_until_ns
+                .store(window_until_ns(now_ns(), ms), Ordering::Relaxed);
+        }
+        Divergence::StallData { ms } => {
+            state
+                .stall_until_ns
+                .store(window_until_ns(now_ns(), ms), Ordering::Relaxed);
         }
         Divergence::ClearDivergences => {
             // Lift both server-owned temporal windows process-wide. `0` is the
             // cleared sentinel: `delay_ms == 0` skips the writer's delay sleep,
-            // and `now_ns() < 0` is never true so the dark guard is off. There
-            // is no backlog to replay because blackout frames are dropped.
+            // and `now_ns() < 0` is never true so the dark and data-stall
+            // guards are off. There is no backlog to replay because gated
+            // frames are dropped.
             state.delay_ms.store(0, Ordering::Relaxed);
             state.dark_until_ns.store(0, Ordering::Relaxed);
+            state.stall_until_ns.store(0, Ordering::Relaxed);
         }
         // Server-ownership contract (pins B.4 / E.11): `DelayAcks`, `GoDark`,
-        // and `ClearDivergences` are server-owned controls with no synchronous
-        // engine-side trigger. The server owns them - they are applied here via
-        // `delay_ms` / `dark_until_ns` and must NEVER reach `engine.arm()`.
+        // `StallData`, and `ClearDivergences` are server-owned controls with no
+        // synchronous engine-side trigger. The server owns them and must NEVER
+        // forward them to `engine.arm()`.
         // The arms above intercept them before this catch-all, so `engine_div`
         // can only be one of the four engine-side variants. The assert makes a
         // future refactor that forwards a whole `HavocSpec.server` vec straight
@@ -199,9 +225,10 @@ async fn arm_divergence(
                     engine_div,
                     Divergence::DelayAcks { .. }
                         | Divergence::GoDark { .. }
+                        | Divergence::StallData { .. }
                         | Divergence::ClearDivergences
                 ),
-                "DelayAcks/GoDark/ClearDivergences are server-owned and must not be forwarded to engine.arm()",
+                "DelayAcks/GoDark/StallData/ClearDivergences are server-owned and must not be forwarded to engine.arm()",
             );
             state.engine.lock().await.arm(engine_div);
         }
@@ -366,16 +393,21 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let mut replays: HashMap<String, Replay> = HashMap::new();
     let delay_ms = Arc::clone(&state.delay_ms);
     let dark_until_ns = Arc::clone(&state.dark_until_ns);
+    let stall_until_ns = Arc::clone(&state.stall_until_ns);
 
     let writer = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            if is_execution_event(&msg) {
+            let is_heartbeat = matches!(msg, ServerMessage::Heartbeat { .. });
+            if !is_heartbeat && is_execution_event(&msg) {
                 let delay = delay_ms.load(Ordering::Relaxed);
                 if delay > 0 {
                     tokio::time::sleep(Duration::from_millis(delay)).await;
                 }
             }
             if now_ns() < dark_until_ns.load(Ordering::Relaxed) {
+                continue;
+            }
+            if msg.is_market_data() && now_ns() < stall_until_ns.load(Ordering::Relaxed) {
                 continue;
             }
             // Skip an un-serializable frame rather than panicking the writer
@@ -393,6 +425,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             }
         }
     });
+
+    let heartbeat = if state.cfg.server_heartbeat_ms > 0 {
+        Some(spawn_heartbeat(state.cfg.server_heartbeat_ms, tx.clone()))
+    } else {
+        None
+    };
 
     while let Some(Ok(msg)) = stream.next().await {
         let Message::Text(text) = msg else { continue };
@@ -465,10 +503,39 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     for (_, replay) in replays.drain() {
         quiesce_replay(replay).await;
     }
+    if let Some(handle) = heartbeat {
+        handle.abort();
+        if let Err(e) = handle.await
+            && !e.is_cancelled()
+        {
+            tracing::warn!(%e, "heartbeat task did not shut down cleanly");
+        }
+    }
     drop(tx);
     if let Err(e) = writer.await {
         tracing::warn!(%e, "writer task did not shut down cleanly");
     }
+}
+
+/// Feed per-session server liveness frames into the same channel the writer
+/// gates and serializes, keeping socket writes single-owned and ordered.
+fn spawn_heartbeat(
+    interval_ms: u64,
+    tx: mpsc::Sender<ServerMessage>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+        loop {
+            interval.tick().await;
+            if tx
+                .send(ServerMessage::Heartbeat { ts_event: now_ns() })
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    })
 }
 
 /// A live per-symbol replay stream: the cancel flag the handler raises to stop
@@ -623,9 +690,11 @@ mod tests {
             cfg: Config {
                 speed: 0.0,
                 gap_cap_ms: 0,
+                server_heartbeat_ms: 0,
             },
             delay_ms: Arc::new(AtomicU64::new(0)),
             dark_until_ns: Arc::new(AtomicU64::new(0)),
+            stall_until_ns: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -680,6 +749,48 @@ mod tests {
             !is_execution_event(&trade),
             "trades are market data, not delayed by DelayAcks"
         );
+    }
+
+    #[test]
+    fn stall_data_classifier_leaves_execution_and_heartbeat_alive() {
+        let trade = ServerMessage::Trade(TradeTick {
+            symbol: "BTCUSDT".into(),
+            price: "1".parse().expect("decimal"),
+            size: "1".parse().expect("decimal"),
+            aggressor: mogwai_protocol::AggressorSide::NoAggressor,
+            ts_event: 1,
+        });
+        assert!(trade.is_market_data());
+        assert!(!is_execution_event(&trade));
+
+        let accepted = ServerMessage::OrderAccepted {
+            client_order_id: "O".into(),
+            venue_order_id: "V".into(),
+            ts_event: 1,
+        };
+        assert!(!accepted.is_market_data());
+        assert!(is_execution_event(&accepted));
+
+        let account = ServerMessage::AccountState(mogwai_protocol::AccountState {
+            balances: Vec::new(),
+            positions: Vec::new(),
+            ts_event: 1,
+        });
+        assert!(!account.is_market_data());
+        assert!(is_execution_event(&account));
+
+        let heartbeat = ServerMessage::Heartbeat { ts_event: 1 };
+        assert_eq!(heartbeat.category(), mogwai_protocol::EventKind::Data);
+        assert!(!heartbeat.is_market_data());
+        assert!(matches!(heartbeat, ServerMessage::Heartbeat { .. }));
+    }
+
+    #[test]
+    fn window_until_ns_saturates_and_preserves_zero_window() {
+        let now = 1_000_000_000;
+        assert_eq!(window_until_ns(now, 0), now);
+        assert_eq!(window_until_ns(now, 250), 1_250_000_000);
+        assert_eq!(window_until_ns(now, u64::MAX), u64::MAX);
     }
 
     #[tokio::test]
@@ -802,6 +913,7 @@ mod tests {
         let cfg = Config {
             speed: 0.0,
             gap_cap_ms: 0,
+            server_heartbeat_ms: 0,
         };
         let (tx, mut rx) = mpsc::channel::<ServerMessage>(8);
         let cancel = Arc::new(AtomicBool::new(false));
@@ -833,6 +945,7 @@ mod tests {
         let cfg = Config {
             speed: 0.0,
             gap_cap_ms: 0,
+            server_heartbeat_ms: 0,
         };
         // Capacity 1 so the generator fills the channel and parks in
         // `send_cancellable` almost immediately, never draining.

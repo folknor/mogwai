@@ -324,8 +324,9 @@ pub fn validate_market_regime(regime: &MarketRegime) -> Result<(), &'static str>
 ///
 /// `PartialFillNext.fraction` must lie in the half-open `(0, 1]`: a fill must
 /// move some quantity (`> 0`) and cannot exceed the order (`<= 1`).
-/// `DelayAcks.ms` and `GoDark.ms` are bounded by `MAX_DIVERGENCE_MS` so a
-/// control-plane request cannot arm an effectively permanent window.
+/// `DelayAcks.ms`, `GoDark.ms`, and `StallData.ms` are bounded by
+/// `MAX_DIVERGENCE_MS` so a control-plane request cannot arm an effectively
+/// permanent window.
 /// `ClearDivergences` and the engine-side single-shot variants are otherwise
 /// unconstrained.
 ///
@@ -341,9 +342,11 @@ pub fn validate_divergence(div: &control::Divergence) -> Result<(), &'static str
             }
             Ok(())
         }
-        control::Divergence::DelayAcks { ms } | control::Divergence::GoDark { ms } => {
+        control::Divergence::DelayAcks { ms }
+        | control::Divergence::GoDark { ms }
+        | control::Divergence::StallData { ms } => {
             if *ms > control::MAX_DIVERGENCE_MS {
-                return Err("DelayAcks/GoDark ms must be <= 3600000 (one hour)");
+                return Err("DelayAcks/GoDark/StallData ms must be <= 3600000 (one hour)");
             }
             Ok(())
         }
@@ -790,6 +793,7 @@ mod tests {
                     fraction: Decimal::new(5, 1),
                 },
                 control::Divergence::GoDark { ms: 250 },
+                control::Divergence::StallData { ms: 125 },
                 control::Divergence::ClearDivergences,
             ],
             data: Some(MarketRegime::LiquidityDrought { thin_factor: 5.0 }),
@@ -815,6 +819,12 @@ mod tests {
         assert_eq!(clear_json, r#"{"type":"ClearDivergences"}"#);
         let clear: control::Divergence = serde_json::from_str(&clear_json).unwrap();
         assert_eq!(clear, control::Divergence::ClearDivergences);
+
+        let stall_json =
+            serde_json::to_string(&control::Divergence::StallData { ms: 500 }).unwrap();
+        assert_eq!(stall_json, r#"{"type":"StallData","ms":500}"#);
+        let stall: control::Divergence = serde_json::from_str(&stall_json).unwrap();
+        assert_eq!(stall, control::Divergence::StallData { ms: 500 });
 
         let clean = HavocSpec::default();
         let json = serde_json::to_string(&clean).unwrap();
@@ -1001,11 +1011,29 @@ mod tests {
         ];
         for msg in &data {
             assert_eq!(msg.category(), EventKind::Data, "{msg:?} is market data");
+            assert!(msg.is_market_data(), "{msg:?} is channel data");
             assert!(
                 !msg.category().is_execution(),
                 "{msg:?} is not delayed as execution"
             );
         }
+
+        let heartbeat = ServerMessage::Heartbeat { ts_event: 1 };
+        assert_eq!(heartbeat.category(), EventKind::Data);
+        assert!(!heartbeat.category().is_execution());
+        assert!(!heartbeat.is_market_data());
+    }
+
+    #[test]
+    fn heartbeat_round_trips() {
+        let heartbeat = ServerMessage::Heartbeat { ts_event: 123 };
+        let json = serde_json::to_string(&heartbeat).unwrap();
+        assert_eq!(json, r#"{"type":"Heartbeat","ts_event":123}"#);
+        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            decoded,
+            ServerMessage::Heartbeat { ts_event: 123 }
+        ));
     }
 
     #[test]
@@ -1136,8 +1164,12 @@ mod tests {
             control::Divergence::GoDark {
                 ms: control::MAX_DIVERGENCE_MS,
             },
+            control::Divergence::StallData {
+                ms: control::MAX_DIVERGENCE_MS,
+            },
             control::Divergence::DelayAcks { ms: 0 },
             control::Divergence::GoDark { ms: 0 },
+            control::Divergence::StallData { ms: 0 },
         ] {
             validate_divergence(&div).expect("bounded ms value is valid");
         }
@@ -1148,10 +1180,13 @@ mod tests {
             control::Divergence::GoDark {
                 ms: control::MAX_DIVERGENCE_MS + 1,
             },
+            control::Divergence::StallData {
+                ms: control::MAX_DIVERGENCE_MS + 1,
+            },
         ] {
             assert_eq!(
                 validate_divergence(&div),
-                Err("DelayAcks/GoDark ms must be <= 3600000 (one hour)")
+                Err("DelayAcks/GoDark/StallData ms must be <= 3600000 (one hour)")
             );
         }
 
@@ -1249,6 +1284,13 @@ pub enum ServerMessage {
     AccountState(AccountState),
     Trade(TradeTick),
     Quote(QuoteTick),
+    /// Server-originated liveness signal. Carries the server wall clock
+    /// unix-ns so the frame is non-empty and timestamp-comparable, but no
+    /// market or execution payload. Clients may ignore it; its job is to keep
+    /// the socket frame-active through a `StallData` window.
+    Heartbeat {
+        ts_event: u64,
+    },
 }
 
 impl ServerMessage {
@@ -1269,7 +1311,12 @@ impl ServerMessage {
     pub fn category(&self) -> EventKind {
         match self {
             ServerMessage::OrderFilled(_) => EventKind::Fill,
-            ServerMessage::Trade(_) | ServerMessage::Quote(_) => EventKind::Data,
+            // Heartbeat is a liveness signal, not execution traffic: `DelayAcks`
+            // must not perturb its cadence. It also must survive `StallData`,
+            // so writer gates use `is_market_data()` rather than this category.
+            ServerMessage::Trade(_) | ServerMessage::Quote(_) | ServerMessage::Heartbeat { .. } => {
+                EventKind::Data
+            }
             ServerMessage::AccountState(_)
             | ServerMessage::OrderAccepted { .. }
             | ServerMessage::OrderRejected { .. }
@@ -1277,6 +1324,15 @@ impl ServerMessage {
             | ServerMessage::OrderUpdated { .. }
             | ServerMessage::OrderModifyRejected { .. } => EventKind::Exec,
         }
+    }
+
+    /// Whether this frame is market channel data, the payload a
+    /// per-subscription data watchdog keys off. This is deliberately narrower
+    /// than `category() == Data`: the server heartbeat rides the data latency
+    /// bucket but is a liveness signal, not channel data.
+    #[must_use]
+    pub fn is_market_data(&self) -> bool {
+        matches!(self, ServerMessage::Trade(_) | ServerMessage::Quote(_))
     }
 }
 
@@ -1349,9 +1405,9 @@ pub mod control {
     /// Upper bound on any single divergence's `ms` window, enforced by
     /// `validate_divergence`.
     ///
-    /// One hour is far longer than any test blackout or ack-delay scenario
-    /// needs, and `3_600_000 * 1_000_000` ns is well below `u64::MAX`, so a
-    /// validated `GoDark` cannot saturate `dark_until_ns` and brick the writer.
+    /// One hour is far longer than any test blackout, data-stall, or ack-delay
+    /// scenario needs, and `3_600_000 * 1_000_000` ns is well below `u64::MAX`,
+    /// so validated temporal windows cannot saturate writer deadlines.
     pub const MAX_DIVERGENCE_MS: u64 = 3_600_000;
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1377,8 +1433,17 @@ pub mod control {
         /// dropped, not buffered. Post `ClearDivergences` to lift the window
         /// early.
         GoDark { ms: u64 },
+        /// Suppress only market-data frames (`Trade` / `Quote`) for `ms`,
+        /// leaving every execution frame alive. Bounded by
+        /// `MAX_DIVERGENCE_MS`. Frames produced during the window are dropped,
+        /// not buffered. Post `ClearDivergences` to lift the window early.
+        ///
+        /// Unlike `GoDark`, this keeps the socket healthy while only channel
+        /// data is withheld, especially when paired with the server
+        /// `Heartbeat`.
+        StallData { ms: u64 },
         /// Clear the server-owned temporal windows: cancel any armed
-        /// `DelayAcks` and any armed `GoDark`.
+        /// `DelayAcks`, any armed `GoDark`, and any armed `StallData`.
         ///
         /// This does not flush engine-side single-shot divergences
         /// (`PartialFillNext`, `RejectNextSubmit`, `DuplicateNextFill`,

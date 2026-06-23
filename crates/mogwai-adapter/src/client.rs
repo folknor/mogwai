@@ -883,6 +883,9 @@ async fn handle_market_message(
                 }
             }
         }
+        ServerMessage::Heartbeat { .. } => {
+            tracing::trace!("ignoring server heartbeat on data path");
+        }
         _ => {}
     }
 }
@@ -2393,6 +2396,9 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
         }
         ServerMessage::OrderFilled(fill) => handle_order_filled(fill, ctx),
         ServerMessage::AccountState(state) => handle_account_state(state, ctx),
+        ServerMessage::Heartbeat { .. } => {
+            tracing::trace!("ignoring server heartbeat on execution path");
+        }
         ServerMessage::Trade(_) | ServerMessage::Quote(_) => {}
     }
 }

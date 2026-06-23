@@ -15,9 +15,21 @@ those steps race and fail spuriously):
     brokkr run -p mogwai-server
 
 then run this script.
+
+The default run keeps the server heartbeat off, so every step reads exactly
+one frame per assertion without an interleaved Heartbeat. The StallData /
+heartbeat (4255) reproduction lives behind `--heartbeat`, which runs only the
+heartbeat step against a server started with server_heartbeat_ms enabled. The
+`--config` flag is consumed by the server binary, not cargo, so it must follow
+a `--` separator:
+
+    brokkr run -p mogwai-server -- --config scripts/smoke-heartbeat.toml
+
+then run `python3 scripts/smoke.py --heartbeat`.
 """
 import json
 import socket
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -70,6 +82,26 @@ def ws_roundtrip(send_obj: dict, expect: int) -> list:
     out = [ws.read() for _ in range(expect)]
     ws.close()
     return out
+
+
+def read_non_heartbeat(ws: "WsClient", timeout: float) -> dict:
+    """Drain interleaved Heartbeat frames and return the first real frame.
+
+    Heartbeats arrive on their own cadence (B4 uses tokio interval, first tick
+    fires immediately on connect), so a post-stall recovery read on the
+    heartbeat-enabled socket must skip them. A per-read socket timeout is
+    treated as "no frame yet, keep waiting" until the overall deadline.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        ws.s.settimeout(max(0.05, deadline - time.monotonic()))
+        try:
+            msg = ws.read()
+        except socket.timeout:
+            continue
+        if msg["type"] != "Heartbeat":
+            return msg
+    raise AssertionError("timed out waiting for non-heartbeat frame")
 
 
 def submit_order(client_order_id: str) -> dict:
@@ -181,7 +213,7 @@ def _recv_exact(s: socket.socket, n: int) -> bytes:
     return payload
 
 
-def main() -> None:
+def main_default() -> None:
     assert post_divergence(
         {"type": "PartialFillNext", "client_order_id": "O1", "fraction": "0.3"}
     ) == 202
@@ -440,6 +472,102 @@ def main() -> None:
         "PASS: ClearDivergences lifts a live dark/delay window "
         "and over-bound ms is rejected"
     )
+
+    assert post_divergence({"type": "StallData", "ms": 500}) == 202
+    ws = WsClient(timeout=0.25)
+    ws.send({"type": "Subscribe", "symbols": ["KEUR"], "start_ts": WINDOW_START_TS})
+    try:
+        stalled = ws.read()
+    except socket.timeout:
+        stalled = None
+    assert stalled is None, stalled
+
+    ws.s.settimeout(1.5)
+    ws.send(submit_order("STALL1"))
+    stall_exec = [ws.read() for _ in range(3)]
+    for msg in stall_exec:
+        print("stall-ex:", msg)
+    assert [msg["type"] for msg in stall_exec] == [
+        "OrderAccepted",
+        "OrderFilled",
+        "AccountState",
+    ], stall_exec
+
+    time.sleep(0.6)
+    ws.s.settimeout(3.0)
+    recovered = ws.read()
+    ws.close()
+    print("stall-rec:", recovered)
+    assert recovered["type"] == "Trade", recovered
+    assert recovered["symbol"] == "KEUR", recovered
+    assert recovered["ts_event"] >= WINDOW_START_TS, recovered
+
+    assert post_divergence({"type": "StallData", "ms": 3_600_001}) == 400
+
+    assert post_divergence({"type": "StallData", "ms": 60_000}) == 202
+    ws = WsClient(timeout=0.25)
+    ws.send({"type": "Subscribe", "symbols": ["KEUR"], "start_ts": WINDOW_START_TS})
+    try:
+        stalled = ws.read()
+    except socket.timeout:
+        stalled = None
+    assert stalled is None, stalled
+
+    assert post_divergence({"type": "ClearDivergences"}) == 202
+    ws.s.settimeout(3.0)
+    recovered = ws.read()
+    ws.close()
+    print("stall-cl:", recovered)
+    assert recovered["type"] == "Trade", recovered
+    assert recovered["symbol"] == "KEUR", recovered
+    assert recovered["ts_event"] >= WINDOW_START_TS, recovered
+    print("PASS: StallData drops market data while execution frames flow")
+
+
+def main_heartbeat() -> None:
+    assert post_divergence({"type": "ClearDivergences"}) == 202
+    assert post_divergence({"type": "StallData", "ms": 700}) == 202
+
+    ws = WsClient(timeout=0.12)
+    ws.send({"type": "Subscribe", "symbols": ["KEUR"], "start_ts": WINDOW_START_TS})
+    deadline = time.monotonic() + 0.55
+    heartbeats = 0
+    market_data = []
+    while time.monotonic() < deadline:
+        try:
+            msg = ws.read()
+        except socket.timeout:
+            continue
+        print("hb-stall:", msg)
+        if msg["type"] == "Heartbeat":
+            heartbeats += 1
+        elif msg["type"] in ("Trade", "Quote"):
+            market_data.append(msg)
+        else:
+            raise AssertionError(msg)
+
+    assert heartbeats > 0, "heartbeat-enabled server did not emit a heartbeat"
+    assert market_data == [], market_data
+
+    time.sleep(0.3)
+    recovered = read_non_heartbeat(ws, 3.0)
+    ws.close()
+    print("hb-rec:  ", recovered)
+    assert recovered["type"] == "Trade", recovered
+    assert recovered["symbol"] == "KEUR", recovered
+    assert recovered["ts_event"] >= WINDOW_START_TS, recovered
+    assert post_divergence({"type": "ClearDivergences"}) == 202
+    print("PASS: Heartbeat keeps the socket frame-active through StallData")
+
+
+def main() -> None:
+    args = sys.argv[1:]
+    if args == ["--heartbeat"]:
+        main_heartbeat()
+    elif not args:
+        main_default()
+    else:
+        raise SystemExit("usage: smoke.py [--heartbeat]")
 
 
 if __name__ == "__main__":

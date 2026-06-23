@@ -171,15 +171,20 @@ Owns the sockets, the clock, and replay pacing.
   inter-tick sleep cap are all pinned by `scripts/smoke.py`.
 - **Temporal divergences live in the outbound writer**, not the engine:
   `DelayAcks` holds each execution event (market data untouched); `GoDark` drops
-  everything for the blackout window. Both are armed over `/control/divergence`
-  via shared atomics.
+  everything for the blackout window; `StallData` drops only market-data frames
+  while execution frames continue to flow. They are armed over
+  `/control/divergence` via shared atomics. An opt-in server heartbeat can emit
+  liveness frames that survive `StallData`, so the socket remains frame-active
+  while channel data is withheld.
 - **Run config** comes from a `mogwai.toml` read at startup - overridable with
   `--config <path>`, built-in defaults when absent - carrying the replay `speed`
   multiplier (the built-in default is 1.0, which paces to real wall-clock gaps;
-  0.0 is an explicit unthrottled firehose) and the `gap_cap_ms` paced-sleep cap.
-  This replaced the former `MOGWAI_REPLAY_SPEED` / `MOGWAI_GAP_CAP_MS`
-  environment variables: run knobs belong in explicit input, not ambient
-  environment.
+  0.0 is an explicit unthrottled firehose), the `gap_cap_ms` paced-sleep cap,
+  and `server_heartbeat_ms` for optional server-originated liveness frames.
+  This is distinct from `ConnHavoc.heartbeat_interval_ms`, which configures
+  client pings in the adapter. The run config replaced the former
+  `MOGWAI_REPLAY_SPEED` / `MOGWAI_GAP_CAP_MS` environment variables: run knobs
+  belong in explicit input, not ambient environment.
 
 ## mogwai-adapter - the nautilus venue adapter
 
