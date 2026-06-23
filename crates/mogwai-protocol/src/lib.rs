@@ -14,6 +14,77 @@ pub type ClientOrderId = String;
 /// Venue-assigned order id (mogwai-assigned `VenueOrderId`).
 pub type VenueOrderId = String;
 
+/// Default per-request timeout in seconds for HTTP order entry. This is the
+/// value `ConnHavoc.request_timeout_secs == 0` documents as "keeps 30s"; the
+/// adapter hardcodes it in several places and should source it from here so the
+/// honest-transport default lives in exactly one spot.
+pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
+
+/// Saturating UNIX-nanoseconds clock reader: the single source of truth for
+/// "now" on the wire's `ts_event` axis, shared by the server (its `now_ns`) and
+/// the adapter (its `now_unix_nanos`, which wraps the result in `UnixNanos`).
+///
+/// A backward clock step (NTP correction, leap second) yields an `Err` from
+/// `duration_since`, which we saturate to `0` rather than panic on - the prior
+/// duplicated readers `.expect("clock before epoch")`ed and would kill their
+/// host task on any skew. The nanosecond count is a `u128`; we clamp it to
+/// `u64::MAX` rather than truncate with `as u64`, which would silently wrap
+/// past year 2554. `map_or` (not `map(...).unwrap_or(...)`) keeps clippy's
+/// `map_unwrap_or` lint quiet.
+#[must_use]
+pub fn now_unix_nanos() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+}
+
+/// Saturating `Decimal` -> `f64`: returns `0.0` when the conversion is `None`
+/// (the magnitude does not fit an `f64`). The data crate already carries a
+/// private reader with this exact contract; the adapter currently
+/// `.to_f64().expect(...)`s on the hot inbound fill/balance path, so a
+/// pathological wire `Decimal` panics the runtime instead of degrading. Hoisted
+/// here so both can converge on a non-panicking conversion.
+#[must_use]
+pub fn decimal_to_f64(d: Decimal) -> f64 {
+    use rust_decimal::prelude::ToPrimitive;
+    d.to_f64().unwrap_or(0.0)
+}
+
+/// Saturating `f64` -> `Decimal`: clamps to `Decimal::MAX` / `Decimal::MIN` for
+/// out-of-range finite inputs and maps any non-finite input (NaN, +/-inf) to
+/// `Decimal::ZERO`. Mirrors the data crate's private writer so the two can be
+/// unified, and gives the adapter a total conversion in place of a panicking one.
+#[must_use]
+pub fn decimal_from_f64(x: f64) -> Decimal {
+    use rust_decimal::prelude::FromPrimitive;
+    if !x.is_finite() {
+        return Decimal::ZERO;
+    }
+    Decimal::from_f64(x).unwrap_or(if x > 0.0 { Decimal::MAX } else { Decimal::MIN })
+}
+
+/// The canonical default instrument set the venue seeds when none is supplied.
+///
+/// Today this is the single BTCUSDT instrument the engine seeds inline in
+/// `Engine::new`; the server's price-grid scalars and the adapter test fixtures
+/// re-pin the same precisions/increments by hand. Sourcing all three from this
+/// one function ends the duplication that the engine's
+/// `btcusdt_uses_engine_price_grid` test exists only to police. The field values
+/// match the engine seed exactly: price precision 2, size precision 8, with
+/// `1e-2` / `1e-8` increments.
+#[must_use]
+pub fn default_instruments() -> Vec<InstrumentDef> {
+    vec![InstrumentDef {
+        symbol: "BTCUSDT".into(),
+        base: "BTC".into(),
+        quote: "USDT".into(),
+        price_precision: 2,
+        size_precision: 8,
+        price_increment: Decimal::new(1, 2),
+        size_increment: Decimal::new(1, 8),
+    }]
+}
+
 /// Selects which transport carries order entry and which carries live market
 /// data, so one mogwai-server can present itself as different venue archetypes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -195,6 +266,34 @@ pub fn validate_market_regime(regime: &MarketRegime) -> Result<(), &'static str>
                 Err("gap_frac must be in [-1.0, 1.0]")
             }
         }
+    }
+}
+
+/// API-boundary guard for an armed divergence, mirroring `validate_conn_havoc`
+/// and `validate_market_regime` in style and message convention.
+///
+/// The only constrained variant is `PartialFillNext`: its `fraction` must lie
+/// in the half-open `(0, 1]` - a fill must move some quantity (`> 0`) and cannot
+/// exceed the order (`<= 1`). All other variants carry no constrainable numeric
+/// field and are always valid.
+///
+/// The engine also applies a defensive runtime clamp (a `fraction > 1` becomes a
+/// full fill, a `fraction <= 0` becomes a full fill with a warning), but that is
+/// a last-line safety net; this validator is the authoritative guard that
+/// rejects the misconfiguration early, before it is armed.
+pub fn validate_divergence(div: &control::Divergence) -> Result<(), &'static str> {
+    match div {
+        control::Divergence::PartialFillNext { fraction, .. } => {
+            if *fraction <= Decimal::ZERO || *fraction > Decimal::ONE {
+                return Err("PartialFillNext fraction must be in (0, 1]");
+            }
+            Ok(())
+        }
+        control::Divergence::RejectNextSubmit { .. }
+        | control::Divergence::DelayAcks { .. }
+        | control::Divergence::DuplicateNextFill
+        | control::Divergence::DropNextAccountUpdate
+        | control::Divergence::GoDark { .. } => Ok(()),
     }
 }
 
@@ -687,6 +786,95 @@ mod tests {
                 ts_event: 789,
             } if client_order_id == "GHOST" && reason == "unknown order"
         ));
+    }
+
+    #[test]
+    fn now_unix_nanos_is_monotone_and_nonzero() {
+        let a = now_unix_nanos();
+        let b = now_unix_nanos();
+        // A real post-epoch wall clock is well past zero and never steps back
+        // across two adjacent reads in this test environment.
+        assert!(a > 0);
+        assert!(b >= a);
+    }
+
+    #[test]
+    fn decimal_f64_round_trips_and_saturates() {
+        // A representable value round-trips through both helpers.
+        let d = Decimal::new(12_345, 2);
+        assert!((decimal_to_f64(d) - 123.45).abs() < 1e-9);
+        assert_eq!(decimal_from_f64(123.45), d);
+
+        // Non-finite inputs collapse to zero rather than panicking.
+        assert_eq!(decimal_from_f64(f64::NAN), Decimal::ZERO);
+        assert_eq!(decimal_from_f64(f64::INFINITY), Decimal::ZERO);
+        assert_eq!(decimal_from_f64(f64::NEG_INFINITY), Decimal::ZERO);
+
+        // Magnitudes past Decimal's range saturate to the signed bound.
+        assert_eq!(decimal_from_f64(1e40), Decimal::MAX);
+        assert_eq!(decimal_from_f64(-1e40), Decimal::MIN);
+    }
+
+    #[test]
+    fn validate_divergence_bounds_partial_fill_fraction() {
+        // Legitimate fractions in (0, 1].
+        validate_divergence(&control::Divergence::PartialFillNext {
+            client_order_id: "O-1".into(),
+            fraction: Decimal::new(5, 1),
+        })
+        .expect("0.5 is in range");
+        validate_divergence(&control::Divergence::PartialFillNext {
+            client_order_id: "O-1".into(),
+            fraction: Decimal::ONE,
+        })
+        .expect("1.0 is the inclusive upper bound");
+
+        // Zero, negative, and >1 are rejected.
+        for bad in [Decimal::ZERO, Decimal::new(-1, 1), Decimal::new(11, 1)] {
+            assert_eq!(
+                validate_divergence(&control::Divergence::PartialFillNext {
+                    client_order_id: "O-1".into(),
+                    fraction: bad,
+                }),
+                Err("PartialFillNext fraction must be in (0, 1]")
+            );
+        }
+
+        // Every other variant is unconditionally valid.
+        for div in [
+            control::Divergence::RejectNextSubmit {
+                reason: "nope".into(),
+            },
+            control::Divergence::DelayAcks { ms: 5 },
+            control::Divergence::DuplicateNextFill,
+            control::Divergence::DropNextAccountUpdate,
+            control::Divergence::GoDark { ms: 25 },
+        ] {
+            validate_divergence(&div).expect("non-PartialFill variants are always valid");
+        }
+    }
+
+    #[test]
+    fn default_instruments_matches_engine_btcusdt_seed() {
+        let defs = default_instruments();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(
+            defs[0],
+            InstrumentDef {
+                symbol: "BTCUSDT".into(),
+                base: "BTC".into(),
+                quote: "USDT".into(),
+                price_precision: 2,
+                size_precision: 8,
+                price_increment: Decimal::new(1, 2),
+                size_increment: Decimal::new(1, 8),
+            }
+        );
+    }
+
+    #[test]
+    fn default_request_timeout_secs_is_thirty() {
+        assert_eq!(DEFAULT_REQUEST_TIMEOUT_SECS, 30);
     }
 }
 

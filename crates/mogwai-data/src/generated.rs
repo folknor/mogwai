@@ -46,6 +46,17 @@ const SIZE_LOG_SIGMA: f64 = 1.15;
 const SIZE_DECIMALS: u32 = 8;
 const MAX_ABS_RETURN: f64 = 0.000_02;
 const GARCH_SIGMA_CAP: f64 = 0.000_001;
+// Shared price/size axes both generator constructors pin identically. Hoisted to
+// module consts so from_fingerprint_medians and xbtusd_anchor cannot drift apart:
+// the start price the GARCH mid walks from, the lognormal size median, and the
+// per-tick volatility scalar feeding GarchVol's unconditional variance. The
+// per-pair fields that legitimately differ (modal_tick, price_decimals) stay in
+// the constructors.
+const START_PRICE_USD: i64 = 60_000;
+// 0.1 expressed as Decimal::new(mantissa, scale).
+const TYPICAL_SIZE_MANTISSA: i64 = 1;
+const TYPICAL_SIZE_SCALE: u32 = 1;
+const VOL_SCALAR: f64 = 0.000_000_05;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Fingerprint {
@@ -84,6 +95,17 @@ impl Fingerprint {
             assert!(
                 *share > 0.0,
                 "fingerprint session_profile.dow_weight[{d}] must be strictly positive, got {share}"
+            );
+        }
+        // vol_hour[h] is multiplied straight onto each formed return (vol_mult in
+        // next_latent_mid). A zero entry zeros that hour's realized returns; a
+        // negative entry flips price direction. Fail loud at load like the two
+        // session shares above, so a broken fingerprint is caught here, not in the
+        // hot path.
+        for (h, mult) in fingerprint.session_profile.vol_hour.iter().enumerate() {
+            assert!(
+                *mult > 0.0,
+                "fingerprint session_profile.vol_hour[{h}] must be strictly positive, got {mult}"
             );
         }
         fingerprint
@@ -220,9 +242,9 @@ impl GeneratorScalars {
             price_decimals: fp.scalar_ranges.price_decimals.median.round() as u32,
             mean_duration_s: fp.scalar_ranges.mean_duration_s.median,
             size_round_frac: fp.scalar_ranges.size_round_frac.median,
-            start_price: Decimal::from(60_000),
-            typical_size: Decimal::new(1, 1),
-            vol_scalar: 0.000_000_05,
+            start_price: Decimal::from(START_PRICE_USD),
+            typical_size: Decimal::new(TYPICAL_SIZE_MANTISSA, TYPICAL_SIZE_SCALE),
+            vol_scalar: VOL_SCALAR,
         }
     }
 
@@ -234,9 +256,9 @@ impl GeneratorScalars {
             price_decimals: 1,
             mean_duration_s: fp.scalar_ranges.mean_duration_s.median,
             size_round_frac: fp.scalar_ranges.size_round_frac.median,
-            start_price: Decimal::from(60_000),
-            typical_size: Decimal::new(1, 1),
-            vol_scalar: 0.000_000_05,
+            start_price: Decimal::from(START_PRICE_USD),
+            typical_size: Decimal::new(TYPICAL_SIZE_MANTISSA, TYPICAL_SIZE_SCALE),
+            vol_scalar: VOL_SCALAR,
         }
     }
 
@@ -260,7 +282,20 @@ impl GeneratorScalars {
             "size_round_frac",
             self.size_round_frac,
             &fp.scalar_ranges.size_round_frac,
-        )
+        )?;
+        // vol_hour is a per-mean RMS-return multiplier consumed directly in the
+        // hot path (next_latent_mid multiplies the formed return by vol_mult). A
+        // zero entry silently zeros that hour's realized returns; a negative entry
+        // inverts price direction with no other guard. Unlike the scalar fields
+        // there is no min/median/max band to range-check against, so enforce the
+        // structural invariant: every hour's multiplier must be strictly positive.
+        for mult in &fp.session_profile.vol_hour {
+            // Reject non-positive and NaN (NaN fails every ordered comparison).
+            if *mult <= 0.0 || mult.is_nan() {
+                return Err(ScalarError { field: "vol_hour" });
+            }
+        }
+        Ok(())
     }
 }
 

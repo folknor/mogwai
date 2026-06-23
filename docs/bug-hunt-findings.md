@@ -36,13 +36,31 @@ validated with `brokkr check`:
   `fraction > 1` clamps to full - defensive pending the protocol `validate_divergence`),
   plus the `abs(Decimal)` -> `Decimal::abs()` nit. Four regression tests added.
 
+**Fix wave 2 (landed)** - data-crate fixes plus the additive half of the cross-crate
+consolidations, validated with `brokkr check`:
+
+- protocol `lib.rs` (additive, callers adopt next wave): `now_unix_nanos()` (saturating
+  shared clock), saturating `decimal_to_f64`/`decimal_from_f64`, `validate_divergence`
+  (rejects `PartialFillNext.fraction` outside `(0, 1]`; signature `(&control::Divergence)
+  -> Result<(), &'static str>`), `DEFAULT_REQUEST_TIMEOUT_SECS`, and `default_instruments()`
+  (the canonical BTCUSDT seed). All unit-tested.
+- data `generated.rs`/`lib.rs`: C.1 (`vol_hour` positivity enforced in both `validate` and
+  `from_repo_json`), C.7 (`KrakenCsvSource` warns on a read error instead of silently
+  treating it as EOF), C.3 (the three shared generator literals hoisted to module consts).
+- engine `lib.rs`: consolidation #4 - deleted the duplicate `Instrument` struct and its
+  `From` impl; the engine now stores `InstrumentDef` directly. (`Engine::new` still seeds
+  BTCUSDT inline; sourcing it from `default_instruments()` is a later rewire.)
+
 **Held for the user (design decisions, not bugs to silently fix):** B.3 (what price a
 market order fills at), E.1/E.2/E.15 (`GoDark` per-session vs global, hold-vs-drop, and a
-clear/reset path), the `/quotes` stub (E.12 / G.bug9).
+clear/reset path), the `/quotes` stub (E.12 / G.bug9), and the `ServerMessage::category()`
+consolidation (item 3 - forces a decision on whether `AccountState` is an exec or data
+event, classified oppositely on the two ends today).
 
-**Planned next:** the cross-crate consolidations (validate_divergence, the
-`now`/`decimal`/`category` protocol helpers, deleting `engine::Instrument`), the data-crate
-fixes (C.1 `vol_hour`, C.7), and the test-suite hardening (F).
+**Planned next (caller rewiring + tests):** adapter and server adopt the new protocol
+helpers (`now_unix_nanos`, the saturating decimal conversion replacing the `to_f64().expect`
+panic sites, `validate_divergence` at the config/arming sites, `DEFAULT_REQUEST_TIMEOUT_SECS`,
+`default_instruments`), and the test-suite hardening (F).
 
 ---
 

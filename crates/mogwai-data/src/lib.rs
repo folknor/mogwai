@@ -199,7 +199,19 @@ impl TickSource for KrakenCsvSource {
         loop {
             self.buf.clear();
             match self.reader.read_line(&mut self.buf) {
-                Ok(0) | Err(_) => return None, // EOF or IO error ends the stream
+                Ok(0) => return None, // clean EOF ends the stream
+                Err(err) => {
+                    // A mid-file read error truncates the stream. The streaming
+                    // contract returns Option, so we still end with None - but no
+                    // longer silently: surface the error so a partial replay is
+                    // distinguishable from a complete one. No tracing dep in this
+                    // crate, so stderr is the visible channel.
+                    eprintln!(
+                        "KrakenCsvSource({}): read error, truncating stream: {err}",
+                        self.symbol
+                    );
+                    return None;
+                }
                 Ok(_) => {}
             }
             if let Some(t) = parse_kraken_line(&self.symbol, &self.buf) {

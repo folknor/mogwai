@@ -26,32 +26,6 @@ pub struct OpenOrder {
     pub leaves_qty: Decimal,
 }
 
-/// Static instrument definition used to split a symbol fill into balance legs.
-#[derive(Debug, Clone)]
-pub struct Instrument {
-    pub symbol: Symbol,
-    pub base: String,
-    pub quote: String,
-    pub price_precision: u8,
-    pub size_precision: u8,
-    pub price_increment: Decimal,
-    pub size_increment: Decimal,
-}
-
-impl From<&Instrument> for InstrumentDef {
-    fn from(instrument: &Instrument) -> Self {
-        Self {
-            symbol: instrument.symbol.clone(),
-            base: instrument.base.clone(),
-            quote: instrument.quote.clone(),
-            price_precision: instrument.price_precision,
-            size_precision: instrument.size_precision,
-            price_increment: instrument.price_increment,
-            size_increment: instrument.size_increment,
-        }
-    }
-}
-
 #[derive(Debug, Default)]
 struct Account {
     balances: HashMap<String, Decimal>,
@@ -75,7 +49,11 @@ struct Warned {
 pub struct Engine {
     open: Vec<OpenOrder>,
     account: Account,
-    instruments: HashMap<Symbol, Instrument>,
+    /// `InstrumentDef` (from `mogwai-protocol`) is used directly as the engine's
+    /// instrument representation - it carries exactly the base/quote and
+    /// precision/increment fields the fill and reservation path needs, so the
+    /// engine keeps no parallel struct that could drift from the wire type.
+    instruments: HashMap<Symbol, InstrumentDef>,
     /// Armed divergences, consumed as their trigger fires.
     armed: VecDeque<Divergence>,
     seq: u64,
@@ -92,7 +70,10 @@ impl Engine {
         reason = "new() seeds the instrument table; a Default impl would diverge or be dead surface"
     )]
     pub fn new() -> Self {
-        Self::with_instruments(vec![Instrument {
+        // Inline BTCUSDT literal for now; a later wave will source this from
+        // `mogwai_protocol::default_instruments()`. Do not depend on that
+        // function yet - it does not exist.
+        Self::with_instruments(vec![InstrumentDef {
             symbol: "BTCUSDT".into(),
             base: "BTC".into(),
             quote: "USDT".into(),
@@ -103,7 +84,7 @@ impl Engine {
         }])
     }
 
-    pub fn with_instruments(instruments: Vec<Instrument>) -> Self {
+    pub fn with_instruments(instruments: Vec<InstrumentDef>) -> Self {
         let instruments = instruments
             .into_iter()
             .map(|instrument| (instrument.symbol.clone(), instrument))
@@ -120,7 +101,7 @@ impl Engine {
     }
 
     pub fn instrument_defs(&self) -> Vec<InstrumentDef> {
-        let mut defs: Vec<_> = self.instruments.values().map(InstrumentDef::from).collect();
+        let mut defs: Vec<_> = self.instruments.values().cloned().collect();
         defs.sort_by(|a, b| a.symbol.cmp(&b.symbol));
         defs
     }
