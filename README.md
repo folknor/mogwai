@@ -1,0 +1,73 @@
+# mogwai
+
+A fake broker/exchange that plugs into broadarrow to exercise the *live*
+trading path. It synthesizes market data from a committed fingerprint fitted
+offline to Kraken trade history (the running server opens no CSV) and injects
+the messy, realistic execution divergences - partial fills, rejects, ack
+delays, duplicate fills, dropped account updates, venue blackouts, silent data
+stalls - that an in-process backtest sandbox structurally cannot produce.
+
+A Cargo workspace of five crates under `crates/`:
+
+- `mogwai-protocol` - the JSON-over-WS wire types and the divergence catalog.
+- `mogwai-engine` - the venue-agnostic exchange core and divergence seam.
+- `mogwai-data` - the synthetic generator and the k-way tick merge.
+- `mogwai-server` - the axum binary owning sockets, clock and replay pacing.
+- `mogwai-adapter` - the nautilus venue adapter broadarrow registers for the
+  `MOGWAI` venue; the only crate that imports nautilus.
+
+## Building
+
+The four broker crates build nautilus-free. `mogwai-adapter` path-depends a
+sibling `nautilus_trader` checkout (default-features off, no pyo3), so a full
+build needs that checkout present next to this repo:
+
+```
+../nautilus_trader   # required to build mogwai-adapter
+```
+
+Use `brokkr` (not raw `cargo`) for check/test/run:
+
+```sh
+brokkr check                 # gremlins + clippy + tests, changed-files scope
+brokkr run -p mogwai-server  # start the gateway on 127.0.0.1:8787
+```
+
+To put a `mogwai-server` binary on your `PATH` instead, install it from the
+crate path - it is never published to crates.io, so the `--path` form is the
+only one that resolves:
+
+```sh
+cargo install --path crates/mogwai-server
+```
+
+This build graph excludes `mogwai-adapter`, so it needs no `../nautilus_trader`
+sibling, and the fingerprint is embedded at compile time - the binary is
+self-contained. It still reads `mogwai.toml` from its working directory (or
+`--config <path>`), so an installed server needs a config alongside wherever you
+run it; see [`reference/cli.md`](reference/cli.md).
+
+## Smoke test
+
+With a server running (`brokkr run -p mogwai-server`, which paces correctly at
+the default `speed = 1.0`):
+
+```sh
+python3 scripts/smoke.py
+```
+
+It arms divergences over the control plane and submits orders over the native
+WS gateway, asserting the resulting execution events. Stdlib only - nothing to
+install.
+
+## Documentation
+
+- [`reference/architecture.md`](reference/architecture.md) - how the system
+  works, subsystem by subsystem, including the HTTP/WS routes.
+- [`reference/havoc.md`](reference/havoc.md) - the havoc model: every divergence
+  variant, the four havoc surfaces, and the validation boundaries.
+- [`reference/config.md`](reference/config.md) - the `mogwai.toml` run knobs.
+- [`reference/cli.md`](reference/cli.md) - the `mogwai-server` command line.
+
+Codebase conventions and build rules live in `AGENTS.md`. The transient TODO is
+`docs/todo.md`; the offline fingerprint-fitting pipeline is `analysis/`.

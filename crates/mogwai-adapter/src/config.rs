@@ -2,7 +2,7 @@ use std::any::Any;
 
 use anyhow::ensure;
 use mogwai_protocol::{
-    ClientHavoc, HavocSpec, TransportProfile, validate_conn_havoc, validate_divergence,
+    HavocSpec, TransportProfile, validate_client_havoc, validate_conn_havoc, validate_divergence,
     validate_market_regime,
 };
 use nautilus_common::factories::ClientConfig;
@@ -221,7 +221,7 @@ fn http_base_url(base_url: &str) -> String {
 /// rejected at config time rather than detonating later on the live path.
 fn validate_havoc(havoc: &Option<HavocSpec>) -> anyhow::Result<()> {
     if let Some(havoc) = havoc {
-        validate_client_havoc(&havoc.client)?;
+        validate_client_havoc(&havoc.client).map_err(anyhow::Error::msg)?;
         validate_conn_havoc(&havoc.conn).map_err(anyhow::Error::msg)?;
         if let Some(regime) = &havoc.data {
             validate_market_regime(regime).map_err(anyhow::Error::msg)?;
@@ -231,26 +231,6 @@ fn validate_havoc(havoc: &Option<HavocSpec>) -> anyhow::Result<()> {
         }
     }
     Ok(())
-}
-
-fn validate_client_havoc(client: &ClientHavoc) -> anyhow::Result<()> {
-    ensure!(
-        valid_probability(client.drop_prob),
-        "havoc drop_prob must be in [0.0, 1.0]"
-    );
-    ensure!(
-        valid_probability(client.duplicate_prob),
-        "havoc duplicate_prob must be in [0.0, 1.0]"
-    );
-    ensure!(
-        valid_probability(client.reorder_prob),
-        "havoc reorder_prob must be in [0.0, 1.0]"
-    );
-    Ok(())
-}
-
-fn valid_probability(value: f64) -> bool {
-    (0.0..=1.0).contains(&value)
 }
 
 #[cfg(test)]

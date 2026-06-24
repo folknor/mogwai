@@ -40,7 +40,9 @@ never imports nautilus.
   adapter's transport archetype.
 - `HavocSpec` / `ClientHavoc` / `HavocLatency` / `EventKind` are the havoc config
   (see the havoc model below); `HavocLatency::delay_for` mirrors nautilus's
-  `StaticLatencyModel` base-plus-op composition.
+  `StaticLatencyModel` base-plus-op composition, and the client knobs (drop /
+  duplicate / reorder probabilities and the latency fields, capped at
+  `MAX_LATENCY_NANOS`) are range-checked by the free `validate_client_havoc`.
 - `MarketRegime` is the data-path havoc surface (`HavocSpec.data`): a generator
   perturbation carried per subscription on `Subscribe` and per request on
   `GET /trades`, range-checked by the free `validate_market_regime` (see the
@@ -176,15 +178,13 @@ Owns the sockets, the clock, and replay pacing.
   `/control/divergence` via shared atomics. An opt-in server heartbeat can emit
   liveness frames that survive `StallData`, so the socket remains frame-active
   while channel data is withheld.
-- **Run config** comes from a `mogwai.toml` read at startup - overridable with
-  `--config <path>`, built-in defaults when absent - carrying the replay `speed`
-  multiplier (the built-in default is 1.0, which paces to real wall-clock gaps;
-  0.0 is an explicit unthrottled firehose), the `gap_cap_ms` paced-sleep cap,
-  and `server_heartbeat_ms` for optional server-originated liveness frames.
-  This is distinct from `ConnHavoc.heartbeat_interval_ms`, which configures
-  client pings in the adapter. The run config replaced the former
-  `MOGWAI_REPLAY_SPEED` / `MOGWAI_GAP_CAP_MS` environment variables: run knobs
-  belong in explicit input, not ambient environment.
+- **Run config** comes from a `mogwai.toml` read at startup (replay `speed`,
+  the `gap_cap_ms` paced-sleep cap, and `server_heartbeat_ms` for optional
+  server-originated liveness frames), carried in explicit input rather than the
+  former `MOGWAI_REPLAY_SPEED` / `MOGWAI_GAP_CAP_MS` ambient environment. The
+  server heartbeat is distinct from `ConnHavoc.heartbeat_interval_ms`, which
+  configures client pings in the adapter. See `reference/config.md` for the
+  knobs and `reference/cli.md` for the binary's command-line surface.
 
 ## mogwai-adapter - the nautilus venue adapter
 

@@ -93,7 +93,10 @@ regardless of transport profile. Knobs:
   category, mirroring nautilus's `StaticLatencyModel` base-plus-op composition.
   The filter computes the effective delay as `BASELINE_LATENCY.delay_for(cat) +
   armed.delay_for(cat)`, so the armed delay always rides on top of the 30 ms
-  floor.
+  floor. Each of the four fields is bounded to `[0, MAX_LATENCY_NANOS]` (60 s)
+  by `validate_client_havoc`, so an armed latency stays in the
+  pathological-but-plausible network band rather than wedging the stream with a
+  multi-century delay.
 - `drop_prob`, `duplicate_prob`, `reorder_prob` - per-event probabilities in
   `[0.0, 1.0]` (range-checked by `validate_client_havoc`). Drop discards an
   inbound event; duplicate emits it twice; reorder holds one event back and
@@ -354,11 +357,30 @@ The regime is venue-wide, not per-symbol.
 
 ## Validation boundaries
 
-Three free validators in `mogwai-protocol` gate the havoc surfaces. The adapter
-runs all of them at config-`validate` time (via `validate_havoc`), and the
-server re-runs the relevant two on its ingress paths. They share a finite-range
-idiom (`finite_in` for inclusive `[lo, hi]`, `finite_in_excl_lo` for half-open
-`(lo, hi]`) so a `NaN`/inf input can never slip a forgotten finiteness check.
+Four free validators in `mogwai-protocol` gate the havoc surfaces, one per
+field of `HavocSpec`. The adapter runs all of them at config-`validate` time
+(via `validate_havoc`), and the server re-runs the relevant two
+(`validate_market_regime` and `validate_divergence`) on its ingress paths. They
+share a finite-range idiom (`finite_in` for inclusive `[lo, hi]`,
+`finite_in_excl_lo` for half-open `(lo, hi]`) so a `NaN`/inf input can never slip
+a forgotten finiteness check.
+
+### `validate_client_havoc`
+
+Run by the adapter on `HavocSpec.client`; the client surface is adapter-applied
+only, so the server never sees these knobs.
+
+- `drop_prob`, `duplicate_prob`, and `reorder_prob` must each be finite in
+  `[0.0, 1.0]` - a probability outside the unit interval (or a `NaN`/inf) is
+  meaningless.
+- The four `HavocLatency` delay fields (`base_nanos`, `exec_event_nanos`,
+  `fill_nanos`, `data_nanos`) must each be in `[0, MAX_LATENCY_NANOS]` (60 s).
+  The ceiling keeps an armed latency inside the plausible-network band - the
+  honest baseline is 30 ms, a badly degraded link reaches seconds, and a frame a
+  full minute late already reads as a dead connection - and stays well below the
+  one-hour `MAX_DIVERGENCE_MS` window cap, since an in-flight per-event delay
+  belongs below a total blackout.
+- `seed` (`Option<u64>`) carries no range.
 
 ### `validate_divergence`
 
@@ -369,8 +391,10 @@ rejected with a `400` rather than surfacing as a degenerate fill downstream.
 - `PartialFillNext.fraction` must be in `(0, 1]` - a fill must move some quantity
   and cannot exceed the order. (The engine's runtime clamp is a last-line net
   below this gate, not a substitute for it.)
-- `DelayAcks.ms`, `GoDark.ms`, `StallData.ms` must be `<= MAX_DIVERGENCE_MS`
-  (one hour); `0` is the valid disarm value.
+- `DelayAcks.ms`, `GoDark.ms`, `StallData.ms` must be in
+  `[0, MAX_DIVERGENCE_MS]` (`0` is the valid disarm value, `MAX_DIVERGENCE_MS`
+  is one hour), so a control-plane request cannot arm an effectively permanent
+  window.
 - `RejectNextSubmit`, `DuplicateNextFill`, `DropNextAccountUpdate`,
   `ClearDivergences` are otherwise unconstrained.
 
@@ -389,7 +413,8 @@ and `/trades` regime inputs.
   `extra_vol_mult` must be finite in `[0.0, 100.0]`.
 - `ReopenGap` - `at_ts` must be `> 0` (the epoch is a halt that has already
   passed before the first forward-replay tick, so it would arm a silently inert
-  divergence), `halt_secs <= 86_400` (one day), and `gap_frac` finite in
+  divergence; there is no upper bound - it is a forward-replay instant),
+  `halt_secs` in `[0, 86_400]` (up to one day), and `gap_frac` finite in
   `[-1.0, 1.0]`.
 
 ### `validate_conn_havoc`

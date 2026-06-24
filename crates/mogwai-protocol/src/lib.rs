@@ -409,6 +409,20 @@ pub const BASELINE_LATENCY: HavocLatency = HavocLatency {
     data_nanos: 0,
 };
 
+/// Upper bound on any single `HavocLatency` field, in nanoseconds: 60 seconds.
+///
+/// The four delay fields are otherwise raw `u64` nanos, so without a ceiling an
+/// armed value up to `u64::MAX` (~584 years) would compose into `delay_for` and
+/// effectively wedge the stream. mogwai's job is to mimic a real network in
+/// trouble, not an impossible one: the honest baseline is 30 ms, a badly
+/// degraded link (hung proxy, congestion, a retransmit storm) stretches a frame
+/// to seconds or low tens of seconds, and a frame arriving a full minute late
+/// already reads as a dead connection downstream. 60 s spans that whole
+/// pathological-but-plausible band while rejecting fat-fingered or hostile
+/// values, and sits well under the one-hour `control::MAX_DIVERGENCE_MS` window
+/// cap - an in-flight per-event delay belongs far below a total blackout.
+pub const MAX_LATENCY_NANOS: u64 = 60_000_000_000;
+
 impl HavocLatency {
     /// Effective delay for an inbound event, composing base into the category.
     #[must_use]
@@ -420,6 +434,37 @@ impl HavocLatency {
         };
         std::time::Duration::from_nanos(self.base_nanos.saturating_add(extra))
     }
+}
+
+/// API-boundary guard for the client-side transport havoc knobs, mirroring
+/// `validate_conn_havoc` / `validate_market_regime` / `validate_divergence` in
+/// style and message convention. The adapter runs it at config-`validate` time
+/// (via `validate_havoc`) so an out-of-range knob never constructs a client.
+///
+/// `drop_prob`, `duplicate_prob`, and `reorder_prob` must each be a finite
+/// probability in `[0.0, 1.0]`. The four `HavocLatency` delay fields must each
+/// be `<= MAX_LATENCY_NANOS` (60 s), so an armed latency stays within the
+/// pathological-but-plausible network band instead of wedging the stream with a
+/// multi-century delay.
+pub fn validate_client_havoc(client: &ClientHavoc) -> Result<(), &'static str> {
+    if !finite_in(client.drop_prob, 0.0, 1.0) {
+        return Err("drop_prob must be in [0.0, 1.0]");
+    }
+    if !finite_in(client.duplicate_prob, 0.0, 1.0) {
+        return Err("duplicate_prob must be in [0.0, 1.0]");
+    }
+    if !finite_in(client.reorder_prob, 0.0, 1.0) {
+        return Err("reorder_prob must be in [0.0, 1.0]");
+    }
+    if let Some(latency) = client.latency
+        && (latency.base_nanos > MAX_LATENCY_NANOS
+            || latency.exec_event_nanos > MAX_LATENCY_NANOS
+            || latency.fill_nanos > MAX_LATENCY_NANOS
+            || latency.data_nanos > MAX_LATENCY_NANOS)
+    {
+        return Err("HavocLatency fields must each be <= MAX_LATENCY_NANOS (60s)");
+    }
+    Ok(())
 }
 
 /// Inbound-event categories the client-side latency knob distinguishes.
@@ -1200,6 +1245,78 @@ mod tests {
             control::Divergence::ClearDivergences,
         ] {
             validate_divergence(&div).expect("non-numeric variants are always valid");
+        }
+    }
+
+    #[test]
+    fn validate_client_havoc_bounds_probabilities_and_latency() {
+        // A clean default and a fully-armed-but-in-range spec both pass.
+        validate_client_havoc(&ClientHavoc::default()).expect("default is clean");
+        validate_client_havoc(&ClientHavoc {
+            latency: Some(HavocLatency {
+                base_nanos: MAX_LATENCY_NANOS,
+                exec_event_nanos: MAX_LATENCY_NANOS,
+                fill_nanos: MAX_LATENCY_NANOS,
+                data_nanos: MAX_LATENCY_NANOS,
+            }),
+            drop_prob: 1.0,
+            duplicate_prob: 0.0,
+            reorder_prob: 0.5,
+            seed: Some(7),
+        })
+        .expect("max latency and boundary probabilities are valid");
+
+        // Each probability is rejected out of [0.0, 1.0], including non-finite.
+        for bad in [1.0001, -0.0001, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                validate_client_havoc(&ClientHavoc {
+                    drop_prob: bad,
+                    ..ClientHavoc::default()
+                }),
+                Err("drop_prob must be in [0.0, 1.0]")
+            );
+            assert_eq!(
+                validate_client_havoc(&ClientHavoc {
+                    duplicate_prob: bad,
+                    ..ClientHavoc::default()
+                }),
+                Err("duplicate_prob must be in [0.0, 1.0]")
+            );
+            assert_eq!(
+                validate_client_havoc(&ClientHavoc {
+                    reorder_prob: bad,
+                    ..ClientHavoc::default()
+                }),
+                Err("reorder_prob must be in [0.0, 1.0]")
+            );
+        }
+
+        // Any single latency field over the ceiling is rejected.
+        for latency in [
+            HavocLatency {
+                base_nanos: MAX_LATENCY_NANOS + 1,
+                ..HavocLatency::default()
+            },
+            HavocLatency {
+                exec_event_nanos: MAX_LATENCY_NANOS + 1,
+                ..HavocLatency::default()
+            },
+            HavocLatency {
+                fill_nanos: MAX_LATENCY_NANOS + 1,
+                ..HavocLatency::default()
+            },
+            HavocLatency {
+                data_nanos: MAX_LATENCY_NANOS + 1,
+                ..HavocLatency::default()
+            },
+        ] {
+            assert_eq!(
+                validate_client_havoc(&ClientHavoc {
+                    latency: Some(latency),
+                    ..ClientHavoc::default()
+                }),
+                Err("HavocLatency fields must each be <= MAX_LATENCY_NANOS (60s)")
+            );
         }
     }
 
