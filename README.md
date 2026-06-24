@@ -69,5 +69,9 @@ install.
 - [`reference/config.md`](reference/config.md) - the `mogwai.toml` run knobs.
 - [`reference/cli.md`](reference/cli.md) - the `mogwai` command line.
 
+These four are bundled into the binary: `mogwai man <topic>` (`cli`, `config`,
+`architecture`, `havoc`) renders them in the terminal, and `mogwai man` lists
+them.
+
 Codebase conventions and build rules live in `AGENTS.md`. The transient TODO is
 `docs/todo.md`; the offline fingerprint-fitting pipeline is `analysis/`.

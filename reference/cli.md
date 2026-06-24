@@ -33,9 +33,28 @@ brokkr run -p mogwai-server -- --config scripts/smoke-heartbeat.toml
 | `--config` | path | `mogwai.toml` in the working directory | Load the run config from this TOML file. A missing file falls back to built-in defaults; a malformed file is a hard error. See `reference/config.md`. |
 | `--version`, `-V` | none | - | Print `mogwai <semver> (<git-hash> <build-time> UTC)` and exit. The hash carries a `-dirty` suffix when the tree had uncommitted changes at build time, and is `unknown` when built outside a checkout. Stamped at compile time by the crate's `build.rs`. |
 
-There is no `--help` and no subcommands; apart from `--config` and
-`--version`/`-V`, the flag parser ignores anything it does not recognize. Run
-knobs live in the config file by design, not in flags or environment variables.
+There is no `--help`; apart from the `man` subcommand below and the `--config`
+and `--version`/`-V` flags, the parser ignores anything it does not recognize.
+Run knobs live in the config file by design, not in flags or environment
+variables.
+
+## Subcommands
+
+### `man [TOPIC]`
+
+Render the bundled reference docs to the terminal. The `reference/*.md` contracts
+are compiled into the binary with `include_str!`, so an installed `mogwai`
+carries its own reference with nothing to ship alongside; `man` recognised as the
+first argument short-circuits server startup.
+
+- `mogwai man` lists the available topics.
+- `mogwai man <topic>` renders one as styled markdown. Topics: `cli`, `config`,
+  `architecture`, `havoc` (the user-facing reference docs; the `orchestrate` and
+  `technical-implementation-spec` process docs are deliberately not bundled).
+- An unknown topic prints the topic list to stderr and exits non-zero.
+
+Colour is auto-disabled when stdout is not a TTY or `NO_COLOR` is set, and a
+closed downstream pipe (`mogwai man havoc | less`, quit early) is a clean exit.
 
 ## Environment
 

@@ -6,6 +6,7 @@
 //! [`mogwai_engine`]; market data is synthesized from the committed fingerprint
 //! by [`mogwai_data`]; this binary owns sockets, the clock and replay pacing.
 
+mod man;
 mod source;
 
 use std::{
@@ -148,6 +149,7 @@ fn print_version_and_exit_if_requested() {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     print_version_and_exit_if_requested();
+    man::run_if_requested();
 
     // RUST_LOG is the one deliberate exception to the no-ambient-environment
     // rule that governs run knobs (those live in mogwai.toml): log level is the

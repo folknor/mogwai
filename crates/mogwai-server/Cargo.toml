@@ -28,5 +28,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 
+# `mogwai man` renders the bundled reference/*.md docs to the terminal.
+owo-colors = "4"
+pulldown-cmark = "0.13"
+
 [lints]
 workspace = true
