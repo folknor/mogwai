@@ -33,9 +33,9 @@ brokkr check                 # gremlins + clippy + tests, changed-files scope
 brokkr run -p mogwai-server  # start the gateway on 127.0.0.1:8787
 ```
 
-To put a `mogwai-server` binary on your `PATH` instead, install it from the
-crate path - it is never published to crates.io, so the `--path` form is the
-only one that resolves:
+To put a `mogwai` binary on your `PATH` instead, install it from the crate path
+- it is never published to crates.io, so the `--path` form is the only one that
+resolves (the package is `mogwai-server`; the binary it installs is `mogwai`):
 
 ```sh
 cargo install --path crates/mogwai-server
@@ -67,7 +67,7 @@ install.
 - [`reference/havoc.md`](reference/havoc.md) - the havoc model: every divergence
   variant, the four havoc surfaces, and the validation boundaries.
 - [`reference/config.md`](reference/config.md) - the `mogwai.toml` run knobs.
-- [`reference/cli.md`](reference/cli.md) - the `mogwai-server` command line.
+- [`reference/cli.md`](reference/cli.md) - the `mogwai` command line.
 
 Codebase conventions and build rules live in `AGENTS.md`. The transient TODO is
 `docs/todo.md`; the offline fingerprint-fitting pipeline is `analysis/`.

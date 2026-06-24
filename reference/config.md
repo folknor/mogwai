@@ -1,6 +1,6 @@
-# mogwai-server run config
+# mogwai run config
 
-The `mogwai-server` binary takes its run knobs from a TOML file, not from the
+The `mogwai` binary takes its run knobs from a TOML file, not from the
 ambient environment. This is the reference for that file; see `reference/cli.md`
 for how the binary finds it (`--config <path>`, default `mogwai.toml` in the
 working directory) and the rest of the command-line surface.

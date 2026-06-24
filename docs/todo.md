@@ -105,13 +105,18 @@ copy:
   bar-aggregation windows tick at 1x even if the time-read axis were scaled.
 
 So coherent acceleration is NOT a mogwai+adapter-only change - it needs a
-nautilus seam (a scalable "accelerated live" `Clock` whose time source AND timers
-scale, plus a kernel/builder injection point or a new `Environment` variant),
-after which broadarrow constructs its node in that mode. The user is filing the
-request upstream with nautilus. This item is parked until that lands; no mogwai
-spec or code until the nautilus seam exists.
+nautilus seam. The single upstream ask narrowed to just a *clock-injection
+point*: the `Clock` trait already owns timer creation AND firing (`LiveTimer`
+pushes `TimeEvent`s into a `TimeEventSender` the runner only drains in its
+`select!` loop, with no wall-clock assumption), so the accelerated `Clock` is
+ours to implement - nautilus only needs to let a live/sandbox node construct on
+a caller-supplied clock factory instead of hardwiring `LiveClock::default()` at
+`kernel.rs initialize_clock` and `trader.rs create_component_clock`. Filed
+upstream as nautechsystems/nautilus_trader#4304. This item is parked until that
+lands; no mogwai spec or code until the nautilus seam exists.
 
-- [ ] Upstream: nautilus accepts a non-wall `Clock` for a live node (user-filed).
+- [ ] Upstream: nautilus accepts a non-wall `Clock` for a live node - filed as
+      nautechsystems/nautilus_trader#4304.
 - [ ] Then write the spec per `reference/technical-implementation-spec.md`
       before any mogwai/adapter code (this item is the TODO source it cites).
 

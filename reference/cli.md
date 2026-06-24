@@ -1,17 +1,23 @@
-# mogwai-server command line
+# mogwai command line
 
-The workspace ships one binary, `mogwai-server` (the axum gateway). The other
-crates are libraries: `mogwai-protocol`, `mogwai-engine` and `mogwai-data` are
-broker internals, and `mogwai-adapter` is the nautilus venue adapter broadarrow
-loads in-process - none has a `main`. This document is the command-line surface
-of the server binary; `reference/config.md` covers the TOML file it loads, and
-`reference/architecture.md` covers the HTTP/WS routes it serves.
+The workspace ships one binary, **`mogwai`** (the axum gateway, built from the
+`mogwai-server` crate - the binary is named `mogwai`, the package
+`mogwai-server`). The other crates are libraries: `mogwai-protocol`,
+`mogwai-engine` and `mogwai-data` are broker internals, and `mogwai-adapter` is
+the nautilus venue adapter broadarrow loads in-process - none has a `main`. This
+document is the command-line surface of the server binary; `reference/config.md`
+covers the TOML file it loads, and `reference/architecture.md` covers the
+HTTP/WS routes it serves.
 
 ## Running
 
 ```sh
 brokkr run -p mogwai-server
 ```
+
+`-p mogwai-server` is the package (cargo scopes by package name); the binary it
+runs is `mogwai`. An installed build (`cargo install --path crates/mogwai-server`)
+is invoked directly as `mogwai`.
 
 `brokkr run` is a thin wrapper over `cargo run`; arguments after a `--`
 separator are forwarded to the binary, not to cargo:
@@ -25,10 +31,11 @@ brokkr run -p mogwai-server -- --config scripts/smoke-heartbeat.toml
 | Flag | Argument | Default | Effect |
 | --- | --- | --- | --- |
 | `--config` | path | `mogwai.toml` in the working directory | Load the run config from this TOML file. A missing file falls back to built-in defaults; a malformed file is a hard error. See `reference/config.md`. |
+| `--version`, `-V` | none | - | Print `mogwai <semver> (<git-hash> <build-time> UTC)` and exit. The hash carries a `-dirty` suffix when the tree had uncommitted changes at build time, and is `unknown` when built outside a checkout. Stamped at compile time by the crate's `build.rs`. |
 
-There is no `--help`, no subcommands, and the flag parser ignores anything it
-does not recognize. Run knobs live in the config file by design, not in flags or
-environment variables.
+There is no `--help` and no subcommands; apart from `--config` and
+`--version`/`-V`, the flag parser ignores anything it does not recognize. Run
+knobs live in the config file by design, not in flags or environment variables.
 
 ## Environment
 

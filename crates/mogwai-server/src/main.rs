@@ -126,8 +126,29 @@ fn window_until_ns(now: u64, ms: u64) -> u64 {
     now.saturating_add(ms.saturating_mul(1_000_000))
 }
 
+/// Version banner: semver plus the short git hash (with a `-dirty` suffix for an
+/// unclean tree) and the UTC build time, stamped at compile time by `build.rs`.
+/// e.g. `0.1.0 (abc123def 2026-06-24 12:34:56 UTC)`.
+const LONG_VERSION: &str = env!("MOGWAI_LONG_VERSION");
+
+/// Print `mogwai <version>` and exit if `--version` / `-V` was passed, before
+/// any startup work. The binary is named `mogwai`, so the banner leads with that
+/// rather than the package name. Handled in the same hand-rolled scan as
+/// `--config`, so the server stays clap-free.
+fn print_version_and_exit_if_requested() {
+    if std::env::args()
+        .skip(1)
+        .any(|arg| arg == "--version" || arg == "-V")
+    {
+        println!("mogwai {LONG_VERSION}");
+        std::process::exit(0);
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    print_version_and_exit_if_requested();
+
     // RUST_LOG is the one deliberate exception to the no-ambient-environment
     // rule that governs run knobs (those live in mogwai.toml): log level is the
     // universally-expected env var and is not a run knob. Falls back to
