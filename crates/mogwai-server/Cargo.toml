@@ -17,6 +17,7 @@ mogwai-protocol.workspace = true
 mogwai-engine.workspace = true
 mogwai-data.workspace = true
 
+clap = { version = "4", features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true

@@ -4,39 +4,59 @@
 //! `include_str!` and rendered to the terminal through the markdown->ANSI
 //! renderer in `render`. With no topic, list what is available; with a topic,
 //! render it (colour auto-disabled when stdout is not a TTY or `NO_COLOR` is
-//! set). Detected as the first CLI argument so the server stays clap-free,
-//! alongside the hand-rolled `--config` / `--version` handling in `main`.
+//! set). The topic is a clap `ValueEnum`, so an unknown topic is rejected by the
+//! argument parser before `run` is reached.
 
 mod render;
 
 use std::io::{IsTerminal, Write};
 
-/// The reference topics, in listing order: the name as typed on the command
-/// line plus the one-line summary shown by a bare `mogwai man`. Each name must
-/// have an arm in `content`. The user-facing reference docs only - the process
-/// docs (`orchestrate`, `technical-implementation-spec`) are deliberately out.
-const TOPICS: &[(&str, &str)] = &[
-    ("cli", "the mogwai command line"),
-    ("config", "the mogwai.toml run knobs"),
-    (
-        "architecture",
-        "how the system works, subsystem by subsystem",
-    ),
-    (
-        "havoc",
-        "the havoc model: every divergence and the four surfaces",
-    ),
-];
+use clap::ValueEnum;
 
-/// The bundled markdown for a topic, compiled into the binary, or `None` for an
-/// unknown topic name. Each topic maps to one `reference/*.md`.
-fn content(topic: &str) -> Option<&'static str> {
+/// The bundled reference topics. The user-facing reference docs only - the
+/// process docs (`orchestrate`, `technical-implementation-spec`) are
+/// deliberately not bundled. Each variant must have an arm in `content`.
+#[derive(Clone, Copy, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub(crate) enum ManTopic {
+    /// The mogwai command line (reference/cli.md).
+    Cli,
+    /// The mogwai.toml run knobs (reference/config.md).
+    Config,
+    /// How the system works, subsystem by subsystem (reference/architecture.md).
+    Architecture,
+    /// The havoc model: divergences and the four surfaces (reference/havoc.md).
+    Havoc,
+}
+
+/// The kebab-case topic name as typed on the command line.
+fn name(topic: ManTopic) -> &'static str {
     match topic {
-        "cli" => Some(include_str!("../../../reference/cli.md")),
-        "config" => Some(include_str!("../../../reference/config.md")),
-        "architecture" => Some(include_str!("../../../reference/architecture.md")),
-        "havoc" => Some(include_str!("../../../reference/havoc.md")),
-        _ => None,
+        ManTopic::Cli => "cli",
+        ManTopic::Config => "config",
+        ManTopic::Architecture => "architecture",
+        ManTopic::Havoc => "havoc",
+    }
+}
+
+/// One-line summary shown in the topic listing.
+fn summary(topic: ManTopic) -> &'static str {
+    match topic {
+        ManTopic::Cli => "the mogwai command line",
+        ManTopic::Config => "the mogwai.toml run knobs",
+        ManTopic::Architecture => "how the system works, subsystem by subsystem",
+        ManTopic::Havoc => "the havoc model: every divergence and the four surfaces",
+    }
+}
+
+/// The bundled markdown for a topic, compiled into the binary. Each topic maps
+/// to one `reference/*.md`.
+fn content(topic: ManTopic) -> &'static str {
+    match topic {
+        ManTopic::Cli => include_str!("../../../reference/cli.md"),
+        ManTopic::Config => include_str!("../../../reference/config.md"),
+        ManTopic::Architecture => include_str!("../../../reference/architecture.md"),
+        ManTopic::Havoc => include_str!("../../../reference/havoc.md"),
     }
 }
 
@@ -45,33 +65,13 @@ fn no_color() -> bool {
     std::env::var_os("NO_COLOR").is_some() || !std::io::stdout().is_terminal()
 }
 
-/// If the first CLI argument is `man`, render the requested topic (or list the
-/// topics when none is given) and exit; otherwise return so normal server
-/// startup proceeds. An unknown topic prints the available set to stderr and
-/// exits non-zero.
-pub(crate) fn run_if_requested() {
-    let mut args = std::env::args().skip(1);
-    if args.next().as_deref() != Some("man") {
-        return;
-    }
-    let code = match args.next() {
-        None => {
-            write_stdout(&list_topics());
-            0
-        }
-        Some(topic) => match content(&topic) {
-            Some(markdown) => {
-                write_stdout(&render::render(markdown, no_color()));
-                0
-            }
-            None => {
-                eprintln!("mogwai man: unknown topic {topic:?}\n");
-                eprint!("{}", list_topics());
-                2
-            }
-        },
+/// Render `topic` to the terminal, or list the available topics when `None`.
+pub(crate) fn run(topic: Option<ManTopic>) {
+    let out = match topic {
+        Some(topic) => render::render(content(topic), no_color()),
+        None => list_topics(),
     };
-    std::process::exit(code);
+    write_stdout(&out);
 }
 
 /// Write to stdout, treating a closed downstream pipe (EPIPE, e.g. `| less`
@@ -88,10 +88,19 @@ fn write_stdout(text: &str) {
 /// The bare-`mogwai man` listing: each topic name padded to a common width
 /// followed by its one-line summary.
 fn list_topics() -> String {
-    let width = TOPICS.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
+    let topics = ManTopic::value_variants();
+    let width = topics
+        .iter()
+        .map(|topic| name(*topic).len())
+        .max()
+        .unwrap_or(0);
     let mut out = String::from("Bundled reference docs. Run `mogwai man <topic>` to read one.\n\n");
-    for (name, summary) in TOPICS {
-        out.push_str(&format!("  {name:width$}  {summary}\n"));
+    for topic in topics {
+        out.push_str(&format!(
+            "  {name:width$}  {summary}\n",
+            name = name(*topic),
+            summary = summary(*topic)
+        ));
     }
     out
 }

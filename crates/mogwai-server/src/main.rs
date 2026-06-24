@@ -28,6 +28,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+use clap::{Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use mogwai_data::TickEvent;
 use mogwai_engine::Engine;
@@ -73,23 +74,15 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Load run config from a TOML file. The path is the `--config <path>`
+    /// Load run config from a TOML file. `path` is the parsed `--config <path>`
     /// argument when passed, otherwise `mogwai.toml` in the working directory.
     /// A missing file yields built-in defaults so the server still starts with
     /// no config present; a malformed file is a hard error rather than a silent
     /// fallback. Replaces the former MOGWAI_REPLAY_SPEED and MOGWAI_GAP_CAP_MS
     /// environment variables - run knobs belong in explicit input, not ambient
     /// environment.
-    fn load() -> anyhow::Result<Self> {
-        let mut path = std::path::PathBuf::from("mogwai.toml");
-        let mut args = std::env::args().skip(1);
-        while let Some(arg) = args.next() {
-            if arg == "--config"
-                && let Some(p) = args.next()
-            {
-                path = std::path::PathBuf::from(p);
-            }
-        }
+    fn load(path: Option<std::path::PathBuf>) -> anyhow::Result<Self> {
+        let path = path.unwrap_or_else(|| std::path::PathBuf::from("mogwai.toml"));
         match std::fs::read_to_string(&path) {
             Ok(text) => Ok(toml::from_str(&text)?),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
@@ -129,27 +122,47 @@ fn window_until_ns(now: u64, ms: u64) -> u64 {
 
 /// Version banner: semver plus the short git hash (with a `-dirty` suffix for an
 /// unclean tree) and the UTC build time, stamped at compile time by `build.rs`.
-/// e.g. `0.1.0 (abc123def 2026-06-24 12:34:56 UTC)`.
+/// e.g. `0.1.0 (abc123def 2026-06-24 12:34:56 UTC)`. Fed to clap's `--version`.
 const LONG_VERSION: &str = env!("MOGWAI_LONG_VERSION");
 
-/// Print `mogwai <version>` and exit if `--version` / `-V` was passed, before
-/// any startup work. The binary is named `mogwai`, so the banner leads with that
-/// rather than the package name. Handled in the same hand-rolled scan as
-/// `--config`, so the server stays clap-free.
-fn print_version_and_exit_if_requested() {
-    if std::env::args()
-        .skip(1)
-        .any(|arg| arg == "--version" || arg == "-V")
-    {
-        println!("mogwai {LONG_VERSION}");
-        std::process::exit(0);
-    }
+/// The `mogwai` command line. With no subcommand the gateway runs; `man` renders
+/// the bundled reference docs instead. `--help`, `--version`/`-V` and the
+/// argument grammar are clap-provided; the only run knobs that matter live in
+/// `mogwai.toml`, not in flags or the environment.
+#[derive(Parser)]
+#[command(
+    name = "mogwai",
+    version = LONG_VERSION,
+    about = "Fake broker/exchange that drives broadarrow's live trading path"
+)]
+struct Cli {
+    /// Load run config from this TOML file. Defaults to `mogwai.toml` in the
+    /// working directory; a missing file falls back to built-in defaults, a
+    /// malformed one is a hard error.
+    #[arg(long, value_name = "PATH")]
+    config: Option<std::path::PathBuf>,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// Subcommands. An absent subcommand means "run the server".
+#[derive(Subcommand)]
+enum Command {
+    /// Render a bundled reference doc, or list the topics when none is given.
+    Man {
+        /// Reference topic to display. Omit to list the available topics.
+        #[arg(value_name = "TOPIC")]
+        topic: Option<man::ManTopic>,
+    },
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    print_version_and_exit_if_requested();
-    man::run_if_requested();
+    let cli = Cli::parse();
+    if let Some(Command::Man { topic }) = cli.command {
+        man::run(topic);
+        return Ok(());
+    }
 
     // RUST_LOG is the one deliberate exception to the no-ambient-environment
     // rule that governs run knobs (those live in mogwai.toml): log level is the
@@ -162,7 +175,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let cfg = Config::load()?;
+    let cfg = Config::load(cli.config)?;
     tracing::info!(
         speed = cfg.speed,
         gap_cap_ms = cfg.gap_cap_ms,
