@@ -29,8 +29,8 @@ build needs that checkout present next to this repo:
 Use `brokkr` (not raw `cargo`) for check/test/run:
 
 ```sh
-brokkr check                 # gremlins + clippy + tests, changed-files scope
-brokkr run -p mogwai-server  # start the gateway on 127.0.0.1:8787
+brokkr check                         # gremlins + clippy + tests, changed-files scope
+brokkr run -p mogwai-server -- serve  # start the gateway on 127.0.0.1:8787
 ```
 
 To put a `mogwai` binary on your `PATH` instead, install it from the crate path
@@ -43,14 +43,14 @@ cargo install --path crates/mogwai-server
 
 This build graph excludes `mogwai-adapter`, so it needs no `../nautilus_trader`
 sibling, and the fingerprint is embedded at compile time - the binary is
-self-contained. It still reads `mogwai.toml` from its working directory (or
-`--config <path>`), so an installed server needs a config alongside wherever you
-run it; see [`reference/cli.md`](reference/cli.md).
+self-contained. `mogwai serve` still reads `mogwai.toml` from its working
+directory (or `serve --config <path>`), so an installed server needs a config
+alongside wherever you run it; see [`reference/cli.md`](reference/cli.md).
 
 ## Smoke test
 
-With a server running (`brokkr run -p mogwai-server`, which paces correctly at
-the default `speed = 1.0`):
+With a server running (`brokkr run -p mogwai-server -- serve`, which paces
+correctly at the default `speed = 1.0`):
 
 ```sh
 python3 scripts/smoke.py

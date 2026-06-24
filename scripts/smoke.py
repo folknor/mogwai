@@ -12,7 +12,7 @@ the generated stream. The built-in default and the committed mogwai.toml both
 set speed = 1.0, so a plain launch paces correctly (unthrottled speed 0.0 makes
 those steps race and fail spuriously):
 
-    brokkr run -p mogwai-server
+    brokkr run -p mogwai-server -- serve
 
 then run this script.
 
@@ -20,10 +20,10 @@ The default run keeps the server heartbeat off, so every step reads exactly
 one frame per assertion without an interleaved Heartbeat. The StallData /
 heartbeat (4255) reproduction lives behind `--heartbeat`, which runs only the
 heartbeat step against a server started with server_heartbeat_ms enabled. The
-`--config` flag is consumed by the server binary, not cargo, so it must follow
-a `--` separator:
+`serve --config` flag is consumed by the server binary, not cargo, so it must
+follow a `--` separator:
 
-    brokkr run -p mogwai-server -- --config scripts/smoke-heartbeat.toml
+    brokkr run -p mogwai-server -- serve --config scripts/smoke-heartbeat.toml
 
 then run `python3 scripts/smoke.py --heartbeat`.
 """

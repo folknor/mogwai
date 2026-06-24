@@ -11,37 +11,48 @@ HTTP/WS routes it serves.
 
 ## Running
 
+`mogwai` has two verbs, `serve` and `man`; there is no default verb, so a bare
+`mogwai` prints help. Start the gateway with `serve`:
+
 ```sh
-brokkr run -p mogwai-server
+brokkr run -p mogwai-server -- serve
 ```
 
 `-p mogwai-server` is the package (cargo scopes by package name); the binary it
 runs is `mogwai`. An installed build (`cargo install --path crates/mogwai-server`)
-is invoked directly as `mogwai`.
+is invoked directly, e.g. `mogwai serve`.
 
 `brokkr run` is a thin wrapper over `cargo run`; arguments after a `--`
 separator are forwarded to the binary, not to cargo:
 
 ```sh
-brokkr run -p mogwai-server -- --config scripts/smoke-heartbeat.toml
+brokkr run -p mogwai-server -- serve --config scripts/smoke-heartbeat.toml
 ```
 
-## Flags
+## Global flags
 
 The argument grammar is clap-parsed: `--help`/`-h` and `--version`/`-V` work,
 unknown flags and bad values are rejected with a usage error (not silently
-ignored), and each subcommand carries its own `--help`.
+ignored), each verb carries its own `--help`, and a bare `mogwai` prints help
+rather than doing anything.
+
+| Flag | Effect |
+| --- | --- |
+| `--version`, `-V` | Print `mogwai <semver> (<git-hash> <build-time> UTC)` and exit. The hash carries a `-dirty` suffix when the tree had uncommitted changes at build time, and is `unknown` when built outside a checkout. Stamped at compile time by the crate's `build.rs`. |
+| `--help`, `-h` | Print usage and exit. `mogwai <verb> --help` prints that verb's help. |
+
+## Subcommands
+
+### `serve [OPTIONS]`
+
+Run the gateway: bind the sockets, replay synthesized market data, and serve the
+HTTP/WS routes. Its run knobs live in `mogwai.toml`, not in flags; the two flags
+are where to read that file and what to bind.
 
 | Flag | Argument | Default | Effect |
 | --- | --- | --- | --- |
 | `--config` | path | `mogwai.toml` in the working directory | Load the run config from this TOML file. A missing file falls back to built-in defaults; a malformed file is a hard error. See `reference/config.md`. |
-| `--version`, `-V` | none | - | Print `mogwai <semver> (<git-hash> <build-time> UTC)` and exit. The hash carries a `-dirty` suffix when the tree had uncommitted changes at build time, and is `unknown` when built outside a checkout. Stamped at compile time by the crate's `build.rs`. |
-| `--help`, `-h` | none | - | Print usage and exit. `mogwai man --help` prints the subcommand's help. |
-
-With no subcommand, `mogwai` runs the server. Run knobs live in the config file
-by design, not in flags or the environment.
-
-## Subcommands
+| `--addr` | `host:port` | `127.0.0.1:8787` | Address to bind the gateway to. The adapter's default server URL targets `8787`, so a non-default port also needs the adapter pointed at it. |
 
 ### `man [TOPIC]`
 
@@ -64,9 +75,3 @@ closed downstream pipe (`mogwai man havoc | less`, quit early) is a clean exit.
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `RUST_LOG` | `mogwai_server=info` | Standard `tracing` env-filter directive. The one deliberate exception to the no-ambient-environment rule for run knobs: log level is the universally-expected env var, not a run knob. An unset or unparseable value falls back to `mogwai_server=info`. |
-
-## Listen address
-
-The server binds `127.0.0.1:8787`, hardcoded. It is not yet configurable from
-the command line or the config file; the adapter's default server URL targets
-the same `8787` port.

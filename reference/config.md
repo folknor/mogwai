@@ -2,8 +2,8 @@
 
 The `mogwai` binary takes its run knobs from a TOML file, not from the
 ambient environment. This is the reference for that file; see `reference/cli.md`
-for how the binary finds it (`--config <path>`, default `mogwai.toml` in the
-working directory) and the rest of the command-line surface.
+for how the binary finds it (`serve --config <path>`, default `mogwai.toml` in
+the working directory) and the rest of the command-line surface.
 
 These are *run* knobs - replay pacing and the optional server heartbeat. They are
 distinct from the per-venue havoc configuration broadarrow constructs on the

@@ -28,7 +28,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use mogwai_data::TickEvent;
 use mogwai_engine::Engine;
@@ -125,29 +125,28 @@ fn window_until_ns(now: u64, ms: u64) -> u64 {
 /// e.g. `0.1.0 (abc123def 2026-06-24 12:34:56 UTC)`. Fed to clap's `--version`.
 const LONG_VERSION: &str = env!("MOGWAI_LONG_VERSION");
 
-/// The `mogwai` command line. With no subcommand the gateway runs; `man` renders
-/// the bundled reference docs instead. `--help`, `--version`/`-V` and the
-/// argument grammar are clap-provided; the only run knobs that matter live in
-/// `mogwai.toml`, not in flags or the environment.
+/// The `mogwai` command line. Two explicit verbs: `serve` runs the gateway,
+/// `man` renders the bundled reference docs. There is deliberately no default
+/// verb - a bare `mogwai` prints help rather than silently binding a socket.
+/// `--help`, `--version`/`-V` and the argument grammar are clap-provided; the
+/// server's run knobs live in `mogwai.toml`, not in flags or the environment.
 #[derive(Parser)]
 #[command(
     name = "mogwai",
     version = LONG_VERSION,
-    about = "Fake broker/exchange that drives broadarrow's live trading path"
+    about = "Fake broker/exchange that drives broadarrow's live trading path",
+    arg_required_else_help = true
 )]
 struct Cli {
-    /// Load run config from this TOML file. Defaults to `mogwai.toml` in the
-    /// working directory; a missing file falls back to built-in defaults, a
-    /// malformed one is a hard error.
-    #[arg(long, value_name = "PATH")]
-    config: Option<std::path::PathBuf>,
     #[command(subcommand)]
-    command: Option<Command>,
+    command: Command,
 }
 
-/// Subcommands. An absent subcommand means "run the server".
+/// The two modes: serve the gateway, or read the bundled docs.
 #[derive(Subcommand)]
 enum Command {
+    /// Run the gateway server (binds the sockets and replays market data).
+    Serve(ServeArgs),
     /// Render a bundled reference doc, or list the topics when none is given.
     Man {
         /// Reference topic to display. Omit to list the available topics.
@@ -156,13 +155,30 @@ enum Command {
     },
 }
 
+/// `serve` arguments: where to read run config and what address to bind.
+#[derive(Args)]
+struct ServeArgs {
+    /// Load run config from this TOML file. Defaults to `mogwai.toml` in the
+    /// working directory; a missing file falls back to built-in defaults, a
+    /// malformed one is a hard error.
+    #[arg(long, value_name = "PATH")]
+    config: Option<std::path::PathBuf>,
+    /// Address to bind the gateway to, as `host:port`. The adapter's default
+    /// server URL targets `8787`, so a non-default port also needs the adapter
+    /// pointed at it.
+    #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:8787")]
+    addr: std::net::SocketAddr,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    if let Some(Command::Man { topic }) = cli.command {
-        man::run(topic);
-        return Ok(());
-    }
+    let serve = match Cli::parse().command {
+        Command::Man { topic } => {
+            man::run(topic);
+            return Ok(());
+        }
+        Command::Serve(args) => args,
+    };
 
     // RUST_LOG is the one deliberate exception to the no-ambient-environment
     // rule that governs run knobs (those live in mogwai.toml): log level is the
@@ -175,7 +191,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let cfg = Config::load(cli.config)?;
+    let cfg = Config::load(serve.config)?;
     tracing::info!(
         speed = cfg.speed,
         gap_cap_ms = cfg.gap_cap_ms,
@@ -201,9 +217,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/control/divergence", post(arm_divergence))
         .with_state(state);
 
-    let addr = "127.0.0.1:8787";
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "mogwai listening");
+    let listener = tokio::net::TcpListener::bind(serve.addr).await?;
+    tracing::info!(addr = %serve.addr, "mogwai listening");
     axum::serve(listener, app).await?;
     Ok(())
 }
