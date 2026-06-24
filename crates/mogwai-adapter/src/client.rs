@@ -44,7 +44,7 @@ use nautilus_model::{
     types::{AccountBalance, MarginBalance, currency::Currency},
 };
 use nautilus_network::http::HttpClient;
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use rust_decimal::Decimal;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
@@ -1367,7 +1367,7 @@ impl HavocFilter {
             reorder_prob: client.reorder_prob,
             rng: client
                 .seed
-                .map_or_else(StdRng::from_entropy, StdRng::seed_from_u64),
+                .map_or_else(|| StdRng::from_rng(&mut rand::rng()), StdRng::seed_from_u64),
             held: None,
         }
     }
@@ -1421,7 +1421,7 @@ impl HavocFilter {
     }
 
     fn draw(&mut self, probability: f64) -> bool {
-        probability > 0.0 && self.rng.r#gen::<f64>() < probability
+        probability > 0.0 && self.rng.random::<f64>() < probability
     }
 }
 

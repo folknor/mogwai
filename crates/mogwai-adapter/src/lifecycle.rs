@@ -11,7 +11,7 @@ use std::{
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
 use mogwai_protocol::{ClientMessage, ConnHavoc, ServerMessage};
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use tokio::{
     sync::{
         Mutex,
@@ -61,7 +61,7 @@ impl ReconnectPolicy {
         let jitter = if self.jitter_ms == 0 {
             0
         } else {
-            rng.gen_range(0..=self.jitter_ms)
+            rng.random_range(0..=self.jitter_ms)
         };
         Duration::from_millis(base_ms as u64).saturating_add(Duration::from_millis(jitter))
     }
@@ -159,7 +159,7 @@ pub(crate) async fn run_ws_connection<
     // is set, so jitter is reproducible (D.6). Both client.rs construction sites
     // pass `seed: client_havoc.seed` into `WsConnectionConfig`, so a configured
     // seed reaches here; absent a seed we fall back to entropy.
-    let mut rng = seed.map_or_else(StdRng::from_entropy, StdRng::seed_from_u64);
+    let mut rng = seed.map_or_else(|| StdRng::from_rng(&mut rand::rng()), StdRng::seed_from_u64);
     let mut attempt = 0u32;
 
     loop {

@@ -42,25 +42,16 @@ four-surface `HavocSpec` (client / server / data / connection-lifecycle).
 Subsystem detail is in `reference/architecture.md`; the offline analysis
 that produced the fingerprint is under `analysis/` (`analysis/findings.md` is
 the summary). A project-wide bug/duplication hunt ran as six fix waves (see git
-log); the clearly-correct bugs and safe consolidations all landed.
+log); the clearly-correct bugs and safe consolidations all landed. The `mogwai`
+binary exposes a clap command line: `serve` runs the gateway (with `--config`
+and `--addr`), `man` renders the `reference/*.md` docs compiled into the binary,
+and `--version` reports the git-stamped build. Every havoc knob is now
+range-checked at its boundary; the client-latency cap (`MAX_LATENCY_NANOS`,
+60 s) closed the last unbounded one.
 
 ## Next
 
-### 1. broadarrow integration: point a MOGWAI venue at the server
-
-The adapter, its `transport_profile` selector, and its full four-surface
-`HavocSpec` (client / server / data / connection-lifecycle) are landed (see
-`reference/architecture.md`). What remains lives in broadarrow, not this repo:
-
-- [ ] broadarrow side (lives in broadarrow, not here): a `MOGWAI` arm in
-      `run-prep/src/venue.rs` and a `core::venue` PROFILES row, with a
-      profile-guard test enforcing that every wired venue has a PROFILES row.
-      This is where broadarrow sets the per-venue `HavocSpec` (including its
-      `data` market-regime and `conn` connection-lifecycle fields), the
-      `oms_type` (the adapter exposes it as a `MogwaiExecClientConfig` field
-      defaulting to `Netting`), and picks the `transport_profile`.
-
-### 2. Coherent simulated clock for accelerated forward testing (NEEDS A SPEC)
+### 1. Coherent simulated clock for accelerated forward testing (NEEDS A SPEC)
 
 The headline capability a synthetic venue can offer that a real exchange cannot:
 run the *actual live trading path* (real async, real reconnects, real WS frames)
@@ -120,66 +111,13 @@ lands; no mogwai spec or code until the nautilus seam exists.
 - [ ] Then write the spec per `reference/technical-implementation-spec.md`
       before any mogwai/adapter code (this item is the TODO source it cites).
 
-### 3. Bug-hunt follow-ups - the residual tail
+### 2. Bug-hunt follow-ups - the residual tail
 
-The fix waves are done, and every follow-up that was open here has now landed
-or been closed - nothing in this section remains open. The lists below record
-the closed and wontfix decisions so they are not re-flagged. Tags (`B.8`,
-`C.2`, etc.) cross-reference the fix-wave commit messages.
-
-Resolved by the scope conversation - closed, NOT to be re-flagged as bugs:
-
-- **Lognormal size: median vs mean (C.2)** - closed: correct as-is. `typical_size`
-  is not fit from the corpus at all - it is a hand-set constant
-  (`TYPICAL_SIZE_MANTISSA` / `TYPICAL_SIZE_SCALE` in `mogwai-data` `generated.rs`),
-  like `start_price` and `vol_scalar`. Only `modal_tick`, `price_decimals`,
-  `mean_duration_s` and `size_round_frac` come from fingerprint medians; the
-  corpus `size_log10_hist` is emitted to the `char_*.json` files but never folded
-  into the fingerprint. So there is no mean-fit to be ~2x off from: using the
-  author-chosen typical size as the lognormal median is the natural reading and
-  is correct.
-- **Market-order fill price (B.3)** - fills at zero, "free base". Closed: the
-  fake venue's balances are not consumed as truth, so the accounting need not be
-  economically correct.
-- **`GoDark` drops frames and is process-global (E.1 / E.2)** - endorsed as
-  faithful to a real venue blackout (cf. issue 4255). Only the clear/reset + `ms`
-  bound survives, listed under deferred above.
-- **`AccountBalance::new` assert** - closed: no hostile input exists (mogwai
-  emits its own snapshots); if it ever fires it is a mogwai-engine consistency
-  bug to fix there, not an adapter-hardening surface.
-- **`/quotes` empty-OK stub (E.12 / A.10)** - closed: the corpus is trades-only
-  and it is documented; leave it.
-- **Surfacing rejects for unknown orders (A.11)** - closed for now: the mirror
-  records on submit so the normal path works; the unknown-order case is an edge
-  the warn-log covers. Revisit only if it bites (it needs a non-mirror identifier
-  source, which `ExecContext` does not hold).
-- **`RejectNextSubmit` untargeted (B.8)** - closed unless broadarrow needs
-  targeting: "reject the next order" is fine for test scenarios.
-- **Reopen-gap halt origin (C.6)** - closed: the imprecision is bounded by one
-  inter-arrival gap; not worth the complexity.
-
-Wontfix / accepted as-is (recorded so they are not re-flagged):
-
-- `seq: u64` overflow is unguarded but unreachable in practice (B.11).
-- Modify rejects `new_total == filled` exactly (B.12) - the reject is defensible.
-- `HavocSpec.data` vs `conn` `skip_serializing_if` asymmetry is intentional
-  (B.13, per its comment).
-- `wait_connected` is racy against a fast socket flap (A.17) - minor.
-- `convert::instrument_id` takes `&InstrumentDef` but reads only `symbol` (D.10) -
-  cosmetic. `TradeId` from `symbol-ts` is not collision-free (D.11) - would need a
-  real wire id.
-- The reorder filter holds a message until the next one or stream-close (A.5),
-  and reorder is a no-op over the HTTP-orders transport (A.13) - both are part of
-  the current havoc model; revisit only if the model changes.
-- The adapter test suite is `#[ignore]`d so CI only compiles it (F.20) - a
-  deliberate socket-sandbox tradeoff.
-- `http_base_url` stays infallible (D.13) - `validate_base_url` rejects any
-  non-ws/wss `base_url` up front (D.4), so the helper's non-ws fallback is
-  unreachable defensive code, already pinned by a test. Making it fallible would
-  thread `Result` through ~13 call sites to surface an error that cannot occur,
-  and would contradict the authoritative-gate-plus-total-function-downstream
-  pattern used elsewhere (the GoDark saturating arithmetic, `validate_divergence`).
-  Kept total by design.
+Closed - nothing here is open. The project-wide bug/duplication hunt ran as six
+fix waves; every follow-up has landed or been decided (closed-as-correct or
+wontfix). The per-item dispositions and their rationale live in the fix-wave
+commit messages, keyed by the `B.8` / `C.2` / `D.10` / etc. tags - consult git
+log rather than re-deriving them, so a settled bug is not re-flagged.
 
 ## Notes / gotchas
 

@@ -1,5 +1,5 @@
 use mogwai_protocol::{AggressorSide, MarketRegime, TradeTick};
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use rand_distr::{ChiSquared, Distribution, LogNormal, Normal, Weibull};
 use rust_decimal::{Decimal, prelude::FromPrimitive, prelude::ToPrimitive};
 use serde::Deserialize;
@@ -481,7 +481,7 @@ impl GeneratedSource {
 
     fn next_size(&mut self) -> Decimal {
         let base = self.size_dist.sample(&mut self.rng).max(f64::MIN_POSITIVE);
-        let size = if self.rng.gen_bool(self.scalars.size_round_frac) {
+        let size = if self.rng.random_bool(self.scalars.size_round_frac) {
             round_lot_size(base)
         } else {
             decimal_from_f64(base).round_dp(SIZE_DECIMALS)
@@ -683,7 +683,7 @@ impl BounceState {
         if !self.high_regime {
             return;
         }
-        if rng.gen_bool(DRIFT_DIR_FLIP_PROB) {
+        if rng.random_bool(DRIFT_DIR_FLIP_PROB) {
             self.drift_dir *= -1;
         }
         let p_drift = if self.drift_hot {
@@ -691,7 +691,7 @@ impl BounceState {
         } else {
             HIGH_REGIME_DRIFT_PROB
         };
-        if rng.gen_bool(p_drift) {
+        if rng.random_bool(p_drift) {
             self.drift_ticks += self.drift_dir;
             self.drift_hot = true;
         } else {
@@ -701,10 +701,10 @@ impl BounceState {
 
     fn next_side(&mut self, rng: &mut StdRng) -> AggressorSide {
         if self.high_regime {
-            if rng.gen_bool(BOUNCE_HIGH_TO_LOW_PROB) {
+            if rng.random_bool(BOUNCE_HIGH_TO_LOW_PROB) {
                 self.high_regime = false;
             }
-        } else if rng.gen_bool(BOUNCE_LOW_TO_HIGH_PROB) {
+        } else if rng.random_bool(BOUNCE_LOW_TO_HIGH_PROB) {
             self.high_regime = true;
         }
         let p_flip = if self.high_regime {
@@ -712,7 +712,7 @@ impl BounceState {
         } else {
             BOUNCE_LOW_FLIP_PROB
         };
-        if rng.gen_bool(p_flip) {
+        if rng.random_bool(p_flip) {
             self.prev_side = match self.prev_side {
                 AggressorSide::Buyer => AggressorSide::Seller,
                 AggressorSide::Seller | AggressorSide::NoAggressor => AggressorSide::Buyer,
