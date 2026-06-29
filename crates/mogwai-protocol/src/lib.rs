@@ -44,6 +44,92 @@ pub fn now_unix_nanos() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
 }
 
+/// Affine wall-to-simulated time map shared by the server, adapter, and the
+/// nautilus clock injected into broadarrow's live node.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SimClock {
+    pub sim_epoch_ns: u64,
+    pub wall_anchor_ns: u64,
+    pub speed: f64,
+}
+
+impl SimClock {
+    /// The identity map: simulated time equals wall time.
+    #[must_use]
+    pub const fn identity() -> Self {
+        Self {
+            sim_epoch_ns: 0,
+            wall_anchor_ns: 0,
+            speed: 1.0,
+        }
+    }
+
+    /// Map a wall-clock nanosecond read onto the simulated axis.
+    #[must_use]
+    pub fn sim_ns(&self, wall_ns: u64) -> u64 {
+        if wall_ns <= self.wall_anchor_ns {
+            return self.sim_epoch_ns;
+        }
+        if !self.speed.is_finite() || self.speed <= 0.0 {
+            return self.sim_epoch_ns;
+        }
+        let offset = wall_ns - self.wall_anchor_ns;
+        let scaled = scaled_f64_to_u64(offset as f64 * self.speed);
+        self.sim_epoch_ns.saturating_add(scaled)
+    }
+
+    /// Return the wall instant at which the clock reaches `sim_ns`.
+    #[must_use]
+    pub fn wall_ns(&self, sim_ns: u64) -> u64 {
+        if sim_ns <= self.sim_epoch_ns {
+            return self.wall_anchor_ns;
+        }
+        if !self.speed.is_finite() || self.speed <= 0.0 {
+            return u64::MAX;
+        }
+        let offset = sim_ns - self.sim_epoch_ns;
+        let scaled = scaled_f64_to_u64(offset as f64 / self.speed);
+        self.wall_anchor_ns.saturating_add(scaled)
+    }
+
+    /// Return the wall duration that realizes `sim_dur_ns` simulated nanos.
+    #[must_use]
+    pub fn wall_span(&self, sim_dur_ns: u64) -> u64 {
+        if !self.speed.is_finite() || self.speed <= 0.0 {
+            return u64::MAX;
+        }
+        scaled_f64_to_u64(sim_dur_ns as f64 / self.speed)
+    }
+
+    /// `wall_span` as a `Duration`, the form every caller actually sleeps or
+    /// intervals on. The single place the wall floor is applied: a span that
+    /// scales to zero nanos is clamped to 1ns so a `tokio::time::sleep` /
+    /// `interval` derived from a configured (sim-intended) duration never
+    /// degenerates to a zero-delay busy loop. This 1ns is only the code floor;
+    /// the EFFECTIVE floor is the tokio timer granularity (~1ms), below which a
+    /// scaled duration coalesces regardless. See `reference/clock.md`.
+    #[must_use]
+    pub fn wall_duration(&self, sim_dur_ns: u64) -> std::time::Duration {
+        std::time::Duration::from_nanos(self.wall_span(sim_dur_ns).max(1))
+    }
+
+    /// True when this clock is the default wall-time map.
+    #[must_use]
+    pub fn is_identity(&self) -> bool {
+        *self == Self::identity()
+    }
+}
+
+fn scaled_f64_to_u64(value: f64) -> u64 {
+    if value.is_nan() || value <= 0.0 {
+        0
+    } else if value >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        value as u64
+    }
+}
+
 /// Saturating `Decimal` -> `f64`: returns `0.0` when the conversion is `None`
 /// (the magnitude does not fit an `f64`). The data crate already carries a
 /// private reader with this exact contract; the adapter currently
@@ -561,6 +647,112 @@ pub enum ClientMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sim_clock_identity_maps_wall_unchanged() {
+        let clock = SimClock::identity();
+
+        assert_eq!(clock.sim_ns(123), 123);
+        assert_eq!(clock.wall_ns(456), 456);
+        assert_eq!(clock.wall_span(789), 789);
+        assert!(clock.is_identity());
+    }
+
+    #[test]
+    fn sim_clock_preserves_epoch_scale_nanosecond_precision() {
+        let clock = SimClock {
+            sim_epoch_ns: 1_900_000_000_000_000_001,
+            wall_anchor_ns: 10_000_000,
+            speed: 1.0,
+        };
+
+        assert_eq!(
+            clock.sim_ns(clock.wall_anchor_ns + 17),
+            clock.sim_epoch_ns + 17
+        );
+        assert_eq!(
+            clock.wall_ns(clock.sim_epoch_ns + 17),
+            clock.wall_anchor_ns + 17
+        );
+    }
+
+    #[test]
+    fn sim_clock_wall_duration_scales_and_floors_at_one_nano() {
+        use std::time::Duration;
+
+        // Identity: a sim duration is its own wall duration.
+        assert_eq!(
+            SimClock::identity().wall_duration(5_000_000),
+            Duration::from_nanos(5_000_000)
+        );
+
+        // Accelerated: a 100 ms sim duration realizes as 1 ms wall at 100x.
+        let fast = SimClock {
+            sim_epoch_ns: 1,
+            wall_anchor_ns: 1,
+            speed: 100.0,
+        };
+        assert_eq!(fast.wall_duration(100_000_000), Duration::from_millis(1));
+
+        // A span that scales below one nanosecond is clamped to the 1ns code
+        // floor, never zero (the tokio granularity floor is the real bound).
+        assert_eq!(fast.wall_duration(0), Duration::from_nanos(1));
+        assert_eq!(fast.wall_duration(50), Duration::from_nanos(1));
+    }
+
+    #[test]
+    fn sim_clock_scales_and_inverts_with_rounding_bound() {
+        let clock = SimClock {
+            sim_epoch_ns: 86_400_000_000_000,
+            wall_anchor_ns: 1_000_000_000,
+            speed: 3.5,
+        };
+        let wall = clock.wall_anchor_ns + 20_000;
+        let sim = clock.sim_ns(wall);
+
+        assert_eq!(sim, clock.sim_epoch_ns + 70_000);
+        assert_eq!(clock.wall_ns(sim), wall);
+        assert_eq!(clock.wall_span(35_000), 10_000);
+    }
+
+    #[test]
+    fn sim_clock_saturates_underflow_and_overflow() {
+        let clock = SimClock {
+            sim_epoch_ns: 1_000,
+            wall_anchor_ns: 2_000,
+            speed: 2.0,
+        };
+        assert_eq!(clock.sim_ns(1_999), 1_000);
+        assert_eq!(clock.wall_ns(999), 2_000);
+
+        let overflow_sim = SimClock {
+            sim_epoch_ns: u64::MAX - 10,
+            wall_anchor_ns: 0,
+            speed: 100.0,
+        };
+        assert_eq!(overflow_sim.sim_ns(1), u64::MAX);
+
+        let overflow_wall = SimClock {
+            sim_epoch_ns: 0,
+            wall_anchor_ns: u64::MAX - 10,
+            speed: 1.0,
+        };
+        assert_eq!(overflow_wall.wall_ns(20), u64::MAX);
+    }
+
+    #[test]
+    fn sim_clock_round_trips_over_json() {
+        let clock = SimClock {
+            sim_epoch_ns: 123,
+            wall_anchor_ns: 456,
+            speed: 7.5,
+        };
+
+        let json = serde_json::to_string(&clock).unwrap();
+        let decoded: SimClock = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, clock);
+    }
 
     #[test]
     fn subscribe_start_ts_round_trips_and_legacy_payloads_default() {

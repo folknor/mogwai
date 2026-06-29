@@ -34,7 +34,7 @@ use mogwai_data::TickEvent;
 use mogwai_engine::Engine;
 use mogwai_protocol::{
     ClientMessage, InstrumentDef, MAX_HISTORY_LIMIT, MarketRegime, QuoteTick, ServerMessage,
-    TradeTick, control::Divergence, validate_divergence, validate_market_regime,
+    SimClock, TradeTick, control::Divergence, validate_divergence, validate_market_regime,
 };
 use serde::Deserialize;
 use tokio::sync::{Mutex, mpsc};
@@ -44,6 +44,8 @@ use tokio::sync::{Mutex, mpsc};
 #[derive(Clone, serde::Deserialize)]
 #[serde(default)]
 struct Config {
+    /// Simulated start instant. `0` keeps the identity wall-time clock.
+    sim_epoch_ns: u64,
     /// Replay speed multiplier. `0.0` means unthrottled (stream as fast as the client
     /// drains). `1.0` is the default and paces to real wall-clock gaps; otherwise
     /// inter-tick wall delay = (tick gap) / speed.
@@ -60,6 +62,7 @@ struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            sim_epoch_ns: 0,
             // Honest-by-default: wall-clock pace the generator's inter-arrival
             // gaps so a no-config server serves a realistic live feed, matching
             // the committed mogwai.toml. 0.0 remains available as an explicit
@@ -95,11 +98,13 @@ impl Config {
 struct AppState {
     engine: Arc<Mutex<Engine>>,
     cfg: Config,
+    /// Run clock shared with adapters over `/clock`.
+    sim: SimClock,
     /// Execution-event delay in milliseconds, shared by all live writers.
     delay_ms: Arc<AtomicU64>,
-    /// Wall-clock unix-ns instant before which writers drop all outbound frames.
+    /// Sim-time unix-ns instant before which writers drop all outbound frames.
     dark_until_ns: Arc<AtomicU64>,
-    /// Wall-clock unix-ns instant before which writers drop market-data frames.
+    /// Sim-time unix-ns instant before which writers drop market-data frames.
     stall_until_ns: Arc<AtomicU64>,
 }
 
@@ -115,9 +120,37 @@ fn now_ns() -> u64 {
     mogwai_protocol::now_unix_nanos()
 }
 
-/// Convert a millisecond window into an absolute wall-clock unix-ns deadline.
+fn sim_now_ns(sim: SimClock) -> u64 {
+    sim.sim_ns(now_ns())
+}
+
+fn sim_duration_from_millis(ms: u64) -> u64 {
+    ms.saturating_mul(1_000_000)
+}
+
+/// Convert a millisecond window into an absolute sim-time unix-ns deadline.
 fn window_until_ns(now: u64, ms: u64) -> u64 {
     now.saturating_add(ms.saturating_mul(1_000_000))
+}
+
+fn build_sim_clock(cfg: &Config, wall_anchor_ns: u64) -> anyhow::Result<SimClock> {
+    if !cfg.speed.is_finite() {
+        anyhow::bail!("speed must be finite");
+    }
+    if cfg.sim_epoch_ns == 0 {
+        if cfg.speed != 1.0 && cfg.speed != 0.0 {
+            anyhow::bail!("sim_epoch_ns must be set when speed is neither 0.0 nor 1.0");
+        }
+        return Ok(SimClock::identity());
+    }
+    if cfg.speed <= 0.0 {
+        anyhow::bail!("speed must be > 0.0 when sim_epoch_ns is set");
+    }
+    Ok(SimClock {
+        sim_epoch_ns: cfg.sim_epoch_ns,
+        wall_anchor_ns,
+        speed: cfg.speed,
+    })
 }
 
 /// Version banner: semver plus the short git hash (with a `-dirty` suffix for an
@@ -192,16 +225,26 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cfg = Config::load(serve.config)?;
+    let sim = build_sim_clock(&cfg, now_ns())?;
     tracing::info!(
+        sim_epoch_ns = cfg.sim_epoch_ns,
+        wall_anchor_ns = sim.wall_anchor_ns,
         speed = cfg.speed,
         gap_cap_ms = cfg.gap_cap_ms,
         server_heartbeat_ms = cfg.server_heartbeat_ms,
         "config"
     );
+    if !sim.is_identity() && cfg.gap_cap_ms != 0 {
+        tracing::info!(
+            gap_cap_ms = cfg.gap_cap_ms,
+            "gap_cap_ms is ignored under simulated deadline pacing"
+        );
+    }
 
     let state = AppState {
         engine: Arc::new(Mutex::new(Engine::new())),
         cfg,
+        sim,
         delay_ms: Arc::new(AtomicU64::new(0)),
         dark_until_ns: Arc::new(AtomicU64::new(0)),
         stall_until_ns: Arc::new(AtomicU64::new(0)),
@@ -212,6 +255,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/instruments", get(instruments))
         .route("/trades", get(trades))
         .route("/quotes", get(quotes))
+        .route("/clock", get(clock))
         .route("/orders", post(submit_order_http))
         .route("/ws", get(ws_upgrade))
         .route("/control/divergence", post(arm_divergence))
@@ -243,14 +287,16 @@ async fn arm_divergence(
             state.delay_ms.store(ms, Ordering::Relaxed);
         }
         Divergence::GoDark { ms } => {
-            state
-                .dark_until_ns
-                .store(window_until_ns(now_ns(), ms), Ordering::Relaxed);
+            state.dark_until_ns.store(
+                window_until_ns(sim_now_ns(state.sim), ms),
+                Ordering::Relaxed,
+            );
         }
         Divergence::StallData { ms } => {
-            state
-                .stall_until_ns
-                .store(window_until_ns(now_ns(), ms), Ordering::Relaxed);
+            state.stall_until_ns.store(
+                window_until_ns(sim_now_ns(state.sim), ms),
+                Ordering::Relaxed,
+            );
         }
         Divergence::ClearDivergences => {
             // Lift both server-owned temporal windows process-wide. `0` is the
@@ -291,6 +337,10 @@ async fn instruments(State(state): State<AppState>) -> Json<Vec<InstrumentDef>> 
     Json(state.engine.lock().await.instrument_defs())
 }
 
+async fn clock(State(state): State<AppState>) -> Json<SimClock> {
+    Json(state.sim)
+}
+
 /// HTTP order-entry surface for profiles that do not use `/ws` for orders.
 async fn submit_order_http(
     State(state): State<AppState>,
@@ -301,7 +351,11 @@ async fn submit_order_http(
             Err(StatusCode::BAD_REQUEST)
         }
         order_cmd => {
-            let events = state.engine.lock().await.process(order_cmd, now_ns());
+            let events = state
+                .engine
+                .lock()
+                .await
+                .process(order_cmd, sim_now_ns(state.sim));
             Ok(Json(events))
         }
     }
@@ -445,6 +499,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let delay_ms = Arc::clone(&state.delay_ms);
     let dark_until_ns = Arc::clone(&state.dark_until_ns);
     let stall_until_ns = Arc::clone(&state.stall_until_ns);
+    let sim = state.sim;
 
     let writer = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
@@ -452,13 +507,14 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             if !is_heartbeat && is_execution_event(&msg) {
                 let delay = delay_ms.load(Ordering::Relaxed);
                 if delay > 0 {
-                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                    tokio::time::sleep(sim.wall_duration(sim_duration_from_millis(delay))).await;
                 }
             }
-            if now_ns() < dark_until_ns.load(Ordering::Relaxed) {
+            let now = sim_now_ns(sim);
+            if now < dark_until_ns.load(Ordering::Relaxed) {
                 continue;
             }
-            if msg.is_market_data() && now_ns() < stall_until_ns.load(Ordering::Relaxed) {
+            if msg.is_market_data() && now < stall_until_ns.load(Ordering::Relaxed) {
                 continue;
             }
             // Skip an un-serializable frame rather than panicking the writer
@@ -478,7 +534,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     });
 
     let heartbeat = if state.cfg.server_heartbeat_ms > 0 {
-        Some(spawn_heartbeat(state.cfg.server_heartbeat_ms, tx.clone()))
+        Some(spawn_heartbeat(
+            state.cfg.server_heartbeat_ms,
+            state.sim,
+            tx.clone(),
+        ))
     } else {
         None
     };
@@ -518,6 +578,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         start_ts,
                         regime,
                         &state.cfg,
+                        state.sim,
                         tx.clone(),
                         Arc::clone(&cancel),
                     );
@@ -532,7 +593,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             }
             order_cmd => {
-                let events = state.engine.lock().await.process(order_cmd, now_ns());
+                let events = state
+                    .engine
+                    .lock()
+                    .await
+                    .process(order_cmd, sim_now_ns(state.sim));
                 for ev in events {
                     if tx.send(ev).await.is_err() {
                         break;
@@ -572,14 +637,18 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 /// gates and serializes, keeping socket writes single-owned and ordered.
 fn spawn_heartbeat(
     interval_ms: u64,
+    sim: SimClock,
     tx: mpsc::Sender<ServerMessage>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+        let mut interval =
+            tokio::time::interval(sim.wall_duration(sim_duration_from_millis(interval_ms)));
         loop {
             interval.tick().await;
             if tx
-                .send(ServerMessage::Heartbeat { ts_event: now_ns() })
+                .send(ServerMessage::Heartbeat {
+                    ts_event: sim_now_ns(sim),
+                })
                 .await
                 .is_err()
             {
@@ -648,6 +717,7 @@ fn spawn_replay(
     start_ts: Option<u64>,
     regime: Option<MarketRegime>,
     cfg: &Config,
+    sim: SimClock,
     tx: mpsc::Sender<ServerMessage>,
     cancel: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
@@ -665,7 +735,13 @@ fn spawn_replay(
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
-            if speed > 0.0 {
+            if !sim.is_identity() {
+                let deadline = sim.wall_ns(tick.ts_event());
+                let now = now_ns();
+                if deadline > now {
+                    std::thread::sleep(Duration::from_nanos(deadline - now));
+                }
+            } else if speed > 0.0 {
                 if let Some(prev) = prev_ts {
                     let gap_ns = tick.ts_event().saturating_sub(prev);
                     // Pace at nanosecond resolution: integer-dividing the scaled
@@ -739,14 +815,80 @@ mod tests {
         AppState {
             engine: Arc::new(Mutex::new(Engine::new())),
             cfg: Config {
+                sim_epoch_ns: 0,
                 speed: 0.0,
                 gap_cap_ms: 0,
                 server_heartbeat_ms: 0,
             },
+            sim: SimClock::identity(),
             delay_ms: Arc::new(AtomicU64::new(0)),
             dark_until_ns: Arc::new(AtomicU64::new(0)),
             stall_until_ns: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    #[test]
+    fn sim_clock_config_rejects_two_knob_trap() {
+        let cfg = Config {
+            speed: 2.0,
+            ..Config::default()
+        };
+
+        let err = build_sim_clock(&cfg, 123)
+            .expect_err("data-only acceleration must be rejected")
+            .to_string();
+
+        assert!(err.contains("sim_epoch_ns must be set"));
+    }
+
+    #[test]
+    fn sim_clock_config_builds_identity_and_accelerated_maps() {
+        let mut cfg = Config::default();
+        assert_eq!(
+            build_sim_clock(&cfg, 123).expect("identity clock"),
+            SimClock::identity()
+        );
+
+        cfg.speed = 0.0;
+        assert_eq!(
+            build_sim_clock(&cfg, 123).expect("legacy firehose keeps identity clock"),
+            SimClock::identity()
+        );
+
+        cfg.sim_epoch_ns = 1_700_438_400_000_000_000;
+        cfg.speed = 3_600.0;
+        assert_eq!(
+            build_sim_clock(&cfg, 123).expect("accelerated clock"),
+            SimClock {
+                sim_epoch_ns: 1_700_438_400_000_000_000,
+                wall_anchor_ns: 123,
+                speed: 3_600.0,
+            }
+        );
+
+        cfg.speed = 0.0;
+        assert!(build_sim_clock(&cfg, 123).is_err());
+    }
+
+    #[tokio::test]
+    async fn clock_route_returns_stored_run_clock() {
+        let mut state = state();
+        state.sim = SimClock {
+            sim_epoch_ns: 10,
+            wall_anchor_ns: 20,
+            speed: 30.0,
+        };
+
+        let Json(returned) = clock(State(state)).await;
+
+        assert_eq!(
+            returned,
+            SimClock {
+                sim_epoch_ns: 10,
+                wall_anchor_ns: 20,
+                speed: 30.0,
+            }
+        );
     }
 
     #[tokio::test]
@@ -962,6 +1104,7 @@ mod tests {
     #[tokio::test]
     async fn replay_is_cancellable_and_joins() {
         let cfg = Config {
+            sim_epoch_ns: 0,
             speed: 0.0,
             gap_cap_ms: 0,
             server_heartbeat_ms: 0,
@@ -973,6 +1116,7 @@ mod tests {
             None,
             None,
             &cfg,
+            SimClock::identity(),
             tx,
             Arc::clone(&cancel),
         );
@@ -994,6 +1138,7 @@ mod tests {
     #[tokio::test]
     async fn parked_replay_quiesces_promptly() {
         let cfg = Config {
+            sim_epoch_ns: 0,
             speed: 0.0,
             gap_cap_ms: 0,
             server_heartbeat_ms: 0,
@@ -1007,6 +1152,7 @@ mod tests {
             None,
             None,
             &cfg,
+            SimClock::identity(),
             tx,
             Arc::clone(&cancel),
         );
@@ -1020,5 +1166,65 @@ mod tests {
             "parked replay took {:?} to quiesce",
             started.elapsed(),
         );
+    }
+
+    /// The accelerated branch of `spawn_replay` deadline-paces against the sim
+    /// clock instead of the legacy per-gap sleep. Anchoring the clock ~150 ms in
+    /// the FUTURE makes the first tick's wall deadline `wall_ns(ts_event)` land
+    /// at the anchor, so a correct deadline-pacer holds the very first tick for
+    /// ~150 ms; a broken one (or the identity gap-pacer) would release it at
+    /// once. The high speed collapses the generator's own inter-arrival gaps to
+    /// near zero, isolating the assertion to the anchor delay alone. This is the
+    /// only unit coverage of the deadline branch (the rest is the `--accelerated`
+    /// smoke, which `brokkr check` does not run).
+    #[tokio::test]
+    async fn replay_deadline_paces_against_sim_clock() {
+        const EPOCH: u64 = 1_900_000_000_000_000_000;
+        let anchor = now_ns() + 150_000_000;
+        let sim = SimClock {
+            sim_epoch_ns: EPOCH,
+            wall_anchor_ns: anchor,
+            speed: 1_000.0,
+        };
+        // `gap_cap_ms`/`speed` are the identity-path knobs; under a non-identity
+        // clock `spawn_replay` ignores them and takes the deadline branch.
+        let cfg = Config {
+            sim_epoch_ns: EPOCH,
+            speed: 1_000.0,
+            gap_cap_ms: 1_000,
+            server_heartbeat_ms: 0,
+        };
+        let (tx, mut rx) = mpsc::channel::<ServerMessage>(8);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let started = Instant::now();
+        let handle = spawn_replay(
+            "KEUR".to_string(),
+            Some(EPOCH),
+            None,
+            &cfg,
+            sim,
+            tx,
+            Arc::clone(&cancel),
+        );
+
+        let first = rx.recv().await.expect("a tick");
+        let elapsed = started.elapsed();
+        let ts_event = match first {
+            ServerMessage::Trade(t) => t.ts_event,
+            ServerMessage::Quote(q) => q.ts_event,
+            other => panic!("unexpected first frame: {other:?}"),
+        };
+        // Deadline-paced to the future anchor (generous lower bound for slow CI).
+        assert!(
+            elapsed >= Duration::from_millis(80),
+            "first tick released after {elapsed:?}, expected deadline pacing to the anchor",
+        );
+        // The generator anchored on the sim epoch, so stamps ride the sim axis.
+        assert!(
+            ts_event >= EPOCH,
+            "ts_event {ts_event} below sim epoch {EPOCH}"
+        );
+
+        quiesce_replay(Replay { cancel, handle }).await;
     }
 }

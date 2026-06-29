@@ -78,16 +78,14 @@ clock. This spans:
 - `mogwai-adapter`: its time source (currently the shared wall-clock reader).
 - broadarrow's node clock seam.
 
-**Feasibility crux - RESOLVED, and the answer is DEFERRED to nautilus.** A
-nautilus `LiveNode` cannot today be driven by a non-wall `Clock` without an
-upstream change. Three independent walls in the in-tree `research/nautilus_trader`
-copy:
+**Feasibility crux - RESOLVED, and the upstream seam has LANDED.** A nautilus
+`LiveNode` previously could not be driven by a non-wall `Clock` without an
+upstream change. Three independent walls existed:
 
-- The kernel hardwires the clock by environment with no injection seam:
-  `crates/system/src/kernel.rs` `initialize_clock` is a bare match - `Backtest`
-  gets a `TestClock`, `Live | Sandbox` get `LiveClock::default()`. Neither the
-  config nor the builder accepts a caller-supplied `Clock` (the builder only
-  hands the kernel's own clock to factories, read-only).
+- The kernel hardwired the clock by environment with no injection seam:
+  `crates/system/src/kernel.rs` `initialize_clock` was a bare match - `Backtest`
+  got a `TestClock`, `Live | Sandbox` got `LiveClock::default()`. Neither the
+  config nor the builder accepted a caller-supplied `Clock`.
 - `LiveClock`'s time-read axis is the process-global realtime singleton:
   `crates/common/src/live/clock.rs` takes `get_atomic_clock_realtime()` and
   `timestamp_ns()` just reads it.
@@ -95,21 +93,53 @@ copy:
   `LiveTimer`s that sleep a real duration, so time-in-force expiries and
   bar-aggregation windows tick at 1x even if the time-read axis were scaled.
 
-So coherent acceleration is NOT a mogwai+adapter-only change - it needs a
-nautilus seam. The single upstream ask narrowed to just a *clock-injection
-point*: the `Clock` trait already owns timer creation AND firing (`LiveTimer`
-pushes `TimeEvent`s into a `TimeEventSender` the runner only drains in its
-`select!` loop, with no wall-clock assumption), so the accelerated `Clock` is
-ours to implement - nautilus only needs to let a live/sandbox node construct on
-a caller-supplied clock factory instead of hardwiring `LiveClock::default()` at
-`kernel.rs initialize_clock` and `trader.rs create_component_clock`. Filed
-upstream as nautechsystems/nautilus_trader#4304. This item is parked until that
-lands; no mogwai spec or code until the nautilus seam exists.
+The first wall - the missing clock-injection point - is now closed upstream.
+Issue nautechsystems/nautilus_trader#4304 was resolved by PR #4331 (commit
+`338b64b`) and refined by `66dcfd5`. A live/sandbox node can now be constructed
+on a caller-supplied clock instead of hardwiring `LiveClock::default()`. The
+landed API (`crates/system/src/clock_factory.rs`):
 
-- [ ] Upstream: nautilus accepts a non-wall `Clock` for a live node - filed as
-      nautechsystems/nautilus_trader#4304.
-- [ ] Then write the spec per `reference/technical-implementation-spec.md`
-      before any mogwai/adapter code (this item is the TODO source it cites).
+- `ClockFactory` - a cloneable struct wrapping a re-invocable
+  `Rc<dyn Fn() -> Rc<RefCell<dyn Clock>>>`. It memoizes ONE *primary* clock via
+  an inner `OnceCell` and mints *fresh* component clocks on demand:
+  - `ClockFactory::new(closure)` - build from a clock constructor.
+  - `clock()` - the memoized primary clock, shared by the kernel and the trader
+    timestamps (lazily created on first call, same `Rc` thereafter).
+  - `create_component_clock()` - a brand-new clock instance per call, so each
+    component's timer/callback registration stays isolated.
+  - `for_environment(Environment)` / `test_default()` - defaults: `TestClock`
+    for `Backtest`, `LiveClock` for `Live | Sandbox` (the live default is
+    feature-gated behind `live`; without it the factory panics with guidance).
+- Threaded through `NautilusKernelBuilder`, `LiveNodeBuilder::with_clock_factory`,
+  `NautilusKernel::new_with`, and `Trader::new`. Supplying no factory is
+  byte-identical to the old `LiveClock::default()` behavior; the backtest path
+  (`TestClock`) is unchanged.
+
+The remaining two walls (the realtime-singleton read axis and the Tokio
+`LiveTimer` fire axis) are ours to solve, NOT upstream's: the `Clock` trait
+already owns both timer creation AND firing (`LiveTimer` pushes `TimeEvent`s
+into a `TimeEventSender` the runner only drains in its `select!` loop, with no
+wall-clock assumption), so the accelerated `Clock` is a mogwai implementation
+we hand to the node via `with_clock_factory`. This item is now UNPARKED: the
+spec can be written.
+
+- [x] Upstream: nautilus accepts a non-wall `Clock` for a live node -
+      nautechsystems/nautilus_trader#4304, landed as PR #4331 (`338b64b`,
+      refined by `66dcfd5`). The seam is `ClockFactory` +
+      `LiveNodeBuilder::with_clock_factory`.
+- [x] Spec written: `docs/coherent-clock-spec.md`, per
+      `reference/technical-implementation-spec.md`. Design: one affine
+      `SimClock` (`sim = sim_epoch + (wall - wall_anchor) * speed`) shared by
+      server and adapter; deadline-paced replay binds the data stream to the
+      clock; the adapter implements `MogwaiClock` (sim reads, scaled-wall timer
+      fires into the runner `TimeEventSender`) and exports a `ClockFactory` via
+      `mogwai_clock_factory`, closing both non-upstream walls. `mogwai-engine`
+      needs no change (its `process(msg, ts)` already abstracts the clock).
+- [ ] Implement the spec in three keep/revert landings (protocol SimClock ->
+      server sim-time + `/clock` + deadline pacing + accelerated smoke ->
+      adapter MogwaiClock + factory). Then the downstream broadarrow wiring
+      (`with_clock_factory` in `ba-worker.rs`), which is a separate repo's item
+      named and excluded by the spec.
 
 ### 2. Bug-hunt follow-ups - the residual tail
 

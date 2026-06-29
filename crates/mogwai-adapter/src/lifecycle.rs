@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
-use mogwai_protocol::{ClientMessage, ConnHavoc, ServerMessage};
+use mogwai_protocol::{ClientMessage, ConnHavoc, ServerMessage, SimClock};
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 use tokio::{
     sync::{
@@ -23,27 +23,29 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ReconnectPolicy {
-    initial: Duration,
-    max: Duration,
+    initial_ms: u64,
+    max_ms: u64,
     factor: f64,
     jitter_ms: u64,
     max_attempts: Option<u32>,
+    sim: SimClock,
 }
 
 impl ReconnectPolicy {
-    pub(crate) fn from_conn(conn: &ConnHavoc) -> Self {
+    pub(crate) fn from_conn(conn: &ConnHavoc, sim: SimClock) -> Self {
         Self {
-            initial: Duration::from_millis(conn.reconnect_delay_initial_ms),
-            max: Duration::from_millis(conn.reconnect_delay_max_ms),
+            initial_ms: conn.reconnect_delay_initial_ms,
+            max_ms: conn.reconnect_delay_max_ms,
             factor: conn.reconnect_backoff_factor,
             jitter_ms: conn.reconnect_jitter_ms,
             max_attempts: conn.reconnect_max_attempts,
+            sim,
         }
     }
 
     pub(crate) fn backoff(&self, attempt: u32, rng: &mut StdRng) -> Duration {
-        let initial_ms = self.initial.as_millis() as f64;
-        let max_ms = self.max.as_millis() as f64;
+        let initial_ms = self.initial_ms as f64;
+        let max_ms = self.max_ms as f64;
         // `max_ms == 0` means "no ceiling": clamp only when a positive max is
         // configured. The old code collapsed the delay to zero whenever either
         // bound was zero, so a nonzero initial paired with a zero max busy-spun
@@ -63,7 +65,13 @@ impl ReconnectPolicy {
         } else {
             rng.random_range(0..=self.jitter_ms)
         };
-        Duration::from_millis(base_ms as u64).saturating_add(Duration::from_millis(jitter))
+        let base_ms = base_ms.max(0.0).min(u64::MAX as f64) as u64;
+        let total_ms = base_ms.saturating_add(jitter);
+        if total_ms == 0 {
+            Duration::ZERO
+        } else {
+            self.sim.wall_duration(total_ms.saturating_mul(1_000_000))
+        }
     }
 
     pub(crate) fn exhausted(&self, attempt: u32) -> bool {
@@ -78,7 +86,7 @@ pub(crate) struct HttpQuota {
 }
 
 impl HttpQuota {
-    pub(crate) fn from_conn(conn: &ConnHavoc) -> Self {
+    pub(crate) fn from_conn(conn: &ConnHavoc, sim: SimClock) -> Self {
         Self {
             min_interval: conn.max_requests_per_second.map(|max| {
                 // Round the per-request spacing UP (ceil-divide) so a rate that
@@ -89,7 +97,7 @@ impl HttpQuota {
                 // configured ceiling.
                 let max = u64::from(max);
                 let nanos = 1_000_000_000u64.div_ceil(max);
-                Duration::from_nanos(nanos.max(1))
+                sim.wall_duration(nanos.max(1))
             }),
             last_send: Arc::new(Mutex::new(None)),
         }
@@ -122,6 +130,7 @@ pub(crate) struct WsConnectionConfig {
     pub(crate) conn: ConnHavoc,
     pub(crate) seed: Option<u64>,
     pub(crate) connected: Arc<AtomicBool>,
+    pub(crate) sim: SimClock,
 }
 
 pub(crate) async fn run_ws_connection<
@@ -153,8 +162,9 @@ pub(crate) async fn run_ws_connection<
         conn,
         seed,
         connected,
+        sim,
     } = config;
-    let policy = ReconnectPolicy::from_conn(&conn);
+    let policy = ReconnectPolicy::from_conn(&conn, sim);
     // The reconnect-jitter RNG is seeded from the configured havoc seed when one
     // is set, so jitter is reproducible (D.6). Both client.rs construction sites
     // pass `seed: client_havoc.seed` into `WsConnectionConfig`, so a configured
@@ -212,12 +222,12 @@ pub(crate) async fn run_ws_connection<
             // first Ping from firing right after connect (D.8): the cadence
             // should be one `heartbeat_interval_ms` after the socket comes up,
             // not at t=0.
-            let period = Duration::from_millis(conn.heartbeat_interval_ms);
+            let period = sim.wall_duration(conn.heartbeat_interval_ms.saturating_mul(1_000_000));
             let mut interval = tokio::time::interval_at(Instant::now() + period, period);
             interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
             interval
         });
-        let mut idle_sleep = idle_sleep(conn.idle_timeout_ms);
+        let mut idle_sleep = idle_sleep(conn.idle_timeout_ms, sim);
         let mut commands_closed = false;
 
         loop {
@@ -235,7 +245,7 @@ pub(crate) async fn run_ws_connection<
                     }
                     match inbound.expect("inbound close and errors returned above") {
                         Ok(Message::Text(text)) => {
-                            reset_idle(&mut idle_sleep, conn.idle_timeout_ms);
+                            reset_idle(&mut idle_sleep, conn.idle_timeout_ms, sim);
                             // Surface deserialization failures: a version-skewed
                             // or malformed frame would otherwise be swallowed
                             // while the idle clock was just reset, so the
@@ -250,7 +260,7 @@ pub(crate) async fn run_ws_connection<
                             }
                         }
                         Ok(Message::Binary(bytes)) => {
-                            reset_idle(&mut idle_sleep, conn.idle_timeout_ms);
+                            reset_idle(&mut idle_sleep, conn.idle_timeout_ms, sim);
                             match serde_json::from_slice::<ServerMessage>(&bytes) {
                                 Ok(server_msg) => handler(server_msg).await,
                                 Err(error) => tracing::warn!(
@@ -329,15 +339,19 @@ where
         .context("send websocket command")
 }
 
-fn idle_sleep(timeout_ms: u64) -> Option<Pin<Box<Sleep>>> {
-    (timeout_ms > 0).then(|| Box::pin(tokio::time::sleep(Duration::from_millis(timeout_ms))))
+fn idle_sleep(timeout_ms: u64, sim: SimClock) -> Option<Pin<Box<Sleep>>> {
+    (timeout_ms > 0).then(|| {
+        Box::pin(tokio::time::sleep(
+            sim.wall_duration(timeout_ms.saturating_mul(1_000_000)),
+        ))
+    })
 }
 
-fn reset_idle(idle_sleep: &mut Option<Pin<Box<Sleep>>>, timeout_ms: u64) {
+fn reset_idle(idle_sleep: &mut Option<Pin<Box<Sleep>>>, timeout_ms: u64, sim: SimClock) {
     if let Some(sleep) = idle_sleep {
         sleep
             .as_mut()
-            .reset(Instant::now() + Duration::from_millis(timeout_ms));
+            .reset(Instant::now() + sim.wall_duration(timeout_ms.saturating_mul(1_000_000)));
     }
 }
 
@@ -365,7 +379,7 @@ mod tests {
             reconnect_backoff_factor: 2.0,
             ..Default::default()
         };
-        let policy = ReconnectPolicy::from_conn(&conn);
+        let policy = ReconnectPolicy::from_conn(&conn, SimClock::identity());
         let mut rng = StdRng::seed_from_u64(7);
 
         assert_eq!(policy.backoff(0, &mut rng), Duration::from_millis(100));
@@ -381,7 +395,7 @@ mod tests {
             reconnect_jitter_ms: 50,
             ..Default::default()
         };
-        let policy = ReconnectPolicy::from_conn(&conn);
+        let policy = ReconnectPolicy::from_conn(&conn, SimClock::identity());
         let mut left = StdRng::seed_from_u64(11);
         let mut right = StdRng::seed_from_u64(11);
 
@@ -415,7 +429,7 @@ mod tests {
             reconnect_backoff_factor: 2.0,
             ..Default::default()
         };
-        let policy = ReconnectPolicy::from_conn(&conn);
+        let policy = ReconnectPolicy::from_conn(&conn, SimClock::identity());
         let mut rng = StdRng::seed_from_u64(3);
 
         assert_eq!(policy.backoff(0, &mut rng), Duration::from_millis(100));
@@ -433,7 +447,7 @@ mod tests {
             reconnect_backoff_factor: 2.0,
             ..Default::default()
         };
-        let policy = ReconnectPolicy::from_conn(&conn);
+        let policy = ReconnectPolicy::from_conn(&conn, SimClock::identity());
         let mut rng = StdRng::seed_from_u64(3);
 
         assert_eq!(policy.backoff(0, &mut rng), Duration::ZERO);
@@ -445,10 +459,13 @@ mod tests {
         // D.9: 3 requests/sec does not divide one second evenly. Ceil-dividing
         // 1e9 / 3 yields 333_333_334ns (>= 333_333_333), so the spacing never
         // undershoots and the effective rate stays at or below the cap.
-        let quota = HttpQuota::from_conn(&ConnHavoc {
-            max_requests_per_second: Some(3),
-            ..Default::default()
-        });
+        let quota = HttpQuota::from_conn(
+            &ConnHavoc {
+                max_requests_per_second: Some(3),
+                ..Default::default()
+            },
+            SimClock::identity(),
+        );
 
         assert_eq!(quota.min_interval, Some(Duration::from_nanos(333_333_334)));
     }
@@ -459,11 +476,50 @@ mod tests {
             reconnect_max_attempts: Some(3),
             ..Default::default()
         };
-        let policy = ReconnectPolicy::from_conn(&conn);
+        let policy = ReconnectPolicy::from_conn(&conn, SimClock::identity());
 
         assert!(!policy.exhausted(0));
         assert!(!policy.exhausted(2));
         assert!(policy.exhausted(3));
+    }
+
+    #[test]
+    fn reconnect_policy_backoff_scales_with_sim_clock() {
+        let conn = ConnHavoc {
+            reconnect_delay_initial_ms: 100,
+            reconnect_delay_max_ms: 1_000,
+            reconnect_backoff_factor: 2.0,
+            ..Default::default()
+        };
+        let policy = ReconnectPolicy::from_conn(
+            &conn,
+            SimClock {
+                sim_epoch_ns: 1,
+                wall_anchor_ns: 1,
+                speed: 10.0,
+            },
+        );
+        let mut rng = StdRng::seed_from_u64(7);
+
+        assert_eq!(policy.backoff(0, &mut rng), Duration::from_millis(10));
+        assert_eq!(policy.backoff(1, &mut rng), Duration::from_millis(20));
+    }
+
+    #[test]
+    fn http_quota_interval_scales_with_sim_clock() {
+        let quota = HttpQuota::from_conn(
+            &ConnHavoc {
+                max_requests_per_second: Some(10),
+                ..Default::default()
+            },
+            SimClock {
+                sim_epoch_ns: 1,
+                wall_anchor_ns: 1,
+                speed: 10.0,
+            },
+        );
+
+        assert_eq!(quota.min_interval, Some(Duration::from_millis(10)));
     }
 
     #[test]
@@ -472,7 +528,7 @@ mod tests {
             reconnect_max_attempts: Some(2),
             ..Default::default()
         };
-        let policy = ReconnectPolicy::from_conn(&conn);
+        let policy = ReconnectPolicy::from_conn(&conn, SimClock::identity());
 
         assert!(!policy.exhausted(0));
         assert!(!policy.exhausted(1));
@@ -481,10 +537,13 @@ mod tests {
 
     #[tokio::test]
     async fn conn_http_quota_spaces_requests() {
-        let quota = HttpQuota::from_conn(&ConnHavoc {
-            max_requests_per_second: Some(20),
-            ..Default::default()
-        });
+        let quota = HttpQuota::from_conn(
+            &ConnHavoc {
+                max_requests_per_second: Some(20),
+                ..Default::default()
+            },
+            SimClock::identity(),
+        );
 
         quota.wait().await;
         let first = Instant::now();

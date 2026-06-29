@@ -243,6 +243,15 @@ The `ms` windows of `DelayAcks`, `GoDark`, and `StallData` are all bounded by
 `control::MAX_DIVERGENCE_MS` (3 600 000 ms = one hour), so a single request
 cannot arm an effectively permanent window or saturate a writer deadline.
 
+Under acceleration these `ms` are **simulated** milliseconds. The deadlines and
+the `DelayAcks` sleep are computed on the one sim axis (the `wall-clock` wording
+above is exact only at `speed = 1.0`): a `GoDark { ms }` blackout lasts `ms`
+simulated ms, realized in `ms / speed` wall, and the writer's drop guards compare
+against sim-now. So every temporal divergence here - plus the client inbound
+latency and the connection-lifecycle knobs in the surfaces above - scales with
+`speed` and stays coherent with the data stream. The full knob-by-knob table and
+each duration's wall lower bound live in `reference/clock.md`.
+
 ## The server/engine split and why it matters
 
 The catalog is split deliberately, and the split is enforced at two points:

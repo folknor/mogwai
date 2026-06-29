@@ -12,7 +12,7 @@ use anyhow::{Context, ensure};
 use async_trait::async_trait;
 use mogwai_protocol::{
     ClientHavoc, ClientMessage, ConnHavoc, HavocLatency, HavocSpec, InstrumentDef, MarketRegime,
-    ServerMessage, Symbol, TradeTick,
+    ServerMessage, SimClock, Symbol, TradeTick,
 };
 use nautilus_common::{
     clients::{DataClient, ExecutionClient},
@@ -38,8 +38,12 @@ use nautilus_model::{
     accounts::AccountAny,
     data::{Bar, BarType, Data, bar::get_bar_interval_ns},
     enums::{LiquiditySide, OmsType, OrderSide, OrderStatus, OrderType, PositionSideSpecified},
-    events::{OrderAccepted, OrderCanceled, OrderEventAny, OrderFilled, OrderUpdated},
+    events::{
+        AccountState as NautilusAccountState, OrderAccepted, OrderCanceled, OrderEventAny,
+        OrderFilled, OrderModifyRejected, OrderRejected, OrderSubmitted, OrderUpdated,
+    },
     identifiers::{AccountId, ClientId, ClientOrderId, InstrumentId, TradeId, Venue, VenueOrderId},
+    orders::Order,
     reports::{FillReport, OrderStatusReport, PositionStatusReport},
     types::{AccountBalance, MarginBalance, currency::Currency},
 };
@@ -50,10 +54,19 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 
 use crate::{
-    MOGWAI_VENUE, MogwaiDataClientConfig, MogwaiExecClientConfig, convert,
+    MOGWAI_VENUE, MogwaiDataClientConfig, MogwaiExecClientConfig,
+    clock::fetch_clock,
+    convert,
     lifecycle::{HttpQuota, WsConnectionConfig, run_ws_connection},
 };
 
+/// Cadence of the `HttpPolling` data path's `/trades` pull. This stays a WALL
+/// duration and is deliberately NOT scaled by the sim clock: the endpoint it
+/// polls is the `ORIGIN_TS`-anchored history seek path, which the coherent-clock
+/// work leaves OFF the accelerated axis (see `reference/clock.md` and the
+/// coherent-clock spec). Scaling it would only spin the poll loop faster under
+/// acceleration without producing on-axis data. The accelerated vehicle is the
+/// WS push path, which deadline-paces server-side.
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug)]
@@ -65,6 +78,7 @@ pub struct MogwaiDataClient {
     sink: Option<UnboundedSender<DataEvent>>,
     http: HttpClient,
     http_quota: HttpQuota,
+    sim: SimClock,
     ws_cmd: Option<UnboundedSender<WsCommand>>,
     instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     subs: Arc<Mutex<HashMap<Symbol, SubState>>>,
@@ -92,11 +106,12 @@ impl MogwaiDataClient {
         .context("create HTTP client")?;
         Ok(Self {
             client_id,
-            http_quota: HttpQuota::from_conn(&conn_havoc(&config.havoc)),
+            http_quota: HttpQuota::from_conn(&conn_havoc(&config.havoc), SimClock::identity()),
             config,
             connected: Arc::new(AtomicBool::new(false)),
             sink: None,
             http,
+            sim: SimClock::identity(),
             ws_cmd: None,
             instruments: Arc::new(Mutex::new(HashMap::new())),
             subs: Arc::new(Mutex::new(HashMap::new())),
@@ -112,6 +127,8 @@ impl MogwaiDataClient {
         kind: SubKind,
         start_ts: Option<u64>,
     ) -> anyhow::Result<()> {
+        let start_ts =
+            start_ts.or_else(|| (self.sim.sim_epoch_ns != 0).then_some(self.sim.sim_epoch_ns));
         let (emit, active_start_ts) = {
             let mut subs = self
                 .subs
@@ -242,6 +259,10 @@ impl DataClient for MogwaiDataClient {
     async fn connect(&mut self) -> anyhow::Result<()> {
         let sink = self.sink()?;
         let http_base_url = self.config.http_base_url();
+        let sim = fetch_clock_or_identity(&self.http, &http_base_url).await;
+        self.sim = sim;
+        let conn = conn_havoc(&self.config.havoc);
+        self.http_quota = HttpQuota::from_conn(&conn, sim);
         seed_instruments(
             &self.http,
             &self.http_quota,
@@ -253,7 +274,6 @@ impl DataClient for MogwaiDataClient {
         // the same config object but only applies its client-side transport half.
         let client_havoc = client_havoc(&self.config.havoc);
         let regime = data_regime(&self.config.havoc);
-        let conn = conn_havoc(&self.config.havoc);
 
         if self.config.transport_profile.data_by_polling() {
             let connected = Arc::clone(&self.connected);
@@ -278,6 +298,7 @@ impl DataClient for MogwaiDataClient {
                     connected,
                     havoc_filter,
                     regime,
+                    sim,
                 })
                 .await;
             });
@@ -315,6 +336,7 @@ impl DataClient for MogwaiDataClient {
                     conn,
                     seed: client_havoc.seed,
                     connected,
+                    sim,
                 },
                 cmd_rx,
                 ws_command_to_client_message,
@@ -327,8 +349,8 @@ impl DataClient for MogwaiDataClient {
                     let bars = Arc::clone(&handler_bars);
                     async move {
                         let mut filter = handler_filter.lock().await;
-                        dispatch_havoc(&mut filter, server_msg, |msg| {
-                            handle_market_message(msg, &sink, &instruments, &subs, &bars)
+                        dispatch_havoc(&mut filter, server_msg, sim, |msg| {
+                            handle_market_message(msg, &sink, &instruments, &subs, &bars, sim)
                         })
                         .await;
                     }
@@ -341,8 +363,8 @@ impl DataClient for MogwaiDataClient {
                     let bars = Arc::clone(&disconnect_bars);
                     async move {
                         let mut filter = disconnect_filter.lock().await;
-                        flush_havoc(&mut filter, |msg| {
-                            handle_market_message(msg, &sink, &instruments, &subs, &bars)
+                        flush_havoc(&mut filter, sim, |msg| {
+                            handle_market_message(msg, &sink, &instruments, &subs, &bars, sim)
                         })
                         .await;
                     }
@@ -377,10 +399,11 @@ impl DataClient for MogwaiDataClient {
         let http_quota = self.http_quota.clone();
         let base = self.config.http_base_url();
         let instruments = Arc::clone(&self.instruments);
+        let sim = self.sim;
         drop(get_runtime().spawn(async move {
             if let Ok(defs) = fetch_instruments(&http, &http_quota, &base).await {
                 cache_instruments(&instruments, defs.clone());
-                let ts_init = now_unix_nanos();
+                let ts_init = now_unix_nanos(sim);
                 for def in defs {
                     if let Ok(instrument) = convert::instrument_any(&def, ts_init) {
                         drop(sink.send(DataEvent::Instrument(instrument)));
@@ -398,10 +421,11 @@ impl DataClient for MogwaiDataClient {
         let http_quota = self.http_quota.clone();
         let base = self.config.http_base_url();
         let instruments = Arc::clone(&self.instruments);
+        let sim = self.sim;
         drop(get_runtime().spawn(async move {
             if let Ok(defs) = fetch_instruments(&http, &http_quota, &base).await {
                 cache_instruments(&instruments, defs.clone());
-                let ts_init = now_unix_nanos();
+                let ts_init = now_unix_nanos(sim);
                 for def in defs {
                     if def.symbol == symbol
                         && let Ok(instrument) = convert::instrument_any(&def, ts_init)
@@ -481,6 +505,7 @@ impl DataClient for MogwaiDataClient {
         let regime = data_regime(&self.config.havoc);
         let instruments = Arc::clone(&self.instruments);
         let client_id = request.client_id.unwrap_or(self.client_id);
+        let sim = self.sim;
         drop(get_runtime().spawn(async move {
             let symbol = symbol_from_instrument(request.instrument_id);
             let start = date_to_unix_nanos(request.start);
@@ -504,7 +529,7 @@ impl DataClient for MogwaiDataClient {
                 let data = trades
                     .iter()
                     .filter_map(|t| {
-                        convert::trade_tick(t, request.instrument_id, &def, now_unix_nanos())
+                        convert::trade_tick(t, request.instrument_id, &def, now_unix_nanos(sim))
                             .map_err(|err| {
                                 tracing::warn!(
                                     symbol = %t.symbol,
@@ -523,7 +548,7 @@ impl DataClient for MogwaiDataClient {
                     data,
                     start,
                     end,
-                    now_unix_nanos(),
+                    now_unix_nanos(sim),
                     request.params,
                 );
                 drop(sink.send(DataEvent::Response(DataResponse::Trades(response))));
@@ -535,6 +560,7 @@ impl DataClient for MogwaiDataClient {
     fn request_quotes(&self, request: RequestQuotes) -> anyhow::Result<()> {
         let sink = self.sink()?;
         let client_id = request.client_id.unwrap_or(self.client_id);
+        let sim = self.sim;
         drop(get_runtime().spawn(async move {
             let response = QuotesResponse::new(
                 request.request_id,
@@ -543,7 +569,7 @@ impl DataClient for MogwaiDataClient {
                 Vec::new(),
                 date_to_unix_nanos(request.start),
                 date_to_unix_nanos(request.end),
-                now_unix_nanos(),
+                now_unix_nanos(sim),
                 request.params,
             );
             drop(sink.send(DataEvent::Response(DataResponse::Quotes(response))));
@@ -563,6 +589,7 @@ impl DataClient for MogwaiDataClient {
         let regime = data_regime(&self.config.havoc);
         let instruments = Arc::clone(&self.instruments);
         let client_id = request.client_id.unwrap_or(self.client_id);
+        let sim = self.sim;
         drop(get_runtime().spawn(async move {
             let instrument_id = request.bar_type.instrument_id();
             let symbol = symbol_from_instrument(instrument_id);
@@ -584,7 +611,7 @@ impl DataClient for MogwaiDataClient {
                 )
                 .await
             {
-                let bars = aggregate_bars(&request.bar_type, &trades, &def);
+                let bars = aggregate_bars(&request.bar_type, &trades, &def, sim);
                 let response = BarsResponse::new(
                     request.request_id,
                     client_id,
@@ -592,7 +619,7 @@ impl DataClient for MogwaiDataClient {
                     bars,
                     start,
                     end,
-                    now_unix_nanos(),
+                    now_unix_nanos(sim),
                     request.params,
                 );
                 drop(sink.send(DataEvent::Response(DataResponse::Bars(response))));
@@ -608,10 +635,11 @@ impl DataClient for MogwaiDataClient {
         let base = self.config.http_base_url();
         let instruments = Arc::clone(&self.instruments);
         let client_id = request.client_id.unwrap_or(self.client_id);
+        let sim = self.sim;
         drop(get_runtime().spawn(async move {
             if let Ok(defs) = fetch_instruments(&http, &http_quota, &base).await {
                 cache_instruments(&instruments, defs.clone());
-                let ts_init = now_unix_nanos();
+                let ts_init = now_unix_nanos(sim);
                 let data = defs
                     .iter()
                     .filter_map(|def| convert::instrument_any(def, ts_init).ok())
@@ -639,12 +667,13 @@ impl DataClient for MogwaiDataClient {
         let base = self.config.http_base_url();
         let instruments = Arc::clone(&self.instruments);
         let client_id = request.client_id.unwrap_or(self.client_id);
+        let sim = self.sim;
         drop(get_runtime().spawn(async move {
             let symbol = symbol_from_instrument(request.instrument_id);
             if let Ok(def) =
                 ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await
             {
-                let ts_init = now_unix_nanos();
+                let ts_init = now_unix_nanos(sim);
                 if let Ok(data) = convert::instrument_any(&def, ts_init) {
                     let response = InstrumentResponse::new(
                         request.request_id,
@@ -814,24 +843,28 @@ fn ws_command_to_client_message(cmd: WsCommand) -> ClientMessage {
 /// `handle_exec_message`, wrapped in an async block) share one control flow.
 /// `flush_havoc` is the same loop over `filter.flush()` for the disconnect
 /// teardown that emits any divergence-held events.
-async fn dispatch_havoc<F, Fut>(filter: &mut HavocFilter, msg: ServerMessage, mut handle: F)
-where
+async fn dispatch_havoc<F, Fut>(
+    filter: &mut HavocFilter,
+    msg: ServerMessage,
+    sim: SimClock,
+    mut handle: F,
+) where
     F: FnMut(ServerMessage) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
     for (msg, delay) in filter.apply(msg) {
-        sleep_havoc_delay(delay).await;
+        sleep_havoc_delay(sim, delay).await;
         handle(msg).await;
     }
 }
 
-async fn flush_havoc<F, Fut>(filter: &mut HavocFilter, mut handle: F)
+async fn flush_havoc<F, Fut>(filter: &mut HavocFilter, sim: SimClock, mut handle: F)
 where
     F: FnMut(ServerMessage) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
     for (msg, delay) in filter.flush() {
-        sleep_havoc_delay(delay).await;
+        sleep_havoc_delay(sim, delay).await;
         handle(msg).await;
     }
 }
@@ -861,10 +894,11 @@ async fn handle_market_message(
     instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
     bars: &Arc<Mutex<HashMap<BarType, BarSubState>>>,
+    sim: SimClock,
 ) {
     match msg {
         ServerMessage::Trade(trade) => {
-            emit_trade(&trade, sink, instruments, subs, bars);
+            emit_trade(&trade, sink, instruments, subs, bars, sim);
         }
         ServerMessage::Quote(quote) => {
             let Some(def) = instrument_def(instruments, &quote.symbol) else {
@@ -873,7 +907,7 @@ async fn handle_market_message(
             let state = sub_state(subs, &quote.symbol);
             if state.as_ref().is_some_and(|s| s.quotes > 0) {
                 let id = convert::instrument_id(&def);
-                match convert::quote_tick(&quote, id, &def, now_unix_nanos()) {
+                match convert::quote_tick(&quote, id, &def, now_unix_nanos(sim)) {
                     Ok(tick) => drop(sink.send(DataEvent::Data(Data::Quote(tick)))),
                     Err(err) => tracing::warn!(
                         symbol = %quote.symbol,
@@ -896,6 +930,7 @@ fn emit_trade(
     instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
     bars: &Arc<Mutex<HashMap<BarType, BarSubState>>>,
+    sim: SimClock,
 ) {
     let Some(def) = instrument_def(instruments, &trade.symbol) else {
         return;
@@ -912,7 +947,7 @@ fn emit_trade(
     let state = sub_state(subs, &trade.symbol);
     let id = convert::instrument_id(&def);
     if state.as_ref().is_some_and(|s| s.trades > 0) {
-        match convert::trade_tick(trade, id, &def, now_unix_nanos()) {
+        match convert::trade_tick(trade, id, &def, now_unix_nanos(sim)) {
             Ok(tick) => drop(sink.send(DataEvent::Data(Data::Trade(tick)))),
             Err(err) => tracing::warn!(
                 symbol = %trade.symbol,
@@ -923,7 +958,7 @@ fn emit_trade(
         }
     }
     if state.as_ref().is_some_and(|s| s.bars > 0) {
-        emit_live_bars(trade, &def, sink, bars);
+        emit_live_bars(trade, &def, sink, bars, sim);
     }
 }
 
@@ -939,6 +974,7 @@ struct DataPollContext {
     connected: Arc<AtomicBool>,
     havoc_filter: HavocFilter,
     regime: Option<MarketRegime>,
+    sim: SimClock,
 }
 
 async fn poll_market_data(mut ctx: DataPollContext) {
@@ -978,17 +1014,20 @@ async fn poll_market_data(mut ctx: DataPollContext) {
             for trade in trades {
                 let (sink, instruments, subs, bars) =
                     (&ctx.sink, &ctx.instruments, &ctx.subs, &ctx.bars);
-                dispatch_havoc(&mut ctx.havoc_filter, ServerMessage::Trade(trade), |msg| {
-                    handle_market_message(msg, sink, instruments, subs, bars)
-                })
+                dispatch_havoc(
+                    &mut ctx.havoc_filter,
+                    ServerMessage::Trade(trade),
+                    ctx.sim,
+                    |msg| handle_market_message(msg, sink, instruments, subs, bars, ctx.sim),
+                )
                 .await;
             }
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
     let (sink, instruments, subs, bars) = (&ctx.sink, &ctx.instruments, &ctx.subs, &ctx.bars);
-    flush_havoc(&mut ctx.havoc_filter, |msg| {
-        handle_market_message(msg, sink, instruments, subs, bars)
+    flush_havoc(&mut ctx.havoc_filter, ctx.sim, |msg| {
+        handle_market_message(msg, sink, instruments, subs, bars, ctx.sim)
     })
     .await;
 }
@@ -1006,6 +1045,7 @@ fn emit_live_bars(
     def: &InstrumentDef,
     sink: &UnboundedSender<DataEvent>,
     bars: &Arc<Mutex<HashMap<BarType, BarSubState>>>,
+    sim: SimClock,
 ) {
     let mut ready = Vec::new();
     {
@@ -1014,7 +1054,7 @@ fn emit_live_bars(
             if bar_type.instrument_id() != convert::instrument_id(def) || state.refs == 0 {
                 continue;
             }
-            if let Some(bar) = update_bar_state(*bar_type, state, trade, def) {
+            if let Some(bar) = update_bar_state(*bar_type, state, trade, def, sim) {
                 ready.push(bar);
             }
         }
@@ -1029,6 +1069,7 @@ fn update_bar_state(
     state: &mut BarSubState,
     trade: &mogwai_protocol::TradeTick,
     def: &InstrumentDef,
+    sim: SimClock,
 ) -> Option<Bar> {
     let interval = get_bar_interval_ns(&bar_type).as_u64();
     let close_ts = ((trade.ts_event / interval) + 1) * interval;
@@ -1039,7 +1080,7 @@ fn update_bar_state(
             // Price/Quantity drops just this bar with a warning rather than
             // panicking the reader/poll task; the window still rotates so a
             // single bad bar does not wedge aggregation.
-            let bar = match active_to_bar(bar_type, active, def) {
+            let bar = match active_to_bar(bar_type, active, def, sim) {
                 Ok(bar) => Some(bar),
                 Err(err) => {
                     tracing::warn!(%bar_type, error = %err, "dropping unrepresentable bar");
@@ -1065,11 +1106,12 @@ fn aggregate_bars(
     bar_type: &BarType,
     trades: &[mogwai_protocol::TradeTick],
     def: &InstrumentDef,
+    sim: SimClock,
 ) -> Vec<Bar> {
     let mut state = BarSubState::default();
     let mut out = Vec::new();
     for trade in trades {
-        if let Some(bar) = update_bar_state(*bar_type, &mut state, trade, def) {
+        if let Some(bar) = update_bar_state(*bar_type, &mut state, trade, def, sim) {
             out.push(bar);
         }
     }
@@ -1091,6 +1133,7 @@ fn active_to_bar(
     bar_type: BarType,
     active: &ActiveBar,
     def: &InstrumentDef,
+    sim: SimClock,
 ) -> anyhow::Result<Bar> {
     Ok(Bar::new(
         bar_type,
@@ -1100,7 +1143,7 @@ fn active_to_bar(
         convert::price(active.close, def.price_precision)?,
         convert::quantity(active.volume, def.size_precision)?,
         UnixNanos::from(active.close_ts),
-        now_unix_nanos(),
+        now_unix_nanos(sim),
     ))
 }
 
@@ -1323,6 +1366,7 @@ async fn ship_server_havoc(
     http: &HttpClient,
     http_base: &str,
     spec: &HavocSpec,
+    sim: SimClock,
 ) -> anyhow::Result<()> {
     let url = join_url(http_base, "control/divergence");
     for divergence in &spec.server {
@@ -1335,7 +1379,7 @@ async fn ship_server_havoc(
                 None,
                 Some(headers),
                 Some(body),
-                Some(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS),
+                Some(request_timeout_secs(&None, sim)),
                 None,
             )
             .await
@@ -1439,13 +1483,27 @@ fn conn_havoc(spec: &Option<HavocSpec>) -> ConnHavoc {
         .map_or_else(ConnHavoc::default, |spec| spec.conn)
 }
 
-fn request_timeout_secs(spec: &Option<HavocSpec>) -> u64 {
+/// Wall floor for the scaled HTTP request timeout, in seconds. Unlike the other
+/// scaled durations (whose floor is the ~1ms tokio granularity), this one guards
+/// a REAL local-IO round trip whose wall cost does NOT compress with `speed`:
+/// dividing a sim-seconds timeout by a high `speed` would otherwise yield a
+/// sub-second wall budget that the actual HTTP round trip blows, spuriously
+/// timing out every order. Clamping UP to one wall second keeps the request
+/// survivable; the consequence is that `request_timeout_secs` is the tightest
+/// contributor to the usable-speed ceiling. Documented in `reference/clock.md`.
+const MIN_WALL_REQUEST_TIMEOUT_SECS: u64 = 1;
+
+fn request_timeout_secs(spec: &Option<HavocSpec>, sim: SimClock) -> u64 {
     let configured = conn_havoc(spec).request_timeout_secs;
-    if configured == 0 {
+    let sim_secs = if configured == 0 {
         mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS
     } else {
         configured
-    }
+    };
+    let wall_ns = sim.wall_span(sim_secs.saturating_mul(1_000_000_000));
+    wall_ns
+        .div_ceil(1_000_000_000)
+        .max(MIN_WALL_REQUEST_TIMEOUT_SECS)
 }
 
 fn client_havoc_for_dispatch(spec: &Option<HavocSpec>, counter: u64) -> ClientHavoc {
@@ -1456,10 +1514,24 @@ fn client_havoc_for_dispatch(spec: &Option<HavocSpec>, counter: u64) -> ClientHa
     client
 }
 
-async fn sleep_havoc_delay(delay: Duration) {
+async fn sleep_havoc_delay(sim: SimClock, delay: Duration) {
     if !delay.is_zero() {
-        tokio::time::sleep(delay).await;
+        tokio::time::sleep(sim.wall_duration(duration_to_nanos(delay))).await;
     }
+}
+
+async fn fetch_clock_or_identity(http: &HttpClient, http_base: &str) -> SimClock {
+    match fetch_clock(http, http_base).await {
+        Ok(sim) => sim,
+        Err(err) => {
+            tracing::warn!(%err, "falling back to identity mogwai clock");
+            SimClock::identity()
+        }
+    }
+}
+
+fn duration_to_nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
 /// Resolves the effective row limit sent to the server's bounded `/trades`
@@ -1475,7 +1547,7 @@ fn capped_limit(limit: Option<std::num::NonZeroUsize>) -> usize {
         .min(mogwai_protocol::MAX_HISTORY_LIMIT)
 }
 
-fn join_url(base: &str, path: &str) -> String {
+pub(crate) fn join_url(base: &str, path: &str) -> String {
     format!("{}/{}", base.trim_end_matches('/'), path)
 }
 
@@ -1493,13 +1565,11 @@ fn date_to_unix_nanos(date: Option<chrono::DateTime<chrono::Utc>>) -> Option<Uni
         .map(UnixNanos::from)
 }
 
-fn now_unix_nanos() -> UnixNanos {
-    // Thin typed wrapper over the shared, saturating `mogwai_protocol::
-    // now_unix_nanos`: a backward clock step (NTP correction, leap-second
-    // smear) or a far-future instant degrades to a clamped `u64` rather than
-    // panicking the spawned reader/dispatch task (which has no supervisor) or
-    // silently truncating. Callers stay unchanged - they want the `UnixNanos`.
-    UnixNanos::from(mogwai_protocol::now_unix_nanos())
+fn now_unix_nanos(sim: SimClock) -> UnixNanos {
+    // Thin typed wrapper over the shared wall read plus the fetched simulated
+    // clock. The underlying reader keeps the saturating contract; the affine
+    // map then places adapter-side `ts_init` on the same axis as the server.
+    UnixNanos::from(sim.sim_ns(mogwai_protocol::now_unix_nanos()))
 }
 
 async fn wait_connected(connected: &Arc<AtomicBool>, ws_url: &str) -> anyhow::Result<()> {
@@ -1522,6 +1592,7 @@ pub struct MogwaiExecutionClient {
     connected: Arc<AtomicBool>,
     http: HttpClient,
     http_quota: HttpQuota,
+    sim: SimClock,
     ws_cmd: Option<UnboundedSender<ExecWsCommand>>,
     state: Arc<Mutex<ExecState>>,
     instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
@@ -1555,11 +1626,12 @@ impl MogwaiExecutionClient {
         .context("create HTTP client")?;
         Ok(Self {
             core,
-            http_quota: HttpQuota::from_conn(&conn_havoc(&config.havoc)),
+            http_quota: HttpQuota::from_conn(&conn_havoc(&config.havoc), SimClock::identity()),
             config,
             emitter,
             connected: Arc::new(AtomicBool::new(false)),
             http,
+            sim: SimClock::identity(),
             ws_cmd: None,
             state: Arc::new(Mutex::new(ExecState::default())),
             instruments: Arc::new(Mutex::new(HashMap::new())),
@@ -1593,6 +1665,8 @@ impl MogwaiExecutionClient {
             instruments: Arc::clone(&self.instruments),
             trader_id: self.core.trader_id,
             account_id: self.core.account_id,
+            account_type: self.config.account_type,
+            sim: self.sim,
         }
     }
 
@@ -1605,28 +1679,33 @@ impl MogwaiExecutionClient {
             let ctx = self.exec_context();
             let counter = self.http_dispatch_counter.fetch_add(1, Ordering::Relaxed);
             let client_havoc = client_havoc_for_dispatch(&self.config.havoc, counter);
-            let timeout_secs = request_timeout_secs(&self.config.havoc);
+            let timeout_secs = request_timeout_secs(&self.config.havoc, self.sim);
             drop(get_runtime().spawn(async move {
                 let mut filter = HavocFilter::from_client(&client_havoc);
                 match post_order(&http, &http_quota, &url, &msg, timeout_secs).await {
                     Ok(events) => {
                         for event in events {
-                            dispatch_havoc(&mut filter, event, |msg| async {
+                            dispatch_havoc(&mut filter, event, ctx.sim, |msg| async {
                                 handle_exec_message(msg, &ctx);
                             })
                             .await;
                         }
-                        flush_havoc(&mut filter, |msg| async {
+                        flush_havoc(&mut filter, ctx.sim, |msg| async {
                             handle_exec_message(msg, &ctx);
                         })
                         .await;
                     }
                     Err(err) => {
-                        dispatch_havoc(&mut filter, reject_for(&cmd, &err), |msg| async {
-                            handle_exec_message(msg, &ctx);
-                        })
+                        dispatch_havoc(
+                            &mut filter,
+                            reject_for(&cmd, &err, ctx.sim),
+                            ctx.sim,
+                            |msg| async {
+                                handle_exec_message(msg, &ctx);
+                            },
+                        )
                         .await;
-                        flush_havoc(&mut filter, |msg| async {
+                        flush_havoc(&mut filter, ctx.sim, |msg| async {
                             handle_exec_message(msg, &ctx);
                         })
                         .await;
@@ -1673,8 +1752,17 @@ impl ExecutionClient for MogwaiExecutionClient {
         reported: bool,
         ts_event: UnixNanos,
     ) -> anyhow::Result<()> {
-        self.emitter
-            .emit_account_state(balances, margins, reported, ts_event);
+        self.emitter.send_account_state(NautilusAccountState::new(
+            self.core.account_id,
+            self.config.account_type,
+            balances,
+            margins,
+            reported,
+            UUID4::new(),
+            ts_event,
+            now_unix_nanos(self.sim),
+            None,
+        ));
         Ok(())
     }
 
@@ -1723,6 +1811,10 @@ impl ExecutionClient for MogwaiExecutionClient {
 
     async fn connect(&mut self) -> anyhow::Result<()> {
         let http_base_url = self.config.http_base_url();
+        let sim = fetch_clock_or_identity(&self.http, &http_base_url).await;
+        self.sim = sim;
+        let conn = conn_havoc(&self.config.havoc);
+        self.http_quota = HttpQuota::from_conn(&conn, sim);
         seed_instruments(
             &self.http,
             &self.http_quota,
@@ -1731,10 +1823,9 @@ impl ExecutionClient for MogwaiExecutionClient {
         )
         .await?;
         if let Some(havoc) = &self.config.havoc {
-            ship_server_havoc(&self.http, &http_base_url, havoc).await?;
+            ship_server_havoc(&self.http, &http_base_url, havoc, sim).await?;
         }
         let client_havoc = client_havoc(&self.config.havoc);
-        let conn = conn_havoc(&self.config.havoc);
 
         if self.config.transport_profile.orders_over_http() {
             self.connected.store(true, Ordering::Relaxed);
@@ -1763,6 +1854,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                     conn,
                     seed: client_havoc.seed,
                     connected,
+                    sim,
                 },
                 cmd_rx,
                 exec_command_to_client_message,
@@ -1772,7 +1864,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                     let ctx = handler_ctx.clone();
                     async move {
                         let mut filter = handler_filter.lock().await;
-                        dispatch_havoc(&mut filter, server_msg, |msg| async {
+                        dispatch_havoc(&mut filter, server_msg, sim, |msg| async {
                             handle_exec_message(msg, &ctx);
                         })
                         .await;
@@ -1783,7 +1875,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                     let ctx = disconnect_ctx.clone();
                     async move {
                         let mut filter = disconnect_filter.lock().await;
-                        flush_havoc(&mut filter, |msg| async {
+                        flush_havoc(&mut filter, sim, |msg| async {
                             handle_exec_message(msg, &ctx);
                         })
                         .await;
@@ -1814,7 +1906,19 @@ impl ExecutionClient for MogwaiExecutionClient {
 
     fn submit_order(&self, cmd: SubmitOrder) -> anyhow::Result<()> {
         let order = self.core.get_order(&cmd.client_order_id)?;
-        self.emitter.emit_order_submitted(&order);
+        let ts_init = now_unix_nanos(self.sim);
+        let submitted = OrderSubmitted::new(
+            self.core.trader_id,
+            order.strategy_id(),
+            order.instrument_id(),
+            order.client_order_id(),
+            self.core.account_id,
+            UUID4::new(),
+            ts_init,
+            ts_init,
+        );
+        self.emitter
+            .send_order_event(OrderEventAny::Submitted(submitted));
 
         let wire = mogwai_protocol::SubmitOrder {
             client_order_id: cmd.client_order_id.to_string(),
@@ -1925,7 +2029,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                     filled,
                     record.ts_accepted,
                     record.ts_last,
-                    now_unix_nanos(),
+                    now_unix_nanos(self.sim),
                     None,
                 ))
             })
@@ -1975,7 +2079,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                     Some(fill.client_order_id),
                     None,
                     fill.ts_event,
-                    now_unix_nanos(),
+                    now_unix_nanos(self.sim),
                     None,
                 ))
             })
@@ -2016,7 +2120,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                     position_side(position.quantity),
                     quantity,
                     position.ts_last,
-                    now_unix_nanos(),
+                    now_unix_nanos(self.sim),
                     None,
                     None,
                     Some(position.avg_px),
@@ -2056,9 +2160,9 @@ fn exec_command_to_client_message(cmd: ExecWsCommand) -> ClientMessage {
     }
 }
 
-fn reject_for(cmd: &ExecWsCommand, err: &anyhow::Error) -> ServerMessage {
+fn reject_for(cmd: &ExecWsCommand, err: &anyhow::Error, sim: SimClock) -> ServerMessage {
     let reason = err.to_string();
-    let ts_event = now_unix_nanos().as_u64();
+    let ts_event = now_unix_nanos(sim).as_u64();
     match cmd {
         ExecWsCommand::Submit(order) => ServerMessage::OrderRejected {
             client_order_id: order.client_order_id.clone(),
@@ -2088,6 +2192,8 @@ struct ExecContext {
     instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     trader_id: nautilus_model::identifiers::TraderId,
     account_id: AccountId,
+    account_type: nautilus_model::enums::AccountType,
+    sim: SimClock,
 }
 
 #[derive(Debug, Default)]
@@ -2191,7 +2297,7 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 ctx.account_id,
                 UUID4::new(),
                 UnixNanos::from(ts_event),
-                now_unix_nanos(),
+                now_unix_nanos(ctx.sim),
                 false,
             );
             ctx.emitter.send_order_event(OrderEventAny::Accepted(event));
@@ -2225,14 +2331,20 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 );
                 return;
             };
-            ctx.emitter.emit_order_rejected_event(
+            let event = OrderRejected::new(
+                ctx.trader_id,
                 record.strategy_id,
                 record.instrument_id,
                 client_order_id,
-                &reason,
+                ctx.account_id,
+                reason.into(),
+                UUID4::new(),
                 UnixNanos::from(ts_event),
+                now_unix_nanos(ctx.sim),
+                false,
                 false,
             );
+            ctx.emitter.send_order_event(OrderEventAny::Rejected(event));
         }
         ServerMessage::OrderCanceled {
             client_order_id,
@@ -2256,7 +2368,7 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 client_order_id,
                 UUID4::new(),
                 UnixNanos::from(ts_event),
-                now_unix_nanos(),
+                now_unix_nanos(ctx.sim),
                 false,
                 Some(venue_order_id),
                 Some(ctx.account_id),
@@ -2349,7 +2461,7 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 updated_quantity,
                 UUID4::new(),
                 UnixNanos::from(ts_event),
-                now_unix_nanos(),
+                now_unix_nanos(ctx.sim),
                 false,
                 Some(venue_order_id),
                 Some(ctx.account_id),
@@ -2385,14 +2497,21 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 );
                 return;
             };
-            ctx.emitter.emit_order_modify_rejected_event(
+            let event = OrderModifyRejected::new(
+                ctx.trader_id,
                 record.strategy_id,
                 record.instrument_id,
                 client_order_id,
-                venue_order_id.map(VenueOrderId::from),
-                &reason,
+                reason.into(),
+                UUID4::new(),
                 UnixNanos::from(ts_event),
+                now_unix_nanos(ctx.sim),
+                false,
+                venue_order_id.map(VenueOrderId::from),
+                Some(ctx.account_id),
             );
+            ctx.emitter
+                .send_order_event(OrderEventAny::ModifyRejected(event));
         }
         ServerMessage::OrderFilled(fill) => handle_order_filled(fill, ctx),
         ServerMessage::AccountState(state) => handle_account_state(state, ctx),
@@ -2550,7 +2669,7 @@ fn handle_order_filled(fill: mogwai_protocol::OrderFilled, ctx: &ExecContext) {
         LiquiditySide::Taker,
         UUID4::new(),
         UnixNanos::from(fill.ts_event),
-        now_unix_nanos(),
+        now_unix_nanos(ctx.sim),
         false,
         None,
         commission,
@@ -2615,8 +2734,17 @@ fn handle_account_state(state: mogwai_protocol::AccountState, ctx: &ExecContext)
             );
         }
     }
-    ctx.emitter
-        .emit_account_state(balances, Vec::new(), true, ts_event);
+    ctx.emitter.send_account_state(NautilusAccountState::new(
+        ctx.account_id,
+        ctx.account_type,
+        balances,
+        Vec::new(),
+        true,
+        UUID4::new(),
+        ts_event,
+        now_unix_nanos(ctx.sim),
+        None,
+    ));
 }
 
 fn with_order_record<T>(
@@ -2759,6 +2887,7 @@ mod data_client_tests {
             &instruments,
             &subs,
             &bars,
+            SimClock::identity(),
         )
         .await;
 
@@ -2782,7 +2911,14 @@ mod data_client_tests {
         });
         let bars = Arc::new(Mutex::new(HashMap::new()));
 
-        emit_trade(&trade(42, 12_345, 1), &tx, &instruments, &subs, &bars);
+        emit_trade(
+            &trade(42, 12_345, 1),
+            &tx,
+            &instruments,
+            &subs,
+            &bars,
+            SimClock::identity(),
+        );
 
         match rx.try_recv().expect("a data event was emitted") {
             DataEvent::Data(Data::Trade(t)) => {
@@ -2818,6 +2954,7 @@ mod data_client_tests {
             &instruments,
             &subs,
             &bars,
+            SimClock::identity(),
         )
         .await;
 
@@ -3023,7 +3160,7 @@ mod data_client_tests {
             trade(interval + 5, 30_000, 1), // window [interval, 2*interval)
         ];
 
-        let bars = aggregate_bars(&bar_type, &trades, &def);
+        let bars = aggregate_bars(&bar_type, &trades, &def, SimClock::identity());
 
         assert_eq!(bars.len(), 1, "only the closed window emits a bar");
         let bar = bars[0];
@@ -3052,14 +3189,36 @@ mod data_client_tests {
         };
 
         // Two trades inside the first window: no bar yet.
-        assert!(update_bar_state(bar_type, &mut state, &trade(0, 10_000, 1), &def).is_none());
         assert!(
-            update_bar_state(bar_type, &mut state, &trade(interval - 1, 11_000, 1), &def).is_none()
+            update_bar_state(
+                bar_type,
+                &mut state,
+                &trade(0, 10_000, 1),
+                &def,
+                SimClock::identity(),
+            )
+            .is_none()
+        );
+        assert!(
+            update_bar_state(
+                bar_type,
+                &mut state,
+                &trade(interval - 1, 11_000, 1),
+                &def,
+                SimClock::identity(),
+            )
+            .is_none()
         );
 
         // A trade past the close boundary flushes the completed window.
-        let bar = update_bar_state(bar_type, &mut state, &trade(interval, 12_000, 1), &def)
-            .expect("window close flushes a bar");
+        let bar = update_bar_state(
+            bar_type,
+            &mut state,
+            &trade(interval, 12_000, 1),
+            &def,
+            SimClock::identity(),
+        )
+        .expect("window close flushes a bar");
         assert_eq!(bar.ts_event, UnixNanos::from(interval));
         assert_eq!(bar.open.as_f64(), 100.0);
         assert_eq!(bar.close.as_f64(), 110.0);
@@ -3273,6 +3432,8 @@ mod tests {
                 instruments: instruments_map(),
                 trader_id: config.trader_id,
                 account_id: config.account_id,
+                account_type: config.account_type,
+                sim: SimClock::identity(),
             },
             rx,
         )
@@ -3734,7 +3895,7 @@ mod tests {
         });
         let err = anyhow::anyhow!("connection refused");
 
-        handle_exec_message(reject_for(&cmd, &err), &ctx);
+        handle_exec_message(reject_for(&cmd, &err, SimClock::identity()), &ctx);
 
         match rx.try_recv().expect("rejected event") {
             ExecutionEvent::Order(OrderEventAny::Rejected(event)) => {
@@ -3745,6 +3906,47 @@ mod tests {
         }
         let record = order_record(&ctx.state, ClientOrderId::from("O-1")).expect("order record");
         assert_eq!(record.status, OrderStatus::Rejected);
+    }
+
+    #[test]
+    fn emitter_bypass_events_stamp_ts_init_on_sim_axis() {
+        let (mut ctx, mut rx) = exec_context();
+        let wall = mogwai_protocol::now_unix_nanos();
+        ctx.sim = SimClock {
+            sim_epoch_ns: 1_900_000_000_000_000_000,
+            wall_anchor_ns: wall.saturating_sub(1),
+            speed: 1.0,
+        };
+
+        handle_exec_message(
+            ServerMessage::OrderRejected {
+                client_order_id: "O-1".into(),
+                reason: "no".into(),
+                ts_event: 10,
+            },
+            &ctx,
+        );
+        match rx.try_recv().expect("rejected event") {
+            ExecutionEvent::Order(OrderEventAny::Rejected(event)) => {
+                assert!(event.ts_init.as_u64() >= ctx.sim.sim_epoch_ns);
+            }
+            other => panic!("expected rejected event, got {other:?}"),
+        }
+
+        handle_exec_message(
+            ServerMessage::AccountState(mogwai_protocol::AccountState {
+                balances: Vec::new(),
+                positions: Vec::new(),
+                ts_event: 12,
+            }),
+            &ctx,
+        );
+        match rx.try_recv().expect("account event") {
+            ExecutionEvent::Account(event) => {
+                assert!(event.ts_init.as_u64() >= ctx.sim.sim_epoch_ns);
+            }
+            other => panic!("expected account event, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -3759,6 +3961,8 @@ mod tests {
             instruments: Arc::clone(&client.instruments),
             trader_id: ctx.trader_id,
             account_id: ctx.account_id,
+            account_type: ctx.account_type,
+            sim: ctx.sim,
         };
 
         handle_exec_message(

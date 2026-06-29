@@ -10,12 +10,14 @@ use std::sync::LazyLock;
 use nautilus_model::identifiers::Venue;
 
 mod client;
+mod clock;
 mod config;
 mod convert;
 mod factories;
 mod lifecycle;
 
 pub use client::{MogwaiDataClient, MogwaiExecutionClient};
+pub use clock::{MogwaiClock, mogwai_clock_factory};
 pub use config::{MogwaiDataClientConfig, MogwaiExecClientConfig};
 pub use factories::{MogwaiDataClientFactory, MogwaiExecutionClientFactory};
 

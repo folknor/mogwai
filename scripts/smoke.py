@@ -26,6 +26,12 @@ follow a `--` separator:
     brokkr run -p mogwai-server -- serve --config scripts/smoke-heartbeat.toml
 
 then run `python3 scripts/smoke.py --heartbeat`.
+
+Accelerated coherent-clock smoke:
+
+    brokkr run -p mogwai-server -- serve --config scripts/smoke-accelerated.toml
+
+then run `python3 scripts/smoke.py --accelerated`.
 """
 import json
 import socket
@@ -37,6 +43,7 @@ import urllib.request
 
 HOST, PORT = "127.0.0.1", 8787
 WINDOW_START_TS = 86_401_000_000_000
+ACCEL_DELAY_MS = 1000
 
 
 def post_divergence(payload: dict) -> int:
@@ -71,6 +78,12 @@ def fetch_trades(symbol: str, start: int, limit: int, regime: dict | None = None
         params["regime"] = json.dumps(regime)
     url = f"http://{HOST}:{PORT}/trades?{urllib.parse.urlencode(params)}"
     with urllib.request.urlopen(url) as r:
+        assert r.status == 200, r.status
+        return json.loads(r.read().decode())
+
+
+def fetch_clock() -> dict:
+    with urllib.request.urlopen(f"http://{HOST}:{PORT}/clock") as r:
         assert r.status == 200, r.status
         return json.loads(r.read().decode())
 
@@ -146,6 +159,14 @@ def mean_event_gap(trades: list) -> float:
         for i in range(1, len(trades))
     ]
     return sum(gaps) / len(gaps)
+
+
+def sim_now(clock: dict, wall_ns: int | None = None) -> int:
+    if wall_ns is None:
+        wall_ns = time.time_ns()
+    if wall_ns <= clock["wall_anchor_ns"]:
+        return clock["sim_epoch_ns"]
+    return int(clock["sim_epoch_ns"] + (wall_ns - clock["wall_anchor_ns"]) * clock["speed"])
 
 
 class WsClient:
@@ -560,14 +581,105 @@ def main_heartbeat() -> None:
     print("PASS: Heartbeat keeps the socket frame-active through StallData")
 
 
+def main_accelerated() -> None:
+    clock = fetch_clock()
+    print("clock:   ", clock)
+    assert clock["sim_epoch_ns"] > 0, clock
+    assert clock["speed"] > 1.0, clock
+    assert post_divergence({"type": "ClearDivergences"}) == 202
+
+    order_start_wall = time.time_ns()
+    msgs = ws_roundtrip(submit_order("ACCEL1"), expect=3)
+    order_end_wall = time.time_ns()
+    for msg in msgs:
+        print("accel-ex:", msg)
+    assert [msg["type"] for msg in msgs] == [
+        "OrderAccepted",
+        "OrderFilled",
+        "AccountState",
+    ], msgs
+    filled = msgs[1]
+    account = msgs[2]
+    assert filled["ts_event"] >= clock["sim_epoch_ns"], filled
+    assert account["ts_event"] >= clock["sim_epoch_ns"], account
+    assert filled["ts_event"] > order_start_wall, (filled, order_start_wall)
+    expected_order_sim = sim_now(clock, (order_start_wall + order_end_wall) // 2)
+    order_error = abs(filled["ts_event"] - expected_order_sim)
+    print("accel-order-error-ns:", order_error)
+
+    ws = WsClient(timeout=2.0)
+    data_start_wall = time.time_ns()
+    ws.send(
+        {
+            "type": "Subscribe",
+            "symbols": ["KEUR"],
+            "start_ts": clock["sim_epoch_ns"],
+        }
+    )
+    trade = ws.read()
+    data_end_wall = time.time_ns()
+    ws.close()
+    print("accel-md:", trade)
+    assert trade["type"] == "Trade", trade
+    assert trade["ts_event"] >= clock["sim_epoch_ns"], trade
+    assert (data_end_wall - data_start_wall) < 250_000_000, trade
+
+    # Coherence budget, all terms in SIMULATED nanoseconds (skew is a sim-ns
+    # difference). Three components, each justified rather than a fudge factor:
+    #
+    #   measured_wall_latency * speed
+    #     The real round-trip wall latency projected onto the sim axis - the
+    #     irreducible delivery cost that does not compress with speed.
+    #   connect_catchup = (data_start_wall - wall_anchor) * speed
+    #     The order fill is stamped sim_now at order time, while the FIRST trade
+    #     read is the generator's first tick at ~sim_epoch. Their difference is
+    #     dominated by the sim-time elapsed between the boot anchor and the
+    #     connect, which this term bounds from above (data subscribe happens
+    #     after the order, so it over-covers the order's own catch-up).
+    #   FIRST_GAP_SLACK_NS
+    #     The generator's first inter-arrival gap. trade.ts_event is
+    #     sim_epoch + first_gap; in a sparse regime that gap can exceed the
+    #     connect catch-up, flipping the sign of the skew, so the budget must
+    #     also bound the largest plausible first gap (~2 simulated seconds).
+    FIRST_GAP_SLACK_NS = 2_000_000_000
+    measured_wall_latency = max(order_end_wall - order_start_wall, data_end_wall - data_start_wall)
+    connect_catchup = int(
+        max(0, data_start_wall - clock["wall_anchor_ns"]) * clock["speed"]
+    )
+    budget = int(measured_wall_latency * clock["speed"]) + connect_catchup + FIRST_GAP_SLACK_NS
+    skew = abs(filled["ts_event"] - trade["ts_event"])
+    print(
+        "accel-coherence:",
+        {"skew_ns": skew, "budget_ns": budget, "catchup_ns": connect_catchup},
+    )
+    assert skew <= budget, (skew, budget, filled, trade)
+
+    assert post_divergence({"type": "DelayAcks", "ms": ACCEL_DELAY_MS}) == 202
+    ws = WsClient(timeout=2.0)
+    ws.send(submit_order("ACCEL-D"))
+    start = time.monotonic()
+    delay_msgs = [ws.read() for _ in range(3)]
+    elapsed = time.monotonic() - start
+    ws.close()
+    for msg in delay_msgs:
+        print("accel-dl:", msg)
+    expected_delay = ACCEL_DELAY_MS / 1000.0 / clock["speed"]
+    assert elapsed >= expected_delay * 0.5, (elapsed, expected_delay)
+    assert elapsed < 0.5, elapsed
+    assert post_divergence({"type": "DelayAcks", "ms": 0}) == 202
+    print("PASS: accelerated coherent-clock smoke")
+
+
 def main() -> None:
     args = sys.argv[1:]
     if args == ["--heartbeat"]:
         main_heartbeat()
+    elif args == ["--accelerated"]:
+        main_accelerated()
     elif not args:
         main_default()
     else:
-        raise SystemExit("usage: smoke.py [--heartbeat]")
+        raise SystemExit("usage: smoke.py [--heartbeat|--accelerated]")
 
 
 if __name__ == "__main__":
