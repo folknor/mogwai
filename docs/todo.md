@@ -149,6 +149,36 @@ wontfix). The per-item dispositions and their rationale live in the fix-wave
 commit messages, keyed by the `B.8` / `C.2` / `D.10` / etc. tags - consult git
 log rather than re-deriving them, so a settled bug is not re-flagged.
 
+### 3. Coherent forward-test data origin (SPEC WRITTEN)
+
+`../freedom/FINDINGS.md` #13: a forward warmup never receives historical bars
+and dies on a fatal timeout. Root cause is a coherence bug - the tape is frozen
+at `ORIGIN_TS` (2023) while the identity clock advertises wall-now (2026), so
+the warmup window lands years past the tape start, blows the 50k seek cap, and
+returns an empty page. Fix: delete the frozen origin, derive
+`data_origin = sim_now_at_boot - backfill_horizon` from the clock, unify the
+live path to seek the shared tape (closing the warmup/live discontinuity and the
+reconnect price-reset), refuse off-tape warmups loudly, and publish the tape
+boundary on `/clock` so broadarrow can guard its own warmup. Spec:
+`docs/forward-origin-spec.md`, per `reference/technical-implementation-spec.md`.
+
+- [x] Spec written: `docs/forward-origin-spec.md`. Four landings - measure the
+      seek; boot-derived origin + unified seek + refuse-straddle (server);
+      publish `ServerClock` + adapter consumption; checkpointed seek (conditional
+      on the measurement). broadarrow's count-based warmup guard + honest message,
+      #12, the O(1) block-addressable generator, and per-symbol horizon are named
+      and excluded.
+- [x] Landing 1 (measurement): `seek_throughput_measurement` in
+      `crates/mogwai-server/src/source.rs` prices the from-origin `BoundedSeek`.
+      Reading at ~1.9M ticks per second synthesis: a 24h fast-cadence warmup is
+      ~22k ticks (11.7 ms), comfortably under the 100 ms request budget B. But
+      the budget-affordable cap C_B is ~190k ticks while honoring the 2h
+      fresh-subscribe floor F at speed 120 demands C_F ~244k ticks, so no single
+      cap satisfies both B and F -> Landing 4 (checkpointed seek) PROCEEDS. A
+      from-origin seek cannot decouple per-request cost from session length; the
+      verdict is throughput-sensitive near the boundary but structurally PROCEEDS.
+- [ ] Implement landings 2 through 4, suite green at every boundary.
+
 ## Notes / gotchas
 
 - The offline Kraken corpus is trades only - no quotes, no L2, no aggressor side.
