@@ -971,7 +971,19 @@ fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
         };
         tracing::info!(%symbol, ?start_ts, sim_now, data_origin, ?regime, "replay started");
 
-        let mut prev_ts: Option<u64> = None;
+        // Identity pacing (the `else if speed > 0.0` branch below) sleeps the
+        // inter-tick gap measured from the PREVIOUS tick; with no previous tick
+        // the first one emits with no sleep. For a fresh subscribe - which seeks
+        // the tape to sim-now - the first generated tick lands a few seconds PAST
+        // sim-now, so an unpaced emit would hand the client a tick stamped ahead
+        // of the clock. Seed the pacer with the seek target (sim-now) so the first
+        // tick is paced to its own timestamp instead of racing out immediately.
+        // The accelerated branch deadline-paces every tick (including the first)
+        // and ignores `prev_ts`, so this only affects identity mode. An explicit
+        // `start_ts` is a historical window or resume cursor that lands at or
+        // before its target - that is backfill and should replay promptly, so it
+        // keeps the `None` seed and the first tick emits at once.
+        let mut prev_ts: Option<u64> = start_ts.is_none().then_some(sim_now);
         while let Some(tick) = merged.next_tick() {
             if cancel.load(Ordering::Relaxed) {
                 break;

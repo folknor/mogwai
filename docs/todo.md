@@ -233,6 +233,14 @@ becoming the default:
 Until a workflow actually needs the bare-`serve`-returns behavior, the
 file-logging plus disciplined backgrounding covers the need at far lower cost.
 
+Sharp edge in the current foreground logging: `--log-file` defaults to
+`mogwai.log` in the working directory and is opened with `File::create`, which
+truncates on every boot - so the previous run's log is lost on restart, and two
+servers left on the default path clobber and interleave each other's lines. Fine
+for the single-instance smoke harness, but a `--daemon` mode running multiple
+instances (or wanting log retention) would want per-instance paths and append
+or rotation rather than truncate-on-create.
+
 ## Notes / gotchas
 
 - The offline Kraken corpus is trades only - no quotes, no L2, no aggressor side.

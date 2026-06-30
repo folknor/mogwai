@@ -604,31 +604,52 @@ pub struct CheckpointIndex {
     since_snapshot: usize,
     /// Snapshot spacing in ticks.
     k: usize,
+    /// Runaway backstop: the most ticks `extend_to` will walk the lead in a
+    /// single call. The server refuses a `start` below `data_origin`, but
+    /// nothing rejects an absurd `start` *above* the live frontier (a bogus or
+    /// far-future window), and `GeneratedSource::next_tick` never ends - so an
+    /// uncapped `extend_to` would spin the path-dependent walk indefinitely
+    /// while holding the shared index mutex. A target past this bound leaves the
+    /// frontier short; the caller's own `BoundedSeek` then caps too and the seek
+    /// yields an empty page instead of hanging. Sized to the same budget as the
+    /// from-origin cap, so every legitimate target (warmup, live sim-now, a
+    /// poll's modest per-step delta) sits far inside it.
+    max_extend: usize,
 }
 
 impl CheckpointIndex {
     /// Build an index over the realization `origin` heads. `origin` must be a
     /// fresh source at the tape origin (no ticks drawn yet); its pre-first-tick
-    /// state becomes checkpoint 0.
+    /// state becomes checkpoint 0. `max_extend` bounds the per-call walk (see the
+    /// field doc) - pass the caller's from-origin seek cap.
     #[must_use]
-    pub fn new(origin: GeneratedSource, k: usize) -> Self {
+    pub fn new(origin: GeneratedSource, k: usize, max_extend: usize) -> Self {
         assert!(k > 0, "checkpoint spacing must be positive");
+        assert!(max_extend > 0, "extension cap must be positive");
         Self {
             checkpoints: vec![origin.clone()],
             lead: origin,
             since_snapshot: 0,
             k,
+            max_extend,
         }
     }
 
     /// Extend the snapshot chain until it covers `target`, advancing the lead and
     /// snapshotting every `k` ticks. Monotonic: a later, further target only does
-    /// the new delta, so the from-origin walk is paid once across all seeks.
+    /// the new delta, so the from-origin walk is paid once across all seeks. The
+    /// walk is bounded by `max_extend` per call (the runaway backstop); a target
+    /// beyond that leaves the lead short and the caller's seek caps the rest.
     fn extend_to(&mut self, target: u64) {
+        let mut walked = 0usize;
         while self.lead.clock_ns() < target {
+            if walked >= self.max_extend {
+                break;
+            }
             if self.lead.next_tick().is_none() {
                 break;
             }
+            walked += 1;
             self.since_snapshot += 1;
             if self.since_snapshot >= self.k {
                 self.checkpoints.push(self.lead.clone());
@@ -1082,7 +1103,9 @@ mod tests {
         // deep enough that the resume restores from a non-origin checkpoint.
         let target = ref_ticks[3_000].0;
         let origin = GeneratedSource::new(scalars.clone(), seed, origin_ts, &fp, None);
-        let mut index = CheckpointIndex::new(origin, 128);
+        // A generous extension cap so the 3000-tick target is reached in one
+        // call; the cap's runaway behavior is pinned separately below.
+        let mut index = CheckpointIndex::new(origin, 128, 100_000);
         let mut resumed = index.source_at_or_before(target);
         assert!(
             index.checkpoint_count() > 1,
@@ -1106,6 +1129,37 @@ mod tests {
             assert_eq!((t.ts_event, t.price), *expected, "resumed tail diverged");
             tick = resumed.next_tick().expect("trade");
         }
+    }
+
+    // The runaway backstop: a target far beyond what `max_extend` permits in one
+    // call leaves the lead short rather than spinning the never-ending walk. This
+    // is what keeps a bogus or far-future `start` (which the server does not
+    // refuse - only `start < data_origin` is) from hanging the shared index under
+    // its mutex.
+    #[test]
+    fn checkpoint_extension_is_capped() {
+        let fp = Fingerprint::from_repo_json();
+        let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+        let origin_ts = 1_000u64;
+        let cap = 500usize;
+
+        let origin = GeneratedSource::new(scalars.clone(), 7u64, origin_ts, &fp, None);
+        let mut index = CheckpointIndex::new(origin, 64, cap);
+
+        // A target a decade of nanoseconds away is unreachable within the cap; the
+        // walk stops at the bound instead of running forever.
+        let unreachable_target = origin_ts + 315_360_000_000_000_000;
+        let positioned = index.source_at_or_before(unreachable_target);
+        assert!(
+            positioned.clock_ns() < unreachable_target,
+            "a target past the extension cap must not be reached in one call"
+        );
+        // At most `cap` ticks were walked, so at most `cap / K` interior snapshots
+        // were taken beyond the origin.
+        assert!(
+            index.checkpoint_count() <= 1 + cap / 64 + 1,
+            "the bounded walk took at most cap/K interior checkpoints"
+        );
     }
 
     #[test]

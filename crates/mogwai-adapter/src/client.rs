@@ -1024,11 +1024,18 @@ async fn poll_market_data(mut ctx: DataPollContext) {
     while ctx.connected.load(Ordering::Relaxed) {
         let symbols = poll_symbols(&ctx.subs);
         for (symbol, start_ts) in symbols {
+            // A fresh subscribe carries no start (the server seeks live to
+            // sim-now); the poll cursor must anchor there too. Defaulting to 0
+            // would send `start=0`, which the boot-derived-origin server refuses
+            // with a 422 (0 precedes data_origin) - the poll would loop forever
+            // on the rejection and emit nothing. Anchor an absent start at sim-now
+            // so the first poll fetches an on-tape window.
+            let poll_anchor = start_ts.or_else(|| Some(now_unix_nanos(ctx.sim).as_u64()));
             let start = {
                 let mut cursors = lock_recover(&ctx.cursor, "poll cursor");
                 let entry = cursors
                     .entry(symbol.clone())
-                    .or_insert_with(|| PollCursor::new(start_ts));
+                    .or_insert_with(|| PollCursor::new(poll_anchor));
                 UnixNanos::from(entry.last_ts)
             };
             let Ok(batch) = fetch_trades(
@@ -1051,7 +1058,7 @@ async fn poll_market_data(mut ctx: DataPollContext) {
                 let mut cursors = lock_recover(&ctx.cursor, "poll cursor");
                 let entry = cursors
                     .entry(symbol.clone())
-                    .or_insert_with(|| PollCursor::new(start_ts));
+                    .or_insert_with(|| PollCursor::new(poll_anchor));
                 entry.unseen_from_batch(batch)
             };
             for trade in trades {

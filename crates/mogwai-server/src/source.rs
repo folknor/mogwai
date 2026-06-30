@@ -178,6 +178,10 @@ fn positioned_generator(
                 CheckpointIndex::new(
                     fresh_generator(profile, seed, data_origin, fp, None),
                     CHECKPOINT_K,
+                    // The from-origin backstop doubles as the index's per-call
+                    // extension cap: a `start` past the live frontier walks at
+                    // most this far before the seek gives up, never spinning.
+                    MAX_HISTORY_SEEK_TICKS,
                 )
             });
         return index.source_at_or_before(target);
@@ -515,6 +519,7 @@ mod tests {
                 None,
             ),
             CHECKPOINT_K,
+            MAX_HISTORY_SEEK_TICKS,
         );
 
         // Warm the index past the farthest target so each timed seek below is a

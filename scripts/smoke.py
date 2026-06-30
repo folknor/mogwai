@@ -440,14 +440,22 @@ def main_default() -> None:
     for gap in gaps:
         assert gap >= 0.25, gaps
 
+    # Probe that DelayAcks delays execution events but NOT market data. Use a
+    # WINDOWED subscribe: its first tick is historical backfill seeked from a past
+    # cursor, so the server emits it immediately and the strict <0.2s latency bound
+    # cleanly proves the 300ms ack delay did not leak onto the data path. A fresh
+    # (start-less) subscribe seeks live to sim-now and the server now paces that
+    # first tick to its own timestamp (up to gap_cap_ms behind), which is correct
+    # live behavior but no longer an immediate-delivery probe.
     ws = WsClient(timeout=1.0)
-    ws.send({"type": "Subscribe", "symbols": ["BTCUSDT"]})
+    ws.send({"type": "Subscribe", "symbols": ["BTCUSDT"], "start_ts": window_start_ts})
     start = time.monotonic()
     trade = ws.read()
     elapsed = time.monotonic() - start
     ws.close()
     print("delay-md:", trade)
     assert trade["type"] == "Trade", trade
+    assert trade["ts_event"] >= window_start_ts, trade
     assert elapsed < 0.2, elapsed
 
     assert post_divergence({"type": "DelayAcks", "ms": 0}) == 202
