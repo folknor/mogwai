@@ -12,7 +12,7 @@ use anyhow::{Context, ensure};
 use async_trait::async_trait;
 use mogwai_protocol::{
     ClientHavoc, ClientMessage, ConnHavoc, HavocLatency, HavocSpec, InstrumentDef, MarketRegime,
-    ServerMessage, SimClock, Symbol, TradeTick,
+    ServerClock, ServerMessage, SimClock, Symbol, TradeTick,
 };
 use nautilus_common::{
     clients::{DataClient, ExecutionClient},
@@ -79,6 +79,10 @@ pub struct MogwaiDataClient {
     http: HttpClient,
     http_quota: HttpQuota,
     sim: SimClock,
+    /// Earliest `ts_event` the venue can serve, learned from `/clock` at connect.
+    /// `0` means unknown (clock fetch failed); the warmup guard skips its
+    /// pre-flight refusal in that case and defers to the server's own 422.
+    data_origin_ns: u64,
     ws_cmd: Option<UnboundedSender<WsCommand>>,
     instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     subs: Arc<Mutex<HashMap<Symbol, SubState>>>,
@@ -112,6 +116,7 @@ impl MogwaiDataClient {
             sink: None,
             http,
             sim: SimClock::identity(),
+            data_origin_ns: 0,
             ws_cmd: None,
             instruments: Arc::new(Mutex::new(HashMap::new())),
             subs: Arc::new(Mutex::new(HashMap::new())),
@@ -127,8 +132,12 @@ impl MogwaiDataClient {
         kind: SubKind,
         start_ts: Option<u64>,
     ) -> anyhow::Result<()> {
-        let start_ts =
-            start_ts.or_else(|| (self.sim.sim_epoch_ns != 0).then_some(self.sim.sim_epoch_ns));
+        // A live subscribe sends `start_ts = None` and lets the server seek the
+        // shared tape to sim-now. The old default anchored a fresh subscribe at
+        // `sim_epoch_ns` (the tape origin), which under acceleration made the
+        // server replay the whole backfill at once - the catch-up dump. "Live
+        // means from now" is now the server's job; the adapter only forwards an
+        // explicit caller-supplied start (a resume cursor) unchanged.
         let (emit, active_start_ts) = {
             let mut subs = self
                 .subs
@@ -259,8 +268,10 @@ impl DataClient for MogwaiDataClient {
     async fn connect(&mut self) -> anyhow::Result<()> {
         let sink = self.sink()?;
         let http_base_url = self.config.http_base_url();
-        let sim = fetch_clock_or_identity(&self.http, &http_base_url).await;
+        let server = fetch_clock_or_identity(&self.http, &http_base_url).await;
+        let sim = server.sim;
         self.sim = sim;
+        self.data_origin_ns = server.data_origin_ns;
         let conn = conn_havoc(&self.config.havoc);
         self.http_quota = HttpQuota::from_conn(&conn, sim);
         seed_instruments(
@@ -506,53 +517,70 @@ impl DataClient for MogwaiDataClient {
         let instruments = Arc::clone(&self.instruments);
         let client_id = request.client_id.unwrap_or(self.client_id);
         let sim = self.sim;
+        let start = date_to_unix_nanos(request.start);
+        let end = date_to_unix_nanos(request.end);
+        // Refuse an off-tape window at the boundary, loudly, rather than spawning
+        // a doomed fetch the warmup would read as an empty page.
+        ensure_on_tape(start, self.data_origin_ns)?;
         drop(get_runtime().spawn(async move {
             let symbol = symbol_from_instrument(request.instrument_id);
-            let start = date_to_unix_nanos(request.start);
-            let end = date_to_unix_nanos(request.end);
-            if let Ok(def) =
-                ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await
-                && let Ok(trades) = fetch_trades(
-                    &http,
-                    &http_quota,
-                    &base,
-                    TradeFetch {
-                        symbol: &symbol,
-                        start,
-                        end,
-                        limit: request.limit,
-                        regime,
-                    },
-                )
-                .await
+            let def = match ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await
             {
-                let data = trades
-                    .iter()
-                    .filter_map(|t| {
-                        convert::trade_tick(t, request.instrument_id, &def, now_unix_nanos(sim))
-                            .map_err(|err| {
-                                tracing::warn!(
-                                    symbol = %t.symbol,
-                                    ts_event = t.ts_event,
-                                    error = %err,
-                                    "dropping historical trade: unrepresentable tick"
-                                );
-                            })
-                            .ok()
-                    })
-                    .collect();
-                let response = TradesResponse::new(
-                    request.request_id,
-                    client_id,
-                    request.instrument_id,
-                    data,
+                Ok(def) => def,
+                Err(err) => {
+                    tracing::error!(%symbol, error = %err, "request_trades: instrument lookup failed");
+                    return;
+                }
+            };
+            let trades = match fetch_trades(
+                &http,
+                &http_quota,
+                &base,
+                TradeFetch {
+                    symbol: &symbol,
                     start,
                     end,
-                    now_unix_nanos(sim),
-                    request.params,
-                );
-                drop(sink.send(DataEvent::Response(DataResponse::Trades(response))));
-            }
+                    limit: request.limit,
+                    regime,
+                },
+            )
+            .await
+            {
+                Ok(trades) => trades,
+                Err(err) => {
+                    // Surface the failure instead of the old silent `if let Ok`
+                    // drop: a server 422 (off-tape) or any fetch error must be
+                    // visible, not mistaken for "no trades in the window".
+                    tracing::error!(%symbol, error = %err, "request_trades: trade fetch failed; the server may have refused an off-tape window");
+                    return;
+                }
+            };
+            let data = trades
+                .iter()
+                .filter_map(|t| {
+                    convert::trade_tick(t, request.instrument_id, &def, now_unix_nanos(sim))
+                        .map_err(|err| {
+                            tracing::warn!(
+                                symbol = %t.symbol,
+                                ts_event = t.ts_event,
+                                error = %err,
+                                "dropping historical trade: unrepresentable tick"
+                            );
+                        })
+                        .ok()
+                })
+                .collect();
+            let response = TradesResponse::new(
+                request.request_id,
+                client_id,
+                request.instrument_id,
+                data,
+                start,
+                end,
+                now_unix_nanos(sim),
+                request.params,
+            );
+            drop(sink.send(DataEvent::Response(DataResponse::Trades(response))));
         }));
         Ok(())
     }
@@ -590,40 +618,55 @@ impl DataClient for MogwaiDataClient {
         let instruments = Arc::clone(&self.instruments);
         let client_id = request.client_id.unwrap_or(self.client_id);
         let sim = self.sim;
+        let start = date_to_unix_nanos(request.start);
+        let end = date_to_unix_nanos(request.end);
+        // Refuse an off-tape warmup window at the boundary, naming the floor,
+        // rather than spawning a fetch that returns an empty page the warmup
+        // can never complete on (the #13 failure mode this spec closes).
+        ensure_on_tape(start, self.data_origin_ns)?;
         drop(get_runtime().spawn(async move {
             let instrument_id = request.bar_type.instrument_id();
             let symbol = symbol_from_instrument(instrument_id);
-            let start = date_to_unix_nanos(request.start);
-            let end = date_to_unix_nanos(request.end);
-            if let Ok(def) =
-                ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await
-                && let Ok(trades) = fetch_trades(
-                    &http,
-                    &http_quota,
-                    &base,
-                    TradeFetch {
-                        symbol: &symbol,
-                        start,
-                        end,
-                        limit: request.limit,
-                        regime,
-                    },
-                )
-                .await
+            let def = match ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await
             {
-                let bars = aggregate_bars(&request.bar_type, &trades, &def, sim);
-                let response = BarsResponse::new(
-                    request.request_id,
-                    client_id,
-                    request.bar_type,
-                    bars,
+                Ok(def) => def,
+                Err(err) => {
+                    tracing::error!(%symbol, error = %err, "request_bars: instrument lookup failed");
+                    return;
+                }
+            };
+            let trades = match fetch_trades(
+                &http,
+                &http_quota,
+                &base,
+                TradeFetch {
+                    symbol: &symbol,
                     start,
                     end,
-                    now_unix_nanos(sim),
-                    request.params,
-                );
-                drop(sink.send(DataEvent::Response(DataResponse::Bars(response))));
-            }
+                    limit: request.limit,
+                    regime,
+                },
+            )
+            .await
+            {
+                Ok(trades) => trades,
+                Err(err) => {
+                    tracing::error!(%symbol, error = %err, "request_bars: trade fetch failed; the server may have refused an off-tape window");
+                    return;
+                }
+            };
+            let bars = aggregate_bars(&request.bar_type, &trades, &def, sim);
+            let response = BarsResponse::new(
+                request.request_id,
+                client_id,
+                request.bar_type,
+                bars,
+                start,
+                end,
+                now_unix_nanos(sim),
+                request.params,
+            );
+            drop(sink.send(DataEvent::Response(DataResponse::Bars(response))));
         }));
         Ok(())
     }
@@ -1520,12 +1563,21 @@ async fn sleep_havoc_delay(sim: SimClock, delay: Duration) {
     }
 }
 
-async fn fetch_clock_or_identity(http: &HttpClient, http_base: &str) -> SimClock {
+async fn fetch_clock_or_identity(http: &HttpClient, http_base: &str) -> ServerClock {
     match fetch_clock(http, http_base).await {
-        Ok(sim) => sim,
+        Ok(clock) => clock,
         Err(err) => {
             tracing::warn!(%err, "falling back to identity mogwai clock");
-            SimClock::identity()
+            // No reachable server: identity map and an UNKNOWN tape floor. A
+            // `data_origin_ns` of 0 is the "floor unknown" sentinel the warmup
+            // guard checks - it skips the pre-flight refusal and lets the server's
+            // own 422 stand if a later request is off-tape.
+            ServerClock {
+                sim: SimClock::identity(),
+                server_now_ns: 0,
+                data_origin_ns: 0,
+                backfill_horizon_ns: 0,
+            }
         }
     }
 }
@@ -1563,6 +1615,31 @@ fn date_to_unix_nanos(date: Option<chrono::DateTime<chrono::Utc>>) -> Option<Uni
     date.and_then(|dt| dt.timestamp_nanos_opt())
         .and_then(|ns| u64::try_from(ns).ok())
         .map(UnixNanos::from)
+}
+
+/// Refuse an off-tape warmup BEFORE spending a round trip on it. A `start`
+/// below the published `data_origin` can never be served (the tape begins at the
+/// origin), so a fetch would come back an empty `200` the warmup cannot tell
+/// from "no trades happened" - or, post-Landing-2, a server `422`. Failing here,
+/// naming both the requested start and the floor, turns that into a loud,
+/// surfaced error at the request boundary instead of a silent doomed fetch.
+///
+/// `data_origin == 0` is the "floor unknown" sentinel (the `/clock` fetch failed
+/// and the client fell back to identity): the check is skipped so the server's
+/// own refusal stays authoritative. A `None` start means "from origin" and is
+/// always on-tape.
+fn ensure_on_tape(start: Option<UnixNanos>, data_origin: u64) -> anyhow::Result<()> {
+    if let Some(start) = start
+        && data_origin != 0
+        && start.as_u64() < data_origin
+    {
+        anyhow::bail!(
+            "requested start {} precedes data_origin_ns {}; the mogwai tape cannot serve before its origin",
+            start.as_u64(),
+            data_origin
+        );
+    }
+    Ok(())
 }
 
 fn now_unix_nanos(sim: SimClock) -> UnixNanos {
@@ -1811,7 +1888,11 @@ impl ExecutionClient for MogwaiExecutionClient {
 
     async fn connect(&mut self) -> anyhow::Result<()> {
         let http_base_url = self.config.http_base_url();
-        let sim = fetch_clock_or_identity(&self.http, &http_base_url).await;
+        // The execution client rides only the affine map; the tape boundary in
+        // the envelope is the data client's concern.
+        let sim = fetch_clock_or_identity(&self.http, &http_base_url)
+            .await
+            .sim;
         self.sim = sim;
         let conn = conn_havoc(&self.config.havoc);
         self.http_quota = HttpQuota::from_conn(&conn, sim);
@@ -3141,6 +3222,36 @@ mod data_client_tests {
             ClientMessage::Unsubscribe { symbols }
                 if symbols == vec!["BTCUSDT".to_string()]
         ));
+    }
+
+    // Landing 3 warmup guard: a window whose start precedes the published
+    // data_origin is refused at the request boundary (a loud, surfaced error
+    // naming both the start and the floor), while an on-tape window - or one with
+    // an unknown floor - passes through to the fetch. This is the adapter half of
+    // the #13 close: broadarrow learns "off-tape" as an error, not an empty page.
+    #[test]
+    fn request_bars_off_tape_window_errors_loudly() {
+        const ORIGIN: u64 = 1_900_000_000_000_000_000;
+
+        // Below the floor: refused, and the message names both numbers so the
+        // operator can see exactly how far off-tape the request was.
+        let err = ensure_on_tape(Some(UnixNanos::from(ORIGIN - 1)), ORIGIN)
+            .expect_err("a start below data_origin is refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&(ORIGIN - 1).to_string()),
+            "names the start: {msg}"
+        );
+        assert!(msg.contains(&ORIGIN.to_string()), "names the floor: {msg}");
+
+        // On the floor and above it: served.
+        assert!(ensure_on_tape(Some(UnixNanos::from(ORIGIN)), ORIGIN).is_ok());
+        assert!(ensure_on_tape(Some(UnixNanos::from(ORIGIN + 1)), ORIGIN).is_ok());
+        // "From origin" (no start) is always on-tape.
+        assert!(ensure_on_tape(None, ORIGIN).is_ok());
+        // Unknown floor (clock fetch failed -> identity fallback): defer to the
+        // server's own refusal rather than guessing.
+        assert!(ensure_on_tape(Some(UnixNanos::from(1)), 0).is_ok());
     }
 
     // Brick-2/3 bars (request path): aggregation pins ts_event = bar close,

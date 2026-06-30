@@ -177,7 +177,21 @@ boundary on `/clock` so broadarrow can guard its own warmup. Spec:
       cap satisfies both B and F -> Landing 4 (checkpointed seek) PROCEEDS. A
       from-origin seek cannot decouple per-request cost from session length; the
       verdict is throughput-sensitive near the boundary but structurally PROCEEDS.
-- [ ] Implement landings 2 through 4, suite green at every boundary.
+- [x] Landing 2 (boot-derived origin + unified seek + refuse-straddle): the
+      frozen `ORIGIN_TS` is gone; `Config.backfill_horizon_ns` and
+      `AppState.data_origin_ns` derive the tape origin from the boot clock; both
+      builders anchor there; `build_live_source` wraps `BoundedSeek` and seeks to
+      `start_ts.unwrap_or(sim_now)`; `/trades` refuses a pre-origin start with a
+      422; `MAX_HISTORY_SEEK_TICKS` is 190k. Default smoke green.
+- [x] Landing 3 (publish the affordance + adapter consumption): `ServerClock`
+      in `mogwai-protocol` (sim plus server_now_ns, data_origin_ns,
+      backfill_horizon_ns); `/clock` returns it; the adapter `fetch_clock`
+      decodes it, the node clock takes `.sim`, the data client stores
+      data_origin_ns and refuses an off-tape warmup at the request boundary,
+      surfaces a fetch error instead of dropping it, and a live subscribe sends
+      `start_ts = None`. The cross-repo `ba forward` confirmation is the
+      operator's, not a mogwai gate.
+- [ ] Landing 4 (checkpointed seek), suite green at the boundary.
 
 ### 4. Self-detaching `mogwai serve --daemon` (DEFERRED)
 

@@ -120,6 +120,29 @@ impl SimClock {
     }
 }
 
+/// The `/clock` payload: the affine `SimClock` plus the tape boundary the
+/// server derived at boot. `SimClock` stays the pure wall-to-sim map; this
+/// richer envelope publishes where the synthetic tape begins so a client can
+/// guard its own warmup window instead of issuing a doomed off-tape fetch.
+///
+/// `server_now_ns` is `sim.sim_ns(wall)` sampled when the request is served, so
+/// a client gets sim-now and the tape floor from one round trip without having
+/// to read its own (possibly skewed) wall clock. `data_origin_ns` is the
+/// earliest `ts_event` any source can serve (`server_now_at_boot -
+/// backfill_horizon_ns`); a request for a `start` below it is refused. The
+/// horizon is echoed so the client can report the floor in its own terms.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ServerClock {
+    /// The affine wall-to-sim map the adapter feeds to the nautilus node.
+    pub sim: SimClock,
+    /// `sim.sim_ns(wall)` at the instant the `/clock` request was served.
+    pub server_now_ns: u64,
+    /// Earliest `ts_event` the tape can serve; a `start` below it is off-tape.
+    pub data_origin_ns: u64,
+    /// How far behind boot sim-now the tape begins, in nanoseconds.
+    pub backfill_horizon_ns: u64,
+}
+
 fn scaled_f64_to_u64(value: f64) -> u64 {
     if value.is_nan() || value <= 0.0 {
         0
@@ -748,6 +771,25 @@ mod tests {
 
         let json = serde_json::to_string(&clock).unwrap();
         let decoded: SimClock = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, clock);
+    }
+
+    #[test]
+    fn server_clock_serde_round_trip() {
+        let clock = ServerClock {
+            sim: SimClock {
+                sim_epoch_ns: 1_900_000_000_000_000_000,
+                wall_anchor_ns: 1_782_000_000_000_000_000,
+                speed: 120.0,
+            },
+            server_now_ns: 1_900_000_799_000_000_000,
+            data_origin_ns: 1_899_913_600_000_000_000,
+            backfill_horizon_ns: 86_400_000_000_000,
+        };
+
+        let json = serde_json::to_string(&clock).unwrap();
+        let decoded: ServerClock = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded, clock);
     }

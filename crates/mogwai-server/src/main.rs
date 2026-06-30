@@ -33,8 +33,9 @@ use futures_util::{SinkExt, StreamExt};
 use mogwai_data::{GeneratorScalars, SessionProfile, TickEvent};
 use mogwai_engine::Engine;
 use mogwai_protocol::{
-    ClientMessage, InstrumentDef, MAX_HISTORY_LIMIT, MarketRegime, QuoteTick, ServerMessage,
-    SimClock, TradeTick, control::Divergence, validate_divergence, validate_market_regime,
+    ClientMessage, InstrumentDef, MAX_HISTORY_LIMIT, MarketRegime, QuoteTick, ServerClock,
+    ServerMessage, SimClock, TradeTick, control::Divergence, validate_divergence,
+    validate_market_regime,
 };
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -513,8 +514,19 @@ async fn instruments(State(state): State<AppState>) -> Json<Vec<InstrumentDef>> 
     Json(state.engine.lock().await.instrument_defs())
 }
 
-async fn clock(State(state): State<AppState>) -> Json<SimClock> {
-    Json(state.sim)
+async fn clock(State(state): State<AppState>) -> Json<ServerClock> {
+    // Publish the tape boundary alongside the affine map so a client can guard
+    // its own warmup against `data_origin_ns` rather than issuing a doomed
+    // off-tape fetch. `server_now_ns` is sampled here so the client gets sim-now
+    // and the floor from one round trip, without reading its own (skewable) wall
+    // clock. `data_origin_ns` is the boot-derived floor; the horizon is echoed so
+    // the client can report the floor in its own terms.
+    Json(ServerClock {
+        sim: state.sim,
+        server_now_ns: sim_now_ns(state.sim),
+        data_origin_ns: state.data_origin_ns,
+        backfill_horizon_ns: state.cfg.backfill_horizon_ns,
+    })
 }
 
 /// HTTP order-entry surface for profiles that do not use `/ws` for orders.
@@ -1119,24 +1131,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clock_route_returns_stored_run_clock() {
-        let mut state = state();
-        state.sim = SimClock {
+    async fn clock_route_returns_stored_run_clock_and_tape_boundary() {
+        let sim = SimClock {
             sim_epoch_ns: 10,
             wall_anchor_ns: 20,
             speed: 30.0,
         };
+        let mut state = state();
+        state.sim = sim;
+        state.data_origin_ns = TEST_DATA_ORIGIN;
 
         let Json(returned) = clock(State(state)).await;
 
-        assert_eq!(
-            returned,
-            SimClock {
-                sim_epoch_ns: 10,
-                wall_anchor_ns: 20,
-                speed: 30.0,
-            }
-        );
+        // The affine map and the tape boundary both ride the one payload, so a
+        // client gets sim-now and the floor from one round trip.
+        assert_eq!(returned.sim, sim);
+        assert_eq!(returned.data_origin_ns, TEST_DATA_ORIGIN);
+        assert_eq!(returned.backfill_horizon_ns, 86_400_000_000_000);
+        // `server_now_ns` is sim-now sampled in the handler; it must equal the
+        // clock applied to some wall instant, so it sits at or above the epoch.
+        assert!(returned.server_now_ns >= sim.sim_epoch_ns);
     }
 
     #[tokio::test]

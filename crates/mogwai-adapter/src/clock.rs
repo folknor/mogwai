@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::{Context, ensure};
-use mogwai_protocol::SimClock;
+use mogwai_protocol::{ServerClock, SimClock};
 use nautilus_common::{
     clock::{CallbackRegistry, Clock, validate_and_prepare_time_alert, validate_and_prepare_timer},
     live::get_runtime,
@@ -351,7 +351,7 @@ fn sim_now(sim: SimClock) -> UnixNanos {
     UnixNanos::from(sim.sim_ns(mogwai_protocol::now_unix_nanos()))
 }
 
-pub(crate) async fn fetch_clock(http: &HttpClient, http_base: &str) -> anyhow::Result<SimClock> {
+pub(crate) async fn fetch_clock(http: &HttpClient, http_base: &str) -> anyhow::Result<ServerClock> {
     let response = http
         .get(
             join_url(http_base, "clock"),
@@ -382,7 +382,9 @@ pub async fn mogwai_clock_factory(
         None,
     )
     .context("create HTTP client")?;
-    let sim = fetch_clock(&http, http_base).await?;
+    // The node clock only needs the affine map; the tape boundary in the
+    // `ServerClock` envelope is for the data client's warmup guard, not the clock.
+    let sim = fetch_clock(&http, http_base).await?.sim;
     Ok(move || {
         let clock: Rc<RefCell<dyn Clock>> = Rc::new(RefCell::new(MogwaiClock::new(
             sim,

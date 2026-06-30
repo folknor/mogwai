@@ -171,11 +171,14 @@ def mean_event_gap(trades: list) -> float:
 
 
 def sim_now(clock: dict, wall_ns: int | None = None) -> int:
+    # /clock now returns a ServerClock envelope: the affine map lives under
+    # "sim", alongside server_now_ns, data_origin_ns and backfill_horizon_ns.
+    sim = clock["sim"]
     if wall_ns is None:
         wall_ns = time.time_ns()
-    if wall_ns <= clock["wall_anchor_ns"]:
-        return clock["sim_epoch_ns"]
-    return int(clock["sim_epoch_ns"] + (wall_ns - clock["wall_anchor_ns"]) * clock["speed"])
+    if wall_ns <= sim["wall_anchor_ns"]:
+        return sim["sim_epoch_ns"]
+    return int(sim["sim_epoch_ns"] + (wall_ns - sim["wall_anchor_ns"]) * sim["speed"])
 
 
 class WsClient:
@@ -614,8 +617,10 @@ def main_heartbeat() -> None:
 def main_accelerated() -> None:
     clock = fetch_clock()
     print("clock:   ", clock)
-    assert clock["sim_epoch_ns"] > 0, clock
-    assert clock["speed"] > 1.0, clock
+    # The affine map lives under "sim" in the ServerClock envelope.
+    sim = clock["sim"]
+    assert sim["sim_epoch_ns"] > 0, clock
+    assert sim["speed"] > 1.0, clock
     assert post_divergence({"type": "ClearDivergences"}) == 202
 
     order_start_wall = time.time_ns()
@@ -630,8 +635,8 @@ def main_accelerated() -> None:
     ], msgs
     filled = msgs[1]
     account = msgs[2]
-    assert filled["ts_event"] >= clock["sim_epoch_ns"], filled
-    assert account["ts_event"] >= clock["sim_epoch_ns"], account
+    assert filled["ts_event"] >= sim["sim_epoch_ns"], filled
+    assert account["ts_event"] >= sim["sim_epoch_ns"], account
     assert filled["ts_event"] > order_start_wall, (filled, order_start_wall)
     expected_order_sim = sim_now(clock, (order_start_wall + order_end_wall) // 2)
     order_error = abs(filled["ts_event"] - expected_order_sim)
@@ -643,7 +648,7 @@ def main_accelerated() -> None:
         {
             "type": "Subscribe",
             "symbols": ["BTCUSDT"],
-            "start_ts": clock["sim_epoch_ns"],
+            "start_ts": sim["sim_epoch_ns"],
         }
     )
     trade = ws.read()
@@ -651,7 +656,7 @@ def main_accelerated() -> None:
     ws.close()
     print("accel-md:", trade)
     assert trade["type"] == "Trade", trade
-    assert trade["ts_event"] >= clock["sim_epoch_ns"], trade
+    assert trade["ts_event"] >= sim["sim_epoch_ns"], trade
     assert (data_end_wall - data_start_wall) < 250_000_000, trade
 
     # Coherence budget, all terms in SIMULATED nanoseconds (skew is a sim-ns
@@ -674,9 +679,9 @@ def main_accelerated() -> None:
     FIRST_GAP_SLACK_NS = 2_000_000_000
     measured_wall_latency = max(order_end_wall - order_start_wall, data_end_wall - data_start_wall)
     connect_catchup = int(
-        max(0, data_start_wall - clock["wall_anchor_ns"]) * clock["speed"]
+        max(0, data_start_wall - sim["wall_anchor_ns"]) * sim["speed"]
     )
-    budget = int(measured_wall_latency * clock["speed"]) + connect_catchup + FIRST_GAP_SLACK_NS
+    budget = int(measured_wall_latency * sim["speed"]) + connect_catchup + FIRST_GAP_SLACK_NS
     skew = abs(filled["ts_event"] - trade["ts_event"])
     print(
         "accel-coherence:",
@@ -693,7 +698,7 @@ def main_accelerated() -> None:
     ws.close()
     for msg in delay_msgs:
         print("accel-dl:", msg)
-    expected_delay = ACCEL_DELAY_MS / 1000.0 / clock["speed"]
+    expected_delay = ACCEL_DELAY_MS / 1000.0 / sim["speed"]
     assert elapsed >= expected_delay * 0.5, (elapsed, expected_delay)
     assert elapsed < 0.5, elapsed
     assert post_divergence({"type": "DelayAcks", "ms": 0}) == 202
