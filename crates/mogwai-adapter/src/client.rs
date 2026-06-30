@@ -281,6 +281,11 @@ impl DataClient for MogwaiDataClient {
             &self.instruments,
         )
         .await?;
+        // Populate the worker's Nautilus cache before any subscription so the
+        // executor's instrument-presence guard is satisfied the moment bars
+        // start flowing (see `emit_seeded_instruments`). `sink` is still owned
+        // here; both transport branches move/clone it afterwards.
+        emit_seeded_instruments(&sink, &self.instruments, sim);
         // Server-side divergences are execution-owned. The data client accepts
         // the same config object but only applies its client-side transport half.
         let client_havoc = client_havoc(&self.config.havoc);
@@ -1267,6 +1272,34 @@ async fn seed_instruments(
     let defs = fetch_instruments(http, quota, base).await?;
     cache_instruments(instruments, defs);
     Ok(())
+}
+
+/// Push every seeded instrument into the Nautilus cache on connect.
+///
+/// Seeding only fills the adapter's local `InstrumentDef` map, which the
+/// adapter consults for price/precision conversion. Nautilus's own cache is a
+/// separate store fed exclusively by `DataEvent::Instrument`, and broadarrow's
+/// executor refuses to process a bar whose instrument is absent from that cache
+/// (a desync guard against advancing the shadow with no real order). A forward
+/// run that subscribes to bars but never to the instrument itself would
+/// therefore have the cache stay empty and every bar refused. Emitting the
+/// seeded defs here populates the cache the instant the data client connects,
+/// independent of whatever the strategy later subscribes to.
+fn emit_seeded_instruments(
+    sink: &UnboundedSender<DataEvent>,
+    instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
+    sim: SimClock,
+) {
+    let ts_init = now_unix_nanos(sim);
+    let defs: Vec<InstrumentDef> = lock_recover(instruments, "instrument")
+        .values()
+        .cloned()
+        .collect();
+    for def in defs {
+        if let Ok(instrument) = convert::instrument_any(&def, ts_init) {
+            drop(sink.send(DataEvent::Instrument(instrument)));
+        }
+    }
 }
 
 async fn ensure_instrument(
@@ -3015,6 +3048,33 @@ mod data_client_tests {
             }
             other => panic!("expected trade data event, got {other:?}"),
         }
+    }
+
+    // Connect-side seam: seeding fills only the adapter's local def map; the
+    // worker's Nautilus cache is fed solely by `DataEvent::Instrument`. Without
+    // a connect-time emit, a forward run that subscribes to bars but never to
+    // the instrument leaves the cache empty and the executor refuses every bar.
+    // `emit_seeded_instruments` must push each seeded def into the sink so the
+    // cache is populated the instant the data client connects.
+    #[test]
+    fn connect_emits_seeded_instruments_into_sink() {
+        let (tx, mut rx) = unbounded_channel();
+        let instruments = instruments_map();
+
+        emit_seeded_instruments(&tx, &instruments, SimClock::identity());
+
+        match rx.try_recv().expect("an instrument event was emitted") {
+            DataEvent::Instrument(nautilus_model::instruments::InstrumentAny::CurrencyPair(
+                pair,
+            )) => {
+                assert_eq!(pair.id, instrument_id());
+            }
+            other => panic!("expected currency-pair instrument event, got {other:?}"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "exactly one instrument should be emitted for a single seeded def"
+        );
     }
 
     // Drain-side type filter: a symbol subscribed for trades only must not

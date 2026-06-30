@@ -255,8 +255,13 @@ messages. The only crate that path-deps the sibling `../nautilus_trader` checkou
   `http://` base from the `ws://` one, so both transports speak the right scheme
   off one field; the default base targets the server's `8787` port.
 - **DataClient.** `start` grabs the runner's thread-local egress sink; `connect`
-  seeds the instrument cache off `GET /instruments`, opens the `/ws` socket and
-  spawns the reader/writer drain pair; `disconnect`/`stop` tear them down.
+  seeds the adapter's local `InstrumentDef` map off `GET /instruments`, then emits
+  each seeded def into the sink as a `DataEvent::Instrument` so the worker's
+  Nautilus cache is populated before any subscription (the executor refuses bars
+  whose instrument is absent from that cache, so a bars-only subscription that
+  never loads the instrument would otherwise have every bar refused), opens the
+  `/ws` socket and spawns the reader/writer drain pair; `disconnect`/`stop` tear
+  them down.
   `subscribe_`/`unsubscribe_` for trades/quotes/bars/instruments use an
   adapter-owned per-symbol refcount table that only sends `Subscribe`/`Unsubscribe`
   on the 0-to-1 transition (so one symbol's subscriptions do not clobber the
