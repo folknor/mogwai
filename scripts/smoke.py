@@ -97,6 +97,12 @@ def fetch_clock() -> dict:
         return json.loads(r.read().decode())
 
 
+def fetch_account() -> dict:
+    with urllib.request.urlopen(f"http://{HOST}:{PORT}/account") as r:
+        assert r.status == 200, r.status
+        return json.loads(r.read().decode())
+
+
 def ws_roundtrip(send_obj: dict, expect: int) -> list:
     """Minimal RFC6455 client: handshake, send one text frame, read `expect` frames."""
     ws = WsClient()
@@ -251,6 +257,10 @@ def main_default() -> None:
     # the clock now, so a frozen constant would fall before data_origin and be
     # refused. One hour behind sim-now is on-tape under the 24h horizon.
     window_start_ts = sim_now(fetch_clock()) - WINDOW_LOOKBACK_NS
+    initial_account = fetch_account()
+    print("initial:", initial_account)
+    assert initial_account["balances"] == [], initial_account
+    assert initial_account["positions"] == [], initial_account
 
     assert post_divergence(
         {"type": "PartialFillNext", "client_order_id": "O1", "fraction": "0.3"}
@@ -282,6 +292,11 @@ def main_default() -> None:
     assert float(usdt["total"]) == -300.0, usdt
     assert float(usdt["locked"]) == 700.0, usdt
     assert float(usdt["free"]) == -1000.0, usdt
+
+    pulled_account = fetch_account()
+    print("pulled:  ", pulled_account)
+    pulled_btc = find_balance(pulled_account, "BTC")
+    assert float(pulled_btc["total"]) == 3.0, pulled_btc
     print("PASS: partial fill round-tripped through the live WS path")
 
     assert post_divergence({"type": "DuplicateNextFill"}) == 202

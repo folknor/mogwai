@@ -41,9 +41,9 @@ use futures_util::{SinkExt, StreamExt};
 use mogwai_data::{GeneratorScalars, SessionProfile, TickEvent};
 use mogwai_engine::Engine;
 use mogwai_protocol::{
-    ClientMessage, InstrumentDef, MAX_HISTORY_LIMIT, MarketRegime, OrderType, QuoteTick,
-    ServerClock, ServerMessage, SimClock, TradeTick, control::Divergence, validate_divergence,
-    validate_market_regime,
+    AccountState, ClientMessage, InstrumentDef, MAX_HISTORY_LIMIT, MarketRegime, OrderType,
+    QuoteTick, ServerClock, ServerMessage, SimClock, TradeTick, control::Divergence,
+    validate_divergence, validate_market_regime,
 };
 use nix::{
     errno::Errno,
@@ -543,6 +543,7 @@ async fn serve_async(
 
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route("/account", get(account))
         .route("/instruments", get(instruments))
         .route("/trades", get(trades))
         .route("/quotes", get(quotes))
@@ -953,6 +954,19 @@ async fn arm_divergence(
 
 async fn instruments(State(state): State<AppState>) -> Json<Vec<InstrumentDef>> {
     Json(state.engine.lock().await.instrument_defs())
+}
+
+/// Pull route for the venue's current account snapshot.
+///
+/// AccountState is execution-owned and is otherwise only pushed with an order
+/// event. An adapter connecting over either transport pulls this once so the
+/// bridge's account row exists before the first order is worked, rather than
+/// learning the account only when the first fill's AccountState arrives. The
+/// route is transport-agnostic, so it also serves the HttpOrders execution
+/// profile that opens no /ws socket and never sends Subscribe.
+async fn account(State(state): State<AppState>) -> Json<AccountState> {
+    let ts = sim_now_ns(state.sim);
+    Json(state.engine.lock().await.account_snapshot(ts))
 }
 
 async fn clock(State(state): State<AppState>) -> Json<ServerClock> {

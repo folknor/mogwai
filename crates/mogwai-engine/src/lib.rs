@@ -730,6 +730,15 @@ mod tests {
         state
     }
 
+    #[test]
+    fn account_snapshot_is_empty_before_any_fill() {
+        let e = Engine::new();
+        let state = e.account_snapshot(7);
+        assert!(state.balances.is_empty());
+        assert!(state.positions.is_empty());
+        assert_eq!(state.ts_event, 7);
+    }
+
     fn fill(out: &[ServerMessage], index: usize) -> &OrderFilled {
         let ServerMessage::OrderFilled(fill) = &out[index] else {
             panic!("expected fill")

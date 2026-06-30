@@ -84,9 +84,10 @@ sockets, timers and the clock; the engine owns order and account state.
   out of the engine queue and applied in the server's outbound writer instead.
 - **Account model.** Per-currency balances and per-symbol VWAP positions off an
   instrument-decomposition table. `AccountState` is pushed after fills and after
-  reservation-freeing cancels. free/locked is derived from resting-order
-  reservations; the ledger is a pure delta off zero, so an unfunded buy drives
-  the quote leg negative.
+  reservation-freeing cancels, and is pullable over `GET /account` so live
+  adapters can register the venue account before the first order is worked.
+  free/locked is derived from resting-order reservations; the ledger is a pure
+  delta off zero, so an unfunded buy drives the quote leg negative.
 - **Amend.** `ModifyOrder` is a real amend of a resting order: it reprices and/or
   resizes in place (the wire `quantity` is the order's total, so leaves is
   re-derived as total minus already-filled), re-derives the backing reservation,
@@ -179,9 +180,9 @@ Owns the sockets, the clock, and replay pacing.
   `ClientMessage` in, the engine's `ServerMessage` events out as a JSON array -
   the identical `engine.process` call the `/ws` order arm makes, so order
   semantics are byte-identical across the two carriers); `GET /instruments`;
-  `GET /trades` and `GET /quotes` (bounded historical fetch keyed by
-  symbol/start/end/limit; `/quotes` is always empty because generated history is
-  trades-only).
+  `GET /account` (the current `AccountState` snapshot); `GET /trades` and
+  `GET /quotes` (bounded historical fetch keyed by symbol/start/end/limit;
+  `/quotes` is always empty because generated history is trades-only).
 - **Generated market data, two carriers.** A server-owned `source` module owns
   both. Both anchor every generator at the boot-derived `data_origin` (the server
   derives it once from the boot clock and threads it in) and SEEK into that one
@@ -275,9 +276,12 @@ messages. The only crate that path-deps the sibling `../nautilus_trader` checkou
   `Price`/`Quantity`/`TradeTick`/`QuoteTick`/`InstrumentAny` at the instrument's
   declared precision.
 - **ExecutionClient.** `submit`/`modify`/`cancel` translate nautilus trading
-  commands into `mogwai-protocol` order commands over an exec-owned `/ws` socket;
-  a reader task drains the order-event stream and dispatches each variant through
-  an `ExecutionEventEmitter` into the live runner's channel;
+  commands into `mogwai-protocol` order commands over an exec-owned `/ws` socket.
+  `connect` pulls `GET /account`, forwards the snapshot through the same dispatch
+  path as an inbound `AccountState`, and waits until the Nautilus cache contains
+  the account row before returning, so the first live order is not worked against
+  an unknown account. A reader task drains the order-event stream and dispatches
+  each variant through an `ExecutionEventEmitter` into the live runner's channel;
   `generate_account_state` emits the pushed `AccountState` snapshots. Because the
   global runtime is multi-thread and `CacheView` is not `Send`, the reader thread
   never touches the cache: it builds events from raw wire fields plus an

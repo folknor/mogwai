@@ -78,6 +78,9 @@ pub struct StubState {
     pub ws_server_pings: AtomicUsize,
     /// JSON body of each HTTP `GET /trades` response. Defaults to `[]`.
     pub trades_body: Mutex<Option<String>>,
+    /// When true, `GET /account` returns an empty account snapshot. Defaults to
+    /// false so older-server compatibility remains the default stub behavior.
+    pub serve_account: AtomicBool,
     /// Timestamps of each HTTP request to `/orders` and `/trades`. The quota
     /// tests assert the gaps between consecutive entries.
     pub http_request_times: Mutex<Vec<Instant>>,
@@ -138,6 +141,17 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
 
     if path.starts_with("/ws") {
         serve_ws(stream, head, state).await;
+    } else if path.starts_with("/account") {
+        if state.serve_account.load(Ordering::Relaxed) {
+            respond_json(
+                stream,
+                "200 OK",
+                r#"{"balances":[],"positions":[],"ts_event":0}"#,
+            )
+            .await;
+        } else {
+            respond_json(stream, "404 Not Found", "").await;
+        }
     } else if path.starts_with("/instruments") {
         respond_json(stream, "200 OK", INSTRUMENTS_JSON).await;
     } else if path.starts_with("/trades") {

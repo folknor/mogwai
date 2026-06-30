@@ -68,6 +68,8 @@ use crate::{
 /// acceleration without producing on-axis data. The accelerated vehicle is the
 /// WS push path, which deadline-paces server-side.
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+const ACCOUNT_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(5);
+const ACCOUNT_REGISTRATION_POLL: Duration = Duration::from_millis(10);
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -1350,6 +1352,70 @@ async fn fetch_instruments(
     serde_json::from_slice(&response.body).context("decode instruments")
 }
 
+/// Distinguishes a 404 (older server without GET /account, the only
+/// warn-and-continue case) from every other pull failure (decode, 5xx, timeout,
+/// transport), which must fail connect() rather than silently recreate the
+/// first-fill `account not found in cache` this fix exists to eliminate.
+#[derive(Debug)]
+enum FetchAccountError {
+    NotFound,
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for FetchAccountError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => write!(f, "fetch account returned 404"),
+            Self::Other(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for FetchAccountError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::NotFound => None,
+            Self::Other(err) => err.source(),
+        }
+    }
+}
+
+impl From<anyhow::Error> for FetchAccountError {
+    fn from(err: anyhow::Error) -> Self {
+        Self::Other(err)
+    }
+}
+
+async fn fetch_account(
+    http: &HttpClient,
+    quota: &HttpQuota,
+    base: &str,
+) -> Result<mogwai_protocol::AccountState, FetchAccountError> {
+    quota.wait().await;
+    let response = http
+        .get(
+            join_url(base, "account"),
+            None,
+            None,
+            Some(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS),
+            None,
+        )
+        .await
+        .context("fetch account")?;
+    if response.status.as_u16() == 404 {
+        return Err(FetchAccountError::NotFound);
+    }
+    if !response.status.is_success() {
+        return Err(FetchAccountError::Other(anyhow::anyhow!(
+            "fetch account returned {}",
+            response.status.as_u16()
+        )));
+    }
+    serde_json::from_slice(&response.body)
+        .context("decode account")
+        .map_err(FetchAccountError::Other)
+}
+
 struct TradeFetch<'a> {
     symbol: &'a str,
     start: Option<UnixNanos>,
@@ -1834,6 +1900,32 @@ impl MogwaiExecutionClient {
             self.send_ws(cmd)
         }
     }
+
+    /// Block until the runner has drained the forwarded AccountState and the
+    /// cache holds the account row, or the timeout elapses. The forward only
+    /// queues an event; this proves the row is present before connect() returns
+    /// so the first order is not worked against an unknown account.
+    async fn await_account_registered(&self) -> anyhow::Result<()> {
+        let deadline = tokio::time::Instant::now() + ACCOUNT_REGISTRATION_TIMEOUT;
+        loop {
+            if self
+                .core
+                .cache()
+                .account_owned(&self.core.account_id)
+                .is_some()
+            {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "account {} not registered after {:?}",
+                    self.core.account_id,
+                    ACCOUNT_REGISTRATION_TIMEOUT
+                );
+            }
+            tokio::time::sleep(ACCOUNT_REGISTRATION_POLL).await;
+        }
+    }
 }
 
 #[async_trait(?Send)]
@@ -1945,6 +2037,41 @@ impl ExecutionClient for MogwaiExecutionClient {
         .await?;
         if let Some(havoc) = &self.config.havoc {
             ship_server_havoc(&self.http, &http_base_url, havoc, sim).await?;
+        }
+        // Seed the bridge's account row before any order is worked. Pull the
+        // venue's current snapshot and forward it through the same exec dispatch
+        // an inbound AccountState frame uses, so the cache row exists before the
+        // first order's events arrive instead of erroring `account not found in
+        // cache`. Instruments are already seeded above, so any positions in the
+        // snapshot resolve their defs.
+        //
+        // Forwarding alone is necessary but not sufficient: handle_account_state
+        // only sends an ExecutionEvent::Account onto the exec channel, which the
+        // runner drains and applies to the cache asynchronously - possibly after
+        // connect() returns and the first order is worked. So we block on
+        // await_account_registered (mirroring every canonical adapter's
+        // await_account_registered) until the cache row is proven present.
+        //
+        // This pull bypasses the HavocFilter that WS-pushed AccountState frames
+        // pass through, by design: the snapshot is a point-in-time query, not a
+        // tape frame, so a DropNextAccountUpdate divergence does not suppress it.
+        //
+        // Failure policy: a 404 means a server predating GET /account; warn and
+        // fall back to the legacy reactive path (the account seeds off the first
+        // fill, as before this fix). Any OTHER failure against a server that does
+        // publish the route is fatal - warn-and-continue there would silently
+        // recreate the exact first-fill cache-miss this fix exists to eliminate.
+        match fetch_account(&self.http, &self.http_quota, &http_base_url).await {
+            Ok(state) => {
+                handle_exec_message(ServerMessage::AccountState(state), &self.exec_context());
+                self.await_account_registered().await?;
+            }
+            Err(FetchAccountError::NotFound) => {
+                tracing::warn!("server predates GET /account; account will seed on first fill");
+            }
+            Err(err) => {
+                return Err(anyhow::Error::new(err).context("initial account snapshot"));
+            }
         }
         let client_havoc = client_havoc(&self.config.havoc);
 

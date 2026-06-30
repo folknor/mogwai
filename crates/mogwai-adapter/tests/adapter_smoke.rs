@@ -7,10 +7,16 @@
 
 mod common;
 
-use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
 
 use common::{StubState, bound_stub, cached_order, instrument_id, next_exec_event};
 use mogwai_adapter::{MOGWAI_VENUE, MogwaiExecClientConfig, MogwaiExecutionClient};
+use mogwai_protocol::TransportProfile;
 use nautilus_common::{
     cache::Cache,
     clients::ExecutionClient,
@@ -27,6 +33,59 @@ use nautilus_model::{
     types::{Price, Quantity},
 };
 use tokio::sync::mpsc::unbounded_channel;
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn connect_seeds_initial_account_state() {
+    for transport_profile in [TransportProfile::WsStreaming, TransportProfile::HttpOrders] {
+        let state = Arc::new(StubState::default());
+        state.serve_account.store(true, Ordering::Relaxed);
+        let base_url = bound_stub(Arc::clone(&state)).await;
+
+        let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
+        replace_exec_event_sender(sink_tx);
+
+        let cache = Rc::new(RefCell::new(Cache::default()));
+        let config = MogwaiExecClientConfig {
+            base_url,
+            transport_profile,
+            ..MogwaiExecClientConfig::default()
+        };
+        let core = ExecutionClientCore::new(
+            config.trader_id,
+            ClientId::from("MOGWAI-EXEC"),
+            *MOGWAI_VENUE,
+            OmsType::Netting,
+            config.account_id,
+            config.account_type,
+            None,
+            Rc::clone(&cache),
+        );
+        let mut client = MogwaiExecutionClient::new(core, config).expect("client builds");
+
+        client.start().expect("start grabs sink");
+
+        let account_id = client.account_id();
+        let drain_account = async {
+            match next_exec_event(&mut sink_rx, Duration::from_secs(2)).await {
+                ExecutionEvent::Account(account) => {
+                    assert_eq!(account.account_id, account_id);
+                    cache
+                        .borrow_mut()
+                        .add_account(account.into())
+                        .expect("cache account");
+                }
+                other => panic!("expected initial AccountState, got {other:?}"),
+            }
+        };
+        let (connect, ()) = tokio::join!(client.connect(), drain_account);
+        connect.expect("connect seeds account");
+        assert!(
+            client.get_account().is_some(),
+            "account registered for {transport_profile:?}"
+        );
+    }
+}
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
