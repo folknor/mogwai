@@ -27,6 +27,8 @@ pub(crate) enum ManTopic {
     Architecture,
     /// The havoc model: divergences and the four surfaces (reference/havoc.md).
     Havoc,
+    /// The simulated clock for accelerated forward testing (reference/clock.md).
+    Clock,
 }
 
 /// The kebab-case topic name as typed on the command line.
@@ -36,6 +38,7 @@ fn name(topic: ManTopic) -> &'static str {
         ManTopic::Config => "config",
         ManTopic::Architecture => "architecture",
         ManTopic::Havoc => "havoc",
+        ManTopic::Clock => "clock",
     }
 }
 
@@ -46,6 +49,7 @@ fn summary(topic: ManTopic) -> &'static str {
         ManTopic::Config => "the mogwai.toml run knobs",
         ManTopic::Architecture => "how the system works, subsystem by subsystem",
         ManTopic::Havoc => "the havoc model: every divergence and the four surfaces",
+        ManTopic::Clock => "the simulated clock for accelerated forward testing",
     }
 }
 
@@ -57,6 +61,7 @@ fn content(topic: ManTopic) -> &'static str {
         ManTopic::Config => include_str!("../../../reference/config.md"),
         ManTopic::Architecture => include_str!("../../../reference/architecture.md"),
         ManTopic::Havoc => include_str!("../../../reference/havoc.md"),
+        ManTopic::Clock => include_str!("../../../reference/clock.md"),
     }
 }
 
