@@ -11,8 +11,19 @@ use mogwai_data::{
 };
 use mogwai_protocol::{InstrumentDef, MarketRegime, Symbol, default_instruments};
 
-const ORIGIN_TS: u64 = 1_700_438_400_000_000_000;
-const MAX_HISTORY_SEEK_TICKS: usize = 50_000;
+// Runaway backstop on a from-origin seek, NOT the binding window check - that is
+// the analytic `start >= data_origin` refuse the `/trades` handler applies before
+// any synthesis. Sized to the Landing-1 reading (docs/forward-origin-spec.md): at
+// ~1.9M ticks/sec synthesis, ~190k ticks is the largest from-origin drain that
+// still finishes inside the ~100ms request-path budget. Every legitimate on-tape
+// request lives in `[data_origin, sim_now]` by construction, well inside this; the
+// cap only stops a pathological seek (an accelerated session run long enough that a
+// fresh-subscribe seek to sim-now exceeds it - the uptime ceiling Landing 4 lifts
+// via checkpointing). There is no longer a frozen tape origin: both builders anchor
+// each generator at the boot-derived `data_origin` the caller threads in, so the
+// data timeline tracks the advertised clock and cannot drift into the multi-year
+// seek that emptied forward warmups.
+const MAX_HISTORY_SEEK_TICKS: usize = 190_000;
 
 fn fingerprint() -> &'static Fingerprint {
     static FP: OnceLock<Fingerprint> = OnceLock::new();
@@ -95,14 +106,48 @@ fn default_profile(def: InstrumentDef, fp: &Fingerprint) -> InstrumentProfile {
     InstrumentProfile::new(def, scalars, fp.session_profile.clone())
 }
 
+/// One symbol's tape: a generator anchored at the shared boot-derived
+/// `data_origin`, wrapped in the `BoundedSeek` runaway backstop. Both the live
+/// and history builders compose this so every realization is a sample of the same
+/// single coherent tape - the live stream and a warmup window over the same
+/// `data_origin` are seeks into one sequence, never two divergent re-anchorings.
+fn bounded_generator(
+    profile: &InstrumentProfile,
+    seed: u64,
+    data_origin: u64,
+    fp: &Fingerprint,
+    regime: Option<MarketRegime>,
+) -> Box<dyn TickSource> {
+    let source: Box<dyn TickSource> = Box::new(GeneratedSource::new_with_session_profile(
+        profile.scalars.clone(),
+        seed,
+        data_origin,
+        fp,
+        &profile.session,
+        regime,
+    ));
+    Box::new(BoundedSeek {
+        inner: source,
+        cap: MAX_HISTORY_SEEK_TICKS,
+    })
+}
+
 pub(crate) fn build_live_source(
     symbols: &[String],
     start_ts: Option<u64>,
     regime: Option<MarketRegime>,
     profiles: &InstrumentProfiles,
+    data_origin: u64,
+    sim_now: u64,
 ) -> Option<Box<dyn TickSource>> {
     let fp = fingerprint();
-    let anchor = start_ts.unwrap_or(ORIGIN_TS);
+    // Anchor at `data_origin` and SEEK to sim-now (or the resume cursor) rather
+    // than re-anchoring a fresh seed-head at the cursor. A fresh re-anchor restarts
+    // the price walk at `start_price` on every (re)subscribe - the reconnect price
+    // reset - and a generator parked behind now firehoses (accelerated) or replays
+    // hours of stale backfill at real-time gaps (identity). Seeking the shared tape
+    // makes the first live tick land at `seek_target` on the one coherent walk.
+    let seek_target = start_ts.unwrap_or(sim_now);
     let sources: Vec<Box<dyn TickSource>> = symbols
         .iter()
         .filter_map(|sym| {
@@ -112,15 +157,13 @@ pub(crate) fn build_live_source(
             // an unknown instrument. A mixed subscribe streams only its known
             // symbols; an all-unknown subscribe collapses to None below.
             let profile = profiles.get(sym)?;
-            let source: Box<dyn TickSource> = Box::new(GeneratedSource::new_with_session_profile(
-                profile.scalars.clone(),
+            Some(bounded_generator(
+                profile,
                 seed_for(sym),
-                anchor,
+                data_origin,
                 fp,
-                &profile.session,
                 regime,
-            ));
-            Some(source)
+            ))
         })
         .collect();
 
@@ -128,7 +171,10 @@ pub(crate) fn build_live_source(
         return None;
     }
 
-    Some(Box::new(MergeSource::new(sources)))
+    Some(Box::new(MergeSource::starting_at(
+        sources,
+        Some(seek_target),
+    )))
 }
 
 pub(crate) fn build_history_source(
@@ -136,21 +182,15 @@ pub(crate) fn build_history_source(
     start: Option<u64>,
     regime: Option<MarketRegime>,
     profiles: &InstrumentProfiles,
+    data_origin: u64,
 ) -> Option<Box<dyn TickSource>> {
     let fp = fingerprint();
     let profile = profiles.get(symbol)?;
-    let source: Box<dyn TickSource> = Box::new(GeneratedSource::new_with_session_profile(
-        profile.scalars.clone(),
-        seed_for(symbol),
-        ORIGIN_TS,
-        fp,
-        &profile.session,
-        regime,
-    ));
-    let bounded: Box<dyn TickSource> = Box::new(BoundedSeek {
-        inner: source,
-        cap: MAX_HISTORY_SEEK_TICKS,
-    });
+    let bounded = bounded_generator(profile, seed_for(symbol), data_origin, fp, regime);
+    // `start = None` means "from the origin": `starting_at` buffers the first tick
+    // with no seek, serving the head of the tape. A `Some(start)` seeks into the
+    // shared tape; the handler has already refused any `start < data_origin`, so a
+    // legitimate seek always lands inside `[data_origin, sim_now]`.
     Some(Box::new(MergeSource::starting_at(vec![bounded], start)))
 }
 
@@ -188,6 +228,11 @@ impl TickSource for BoundedSeek {
 mod tests {
     use super::*;
     use rust_decimal::Decimal;
+
+    // A fixed boot-derived origin stand-in for the unit tests. The production
+    // origin is `sim_now_at_boot - backfill_horizon`; the tests pin a concrete
+    // instant so a from-origin seek and its expected tick are reproducible.
+    const TEST_ORIGIN: u64 = 1_700_438_400_000_000_000;
 
     fn profile(
         symbol: &str,
@@ -291,7 +336,7 @@ mod tests {
             let mut source = GeneratedSource::new_with_session_profile(
                 profile.scalars.clone(),
                 seed_for("BTCUSDT"),
-                ORIGIN_TS,
+                TEST_ORIGIN,
                 fp,
                 &profile.session,
                 None,
@@ -382,8 +427,15 @@ mod tests {
             Decimal::from(100),
             default_session(),
         )]);
-        let mut source =
-            build_live_source(&symbols, Some(86_401_000_000_000), None, &profiles).expect("source");
+        let mut source = build_live_source(
+            &symbols,
+            Some(86_401_000_000_000),
+            None,
+            &profiles,
+            86_400_000_000_000,
+            86_401_000_000_000,
+        )
+        .expect("source");
         let TickEvent::Trade(trade) = source.next_tick().expect("first tick") else {
             panic!("generated source emits trades");
         };
@@ -410,13 +462,22 @@ mod tests {
     fn live_source_applies_regime() {
         let symbols = vec!["BTCUSDT".to_string()];
         let profiles = InstrumentProfiles::defaults();
-        let mut clean =
-            build_live_source(&symbols, Some(ORIGIN_TS), None, &profiles).expect("clean source");
+        let mut clean = build_live_source(
+            &symbols,
+            Some(TEST_ORIGIN),
+            None,
+            &profiles,
+            TEST_ORIGIN,
+            TEST_ORIGIN,
+        )
+        .expect("clean source");
         let mut drought = build_live_source(
             &symbols,
-            Some(ORIGIN_TS),
+            Some(TEST_ORIGIN),
             Some(MarketRegime::LiquidityDrought { thin_factor: 5.0 }),
             &profiles,
+            TEST_ORIGIN,
+            TEST_ORIGIN,
         )
         .expect("drought source");
 
@@ -433,8 +494,18 @@ mod tests {
         let profiles = InstrumentProfiles::defaults();
         let symbols = vec!["FAKE".to_string()];
 
-        assert!(build_live_source(&symbols, Some(ORIGIN_TS), None, &profiles).is_none());
-        assert!(build_history_source("FAKE", None, None, &profiles).is_none());
+        assert!(
+            build_live_source(
+                &symbols,
+                Some(TEST_ORIGIN),
+                None,
+                &profiles,
+                TEST_ORIGIN,
+                TEST_ORIGIN
+            )
+            .is_none()
+        );
+        assert!(build_history_source("FAKE", None, None, &profiles, TEST_ORIGIN).is_none());
     }
 
     #[test]
@@ -450,8 +521,10 @@ mod tests {
             btc_profile("BTCUSDT", Decimal::from(60_000), default_session()),
         ]);
 
-        let mut eur = build_history_source("EURUSD", None, None, &profiles).expect("eur source");
-        let mut btc = build_history_source("BTCUSDT", None, None, &profiles).expect("btc source");
+        let mut eur =
+            build_history_source("EURUSD", None, None, &profiles, TEST_ORIGIN).expect("eur source");
+        let mut btc = build_history_source("BTCUSDT", None, None, &profiles, TEST_ORIGIN)
+            .expect("btc source");
         let TickEvent::Trade(eur) = eur.next_tick().expect("eur first trade") else {
             panic!("generated source emits trades");
         };
@@ -476,10 +549,10 @@ mod tests {
             flat_session(1.0),
         )]);
 
-        let mut slow =
-            build_history_source("BTCUSDT", None, None, &slow_profiles).expect("slow source");
-        let mut fast =
-            build_history_source("BTCUSDT", None, None, &fast_profiles).expect("fast source");
+        let mut slow = build_history_source("BTCUSDT", None, None, &slow_profiles, TEST_ORIGIN)
+            .expect("slow source");
+        let mut fast = build_history_source("BTCUSDT", None, None, &fast_profiles, TEST_ORIGIN)
+            .expect("fast source");
 
         let slow_ts = slow.next_tick().expect("slow first trade").ts_event();
         let fast_ts = fast.next_tick().expect("fast first trade").ts_event();

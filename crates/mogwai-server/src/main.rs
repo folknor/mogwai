@@ -58,6 +58,14 @@ struct Config {
     /// disables it. When enabled, each websocket session receives liveness
     /// frames that survive `StallData` but not `GoDark`.
     server_heartbeat_ms: u64,
+    /// How far before sim-now the synthetic tape begins, in nanoseconds. The boot
+    /// `data_origin = sim_now_at_boot - backfill_horizon_ns` is the earliest
+    /// instant any source can serve, shared by every symbol's generator so the
+    /// data timeline tracks the advertised clock (no frozen origin to drift past).
+    /// A request straddling the floor is refused loudly rather than served short,
+    /// so this default need not be exact - 24h covers a day's warmup. Documented
+    /// next to `sim_epoch_ns`: both anchor the run's timelines.
+    backfill_horizon_ns: u64,
     /// Optional explicit venue instrument set. When empty, the server seeds the
     /// protocol default set. When present, this is authoritative for
     /// `/instruments`, order validation, and data generation.
@@ -78,6 +86,10 @@ impl Default for Config {
             speed: 1.0,
             gap_cap_ms: 1000,
             server_heartbeat_ms: 0,
+            // 24h: one day of warmup tape behind sim-now. A wrong horizon is made
+            // loud (off-tape requests are refused, not silently under-served), so
+            // the default's exactness is low-stakes.
+            backfill_horizon_ns: 86_400_000_000_000,
             instruments: Vec::new(),
         }
     }
@@ -214,6 +226,11 @@ struct AppState {
     profiles: Arc<source::InstrumentProfiles>,
     /// Run clock shared with adapters over `/clock`.
     sim: SimClock,
+    /// Earliest sim-time unix-ns instant the synthetic tape can serve, derived
+    /// once at boot as `sim.sim_ns(now) - backfill_horizon_ns`. The binding floor
+    /// for `/trades` and the anchor both source builders generate from, so the
+    /// data origin and the advertised clock cannot diverge.
+    data_origin_ns: u64,
     /// Execution-event delay in milliseconds, shared by all live writers.
     delay_ms: Arc<AtomicU64>,
     /// Sim-time unix-ns instant before which writers drop all outbound frames.
@@ -315,6 +332,14 @@ struct ServeArgs {
     /// pointed at it.
     #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:8787")]
     addr: std::net::SocketAddr,
+    /// Write structured logs to this file instead of the terminal. A server
+    /// launched in the background has its stdout block-buffered by the launcher,
+    /// so a tracing line can sit unflushed indefinitely - invisible to a tail or
+    /// grep watching for readiness. A dedicated file is written per event and
+    /// stays greppable in real time; the one-line readiness banner still prints
+    /// to stdout. Defaults to `mogwai.log` in the working directory.
+    #[arg(long, value_name = "PATH", default_value = "mogwai.log")]
+    log_file: std::path::PathBuf,
 }
 
 #[tokio::main]
@@ -327,15 +352,29 @@ async fn main() -> anyhow::Result<()> {
         Command::Serve(args) => args,
     };
 
+    // Logs go to a FILE, not the terminal: a backgrounded server's stdout is
+    // block-buffered by the launcher, so a tracing line (e.g. the bind notice)
+    // can sit unflushed and a tail/grep watching for readiness never sees it. The
+    // file is wrapped in a `Mutex<File>` MakeWriter, which writes (and flushes)
+    // each event synchronously, so the log stays current. The human-facing
+    // readiness banner is printed to stdout after the bind below.
+    //
     // RUST_LOG is the one deliberate exception to the no-ambient-environment
     // rule that governs run knobs (those live in mogwai.toml): log level is the
     // universally-expected env var and is not a run knob. Falls back to
-    // mogwai_server=info when RUST_LOG is unset or unparseable.
+    // `mogwai=info` when RUST_LOG is unset or unparseable. The target is `mogwai`,
+    // not `mogwai_server`: the package is `mogwai-server` but the binary target is
+    // `[[bin]] name = "mogwai"`, so this crate's `module_path!()` (and thus every
+    // event target) is `mogwai`. A `mogwai_server=info` default silently matched
+    // nothing and dropped the server's own logs.
+    let log_file = std::fs::File::create(&serve.log_file)?;
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "mogwai_server=info".into()),
+                .unwrap_or_else(|_| "mogwai=info".into()),
         )
+        .with_ansi(false)
+        .with_writer(std::sync::Mutex::new(log_file))
         .init();
 
     let cfg = Config::load(serve.config)?;
@@ -357,6 +396,16 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // Derive the tape origin from the advertised clock, once, at boot. Every
+    // generator anchors here, so the data timeline cannot drift past the clock
+    // into the multi-year seek that emptied forward warmups (the #13 root).
+    let data_origin_ns = sim.sim_ns(now_ns()).saturating_sub(cfg.backfill_horizon_ns);
+    tracing::info!(
+        data_origin_ns,
+        backfill_horizon_ns = cfg.backfill_horizon_ns,
+        "data origin"
+    );
+
     let state = AppState {
         engine: Arc::new(Mutex::new(Engine::with_instruments(
             profiles.instrument_defs(),
@@ -364,6 +413,7 @@ async fn main() -> anyhow::Result<()> {
         cfg,
         profiles,
         sim,
+        data_origin_ns,
         delay_ms: Arc::new(AtomicU64::new(0)),
         dark_until_ns: Arc::new(AtomicU64::new(0)),
         stall_until_ns: Arc::new(AtomicU64::new(0)),
@@ -382,6 +432,13 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(serve.addr).await?;
     tracing::info!(addr = %serve.addr, "mogwai listening");
+    // Readiness banner on stdout (line-buffered, flushed): the operator - or a
+    // script polling for "Listening." - sees the bind address and a clear ready
+    // line immediately, while the detailed logs stream to the file above.
+    println!("mogwai serving on {}", serve.addr);
+    println!("logs -> {}", serve.log_file.display());
+    println!("Listening.");
+    std::io::Write::flush(&mut std::io::stdout()).ok();
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -493,27 +550,45 @@ struct HistoryQuery {
 async fn trades(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
-) -> Result<Json<Vec<TradeTick>>, StatusCode> {
+) -> Result<Json<Vec<TradeTick>>, (StatusCode, String)> {
     let limit = normalize_limit(query.limit);
     let regime = parse_history_regime(query.regime.as_deref());
     let profiles = Arc::clone(&state.profiles);
+    let data_origin = state.data_origin_ns;
+    let HistoryQuery {
+        symbol, start, end, ..
+    } = query;
+
+    // Analytic refuse of an off-tape window: a `start` before the data origin can
+    // never be served (the tape begins at `data_origin`), so reject it LOUDLY with
+    // the floor named rather than draining the seek cap and returning an empty
+    // `200` the warmup cannot distinguish from "no trades happened". `None` means
+    // "from origin" and is served; degenerate windows (start > end, limit 0) flow
+    // through to `bounded_trades` unchanged.
+    if let Some(start) = start
+        && start < data_origin
+    {
+        let body = format!(
+            "requested start {start} precedes data_origin_ns {data_origin}; the tape cannot serve before its origin"
+        );
+        tracing::warn!(start, data_origin, "refusing off-tape trades window");
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, body));
+    }
+
     // Synthesizing up to `MAX_HISTORY_LIMIT` ticks is pure CPU work against the
     // generator (the source never blocks on IO), and `next_tick` never returns
     // `None`, so a no-`end` request always grinds out the full `limit`. Run it on
     // a blocking thread rather than inline on the tokio worker, so a burst of
     // `/trades` requests cannot stall the async runtime's worker pool.
-    let HistoryQuery {
-        symbol, start, end, ..
-    } = query;
     let ticks = match tokio::task::spawn_blocking(move || {
-        bounded_trades(&symbol, start, end, limit, regime, &profiles)
+        bounded_trades(&symbol, start, end, limit, regime, &profiles, data_origin)
     })
     .await
     {
         Ok(ticks) => ticks,
         Err(e) => {
             tracing::error!(%e, "history synthesis task failed");
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()));
         }
     };
     Ok(Json(ticks))
@@ -546,12 +621,15 @@ fn bounded_trades(
     limit: usize,
     regime: Option<MarketRegime>,
     profiles: &source::InstrumentProfiles,
+    data_origin: u64,
 ) -> Vec<TradeTick> {
     if limit == 0 {
         return Vec::new();
     }
 
-    let Some(mut merged) = source::build_history_source(symbol, start, regime, profiles) else {
+    let Some(mut merged) =
+        source::build_history_source(symbol, start, regime, profiles, data_origin)
+    else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -704,6 +782,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         gap_cap_ms: state.cfg.gap_cap_ms,
                         profiles: Arc::clone(&state.profiles),
                         sim: state.sim,
+                        data_origin: state.data_origin_ns,
                         tx: tx.clone(),
                         cancel: Arc::clone(&cancel),
                     });
@@ -837,6 +916,8 @@ struct ReplaySpawn {
     gap_cap_ms: u64,
     profiles: Arc<source::InstrumentProfiles>,
     sim: SimClock,
+    /// The boot-derived tape origin every generator anchors at.
+    data_origin: u64,
     tx: mpsc::Sender<ServerMessage>,
     cancel: Arc<AtomicBool>,
 }
@@ -858,16 +939,25 @@ fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
         gap_cap_ms,
         profiles,
         sim,
+        data_origin,
         tx,
         cancel,
     } = spawn;
     std::thread::spawn(move || {
         let symbols = [symbol.clone()];
-        let Some(mut merged) = source::build_live_source(&symbols, start_ts, regime, &profiles)
+        // Seek the shared tape to sim-now (or the resume cursor) instead of
+        // re-anchoring a fresh generator behind now. Computed here, at the start of
+        // the replay thread (~subscribe time), so a fresh subscribe's first live
+        // tick lands at sim-now: no accelerated catch-up firehose, no identity
+        // backfill replayed at real-time gaps, and a reconnect resumes the same
+        // walk at its cursor rather than resetting the price to `start_price`.
+        let sim_now = sim.sim_ns(now_ns());
+        let Some(mut merged) =
+            source::build_live_source(&symbols, start_ts, regime, &profiles, data_origin, sim_now)
         else {
             return;
         };
-        tracing::info!(%symbol, ?start_ts, ?regime, "replay started");
+        tracing::info!(%symbol, ?start_ts, sim_now, data_origin, ?regime, "replay started");
 
         let mut prev_ts: Option<u64> = None;
         while let Some(tick) = merged.next_tick() {
@@ -950,6 +1040,11 @@ mod tests {
     use mogwai_protocol::{OrderType, Side, SubmitOrder, TimeInForce};
     use std::time::Instant;
 
+    // A fixed boot-derived origin for the synthesis tests: production derives it
+    // from the clock at boot, but these tests pin a concrete instant so a
+    // from-origin page and its resume cursor are reproducible.
+    const TEST_DATA_ORIGIN: u64 = 1_700_438_400_000_000_000;
+
     fn default_profiles() -> Arc<source::InstrumentProfiles> {
         Arc::new(source::InstrumentProfiles::defaults())
     }
@@ -965,10 +1060,15 @@ mod tests {
                 speed: 0.0,
                 gap_cap_ms: 0,
                 server_heartbeat_ms: 0,
+                backfill_horizon_ns: 86_400_000_000_000,
                 instruments: Vec::new(),
             },
             profiles,
             sim: SimClock::identity(),
+            // Coherent by construction, matching the boot formula: identity sim-now
+            // is wall-now, so the tape origin sits 24h behind. A handler test that
+            // needs a different floor overrides `data_origin_ns` after building.
+            data_origin_ns: now_ns().saturating_sub(86_400_000_000_000),
             delay_ms: Arc::new(AtomicU64::new(0)),
             dark_until_ns: Arc::new(AtomicU64::new(0)),
             stall_until_ns: Arc::new(AtomicU64::new(0)),
@@ -1154,7 +1254,15 @@ mod tests {
     fn generated_history_default_limit_is_bounded_and_fast() {
         let profiles = default_profiles();
         let start = Instant::now();
-        let ticks = bounded_trades("BTCUSDT", None, None, MAX_HISTORY_LIMIT, None, &profiles);
+        let ticks = bounded_trades(
+            "BTCUSDT",
+            None,
+            None,
+            MAX_HISTORY_LIMIT,
+            None,
+            &profiles,
+            TEST_DATA_ORIGIN,
+        );
         let elapsed = start.elapsed();
 
         println!("default /trades synthesis elapsed: {elapsed:?}");
@@ -1169,12 +1277,20 @@ mod tests {
     #[test]
     fn generated_history_is_replayable_and_cursorable() {
         let profiles = default_profiles();
-        let first = bounded_trades("BTCUSDT", None, None, 8, None, &profiles);
-        let replay = bounded_trades("BTCUSDT", None, None, 8, None, &profiles);
+        let first = bounded_trades("BTCUSDT", None, None, 8, None, &profiles, TEST_DATA_ORIGIN);
+        let replay = bounded_trades("BTCUSDT", None, None, 8, None, &profiles, TEST_DATA_ORIGIN);
         assert_eq!(trade_signatures(&first), trade_signatures(&replay));
 
         let cursor = first.last().expect("first page has trades").ts_event;
-        let second = bounded_trades("BTCUSDT", Some(cursor), None, 8, None, &profiles);
+        let second = bounded_trades(
+            "BTCUSDT",
+            Some(cursor),
+            None,
+            8,
+            None,
+            &profiles,
+            TEST_DATA_ORIGIN,
+        );
 
         assert_eq!(
             second.first().expect("second page has trades").ts_event,
@@ -1184,27 +1300,150 @@ mod tests {
         assert_ne!(trade_signatures(&first), trade_signatures(&second));
     }
 
+    // Landing 2 #13 regression pin: a forward warmup window that sits ON the tape
+    // (inside `[data_origin, sim_now]`) yields bars. Before the boot-derived
+    // origin, this seek ran from a frozen 2023 anchor to a 2026 window, drained
+    // the cap, and returned an empty `200` the warmup could never complete.
+    #[tokio::test]
+    async fn warmup_window_on_tape_returns_bars() {
+        let sim_now = TEST_DATA_ORIGIN + 86_400_000_000_000; // origin + 24h
+        let mut state = state();
+        state.data_origin_ns = TEST_DATA_ORIGIN;
+
+        let start = sim_now - 3_600_000_000_000; // sim_now - 1h
+        let query = HistoryQuery {
+            symbol: "BTCUSDT".to_string(),
+            start: Some(start),
+            end: Some(sim_now),
+            limit: None,
+            regime: None,
+        };
+        let Json(ticks) = trades(State(state), axum::extract::Query(query))
+            .await
+            .expect("on-tape warmup is served, not refused");
+
+        assert!(!ticks.is_empty(), "on-tape warmup window must yield bars");
+        assert!(
+            ticks
+                .iter()
+                .all(|t| t.ts_event >= start && t.ts_event <= sim_now),
+            "every bar lands inside the requested window"
+        );
+    }
+
+    // The straddle refusal: a `start` before `data_origin` can never be served, so
+    // the handler returns `422` naming the floor rather than draining the cap to an
+    // empty `200` the warmup cannot distinguish from "no trades happened".
+    #[tokio::test]
+    async fn trades_before_data_origin_refuses() {
+        let mut state = state();
+        state.data_origin_ns = TEST_DATA_ORIGIN;
+
+        let before = TEST_DATA_ORIGIN - 3_600_000_000_000; // 1h before the origin
+        let query = HistoryQuery {
+            symbol: "BTCUSDT".to_string(),
+            start: Some(before),
+            end: None,
+            limit: None,
+            regime: None,
+        };
+        let (status, body) = trades(State(state), axum::extract::Query(query))
+            .await
+            .expect_err("an off-tape window is refused");
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            body.contains(&TEST_DATA_ORIGIN.to_string()),
+            "the refusal names the data_origin floor: {body}"
+        );
+    }
+
+    // A fresh live subscribe seeks to sim-now, NOT the data origin: the first live
+    // tick lands at sim-now so there is no 24h backfill replayed before the stream
+    // goes current (the identity-mode staleness the spec calls out).
+    #[test]
+    fn live_seek_starts_at_sim_now_identity() {
+        let profiles = default_profiles();
+        let data_origin = TEST_DATA_ORIGIN;
+        let sim_now = TEST_DATA_ORIGIN + 86_400_000_000_000; // 24h of tape behind now
+        let symbols = ["BTCUSDT".to_string()];
+
+        let mut live =
+            source::build_live_source(&symbols, None, None, &profiles, data_origin, sim_now)
+                .expect("live source");
+        let first = live.next_tick().expect("first live tick").ts_event();
+
+        assert!(
+            first >= sim_now,
+            "first live tick {first} precedes sim_now {sim_now} - backfill leaked"
+        );
+        // The seek stops at sim-now, not hours past it: the first tick is within a
+        // handful of inter-arrival gaps of the target.
+        assert!(
+            first - sim_now < 60_000_000_000,
+            "first live tick {first} is more than 60s past sim_now {sim_now}"
+        );
+    }
+
+    // The live stream continues the same realization a warmup window ends on: both
+    // seek the one coherent tape (same seed, same data_origin) to sim-now, so a
+    // history request for sim-now and the live first tick are byte-identical - no
+    // price discontinuity at the warmup/live splice, no reconnect price reset.
+    #[test]
+    fn live_seek_is_continuous_with_history() {
+        let profiles = default_profiles();
+        let data_origin = TEST_DATA_ORIGIN;
+        let sim_now = TEST_DATA_ORIGIN + 86_400_000_000_000;
+        let symbols = ["BTCUSDT".to_string()];
+
+        let mut hist =
+            source::build_history_source("BTCUSDT", Some(sim_now), None, &profiles, data_origin)
+                .expect("history source");
+        let mut live =
+            source::build_live_source(&symbols, None, None, &profiles, data_origin, sim_now)
+                .expect("live source");
+
+        let TickEvent::Trade(hist_first) = hist.next_tick().expect("history tick") else {
+            panic!("generated source emits trades");
+        };
+        let TickEvent::Trade(live_first) = live.next_tick().expect("live tick") else {
+            panic!("generated source emits trades");
+        };
+
+        assert_eq!(
+            hist_first.ts_event, live_first.ts_event,
+            "live resumes the same tape instant a warmup for sim_now ends on"
+        );
+        assert_eq!(
+            hist_first.price, live_first.price,
+            "price is contiguous across the warmup/live splice"
+        );
+    }
+
     #[test]
     fn out_of_range_regime_replays_clean() {
         let profiles = default_profiles();
+        let seek = TEST_DATA_ORIGIN + 3_600_000_000_000; // 1h into the tape
         let clean = bounded_trades(
             "BTCUSDT",
-            Some(86_401_000_000_000),
+            Some(seek),
             None,
             8,
             None,
             &profiles,
+            TEST_DATA_ORIGIN,
         );
         let invalid =
             parse_history_regime(Some(r#"{"type":"LiquidityDrought","thin_factor":0.5}"#));
         assert_eq!(invalid, None);
         let fallback = bounded_trades(
             "BTCUSDT",
-            Some(86_401_000_000_000),
+            Some(seek),
             None,
             8,
             invalid,
             &profiles,
+            TEST_DATA_ORIGIN,
         );
 
         assert_eq!(trade_signatures(&clean), trade_signatures(&fallback));
@@ -1269,6 +1508,7 @@ mod tests {
                 normalize_limit(Some(0)),
                 None,
                 &profiles,
+                TEST_DATA_ORIGIN,
             )
             .is_empty()
         );
@@ -1284,6 +1524,7 @@ mod tests {
             speed: 0.0,
             gap_cap_ms: 0,
             server_heartbeat_ms: 0,
+            backfill_horizon_ns: 86_400_000_000_000,
             instruments: Vec::new(),
         };
         let profiles = default_profiles();
@@ -1297,6 +1538,9 @@ mod tests {
             gap_cap_ms: cfg.gap_cap_ms,
             profiles,
             sim: SimClock::identity(),
+            // Origin at wall-now so the fresh-subscribe seek to sim-now is trivial;
+            // this test only checks the stream is live and cancellable.
+            data_origin: now_ns(),
             tx,
             cancel: Arc::clone(&cancel),
         });
@@ -1323,6 +1567,7 @@ mod tests {
             speed: 0.0,
             gap_cap_ms: 0,
             server_heartbeat_ms: 0,
+            backfill_horizon_ns: 86_400_000_000_000,
             instruments: Vec::new(),
         };
         let profiles = default_profiles();
@@ -1338,6 +1583,7 @@ mod tests {
             gap_cap_ms: cfg.gap_cap_ms,
             profiles,
             sim: SimClock::identity(),
+            data_origin: now_ns(),
             tx,
             cancel: Arc::clone(&cancel),
         });
@@ -1378,6 +1624,7 @@ mod tests {
             speed: 1_000.0,
             gap_cap_ms: 1_000,
             server_heartbeat_ms: 0,
+            backfill_horizon_ns: 86_400_000_000_000,
             instruments: Vec::new(),
         };
         let profiles = default_profiles();
@@ -1392,6 +1639,9 @@ mod tests {
             gap_cap_ms: cfg.gap_cap_ms,
             profiles,
             sim,
+            // Origin AT the seek target, so the first tick lands at EPOCH and its
+            // wall deadline is the anchor - the delay this test measures.
+            data_origin: EPOCH,
             tx,
             cancel: Arc::clone(&cancel),
         });

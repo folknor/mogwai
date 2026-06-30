@@ -227,6 +227,26 @@ length. The numeric margin is throughput-sensitive (a much faster host could
 raise `C_B` past `C_F` and flip the arithmetic), but the decoupling argument
 holds regardless, so checkpointing is the durable answer.
 
+Two flags for Landing 2 from building the measurement:
+
+- **The 50k cap never caused #13; the frozen `ORIGIN_TS` did.** 50k ticks is
+  ~52h of fast-cadence tape (~25 ms) - it would have comfortably served any
+  `[now-24h, now]` warmup. #13 is the ~1.6-year seek span from a 2023 origin to
+  a 2026 window (~13M ticks), which no sane cap survives. So Landing 2's cap
+  raise is not what closes #13 (the boot-derived origin is); it only extends the
+  accelerated uptime ceiling. The reading supports raising `MAX_HISTORY_SEEK_TICKS`
+  to `C_B ~190k` - the largest backstop that keeps a worst-case full-cap drain
+  inside `B`, buying the ~90 min ceiling until Landing 4 lifts it. Legitimate
+  history is already bounded by the analytic `start >= data_origin` refuse, so
+  the cap is purely a runaway guard and a bigger budget-safe value is free.
+- **Cadence-profile test helpers must carry the committed session envelope.**
+  `arr_mult = intensity_hour*24 * dow_weight*7`, so a flat unit-intensity session
+  multiplies arrivals ~168x and crushes realized cadence to ~0.05s/tick. The
+  committed envelope centers `arr_mult` near 1.0, so realized cadence tracks the
+  `mean_duration_s` scalar. Any Landing 2/4 test that pins a cadence (the
+  fast-cadence `live_seek` pins, the checkpoint-spacing tests) must use the real
+  session profile, not `flat_session(1.0)`.
+
 ### Landing 2 - Boot-derived origin + unified seek + refuse-straddle (server)
 
 The core of #13. Delete `ORIGIN_TS`; add `backfill_horizon_ns` to `Config` and

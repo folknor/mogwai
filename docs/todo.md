@@ -179,6 +179,33 @@ boundary on `/clock` so broadarrow can guard its own warmup. Spec:
       verdict is throughput-sensitive near the boundary but structurally PROCEEDS.
 - [ ] Implement landings 2 through 4, suite green at every boundary.
 
+### 4. Self-detaching `mogwai serve --daemon` (DEFERRED)
+
+`serve` logs to a file (`--log-file`, default `mogwai.log`, written per event so a
+backgrounded server stays greppable) and prints a flushed `Listening.` banner to
+stdout. It is still a foreground process: it holds the terminal until killed,
+which is the right shape for systemd / containers / CI and is fine for the dev
+loop when launched in the background by the caller.
+
+Deferred is making the binary detach itself so a bare `mogwai serve` returns the
+prompt while the server keeps running. That is daemonization, and it drags a tail
+of machinery behind it, so it stays behind an explicit opt-in rather than
+becoming the default:
+
+- A `--daemon` flag that forks, `setsid`, redirects stdio, and writes a PID file;
+  the default stays foreground-clean.
+- The fork MUST happen before the Tokio runtime starts (forking a multithreaded
+  process and then using those threads in the child is undefined behavior), so
+  `main` would drop `#[tokio::main]` and build the runtime by hand in the child.
+- A `mogwai stop` subcommand that reads the PID file and signals the daemon, plus
+  a graceful-shutdown handler (axum `with_graceful_shutdown`, not wired today) so
+  the stop is clean.
+- It also fights `cargo run` / `brokkr run`, which are foreground wrappers: a
+  self-detaching child makes cargo report "finished" while the daemon lives on.
+
+Until a workflow actually needs the bare-`serve`-returns behavior, the
+file-logging plus disciplined backgrounding covers the need at far lower cost.
+
 ## Notes / gotchas
 
 - The offline Kraken corpus is trades only - no quotes, no L2, no aggressor side.

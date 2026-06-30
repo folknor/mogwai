@@ -42,7 +42,14 @@ import urllib.parse
 import urllib.request
 
 HOST, PORT = "127.0.0.1", 8787
-WINDOW_START_TS = 86_401_000_000_000
+# How far behind sim-now the windowed-subscribe / history probes anchor their
+# start. The server now derives the tape origin from the clock at boot
+# (data_origin = sim_now - backfill_horizon, 24h by default) and refuses a
+# /trades start before that floor, so the window start can no longer be a frozen
+# constant - it must sit inside [data_origin, sim_now]. One hour back is safely
+# on-tape under the 24h horizon. main_default resolves the absolute start from
+# the live clock at runtime.
+WINDOW_LOOKBACK_NS = 3_600_000_000_000
 ACCEL_DELAY_MS = 1000
 
 
@@ -72,8 +79,10 @@ def post_order(payload: dict) -> list:
         return json.loads(r.read().decode())
 
 
-def fetch_trades(symbol: str, start: int, limit: int, regime: dict | None = None) -> list:
-    params = {"symbol": symbol, "start": start, "limit": limit}
+def fetch_trades(symbol: str, start: int | None, limit: int, regime: dict | None = None) -> list:
+    params = {"symbol": symbol, "limit": limit}
+    if start is not None:
+        params["start"] = start
     if regime is not None:
         params["regime"] = json.dumps(regime)
     url = f"http://{HOST}:{PORT}/trades?{urllib.parse.urlencode(params)}"
@@ -235,6 +244,11 @@ def _recv_exact(s: socket.socket, n: int) -> bytes:
 
 
 def main_default() -> None:
+    # Resolve a coherent window start from the live clock: the tape origin tracks
+    # the clock now, so a frozen constant would fall before data_origin and be
+    # refused. One hour behind sim-now is on-tape under the 24h horizon.
+    window_start_ts = sim_now(fetch_clock()) - WINDOW_LOOKBACK_NS
+
     assert post_divergence(
         {"type": "PartialFillNext", "client_order_id": "O1", "fraction": "0.3"}
     ) == 202
@@ -337,28 +351,39 @@ def main_default() -> None:
     assert reject_msgs[0]["venue_order_id"] is None, reject_msgs
     print("PASS: ModifyOrder reprices the resting reservation")
 
-    # Market-data replay: subscribe to an arbitrary pair name and read the first 2 trades.
-    ticks = ws_roundtrip({"type": "Subscribe", "symbols": ["KEUR"]}, expect=2)
+    # Market-data replay: subscribe to the venue's listed instrument and read the
+    # first 2 trades. The generator only synthesizes a tape for a configured
+    # symbol (the per-symbol instrument set), mirroring the engine rejecting an
+    # order for an unknown instrument, so the subscription must name a listed
+    # symbol - the default venue lists BTCUSDT.
+    ticks = ws_roundtrip({"type": "Subscribe", "symbols": ["BTCUSDT"]}, expect=2)
     for t in ticks:
         print("tick:    ", t)
         assert t["type"] == "Trade", t
-        assert t["symbol"] == "KEUR", t
+        assert t["symbol"] == "BTCUSDT", t
     print("PASS: historical trades replayed over the live WS path")
 
     windowed = ws_roundtrip(
-        {"type": "Subscribe", "symbols": ["KEUR"], "start_ts": WINDOW_START_TS},
+        {"type": "Subscribe", "symbols": ["BTCUSDT"], "start_ts": window_start_ts},
         expect=1,
     )[0]
     print("windowed:", windowed)
     assert windowed["type"] == "Trade", windowed
-    assert windowed["symbol"] == "KEUR", windowed
-    assert windowed["ts_event"] >= WINDOW_START_TS, windowed
+    assert windowed["symbol"] == "BTCUSDT", windowed
+    assert windowed["ts_event"] >= window_start_ts, windowed
     print("PASS: Subscribe.start_ts is wired through live replay")
 
-    clean_trades = fetch_trades("KEUR", WINDOW_START_TS, 200)
+    # Measure the regime effect from the tape HEAD (start omitted = from origin),
+    # not from a windowed start. Clean and drought are independent realizations of
+    # the same seed; the generator's arrival envelope is keyed to each tape's own
+    # clock_ns, which under a thin regime advances ~thin_factor faster. From the
+    # head the two share RNG/ACD state tick-for-tick, so the thin-factor shows as a
+    # clean multiple; after a deep seek their clocks have diverged into different
+    # session phases and the gap comparison is meaningless (it can even invert).
+    clean_trades = fetch_trades("BTCUSDT", None, 200)
     drought_trades = fetch_trades(
-        "KEUR",
-        WINDOW_START_TS,
+        "BTCUSDT",
+        None,
         200,
         {"type": "LiquidityDrought", "thin_factor": 5.0},
     )
@@ -369,11 +394,11 @@ def main_default() -> None:
     print("PASS: LiquidityDrought stretches event-time market data gaps")
 
     ws = WsClient(timeout=1.5)
-    ws.send({"type": "Subscribe", "symbols": ["KEUR"]})
+    ws.send({"type": "Subscribe", "symbols": ["BTCUSDT"]})
     first = ws.read()
     print("first:   ", first)
     assert first["type"] == "Trade", first
-    ws.send({"type": "Unsubscribe", "symbols": ["KEUR"]})
+    ws.send({"type": "Unsubscribe", "symbols": ["BTCUSDT"]})
     try:
         extra = ws.read()
     except socket.timeout:
@@ -383,13 +408,13 @@ def main_default() -> None:
     print("PASS: Unsubscribe stops the live replay")
 
     ws = WsClient(timeout=5.0)
-    ws.send({"type": "Subscribe", "symbols": ["KEUR"]})
+    ws.send({"type": "Subscribe", "symbols": ["BTCUSDT"]})
     capped = [ws.read() for _ in range(4)]
     ws.close()
     for t in capped:
         print("capped:  ", t)
         assert t["type"] == "Trade", t
-        assert t["symbol"] == "KEUR", t
+        assert t["symbol"] == "BTCUSDT", t
     print("PASS: capped paced replay delivers generated trades")
 
     assert post_divergence({"type": "DelayAcks", "ms": 300}) == 202
@@ -413,7 +438,7 @@ def main_default() -> None:
         assert gap >= 0.25, gaps
 
     ws = WsClient(timeout=1.0)
-    ws.send({"type": "Subscribe", "symbols": ["KEUR"]})
+    ws.send({"type": "Subscribe", "symbols": ["BTCUSDT"]})
     start = time.monotonic()
     trade = ws.read()
     elapsed = time.monotonic() - start
@@ -436,7 +461,7 @@ def main_default() -> None:
 
     assert post_divergence({"type": "GoDark", "ms": 500}) == 202
     ws = WsClient(timeout=0.3)
-    ws.send({"type": "Subscribe", "symbols": ["KEUR"]})
+    ws.send({"type": "Subscribe", "symbols": ["BTCUSDT"]})
     try:
         dark = ws.read()
     except socket.timeout:
@@ -451,8 +476,8 @@ def main_default() -> None:
     ws.close()
     print("recovered:", recovered)
     assert recovered["type"] == "Trade", recovered
-    assert recovered["symbol"] == "KEUR", recovered
-    assert recovered["ts_event"] >= WINDOW_START_TS, recovered
+    assert recovered["symbol"] == "BTCUSDT", recovered
+    assert recovered["ts_event"] >= window_start_ts, recovered
     print("PASS: GoDark drops blackout frames instead of buffering them")
 
     assert post_divergence({"type": "GoDark", "ms": 3_600_001}) == 400
@@ -460,7 +485,7 @@ def main_default() -> None:
 
     assert post_divergence({"type": "GoDark", "ms": 60_000}) == 202
     ws = WsClient(timeout=0.3)
-    ws.send({"type": "Subscribe", "symbols": ["KEUR"], "start_ts": WINDOW_START_TS})
+    ws.send({"type": "Subscribe", "symbols": ["BTCUSDT"], "start_ts": window_start_ts})
     try:
         dark = ws.read()
     except socket.timeout:
@@ -470,13 +495,13 @@ def main_default() -> None:
 
     assert post_divergence({"type": "ClearDivergences"}) == 202
     ws = WsClient(timeout=3.0)
-    ws.send({"type": "Subscribe", "symbols": ["KEUR"], "start_ts": WINDOW_START_TS})
+    ws.send({"type": "Subscribe", "symbols": ["BTCUSDT"], "start_ts": window_start_ts})
     recovered = ws.read()
     ws.close()
     print("cleared:  ", recovered)
     assert recovered["type"] == "Trade", recovered
-    assert recovered["symbol"] == "KEUR", recovered
-    assert recovered["ts_event"] >= WINDOW_START_TS, recovered
+    assert recovered["symbol"] == "BTCUSDT", recovered
+    assert recovered["ts_event"] >= window_start_ts, recovered
 
     assert post_divergence({"type": "DelayAcks", "ms": 60_000}) == 202
     assert post_divergence({"type": "ClearDivergences"}) == 202
@@ -496,7 +521,7 @@ def main_default() -> None:
 
     assert post_divergence({"type": "StallData", "ms": 500}) == 202
     ws = WsClient(timeout=0.25)
-    ws.send({"type": "Subscribe", "symbols": ["KEUR"], "start_ts": WINDOW_START_TS})
+    ws.send({"type": "Subscribe", "symbols": ["BTCUSDT"], "start_ts": window_start_ts})
     try:
         stalled = ws.read()
     except socket.timeout:
@@ -520,14 +545,14 @@ def main_default() -> None:
     ws.close()
     print("stall-rec:", recovered)
     assert recovered["type"] == "Trade", recovered
-    assert recovered["symbol"] == "KEUR", recovered
-    assert recovered["ts_event"] >= WINDOW_START_TS, recovered
+    assert recovered["symbol"] == "BTCUSDT", recovered
+    assert recovered["ts_event"] >= window_start_ts, recovered
 
     assert post_divergence({"type": "StallData", "ms": 3_600_001}) == 400
 
     assert post_divergence({"type": "StallData", "ms": 60_000}) == 202
     ws = WsClient(timeout=0.25)
-    ws.send({"type": "Subscribe", "symbols": ["KEUR"], "start_ts": WINDOW_START_TS})
+    ws.send({"type": "Subscribe", "symbols": ["BTCUSDT"], "start_ts": window_start_ts})
     try:
         stalled = ws.read()
     except socket.timeout:
@@ -540,17 +565,22 @@ def main_default() -> None:
     ws.close()
     print("stall-cl:", recovered)
     assert recovered["type"] == "Trade", recovered
-    assert recovered["symbol"] == "KEUR", recovered
-    assert recovered["ts_event"] >= WINDOW_START_TS, recovered
+    assert recovered["symbol"] == "BTCUSDT", recovered
+    assert recovered["ts_event"] >= window_start_ts, recovered
     print("PASS: StallData drops market data while execution frames flow")
 
 
 def main_heartbeat() -> None:
+    # Same runtime-resolved window start as main_default: the tape origin tracks
+    # the clock, so the windowed subscribe must anchor inside [data_origin, sim_now]
+    # rather than at a frozen constant.
+    window_start_ts = sim_now(fetch_clock()) - WINDOW_LOOKBACK_NS
+
     assert post_divergence({"type": "ClearDivergences"}) == 202
     assert post_divergence({"type": "StallData", "ms": 700}) == 202
 
     ws = WsClient(timeout=0.12)
-    ws.send({"type": "Subscribe", "symbols": ["KEUR"], "start_ts": WINDOW_START_TS})
+    ws.send({"type": "Subscribe", "symbols": ["BTCUSDT"], "start_ts": window_start_ts})
     deadline = time.monotonic() + 0.55
     heartbeats = 0
     market_data = []
@@ -575,8 +605,8 @@ def main_heartbeat() -> None:
     ws.close()
     print("hb-rec:  ", recovered)
     assert recovered["type"] == "Trade", recovered
-    assert recovered["symbol"] == "KEUR", recovered
-    assert recovered["ts_event"] >= WINDOW_START_TS, recovered
+    assert recovered["symbol"] == "BTCUSDT", recovered
+    assert recovered["ts_event"] >= window_start_ts, recovered
     assert post_divergence({"type": "ClearDivergences"}) == 202
     print("PASS: Heartbeat keeps the socket frame-active through StallData")
 
@@ -612,7 +642,7 @@ def main_accelerated() -> None:
     ws.send(
         {
             "type": "Subscribe",
-            "symbols": ["KEUR"],
+            "symbols": ["BTCUSDT"],
             "start_ts": clock["sim_epoch_ns"],
         }
     )
