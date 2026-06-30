@@ -611,6 +611,33 @@ mod tests {
     }
 
     #[test]
+    fn omitted_start_ts_seeks_to_sim_now_instead_of_dumping_from_origin() {
+        // A `Subscribe` with no `start_ts` must seek the live stream to
+        // sim-now, not re-anchor it at `data_origin` and let the first read
+        // drain the whole elapsed-since-boot window at max speed before live
+        // pacing kicks in. 48h between origin and sim-now is far enough that a
+        // from-origin catch-up dump and a seek-to-now land nowhere near each
+        // other, so the first tick's timestamp tells them apart.
+        const HOUR_NS: u64 = 3_600_000_000_000;
+        let sim_now = TEST_ORIGIN + 48 * HOUR_NS;
+        let symbols = vec!["BTCUSDT".to_string()];
+        let profiles = InstrumentProfiles::defaults();
+
+        let mut source = build_live_source(&symbols, None, None, &profiles, TEST_ORIGIN, sim_now)
+            .expect("source");
+        let TickEvent::Trade(trade) = source.next_tick().expect("first tick") else {
+            panic!("generated source emits trades");
+        };
+
+        assert!(
+            trade.ts_event >= sim_now,
+            "first live tick at {} should land at or after sim_now {sim_now}, not back near \
+             data_origin {TEST_ORIGIN}",
+            trade.ts_event
+        );
+    }
+
+    #[test]
     fn btcusdt_uses_engine_price_grid() {
         let fp = fingerprint();
         let profiles = InstrumentProfiles::defaults();
