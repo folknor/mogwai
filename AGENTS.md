@@ -27,9 +27,11 @@ A Cargo workspace, five crates under `crates/`:
   `GeneratedSource` synthetic generator the running server uses (fitted to the
   committed fingerprint) plus the `KrakenCsvSource` streaming loader kept as the
   offline-analysis lineage.
-- `mogwai-server` - the axum binary that owns the sockets, the clock and replay
-  pacing, synthesizing market data per subscription; exposes `/health`, `/ws`,
-  `/control/divergence`, `/orders`, `/instruments` and `/trades`.
+- `mogwai-server` - the axum binary that owns the sockets, the clock, replay
+  pacing, and its own daemon lifecycle (`serve` daemonizes by default, `-f` stays
+  foreground, `stop` ends it via a PID-file lock), synthesizing market data per
+  subscription; exposes `/health`, `/ws`, `/control/divergence`, `/orders`,
+  `/instruments` and `/trades`.
 - `mogwai-adapter` - the nautilus venue adapter: the `MogwaiDataClientFactory` /
   `MogwaiExecutionClientFactory`, their configs, and the client pair broadarrow
   registers for the `MOGWAI` venue. The only crate that path-deps the sibling

@@ -11,22 +11,25 @@ HTTP/WS routes it serves.
 
 ## Running
 
-`mogwai` has two verbs, `serve` and `man`; there is no default verb, so a bare
-`mogwai` prints help. Start the gateway with `serve`:
+`mogwai` has three verbs, `serve`, `stop`, and `man`; there is no default verb,
+so a bare `mogwai` prints help. Start a daemon with `serve`:
 
 ```sh
 brokkr run -p mogwai-server -- serve
 ```
 
 `-p mogwai-server` is the package (cargo scopes by package name); the binary it
-runs is `mogwai`. An installed build (`cargo install --path crates/mogwai-server`)
-is invoked directly, e.g. `mogwai serve`.
+runs is `mogwai`. The command returns after the socket is bound and the daemon
+keeps running. Stop it with `brokkr run -p mogwai-server -- stop`, or use
+`serve -f` when a foreground process is wanted. An installed build (`cargo
+install --path crates/mogwai-server`) is invoked directly, e.g. `mogwai serve`
+and `mogwai stop`.
 
 `brokkr run` is a thin wrapper over `cargo run`; arguments after a `--`
 separator are forwarded to the binary, not to cargo:
 
 ```sh
-brokkr run -p mogwai-server -- serve --config scripts/smoke-heartbeat.toml
+brokkr run -p mogwai-server -- serve -f --config scripts/smoke-heartbeat.toml
 ```
 
 ## Global flags
@@ -46,13 +49,29 @@ rather than doing anything.
 ### `serve [OPTIONS]`
 
 Run the gateway: bind the sockets, replay synthesized market data, and serve the
-HTTP/WS routes. Its run knobs live in `mogwai.toml`, not in flags; the two flags
-are where to read that file and what to bind.
+HTTP/WS routes. A bare `serve` daemonizes by default, writes a PID file, and
+returns once the listener is ready. Pass `-f` / `--foreground` for containers,
+systemd Type=simple units, and local harnesses that need a foreground process.
+Its run knobs live in `mogwai.toml`, not in flags; the flags here select paths,
+the bind address, and foreground mode.
 
 | Flag | Argument | Default | Effect |
 | --- | --- | --- | --- |
 | `--config` | path | `mogwai.toml` in the working directory | Load the run config from this TOML file. A missing file falls back to built-in defaults; a malformed file is a hard error. See `reference/config.md`. |
 | `--addr` | `host:port` | `127.0.0.1:8787` | Address to bind the gateway to. The adapter's default server URL targets `8787`, so a non-default port also needs the adapter pointed at it. |
+| `--log-file` | path | `mogwai.log` in the working directory | Append structured tracing logs to this file. The readiness banner still prints to stdout in foreground mode and from the launcher parent in daemon mode. |
+| `--pid-file` | path | `mogwai.pid` in the working directory | PID-file path used by daemon mode for the single-instance lock and by `stop` to find the daemon. Ignored under `-f`. |
+| `--foreground`, `-f` | none | off | Stay in the foreground instead of daemonizing. |
+
+### `stop [OPTIONS]`
+
+Stop a daemon started by `mogwai serve`. `stop` uses the PID-file lock to decide
+whether a daemon is live before it signals anything, so a stale PID file is
+removed without targeting a recycled PID.
+
+| Flag | Argument | Default | Effect |
+| --- | --- | --- | --- |
+| `--pid-file` | path | `mogwai.pid` in the working directory | PID-file path for the daemon to stop. Use the same value that was passed to `serve --pid-file`. |
 
 ### `man [TOPIC]`
 
@@ -74,4 +93,4 @@ closed downstream pipe (`mogwai man havoc | less`, quit early) is a clean exit.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `RUST_LOG` | `mogwai_server=info` | Standard `tracing` env-filter directive. The one deliberate exception to the no-ambient-environment rule for run knobs: log level is the universally-expected env var, not a run knob. An unset or unparseable value falls back to `mogwai_server=info`. |
+| `RUST_LOG` | `mogwai=info` | Standard `tracing` env-filter directive. The one deliberate exception to the no-ambient-environment rule for run knobs: log level is the universally-expected env var, not a run knob. An unset or unparseable value falls back to `mogwai=info`. |

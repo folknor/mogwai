@@ -183,21 +183,26 @@ Owns the sockets, the clock, and replay pacing.
   symbol/start/end/limit; `/quotes` is always empty because generated history is
   trades-only).
 - **Generated market data, two carriers.** A server-owned `source` module owns
-  both. `build_live_source` (the `/ws` `Subscribe` path) anchors each generator
-  directly at the requested window `start_ts`, so a windowed subscribe is O(1)
-  with no draining seek over a multi-year prefix. `build_history_source` (the
-  `GET /trades` path) anchors every generator at a fixed per-symbol `ORIGIN_TS`
-  and seeks to `start` into that one append-only tape, so the same tick always
-  lands at the same `ts_event` and the adapter's poll cursor slices one stable
-  timeline rather than restarting a fresh prefix on each poll. The history seek is
-  bounded by a `BoundedSeek` wrapper (`MAX_HISTORY_SEEK_TICKS`), and
-  `MAX_HISTORY_LIMIT` is `1_000`, so a default-limit `/trades` call synthesizes a
-  bounded number of ticks and returns well inside the adapter's poll interval
-  (measured well under a millisecond). Both feed the same `MergeSource` and the
-  same outbound writer the CSV path used. Both look the symbol up in the
-  configured `InstrumentProfiles`: an unknown symbol yields no source, so a live
-  `Subscribe` to it streams nothing and a `/trades` request returns an empty page
-  rather than synthesizing a phantom BTC-scaled tape.
+  both. Both anchor every generator at the boot-derived `data_origin` (the server
+  derives it once from the boot clock and threads it in) and SEEK into that one
+  append-only tape, so they slice a single coherent walk rather than re-anchoring
+  two divergent seed-heads: `build_live_source` (the `/ws` `Subscribe` path) seeks
+  to sim-now, or to the `start_ts`/reconnect resume cursor when one is supplied,
+  and `build_history_source` (the `GET /trades` path) seeks to the requested
+  `start`. The same tick always lands at the same `ts_event`, so the adapter's
+  poll cursor slices one stable timeline rather than restarting a fresh prefix on
+  each poll, and a live resubscribe no longer resets the price walk. A
+  process-global checkpoint index keyed by `(symbol, data_origin)` snapshots the
+  walk every K ticks, so a fresh subscribe's seek is flat in K no matter how long
+  the session has run; the seek is bounded by a `BoundedSeek` wrapper
+  (`MAX_HISTORY_SEEK_TICKS`) as a runaway backstop, and `MAX_HISTORY_LIMIT` is
+  `1_000`, so a default-limit `/trades` call synthesizes a bounded number of ticks
+  and returns well inside the adapter's poll interval (measured well under a
+  millisecond). Both feed the same `MergeSource` and the same outbound writer the
+  CSV path used. Both look the symbol up in the configured `InstrumentProfiles`:
+  an unknown symbol yields no source, so a live `Subscribe` to it streams nothing
+  and a `/trades` request returns an empty page rather than synthesizing a phantom
+  BTC-scaled tape.
 - **Pacing and windowing.** Replay runs on a blocking thread with backpressure.
   Per-subscription windowing (`start_ts` on `Subscribe`), `Unsubscribe`
   cancellation (a shared atomic flag the replay loop polls), and the paced
@@ -220,6 +225,20 @@ Owns the sockets, the clock, and replay pacing.
   server heartbeat is distinct from `ConnHavoc.heartbeat_interval_ms`, which
   configures client pings in the adapter. See `reference/config.md` for the
   knobs and `reference/cli.md` for the binary's command-line surface.
+- **Process lifecycle.** `mogwai serve` daemonizes by default: it `fork`s,
+  `setsid`s, redirects stdio to `/dev/null`, and returns the launching shell only
+  once the listener is bound. A self-pipe readiness handshake carries that bind
+  result back across the fork, so the parent prints the banner (or fails loudly)
+  rather than racing the bind. An exclusive advisory `flock` on the PID file
+  (`--pid-file`, default `mogwai.pid`) rides the fork as the single-instance
+  guard, so a second `serve` is refused without a non-atomic PID probe; the
+  runtime is built by hand AFTER the fork because forking a live Tokio runtime is
+  undefined. `mogwai stop` probes that same lock to tell a live daemon from a
+  stale PID file before it signals anything, so a recycled PID is never hit, then
+  escalates SIGTERM to SIGKILL on a bounded deadline. `serve -f` stays foreground
+  for containers, `systemd` Type=simple, and the `brokkr run` dev loop. SIGTERM
+  and Ctrl-C drain via a watchdog-bounded graceful shutdown (`SHUTDOWN_GRACE`) so
+  an open `/ws` subscription cannot wedge teardown.
 
 ## mogwai-adapter - the nautilus venue adapter
 

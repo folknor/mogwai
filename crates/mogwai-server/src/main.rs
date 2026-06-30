@@ -6,16 +6,24 @@
 //! [`mogwai_engine`]; market data is synthesized from the committed fingerprint
 //! by [`mogwai_data`]; this binary owns sockets, the clock and replay pacing.
 
+#[cfg(not(unix))]
+compile_error!("mogwai-server requires a Unix target");
+
 mod man;
 mod source;
 
 use std::{
     collections::{HashMap, HashSet},
+    fs::{File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
+    net::SocketAddr,
+    os::fd::{AsRawFd, OwnedFd},
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -36,6 +44,12 @@ use mogwai_protocol::{
     ClientMessage, InstrumentDef, MAX_HISTORY_LIMIT, MarketRegime, QuoteTick, ServerClock,
     ServerMessage, SimClock, TradeTick, control::Divergence, validate_divergence,
     validate_market_regime,
+};
+use nix::{
+    errno::Errno,
+    fcntl::{Flock, FlockArg},
+    sys::signal::{Signal, kill},
+    unistd::{ForkResult, Pid},
 };
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -104,8 +118,8 @@ impl Config {
     /// fallback. Replaces the former MOGWAI_REPLAY_SPEED and MOGWAI_GAP_CAP_MS
     /// environment variables - run knobs belong in explicit input, not ambient
     /// environment.
-    fn load(path: Option<std::path::PathBuf>) -> anyhow::Result<Self> {
-        let path = path.unwrap_or_else(|| std::path::PathBuf::from("mogwai.toml"));
+    fn load(path: Option<PathBuf>) -> anyhow::Result<Self> {
+        let path = path.unwrap_or_else(|| PathBuf::from("mogwai.toml"));
         match std::fs::read_to_string(&path) {
             Ok(text) => Ok(toml::from_str(&text)?),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
@@ -290,9 +304,9 @@ fn build_sim_clock(cfg: &Config, wall_anchor_ns: u64) -> anyhow::Result<SimClock
 /// e.g. `0.1.0 (abc123def 2026-06-24 12:34:56 UTC)`. Fed to clap's `--version`.
 const LONG_VERSION: &str = env!("MOGWAI_LONG_VERSION");
 
-/// The `mogwai` command line. Two explicit verbs: `serve` runs the gateway,
-/// `man` renders the bundled reference docs. There is deliberately no default
-/// verb - a bare `mogwai` prints help rather than silently binding a socket.
+/// The `mogwai` command line. Explicit verbs run the gateway, stop its daemon,
+/// or render the bundled reference docs. There is deliberately no default verb:
+/// a bare `mogwai` prints help rather than silently binding a socket.
 /// `--help`, `--version`/`-V` and the argument grammar are clap-provided; the
 /// server's run knobs live in `mogwai.toml`, not in flags or the environment.
 #[derive(Parser)]
@@ -307,11 +321,13 @@ struct Cli {
     command: Command,
 }
 
-/// The two modes: serve the gateway, or read the bundled docs.
+/// The explicit verbs: serve the gateway, stop a daemon, or read bundled docs.
 #[derive(Subcommand)]
 enum Command {
-    /// Run the gateway server (binds the sockets and replays market data).
+    /// Run the gateway server. Daemonizes by default; pass -f for foreground.
     Serve(ServeArgs),
+    /// Stop a daemon started by `mogwai serve`, by its PID file.
+    Stop(StopArgs),
     /// Render a bundled reference doc, or list the topics when none is given.
     Man {
         /// Reference topic to display. Omit to list the available topics.
@@ -327,12 +343,12 @@ struct ServeArgs {
     /// working directory; a missing file falls back to built-in defaults, a
     /// malformed one is a hard error.
     #[arg(long, value_name = "PATH")]
-    config: Option<std::path::PathBuf>,
+    config: Option<PathBuf>,
     /// Address to bind the gateway to, as `host:port`. The adapter's default
     /// server URL targets `8787`, so a non-default port also needs the adapter
     /// pointed at it.
     #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:8787")]
-    addr: std::net::SocketAddr,
+    addr: SocketAddr,
     /// Write structured logs to this file instead of the terminal. A server
     /// launched in the background has its stdout block-buffered by the launcher,
     /// so a tracing line can sit unflushed indefinitely - invisible to a tail or
@@ -340,45 +356,151 @@ struct ServeArgs {
     /// stays greppable in real time; the one-line readiness banner still prints
     /// to stdout. Defaults to `mogwai.log` in the working directory.
     #[arg(long, value_name = "PATH", default_value = "mogwai.log")]
-    log_file: std::path::PathBuf,
+    log_file: PathBuf,
+    /// PID-file path for the daemon and single-instance lock. Ignored under -f.
+    #[arg(long, value_name = "PATH", default_value = "mogwai.pid")]
+    pid_file: PathBuf,
+    /// Stay in the foreground instead of daemonizing.
+    #[arg(short = 'f', long)]
+    foreground: bool,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let serve = match Cli::parse().command {
+#[derive(Args)]
+struct StopArgs {
+    #[arg(long, value_name = "PATH", default_value = "mogwai.pid")]
+    pid_file: PathBuf,
+}
+
+struct ResolvedServeArgs {
+    config: Option<PathBuf>,
+    addr: SocketAddr,
+    log_file: PathBuf,
+    pid_file: PathBuf,
+    foreground: bool,
+}
+
+/// Owns the readiness pipe write end. A clean bind writes 0; dropping before
+/// that writes 1 so the parent never waits forever on startup failure.
+struct PipeReady {
+    fd: Option<OwnedFd>,
+}
+
+impl PipeReady {
+    fn new(fd: OwnedFd) -> Self {
+        Self { fd: Some(fd) }
+    }
+
+    fn signal_ready(&mut self) -> anyhow::Result<()> {
+        if let Some(fd) = self.fd.take() {
+            let written = nix::unistd::write(&fd, &[0u8])?;
+            if written != 1 {
+                anyhow::bail!("readiness pipe wrote {written} bytes instead of 1");
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for PipeReady {
+    fn drop(&mut self) {
+        if let Some(fd) = self.fd.take() {
+            ignore_error(nix::unistd::write(&fd, &[1u8]));
+        }
+    }
+}
+
+enum Ready {
+    Stdout,
+    Pipe(PipeReady),
+}
+
+/// Held for the daemon lifetime. The wrapped fd owns the advisory PID lock.
+struct PidLock(Flock<File>);
+
+enum PidLockStatus {
+    Acquired(PidLock),
+    Held(Option<i32>),
+}
+
+enum LockAttempt {
+    Acquired(PidLock),
+    Held(File),
+}
+
+enum WaitLock {
+    Released,
+    StillHeld(File),
+}
+
+const READY_TIMEOUT: Duration = Duration::from_secs(10);
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+const STOP_TIMEOUT: Duration = Duration::from_secs(5);
+const STOP_KILL_GRACE: Duration = Duration::from_secs(2);
+const PID_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+fn main() -> anyhow::Result<()> {
+    match Cli::parse().command {
         Command::Man { topic } => {
             man::run(topic);
-            return Ok(());
+            Ok(())
         }
-        Command::Serve(args) => args,
+        Command::Stop(args) => stop(args),
+        Command::Serve(args) => serve(args),
+    }
+}
+
+fn serve(args: ServeArgs) -> anyhow::Result<()> {
+    let args = resolve_paths(args)?;
+    if args.foreground {
+        init_logging(&args.log_file)?;
+        return run_runtime(args, Ready::Stdout, None);
+    }
+
+    let lock = match acquire_pid_lock(&args.pid_file)? {
+        PidLockStatus::Acquired(lock) => lock,
+        PidLockStatus::Held(Some(pid)) => {
+            anyhow::bail!("already running, pid {pid}; run `mogwai stop` first");
+        }
+        PidLockStatus::Held(None) => {
+            anyhow::bail!("already running, pid not yet written; run `mogwai stop` first");
+        }
     };
 
-    // Logs go to a FILE, not the terminal: a backgrounded server's stdout is
-    // block-buffered by the launcher, so a tracing line (e.g. the bind notice)
-    // can sit unflushed and a tail/grep watching for readiness never sees it. The
-    // file is wrapped in a `Mutex<File>` MakeWriter, which writes (and flushes)
-    // each event synchronously, so the log stays current. The human-facing
-    // readiness banner is printed to stdout after the bind below.
-    //
-    // RUST_LOG is the one deliberate exception to the no-ambient-environment
-    // rule that governs run knobs (those live in mogwai.toml): log level is the
-    // universally-expected env var and is not a run knob. Falls back to
-    // `mogwai=info` when RUST_LOG is unset or unparseable. The target is `mogwai`,
-    // not `mogwai_server`: the package is `mogwai-server` but the binary target is
-    // `[[bin]] name = "mogwai"`, so this crate's `module_path!()` (and thus every
-    // event target) is `mogwai`. A `mogwai_server=info` default silently matched
-    // nothing and dropped the server's own logs.
-    let log_file = std::fs::File::create(&serve.log_file)?;
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "mogwai=info".into()),
-        )
-        .with_ansi(false)
-        .with_writer(std::sync::Mutex::new(log_file))
-        .init();
+    let (read, write) = nix::unistd::pipe()?;
+    match unsafe { nix::unistd::fork()? } {
+        ForkResult::Parent { child } => {
+            drop(write);
+            // Leak, do NOT drop. The flock is tied to the open file description
+            // the child shares through the fork, so `Flock::drop` issuing LOCK_UN
+            // here would release the child's lock too and un-guard the daemon.
+            // Closing the parent's fd on exit (without LOCK_UN) leaves the lock
+            // held by the child; mem::forget gives exactly that.
+            std::mem::forget(lock);
+            await_ready(read, child, &args)
+        }
+        ForkResult::Child => {
+            drop(read);
+            nix::unistd::setsid()?;
+            redirect_stdio_to_devnull()?;
+            init_logging(&args.log_file)?;
+            run_runtime(args, Ready::Pipe(PipeReady::new(write)), Some(lock))
+        }
+    }
+}
 
-    let cfg = Config::load(serve.config)?;
+fn run_runtime(args: ResolvedServeArgs, ready: Ready, lock: Option<PidLock>) -> anyhow::Result<()> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(serve_async(args, ready, lock))
+}
+
+async fn serve_async(
+    args: ResolvedServeArgs,
+    mut ready: Ready,
+    mut lock: Option<PidLock>,
+) -> anyhow::Result<()> {
+    let cfg = Config::load(args.config.clone())?;
     let profiles = Arc::new(build_instrument_profiles(&cfg)?);
     let sim = build_sim_clock(&cfg, now_ns())?;
     tracing::info!(
@@ -396,7 +518,6 @@ async fn main() -> anyhow::Result<()> {
             "gap_cap_ms is ignored under simulated deadline pacing"
         );
     }
-
     // Derive the tape origin from the advertised clock, once, at boot. Every
     // generator anchors here, so the data timeline cannot drift past the clock
     // into the multi-year seek that emptied forward warmups (the #13 root).
@@ -431,17 +552,338 @@ async fn main() -> anyhow::Result<()> {
         .route("/control/divergence", post(arm_divergence))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind(serve.addr).await?;
-    tracing::info!(addr = %serve.addr, "mogwai listening");
-    // Readiness banner on stdout (line-buffered, flushed): the operator - or a
-    // script polling for "Listening." - sees the bind address and a clear ready
-    // line immediately, while the detailed logs stream to the file above.
-    println!("mogwai serving on {}", serve.addr);
-    println!("logs -> {}", serve.log_file.display());
-    println!("Listening.");
-    std::io::Write::flush(&mut std::io::stdout()).ok();
-    axum::serve(listener, app).await?;
+    let listener = tokio::net::TcpListener::bind(args.addr).await?;
+    tracing::info!(addr = %args.addr, "mogwai listening");
+    if let Some(lock) = &mut lock {
+        write_pid_into_locked_file(lock, std::process::id())?;
+    }
+    match &mut ready {
+        Ready::Stdout => print_banner(args.addr, std::process::id(), &args.log_file),
+        Ready::Pipe(pipe) => pipe.signal_ready()?,
+    }
+    serve_with_bounded_shutdown(listener, app).await?;
+    if !args.foreground {
+        ignore_error(std::fs::remove_file(&args.pid_file));
+    }
     Ok(())
+}
+
+fn resolve_paths(args: ServeArgs) -> anyhow::Result<ResolvedServeArgs> {
+    let cwd = std::env::current_dir()?;
+    Ok(ResolvedServeArgs {
+        config: Some(resolve_path(
+            &cwd,
+            args.config.unwrap_or_else(|| PathBuf::from("mogwai.toml")),
+        )),
+        addr: args.addr,
+        log_file: resolve_path(&cwd, args.log_file),
+        pid_file: resolve_path(&cwd, args.pid_file),
+        foreground: args.foreground,
+    })
+}
+
+fn resolve_path(cwd: &Path, path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    }
+}
+
+fn init_logging(log_file: &Path) -> anyhow::Result<()> {
+    // Logs go to a file, not the terminal: daemon mode redirects stdio to
+    // /dev/null, and foreground wrappers can buffer stdout. The mutex writer
+    // keeps each tracing event flushed and visible to a tailing operator.
+    //
+    // RUST_LOG is the one deliberate exception to the no-ambient-environment
+    // rule that governs run knobs. It falls back to `mogwai=info`, matching the
+    // binary target and this crate's tracing event target.
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_file)?;
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "mogwai=info".into()),
+        )
+        .with_ansi(false)
+        .with_writer(std::sync::Mutex::new(log_file))
+        .try_init()
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    Ok(())
+}
+
+fn print_banner(addr: SocketAddr, pid: u32, log_file: &Path) {
+    println!("mogwai serving on {addr}");
+    println!("pid -> {pid}");
+    println!("logs -> {}", log_file.display());
+    println!("Listening.");
+    let mut stdout = std::io::stdout();
+    ignore_error(stdout.flush());
+}
+
+fn ignore_error<T, E>(result: Result<T, E>) {
+    if let Err(err) = result {
+        let _ignored = err;
+    }
+}
+
+fn await_ready(read: OwnedFd, child: Pid, args: &ResolvedServeArgs) -> anyhow::Result<()> {
+    let ready = read_ready_byte(&read, READY_TIMEOUT)?;
+    drop(read);
+    match ready {
+        ReadyByte::Ready => {
+            print_banner(args.addr, child.as_raw() as u32, &args.log_file);
+            Ok(())
+        }
+        ReadyByte::Failed | ReadyByte::Eof => {
+            ignore_error(std::fs::remove_file(&args.pid_file));
+            anyhow::bail!("daemon failed to start; see {}", args.log_file.display());
+        }
+        ReadyByte::Timeout => {
+            ignore_error(kill(child, Signal::SIGKILL));
+            ignore_error(std::fs::remove_file(&args.pid_file));
+            anyhow::bail!(
+                "daemon did not signal readiness within {:?}; see {}",
+                READY_TIMEOUT,
+                args.log_file.display()
+            );
+        }
+    }
+}
+
+enum ReadyByte {
+    Ready,
+    Failed,
+    Eof,
+    Timeout,
+}
+
+fn read_ready_byte(read: &OwnedFd, timeout: Duration) -> anyhow::Result<ReadyByte> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(ReadyByte::Timeout);
+        }
+        let timeout_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+        let mut pollfd = nix::libc::pollfd {
+            fd: read.as_raw_fd(),
+            events: nix::libc::POLLIN,
+            revents: 0,
+        };
+        let rc = unsafe { nix::libc::poll(&mut pollfd, 1, timeout_ms) };
+        if rc == 0 {
+            return Ok(ReadyByte::Timeout);
+        }
+        if rc < 0 {
+            let errno = Errno::last();
+            if errno == Errno::EINTR {
+                continue;
+            }
+            return Err(errno.into());
+        }
+        if pollfd.revents & (nix::libc::POLLIN | nix::libc::POLLHUP | nix::libc::POLLERR) == 0 {
+            continue;
+        }
+        let mut buf = [0u8; 1];
+        match nix::unistd::read(read.as_raw_fd(), &mut buf) {
+            Ok(1) if buf[0] == 0 => return Ok(ReadyByte::Ready),
+            Ok(0) => return Ok(ReadyByte::Eof),
+            Ok(_) => return Ok(ReadyByte::Failed),
+            Err(Errno::EINTR) => continue,
+            Err(errno) => return Err(errno.into()),
+        }
+    }
+}
+
+fn redirect_stdio_to_devnull() -> anyhow::Result<()> {
+    let devnull = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/null")?;
+    let fd = devnull.as_raw_fd();
+    nix::unistd::dup2(fd, 0)?;
+    nix::unistd::dup2(fd, 1)?;
+    nix::unistd::dup2(fd, 2)?;
+    Ok(())
+}
+
+fn acquire_pid_lock(pid_file: &Path) -> anyhow::Result<PidLockStatus> {
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(pid_file)?;
+    match try_lock_pid_file(file)? {
+        LockAttempt::Acquired(mut lock) => {
+            clear_pid_file(&mut lock)?;
+            Ok(PidLockStatus::Acquired(lock))
+        }
+        LockAttempt::Held(mut file) => Ok(PidLockStatus::Held(read_pid_from_file(&mut file)?)),
+    }
+}
+
+fn try_lock_pid_file(file: File) -> anyhow::Result<LockAttempt> {
+    match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+        Ok(lock) => Ok(LockAttempt::Acquired(PidLock(lock))),
+        Err((file, errno)) if is_lock_held(errno) => Ok(LockAttempt::Held(file)),
+        Err((_file, errno)) => Err(errno.into()),
+    }
+}
+
+fn is_lock_held(errno: Errno) -> bool {
+    errno == Errno::EWOULDBLOCK || errno == Errno::EAGAIN
+}
+
+fn clear_pid_file(lock: &mut PidLock) -> anyhow::Result<()> {
+    lock.0.set_len(0)?;
+    lock.0.seek(SeekFrom::Start(0))?;
+    Ok(())
+}
+
+fn write_pid_into_locked_file(lock: &mut PidLock, pid: u32) -> anyhow::Result<()> {
+    clear_pid_file(lock)?;
+    writeln!(lock.0, "{pid}")?;
+    lock.0.sync_data()?;
+    Ok(())
+}
+
+fn read_pid_from_file(file: &mut File) -> anyhow::Result<Option<i32>> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let pid = text.parse::<i32>()?;
+    if pid <= 0 {
+        anyhow::bail!("PID file contains non-positive pid {pid}");
+    }
+    Ok(Some(pid))
+}
+
+fn open_existing_pid_file(pid_file: &Path) -> std::io::Result<File> {
+    OpenOptions::new().read(true).write(true).open(pid_file)
+}
+
+fn stop(args: StopArgs) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let pid_file = resolve_path(&cwd, args.pid_file);
+    let file = match open_existing_pid_file(&pid_file) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!("no daemon running (no {})", pid_file.display());
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    };
+    match try_lock_pid_file(file)? {
+        LockAttempt::Acquired(_lock) => {
+            ignore_error(std::fs::remove_file(&pid_file));
+            println!("no daemon running (removed stale {})", pid_file.display());
+            Ok(())
+        }
+        LockAttempt::Held(mut file) => {
+            let pid = read_pid_when_ready(&mut file, STOP_TIMEOUT)?;
+            signal_pid(pid, Signal::SIGTERM)?;
+            match wait_for_lock_release(file, STOP_TIMEOUT)? {
+                WaitLock::Released => {
+                    ignore_error(std::fs::remove_file(&pid_file));
+                    Ok(())
+                }
+                WaitLock::StillHeld(file) => {
+                    signal_pid(pid, Signal::SIGKILL)?;
+                    match wait_for_lock_release(file, STOP_KILL_GRACE)? {
+                        WaitLock::Released => {
+                            ignore_error(std::fs::remove_file(&pid_file));
+                            Ok(())
+                        }
+                        WaitLock::StillHeld(_file) => {
+                            anyhow::bail!(
+                                "daemon pid {pid} did not exit after SIGTERM and SIGKILL"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn read_pid_when_ready(file: &mut File, timeout: Duration) -> anyhow::Result<i32> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(pid) = read_pid_from_file(file)? {
+            return Ok(pid);
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("daemon did not write its PID within {timeout:?}");
+        }
+        std::thread::sleep(PID_POLL_INTERVAL);
+    }
+}
+
+fn wait_for_lock_release(file: File, timeout: Duration) -> anyhow::Result<WaitLock> {
+    let deadline = Instant::now() + timeout;
+    let mut file = file;
+    loop {
+        match try_lock_pid_file(file)? {
+            LockAttempt::Acquired(_lock) => return Ok(WaitLock::Released),
+            LockAttempt::Held(returned) => {
+                file = returned;
+                if Instant::now() >= deadline {
+                    return Ok(WaitLock::StillHeld(file));
+                }
+                std::thread::sleep(PID_POLL_INTERVAL);
+            }
+        }
+    }
+}
+
+fn signal_pid(pid: i32, signal: Signal) -> anyhow::Result<()> {
+    match kill(Pid::from_raw(pid), signal) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Err(errno) => Err(errno.into()),
+    }
+}
+
+async fn serve_with_bounded_shutdown(
+    listener: tokio::net::TcpListener,
+    app: Router,
+) -> anyhow::Result<()> {
+    tokio::spawn(async {
+        shutdown_signal().await;
+        tokio::time::sleep(SHUTDOWN_GRACE).await;
+        std::process::exit(0);
+    });
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    Ok(())
+}
+
+async fn shutdown_signal() {
+    let mut terminate =
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(signal) => signal,
+            Err(e) => {
+                tracing::warn!(%e, "failed to install SIGTERM handler");
+                ignore_error(tokio::signal::ctrl_c().await);
+                return;
+            }
+        };
+    tokio::select! {
+        _ = terminate.recv() => {}
+        result = tokio::signal::ctrl_c() => {
+            if let Err(e) = result {
+                tracing::warn!(%e, "failed while waiting for Ctrl-C");
+            }
+        }
+    }
 }
 
 /// Control plane: arm a divergence to fire on its next trigger.

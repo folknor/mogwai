@@ -16,7 +16,7 @@ use mogwai_protocol::{InstrumentDef, MarketRegime, Symbol, default_instruments};
 
 // Runaway backstop on a from-origin seek, NOT the binding window check - that is
 // the analytic `start >= data_origin` refuse the `/trades` handler applies before
-// any synthesis. Sized to the Landing-1 reading (docs/forward-origin-spec.md): at
+// any synthesis. Sized to the `seek_throughput_measurement` reporter below: at
 // ~1.9M ticks/sec synthesis, ~190k ticks is the largest from-origin drain that
 // still finishes inside the ~100ms request-path budget. Every legitimate on-tape
 // request lives in `[data_origin, sim_now]` by construction, well inside this; the
@@ -371,9 +371,9 @@ mod tests {
         InstrumentProfile::new(def, scalars, fp.session_profile.clone())
     }
 
-    // Landing 1 of `docs/forward-origin-spec.md`: price the from-origin
-    // `BoundedSeek` so the backstop cap `C` and the checkpoint-vs-raise-cap
-    // decision (Landing 4) are throughput-justified rather than guessed. This is
+    // Price the from-origin `BoundedSeek` so the `MAX_HISTORY_SEEK_TICKS`
+    // backstop cap `C` and the checkpoint-vs-raise-cap decision are
+    // throughput-justified rather than guessed. This is
     // a REPORTER test - read the printed numbers; the only hard assertion pins
     // the request-path budget `B` for the worst legitimate on-tape warmup. The
     // F-floor verdict (does a single `C` satisfy both the per-request budget and

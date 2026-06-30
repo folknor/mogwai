@@ -3,6 +3,8 @@ research
 __pycache__
 # Default `mogwai serve --log-file` target; logs are runtime output, not source.
 mogwai.log
+# Default `mogwai serve --pid-file` target; the daemon PID lock, not source.
+mogwai.pid
 scripts/server.log
 # Regenerable Phase 0 intermediates; the durable artifact is fingerprint.json.
 /analysis/char_*.json
