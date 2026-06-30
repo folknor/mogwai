@@ -2964,6 +2964,21 @@ fn handle_account_state(state: mogwai_protocol::AccountState, ctx: &ExecContext)
 
     {
         let mut mirror = lock_recover(&ctx.state, "execution state");
+        // The engine reports a COMPLETE set of its non-zero positions in every
+        // snapshot, and signals a flat instrument by OMITTING it: a position
+        // closed to zero is removed from the engine's map, never reported as a
+        // zero-qty entry. So the snapshot is authoritative - any symbol the
+        // mirror still holds that is absent here has gone flat at the venue and
+        // must be dropped. Without this drop the insert-only mirror keeps the
+        // stale non-zero PositionRecord from the entry after the close, and
+        // generate_position_status_reports then hands broadarrow a phantom
+        // venue net it can only adopt as an EXTERNAL position - desyncing
+        // reconciliation (slices no longer sum to net) and halting the account.
+        let present: std::collections::HashSet<Symbol> =
+            state.positions.iter().map(|p| p.symbol.clone()).collect();
+        mirror
+            .positions
+            .retain(|symbol, _| present.contains(symbol));
         for position in state.positions {
             let Some(def) = instrument_def(&ctx.instruments, &position.symbol) else {
                 // A legitimate missing def (instrument cache not yet seeded)
@@ -4358,5 +4373,71 @@ mod tests {
         assert_eq!(fills[0].trade_id, TradeId::from("T-1"));
         assert_eq!(positions.len(), 1);
         assert_eq!(positions[0].position_side, PositionSideSpecified::Long);
+    }
+
+    #[tokio::test]
+    async fn closed_position_drops_from_mirror_so_reconciliation_reports_none() {
+        // Regression: the engine omits a flat instrument from its account
+        // snapshot (it removes a position closed to zero rather than reporting
+        // zero qty). The insert-only mirror used to keep the stale entry
+        // PositionRecord, so generate_position_status_reports handed broadarrow
+        // a phantom venue net it adopted as an EXTERNAL position -> attribution
+        // desync -> halted account. The close snapshot must clear the mirror.
+        let mut client = execution_client();
+        client.instruments = instruments_map();
+        seed_order(&client.state);
+        let (ctx, _rx) = exec_context();
+        let ctx = ExecContext {
+            emitter: ctx.emitter,
+            state: Arc::clone(&client.state),
+            instruments: Arc::clone(&client.instruments),
+            trader_id: ctx.trader_id,
+            account_id: ctx.account_id,
+            account_type: ctx.account_type,
+            sim: ctx.sim,
+        };
+
+        // Entry snapshot carries the open long.
+        handle_exec_message(
+            ServerMessage::AccountState(mogwai_protocol::AccountState {
+                balances: Vec::new(),
+                positions: vec![mogwai_protocol::Position {
+                    symbol: "BTCUSDT".into(),
+                    quantity: Decimal::new(1, 0),
+                    avg_px: Decimal::new(10_000, 2),
+                }],
+                ts_event: 12,
+            }),
+            &ctx,
+        );
+
+        // Close snapshot: the engine has dropped the now-flat position, so the
+        // snapshot lists none. The mirror must follow and drop BTCUSDT too.
+        handle_exec_message(
+            ServerMessage::AccountState(mogwai_protocol::AccountState {
+                balances: Vec::new(),
+                positions: Vec::new(),
+                ts_event: 13,
+            }),
+            &ctx,
+        );
+
+        let positions = client
+            .generate_position_status_reports(&GeneratePositionStatusReports::new(
+                UUID4::new(),
+                UnixNanos::from(20),
+                Some(instrument_id()),
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("position reports");
+
+        assert!(
+            positions.is_empty(),
+            "a flattened position must not survive as a phantom reconciliation report"
+        );
     }
 }

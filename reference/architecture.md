@@ -288,7 +288,13 @@ messages. The only crate that path-deps the sibling `../nautilus_trader` checkou
   `Arc<Mutex<ExecState>>` reconciliation mirror seeded at `submit` time, and
   resolves a fill's quote currency and precision from the `GET /instruments`
   table. The three reconciliation report generators rebuild from that mirror,
-  filtered by the request's start/end bounds.
+  filtered by the request's start/end bounds. The mirror's position view follows
+  the engine's convention that a flat instrument is OMITTED from the snapshot (a
+  position closed to zero is removed, never reported as zero qty): each inbound
+  `AccountState` is authoritative, so the mirror drops any symbol absent from it
+  before upserting the rest. Without that drop a closed position would linger as a
+  phantom venue net and broadarrow would adopt it as an `EXTERNAL` position,
+  desyncing reconciliation and halting the account.
 - **Transport profile.** Both configs carry a `transport_profile`; `connect`
   branches on it. Under `HttpOrders` the exec client opens no `/ws` socket: the
   three order methods POST to `/orders` and drain the returned events through the
