@@ -2639,6 +2639,13 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
         ServerMessage::Heartbeat { .. } => {
             tracing::trace!("ignoring server heartbeat on execution path");
         }
+        ServerMessage::ProtocolError { reason, .. } => {
+            // Untargeted (no client_order_id to attribute it to, unlike
+            // OrderRejected), so there is no nautilus order event to raise -
+            // just make the venue-side decode failure visible in the adapter's
+            // own logs.
+            tracing::warn!(%reason, "venue reported a protocol error");
+        }
         ServerMessage::Trade(_) | ServerMessage::Quote(_) => {}
     }
 }

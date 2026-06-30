@@ -349,8 +349,8 @@ impl Engine {
             ]
         } else {
             vec![ServerMessage::OrderRejected {
+                reason: terminal_or_unknown_reason(&self.seen_client_order_ids, &client_order_id),
                 client_order_id,
-                reason: "unknown order".into(),
                 ts_event: ts,
             }]
         }
@@ -369,9 +369,9 @@ impl Engine {
             .position(|o| o.submit.client_order_id == client_order_id)
         else {
             return vec![ServerMessage::OrderModifyRejected {
+                reason: terminal_or_unknown_reason(&self.seen_client_order_ids, &client_order_id),
                 client_order_id,
                 venue_order_id: None,
-                reason: "unknown order".into(),
                 ts_event: ts,
             }];
         };
@@ -664,6 +664,21 @@ fn fill_quantity(order: &SubmitOrder, fill_fraction: Decimal) -> Decimal {
 
 fn on_increment(value: Decimal, increment: Decimal) -> bool {
     increment > Decimal::ZERO && (value / increment).fract() == Decimal::ZERO
+}
+
+/// Distinguishes a cancel/modify target that was never a real order from one
+/// that was accepted but has since gone terminal (filled - the no-book engine
+/// fills a limit immediately on accept, so it can already be gone by the time
+/// a cancel/modify for it arrives - or already canceled). `seen_client_order_ids`
+/// is populated only on accept and never cleared, so its presence is exactly
+/// "this id was once a real order, just not a resting one anymore". An id the
+/// venue genuinely never saw still reads as "unknown order".
+fn terminal_or_unknown_reason(seen: &HashSet<ClientOrderId>, client_order_id: &str) -> String {
+    if seen.contains(client_order_id) {
+        "order already terminal (filled or canceled)".into()
+    } else {
+        "unknown order".into()
+    }
 }
 
 #[cfg(test)]
@@ -1244,6 +1259,55 @@ mod tests {
         assert_eq!(usdt.total, Decimal::from(-300));
         assert_eq!(usdt.locked, Decimal::ZERO);
         assert_eq!(usdt.free, Decimal::from(-300));
+    }
+
+    #[test]
+    fn cancel_of_already_filled_order_distinguishes_terminal_from_unknown() {
+        // A limit on the no-book engine fills immediately on accept, so it is
+        // already gone from `open` by the time a cancel for it can arrive - a
+        // different situation from an id the venue never accepted at all. The
+        // reason must say so rather than reusing "unknown order" for both.
+        let mut e = Engine::new();
+        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+
+        let out = e.process(
+            ClientMessage::CancelOrder {
+                client_order_id: "O1".into(),
+            },
+            2,
+        );
+        assert_eq!(
+            reject_reason(&out),
+            "order already terminal (filled or canceled)"
+        );
+
+        let out = e.process(
+            ClientMessage::CancelOrder {
+                client_order_id: "ghost".into(),
+            },
+            3,
+        );
+        assert_eq!(reject_reason(&out), "unknown order");
+    }
+
+    #[test]
+    fn modify_of_already_filled_order_distinguishes_terminal_from_unknown() {
+        let mut e = Engine::new();
+        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+
+        let out = e.process(
+            ClientMessage::ModifyOrder {
+                client_order_id: "O1".into(),
+                price: Some(Decimal::from(200)),
+                quantity: None,
+            },
+            2,
+        );
+        assert!(matches!(
+            &out[0],
+            ServerMessage::OrderModifyRejected { reason, .. }
+                if reason == "order already terminal (filled or canceled)"
+        ));
     }
 
     #[test]

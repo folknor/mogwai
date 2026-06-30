@@ -13,6 +13,7 @@ use mogwai_data::{
     TickEvent, TickSource,
 };
 use mogwai_protocol::{InstrumentDef, MarketRegime, Symbol, default_instruments};
+use rust_decimal::Decimal;
 
 // Runaway backstop on a from-origin seek, NOT the binding window check - that is
 // the analytic `start >= data_origin` refuse the `/trades` handler applies before
@@ -187,6 +188,37 @@ fn positioned_generator(
         return index.source_at_or_before(target);
     }
     fresh_generator(profile, seed, data_origin, fp, regime)
+}
+
+/// The price a fresh MARKET order would print at `sim_now`: the next trade on
+/// the same checkpointed tape live subscribers replay, drawn without
+/// disturbing any subscriber's own seek position. Used to give the engine's
+/// no-book "fill at the order's own price" a price to fill a price-less
+/// MARKET order with - the wire's `SubmitOrder.price` is `None` for a market
+/// order (mirroring Nautilus, which never stamps one), and the venue is the
+/// only side with the synthesized tape, so it stamps the order before the
+/// engine ever validates it. Returns `None` for an unconfigured symbol,
+/// leaving the engine's "unknown instrument" rejection to fire as normal.
+pub(crate) fn current_price(
+    symbol: &str,
+    profiles: &InstrumentProfiles,
+    data_origin: u64,
+    sim_now: u64,
+) -> Option<Decimal> {
+    let fp = fingerprint();
+    let profile = profiles.get(symbol)?;
+    let mut source = positioned_generator(
+        profile,
+        seed_for(symbol),
+        data_origin,
+        fp,
+        None,
+        Some(sim_now),
+    );
+    let TickEvent::Trade(trade) = source.next_tick()? else {
+        return None;
+    };
+    Some(trade.price)
 }
 
 fn fresh_generator(

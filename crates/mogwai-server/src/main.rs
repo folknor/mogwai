@@ -41,8 +41,8 @@ use futures_util::{SinkExt, StreamExt};
 use mogwai_data::{GeneratorScalars, SessionProfile, TickEvent};
 use mogwai_engine::Engine;
 use mogwai_protocol::{
-    ClientMessage, InstrumentDef, MAX_HISTORY_LIMIT, MarketRegime, QuoteTick, ServerClock,
-    ServerMessage, SimClock, TradeTick, control::Divergence, validate_divergence,
+    ClientMessage, InstrumentDef, MAX_HISTORY_LIMIT, MarketRegime, OrderType, QuoteTick,
+    ServerClock, ServerMessage, SimClock, TradeTick, control::Divergence, validate_divergence,
     validate_market_regime,
 };
 use nix::{
@@ -971,6 +971,28 @@ async fn clock(State(state): State<AppState>) -> Json<ServerClock> {
     })
 }
 
+/// A wire MARKET order carries no price (mirroring Nautilus, which never
+/// stamps one), but the engine has no book of its own and fills "at the
+/// order's own price" - so before either order-entry surface hands a
+/// `SubmitOrder` to the engine, stamp a MARKET order missing a price with the
+/// venue's own current synthesized price. A LIMIT order's price is left
+/// untouched: the engine's "submit price required" rejection is correct for a
+/// limit, it only over-reached for the price-less market case.
+fn stamp_market_price(msg: ClientMessage, state: &AppState) -> ClientMessage {
+    let ClientMessage::SubmitOrder(mut order) = msg else {
+        return msg;
+    };
+    if order.order_type == OrderType::Market && order.price.is_none() {
+        order.price = source::current_price(
+            &order.symbol,
+            &state.profiles,
+            state.data_origin_ns,
+            sim_now_ns(state.sim),
+        );
+    }
+    ClientMessage::SubmitOrder(order)
+}
+
 /// HTTP order-entry surface for profiles that do not use `/ws` for orders.
 async fn submit_order_http(
     State(state): State<AppState>,
@@ -981,6 +1003,7 @@ async fn submit_order_http(
             Err(StatusCode::BAD_REQUEST)
         }
         order_cmd => {
+            let order_cmd = stamp_market_price(order_cmd, &state);
             let events = state
                 .engine
                 .lock()
@@ -1205,6 +1228,19 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!(%e, %text, "undecodable client message");
+                // Surface the decode failure on the wire instead of dropping it
+                // silently: previously a malformed/under-specified frame (e.g.
+                // `{"type":"Subscribe"}` missing `symbols`) looked identical to
+                // a healthy-but-idle feed to the client. `tx.send` failing here
+                // just means the writer task already gave up on this socket;
+                // the outer loop's next read will observe the same and exit.
+                drop(
+                    tx.send(ServerMessage::ProtocolError {
+                        reason: e.to_string(),
+                        ts_event: sim_now_ns(state.sim),
+                    })
+                    .await,
+                );
                 continue;
             }
         };
@@ -1251,6 +1287,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             }
             order_cmd => {
+                let order_cmd = stamp_market_price(order_cmd, &state);
                 let events = state
                     .engine
                     .lock()
@@ -1627,6 +1664,81 @@ mod tests {
         assert!(matches!(response.0[0], ServerMessage::OrderAccepted { .. }));
         assert!(matches!(response.0[1], ServerMessage::OrderFilled(_)));
         assert!(matches!(response.0[2], ServerMessage::AccountState(_)));
+    }
+
+    #[tokio::test]
+    async fn http_orders_route_fills_a_priceless_market_order() {
+        // A Nautilus MARKET order carries no price on the wire - mirroring that,
+        // this submit omits `price` entirely. The engine has no book and only
+        // knows how to fill "at the order's own price", so the route must stamp
+        // one from the venue's own synthesized tape before the engine sees it;
+        // unfixed, this rejects with "submit price required" instead of filling.
+        let response = submit_order_http(
+            State(state()),
+            Json(ClientMessage::SubmitOrder(SubmitOrder {
+                client_order_id: "HTTP-MKT1".into(),
+                symbol: "BTCUSDT".into(),
+                side: Side::Buy,
+                order_type: OrderType::Market,
+                quantity: "1".parse().expect("decimal"),
+                price: None,
+                time_in_force: TimeInForce::Gtc,
+            })),
+        )
+        .await
+        .expect("order accepted");
+
+        assert!(
+            matches!(response.0[0], ServerMessage::OrderAccepted { .. }),
+            "expected acceptance, got {:?}",
+            response.0[0]
+        );
+        let ServerMessage::OrderFilled(fill) = &response.0[1] else {
+            panic!("expected a fill, got {:?}", response.0[1]);
+        };
+        assert!(fill.last_px > Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn ws_route_reports_undecodable_frames_instead_of_dropping_them() {
+        // A `Subscribe` missing its required `symbols` field used to vanish
+        // silently - 0 frames back, socket left open - indistinguishable from a
+        // healthy-but-idle feed. It must now come back as a `ProtocolError`.
+        let app = Router::new()
+            .route("/ws", get(ws_upgrade))
+            .with_state(state());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            drop(axum::serve(listener, app).await);
+        });
+
+        let frame = tokio::task::spawn_blocking(move || {
+            let (mut socket, _) =
+                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            socket
+                .send(tungstenite::Message::Text(r#"{"type":"Subscribe"}"#.into()))
+                .expect("send malformed subscribe");
+            loop {
+                match socket.read().expect("read ws frame") {
+                    tungstenite::Message::Text(text) => {
+                        return serde_json::from_str::<ServerMessage>(&text)
+                            .expect("decode ServerMessage");
+                    }
+                    tungstenite::Message::Close(_) => panic!("socket closed with no reply"),
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("blocking ws client");
+
+        assert!(
+            matches!(frame, ServerMessage::ProtocolError { .. }),
+            "expected ProtocolError, got {frame:?}"
+        );
     }
 
     #[test]

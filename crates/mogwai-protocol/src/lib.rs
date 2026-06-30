@@ -1640,6 +1640,16 @@ pub enum ServerMessage {
     Heartbeat {
         ts_event: u64,
     },
+    /// A `/ws` frame the server could not decode as a `ClientMessage` (bad
+    /// JSON, unknown `type`, or a known `type` missing a required field, e.g.
+    /// `{"type":"Subscribe"}` with no `symbols`). Emitted in place of the old
+    /// silent drop: without it, a malformed live request and a healthy-but-idle
+    /// feed were indistinguishable on the wire. Untargeted - the malformed
+    /// frame carries no `client_order_id` to echo, unlike `OrderRejected`.
+    ProtocolError {
+        reason: String,
+        ts_event: u64,
+    },
 }
 
 impl ServerMessage {
@@ -1671,7 +1681,8 @@ impl ServerMessage {
             | ServerMessage::OrderRejected { .. }
             | ServerMessage::OrderCanceled { .. }
             | ServerMessage::OrderUpdated { .. }
-            | ServerMessage::OrderModifyRejected { .. } => EventKind::Exec,
+            | ServerMessage::OrderModifyRejected { .. }
+            | ServerMessage::ProtocolError { .. } => EventKind::Exec,
         }
     }
 
