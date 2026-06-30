@@ -20,8 +20,8 @@ use mogwai_protocol::{AggressorSide, QuoteTick, TradeTick};
 use rust_decimal::Decimal;
 
 pub use generated::{
-    AbsReturnAcf, AnchorRange, Fingerprint, GeneratedSource, GeneratorScalars, GoldenTargets,
-    MinMedianMax, ScalarError, ScalarRanges, SessionProfile, SessionProfileError,
+    AbsReturnAcf, AnchorRange, CheckpointIndex, Fingerprint, GeneratedSource, GeneratorScalars,
+    GoldenTargets, MinMedianMax, ScalarError, ScalarRanges, SessionProfile, SessionProfileError,
 };
 pub use mogwai_protocol::MarketRegime;
 

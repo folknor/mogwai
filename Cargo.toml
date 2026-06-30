@@ -20,6 +20,12 @@ toml = "1"
 rust_decimal = { version = "1", features = ["serde-with-str"] }
 rand = "0.10"
 rand_distr = "0.6"
+# Explicit ChaCha12 RNG for the generator. rand 0.10's StdRng is ChaCha12 too but
+# dropped Clone, and chacha20's RNG zeroizes on drop so it is not Clone either;
+# rand_chacha's ChaCha12Rng is a plain struct that is Clone, seekable (word
+# position), seedable and deterministic - the substrate the checkpointed seek
+# (CheckpointIndex) needs. rand_core 0.10, so rand_distr 0.6 sampling composes.
+rand_chacha = "0.10"
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"

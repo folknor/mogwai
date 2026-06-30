@@ -1,5 +1,6 @@
 use mogwai_protocol::{AggressorSide, MarketRegime, TradeTick};
-use rand::{RngExt, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng};
+use rand_chacha::ChaCha12Rng;
 use rand_distr::{ChiSquared, Distribution, LogNormal, Normal, Weibull};
 use rust_decimal::{Decimal, prelude::FromPrimitive, prelude::ToPrimitive};
 use serde::Deserialize;
@@ -195,6 +196,7 @@ fn utc_hour(clock_ns: u64) -> usize {
 // not a re-normalization. The arrival multiplier centers each share on 1.0 by
 // dividing out the uniform share (24 hours, 7 days); the vol multiplier is the
 // fingerprint's per-mean ratio used as-is.
+#[derive(Clone)]
 struct SessionModulator {
     // intensity_hour[h] * 24.0: arrival-rate multiplier from the hour share,
     // centered on 1.0 (uniform hour share is 1/24).
@@ -334,9 +336,16 @@ pub struct ScalarError {
     pub field: &'static str,
 }
 
+/// `Clone` is the substrate of the checkpointed seek (`CheckpointIndex`): the
+/// generator is a path-dependent walk whose entire future is a pure function of
+/// its current state, so a clone taken at tick N, advanced, reproduces ticks
+/// N+1, N+2, ... byte-for-byte. Every field is `Clone`, including the
+/// `ChaCha12Rng` (rand's `StdRng` is the same cipher but dropped `Clone`, which is
+/// why the generator holds `ChaCha12Rng` directly).
+#[derive(Clone)]
 pub struct GeneratedSource {
     scalars: GeneratorScalars,
-    rng: StdRng,
+    rng: ChaCha12Rng,
     clock_ns: u64,
     acd: AcdClock,
     vol: GarchVol,
@@ -399,7 +408,7 @@ impl GeneratedSource {
         Self {
             tick_f64: decimal_to_f64(scalars.modal_tick),
             scalars,
-            rng: StdRng::seed_from_u64(seed),
+            rng: ChaCha12Rng::seed_from_u64(seed),
             clock_ns: start_ts,
             acd: AcdClock {
                 omega,
@@ -425,6 +434,15 @@ impl GeneratedSource {
             size_dist,
             regime: RegimeState::new(regime, clamp_override),
         }
+    }
+
+    /// The simulated instant the generator has reached: the `ts_event` of the
+    /// last emitted tick, i.e. the clock the NEXT `next_tick` advances from. A
+    /// fresh source sits at its `start_ts`. `CheckpointIndex` uses this to place
+    /// snapshots and to binary-search them against a seek target.
+    #[must_use]
+    pub fn clock_ns(&self) -> u64 {
+        self.clock_ns
     }
 
     #[cfg(test)]
@@ -558,6 +576,90 @@ impl TickSource for GeneratedSource {
     }
 }
 
+/// Turns the from-origin seek from O(distance) into O(K): instead of re-walking
+/// the path-dependent generator from the tape origin to a target, snapshot the
+/// walk (a `GeneratedSource` clone) every `K` ticks and, to reach a target,
+/// resume from the latest snapshot at or before it and replay only the residual
+/// (< K ticks).
+///
+/// This lifts the accelerated uptime ceiling Landing 1 priced: a from-origin
+/// seek to sim-now grows with session length and eventually blows the backstop
+/// cap, but a resume-and-replay is flat in `K` no matter how far the session has
+/// run. The index is shared per realization (one symbol's clean tape) and
+/// extended lazily and monotonically, so the O(span) walk to the frontier is
+/// paid once across all of that realization's seeks, never per request.
+///
+/// The realization is preserved byte-for-byte: a snapshot is the exact walk
+/// state, so resuming it and replaying yields the same ticks a from-origin run
+/// would (the golden sequence is unchanged, and `checkpoint_resume_is_byte_identical`
+/// pins the resume path directly).
+pub struct CheckpointIndex {
+    /// A generator advanced to the frontier; cloned to extend the chain and to
+    /// hand out positioned sources. Carries the immutable config every snapshot
+    /// shares.
+    lead: GeneratedSource,
+    /// Snapshots in ascending `clock_ns`; `[0]` is the origin (pre-first-tick).
+    checkpoints: Vec<GeneratedSource>,
+    /// Ticks the lead has advanced since the last snapshot was taken.
+    since_snapshot: usize,
+    /// Snapshot spacing in ticks.
+    k: usize,
+}
+
+impl CheckpointIndex {
+    /// Build an index over the realization `origin` heads. `origin` must be a
+    /// fresh source at the tape origin (no ticks drawn yet); its pre-first-tick
+    /// state becomes checkpoint 0.
+    #[must_use]
+    pub fn new(origin: GeneratedSource, k: usize) -> Self {
+        assert!(k > 0, "checkpoint spacing must be positive");
+        Self {
+            checkpoints: vec![origin.clone()],
+            lead: origin,
+            since_snapshot: 0,
+            k,
+        }
+    }
+
+    /// Extend the snapshot chain until it covers `target`, advancing the lead and
+    /// snapshotting every `k` ticks. Monotonic: a later, further target only does
+    /// the new delta, so the from-origin walk is paid once across all seeks.
+    fn extend_to(&mut self, target: u64) {
+        while self.lead.clock_ns() < target {
+            if self.lead.next_tick().is_none() {
+                break;
+            }
+            self.since_snapshot += 1;
+            if self.since_snapshot >= self.k {
+                self.checkpoints.push(self.lead.clone());
+                self.since_snapshot = 0;
+            }
+        }
+    }
+
+    /// A fresh generator positioned at the latest checkpoint with `clock_ns <=
+    /// target`. The caller drains it forward to the exact target (< K ticks) via
+    /// the normal seek; the returned source is an independent clone, so the shared
+    /// index is untouched by that replay.
+    pub fn source_at_or_before(&mut self, target: u64) -> GeneratedSource {
+        self.extend_to(target);
+        // `[0]` is the origin and is <= every legitimate target, so the partition
+        // point is at least 1 and the subtraction never underflows.
+        let idx = self
+            .checkpoints
+            .partition_point(|c| c.clock_ns() <= target)
+            .saturating_sub(1);
+        self.checkpoints[idx].clone()
+    }
+
+    /// Number of snapshots held (origin included). For tests and the measurement.
+    #[must_use]
+    pub fn checkpoint_count(&self) -> usize {
+        self.checkpoints.len()
+    }
+}
+
+#[derive(Clone)]
 struct AcdClock {
     omega: f64,
     alpha: f64,
@@ -682,6 +784,7 @@ struct Reopen {
     gap_frac: f64,
 }
 
+#[derive(Clone)]
 struct GarchVol {
     a0: f64,
     a1: f64,
@@ -706,6 +809,7 @@ impl GarchVol {
     }
 }
 
+#[derive(Clone)]
 struct BounceState {
     prev_side: AggressorSide,
     high_regime: bool,
@@ -716,7 +820,7 @@ struct BounceState {
 }
 
 impl BounceState {
-    fn next_drift(&mut self, rng: &mut StdRng) {
+    fn next_drift(&mut self, rng: &mut ChaCha12Rng) {
         if !self.high_regime {
             return;
         }
@@ -736,7 +840,7 @@ impl BounceState {
         }
     }
 
-    fn next_side(&mut self, rng: &mut StdRng) -> AggressorSide {
+    fn next_side(&mut self, rng: &mut ChaCha12Rng) -> AggressorSide {
         if self.high_regime {
             if rng.random_bool(BOUNCE_HIGH_TO_LOW_PROB) {
                 self.high_regime = false;
@@ -949,6 +1053,58 @@ mod tests {
                 trade.aggressor,
                 AggressorSide::Buyer | AggressorSide::Seller
             ));
+        }
+    }
+
+    // Landing 4: resuming from a checkpoint and replaying the residual yields the
+    // EXACT ticks a from-origin run produces - the byte-identical guarantee the
+    // checkpointed seek rests on. Drives the resume path directly (the golden
+    // sequence only exercises the from-origin path).
+    #[test]
+    fn checkpoint_resume_is_byte_identical() {
+        let fp = Fingerprint::from_repo_json();
+        let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+        let origin_ts = 1_000u64;
+        let seed = 42u64;
+
+        // Reference: a straight from-origin run, captured as (ts, price) pairs.
+        let mut reference = GeneratedSource::new(scalars.clone(), seed, origin_ts, &fp, None);
+        let ref_ticks: Vec<(u64, Decimal)> = (0..5_000)
+            .map(|_| {
+                let TickEvent::Trade(t) = reference.next_tick().expect("trade") else {
+                    unreachable!("generated source emits trades")
+                };
+                (t.ts_event, t.price)
+            })
+            .collect();
+
+        // A small spacing so a 5k-tick run holds many checkpoints, and a target
+        // deep enough that the resume restores from a non-origin checkpoint.
+        let target = ref_ticks[3_000].0;
+        let origin = GeneratedSource::new(scalars.clone(), seed, origin_ts, &fp, None);
+        let mut index = CheckpointIndex::new(origin, 128);
+        let mut resumed = index.source_at_or_before(target);
+        assert!(
+            index.checkpoint_count() > 1,
+            "a 3000-tick seek at K=128 must have taken interior checkpoints"
+        );
+        assert!(
+            resumed.clock_ns() <= target,
+            "resume starts at or before the target"
+        );
+
+        // Drain the residual up to the target tick, then compare the tail to the
+        // reference: same ts AND same price, tick for tick.
+        let mut tick = resumed.next_tick().expect("trade");
+        while tick.ts_event() < target {
+            tick = resumed.next_tick().expect("trade");
+        }
+        for expected in &ref_ticks[3_000..3_200] {
+            let TickEvent::Trade(t) = tick else {
+                unreachable!("generated source emits trades")
+            };
+            assert_eq!((t.ts_event, t.price), *expected, "resumed tail diverged");
+            tick = resumed.next_tick().expect("trade");
         }
     }
 

@@ -191,7 +191,20 @@ boundary on `/clock` so broadarrow can guard its own warmup. Spec:
       surfaces a fetch error instead of dropping it, and a live subscribe sends
       `start_ts = None`. The cross-repo `ba forward` confirmation is the
       operator's, not a mogwai gate.
-- [ ] Landing 4 (checkpointed seek), suite green at the boundary.
+- [x] Landing 4 (checkpointed seek): the generator now holds an explicit
+      `rand_chacha::ChaCha12Rng` (Clone, seekable, seedable, deterministic) in
+      place of rand's `StdRng`, which dropped `Clone` in 0.9 - and because it is
+      the same ChaCha12 with the same seed expansion, the golden vectors stayed
+      byte-identical, so no re-baseline. `mogwai_data::CheckpointIndex` snapshots
+      the walk every K=8192 ticks; a seek restores the nearest checkpoint at or
+      before the target and replays only the residual. The server holds a
+      process-global per-symbol-and-origin index over the clean tape, so a fresh
+      subscribe's seek is flat in K no matter how far the session has run - the
+      uptime ceiling Landing 1 priced is lifted. `checkpoint_resume_is_byte_identical`
+      and `checkpointed_seek_is_flat_in_k` pin it; golden and default smoke green.
+      Known separate issue: the accelerated smoke (a coherent-clock-spec gate, not
+      a forward-origin gate) times out on its market-data subscribe; pre-existing
+      since Landing 2, undiagnosed, tracked there.
 
 ### 4. Self-detaching `mogwai serve --daemon` (DEFERRED)
 

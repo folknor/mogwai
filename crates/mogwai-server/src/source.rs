@@ -3,11 +3,14 @@
 //! Every tick is generated from the committed fingerprint; the server opens no
 //! CSV on either the live or historical market-data path.
 
-use std::{collections::HashMap, sync::OnceLock};
+use std::{
+    collections::HashMap,
+    sync::{Mutex, OnceLock},
+};
 
 use mogwai_data::{
-    Fingerprint, GeneratedSource, GeneratorScalars, MergeSource, SessionProfile, TickEvent,
-    TickSource,
+    CheckpointIndex, Fingerprint, GeneratedSource, GeneratorScalars, MergeSource, SessionProfile,
+    TickEvent, TickSource,
 };
 use mogwai_protocol::{InstrumentDef, MarketRegime, Symbol, default_instruments};
 
@@ -24,6 +27,27 @@ use mogwai_protocol::{InstrumentDef, MarketRegime, Symbol, default_instruments};
 // data timeline tracks the advertised clock and cannot drift into the multi-year
 // seek that emptied forward warmups.
 const MAX_HISTORY_SEEK_TICKS: usize = 190_000;
+
+// Checkpoint spacing for the per-symbol `CheckpointIndex`, in ticks. A seek
+// restores the nearest checkpoint at or before the target and replays at most
+// this many ticks, so the residual drain costs `K / synthesis_rate` - at
+// ~1.9M ticks/sec and K = 8192, ~4 ms, far inside the request budget and far
+// under `MAX_HISTORY_SEEK_TICKS`. Small enough that snapshots stay sparse (one
+// generator clone per K ticks), large enough that the index never bloats.
+const CHECKPOINT_K: usize = 8192;
+
+// Process-global per-symbol checkpoint index over the CLEAN (regime-free) tape,
+// keyed by `(symbol, data_origin)`. Shared across every live subscribe and
+// `/trades` request, so the O(span) walk to the frontier is paid once per symbol
+// rather than per request - this is what lifts the accelerated uptime ceiling
+// Landing 1 priced (a from-origin seek to sim-now grows with session length and
+// eventually blows the cap; a checkpoint resume is flat in K). Regime'd
+// realizations are rare havoc requests on a different tape and are not cached;
+// they take the plain from-origin drain, still bounded by the backstop cap.
+fn checkpoint_store() -> &'static Mutex<HashMap<(String, u64), CheckpointIndex>> {
+    static STORE: OnceLock<Mutex<HashMap<(String, u64), CheckpointIndex>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 fn fingerprint() -> &'static Fingerprint {
     static FP: OnceLock<Fingerprint> = OnceLock::new();
@@ -117,19 +141,65 @@ fn bounded_generator(
     data_origin: u64,
     fp: &Fingerprint,
     regime: Option<MarketRegime>,
+    seek_target: Option<u64>,
 ) -> Box<dyn TickSource> {
-    let source: Box<dyn TickSource> = Box::new(GeneratedSource::new_with_session_profile(
+    let source = positioned_generator(profile, seed, data_origin, fp, regime, seek_target);
+    Box::new(BoundedSeek {
+        inner: Box::new(source),
+        cap: MAX_HISTORY_SEEK_TICKS,
+    })
+}
+
+/// The symbol's generator, already positioned for the upcoming seek. For the
+/// clean tape with a real target, restore the nearest checkpoint at or before the
+/// target from the shared index so the `BoundedSeek` drain that follows is O(K),
+/// not O(span). Otherwise - a "from origin" request (`None` target) or a regime'd
+/// realization - anchor a fresh generator at `data_origin` and let the drain walk
+/// forward. The result is byte-identical either way: a checkpoint is the exact
+/// walk state, so resuming and replaying reproduces the from-origin ticks.
+fn positioned_generator(
+    profile: &InstrumentProfile,
+    seed: u64,
+    data_origin: u64,
+    fp: &Fingerprint,
+    regime: Option<MarketRegime>,
+    seek_target: Option<u64>,
+) -> GeneratedSource {
+    if regime.is_none()
+        && let Some(target) = seek_target
+        && target > data_origin
+    {
+        let mut store = checkpoint_store()
+            .lock()
+            .expect("checkpoint store mutex poisoned");
+        let index = store
+            .entry((profile.def.symbol.clone(), data_origin))
+            .or_insert_with(|| {
+                CheckpointIndex::new(
+                    fresh_generator(profile, seed, data_origin, fp, None),
+                    CHECKPOINT_K,
+                )
+            });
+        return index.source_at_or_before(target);
+    }
+    fresh_generator(profile, seed, data_origin, fp, regime)
+}
+
+fn fresh_generator(
+    profile: &InstrumentProfile,
+    seed: u64,
+    data_origin: u64,
+    fp: &Fingerprint,
+    regime: Option<MarketRegime>,
+) -> GeneratedSource {
+    GeneratedSource::new_with_session_profile(
         profile.scalars.clone(),
         seed,
         data_origin,
         fp,
         &profile.session,
         regime,
-    ));
-    Box::new(BoundedSeek {
-        inner: source,
-        cap: MAX_HISTORY_SEEK_TICKS,
-    })
+    )
 }
 
 pub(crate) fn build_live_source(
@@ -163,6 +233,7 @@ pub(crate) fn build_live_source(
                 data_origin,
                 fp,
                 regime,
+                Some(seek_target),
             ))
         })
         .collect();
@@ -186,7 +257,7 @@ pub(crate) fn build_history_source(
 ) -> Option<Box<dyn TickSource>> {
     let fp = fingerprint();
     let profile = profiles.get(symbol)?;
-    let bounded = bounded_generator(profile, seed_for(symbol), data_origin, fp, regime);
+    let bounded = bounded_generator(profile, seed_for(symbol), data_origin, fp, regime, start);
     // `start = None` means "from the origin": `starting_at` buffers the first tick
     // with no seek, serving the head of the tape. A `Some(start)` seeks into the
     // shared tape; the handler has already refused any `start < data_origin`, so a
@@ -416,6 +487,64 @@ mod tests {
         assert!(
             warmup_24h_ms < B_MS,
             "24h fast-cadence warmup seek {warmup_24h_ms:.1} ms exceeds B={B_MS} ms budget"
+        );
+    }
+
+    // Landing 4 re-measurement: with the checkpoint index warm, a seek's residual
+    // replay is bounded by K REGARDLESS of how far the target sits from the origin
+    // - this is the flat-in-K property that decouples per-request cost from session
+    // length and lifts the accelerated uptime ceiling the from-origin seek could
+    // not. A REPORTER (read the printed residuals); the hard assertion is that no
+    // warm seek replays more than K ticks, at any distance.
+    #[test]
+    fn checkpointed_seek_is_flat_in_k() {
+        use std::time::Instant;
+
+        const HOUR_NS: u64 = 3_600_000_000_000;
+        let fp = fingerprint();
+        // Fast cadence packs the most ticks per hour of tape, so it is the worst
+        // case for residual size; it must still stay within K.
+        let profile = cadence_profile("BTCUSDT", fp.scalar_ranges.mean_duration_s.min);
+        let mut index = CheckpointIndex::new(
+            GeneratedSource::new_with_session_profile(
+                profile.scalars.clone(),
+                seed_for("BTCUSDT"),
+                TEST_ORIGIN,
+                fp,
+                &profile.session,
+                None,
+            ),
+            CHECKPOINT_K,
+        );
+
+        // Warm the index past the farthest target so each timed seek below is a
+        // pure restore + residual drain, not an index extension.
+        let targets = [6, 24, 48, 96].map(|h| TEST_ORIGIN + h * HOUR_NS);
+        let _ = index.source_at_or_before(*targets.last().expect("targets"));
+
+        println!("\n=== Landing 4: checkpointed seek cost vs distance (K={CHECKPOINT_K}) ===");
+        for &target in &targets {
+            let start = Instant::now();
+            let mut source = index.source_at_or_before(target);
+            let mut tick = source.next_tick().expect("first tick after resume");
+            let mut residual = 1usize;
+            while tick.ts_event() < target {
+                tick = source.next_tick().expect("residual tick");
+                residual += 1;
+            }
+            let elapsed = start.elapsed();
+            let dist_h = (target - TEST_ORIGIN) as f64 / HOUR_NS as f64;
+            println!(
+                "  {dist_h:>3.0}h from origin: resume + {residual} residual ticks in {elapsed:?}"
+            );
+            assert!(
+                residual <= CHECKPOINT_K,
+                "residual replay {residual} exceeds K={CHECKPOINT_K} at {dist_h}h"
+            );
+        }
+        println!(
+            "  checkpoints held: {} (flat seek independent of distance)",
+            index.checkpoint_count()
         );
     }
 
