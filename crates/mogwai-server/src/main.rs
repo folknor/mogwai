@@ -688,7 +688,7 @@ fn read_ready_byte(read: &OwnedFd, timeout: Duration) -> anyhow::Result<ReadyByt
             continue;
         }
         let mut buf = [0u8; 1];
-        match nix::unistd::read(read.as_raw_fd(), &mut buf) {
+        match nix::unistd::read(read, &mut buf) {
             Ok(1) if buf[0] == 0 => return Ok(ReadyByte::Ready),
             Ok(0) => return Ok(ReadyByte::Eof),
             Ok(_) => return Ok(ReadyByte::Failed),
@@ -703,10 +703,9 @@ fn redirect_stdio_to_devnull() -> anyhow::Result<()> {
         .read(true)
         .write(true)
         .open("/dev/null")?;
-    let fd = devnull.as_raw_fd();
-    nix::unistd::dup2(fd, 0)?;
-    nix::unistd::dup2(fd, 1)?;
-    nix::unistd::dup2(fd, 2)?;
+    nix::unistd::dup2_stdin(&devnull)?;
+    nix::unistd::dup2_stdout(&devnull)?;
+    nix::unistd::dup2_stderr(&devnull)?;
     Ok(())
 }
 
