@@ -5,14 +5,14 @@ ambient environment. This is the reference for that file; see `reference/cli.md`
 for how the binary finds it (`serve --config <path>`, default `mogwai.toml` in
 the working directory) and the rest of the command-line surface.
 
-These are *run* knobs - the simulated clock, replay pacing, and the optional
-server heartbeat. They are distinct from the per-venue havoc configuration
-broadarrow constructs on the adapter side (`HavocSpec`, including
-`ConnHavoc.heartbeat_interval_ms`, which is a *client* ping, not this server
-heartbeat); see `reference/havoc.md` for that. For the affine simulated-clock
-model these `sim_epoch_ns` / `speed` knobs drive - and the full table of every
-temporal quantity that scales with `speed` and its wall lower bound - see
-`reference/clock.md`.
+These are server run knobs: the simulated clock, replay pacing, optional server
+heartbeat, and optional instrument profiles. They are distinct from the
+per-venue havoc configuration broadarrow constructs on the adapter side
+(`HavocSpec`, including `ConnHavoc.heartbeat_interval_ms`, which is a *client*
+ping, not this server heartbeat); see `reference/havoc.md` for that. For the
+affine simulated-clock model these `sim_epoch_ns` / `speed` knobs drive, and the
+full table of every temporal quantity that scales with `speed` and its wall
+lower bound, see `reference/clock.md`.
 
 ## Loading
 
@@ -37,6 +37,68 @@ realistic paced live feed out of the box.
 | `speed` | float | `1.0` | Clock speed multiplier. With `sim_epoch_ns = 0`, only `1.0` and `0.0` are valid: `1.0` is honest paced replay, and `0.0` is the legacy unthrottled firehose. Any other speed requires a nonzero `sim_epoch_ns`, so market data, execution timestamps, adapter `ts_init`, and timers share one simulated axis. |
 | `gap_cap_ms` | integer ms | `1000` | Maximum wall-clock sleep between two ticks under identity paced replay. Bounds the longest pause a sparse stretch of the generated tape can produce. `0` disables the cap. In accelerated mode replay is deadline-paced against the simulated clock and this cap is ignored. |
 | `server_heartbeat_ms` | integer ms | `0` | Server-originated websocket heartbeat cadence in simulated milliseconds. `0` keeps it off. When set, each `/ws` session receives liveness frames that survive `StallData` but not `GoDark` - enable it to test liveness frames that outlive a data stall (the issue-4255 reproduction). |
+| `[[instrument]]` | array of tables | built-in BTCUSDT | Optional authoritative instrument set. When present, each table carries the wire `InstrumentDef`, a `generator` table, and a `session` table. The server uses this same set for `GET /instruments`, order validation, live subscriptions, and historical `/trades`. |
+
+## Instrument Profiles
+
+If no `[[instrument]]` tables are present, mogwai serves the built-in BTCUSDT
+profile. Once any `[[instrument]]` table is present, that array is the full venue
+instrument set. Orders for symbols outside the set are rejected, and market-data
+requests for unknown symbols return no generated source.
+
+Each configured instrument carries:
+
+- `InstrumentDef` fields at the top of the table: `symbol`, `base`, `quote`,
+  precisions, and increments.
+- `generator`: the `GeneratorScalars` used by the synthetic source. Its
+  `modal_tick` must equal `price_increment`, and `price_decimals` must equal
+  `price_precision`, so generated trades are on the same grid orders validate
+  against.
+- `session`: a `SessionProfile` with 24 hourly arrival shares, 24 hourly
+  volatility multipliers, and 7 day-of-week arrival weights. These are consumed
+  directly by the generator's hour and day axes, so per-symbol exchange hours,
+  maintenance breaks, and weekend shape belong here.
+
+Startup rejects duplicate symbols, empty symbols/currencies, non-positive
+increments, generator/grid mismatches, out-of-range generator scalars, and
+non-positive or non-finite session entries.
+
+Minimal custom profile shape:
+
+```toml
+[[instrument]]
+symbol = "EURUSD"
+base = "EUR"
+quote = "USD"
+price_precision = 4
+size_precision = 8
+price_increment = "0.0001"
+size_increment = "0.00000001"
+
+[instrument.generator]
+modal_tick = "0.0001"
+price_decimals = 4
+mean_duration_s = 7.194349711185499
+size_round_frac = 0.20856767610054022
+start_price = "1.1000"
+typical_size = "100000.0"
+vol_scalar = 0.00000005
+
+[instrument.session]
+intensity_hour = [
+  1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+  1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+  1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+  1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+]
+vol_hour = [
+  1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+  1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+  1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+  1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+]
+dow_weight = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+```
 
 Startup rejects the dangerous middle ground: `sim_epoch_ns = 0` with a `speed`
 other than `1.0` or `0.0`. That combination would accelerate only market-data

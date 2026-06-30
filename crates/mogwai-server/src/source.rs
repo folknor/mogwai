@@ -3,12 +3,13 @@
 //! Every tick is generated from the committed fingerprint; the server opens no
 //! CSV on either the live or historical market-data path.
 
-use std::sync::OnceLock;
+use std::{collections::HashMap, sync::OnceLock};
 
 use mogwai_data::{
-    Fingerprint, GeneratedSource, GeneratorScalars, MergeSource, TickEvent, TickSource,
+    Fingerprint, GeneratedSource, GeneratorScalars, MergeSource, SessionProfile, TickEvent,
+    TickSource,
 };
-use mogwai_protocol::{InstrumentDef, MarketRegime, default_instruments};
+use mogwai_protocol::{InstrumentDef, MarketRegime, Symbol, default_instruments};
 
 const ORIGIN_TS: u64 = 1_700_438_400_000_000_000;
 const MAX_HISTORY_SEEK_TICKS: usize = 50_000;
@@ -27,52 +28,99 @@ fn seed_for(symbol: &str) -> u64 {
     })
 }
 
-/// Look up the canonical [`InstrumentDef`] for `symbol` among the shared
-/// protocol defaults, if one is defined there.
-fn default_instrument(symbol: &str) -> Option<InstrumentDef> {
-    default_instruments()
-        .into_iter()
-        .find(|def| def.symbol == symbol)
+#[derive(Debug, Clone)]
+pub(crate) struct InstrumentProfile {
+    pub(crate) def: InstrumentDef,
+    pub(crate) scalars: GeneratorScalars,
+    pub(crate) session: SessionProfile,
 }
 
-fn scalars_for(symbol: &str, fp: &Fingerprint) -> GeneratorScalars {
-    match symbol {
-        "XBTUSD" => GeneratorScalars::xbtusd_anchor(fp),
-        // BTCUSDT must generate on the exact price grid the engine fills on, so
-        // its tick/precision are sourced from the single protocol definition
-        // (`default_instruments`) rather than hand-pinned here - one source of
-        // truth shared with the engine seed.
-        "BTCUSDT" => {
-            let mut scalars = GeneratorScalars::from_fingerprint_medians(symbol, fp);
-            if let Some(def) = default_instrument(symbol) {
-                scalars.modal_tick = def.price_increment;
-                scalars.price_decimals = u32::from(def.price_precision);
-            }
-            scalars
+impl InstrumentProfile {
+    pub(crate) fn new(
+        def: InstrumentDef,
+        mut scalars: GeneratorScalars,
+        session: SessionProfile,
+    ) -> Self {
+        scalars.symbol = def.symbol.clone();
+        Self {
+            def,
+            scalars,
+            session,
         }
-        _ => GeneratorScalars::from_fingerprint_medians(symbol, fp),
     }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct InstrumentProfiles {
+    by_symbol: HashMap<Symbol, InstrumentProfile>,
+}
+
+impl InstrumentProfiles {
+    pub(crate) fn defaults() -> Self {
+        let fp = fingerprint();
+        let profiles = default_instruments()
+            .into_iter()
+            .map(|def| default_profile(def, fp))
+            .collect();
+        Self::from_profiles(profiles)
+    }
+
+    pub(crate) fn from_profiles(profiles: Vec<InstrumentProfile>) -> Self {
+        let by_symbol = profiles
+            .into_iter()
+            .map(|profile| (profile.def.symbol.clone(), profile))
+            .collect();
+        Self { by_symbol }
+    }
+
+    pub(crate) fn get(&self, symbol: &str) -> Option<&InstrumentProfile> {
+        self.by_symbol.get(symbol)
+    }
+
+    pub(crate) fn instrument_defs(&self) -> Vec<InstrumentDef> {
+        let mut defs: Vec<_> = self
+            .by_symbol
+            .values()
+            .map(|profile| profile.def.clone())
+            .collect();
+        defs.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        defs
+    }
+}
+
+fn default_profile(def: InstrumentDef, fp: &Fingerprint) -> InstrumentProfile {
+    let mut scalars = GeneratorScalars::from_fingerprint_medians(&def.symbol, fp);
+    scalars.modal_tick = def.price_increment;
+    scalars.price_decimals = u32::from(def.price_precision);
+    InstrumentProfile::new(def, scalars, fp.session_profile.clone())
 }
 
 pub(crate) fn build_live_source(
     symbols: &[String],
     start_ts: Option<u64>,
     regime: Option<MarketRegime>,
+    profiles: &InstrumentProfiles,
 ) -> Option<Box<dyn TickSource>> {
     let fp = fingerprint();
     let anchor = start_ts.unwrap_or(ORIGIN_TS);
     let sources: Vec<Box<dyn TickSource>> = symbols
         .iter()
-        .map(|sym| {
-            let scalars = scalars_for(sym, fp);
-            let source: Box<dyn TickSource> = Box::new(GeneratedSource::new(
-                scalars,
+        .filter_map(|sym| {
+            // A symbol absent from the configured set produces no source - the
+            // generator never synthesizes a phantom tape for an instrument the
+            // venue does not list, mirroring the engine rejecting an order for
+            // an unknown instrument. A mixed subscribe streams only its known
+            // symbols; an all-unknown subscribe collapses to None below.
+            let profile = profiles.get(sym)?;
+            let source: Box<dyn TickSource> = Box::new(GeneratedSource::new_with_session_profile(
+                profile.scalars.clone(),
                 seed_for(sym),
                 anchor,
                 fp,
+                &profile.session,
                 regime,
             ));
-            source
+            Some(source)
         })
         .collect();
 
@@ -87,21 +135,23 @@ pub(crate) fn build_history_source(
     symbol: &str,
     start: Option<u64>,
     regime: Option<MarketRegime>,
-) -> Box<dyn TickSource> {
+    profiles: &InstrumentProfiles,
+) -> Option<Box<dyn TickSource>> {
     let fp = fingerprint();
-    let scalars = scalars_for(symbol, fp);
-    let source: Box<dyn TickSource> = Box::new(GeneratedSource::new(
-        scalars,
+    let profile = profiles.get(symbol)?;
+    let source: Box<dyn TickSource> = Box::new(GeneratedSource::new_with_session_profile(
+        profile.scalars.clone(),
         seed_for(symbol),
         ORIGIN_TS,
         fp,
+        &profile.session,
         regime,
     ));
     let bounded: Box<dyn TickSource> = Box::new(BoundedSeek {
         inner: source,
         cap: MAX_HISTORY_SEEK_TICKS,
     });
-    Box::new(MergeSource::starting_at(vec![bounded], start))
+    Some(Box::new(MergeSource::starting_at(vec![bounded], start)))
 }
 
 struct BoundedSeek {
@@ -137,12 +187,61 @@ impl TickSource for BoundedSeek {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal::Decimal;
+
+    fn profile(
+        symbol: &str,
+        start_price: Decimal,
+        price_increment: Decimal,
+        price_precision: u8,
+        session: SessionProfile,
+    ) -> InstrumentProfile {
+        let fp = fingerprint();
+        let mut def = default_instruments()
+            .into_iter()
+            .next()
+            .expect("default instrument");
+        def.symbol = symbol.to_string();
+        def.price_increment = price_increment;
+        def.price_precision = price_precision;
+
+        let mut scalars = GeneratorScalars::from_fingerprint_medians(symbol, fp);
+        scalars.modal_tick = def.price_increment;
+        scalars.price_decimals = u32::from(def.price_precision);
+        scalars.start_price = start_price;
+        InstrumentProfile::new(def, scalars, session)
+    }
+
+    fn btc_profile(
+        symbol: &str,
+        start_price: Decimal,
+        session: SessionProfile,
+    ) -> InstrumentProfile {
+        profile(symbol, start_price, Decimal::new(1, 2), 2, session)
+    }
+
+    fn default_session() -> SessionProfile {
+        fingerprint().session_profile.clone()
+    }
+
+    fn flat_session(intensity: f64) -> SessionProfile {
+        SessionProfile {
+            intensity_hour: [intensity; 24],
+            vol_hour: [1.0; 24],
+            dow_weight: [1.0; 7],
+        }
+    }
 
     #[test]
     fn live_source_honors_symbol_and_window_anchor() {
         let symbols = vec!["KEUR".to_string()];
+        let profiles = InstrumentProfiles::from_profiles(vec![btc_profile(
+            "KEUR",
+            Decimal::from(100),
+            default_session(),
+        )]);
         let mut source =
-            build_live_source(&symbols, Some(86_401_000_000_000), None).expect("source");
+            build_live_source(&symbols, Some(86_401_000_000_000), None, &profiles).expect("source");
         let TickEvent::Trade(trade) = source.next_tick().expect("first tick") else {
             panic!("generated source emits trades");
         };
@@ -154,22 +253,28 @@ mod tests {
     #[test]
     fn btcusdt_uses_engine_price_grid() {
         let fp = fingerprint();
-        let scalars = scalars_for("BTCUSDT", fp);
-        let def = default_instrument("BTCUSDT").expect("BTCUSDT is a default instrument");
+        let profiles = InstrumentProfiles::defaults();
+        let profile = profiles.get("BTCUSDT").expect("BTCUSDT profile");
 
-        assert_eq!(scalars.modal_tick, def.price_increment);
-        assert_eq!(scalars.price_decimals, u32::from(def.price_precision));
-        assert!(scalars.validate(fp).is_ok());
+        assert_eq!(profile.scalars.modal_tick, profile.def.price_increment);
+        assert_eq!(
+            profile.scalars.price_decimals,
+            u32::from(profile.def.price_precision)
+        );
+        assert!(profile.scalars.validate(fp).is_ok());
     }
 
     #[test]
     fn live_source_applies_regime() {
-        let symbols = vec!["KEUR".to_string()];
-        let mut clean = build_live_source(&symbols, Some(ORIGIN_TS), None).expect("clean source");
+        let symbols = vec!["BTCUSDT".to_string()];
+        let profiles = InstrumentProfiles::defaults();
+        let mut clean =
+            build_live_source(&symbols, Some(ORIGIN_TS), None, &profiles).expect("clean source");
         let mut drought = build_live_source(
             &symbols,
             Some(ORIGIN_TS),
             Some(MarketRegime::LiquidityDrought { thin_factor: 5.0 }),
+            &profiles,
         )
         .expect("drought source");
 
@@ -179,6 +284,65 @@ mod tests {
             drought_mean >= clean_mean * 4.0,
             "clean_mean={clean_mean} drought_mean={drought_mean}"
         );
+    }
+
+    #[test]
+    fn unknown_symbols_do_not_generate_sources() {
+        let profiles = InstrumentProfiles::defaults();
+        let symbols = vec!["FAKE".to_string()];
+
+        assert!(build_live_source(&symbols, Some(ORIGIN_TS), None, &profiles).is_none());
+        assert!(build_history_source("FAKE", None, None, &profiles).is_none());
+    }
+
+    #[test]
+    fn configured_scalars_set_price_level_by_symbol() {
+        let profiles = InstrumentProfiles::from_profiles(vec![
+            profile(
+                "EURUSD",
+                Decimal::new(11_000, 4),
+                Decimal::new(1, 4),
+                4,
+                default_session(),
+            ),
+            btc_profile("BTCUSDT", Decimal::from(60_000), default_session()),
+        ]);
+
+        let mut eur = build_history_source("EURUSD", None, None, &profiles).expect("eur source");
+        let mut btc = build_history_source("BTCUSDT", None, None, &profiles).expect("btc source");
+        let TickEvent::Trade(eur) = eur.next_tick().expect("eur first trade") else {
+            panic!("generated source emits trades");
+        };
+        let TickEvent::Trade(btc) = btc.next_tick().expect("btc first trade") else {
+            panic!("generated source emits trades");
+        };
+
+        assert!(eur.price < Decimal::from(2), "eur price={}", eur.price);
+        assert!(btc.price > Decimal::from(59_000), "btc price={}", btc.price);
+    }
+
+    #[test]
+    fn configured_session_profile_controls_arrival_shape() {
+        let slow_profiles = InstrumentProfiles::from_profiles(vec![btc_profile(
+            "BTCUSDT",
+            Decimal::from(60_000),
+            flat_session(0.01),
+        )]);
+        let fast_profiles = InstrumentProfiles::from_profiles(vec![btc_profile(
+            "BTCUSDT",
+            Decimal::from(60_000),
+            flat_session(1.0),
+        )]);
+
+        let mut slow =
+            build_history_source("BTCUSDT", None, None, &slow_profiles).expect("slow source");
+        let mut fast =
+            build_history_source("BTCUSDT", None, None, &fast_profiles).expect("fast source");
+
+        let slow_ts = slow.next_tick().expect("slow first trade").ts_event();
+        let fast_ts = fast.next_tick().expect("fast first trade").ts_event();
+
+        assert!(fast_ts < slow_ts, "fast_ts={fast_ts} slow_ts={slow_ts}");
     }
 
     fn mean_duration(source: &mut Box<dyn TickSource>, draw: usize) -> f64 {

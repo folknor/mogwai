@@ -157,12 +157,10 @@ pub fn decimal_from_f64(x: f64) -> Decimal {
 
 /// The canonical default instrument set the venue seeds when none is supplied.
 ///
-/// Today this is the single BTCUSDT instrument the engine seeds inline in
-/// `Engine::new`; the server's price-grid scalars and the adapter test fixtures
-/// re-pin the same precisions/increments by hand. Sourcing all three from this
-/// one function ends the duplication that the engine's
-/// `btcusdt_uses_engine_price_grid` test exists only to police. The field values
-/// match the engine seed exactly: price precision 2, size precision 8, with
+/// Today this is the single BTCUSDT instrument. The engine seeds from this
+/// function, and the server derives its default generator grid from the same
+/// definition, so order validation and generated prices agree on tick size and
+/// precision. The field values are price precision 2, size precision 8, with
 /// `1e-2` / `1e-8` increments.
 #[must_use]
 pub fn default_instruments() -> Vec<InstrumentDef> {

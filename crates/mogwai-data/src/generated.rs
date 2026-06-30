@@ -73,41 +73,10 @@ impl Fingerprint {
             "/../../analysis/fingerprint.json"
         ));
         let fingerprint: Self = serde_json::from_str(bytes).expect("committed fingerprint parses");
-        // Fail loud on a non-positive session share. arrival_mult divides the
-        // drawn duration by arr_hour[h] * arr_dow[d], which are these shares
-        // scaled by 24 and 7; a zero or negative entry would make the divisor
-        // zero or negative, yielding infinite/negative durations that saturate
-        // to u64::MAX. Rather than a silent clamp masking a broken fingerprint,
-        // panic here - consistent with the parse-on-malformed contract above -
-        // so a bad fingerprint is caught at load, not in the hot path.
-        for (h, share) in fingerprint
+        fingerprint
             .session_profile
-            .intensity_hour
-            .iter()
-            .enumerate()
-        {
-            assert!(
-                *share > 0.0,
-                "fingerprint session_profile.intensity_hour[{h}] must be strictly positive, got {share}"
-            );
-        }
-        for (d, share) in fingerprint.session_profile.dow_weight.iter().enumerate() {
-            assert!(
-                *share > 0.0,
-                "fingerprint session_profile.dow_weight[{d}] must be strictly positive, got {share}"
-            );
-        }
-        // vol_hour[h] is multiplied straight onto each formed return (vol_mult in
-        // next_latent_mid). A zero entry zeros that hour's realized returns; a
-        // negative entry flips price direction. Fail loud at load like the two
-        // session shares above, so a broken fingerprint is caught here, not in the
-        // hot path.
-        for (h, mult) in fingerprint.session_profile.vol_hour.iter().enumerate() {
-            assert!(
-                *mult > 0.0,
-                "fingerprint session_profile.vol_hour[{h}] must be strictly positive, got {mult}"
-            );
-        }
+            .validate()
+            .expect("committed fingerprint session profile is valid");
         fingerprint
     }
 }
@@ -159,6 +128,46 @@ pub struct SessionProfile {
     pub intensity_hour: [f64; 24],
     pub vol_hour: [f64; 24],
     pub dow_weight: [f64; 7],
+}
+
+impl SessionProfile {
+    pub fn validate(&self) -> Result<(), SessionProfileError> {
+        for (index, share) in self.intensity_hour.iter().enumerate() {
+            if !strictly_positive_finite(*share) {
+                return Err(SessionProfileError {
+                    field: "intensity_hour",
+                    index,
+                });
+            }
+        }
+        for (index, mult) in self.vol_hour.iter().enumerate() {
+            if !strictly_positive_finite(*mult) {
+                return Err(SessionProfileError {
+                    field: "vol_hour",
+                    index,
+                });
+            }
+        }
+        for (index, share) in self.dow_weight.iter().enumerate() {
+            if !strictly_positive_finite(*share) {
+                return Err(SessionProfileError {
+                    field: "dow_weight",
+                    index,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionProfileError {
+    pub field: &'static str,
+    pub index: usize,
+}
+
+fn strictly_positive_finite(value: f64) -> bool {
+    value.is_finite() && value > 0.0
 }
 
 // Civil UTC fields the session profile is keyed on. Derived purely from the
@@ -238,8 +247,9 @@ pub struct ScalarRanges {
     pub size_round_frac: MinMedianMax,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GeneratorScalars {
+    #[serde(default)]
     pub symbol: String,
     pub modal_tick: Decimal,
     pub price_decimals: u32,
@@ -300,17 +310,20 @@ impl GeneratorScalars {
             self.size_round_frac,
             &fp.scalar_ranges.size_round_frac,
         )?;
-        // vol_hour is a per-mean RMS-return multiplier consumed directly in the
-        // hot path (next_latent_mid multiplies the formed return by vol_mult). A
-        // zero entry silently zeros that hour's realized returns; a negative entry
-        // inverts price direction with no other guard. Unlike the scalar fields
-        // there is no min/median/max band to range-check against, so enforce the
-        // structural invariant: every hour's multiplier must be strictly positive.
-        for mult in &fp.session_profile.vol_hour {
-            // Reject non-positive and NaN (NaN fails every ordered comparison).
-            if *mult <= 0.0 || mult.is_nan() {
-                return Err(ScalarError { field: "vol_hour" });
-            }
+        if self.start_price <= Decimal::ZERO {
+            return Err(ScalarError {
+                field: "start_price",
+            });
+        }
+        if self.typical_size <= Decimal::ZERO {
+            return Err(ScalarError {
+                field: "typical_size",
+            });
+        }
+        if !strictly_positive_finite(self.vol_scalar) {
+            return Err(ScalarError {
+                field: "vol_scalar",
+            });
         }
         Ok(())
     }
@@ -346,7 +359,19 @@ impl GeneratedSource {
         fp: &Fingerprint,
         regime: Option<MarketRegime>,
     ) -> Self {
-        Self::with_clamp_override(scalars, seed, start_ts, fp, regime, None)
+        Self::new_with_session_profile(scalars, seed, start_ts, fp, &fp.session_profile, regime)
+    }
+
+    #[must_use]
+    pub fn new_with_session_profile(
+        scalars: GeneratorScalars,
+        seed: u64,
+        start_ts: u64,
+        fp: &Fingerprint,
+        session: &SessionProfile,
+        regime: Option<MarketRegime>,
+    ) -> Self {
+        Self::with_clamp_override(scalars, seed, start_ts, fp, session, regime, None)
     }
 
     fn with_clamp_override(
@@ -354,12 +379,16 @@ impl GeneratedSource {
         seed: u64,
         start_ts: u64,
         fp: &Fingerprint,
+        session: &SessionProfile,
         regime: Option<MarketRegime>,
         clamp_override: Option<f64>,
     ) -> Self {
         scalars
             .validate(fp)
             .expect("generated source scalars are inside fingerprint ranges");
+        session
+            .validate()
+            .expect("generated source session profile is valid");
         let mean_duration_s = scalars.mean_duration_s;
         let alpha = ACD_PERSISTENCE * ACD_FEEDBACK_SHARE;
         let beta = ACD_PERSISTENCE - alpha;
@@ -381,7 +410,7 @@ impl GeneratedSource {
                 eps_mean: WEIBULL_MEAN_SHAPE_060,
             },
             vol,
-            session: SessionModulator::new(&fp.session_profile),
+            session: SessionModulator::new(session),
             bounce: BounceState {
                 prev_side: AggressorSide::Buyer,
                 high_regime: false,
@@ -407,7 +436,15 @@ impl GeneratedSource {
         regime: Option<MarketRegime>,
         clamp_mult: f64,
     ) -> Self {
-        Self::with_clamp_override(scalars, seed, start_ts, fp, regime, Some(clamp_mult))
+        Self::with_clamp_override(
+            scalars,
+            seed,
+            start_ts,
+            fp,
+            &fp.session_profile,
+            regime,
+            Some(clamp_mult),
+        )
     }
 
     fn next_duration_ns(&mut self) -> u64 {

@@ -23,3 +23,7 @@ gap_cap_ms = 1000
 # the honest default off. Enable in a separate config when testing liveness
 # frames that survive StallData.
 server_heartbeat_ms = 0
+
+# Omit [[instrument]] tables to use the built-in BTCUSDT profile. Add explicit
+# profiles when a run needs a custom instrument set, generator scale, or session
+# shape; see reference/config.md.

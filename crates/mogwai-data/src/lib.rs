@@ -21,7 +21,7 @@ use rust_decimal::Decimal;
 
 pub use generated::{
     AbsReturnAcf, AnchorRange, Fingerprint, GeneratedSource, GeneratorScalars, GoldenTargets,
-    MinMedianMax, ScalarError, ScalarRanges, SessionProfile,
+    MinMedianMax, ScalarError, ScalarRanges, SessionProfile, SessionProfileError,
 };
 pub use mogwai_protocol::MarketRegime;
 

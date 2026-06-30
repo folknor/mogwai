@@ -64,6 +64,19 @@ sockets, timers and the clock; the engine owns order and account state.
   onto the fill, never used as a matching constraint. mogwai never replays a real
   market against orders, so the immediate full fill is the neutral baseline and
   every interesting behaviour is a deliberate divergence from it.
+- **Submit validation.** Before a submit is accepted it is range-checked the same
+  way an amend is: empty or duplicate `client_order_id`, an unknown instrument, a
+  non-positive quantity or price, a missing price, and a quantity or price off
+  the instrument's size/price increment are all rejected on the wire with
+  `OrderRejected` and never touch the ledger. (A duplicate id is one already
+  accepted; a rejected submit does not reserve its id.) The neutral baseline is
+  the full fill *of a well-formed order*, so a nonsensical submit is a reject, not
+  a corrupt fill.
+- **Time in force.** `Gtc` rests any unfilled remainder. `Ioc` fills what it can
+  immediately and cancels the rest (`OrderCanceled`, nothing left resting). `Fok`
+  is all-or-nothing: if the order cannot fully fill - only possible under an armed
+  `PartialFillNext` - it is rejected before acceptance and books nothing. A plain
+  order fills in full, so TIF only diverges from `Gtc` once a partial is in play.
 - **Divergence injection seam.** Armed divergences sit in a queue consumed as
   their trigger fires. `PartialFillNext`, `RejectNextSubmit`, `DuplicateNextFill`
   and `DropNextAccountUpdate` are the four engine-side divergences. The two
@@ -81,9 +94,14 @@ sockets, timers and the clock; the engine owns order and account state.
   order, an empty amend, a non-positive price, or a quantity at or below the
   filled amount is rejected on the wire and leaves the order untouched. The amend
   never touches the armed-divergence queue, so an interleaved modify cannot
-  consume a divergence armed for a fill.
+  consume a divergence armed for a fill. Submit and amend now share the same
+  validators, so a value the amend path rejects is rejected on submit too.
 - **Instrument table** carries precision and increments, exposed as `InstrumentDef`
-  and served by the server over `GET /instruments`.
+  and served by the server over `GET /instruments`. The engine seeds from
+  `default_instruments()` (BTCUSDT only) unless the server constructs it
+  `with_instruments` from a configured set; either way the table is authoritative
+  for submit validation, so an order for a symbol not in it is rejected rather
+  than booked as a position with a dropped quote leg.
 
 ## mogwai-data - the data path
 
@@ -116,9 +134,13 @@ sources into one time-ordered stream.
 
 - `GeneratorScalars` is the per-instrument knob vector - price level, tick size,
   typical size, volatility, activity. `from_fingerprint_medians` and
-  `xbtusd_anchor` construct it; `validate` range-checks it. The model is
-  symbol-agnostic: the shape is universal, only these scalars differ per
-  instrument. The market-regime havoc axis does NOT route through these validated
+  `xbtusd_anchor` construct it, and it also `Deserialize`s straight from a
+  config `[instrument.generator]` table; `validate` range-checks it (and that
+  start price, typical size and the vol scalar are positive and finite). The ACD,
+  GARCH, bounce and size *microstructure* is universal - tuned to the
+  fingerprint's cross-pair bands - but the price scale and the session shape are
+  now per-symbol, so a non-BTC instrument is no longer served at BTC's price
+  level. The market-regime havoc axis does NOT route through these validated
   scalars (a drought is deliberately out of band): `GeneratedSource::new` takes an
   optional `MarketRegime` and decomposes it into a private `RegimeState`, layering
   the perturbation onto the realized output at the same point the session envelope
@@ -128,14 +150,20 @@ sources into one time-ordered stream.
 
 - The `SessionModulator` makes the stream non-stationary in wall-clock time. It
   multiplies the arrival intensity by the UTC hour-of-day and day-of-week shares
-  and the latent-mid volatility by the per-hour vol curve, both read from the
-  fingerprint's `session_profile`, so a generated stream reproduces the intraday
-  intensity, intraday volatility and weekend thinning of the real corpus (peak at
-  the London-NY overlap, trough in the Asian small hours, the NY-open vol spike).
-  The envelope is a deterministic outer factor applied to the *realized* duration
-  and return; the ACD and GARCH recursions keep running on the un-modulated
-  feedback values, so their clustering dynamics survive. The fingerprint loader
-  fails loud on a non-positive session share.
+  and the latent-mid volatility by the per-hour vol curve, read from a
+  `SessionProfile`. By default that is the fingerprint's `session_profile`, so a
+  generated stream reproduces the intraday intensity, intraday volatility and
+  weekend thinning of the real corpus (peak at the London-NY overlap, trough in
+  the Asian small hours, the NY-open vol spike). A configured instrument may carry
+  its own `SessionProfile`, which is exactly the axis that distinguishes a 24/7
+  crypto tape from an exchange with trading hours, a maintenance break or a
+  closed weekend - those are expressed as near-zero hour or day shares, not a
+  different code path. The envelope is a deterministic outer factor applied to the
+  *realized* duration and return; the ACD and GARCH recursions keep running on the
+  un-modulated feedback values, so their clustering dynamics survive.
+  `SessionProfile::validate` rejects any non-positive or non-finite share or
+  multiplier, and both the fingerprint loader and the per-instrument config path
+  route through it.
 
 The realism gate is a self-contained Rust test that draws a long stream and
 asserts each measured stylized fact lands inside the fingerprint's cross-pair
@@ -166,7 +194,10 @@ Owns the sockets, the clock, and replay pacing.
   `MAX_HISTORY_LIMIT` is `1_000`, so a default-limit `/trades` call synthesizes a
   bounded number of ticks and returns well inside the adapter's poll interval
   (measured well under a millisecond). Both feed the same `MergeSource` and the
-  same outbound writer the CSV path used.
+  same outbound writer the CSV path used. Both look the symbol up in the
+  configured `InstrumentProfiles`: an unknown symbol yields no source, so a live
+  `Subscribe` to it streams nothing and a `/trades` request returns an empty page
+  rather than synthesizing a phantom BTC-scaled tape.
 - **Pacing and windowing.** Replay runs on a blocking thread with backpressure.
   Per-subscription windowing (`start_ts` on `Subscribe`), `Unsubscribe`
   cancellation (a shared atomic flag the replay loop polls), and the paced
@@ -181,7 +212,11 @@ Owns the sockets, the clock, and replay pacing.
 - **Run config** comes from a `mogwai.toml` read at startup (replay `speed`,
   the `gap_cap_ms` paced-sleep cap, and `server_heartbeat_ms` for optional
   server-originated liveness frames), carried in explicit input rather than the
-  former `MOGWAI_REPLAY_SPEED` / `MOGWAI_GAP_CAP_MS` ambient environment. The
+  former `MOGWAI_REPLAY_SPEED` / `MOGWAI_GAP_CAP_MS` ambient environment. Optional
+  `[[instrument]]` tables replace the built-in BTCUSDT default with an
+  authoritative per-symbol set (`InstrumentDef` plus a `generator` and a
+  `session`), validated at startup and shared by `/instruments`, order
+  validation, and both data carriers. The
   server heartbeat is distinct from `ConnHavoc.heartbeat_interval_ms`, which
   configures client pings in the adapter. See `reference/config.md` for the
   knobs and `reference/cli.md` for the binary's command-line surface.

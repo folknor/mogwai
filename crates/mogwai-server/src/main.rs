@@ -10,7 +10,7 @@ mod man;
 mod source;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -30,12 +30,13 @@ use axum::{
 };
 use clap::{Args, Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
-use mogwai_data::TickEvent;
+use mogwai_data::{GeneratorScalars, SessionProfile, TickEvent};
 use mogwai_engine::Engine;
 use mogwai_protocol::{
     ClientMessage, InstrumentDef, MAX_HISTORY_LIMIT, MarketRegime, QuoteTick, ServerMessage,
     SimClock, TradeTick, control::Divergence, validate_divergence, validate_market_regime,
 };
+use rust_decimal::Decimal;
 use serde::Deserialize;
 use tokio::sync::{Mutex, mpsc};
 
@@ -57,6 +58,11 @@ struct Config {
     /// disables it. When enabled, each websocket session receives liveness
     /// frames that survive `StallData` but not `GoDark`.
     server_heartbeat_ms: u64,
+    /// Optional explicit venue instrument set. When empty, the server seeds the
+    /// protocol default set. When present, this is authoritative for
+    /// `/instruments`, order validation, and data generation.
+    #[serde(rename = "instrument")]
+    instruments: Vec<ConfiguredInstrument>,
 }
 
 impl Default for Config {
@@ -72,6 +78,7 @@ impl Default for Config {
             speed: 1.0,
             gap_cap_ms: 1000,
             server_heartbeat_ms: 0,
+            instruments: Vec::new(),
         }
     }
 }
@@ -94,10 +101,117 @@ impl Config {
     }
 }
 
+#[derive(Clone, serde::Deserialize)]
+struct ConfiguredInstrument {
+    #[serde(flatten)]
+    def: InstrumentDef,
+    generator: GeneratorScalars,
+    session: SessionProfile,
+}
+
+fn build_instrument_profiles(cfg: &Config) -> anyhow::Result<source::InstrumentProfiles> {
+    if cfg.instruments.is_empty() {
+        return Ok(source::InstrumentProfiles::defaults());
+    }
+
+    let fp = mogwai_data::Fingerprint::from_repo_json();
+    let mut seen = HashSet::new();
+    let mut profiles = Vec::with_capacity(cfg.instruments.len());
+
+    for configured in &cfg.instruments {
+        let def = &configured.def;
+        validate_instrument_def(def)?;
+
+        if !seen.insert(def.symbol.clone()) {
+            anyhow::bail!("duplicate instrument symbol {}", def.symbol);
+        }
+
+        let mut scalars = configured.generator.clone();
+        scalars.symbol = def.symbol.clone();
+        if scalars.modal_tick != def.price_increment {
+            anyhow::bail!(
+                "instrument {} generator.modal_tick must equal price_increment",
+                def.symbol
+            );
+        }
+        if scalars.price_decimals != u32::from(def.price_precision) {
+            anyhow::bail!(
+                "instrument {} generator.price_decimals must equal price_precision",
+                def.symbol
+            );
+        }
+        scalars.validate(&fp).map_err(|err| {
+            anyhow::anyhow!(
+                "instrument {} generator.{} failed validation",
+                def.symbol,
+                err.field
+            )
+        })?;
+        configured.session.validate().map_err(|err| {
+            anyhow::anyhow!(
+                "instrument {} session.{}[{}] must be finite and > 0",
+                def.symbol,
+                err.field,
+                err.index
+            )
+        })?;
+
+        profiles.push(source::InstrumentProfile::new(
+            def.clone(),
+            scalars,
+            configured.session.clone(),
+        ));
+    }
+
+    Ok(source::InstrumentProfiles::from_profiles(profiles))
+}
+
+fn validate_instrument_def(def: &InstrumentDef) -> anyhow::Result<()> {
+    if def.symbol.trim().is_empty() {
+        anyhow::bail!("instrument symbol must not be empty");
+    }
+    if def.base.trim().is_empty() {
+        anyhow::bail!("instrument {} base must not be empty", def.symbol);
+    }
+    if def.quote.trim().is_empty() {
+        anyhow::bail!("instrument {} quote must not be empty", def.symbol);
+    }
+    if def.price_increment <= Decimal::ZERO {
+        anyhow::bail!("instrument {} price_increment must be positive", def.symbol);
+    }
+    if def.size_increment <= Decimal::ZERO {
+        anyhow::bail!("instrument {} size_increment must be positive", def.symbol);
+    }
+    if !on_increment(
+        def.price_increment,
+        Decimal::new(1, u32::from(def.price_precision)),
+    ) {
+        anyhow::bail!(
+            "instrument {} price_increment violates price_precision",
+            def.symbol
+        );
+    }
+    if !on_increment(
+        def.size_increment,
+        Decimal::new(1, u32::from(def.size_precision)),
+    ) {
+        anyhow::bail!(
+            "instrument {} size_increment violates size_precision",
+            def.symbol
+        );
+    }
+    Ok(())
+}
+
+fn on_increment(value: Decimal, increment: Decimal) -> bool {
+    increment > Decimal::ZERO && (value / increment).fract() == Decimal::ZERO
+}
+
 #[derive(Clone)]
 struct AppState {
     engine: Arc<Mutex<Engine>>,
     cfg: Config,
+    profiles: Arc<source::InstrumentProfiles>,
     /// Run clock shared with adapters over `/clock`.
     sim: SimClock,
     /// Execution-event delay in milliseconds, shared by all live writers.
@@ -225,6 +339,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cfg = Config::load(serve.config)?;
+    let profiles = Arc::new(build_instrument_profiles(&cfg)?);
     let sim = build_sim_clock(&cfg, now_ns())?;
     tracing::info!(
         sim_epoch_ns = cfg.sim_epoch_ns,
@@ -232,6 +347,7 @@ async fn main() -> anyhow::Result<()> {
         speed = cfg.speed,
         gap_cap_ms = cfg.gap_cap_ms,
         server_heartbeat_ms = cfg.server_heartbeat_ms,
+        instruments = profiles.instrument_defs().len(),
         "config"
     );
     if !sim.is_identity() && cfg.gap_cap_ms != 0 {
@@ -242,8 +358,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let state = AppState {
-        engine: Arc::new(Mutex::new(Engine::new())),
+        engine: Arc::new(Mutex::new(Engine::with_instruments(
+            profiles.instrument_defs(),
+        ))),
         cfg,
+        profiles,
         sim,
         delay_ms: Arc::new(AtomicU64::new(0)),
         dark_until_ns: Arc::new(AtomicU64::new(0)),
@@ -372,11 +491,12 @@ struct HistoryQuery {
 }
 
 async fn trades(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
 ) -> Result<Json<Vec<TradeTick>>, StatusCode> {
     let limit = normalize_limit(query.limit);
     let regime = parse_history_regime(query.regime.as_deref());
+    let profiles = Arc::clone(&state.profiles);
     // Synthesizing up to `MAX_HISTORY_LIMIT` ticks is pure CPU work against the
     // generator (the source never blocks on IO), and `next_tick` never returns
     // `None`, so a no-`end` request always grinds out the full `limit`. Run it on
@@ -386,7 +506,7 @@ async fn trades(
         symbol, start, end, ..
     } = query;
     let ticks = match tokio::task::spawn_blocking(move || {
-        bounded_trades(&symbol, start, end, limit, regime)
+        bounded_trades(&symbol, start, end, limit, regime, &profiles)
     })
     .await
     {
@@ -425,12 +545,15 @@ fn bounded_trades(
     end: Option<u64>,
     limit: usize,
     regime: Option<MarketRegime>,
+    profiles: &source::InstrumentProfiles,
 ) -> Vec<TradeTick> {
     if limit == 0 {
         return Vec::new();
     }
 
-    let mut merged = source::build_history_source(symbol, start, regime);
+    let Some(mut merged) = source::build_history_source(symbol, start, regime, profiles) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
 
     while let Some(tick) = merged.next_tick() {
@@ -573,15 +696,17 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         quiesce_replay(old).await;
                     }
                     let cancel = Arc::new(AtomicBool::new(false));
-                    let handle = spawn_replay(
-                        symbol.clone(),
+                    let handle = spawn_replay(ReplaySpawn {
+                        symbol: symbol.clone(),
                         start_ts,
                         regime,
-                        &state.cfg,
-                        state.sim,
-                        tx.clone(),
-                        Arc::clone(&cancel),
-                    );
+                        speed: state.cfg.speed,
+                        gap_cap_ms: state.cfg.gap_cap_ms,
+                        profiles: Arc::clone(&state.profiles),
+                        sim: state.sim,
+                        tx: tx.clone(),
+                        cancel: Arc::clone(&cancel),
+                    });
                     replays.insert(symbol, Replay { cancel, handle });
                 }
             }
@@ -704,28 +829,42 @@ fn is_execution_event(msg: &ServerMessage) -> bool {
     msg.category().is_execution()
 }
 
-/// Stream generated trades for a single `symbol` as market data into `tx`,
-/// returning the joinable thread handle so the caller can reap it.
+struct ReplaySpawn {
+    symbol: String,
+    start_ts: Option<u64>,
+    regime: Option<MarketRegime>,
+    speed: f64,
+    gap_cap_ms: u64,
+    profiles: Arc<source::InstrumentProfiles>,
+    sim: SimClock,
+    tx: mpsc::Sender<ServerMessage>,
+    cancel: Arc<AtomicBool>,
+}
+
+/// Stream generated trades for one symbol as market data into `tx`, returning
+/// the joinable thread handle so the caller can reap it.
 ///
 /// The replay runs on a dedicated OS thread. It applies backpressure by retrying
 /// a `try_send` whenever the channel is full, sleeping at most
 /// [`REPLAY_SEND_POLL`] between attempts and re-checking `cancel` each time, so a
 /// stream blocked behind a slow/stalled client still observes cancellation
 /// promptly instead of parking indefinitely in a plain `blocking_send` (E.7).
-fn spawn_replay(
-    symbol: String,
-    start_ts: Option<u64>,
-    regime: Option<MarketRegime>,
-    cfg: &Config,
-    sim: SimClock,
-    tx: mpsc::Sender<ServerMessage>,
-    cancel: Arc<AtomicBool>,
-) -> std::thread::JoinHandle<()> {
-    let speed = cfg.speed;
-    let gap_cap_ms = cfg.gap_cap_ms;
+fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
+    let ReplaySpawn {
+        symbol,
+        start_ts,
+        regime,
+        speed,
+        gap_cap_ms,
+        profiles,
+        sim,
+        tx,
+        cancel,
+    } = spawn;
     std::thread::spawn(move || {
         let symbols = [symbol.clone()];
-        let Some(mut merged) = source::build_live_source(&symbols, start_ts, regime) else {
+        let Some(mut merged) = source::build_live_source(&symbols, start_ts, regime, &profiles)
+        else {
             return;
         };
         tracing::info!(%symbol, ?start_ts, ?regime, "replay started");
@@ -811,15 +950,24 @@ mod tests {
     use mogwai_protocol::{OrderType, Side, SubmitOrder, TimeInForce};
     use std::time::Instant;
 
+    fn default_profiles() -> Arc<source::InstrumentProfiles> {
+        Arc::new(source::InstrumentProfiles::defaults())
+    }
+
     fn state() -> AppState {
+        let profiles = default_profiles();
         AppState {
-            engine: Arc::new(Mutex::new(Engine::new())),
+            engine: Arc::new(Mutex::new(Engine::with_instruments(
+                profiles.instrument_defs(),
+            ))),
             cfg: Config {
                 sim_epoch_ns: 0,
                 speed: 0.0,
                 gap_cap_ms: 0,
                 server_heartbeat_ms: 0,
+                instruments: Vec::new(),
             },
+            profiles,
             sim: SimClock::identity(),
             delay_ms: Arc::new(AtomicU64::new(0)),
             dark_until_ns: Arc::new(AtomicU64::new(0)),
@@ -1004,8 +1152,9 @@ mod tests {
 
     #[test]
     fn generated_history_default_limit_is_bounded_and_fast() {
+        let profiles = default_profiles();
         let start = Instant::now();
-        let ticks = bounded_trades("KEUR", None, None, MAX_HISTORY_LIMIT, None);
+        let ticks = bounded_trades("BTCUSDT", None, None, MAX_HISTORY_LIMIT, None, &profiles);
         let elapsed = start.elapsed();
 
         println!("default /trades synthesis elapsed: {elapsed:?}");
@@ -1019,12 +1168,13 @@ mod tests {
 
     #[test]
     fn generated_history_is_replayable_and_cursorable() {
-        let first = bounded_trades("KEUR", None, None, 8, None);
-        let replay = bounded_trades("KEUR", None, None, 8, None);
+        let profiles = default_profiles();
+        let first = bounded_trades("BTCUSDT", None, None, 8, None, &profiles);
+        let replay = bounded_trades("BTCUSDT", None, None, 8, None, &profiles);
         assert_eq!(trade_signatures(&first), trade_signatures(&replay));
 
         let cursor = first.last().expect("first page has trades").ts_event;
-        let second = bounded_trades("KEUR", Some(cursor), None, 8, None);
+        let second = bounded_trades("BTCUSDT", Some(cursor), None, 8, None, &profiles);
 
         assert_eq!(
             second.first().expect("second page has trades").ts_event,
@@ -1036,11 +1186,26 @@ mod tests {
 
     #[test]
     fn out_of_range_regime_replays_clean() {
-        let clean = bounded_trades("KEUR", Some(86_401_000_000_000), None, 8, None);
+        let profiles = default_profiles();
+        let clean = bounded_trades(
+            "BTCUSDT",
+            Some(86_401_000_000_000),
+            None,
+            8,
+            None,
+            &profiles,
+        );
         let invalid =
             parse_history_regime(Some(r#"{"type":"LiquidityDrought","thin_factor":0.5}"#));
         assert_eq!(invalid, None);
-        let fallback = bounded_trades("KEUR", Some(86_401_000_000_000), None, 8, invalid);
+        let fallback = bounded_trades(
+            "BTCUSDT",
+            Some(86_401_000_000_000),
+            None,
+            8,
+            invalid,
+            &profiles,
+        );
 
         assert_eq!(trade_signatures(&clean), trade_signatures(&fallback));
     }
@@ -1095,7 +1260,18 @@ mod tests {
 
     #[test]
     fn zero_limit_yields_empty_page() {
-        assert!(bounded_trades("KEUR", None, None, normalize_limit(Some(0)), None).is_empty());
+        let profiles = default_profiles();
+        assert!(
+            bounded_trades(
+                "BTCUSDT",
+                None,
+                None,
+                normalize_limit(Some(0)),
+                None,
+                &profiles,
+            )
+            .is_empty()
+        );
     }
 
     /// A replay drains into the channel and is cancellable + joinable. Pins E.7:
@@ -1108,19 +1284,24 @@ mod tests {
             speed: 0.0,
             gap_cap_ms: 0,
             server_heartbeat_ms: 0,
+            instruments: Vec::new(),
         };
+        let profiles = default_profiles();
         let (tx, mut rx) = mpsc::channel::<ServerMessage>(8);
         let cancel = Arc::new(AtomicBool::new(false));
-        let handle = spawn_replay(
-            "KEUR".to_string(),
-            None,
-            None,
-            &cfg,
-            SimClock::identity(),
+        let handle = spawn_replay(ReplaySpawn {
+            symbol: "BTCUSDT".to_string(),
+            start_ts: None,
+            regime: None,
+            speed: cfg.speed,
+            gap_cap_ms: cfg.gap_cap_ms,
+            profiles,
+            sim: SimClock::identity(),
             tx,
-            Arc::clone(&cancel),
-        );
-        // First tick arrives, confirming the stream is live and feeding `KEUR`.
+            cancel: Arc::clone(&cancel),
+        });
+        // First tick arrives, confirming the stream is live and feeding the
+        // default instrument.
         let first = rx.recv().await.expect("a tick");
         assert!(matches!(
             first,
@@ -1142,20 +1323,24 @@ mod tests {
             speed: 0.0,
             gap_cap_ms: 0,
             server_heartbeat_ms: 0,
+            instruments: Vec::new(),
         };
+        let profiles = default_profiles();
         // Capacity 1 so the generator fills the channel and parks in
         // `send_cancellable` almost immediately, never draining.
         let (tx, _rx) = mpsc::channel::<ServerMessage>(1);
         let cancel = Arc::new(AtomicBool::new(false));
-        let handle = spawn_replay(
-            "KEUR".to_string(),
-            None,
-            None,
-            &cfg,
-            SimClock::identity(),
+        let handle = spawn_replay(ReplaySpawn {
+            symbol: "BTCUSDT".to_string(),
+            start_ts: None,
+            regime: None,
+            speed: cfg.speed,
+            gap_cap_ms: cfg.gap_cap_ms,
+            profiles,
+            sim: SimClock::identity(),
             tx,
-            Arc::clone(&cancel),
-        );
+            cancel: Arc::clone(&cancel),
+        });
 
         let started = Instant::now();
         quiesce_replay(Replay { cancel, handle }).await;
@@ -1193,19 +1378,23 @@ mod tests {
             speed: 1_000.0,
             gap_cap_ms: 1_000,
             server_heartbeat_ms: 0,
+            instruments: Vec::new(),
         };
+        let profiles = default_profiles();
         let (tx, mut rx) = mpsc::channel::<ServerMessage>(8);
         let cancel = Arc::new(AtomicBool::new(false));
         let started = Instant::now();
-        let handle = spawn_replay(
-            "KEUR".to_string(),
-            Some(EPOCH),
-            None,
-            &cfg,
+        let handle = spawn_replay(ReplaySpawn {
+            symbol: "BTCUSDT".to_string(),
+            start_ts: Some(EPOCH),
+            regime: None,
+            speed: cfg.speed,
+            gap_cap_ms: cfg.gap_cap_ms,
+            profiles,
             sim,
             tx,
-            Arc::clone(&cancel),
-        );
+            cancel: Arc::clone(&cancel),
+        });
 
         let first = rx.recv().await.expect("a tick");
         let elapsed = started.elapsed();

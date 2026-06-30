@@ -13,8 +13,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use mogwai_protocol::{
-    AccountState, Balance, ClientMessage, ClientOrderId, InstrumentDef, OrderFilled, Position,
-    ServerMessage, Side, SubmitOrder, Symbol, VenueOrderId, control::Divergence,
+    AccountState, Balance, ClientMessage, ClientOrderId, InstrumentDef, OrderFilled, OrderType,
+    Position, ServerMessage, Side, SubmitOrder, Symbol, TimeInForce, VenueOrderId,
+    control::Divergence, default_instruments,
 };
 use rust_decimal::Decimal;
 
@@ -54,6 +55,7 @@ pub struct Engine {
     /// precision/increment fields the fill and reservation path needs, so the
     /// engine keeps no parallel struct that could drift from the wire type.
     instruments: HashMap<Symbol, InstrumentDef>,
+    seen_client_order_ids: HashSet<ClientOrderId>,
     /// Armed divergences, consumed as their trigger fires.
     armed: VecDeque<Divergence>,
     seq: u64,
@@ -70,18 +72,7 @@ impl Engine {
         reason = "new() seeds the instrument table; a Default impl would diverge or be dead surface"
     )]
     pub fn new() -> Self {
-        // Inline BTCUSDT literal for now; a later wave will source this from
-        // `mogwai_protocol::default_instruments()`. Do not depend on that
-        // function yet - it does not exist.
-        Self::with_instruments(vec![InstrumentDef {
-            symbol: "BTCUSDT".into(),
-            base: "BTC".into(),
-            quote: "USDT".into(),
-            price_precision: 2,
-            size_precision: 8,
-            price_increment: Decimal::new(1, 2),
-            size_increment: Decimal::new(1, 8),
-        }])
+        Self::with_instruments(default_instruments())
     }
 
     pub fn with_instruments(instruments: Vec<InstrumentDef>) -> Self {
@@ -94,6 +85,7 @@ impl Engine {
             open: Vec::new(),
             account: Account::default(),
             instruments,
+            seen_client_order_ids: HashSet::new(),
             armed: VecDeque::new(),
             seq: 0,
             warned: Warned::default(),
@@ -164,6 +156,14 @@ impl Engine {
     }
 
     fn on_submit(&mut self, order: SubmitOrder, ts: u64) -> Vec<ServerMessage> {
+        if let Err(reason) = self.validate_submit(&order) {
+            return vec![ServerMessage::OrderRejected {
+                client_order_id: order.client_order_id,
+                reason,
+                ts_event: ts,
+            }];
+        }
+
         // Divergence: reject the next submit outright. `RejectNextSubmit`
         // carries no target, so it applies to whatever submit arrives next.
         if let Some(Divergence::RejectNextSubmit { reason }) =
@@ -176,6 +176,33 @@ impl Engine {
             }];
         }
 
+        // Order here is load-bearing. `fill_fraction` consumes the targeted
+        // `PartialFillNext` for this id, and it must run BEFORE the FOK decision
+        // because all-or-nothing is judged against the (possibly diverged) fill
+        // size, not the requested quantity. A FOK the partial pushes below full
+        // is rejected right here, and the partial it consumed goes with it: the
+        // divergence fired on its target (it is what killed the order), so it is
+        // correctly spent rather than left armed to ambush a later resubmit of
+        // the same id.
+        let fill_fraction = self.fill_fraction(&order);
+        let last_qty = fill_quantity(&order, fill_fraction);
+        let leaves_qty = order.quantity - last_qty;
+
+        if order.time_in_force == TimeInForce::Fok && leaves_qty > Decimal::ZERO {
+            return vec![ServerMessage::OrderRejected {
+                client_order_id: order.client_order_id,
+                reason: "fill-or-kill could not fully fill".into(),
+                ts_event: ts,
+            }];
+        }
+
+        // Reserve the id only now, past every reject gate (validation,
+        // RejectNextSubmit, FOK). Only an ACCEPTED order reserves its id, so a
+        // rejected submit can be corrected and resubmitted under the same id,
+        // while a duplicate of an accepted id is caught in `validate_submit`.
+        self.seen_client_order_ids
+            .insert(order.client_order_id.clone());
+
         let venue_order_id = self.next_id("V");
         let mut out = vec![ServerMessage::OrderAccepted {
             client_order_id: order.client_order_id.clone(),
@@ -183,50 +210,7 @@ impl Engine {
             ts_event: ts,
         }];
 
-        // Divergence: partial-fill the next order, leaving the remainder
-        // resting. `PartialFillNext` is targeted: it applies only to the order
-        // whose id it names, so a divergence for a different order is left
-        // armed (it may match a later submit) and does not block the rest of
-        // the queue.
-        let order_id = order.client_order_id.clone();
-        let fill_fraction = match self.take_armed(|d| {
-            matches!(
-                d,
-                Divergence::PartialFillNext { client_order_id, .. }
-                    if *client_order_id == order_id
-            )
-        }) {
-            Some(Divergence::PartialFillNext { fraction, .. }) => fraction,
-            _ => Decimal::ONE,
-        };
-
-        // Defensive guard against an unvalidated `PartialFillNext.fraction`
-        // (there is no protocol-level `validate_divergence` yet). A real venue
-        // never reports a zero-qty fill, and a negative `last_qty` would book a
-        // bogus position/balance leg and emit an `OrderFilled` downstream
-        // nautilus may double-count or choke on. So:
-        //   * `fraction > 1` is clamped to a full fill (`last_qty` never
-        //     exceeds the order quantity);
-        //   * `fraction <= 0` (or any rounding that lands on a non-positive
-        //     quantity) drops the partial-fill behaviour entirely and treats
-        //     the order as a normal, unmodified submission - a full fill at its
-        //     own price.
-        // The legitimate `0 < fraction <= 1` path is untouched.
-        let last_qty = {
-            let candidate = (order.quantity * fill_fraction).min(order.quantity);
-            if candidate <= Decimal::ZERO {
-                let symbol = order.symbol.as_str();
-                tracing::warn!(
-                    %symbol,
-                    "PartialFillNext produced non-positive last_qty; treating as a normal full fill"
-                );
-                order.quantity
-            } else {
-                candidate
-            }
-        };
-        let leaves_qty = order.quantity - last_qty;
-        let last_px = order.price.unwrap_or(Decimal::ZERO);
+        let last_px = order.price.expect("validated submit price is present");
 
         let fill = OrderFilled {
             client_order_id: order.client_order_id.clone(),
@@ -254,12 +238,23 @@ impl Engine {
         out.push(ServerMessage::OrderFilled(fill));
 
         if leaves_qty > Decimal::ZERO {
-            self.warn_priceless_reservation(&order);
-            self.open.push(OpenOrder {
-                venue_order_id,
-                submit: order,
-                leaves_qty,
-            });
+            match order.time_in_force {
+                TimeInForce::Gtc => {
+                    self.open.push(OpenOrder {
+                        venue_order_id,
+                        submit: order,
+                        leaves_qty,
+                    });
+                }
+                TimeInForce::Ioc => {
+                    out.push(ServerMessage::OrderCanceled {
+                        client_order_id: order.client_order_id,
+                        venue_order_id,
+                        ts_event: ts,
+                    });
+                }
+                TimeInForce::Fok => unreachable!("FOK partials are rejected before acceptance"),
+            }
         }
 
         // Untargeted: applies to this submit's account-state snapshot. Scanned
@@ -271,6 +266,70 @@ impl Engine {
             out.push(ServerMessage::AccountState(self.snapshot(ts)));
         }
         out
+    }
+
+    fn validate_submit(&self, order: &SubmitOrder) -> Result<(), String> {
+        if order.client_order_id.trim().is_empty() {
+            return Err("empty client_order_id".into());
+        }
+
+        // "Duplicate" means an id already ACCEPTED (the set is populated only on
+        // the accept path in `on_submit`), so a previously-rejected id is free to
+        // reuse; an id that named a live or completed order is not.
+        if self
+            .seen_client_order_ids
+            .contains(order.client_order_id.as_str())
+        {
+            return Err("duplicate client_order_id".into());
+        }
+
+        let Some(instrument) = self.instruments.get(&order.symbol) else {
+            return Err("unknown instrument".into());
+        };
+
+        if order.quantity <= Decimal::ZERO {
+            return Err("submit with non-positive quantity".into());
+        }
+
+        if !on_increment(order.quantity, instrument.size_increment) {
+            return Err("quantity violates size increment".into());
+        }
+
+        let Some(price) = order.price else {
+            return Err("submit price required".into());
+        };
+
+        if order.order_type == OrderType::Market && price <= Decimal::ZERO {
+            return Err("market order requires positive price".into());
+        }
+
+        if price <= Decimal::ZERO {
+            return Err("submit with non-positive price".into());
+        }
+
+        if !on_increment(price, instrument.price_increment) {
+            return Err("price violates price increment".into());
+        }
+
+        Ok(())
+    }
+
+    fn fill_fraction(&mut self, order: &SubmitOrder) -> Decimal {
+        // Divergence: partial-fill the next order. `PartialFillNext` is
+        // targeted: it applies only to the order whose id it names, so a
+        // divergence for a different order is left armed and does not block the
+        // rest of the queue.
+        let order_id = order.client_order_id.clone();
+        match self.take_armed(|d| {
+            matches!(
+                d,
+                Divergence::PartialFillNext { client_order_id, .. }
+                    if *client_order_id == order_id
+            )
+        }) {
+            Some(Divergence::PartialFillNext { fraction, .. }) => fraction,
+            _ => Decimal::ONE,
+        }
     }
 
     fn on_cancel(&mut self, client_order_id: ClientOrderId, ts: u64) -> Vec<ServerMessage> {
@@ -585,6 +644,28 @@ fn same_sign(a: Decimal, b: Decimal) -> bool {
     (a > Decimal::ZERO && b > Decimal::ZERO) || (a < Decimal::ZERO && b < Decimal::ZERO)
 }
 
+fn fill_quantity(order: &SubmitOrder, fill_fraction: Decimal) -> Decimal {
+    // Defensive guard against an unvalidated `PartialFillNext.fraction`.
+    // Public control validation rejects out-of-range fractions, but the engine
+    // still protects its arithmetic so direct callers cannot emit zero,
+    // negative, or over-sized fills.
+    let candidate = (order.quantity * fill_fraction).min(order.quantity);
+    if candidate <= Decimal::ZERO {
+        let symbol = order.symbol.as_str();
+        tracing::warn!(
+            %symbol,
+            "PartialFillNext produced non-positive last_qty; treating as a normal full fill"
+        );
+        order.quantity
+    } else {
+        candidate
+    }
+}
+
+fn on_increment(value: Decimal, increment: Decimal) -> bool {
+    increment > Decimal::ZERO && (value / increment).fract() == Decimal::ZERO
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,6 +683,16 @@ mod tests {
         qty: i64,
         price: Option<Decimal>,
     ) -> SubmitOrder {
+        order_decimal(id, side, symbol, Decimal::from(qty), price)
+    }
+
+    fn order_decimal(
+        id: &str,
+        side: Side,
+        symbol: &str,
+        quantity: Decimal,
+        price: Option<Decimal>,
+    ) -> SubmitOrder {
         SubmitOrder {
             client_order_id: id.into(),
             symbol: symbol.into(),
@@ -611,7 +702,7 @@ mod tests {
             } else {
                 OrderType::Market
             },
-            quantity: Decimal::from(qty),
+            quantity,
             price,
             time_in_force: TimeInForce::Gtc,
         }
@@ -636,6 +727,13 @@ mod tests {
             panic!("expected order updated")
         };
         &out[index]
+    }
+
+    fn reject_reason(out: &[ServerMessage]) -> &str {
+        let [ServerMessage::OrderRejected { reason, .. }] = out else {
+            panic!("expected one order reject")
+        };
+        reason
     }
 
     fn balance<'a>(state: &'a AccountState, currency: &str) -> &'a Balance {
@@ -669,6 +767,99 @@ mod tests {
     }
 
     #[test]
+    fn submit_rejects_semantically_invalid_inputs() {
+        let cases = [
+            (
+                order_decimal(
+                    "neg_qty",
+                    Side::Buy,
+                    "BTCUSDT",
+                    Decimal::from(-1),
+                    Some(100.into()),
+                ),
+                "submit with non-positive quantity",
+            ),
+            (
+                order_decimal(
+                    "zero_qty",
+                    Side::Buy,
+                    "BTCUSDT",
+                    Decimal::ZERO,
+                    Some(100.into()),
+                ),
+                "submit with non-positive quantity",
+            ),
+            (
+                order_decimal("neg_px", Side::Buy, "BTCUSDT", 1.into(), Some((-5).into())),
+                "submit with non-positive price",
+            ),
+            (
+                order_decimal(
+                    "zero_px",
+                    Side::Buy,
+                    "BTCUSDT",
+                    1.into(),
+                    Some(Decimal::ZERO),
+                ),
+                "submit with non-positive price",
+            ),
+            (
+                order_decimal("market_no_px", Side::Buy, "BTCUSDT", 1.into(), None),
+                "submit price required",
+            ),
+            (
+                order_decimal(
+                    "bad_qty_grid",
+                    Side::Buy,
+                    "BTCUSDT",
+                    "0.123456789".parse().expect("decimal"),
+                    Some(100.into()),
+                ),
+                "quantity violates size increment",
+            ),
+            (
+                order_decimal(
+                    "bad_px_grid",
+                    Side::Buy,
+                    "BTCUSDT",
+                    1.into(),
+                    Some("60000.123".parse().expect("decimal")),
+                ),
+                "price violates price increment",
+            ),
+            (
+                order_decimal("", Side::Buy, "BTCUSDT", 1.into(), Some(100.into())),
+                "empty client_order_id",
+            ),
+            (
+                order_decimal("unknown", Side::Buy, "FAKE", 1.into(), Some(100.into())),
+                "unknown instrument",
+            ),
+        ];
+
+        for (order, expected) in cases {
+            let mut e = Engine::new();
+            let out = e.process(ClientMessage::SubmitOrder(order), 1);
+
+            assert_eq!(reject_reason(&out), expected);
+            assert!(e.account_snapshot(2).balances.is_empty());
+            assert!(e.positions().is_empty());
+            assert!(e.open_orders().is_empty());
+        }
+    }
+
+    #[test]
+    fn duplicate_client_order_id_is_rejected_after_acceptance() {
+        let mut e = Engine::new();
+
+        let first = e.process(ClientMessage::SubmitOrder(order("DUP", 1)), 1);
+        assert!(matches!(first[0], ServerMessage::OrderAccepted { .. }));
+
+        let duplicate = e.process(ClientMessage::SubmitOrder(order("DUP", 1)), 2);
+        assert_eq!(reject_reason(&duplicate), "duplicate client_order_id");
+    }
+
+    #[test]
     fn armed_partial_leaves_remainder_resting() {
         let mut e = Engine::new();
         e.arm(Divergence::PartialFillNext {
@@ -684,6 +875,48 @@ mod tests {
         assert_eq!(f.leaves_qty, Decimal::from(7));
         assert!(matches!(out[2], ServerMessage::AccountState(_)));
         assert_eq!(e.open_orders().len(), 1);
+    }
+
+    #[test]
+    fn ioc_partial_fill_cancels_remainder_without_resting() {
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "O1".into(),
+            fraction: Decimal::from_f64(0.4).unwrap(),
+        });
+        let mut order = order("O1", 10);
+        order.time_in_force = TimeInForce::Ioc;
+
+        let out = e.process(ClientMessage::SubmitOrder(order), 1);
+
+        assert_eq!(out.len(), 4);
+        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        let f = fill(&out, 1);
+        assert_eq!(f.last_qty, Decimal::from(4));
+        assert_eq!(f.leaves_qty, Decimal::from(6));
+        assert!(matches!(out[2], ServerMessage::OrderCanceled { .. }));
+        let state = account(&out, 3);
+        assert_eq!(balance(state, "BTC").total, Decimal::from(4));
+        assert_eq!(balance(state, "USDT").locked, Decimal::ZERO);
+        assert!(e.open_orders().is_empty());
+    }
+
+    #[test]
+    fn fok_partial_liquidity_rejects_without_fill() {
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "O1".into(),
+            fraction: Decimal::from_f64(0.4).unwrap(),
+        });
+        let mut order = order("O1", 10);
+        order.time_in_force = TimeInForce::Fok;
+
+        let out = e.process(ClientMessage::SubmitOrder(order), 1);
+
+        assert_eq!(reject_reason(&out), "fill-or-kill could not fully fill");
+        assert!(e.open_orders().is_empty());
+        assert!(e.account_snapshot(2).balances.is_empty());
+        assert!(e.positions().is_empty());
     }
 
     #[test]
@@ -1255,20 +1488,19 @@ mod tests {
     }
 
     #[test]
-    fn missing_instrument_books_position_only_no_panic() {
+    fn missing_instrument_rejects_without_booking_position() {
         let mut e = Engine::new();
         let order = order_with("O1", Side::Buy, "ETHUSDT", 10, Some(Decimal::from(100)));
         let out = e.process(ClientMessage::SubmitOrder(order), 1);
-        let state = account(&out, 2);
 
-        assert!(state.balances.is_empty());
-        let pos = position(state, "ETHUSDT");
-        assert_eq!(pos.quantity, Decimal::from(10));
-        assert_eq!(pos.avg_px, Decimal::from(100));
+        assert_eq!(reject_reason(&out), "unknown instrument");
+        assert!(e.account_snapshot(2).balances.is_empty());
+        assert!(e.positions().is_empty());
+        assert!(e.open_orders().is_empty());
     }
 
     #[test]
-    fn priceless_partial_market_buy_reserves_zero_quote() {
+    fn market_order_without_price_rejects_without_zero_price_fill() {
         let mut e = Engine::new();
         e.arm(Divergence::PartialFillNext {
             client_order_id: "O1".into(),
@@ -1276,15 +1508,10 @@ mod tests {
         });
         let order = order_with("O1", Side::Buy, "BTCUSDT", 10, None);
         let out = e.process(ClientMessage::SubmitOrder(order), 1);
-        let state = account(&out, 2);
 
-        let usdt = balance(state, "USDT");
-        assert_eq!(usdt.total, Decimal::ZERO);
-        assert_eq!(usdt.locked, Decimal::ZERO);
-        assert_eq!(usdt.free, Decimal::ZERO);
-
-        let pos = position(state, "BTCUSDT");
-        assert_eq!(pos.quantity, Decimal::from(5));
-        assert_eq!(pos.avg_px, Decimal::ZERO);
+        assert_eq!(reject_reason(&out), "submit price required");
+        assert!(e.account_snapshot(2).balances.is_empty());
+        assert!(e.positions().is_empty());
+        assert!(e.open_orders().is_empty());
     }
 }
