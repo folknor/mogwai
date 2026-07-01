@@ -1,8 +1,8 @@
-use mogwai_protocol::{AggressorSide, MarketRegime, TradeTick};
+use mogwai_protocol::{AggressorSide, MarketRegime, TradeTick, decimal_to_f64};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha12Rng;
 use rand_distr::{ChiSquared, Distribution, LogNormal, Normal, Weibull};
-use rust_decimal::{Decimal, prelude::FromPrimitive, prelude::ToPrimitive};
+use rust_decimal::{Decimal, prelude::FromPrimitive};
 use serde::Deserialize;
 
 use crate::{TickEvent, TickSource};
@@ -921,13 +921,20 @@ fn validate_f64(field: &'static str, value: f64, range: &MinMedianMax) -> Result
     }
 }
 
-// Saturating conversions: no internal generator draw can panic here. The
-// pinned size/price distributions keep draws far inside Decimal range in
-// practice, but a sufficiently extreme heavy-tail sample (or a NaN) would
-// make `Decimal::from_f64` return None, so we clamp to the nearest
+// Saturating f64 -> Decimal conversion: no internal generator draw can panic
+// here. The pinned size/price distributions keep draws far inside Decimal
+// range in practice, but a sufficiently extreme heavy-tail sample (or a NaN)
+// would make `Decimal::from_f64` return None, so we clamp to the nearest
 // representable value instead of unwrapping. NaN maps to zero (no sign to
 // preserve); +/-inf and out-of-range finite magnitudes saturate to
 // Decimal::MAX / Decimal::MIN by sign.
+//
+// Deliberately NOT unified with `mogwai_protocol::decimal_from_f64`, which
+// zeroes +/-inf instead of saturating (it has a test pinning that behaviour).
+// For a generated price/size, clamping an overflowed draw to a huge-but-valid
+// magnitude is a safer failure mode than collapsing it to zero, so this stays
+// local. The reverse direction (`decimal_to_f64`) is byte-identical in both
+// crates and is imported from the protocol helper instead of redefined here.
 fn decimal_from_f64(value: f64) -> Decimal {
     if let Some(decimal) = Decimal::from_f64(value) {
         return decimal;
@@ -939,10 +946,6 @@ fn decimal_from_f64(value: f64) -> Decimal {
     } else {
         Decimal::MIN
     }
-}
-
-fn decimal_to_f64(value: Decimal) -> f64 {
-    value.to_f64().unwrap_or(0.0)
 }
 
 fn round_lot_size(base: f64) -> Decimal {
