@@ -421,3 +421,24 @@ pub async fn next_data_event(
         .expect("data event arrives")
         .expect("sink open")
 }
+
+/// Like [`next_data_event`], but discards leading `DataEvent::Instrument`
+/// frames and returns the first event that is not one.
+///
+/// On connect the data client publishes its seeded instrument definitions to
+/// the sink before any trade or bar (`emit_seeded_instruments`), so nautilus
+/// caches the instrument first. That ordering is load-bearing, not incidental:
+/// broadarrow's executor refuses a bar whose instrument is absent from the
+/// cache. A transport test asserting the first TRADE must therefore skip past
+/// this instrument prologue rather than mistake it for the trade.
+pub async fn next_non_instrument_data_event(
+    rx: &mut UnboundedReceiver<DataEvent>,
+    timeout: Duration,
+) -> DataEvent {
+    loop {
+        match next_data_event(rx, timeout).await {
+            DataEvent::Instrument(_) => continue,
+            other => return other,
+        }
+    }
+}

@@ -30,14 +30,6 @@ Or both. There are no exceptions.
   would let cancel failures flow through the same path the fill/reject events
   already use.
 
-- mogwai-adapter `tests/data_client_transport.rs` carries two ignored,
-  deterministically-failing tests (`subscribe_and_request_drive_data_events`
-  and `http_polling_subscribe_fetches_trades_without_ws`): the data client
-  emits an `Instrument` event ahead of the expected `Trade` on connect/
-  subscribe, which the tests do not tolerate. Pre-existing, surfaced during the
-  bug-hunt - either the instrument-seeding-vs-trade-delivery ordering is wrong
-  or the tests need to tolerate the leading `Instrument`.
-
 ## Notes / gotchas
 
 - The offline Kraken corpus is trades only - no quotes, no L2, no aggressor side.

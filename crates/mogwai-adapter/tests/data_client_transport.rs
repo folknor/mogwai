@@ -24,7 +24,9 @@ mod common;
 
 use std::{sync::Arc, time::Duration};
 
-use common::{StubState, bound_stub, instrument_id, next_data_event};
+use common::{
+    StubState, bound_stub, instrument_id, next_data_event, next_non_instrument_data_event,
+};
 use mogwai_adapter::{MogwaiDataClient, MogwaiDataClientConfig};
 use mogwai_protocol::TransportProfile;
 use nautilus_common::{
@@ -86,9 +88,10 @@ async fn subscribe_and_request_drive_data_events() {
 
     // The stub pushes a trade after the Subscribe; it must reach the sink with
     // every field round-tripped (a wrong scaling, flipped aggressor or dropped
-    // ts would still be a Trade variant but is caught here).
+    // ts would still be a Trade variant but is caught here). The connect-time
+    // instrument prologue is skipped (see next_non_instrument_data_event).
     let timeout = Duration::from_secs(2);
-    match next_data_event(&mut sink_rx, timeout).await {
+    match next_non_instrument_data_event(&mut sink_rx, timeout).await {
         DataEvent::Data(Data::Trade(trade)) => {
             assert_eq!(trade.instrument_id, instrument_id());
             assert_eq!(trade.price, Price::from("100.00"));
@@ -178,8 +181,9 @@ async fn http_polling_subscribe_fetches_trades_without_ws() {
         ))
         .expect("subscribe trades");
 
+    // Skip the connect-time instrument prologue and assert the polled trade.
     let timeout = Duration::from_secs(2);
-    match next_data_event(&mut sink_rx, timeout).await {
+    match next_non_instrument_data_event(&mut sink_rx, timeout).await {
         DataEvent::Data(Data::Trade(trade)) => {
             assert_eq!(trade.instrument_id, instrument_id());
             assert_eq!(trade.price, Price::from("100.00"));
