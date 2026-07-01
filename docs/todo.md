@@ -49,3 +49,160 @@ Or both. There are no exceptions.
   offline-analysis input only (`analysis/`), never a server runtime knob.
 - `research/` (the nautilus and broadarrow clones) is gitignored; read those APIs
   from there, depend on the sibling `../` checkouts.
+
+## Hardcoded-value and env-var inventory (read-only sweep, 2026-07-01)
+
+Catalogue only, for later evaluation of what deserves to become a knob - nothing
+here was changed. Pervasive test-fixture literals (repeated `BTCUSDT`/`BTC`/
+`USDT`, golden seed 42, per-assertion timing tolerances) are summarised rather
+than enumerated line-by-line; production and config-relevant values are listed in
+full.
+
+### Environment variables (whole workspace)
+
+The Rust crates are deliberately env-var-free for runtime knobs; run config lives
+in `mogwai.toml`. The only reads:
+
+- `RUST_LOG` - `mogwai-server` via `EnvFilter::try_from_default_env`, falls back
+  to `mogwai=info`. The one documented, deliberate ambient exception; a prior
+  `MOGWAI_REPLAY_SPEED`/`MOGWAI_GAP_CAP_MS` pair was removed in favour of
+  `mogwai.toml`.
+- `NO_COLOR` - `mogwai-server/src/man.rs`, standard convention, `man`-output only.
+- `MOGWAI_DATA_DIR` - `analysis/characterize.py` and `analysis/recon.py`, default
+  `/media/folk/Banan/Kraken_Trading_History`. Offline-analysis input only, never a
+  server runtime knob. The default path string is duplicated verbatim in both
+  files (`recon.py` re-reads the env var instead of importing
+  `characterize.DATA_DIR` the way `run_corpus.py` does).
+- `CODEX_HOME` - `scripts/codex_common.py`, default `~/.codex`, orchestration
+  wrapper only.
+- Compile-time only (not runtime): `env!("CARGO_MANIFEST_DIR")` in
+  `mogwai-data/src/generated.rs` locates the baked-in `analysis/fingerprint.json`;
+  the server build script bakes `MOGWAI_LONG_VERSION` from `CARGO_PKG_VERSION`;
+  `CARGO_TARGET_TMPDIR`/`CARGO_BIN_EXE_mogwai` in server integration tests.
+
+### Cross-crate couplings worth reconciling
+
+- Default server address `127.0.0.1:8787` is hardcoded independently in three
+  places with no shared constant: the server's `--addr` default, the adapter's
+  `DEFAULT_BASE_URL = "ws://127.0.0.1:8787"`, and the smoke test's `HOST, PORT`.
+  Consistent today, but a port change needs three coordinated edits and nothing
+  flags a drift.
+- Correctly single-sourced from `mogwai-protocol` (the pattern to follow):
+  `DEFAULT_REQUEST_TIMEOUT_SECS` (30) and `MAX_HISTORY_LIMIT` (1000) - the adapter
+  references these rather than re-hardcoding them.
+- `default_instruments()` BTCUSDT seed lives in `mogwai-protocol` but its seven
+  literals are duplicated verbatim in two of that crate's own tests, and the smoke
+  test's fixed order shape implicitly depends on it.
+
+### mogwai-protocol (canonical wire defaults)
+
+Named consts, canonical: `DEFAULT_REQUEST_TIMEOUT_SECS = 30`, `MAX_HISTORY_LIMIT
+= 1000`, `BASELINE_LATENCY.base_nanos = 30_000_000` (30ms honest-feed latency
+floor), `MAX_LATENCY_NANOS = 60_000_000_000` (60s per-field ceiling),
+`control::MAX_DIVERGENCE_MS = 3_600_000` (1h DelayAcks/GoDark/StallData ceiling).
+
+Inline literals (no named const):
+- `default_instruments()`: symbol `BTCUSDT`, base `BTC`, quote `USDT`,
+  `price_precision 2`, `size_precision 8`, `price_increment 0.01`, `size_increment
+  1e-8`. Doc comment signposts growth to multi-instrument - prime externalisation
+  candidate.
+- `ConnHavoc::default()` transport bundle: `reconnect_delay_initial_ms 1_000`,
+  `reconnect_delay_max_ms 10_000`, `reconnect_backoff_factor 2.0`, idle/heartbeat/
+  jitter 0, `request_timeout_secs 0` (sentinel for the 30s default). Cross-checked
+  by the validator, so they move together.
+- Validator bounds inline in `validate_*`: VolStorm `vol_mult (0, 100]`,
+  LiquidityDrought `thin_factor [1, 1000]`, SessionEdgeSpike hour clamp and
+  `extra_vol_mult [0, 100]`, ReopenGap `halt_secs > 86_400` (the one temporal
+  bound NOT backed by a named const, unlike its sibling `MAX_DIVERGENCE_MS`),
+  PartialFillNext `fraction (0, 1]`.
+
+### mogwai-engine
+
+- `commission: Decimal::ZERO` booked on every fill unconditionally - no fee policy
+  or divergence path exists (notable for a crate whose stated purpose is injecting
+  realistic execution divergences).
+- No starting-balance concept: accounts start empty, balances derive purely from
+  fills; no funded-account setter exists.
+- Venue/trade id prefixes `V`/`T` as inline magic strings.
+- Test fixtures repeat `BTCUSDT`/`BTC`/`USDT`, a base price of 100, and
+  partial-fill fractions 0.3/0.4/0.5 across dozens of sites (no shared consts).
+
+### mogwai-server
+
+- Bind: `--addr` default `127.0.0.1:8787` (see coupling above); tests bind
+  `127.0.0.1:0`.
+- Filenames: `mogwai.log`; `mogwai.pid` (default duplicated on both `serve` and
+  `stop` args); `mogwai.toml` (fallback duplicated in `Config::load` and
+  `resolve_paths`).
+- HTTP route strings (`/health`, `/account`, `/instruments`, `/trades`,
+  `/quotes`, `/clock`, `/orders`, `/ws`, `/control/divergence`) as inline
+  literals, no shared registry with the adapter's route segments.
+- `Config::default()`: `speed 1.0`, `gap_cap_ms 1000`, `server_heartbeat_ms 0`,
+  `backfill_horizon_ns 86_400_000_000_000` (24h), `sim_epoch_ns 0`.
+- Lifecycle timeout consts: `READY_TIMEOUT 10s`, `SHUTDOWN_GRACE 2s`, `STOP_TIMEOUT
+  5s`, `STOP_KILL_GRACE 2s` (same value as SHUTDOWN_GRACE but a distinct phase),
+  `PID_POLL_INTERVAL 25ms`, `REPLAY_SEND_POLL 5ms`.
+- Channel capacity `1024` duplicated inline for the writer channel and the
+  exec-delay pump channel (different traffic classes, no shared const).
+- Synthesis limits: `MAX_HISTORY_SEEK_TICKS 190_000`, `CHECKPOINT_K 8192`. The
+  test-side `HORIZON_S 86_400.0` stands in for the production `backfill_horizon_ns`
+  default as a plain literal and can silently drift from it.
+
+### mogwai-adapter
+
+- `DEFAULT_BASE_URL = "ws://127.0.0.1:8787"` (see coupling above).
+- `MOGWAI_VENUE_STR = "MOGWAI"` (correctly single-sourced).
+- Default identity `TraderId`/`AccountId` `MOGWAI-001` in the exec config.
+- Timeout consts: HTTP `POLL_INTERVAL 250ms`, `ACCOUNT_REGISTRATION_TIMEOUT 5s`,
+  `ACCOUNT_REGISTRATION_POLL 10ms`, `MIN_WALL_REQUEST_TIMEOUT_SECS 1` (flagged in
+  its own comment as the tightest cap on usable sim speed). `wait_connected`
+  re-hardcodes an independent 5s/10ms pair matching the registration consts by
+  value but not sharing them.
+- `1_000_000_000` (nanos-per-second) repeated inline 5+ times across `client.rs`
+  and `lifecycle.rs` - a `NANOS_PER_SEC` const would remove the repetition.
+- Triplicated test `def()` instrument fixture (`price_precision 2`/`size_precision
+  8`) across three test modules.
+
+### mogwai-data (generator)
+
+Fingerprint/distribution constants are named module consts, fitted-and-committed
+by design (changing them re-shapes the synthetic market): ACD 0.9935 / 0.08 /
+Weibull shape 0.60, GARCH 0.06 / 0.935, Student-t df 4.0, bounce and drift
+transition probabilities, `SIZE_LOG_SIGMA 1.15`, `MAX_ABS_RETURN 2e-5`,
+`GARCH_SIGMA_CAP 1e-6`, anchor `START_PRICE_USD 60_000`, `VOL_SCALAR 5e-8`, and the
+precomputed `WEIBULL_MEAN_SHAPE_060` gamma normaliser. The real fingerprint numbers
+live in `analysis/fingerprint.json` (embedded via `include_str!`), not in Rust.
+
+Inline (not named): `xbtusd_anchor` fields `XBTUSD` / `modal_tick 0.1` /
+`price_decimals 1` (deliberately per-pair, kept in the constructor); the `1e9`
+mid-price runaway ceiling duplicated at two sites; `round_lot_size` thresholds
+(1.0 / 10.0 / 0.1). `seed`, checkpoint `k`, and `max_extend` have no production
+default here (caller-supplied by the server); seed `42` is the pervasive
+golden-test seed.
+
+### Non-crate (scripts, analysis, root config)
+
+- `scripts/smoke.py`: `HOST/PORT 127.0.0.1:8787` (no `--host`/`--port` override),
+  `WINDOW_LOOKBACK_NS 1h`, `ACCEL_DELAY_MS 1000`, `FIRST_GAP_SLACK_NS 2s`, fixed
+  order shape (`BTCUSDT`/`Limit`/qty 10/px 100), plus many inline per-assertion
+  socket timeouts and latency tolerances (not centralised; first place to look if
+  the smoke ever gets flaky).
+- Orchestration: `scripts/codex_common.py` `MODEL "gpt-5.5"` (workspace-wide pin,
+  no override), sandbox `workspace-write`, 30s transcript-match slack;
+  `codex-implement.py` effort `medium`, `codex-review.py` effort `xhigh`;
+  `prevent-harness-bug.sh` default sleep `60`.
+- Smoke fixture configs `smoke-accelerated.toml` (`speed 100.0`) and
+  `smoke-heartbeat.toml` (`server_heartbeat_ms 100`) - by-design knobs.
+- `analysis/`: `MAX_LAG 50` in `characterize.py` with `build_fingerprint.py`
+  hardcoding ACF indices `[9]`/`[49]` as lag10/lag50 (hidden coupling - changing
+  MAX_LAG silently breaks the indices); `TICK_DICT_CAP 500_000`, histogram bin
+  counts, `run_corpus.DEFAULT_PAIRS` (8-pair subset) with the worker pool capped at
+  6, `recon.TAIL_BYTES 8192`, `ANCHOR "XBTUSD"`, and a day-of-week convention
+  re-derived in three files instead of shared.
+- Root `Cargo.toml`: workspace dep version pins (serde 1, tokio 1, axum 0.8,
+  rust_decimal 1 with serde-with-str, rand 0.10, rand_distr 0.6, rand_chacha 0.10,
+  and the rest) centralised as workspace deps; `[profile.release]` opt-level 3 /
+  lto fat / codegen-units 1; `rust-version 1.96`, `resolver 3`. The nautilus
+  path-dep lives in `mogwai-adapter/Cargo.toml`, not root. `brokkr.toml` only sets
+  `project = "mogwai"`. Root `mogwai.toml` carries the four run knobs (`sim_epoch_ns
+  0`, `speed 1.0`, `gap_cap_ms 1000`, `server_heartbeat_ms 0`).
