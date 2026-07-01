@@ -483,7 +483,17 @@ impl GeneratedSource {
 
     fn next_latent_mid(&mut self) -> f64 {
         let normal = self.normal.sample(&mut self.rng);
-        let chi = self.chi_squared.sample(&mut self.rng);
+        // Guard against a chi-squared draw that underflows to exactly 0.0: an
+        // unguarded 0.0 denominator makes `student_t` `0.0/0.0 = NaN` when
+        // `normal` also happens to be 0.0, and `f64::clamp` propagates NaN
+        // through `base_return` into `mid`, poisoning the walk for the rest of
+        // the session. Astronomically unlikely from a continuous distribution,
+        // but cheap to close off (matches the `f64::MIN_POSITIVE` floors used
+        // elsewhere in this file for the same reason).
+        let chi = self
+            .chi_squared
+            .sample(&mut self.rng)
+            .max(f64::MIN_POSITIVE);
         let student_t = normal / (chi / STUDENT_T_DF).sqrt();
         self.vol.sigma2 = self.vol.a0
             + self.vol.a1 * self.vol.prev_return.powi(2)
@@ -530,6 +540,13 @@ impl GeneratedSource {
             // silently quoting a mid-priced trade.
             AggressorSide::NoAggressor => unreachable!("bounce only emits buyer or seller"),
         };
+        // `mid` is floored at one tick (see next_latent_mid), but drift_ticks
+        // is an unbounded accumulated random walk with no such floor: a long
+        // enough same-direction high-regime streak can push mid_ticks (and
+        // hence price_ticks) to zero or negative, quoting a zero/negative
+        // price. Clamp the quoted tick count the same way mid itself is
+        // clamped, so the drifted quote can never undercut one tick.
+        let price_ticks = price_ticks.max(1.0);
         let price = decimal_from_f64(price_ticks * self.tick_f64);
         (price.round_dp(self.scalars.price_decimals), side)
     }
@@ -733,6 +750,18 @@ impl RegimeState {
                 end_hour,
                 extra_vol_mult,
             }) => {
+                // `start_hour < end_hour` is enforced by
+                // mogwai_protocol::validate_market_regime, not here - this
+                // lockstep match trusts a validated regime reached it. A
+                // regime that bypasses the validator (a test fixture, or a
+                // future construction path) with an inverted window would
+                // silently produce a zero-width spike in vol_mult below; catch
+                // that in debug builds instead of staying silent.
+                debug_assert!(
+                    start_hour < end_hour,
+                    "SessionEdgeSpike window must satisfy start_hour < end_hour \
+                     (start_hour={start_hour}, end_hour={end_hour})"
+                );
                 state.edge = Some(EdgeSpike {
                     start_hour,
                     end_hour,

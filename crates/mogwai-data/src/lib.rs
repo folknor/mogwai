@@ -49,6 +49,15 @@ pub trait TickSource {
 
     /// Advance past ticks before `start_ts`, returning the first tick in the
     /// window. The default drains one tick at a time and keeps O(1) memory.
+    ///
+    /// Unbounded: a source whose `next_tick` never returns `None` (e.g.
+    /// [`GeneratedSource`]) spins forever if `start_ts` is unreachable or
+    /// simply far in the future, holding whatever lock the caller took to get
+    /// here. This default has no way to bound the walk without an API change
+    /// that would ripple to every implementer, so callers driving an
+    /// effectively-infinite source must wrap it with their own bound (the
+    /// server's checkpointed seek does this) rather than call `seek_to`
+    /// directly against an untrusted target.
     fn seek_to(&mut self, start_ts: u64) -> Option<TickEvent> {
         loop {
             let tick = self.next_tick()?;
@@ -137,6 +146,15 @@ pub fn parse_kraken_ts(field: &str) -> Option<u64> {
     let secs: u64 = sec.parse().ok()?;
     let mut nanos = 0u64;
     if !frac.is_empty() {
+        // Require the whole fractional field to be ASCII digits before
+        // truncating to ns resolution. This rejects trailing garbage past
+        // digit 9 instead of silently discarding it, and - since every ASCII
+        // digit is exactly one byte - guarantees `frac.len().min(9)` always
+        // lands on a char boundary, so a multi-byte character anywhere past
+        // byte 9 can no longer panic the slice.
+        if !frac.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
         let frac = &frac[..frac.len().min(9)]; // ns resolution
         let val: u64 = frac.parse().ok()?;
         nanos = val * 10u64.pow(9 - frac.len() as u32);
@@ -156,6 +174,13 @@ pub fn parse_kraken_line(symbol: &str, line: &str) -> Option<TradeTick> {
     let ts_event = parse_kraken_ts(cols.next()?)?;
     let price = Decimal::from_str(cols.next()?.trim()).ok()?;
     let size = Decimal::from_str(cols.next()?.trim()).ok()?;
+    // A syntactically valid but non-positive price/size is not a real trade -
+    // treat it the same as a malformed line so it never reaches the replay
+    // stream, where a zero/negative price would poison downstream ln-return
+    // math with -inf/NaN.
+    if price <= Decimal::ZERO || size <= Decimal::ZERO {
+        return None;
+    }
     Some(TradeTick {
         symbol: symbol.to_string(),
         price,
@@ -171,6 +196,11 @@ pub struct KrakenCsvSource {
     symbol: String,
     reader: BufReader<File>,
     buf: String,
+    /// `ts_event` of the last tick emitted, so a backward-stepping row (the
+    /// dump is assumed sorted ascending, but nothing upstream guarantees it)
+    /// can be caught here instead of silently corrupting `MergeSource`'s
+    /// "each head is its source's minimum" invariant downstream.
+    last_ts: Option<u64>,
 }
 
 impl KrakenCsvSource {
@@ -186,6 +216,7 @@ impl KrakenCsvSource {
             symbol,
             reader: BufReader::new(File::open(path)?),
             buf: String::new(),
+            last_ts: None,
         })
     }
 
@@ -215,6 +246,21 @@ impl TickSource for KrakenCsvSource {
                 Ok(_) => {}
             }
             if let Some(t) = parse_kraken_line(&self.symbol, &self.buf) {
+                if let Some(last_ts) = self.last_ts
+                    && t.ts_event < last_ts
+                {
+                    // A backward-stepping row would break the ascending
+                    // assumption every consumer (MergeSource's k-way merge,
+                    // replay pacing) relies on. Skip it and keep reading
+                    // rather than emit it and silently let time run
+                    // backwards downstream.
+                    eprintln!(
+                        "KrakenCsvSource({}): out-of-order row (ts {} < last {}), skipping",
+                        self.symbol, t.ts_event, last_ts
+                    );
+                    continue;
+                }
+                self.last_ts = Some(t.ts_event);
                 return Some(TickEvent::Trade(t));
             }
             // malformed line - skip and keep reading
@@ -347,6 +393,23 @@ mod tests {
     }
 
     #[test]
+    fn fractional_timestamp_with_multibyte_char_does_not_panic() {
+        // Regression: `frac[..frac.len().min(9)]` used to slice by byte index
+        // regardless of char boundaries. "12345678é9" is 11 bytes with `é`
+        // straddling bytes 8..10, so a naive byte-9 slice lands mid-character.
+        // The field is correctly rejected (non-digit), but must not panic.
+        assert_eq!(parse_kraken_ts("1.12345678é9"), None);
+    }
+
+    #[test]
+    fn fractional_timestamp_rejects_trailing_garbage() {
+        // Previously the field was truncated to 9 digits before validation, so
+        // garbage past digit 9 was silently discarded instead of failing the
+        // field like garbage within the first 9 digits already did.
+        assert_eq!(parse_kraken_ts("1.123456789xyzzy"), None);
+    }
+
+    #[test]
     fn parses_kraken_trade_line() {
         let t = parse_kraken_line("XBTUSD", "1743439968,4.8000000,2.63045\n").unwrap();
         assert_eq!(t.symbol, "XBTUSD");
@@ -363,6 +426,13 @@ mod tests {
         assert!(parse_kraken_line("X", "").is_none());
         assert!(parse_kraken_line("X", "   ").is_none());
         assert!(parse_kraken_line("X", "1743439968,onlytwo").is_none());
+    }
+
+    #[test]
+    fn nonpositive_price_or_size_is_rejected() {
+        assert!(parse_kraken_line("X", "1743439968,-4.8,2.6").is_none());
+        assert!(parse_kraken_line("X", "1743439968,4.8,0").is_none());
+        assert!(parse_kraken_line("X", "1743439968,0,2.6").is_none());
     }
 
     #[test]

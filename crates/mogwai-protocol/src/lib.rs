@@ -16,8 +16,9 @@ pub type VenueOrderId = String;
 
 /// Default per-request timeout in seconds for HTTP order entry. This is the
 /// value `ConnHavoc.request_timeout_secs == 0` documents as "keeps 30s"; the
-/// adapter hardcodes it in several places and should source it from here so the
-/// honest-transport default lives in exactly one spot.
+/// adapter sources every occurrence from this constant (`clock.rs`,
+/// `client.rs`'s `request_timeout_secs`) rather than repeating the literal, so
+/// the honest-transport default lives in exactly one spot.
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 
 /// Maximum number of trades a single `/trades` history page returns. The server
@@ -46,6 +47,17 @@ pub fn now_unix_nanos() -> u64 {
 
 /// Affine wall-to-simulated time map shared by the server, adapter, and the
 /// nautilus clock injected into broadarrow's live node.
+///
+/// The scaling step (`offset as f64 * speed` / `offset as f64 / speed` in
+/// `sim_ns`/`wall_ns`/`wall_span`) goes through `f64`, so it is only exact
+/// while the elapsed nanosecond offset (`wall_ns - wall_anchor_ns` or
+/// `sim_ns - sim_epoch_ns`) stays under 2^53 (~104 days of continuous span
+/// from the anchor). Past that the `as f64` cast drops low-order nanoseconds
+/// before scaling, and `sim_ns`/`wall_ns` stop being exact inverses of each
+/// other. Harmless for any realistic session length; noted here because the
+/// anchors themselves (`sim_epoch_ns`, `wall_anchor_ns`) stay `u64` end to end
+/// specifically to dodge this loss, so only the *offset* from the anchor is
+/// exposed to it.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SimClock {
     pub sim_epoch_ns: u64,
@@ -143,6 +155,28 @@ pub struct ServerClock {
     pub backfill_horizon_ns: u64,
 }
 
+/// API-boundary guard for `SimClock`, mirroring `validate_conn_havoc` /
+/// `validate_market_regime` / `validate_client_havoc` in style. `speed` must
+/// be finite and strictly positive.
+///
+/// `sim_ns`/`wall_ns`/`wall_span` all tolerate a non-finite or non-positive
+/// `speed` in memory (they fall back to the anchor instant rather than
+/// panic), so nothing in this type stops a degenerate `SimClock` from
+/// existing - but it cannot round-trip over the wire: serde_json serializes a
+/// non-finite `f64` as JSON `null`, and `null` fails to decode back into the
+/// bare `f64` field, wedging whichever end tries to parse it.
+/// `mogwai-server`'s own config-time check (`build_sim_clock`) already guards
+/// the configured speed before a `SimClock` is ever constructed there; this
+/// validator exists so any other sender of a `SimClock` - present or future -
+/// has the same one-line gate to call before serializing one, instead of
+/// reproducing the check ad hoc.
+pub fn validate_sim_clock(clock: &SimClock) -> Result<(), &'static str> {
+    if !clock.speed.is_finite() || clock.speed <= 0.0 {
+        return Err("speed must be finite and > 0.0");
+    }
+    Ok(())
+}
+
 fn scaled_f64_to_u64(value: f64) -> u64 {
     if value.is_nan() || value <= 0.0 {
         0
@@ -153,12 +187,18 @@ fn scaled_f64_to_u64(value: f64) -> u64 {
     }
 }
 
-/// Saturating `Decimal` -> `f64`: returns `0.0` when the conversion is `None`
-/// (the magnitude does not fit an `f64`). The data crate already carries a
-/// private reader with this exact contract; the adapter currently
-/// `.to_f64().expect(...)`s on the hot inbound fill/balance path, so a
-/// pathological wire `Decimal` panics the runtime instead of degrading. Hoisted
-/// here so both can converge on a non-panicking conversion.
+/// Saturating `Decimal` -> `f64`. `Decimal`'s max magnitude (~7.9e28) sits
+/// nowhere near `f64::MAX` (~1.8e308), so `to_f64()` cannot actually fail for
+/// any value the type can hold - the `unwrap_or(0.0)` fallback is defensive
+/// completeness, not a live safety net today. It is kept anyway because
+/// `0.0` is the worst possible sentinel for a price or quantity on the hot
+/// fill/balance path (a huge magnitude would silently read as zero rather
+/// than surface as an error), so if `Decimal`'s range or `f64`'s ever changed
+/// underneath this, this is the one place that assumption needs revisiting.
+/// The data crate carries a private reader with this exact contract; the
+/// adapter's `convert.rs` already calls this helper directly rather than the
+/// panicking `.to_f64().expect(...)` a pathological wire `Decimal` would
+/// otherwise take the runtime down with.
 #[must_use]
 pub fn decimal_to_f64(d: Decimal) -> f64 {
     use rust_decimal::prelude::ToPrimitive;
@@ -1574,6 +1614,86 @@ mod tests {
     fn default_request_timeout_secs_is_thirty() {
         assert_eq!(DEFAULT_REQUEST_TIMEOUT_SECS, 30);
     }
+
+    #[test]
+    fn validate_sim_clock_rejects_non_finite_and_non_positive_speed() {
+        let mut clock = SimClock::identity();
+        assert_eq!(validate_sim_clock(&clock), Ok(()));
+
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -1.0] {
+            clock.speed = bad;
+            assert_eq!(
+                validate_sim_clock(&clock),
+                Err("speed must be finite and > 0.0")
+            );
+        }
+    }
+
+    #[test]
+    fn validate_submit_order_bounds_quantity_and_limit_price() {
+        let base = SubmitOrder {
+            client_order_id: "O-1".into(),
+            symbol: "BTCUSDT".into(),
+            side: Side::Buy,
+            order_type: OrderType::Limit,
+            quantity: Decimal::ONE,
+            price: Some(Decimal::from(100)),
+            time_in_force: TimeInForce::Gtc,
+        };
+        validate_submit_order(&base).expect("well-formed limit order is valid");
+
+        let mut zero_qty = base.clone();
+        zero_qty.quantity = Decimal::ZERO;
+        assert_eq!(
+            validate_submit_order(&zero_qty),
+            Err("quantity must be > 0")
+        );
+
+        let mut negative_qty = base.clone();
+        negative_qty.quantity = Decimal::from(-1);
+        assert_eq!(
+            validate_submit_order(&negative_qty),
+            Err("quantity must be > 0")
+        );
+
+        let mut priceless_limit = base.clone();
+        priceless_limit.price = None;
+        assert_eq!(
+            validate_submit_order(&priceless_limit),
+            Err("Limit order must carry a price")
+        );
+
+        let mut zero_price = base.clone();
+        zero_price.price = Some(Decimal::ZERO);
+        assert_eq!(validate_submit_order(&zero_price), Err("price must be > 0"));
+
+        // A priceless Market order is legitimate (Nautilus MARKET orders carry
+        // no price).
+        let mut market = base;
+        market.order_type = OrderType::Market;
+        market.price = None;
+        validate_submit_order(&market).expect("priceless market order is valid");
+    }
+
+    #[test]
+    fn validate_modify_order_rejects_empty_and_nonpositive() {
+        assert_eq!(
+            validate_modify_order(None, None),
+            Err("ModifyOrder must set price and/or quantity")
+        );
+        assert_eq!(
+            validate_modify_order(Some(Decimal::ZERO), None),
+            Err("price must be > 0")
+        );
+        assert_eq!(
+            validate_modify_order(None, Some(Decimal::from(-1))),
+            Err("quantity must be > 0")
+        );
+        validate_modify_order(Some(Decimal::from(100)), None).expect("price-only amend is valid");
+        validate_modify_order(None, Some(Decimal::from(1))).expect("quantity-only amend is valid");
+        validate_modify_order(Some(Decimal::from(100)), Some(Decimal::from(1)))
+            .expect("both present and positive is valid");
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1585,6 +1705,47 @@ pub struct SubmitOrder {
     pub quantity: Decimal,
     pub price: Option<Decimal>,
     pub time_in_force: TimeInForce,
+}
+
+/// API-boundary guard for a `SubmitOrder`, mirroring `validate_conn_havoc` /
+/// `validate_market_regime` / `validate_divergence` / `validate_client_havoc`
+/// in style and message convention. `quantity` must be strictly positive, and
+/// a `Limit` order must carry a strictly positive `price` (a `Market` order's
+/// price is legitimately absent - Nautilus MARKET orders carry no price).
+///
+/// This is the crate's own gate, not a substitute for the venue-side check:
+/// `mogwai-engine`'s `validate_submit` is the authoritative, instrument-aware
+/// guard (grid alignment, instrument lookup, precision) and remains the last
+/// line of defense regardless of whether a caller runs this first.
+pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
+    if order.quantity <= Decimal::ZERO {
+        return Err("quantity must be > 0");
+    }
+    match order.price {
+        Some(price) if price <= Decimal::ZERO => Err("price must be > 0"),
+        None if order.order_type == OrderType::Limit => Err("Limit order must carry a price"),
+        _ => Ok(()),
+    }
+}
+
+/// API-boundary guard for a `ClientMessage::ModifyOrder`'s `price`/`quantity`
+/// pair, mirroring `validate_submit_order` in style. At least one of the two
+/// must be present - both absent decodes as a no-op amend that changes
+/// nothing - and whichever is present must be strictly positive.
+pub fn validate_modify_order(
+    price: Option<Decimal>,
+    quantity: Option<Decimal>,
+) -> Result<(), &'static str> {
+    if price.is_none() && quantity.is_none() {
+        return Err("ModifyOrder must set price and/or quantity");
+    }
+    if price.is_some_and(|p| p <= Decimal::ZERO) {
+        return Err("price must be > 0");
+    }
+    if quantity.is_some_and(|q| q <= Decimal::ZERO) {
+        return Err("quantity must be > 0");
+    }
+    Ok(())
 }
 
 /// Server → client messages (execution events + market data).

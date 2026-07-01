@@ -43,7 +43,6 @@ struct PositionState {
 struct Warned {
     missing_instrument: HashSet<Symbol>,
     zero_px: HashSet<Symbol>,
-    priceless_reservation: HashSet<Symbol>,
 }
 
 #[derive(Debug)]
@@ -185,7 +184,14 @@ impl Engine {
         // correctly spent rather than left armed to ambush a later resubmit of
         // the same id.
         let fill_fraction = self.fill_fraction(&order);
-        let last_qty = fill_quantity(&order, fill_fraction);
+        // `validate_submit` already confirmed the instrument exists; a missing
+        // entry here would mean `Decimal::ZERO`, which `floor_to_increment`
+        // treats as "not a grid" and passes the raw fraction through.
+        let size_increment = self
+            .instruments
+            .get(&order.symbol)
+            .map_or(Decimal::ZERO, |instrument| instrument.size_increment);
+        let last_qty = fill_quantity(&order, fill_fraction, size_increment);
         let leaves_qty = order.quantity - last_qty;
 
         if order.time_in_force == TimeInForce::Fok && leaves_qty > Decimal::ZERO {
@@ -311,6 +317,16 @@ impl Engine {
             return Err("price violates price increment".into());
         }
 
+        // No upstream layer bounds order size, and rust_decimal's `Mul` panics
+        // on overflow: `apply_fill`'s `last_qty * last_px` runs unconditionally
+        // once this order is accepted, so a notional this validator lets
+        // through must be one `apply_fill` can actually compute. Reject here,
+        // at the venue's front door, rather than let a single oversized order
+        // panic the engine mid-fill.
+        if order.quantity.checked_mul(price).is_none() {
+            return Err("order notional exceeds maximum representable value".into());
+        }
+
         Ok(())
     }
 
@@ -419,22 +435,67 @@ impl Engine {
             }];
         }
 
-        let (quantity, price, leaves_qty, submit_for_warning) = {
+        // Submit enforces the instrument's price/size grid; modify must too,
+        // or a resting order can drift to an off-grid price/quantity that a
+        // fresh submit would have rejected outright (and that off-grid state
+        // then goes out on the wire via `OrderUpdated`).
+        let Some(instrument) = self.instruments.get(&order.submit.symbol) else {
+            return vec![ServerMessage::OrderModifyRejected {
+                client_order_id,
+                venue_order_id: Some(venue_order_id),
+                reason: "unknown instrument".into(),
+                ts_event: ts,
+            }];
+        };
+
+        if !on_increment(new_total, instrument.size_increment) {
+            return vec![ServerMessage::OrderModifyRejected {
+                client_order_id,
+                venue_order_id: Some(venue_order_id),
+                reason: "quantity violates size increment".into(),
+                ts_event: ts,
+            }];
+        }
+
+        // Every resting order carries a price (submit requires it, modify
+        // never clears it), but `price.or(existing)` is spelled out rather
+        // than unwrapped so this validation degrades instead of panicking if
+        // that invariant is ever loosened.
+        let effective_price = price.or(order.submit.price);
+        if let Some(effective_price) = effective_price {
+            if !on_increment(effective_price, instrument.price_increment) {
+                return vec![ServerMessage::OrderModifyRejected {
+                    client_order_id,
+                    venue_order_id: Some(venue_order_id),
+                    reason: "price violates price increment".into(),
+                    ts_event: ts,
+                }];
+            }
+
+            // Same overflow guard as `validate_submit`: `locked_balances`
+            // multiplies `leaves_qty * price` for every open buy order on
+            // every snapshot, including the one this very modify emits below,
+            // so an unbounded notional here panics immediately rather than in
+            // some later, harder-to-trace fill.
+            if new_total.checked_mul(effective_price).is_none() {
+                return vec![ServerMessage::OrderModifyRejected {
+                    client_order_id,
+                    venue_order_id: Some(venue_order_id),
+                    reason: "order notional exceeds maximum representable value".into(),
+                    ts_event: ts,
+                }];
+            }
+        }
+
+        let (quantity, price, leaves_qty) = {
             let order = &mut self.open[pos];
             if price.is_some() {
                 order.submit.price = price;
             }
             order.submit.quantity = new_total;
             order.leaves_qty = new_total - filled;
-            (
-                order.submit.quantity,
-                order.submit.price,
-                order.leaves_qty,
-                order.submit.clone(),
-            )
+            (order.submit.quantity, order.submit.price, order.leaves_qty)
         };
-
-        self.warn_priceless_reservation(&submit_for_warning);
 
         vec![
             ServerMessage::OrderUpdated {
@@ -541,11 +602,16 @@ impl Engine {
 
             match order.submit.side {
                 Side::Buy => {
-                    let reservation = order
+                    // A resting order's price is never `None`: `validate_submit`
+                    // requires it for every submit (market included - see
+                    // `on_submit`'s doc), and `on_modify` only ever sets it,
+                    // never clears it.
+                    let price = order
                         .submit
                         .price
-                        .map_or(Decimal::ZERO, |price| order.leaves_qty * price);
-                    *locked.entry(instrument.quote.clone()).or_default() += reservation;
+                        .expect("resting order price is always Some");
+                    *locked.entry(instrument.quote.clone()).or_default() +=
+                        order.leaves_qty * price;
                 }
                 Side::Sell => {
                     *locked.entry(instrument.base.clone()).or_default() += order.leaves_qty;
@@ -565,19 +631,6 @@ impl Engine {
     fn warn_zero_px(&mut self, symbol: &str) {
         if self.warned.zero_px.insert(symbol.into()) {
             tracing::warn!(%symbol, "account fill booked with zero price");
-        }
-    }
-
-    fn warn_priceless_reservation(&mut self, order: &SubmitOrder) {
-        if order.side == Side::Buy
-            && order.price.is_none()
-            && self
-                .warned
-                .priceless_reservation
-                .insert(order.symbol.clone())
-        {
-            let symbol = order.symbol.as_str();
-            tracing::warn!(%symbol, "resting buy order has no price to reserve");
         }
     }
 
@@ -644,13 +697,19 @@ fn same_sign(a: Decimal, b: Decimal) -> bool {
     (a > Decimal::ZERO && b > Decimal::ZERO) || (a < Decimal::ZERO && b < Decimal::ZERO)
 }
 
-fn fill_quantity(order: &SubmitOrder, fill_fraction: Decimal) -> Decimal {
+fn fill_quantity(order: &SubmitOrder, fill_fraction: Decimal, size_increment: Decimal) -> Decimal {
     // Defensive guard against an unvalidated `PartialFillNext.fraction`.
     // Public control validation rejects out-of-range fractions, but the engine
     // still protects its arithmetic so direct callers cannot emit zero,
     // negative, or over-sized fills.
     let candidate = (order.quantity * fill_fraction).min(order.quantity);
-    if candidate <= Decimal::ZERO {
+    // Re-align to the instrument's size grid: `quantity * fraction` has no
+    // reason to land on a size-increment multiple, and a real venue's tick
+    // rules could never produce a fill (or the resulting leaves_qty) off that
+    // grid. Floor rather than round so the fill never exceeds the fraction
+    // the divergence asked for.
+    let aligned = floor_to_increment(candidate, size_increment);
+    if aligned <= Decimal::ZERO {
         let symbol = order.symbol.as_str();
         tracing::warn!(
             %symbol,
@@ -658,12 +717,38 @@ fn fill_quantity(order: &SubmitOrder, fill_fraction: Decimal) -> Decimal {
         );
         order.quantity
     } else {
-        candidate
+        aligned
+    }
+}
+
+/// Floors `value` down to the nearest multiple of `increment`. Used to keep a
+/// diverged partial fill on the instrument's size grid; `increment <= 0` is
+/// not a valid grid, so it passes `value` through unchanged rather than
+/// dividing by a non-positive number.
+fn floor_to_increment(value: Decimal, increment: Decimal) -> Decimal {
+    if increment <= Decimal::ZERO {
+        return value;
+    }
+    match value.checked_div(increment) {
+        Some(steps) => steps.trunc() * increment,
+        None => value,
     }
 }
 
 fn on_increment(value: Decimal, increment: Decimal) -> bool {
-    increment > Decimal::ZERO && (value / increment).fract() == Decimal::ZERO
+    if increment <= Decimal::ZERO {
+        return false;
+    }
+    // `checked_div` rather than `/`: rust_decimal's `Div` panics on overflow,
+    // and nothing upstream bounds order quantity/price, so a wildly oversized
+    // value (still grid-aligned in principle) must fail this check instead of
+    // taking down the engine. A value that cannot even be divided by the
+    // increment without overflowing is not on the grid as far as this venue
+    // is concerned.
+    match value.checked_div(increment) {
+        Some(ratio) => ratio.fract() == Decimal::ZERO,
+        None => false,
+    }
 }
 
 /// Distinguishes a cancel/modify target that was never a real order from one
