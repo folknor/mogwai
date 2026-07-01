@@ -19,7 +19,16 @@ rand = "0.10"
 rust_decimal.workspace = true
 tokio.workspace = true
 tokio-tungstenite = "0.29"
-tracing.workspace = true
+# The `log` feature bridges this crate's `tracing` diagnostics onto the `log`
+# facade. The adapter's only runtime host is the broadarrow ba-worker, which
+# installs nautilus_common's global `log` backend and NO tracing subscriber, so
+# without this bridge every `tracing::warn!` here (dropped fills/positions, the
+# A.11 unsurfaced rejects, unrepresentable balances, and omitted status reports)
+# is discarded unseen. With it, tracing events fall back to emitting `log` records
+# when no subscriber consumes them, so they reach the worker log alongside
+# nautilus' own lines; where a subscriber IS present (mogwai-server) they still
+# go there instead.
+tracing = { workspace = true, features = ["log"] }
 ustr = "1.1.0"
 
 nautilus-common = { path = "../../../nautilus_trader/crates/common", default-features = false }
