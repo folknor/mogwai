@@ -39,8 +39,9 @@ use nautilus_model::{
     data::{Bar, BarType, Data, bar::get_bar_interval_ns},
     enums::{LiquiditySide, OmsType, OrderSide, OrderStatus, OrderType, PositionSideSpecified},
     events::{
-        AccountState as NautilusAccountState, OrderAccepted, OrderCanceled, OrderEventAny,
-        OrderFilled, OrderModifyRejected, OrderRejected, OrderSubmitted, OrderUpdated,
+        AccountState as NautilusAccountState, OrderAccepted, OrderCancelRejected, OrderCanceled,
+        OrderEventAny, OrderFilled, OrderModifyRejected, OrderRejected, OrderSubmitted,
+        OrderUpdated,
     },
     identifiers::{AccountId, ClientId, ClientOrderId, InstrumentId, TradeId, Venue, VenueOrderId},
     orders::Order,
@@ -1879,19 +1880,38 @@ impl MogwaiExecutionClient {
                         .await;
                     }
                     Err(err) => {
-                        dispatch_havoc(
-                            &mut filter,
-                            reject_for(&cmd, &err, ctx.sim),
-                            ctx.sim,
-                            |msg| async {
+                        if let ExecWsCommand::Cancel { client_order_id } = &cmd {
+                            // A cancel that fails at transport never reached
+                            // the venue: the order is still live there (or
+                            // its fate is simply unknown), not rejected
+                            // outright. Routing this through
+                            // ServerMessage::OrderRejected (as Submit/Modify
+                            // legitimately do) would flip a live
+                            // Accepted/PartiallyFilled order to a terminal
+                            // Rejected state in both the mirror and
+                            // nautilus - wrong business semantics, and an
+                            // invalid state transition for PartiallyFilled
+                            // orders specifically. The failure is also purely
+                            // local (the venue never saw the request), so
+                            // there is nothing for the venue-havoc pipeline
+                            // to model; report it straight to nautilus as a
+                            // cancel rejection instead.
+                            emit_cancel_rejected(client_order_id, err.to_string(), &ctx);
+                        } else {
+                            dispatch_havoc(
+                                &mut filter,
+                                reject_for(&cmd, &err, ctx.sim),
+                                ctx.sim,
+                                |msg| async {
+                                    handle_exec_message(msg, &ctx);
+                                },
+                            )
+                            .await;
+                            flush_havoc(&mut filter, ctx.sim, |msg| async {
                                 handle_exec_message(msg, &ctx);
-                            },
-                        )
-                        .await;
-                        flush_havoc(&mut filter, ctx.sim, |msg| async {
-                            handle_exec_message(msg, &ctx);
-                        })
-                        .await;
+                            })
+                            .await;
+                        }
                     }
                 }
             }));
@@ -2238,6 +2258,25 @@ impl ExecutionClient for MogwaiExecutionClient {
             })
             .filter(|(_, record)| in_time_range(record.ts_last, cmd.start, cmd.end))
             .filter_map(|(client_order_id, record)| {
+                // A Submitted order with no venue ack yet carries no
+                // venue_order_id. `VenueOrderId::from("")` routes through the
+                // panicking `VenueOrderId::new`, which nautilus's own
+                // `#[should_panic]` empty-string test confirms rejects the
+                // empty string - so a `None` cannot be papered over with a
+                // placeholder here. There is also nothing venue-side to
+                // reconcile yet for an order the venue has not acknowledged,
+                // so the record is dropped from this report set (with a
+                // warning) rather than risk a bogus/duplicate venue id
+                // corrupting the reconciliation manager's venue-order-id
+                // index.
+                let venue_order_id = record.venue_order_id.or_else(|| {
+                    tracing::warn!(
+                        order = %client_order_id,
+                        status = ?record.status,
+                        "omitting order status report: no venue order id yet (unacked submit)"
+                    );
+                    None
+                })?;
                 // A record whose mirrored quantity/filled_qty cannot represent
                 // as a nautilus Quantity (hostile magnitude/precision off the
                 // wire) is dropped from the report set with a warning rather
@@ -2266,9 +2305,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                     self.core.account_id,
                     record.instrument_id,
                     Some(*client_order_id),
-                    record
-                        .venue_order_id
-                        .unwrap_or_else(|| VenueOrderId::from("")),
+                    venue_order_id,
                     record.order_side,
                     record.order_type,
                     record.time_in_force,
@@ -2408,17 +2445,19 @@ fn exec_command_to_client_message(cmd: ExecWsCommand) -> ClientMessage {
     }
 }
 
+/// Maps a transport-level failure (the HTTP POST for the command never got a
+/// venue reply) onto the `ServerMessage` shape `handle_exec_message` already
+/// knows how to turn into a nautilus event. Only valid for `Submit`/`Modify`:
+/// a failed `Cancel` is not a full order rejection (the order is still live,
+/// or its fate is simply unknown) and is handled by `emit_cancel_rejected`
+/// before the call site ever reaches this function - see the comment at the
+/// `dispatch_order` call site.
 fn reject_for(cmd: &ExecWsCommand, err: &anyhow::Error, sim: SimClock) -> ServerMessage {
     let reason = err.to_string();
     let ts_event = now_unix_nanos(sim).as_u64();
     match cmd {
         ExecWsCommand::Submit(order) => ServerMessage::OrderRejected {
             client_order_id: order.client_order_id.clone(),
-            reason,
-            ts_event,
-        },
-        ExecWsCommand::Cancel { client_order_id } => ServerMessage::OrderRejected {
-            client_order_id: client_order_id.clone(),
             reason,
             ts_event,
         },
@@ -2430,7 +2469,54 @@ fn reject_for(cmd: &ExecWsCommand, err: &anyhow::Error, sim: SimClock) -> Server
             reason,
             ts_event,
         },
+        ExecWsCommand::Cancel { client_order_id } => unreachable!(
+            "cancel transport failures are reported via emit_cancel_rejected, \
+             not reject_for (client_order_id={client_order_id})"
+        ),
     }
+}
+
+/// Reports a `Cancel` command that failed at transport (never reached the
+/// venue) as a nautilus `OrderCancelRejected`, without touching the mirrored
+/// order's status. Unlike a submit rejection, a failed cancel does not mean
+/// the order is dead: nautilus's own order FSM restores the pre-cancel status
+/// on `CancelRejected` (see `orders/mod.rs`'s
+/// `(PendingCancel, CancelRejected) => PendingCancel` transition), so the
+/// mirror must likewise leave `record.status` untouched - the order is still
+/// whatever it was (Accepted, PartiallyFilled, ...) before the cancel was
+/// attempted.
+fn emit_cancel_rejected(client_order_id: &str, reason: String, ctx: &ExecContext) {
+    let client_order_id = ClientOrderId::from(client_order_id);
+    let ts_event = now_unix_nanos(ctx.sim);
+    let Some(record) = order_record(&ctx.state, client_order_id) else {
+        // Same limitation as OrderRejected/OrderModifyRejected (A.11): the
+        // mirror lacks the order, so we have no real strategy_id/
+        // instrument_id, and a placeholder would be silently dropped by
+        // nautilus `Order.apply` strategy-id validation. Make the drop
+        // visible rather than silent.
+        tracing::warn!(
+            order = %client_order_id,
+            reason = %reason,
+            "cancel rejected for an order the mirror does not know; \
+             reject not surfaced to nautilus (A.11)"
+        );
+        return;
+    };
+    let event = OrderCancelRejected::new(
+        ctx.trader_id,
+        record.strategy_id,
+        record.instrument_id,
+        client_order_id,
+        reason.into(),
+        UUID4::new(),
+        ts_event,
+        now_unix_nanos(ctx.sim),
+        false,
+        record.venue_order_id,
+        Some(ctx.account_id),
+    );
+    ctx.emitter
+        .send_order_event(OrderEventAny::CancelRejected(event));
 }
 
 #[derive(Clone)]
@@ -2480,8 +2566,7 @@ impl OrderRecord {
         &self,
         instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     ) -> anyhow::Result<nautilus_model::types::Quantity> {
-        let precision = instrument_def(instruments, &symbol_from_instrument(self.instrument_id))
-            .map_or(8, |def| def.size_precision);
+        let precision = report_size_precision(instruments, self.instrument_id)?;
         convert::quantity(self.quantity, precision)
     }
 
@@ -2489,10 +2574,26 @@ impl OrderRecord {
         &self,
         instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     ) -> anyhow::Result<nautilus_model::types::Quantity> {
-        let precision = instrument_def(instruments, &symbol_from_instrument(self.instrument_id))
-            .map_or(8, |def| def.size_precision);
+        let precision = report_size_precision(instruments, self.instrument_id)?;
         convert::quantity(self.filled_qty, precision)
     }
+}
+
+/// The instrument's real `size_precision`, or an error on a cache miss.
+///
+/// A guessed default (this used to fall back to a bare `8`) can silently
+/// misrepresent a report's quantity precision against the real instrument -
+/// exactly the class of hostile/unrepresentable-data problem `convert.rs`
+/// otherwise takes care to surface rather than paper over. Both call sites
+/// already thread the `anyhow::Result` through a `filter_map` that warns and
+/// drops the one report on error, so surfacing the miss here costs nothing.
+fn report_size_precision(
+    instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
+    instrument_id: InstrumentId,
+) -> anyhow::Result<u8> {
+    instrument_def(instruments, &symbol_from_instrument(instrument_id))
+        .map(|def| def.size_precision)
+        .with_context(|| format!("no instrument def cached for {instrument_id}"))
 }
 
 #[derive(Debug, Clone)]
@@ -2954,11 +3055,28 @@ fn handle_account_state(state: mogwai_protocol::AccountState, ctx: &ExecContext)
                     })
                     .ok()
             };
-            Some(AccountBalance::new(
-                convert_amount(balance.total, "total")?,
-                convert_amount(balance.locked, "locked")?,
-                convert_amount(balance.free, "free")?,
-            ))
+            let total = convert_amount(balance.total, "total")?;
+            let locked = convert_amount(balance.locked, "locked")?;
+            let free = convert_amount(balance.free, "free")?;
+            // `AccountBalance::new` hard-asserts `locked + free == total` and
+            // panics otherwise. A havoc'd/messy AccountState can carry
+            // inconsistent amounts, and even a self-consistent wire decimal
+            // snapshot can fail the fixed-point check after each amount is
+            // independently rounded to currency precision above. Route
+            // through new_checked and drop just this currency's balance
+            // (matching convert_amount's own drop-with-warning discipline)
+            // rather than panicking the unsupervised exec task.
+            match AccountBalance::new_checked(total, locked, free) {
+                Ok(balance) => Some(balance),
+                Err(err) => {
+                    tracing::warn!(
+                        currency = %balance.currency,
+                        error = %err,
+                        "dropping account balance: locked + free != total"
+                    );
+                    None
+                }
+            }
         })
         .collect();
 
@@ -4233,6 +4351,31 @@ mod tests {
         }
         let record = order_record(&ctx.state, ClientOrderId::from("O-1")).expect("order record");
         assert_eq!(record.status, OrderStatus::Rejected);
+    }
+
+    #[test]
+    fn http_cancel_failure_reports_cancel_rejected_without_touching_status() {
+        // A cancel failing at transport must not be reported as a full order
+        // rejection (bug-hunt A.3): the order never heard back from the
+        // venue, so it is still whatever it was before the cancel attempt.
+        let (ctx, mut rx) = exec_context();
+        let err = anyhow::anyhow!("connection refused");
+
+        emit_cancel_rejected("O-1", err.to_string(), &ctx);
+
+        match rx.try_recv().expect("cancel rejected event") {
+            ExecutionEvent::Order(OrderEventAny::CancelRejected(event)) => {
+                assert_eq!(event.client_order_id, ClientOrderId::from("O-1"));
+                assert_eq!(event.reason.as_str(), "connection refused");
+            }
+            other => panic!("expected cancel rejected event, got {other:?}"),
+        }
+        let record = order_record(&ctx.state, ClientOrderId::from("O-1")).expect("order record");
+        assert_eq!(
+            record.status,
+            OrderStatus::Submitted,
+            "a failed cancel must leave the mirrored order status untouched"
+        );
     }
 
     #[test]

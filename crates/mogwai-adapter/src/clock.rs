@@ -306,6 +306,21 @@ impl MogwaiTimer {
 
                 if let Some(sender) = sender.as_ref() {
                     sender.send(TimeEventHandler::new(event, callback.clone()));
+                } else if callback.is_local() {
+                    // A `RustLocal` callback wraps an `Rc`, sound to create,
+                    // clone, drop, and invoke only from its originating
+                    // thread (nautilus_common::timer's own doc comment on
+                    // `TimeEventCallback::is_local`). This loop runs inside a
+                    // spawned tokio task, which the multi-threaded runtime is
+                    // free to schedule onto any worker thread, so without a
+                    // sender to hand the event back to the originating
+                    // thread there is no safe way to invoke a local callback
+                    // here. Drop it with a warning rather than risk a
+                    // cross-thread `Rc` race.
+                    tracing::warn!(
+                        timer = %name,
+                        "dropping time event: no time event sender and callback is thread-local"
+                    );
                 } else {
                     callback.call(event);
                 }

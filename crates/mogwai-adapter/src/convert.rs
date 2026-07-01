@@ -95,7 +95,20 @@ pub(crate) fn trade_tick(
         price(t.price, def.price_precision)?,
         quantity(t.size, def.size_precision)?,
         aggressor(t.aggressor),
-        TradeId::from(format!("{}-{}", t.symbol, t.ts_event)),
+        // The wire `TradeTick` carries no exchange-assigned sequence number,
+        // and the adapter's own `PollCursor` explicitly tolerates multiple
+        // trades sharing one `ts_event` (see its doc comment in client.rs).
+        // Keying the id on symbol+ts_event alone collides for any two such
+        // trades. Folding in price/size/aggressor as well does not make the
+        // id truly unique (two distinct trades could in principle share all
+        // five fields at the same nanosecond), but it closes the collision
+        // for the common case PollCursor exists to handle - genuinely
+        // distinct trades landing on the same tick - at zero cost, since all
+        // five fields are already on the wire.
+        TradeId::from(format!(
+            "{}-{}-{}-{}-{:?}",
+            t.symbol, t.ts_event, t.price, t.size, t.aggressor
+        )),
         UnixNanos::from(t.ts_event),
         ts_init,
     ))
@@ -188,9 +201,41 @@ mod tests {
 
         assert_eq!(tick.price.precision, 2);
         assert_eq!(tick.size.precision, 8);
-        assert_eq!(tick.trade_id, TradeId::from("BTCUSDT-42"));
+        assert_eq!(
+            tick.trade_id,
+            TradeId::from("BTCUSDT-42-123.456-0.001-Buyer")
+        );
         assert_eq!(tick.ts_event, UnixNanos::from(42));
         assert_eq!(tick.ts_init, UnixNanos::from(7));
+    }
+
+    #[test]
+    fn trade_id_disambiguates_same_ts_event_trades() {
+        // bug-hunt A.4: keying the id on symbol+ts_event alone collided for
+        // any two trades landing on the same nanosecond - exactly the case
+        // the adapter's own PollCursor is built to tolerate. Folding in
+        // price/size/aggressor must keep two such trades distinct.
+        let def = def();
+        let id = instrument_id(&def);
+        let first = mogwai_protocol::TradeTick {
+            symbol: "BTCUSDT".into(),
+            price: Decimal::new(10_000, 2),
+            size: Decimal::new(1, 0),
+            aggressor: MogwaiAggressorSide::Buyer,
+            ts_event: 42,
+        };
+        let second = mogwai_protocol::TradeTick {
+            symbol: "BTCUSDT".into(),
+            price: Decimal::new(10_100, 2),
+            size: Decimal::new(2, 0),
+            aggressor: MogwaiAggressorSide::Seller,
+            ts_event: 42,
+        };
+
+        let first_tick = trade_tick(&first, id, &def, UnixNanos::from(0)).expect("converts");
+        let second_tick = trade_tick(&second, id, &def, UnixNanos::from(0)).expect("converts");
+
+        assert_ne!(first_tick.trade_id, second_tick.trade_id);
     }
 
     #[test]

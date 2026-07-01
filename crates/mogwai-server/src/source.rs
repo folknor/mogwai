@@ -170,9 +170,20 @@ fn positioned_generator(
         && let Some(target) = seek_target
         && target > data_origin
     {
-        let mut store = checkpoint_store()
-            .lock()
-            .expect("checkpoint store mutex poisoned");
+        // A panic mid-synthesis (a pathological configured scalar/regime,
+        // arithmetic overflow) while this `std::Mutex` is held would otherwise
+        // poison it permanently: every later checkpoint-path call - price-less
+        // market orders, seeked `/trades`, every live `Subscribe` - would
+        // `.expect` its way into the same panic forever, turning one transient
+        // fault into a standing partial outage. Recovering the guard instead
+        // means at worst the entry the panicking call was updating is left
+        // stale (a later seek against exactly that `(symbol, data_origin)` can
+        // repeat the fault), while every other entry, and that one once it is
+        // naturally re-derived, keeps serving.
+        let mut store = checkpoint_store().lock().unwrap_or_else(|poisoned| {
+            tracing::error!("checkpoint store mutex recovered from a prior panic");
+            poisoned.into_inner()
+        });
         let index = store
             .entry((profile.def.symbol.clone(), data_origin))
             .or_insert_with(|| {

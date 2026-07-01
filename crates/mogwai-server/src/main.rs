@@ -43,7 +43,7 @@ use mogwai_engine::Engine;
 use mogwai_protocol::{
     AccountState, ClientMessage, InstrumentDef, MAX_HISTORY_LIMIT, MarketRegime, OrderType,
     QuoteTick, ServerClock, ServerMessage, SimClock, TradeTick, control::Divergence,
-    validate_divergence, validate_market_regime,
+    validate_divergence, validate_market_regime, validate_modify_order, validate_submit_order,
 };
 use nix::{
     errno::Errno,
@@ -919,7 +919,7 @@ async fn arm_divergence(
         }
         Divergence::ClearDivergences => {
             // Lift both server-owned temporal windows process-wide. `0` is the
-            // cleared sentinel: `delay_ms == 0` skips the writer's delay sleep,
+            // cleared sentinel: `delay_ms == 0` skips the exec pump's delay sleep,
             // and `now_ns() < 0` is never true so the dark and data-stall
             // guards are off. There is no backlog to replay because gated
             // frames are dropped.
@@ -991,19 +991,84 @@ async fn clock(State(state): State<AppState>) -> Json<ServerClock> {
 /// venue's own current synthesized price. A LIMIT order's price is left
 /// untouched: the engine's "submit price required" rejection is correct for a
 /// limit, it only over-reached for the price-less market case.
-fn stamp_market_price(msg: ClientMessage, state: &AppState) -> ClientMessage {
+///
+/// Synthesis (`positioned_generator` -> `source_at_or_before`) locks the
+/// process-global checkpoint mutex and, on a cold/deep index, walks up to
+/// `MAX_HISTORY_SEEK_TICKS`. `/trades` already pushes the identical synthesis
+/// onto `spawn_blocking` rather than running it inline on the tokio worker
+/// (see `trades` above); this does the same, so a burst of price-less market
+/// orders cannot stall the runtime's worker pool or serialize behind a seeked
+/// `/trades` request (or vice versa) any longer than the shared mutex itself
+/// requires.
+async fn stamp_market_price(msg: ClientMessage, state: &AppState) -> ClientMessage {
     let ClientMessage::SubmitOrder(mut order) = msg else {
         return msg;
     };
     if order.order_type == OrderType::Market && order.price.is_none() {
-        order.price = source::current_price(
-            &order.symbol,
-            &state.profiles,
-            state.data_origin_ns,
-            sim_now_ns(state.sim),
-        );
+        let symbol = order.symbol.clone();
+        let profiles = Arc::clone(&state.profiles);
+        let data_origin = state.data_origin_ns;
+        let sim_now = sim_now_ns(state.sim);
+        order.price = match tokio::task::spawn_blocking(move || {
+            source::current_price(&symbol, &profiles, data_origin, sim_now)
+        })
+        .await
+        {
+            Ok(price) => price,
+            Err(e) => {
+                tracing::error!(%e, "market price synthesis task failed");
+                None
+            }
+        };
     }
     ClientMessage::SubmitOrder(order)
+}
+
+/// Run one order-entry command (`SubmitOrder`/`ModifyOrder`/`CancelOrder`)
+/// through the protocol-boundary validators before it ever reaches the
+/// engine, the same way `arm_divergence` calls `validate_divergence` and the
+/// subscription/history paths call `validate_market_regime` before touching
+/// server or engine state. A `SubmitOrder` with a non-positive quantity or a
+/// priceless limit, or a `ModifyOrder` that sets neither field, is rejected
+/// right here as a synthesized `OrderRejected`/`OrderModifyRejected` - never
+/// reaching `stamp_market_price` or the engine mutex - instead of leaning on
+/// the engine's own (correct, but redundant) defensive checks. `CancelOrder`
+/// has no protocol-boundary validator and passes straight through. Shared by
+/// both order-entry surfaces (`POST /orders` and the `/ws` handling below) so
+/// the gate lives in exactly one place.
+async fn process_order_cmd(order_cmd: ClientMessage, state: &AppState) -> Vec<ServerMessage> {
+    let ts = sim_now_ns(state.sim);
+    match &order_cmd {
+        ClientMessage::SubmitOrder(order) => {
+            if let Err(reason) = validate_submit_order(order) {
+                return vec![ServerMessage::OrderRejected {
+                    client_order_id: order.client_order_id.clone(),
+                    reason: reason.to_string(),
+                    ts_event: ts,
+                }];
+            }
+        }
+        ClientMessage::ModifyOrder {
+            client_order_id,
+            price,
+            quantity,
+        } => {
+            if let Err(reason) = validate_modify_order(*price, *quantity) {
+                return vec![ServerMessage::OrderModifyRejected {
+                    client_order_id: client_order_id.clone(),
+                    venue_order_id: None,
+                    reason: reason.to_string(),
+                    ts_event: ts,
+                }];
+            }
+        }
+        ClientMessage::CancelOrder { .. } => {}
+        ClientMessage::Subscribe { .. } | ClientMessage::Unsubscribe { .. } => {
+            unreachable!("callers route Subscribe/Unsubscribe away before process_order_cmd")
+        }
+    }
+    let order_cmd = stamp_market_price(order_cmd, state).await;
+    state.engine.lock().await.process(order_cmd, ts)
 }
 
 /// HTTP order-entry surface for profiles that do not use `/ws` for orders.
@@ -1015,15 +1080,7 @@ async fn submit_order_http(
         ClientMessage::Subscribe { .. } | ClientMessage::Unsubscribe { .. } => {
             Err(StatusCode::BAD_REQUEST)
         }
-        order_cmd => {
-            let order_cmd = stamp_market_price(order_cmd, &state);
-            let events = state
-                .engine
-                .lock()
-                .await
-                .process(order_cmd, sim_now_ns(state.sim));
-            Ok(Json(events))
-        }
+        order_cmd => Ok(Json(process_order_cmd(order_cmd, &state).await)),
     }
 }
 
@@ -1173,6 +1230,10 @@ async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
 /// concurrently: every outbound [`ServerMessage`] funnels through one mpsc
 /// channel drained by a single writer task. Order commands are processed inline
 /// against the engine; `Subscribe` spawns a replay feeding the same channel.
+/// Execution events (the engine's own output) take one extra hop through a
+/// dedicated delay pump before landing in that channel, so an armed
+/// `DelayAcks` window paces only execution traffic - see the pump below for
+/// why that hop exists.
 async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::channel::<ServerMessage>(1024);
@@ -1187,20 +1248,19 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // seam (E.6); the handles are tracked and reaped so threads cannot pile up
     // under connect/subscribe/disconnect churn (E.7).
     let mut replays: HashMap<String, Replay> = HashMap::new();
-    let delay_ms = Arc::clone(&state.delay_ms);
     let dark_until_ns = Arc::clone(&state.dark_until_ns);
     let stall_until_ns = Arc::clone(&state.stall_until_ns);
     let sim = state.sim;
 
+    // `tx`/`rx` is the single channel the writer below drains and serializes
+    // onto the socket - market data (replay threads, heartbeat) sends land in
+    // it directly. Execution events take one extra hop through `exec_tx`/
+    // `exec_pump` so a `DelayAcks` sleep never blocks the writer's own
+    // `rx.recv()` loop (see the pump below).
+    let (exec_tx, mut exec_rx) = mpsc::channel::<ServerMessage>(1024);
+
     let writer = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            let is_heartbeat = matches!(msg, ServerMessage::Heartbeat { .. });
-            if !is_heartbeat && is_execution_event(&msg) {
-                let delay = delay_ms.load(Ordering::Relaxed);
-                if delay > 0 {
-                    tokio::time::sleep(sim.wall_duration(sim_duration_from_millis(delay))).await;
-                }
-            }
             let now = sim_now_ns(sim);
             if now < dark_until_ns.load(Ordering::Relaxed) {
                 continue;
@@ -1220,6 +1280,34 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             };
             if sink.send(Message::Text(payload.into())).await.is_err() {
                 break; // client gone
+            }
+        }
+    });
+
+    // Delays queued execution events without head-of-line-blocking the
+    // market-data feed behind them. The writer above used to `sleep` inline
+    // on an execution event before its next `rx.recv()`, which stalled every
+    // tick already queued behind it for the entire armed `DelayAcks` window
+    // (up to one hour) - and, on disconnect, kept the writer (and this
+    // connection's teardown) parked for whatever remained of that sleep even
+    // though the socket was already gone. This dedicated pump instead reads
+    // exec events (only ever sent here, via `exec_tx`, by the order-entry
+    // handling below) off its own channel, sleeps for the currently-armed
+    // delay, then forwards into `tx` - so a long delay only holds up further
+    // exec traffic, never the ticks/heartbeats flowing straight into `tx`.
+    // Sequential by construction (one `while` loop over `exec_rx`), so
+    // exec-event order is preserved exactly as it was in the old inline path.
+    let exec_delay_ms = Arc::clone(&state.delay_ms);
+    let exec_sim = state.sim;
+    let exec_out = tx.clone();
+    let exec_pump = tokio::spawn(async move {
+        while let Some(msg) = exec_rx.recv().await {
+            let delay = exec_delay_ms.load(Ordering::Relaxed);
+            if delay > 0 {
+                tokio::time::sleep(exec_sim.wall_duration(sim_duration_from_millis(delay))).await;
+            }
+            if exec_out.send(msg).await.is_err() {
+                break; // writer gone
             }
         }
     });
@@ -1272,11 +1360,23 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     // shared channel after the new generator starts. Without the
                     // join the old thread - blocked in a send or mid-`next_tick`
                     // - could deliver an out-of-order/duplicate tick at the seam
-                    // (E.6).
-                    if let Some(old) = replays.remove(&symbol) {
+                    // (E.6). The join alone only stops the old thread from
+                    // enqueuing anything ELSE, though - whatever it already
+                    // enqueued before the cancel lands stays in the shared
+                    // channel. `resume_floor` carries that thread's last
+                    // successfully-sent `ts_event` (if it sent one) forward, so
+                    // the replacement's own seek starts strictly past it instead
+                    // of re-sampling a `sim_now` that could land at-or-before an
+                    // already-delivered tick.
+                    let resume_floor = if let Some(old) = replays.remove(&symbol) {
+                        let last_sent = old.last_sent_ts.load(Ordering::Relaxed);
                         quiesce_replay(old).await;
-                    }
+                        (last_sent != NO_TICK_SENT).then_some(last_sent)
+                    } else {
+                        None
+                    };
                     let cancel = Arc::new(AtomicBool::new(false));
+                    let last_sent_ts = Arc::new(AtomicU64::new(NO_TICK_SENT));
                     let handle = spawn_replay(ReplaySpawn {
                         symbol: symbol.clone(),
                         start_ts,
@@ -1288,8 +1388,17 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         data_origin: state.data_origin_ns,
                         tx: tx.clone(),
                         cancel: Arc::clone(&cancel),
+                        resume_floor,
+                        last_sent_ts: Arc::clone(&last_sent_ts),
                     });
-                    replays.insert(symbol, Replay { cancel, handle });
+                    replays.insert(
+                        symbol,
+                        Replay {
+                            cancel,
+                            handle,
+                            last_sent_ts,
+                        },
+                    );
                 }
             }
             ClientMessage::Unsubscribe { symbols } => {
@@ -1300,14 +1409,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             }
             order_cmd => {
-                let order_cmd = stamp_market_price(order_cmd, &state);
-                let events = state
-                    .engine
-                    .lock()
-                    .await
-                    .process(order_cmd, sim_now_ns(state.sim));
+                let events = process_order_cmd(order_cmd, &state).await;
                 for ev in events {
-                    if tx.send(ev).await.is_err() {
+                    debug_assert!(
+                        is_execution_event(&ev),
+                        "order-entry events are always execution-category, never market data"
+                    );
+                    if exec_tx.send(ev).await.is_err() {
                         break;
                     }
                 }
@@ -1335,6 +1443,18 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             tracing::warn!(%e, "heartbeat task did not shut down cleanly");
         }
     }
+    // Abort rather than let the pump drain gracefully: the client is already
+    // gone, so an execution event still sleeping out an armed `DelayAcks`
+    // window has nowhere to go. This is what keeps a disconnect from lingering
+    // for the rest of that sleep - the pump held the only remaining sleep in
+    // this connection, so once it is torn down `writer.await` below returns
+    // promptly instead of waiting out up to an hour of armed delay.
+    exec_pump.abort();
+    if let Err(e) = exec_pump.await
+        && !e.is_cancelled()
+    {
+        tracing::warn!(%e, "exec delay pump did not shut down cleanly");
+    }
     drop(tx);
     if let Err(e) = writer.await {
         tracing::warn!(%e, "writer task did not shut down cleanly");
@@ -1349,8 +1469,14 @@ fn spawn_heartbeat(
     tx: mpsc::Sender<ServerMessage>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval =
-            tokio::time::interval(sim.wall_duration(sim_duration_from_millis(interval_ms)));
+        let period = sim.wall_duration(sim_duration_from_millis(interval_ms));
+        // `tokio::time::interval` fires its first tick immediately rather than
+        // after one period, so a plain `interval(period)` would emit a
+        // `Heartbeat` at t=0 the instant the socket opens - before the client
+        // has even sent its first `Subscribe`, and one full interval earlier
+        // than every tick after it. `interval_at` with an explicit first
+        // deadline one period out keeps the cadence uniform from the start.
+        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         loop {
             interval.tick().await;
             if tx
@@ -1367,12 +1493,20 @@ fn spawn_heartbeat(
 }
 
 /// A live per-symbol replay stream: the cancel flag the handler raises to stop
-/// it, plus the OS-thread handle so the stream can be joined (reaped) rather than
-/// detached and left to linger.
+/// it, the OS-thread handle so the stream can be joined (reaped) rather than
+/// detached and left to linger, and the last `ts_event` it successfully sent
+/// (or [`NO_TICK_SENT`] if none yet) so a resubscribe of this symbol can seek
+/// its replacement strictly past whatever this stream already delivered.
 struct Replay {
     cancel: Arc<AtomicBool>,
     handle: std::thread::JoinHandle<()>,
+    last_sent_ts: Arc<AtomicU64>,
 }
+
+/// Sentinel `last_sent_ts` for a replay that has not yet sent a tick. A real
+/// `ts_event` this large is not reachable within the tape's lifetime, so it is
+/// distinguishable from any genuine timestamp without an `Option` wrapper.
+const NO_TICK_SENT: u64 = u64::MAX;
 
 /// Maximum wall time a replay thread parks while the outbound channel is full
 /// before it re-checks its cancel flag. Bounds how long a cancelled stream can
@@ -1424,6 +1558,37 @@ struct ReplaySpawn {
     data_origin: u64,
     tx: mpsc::Sender<ServerMessage>,
     cancel: Arc<AtomicBool>,
+    /// The predecessor stream's last successfully-sent `ts_event` for this
+    /// symbol, when this spawn replaces one quiesced just now. `None` for a
+    /// symbol with no in-flight predecessor (nothing to resume past).
+    resume_floor: Option<u64>,
+    /// Where this stream records its own last successfully-sent `ts_event`,
+    /// read back by the handler if IT is quiesced by a future resubscribe.
+    last_sent_ts: Arc<AtomicU64>,
+}
+
+/// The seek target a replay thread hands to `build_live_source`.
+///
+/// A live continuation (`start_ts: None`) that replaces a just-quiesced stream
+/// for this symbol must not re-seek to a freshly-sampled `sim_now` unguarded:
+/// quiescing only stops the OLD thread from enqueuing anything further, it
+/// does not purge what it already enqueued, so a fresh `sim_now` seek could
+/// land at-or-before that already-delivered tick (a duplicate) or skip
+/// everything between it and `sim_now` (a gap). `resume_floor` is that
+/// predecessor's last successfully-sent `ts_event`; seeking one nanosecond
+/// past it - unconditionally, not clamped to a freshly-sampled `sim_now` -
+/// resumes the exact same walk exactly where the predecessor left off,
+/// rather than fast-forwarding past whatever it hadn't gotten to generate yet
+/// (which a `.max(sim_now)` would silently skip). An explicit `start_ts` is a
+/// deliberate historical/resume request from the client and is honored as
+/// given, never adjusted by a floor meant for the no-`start_ts`
+/// live-continuation case.
+fn resume_seek_target(start_ts: Option<u64>, resume_floor: Option<u64>) -> Option<u64> {
+    match (start_ts, resume_floor) {
+        (Some(ts), _) => Some(ts),
+        (None, Some(floor)) => Some(floor.saturating_add(1)),
+        (None, None) => None,
+    }
 }
 
 /// Stream generated trades for one symbol as market data into `tx`, returning
@@ -1446,6 +1611,8 @@ fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
         data_origin,
         tx,
         cancel,
+        resume_floor,
+        last_sent_ts,
     } = spawn;
     std::thread::spawn(move || {
         let symbols = [symbol.clone()];
@@ -1456,12 +1623,40 @@ fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
         // backfill replayed at real-time gaps, and a reconnect resumes the same
         // walk at its cursor rather than resetting the price to `start_price`.
         let sim_now = sim.sim_ns(now_ns());
-        let Some(mut merged) =
-            source::build_live_source(&symbols, start_ts, regime, &profiles, data_origin, sim_now)
-        else {
+        let seek_start_ts = resume_seek_target(start_ts, resume_floor);
+        let Some(mut merged) = source::build_live_source(
+            &symbols,
+            seek_start_ts,
+            regime,
+            &profiles,
+            data_origin,
+            sim_now,
+        ) else {
             return;
         };
         tracing::info!(%symbol, ?start_ts, sim_now, data_origin, ?regime, "replay started");
+
+        // Every pacing deadline below is anchored to ONE monotonic `Instant`,
+        // paired with ONE wall-clock read, taken here at thread start. Each
+        // branch converts a wall-clock deadline (unix-nanos) into an offset from
+        // this pairing and sleeps against the `Instant` rather than re-reading
+        // the wall clock per tick - which is what makes pacing immune to an
+        // NTP/leap step mid-session: nothing after this line consults
+        // `CLOCK_REALTIME` again, so a backward step can no longer make the
+        // feed stall (a huge `deadline - now`) and a forward step can no longer
+        // make it burst (`deadline <= now` unpaced).
+        let wall_anchor = now_ns();
+        let instant_anchor = Instant::now();
+        let sleep_until_wall = |target_wall_ns: u64| {
+            if target_wall_ns <= wall_anchor {
+                return;
+            }
+            let target = instant_anchor + Duration::from_nanos(target_wall_ns - wall_anchor);
+            let now = Instant::now();
+            if target > now {
+                std::thread::sleep(target - now);
+            }
+        };
 
         // Identity pacing (the `else if speed > 0.0` branch below) sleeps the
         // inter-tick gap measured from the PREVIOUS tick; with no previous tick
@@ -1476,16 +1671,23 @@ fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
         // before its target - that is backfill and should replay promptly, so it
         // keeps the `None` seed and the first tick emits at once.
         let mut prev_ts: Option<u64> = start_ts.is_none().then_some(sim_now);
+        // Accumulates the identity/speed branch's absolute schedule as
+        // `wall_anchor`-relative deadlines, rather than resetting a fresh
+        // relative sleep off every tick. A per-tick relative sleep never
+        // accounts for the time already spent generating/sending the previous
+        // tick, so over a long session the realized spacing (gap + generation +
+        // scheduling) would progressively lag real wall-clock time. Chaining
+        // deadlines instead - each the last deadline plus this tick's wait -
+        // removes that drift: a slow iteration simply arrives at an
+        // already-past deadline and does not sleep, rather than pushing every
+        // later deadline back by the overrun.
+        let mut next_deadline_wall: Option<u64> = None;
         while let Some(tick) = merged.next_tick() {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
             if !sim.is_identity() {
-                let deadline = sim.wall_ns(tick.ts_event());
-                let now = now_ns();
-                if deadline > now {
-                    std::thread::sleep(Duration::from_nanos(deadline - now));
-                }
+                sleep_until_wall(sim.wall_ns(tick.ts_event()));
             } else if speed > 0.0 {
                 if let Some(prev) = prev_ts {
                     let gap_ns = tick.ts_event().saturating_sub(prev);
@@ -1498,9 +1700,11 @@ fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
                     if gap_cap_ms > 0 {
                         wait_ns = wait_ns.min(gap_cap_ms.saturating_mul(1_000_000));
                     }
-                    if wait_ns > 0 {
-                        std::thread::sleep(Duration::from_nanos(wait_ns));
-                    }
+                    let deadline = next_deadline_wall
+                        .unwrap_or(wall_anchor)
+                        .saturating_add(wait_ns);
+                    sleep_until_wall(deadline);
+                    next_deadline_wall = Some(deadline);
                 }
                 prev_ts = Some(tick.ts_event());
             }
@@ -1508,6 +1712,7 @@ fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
+            let ts_event = tick.ts_event();
             let msg = match tick {
                 TickEvent::Trade(t) => ServerMessage::Trade(t),
                 TickEvent::Quote(q) => ServerMessage::Quote(q),
@@ -1515,6 +1720,7 @@ fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
             if send_cancellable(&tx, msg, &cancel).is_err() {
                 break; // client gone or stream cancelled
             }
+            last_sent_ts.store(ts_event, Ordering::Relaxed);
         }
         tracing::info!(%symbol, "replay finished");
     })
@@ -1756,7 +1962,7 @@ mod tests {
 
     #[test]
     fn account_state_is_delayed_as_an_execution_event() {
-        // The `DelayAcks` writer path delays everything `is_execution_event`
+        // The `DelayAcks` exec-pump path delays everything `is_execution_event`
         // accepts. `AccountState` is an account/execution event, so it must be
         // delayed alongside fills and order-lifecycle events - not treated as
         // market data the way trades and quotes are. This is the server side of
@@ -1825,6 +2031,34 @@ mod tests {
         assert_eq!(window_until_ns(now, 0), now);
         assert_eq!(window_until_ns(now, 250), 1_250_000_000);
         assert_eq!(window_until_ns(now, u64::MAX), u64::MAX);
+    }
+
+    /// Pins the E.6 seam fix: an explicit `start_ts` is a deliberate
+    /// historical/resume request and must be honored exactly, never nudged by
+    /// a floor meant only for the no-`start_ts` live-continuation case.
+    #[test]
+    fn resume_seek_target_honors_explicit_start_ts() {
+        assert_eq!(resume_seek_target(Some(100), Some(50)), Some(100));
+        assert_eq!(resume_seek_target(Some(100), None), Some(100));
+    }
+
+    /// A live continuation (`start_ts: None`) with no in-flight predecessor for
+    /// this symbol has nothing to resume past, so it falls through unchanged -
+    /// `build_live_source` seeks its own freshly-sampled `sim_now`.
+    #[test]
+    fn resume_seek_target_passes_through_with_no_predecessor() {
+        assert_eq!(resume_seek_target(None, None), None);
+    }
+
+    /// The seam this closes: a quiesced predecessor's last successfully-sent
+    /// tick sits at `floor`. Seeking exactly at `floor` would re-deliver that
+    /// tick (a duplicate); seeking to any freshly-sampled `sim_now` ahead of
+    /// `floor + 1` would skip whatever the predecessor never got a chance to
+    /// send (a gap). `floor + 1`, unconditionally, is the only target that
+    /// does neither - it does not even consult `sim_now`.
+    #[test]
+    fn resume_seek_target_resumes_past_a_quiesced_predecessor() {
+        assert_eq!(resume_seek_target(None, Some(500)), Some(501));
     }
 
     #[tokio::test]
@@ -2136,6 +2370,8 @@ mod tests {
             data_origin: now_ns(),
             tx,
             cancel: Arc::clone(&cancel),
+            resume_floor: None,
+            last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
         });
         // First tick arrives, confirming the stream is live and feeding the
         // default instrument.
@@ -2147,7 +2383,12 @@ mod tests {
 
         // Cancel + join must complete: the thread, even if parked behind the
         // bounded channel, observes the flag within one send-poll and exits.
-        quiesce_replay(Replay { cancel, handle }).await;
+        quiesce_replay(Replay {
+            cancel,
+            handle,
+            last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
+        })
+        .await;
     }
 
     /// Re-subscribing a symbol whose stream is parked behind a full channel still
@@ -2179,10 +2420,17 @@ mod tests {
             data_origin: now_ns(),
             tx,
             cancel: Arc::clone(&cancel),
+            resume_floor: None,
+            last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
         });
 
         let started = Instant::now();
-        quiesce_replay(Replay { cancel, handle }).await;
+        quiesce_replay(Replay {
+            cancel,
+            handle,
+            last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
+        })
+        .await;
         // A few send-poll intervals of slack; a plain `blocking_send` would have
         // parked forever here because `_rx` never drains.
         assert!(
@@ -2237,6 +2485,8 @@ mod tests {
             data_origin: EPOCH,
             tx,
             cancel: Arc::clone(&cancel),
+            resume_floor: None,
+            last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
         });
 
         let first = rx.recv().await.expect("a tick");
@@ -2257,6 +2507,11 @@ mod tests {
             "ts_event {ts_event} below sim epoch {EPOCH}"
         );
 
-        quiesce_replay(Replay { cancel, handle }).await;
+        quiesce_replay(Replay {
+            cancel,
+            handle,
+            last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
+        })
+        .await;
     }
 }
