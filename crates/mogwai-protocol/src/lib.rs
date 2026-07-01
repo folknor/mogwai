@@ -289,7 +289,18 @@ pub struct HavocSpec {
 /// heartbeat / idle / request-timeout / quota fields). A clean default is a
 /// production-shaped reconnecting transport; hostile values drive realistic
 /// transport pathologies.
+///
+/// `#[serde(default)]` at the container fills any OMITTED field from
+/// `ConnHavoc::default()`, so a partial `[havoc.conn]` table (arming one knob,
+/// e.g. only `heartbeat_interval_ms`) loads the way partial `[havoc.client]`
+/// and `[havoc.data]` tables already do. It must be the CONTAINER default, not
+/// per-field: per-field `#[serde(default)]` pulls each field type's own
+/// `Default` (`0.0` for `reconnect_backoff_factor`, `0` for the delays), and a
+/// zeroed `reconnect_backoff_factor` fails `validate_conn_havoc`. The container
+/// default routes every omission through this struct's `Default` impl, which
+/// carries the real production-shaped values (`1.0`s/`2.0` factor).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ConnHavoc {
     /// Idle read timeout in ms. If no inbound application-data frame arrives
     /// within this window, the socket is declared dead and reconnected. Ping
@@ -1166,6 +1177,32 @@ mod tests {
         assert!(decoded.server.is_empty());
         assert_eq!(decoded.data, None);
         assert_eq!(decoded.conn, ConnHavoc::default());
+    }
+
+    #[test]
+    fn partial_conn_havoc_fills_omitted_fields_from_default() {
+        // An operator arming ONE conn knob (here `heartbeat_interval_ms`) must
+        // not be forced to spell out the other eight fields. A partial
+        // `[havoc.conn]` table fills every omission from `ConnHavoc::default()`
+        // (the container `#[serde(default)]`), matching how partial
+        // `[havoc.client]` / `[havoc.data]` tables already load, and the result
+        // still passes `validate_conn_havoc` - which a per-field default would
+        // NOT, since it would zero `reconnect_backoff_factor` below its 1.0 floor.
+        let decoded: ConnHavoc = serde_json::from_str(r#"{"heartbeat_interval_ms":2000}"#).unwrap();
+        assert_eq!(
+            decoded,
+            ConnHavoc {
+                heartbeat_interval_ms: 2000,
+                ..ConnHavoc::default()
+            }
+        );
+        assert_eq!(validate_conn_havoc(&decoded), Ok(()));
+
+        // The same partial table nested one level up, as it arrives on a real
+        // `[havoc]` scenario, resolves identically.
+        let spec: HavocSpec =
+            serde_json::from_str(r#"{"conn":{"heartbeat_interval_ms":2000}}"#).unwrap();
+        assert_eq!(spec.conn, decoded);
     }
 
     #[test]
