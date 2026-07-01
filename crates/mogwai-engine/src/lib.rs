@@ -364,9 +364,18 @@ impl Engine {
                 ServerMessage::AccountState(self.snapshot(ts)),
             ]
         } else {
-            vec![ServerMessage::OrderRejected {
+            // The order is not resting, so there is nothing to cancel: it is
+            // either unknown or already terminal (the no-book engine fills a
+            // limit on accept, so it can be gone before a cancel arrives). This
+            // is a CANCEL rejection, not an ORDER rejection - emitting
+            // OrderRejected here would drive the adapter (and nautilus) to flip
+            // an already-filled order to Rejected, an invalid transition.
+            // Mirror on_modify's OrderModifyRejected path with venue_order_id
+            // absent (the engine no longer holds the removed order's venue id).
+            vec![ServerMessage::OrderCancelRejected {
                 reason: terminal_or_unknown_reason(&self.seen_client_order_ids, &client_order_id),
                 client_order_id,
+                venue_order_id: None,
                 ts_event: ts,
             }]
         }
@@ -841,6 +850,13 @@ mod tests {
     fn reject_reason(out: &[ServerMessage]) -> &str {
         let [ServerMessage::OrderRejected { reason, .. }] = out else {
             panic!("expected one order reject")
+        };
+        reason
+    }
+
+    fn cancel_reject_reason(out: &[ServerMessage]) -> &str {
+        let [ServerMessage::OrderCancelRejected { reason, .. }] = out else {
+            panic!("expected one order cancel reject")
         };
         reason
     }
@@ -1371,7 +1387,7 @@ mod tests {
             2,
         );
         assert_eq!(
-            reject_reason(&out),
+            cancel_reject_reason(&out),
             "order already terminal (filled or canceled)"
         );
 
@@ -1381,7 +1397,7 @@ mod tests {
             },
             3,
         );
-        assert_eq!(reject_reason(&out), "unknown order");
+        assert_eq!(cancel_reject_reason(&out), "unknown order");
     }
 
     #[test]

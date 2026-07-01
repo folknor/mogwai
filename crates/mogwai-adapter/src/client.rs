@@ -1896,7 +1896,13 @@ impl MogwaiExecutionClient {
                             // there is nothing for the venue-havoc pipeline
                             // to model; report it straight to nautilus as a
                             // cancel rejection instead.
-                            emit_cancel_rejected(client_order_id, err.to_string(), &ctx);
+                            emit_cancel_rejected(
+                                ClientOrderId::from(client_order_id.as_str()),
+                                None,
+                                err.to_string(),
+                                now_unix_nanos(ctx.sim),
+                                &ctx,
+                            );
                         } else {
                             dispatch_havoc(
                                 &mut filter,
@@ -2476,18 +2482,30 @@ fn reject_for(cmd: &ExecWsCommand, err: &anyhow::Error, sim: SimClock) -> Server
     }
 }
 
-/// Reports a `Cancel` command that failed at transport (never reached the
-/// venue) as a nautilus `OrderCancelRejected`, without touching the mirrored
-/// order's status. Unlike a submit rejection, a failed cancel does not mean
-/// the order is dead: nautilus's own order FSM restores the pre-cancel status
-/// on `CancelRejected` (see `orders/mod.rs`'s
-/// `(PendingCancel, CancelRejected) => PendingCancel` transition), so the
-/// mirror must likewise leave `record.status` untouched - the order is still
-/// whatever it was (Accepted, PartiallyFilled, ...) before the cancel was
-/// attempted.
-fn emit_cancel_rejected(client_order_id: &str, reason: String, ctx: &ExecContext) {
-    let client_order_id = ClientOrderId::from(client_order_id);
-    let ts_event = now_unix_nanos(ctx.sim);
+/// Reports a rejected `Cancel` as a nautilus `OrderCancelRejected` without
+/// touching the mirrored order's status. Serves both origins:
+///
+/// - a `Cancel` that failed at TRANSPORT (the HTTP POST never reached the
+///   venue): `ts_event` is sim-now and `wire_venue_order_id` is `None`, and
+/// - a venue-originated `ServerMessage::OrderCancelRejected` (the engine could
+///   not honor the cancel): `ts_event` is the venue's stamp and the wire may
+///   name the venue id.
+///
+/// Unlike a submit rejection, a failed cancel does not mean the order is dead:
+/// nautilus's own order FSM restores the pre-cancel status on `CancelRejected`
+/// (see `orders/mod.rs`'s `(PendingCancel, CancelRejected) => PendingCancel`
+/// transition), so the mirror must likewise leave `record.status` untouched -
+/// the order is still whatever it was (Accepted, PartiallyFilled, ...) before
+/// the cancel was attempted. The emitted venue id prefers the wire value and
+/// falls back to the mirror's, so a wire `None` on a known order still carries
+/// the id the adapter already holds.
+fn emit_cancel_rejected(
+    client_order_id: ClientOrderId,
+    wire_venue_order_id: Option<VenueOrderId>,
+    reason: String,
+    ts_event: UnixNanos,
+    ctx: &ExecContext,
+) {
     let Some(record) = order_record(&ctx.state, client_order_id) else {
         // Same limitation as OrderRejected/OrderModifyRejected (A.11): the
         // mirror lacks the order, so we have no real strategy_id/
@@ -2512,7 +2530,7 @@ fn emit_cancel_rejected(client_order_id: &str, reason: String, ctx: &ExecContext
         ts_event,
         now_unix_nanos(ctx.sim),
         false,
-        record.venue_order_id,
+        wire_venue_order_id.or(record.venue_order_id),
         Some(ctx.account_id),
     );
     ctx.emitter
@@ -2861,6 +2879,25 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
             );
             ctx.emitter
                 .send_order_event(OrderEventAny::ModifyRejected(event));
+        }
+        ServerMessage::OrderCancelRejected {
+            client_order_id,
+            venue_order_id,
+            reason,
+            ts_event,
+        } => {
+            // A venue-originated cancel rejection. emit_cancel_rejected leaves
+            // the mirror's status untouched (nautilus restores the pre-cancel
+            // status) and handles the unknown-order (A.11) drop, exactly as the
+            // transport-failure path does - the only differences are the wire
+            // timestamp and the possibly-named venue id, both passed through.
+            emit_cancel_rejected(
+                ClientOrderId::from(client_order_id),
+                venue_order_id.map(VenueOrderId::from),
+                reason,
+                UnixNanos::from(ts_event),
+                ctx,
+            );
         }
         ServerMessage::OrderFilled(fill) => handle_order_filled(fill, ctx),
         ServerMessage::AccountState(state) => handle_account_state(state, ctx),
@@ -4361,7 +4398,13 @@ mod tests {
         let (ctx, mut rx) = exec_context();
         let err = anyhow::anyhow!("connection refused");
 
-        emit_cancel_rejected("O-1", err.to_string(), &ctx);
+        emit_cancel_rejected(
+            ClientOrderId::from("O-1"),
+            None,
+            err.to_string(),
+            now_unix_nanos(ctx.sim),
+            &ctx,
+        );
 
         match rx.try_recv().expect("cancel rejected event") {
             ExecutionEvent::Order(OrderEventAny::CancelRejected(event)) => {
@@ -4375,6 +4418,45 @@ mod tests {
             record.status,
             OrderStatus::Submitted,
             "a failed cancel must leave the mirrored order status untouched"
+        );
+    }
+
+    #[test]
+    fn wire_cancel_rejected_surfaces_event_and_honors_wire_venue_id() {
+        // A venue-originated ServerMessage::OrderCancelRejected (the engine
+        // could not honor a cancel: target unknown or already terminal) must
+        // surface as a nautilus CancelRejected, leave the mirrored order's
+        // status untouched (like the transport-failure path), and carry the
+        // venue id named on the wire even though the seeded record holds None.
+        let (ctx, mut rx) = exec_context();
+
+        handle_exec_message(
+            ServerMessage::OrderCancelRejected {
+                client_order_id: "O-1".into(),
+                venue_order_id: Some("V-1".into()),
+                reason: "order already terminal (filled or canceled)".into(),
+                ts_event: 42,
+            },
+            &ctx,
+        );
+
+        match rx.try_recv().expect("cancel rejected event") {
+            ExecutionEvent::Order(OrderEventAny::CancelRejected(event)) => {
+                assert_eq!(event.client_order_id, ClientOrderId::from("O-1"));
+                assert_eq!(
+                    event.reason.as_str(),
+                    "order already terminal (filled or canceled)"
+                );
+                assert_eq!(event.venue_order_id, Some(VenueOrderId::from("V-1")));
+                assert_eq!(event.ts_event, UnixNanos::from(42));
+            }
+            other => panic!("expected cancel rejected event, got {other:?}"),
+        }
+        let record = order_record(&ctx.state, ClientOrderId::from("O-1")).expect("order record");
+        assert_eq!(
+            record.status,
+            OrderStatus::Submitted,
+            "a rejected cancel must leave the mirrored order status untouched"
         );
     }
 

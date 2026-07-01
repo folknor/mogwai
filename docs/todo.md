@@ -23,13 +23,6 @@ Or both. There are no exceptions.
   Closing it means introducing a position-size or notional cap - a design
   decision, not a local fix.
 
-- mogwai-adapter cancel-reject has no wire path. A failed cancel is now
-  surfaced correctly as a nautilus `OrderCancelRejected` built locally in the
-  adapter, but `mogwai_protocol::ServerMessage` still has no `CancelRejected`
-  variant, so the reject bypasses the normal wire/havoc pipeline. Adding one
-  would let cancel failures flow through the same path the fill/reject events
-  already use.
-
 ## Notes / gotchas
 
 - The offline Kraken corpus is trades only - no quotes, no L2, no aggressor side.

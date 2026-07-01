@@ -1322,6 +1322,12 @@ mod tests {
                 reason: "no".into(),
                 ts_event: 1,
             },
+            ServerMessage::OrderCancelRejected {
+                client_order_id: "O".into(),
+                venue_order_id: None,
+                reason: "no".into(),
+                ts_event: 1,
+            },
         ];
         for msg in &exec {
             assert_eq!(msg.category(), EventKind::Exec, "{msg:?} is execution");
@@ -1827,6 +1833,25 @@ pub enum ServerMessage {
         reason: String,
         ts_event: u64,
     },
+    /// The venue received a `CancelOrder` it could not honor: the target is
+    /// unknown, already terminal (filled or canceled), or the cancel is
+    /// otherwise illegal.
+    ///
+    /// Distinct from `OrderRejected`, which terminates the ORDER. A rejected
+    /// cancel does NOT kill the order - it is still whatever it was (Accepted,
+    /// PartiallyFilled, or already terminal), and nautilus's own FSM restores
+    /// the pre-cancel status on `CancelRejected`. Overloading `OrderRejected`
+    /// for a cancel failure (as the engine once did) would wrongly flip a live
+    /// or already-filled order to Rejected - an invalid transition. Mirrors
+    /// `OrderModifyRejected`, including the `venue_order_id` presence rule.
+    OrderCancelRejected {
+        client_order_id: ClientOrderId,
+        /// Present when the order is known but the cancel is illegal; absent
+        /// when the order id is unknown to the venue.
+        venue_order_id: Option<VenueOrderId>,
+        reason: String,
+        ts_event: u64,
+    },
     OrderFilled(OrderFilled),
     AccountState(AccountState),
     Trade(TradeTick),
@@ -1880,6 +1905,7 @@ impl ServerMessage {
             | ServerMessage::OrderCanceled { .. }
             | ServerMessage::OrderUpdated { .. }
             | ServerMessage::OrderModifyRejected { .. }
+            | ServerMessage::OrderCancelRejected { .. }
             | ServerMessage::ProtocolError { .. } => EventKind::Exec,
         }
     }

@@ -25,11 +25,17 @@ never imports nautilus.
 
 - `ClientMessage` / `ServerMessage` are the wire envelopes. Order entry, market
   data, and subscription all flow as these.
-- The order lifecycle keeps submit and amend distinct so the adapter can tell a
-  submit reject from a modify reject: `OrderAccepted` / `OrderRejected` on the
-  submit side; `OrderUpdated` (post-amend price, total quantity, leaves) and
-  `OrderModifyRejected` (whose `venue_order_id` is absent only when the order id
-  is unknown) on the amend side; plus `OrderFilled`, `OrderCanceled`.
+- The order lifecycle keeps submit, amend, and cancel rejects distinct so the
+  adapter can tell them apart: `OrderAccepted` / `OrderRejected` on the submit
+  side; `OrderUpdated` (post-amend price, total quantity, leaves) and
+  `OrderModifyRejected` on the amend side; `OrderCanceled` on the cancel side,
+  with `OrderCancelRejected` when the venue cannot honor a cancel (target
+  unknown or already terminal). `OrderModifyRejected` and `OrderCancelRejected`
+  share the rule that `venue_order_id` is absent only when the order id is
+  unknown. The cancel reject is deliberately not an `OrderRejected`: a rejected
+  cancel leaves the order in whatever state it was (nautilus restores the
+  pre-cancel status), so reusing `OrderRejected` would wrongly flip a live or
+  already-filled order to Rejected. Plus `OrderFilled`.
 - `AccountState` carries balances *and* positions; `Position` is its own type.
 - `InstrumentDef` is the shared instrument record - base/quote plus price and
   size precision and tick/lot increments - so the adapter can translate mogwai
