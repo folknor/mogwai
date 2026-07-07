@@ -876,6 +876,57 @@ hits the generator's `.expect` panic instead of a clean error. The server
 should reject an empty `def.symbol` explicitly. Found by the batch-3
 generator agent.
 
+### F16. gap - mogwai has no end-to-end guard that startup reconciliation actually runs; the nautilus report contract degrades silently
+
+`mogwai-adapter/src/client.rs` exec client, against nautilus's
+`ExecutionClient` trait defaults. Severity medium, confidence high. The
+mogwai-side residue of the withdrawn U3 (see the upstream section).
+
+The nautilus Rust `ExecutionClient` trait defaults are silent no-ops:
+`generate_mass_status` returns `Ok(None)` and the three granular report
+generators return empty vecs, and the live node consumes a `None` mass status
+by logging "likely adapter error" and reconciling NOTHING - never erroring.
+(Python's `LiveExecutionClient` base composes the three for you, so a Python
+adapter cannot fall into this; the Rust trait does not, which is why mogwai
+hit it.) X1 fixed the instance by implementing `generate_mass_status`
+(composing the three, unit-tested by
+`generate_mass_status_composes_the_three_report_sets`), but two exposures
+remain:
+
+- No end-to-end guard. The unit test proves the method composes when called;
+  nothing proves the live node actually reconciles a NON-EMPTY mass status at
+  startup. If a future refactor drops the trait override, breaks the compose,
+  or leaves one granular generator returning empty, startup reconciliation
+  silently reverts to zero with only a warn line - no test goes red.
+  Wanted: a reconciliation-path assertion (integration or smoke) that a
+  seeded venue position/order actually reaches the node's reconciliation.
+- The exposure is a CLASS, not one method. Every report path mogwai relies on
+  (order status, fills, positions, and the query_order / singular
+  order-status-report surfaces still unimplemented per X3) shares the
+  silent-degrade property. mogwai should treat "a nautilus report method we
+  depend on returning its empty/None default" as a footgun to guard against
+  explicitly, because nautilus will not surface the regression.
+
+### F17. gap (doc) - havoc.md advertises delay bounds a nautilus consumer's inflight timeout will convert into local rejects
+
+`mogwai-protocol` `validate_divergence` / `MAX_DIVERGENCE_MS` (1 h),
+`MAX_LATENCY_NANOS` (60 s), and `reference/havoc.md`. The mogwai-doc residue
+of the resolved U5. Severity low (doc/design), confidence high.
+
+mogwai validates and advertises DelayAcks / GoDark up to one hour and inbound
+latency up to 60 s, but any nautilus live consumer runs an execution-manager
+inflight check that re-queries a still-unacked order and, after a bounded
+retry budget, synthesizes a local INFLIGHT_TIMEOUT reject. Past that
+consumer-configured threshold the "delay" is not exercised as a delay at all -
+it becomes a local reject, and the later real ack lands on an already-rejected
+order (X3 is why mogwai cannot answer the re-query and resolve it instead).
+The specific threshold lives in the consumer (broadarrow's ~25 s is documented
+on ITS side, per the mogwai/broadarrow separation - do NOT bake that constant
+into mogwai), but the GENERAL truth belongs in havoc.md: a delay window longer
+than a downstream inflight timeout exercises the consumer's brake, not
+mogwai's delay path. Worth a sentence in the DelayAcks / latency sections so an
+operator arming a multi-minute window knows what they are actually testing.
+
 ---
 
 ## Upstream candidates (dependencies we have commit access to)
@@ -883,6 +934,14 @@ generator agent.
 Findings whose root cause or better fix lives in a dependency. Each needs a
 written report (or a direct fix) in the dependency's own repo; the research/
 copies are read-only mirrors, the sibling checkouts are the real trees.
+
+Status: all five triaged. U1, U2 fixed upstream (nautilus PRs submitted). U3
+withdrawn (not an upstream bug; the fix was mogwai-side X1; residue F16). U4,
+U5 verified by the broadarrow developer as deliberate C5d decisions and
+resolved by documentation on the broadarrow side, no behavior change; their
+mogwai-side residues are X3 (both) and F17 (U5). The two broadarrow BEHAVIORAL
+options below (enable the continuous poll; per-venue inflight ceiling) remain
+open as broadarrow decisions, not mogwai work.
 
 ### U1. nautilus - LiveTimer fires once past stop_time_ns while TestTimer's property test asserts the opposite invariant
 
@@ -898,33 +957,94 @@ mirrors the live behavior deliberately (bug-compatible; AE14).
 `crates/common/src/clock.rs`. The three introspection surfaces disagree about
 whether a fired-and-done timer still "exists". mogwai mirrors it (AE17).
 
-### U3. nautilus - Startup reconciliation reconciles nothing when generate_mass_status returns None, with only a warning
+### U3. WITHDRAWN - "the node should fall back to the three generators" is not an upstream bug; the fix was correctly mogwai-side (X1)
 
-`crates/live/src/node/mod.rs` `perform_startup_reconciliation`. When an
-adapter does not implement `generate_mass_status`, the node logs "likely
-adapter error" and skips reconciliation entirely instead of falling back to
-the three per-kind report generators the adapter DOES implement. Any adapter
-that implements the granular generators but not the composite silently gets
-zero startup reconciliation (mogwai's X1 is exactly this; the mogwai-side fix
-is to implement the composite, but the silent-skip-with-fallback-available is
-an upstream design gap).
+Original framing (node should fall back on `None`) is refuted by the code:
 
-### U4. broadarrow - The open-order poll is disabled, leaving order/fill report generators dead code
+- The Rust node's `None` arm (`crates/live/src/node/mod.rs` ~668) and the
+  Python engine's `None` arm (`nautilus_trader/live/execution_engine.py`
+  ~1721) are IDENTICAL: warn "likely adapter error", skip, no fallback. A
+  Rust engine-level fallback would break the Rust/Python parity the project
+  holds sacred. So the ENGINE handling is correct on both sides.
+- `generate_mass_status` composed from the three report generators is the
+  canonical adapter contract, not a workaround: every Rust adapter
+  (kraken/spot ~1256, binance, IB, ...) implements it as
+  `ExecutionMassStatus::new` + `add_order_reports`/`add_fill_reports`/
+  `add_position_reports`. mogwai's X1 fix does exactly this and is in place
+  (`client.rs` ~2734, test `generate_mass_status_composes_the_three_report_sets`).
 
-`crates/run-prep/src/lib.rs` sets `open_check_interval_secs: None`, so
-`generate_order_status_reports` / `generate_fill_reports` are never called in
-a real run (only the position poll runs). Either enable the open-order poll
-for the MOGWAI venue or document that order-level reconciliation is
-deliberately position-only. Interacts with X1: with mass status implemented
-mogwai-side, startup reconciliation starts working, but continuous
-order-level healing stays off.
+So the symptom was mogwai-side and is fixed. Keeping the entry, downgraded,
+only to record one genuine-but-deliberate parity nuance found while checking:
 
-### U5. broadarrow - Inflight escalation constants make any ack delay past ~30 s a guaranteed phantom local reject against mogwai
+- The DEFAULTS diverge, not the engines. Python's `LiveExecutionClient` base
+  class ships a CONCRETE `generate_mass_status`
+  (`execution_client.py` ~440-514) that composes the three sub-generators for
+  you, so a Python adapter implementing only the granular generators gets a
+  working composite for free. The Rust `ExecutionClient` trait default
+  (`crates/common/src/clients/execution.rs` ~288) instead returns `Ok(None)`,
+  and the Rust live-layer client just delegates (no composition). That is why
+  mogwai (Rust) hit the silent skip where an equivalent Python adapter would
+  not.
+- This is a real Rust-vs-Python default-composition gap, but it is a
+  CONSISTENT Rust-wide choice - all ~20 Rust adapters hand-roll the composite
+  - so "fix" upstream would be a DRY/parity nicety (give the Rust trait or
+  live client a default that composes the three), not a correctness bug. Not
+  worth a PR unless the Rust maintainers want the parity; noted so the
+  reasoning is not re-litigated.
 
-run-prep arms `inflight_check_threshold_ms` 5 s / `inflight_max_retries` 5
-while mogwai's DelayAcks validates up to one hour and client latency up to
-60 s (X3). Not a bug on either side alone, but the pairing means a whole
-band of mogwai's advertised havoc cannot be exercised without tripping
-INFLIGHT_TIMEOUT first. Worth a deliberate broadarrow-side decision (raise
-the ceiling for the MOGWAI venue, or document the ~30 s cliff as the
-intended brake trigger).
+The mogwai-side residue of this investigation is tracked as F16.
+
+### U4. RESOLVED (deliberate broadarrow decision, documented) - the disabled continuous open-order poll
+
+Verified by the broadarrow developer against `crates/run-prep/src/lib.rs`:
+`open_check_interval_secs: None` is a deliberate C5d decision, not an
+oversight, and the "dead code" framing was imprecise:
+
+- The three report generators DO run at startup (mass-status reconcile); only
+  the CONTINUOUS mid-run open-order poll is off.
+- Resting orders (limit/stop/bracket/trailing) are reconciled every bar by
+  `core::plan_stale_cancels` (piners' shadow book vs the Nautilus cache, with
+  bracket/partial-fill/trail-rearm handling in `reconcile.rs`), and
+  order-level state is carried by the lifecycle callbacks
+  (`on_order_filled`/`rejected`/`denied`/`modify_rejected`). So order-level
+  reconciliation is not absent, it is done by a different mechanism.
+- Genuine residual (now disclosed in broadarrow docs): an out-of-band resting-
+  order cancel is dropped mid-run and heals only at reconnect/restart.
+
+Resolution taken: documentation only - the stale rationale comment was
+rewritten and the position-only-continuous posture added to broadarrow's
+`reference/execution.md`. No behavior change.
+
+Mogwai-side residue: enabling the continuous poll would be INERT against
+mogwai anyway, because mogwai exposes no order-status query surface for it to
+call - that is X3, which this makes doubly-motivated (it is the mogwai-side
+blocker for participating in continuous order-level reconciliation at all).
+
+Open broadarrow OPTION (not a bug, flagged by the developer): enable the
+continuous open-order poll to close the mid-run dropped-resting-cancel window
+for real venues (Binance/Kraken/Bybit), at REST-budget cost and needing a
+per-venue reconciliation override that does not exist today. A decision for
+broadarrow, not mogwai.
+
+### U5. RESOLVED (deliberate broadarrow decision, documented) - inflight-timeout brake clips mogwai's long-delay havoc band
+
+Verified by the broadarrow developer against the Nautilus manager: threshold
+5 s, re-query throttled to ~5 s spacing, 5 retries -> INFLIGHT_TIMEOUT
+synthesized at ~25 s in-flight. This is a CORRECT safety brake for a silent
+real venue; it is not a bug on either side. The only gap was that it was
+undocumented that the brake clips mogwai's advertised hour-long
+DelayAcks/GoDark and 60 s latency band.
+
+Resolution taken: documentation only - broadarrow's `reference/mogwai.md`
+gained an operator note (arm ack-delay havoc below ~25 s to exercise the
+delay path; longer windows only exercise the brake). No behavior change.
+
+Mogwai-side residue: the root reason the brake fires is X3 - mogwai cannot
+answer the manager's `QueryOrder` (no order-status query surface), so an
+inflight order can only escalate to the synthesized timeout, never resolve.
+See also F17 for the mogwai-doc side of this.
+
+Open broadarrow OPTION (not a bug, flagged by the developer): raise the
+inflight ceiling for mogwai only - but no per-venue inflight config exists,
+and raising it globally would weaken the real-venue brake, so it needs new
+plumbing. A decision for broadarrow, not mogwai.
