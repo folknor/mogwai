@@ -1,11 +1,26 @@
-//! Tick storage + replay. The replay engine pulls ticks in time order and the
-//! server fans them out to subscribers as market data.
+//! Tick storage + replay. A [`TickSource`] yields ticks in time order and the
+//! server fans them out to subscribers as market data; a [`Permutation`] can
+//! transform them in flight (e.g. tick-rule aggressor inference).
 //!
-//! Backed by the Kraken trade-history CSV dump: one file per pair (symbol taken
-//! from the file stem), no header, three columns `time,price,volume` where time
-//! is unix **seconds** (optionally fractional). Files reach multiple GB, so
-//! [`KrakenCsvSource`] streams one buffered line at a time - O(1) memory - and
-//! [`MergeSource`] k-way merges several symbols into one time-ordered stream.
+//! Two source lineages implement [`TickSource`], and they are not
+//! interchangeable - the running server only ever uses the first:
+//!
+//! - [`GeneratedSource`] - the synthetic generator the RUNNING server uses. It
+//!   synthesizes ticks from a committed fingerprint fitted offline to Kraken
+//!   trade history; it opens no file, is a pure path-dependent walk (same seed
+//!   plus tape anchor yields the same stream byte for byte), and is effectively
+//!   infinite. [`CheckpointIndex`] turns a from-origin seek over it from
+//!   O(distance) into O(K) by snapshotting the walk every K ticks and replaying
+//!   only the residual.
+//! - [`KrakenCsvSource`] - the offline-analysis lineage, retained for fitting
+//!   the fingerprint rather than for serving. Reads the Kraken trade-history CSV
+//!   dump: one file per pair (symbol taken from the file stem), no header, three
+//!   columns `time,price,volume` where time is unix **seconds** (optionally
+//!   fractional). Files reach multiple GB, so it streams one buffered line at a
+//!   time - O(1) memory.
+//!
+//! [`MergeSource`] k-way merges several single-symbol sources into one
+//! time-ordered stream, and [`MemorySource`] backs tests and the wiring skeleton.
 
 mod generated;
 
@@ -20,8 +35,9 @@ use mogwai_protocol::{AggressorSide, QuoteTick, TradeTick};
 use rust_decimal::Decimal;
 
 pub use generated::{
-    AbsReturnAcf, AnchorRange, CheckpointIndex, Fingerprint, GeneratedSource, GeneratorScalars,
-    GoldenTargets, MinMedianMax, ScalarError, ScalarRanges, SessionProfile, SessionProfileError,
+    AbsReturnAcf, AnchorRange, CheckpointIndex, Fingerprint, GeneratedSource, GeneratedSourceError,
+    GeneratorScalars, GoldenTargets, MinMedianMax, ScalarError, ScalarRanges, SessionProfile,
+    SessionProfileError,
 };
 pub use mogwai_protocol::MarketRegime;
 
@@ -141,6 +157,15 @@ impl Permutation for TickRuleAggressor {
 ///
 /// Parsed as integer seconds + integer fraction rather than `f64`, because epoch
 /// nanoseconds (~1.7e18) exceed `f64`'s integer precision.
+///
+/// Deliberately lenient at three edges that cannot occur in a real Kraken dump
+/// and so are left as-is rather than tightened (this is the offline-analysis
+/// lineage, and tightening only risks rejecting a valid row for no gain): a
+/// trailing dot (`"1."`) parses as whole seconds with a zero fraction; a leading
+/// `+` on the seconds field is accepted (Rust's integer `FromStr` allows it); and
+/// [`parse_kraken_line`] ignores any columns past the third. The dump always
+/// emits exactly `time,price,volume` with plain unsigned decimals, so none of
+/// these shapes appears in practice.
 pub fn parse_kraken_ts(field: &str) -> Option<u64> {
     let (sec, frac) = field.split_once('.').unwrap_or((field, ""));
     let secs: u64 = sec.parse().ok()?;
@@ -227,44 +252,74 @@ impl KrakenCsvSource {
 
 impl TickSource for KrakenCsvSource {
     fn next_tick(&mut self) -> Option<TickEvent> {
-        loop {
-            self.buf.clear();
-            match self.reader.read_line(&mut self.buf) {
-                Ok(0) => return None, // clean EOF ends the stream
-                Err(err) => {
-                    // A mid-file read error truncates the stream. The streaming
-                    // contract returns Option, so we still end with None - but no
-                    // longer silently: surface the error so a partial replay is
-                    // distinguishable from a complete one. No tracing dep in this
-                    // crate, so stderr is the visible channel.
-                    eprintln!(
-                        "KrakenCsvSource({}): read error, truncating stream: {err}",
-                        self.symbol
-                    );
-                    return None;
-                }
-                Ok(_) => {}
+        // Disjoint field borrows so the shared read loop can live as a free
+        // function testable over an in-memory reader (see `read_next_trade`);
+        // the file path itself is only exercised in production.
+        read_next_trade(
+            &mut self.reader,
+            &mut self.buf,
+            &self.symbol,
+            &mut self.last_ts,
+        )
+        .map(TickEvent::Trade)
+    }
+}
+
+/// Read forward from `reader` until the next in-order valid trade, skipping
+/// blank, malformed, non-UTF-8, and backward-stepping lines. Returns `None` at
+/// clean EOF or on a genuine (non-decode) read error, which truncates the
+/// stream. Factored out of [`KrakenCsvSource::next_tick`] so the skip logic can
+/// be unit-tested over a `Cursor` without a fixture file.
+fn read_next_trade(
+    reader: &mut impl BufRead,
+    buf: &mut String,
+    symbol: &str,
+    last_ts: &mut Option<u64>,
+) -> Option<TradeTick> {
+    loop {
+        buf.clear();
+        match reader.read_line(buf) {
+            Ok(0) => return None, // clean EOF ends the stream
+            Err(err) if err.kind() == io::ErrorKind::InvalidData => {
+                // A non-UTF-8 line is a malformed ROW, not a stream-fatal IO
+                // failure - so skip it and read on, exactly like every other
+                // malformed-row case below, instead of truncating the whole
+                // stream on one bad byte and dropping every valid trade after
+                // it. `read_line` has already consumed the offending bytes (up
+                // to and including the newline) even though it refused to append
+                // them, so the reader is positioned at the next line. No tracing
+                // dep in this crate, so stderr is the visible channel.
+                eprintln!("KrakenCsvSource({symbol}): non-UTF-8 line, skipping: {err}");
+                continue;
             }
-            if let Some(t) = parse_kraken_line(&self.symbol, &self.buf) {
-                if let Some(last_ts) = self.last_ts
-                    && t.ts_event < last_ts
-                {
-                    // A backward-stepping row would break the ascending
-                    // assumption every consumer (MergeSource's k-way merge,
-                    // replay pacing) relies on. Skip it and keep reading
-                    // rather than emit it and silently let time run
-                    // backwards downstream.
-                    eprintln!(
-                        "KrakenCsvSource({}): out-of-order row (ts {} < last {}), skipping",
-                        self.symbol, t.ts_event, last_ts
-                    );
-                    continue;
-                }
-                self.last_ts = Some(t.ts_event);
-                return Some(TickEvent::Trade(t));
+            Err(err) => {
+                // A genuine mid-file read error truncates the stream. The
+                // streaming contract returns Option, so we still end with None -
+                // but no longer silently: surface the error so a partial replay
+                // is distinguishable from a complete one.
+                eprintln!("KrakenCsvSource({symbol}): read error, truncating stream: {err}");
+                return None;
             }
-            // malformed line - skip and keep reading
+            Ok(_) => {}
         }
+        if let Some(t) = parse_kraken_line(symbol, buf) {
+            if let Some(last) = *last_ts
+                && t.ts_event < last
+            {
+                // A backward-stepping row would break the ascending assumption
+                // every consumer (MergeSource's k-way merge, replay pacing)
+                // relies on. Skip it and keep reading rather than emit it and
+                // silently let time run backwards downstream.
+                eprintln!(
+                    "KrakenCsvSource({symbol}): out-of-order row (ts {} < last {last}), skipping",
+                    t.ts_event
+                );
+                continue;
+            }
+            *last_ts = Some(t.ts_event);
+            return Some(t);
+        }
+        // malformed line - skip and keep reading
     }
 }
 
@@ -433,6 +488,32 @@ mod tests {
         assert!(parse_kraken_line("X", "1743439968,-4.8,2.6").is_none());
         assert!(parse_kraken_line("X", "1743439968,4.8,0").is_none());
         assert!(parse_kraken_line("X", "1743439968,0,2.6").is_none());
+    }
+
+    #[test]
+    fn non_utf8_line_is_skipped_not_fatal() {
+        // Regression: a non-UTF-8 line made `read_line` return
+        // `ErrorKind::InvalidData`, which used to be handled as a fatal read
+        // error truncating the whole stream - so one bad byte dropped every
+        // valid trade after it, unlike every other malformed-row case which is
+        // skipped. Now it skips-with-warn, so a valid trade AFTER the bad line
+        // still comes through.
+        let mut data: Vec<u8> = Vec::new();
+        data.extend_from_slice(b"1743439968,4.8,2.6\n");
+        data.extend_from_slice(&[0xff, 0xfe, b'g', b'a', b'r', b'b', b'\n']); // invalid UTF-8
+        data.extend_from_slice(b"1743439969,4.9,2.7\n");
+        let mut reader = std::io::Cursor::new(data);
+        let mut buf = String::new();
+        let mut last_ts = None;
+
+        let first =
+            read_next_trade(&mut reader, &mut buf, "X", &mut last_ts).expect("first trade parses");
+        assert_eq!(first.ts_event, 1_743_439_968_000_000_000);
+        // The non-UTF-8 line between the two trades is skipped, not fatal.
+        let second =
+            read_next_trade(&mut reader, &mut buf, "X", &mut last_ts).expect("second trade parses");
+        assert_eq!(second.ts_event, 1_743_439_969_000_000_000);
+        assert!(read_next_trade(&mut reader, &mut buf, "X", &mut last_ts).is_none());
     }
 
     #[test]

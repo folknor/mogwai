@@ -460,6 +460,18 @@ pub struct ScalarError {
     pub field: &'static str,
 }
 
+/// Why a [`GeneratedSource`] construction can fail: either the scalar config or
+/// the session profile is outside the fingerprint's validated ranges. Returned
+/// by the fallible [`GeneratedSource::try_new`] /
+/// [`GeneratedSource::try_new_with_session_profile`] constructors so a caller
+/// holding config that has not been pre-validated can surface the error instead
+/// of tripping the panic inside the infallible [`GeneratedSource::new`] family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeneratedSourceError {
+    Scalar(ScalarError),
+    Session(SessionProfileError),
+}
+
 /// `Clone` is the substrate of the checkpointed seek (`CheckpointIndex`): the
 /// generator is a path-dependent walk whose entire future is a pure function of
 /// its current state, so a clone taken at tick N, advanced, reproduces ticks
@@ -507,6 +519,47 @@ impl GeneratedSource {
         Self::with_clamp_override(scalars, seed, start_ts, fp, session, regime, None)
     }
 
+    /// Fallible twin of [`GeneratedSource::new`]. Both `scalars` and the
+    /// fingerprint's session profile `Deserialize` straight from user config, so
+    /// a caller holding un-pre-validated input should route through this and
+    /// surface a [`GeneratedSourceError`] rather than let the infallible `new`
+    /// turn a config typo into a process panic. `new` is `try_new(..).expect(..)`.
+    pub fn try_new(
+        scalars: GeneratorScalars,
+        seed: u64,
+        start_ts: u64,
+        fp: &Fingerprint,
+        regime: Option<MarketRegime>,
+    ) -> Result<Self, GeneratedSourceError> {
+        Self::try_with_clamp_override(
+            scalars,
+            seed,
+            start_ts,
+            fp,
+            &fp.session_profile,
+            regime,
+            None,
+        )
+    }
+
+    /// Fallible twin of [`GeneratedSource::new_with_session_profile`] - same
+    /// rationale as [`GeneratedSource::try_new`], but for the explicit-session
+    /// path where the profile is also untrusted config.
+    pub fn try_new_with_session_profile(
+        scalars: GeneratorScalars,
+        seed: u64,
+        start_ts: u64,
+        fp: &Fingerprint,
+        session: &SessionProfile,
+        regime: Option<MarketRegime>,
+    ) -> Result<Self, GeneratedSourceError> {
+        Self::try_with_clamp_override(scalars, seed, start_ts, fp, session, regime, None)
+    }
+
+    /// Infallible wrapper: panics if either input is outside the fingerprint
+    /// ranges. Callers building from the committed fingerprint (valid by
+    /// construction) use this via `new` / `new_with_session_profile`; callers
+    /// with untrusted config use the `try_*` twins above instead.
     fn with_clamp_override(
         scalars: GeneratorScalars,
         seed: u64,
@@ -516,12 +569,33 @@ impl GeneratedSource {
         regime: Option<MarketRegime>,
         clamp_override: Option<f64>,
     ) -> Self {
+        Self::try_with_clamp_override(scalars, seed, start_ts, fp, session, regime, clamp_override)
+            .expect("generated source inputs are inside fingerprint ranges")
+    }
+
+    // The only fallible inputs are `scalars`/`session`, guarded by the two
+    // `?`-propagated `validate` calls at the top. The distribution constructors
+    // below (`LogNormal`/`Weibull`/`Normal`/`ChiSquared`) take compile-time
+    // constants that are always valid params, so their `expect`s cannot fire -
+    // `unwrap_in_result` is silenced here because there is no meaningful error
+    // variant to map them onto, not because a failure is being swallowed.
+    #[expect(
+        clippy::unwrap_in_result,
+        reason = "distribution params are constant and valid; only the validated scalars/session can fail"
+    )]
+    fn try_with_clamp_override(
+        scalars: GeneratorScalars,
+        seed: u64,
+        start_ts: u64,
+        fp: &Fingerprint,
+        session: &SessionProfile,
+        regime: Option<MarketRegime>,
+        clamp_override: Option<f64>,
+    ) -> Result<Self, GeneratedSourceError> {
         scalars
             .validate(fp)
-            .expect("generated source scalars are inside fingerprint ranges");
-        session
-            .validate()
-            .expect("generated source session profile is valid");
+            .map_err(GeneratedSourceError::Scalar)?;
+        session.validate().map_err(GeneratedSourceError::Session)?;
         let mean_duration_s = scalars.mean_duration_s;
         let alpha = ACD_PERSISTENCE * ACD_FEEDBACK_SHARE;
         let beta = ACD_PERSISTENCE - alpha;
@@ -533,7 +607,7 @@ impl GeneratedSource {
         // which the literal moves; `start_ts` is the tape anchor RegimeState
         // needs to fail-close an already-elapsed ReopenGap.
         let regime = RegimeState::new(regime, clamp_override, start_ts, &scalars.symbol);
-        Self {
+        Ok(Self {
             tick_f64: decimal_to_f64(scalars.modal_tick),
             scalars,
             rng: ChaCha12Rng::seed_from_u64(seed),
@@ -549,6 +623,15 @@ impl GeneratedSource {
             vol,
             session: SessionModulator::new(session),
             bounce: BounceState {
+                // Every realization opens on the Buyer side regardless of seed:
+                // `prev_side` seeds to Buyer and the low regime flips it only at
+                // BOUNCE_LOW_FLIP_PROB (0.02), so a fresh stream prints a long
+                // Buyer run before the first flip. This seed-independent opening
+                // bias is deliberate and left as-is: it is a start-of-stream
+                // transient (a real bounce process is equally free to open either
+                // way), it is fully deterministic, and re-seeding the side would
+                // consume an extra RNG draw and break the committed fingerprint's
+                // byte-identical golden stream for zero fidelity gain.
                 prev_side: AggressorSide::Buyer,
                 high_regime: false,
                 drift_ticks: 0,
@@ -561,7 +644,7 @@ impl GeneratedSource {
             chi_squared: ChiSquared::new(STUDENT_T_DF).expect("valid chi-squared"),
             size_dist,
             regime,
-        }
+        })
     }
 
     /// The simulated instant the generator has reached: the `ts_event` of the
@@ -1157,6 +1240,17 @@ impl GarchVol {
 struct BounceState {
     prev_side: AggressorSide,
     high_regime: bool,
+    /// Accumulated same-direction on-grid drift, in ticks, applied on top of the
+    /// latent mid in `next_price`. This is an UNBOUNDED, never-reset random walk
+    /// (it only advances inside the high regime), so over a long run the printed
+    /// price = mid + drift can wander arbitrarily far from `start_price` even
+    /// though the mid itself is clamped to [tick, MID_CEILING]. Left unbounded
+    /// deliberately: the diffusion is slow, the downside is fenced by the
+    /// `price_ticks.max(1.0)` floor in `next_price` (a quote can never undercut
+    /// one tick), and the only untethered direction is upward and cosmetic.
+    /// Bounding or mean-reverting the drift would change the on-grid walk and
+    /// break the committed fingerprint's byte-identical golden stream, so the
+    /// long-run price un-tethering is documented rather than fixed.
     drift_ticks: i64,
     drift_dir: i64,
     drift_hot: bool,
@@ -1438,6 +1532,40 @@ mod tests {
     }
 
     #[test]
+    fn try_new_accepts_valid_input_and_surfaces_bad_input() {
+        let fp = Fingerprint::from_repo_json();
+        let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+        // Valid input builds a source (the fingerprint-anchored scalars pass).
+        assert!(GeneratedSource::try_new(scalars.clone(), 42, 0, &fp, None).is_ok());
+
+        // Bad scalars come back as an Err instead of panicking the way the
+        // infallible `new` would. `GeneratedSource` is not `PartialEq`, so drop
+        // the Ok half with `.err()` before comparing the error.
+        let mut bad_scalars = scalars.clone();
+        bad_scalars.mean_duration_s = fp.scalar_ranges.mean_duration_s.max + 1.0;
+        assert_eq!(
+            GeneratedSource::try_new(bad_scalars, 42, 0, &fp, None).err(),
+            Some(GeneratedSourceError::Scalar(ScalarError {
+                field: "mean_duration_s"
+            }))
+        );
+
+        // A bad session profile on the explicit-session path is surfaced too: an
+        // all-ones intensity curve sums to 24 and is rejected as a whole-array
+        // normalization violation.
+        let mut bad_session = fp.session_profile.clone();
+        bad_session.intensity_hour = [1.0; 24];
+        assert_eq!(
+            GeneratedSource::try_new_with_session_profile(scalars, 42, 0, &fp, &bad_session, None)
+                .err(),
+            Some(GeneratedSourceError::Session(SessionProfileError {
+                field: "intensity_hour",
+                index: usize::MAX,
+            }))
+        );
+    }
+
+    #[test]
     fn determinism() {
         let fp = Fingerprint::from_repo_json();
         let scalars = GeneratorScalars::xbtusd_anchor(&fp);
@@ -1543,14 +1671,17 @@ mod tests {
         let origin_ts = 1_000u64;
         let seed = 42u64;
 
-        // Reference: a straight from-origin run, captured as (ts, price) pairs.
+        // Reference: a straight from-origin run, captured as every economically
+        // meaningful field (ts, price, size, aggressor) so the "byte-identical"
+        // name is honest - a resume that reproduced ts+price but drifted on size
+        // or side would previously have slipped through.
         let mut reference = GeneratedSource::new(scalars.clone(), seed, origin_ts, &fp, None);
-        let ref_ticks: Vec<(u64, Decimal)> = (0..5_000)
+        let ref_ticks: Vec<(u64, Decimal, Decimal, AggressorSide)> = (0..5_000)
             .map(|_| {
                 let TickEvent::Trade(t) = reference.next_tick().expect("trade") else {
                     unreachable!("generated source emits trades")
                 };
-                (t.ts_event, t.price)
+                (t.ts_event, t.price, t.size, t.aggressor)
             })
             .collect();
 
@@ -1572,7 +1703,7 @@ mod tests {
         );
 
         // Drain the residual up to the target tick, then compare the tail to the
-        // reference: same ts AND same price, tick for tick.
+        // reference: same ts, price, size AND aggressor, tick for tick.
         let mut tick = resumed.next_tick().expect("trade");
         while tick.ts_event() < target {
             tick = resumed.next_tick().expect("trade");
@@ -1581,7 +1712,11 @@ mod tests {
             let TickEvent::Trade(t) = tick else {
                 unreachable!("generated source emits trades")
             };
-            assert_eq!((t.ts_event, t.price), *expected, "resumed tail diverged");
+            assert_eq!(
+                (t.ts_event, t.price, t.size, t.aggressor),
+                *expected,
+                "resumed tail diverged"
+            );
             tick = resumed.next_tick().expect("trade");
         }
     }
