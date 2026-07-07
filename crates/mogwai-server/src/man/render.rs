@@ -365,7 +365,16 @@ where
                 if !self.end_newline {
                     out.push('\n');
                 }
-                let marker = match self.list_stack.last() {
+                // The marker opens a fresh line; record that so a LOOSE item's
+                // following `Paragraph` does not push a SECOND newline and open a
+                // stray blank line between the item and its body (S23).
+                self.end_newline = true;
+                // Indent nested bullets by list depth so architecture.md's nested
+                // lists keep their hierarchy instead of rendering flat.
+                // `list_stack` already holds the current list (pushed on
+                // `Tag::List`), so depth 1 is top-level and gets no indent.
+                let indent = "  ".repeat(self.list_stack.len().saturating_sub(1));
+                let bullet = match self.list_stack.last() {
                     Some(ListState::Ordered { index }) => format!("{index}. ")
                         .style(self.theme.list_marker)
                         .to_string(),
@@ -373,7 +382,7 @@ where
                         "* ".style(self.theme.list_marker).to_string()
                     }
                 };
-                self.pending_list_marker = Some(marker);
+                self.pending_list_marker = Some(format!("{indent}{bullet}"));
             }
             Tag::DefinitionListDefinition => {
                 if !self.end_newline {
@@ -794,6 +803,30 @@ mod tests {
         assert!(
             out.contains("1. **Harvest**"),
             "ordered marker first: {out:?}"
+        );
+    }
+
+    #[test]
+    fn nested_list_items_are_indented() {
+        // S23: nested bullets used to render flat (the tracked list depth went
+        // unused for indent). A 2-space-indented sub-item must keep its hierarchy.
+        let out = render("- top\n  - nested\n", true);
+        assert!(out.contains("* top"), "top-level marker present: {out:?}");
+        assert!(
+            out.contains("  * nested"),
+            "nested marker is indented by depth: {out:?}"
+        );
+    }
+
+    #[test]
+    fn loose_list_item_has_no_stray_blank_line_before_marker() {
+        // S23: a loose list (blank line between items) wraps each item in a
+        // Paragraph. The item's own leading newline plus the Paragraph's used to
+        // double up into a blank line before the marker; the fix keeps one.
+        let out = render("- alpha\n\n- beta\n", true);
+        assert!(
+            out.starts_with("\n* alpha"),
+            "no stray blank line before the first item: {out:?}"
         );
     }
 

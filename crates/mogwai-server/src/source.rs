@@ -342,7 +342,10 @@ impl TickSource for BoundedSeek {
 
     fn seek_to(&mut self, start_ts: u64) -> Option<TickEvent> {
         let mut tick = self.inner.next_tick()?;
-        let mut drained = 0;
+        // The first pull above already replayed a tick, so it counts against the
+        // cap: starting `drained` at 1 keeps the total pulled at exactly `cap`
+        // rather than `cap + 1` (S19).
+        let mut drained = 1;
         while tick.ts_event() < start_ts && drained < self.cap {
             tick = self.inner.next_tick()?;
             drained += 1;
@@ -830,6 +833,51 @@ mod tests {
         let fast_ts = fast.next_tick().expect("fast first trade").ts_event();
 
         assert!(fast_ts < slow_ts, "fast_ts={fast_ts} slow_ts={slow_ts}");
+    }
+
+    #[test]
+    fn bounded_seek_drains_at_most_cap_ticks() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // A source whose ts never reaches the target within the cap, counting
+        // every next_tick. seek_to must give up after EXACTLY `cap` pulls (the
+        // first pull counts too), not cap + 1 (S19).
+        struct Counting {
+            calls: Arc<AtomicUsize>,
+            ts: u64,
+        }
+        impl TickSource for Counting {
+            fn next_tick(&mut self) -> Option<TickEvent> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                self.ts += 1;
+                Some(TickEvent::Trade(mogwai_protocol::TradeTick {
+                    symbol: "X".into(),
+                    price: Decimal::from(1),
+                    size: Decimal::from(1),
+                    aggressor: mogwai_protocol::AggressorSide::NoAggressor,
+                    ts_event: self.ts,
+                }))
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut seek = BoundedSeek {
+            inner: Box::new(Counting {
+                calls: Arc::clone(&calls),
+                ts: 0,
+            }),
+            cap: 5,
+        };
+        assert!(
+            seek.seek_to(1_000_000).is_none(),
+            "an unreachable target fails the bounded seek"
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            5,
+            "the bounded seek pulls exactly cap ticks, not cap + 1"
+        );
     }
 
     fn mean_duration(source: &mut Box<dyn TickSource>, draw: usize) -> f64 {

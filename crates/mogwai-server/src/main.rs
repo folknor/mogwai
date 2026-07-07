@@ -57,8 +57,16 @@ use tokio::sync::{Mutex, mpsc};
 
 /// Replay/runtime configuration, loaded from a TOML config file at startup
 /// (see `load`); never from ambient environment variables.
-#[derive(Clone, serde::Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, serde::Deserialize)]
+// `deny_unknown_fields` makes config.md's "a malformed file is a hard error"
+// promise literally true for top-level knobs: a typo'd key (`gap_cap_m = 0`)
+// used to fall through to the field default silently, so the operator ran with a
+// value they never set (S20). `default` (missing keys keep built-in defaults) and
+// `deny` (unknown keys are rejected) are orthogonal and compose. NOTE: this does
+// not reach the flattened `InstrumentDef` inside a `[[instrument]]` table - serde
+// cannot combine `deny_unknown_fields` with `flatten` - so a typo'd instrument
+// field is still tolerated; only the top-level run knobs are guarded here.
+#[serde(default, deny_unknown_fields)]
 struct Config {
     /// Simulated start instant. `0` keeps the identity wall-time clock.
     sim_epoch_ns: u64,
@@ -128,7 +136,7 @@ impl Config {
     }
 }
 
-#[derive(Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 struct ConfiguredInstrument {
     #[serde(flatten)]
     def: InstrumentDef,
@@ -174,14 +182,10 @@ fn build_instrument_profiles(cfg: &Config) -> anyhow::Result<source::InstrumentP
                 err.field
             )
         })?;
-        configured.session.validate().map_err(|err| {
-            anyhow::anyhow!(
-                "instrument {} session.{}[{}] must be finite and > 0",
-                def.symbol,
-                err.field,
-                err.index
-            )
-        })?;
+        configured
+            .session
+            .validate()
+            .map_err(|err| anyhow::anyhow!(session_error_message(&def.symbol, err)))?;
 
         profiles.push(source::InstrumentProfile::new(
             def.clone(),
@@ -232,6 +236,27 @@ fn validate_instrument_def(def: &InstrumentDef) -> anyhow::Result<()> {
 
 fn on_increment(value: Decimal, increment: Decimal) -> bool {
     increment > Decimal::ZERO && (value / increment).fract() == Decimal::ZERO
+}
+
+/// Render a `SessionProfileError` for the operator. `mogwai_data` reuses the
+/// element `index` field with an `usize::MAX` sentinel to mean a whole-array
+/// normalization (sum) violation, which has no single offending element - so the
+/// per-element "session.intensity_hour[N] must be finite and > 0" message would
+/// otherwise print the raw sentinel as `intensity_hour[18446744073709551615]`.
+/// Branch on the sentinel to tell the sum story honestly (F14); every genuine
+/// per-element failure keeps the indexed message.
+fn session_error_message(symbol: &str, err: mogwai_data::SessionProfileError) -> String {
+    if err.index == usize::MAX {
+        format!(
+            "instrument {symbol} session.{} does not sum to a valid normalization",
+            err.field
+        )
+    } else {
+        format!(
+            "instrument {symbol} session.{}[{}] must be finite and > 0",
+            err.field, err.index
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -428,7 +453,7 @@ enum LockAttempt {
 }
 
 enum WaitLock {
-    Released,
+    Released(PidLock),
     StillHeld(File),
 }
 
@@ -437,6 +462,10 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_KILL_GRACE: Duration = Duration::from_secs(2);
 const PID_POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// How many times `acquire_pid_lock` re-opens after locking an inode that was
+/// unlinked out from under it before giving up. One retry resolves the normal
+/// race; the small cap only stops a pathological adversary unlinking in a loop.
+const PID_LOCK_ACQUIRE_ATTEMPTS: usize = 8;
 
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
@@ -722,19 +751,64 @@ fn redirect_stdio_to_devnull() -> anyhow::Result<()> {
 }
 
 fn acquire_pid_lock(pid_file: &Path) -> anyhow::Result<PidLockStatus> {
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(pid_file)?;
-    match try_lock_pid_file(file)? {
-        LockAttempt::Acquired(mut lock) => {
-            clear_pid_file(&mut lock)?;
-            Ok(PidLockStatus::Acquired(lock))
+    for _ in 0..PID_LOCK_ACQUIRE_ATTEMPTS {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(pid_file)?;
+        match try_lock_pid_file(file)? {
+            LockAttempt::Acquired(mut lock) => {
+                // Guard against the flock-on-unlinked-pidfile race (S7): between
+                // our open and our lock, a concurrent `stop` (or a prior daemon's
+                // own cleanup) may have unlinked this inode and freed the path. We
+                // would then hold an exclusive lock on a ghost file no later opener
+                // can see, so a second `serve` could create a fresh inode at the
+                // same path and start a rival daemon while `stop` sees neither. If
+                // the path no longer names the inode we locked, drop the ghost lock
+                // and retry from a clean open so our lock guards the live file.
+                if !locked_inode_still_at_path(&lock, pid_file)? {
+                    drop(lock);
+                    continue;
+                }
+                clear_pid_file(&mut lock)?;
+                return Ok(PidLockStatus::Acquired(lock));
+            }
+            LockAttempt::Held(mut file) => {
+                return Ok(PidLockStatus::Held(read_pid_from_file(&mut file)?));
+            }
         }
-        LockAttempt::Held(mut file) => Ok(PidLockStatus::Held(read_pid_from_file(&mut file)?)),
     }
+    anyhow::bail!(
+        "could not acquire a stable PID-file lock after {PID_LOCK_ACQUIRE_ATTEMPTS} attempts; \
+         the pid file is being unlinked concurrently"
+    )
+}
+
+/// True when `pid_file` still names the exact inode `lock` holds. Comparing the
+/// locked fd's `(dev, ino)` (an fstat) against the path's (a stat) is what tells
+/// a live lock apart from a lock on an inode already unlinked from the path - the
+/// core of closing the S7 flock/unlink race on both the acquire and the unlink
+/// sides. A missing path is trivially "not the same inode".
+fn locked_inode_still_at_path(lock: &PidLock, pid_file: &Path) -> anyhow::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let locked = lock.0.metadata()?;
+    match std::fs::metadata(pid_file) {
+        Ok(path_meta) => Ok(path_meta.dev() == locked.dev() && path_meta.ino() == locked.ino()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Unlink `pid_file` only while `lock` proves we hold it AND the path still names
+/// that exact inode. Removing under the held lock is what makes it safe: a
+/// concurrent `serve` that already replaced the file has locked a different inode,
+/// so the mismatch leaves its live pidfile untouched rather than deleting it out
+/// from under a running rival (S7). Returns whether the unlink happened.
+fn remove_pid_file_if_owned(lock: &PidLock, pid_file: &Path) -> bool {
+    matches!(locked_inode_still_at_path(lock, pid_file), Ok(true))
+        && std::fs::remove_file(pid_file).is_ok()
 }
 
 fn try_lock_pid_file(file: File) -> anyhow::Result<LockAttempt> {
@@ -793,24 +867,30 @@ fn stop(args: StopArgs) -> anyhow::Result<()> {
         Err(e) => return Err(e.into()),
     };
     match try_lock_pid_file(file)? {
-        LockAttempt::Acquired(_lock) => {
-            ignore_error(std::fs::remove_file(&pid_file));
-            println!("no daemon running (removed stale {})", pid_file.display());
+        LockAttempt::Acquired(lock) => {
+            // Stale file, no daemon. Unlink it under the lock and only if the path
+            // still names the inode we locked, so a `serve` that raced in and
+            // replaced the file keeps its own live pidfile (S7).
+            if remove_pid_file_if_owned(&lock, &pid_file) {
+                println!("no daemon running (removed stale {})", pid_file.display());
+            } else {
+                println!("no daemon running (no {})", pid_file.display());
+            }
             Ok(())
         }
         LockAttempt::Held(mut file) => {
             let pid = read_pid_when_ready(&mut file, STOP_TIMEOUT)?;
             signal_pid(pid, Signal::SIGTERM)?;
             match wait_for_lock_release(file, STOP_TIMEOUT)? {
-                WaitLock::Released => {
-                    ignore_error(std::fs::remove_file(&pid_file));
+                WaitLock::Released(lock) => {
+                    remove_pid_file_if_owned(&lock, &pid_file);
                     Ok(())
                 }
                 WaitLock::StillHeld(file) => {
                     signal_pid(pid, Signal::SIGKILL)?;
                     match wait_for_lock_release(file, STOP_KILL_GRACE)? {
-                        WaitLock::Released => {
-                            ignore_error(std::fs::remove_file(&pid_file));
+                        WaitLock::Released(lock) => {
+                            remove_pid_file_if_owned(&lock, &pid_file);
                             Ok(())
                         }
                         WaitLock::StillHeld(_file) => {
@@ -843,7 +923,11 @@ fn wait_for_lock_release(file: File, timeout: Duration) -> anyhow::Result<WaitLo
     let mut file = file;
     loop {
         match try_lock_pid_file(file)? {
-            LockAttempt::Acquired(_lock) => return Ok(WaitLock::Released),
+            // Hand the acquired lock back so the caller's verified unlink runs
+            // while the lock is still held - removing the pidfile under the lock
+            // is what keeps a fresh `serve` from opening the path, locking behind
+            // us, and being torn from its own live pidfile (S7).
+            LockAttempt::Acquired(lock) => return Ok(WaitLock::Released(lock)),
             LockAttempt::Held(returned) => {
                 file = returned;
                 if Instant::now() >= deadline {
@@ -916,6 +1000,12 @@ async fn arm_divergence(
         Divergence::DelayAcks { ms } => {
             state.delay_ms.store(ms, Ordering::Relaxed);
         }
+        // GoDark/StallData windows are STORE-not-extend (S18): each arm overwrites
+        // the absolute deadline with `now + ms`, so re-arming with a SMALLER `ms`
+        // shortens an in-flight blackout rather than lengthening it. This is
+        // deliberate - re-arming sets the window, it does not accumulate - and lets
+        // a test cut a window short by re-posting a small one; an operator wanting a
+        // longer window re-arms with the longer `ms`.
         Divergence::GoDark { ms } => {
             state.dark_until_ns.store(
                 window_until_ns(sim_now_ns(state.sim), ms),
@@ -1048,6 +1138,8 @@ async fn stamp_market_price(msg: ClientMessage, state: &AppState) -> ClientMessa
 /// both order-entry surfaces (`POST /orders` and the `/ws` handling below) so
 /// the gate lives in exactly one place.
 async fn process_order_cmd(order_cmd: ClientMessage, state: &AppState) -> Vec<ServerMessage> {
+    // Sampled at entry for the protocol-boundary rejections below: they return
+    // before any price synthesis, so entry-time is when they logically occur.
     let ts = sim_now_ns(state.sim);
     match &order_cmd {
         ClientMessage::SubmitOrder(order) => {
@@ -1079,6 +1171,13 @@ async fn process_order_cmd(order_cmd: ClientMessage, state: &AppState) -> Vec<Se
         }
     }
     let order_cmd = stamp_market_price(order_cmd, state).await;
+    // Re-sample after the market-price synthesis, which for a price-less MARKET
+    // order may block ~100 ms on the checkpoint mutex and seek. Stamping the
+    // engine's events with the entry-time `ts` would date them up to a seek's
+    // worth of sim-time before they logically occur - ~10 sim-seconds at speed
+    // 100 (S16). The synthesis-failure reject and the engine events below all
+    // occur now, after synthesis, so they take this fresh instant.
+    let ts = sim_now_ns(state.sim);
     // A MARKET order still price-less after the stamp, for a symbol this venue
     // DOES list, means `current_price` failed: the positioning seek could not
     // reach sim-now within its budget (or the synthesis task itself died).
@@ -1286,6 +1385,88 @@ async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
+/// Emit a `ProtocolError` diagnostic through the execution-delay pump rather
+/// than straight onto the writer channel. `ServerMessage::category` classifies
+/// `ProtocolError` as execution, and havoc.md says `DelayAcks` holds EVERY
+/// outbound execution event, so routing it here is what makes the route match
+/// the classification (S10): an armed `DelayAcks` now holds these diagnostics
+/// too, and the writer's `GoDark` gate still applies downstream. `drop(...await)`
+/// because a send error just means the writer already gave up on this socket -
+/// the read loop observes the same and exits.
+async fn send_exec_protocol_error(
+    exec_tx: &mpsc::Sender<(Instant, ServerMessage)>,
+    ts_event: u64,
+    reason: String,
+) {
+    drop(
+        exec_tx
+            .send((Instant::now(), ServerMessage::ProtocolError { reason, ts_event }))
+            .await,
+    );
+}
+
+/// Reconcile a live `Subscribe`'s `start_ts` against the tape bounds, mirroring
+/// the `/trades` handler's refusals but as a DEGRADATION - the live feed still
+/// starts, because a subscribe carries the client's real want (the feed itself).
+/// Either shortfall goes out as a `ProtocolError` diagnostic so a healthy-looking
+/// feed cannot hide it. Returns the effective `start_ts` to hand the replay.
+async fn reconcile_subscribe_start_ts(
+    start_ts: Option<u64>,
+    state: &AppState,
+    exec_tx: &mpsc::Sender<(Instant, ServerMessage)>,
+) -> Option<u64> {
+    let ts = start_ts?;
+    // Below the tape origin: `/trades` refuses the identical window with a 422,
+    // but here the stream is kept and the generator anchors at the origin
+    // naturally (its first tick lands at or after the origin) - only announce the
+    // shortfall. `start_ts` passes through unchanged.
+    if ts < state.data_origin_ns {
+        tracing::warn!(
+            start_ts = ts,
+            data_origin = state.data_origin_ns,
+            "subscribe start_ts precedes the tape origin; stream anchors at the origin"
+        );
+        send_exec_protocol_error(
+            exec_tx,
+            sim_now_ns(state.sim),
+            format!(
+                "subscribe start_ts {ts} precedes data_origin_ns {}; \
+                 the tape begins at its origin and the stream anchors there",
+                state.data_origin_ns
+            ),
+        )
+        .await;
+        return start_ts;
+    }
+    // Beyond sim-now: the WS twin of the `/trades` future refusal (F8). Honoring
+    // it as given would extend the shared index into the future and, in identity
+    // mode, emit an unpaced look-ahead first tick stamped ahead of the clock -
+    // exactly what `/trades` 422s. Consistent with the below-origin degradation
+    // above, clamp to a fresh live stream from the clock: returning `None` makes
+    // the replay seek sim-now and seed its pacer there, so the first tick is
+    // paced like any live subscribe, and resumes past a quiesced predecessor
+    // rather than jumping to the future. Announce the clamp.
+    let sim_now = sim_now_ns(state.sim);
+    if ts > sim_now {
+        tracing::warn!(
+            start_ts = ts,
+            sim_now,
+            "subscribe start_ts exceeds sim-now; clamping to a live stream from the clock"
+        );
+        send_exec_protocol_error(
+            exec_tx,
+            sim_now,
+            format!(
+                "subscribe start_ts {ts} exceeds sim-now {sim_now}; \
+                 the tape cannot serve past the clock, streaming live from now"
+            ),
+        )
+        .await;
+        return None;
+    }
+    start_ts
+}
+
 /// One client session.
 ///
 /// The socket is split so order events and replayed market data can be written
@@ -1369,17 +1550,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 tracing::warn!(%e, %text, "undecodable client message");
                 // Surface the decode failure on the wire instead of dropping it
                 // silently: previously a malformed/under-specified frame (e.g.
-                // `{"type":"Subscribe"}` missing `symbols`) looked identical to
-                // a healthy-but-idle feed to the client. `tx.send` failing here
-                // just means the writer task already gave up on this socket;
-                // the outer loop's next read will observe the same and exit.
-                drop(
-                    tx.send(ServerMessage::ProtocolError {
-                        reason: e.to_string(),
-                        ts_event: sim_now_ns(state.sim),
-                    })
-                    .await,
-                );
+                // `{"type":"Subscribe"}` missing `symbols`) looked identical to a
+                // healthy-but-idle feed. Routed through the exec pump so this
+                // execution-category diagnostic honors DelayAcks like every other
+                // execution event (S10).
+                send_exec_protocol_error(&exec_tx, sim_now_ns(state.sim), e.to_string()).await;
                 continue;
             }
         };
@@ -1391,34 +1566,34 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 regime,
             } => {
                 let regime = validate_regime_or_clean(regime);
-                // A `start_ts` below the tape origin can never be served -
-                // `/trades` refuses the identical window with a loud `422`. A
-                // live subscribe still carries the client's real want (the
-                // feed itself), so the stream is kept and anchors at the
-                // origin, but the shortfall goes out on the wire instead of
-                // clamping in silence: without the frame, "my backfill began
-                // later than I asked" is invisible on a healthy-looking feed.
-                if let Some(ts) = start_ts
-                    && ts < state.data_origin_ns
-                {
-                    tracing::warn!(
-                        start_ts = ts,
-                        data_origin = state.data_origin_ns,
-                        "subscribe start_ts precedes the tape origin; stream anchors at the origin"
-                    );
-                    drop(
-                        tx.send(ServerMessage::ProtocolError {
-                            reason: format!(
-                                "subscribe start_ts {ts} precedes data_origin_ns {}; \
-                                 the tape begins at its origin and the stream anchors there",
-                                state.data_origin_ns
-                            ),
-                            ts_event: sim_now_ns(state.sim),
-                        })
-                        .await,
-                    );
-                }
+                // Reconcile the requested window against the tape bounds up front:
+                // a start below the origin anchors at the origin, a start beyond
+                // sim-now clamps to a live stream from the clock (F8), each with a
+                // ProtocolError diagnostic. The effective start_ts drives every
+                // symbol's replay below.
+                let start_ts =
+                    reconcile_subscribe_start_ts(start_ts, &state, &exec_tx).await;
                 for symbol in dedup_symbols(symbols) {
+                    // Unknown symbols get their diagnostic here rather than from a
+                    // spawned replay thread: whether the venue lists a symbol is a
+                    // cheap synchronous check, so there is no reason to spin up an
+                    // OS thread that immediately exits and leaves a dead entry in
+                    // `replays` (S22). The dead-SEEK diagnostic - knowable only by
+                    // actually running the positioning seek - still comes from the
+                    // thread in `spawn_replay`.
+                    if state.profiles.get(&symbol).is_none() {
+                        tracing::warn!(%symbol, "subscribe for unknown symbol streams nothing");
+                        send_exec_protocol_error(
+                            &exec_tx,
+                            sim_now_ns(state.sim),
+                            format!(
+                                "subscribe for unknown symbol {symbol}: the venue does not \
+                                 list it, no data will stream"
+                            ),
+                        )
+                        .await;
+                        continue;
+                    }
                     // Quiesce any in-flight stream for this symbol BEFORE the
                     // replacement emits: cancel the old thread and join it (off
                     // the async worker) so it cannot land one last tick into the
@@ -1540,9 +1715,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 /// behind it for the entire armed `DelayAcks` window (up to one hour) - and,
 /// on disconnect, kept the writer (and the connection's teardown) parked for
 /// whatever remained of that sleep even though the socket was already gone.
-/// This pump reads exec events (only ever sent here, via the paired sender,
-/// by the order-entry handling in `handle_socket`) off their own channel and
-/// forwards into `out`, so a long delay only holds up further exec traffic.
+/// This pump reads execution-category events off their own channel and forwards
+/// into `out`, so a long delay only holds up further exec traffic. The senders
+/// are the order-entry handling in `handle_socket` (engine events) and
+/// `send_exec_protocol_error` (ProtocolError diagnostics, which classify as
+/// execution and so honor DelayAcks like any other exec event - S10).
 ///
 /// The delay deadline is PER EVENT, anchored at the instant the event was
 /// enqueued: `arrival + armed delay`. Sleeping the full window between
@@ -1585,6 +1762,22 @@ fn spawn_exec_pump(
     })
 }
 
+/// Explicit wall-clock floor on the heartbeat period (S21). `wall_duration`
+/// already clamps a scaled span to 1ns so `interval_at` never sees a zero
+/// Duration, but under a large `speed` the configured sim-ms cadence still
+/// collapses toward the timer granularity and the heartbeat becomes a ~kHz
+/// per-socket flood. Pinning an explicit 1ms floor bounds the rate without
+/// depending on tokio's internal coalescing; a heartbeat finer than a
+/// millisecond carries no liveness signal a coarser one does not.
+const MIN_HEARTBEAT_WALL: Duration = Duration::from_millis(1);
+
+/// The wall period a heartbeat ticks on: the configured sim-ms cadence mapped
+/// onto the wall axis, floored at [`MIN_HEARTBEAT_WALL`].
+fn heartbeat_period(interval_ms: u64, sim: SimClock) -> Duration {
+    sim.wall_duration(sim_duration_from_millis(interval_ms))
+        .max(MIN_HEARTBEAT_WALL)
+}
+
 /// Feed per-session server liveness frames into the same channel the writer
 /// gates and serializes, keeping socket writes single-owned and ordered.
 fn spawn_heartbeat(
@@ -1593,7 +1786,7 @@ fn spawn_heartbeat(
     tx: mpsc::Sender<ServerMessage>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let period = sim.wall_duration(sim_duration_from_millis(interval_ms));
+        let period = heartbeat_period(interval_ms, sim);
         // `tokio::time::interval` fires its first tick immediately rather than
         // after one period, so a plain `interval(period)` would emit a
         // `Heartbeat` at t=0 the instant the socket opens - before the client
@@ -1601,6 +1794,10 @@ fn spawn_heartbeat(
         // than every tick after it. `interval_at` with an explicit first
         // deadline one period out keeps the cadence uniform from the start.
         let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        // Skip missed ticks rather than the default Burst: if the runtime stalls,
+        // a heartbeat should resume its cadence from now, not fire a catch-up
+        // burst of every deadline it slept through (S21).
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
             if tx
@@ -1691,9 +1888,31 @@ fn sleep_until_wall_cancellable(
 /// tick after its successor begins (E.6), and so disconnect reaps every thread.
 async fn quiesce_replay(replay: Replay) {
     replay.cancel.store(true, Ordering::Relaxed);
-    if let Err(e) = tokio::task::spawn_blocking(move || replay.handle.join()).await {
-        tracing::warn!(%e, "replay join task panicked");
+    match tokio::task::spawn_blocking(move || replay.handle.join()).await {
+        Ok(Ok(())) => {}
+        // The replay OS thread panicked mid-stream. `join()` surfaces the panic
+        // payload here; without logging it, a wedged/panicked replay silently
+        // ended the feed and the client saw an idle-but-healthy socket rather than
+        // any sign the stream died (S15).
+        Ok(Err(panic)) => {
+            tracing::error!(
+                panic = %panic_message(&panic),
+                "replay thread panicked; its market-data feed ended silently"
+            );
+        }
+        // The outer spawn_blocking wrapper (not the replay thread) failed to run.
+        Err(e) => tracing::warn!(%e, "replay join task panicked"),
     }
+}
+
+/// Best-effort human-readable text from a `catch_unwind`/`JoinHandle::join`
+/// panic payload - the common `&str` and `String` shapes, else a placeholder.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
 }
 
 /// Quiesce a symbol's in-flight replay and return its resume floor: the last
@@ -2095,6 +2314,22 @@ mod tests {
         assert!(build_sim_clock(&cfg, 123).is_err());
     }
 
+    #[test]
+    fn config_rejects_unknown_top_level_key() {
+        // S20: a typo'd knob must be a hard error, not a silent fallback to the
+        // field default - making config.md's "malformed file is a hard error"
+        // promise literally true for the run knobs.
+        let err = toml::from_str::<Config>("gap_cap_m = 0\n")
+            .expect_err("an unknown top-level key is rejected")
+            .to_string();
+        assert!(
+            err.contains("gap_cap_m") || err.contains("unknown"),
+            "the error names the bad key: {err}"
+        );
+        // A correctly-spelled key still parses (missing keys keep their defaults).
+        assert!(toml::from_str::<Config>("gap_cap_ms = 5\n").is_ok());
+    }
+
     #[tokio::test]
     async fn clock_route_returns_stored_run_clock_and_tape_boundary() {
         let sim = SimClock {
@@ -2260,8 +2495,12 @@ mod tests {
         // A `start_ts` below the tape origin used to clamp to the origin in
         // silence - asymmetric with `/trades`, which refuses the identical
         // window with a 422. The subscribe must now announce the shortfall on
-        // the wire AND still deliver the origin-anchored stream after it: the
-        // frame is a diagnostic, not a refusal of the live feed.
+        // the wire AND still deliver the origin-anchored stream: the frame is a
+        // diagnostic, not a refusal of the live feed. The diagnostic rides the
+        // exec pump (ProtocolError is execution-category, S10), so it and the
+        // data-channel trades race onto the socket - assert both are present
+        // rather than pinning a strict interleave the exec/data split does not
+        // guarantee.
         let state = state();
         let data_origin = state.data_origin_ns;
         let app = Router::new()
@@ -2287,32 +2526,218 @@ mod tests {
             socket
                 .send(tungstenite::Message::Text(subscribe.into()))
                 .expect("send pre-origin subscribe");
-            let mut frames = Vec::new();
-            while frames.len() < 2 {
-                match socket.read().expect("read ws frame") {
-                    tungstenite::Message::Text(text) => frames.push(
-                        serde_json::from_str::<ServerMessage>(&text).expect("decode ServerMessage"),
-                    ),
-                    tungstenite::Message::Close(_) => panic!("socket closed prematurely"),
-                    _ => continue,
-                }
-            }
-            frames
+            // The diagnostic rides the exec pump and the trades the data channel,
+            // so they race; read until both have appeared (bounded so a genuinely
+            // missing diagnostic still fails rather than hangs).
+            read_until_error_and_trade(&mut socket)
         })
         .await
         .expect("blocking ws client");
 
-        let ServerMessage::ProtocolError { reason, .. } = &frames[0] else {
-            panic!("expected ProtocolError first, got {:?}", frames[0]);
-        };
+        let (reason, _) = frames;
         assert!(
             reason.contains(&data_origin.to_string()),
-            "the frame names the origin the stream anchors at: {reason}"
+            "the diagnostic names the origin the stream anchors at: {reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_beyond_sim_now_clamps_to_a_live_stream() {
+        // F8: a live Subscribe with a start_ts past sim-now is the WS twin of the
+        // /trades future refusal. Rather than honor it (extending the index into
+        // the future and emitting unpaced look-ahead ticks), it degrades to a live
+        // stream from the clock and announces the clamp on the wire. Under the
+        // identity firehose clock the first delivered trade must land at or after
+        // sim-now, never in the requested future.
+        let state = state(); // identity clock, speed 0 (firehose)
+        let sim_now = sim_now_ns(state.sim);
+        let future = sim_now + 3_600_000_000_000; // 1h past the clock
+        let app = Router::new()
+            .route("/ws", get(ws_upgrade))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            drop(axum::serve(listener, app).await);
+        });
+
+        let frames = tokio::task::spawn_blocking(move || {
+            let (mut socket, _) =
+                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
+                symbols: vec!["BTCUSDT".to_string()],
+                start_ts: Some(future),
+                regime: None,
+            })
+            .expect("encode subscribe");
+            socket
+                .send(tungstenite::Message::Text(subscribe.into()))
+                .expect("send future subscribe");
+            read_until_error_and_trade(&mut socket)
+        })
+        .await
+        .expect("blocking ws client");
+
+        let (reason, first_trade_ts) = frames;
+        assert!(
+            reason.contains("sim-now"),
+            "the diagnostic names the sim-now ceiling: {reason}"
         );
         assert!(
-            matches!(frames[1], ServerMessage::Trade(_)),
-            "the stream still delivers after the diagnostic frame, got {:?}",
-            frames[1]
+            first_trade_ts < future,
+            "the clamped stream must not deliver the requested future tape: \
+             first trade {first_trade_ts} >= requested future {future}"
+        );
+    }
+
+    /// Read WS frames until both a `ProtocolError` and a `Trade` have arrived,
+    /// returning the diagnostic reason and the first trade's `ts_event`. Bounded
+    /// so a genuinely absent diagnostic (or trade) fails the test rather than
+    /// hanging. Shared by the below-origin and future-clamp subscribe tests, whose
+    /// diagnostic (exec pump) and trades (data channel) race onto the socket.
+    fn read_until_error_and_trade<S: std::io::Read + std::io::Write>(
+        socket: &mut tungstenite::WebSocket<S>,
+    ) -> (String, u64) {
+        let mut reason: Option<String> = None;
+        let mut first_trade_ts: Option<u64> = None;
+        for _ in 0..2_000 {
+            if reason.is_some() && first_trade_ts.is_some() {
+                break;
+            }
+            match socket.read().expect("read ws frame") {
+                tungstenite::Message::Text(text) => {
+                    match serde_json::from_str::<ServerMessage>(&text).expect("decode ServerMessage")
+                    {
+                        ServerMessage::ProtocolError { reason: r, .. } => reason = Some(r),
+                        ServerMessage::Trade(t) => {
+                            first_trade_ts.get_or_insert(t.ts_event);
+                        }
+                        _ => {}
+                    }
+                }
+                tungstenite::Message::Close(_) => panic!("socket closed prematurely"),
+                _ => continue,
+            }
+        }
+        (
+            reason.expect("a ProtocolError diagnostic must arrive"),
+            first_trade_ts.expect("a trade must arrive"),
+        )
+    }
+
+    #[tokio::test]
+    async fn reconcile_subscribe_start_ts_clamps_future_to_live() {
+        // The clamp itself, without a socket: a future start returns None (a live
+        // stream from the clock), while an in-range start passes through unchanged.
+        let state = state();
+        let (exec_tx, mut exec_rx) = mpsc::channel::<(Instant, ServerMessage)>(8);
+
+        let sim_now = sim_now_ns(state.sim);
+        let clamped =
+            reconcile_subscribe_start_ts(Some(sim_now + 3_600_000_000_000), &state, &exec_tx).await;
+        assert_eq!(clamped, None, "a future start clamps to a live stream");
+        let (_, msg) = exec_rx.try_recv().expect("a diagnostic frame was emitted");
+        assert!(matches!(msg, ServerMessage::ProtocolError { .. }));
+
+        let in_range = reconcile_subscribe_start_ts(Some(sim_now), &state, &exec_tx).await;
+        assert_eq!(in_range, Some(sim_now), "an in-range start is honored as given");
+        assert!(
+            exec_rx.try_recv().is_err(),
+            "an in-range start emits no diagnostic"
+        );
+    }
+
+    #[test]
+    fn session_error_message_renders_the_sum_sentinel_honestly() {
+        // F14: the usize::MAX sentinel marks a whole-array sum violation with no
+        // single bad element. It must NOT print as intensity_hour[18446744073709551615].
+        let sum = session_error_message(
+            "BTCUSDT",
+            mogwai_data::SessionProfileError {
+                field: "intensity_hour",
+                index: usize::MAX,
+            },
+        );
+        assert!(sum.contains("does not sum"), "sum message: {sum}");
+        assert!(
+            !sum.contains("18446744073709551615"),
+            "the raw sentinel must not leak: {sum}"
+        );
+        // A genuine per-element failure keeps the indexed message.
+        let element = session_error_message(
+            "BTCUSDT",
+            mogwai_data::SessionProfileError {
+                field: "vol_hour",
+                index: 7,
+            },
+        );
+        assert!(element.contains("vol_hour[7]"), "element message: {element}");
+    }
+
+    #[test]
+    fn validate_instrument_def_rejects_empty_symbol() {
+        // F15: an empty symbol must be a clean startup error, not a downstream
+        // generator `.expect` panic. base/quote are non-empty so the symbol check
+        // is what fires.
+        let mut def = mogwai_protocol::default_instruments()
+            .into_iter()
+            .next()
+            .expect("a default instrument");
+        def.symbol = String::new();
+        let err = validate_instrument_def(&def)
+            .expect_err("an empty symbol is rejected")
+            .to_string();
+        assert!(err.contains("symbol"), "the error names the symbol: {err}");
+    }
+
+    #[tokio::test]
+    async fn quiesce_replay_survives_a_panicking_thread() {
+        // S15: a replay OS thread that panics mid-stream must be joined (the panic
+        // logged, not swallowed) without propagating into the connection teardown.
+        let cancel = Arc::new(AtomicBool::new(false));
+        let thread_cancel = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            while !thread_cancel.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            panic!("replay thread blew up");
+        });
+        // Returns cleanly despite the thread's panic; a failure would propagate
+        // the panic and fail the test.
+        quiesce_replay(Replay {
+            cancel,
+            handle,
+            last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
+        })
+        .await;
+    }
+
+    #[test]
+    fn panic_message_extracts_str_and_string_payloads() {
+        // S15 relies on this to surface a joined replay-thread panic.
+        let str_panic = std::panic::catch_unwind(|| panic!("boom")).unwrap_err();
+        assert_eq!(panic_message(&*str_panic), "boom");
+        let string_panic =
+            std::panic::catch_unwind(|| panic!("{}", String::from("dynamic"))).unwrap_err();
+        assert_eq!(panic_message(&*string_panic), "dynamic");
+    }
+
+    #[test]
+    fn heartbeat_period_is_floored_against_a_speed_flood() {
+        // S21: a large speed collapses the scaled wall period; the floor keeps it
+        // at MIN_HEARTBEAT_WALL rather than a per-socket kHz flood.
+        let fast = SimClock {
+            sim_epoch_ns: 1,
+            wall_anchor_ns: 0,
+            speed: 1e12,
+        };
+        assert!(heartbeat_period(1, fast) >= MIN_HEARTBEAT_WALL);
+        // Above the floor, the configured cadence is preserved on the identity map.
+        assert_eq!(
+            heartbeat_period(250, SimClock::identity()),
+            Duration::from_millis(250)
         );
     }
 

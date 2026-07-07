@@ -82,6 +82,38 @@ fn serve_refuses_second_start() {
     );
 }
 
+#[test]
+fn stop_removes_a_stale_pid_file() {
+    // A pid file with no live daemon behind it: `stop` acquires the (unheld)
+    // lock and unlinks it under the lock, having verified the path still names
+    // the inode it locked (the S7 verified-unlink). The file must be gone and the
+    // command must succeed.
+    let pid_file = target_tmp_dir().join(format!("stale-{}.pid", std::process::id()));
+    fs::write(&pid_file, "").expect("write stale pid file");
+
+    let output = stop_daemon(&pid_file);
+    assert_success(&output, "stop a stale pid file");
+    assert!(
+        !pid_file.exists(),
+        "stale pid file should be removed: {}",
+        pid_file.display()
+    );
+}
+
+#[test]
+fn stop_on_missing_pid_file_is_clean() {
+    let pid_file = target_tmp_dir().join(format!("missing-{}.pid", std::process::id()));
+    ignore_error(fs::remove_file(&pid_file));
+
+    let output = stop_daemon(&pid_file);
+    assert_success(&output, "stop a missing pid file");
+    assert!(
+        stdout(&output).contains("no daemon running"),
+        "stop on a missing pid file reports no daemon: {}",
+        stdout(&output)
+    );
+}
+
 struct Daemon {
     addr: SocketAddr,
     pid_file: PathBuf,
