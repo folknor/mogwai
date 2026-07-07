@@ -436,8 +436,16 @@ Run by the adapter on `HavocSpec.conn`.
   0` (a zero ceiling with a real initial backoff is ambiguous - `max == 0` is not
   a documented "unlimited" sentinel, and it would collapse the lifecycle backoff
   into a CPU-spinning zero-delay reconnect loop), and `>=`
-  `reconnect_delay_initial_ms` when both are positive. Both bounds zero is fine
-  (backoff disabled).
+  `reconnect_delay_initial_ms` when both are positive.
+- Symmetrically, `reconnect_delay_initial_ms` must be `> 0` whenever
+  `reconnect_delay_max_ms > 0`: the lifecycle backoff is
+  `initial * factor^attempt`, so a zero initial stays zero on every attempt
+  regardless of the ceiling - the same CPU-spinning reconnect loop from the
+  other direction. Disabling backoff requires BOTH bounds zero, which is fine
+  (backoff disabled). Note the partial-table implication: a `[havoc.conn]`
+  arming only `reconnect_delay_initial_ms = 0` inherits the default
+  `reconnect_delay_max_ms = 10_000` and is rejected - set both to zero to
+  disable backoff.
 - `max_requests_per_second`, when present, must be `> 0` (`None` is the
   documented "unlimited"; `Some(0)` has no defined meaning).
 

@@ -160,8 +160,11 @@ pub struct ServerClock {
 /// be finite and strictly positive.
 ///
 /// `sim_ns`/`wall_ns`/`wall_span` all tolerate a non-finite or non-positive
-/// `speed` in memory (they fall back to the anchor instant rather than
-/// panic), so nothing in this type stops a degenerate `SimClock` from
+/// `speed` in memory rather than panic: `sim_ns` pins to the sim anchor
+/// (`sim_epoch_ns` - sim time never leaves the epoch), while `wall_ns` and
+/// `wall_span` saturate to `u64::MAX` (at zero speed a sim instant beyond the
+/// epoch is never reached, so the wall answer is "the end of time", not the
+/// anchor). So nothing in this type stops a degenerate `SimClock` from
 /// existing - but it cannot round-trip over the wire: serde_json serializes a
 /// non-finite `f64` as JSON `null`, and `null` fails to decode back into the
 /// bare `f64` field, wedging whichever end tries to parse it.
@@ -373,6 +376,21 @@ pub fn validate_conn_havoc(conn: &ConnHavoc) -> Result<(), &'static str> {
     if conn.reconnect_delay_initial_ms > 0 && conn.reconnect_delay_max_ms == 0 {
         return Err("reconnect_delay_max_ms must be > 0 when reconnect_delay_initial_ms > 0");
     }
+    // The mirror image of the gate above: a zero initial under a positive
+    // ceiling is the SAME spin loop from the other side. The lifecycle backoff
+    // is multiplicative (`initial * factor^attempt`), so `initial == 0` yields
+    // a zero delay on every attempt no matter how large the ceiling - while
+    // the venue is down the reconnect loop redials with `Duration::ZERO`, an
+    // unthrottled CPU spin the positive max appears to rule out but cannot.
+    // Disabling backoff is a deliberate two-knob act: BOTH bounds must be
+    // zero. This also fails loud for a partial `[havoc.conn]` table that arms
+    // only `reconnect_delay_initial_ms = 0` and inherits the default ceiling
+    // (10000): add `reconnect_delay_max_ms = 0` to actually disable backoff.
+    if conn.reconnect_delay_initial_ms == 0 && conn.reconnect_delay_max_ms > 0 {
+        return Err(
+            "reconnect_delay_initial_ms must be > 0 when reconnect_delay_max_ms > 0 (backoff is initial * factor^attempt, so a zero initial spins at zero delay forever; set BOTH to 0 to disable backoff)",
+        );
+    }
     if conn.reconnect_delay_initial_ms > 0
         && conn.reconnect_delay_max_ms > 0
         && conn.reconnect_delay_max_ms < conn.reconnect_delay_initial_ms
@@ -480,6 +498,11 @@ pub fn validate_market_regime(regime: &MarketRegime) -> Result<(), &'static str>
 /// API-boundary guard for an armed divergence, mirroring `validate_conn_havoc`
 /// and `validate_market_regime` in style and message convention.
 ///
+/// `PartialFillNext.client_order_id` must be non-blank (the same trim-based
+/// emptiness the engine applies to a submitted order's id): the engine rejects
+/// every submit whose id trims to empty, so a partial targeting a blank id can
+/// never match an order - it would sit in the armed queue forever as a dead
+/// entry, and no API flushes engine-side single-shots.
 /// `PartialFillNext.fraction` must lie in the half-open `(0, 1]`: a fill must
 /// move some quantity (`> 0`) and cannot exceed the order (`<= 1`).
 /// `DelayAcks.ms`, `GoDark.ms`, and `StallData.ms` are bounded by
@@ -494,7 +517,13 @@ pub fn validate_market_regime(regime: &MarketRegime) -> Result<(), &'static str>
 /// rejects the misconfiguration early, before it is armed.
 pub fn validate_divergence(div: &control::Divergence) -> Result<(), &'static str> {
     match div {
-        control::Divergence::PartialFillNext { fraction, .. } => {
+        control::Divergence::PartialFillNext {
+            client_order_id,
+            fraction,
+        } => {
+            if client_order_id.trim().is_empty() {
+                return Err("PartialFillNext client_order_id must be non-empty");
+            }
             if *fraction <= Decimal::ZERO || *fraction > Decimal::ONE {
                 return Err("PartialFillNext fraction must be in (0, 1]");
             }
@@ -1203,6 +1232,23 @@ mod tests {
         let spec: HavocSpec =
             serde_json::from_str(r#"{"conn":{"heartbeat_interval_ms":2000}}"#).unwrap();
         assert_eq!(spec.conn, decoded);
+
+        // A partial table arming ONLY `reconnect_delay_initial_ms = 0` still
+        // decodes (the container default fills the rest), but it inherits the
+        // default ceiling (10000) and the validator rejects the combination
+        // loudly - a zero initial under a positive max is a zero-delay
+        // reconnect spin, and the error tells the operator the way out (zero
+        // BOTH bounds to disable backoff) rather than silently arming it.
+        let zero_initial: ConnHavoc =
+            serde_json::from_str(r#"{"reconnect_delay_initial_ms":0}"#).unwrap();
+        assert_eq!(
+            zero_initial,
+            ConnHavoc {
+                reconnect_delay_initial_ms: 0,
+                ..ConnHavoc::default()
+            }
+        );
+        assert!(validate_conn_havoc(&zero_initial).is_err());
     }
 
     #[test]
@@ -1257,8 +1303,22 @@ mod tests {
             Err("reconnect_delay_max_ms must be > 0 when reconnect_delay_initial_ms > 0")
         );
 
-        // But a zero initial with a zero max is still fine (backoff disabled),
-        // as is the honest default.
+        // The mirror image: a zero initial under a positive ceiling is the
+        // same spin loop from the other side - the lifecycle backoff is
+        // `initial * factor^attempt`, so a zero initial stays zero on every
+        // attempt regardless of the ceiling.
+        invalid = conn;
+        invalid.reconnect_delay_initial_ms = 0;
+        invalid.reconnect_delay_max_ms = 5_000;
+        assert_eq!(
+            validate_conn_havoc(&invalid),
+            Err(
+                "reconnect_delay_initial_ms must be > 0 when reconnect_delay_max_ms > 0 (backoff is initial * factor^attempt, so a zero initial spins at zero delay forever; set BOTH to 0 to disable backoff)"
+            )
+        );
+
+        // But a zero initial with a zero max is still fine (backoff disabled
+        // takes BOTH knobs), as is the honest default.
         let mut both_zero = conn;
         both_zero.reconnect_delay_initial_ms = 0;
         both_zero.reconnect_delay_max_ms = 0;
@@ -1464,13 +1524,15 @@ mod tests {
     }
 
     #[test]
-    fn now_unix_nanos_is_monotone_and_nonzero() {
-        let a = now_unix_nanos();
-        let b = now_unix_nanos();
-        // A real post-epoch wall clock is well past zero and never steps back
-        // across two adjacent reads in this test environment.
-        assert!(a > 0);
-        assert!(b >= a);
+    fn now_unix_nanos_reads_a_post_epoch_clock() {
+        // A real post-epoch wall clock is well past zero. Deliberately NO
+        // ordering assertion across two reads: `now_unix_nanos` wraps
+        // `SystemTime`, which is not monotonic - an NTP step between two reads
+        // can legitimately go backward, and the helper's contract is exactly
+        // to saturate such a step (to 0 at worst) rather than promise
+        // monotonicity, so asserting `b >= a` would pin the host's clock
+        // discipline, not this function.
+        assert!(now_unix_nanos() > 0);
     }
 
     #[test]
@@ -1560,6 +1622,34 @@ mod tests {
             control::Divergence::ClearDivergences,
         ] {
             validate_divergence(&div).expect("non-numeric variants are always valid");
+        }
+    }
+
+    #[test]
+    fn validate_divergence_rejects_blank_partial_fill_target() {
+        // The engine rejects every submit whose client_order_id trims to
+        // empty, so a PartialFillNext targeting a blank id can never match an
+        // order - it would sit armed forever as a dead queue entry. The same
+        // trim-based emptiness check the engine applies to submits guards the
+        // divergence target here, so whitespace-only ids reject too.
+        for blank in ["", " ", "\t\n  "] {
+            assert_eq!(
+                validate_divergence(&control::Divergence::PartialFillNext {
+                    client_order_id: blank.into(),
+                    fraction: Decimal::new(5, 1),
+                }),
+                Err("PartialFillNext client_order_id must be non-empty")
+            );
+        }
+
+        // A real id stays valid; trim-based means only ALL-whitespace rejects,
+        // so an id with inner whitespace passes too.
+        for ok in ["O-1", "O 1"] {
+            validate_divergence(&control::Divergence::PartialFillNext {
+                client_order_id: ok.into(),
+                fraction: Decimal::new(5, 1),
+            })
+            .expect("non-blank target id is valid");
         }
     }
 
