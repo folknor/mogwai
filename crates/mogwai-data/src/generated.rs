@@ -58,6 +58,28 @@ const START_PRICE_USD: i64 = 60_000;
 const TYPICAL_SIZE_MANTISSA: i64 = 1;
 const TYPICAL_SIZE_SCALE: u32 = 1;
 const VOL_SCALAR: f64 = 0.000_000_05;
+// Session-gap rails. Trading hours, maintenance breaks and closed weekends are
+// expressed as NEAR-ZERO hour/day shares in a custom SessionProfile - not a
+// separate code path - but the arrival multiplier is sampled once, at the
+// instant a gap opens, and dividing a whole duration draw by a near-zero share
+// stretches it far past the closed window (share 1e-6 turns a ~7 s draw into
+// ~80 days) and can push the ns cast to saturate at u64::MAX, pinning the
+// clock there forever. Gaps that open BELOW this multiplier gate therefore
+// take the hour-integrating path (`closed_window_gap_ns`); gaps at or above it
+// keep the original once-sampled math bit for bit, which is what keeps the
+// committed fingerprint's stream byte-identical - its smallest hour*day
+// multiplier is ~0.58, two orders of magnitude above the gate, so the
+// fingerprint profile can never cross it.
+const SESSION_CLOSED_ARR_MULT: f64 = 0.01;
+// Hard per-gap ceiling (366 days in ns) for BOTH paths. On the open path it is
+// unreachable for any multiplier above the gate paired with the validated
+// thin_factor <= 1000 and realistic duration draws - it exists so no f64->u64
+// cast can ever land on u64::MAX again. On the closed path it bounds the
+// hour walk when a profile closes EVERY hour so hard the budget can never be
+// spent: the gap caps at ~a year and the clock keeps strictly advancing
+// instead of freezing.
+const MAX_SESSION_GAP_NS: u64 = 31_622_400_000_000_000;
+const NS_PER_HOUR: u64 = 3_600_000_000_000;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Fingerprint {
@@ -405,6 +427,10 @@ impl GeneratedSource {
         let vol = GarchVol::new(decimal_to_f64(scalars.start_price), scalars.vol_scalar);
         let size_median = decimal_to_f64(scalars.typical_size).max(f64::MIN_POSITIVE);
         let size_dist = LogNormal::new(size_median.ln(), SIZE_LOG_SIGMA).expect("valid lognormal");
+        // Built before the struct literal because it borrows `scalars.symbol`,
+        // which the literal moves; `start_ts` is the tape anchor RegimeState
+        // needs to fail-close an already-elapsed ReopenGap.
+        let regime = RegimeState::new(regime, clamp_override, start_ts, &scalars.symbol);
         Self {
             tick_f64: decimal_to_f64(scalars.modal_tick),
             scalars,
@@ -432,7 +458,7 @@ impl GeneratedSource {
             normal: Normal::new(0.0, 1.0).expect("valid normal"),
             chi_squared: ChiSquared::new(STUDENT_T_DF).expect("valid chi-squared"),
             size_dist,
-            regime: RegimeState::new(regime, clamp_override),
+            regime,
         }
     }
 
@@ -477,8 +503,90 @@ impl GeneratedSource {
         // realized gap.
         self.acd.prev_duration_s = duration_s;
         let arr_mult = self.session.arrival_mult(self.clock_ns);
-        let duration_s = ((duration_s / arr_mult) * self.regime.arrival_thin).max(0.000_000_001);
-        (duration_s * 1_000_000_000.0).round().max(1.0) as u64
+        if arr_mult >= SESSION_CLOSED_ARR_MULT {
+            // Open-market path: the multiplier sampled at the instant the gap
+            // opens stretches the whole draw - the original math, unchanged
+            // bit for bit so the committed fingerprint's golden stream stays
+            // byte-identical (its multipliers never go near the gate). The
+            // trailing `.min` is a pure safety rail: for any multiplier above
+            // the gate and the validated thin_factor range it is far out of
+            // reach of realistic draws, so it never alters an open-market gap;
+            // it only guarantees the cast can never saturate to u64::MAX.
+            let duration_s =
+                ((duration_s / arr_mult) * self.regime.arrival_thin).max(0.000_000_001);
+            return (duration_s * 1_000_000_000.0)
+                .round()
+                .max(1.0)
+                .min(MAX_SESSION_GAP_NS as f64) as u64;
+        }
+        self.closed_window_gap_ns(duration_s)
+    }
+
+    /// Wall-clock gap for a duration draw whose gap OPENS inside a closed
+    /// session window (arrival multiplier below `SESSION_CLOSED_ARR_MULT`).
+    ///
+    /// The open-market path in `next_duration_ns` samples the arrival
+    /// multiplier once and stretches the entire draw by `1/mult` - fine while
+    /// the multiplier is O(1), catastrophic when a share is near zero: the
+    /// stretched gap wildly overshoots the closed window (share 1e-6 turns a
+    /// ~7 s draw into ~80 days) and an extreme share saturates the f64->u64
+    /// cast at u64::MAX, pinning the clock there so every later tick carries
+    /// the same `ts_event` - breaking the strict monotonicity `monotonic_clock`
+    /// pins and the ordering `MergeSource` and `seek_to` rely on.
+    ///
+    /// Here the draw is instead treated as a BUDGET of un-modulated seconds
+    /// and converted to wall time by integrating the piecewise-constant
+    /// session intensity hour by hour: each wall hour consumes
+    /// `hour_seconds * rate` of budget, so a closed hour consumes almost
+    /// nothing and the budget is spent almost entirely in the first open
+    /// hour - the tape resumes roughly when the market reopens, which is the
+    /// trading-hours semantics the near-zero-share mechanism promises.
+    /// Day-of-week transitions land on hour boundaries, so stepping hours
+    /// re-samples both curves. Deterministic: no RNG is consumed; the walk is
+    /// a pure function of `clock_ns`, the profile and the draw, so same seed +
+    /// anchor still yields the same stream.
+    ///
+    /// Residual limitations, stated honestly:
+    /// - only gaps that OPEN below the gate take this path. A gap opening in
+    ///   an open hour still crosses a later closed window at its open-hour
+    ///   rate (a tick can print inside the closed window). That artifact
+    ///   predates this path and is left in place deliberately: fixing it would
+    ///   change every boundary-crossing gap and break the committed
+    ///   fingerprint's byte-identical golden stream.
+    /// - a profile whose EVERY hour is effectively closed can never spend the
+    ///   budget; the walk caps at `MAX_SESSION_GAP_NS` per gap, so the clock
+    ///   advances strictly (one tick per ~year) instead of freezing. Reaching
+    ///   u64::MAX at all now requires actually simulating the ~580-year u64
+    ///   nanosecond epoch - an inherent representation limit, no longer a
+    ///   session artifact.
+    fn closed_window_gap_ns(&self, duration_s: f64) -> u64 {
+        let mut budget_s = duration_s;
+        let mut pos_ns = self.clock_ns;
+        let mut gap_ns: u64 = 0;
+        while gap_ns < MAX_SESSION_GAP_NS {
+            // Effective arrival rate over this hour segment: session shares are
+            // validated strictly positive finite and thin_factor is validated
+            // in [1, 1000], so the rate is positive - unless the product
+            // underflows to 0.0, in which case `budget_s / rate` is +inf, the
+            // residual branch below never fires, and the walk runs to the cap
+            // (the venue is closed harder than f64 can express).
+            let rate = self.session.arrival_mult(pos_ns) / self.regime.arrival_thin;
+            let to_boundary_ns = NS_PER_HOUR - (pos_ns % NS_PER_HOUR);
+            let need_ns = (budget_s / rate) * 1_000_000_000.0;
+            if need_ns <= to_boundary_ns as f64 {
+                // The budget runs out inside this hour: spend the residual and
+                // stop. `need_ns` is at most an hour in ns here, so the cast is
+                // exact; the floor keeps the clock strictly advancing.
+                let residual_ns = (need_ns.round() as u64).max(1);
+                return gap_ns
+                    .saturating_add(residual_ns)
+                    .clamp(1, MAX_SESSION_GAP_NS);
+            }
+            budget_s -= (to_boundary_ns as f64 / 1_000_000_000.0) * rate;
+            pos_ns = pos_ns.saturating_add(to_boundary_ns);
+            gap_ns = gap_ns.saturating_add(to_boundary_ns);
+        }
+        MAX_SESSION_GAP_NS
     }
 
     fn next_latent_mid(&mut self) -> f64 {
@@ -675,17 +783,33 @@ impl CheckpointIndex {
         }
     }
 
-    /// A fresh generator positioned at the latest checkpoint with `clock_ns <=
-    /// target`. The caller drains it forward to the exact target (< K ticks) via
-    /// the normal seek; the returned source is an independent clone, so the shared
-    /// index is untouched by that replay.
+    /// A fresh generator positioned at the latest checkpoint strictly before
+    /// `target` (or the origin when nothing is). The caller drains it forward to
+    /// the exact target (< K ticks) via the normal seek; the returned source is
+    /// an independent clone, so the shared index is untouched by that replay.
     pub fn source_at_or_before(&mut self, target: u64) -> GeneratedSource {
         self.extend_to(target);
-        // `[0]` is the origin and is <= every legitimate target, so the partition
-        // point is at least 1 and the subtraction never underflows.
+        // Strictly-before partition (`<`, not `<=`): a checkpoint's `clock_ns`
+        // is the `ts_event` of the last tick it has ALREADY consumed, so a
+        // checkpoint whose `clock_ns` EQUALS the target has the boundary tick
+        // behind it. Resuming there and seeking to `target` (the trait-default
+        // seek returns the first tick with `ts_event >= target`) would skip
+        // that boundary tick, while a from-origin seek returns it - the two
+        // paths the byte-identical guarantee promises are one tape would
+        // disagree by exactly one tick. The collision is not hypothetical:
+        // snapshots land on every K-th tick's exact `ts_event`, and pollers
+        // legitimately pass an emitted tick's exact `ts_event` as the seek
+        // target, so under `<=` one tick per ~K such seeks would vanish. With
+        // `<` the resume point sits strictly before the target and the
+        // residual replay re-emits the boundary tick itself
+        // (`checkpoint_resume_at_exact_boundary_ts_returns_boundary_tick` pins
+        // this). When `target` is at or before the origin's clock the
+        // partition point is 0 and the `saturating_sub` keeps us on the
+        // origin, which has emitted nothing and is therefore always a safe
+        // resume point.
         let idx = self
             .checkpoints
-            .partition_point(|c| c.clock_ns() <= target)
+            .partition_point(|c| c.clock_ns() < target)
             .saturating_sub(1);
         self.checkpoints[idx].clone()
     }
@@ -717,7 +841,12 @@ struct RegimeState {
 }
 
 impl RegimeState {
-    fn new(regime: Option<MarketRegime>, clamp_override: Option<f64>) -> Self {
+    fn new(
+        regime: Option<MarketRegime>,
+        clamp_override: Option<f64>,
+        start_ts: u64,
+        symbol: &str,
+    ) -> Self {
         let mut state = Self {
             arrival_thin: 1.0,
             vol_mult: 1.0,
@@ -773,11 +902,36 @@ impl RegimeState {
                 halt_secs,
                 gap_frac,
             }) => {
-                state.reopen = Some(Reopen {
-                    at_ts,
-                    halt_ns: halt_secs.saturating_mul(1_000_000_000),
-                    gap_frac,
-                });
+                // Crossing detection (`take_reopen_crossed`) fires when a
+                // tick's gap straddles the instant:
+                // `old_clock < at_ts && at_ts <= new_clock`. The very first
+                // gap opens at the tape anchor (`start_ts`), so an `at_ts` at
+                // or before the anchor can NEVER satisfy the first conjunct -
+                // the halt would sit armed forever, silently inert.
+                // `validate_market_regime` rejects `at_ts == 0` for exactly
+                // that failure mode, but any other already-elapsed instant
+                // reproduces it one layer down, so treat it the way the server
+                // treats out-of-band divergences: consume it at construction
+                // (fail closed) and say so, rather than fabricate a halt at
+                // whatever tick the anchor happens to make first. No RNG is
+                // drawn either way, so an elapsed ReopenGap leaves a stream
+                // byte-identical to no regime at all
+                // (`reopen_gap_at_or_before_anchor_is_consumed_and_matches_clean`
+                // pins this). No tracing dep in this crate, so stderr is the
+                // visible channel - same convention as KrakenCsvSource.
+                if at_ts <= start_ts {
+                    eprintln!(
+                        "GeneratedSource({symbol}): ReopenGap at_ts {at_ts} is at or before \
+                         the tape anchor {start_ts}; the halt has already elapsed and is \
+                         dropped (it would never fire)"
+                    );
+                } else {
+                    state.reopen = Some(Reopen {
+                        at_ts,
+                        halt_ns: halt_secs.saturating_mul(1_000_000_000),
+                        gap_frac,
+                    });
+                }
             }
             None => {}
         }
@@ -1163,6 +1317,68 @@ mod tests {
         }
     }
 
+    // Regression for the exact-ts collision the strictly-before partition in
+    // `source_at_or_before` exists for: snapshots land on every K-th tick's
+    // exact ts_event, and pollers pass an emitted tick's exact ts_event as the
+    // seek target, so a seek target CAN equal a checkpoint's clock_ns. Under
+    // the old `<=` partition the index handed back the checkpoint that had
+    // already consumed the boundary tick, and the residual seek silently
+    // skipped to the NEXT tick - one tick dropped versus the from-origin path.
+    #[test]
+    fn checkpoint_resume_at_exact_boundary_ts_returns_boundary_tick() {
+        let fp = Fingerprint::from_repo_json();
+        let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+        let origin_ts = 1_000u64;
+        let seed = 42u64;
+        let k = 128usize;
+
+        // From-origin reference, captured as full debug strings so the
+        // comparison pins every field of every tick, not just (ts, price).
+        let mut reference = GeneratedSource::new(scalars.clone(), seed, origin_ts, &fp, None);
+        let ref_ticks: Vec<(u64, String)> = (0..600)
+            .map(|_| {
+                let tick = reference.next_tick().expect("trade");
+                (tick.ts_event(), format!("{tick:?}"))
+            })
+            .collect();
+
+        // The 3K-th tick (0-based index 3K-1) is exactly where extend_to
+        // pushes its third interior snapshot, so that snapshot's clock_ns
+        // EQUALS this tick's ts_event - the forced collision. The from-origin
+        // seek semantics (first tick with ts_event >= target) return this
+        // boundary tick itself; the checkpointed path must return the
+        // identical tick and stay byte-identical afterwards.
+        let boundary = 3 * k - 1;
+        let target = ref_ticks[boundary].0;
+
+        let origin = GeneratedSource::new(scalars, seed, origin_ts, &fp, None);
+        let mut index = CheckpointIndex::new(origin, k, 100_000);
+        let mut resumed = index.source_at_or_before(target);
+        // Origin plus exactly three interior snapshots: extend_to stops the
+        // moment the lead reaches the target, right after snapshotting it -
+        // proof the collision this test is about actually occurred.
+        assert_eq!(index.checkpoint_count(), 4);
+        assert!(
+            resumed.clock_ns() < target,
+            "an exact-ts target must resume strictly before the boundary tick \
+             (resumed={} target={target})",
+            resumed.clock_ns()
+        );
+
+        let mut tick = resumed.next_tick().expect("trade");
+        while tick.ts_event() < target {
+            tick = resumed.next_tick().expect("trade");
+        }
+        for expected in &ref_ticks[boundary..boundary + 100] {
+            assert_eq!(
+                (tick.ts_event(), format!("{tick:?}")),
+                *expected,
+                "checkpoint resume diverged from the from-origin tape"
+            );
+            tick = resumed.next_tick().expect("trade");
+        }
+    }
+
     // The runaway backstop: a target far beyond what `max_extend` permits in one
     // call leaves the lead short rather than spinning the never-ending walk. This
     // is what keeps a bogus or far-future `start` (which the server does not
@@ -1362,6 +1578,145 @@ mod tests {
             (gap_return - gap_frac).abs() <= 0.001,
             "gap_return={gap_return} gap_frac={gap_frac}"
         );
+    }
+
+    // A ReopenGap whose at_ts is at or before the tape anchor has already
+    // elapsed: the crossing condition (old_clock < at_ts) can never hold, so
+    // pre-fix the halt sat armed forever, silently inert. The fix consumes it
+    // at construction (fail closed, with a stderr warning) and draws no RNG,
+    // so the resulting stream must be byte-identical to a regime-free run - in
+    // particular no halt-sized gap and no mid jump can ever appear.
+    #[test]
+    fn reopen_gap_at_or_before_anchor_is_consumed_and_matches_clean() {
+        let fp = Fingerprint::from_repo_json();
+        let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+        let start_ts = 1_000_000u64;
+        // The anchor itself (gaps cover (old, new], so an instant exactly at
+        // the anchor is already past), one tick before it, and the earliest
+        // instant the protocol validator admits.
+        for at_ts in [start_ts, start_ts - 1, 1] {
+            let regime = Some(MarketRegime::ReopenGap {
+                at_ts,
+                halt_secs: 86_400,
+                gap_frac: 0.05,
+            });
+            let mut clean = GeneratedSource::new(scalars.clone(), 42, start_ts, &fp, None);
+            let mut gapped = GeneratedSource::new(scalars.clone(), 42, start_ts, &fp, regime);
+            for _ in 0..5_000 {
+                assert_eq!(
+                    format!("{:?}", clean.next_tick()),
+                    format!("{:?}", gapped.next_tick()),
+                    "an elapsed ReopenGap (at_ts={at_ts}) must leave the stream untouched"
+                );
+            }
+        }
+    }
+
+    // Trading hours are expressed as near-zero hour shares, not a separate
+    // code path. Pre-fix, the arrival multiplier was sampled once at the
+    // instant a gap opened and the whole draw was divided by it: a 1e-12 share
+    // stretched the first draw by ~4e10, saturating the ns cast at u64::MAX
+    // and pinning the clock there forever. Post-fix a gap opening below the
+    // closed-window gate treats the draw as a budget integrated hour by hour,
+    // so the closed hour consumes almost none of it and the tape resumes
+    // roughly when the next open hour begins.
+    #[test]
+    fn near_zero_hour_share_reopens_at_the_next_open_hour() {
+        // SESSION_START_TS is exactly hour 0 of a Monday; re-pin that here
+        // since the placement of the closed hour depends on it.
+        assert_eq!(utc_hour_dow(SESSION_START_TS), (0, 1));
+        let fp = Fingerprint::from_repo_json();
+        let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+        let mut intensity_hour = [(1.0 - 1e-12) / 23.0; 24];
+        intensity_hour[0] = 1e-12;
+        let profile = SessionProfile {
+            intensity_hour,
+            vol_hour: [1.0; 24],
+            dow_weight: [1.0 / 7.0; 7],
+        };
+        profile
+            .validate()
+            .expect("near-zero shares pass validation");
+
+        let mut src = GeneratedSource::new_with_session_profile(
+            scalars.clone(),
+            42,
+            SESSION_START_TS,
+            &fp,
+            &profile,
+            None,
+        );
+        let first = src.next_tick().expect("trade").ts_event();
+        // The first tick must survive the closed hour 0 (not print inside it)
+        // and land shortly after hour 1 opens - not months out, and nowhere
+        // near u64 saturation. The upper bound leaves room for the draw's own
+        // few seconds of open-hour budget plus heavy-tail slack.
+        assert!(
+            first >= SESSION_START_TS + NS_PER_HOUR,
+            "first tick printed inside the closed hour: first={first}"
+        );
+        assert!(
+            first < SESSION_START_TS + 3 * NS_PER_HOUR,
+            "first tick overshot the reopen: first={first}"
+        );
+
+        // Determinism holds on the integrating path (it draws no RNG), and
+        // strict monotonicity survives the repeated daily close.
+        let mut twin = GeneratedSource::new_with_session_profile(
+            scalars,
+            42,
+            SESSION_START_TS,
+            &fp,
+            &profile,
+            None,
+        );
+        assert_eq!(twin.next_tick().expect("trade").ts_event(), first);
+        let mut prior = first;
+        for _ in 0..5_000 {
+            let tick = src.next_tick().expect("trade");
+            let twin_tick = twin.next_tick().expect("trade");
+            assert_eq!(format!("{tick:?}"), format!("{twin_tick:?}"));
+            assert!(tick.ts_event() > prior, "clock stalled at {prior}");
+            prior = tick.ts_event();
+        }
+    }
+
+    // The degenerate extreme: EVERY hour closed so hard the budget can never
+    // be spent. The hour walk must cap each gap at MAX_SESSION_GAP_NS and keep
+    // the clock strictly advancing - one tick per ~year - instead of the
+    // pre-fix u64::MAX saturation that pinned the clock forever. 300 capped
+    // gaps cover ~300 years of sim time while staying far from the u64
+    // nanosecond ceiling (~584 years).
+    #[test]
+    fn fully_closed_profile_caps_each_gap_and_never_freezes_the_clock() {
+        let fp = Fingerprint::from_repo_json();
+        let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+        let profile = SessionProfile {
+            intensity_hour: [1e-30; 24],
+            vol_hour: [1.0; 24],
+            dow_weight: [1.0 / 7.0; 7],
+        };
+        profile.validate().expect("tiny shares pass validation");
+        let mut src = GeneratedSource::new_with_session_profile(
+            scalars,
+            42,
+            SESSION_START_TS,
+            &fp,
+            &profile,
+            None,
+        );
+        let mut prior = SESSION_START_TS;
+        for _ in 0..300 {
+            let ts = src.next_tick().expect("trade").ts_event();
+            assert!(ts > prior, "clock froze: ts={ts} prior={prior}");
+            assert!(ts < u64::MAX, "clock saturated at the u64 ceiling");
+            assert!(
+                ts - prior <= MAX_SESSION_GAP_NS,
+                "gap {} exceeds the per-gap cap",
+                ts - prior
+            );
+            prior = ts;
+        }
     }
 
     #[test]
