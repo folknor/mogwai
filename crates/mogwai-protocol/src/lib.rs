@@ -1850,6 +1850,19 @@ pub struct SubmitOrder {
 /// `mogwai-engine`'s `validate_submit` is the authoritative, instrument-aware
 /// guard (grid alignment, instrument lookup, precision) and remains the last
 /// line of defense regardless of whether a caller runs this first.
+///
+/// The apparent disagreement with the engine - this validator ACCEPTS a
+/// priceless `Market` order while `mogwai-engine`'s `validate_submit` REJECTS
+/// one ("submit price required") - is a deliberate two-phase split, not a
+/// drift. This gate validates the PRE-stamp wire, exactly what the adapter puts
+/// on the socket: a nautilus MARKET order legitimately carries no price there.
+/// The server then STAMPS a synthetic execution price onto every Market order
+/// (on both the WS and HTTP carriers, failing loudly if synthesis fails) before
+/// the engine ever sees it, so by the time `validate_submit` runs the order
+/// always carries a price and a still-priceless one is a genuine post-stamp
+/// bug. The engine is the authoritative POST-stamp gate; this is the honest
+/// PRE-stamp one, and the two are consistent precisely because the stamp sits
+/// between them.
 pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
     if order.quantity <= Decimal::ZERO {
         return Err("quantity must be > 0");

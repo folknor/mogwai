@@ -19,6 +19,19 @@ use mogwai_protocol::{
 };
 use rust_decimal::Decimal;
 
+/// Upper bound on the engine-side armed-divergence queue.
+///
+/// Single-shot divergences normally self-disarm on their own trigger, but a
+/// TARGETED `PartialFillNext` whose order never arrives has no trigger and
+/// would sit armed forever (see `take_armed`). Without a cap a stream of
+/// control-plane arms - or a scenario that keeps arming targeted partials whose
+/// orders never show up - grows the queue without bound (a test-harness DoS).
+/// This ceiling is far above any legitimate scenario's arm count, so reaching
+/// it means the queue is leaking; `arm` sheds the OLDEST entry at the cap,
+/// exactly the accumulated never-triggered leftovers. `clear_armed` is the
+/// explicit flush for the same leak.
+const MAX_ARMED_DIVERGENCES: usize = 1_024;
+
 /// A resting order tracked by the venue.
 #[derive(Debug, Clone)]
 pub struct OpenOrder {
@@ -119,8 +132,45 @@ impl Engine {
             | Divergence::GoDark { .. }
             | Divergence::StallData { .. }
             | Divergence::ClearDivergences => {}
-            other => self.armed.push_back(other),
+            other => {
+                // Bound the queue so control-plane arms cannot accumulate
+                // without limit. At the cap, shed the OLDEST entry: a
+                // never-triggered targeted `PartialFillNext` sits at the front
+                // (its order may never arrive), so dropping the front sheds the
+                // accumulated stale leftovers rather than the arm just
+                // requested. See `MAX_ARMED_DIVERGENCES` and `clear_armed`.
+                if self.armed.len() >= MAX_ARMED_DIVERGENCES {
+                    self.armed.pop_front();
+                    tracing::warn!(
+                        cap = MAX_ARMED_DIVERGENCES,
+                        "armed divergence queue at capacity; dropped the oldest entry"
+                    );
+                }
+                self.armed.push_back(other);
+            }
         }
+    }
+
+    /// Flush every engine-side armed divergence, draining the queue outright.
+    ///
+    /// The single-shot divergences (`PartialFillNext`, `RejectNextSubmit`,
+    /// `DuplicateNextFill`, `DropNextAccountUpdate`) normally self-disarm on
+    /// their own trigger, but a TARGETED `PartialFillNext` whose order never
+    /// arrives has no trigger and would sit armed forever - a leftover from one
+    /// scenario can otherwise ambush a later scenario that reuses the same order
+    /// id. This is the explicit escape hatch a harness calls between scenarios
+    /// to guarantee a clean slate.
+    ///
+    /// Deliberately distinct from the wire `control::Divergence::ClearDivergences`,
+    /// which clears ONLY the server-owned temporal windows (`DelayAcks`,
+    /// `GoDark`, `StallData`) and by documented contract leaves the engine-side
+    /// single-shots alone. Widening that wire variant to also flush the engine
+    /// queue would change its contract; this crate-local method flushes without
+    /// touching the wire, so a future server that wants a full reset on
+    /// `ClearDivergences` can call this alongside its atomics rather than
+    /// overloading the variant.
+    pub fn clear_armed(&mut self) {
+        self.armed.clear();
     }
 
     /// Monotonic id source; the server stamps real timestamps.
@@ -229,32 +279,44 @@ impl Engine {
             ts_event: ts,
         }];
 
-        let last_px = order.price.expect("validated submit price is present");
+        // A zero `last_qty` means a wire-valid `PartialFillNext` fraction
+        // floored below one size increment on a minimum-lot order: the grid
+        // cannot represent the partial, so nothing fills (see `fill_quantity`).
+        // Skip the fill entirely rather than emit a zero-qty fill or silently
+        // promote it to a full fill - the order simply rests (GTC) or cancels
+        // (IOC) on its full `leaves_qty`, and a FOK was already rejected above
+        // because that same `leaves_qty` is the whole order. `last_qty == 0`
+        // only ever happens under an armed partial (the clean path fills fully),
+        // so this never perturbs a normal submit. An armed `DuplicateNextFill`
+        // is left in place: it applies to a fill, and no fill was produced.
+        if last_qty > Decimal::ZERO {
+            let last_px = order.price.expect("validated submit price is present");
 
-        let fill = OrderFilled {
-            client_order_id: order.client_order_id.clone(),
-            venue_order_id: venue_order_id.clone(),
-            trade_id: self.next_id("T"),
-            symbol: order.symbol.clone(),
-            side: order.side,
-            last_qty,
-            last_px,
-            leaves_qty,
-            commission: Decimal::ZERO,
-            ts_event: ts,
-        };
+            let fill = OrderFilled {
+                client_order_id: order.client_order_id.clone(),
+                venue_order_id: venue_order_id.clone(),
+                trade_id: self.next_id("T"),
+                symbol: order.symbol.clone(),
+                side: order.side,
+                last_qty,
+                last_px,
+                leaves_qty,
+                commission: Decimal::ZERO,
+                ts_event: ts,
+            };
 
-        self.apply_fill(&fill);
-        // Untargeted: applies to the fill just produced. Scanned (not peeked at
-        // `front()`) so a non-matching targeted `PartialFillNext` parked ahead
-        // of it in the queue cannot block it - see `take_armed`.
-        let duplicate = self
-            .take_armed(|d| matches!(d, Divergence::DuplicateNextFill))
-            .is_some();
-        if duplicate {
-            out.push(ServerMessage::OrderFilled(fill.clone()));
+            self.apply_fill(&fill);
+            // Untargeted: applies to the fill just produced. Scanned (not peeked
+            // at `front()`) so a non-matching targeted `PartialFillNext` parked
+            // ahead of it in the queue cannot block it - see `take_armed`.
+            let duplicate = self
+                .take_armed(|d| matches!(d, Divergence::DuplicateNextFill))
+                .is_some();
+            if duplicate {
+                out.push(ServerMessage::OrderFilled(fill.clone()));
+            }
+            out.push(ServerMessage::OrderFilled(fill));
         }
-        out.push(ServerMessage::OrderFilled(fill));
 
         if leaves_qty > Decimal::ZERO {
             match order.time_in_force {
@@ -544,10 +606,23 @@ impl Engine {
     fn apply_fill(&mut self, fill: &OrderFilled) {
         self.apply_position(fill);
 
+        // Defense-in-depth, unreachable through `process` today: a fill's
+        // `last_px` is `order.price`, which `validate_submit` already proved
+        // `> 0`, so a zero price never gets here on the public path. `apply_fill`
+        // is private, so the only way in is a future in-crate caller that builds
+        // a fill some other way; the warn is kept (rather than an `.expect`
+        // panic) so such a caller books its ledger LOUDLY-wrong instead of
+        // silently, matching this crate's saturate-and-warn philosophy.
         if fill.last_px == Decimal::ZERO {
             self.warn_zero_px(&fill.symbol);
         }
 
+        // Also defense-in-depth: `validate_submit` rejects an unknown
+        // instrument at the door and there is no instrument-removal API, so
+        // every accepted fill's symbol resolves here on the public path. Kept
+        // for the same reason - a future direct caller with a delisted symbol
+        // skips the balance leg with a once-per-symbol warn rather than
+        // silently corrupting the ledger or panicking.
         let Some(instrument) = self.instruments.get(&fill.symbol) else {
             self.warn_missing_instrument(&fill.symbol);
             return;
@@ -555,6 +630,15 @@ impl Engine {
 
         let base = instrument.base.clone();
         let quote = instrument.quote.clone();
+        // `fill.commission` is always `Decimal::ZERO` on this venue: mogwai
+        // models execution DIVERGENCES (partials, rejects, delays, drops), not
+        // fees, so no commission source exists and none is wired. The
+        // direction-aware handling below (a buy's cost ADDS commission to the
+        // quote spend, a sell's proceeds SUBTRACT it) is kept anyway because
+        // `OrderFilled` carries the field on the wire: if a future config or
+        // divergence ever populates a non-zero commission, the ledger math is
+        // already correct rather than silently dropping or mis-signing the fee.
+
         // This fill's own notional is representable (`validate_submit` /
         // `on_modify` checked `quantity * price`, and `last_qty <= quantity`),
         // but the running balance totals accumulate notionals across every
@@ -669,6 +753,12 @@ impl Engine {
         let mut clipped_currencies = Vec::new();
 
         for order in &self.open {
+            // Defense-in-depth, unreachable through `process`: an order only
+            // rests here after `validate_submit`/`on_modify` confirmed its
+            // instrument, and none is ever removed, so the lookup always
+            // resolves on the public path. Kept as a skip (not an `.expect`)
+            // so a future direct caller with a stale open order simply omits
+            // that order's reservation rather than panicking the snapshot.
             let Some(instrument) = self.instruments.get(&order.submit.symbol) else {
                 continue;
             };
@@ -884,15 +974,38 @@ fn fill_quantity(order: &SubmitOrder, fill_fraction: Decimal, size_increment: De
     // grid. Floor rather than round so the fill never exceeds the fraction
     // the divergence asked for.
     let aligned = floor_to_increment(candidate, size_increment);
-    if aligned <= Decimal::ZERO {
-        let symbol = order.symbol.as_str();
+    if aligned > Decimal::ZERO {
+        return aligned;
+    }
+
+    let symbol = order.symbol.as_str();
+    if candidate > Decimal::ZERO {
+        // The fraction was a valid positive partial, but `quantity * fraction`
+        // is smaller than one size increment: on a minimum-lot order the grid
+        // simply cannot represent the partial. Fill ZERO rather than round the
+        // partial UP to a full fill - a `PartialFillNext` armed to leave a
+        // remainder must never invert into its opposite. Critically this keeps
+        // a FOK the divergence was armed to kill dead: `last_qty == 0` leaves
+        // the whole order unfilled, so the FOK all-or-nothing gate rejects it
+        // instead of letting a full fill sneak through. `on_submit` emits no
+        // fill event for a zero `last_qty`.
+        tracing::warn!(
+            %symbol,
+            "PartialFillNext fraction floors below one size increment on a \
+             minimum-lot order; the partial cannot be represented on the size \
+             grid, so nothing fills"
+        );
+        Decimal::ZERO
+    } else {
+        // `candidate <= 0` is the genuinely-degenerate case: the fraction
+        // clamped to a non-positive value (an unvalidated direct arm - a
+        // negative, zero, or `Decimal::MIN` fraction). Here the defensive
+        // fallback is a normal full fill, as documented above.
         tracing::warn!(
             %symbol,
             "PartialFillNext produced non-positive last_qty; treating as a normal full fill"
         );
         order.quantity
-    } else {
-        aligned
     }
 }
 
@@ -1471,6 +1584,95 @@ mod tests {
             assert_eq!(f.leaves_qty, Decimal::ZERO);
             assert!(e.open_orders().is_empty());
         }
+    }
+
+    #[test]
+    fn min_lot_partial_fraction_does_not_invert_into_a_full_fill() {
+        // E7: an order of exactly one size increment (1e-8) with a wire-valid
+        // armed fraction (0.3). `1e-8 * 0.3 = 3e-9` floors below the grid, so
+        // the partial cannot be represented. The old code promoted this to a
+        // FULL fill with a misleading "produced non-positive last_qty" warn -
+        // silently inverting the divergence and, for a FOK, letting an order
+        // the partial was armed to kill fully fill and pass. The fix fills
+        // ZERO: the FOK gate now rejects on the full leaves, and a GTC rests.
+        let lot = Decimal::new(1, 8);
+        let px = Decimal::from(100);
+
+        // FOK: nothing fills, leaves stays the whole lot, the all-or-nothing
+        // gate rejects rather than sneaking a full fill through.
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "FOK".into(),
+            fraction: Decimal::from_f64(0.3).unwrap(),
+        });
+        let mut fok = order_decimal("FOK", Side::Buy, "BTCUSDT", lot, Some(px));
+        fok.time_in_force = TimeInForce::Fok;
+        let out = e.process(ClientMessage::SubmitOrder(fok), 1);
+        assert_eq!(reject_reason(&out), "fill-or-kill could not fully fill");
+        assert!(e.open_orders().is_empty());
+        assert!(e.account_snapshot(2).balances.is_empty());
+        assert!(e.positions().is_empty());
+
+        // GTC: accepted, NO fill event emitted, and the order rests fully open
+        // with the whole lot as leaves. The snapshot shows only the locked
+        // quote reservation - nothing filled, so no base/position leg.
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "GTC".into(),
+            fraction: Decimal::from_f64(0.3).unwrap(),
+        });
+        let gtc = order_decimal("GTC", Side::Buy, "BTCUSDT", lot, Some(px));
+        let out = e.process(ClientMessage::SubmitOrder(gtc), 1);
+        assert_eq!(out.len(), 2, "accept + account state only, no fill event");
+        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(out[1], ServerMessage::AccountState(_)));
+        assert_eq!(e.open_orders().len(), 1);
+        assert_eq!(e.open_orders()[0].leaves_qty, lot);
+        let state = account(&out, 1);
+        // 1e-8 lot * 100 price = 1e-6 quote locked; free is the negation.
+        let usdt = balance(state, "USDT");
+        assert_eq!(usdt.locked, Decimal::new(1, 6));
+        assert_eq!(usdt.total, Decimal::ZERO);
+        assert!(state.positions.is_empty());
+    }
+
+    #[test]
+    fn clear_armed_flushes_stale_targeted_partials() {
+        // E5: a targeted `PartialFillNext` whose order never arrives has no
+        // trigger to self-disarm and would sit armed forever, ready to ambush a
+        // later reuse of the id. `clear_armed` is the explicit flush.
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "NEVER".into(),
+            fraction: Decimal::from_f64(0.3).unwrap(),
+        });
+        assert_eq!(e.armed.len(), 1);
+
+        e.clear_armed();
+        assert!(e.armed.is_empty());
+
+        // With the stale partial flushed, a later order reusing the id fills
+        // fully instead of being ambushed into a partial.
+        let out = e.process(ClientMessage::SubmitOrder(order("NEVER", 10)), 1);
+        let f = fill(&out, 1);
+        assert_eq!(f.last_qty, Decimal::from(10));
+        assert_eq!(f.leaves_qty, Decimal::ZERO);
+    }
+
+    #[test]
+    fn armed_divergence_queue_is_bounded() {
+        // E5: arming well past the cap with targeted partials whose orders
+        // never arrive (no trigger to self-disarm) must not grow the queue
+        // without bound - it saturates at `MAX_ARMED_DIVERGENCES`, shedding the
+        // oldest stale entry per arm past the cap.
+        let mut e = Engine::new();
+        for i in 0..(MAX_ARMED_DIVERGENCES + 50) {
+            e.arm(Divergence::PartialFillNext {
+                client_order_id: format!("O-{i}"),
+                fraction: Decimal::ONE,
+            });
+        }
+        assert_eq!(e.armed.len(), MAX_ARMED_DIVERGENCES);
     }
 
     #[test]
