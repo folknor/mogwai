@@ -37,7 +37,10 @@ use nautilus_live::{ExecutionClientCore, ExecutionEventEmitter};
 use nautilus_model::{
     accounts::AccountAny,
     data::{Bar, BarType, Data, bar::get_bar_interval_ns},
-    enums::{LiquiditySide, OmsType, OrderSide, OrderStatus, OrderType, PositionSideSpecified},
+    enums::{
+        BarAggregation, LiquiditySide, OmsType, OrderSide, OrderStatus, OrderType,
+        PositionSideSpecified,
+    },
     events::{
         AccountState as NautilusAccountState, OrderAccepted, OrderCancelRejected, OrderCanceled,
         OrderEventAny, OrderFilled, OrderModifyRejected, OrderRejected, OrderSubmitted,
@@ -69,11 +72,14 @@ use crate::{
 /// acceleration without producing on-axis data. The accelerated vehicle is the
 /// WS push path, which deadline-paces server-side.
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Consecutive poll-failure count at which the wedged-feed warning re-fires and
+/// the AD6 self-heal (clock re-fetch + cursor reset) runs - onset (count 1),
+/// then every this-many failures (~10s at the 250ms POLL_INTERVAL).
+const POLL_FAILURE_ALERT_EVERY: u64 = 40;
 const ACCOUNT_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCOUNT_REGISTRATION_POLL: Duration = Duration::from_millis(10);
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct MogwaiDataClient {
     client_id: ClientId,
     config: MogwaiDataClientConfig,
@@ -91,7 +97,14 @@ pub struct MogwaiDataClient {
     subs: Arc<Mutex<HashMap<Symbol, SubState>>>,
     bars: Arc<Mutex<HashMap<BarType, BarSubState>>>,
     poll_cursor: Arc<Mutex<HashMap<Symbol, PollCursor>>>,
-    task_handles: Vec<JoinHandle<()>>,
+    /// Handles for every task this client spawns (the WS reader, the poll loop,
+    /// and each short-lived `request_*`/`subscribe_instrument*` fetch). Shared
+    /// behind an `Arc<Mutex<..>>` so the `&self` request handlers can record
+    /// their handle too, not just the `&mut self` connect path; `stop()` aborts
+    /// the lot so a fetch spawned just before disconnect cannot keep issuing
+    /// HTTP requests (and racing the HttpQuota) or send into a dropped sink
+    /// after the client stopped (AD17).
+    task_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
 impl MogwaiDataClient {
@@ -125,7 +138,7 @@ impl MogwaiDataClient {
             subs: Arc::new(Mutex::new(HashMap::new())),
             bars: Arc::new(Mutex::new(HashMap::new())),
             poll_cursor: Arc::new(Mutex::new(HashMap::new())),
-            task_handles: Vec::new(),
+            task_handles: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -149,15 +162,40 @@ impl MogwaiDataClient {
             let state = subs.entry(symbol.clone()).or_default();
             let emit = state.total() == 0;
             state.increment(kind);
-            match (state.start_ts, start_ts) {
-                (Some(existing), Some(new)) => state.start_ts = Some(existing.min(new)),
-                (None, Some(new)) => state.start_ts = Some(new),
-                _ => {}
+            // `start_ts` is this symbol's single shared resume cursor, advanced
+            // forward-only by `advance_sub_start_ts` on every delivered tick so a
+            // reconnect resumes after the last delivered tick instead of replaying.
+            // Only the FIRST subscriber (the 0->1 transition, `emit`) seeds it. The
+            // old `min(existing, new)` on a later subscriber pulled the cursor
+            // BACKWARD to an earlier requested start (AD7); since a live second
+            // subscribe never actually sends a Subscribe on the WS path (that fires
+            // only on 0->1) and the poll path ignores the update, the earlier start
+            // was never delivered as backfill - it only corrupted the resume cursor,
+            // so the NEXT reconnect replayed an already-delivered window. A later
+            // subscriber must not move the shared cursor at all: not backward (the
+            // replay), and not forward either (that would skip data the first
+            // subscriber still wants). The shared feed already serves every
+            // subscriber from the cursor forward.
+            if emit {
+                state.start_ts = start_ts;
             }
             (emit, state.start_ts)
         };
 
-        if emit && !self.config.transport_profile.data_by_polling() {
+        // Gate the direct Subscribe send on a live connection. A subscribe that
+        // lands during a reconnect backoff (`connected == false`) must NOT queue a
+        // Subscribe: the queued command survives the reconnect in the unbounded
+        // command channel and would be sent AGAIN after `on_connect`
+        // (`subscribe_commands`) already rebuilt the full subscription state from
+        // the table, double-subscribing the symbol and restarting the server-side
+        // replay - the resubscribe duplicate-window bug (AD5). While disconnected,
+        // `on_connect` is the sole post-reconnect subscribe source, and it
+        // reconstructs this subscription from the table the increment above just
+        // updated, so nothing is lost by skipping the send here.
+        if emit
+            && !self.config.transport_profile.data_by_polling()
+            && self.connected.load(Ordering::Relaxed)
+        {
             self.send_ws(WsCommand::Subscribe {
                 symbols: vec![symbol],
                 start_ts: active_start_ts,
@@ -190,7 +228,16 @@ impl MogwaiDataClient {
                 .remove(&symbol);
         }
 
-        if emit && !self.config.transport_profile.data_by_polling() {
+        // Gate the Unsubscribe send on a live connection, mirroring the subscribe
+        // path (AD5). While disconnected the symbol was already removed from the
+        // table above, so `on_connect` will simply not re-subscribe it on the next
+        // reconnect - there is nothing to unsubscribe on a dead socket, and queuing
+        // a command that outlives the reconnect only risks racing a fresh
+        // subscribe's rebuilt state.
+        if emit
+            && !self.config.transport_profile.data_by_polling()
+            && self.connected.load(Ordering::Relaxed)
+        {
             self.send_ws(WsCommand::Unsubscribe {
                 symbols: vec![symbol],
             })?;
@@ -232,10 +279,7 @@ impl DataClient for MogwaiDataClient {
     fn stop(&mut self) -> anyhow::Result<()> {
         self.connected.store(false, Ordering::Relaxed);
         self.ws_cmd = None;
-        for handle in &self.task_handles {
-            handle.abort();
-        }
-        self.task_handles.clear();
+        abort_tasks(&self.task_handles);
         Ok(())
     }
 
@@ -321,7 +365,7 @@ impl DataClient for MogwaiDataClient {
                 })
                 .await;
             });
-            self.task_handles.push(poll_handle);
+            track_task(&self.task_handles, poll_handle);
             return Ok(());
         }
 
@@ -392,14 +436,14 @@ impl DataClient for MogwaiDataClient {
             .await;
         });
 
-        self.task_handles.push(reader_handle);
+        track_task(&self.task_handles, reader_handle);
         // A timed-out connect must not orphan the reader task: it is already in
         // task_handles and would keep looping/reconnecting on the shared
         // `connected` flag, so a retry would spawn a second reader racing the
         // first. Abort the task and clear the stale handle and ws_cmd before
         // propagating, leaving the client cleanly disconnected for retry.
         if let Err(err) = wait_connected(&self.connected, &ws_url).await {
-            if let Some(handle) = self.task_handles.pop() {
+            if let Some(handle) = lock_recover(&self.task_handles, "task handles").pop() {
                 handle.abort();
             }
             self.ws_cmd = None;
@@ -419,7 +463,7 @@ impl DataClient for MogwaiDataClient {
         let base = self.config.http_base_url();
         let instruments = Arc::clone(&self.instruments);
         let sim = self.sim;
-        drop(get_runtime().spawn(async move {
+        track_task(&self.task_handles, get_runtime().spawn(async move {
             if let Ok(defs) = fetch_instruments(&http, &http_quota, &base).await {
                 cache_instruments(&instruments, defs.clone());
                 let ts_init = now_unix_nanos(sim);
@@ -441,7 +485,7 @@ impl DataClient for MogwaiDataClient {
         let base = self.config.http_base_url();
         let instruments = Arc::clone(&self.instruments);
         let sim = self.sim;
-        drop(get_runtime().spawn(async move {
+        track_task(&self.task_handles, get_runtime().spawn(async move {
             if let Ok(defs) = fetch_instruments(&http, &http_quota, &base).await {
                 cache_instruments(&instruments, defs.clone());
                 let ts_init = now_unix_nanos(sim);
@@ -480,6 +524,12 @@ impl DataClient for MogwaiDataClient {
             cmd.bar_type.spec().is_time_aggregated(),
             "mogwai only supports time based external bars"
         );
+        ensure!(
+            !is_calendar_anchored(cmd.bar_type.spec().aggregation),
+            "mogwai does not support Week/Month/Year bars: they need calendar \
+             anchoring this adapter's epoch-anchored aggregation cannot produce; \
+             use Day or finer"
+        );
         let symbol = symbol_from_instrument(cmd.bar_type.instrument_id());
         {
             let mut bars = self
@@ -501,19 +551,75 @@ impl DataClient for MogwaiDataClient {
 
     fn unsubscribe_bars(&mut self, cmd: &UnsubscribeBars) -> anyhow::Result<()> {
         let symbol = symbol_from_instrument(cmd.bar_type.instrument_id());
-        {
+        // Decrement the per-symbol bars count ONLY when this bar type actually had
+        // a live subscription to release (AD10). The per-BarType refs and the
+        // per-symbol SubState.bars count are incremented together on subscribe, so
+        // they must be decremented together. An unmatched unsubscribe_bars (a bar
+        // type never subscribed, or a double-unsubscribe interleaved by nautilus
+        // command replay) that still decremented the symbol count would steal a
+        // decrement belonging to a DIFFERENT bar type's live subscription and, if
+        // that dropped the symbol total to 0, fire a wire Unsubscribe that darkens
+        // the surviving feed. Saturating arithmetic prevents underflow, not this
+        // cross-type theft - so gate the symbol decrement on a real match.
+        let (matched, to_flush) = {
             let mut bars = self
                 .bars
                 .lock()
                 .map_err(|_| anyhow::anyhow!("bar mutex poisoned"))?;
-            if let Some(state) = bars.get_mut(&cmd.bar_type) {
-                state.refs = state.refs.saturating_sub(1);
-                if state.refs == 0 {
-                    bars.remove(&cmd.bar_type);
+            let refs_after = match bars.get_mut(&cmd.bar_type) {
+                Some(state) if state.refs > 0 => {
+                    state.refs -= 1;
+                    Some(state.refs)
+                }
+                _ => None,
+            };
+            match refs_after {
+                // On the last release, take the removed bar type's active window
+                // out with it so a completed-but-withheld bar can be flushed
+                // below rather than silently discarded (AD19).
+                Some(0) => (true, bars.remove(&cmd.bar_type).and_then(|state| state.active)),
+                Some(_) => (true, None),
+                None => (false, None),
+            }
+        };
+        if matched {
+            // Flush the removed bar type's active window IF it already closed
+            // (close_ts <= sim-now) but was withheld only for lack of a later
+            // trade to cross its boundary - the AD19 discard-on-unsubscribe case.
+            // A genuinely in-progress window (close_ts still in the future) is
+            // dropped, not emitted: shipping it would inject a future-stamped,
+            // incomplete bar a consumer could not tell from a real completed one.
+            // Closing live in-progress windows on a clock timer (the general
+            // AD19 fix, and the stop()-teardown flush) is a larger feature,
+            // flagged rather than built here.
+            if let Some(active) = to_flush {
+                let now = now_unix_nanos(self.sim).as_u64();
+                if active.close_ts <= now
+                    && let Some(def) = instrument_def(&self.instruments, &symbol)
+                {
+                    match active_to_bar(cmd.bar_type, &active, &def, self.sim) {
+                        Ok(bar) => {
+                            if let Ok(sink) = self.sink() {
+                                drop(sink.send(DataEvent::Data(Data::Bar(bar))));
+                            }
+                        }
+                        Err(err) => tracing::warn!(
+                            bar_type = %cmd.bar_type,
+                            error = %err,
+                            "dropping unrepresentable bar on unsubscribe flush"
+                        ),
+                    }
                 }
             }
+            self.unsubscribe_symbol(symbol, SubKind::Bars)?;
+        } else {
+            tracing::warn!(
+                bar_type = %cmd.bar_type,
+                "ignoring unsubscribe_bars with no matching subscription; \
+                 not touching the symbol's shared bars count (AD10)"
+            );
         }
-        self.unsubscribe_symbol(symbol, SubKind::Bars)
+        Ok(())
     }
 
     fn request_trades(&self, request: RequestTrades) -> anyhow::Result<()> {
@@ -530,7 +636,7 @@ impl DataClient for MogwaiDataClient {
         // Refuse an off-tape window at the boundary, loudly, rather than spawning
         // a doomed fetch the warmup would read as an empty page.
         ensure_on_tape(start, self.data_origin_ns)?;
-        drop(get_runtime().spawn(async move {
+        track_task(&self.task_handles, get_runtime().spawn(async move {
             let symbol = symbol_from_instrument(request.instrument_id);
             let def = match ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await
             {
@@ -617,7 +723,7 @@ impl DataClient for MogwaiDataClient {
         let sink = self.sink()?;
         let client_id = request.client_id.unwrap_or(self.client_id);
         let sim = self.sim;
-        drop(get_runtime().spawn(async move {
+        track_task(&self.task_handles, get_runtime().spawn(async move {
             let response = QuotesResponse::new(
                 request.request_id,
                 client_id,
@@ -638,6 +744,12 @@ impl DataClient for MogwaiDataClient {
             request.bar_type.spec().is_time_aggregated(),
             "mogwai only supports time based external bars"
         );
+        ensure!(
+            !is_calendar_anchored(request.bar_type.spec().aggregation),
+            "mogwai does not support Week/Month/Year bars: they need calendar \
+             anchoring this adapter's epoch-anchored aggregation cannot produce; \
+             use Day or finer"
+        );
         let sink = self.sink()?;
         let http = self.http.clone();
         let http_quota = self.http_quota.clone();
@@ -652,7 +764,7 @@ impl DataClient for MogwaiDataClient {
         // rather than spawning a fetch that returns an empty page the warmup
         // can never complete on (the #13 failure mode this spec closes).
         ensure_on_tape(start, self.data_origin_ns)?;
-        drop(get_runtime().spawn(async move {
+        track_task(&self.task_handles, get_runtime().spawn(async move {
             let instrument_id = request.bar_type.instrument_id();
             let symbol = symbol_from_instrument(instrument_id);
             let def = match ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await
@@ -727,7 +839,7 @@ impl DataClient for MogwaiDataClient {
         let instruments = Arc::clone(&self.instruments);
         let client_id = request.client_id.unwrap_or(self.client_id);
         let sim = self.sim;
-        drop(get_runtime().spawn(async move {
+        track_task(&self.task_handles, get_runtime().spawn(async move {
             if let Ok(defs) = fetch_instruments(&http, &http_quota, &base).await {
                 cache_instruments(&instruments, defs.clone());
                 let ts_init = now_unix_nanos(sim);
@@ -759,7 +871,7 @@ impl DataClient for MogwaiDataClient {
         let instruments = Arc::clone(&self.instruments);
         let client_id = request.client_id.unwrap_or(self.client_id);
         let sim = self.sim;
-        drop(get_runtime().spawn(async move {
+        track_task(&self.task_handles, get_runtime().spawn(async move {
             let symbol = symbol_from_instrument(request.instrument_id);
             if let Ok(def) =
                 ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await
@@ -1106,6 +1218,16 @@ async fn poll_market_data(mut ctx: DataPollContext) {
     let mut poll_failures: HashMap<Symbol, u64> = HashMap::new();
     while ctx.connected.load(Ordering::Relaxed) {
         let symbols = poll_symbols(&ctx.subs);
+        // Drop failure counters for symbols no longer subscribed (F13): the
+        // counter was previously removed only on a successful fetch, so a symbol
+        // unsubscribed WHILE its poll was failing left a stale entry that never
+        // cleared. Retaining only currently-polled symbols each cycle bounds the
+        // map by the live subscription set.
+        {
+            let active: std::collections::HashSet<&Symbol> =
+                symbols.iter().map(|(symbol, _)| symbol).collect();
+            poll_failures.retain(|symbol, _| active.contains(symbol));
+        }
         for (symbol, start_ts) in symbols {
             // Self-heal a missing instrument def on the poll path: a symbol
             // streaming without a seeded def is otherwise silently black-holed
@@ -1166,13 +1288,43 @@ async fn poll_market_data(mut ctx: DataPollContext) {
                 Err(err) => {
                     let count = poll_failures.entry(symbol.clone()).or_insert(0);
                     *count += 1;
-                    if *count == 1 || count.is_multiple_of(40) {
+                    let count = *count;
+                    if count == 1 || count.is_multiple_of(POLL_FAILURE_ALERT_EVERY) {
                         tracing::warn!(
                             %symbol,
                             error = %err,
-                            failures = *count,
+                            failures = count,
                             "poll fetch failed; the feed may be dead (server restart with a \
                              fresh data_origin, or an off-tape cursor)"
+                        );
+                    }
+                    // Self-heal a persistently wedged feed (AD6). A run of
+                    // consecutive failures is the server-restart / off-tape-cursor
+                    // class: the cursor's last_ts (or the sim-now anchor computed
+                    // against the pre-restart clock) now precedes the server's
+                    // fresh data_origin, so every GET /trades 422s forever - and
+                    // batch 3 only made that VISIBLE (the warn above), not
+                    // recoverable. Re-fetch /clock to pick up the restarted
+                    // server's sim mapping and origin, then reset this symbol's
+                    // cursor onto the new tape (its old start floored up to the new
+                    // data_origin) so the next poll requests an on-tape window.
+                    // Done once per alert interval, not every failure, to avoid a
+                    // fetch_clock storm while the server is genuinely down; if it
+                    // is, the re-fetch falls back to identity and the next interval
+                    // retries.
+                    if count.is_multiple_of(POLL_FAILURE_ALERT_EVERY) {
+                        let refreshed = fetch_clock_or_identity(&ctx.http, &ctx.base).await;
+                        ctx.sim = refreshed.sim;
+                        let requested =
+                            start_ts.unwrap_or_else(|| now_unix_nanos(ctx.sim).as_u64());
+                        let anchor = requested.max(refreshed.data_origin_ns);
+                        lock_recover(&ctx.cursor, "poll cursor")
+                            .insert(symbol.clone(), PollCursor::new(Some(anchor)));
+                        tracing::warn!(
+                            %symbol,
+                            anchor,
+                            "poll feed self-heal: re-fetched clock and reset the cursor \
+                             after persistent failures"
                         );
                     }
                     continue;
@@ -1243,6 +1395,25 @@ fn emit_live_bars(
     for bar in ready {
         drop(sink.send(DataEvent::Data(Data::Bar(bar))));
     }
+}
+
+/// True for the time-aggregated bar aggregations mogwai refuses (AD11). Week,
+/// Month, and Year are calendar-anchored in nautilus (`get_time_bar_start`
+/// anchors weeks to Monday and months/years to the calendar), but
+/// `get_bar_interval_ns` returns a fixed 7-day/30-day/365-day proxy - nautilus's
+/// own comment calls it a proxy "for comparing bar lengths", not a calendar
+/// interval. The adapter's `((ts / interval) + 1) * interval` aggregation would
+/// therefore produce epoch-anchored 30-day blocks instead of calendar months,
+/// and epoch-anchored (Thursday) weeks instead of Monday-anchored ones. Day and
+/// finer are correctly UTC-aligned, so only these three are refused - like the
+/// tick/volume aggregations `is_time_aggregated` already refuses. Refusing is the
+/// chosen resolution over building calendar anchoring (heavy, and unlikely bar
+/// specs for this venue).
+fn is_calendar_anchored(aggregation: BarAggregation) -> bool {
+    matches!(
+        aggregation,
+        BarAggregation::Week | BarAggregation::Month | BarAggregation::Year
+    )
 }
 
 fn update_bar_state(
@@ -1374,6 +1545,27 @@ fn lock_recover<'a, T>(mutex: &'a Mutex<T>, label: &str) -> std::sync::MutexGuar
         tracing::warn!(lock = label, "recovering from poisoned mutex");
         poisoned.into_inner()
     })
+}
+
+/// Records a spawned task's handle so `stop()`/`disconnect()` can abort it
+/// (AD17/AE19: a `request_*` fetch or an HTTP order dispatch spawned just before
+/// disconnect otherwise keeps issuing HTTP requests, racing the HttpQuota, and
+/// sends into a possibly-dropped sink after the client stopped). Already-finished
+/// handles are pruned on every insert so the vec is bounded by the count of
+/// in-flight tasks rather than growing once per short-lived request over the
+/// client's lifetime. Shared behind the `Arc<Mutex<..>>` so the `&self` request
+/// handlers can track their task alongside the `&mut self` connect path.
+fn track_task(handles: &Arc<Mutex<Vec<JoinHandle<()>>>>, handle: JoinHandle<()>) {
+    let mut handles = lock_recover(handles, "task handles");
+    handles.retain(|h| !h.is_finished());
+    handles.push(handle);
+}
+
+/// Aborts and clears every tracked task handle. Shared by both clients' `stop()`.
+fn abort_tasks(handles: &Arc<Mutex<Vec<JoinHandle<()>>>>) {
+    for handle in lock_recover(handles, "task handles").drain(..) {
+        handle.abort();
+    }
 }
 
 fn sub_state(
@@ -1963,22 +2155,59 @@ async fn sleep_havoc_delay(sim: SimClock, delay: Duration) {
     }
 }
 
+/// Wall backoff between clock-fetch retries. Small and fixed: this runs inline
+/// in connect(), so it must not stall boot for long, but a couple of retries
+/// ride out a transient blip before the identity fallback commits the whole
+/// connection to the wrong time axis.
+const CLOCK_FETCH_RETRY_DELAY: Duration = Duration::from_millis(200);
+const CLOCK_FETCH_MAX_ATTEMPTS: u32 = 3;
+
 async fn fetch_clock_or_identity(http: &HttpClient, http_base: &str) -> ServerClock {
-    match fetch_clock(http, http_base).await {
-        Ok(clock) => clock,
-        Err(err) => {
-            tracing::warn!(%err, "falling back to identity mogwai clock");
-            // No reachable server: identity map and an UNKNOWN tape floor. A
-            // `data_origin_ns` of 0 is the "floor unknown" sentinel the warmup
-            // guard checks - it skips the pre-flight refusal and lets the server's
-            // own 422 stand if a later request is off-tape.
-            ServerClock {
-                sim: SimClock::identity(),
-                server_now_ns: 0,
-                data_origin_ns: 0,
-                backfill_horizon_ns: 0,
+    // Retry before committing to identity (AD16): the identity fallback silently
+    // puts EVERY ts_init, havoc sleep, quota interval, backoff and timeout on the
+    // wrong axis for the life of the connection if the server actually runs at
+    // speed != 1, and nothing re-fetches the clock later. A couple of quick
+    // retries ride out a transient fetch blip; only a persistent failure falls
+    // back, and then loudly.
+    let mut last_err = None;
+    for attempt in 0..CLOCK_FETCH_MAX_ATTEMPTS {
+        match fetch_clock(http, http_base).await {
+            Ok(clock) => {
+                if attempt > 0 {
+                    tracing::info!(attempt, "clock fetch recovered after retry");
+                }
+                return clock;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    attempt,
+                    "clock fetch failed; retrying before the identity fallback"
+                );
+                last_err = Some(err);
+                if attempt + 1 < CLOCK_FETCH_MAX_ATTEMPTS {
+                    tokio::time::sleep(CLOCK_FETCH_RETRY_DELAY).await;
+                }
             }
         }
+    }
+    tracing::error!(
+        err = ?last_err,
+        attempts = CLOCK_FETCH_MAX_ATTEMPTS,
+        "clock fetch failed after retries; falling back to the identity mogwai \
+         clock - if the server runs at speed != 1, every ts_init, havoc sleep, \
+         quota interval, backoff and timeout will be scaled on the wrong axis for \
+         the life of this connection"
+    );
+    // No reachable server: identity map and an UNKNOWN tape floor. A
+    // `data_origin_ns` of 0 is the "floor unknown" sentinel the warmup
+    // guard checks - it skips the pre-flight refusal and lets the server's
+    // own 422 stand if a later request is off-tape.
+    ServerClock {
+        sim: SimClock::identity(),
+        server_now_ns: 0,
+        data_origin_ns: 0,
+        backfill_horizon_ns: 0,
     }
 }
 
@@ -2061,7 +2290,6 @@ async fn wait_connected(connected: &Arc<AtomicBool>, ws_url: &str) -> anyhow::Re
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct MogwaiExecutionClient {
     core: ExecutionClientCore,
     config: MogwaiExecClientConfig,
@@ -2074,7 +2302,12 @@ pub struct MogwaiExecutionClient {
     state: Arc<Mutex<ExecState>>,
     instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     http_dispatch_counter: Arc<AtomicU64>,
-    task_handles: Vec<JoinHandle<()>>,
+    /// Handles for the WS reader and every spawned HTTP order dispatch. Shared
+    /// behind an `Arc<Mutex<..>>` so the `&self` `dispatch_order` can record its
+    /// spawned POST task; `stop()` aborts the lot so a slow POST cannot emit exec
+    /// events (its emitter still holds a live sender clone) after the client
+    /// stopped (AE19).
+    task_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
 impl MogwaiExecutionClient {
@@ -2113,7 +2346,7 @@ impl MogwaiExecutionClient {
             state: Arc::new(Mutex::new(ExecState::default())),
             instruments: Arc::new(Mutex::new(HashMap::new())),
             http_dispatch_counter: Arc::new(AtomicU64::new(0)),
-            task_handles: Vec::new(),
+            task_handles: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -2157,7 +2390,7 @@ impl MogwaiExecutionClient {
             let counter = self.http_dispatch_counter.fetch_add(1, Ordering::Relaxed);
             let client_havoc = client_havoc_for_dispatch(&self.config.havoc, counter);
             let timeout_secs = request_timeout_secs(&self.config.havoc, self.sim);
-            drop(get_runtime().spawn(async move {
+            track_task(&self.task_handles, get_runtime().spawn(async move {
                 let mut filter = HavocFilter::from_client(&client_havoc);
                 match post_order(&http, &http_quota, &url, &msg, timeout_secs).await {
                     Ok(events) => {
@@ -2172,54 +2405,25 @@ impl MogwaiExecutionClient {
                         })
                         .await;
                     }
-                    Err(err) => {
-                        if let ExecWsCommand::Cancel { client_order_id } = &cmd {
-                            // A cancel that fails at transport never reached
-                            // the venue: the order is still live there (or
-                            // its fate is simply unknown), not rejected
-                            // outright. Routing this through
-                            // ServerMessage::OrderRejected (as Submit/Modify
-                            // legitimately do) would flip a live
-                            // Accepted/PartiallyFilled order to a terminal
-                            // Rejected state in both the mirror and
-                            // nautilus - wrong business semantics, and an
-                            // invalid state transition for PartiallyFilled
-                            // orders specifically. The failure is also purely
-                            // local (the venue never saw the request), so
-                            // there is nothing for the venue-havoc pipeline
-                            // to model; report it straight to nautilus as a
-                            // cancel rejection instead.
-                            if let Some(client_order_id) = wire_client_order_id(client_order_id) {
-                                emit_cancel_rejected(
-                                    client_order_id,
-                                    None,
-                                    err.to_string(),
-                                    now_unix_nanos(ctx.sim),
-                                    &ctx,
-                                );
-                            }
-                        } else {
-                            // A failed Submit/Modify POST synthesizes the
-                            // matching reject so the order reaches a terminal
-                            // state instead of wedging in Submitted. Like the
-                            // cancel branch above, the failure is purely local
-                            // (the venue never saw the request, and this reject
-                            // never traveled the wire), so there is nothing for
-                            // the venue-havoc pipeline to model - and routing it
-                            // through the per-dispatch HavocFilter would let a
-                            // drop_prob draw discard the terminal event
-                            // entirely, leaving nautilus and the mirror stuck in
-                            // Submitted forever (and the venue-id-less record
-                            // omitted from status reports). Bypass the filter
-                            // and report it straight.
-                            handle_exec_message(reject_for(&cmd, &err, ctx.sim), &ctx);
-                        }
-                    }
+                    Err(err) => synthesize_transport_reject(&cmd, &err, &ctx),
                 }
             }));
             Ok(())
+        } else if let Err(err) = self.send_ws(cmd.clone()) {
+            // The WS command channel is gone (reconnect exhausted, or the client
+            // was stopped), so the command never reached the venue. Nautilus only
+            // LOGS an Err from cancel_order/modify_order (no event), so without
+            // this a cancel/modify would sit forever in PendingCancel/PendingUpdate
+            // (and a submit in Submitted) with no reject to restore it - unlike the
+            // HTTP path, which already synthesizes the matching reject on transport
+            // failure. Synthesize it here too and report success: the reject event
+            // is the signal, not the return value (matching the HTTP path, whose
+            // spawn returns Ok and surfaces the failure only as the event) (AE9).
+            let ctx = self.exec_context();
+            synthesize_transport_reject(&cmd, &err, &ctx);
+            Ok(())
         } else {
-            self.send_ws(cmd)
+            Ok(())
         }
     }
 
@@ -2316,10 +2520,7 @@ impl ExecutionClient for MogwaiExecutionClient {
 
         self.connected.store(false, Ordering::Relaxed);
         self.ws_cmd = None;
-        for handle in &self.task_handles {
-            handle.abort();
-        }
-        self.task_handles.clear();
+        abort_tasks(&self.task_handles);
         self.core.set_stopped();
         self.core.set_disconnected();
         Ok(())
@@ -2455,12 +2656,12 @@ impl ExecutionClient for MogwaiExecutionClient {
             .await;
         });
 
-        self.task_handles.push(reader_handle);
+        track_task(&self.task_handles, reader_handle);
         // See MogwaiDataClient::connect: a timed-out connect must abort the
         // just-spawned reader and clear the stale handle/ws_cmd so a retry does
         // not orphan the first task racing on the shared `connected` flag.
         if let Err(err) = wait_connected(&self.connected, &ws_url).await {
-            if let Some(handle) = self.task_handles.pop() {
+            if let Some(handle) = lock_recover(&self.task_handles, "task handles").pop() {
                 handle.abort();
             }
             self.ws_cmd = None;
@@ -2476,6 +2677,26 @@ impl ExecutionClient for MogwaiExecutionClient {
 
     fn submit_order(&self, cmd: SubmitOrder) -> anyhow::Result<()> {
         let order = self.core.get_order(&cmd.client_order_id)?;
+
+        // Build the wire order FIRST (AE8). An unsupported side/type/TIF errors
+        // out of convert::wire_* here; emitting OrderSubmitted before this - as
+        // the code used to - queued a Submitted event that nautilus then had to
+        // apply to an order it had already denied (Initialized -> Denied) on the
+        // very same failed conversion, producing a stray event, a scary
+        // invalid-transition log, and (on a later send failure) a permanently
+        // Submitted mirror stray that fed the unbounded ExecState growth.
+        // Converting first means a conversion failure returns before any event is
+        // emitted or any mirror record exists.
+        let wire = mogwai_protocol::SubmitOrder {
+            client_order_id: cmd.client_order_id.to_string(),
+            symbol: symbol_from_instrument(cmd.instrument_id),
+            side: convert::wire_side(cmd.order_init.order_side)?,
+            order_type: convert::wire_order_type(cmd.order_init.order_type)?,
+            quantity: cmd.order_init.quantity.as_decimal(),
+            price: cmd.order_init.price.map(|p| p.as_decimal()),
+            time_in_force: convert::wire_time_in_force(cmd.order_init.time_in_force)?,
+        };
+
         let ts_init = now_unix_nanos(self.sim);
         let submitted = OrderSubmitted::new(
             self.core.trader_id,
@@ -2487,43 +2708,41 @@ impl ExecutionClient for MogwaiExecutionClient {
             ts_init,
             ts_init,
         );
+
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("execution state mutex poisoned"))?;
+            state.orders.insert(
+                cmd.client_order_id,
+                OrderRecord {
+                    strategy_id: cmd.strategy_id,
+                    instrument_id: cmd.instrument_id,
+                    order_side: cmd.order_init.order_side,
+                    order_type: cmd.order_init.order_type,
+                    time_in_force: cmd.order_init.time_in_force,
+                    status: OrderStatus::Submitted,
+                    quantity: cmd.order_init.quantity.as_decimal(),
+                    price: cmd.order_init.price.map(|p| p.as_decimal()),
+                    filled_qty: Decimal::ZERO,
+                    avg_px: None,
+                    venue_order_id: None,
+                    ts_accepted: cmd.ts_init,
+                    ts_last: cmd.ts_init,
+                    seen_trades: std::collections::HashSet::new(),
+                },
+            );
+            state.prune();
+        }
+
+        // Emit Submitted only now that conversion has succeeded and the mirror
+        // record exists. The dispatch below may still fail at transport (WS
+        // channel gone, or an HTTP POST error), in which case dispatch_order
+        // synthesizes the matching OrderRejected - a valid Submitted -> Rejected
+        // transition - so the order still reaches a terminal state.
         self.emitter
             .send_order_event(OrderEventAny::Submitted(submitted));
-
-        let wire = mogwai_protocol::SubmitOrder {
-            client_order_id: cmd.client_order_id.to_string(),
-            symbol: symbol_from_instrument(cmd.instrument_id),
-            side: convert::wire_side(cmd.order_init.order_side)?,
-            order_type: convert::wire_order_type(cmd.order_init.order_type)?,
-            quantity: cmd.order_init.quantity.as_decimal(),
-            price: cmd.order_init.price.map(|p| p.as_decimal()),
-            time_in_force: convert::wire_time_in_force(cmd.order_init.time_in_force)?,
-        };
-
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("execution state mutex poisoned"))?;
-        state.orders.insert(
-            cmd.client_order_id,
-            OrderRecord {
-                strategy_id: cmd.strategy_id,
-                instrument_id: cmd.instrument_id,
-                order_side: cmd.order_init.order_side,
-                order_type: cmd.order_init.order_type,
-                time_in_force: cmd.order_init.time_in_force,
-                status: OrderStatus::Submitted,
-                quantity: cmd.order_init.quantity.as_decimal(),
-                price: cmd.order_init.price.map(|p| p.as_decimal()),
-                filled_qty: Decimal::ZERO,
-                avg_px: None,
-                venue_order_id: None,
-                ts_accepted: cmd.ts_init,
-                ts_last: cmd.ts_init,
-                seen_trades: std::collections::HashSet::new(),
-            },
-        );
-        drop(state);
 
         self.dispatch_order(ExecWsCommand::Submit(wire))
     }
@@ -2558,7 +2777,17 @@ impl ExecutionClient for MogwaiExecutionClient {
                 cmd.instrument_id
                     .is_none_or(|id| id == record.instrument_id)
             })
-            .filter(|(_, record)| in_time_range(record.ts_last, cmd.start, cmd.end))
+            .filter(|(_, record)| {
+                // An open order requested under open_only is always included,
+                // regardless of when it last had activity: a real venue
+                // mass-status returns every resting order, and reconciliation
+                // passes a lookback-bounded `start`, so filtering a long-quiet
+                // open order by `ts_last` used to hide it - and the manager then
+                // infers it canceled-at-venue (AE10). The time filter still
+                // applies to closed/historical records (open_only false).
+                (cmd.open_only && record.status.is_open())
+                    || in_time_range(record.ts_last, cmd.start, cmd.end)
+            })
             .filter_map(|(client_order_id, record)| {
                 // A Submitted order with no venue ack yet carries no
                 // venue_order_id. `VenueOrderId::from("")` routes through the
@@ -2689,7 +2918,17 @@ impl ExecutionClient for MogwaiExecutionClient {
                 cmd.instrument_id
                     .is_none_or(|id| id == position.instrument_id)
             })
-            .filter(|position| in_time_range(position.ts_last, cmd.start, cmd.end))
+            .filter(|position| {
+                // Every position the mirror holds is a current open (nonzero)
+                // venue position - the account-snapshot apply drops flat
+                // instruments - so a lookback-bounded `start` must not hide a
+                // long-quiet resting position (reconciliation would otherwise
+                // have to re-adopt it as EXTERNAL mid-run) (AE10). Include any
+                // open position regardless of last-activity time; the time filter
+                // still applies to a defensive flat entry.
+                !position.quantity.is_zero()
+                    || in_time_range(position.ts_last, cmd.start, cmd.end)
+            })
             .filter_map(|position| {
                 let def = instrument_def(&self.instruments, &position.symbol)?;
                 let quantity = convert::quantity(position.quantity.abs(), def.size_precision)
@@ -2854,6 +3093,33 @@ fn reject_for(cmd: &ExecWsCommand, err: &anyhow::Error, sim: SimClock) -> Server
     }
 }
 
+/// Synthesizes the nautilus reject for a command whose transport failed before
+/// the venue ever saw it - shared by the HTTP POST error path and the WS
+/// send-failure path (AE9). A failed `Cancel` is reported as a `CancelRejected`
+/// (the order is still live, or its fate is simply unknown, not dead), leaving
+/// the mirrored status untouched; a failed `Submit`/`Modify` is reported as the
+/// matching `OrderRejected`/`OrderModifyRejected` so the order reaches a terminal
+/// state instead of wedging in `Submitted`/`PendingUpdate`. Both bypass the
+/// per-dispatch `HavocFilter` by design: the failure is purely local and never
+/// traveled the wire, so there is nothing for the venue-havoc pipeline to model,
+/// and routing a terminal reject through a `drop_prob` draw could discard it
+/// entirely, leaving nautilus and the mirror stuck forever.
+fn synthesize_transport_reject(cmd: &ExecWsCommand, err: &anyhow::Error, ctx: &ExecContext) {
+    if let ExecWsCommand::Cancel { client_order_id } = cmd {
+        if let Some(client_order_id) = wire_client_order_id(client_order_id) {
+            emit_cancel_rejected(
+                client_order_id,
+                None,
+                err.to_string(),
+                now_unix_nanos(ctx.sim),
+                ctx,
+            );
+        }
+    } else {
+        handle_exec_message(reject_for(cmd, err, ctx.sim), ctx);
+    }
+}
+
 /// Reports a rejected `Cancel` as a nautilus `OrderCancelRejected` without
 /// touching the mirrored order's status. Serves both origins:
 ///
@@ -2934,6 +3200,61 @@ struct ExecState {
     /// exists to kill), erase a just-opened one, and move ts_last backward.
     /// `handle_account_state` skips any snapshot below this watermark.
     account_ts_last: UnixNanos,
+}
+
+/// Cap on retained terminal order records. Open orders are never pruned (they
+/// are live reconciliation truth); only closed records beyond this many are
+/// dropped, oldest-by-`ts_last` first, so a report over the retained window
+/// keeps every record it needs while a long forward run cannot accumulate
+/// terminal orders without bound (AE6).
+const MAX_TERMINAL_ORDERS: usize = 10_000;
+
+/// Cap on the append-only `fills` Vec, pruned oldest-first past this bound.
+/// Fill reports are lookback-bounded, so the oldest fills beyond this many are
+/// never needed by a report within the retained window (AE6).
+const MAX_FILLS: usize = 10_000;
+
+impl ExecState {
+    /// Bounds the mirror's memory: an unpruned `orders` map (terminal records
+    /// and permanently-Submitted strays live forever) and an append-only `fills`
+    /// Vec otherwise grow linearly over a long forward run, and every report
+    /// generation scans them all. Prunes the oldest terminal orders and the
+    /// oldest fills past their caps; open orders are always retained. Called
+    /// after each mirror mutation that can grow the maps (a submit insert, a fill
+    /// push), and does real work only when a cap is exceeded.
+    fn prune(&mut self) {
+        if self.fills.len() > MAX_FILLS {
+            // `fills` is appended in arrival order (ascending ts on the clean
+            // path), so draining the front drops the oldest.
+            let excess = self.fills.len() - MAX_FILLS;
+            self.fills.drain(0..excess);
+        }
+        // Cheap length gate before the O(n) terminal scan: the terminal count
+        // cannot exceed the cap unless the whole map does, so this keeps prune
+        // O(1) on the hot submit/fill paths until the mirror genuinely grows
+        // large.
+        if self.orders.len() <= MAX_TERMINAL_ORDERS {
+            return;
+        }
+        let terminal = self
+            .orders
+            .values()
+            .filter(|record| record.status.is_closed())
+            .count();
+        if terminal > MAX_TERMINAL_ORDERS {
+            let excess = terminal - MAX_TERMINAL_ORDERS;
+            let mut terminal_ids: Vec<(ClientOrderId, UnixNanos)> = self
+                .orders
+                .iter()
+                .filter(|(_, record)| record.status.is_closed())
+                .map(|(id, record)| (*id, record.ts_last))
+                .collect();
+            terminal_ids.sort_by_key(|(_, ts_last)| *ts_last);
+            for (id, _) in terminal_ids.into_iter().take(excess) {
+                self.orders.remove(&id);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -3047,7 +3368,11 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                     record.status = OrderStatus::Accepted;
                     record.venue_order_id = Some(venue_order_id);
                     record.ts_accepted = UnixNanos::from(ts_event);
-                    record.ts_last = UnixNanos::from(ts_event);
+                    // Forward-only, matching the fill handler (F11): a non-terminal
+                    // Accepted reordered behind an event that already advanced the
+                    // record must not walk ts_last backward and perturb the
+                    // in_time_range report filtering.
+                    record.ts_last = record.ts_last.max(UnixNanos::from(ts_event));
                 }
                 (record.clone(), stale)
             }) else {
@@ -3152,7 +3477,8 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 if !stale {
                     record.status = OrderStatus::Canceled;
                     record.venue_order_id = Some(venue_order_id);
-                    record.ts_last = UnixNanos::from(ts_event);
+                    // Forward-only, matching the fill handler (F11).
+                    record.ts_last = record.ts_last.max(UnixNanos::from(ts_event));
                 }
                 (record.clone(), stale)
             }) else {
@@ -3286,7 +3612,10 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                     } else {
                         OrderStatus::PartiallyFilled
                     };
-                    record.ts_last = UnixNanos::from(ts_event);
+                    // Forward-only, matching the fill handler (F11): a non-terminal
+                    // amend ack reordered behind a later event must not walk
+                    // ts_last backward.
+                    record.ts_last = record.ts_last.max(UnixNanos::from(ts_event));
                 }
                 (record.clone(), stale)
             }) else {
@@ -3557,6 +3886,7 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
             quote_currency,
             ts_event: UnixNanos::from(fill.ts_event),
         });
+        state.prune();
     }
 
     let commission = if fill.commission.is_zero() {
@@ -3613,7 +3943,21 @@ fn handle_account_state(state: mogwai_protocol::AccountState, ctx: &ExecContext)
         .balances
         .iter()
         .filter_map(|balance| {
-            let currency = Currency::from_str(&balance.currency).ok()?;
+            // Warn on a balance whose currency string nautilus cannot represent,
+            // matching every other unrepresentable-amount drop in this closure
+            // (AE18): a bare `.ok()?` swallowed the whole currency's balance with
+            // no diagnostic, so an account snapshot silently under-reported.
+            let currency = match Currency::from_str(&balance.currency) {
+                Ok(currency) => currency,
+                Err(err) => {
+                    tracing::warn!(
+                        currency = %balance.currency,
+                        error = %err,
+                        "dropping account balance: currency unknown to nautilus"
+                    );
+                    return None;
+                }
+            };
             // A hostile balance amount that cannot represent as nautilus Money
             // drops just this currency's balance with a warning rather than
             // panicking the exec task that books the account snapshot.
@@ -4018,6 +4362,10 @@ mod data_client_tests {
         let mut client = data_client();
         let (tx, mut rx) = unbounded_channel::<WsCommand>();
         client.ws_cmd = Some(tx);
+        // A live subscribe emits its Subscribe only on a live connection (AD5):
+        // mark the client connected so these refcount-wiring assertions exercise
+        // the direct-send path rather than the disconnected defer-to-on_connect path.
+        client.connected.store(true, Ordering::Relaxed);
 
         client
             .subscribe_trades(SubscribeTrades::new(
@@ -4076,6 +4424,10 @@ mod data_client_tests {
         .expect("valid data client");
         let (tx, mut rx) = unbounded_channel::<WsCommand>();
         client.ws_cmd = Some(tx);
+        // A live subscribe emits its Subscribe only on a live connection (AD5):
+        // mark the client connected so these refcount-wiring assertions exercise
+        // the direct-send path rather than the disconnected defer-to-on_connect path.
+        client.connected.store(true, Ordering::Relaxed);
 
         client
             .subscribe_trades(SubscribeTrades::new(
@@ -4128,6 +4480,10 @@ mod data_client_tests {
         let mut client = data_client();
         let (tx, mut rx) = unbounded_channel::<WsCommand>();
         client.ws_cmd = Some(tx);
+        // A live subscribe emits its Subscribe only on a live connection (AD5):
+        // mark the client connected so these refcount-wiring assertions exercise
+        // the direct-send path rather than the disconnected defer-to-on_connect path.
+        client.connected.store(true, Ordering::Relaxed);
 
         client
             .subscribe_trades(SubscribeTrades::new(
@@ -4491,6 +4847,283 @@ mod data_client_tests {
         assert!(!bar_span_reached(&spanning, interval, None));
         // Empty accumulation never stops.
         assert!(!bar_span_reached(&[], interval, Some(1)));
+    }
+
+    // AD5: a subscribe that lands during a reconnect backoff (connected == false)
+    // must NOT queue a Subscribe. The queued command would survive the reconnect
+    // in the command channel and be sent AGAIN after on_connect
+    // (subscribe_commands) already rebuilt the subscription from the table -
+    // double-subscribing and restarting the server-side replay. While
+    // disconnected, on_connect is the sole subscribe source and reconstructs the
+    // subscription from the table, so nothing is lost.
+    #[test]
+    fn subscribe_while_disconnected_defers_to_on_connect() {
+        let mut client = data_client();
+        let (tx, mut rx) = unbounded_channel::<WsCommand>();
+        client.ws_cmd = Some(tx);
+        // connected stays false: this is a reconnect backoff window.
+
+        client
+            .subscribe_trades(SubscribeTrades::new(
+                instrument_id(),
+                Some(client.client_id),
+                None,
+                UUID4::new(),
+                UnixNanos::default(),
+                None,
+                start_ts_params(100),
+            ))
+            .expect("subscribe trades while disconnected");
+
+        assert!(
+            rx.try_recv().is_err(),
+            "a subscribe while disconnected must not queue a Subscribe (AD5)"
+        );
+        // The subscription is recorded, so on_connect reconstructs it exactly once.
+        let reconstructed = subscribe_commands(&client.subs, None);
+        assert!(matches!(
+            reconstructed.as_slice(),
+            [
+                WsCommand::Subscribe {
+                    symbols,
+                    start_ts: Some(100),
+                    ..
+                }
+            ] if symbols == &vec!["BTCUSDT".to_string()]
+        ));
+    }
+
+    // AD7: a later subscriber must not pull the symbol's shared resume cursor
+    // (start_ts) backward. The old min(existing, new) rewound it to an earlier
+    // requested start, which the next reconnect's on_connect then replayed as an
+    // already-delivered window. Only the first subscriber seeds the cursor.
+    #[test]
+    fn later_subscriber_does_not_pull_start_ts_backward() {
+        let mut client = data_client();
+        let (tx, _rx) = unbounded_channel::<WsCommand>();
+        client.ws_cmd = Some(tx);
+        client.connected.store(true, Ordering::Relaxed);
+
+        client
+            .subscribe_trades(SubscribeTrades::new(
+                instrument_id(),
+                Some(client.client_id),
+                None,
+                UUID4::new(),
+                UnixNanos::default(),
+                None,
+                start_ts_params(100),
+            ))
+            .expect("first subscribe seeds the cursor at 100");
+
+        // A second subscriber asking for an EARLIER start (50) must not rewind it.
+        client
+            .subscribe_quotes(SubscribeQuotes::new(
+                instrument_id(),
+                Some(client.client_id),
+                None,
+                UUID4::new(),
+                UnixNanos::default(),
+                None,
+                start_ts_params(50),
+            ))
+            .expect("second subscribe with an earlier start");
+
+        let subs = client.subs.lock().expect("subscription mutex");
+        assert_eq!(
+            subs.get("BTCUSDT").expect("symbol subscribed").start_ts,
+            Some(100),
+            "a later earlier-start subscriber must not rewind the shared cursor (AD7)"
+        );
+    }
+
+    // AD10: an unsubscribe_bars for a bar type that was never subscribed must be a
+    // no-op on the symbol's shared bars count, so it cannot darken a surviving
+    // subscription for a DIFFERENT bar type on the same symbol.
+    #[test]
+    fn unmatched_unsubscribe_bars_does_not_darken_surviving_feed() {
+        let mut client = data_client();
+        let (tx, mut rx) = unbounded_channel::<WsCommand>();
+        client.ws_cmd = Some(tx);
+        client.connected.store(true, Ordering::Relaxed);
+
+        let subscribed = time_bar_type(1, BarAggregation::Second);
+        client
+            .subscribe_bars(SubscribeBars::new(
+                subscribed,
+                Some(client.client_id),
+                None,
+                UUID4::new(),
+                UnixNanos::default(),
+                None,
+                None,
+            ))
+            .expect("subscribe bars");
+        assert!(
+            matches!(
+                ws_command_to_client_message(rx.try_recv().expect("0->1 subscribe")),
+                ClientMessage::Subscribe { .. }
+            ),
+            "the live bar subscription emits its Subscribe"
+        );
+
+        // Unsubscribe a DIFFERENT bar type that was never subscribed.
+        let never = time_bar_type(5, BarAggregation::Minute);
+        client
+            .unsubscribe_bars(&UnsubscribeBars::new(
+                never,
+                Some(client.client_id),
+                None,
+                UUID4::new(),
+                UnixNanos::default(),
+                None,
+                None,
+            ))
+            .expect("unmatched unsubscribe is a no-op");
+
+        assert!(
+            rx.try_recv().is_err(),
+            "an unmatched unsubscribe_bars must not fire a wire Unsubscribe (AD10)"
+        );
+        let subs = client.subs.lock().expect("subscription mutex");
+        assert_eq!(
+            subs.get("BTCUSDT").expect("symbol still subscribed").bars,
+            1,
+            "the surviving bar subscription's shared count must be untouched"
+        );
+    }
+
+    // AD11: Week/Month/Year bars are refused (their calendar anchoring cannot be
+    // produced by the adapter's epoch-anchored aggregation); Day and finer pass.
+    #[test]
+    fn calendar_anchored_bar_aggregations_are_refused() {
+        assert!(is_calendar_anchored(BarAggregation::Week));
+        assert!(is_calendar_anchored(BarAggregation::Month));
+        assert!(is_calendar_anchored(BarAggregation::Year));
+        assert!(!is_calendar_anchored(BarAggregation::Day));
+        assert!(!is_calendar_anchored(BarAggregation::Hour));
+        assert!(!is_calendar_anchored(BarAggregation::Minute));
+        assert!(!is_calendar_anchored(BarAggregation::Second));
+
+        // Wired into subscribe_bars: a Week bar is refused at the boundary.
+        let mut client = data_client();
+        client.connected.store(true, Ordering::Relaxed);
+        let err = client
+            .subscribe_bars(SubscribeBars::new(
+                time_bar_type(1, BarAggregation::Week),
+                Some(client.client_id),
+                None,
+                UUID4::new(),
+                UnixNanos::default(),
+                None,
+                None,
+            ))
+            .expect_err("Week bars are refused");
+        assert!(err.to_string().contains("Week/Month/Year"), "{err}");
+
+        // A Day bar passes the gate.
+        let (tx, _rx) = unbounded_channel::<WsCommand>();
+        client.ws_cmd = Some(tx);
+        client
+            .subscribe_bars(SubscribeBars::new(
+                time_bar_type(1, BarAggregation::Day),
+                Some(client.client_id),
+                None,
+                UUID4::new(),
+                UnixNanos::default(),
+                None,
+                None,
+            ))
+            .expect("Day bars are accepted");
+    }
+
+    // AD19 (partial): on the last unsubscribe of a bar type, a window that has
+    // already closed (close_ts <= sim-now) but was withheld for lack of a later
+    // trade to cross its boundary is flushed rather than silently discarded; a
+    // genuinely in-progress window (close_ts still in the future) is dropped, not
+    // shipped as a future-stamped partial bar.
+    #[test]
+    fn unsubscribe_bars_flushes_completed_window_but_not_in_progress() {
+        fn active_bar(close_ts: u64) -> ActiveBar {
+            ActiveBar {
+                open: Decimal::new(10_000, 2),
+                high: Decimal::new(10_000, 2),
+                low: Decimal::new(10_000, 2),
+                close: Decimal::new(10_000, 2),
+                volume: Decimal::new(1, 0),
+                close_ts,
+            }
+        }
+
+        let mut client = data_client();
+        let cid = client.client_id;
+        let (tx, mut rx) = unbounded_channel();
+        client.sink = Some(tx);
+        client.instruments = instruments_map();
+
+        let completed = time_bar_type(1, BarAggregation::Second);
+        let in_progress = time_bar_type(5, BarAggregation::Minute);
+        {
+            let mut bars = client.bars.lock().expect("bars");
+            bars.insert(
+                completed,
+                BarSubState {
+                    refs: 1,
+                    // close_ts 1 is far in the past under the identity clock
+                    // (sim-now reads wall-clock nanos).
+                    active: Some(active_bar(1)),
+                },
+            );
+            bars.insert(
+                in_progress,
+                BarSubState {
+                    refs: 1,
+                    active: Some(active_bar(u64::MAX)),
+                },
+            );
+        }
+        {
+            let mut subs = client.subs.lock().expect("subs");
+            subs.insert(
+                "BTCUSDT".to_string(),
+                SubState {
+                    bars: 2,
+                    ..SubState::default()
+                },
+            );
+        }
+
+        client
+            .unsubscribe_bars(&UnsubscribeBars::new(
+                completed,
+                Some(cid),
+                None,
+                UUID4::new(),
+                UnixNanos::default(),
+                None,
+                None,
+            ))
+            .expect("unsubscribe the completed bar type");
+        match rx.try_recv().expect("the completed withheld window is flushed") {
+            DataEvent::Data(Data::Bar(bar)) => assert_eq!(bar.ts_event, UnixNanos::from(1)),
+            other => panic!("expected a bar, got {other:?}"),
+        }
+
+        client
+            .unsubscribe_bars(&UnsubscribeBars::new(
+                in_progress,
+                Some(cid),
+                None,
+                UUID4::new(),
+                UnixNanos::default(),
+                None,
+                None,
+            ))
+            .expect("unsubscribe the in-progress bar type");
+        assert!(
+            rx.try_recv().is_err(),
+            "an in-progress window must not ship a future-stamped partial bar"
+        );
     }
 }
 
@@ -5762,17 +6395,32 @@ mod tests {
         );
         assert_eq!(mass.position_reports().len(), 1, "the position must report");
 
-        // The lookback maps onto the same start bound the three generators
-        // already apply (ts within [start, end]): a 1-minute lookback against
-        // sim-now excludes every mirrored record stamped near the epoch.
+        // The lookback bounds the FILL reports (still time-filtered by ts_event),
+        // but open orders and open positions now report regardless of
+        // last-activity time (AE10): a real venue mass-status returns every
+        // resting order/position, so a long-quiet open item stamped near the
+        // epoch must NOT vanish under a short lookback (which reconciliation
+        // would otherwise read as canceled/closed at venue). Only closed and
+        // historical records honor the lookback.
         let bounded = client
             .generate_mass_status(Some(1))
             .await
             .expect("bounded mass status generates")
             .expect("bounded mass status is Some");
-        assert!(bounded.order_reports().is_empty());
-        assert!(bounded.fill_reports().is_empty());
-        assert!(bounded.position_reports().is_empty());
+        assert_eq!(
+            bounded.order_reports().len(),
+            1,
+            "an open order still reports under a short lookback (AE10)"
+        );
+        assert_eq!(
+            bounded.position_reports().len(),
+            1,
+            "an open position still reports under a short lookback (AE10)"
+        );
+        assert!(
+            bounded.fill_reports().is_empty(),
+            "fills remain time-filtered by the lookback"
+        );
     }
 
     #[tokio::test]
@@ -5822,5 +6470,255 @@ mod tests {
         ));
         let record = order_record(&client.state, ClientOrderId::from("O-1")).expect("order record");
         assert_eq!(record.status, OrderStatus::Rejected);
+    }
+
+    fn order_at(status: OrderStatus, ts: UnixNanos) -> OrderRecord {
+        OrderRecord {
+            strategy_id: StrategyId::from("S-001"),
+            instrument_id: instrument_id(),
+            order_side: OrderSide::Buy,
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::Gtc,
+            status,
+            quantity: Decimal::new(1, 0),
+            price: Some(Decimal::new(10_000, 2)),
+            filled_qty: Decimal::ZERO,
+            avg_px: None,
+            venue_order_id: Some(VenueOrderId::from("V-1")),
+            ts_accepted: ts,
+            ts_last: ts,
+            seen_trades: std::collections::HashSet::new(),
+        }
+    }
+
+    // AE9: on the WS path, a cancel whose send fails (channel gone: reconnect
+    // exhausted or the client stopped) must synthesize a CancelRejected so the
+    // order does not sit forever in PendingCancel with no reject to restore it -
+    // matching the HTTP path. The mirrored status is left untouched.
+    #[test]
+    fn ws_cancel_send_failure_synthesizes_cancel_rejected() {
+        let mut client = execution_client(); // default = WsStreaming
+        let (tx, mut rx) = unbounded_channel();
+        client.emitter.set_sender(tx);
+        seed_order(&client.state);
+        assert!(client.ws_cmd.is_none(), "no live WS channel");
+
+        client
+            .dispatch_order(ExecWsCommand::Cancel {
+                client_order_id: "O-1".into(),
+            })
+            .expect("dispatch returns Ok after synthesizing the reject");
+
+        match rx.try_recv().expect("cancel rejected event") {
+            ExecutionEvent::Order(OrderEventAny::CancelRejected(event)) => {
+                assert_eq!(event.client_order_id, ClientOrderId::from("O-1"));
+            }
+            other => panic!("expected cancel rejected, got {other:?}"),
+        }
+        let record = order_record(&client.state, ClientOrderId::from("O-1")).expect("order record");
+        assert_eq!(
+            record.status,
+            OrderStatus::Submitted,
+            "a failed WS cancel must leave the mirrored status untouched"
+        );
+    }
+
+    // AE9: a failed WS modify synthesizes a ModifyRejected (status untouched),
+    // and a failed WS submit synthesizes an OrderRejected (Submitted -> Rejected).
+    #[test]
+    fn ws_modify_and_submit_send_failures_synthesize_rejects() {
+        let mut client = execution_client();
+        let (tx, mut rx) = unbounded_channel();
+        client.emitter.set_sender(tx);
+        seed_order(&client.state);
+
+        client
+            .dispatch_order(ExecWsCommand::Modify {
+                client_order_id: "O-1".into(),
+                price: Some(Decimal::new(12_000, 2)),
+                quantity: None,
+            })
+            .expect("modify dispatch returns Ok after synthesizing the reject");
+        assert!(matches!(
+            rx.try_recv().expect("modify rejected event"),
+            ExecutionEvent::Order(OrderEventAny::ModifyRejected(_))
+        ));
+        assert_eq!(
+            order_record(&client.state, ClientOrderId::from("O-1"))
+                .expect("order record")
+                .status,
+            OrderStatus::Submitted,
+            "a failed modify leaves the order live"
+        );
+
+        client
+            .dispatch_order(ExecWsCommand::Submit(mogwai_protocol::SubmitOrder {
+                client_order_id: "O-1".into(),
+                symbol: "BTCUSDT".into(),
+                side: Side::Buy,
+                order_type: mogwai_protocol::OrderType::Limit,
+                quantity: Decimal::new(1, 0),
+                price: Some(Decimal::new(10_000, 2)),
+                time_in_force: mogwai_protocol::TimeInForce::Gtc,
+            }))
+            .expect("submit dispatch returns Ok after synthesizing the reject");
+        assert!(matches!(
+            rx.try_recv().expect("rejected event"),
+            ExecutionEvent::Order(OrderEventAny::Rejected(_))
+        ));
+        assert_eq!(
+            order_record(&client.state, ClientOrderId::from("O-1"))
+                .expect("order record")
+                .status,
+            OrderStatus::Rejected,
+            "a failed submit reaches a terminal Rejected state"
+        );
+    }
+
+    // AE10: an open order under open_only reports regardless of last-activity
+    // time (a resting order older than the reconciliation lookback must not be
+    // hidden and then inferred canceled-at-venue); the time filter still applies
+    // to closed records and whenever open_only is false.
+    #[tokio::test]
+    async fn open_only_keeps_long_quiet_open_order_but_time_filters_the_rest() {
+        let mut client = execution_client();
+        client.instruments = instruments_map();
+        {
+            let mut state = client.state.lock().expect("state");
+            state
+                .orders
+                .insert(ClientOrderId::from("O-OPEN"), order_at(OrderStatus::Accepted, UnixNanos::from(1)));
+            state
+                .orders
+                .insert(ClientOrderId::from("O-CLOSED"), order_at(OrderStatus::Canceled, UnixNanos::from(1)));
+        }
+
+        let start = Some(UnixNanos::from(1_000_000));
+        let open = client
+            .generate_order_status_reports(&GenerateOrderStatusReports::new(
+                UUID4::new(),
+                UnixNanos::from(2_000_000),
+                true,
+                None,
+                start,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("open-only reports");
+        assert_eq!(
+            open.len(),
+            1,
+            "the long-quiet open order must still report under open_only (AE10)"
+        );
+        assert_eq!(open[0].order_status, OrderStatus::Accepted);
+
+        let all = client
+            .generate_order_status_reports(&GenerateOrderStatusReports::new(
+                UUID4::new(),
+                UnixNanos::from(2_000_000),
+                false,
+                None,
+                start,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("all reports");
+        assert!(
+            all.is_empty(),
+            "with open_only false the lookback still filters long-quiet records"
+        );
+    }
+
+    // AE10 (positions): every mirrored position is a current open venue position
+    // (flat ones are dropped on snapshot apply), so a lookback-bounded start must
+    // not hide a long-quiet resting position.
+    #[tokio::test]
+    async fn position_report_keeps_long_quiet_open_position() {
+        let mut client = execution_client();
+        client.instruments = instruments_map();
+        client.state.lock().expect("state").positions.insert(
+            "BTCUSDT".to_string(),
+            PositionRecord {
+                symbol: "BTCUSDT".to_string(),
+                instrument_id: instrument_id(),
+                quantity: Decimal::new(1, 0),
+                avg_px: Decimal::new(10_000, 2),
+                ts_last: UnixNanos::from(1),
+            },
+        );
+
+        let reports = client
+            .generate_position_status_reports(&GeneratePositionStatusReports::new(
+                UUID4::new(),
+                UnixNanos::from(2_000_000),
+                None,
+                Some(UnixNanos::from(1_000_000)),
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("position reports");
+        assert_eq!(
+            reports.len(),
+            1,
+            "a long-quiet open position must still report (AE10)"
+        );
+    }
+
+    // AE6: ExecState.prune bounds the append-only fills Vec and terminal-order
+    // records past their caps (oldest-first) while never dropping an open order.
+    #[test]
+    fn exec_state_prune_bounds_fills_and_terminal_orders_keeping_open() {
+        let mut state = ExecState::default();
+        for i in 0..(MAX_FILLS as u64 + 3) {
+            state.fills.push(FillRecord {
+                client_order_id: ClientOrderId::from("O-1"),
+                instrument_id: instrument_id(),
+                venue_order_id: VenueOrderId::from("V-1"),
+                trade_id: TradeId::from("T-1"),
+                order_side: OrderSide::Buy,
+                last_qty: nautilus_model::types::Quantity::new(1.0, 8),
+                last_px: nautilus_model::types::Price::new(100.0, 2),
+                commission: Decimal::ZERO,
+                quote_currency: Currency::from_str("USDT").expect("usdt"),
+                ts_event: UnixNanos::from(i),
+            });
+        }
+        for i in 0..(MAX_TERMINAL_ORDERS as u64 + 2) {
+            state.orders.insert(
+                ClientOrderId::from(format!("C-{i}").as_str()),
+                order_at(OrderStatus::Canceled, UnixNanos::from(i)),
+            );
+        }
+        state
+            .orders
+            .insert(ClientOrderId::from("OPEN"), order_at(OrderStatus::Accepted, UnixNanos::from(5)));
+
+        state.prune();
+
+        assert_eq!(state.fills.len(), MAX_FILLS, "fills capped at MAX_FILLS");
+        assert_eq!(
+            state.fills.first().map(|fill| fill.ts_event),
+            Some(UnixNanos::from(3)),
+            "the oldest 3 fills were dropped"
+        );
+        let terminal = state
+            .orders
+            .values()
+            .filter(|record| record.status.is_closed())
+            .count();
+        assert_eq!(
+            terminal, MAX_TERMINAL_ORDERS,
+            "terminal orders capped at MAX_TERMINAL_ORDERS"
+        );
+        assert!(
+            state.orders.contains_key(&ClientOrderId::from("OPEN")),
+            "an open order is never pruned"
+        );
     }
 }
