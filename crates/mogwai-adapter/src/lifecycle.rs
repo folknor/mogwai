@@ -49,11 +49,17 @@ impl ReconnectPolicy {
         // `max_ms == 0` means "no ceiling": clamp only when a positive max is
         // configured. The old code collapsed the delay to zero whenever either
         // bound was zero, so a nonzero initial paired with a zero max busy-spun
-        // the reconnect loop (D.3). The protocol validator now rejects that
-        // combination, but this guard is belt-and-suspenders: a zero max never
-        // floors the delay, and an exponential base never drops below the
-        // configured initial. With both bounds zero the delay is genuinely
-        // zero, which is fine - there is no backoff to spin against.
+        // the reconnect loop (D.3). The protocol validator now rejects BOTH
+        // mixed-zero combinations - a positive initial with a zero max, and
+        // (because the base is `initial * factor^attempt`) a zero initial with
+        // a positive max, the same spin from the other side - so the only
+        // validated config that yields a zero delay here is both bounds zero:
+        // backoff deliberately disabled, nothing to spin against. The `max ==
+        // 0` branch below stays as belt-and-suspenders for a caller that
+        // bypasses the validator; the mirror case (zero initial, positive max)
+        // deliberately gets NO defensive floor - the mechanism has no
+        // principled delay to invent, and silently substituting one would mask
+        // the missing validation instead of surfacing it.
         let uncapped = initial_ms * self.factor.powi(attempt as i32);
         let base_ms = if max_ms == 0.0 {
             uncapped
@@ -189,7 +195,15 @@ pub(crate) async fn run_ws_connection<
             }
         };
 
-        attempt = 0;
+        // A successful dial alone does NOT reset the attempt counter: a venue
+        // that accepts the handshake and immediately dies would otherwise
+        // restart the count on every cycle, so `reconnect_max_attempts` could
+        // never trip and each re-dial would re-enter at the cheap initial
+        // backoff. The counter resets only once the connection proves itself
+        // by delivering an inbound application frame (Text/Binary, in the
+        // select loop below) - the same liveness criterion the idle timeout
+        // uses - so unproven connect/teardown cycles keep walking the
+        // exponential ladder toward the cap.
         connected.store(true, Ordering::Relaxed);
         let (mut writer, mut reader) = ws.split();
         let (out_tx, mut out_rx) = unbounded_channel::<Message>();
@@ -245,6 +259,10 @@ pub(crate) async fn run_ws_connection<
                     }
                     match inbound.expect("inbound close and errors returned above") {
                         Ok(Message::Text(text)) => {
+                            // Connection proven by an inbound application
+                            // frame: reset the reconnect attempt counter (see
+                            // the comment at the top of the connection).
+                            attempt = 0;
                             reset_idle(&mut idle_sleep, conn.idle_timeout_ms, sim);
                             // Surface deserialization failures: a version-skewed
                             // or malformed frame would otherwise be swallowed
@@ -260,6 +278,8 @@ pub(crate) async fn run_ws_connection<
                             }
                         }
                         Ok(Message::Binary(bytes)) => {
+                            // Connection proven; same as the Text arm above.
+                            attempt = 0;
                             reset_idle(&mut idle_sleep, conn.idle_timeout_ms, sim);
                             match serde_json::from_slice::<ServerMessage>(&bytes) {
                                 Ok(server_msg) => handler(server_msg).await,
@@ -307,6 +327,20 @@ pub(crate) async fn run_ws_connection<
         drop(reader_handle.await);
         on_disconnect().await;
         connected.store(false, Ordering::Relaxed);
+        // An established connection dropping (peer Close, read error, idle
+        // timeout) re-enters the dial through the same backoff as a failed
+        // dial. The sleep used to live only on the `connect_async` Err arm, so
+        // an accept-then-die venue produced an unthrottled connect/teardown
+        // flood with zero delay between cycles - and because dialing kept
+        // succeeding (and used to reset the counter), the attempt cap never
+        // tripped. Sleeping and escalating here restores production reconnect
+        // semantics: a proven connection re-dials after the initial backoff
+        // (the counter was reset by its first inbound frame), while unproven
+        // cycles compound toward `reconnect_max_attempts`. The delay is
+        // sim-clock-scaled inside `backoff`, like every other lifecycle sleep.
+        let delay = policy.backoff(attempt, &mut rng);
+        attempt = attempt.saturating_add(1);
+        tokio::time::sleep(delay).await;
     }
 }
 
@@ -369,6 +403,8 @@ async fn idle_tick(idle_sleep: &mut Option<Pin<Box<Sleep>>>) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+
     use super::*;
 
     #[test]
@@ -421,7 +457,9 @@ mod tests {
     #[test]
     fn reconnect_policy_zero_max_does_not_clamp_to_zero() {
         // D.3: a nonzero initial paired with a zero ceiling used to collapse to
-        // a zero delay (a busy-spin). `max == 0` now means "no clamp", so the
+        // a zero delay (a busy-spin). The protocol validator rejects this
+        // config outright; this test pins the belt-and-suspenders guard for a
+        // caller that bypasses it - `max == 0` means "no clamp", so the
         // exponential base grows from the configured initial instead.
         let conn = ConnHavoc {
             reconnect_delay_initial_ms: 100,
@@ -439,8 +477,9 @@ mod tests {
 
     #[test]
     fn reconnect_policy_zero_initial_stays_zero() {
-        // With a zero initial there is genuinely no backoff to spin against, so
-        // the delay stays zero regardless of the ceiling.
+        // Both bounds zero is the one validated backoff-disabled configuration
+        // (the protocol validator rejects either bound at zero while the other
+        // is positive), and it yields a genuinely zero delay on every attempt.
         let conn = ConnHavoc {
             reconnect_delay_initial_ms: 0,
             reconnect_delay_max_ms: 0,
@@ -554,5 +593,136 @@ mod tests {
             elapsed >= Duration::from_millis(50),
             "quota allowed second request after {elapsed:?}"
         );
+    }
+
+    /// Completes one server-side WS handshake on `listener`.
+    async fn accept_ws(
+        listener: &tokio::net::TcpListener,
+    ) -> tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> {
+        let (stream, _) = listener.accept().await.expect("accept ws dial");
+        tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("server ws handshake")
+    }
+
+    /// Drives `run_ws_connection` with inert callbacks against a loopback stub.
+    async fn run_lifecycle(port: u16, conn: ConnHavoc) {
+        let (_cmd_tx, cmd_rx) = unbounded_channel::<ClientMessage>();
+        run_ws_connection(
+            WsConnectionConfig {
+                ws_url: format!("ws://127.0.0.1:{port}/ws"),
+                conn,
+                seed: Some(1),
+                connected: Arc::new(AtomicBool::new(false)),
+                sim: SimClock::identity(),
+            },
+            cmd_rx,
+            |cmd: ClientMessage| cmd,
+            Vec::new,
+            |_msg: ServerMessage| async {},
+            || async {},
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+    async fn reconnect_backoff_throttles_accept_then_die_and_trips_attempt_cap() {
+        // A venue that completes the WS handshake and immediately closes must
+        // not produce an unthrottled connect/teardown flood: dropping an
+        // unproven connection sleeps the backoff and escalates the attempt
+        // counter, so the cap eventually trips and the loop returns. Before
+        // the fix the counter reset on every successful dial and the backoff
+        // sleep lived only on the failed-dial arm, so this scenario redialed
+        // forever with zero delay between cycles.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub listener");
+        let port = listener.local_addr().expect("stub addr").port();
+        let dials = Arc::new(AtomicUsize::new(0));
+        let server_dials = Arc::clone(&dials);
+        let server = tokio::spawn(async move {
+            loop {
+                let mut ws = accept_ws(&listener).await;
+                server_dials.fetch_add(1, Ordering::Relaxed);
+                drop(ws.close(None).await);
+            }
+        });
+
+        let conn = ConnHavoc {
+            reconnect_delay_initial_ms: 100,
+            reconnect_delay_max_ms: 100,
+            reconnect_backoff_factor: 1.0,
+            reconnect_max_attempts: Some(3),
+            ..Default::default()
+        };
+        let started = Instant::now();
+        tokio::time::timeout(Duration::from_secs(5), run_lifecycle(port, conn))
+            .await
+            .expect("the attempt cap must trip under accept-then-die");
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            dials.load(Ordering::Relaxed),
+            3,
+            "a three-attempt cap must dial exactly three unproven connections"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(300),
+            "each unproven drop must sleep the 100ms backoff before redialing \
+             (elapsed {elapsed:?})"
+        );
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+    async fn reconnect_attempt_counter_resets_once_a_frame_arrives() {
+        // The attempt counter resets only once a connection proves itself by
+        // delivering an inbound application frame. A venue that serves one
+        // frame per connection before dropping keeps proving itself, so with a
+        // two-attempt cap the loop must reconnect indefinitely - a counter
+        // that never reset would exhaust after two cycles, and one that reset
+        // on the bare dial is pinned out by the accept-then-die test above.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub listener");
+        let port = listener.local_addr().expect("stub addr").port();
+        let dials = Arc::new(AtomicUsize::new(0));
+        let server_dials = Arc::clone(&dials);
+        let server = tokio::spawn(async move {
+            loop {
+                let mut ws = accept_ws(&listener).await;
+                server_dials.fetch_add(1, Ordering::Relaxed);
+                let frame = r#"{"type":"Heartbeat","ts_event":1}"#;
+                drop(ws.send(Message::Text(frame.into())).await);
+                drop(ws.close(None).await);
+            }
+        });
+
+        let conn = ConnHavoc {
+            reconnect_delay_initial_ms: 10,
+            reconnect_delay_max_ms: 10,
+            reconnect_backoff_factor: 1.0,
+            reconnect_max_attempts: Some(2),
+            ..Default::default()
+        };
+        let run = tokio::spawn(run_lifecycle(port, conn));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while dials.load(Ordering::Relaxed) < 5 {
+            assert!(
+                Instant::now() < deadline,
+                "proven connections stopped reconnecting after {} dials",
+                dials.load(Ordering::Relaxed)
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !run.is_finished(),
+            "a two-attempt cap must not exhaust across proven connections"
+        );
+        run.abort();
+        server.abort();
     }
 }

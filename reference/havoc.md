@@ -151,7 +151,15 @@ timeout fields). It is consumed entirely inside the adapter's `lifecycle.rs`:
   0` means "no clamp", not "clamp to zero"), and adds uniform jitter seeded from
   `ClientHavoc.seed` for reproducibility.
 - `reconnect_max_attempts: Option<u32>` -> `ReconnectPolicy::exhausted`; `None`
-  is unlimited.
+  is unlimited. The attempt counter counts CONSECUTIVE UNPROVEN connection
+  cycles: it resets only once a connection proves itself by delivering an
+  inbound application frame (Text/Binary - the same liveness criterion the
+  idle timeout uses; Ping/Pong do not count), not on a successful dial. The
+  backoff sleep applies after ANY disconnect - a failed dial, a peer close, a
+  read error, an idle-timeout death - so an accept-then-die venue walks the
+  exponential ladder and eventually trips the cap instead of re-dialing in a
+  hot loop, while a proven connection that later drops re-dials after the
+  initial backoff with a fresh count.
 - `heartbeat_interval_ms` -> a Tokio interval that fires a WS Ping each period
   (first ping one interval after connect, not at `t=0`). `0` disables it. This
   is the *client*'s ping cadence, distinct from the *server*'s
