@@ -81,8 +81,9 @@ carries its own reference with nothing to ship alongside.
 
 - `mogwai man` lists the available topics.
 - `mogwai man <topic>` renders one as styled markdown. Topics: `cli`, `config`,
-  `architecture`, `havoc` (the user-facing reference docs; the `orchestrate` and
-  `technical-implementation-spec` process docs are deliberately not bundled).
+  `architecture`, `havoc`, `clock` (the user-facing reference docs; the
+  `orchestrate` and `technical-implementation-spec` process docs are
+  deliberately not bundled).
 - The topic is a clap value, so an unknown one is rejected with the valid set,
   and `mogwai man --help` lists the topics with a one-line description each.
 

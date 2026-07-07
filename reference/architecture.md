@@ -257,8 +257,11 @@ messages. The only crate that path-deps the sibling `../nautilus_trader` checkou
 
 - **Factories.** `MogwaiDataClientFactory` / `MogwaiExecutionClientFactory`
   downcast their serde `ClientConfig`-downcastable configs, validate, and
-  construct (exec building an `ExecutionClientCore` at `OmsType::Netting`),
-  reporting the `MOGWAI` venue. The config carries the server URL and derives an
+  construct, reporting the `MOGWAI` venue. The exec client builds an
+  `ExecutionClientCore` at whatever `OmsType` its config carries; the adapter
+  config defaults to `Netting`, but that default is a knob, not the operating
+  reality - broadarrow's run-prep constructs the MOGWAI exec client at
+  `OmsType::Hedging` on every path, so a live run is Hedging. The config carries the server URL and derives an
   `http://` base from the `ws://` one, so both transports speak the right scheme
   off one field; the default base targets the server's `8787` port.
 - **DataClient.** `start` grabs the runner's thread-local egress sink; `connect`
@@ -269,10 +272,14 @@ messages. The only crate that path-deps the sibling `../nautilus_trader` checkou
   never loads the instrument would otherwise have every bar refused), opens the
   `/ws` socket and spawns the reader/writer drain pair; `disconnect`/`stop` tear
   them down.
-  `subscribe_`/`unsubscribe_` for trades/quotes/bars/instruments use an
-  adapter-owned per-symbol refcount table that only sends `Subscribe`/`Unsubscribe`
-  on the 0-to-1 transition (so one symbol's subscriptions do not clobber the
-  server's set-keyed replay), keeping the earliest `start_ts` on conflict. Bars
+  `subscribe_`/`unsubscribe_` for trades/quotes/bars use an adapter-owned
+  per-symbol refcount table that only sends `Subscribe`/`Unsubscribe` on the
+  0-to-1 transition (so one symbol's subscriptions do not clobber the server's
+  set-keyed replay), keeping the earliest `start_ts` on conflict. Instrument
+  subscriptions are NOT on that table: `subscribe_instruments` /
+  `subscribe_instrument` are one-shot fetch-and-emit and their unsubscribes are
+  no-ops, which is correct for a static venue whose instrument set does not
+  change mid-session. Bars
   are venue-delivered: the adapter aggregates the drained trade stream into
   time-based `Bar` values rather than relying on nautilus's internal aggregator,
   which never reaches an external-bar client. The `request_` handlers follow the

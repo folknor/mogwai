@@ -128,26 +128,12 @@ unknown-symbol one is now production-unreachable (S22b pre-filters it), but the
 dead-seek ProtocolError remains on `tx` - routing it through exec would need
 threading an exec sender through `spawn_replay`. Low severity.
 
-### S11. gap - Writer-side temporal divergences have zero effect under the HttpOrders transport
-
-`submit_order_http` returns engine events synchronously; DelayAcks / GoDark /
-StallData live only in the /ws writer. An armed GoDark blacks out a WS client
-but an HttpOrders exec client trades straight through. May be intended
-(havoc.md frames them as connection-scoped), but no doc states the HTTP order
-path is exempt. Low-moderate; needs a doc or design decision.
-
-Wave-2 resolution: CONFIRMED independently at the seam by the cross-boundary
-agent (GET /trades polling bypasses the windows too, so under HttpPolling the
-whole feed is exempt): a scenario TOML arming GoDark plus `transport_profile =
-"HttpOrders"` runs a clean execution path while the operator believes a
-blackout is being exercised. Neither agent found the exemption documented.
-
-### S12. gap (doc) - config.md and cli.md omissions
-
-`backfill_horizon_ns` is missing from config.md's key table despite being a
-first-class Config field (the data-origin floor). cli.md's `man` topic list
-omits `clock` while `ManTopic` in man.rs bundles it - the bundled cli doc
-self-describes wrongly.
+(S11 the HTTP-carrier exemption from the temporal divergences and S12 the
+config.md/cli.md omissions were resolved by documentation: havoc.md now states
+the writer-only / WS-only scope of DelayAcks/GoDark/StallData as a deliberate
+connection-scoped behavior and an operator trap, config.md gained the
+`backfill_horizon_ns` row and the deny-unknown-fields caveat, and cli.md's man
+topic list gained `clock`.)
 
 ### Server smells and nits
 
@@ -273,12 +259,9 @@ subscribed symbol" heartbeat proving a subscribed-but-silent feed is alive
 AD12 - a real feature (a per-subscription liveness timer), flagged rather
 than built.
 
-### AD18. gap - architecture.md misdescribes instruments subscriptions
-
-architecture.md says trades/quotes/bars/INSTRUMENTS ride the refcount table.
-`subscribe_instruments`/`subscribe_instrument` are one-shot fetch-and-emit;
-the unsubscribes are no-ops; no refcount involvement. Fine behavior for a
-static venue; the doc is wrong. Doc-only, confidence high.
+(AD18 the architecture.md instruments-subscription drift was resolved: the doc
+now states instrument subscriptions are one-shot fetch-and-emit and NOT on the
+refcount table, which is correct for a static venue.)
 
 ### AD19. gap (downgraded) - Live in-progress bars still have no timer-based close
 
@@ -463,13 +446,7 @@ across the two carriers"; the ordering guarantee is not.
 
 ### X7. (merged into S11 - temporal divergences do not apply to the HTTP carriers; confirmed and expanded there)
 
-### X9. nit/doc - OMS type: docs say Netting, broadarrow always runs the mogwai exec client at Hedging
-
-architecture.md: "exec building an ExecutionClientCore at OmsType::Netting".
-research/broadarrow run-prep venue.rs applied_exec_config unconditionally
-sets oms_type = Hedging (both scenario and default paths, pinned by its own
-test). The adapter's config default (Netting) is never what runs under
-broadarrow. Doc drift only - the config knob exists precisely to allow this.
+### X9. (resolved - architecture.md now states the exec client builds at whatever OmsType the config carries, that the Netting default is a knob not the operating reality, and that broadarrow runs it at Hedging.)
 
 ### X10. (merged into AE7 - asymmetric venue-id fallback between the two reject paths; see also E3)
 
@@ -590,39 +567,29 @@ remain:
   depend on returning its empty/None default" as a footgun to guard against
   explicitly, because nautilus will not surface the regression.
 
-### F17. gap (doc) - havoc.md advertises delay bounds a nautilus consumer's inflight timeout will convert into local rejects
+### F17. (resolved - havoc.md's temporal-divergence section now carries the operator note: any nautilus consumer's inflight timeout converts a delay window longer than its threshold into a local reject, so a multi-minute DelayAcks/GoDark/latency window exercises the consumer's brake, not mogwai's delay path. Framed generally, without baking in broadarrow's constant. The root cause that mogwai cannot resolve the inflight instead is X3.)
 
-`mogwai-protocol` `validate_divergence` / `MAX_DIVERGENCE_MS` (1 h),
-`MAX_LATENCY_NANOS` (60 s), and `reference/havoc.md`. The mogwai-doc residue
-of the resolved U5. Severity low (doc/design), confidence high.
+### F18. assessed - three cross-file follow-ups the batch-4 agents flagged; none warrant an autonomous change
 
-mogwai validates and advertises DelayAcks / GoDark up to one hour and inbound
-latency up to 60 s, but any nautilus live consumer runs an execution-manager
-inflight check that re-queries a still-unacked order and, after a bounded
-retry budget, synthesizes a local INFLIGHT_TIMEOUT reject. Past that
-consumer-configured threshold the "delay" is not exercised as a delay at all -
-it becomes a local reject, and the later real ack lands on an already-rejected
-order (X3 is why mogwai cannot answer the re-query and resolve it instead).
-The specific threshold lives in the consumer (broadarrow's ~25 s is documented
-on ITS side, per the mogwai/broadarrow separation - do NOT bake that constant
-into mogwai), but the GENERAL truth belongs in havoc.md: a delay window longer
-than a downstream inflight timeout exercises the consumer's brake, not
-mogwai's delay path. Worth a sentence in the DelayAcks / latency sections so an
-operator arming a multi-minute window knows what they are actually testing.
-
-### F18. gap - three low-risk cross-file follow-ups the batch-4 agents flagged but could not make (each is a one-file change in a territory another agent owned that round)
-
-- Adopt `try_new` / `try_new_with_session_profile` (added to mogwai-data in
-  batch 4) in the mogwai-server `source.rs` and, if applicable, the adapter
-  config-driven construction paths, so a config typo surfaces as a clean
-  error instead of the generator's `.expect` panic. (D8's cross-file half.)
-- Optionally wire the engine's new `clear_armed()` into the server's
-  `ClearDivergences` handler for a full cross-scenario reset. Additive, not a
-  wire-contract change. (E5 flag.)
-- Route `ship_server_havoc` (the connect-time control-plane loop) through the
-  `HttpQuota` for strict metering consistency. The connect-time clock fetch
-  bypass must stay (chicken-and-egg: the quota's spacing is sim-scaled and the
-  clock fetch is what returns sim). (AE13 flag.)
+- Adopt `try_new` in the server (D8's cross-file half): ASSESSED, not needed.
+  The server validates `GeneratorScalars`, `SessionProfile`, and the
+  instrument def at config load (main.rs ~158/178/187), so the generator
+  constructor's `.expect` is already unreachable via the config path. Plumbing
+  `Result` through the request path (`positioned_generator` ->
+  `bounded_generator` -> the live/history builders) would be churn for a panic
+  that cannot fire. `try_new` now exists for any FUTURE caller that builds a
+  generator from unvalidated input.
+- Wire `clear_armed()` into the server's `ClearDivergences` handler (E5 flag):
+  NOT done autonomously. `ClearDivergences`'s documented wire contract is that
+  it clears the server-owned temporal windows and deliberately does NOT flush
+  engine-side single-shots. Wiring `clear_armed()` in would change that
+  documented contract - a decision, not a mechanical follow-up.
+- Route `ship_server_havoc` through the `HttpQuota` (AE13 flag): NOT done
+  autonomously. Whether a connect-time control-plane loop should be throttled
+  by the venue's data-request quota is a genuine judgment call (they model
+  different concerns), the default quota is unlimited so there is no current
+  effect, and the lifecycle agent documented the bypass as deliberate. Left
+  as-is.
 
 ### F19. gap - larger design/feature items deferred out of the mechanical sweep
 

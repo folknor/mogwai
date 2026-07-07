@@ -251,6 +251,36 @@ The `ms` windows of `DelayAcks`, `GoDark`, and `StallData` are all bounded by
 `control::MAX_DIVERGENCE_MS` (3 600 000 ms = one hour), so a single request
 cannot arm an effectively permanent window or saturate a writer deadline.
 
+Re-arming a window **replaces** it, it does not extend it: a second POST with a
+smaller `ms` SHORTENS an in-flight `GoDark`/`StallData` rather than adding to
+it (the writer stores the new absolute deadline over the old). Store-not-extend
+is deliberate so a test can shorten a window it armed; arm `ms: 0` (or
+`ClearDivergences`) to lift one immediately.
+
+**These windows live only in the `/ws` outbound writer, so they apply only to
+the WS-streaming transport.** Under `HttpOrders` the exec client's order events
+are returned synchronously in the `POST /orders` response, and under
+`HttpPolling` market data is fetched over `GET /trades` - neither path passes
+through the writer, so an armed `DelayAcks`/`GoDark`/`StallData` has NO effect on
+an HTTP carrier. This is faithful to the connection-scoped framing of these
+divergences (they model a sick socket, and the HTTP carriers do not hold one),
+but it is a real operator trap: arming `GoDark` against a `transport_profile =
+"HttpOrders"` client exercises a clean path while the operator believes a
+blackout is running. Use the WS-streaming profile to exercise the temporal
+divergences.
+
+Operator note on long delay windows: any nautilus consumer runs an
+execution-manager inflight check that re-queries a still-unacked order and,
+after a bounded retry budget, synthesizes a local reject. A `DelayAcks` (or
+`GoDark`, or client `latency`) window longer than that consumer-configured
+threshold is therefore NOT exercised as a delay - past the threshold the
+consumer locally rejects the order and the later real ack lands on an
+already-rejected order. mogwai has no order-status query surface to answer the
+re-query and resolve the inflight instead (an open item). Arm ack-delay havoc
+inside the consumer's inflight threshold to exercise the delay path; longer
+windows exercise the consumer's brake. The specific threshold is the consumer's
+to document.
+
 Under acceleration these `ms` are **simulated** milliseconds. The deadlines and
 the `DelayAcks` sleep are computed on the one sim axis (the `wall-clock` wording
 above is exact only at `speed = 1.0`): a `GoDark { ms }` blackout lasts `ms`
