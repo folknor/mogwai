@@ -405,11 +405,23 @@ mod tests {
         fingerprint().session_profile.clone()
     }
 
-    fn flat_session(intensity: f64) -> SessionProfile {
+    // A normalized session profile whose intensity_hour and dow_weight each sum
+    // to 1.0, so it expresses intraday SHAPE rather than an absolute level - the
+    // arrival rate itself lives in the generator's `mean_duration_s`, not here.
+    // Hour 0 (which is where TEST_ORIGIN lands - it is exactly midnight UTC)
+    // carries `hour0_share` of the day's intensity mass and the other 23 hours
+    // split the remainder evenly, so the arrival multiplier at the first tick
+    // (`share * 24`) is `hour0_share * 24`: a large share there means a dense
+    // hour and a fast first tick, a small share a thin hour and a slow one. A
+    // uniform level is deliberately NOT expressible this way, because a flat
+    // profile carries no intraday shape and its multiplier normalizes to 1.0.
+    fn shaped_session(hour0_share: f64) -> SessionProfile {
+        let mut intensity_hour = [(1.0 - hour0_share) / 23.0; 24];
+        intensity_hour[0] = hour0_share;
         SessionProfile {
-            intensity_hour: [intensity; 24],
+            intensity_hour,
             vol_hour: [1.0; 24],
-            dow_weight: [1.0; 7],
+            dow_weight: [1.0 / 7.0; 7],
         }
     }
 
@@ -794,15 +806,19 @@ mod tests {
 
     #[test]
     fn configured_session_profile_controls_arrival_shape() {
+        // Both profiles are normalized (they pass session validation); they
+        // differ only in how much of the day's intensity mass sits in hour 0,
+        // where TEST_ORIGIN begins. The dense-hour-0 profile fires its first
+        // tick sooner than the thin-hour-0 one.
         let slow_profiles = InstrumentProfiles::from_profiles(vec![btc_profile(
             "BTCUSDT",
             Decimal::from(60_000),
-            flat_session(0.01),
+            shaped_session(0.001),
         )]);
         let fast_profiles = InstrumentProfiles::from_profiles(vec![btc_profile(
             "BTCUSDT",
             Decimal::from(60_000),
-            flat_session(1.0),
+            shaped_session(0.5),
         )]);
 
         let mut slow = build_history_source("BTCUSDT", None, None, &slow_profiles, TEST_ORIGIN)
