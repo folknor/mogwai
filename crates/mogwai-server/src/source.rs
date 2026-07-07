@@ -26,8 +26,9 @@ use rust_decimal::Decimal;
 // via checkpointing). There is no longer a frozen tape origin: both builders anchor
 // each generator at the boot-derived `data_origin` the caller threads in, so the
 // data timeline tracks the advertised clock and cannot drift into the multi-year
-// seek that emptied forward warmups.
-const MAX_HISTORY_SEEK_TICKS: usize = 190_000;
+// seek that emptied forward warmups. `pub(crate)` so the replay spawn can name
+// the exhausted budget when it reports a seek that died against this cap.
+pub(crate) const MAX_HISTORY_SEEK_TICKS: usize = 190_000;
 
 // Checkpoint spacing for the per-symbol `CheckpointIndex`, in ticks. A seek
 // restores the nearest checkpoint at or before the target and replays at most
@@ -211,8 +212,11 @@ fn positioned_generator(
 /// engine ever validates it. Returns `None` for an unconfigured symbol
 /// (leaving the engine's "unknown instrument" rejection to fire as normal)
 /// or when the bounded drain below cannot reach `sim_now` (the order stays
-/// price-less and the engine's "submit price required" rejection fires - an
-/// honest refusal rather than a fill at a price hours behind the clock).
+/// price-less and the order path rejects it with its own "could not
+/// synthesize a market price" reason - an honest refusal rather than a fill
+/// at a price hours behind the clock, and honest about WHOSE failure it is:
+/// the engine's "submit price required" would blame a client that correctly
+/// sent a market order price-less).
 pub(crate) fn current_price(
     symbol: &str,
     profiles: &InstrumentProfiles,

@@ -1953,12 +1953,16 @@ pub enum ServerMessage {
     Heartbeat {
         ts_event: u64,
     },
-    /// A `/ws` frame the server could not decode as a `ClientMessage` (bad
-    /// JSON, unknown `type`, or a known `type` missing a required field, e.g.
-    /// `{"type":"Subscribe"}` with no `symbols`). Emitted in place of the old
-    /// silent drop: without it, a malformed live request and a healthy-but-idle
-    /// feed were indistinguishable on the wire. Untargeted - the malformed
-    /// frame carries no `client_order_id` to echo, unlike `OrderRejected`.
+    /// A `/ws` request the server could not decode OR could not serve: a
+    /// frame that is not a `ClientMessage` (bad JSON, unknown `type`, or a
+    /// known `type` missing a required field, e.g. `{"type":"Subscribe"}`
+    /// with no `symbols`), a `Subscribe` for a symbol the venue does not
+    /// list, a subscription whose positioning seek exhausted its tick budget,
+    /// or a `start_ts` below the tape's data origin (diagnosed, then
+    /// clamped). Emitted in place of the old silent drop: without it, an
+    /// unservable live request and a healthy-but-idle feed were
+    /// indistinguishable on the wire. Untargeted - the offending frame
+    /// carries no `client_order_id` to echo, unlike `OrderRejected`.
     ProtocolError {
         reason: String,
         ts_event: u64,

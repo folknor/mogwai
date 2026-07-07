@@ -1079,6 +1079,31 @@ async fn process_order_cmd(order_cmd: ClientMessage, state: &AppState) -> Vec<Se
         }
     }
     let order_cmd = stamp_market_price(order_cmd, state).await;
+    // A MARKET order still price-less after the stamp, for a symbol this venue
+    // DOES list, means `current_price` failed: the positioning seek could not
+    // reach sim-now within its budget (or the synthesis task itself died).
+    // Reject it here with the honest story - the client correctly sent no
+    // price (Nautilus never stamps a market order), so letting the engine's
+    // "submit price required" fire would blame the client for the venue's own
+    // synthesis failure. An UNCONFIGURED symbol is deliberately left
+    // price-less: the engine checks instrument existence before the price, so
+    // its "unknown instrument" rejection tells that story unaltered.
+    if let ClientMessage::SubmitOrder(order) = &order_cmd
+        && order.order_type == OrderType::Market
+        && order.price.is_none()
+        && state.profiles.get(&order.symbol).is_some()
+    {
+        tracing::warn!(
+            symbol = %order.symbol,
+            client_order_id = %order.client_order_id,
+            "rejecting price-less market order: market price synthesis failed"
+        );
+        return vec![ServerMessage::OrderRejected {
+            client_order_id: order.client_order_id.clone(),
+            reason: "venue could not synthesize a market price at sim-now".to_string(),
+            ts_event: ts,
+        }];
+    }
     state.engine.lock().await.process(order_cmd, ts)
 }
 
@@ -1113,6 +1138,7 @@ async fn trades(
     let regime = parse_history_regime(query.regime.as_deref());
     let profiles = Arc::clone(&state.profiles);
     let data_origin = state.data_origin_ns;
+    let sim_now = sim_now_ns(state.sim);
     let HistoryQuery {
         symbol, start, end, ..
     } = query;
@@ -1133,11 +1159,36 @@ async fn trades(
         return Err((StatusCode::UNPROCESSABLE_ENTITY, body));
     }
 
+    // The symmetric ceiling: tape past sim-now does not exist yet. Every
+    // legitimate window lives in `[data_origin, sim_now]` by construction, and
+    // the generator is deterministic, so serving a future `start` would extend
+    // the shared index past the clock and hand the client tomorrow's tape - a
+    // look-ahead leak no real venue can produce. Refused with the same loud
+    // `422` as the origin floor, so "you asked for data that cannot exist yet"
+    // stays distinguishable from "no trades happened".
+    if let Some(start) = start
+        && start > sim_now
+    {
+        let body = format!(
+            "requested start {start} exceeds sim-now {sim_now}; the tape cannot serve past the clock"
+        );
+        tracing::warn!(start, sim_now, "refusing future trades window");
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, body));
+    }
+
+    // Clamp the served tail at sim-now for the same reason: an `end` past the
+    // clock - or a no-`end` request, which otherwise grinds out the full
+    // `limit` however far into the future that lands - must not stream ticks
+    // stamped ahead of the clock. The bound is inclusive, so a tick landing
+    // exactly at sim-now is still served.
+    let end = Some(end.map_or(sim_now, |end| end.min(sim_now)));
+
     // Synthesizing up to `MAX_HISTORY_LIMIT` ticks is pure CPU work against the
     // generator (the source never blocks on IO), and `next_tick` never returns
-    // `None`, so a no-`end` request always grinds out the full `limit`. Run it on
-    // a blocking thread rather than inline on the tokio worker, so a burst of
-    // `/trades` requests cannot stall the async runtime's worker pool.
+    // `None`, so a request grinds until it fills `limit` or crosses the
+    // effective `end`. Run it on a blocking thread rather than inline on the
+    // tokio worker, so a burst of `/trades` requests cannot stall the async
+    // runtime's worker pool.
     let ticks = match tokio::task::spawn_blocking(move || {
         bounded_trades(&symbol, start, end, limit, regime, &profiles, data_origin)
     })
@@ -1340,6 +1391,33 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 regime,
             } => {
                 let regime = validate_regime_or_clean(regime);
+                // A `start_ts` below the tape origin can never be served -
+                // `/trades` refuses the identical window with a loud `422`. A
+                // live subscribe still carries the client's real want (the
+                // feed itself), so the stream is kept and anchors at the
+                // origin, but the shortfall goes out on the wire instead of
+                // clamping in silence: without the frame, "my backfill began
+                // later than I asked" is invisible on a healthy-looking feed.
+                if let Some(ts) = start_ts
+                    && ts < state.data_origin_ns
+                {
+                    tracing::warn!(
+                        start_ts = ts,
+                        data_origin = state.data_origin_ns,
+                        "subscribe start_ts precedes the tape origin; stream anchors at the origin"
+                    );
+                    drop(
+                        tx.send(ServerMessage::ProtocolError {
+                            reason: format!(
+                                "subscribe start_ts {ts} precedes data_origin_ns {}; \
+                                 the tape begins at its origin and the stream anchors there",
+                                state.data_origin_ns
+                            ),
+                            ts_event: sim_now_ns(state.sim),
+                        })
+                        .await,
+                    );
+                }
                 for symbol in dedup_symbols(symbols) {
                     // Quiesce any in-flight stream for this symbol BEFORE the
                     // replacement emits: cancel the old thread and join it (off
@@ -1743,9 +1821,73 @@ fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
             data_origin,
             sim_now,
         ) else {
+            // No source at all: the symbol is not configured on this venue.
+            // Mirror the engine's loud "unknown instrument" order rejection on
+            // the data plane - a silent return here left the subscribe
+            // indistinguishable from a healthy-but-idle feed.
+            tracing::warn!(%symbol, "subscribe for unknown symbol streams nothing");
+            // Best-effort diagnostic: an Err means the client is already gone
+            // (channel closed or subscription cancelled), so there is nobody
+            // left to tell - the thread exits either way.
+            if send_cancellable(
+                &tx,
+                ServerMessage::ProtocolError {
+                    reason: format!(
+                        "subscribe for unknown symbol {symbol}: the venue does not list it, \
+                         no data will stream"
+                    ),
+                    ts_event: sim.sim_ns(now_ns()),
+                },
+                &cancel,
+            )
+            .is_err()
+            {
+                tracing::debug!(%symbol, "protocol error frame undeliverable; client gone");
+            }
             return;
         };
         tracing::info!(%symbol, ?start_ts, sim_now, data_origin, ?regime, "replay started");
+
+        // The generated tape never runs dry on its own (`GeneratedSource::
+        // next_tick` always yields), so a `None` FIRST tick has exactly one
+        // meaning: the positioning seek could not reach its target within the
+        // budgets - a regime'd from-origin drain past `MAX_HISTORY_SEEK_TICKS`,
+        // or a cold checkpoint frontier lagging the target by more than one
+        // extension. The stream is dead before it starts; say so on the wire
+        // (the untargeted `ProtocolError` exists for exactly this unservable-
+        // request vs healthy-but-idle ambiguity) instead of logging started/
+        // finished back to back around zero frames.
+        let Some(first_tick) = merged.next_tick() else {
+            tracing::warn!(
+                %symbol,
+                ?seek_start_ts,
+                sim_now,
+                data_origin,
+                ?regime,
+                budget = source::MAX_HISTORY_SEEK_TICKS,
+                "live subscription could not be positioned; the seek exhausted its tick budget"
+            );
+            // Best-effort diagnostic: an Err means the client is already gone
+            // (channel closed or subscription cancelled), so there is nobody
+            // left to tell - the thread exits either way.
+            if send_cancellable(
+                &tx,
+                ServerMessage::ProtocolError {
+                    reason: format!(
+                        "subscription for {symbol} could not be positioned: the seek toward \
+                         its start exhausted the {}-tick budget, no data will stream",
+                        source::MAX_HISTORY_SEEK_TICKS
+                    ),
+                    ts_event: sim.sim_ns(now_ns()),
+                },
+                &cancel,
+            )
+            .is_err()
+            {
+                tracing::debug!(%symbol, "protocol error frame undeliverable; client gone");
+            }
+            return;
+        };
 
         // Every pacing deadline below is anchored to ONE monotonic `Instant`,
         // paired with ONE wall-clock read, taken here at thread start. Each
@@ -1790,7 +1932,11 @@ fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
         // already-past deadline and does not sleep, rather than pushing every
         // later deadline back by the overrun.
         let mut next_deadline_wall: Option<u64> = None;
-        while let Some(tick) = merged.next_tick() {
+        // `next` starts as the tick pulled by the dead-subscribe probe above,
+        // then follows the merge; the pacing and send below treat it exactly
+        // as the old loop-top `next_tick` did.
+        let mut next = Some(first_tick);
+        while let Some(tick) = next {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
@@ -1829,6 +1975,7 @@ fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
                 break; // client gone or stream cancelled
             }
             last_sent_ts.store(ts_event, Ordering::Relaxed);
+            next = merged.next_tick();
         }
         tracing::info!(%symbol, "replay finished");
     })
@@ -2027,6 +2174,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn priceless_market_order_reports_synthesis_failure_honestly() {
+        // Push the origin 90 days behind sim-now: `current_price`'s checkpoint
+        // index extends at most MAX_HISTORY_SEEK_TICKS per call and the
+        // BoundedSeek drains at most the same again (~31 days of tape at the
+        // committed cadence), so the price seek cannot reach sim-now and comes
+        // back empty. Left alone, the engine rejects the still-price-less
+        // order with "submit price required" - the wrong story for a client
+        // that correctly sent a MARKET order with no price. The route must
+        // reject with the venue's own synthesis-failure reason instead.
+        let mut state = state();
+        state.data_origin_ns = now_ns().saturating_sub(90 * 86_400_000_000_000);
+        let response = submit_order_http(
+            State(state),
+            Json(ClientMessage::SubmitOrder(SubmitOrder {
+                client_order_id: "HTTP-MKT-DEAD".into(),
+                symbol: "BTCUSDT".into(),
+                side: Side::Buy,
+                order_type: OrderType::Market,
+                quantity: "1".parse().expect("decimal"),
+                price: None,
+                time_in_force: TimeInForce::Gtc,
+            })),
+        )
+        .await
+        .expect("route answers");
+
+        let ServerMessage::OrderRejected { reason, .. } = &response.0[0] else {
+            panic!("expected a rejection, got {:?}", response.0[0]);
+        };
+        assert!(
+            reason.contains("synthesize"),
+            "the reject names the venue's synthesis failure: {reason}"
+        );
+        assert!(
+            !reason.contains("submit price required"),
+            "the engine's limit-order reason must not leak onto the market path: {reason}"
+        );
+    }
+
+    #[tokio::test]
     async fn ws_route_reports_undecodable_frames_instead_of_dropping_them() {
         // A `Subscribe` missing its required `symbols` field used to vanish
         // silently - 0 frames back, socket left open - indistinguishable from a
@@ -2065,6 +2252,67 @@ mod tests {
         assert!(
             matches!(frame, ServerMessage::ProtocolError { .. }),
             "expected ProtocolError, got {frame:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_below_data_origin_reports_protocol_error_then_streams() {
+        // A `start_ts` below the tape origin used to clamp to the origin in
+        // silence - asymmetric with `/trades`, which refuses the identical
+        // window with a 422. The subscribe must now announce the shortfall on
+        // the wire AND still deliver the origin-anchored stream after it: the
+        // frame is a diagnostic, not a refusal of the live feed.
+        let state = state();
+        let data_origin = state.data_origin_ns;
+        let app = Router::new()
+            .route("/ws", get(ws_upgrade))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            drop(axum::serve(listener, app).await);
+        });
+
+        let frames = tokio::task::spawn_blocking(move || {
+            let (mut socket, _) =
+                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
+                symbols: vec!["BTCUSDT".to_string()],
+                start_ts: Some(data_origin - 3_600_000_000_000), // 1h before the origin
+                regime: None,
+            })
+            .expect("encode subscribe");
+            socket
+                .send(tungstenite::Message::Text(subscribe.into()))
+                .expect("send pre-origin subscribe");
+            let mut frames = Vec::new();
+            while frames.len() < 2 {
+                match socket.read().expect("read ws frame") {
+                    tungstenite::Message::Text(text) => frames.push(
+                        serde_json::from_str::<ServerMessage>(&text).expect("decode ServerMessage"),
+                    ),
+                    tungstenite::Message::Close(_) => panic!("socket closed prematurely"),
+                    _ => continue,
+                }
+            }
+            frames
+        })
+        .await
+        .expect("blocking ws client");
+
+        let ServerMessage::ProtocolError { reason, .. } = &frames[0] else {
+            panic!("expected ProtocolError first, got {:?}", frames[0]);
+        };
+        assert!(
+            reason.contains(&data_origin.to_string()),
+            "the frame names the origin the stream anchors at: {reason}"
+        );
+        assert!(
+            matches!(frames[1], ServerMessage::Trade(_)),
+            "the stream still delivers after the diagnostic frame, got {:?}",
+            frames[1]
         );
     }
 
@@ -2293,6 +2541,65 @@ mod tests {
         );
     }
 
+    // The ceiling refusal, symmetric with the origin floor: a `start` past
+    // sim-now asks for tape that does not exist yet. Unfixed, the handler
+    // extended the shared index into the future and served deterministic
+    // FUTURE ticks - a look-ahead leak.
+    #[tokio::test]
+    async fn trades_beyond_sim_now_refuses() {
+        let state = state(); // identity clock: sim-now is wall-now
+        let future = now_ns() + 3_600_000_000_000; // 1h past the clock
+        let query = HistoryQuery {
+            symbol: "BTCUSDT".to_string(),
+            start: Some(future),
+            end: None,
+            limit: None,
+            regime: None,
+        };
+        let (status, body) = trades(State(state), axum::extract::Query(query))
+            .await
+            .expect_err("a future window is refused");
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            body.contains("sim-now"),
+            "the refusal names the sim-now ceiling: {body}"
+        );
+    }
+
+    // The look-ahead clamp: a window whose tail crosses sim-now (here an `end`
+    // a full hour into the future) is served only up to the clock. Unfixed,
+    // the synthesis loop ground toward `end` and returned ticks stamped in
+    // the future.
+    #[tokio::test]
+    async fn trades_window_is_clamped_at_sim_now() {
+        let state = state();
+        let start = now_ns().saturating_sub(600_000_000_000); // 10 min of tape
+        let end = now_ns() + 3_600_000_000_000; // 1h past the clock
+        let query = HistoryQuery {
+            symbol: "BTCUSDT".to_string(),
+            start: Some(start),
+            end: Some(end),
+            limit: None,
+            regime: None,
+        };
+        let Json(ticks) = trades(State(state), axum::extract::Query(query))
+            .await
+            .expect("the on-tape half of a straddling window is served");
+        // Sampled after the handler sampled its own sim-now, so it bounds
+        // every legitimately-served tick from above.
+        let ceiling = now_ns();
+
+        assert!(
+            !ticks.is_empty(),
+            "ten minutes of on-tape window has trades"
+        );
+        assert!(
+            ticks.iter().all(|t| t.ts_event <= ceiling),
+            "no served tick may be stamped past sim-now"
+        );
+    }
+
     // A fresh live subscribe seeks to sim-now, NOT the data origin: the first live
     // tick lands at sim-now so there is no 24h backfill replayed before the stream
     // goes current (the identity-mode staleness the spec calls out).
@@ -2491,6 +2798,96 @@ mod tests {
 
         // Cancel + join must complete: the thread, even if parked behind the
         // bounded channel, observes the flag within one send-poll and exits.
+        quiesce_replay(Replay {
+            cancel,
+            handle,
+            last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
+        })
+        .await;
+    }
+
+    /// A subscribe whose positioning seek exhausts its budget must report the
+    /// dead stream on the wire, not die in silence. A regime'd subscribe never
+    /// uses the checkpoint index (regime'd realizations are a different tape),
+    /// so it takes the fresh from-origin drain; 60 days of tape at the
+    /// committed cadence holds far more than MAX_HISTORY_SEEK_TICKS ticks, so
+    /// the seek toward sim-now dies against the cap. Unfixed, the thread
+    /// logged started/finished back to back and the client saw a
+    /// healthy-but-idle feed - exactly the ambiguity ProtocolError exists for.
+    #[tokio::test]
+    async fn dead_subscribe_reports_protocol_error_instead_of_silence() {
+        let (tx, mut rx) = mpsc::channel::<ServerMessage>(8);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let handle = spawn_replay(ReplaySpawn {
+            symbol: "BTCUSDT".to_string(),
+            start_ts: None,
+            regime: Some(MarketRegime::VolStorm { vol_mult: 2.0 }),
+            speed: 0.0,
+            gap_cap_ms: 0,
+            profiles: default_profiles(),
+            sim: SimClock::identity(),
+            data_origin: now_ns().saturating_sub(60 * 86_400_000_000_000),
+            tx,
+            cancel: Arc::clone(&cancel),
+            resume_floor: None,
+            last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
+        });
+
+        let frame = rx.recv().await.expect("a frame, not silence");
+        let ServerMessage::ProtocolError { reason, .. } = frame else {
+            panic!("expected ProtocolError, got {frame:?}");
+        };
+        assert!(
+            reason.contains("BTCUSDT"),
+            "the frame names the dead symbol: {reason}"
+        );
+        assert!(
+            rx.recv().await.is_none(),
+            "a dead stream sends nothing after the error frame"
+        );
+        quiesce_replay(Replay {
+            cancel,
+            handle,
+            last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
+        })
+        .await;
+    }
+
+    /// The other silent-zero-frames path: a subscribe for a symbol the venue
+    /// does not list spawned a thread that returned without a word. It must
+    /// mirror the engine's loud "unknown instrument" rejection on the data
+    /// plane.
+    #[tokio::test]
+    async fn unknown_symbol_subscribe_reports_protocol_error() {
+        let (tx, mut rx) = mpsc::channel::<ServerMessage>(8);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let handle = spawn_replay(ReplaySpawn {
+            symbol: "FAKE".to_string(),
+            start_ts: None,
+            regime: None,
+            speed: 0.0,
+            gap_cap_ms: 0,
+            profiles: default_profiles(),
+            sim: SimClock::identity(),
+            data_origin: now_ns(),
+            tx,
+            cancel: Arc::clone(&cancel),
+            resume_floor: None,
+            last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
+        });
+
+        let frame = rx.recv().await.expect("a frame, not silence");
+        let ServerMessage::ProtocolError { reason, .. } = frame else {
+            panic!("expected ProtocolError, got {frame:?}");
+        };
+        assert!(
+            reason.contains("FAKE"),
+            "the frame names the unknown symbol: {reason}"
+        );
+        assert!(
+            rx.recv().await.is_none(),
+            "an unknown-symbol subscribe streams nothing after the error frame"
+        );
         quiesce_replay(Replay {
             cancel,
             handle,
