@@ -18,7 +18,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
 rust_decimal = { version = "1", features = ["serde-with-str"] }
-rand = "0.10"
+rand = "0.10.2"
 rand_distr = "0.6"
 # Explicit ChaCha12 RNG for the generator. rand 0.10's StdRng is ChaCha12 too but
 # dropped Clone, and chacha20's RNG zeroizes on drop so it is not Clone either;

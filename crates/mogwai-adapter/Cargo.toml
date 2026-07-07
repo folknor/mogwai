@@ -15,7 +15,7 @@ anyhow.workspace = true
 async-trait = "=0.1.89"
 chrono = "0.4.45"
 futures-util.workspace = true
-rand = "0.10"
+rand = "0.10.2"
 rust_decimal.workspace = true
 tokio.workspace = true
 tokio-tungstenite = "0.29"
