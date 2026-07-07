@@ -13,9 +13,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use mogwai_protocol::{
-    AccountState, Balance, ClientMessage, ClientOrderId, InstrumentDef, OrderFilled, OrderType,
-    Position, ServerMessage, Side, SubmitOrder, Symbol, TimeInForce, VenueOrderId,
-    control::Divergence, default_instruments,
+    AccountState, Balance, ClientMessage, ClientOrderId, InstrumentDef, OrderFilled, Position,
+    ServerMessage, Side, SubmitOrder, Symbol, TimeInForce, VenueOrderId, control::Divergence,
+    default_instruments,
 };
 use rust_decimal::Decimal;
 
@@ -59,7 +59,13 @@ pub struct Engine {
     /// precision/increment fields the fill and reservation path needs, so the
     /// engine keeps no parallel struct that could drift from the wire type.
     instruments: HashMap<Symbol, InstrumentDef>,
-    seen_client_order_ids: HashSet<ClientOrderId>,
+    /// Every ACCEPTED client order id, mapped to the venue order id it was
+    /// assigned. Never cleared (a deliberate, unbounded retention): key
+    /// presence distinguishes "was once a real order, now terminal" from
+    /// "never accepted at all", and the retained venue id lets a cancel/modify
+    /// reject for a terminal order still name the order it targets - the wire
+    /// contract says `venue_order_id` is absent ONLY for genuinely unknown ids.
+    seen_client_order_ids: HashMap<ClientOrderId, VenueOrderId>,
     /// Armed divergences, consumed as their trigger fires.
     armed: VecDeque<Divergence>,
     seq: u64,
@@ -89,7 +95,7 @@ impl Engine {
             open: Vec::new(),
             account: Account::default(),
             instruments,
-            seen_client_order_ids: HashSet::new(),
+            seen_client_order_ids: HashMap::new(),
             armed: VecDeque::new(),
             seq: 0,
             warned: Warned::default(),
@@ -211,10 +217,12 @@ impl Engine {
         // RejectNextSubmit, FOK). Only an ACCEPTED order reserves its id, so a
         // rejected submit can be corrected and resubmitted under the same id,
         // while a duplicate of an accepted id is caught in `validate_submit`.
-        self.seen_client_order_ids
-            .insert(order.client_order_id.clone());
-
+        // The venue id rides along so a cancel/modify that arrives after this
+        // order has gone terminal can still name it on the reject.
         let venue_order_id = self.next_id("V");
+        self.seen_client_order_ids
+            .insert(order.client_order_id.clone(), venue_order_id.clone());
+
         let mut out = vec![ServerMessage::OrderAccepted {
             client_order_id: order.client_order_id.clone(),
             venue_order_id: venue_order_id.clone(),
@@ -284,12 +292,12 @@ impl Engine {
             return Err("empty client_order_id".into());
         }
 
-        // "Duplicate" means an id already ACCEPTED (the set is populated only on
+        // "Duplicate" means an id already ACCEPTED (the map is populated only on
         // the accept path in `on_submit`), so a previously-rejected id is free to
         // reuse; an id that named a live or completed order is not.
         if self
             .seen_client_order_ids
-            .contains(order.client_order_id.as_str())
+            .contains_key(order.client_order_id.as_str())
         {
             return Err("duplicate client_order_id".into());
         }
@@ -310,10 +318,10 @@ impl Engine {
             return Err("submit price required".into());
         };
 
-        if order.order_type == OrderType::Market && price <= Decimal::ZERO {
-            return Err("market order requires positive price".into());
-        }
-
+        // No order-type special case: this venue prices Market orders like any
+        // other submit (a price is required just above, since synthetic fills
+        // execute at the order's own price), so a non-positive price earns the
+        // same rejection regardless of order type.
         if price <= Decimal::ZERO {
             return Err("submit with non-positive price".into());
         }
@@ -375,12 +383,15 @@ impl Engine {
             // is a CANCEL rejection, not an ORDER rejection - emitting
             // OrderRejected here would drive the adapter (and nautilus) to flip
             // an already-filled order to Rejected, an invalid transition.
-            // Mirror on_modify's OrderModifyRejected path with venue_order_id
-            // absent (the engine no longer holds the removed order's venue id).
+            // Mirrors on_modify's OrderModifyRejected path: a terminal id keeps
+            // the venue id it was accepted under, and only a genuinely unknown
+            // id goes out with venue_order_id absent.
+            let (reason, venue_order_id) =
+                terminal_or_unknown_reject(&self.seen_client_order_ids, &client_order_id);
             vec![ServerMessage::OrderCancelRejected {
-                reason: terminal_or_unknown_reason(&self.seen_client_order_ids, &client_order_id),
+                reason,
                 client_order_id,
-                venue_order_id: None,
+                venue_order_id,
                 ts_event: ts,
             }]
         }
@@ -398,10 +409,12 @@ impl Engine {
             .iter()
             .position(|o| o.submit.client_order_id == client_order_id)
         else {
+            let (reason, venue_order_id) =
+                terminal_or_unknown_reject(&self.seen_client_order_ids, &client_order_id);
             return vec![ServerMessage::OrderModifyRejected {
-                reason: terminal_or_unknown_reason(&self.seen_client_order_ids, &client_order_id),
+                reason,
                 client_order_id,
-                venue_order_id: None,
+                venue_order_id,
                 ts_event: ts,
             }];
         };
@@ -917,14 +930,22 @@ fn on_increment(value: Decimal, increment: Decimal) -> bool {
 /// that was accepted but has since gone terminal (filled - the no-book engine
 /// fills a limit immediately on accept, so it can already be gone by the time
 /// a cancel/modify for it arrives - or already canceled). `seen_client_order_ids`
-/// is populated only on accept and never cleared, so its presence is exactly
-/// "this id was once a real order, just not a resting one anymore". An id the
-/// venue genuinely never saw still reads as "unknown order".
-fn terminal_or_unknown_reason(seen: &HashSet<ClientOrderId>, client_order_id: &str) -> String {
-    if seen.contains(client_order_id) {
-        "order already terminal (filled or canceled)".into()
-    } else {
-        "unknown order".into()
+/// is populated only on accept and never cleared, so key presence is exactly
+/// "this id was once a real order, just not a resting one anymore" - and the
+/// venue id retained alongside it goes out on the reject, upholding the wire
+/// contract that `venue_order_id` is absent ONLY when the order id is unknown.
+/// An id the venue genuinely never saw reads as "unknown order" with no venue
+/// id, because none was ever assigned.
+fn terminal_or_unknown_reject(
+    seen: &HashMap<ClientOrderId, VenueOrderId>,
+    client_order_id: &str,
+) -> (String, Option<VenueOrderId>) {
+    match seen.get(client_order_id) {
+        Some(venue_order_id) => (
+            "order already terminal (filled or canceled)".into(),
+            Some(venue_order_id.clone()),
+        ),
+        None => ("unknown order".into(), None),
     }
 }
 
@@ -1014,6 +1035,13 @@ mod tests {
         reason
     }
 
+    fn accepted_venue_id(out: &[ServerMessage]) -> VenueOrderId {
+        let ServerMessage::OrderAccepted { venue_order_id, .. } = &out[0] else {
+            panic!("expected accept first")
+        };
+        venue_order_id.clone()
+    }
+
     fn balance<'a>(state: &'a AccountState, currency: &str) -> &'a Balance {
         state
             .balances
@@ -1084,6 +1112,23 @@ mod tests {
             (
                 order_decimal("market_no_px", Side::Buy, "BTCUSDT", 1.into(), None),
                 "submit price required",
+            ),
+            (
+                // A Market order with a non-positive price earns the same
+                // generic rejection as any other order type - the validator
+                // deliberately has no market-specific price message.
+                {
+                    let mut market = order_decimal(
+                        "market_neg_px",
+                        Side::Buy,
+                        "BTCUSDT",
+                        1.into(),
+                        Some((-5).into()),
+                    );
+                    market.order_type = OrderType::Market;
+                    market
+                },
+                "submit with non-positive price",
             ),
             (
                 order_decimal(
@@ -1660,6 +1705,47 @@ mod tests {
     }
 
     #[test]
+    fn terminal_cancel_reject_carries_original_venue_id() {
+        // The wire contract: `venue_order_id` is absent ONLY when the order id
+        // is unknown. A terminal id WAS accepted, so its cancel reject must
+        // carry the venue id it was accepted under, while a genuinely unknown
+        // id carries none - no venue id was ever assigned to it.
+        let mut e = Engine::new();
+        let accepted = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let venue_id = accepted_venue_id(&accepted);
+
+        let out = e.process(
+            ClientMessage::CancelOrder {
+                client_order_id: "O1".into(),
+            },
+            2,
+        );
+        assert!(matches!(
+            &out[0],
+            ServerMessage::OrderCancelRejected {
+                venue_order_id: Some(id),
+                reason,
+                ..
+            } if *id == venue_id && reason == "order already terminal (filled or canceled)"
+        ));
+
+        let out = e.process(
+            ClientMessage::CancelOrder {
+                client_order_id: "ghost".into(),
+            },
+            3,
+        );
+        assert!(matches!(
+            &out[0],
+            ServerMessage::OrderCancelRejected {
+                venue_order_id: None,
+                reason,
+                ..
+            } if reason == "unknown order"
+        ));
+    }
+
+    #[test]
     fn modify_of_already_filled_order_distinguishes_terminal_from_unknown() {
         let mut e = Engine::new();
         e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
@@ -1676,6 +1762,33 @@ mod tests {
             &out[0],
             ServerMessage::OrderModifyRejected { reason, .. }
                 if reason == "order already terminal (filled or canceled)"
+        ));
+    }
+
+    #[test]
+    fn terminal_modify_reject_carries_original_venue_id() {
+        // Same presence rule as the cancel path: terminal means the venue id
+        // is known, so it must go out on the reject; only a genuinely unknown
+        // id is bare (see modify_unknown_order_is_rejected_without_venue_id).
+        let mut e = Engine::new();
+        let accepted = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let venue_id = accepted_venue_id(&accepted);
+
+        let out = e.process(
+            ClientMessage::ModifyOrder {
+                client_order_id: "O1".into(),
+                price: Some(Decimal::from(200)),
+                quantity: None,
+            },
+            2,
+        );
+        assert!(matches!(
+            &out[0],
+            ServerMessage::OrderModifyRejected {
+                venue_order_id: Some(id),
+                reason,
+                ..
+            } if *id == venue_id && reason == "order already terminal (filled or canceled)"
         ));
     }
 
