@@ -21,8 +21,15 @@ S5, S8, S9, X1 verified-and-fixed (every one confirmed real).
 Fix batch 3 (complete): AD2, AD3 (subsumes AD23), AD8, AD9, AD13, AD14, AD15,
 X8, F7, D4, D5, D6 verified-and-fixed (every one confirmed real); a
 non-normalized-flat-session test in mogwai-server that had encoded the D4
-footgun was reworked to exercise genuine intraday shape. See "Found during
-fix batches" and "Upstream candidates" at the bottom for new entries.
+footgun was reworked to exercise genuine intraday shape.
+Fix batch 4 (complete): E5, E7, D8, D9, D10, D12, S7, S10, S15, S16, S19,
+S20, S21, S22b, S23, AD5, AD6, AD7, AD10, AD11, AD16, AD17, AD24, AD26, AE6,
+AE8, AE9, AE10, AE18, AE19, F8, F11, F12, F13, F14 fixed; E4, S17 refuted;
+E9, E10, D13, D14, D15, S18, AE13, AE14, AE15, AE16, AE17 resolved as
+documented-deferrals; F15 was already fixed in an earlier batch. Remaining
+open items are the design-scoped ones (AD4, AD12, AE2, X3), the flagged
+follow-ups, and the doc-drift items the orchestrator owns. See "Found during
+fix batches" and "Upstream candidates" at the bottom.
 
 IDs: E = engine/protocol, D = data path, S = server, AD = adapter data half,
 AE = adapter exec half, X = cross-boundary seams, F = found during fix
@@ -36,62 +43,23 @@ the min-start_ts cursor drag by the data and exec agents (AD7).
 
 ## Engine + protocol (crates/mogwai-engine, crates/mogwai-protocol)
 
-### E4. gap - Validator disagreement on priceless Market orders; "share the same validators" is not literally true
-
-`mogwai-protocol::validate_submit_order` accepts a `Market` order with
-`price: None` (comment and test: Nautilus MARKET orders carry no price). The
-engine's `validate_submit` rejects the same order with "submit price
-required". A client that pre-validates with the protocol's free validator
-passes an order the venue then rejects. Related: the engine never calls
-`validate_submit_order`/`validate_modify_order` at all - `validate_submit` and
-`on_modify` are parallel re-implementations with different error strings
-("quantity must be > 0" vs "submit with non-positive quantity"). Amend-vs-
-submit parity inside the engine checks out (qty > 0, qty grid, price > 0,
-price grid, notional `checked_mul` all enforced on both paths); the drift is
-protocol-vs-engine.
-
-### E5. gap - Stale engine-side divergences are unflushable and the armed queue is unbounded
-
-`mogwai-engine` `arm`/`take_armed`; `control::ClearDivergences` docs. Severity
-low-medium (test-harness DoS / cross-test contamination), confidence high;
-behavior is partially documented.
-
-`ClearDivergences` deliberately does not flush single-shots, and single-shots
-self-disarm on their own trigger - but a targeted `PartialFillNext` whose
-order never arrives has no trigger and stays armed forever. No API clears the
-engine queue, so control-plane arms accumulate without bound, and a leftover
-targeted partial from one test scenario can ambush a later scenario that
-reuses the order id.
-
-### E7. gap - A valid partial fraction on a minimum-lot order silently becomes a full fill, and lets a FOK survive
-
-`mogwai-engine`, `fill_quantity`. Severity low, confidence high.
-
-Qty `0.00000001` (one size increment), armed fraction `0.3` (wire-valid):
-`candidate = 3e-9` floors to `0`; the `<= ZERO` fallback promotes it to a FULL
-fill with only a `tracing::warn`. A FOK order the divergence was armed to kill
-therefore fully fills and passes. The grid cannot represent the partial, but a
-divergence quietly inverting into its opposite is a surprising failure mode
-for a havoc tool, and the warn message ("produced non-positive last_qty")
-misleads for a perfectly-validated fraction.
-
 ### Engine/protocol smells and nits
 
-- E9. smell - Dead defensive paths: `warn_zero_px` (fill price validated > 0),
-  `warn_missing_instrument` and `locked_balances`' missing-instrument
-  `continue` are unreachable through `process` (instrument existence is
-  validated at submit; no instrument-removal API). The whole `Warned` struct
-  services unreachable branches.
-- E10. smell - `commission` is always `Decimal::ZERO`; `apply_fill`'s
-  commission sign handling (buy adds, sell subtracts - correct) is never
-  exercised with a non-zero value anywhere in the crate.
 - E11. smell - `seen_client_order_ids` grows forever (documented as
   intentional for terminal-vs-unknown discrimination). Since fix batch 2 it is
   a map retaining a venue id per entry (the E3 fix), so the deliberate
   unbounded growth now carries slightly more per-entry weight.
-- E16. nit - protocol's `#[cfg(test)] mod tests` sits mid-file with
-  `SubmitOrder`, `ServerMessage`, and the `control` module defined after it -
-  legal but disorienting in a 2000-line file.
+- E16. nit (deferred) - protocol's `#[cfg(test)] mod tests` sits mid-file with
+  `SubmitOrder`, `ServerMessage`, and the `control` module defined after it.
+  Batch 4 assessed and deliberately skipped moving it: the block is ~1080
+  lines, so relocating it would swamp real diffs for a pure cosmetic gain.
+  Left in place on purpose.
+
+(E9 dead defensive paths and E10 always-zero commission were resolved in
+batch 4 as documented-deliberate: E9's unreachable-through-`process` warn
+paths are kept as intentional defense-in-depth with comments saying so, and
+the zero commission is documented as intentional with the sign-handling math
+retained for correctness.)
 
 ### Engine/protocol verified-correct notes
 
@@ -117,19 +85,6 @@ serde round-trips and partial-payload defaults hold on both crates.
   backstop bounds latency per call but not cumulative work. (Same defect
   reported independently by the server agent - see S14; recorded once here,
   server angle there.)
-- D8. smell - Panicking public constructors: `GeneratedSource::
-  with_clamp_override` (reached from `new` / `new_with_session_profile`)
-  expect-panics on invalid scalars or session profile instead of returning
-  `Result`, though `ScalarError`/`SessionProfileError` exist. Both inputs
-  `Deserialize` straight from user config, so a caller that forgets to
-  pre-validate turns a config typo into a process panic.
-- D9. smell - lib.rs crate doc drift: describes the whole crate as CSV-backed
-  ("Backed by the Kraken trade-history CSV dump...") and never mentions
-  `GeneratedSource`, contradicting architecture.md.
-- D10. smell - Invalid UTF-8 line kills the rest of a CSV stream:
-  `read_line` returns `Err(InvalidData)`, handled as a fatal read error
-  truncating the stream - unlike every other malformed-row case, which is
-  skipped. Offline lineage only.
 - D11. nit - VolStorm's clamp lift touches the feedback path: `base_return`
   (the GARCH feedback) is clamped at the LIFTED cap, and sigma2's cap is
   lifted too, so under a storm the recursion state can differ from clean
@@ -137,20 +92,16 @@ serde round-trips and partial-payload defaults hold on both crates.
   consume their un-modulated feedback" is strictly true only for the
   multiplier, not the clamp lift. Deliberate per in-code comments; doc
   tension only.
-- D12. nit - `checkpoint_resume_is_byte_identical` compares only (ts, price);
-  size and aggressor are not compared. Test name overclaims slightly.
-- D13. nit - parse_kraken_ts / parse_kraken_line lenient edges: `"1."`
-  (trailing dot) parses as 1 s; a leading `+` on the seconds field is
-  accepted; extra columns are silently ignored. Harmless for real dumps.
-- D14. nit - First emitted side is always Buyer for every seed
-  (`prev_side: Buyer`, low regime, flip prob 0.02): every realization opens
-  with a long Buyer run (32 consecutive in the golden stream). A
-  seed-independent structural bias at stream start.
-- D15. nit - Realized price can drift arbitrarily far from the latent mid:
-  `drift_ticks` is an unbounded never-reset random walk; the mid is bounded
-  to [tick, 1e9] but the printed price is mid + drift, unbounded above.
-  Diffusion is slow; cosmetic, but price is not tethered to `start_price`
-  long-run.
+
+(D8 panicking constructors, D9 crate-doc drift, D10 UTF-8-truncates-CSV, and
+D12 the byte-identity test's narrow comparison were all fixed in batch 4:
+`try_new` / `try_new_with_session_profile` return `Result` alongside the
+unchanged panicking constructors, a non-UTF-8 CSV line skips-with-warn, the
+crate doc leads with `GeneratedSource`, and the test now compares size and
+aggressor too. D13 lenient parse edges, D14 the seed-independent Buyer
+opening, and D15 the untethered drift walk were assessed and documented as
+deliberate - bounding any would break the committed golden stream for no
+fidelity gain.)
 
 ### Data-path verified-correct notes
 
@@ -167,24 +118,15 @@ divergence from the protocol's zeroing variant is deliberate and documented.
 
 ## Server (crates/mogwai-server)
 
-### S7. bug (low) - flock/unlink race in `stop` can leave a live daemon unguarded
+### S10 residual. gap - one dead-seek ProtocolError diagnostic still rides the data channel
 
-`main.rs`, `stop`. Severity low (narrow window), confidence high on the
-mechanism.
-
-On `LockAttempt::Acquired` (stale file) `stop` unlinks the pid file while
-holding the lock. A concurrent `serve` that already opened the same inode but
-has not locked yet will lock the now-unlinked inode; its daemon then runs with
-its lock on a ghost file, the path is free, and a second `serve` (fresh inode)
-can also start - two daemons, and `stop` cannot see the first. Same race class
-between `stop`'s unlink and `serve`'s open. The classic
-flock-on-unlinkable-pidfile hazard.
-
-### S10. gap - ProtocolError is execution-category but bypasses the DelayAcks pump
-
-`handle_socket` sends ProtocolError straight into `tx`;
-`ServerMessage::category` classifies it Exec. havoc.md says DelayAcks holds
-EVERY outbound execution event. Low severity; classifier/route mismatch.
+Batch 4 fixed the main S10: ProtocolError now routes through the exec pump so
+DelayAcks holds it, at both `handle_socket` sites. RESIDUAL: the two
+diagnostics emitted inside `spawn_replay` (unknown-symbol, dead-seek) still
+ride the data channel `tx` because the replay OS thread only holds `tx`. The
+unknown-symbol one is now production-unreachable (S22b pre-filters it), but the
+dead-seek ProtocolError remains on `tx` - routing it through exec would need
+threading an exec sender through `spawn_replay`. Low severity.
 
 ### S11. gap - Writer-side temporal divergences have zero effect under the HttpOrders transport
 
@@ -219,38 +161,28 @@ self-describes wrongly.
   GeneratedSource clone per K ticks per (symbol, data_origin), never pruned;
   a long accelerated run is a slow unbounded memory ratchet (hundreds of
   clones per day per symbol at speed 100). (Same defect as D7, server angle.)
-- S15. smell - A panicking replay thread dies silently: `quiesce_replay`
-  discards the inner `handle.join()` Result (only the spawn_blocking
-  JoinError is logged); an unjoined panic mid-stream just ends the feed -
-  client sees an idle-but-healthy socket.
-- S16. smell - Order event timestamps are sampled before a potentially
-  ~100 ms blocking price synthesis: `process_order_cmd` takes ts at entry,
-  then `stamp_market_price` may block on the checkpoint mutex/seek; at speed
-  100 the emitted events are stamped ~10 sim-seconds before they logically
-  occurred.
-- S17. nit - Divergence atomics are all Relaxed; no formal happens-before
-  between the /control/divergence 202 response and the writer/pump observing
-  the new value. Fine on x86, formally racy for arm-then-immediately-order.
-  Reporting agent's confidence that it ever matters in practice: low.
-- S18. nit - Re-arming GoDark/StallData replaces the window, so a second POST
-  with a smaller ms SHORTENS an in-flight blackout. Store-not-extend
-  semantics, undocumented.
-- S19. nit - `BoundedSeek::seek_to` drains up to cap+1 ticks (the first
-  next_tick is not counted). Harmless off-by-one against a backstop.
-- S20. nit - Config lacks `deny_unknown_fields`: a typo'd knob (`gap_cap_m =
-  0`) silently falls back to the default, adjacent to config.md's "malformed
-  file is a hard error" promise (technically only syntax errors are hard).
-- S21. nit - Heartbeat cadence edges: default MissedTickBehavior::Burst means
-  a stalled runtime replays missed heartbeats in a burst; `server_heartbeat_ms`
-  scaled by a large speed can collapse to the 1 ns floor and become a ~1 kHz
-  heartbeat flood per socket. No validation bounds it.
-- S22. nit - A subscribe of N symbols spawns N OS threads, client-controlled
-  and unbounded (unknown symbols still spawn a thread that exits immediately
-  and leaves a dead entry in `replays`).
-- S23. nit - `man/render.rs` renders nested lists flat (list_stack depth
-  tracked but unused for indent), so architecture.md's nested bullets lose
-  hierarchy; loose list items pick up a stray blank line between marker and
-  body. Cosmetic.
+- S17. nit (refuted) - Divergence atomics are all Relaxed. Batch 4 refuted
+  this as a defect: the three atomics are independent with no cross-location
+  invariant, and the arm and the order arrive over separate connections, so
+  Release/Acquire would establish a happens-before nothing consumes. Left
+  Relaxed on purpose.
+- S18. nit (documented) - Re-arming GoDark/StallData replaces the window (a
+  smaller ms SHORTENS an in-flight blackout). Batch 4 documented this
+  store-not-extend semantics in code as deliberate; havoc.md could note it
+  too (orchestrator doc item).
+- S22a. nit (flagged) - A subscribe of N symbols spawns N OS threads,
+  client-controlled and unbounded. Batch 4 fixed the S22b half (unknown
+  symbols are pre-filtered and no longer spawn a throwaway thread or leave a
+  dead `replays` entry); the unbounded-thread-per-symbol shape remains and
+  needs a concurrency-cap / behavior decision, so it is flagged rather than
+  fixed.
+
+(S15 silent panicking replay thread, S16 pre-synthesis timestamp sampling,
+S19 the BoundedSeek off-by-one, S20 the missing deny_unknown_fields, S21 the
+heartbeat cadence edges, and S23 the flat nested-list rendering were all
+fixed in batch 4. S20 residual: serde cannot combine deny_unknown_fields with
+the flattened InstrumentDef, so a typo'd instrument sub-field is still
+tolerated - only top-level knobs are guarded.)
 
 ### Server verified-correct notes
 
@@ -318,87 +250,6 @@ commands/heartbeats are head-of-line blocked behind the backlog. At high
 `speed` the wall sleep compresses and this vanishes; at speed 1 with an
 active tape it materially distorts delivery timing.
 
-### AD5. bug - A Subscribe queued across a reconnect is sent twice, triggering the server's resubscribe duplicate-window bug
-
-`client.rs` `subscribe_symbol` + `lifecycle.rs` `run_ws_connection`. Severity
-medium, confidence medium-high (narrow window, but the havoc surfaces exist
-to create exactly these windows).
-
-`send_ws` pushes into the unbounded `cmd_rx`, drained only while a socket is
-up. If a subscribe lands during the backoff window, the reconnect first
-replays `on_connect()` = `subscribe_commands(subs)` (the symbol is already in
-the table - updated before the send), then the select loop drains the stale
-queued Subscribe and sends it AGAIN. The double-Subscribe restarts the
-server-side replay, and the queued command can carry a stale (older) start_ts
-than the table's advanced cursor, replaying an already-delivered window -
-duplicate ticks on the wire, which the WS drain has zero dedup for (mogwai
-wire trades carry no id; `emit_trade` forwards everything), duplicating
-TradeTicks into nautilus and double-counting bar volume. (The server-side
-resume-floor race that originally amplified this - old S2 - was fixed in fix
-batch 1; the stale-start_ts duplication path here is adapter-side and still
-open.) Fix shape: drain/discard cmd_rx before on_connect, or make on_connect
-the only subscribe source after a reconnect.
-
-### AD6. bug - HttpPolling feed wedges permanently and silently after a server restart
-
-`client.rs` `poll_market_data`. Severity medium-high, confidence high.
-
-The poll cursor and the SimClock/data_origin_ns are fetched once at connect.
-A restarted server derives a fresh data_origin; the cursor's last_ts (or the
-sim-now anchor computed against the stale clock) can precede it, so every
-`GET /trades` 422s. The loop does `let Ok(batch) = fetch_trades(...) else {
-continue; }` - no log, no error counter, no cursor reset, no clock re-fetch,
-no disconnect signal. The feed is dead forever and indistinguishable from a
-quiet market (`connected` stays true). `ensure_on_tape` guards only the
-request_ handlers, not the poll loop.
-
-### AD7. bug - The earliest-start_ts-on-conflict rule never reaches the server on a live second subscription, and fights the reconnect cursor
-
-`client.rs` `subscribe_symbol`, `advance_sub_start_ts`,
-`subscribe_commands`. Severity medium, confidence high on the
-never-delivered-backfill half, medium-high on the reconnect-duplicate half.
-(The exec-half agent independently flagged the min-drag half.)
-
-On a nonzero refcount, `subscribe_symbol` takes `min(existing, new)` into
-`state.start_ts` but sends nothing (Subscribe fires only on 0-to-1). A second
-subscriber asking for an earlier start_ts never gets its backfill on the WS
-path (on the polling path the existing PollCursor ignores the update
-entirely). The stored min then only takes effect at the NEXT reconnect, where
-`subscribe_commands` replays `Subscribe { start_ts: min }` - replaying a
-range the first subscriber already consumed, i.e. duplicate ticks and
-double-counted bars, unless a trade arrived in between and
-`advance_sub_start_ts`'s max() pushed the cursor forward again. Min-on-
-subscribe and max-on-delivery write the same field with opposing policies;
-the result depends on interleaving.
-
-### AD10. bug - Cross-table bars refcount desync: an unmatched unsubscribe_bars can kill the symbol's live feed for the remaining subscriber
-
-`client.rs` `unsubscribe_bars`. Severity low (requires a misbehaving caller,
-but nautilus command replay/races can produce unmatched unsubscribes),
-confidence high on mechanism.
-
-The per-BarType refs and the per-symbol SubState.bars are decremented
-independently. An unsubscribe_bars for a bar type never subscribed (or a
-double-unsubscribe interleaved just right) is a no-op on the bars table but
-still calls `unsubscribe_symbol(.., SubKind::Bars)`, decrementing the
-symbol's bars count that belongs to a DIFFERENT bar type's subscription. If
-that drops total() to 0, a wire Unsubscribe fires and the surviving bar/trade
-subscription goes dark. Saturating arithmetic prevents underflow, not
-cross-type theft.
-
-### AD11. bug - Week/Month/Year bars pass the time-aggregated gate but are aggregated on wrong windows
-
-`client.rs` `subscribe_bars`/`request_bars` guard + `update_bar_state`.
-Severity low (unlikely bar specs for this venue), confidence high.
-
-`is_time_aggregated()` includes Week/Month/Year (research bar.rs), and
-`get_bar_interval_ns` returns a 30-day/365-day "proxy for comparing bar
-lengths" (nautilus's own comment) - not a calendar interval. The adapter's
-`((ts / interval) + 1) * interval` produces epoch-anchored 30-day blocks
-instead of calendar months, and epoch-anchored weeks (epoch was a Thursday)
-instead of nautilus's Monday-anchored weeks (get_time_bar_start).
-Day/hour/minute/second are correctly UTC-aligned.
-
 ### AD12. gap - No dead-feed detection anywhere; a zero-frame subscription is structurally invisible
 
 `client.rs`, both transports. Severity medium, confidence high.
@@ -412,33 +263,15 @@ when armed, the idle clock resets on ANY application frame (heartbeat, exec
 traffic), so a data-silent-but-frame-active socket never trips it -
 deliberate for the 4255 reproduction, but it means the CLEAN default has no
 watchdog, no counter, no periodic "0 ticks in N s for subscribed symbol" log.
-Now that fix batch 3 fixed X8 (the drain warns on ProtocolError), the
-server's unservable-subscribe diagnostics DO reach the adapter log, and the
-poll-path silent-drop (old AD13) now logs rate-limited. What remains open is
-the AD6 family: a persistently failing poll (server restart, clock skew) is
-now VISIBLE in the log but still not self-healed - no cursor reset, no clock
-re-fetch, no disconnect signal. And there is still no positive watchdog
-(counter / "0 ticks in N s" heartbeat) on either transport.
-
-### AD16. gap - /clock fetch failure falls back to the identity SimClock while the server may run at speed != 1
-
-`client.rs` `fetch_clock_or_identity`. Severity low, confidence high on
-behavior, low on real-world frequency.
-
-One warn line, then every ts_init, havoc sleep, quota interval, backoff and
-timeout is scaled on the wrong axis for the life of the connection; nothing
-retries the clock fetch later.
-
-### AD17. gap - Spawned request_ tasks outlive stop/disconnect
-
-All request_* handlers spawn onto the global runtime without recording
-handles in task_handles; stop() cannot abort them. Severity low, confidence
-high.
-
-They keep issuing HTTP requests after disconnect and send into a
-possibly-dropped sink (error discarded). Benign in practice (bounded work),
-but they also consume HttpQuota budget racing a reconnect. (See also the
-exec-side twin for dispatch_order tasks under AE laterals.)
+Batch 3 fixed X8 (the drain warns on ProtocolError) and batch 4 fixed AD6
+(the poll loop now self-heals after a server restart: a run of consecutive
+failures re-fetches the clock and resets the cursor onto the fresh tape). So
+the diagnostics reach the log and a wedged poll recovers. What remains open
+is the POSITIVE watchdog: there is still no counter or "0 ticks in N s for a
+subscribed symbol" heartbeat proving a subscribed-but-silent feed is alive
+(vs a genuinely quiet market) on either transport. That is the residual
+AD12 - a real feature (a per-subscription liveness timer), flagged rather
+than built.
 
 ### AD18. gap - architecture.md misdescribes instruments subscriptions
 
@@ -447,18 +280,19 @@ architecture.md says trades/quotes/bars/INSTRUMENTS ride the refcount table.
 the unsubscribes are no-ops; no refcount involvement. Fine behavior for a
 static venue; the doc is wrong. Doc-only, confidence high.
 
-### AD19. gap - Live bars close only on the next trade; a thin tape delays or forever withholds the closing bar
+### AD19. gap (downgraded) - Live in-progress bars still have no timer-based close
 
-`client.rs` `update_bar_state` (no timer). Severity low-medium,
-design-adjacent, confidence high on behavior.
+`client.rs` `update_bar_state`. Severity low-medium, design-adjacent.
 
-Under LiquidityDrought / ReopenGap halt, the last completed window's bar is
-emitted arbitrarily late (with old ts_event) or never (on unsubscribe/stop
-the active bar is discarded). Multiple empty windows emit no bars at all.
-Nautilus's internal time aggregator fires on the clock; the adapter
-deliberately bypasses it (external bars) but provides no timer replacement.
-Arguably realistic venue behavior; broadarrow should know bars can stall on
-quiet tape.
+Batch 4 built the safe half: on the final `unsubscribe_bars`, a window that
+has already closed (close_ts <= sim-now) but was withheld for lack of a later
+trade is now flushed instead of discarded. RESIDUAL (flagged, not built): a
+clock timer that closes a LIVE in-progress window on time is a real feature,
+and a `stop()`-teardown flush touches the delicate stop/reset/dispose path -
+both left unbuilt. So under a thin tape or a halt, a live window's bar is
+still emitted late (on the next trade) or, for the genuinely in-progress
+window at teardown, dropped. Arguably realistic venue behavior; broadarrow
+should know bars can stall on quiet tape.
 
 ### Adapter data-half smells and nits
 
@@ -527,124 +361,23 @@ venue-truth source: the server exposes only POST /orders. Also: the adapter
 never re-pulls GET /account on an internal reconnect, so an account snapshot
 lost to a blackout stays lost until the next fill-driven snapshot.
 
-### AE6. smell - ExecState grows without bound
+(AE6 unbounded ExecState, AE8 submit-before-dispatch, AE9 WS cancel/modify
+errors surfacing nowhere, AE10 the lookback hiding long-quiet open orders,
+and the AE18 silent unrepresentable-currency drop were all fixed in batch 4.
+AE13 the HttpQuota-mutex-across-sleep and inconsistent accounting was
+documented as its deliberate metered-vs-exempt contract - the clock-fetch
+bypass is an unavoidable chicken-and-egg; routing ship_server_havoc through
+the quota is a client.rs follow-up, F18. AE14 fire-past-stop and AE15
+past-start catch-up are documented as deliberate mirrors of nautilus
+LiveTimer, AE16 the senderless clock is documented as reachable only off the
+canonical wiring path, and AE17 mirrors LiveClock - all with pin tests. The
+AD17/AE19 spawned-task-tracking twin was fixed in batch 4: request_ and
+dispatch tasks are now tracked and aborted on stop.)
 
-`client.rs` ExecState. Severity low, confidence high.
+### AE-clock deferrals kept upstream
 
-`orders` is never pruned (terminal records and permanently-Submitted strays
-from failed WS sends live forever) and `fills` is an append-only Vec. A
-long-lived forward run accumulates memory linearly and every report
-generation scans it all; every report also re-warns "omitting order status
-report" for each venue-id-less stray.
-
-### AE8. smell - submit_order emits OrderSubmitted before conversion/dispatch can fail
-
-`client.rs` `submit_order`. Severity low, confidence high. (Also flagged
-laterally by the data-half agent.)
-
-An unsupported side/type/TIF errors out of convert::wire_* AFTER the
-Submitted event was queued. The nautilus engine then denies the order
-synchronously (Initialized to Denied), and the queued Submitted later hits
-the Denied order as an invalid transition (logged error, event dropped). End
-state is correctly terminal - no wedge - but it produces a stray event, a
-scary log, and on a send_ws failure a permanently-Submitted mirror stray
-(feeds AE6). Emitting Submitted after successful conversion+dispatch would be
-cleaner.
-
-### AE9. gap - cancel_order/modify_order errors surface nowhere on the WS path once the channel is gone
-
-`client.rs` `dispatch_order` WS branch; research nautilus engine only LOGS an
-Err from cancel_order/modify_order (no event). Severity low-medium (requires
-exhausted reconnects), confidence high on mechanism.
-
-If run_ws_connection has exited (attempt cap exhausted) or the client is
-stopped, a cancel returns Err and the order sits in PendingCancel with no
-CancelRejected to restore it - unlike the HTTP profile, which emits
-emit_cancel_rejected on transport failure. The WS path could do the same when
-send_ws fails.
-
-### AE10. gap - Order-status/position reports filter by ts_last within [start, end], hiding long-quiet open orders
-
-`client.rs` `in_time_range` usage. Severity low-medium depending on how
-broadarrow sets bounds; confidence medium.
-
-An open order (or position) with no events since `start` is excluded from
-reports even when open_only is requested. If reconciliation passes a
-lookback-bounded start, a resting order older than the lookback disappears
-from the mass status and may be inferred external/canceled. Real venue
-mass-status endpoints return all open orders regardless of last-activity
-time. (The seam agent's check found nautilus's manager tolerates this for
-open_only=true - it only logs - so no false venue-cancels today.)
-
-Priority bump after fix batch 2: `generate_mass_status` (the X1 fix) now
-composes the order reports with this same lookback filter and startup
-reconciliation actually consumes it, so a long-quiet resting order can now be
-hidden from a REAL consumer, not a hypothetical one.
-
-### AE13. nit - HttpQuota::wait holds the tokio Mutex across the sleep; quota accounting is inconsistent across call sites
-
-`lifecycle.rs`. Severity low, confidence high.
-
-Holding the mutex across the sleep is how spacing is enforced across
-concurrent callers (FIFO, arguably by design), but a burst of N dispatches
-queues linearly with no cap and no timeout (the request_timeout_secs clock
-starts only once the POST is issued), so an order can sit in the quota queue
-indefinitely with nautilus seeing only Submitted. Also ship_server_havoc and
-the connect-time fetch_clock bypass the quota entirely while
-fetch_instruments/fetch_account/fetch_trades/post_order honor it.
-
-### AE14. nit - Repeating timer can fire once past stop_time_ns
-
-`clock.rs` `MogwaiTimer::start`. Severity very low, confidence high.
-
-The loop fires at next_time unconditionally and checks the stop bound only
-when scheduling the NEXT fire; a timer with stop < start + interval fires
-once past stop. Nautilus's LiveTimer has the same fire-then-check shape, so
-this matches the live clock - but nautilus's TestTimer property test asserts
-ts_event <= stop_time_ns, so components relying on that invariant could be
-surprised.
-
-### AE15. nit - A repeating timer whose start is in the past replays a catch-up burst instead of skipping to now
-
-`clock.rs` `MogwaiTimer::start` vs nautilus LiveTimer (which CAS-adjusts a
-past next_time to now with a warning). Confidence high.
-
-With allow_past and an explicit past start_time_ns, MogwaiTimer fires once
-per elapsed interval as fast as it can (each with historically-correct sim
-ts_event) where LiveTimer would fire once and continue from now.
-Deterministic catch-up is arguably better on a sim axis; flagged as a
-deviation from the canonical clock. Also set_time_alert_ns for a past alert
-fires with ts_event = ts_now + 1ns rather than ts_now due to the
-create_valid_interval(0) floor - a 1 ns skew, immaterial.
-
-### AE16. gap - A senderless clock silently drops thread-local timer callbacks; depends on broadarrow's wiring order
-
-`clock.rs` `mogwai_clock_factory` / `MogwaiTimer::start`. Severity
-low-medium, confidence medium (depends on construction order not auditable
-from this repo alone; the seam agent's check of the kernel ordering suggests
-the senders are bound first in the normal path).
-
-The factory closure captures try_get_time_event_sender() at clock CREATION
-time. If the node constructs the clock before the runner registers the
-time-event sender, the clock is permanently senderless and every RustLocal
-callback timer is dropped with only a tracing::warn. The fallback rationale
-(Rc cross-thread hazard) is well commented, but a permanently-degraded clock
-deserves louder-than-warn handling or a late re-lookup per fire.
-
-### AE17. nit - timer_exists counts expired timers while timer_names/timer_count filter them
-
-`clock.rs`. Exactly mirrors nautilus's LiveClock, so bug-compatible rather
-than wrong; the asymmetry is surprising in both places.
-
-### Adapter exec-half laterals
-
-- AE18. nit - handle_account_state drops a balance whose currency string
-  fails Currency::from_str silently (bare .ok()?), while every other
-  unrepresentable-amount path in the same closure warns.
-- AE19. nit - Spawned HTTP dispatch tasks (dispatch_order) are not tracked in
-  task_handles, so stop() cannot abort them; a slow POST can emit exec events
-  after the client stopped (emitter still holds a live sender clone). (Twin
-  of AD17 for the order path.)
+AE14 and AE17 remain tracked as the upstream nautilus items U1 and U2 (the
+mogwai clock deliberately matches the nautilus behavior being reported).
 
 ### Adapter exec-half verified-correct notes
 
@@ -805,27 +538,17 @@ stretch on an open-hour gap is still a once-sampled multiplier, now capped at
 366 days. Deliberate (thin tape is a venue-wide divergence, not a session
 curve); recorded as behavior, not a bug.
 
-### F8. gap - Subscribe with a FUTURE start_ts is the unfixed WS twin of the /trades look-ahead leak
-
-`mogwai-server` `handle_socket`/`resume_seek_target`. Found by the batch-2
-server agent while fixing S8. Severity low-medium, confidence high.
-
-A live Subscribe with explicit start_ts beyond sim-now is honored as given:
-the checkpoint index extends toward the future, and in identity mode the
-first future-stamped tick emits unpaced (accelerated mode is protected by
-deadline pacing). The /trades side now refuses future starts; the WS side
-does not. Fixing touches resume_seek_target and pacing semantics.
-
-### F9. gap - Adapter clock skew against the new /trades sim-now refusal lands on the silent poll swallow
+### F9. gap - Adapter clock skew against the /trades sim-now refusal (now visible, self-heals)
 
 Cross-crate (server 422 vs adapter poll loop). Found by the batch-2 server
 agent. Severity low (same-machine deployments safe), confidence medium.
 
 If the adapter's sim-now anchor ever runs ahead of the server's (cross-machine
-NTP skew), its poll `start` can trip the new start-beyond-sim-now 422. Since
-fix batch 3 the poll loop logs this rate-limited instead of swallowing it, so
-the feed is now VISIBLY dead rather than silently dead - but still not
-self-healed (no cursor reset / clock re-fetch), the AD6 residual.
+NTP skew), its poll `start` can trip the start-beyond-sim-now 422. Batch 3
+made it log rate-limited (visible, not silent), and batch 4's AD6 self-heal
+now re-fetches the clock and resets the cursor after a run of failures - so
+this case now recovers rather than staying dead. Kept as a note that the
+underlying cross-machine skew is a deployment consideration.
 
 ### F10. note - The OrderRejected arm still overwrites mirror status unconditionally
 
@@ -835,46 +558,6 @@ only reachable overwrite is the HTTP synthesized-reject-after-processed case,
 which is AE2's documented unrecoverable-desync class. Recorded so the
 asymmetry with the new terminal-state guards reads as a decision, not an
 oversight.
-
-### F11. smell - Non-terminal reorders can still move ts_last backward for open orders
-
-`client.rs`. The batch-2 fill handler got a forward-only ts_last guard, but
-Accepted/Updated on a still-open order can still move ts_last backward under
-reorder havoc, perturbing in_time_range filtering. The full ts-ordering guard
-from AE3's original suggestion is only partially applied.
-
-### F12. nit - The reconnect loop sleeps one final backoff before returning exhausted
-
-`lifecycle.rs` `run_ws_connection`. Pre-existing shape the batch-2 lifecycle
-agent kept (mirrors the Err-arm): after the last permitted cycle dies, the
-loop sleeps its backoff once more before the loop-top exhausted check
-returns. Harmless delay of the exhausted return by one backoff.
-
-### F13. smell - poll_failures map leaks an entry for a symbol unsubscribed while failing
-
-`client.rs` `poll_market_data`. Found by the batch-3 data agent. The
-rate-limited poll-failure counter (old AD13 fix) is removed only on a
-successful fetch, so a symbol unsubscribed while its poll is failing leaves a
-stale counter entry. Trivial memory, bounded by symbol count.
-
-### F14. gap (doc) - mogwai-server session-validation message renders the D4 sum-violation sentinel index literally
-
-`mogwai-server` config validation formats `err.index` into
-`session.intensity_hour[18446744073709551615] must be finite and > 0` for a
-D4 sum violation (the fix batch 3 SessionProfileError uses `index:
-usize::MAX` as the "whole-array sum" sentinel). The field name is right; the
-`[index]` text and the "finite and > 0" wording are misleading for a sum
-violation. Wants a branch on `index == usize::MAX`. Found by the batch-3
-generator agent.
-
-### F15. gap - mogwai-server does not reject an empty instrument symbol before it reaches the generator's expect
-
-`mogwai-server` `validate_instrument_def` checks base/quote non-empty but not
-`symbol`. The batch-3 D5(d) fix now rejects an empty symbol at
-`GeneratorScalars::validate`, but a config path that skips pre-validation
-hits the generator's `.expect` panic instead of a clean error. The server
-should reject an empty `def.symbol` explicitly. Found by the batch-3
-generator agent.
 
 ### F16. gap - mogwai has no end-to-end guard that startup reconciliation actually runs; the nautilus report contract degrades silently
 
@@ -926,6 +609,41 @@ into mogwai), but the GENERAL truth belongs in havoc.md: a delay window longer
 than a downstream inflight timeout exercises the consumer's brake, not
 mogwai's delay path. Worth a sentence in the DelayAcks / latency sections so an
 operator arming a multi-minute window knows what they are actually testing.
+
+### F18. gap - three low-risk cross-file follow-ups the batch-4 agents flagged but could not make (each is a one-file change in a territory another agent owned that round)
+
+- Adopt `try_new` / `try_new_with_session_profile` (added to mogwai-data in
+  batch 4) in the mogwai-server `source.rs` and, if applicable, the adapter
+  config-driven construction paths, so a config typo surfaces as a clean
+  error instead of the generator's `.expect` panic. (D8's cross-file half.)
+- Optionally wire the engine's new `clear_armed()` into the server's
+  `ClearDivergences` handler for a full cross-scenario reset. Additive, not a
+  wire-contract change. (E5 flag.)
+- Route `ship_server_havoc` (the connect-time control-plane loop) through the
+  `HttpQuota` for strict metering consistency. The connect-time clock fetch
+  bypass must stay (chicken-and-egg: the quota's spacing is sim-scaled and the
+  clock fetch is what returns sim). (AE13 flag.)
+
+### F19. gap - larger design/feature items deferred out of the mechanical sweep
+
+Recorded so they are not mistaken for oversights. Each needs a design
+decision or a non-trivial build, so they were flagged rather than forced:
+
+- AD4: the serial per-message havoc-latency sleep behaves as a throughput cap
+  rather than pipelined delay. A faithful fix pipelines the delay across the
+  drain without serializing throughput - a drain rearchitecture spanning
+  client.rs and lifecycle.rs.
+- AD12: a POSITIVE dead-feed watchdog (a per-subscription liveness timer /
+  "0 ticks in N s" heartbeat). Diagnostics now reach the log; what is missing
+  is a positive proof-of-life. A real feature.
+- AD19 residual: a clock timer that closes a live in-progress bar window on
+  time, plus a stop()-teardown flush.
+- S22a: the unbounded-OS-thread-per-subscribed-symbol shape needs a
+  concurrency-cap / behavior decision.
+- AE2 / X3: the venue-truth source (an order-status query surface). This is a
+  NEW WIRE PROTOCOL SURFACE (a `GET /orders` endpoint + `query_order` messages
+  + adapter impl) and is NOT being built autonomously - it needs sign-off
+  because it changes the protocol. See X3 for the full shape and options.
 
 ---
 
