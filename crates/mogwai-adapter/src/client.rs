@@ -45,7 +45,7 @@ use nautilus_model::{
     },
     identifiers::{AccountId, ClientId, ClientOrderId, InstrumentId, TradeId, Venue, VenueOrderId},
     orders::Order,
-    reports::{FillReport, OrderStatusReport, PositionStatusReport},
+    reports::{ExecutionMassStatus, FillReport, OrderStatusReport, PositionStatusReport},
     types::{AccountBalance, MarginBalance, currency::Currency},
 };
 use nautilus_network::http::HttpClient;
@@ -1904,19 +1904,20 @@ impl MogwaiExecutionClient {
                                 &ctx,
                             );
                         } else {
-                            dispatch_havoc(
-                                &mut filter,
-                                reject_for(&cmd, &err, ctx.sim),
-                                ctx.sim,
-                                |msg| async {
-                                    handle_exec_message(msg, &ctx);
-                                },
-                            )
-                            .await;
-                            flush_havoc(&mut filter, ctx.sim, |msg| async {
-                                handle_exec_message(msg, &ctx);
-                            })
-                            .await;
+                            // A failed Submit/Modify POST synthesizes the
+                            // matching reject so the order reaches a terminal
+                            // state instead of wedging in Submitted. Like the
+                            // cancel branch above, the failure is purely local
+                            // (the venue never saw the request, and this reject
+                            // never traveled the wire), so there is nothing for
+                            // the venue-havoc pipeline to model - and routing it
+                            // through the per-dispatch HavocFilter would let a
+                            // drop_prob draw discard the terminal event
+                            // entirely, leaving nautilus and the mirror stuck in
+                            // Submitted forever (and the venue-id-less record
+                            // omitted from status reports). Bypass the filter
+                            // and report it straight.
+                            handle_exec_message(reject_for(&cmd, &err, ctx.sim), &ctx);
                         }
                     }
                 }
@@ -2420,6 +2421,82 @@ impl ExecutionClient for MogwaiExecutionClient {
             .collect();
         Ok(reports)
     }
+
+    /// Composes the three report generators into the mass status the live
+    /// node's startup reconciliation consumes. The trait default returns
+    /// `Ok(None)`, which the node logs as "no mass status available (likely
+    /// adapter error)" and then reconciles NOTHING - a worker restarted while
+    /// holding an open mogwai position would boot flat and only discover the
+    /// venue net via the periodic position poll, mid-run, as a late EXTERNAL
+    /// adoption. Following the canonical adapter shape (e.g. kraken spot):
+    /// open orders, their fills, and current positions, bounded by the
+    /// caller's lookback.
+    ///
+    /// `lookback_mins` maps to the same `start` bound the three generators
+    /// already apply (each filters records by `ts_last`/`ts_event` within
+    /// `[start, end]`), computed against sim-now because every mirrored
+    /// timestamp lives on the venue's sim axis. `None` means unbounded.
+    async fn generate_mass_status(
+        &self,
+        lookback_mins: Option<u64>,
+    ) -> anyhow::Result<Option<ExecutionMassStatus>> {
+        let ts_init = now_unix_nanos(self.sim);
+        let start = lookback_mins.map(|mins| {
+            UnixNanos::from(
+                ts_init
+                    .as_u64()
+                    .saturating_sub(mins.saturating_mul(60 * 1_000_000_000)),
+            )
+        });
+        let order_reports = self
+            .generate_order_status_reports(&GenerateOrderStatusReports::new(
+                UUID4::new(),
+                ts_init,
+                true,
+                None,
+                start,
+                None,
+                None,
+                None,
+            ))
+            .await?;
+        let fill_reports = self
+            .generate_fill_reports(GenerateFillReports::new(
+                UUID4::new(),
+                ts_init,
+                None,
+                None,
+                start,
+                None,
+                None,
+                None,
+            ))
+            .await?;
+        let position_reports = self
+            .generate_position_status_reports(&GeneratePositionStatusReports::new(
+                UUID4::new(),
+                ts_init,
+                None,
+                start,
+                None,
+                None,
+                None,
+            ))
+            .await?;
+
+        let mut mass_status = ExecutionMassStatus::new(
+            self.core.client_id,
+            self.core.account_id,
+            *MOGWAI_VENUE,
+            ts_init,
+            None,
+        );
+        mass_status.add_order_reports(order_reports);
+        mass_status.add_fill_reports(fill_reports);
+        mass_status.add_position_reports(position_reports);
+
+        Ok(Some(mass_status))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2553,6 +2630,15 @@ struct ExecState {
     orders: HashMap<ClientOrderId, OrderRecord>,
     fills: Vec<FillRecord>,
     positions: HashMap<Symbol, PositionRecord>,
+    /// `ts_event` of the last account snapshot applied to the position mirror.
+    /// Snapshots carry the venue's COMPLETE non-zero position set and are
+    /// applied destructively (absent symbols are dropped as flat), which is
+    /// only sound if each applied snapshot is at least as new as the last:
+    /// reorder/duplicate havoc delivering an OLDER snapshot would resurrect a
+    /// just-closed position (the phantom-EXTERNAL desync class the drop rule
+    /// exists to kill), erase a just-opened one, and move ts_last backward.
+    /// `handle_account_state` skips any snapshot below this watermark.
+    account_ts_last: UnixNanos,
 }
 
 #[derive(Debug, Clone)]
@@ -2646,15 +2732,46 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
         } => {
             let client_order_id = ClientOrderId::from(client_order_id);
             let venue_order_id = VenueOrderId::from(venue_order_id);
-            let Some(record) = with_order_record(&ctx.state, client_order_id, |record| {
-                record.status = OrderStatus::Accepted;
-                record.venue_order_id = Some(venue_order_id);
-                record.ts_accepted = UnixNanos::from(ts_event);
-                record.ts_last = UnixNanos::from(ts_event);
-                record.clone()
+            let Some((record, stale)) = with_order_record(&ctx.state, client_order_id, |record| {
+                // Terminal-state guard: reorder/duplicate havoc can deliver this
+                // Accepted AFTER the fill or cancel that ended the order (the
+                // engine emits Accepted and Filled adjacently for immediate
+                // fills - exactly the pair a reorder transposes). Nautilus's own
+                // order FSM has no terminal-to-Accepted arm, and this mirror is
+                // the reconciliation truth source, so it must be at least as
+                // strict: never regress a terminal record. The wire event is
+                // still forwarded below (the intended divergence, matching the
+                // duplicate-fill discipline); only the mirror mutation is
+                // skipped.
+                let stale = record.status.is_closed();
+                if !stale {
+                    record.status = OrderStatus::Accepted;
+                    record.venue_order_id = Some(venue_order_id);
+                    record.ts_accepted = UnixNanos::from(ts_event);
+                    record.ts_last = UnixNanos::from(ts_event);
+                }
+                (record.clone(), stale)
             }) else {
+                // Same A.11 limitation as the reject arms: the mirror lacks the
+                // order (e.g. an event arriving after reset() cleared it), so
+                // there is no real strategy_id/instrument_id to emit with. Make
+                // the drop visible instead of silent.
+                tracing::warn!(
+                    order = %client_order_id,
+                    venue_order_id = %venue_order_id,
+                    "order accepted for an order the mirror does not know; \
+                     event not surfaced to nautilus (A.11)"
+                );
                 return;
             };
+            if stale {
+                tracing::warn!(
+                    order = %client_order_id,
+                    status = ?record.status,
+                    "accepted event for a terminal mirror record; keeping the \
+                     terminal status (reordered or duplicated event)"
+                );
+            }
             let event = OrderAccepted::new(
                 ctx.trader_id,
                 record.strategy_id,
@@ -2720,14 +2837,38 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
         } => {
             let client_order_id = ClientOrderId::from(client_order_id);
             let venue_order_id = VenueOrderId::from(venue_order_id);
-            let Some(record) = with_order_record(&ctx.state, client_order_id, |record| {
-                record.status = OrderStatus::Canceled;
-                record.venue_order_id = Some(venue_order_id);
-                record.ts_last = UnixNanos::from(ts_event);
-                record.clone()
+            let Some((record, stale)) = with_order_record(&ctx.state, client_order_id, |record| {
+                // Terminal-state guard, same as the OrderAccepted arm: a
+                // Canceled transposed behind the fill that actually ended the
+                // order must not overwrite Filled (or a duplicate re-cancel an
+                // already-terminal record). Forward the wire event, skip the
+                // mirror regression.
+                let stale = record.status.is_closed();
+                if !stale {
+                    record.status = OrderStatus::Canceled;
+                    record.venue_order_id = Some(venue_order_id);
+                    record.ts_last = UnixNanos::from(ts_event);
+                }
+                (record.clone(), stale)
             }) else {
+                // Same A.11 limitation as the reject arms: no real strategy_id/
+                // instrument_id to emit with. Make the drop visible.
+                tracing::warn!(
+                    order = %client_order_id,
+                    venue_order_id = %venue_order_id,
+                    "order canceled for an order the mirror does not know; \
+                     event not surfaced to nautilus (A.11)"
+                );
                 return;
             };
+            if stale {
+                tracing::warn!(
+                    order = %client_order_id,
+                    status = ?record.status,
+                    "canceled event for a terminal mirror record; keeping the \
+                     terminal status (reordered or duplicated event)"
+                );
+            }
             let event = OrderCanceled::new(
                 ctx.trader_id,
                 record.strategy_id,
@@ -2752,14 +2893,28 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
         } => {
             let client_order_id = ClientOrderId::from(client_order_id);
             let venue_order_id = VenueOrderId::from(venue_order_id);
+            let Some(known) = order_record(&ctx.state, client_order_id) else {
+                // Same A.11 limitation as the reject arms: no real strategy_id/
+                // instrument_id to emit with. Make the drop visible.
+                tracing::warn!(
+                    order = %client_order_id,
+                    venue_order_id = %venue_order_id,
+                    "order update for an order the mirror does not know; \
+                     event not surfaced to nautilus (A.11)"
+                );
+                return;
+            };
             // Resolve the instrument before touching the mirror so a missing def
             // does not leave the mirror amended with no matching event emitted.
-            let Some(def) = order_record(&ctx.state, client_order_id).and_then(|record| {
-                instrument_def(
-                    &ctx.instruments,
-                    &symbol_from_instrument(record.instrument_id),
-                )
-            }) else {
+            let Some(def) = instrument_def(
+                &ctx.instruments,
+                &symbol_from_instrument(known.instrument_id),
+            ) else {
+                tracing::warn!(
+                    order = %client_order_id,
+                    instrument = %known.instrument_id,
+                    "dropping order update: no instrument def (cache not seeded?)"
+                );
                 return;
             };
             // Convert the amend's quantity/price before touching the mirror,
@@ -2792,34 +2947,50 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                     return;
                 }
             };
-            let Some(record) = with_order_record(&ctx.state, client_order_id, |record| {
-                record.venue_order_id = Some(venue_order_id);
-                record.quantity = quantity;
-                record.price = price;
-                // The venue's `leaves_qty` is authoritative for the remaining
-                // size after the amend. Reconcile `filled_qty` so the mirror
-                // invariant `quantity - filled_qty == leaves_qty` holds even
-                // after a downsizing amend (which the bare `quantity` overwrite
-                // used to leave stale, drifting from the venue). Clamp at zero
-                // so a `leaves_qty` exceeding the new total cannot push
-                // `filled_qty` negative.
-                record.filled_qty = (quantity - leaves_qty).max(Decimal::ZERO);
-                // An amend never reverses an in-progress fill: an order with a
-                // non-zero filled_qty stays PARTIALLY_FILLED (or flips to FILLED
-                // when the amend leaves nothing outstanding) so the mirror does
-                // not report Accepted alongside a non-zero filled_qty.
-                record.status = if record.filled_qty.is_zero() {
-                    OrderStatus::Accepted
-                } else if leaves_qty.is_zero() {
-                    OrderStatus::Filled
-                } else {
-                    OrderStatus::PartiallyFilled
-                };
-                record.ts_last = UnixNanos::from(ts_event);
-                record.clone()
+            let Some((record, stale)) = with_order_record(&ctx.state, client_order_id, |record| {
+                // Terminal-state guard, same as the OrderAccepted arm: an amend
+                // ack reordered behind the order's terminal event must not
+                // recompute a non-terminal status from leaves_qty (or rewrite
+                // quantity/price on a record the venue has already closed).
+                // Forward the wire event, skip the mirror mutation.
+                let stale = record.status.is_closed();
+                if !stale {
+                    record.venue_order_id = Some(venue_order_id);
+                    record.quantity = quantity;
+                    record.price = price;
+                    // The venue's `leaves_qty` is authoritative for the remaining
+                    // size after the amend. Reconcile `filled_qty` so the mirror
+                    // invariant `quantity - filled_qty == leaves_qty` holds even
+                    // after a downsizing amend (which the bare `quantity` overwrite
+                    // used to leave stale, drifting from the venue). Clamp at zero
+                    // so a `leaves_qty` exceeding the new total cannot push
+                    // `filled_qty` negative.
+                    record.filled_qty = (quantity - leaves_qty).max(Decimal::ZERO);
+                    // An amend never reverses an in-progress fill: an order with a
+                    // non-zero filled_qty stays PARTIALLY_FILLED (or flips to FILLED
+                    // when the amend leaves nothing outstanding) so the mirror does
+                    // not report Accepted alongside a non-zero filled_qty.
+                    record.status = if record.filled_qty.is_zero() {
+                        OrderStatus::Accepted
+                    } else if leaves_qty.is_zero() {
+                        OrderStatus::Filled
+                    } else {
+                        OrderStatus::PartiallyFilled
+                    };
+                    record.ts_last = UnixNanos::from(ts_event);
+                }
+                (record.clone(), stale)
             }) else {
                 return;
             };
+            if stale {
+                tracing::warn!(
+                    order = %client_order_id,
+                    status = ?record.status,
+                    "update event for a terminal mirror record; keeping the \
+                     terminal status (reordered or duplicated event)"
+                );
+            }
             let event = OrderUpdated::new(
                 ctx.trader_id,
                 record.strategy_id,
@@ -2874,7 +3045,15 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 UnixNanos::from(ts_event),
                 now_unix_nanos(ctx.sim),
                 false,
-                venue_order_id.map(VenueOrderId::from),
+                // Prefer the wire id and fall back to the mirror's, matching
+                // emit_cancel_rejected: the engine omits the venue id for an
+                // order that has gone terminal even though the id is known, so
+                // a known order's modify-reject would otherwise reach nautilus
+                // with no venue id where the equivalent cancel-reject carries
+                // one. The fallback also covers any future wire omission.
+                venue_order_id
+                    .map(VenueOrderId::from)
+                    .or(record.venue_order_id),
                 Some(ctx.account_id),
             );
             ctx.emitter
@@ -2941,7 +3120,24 @@ fn handle_order_filled(fill: mogwai_protocol::OrderFilled, ctx: &ExecContext) {
         return;
     };
     let venue_order_id = VenueOrderId::from(fill.venue_order_id);
-    let trade_id = TradeId::from(fill.trade_id);
+    // Nautilus caps a `TradeId` at 36 non-empty ASCII chars and the panicking
+    // constructors (`TradeId::new`, the `From` impls) assert past that. The
+    // engine's ids are short, but this is a wire value: a server bug or havoc
+    // corruption sending an over-long/empty/non-ASCII id must drop the fill
+    // with a warning rather than panic the unsupervised exec task (the same
+    // discipline convert.rs applies to the data-side synthetic trade ids).
+    let trade_id = match TradeId::new_checked(&fill.trade_id) {
+        Ok(trade_id) => trade_id,
+        Err(err) => {
+            tracing::warn!(
+                order = %client_order_id,
+                trade = %fill.trade_id,
+                error = %err,
+                "dropping order fill: unrepresentable trade id"
+            );
+            return;
+        }
+    };
     // Convert the wire price/qty before mutating the mirror so a hostile fill
     // value that overflows nautilus Price/Quantity drops the whole fill with a
     // warning rather than panicking the exec task or leaving the mirror
@@ -2977,11 +3173,19 @@ fn handle_order_filled(fill: mogwai_protocol::OrderFilled, ctx: &ExecContext) {
     let Some((record, is_duplicate)) = with_order_record(&ctx.state, client_order_id, |record| {
         let is_duplicate = !record.seen_trades.insert(trade_id);
         if !is_duplicate {
-            record.status = if fill.leaves_qty.is_zero() {
-                OrderStatus::Filled
-            } else {
-                OrderStatus::PartiallyFilled
-            };
+            // Terminal-state guard (see the OrderAccepted arm): a partial fill
+            // transposed behind the cancel (or the final fill) that ended the
+            // order must still book its economics - money moved at the venue,
+            // so filled_qty/avg_px/the fill record are real - but must not
+            // regress the terminal status back to PartiallyFilled and re-open
+            // a closed order in the reconciliation mirror.
+            if !record.status.is_closed() {
+                record.status = if fill.leaves_qty.is_zero() {
+                    OrderStatus::Filled
+                } else {
+                    OrderStatus::PartiallyFilled
+                };
+            }
             record.venue_order_id = Some(venue_order_id);
             let previous_notional = record
                 .avg_px
@@ -2999,10 +3203,24 @@ fn handle_order_filled(fill: mogwai_protocol::OrderFilled, ctx: &ExecContext) {
             if !record.filled_qty.is_zero() {
                 record.avg_px = total_notional.checked_div(record.filled_qty);
             }
-            record.ts_last = UnixNanos::from(fill.ts_event);
+            // A reordered fill carries an OLDER ts_event than the event that
+            // already advanced the record; only ever move ts_last forward so
+            // the mirror's in_time_range filtering does not walk backward.
+            record.ts_last = record.ts_last.max(UnixNanos::from(fill.ts_event));
         }
         (record.clone(), is_duplicate)
     }) else {
+        // The worst silent drop on this path: money moved at the venue and no
+        // nautilus event can be built (same A.11 limitation as the reject
+        // arms - the mirror lacks the order, so there is no real strategy_id/
+        // instrument_id to emit with). Make it loud.
+        tracing::warn!(
+            order = %client_order_id,
+            trade = %trade_id,
+            venue_order_id = %venue_order_id,
+            "order fill for an order the mirror does not know; \
+             fill not surfaced to nautilus (A.11)"
+        );
         return;
     };
 
@@ -3119,6 +3337,25 @@ fn handle_account_state(state: mogwai_protocol::AccountState, ctx: &ExecContext)
 
     {
         let mut mirror = lock_recover(&ctx.state, "execution state");
+        // Snapshots must apply in venue order, not arrival order: the retain
+        // below treats each snapshot as the newest truth, so an OLDER snapshot
+        // delivered late by reorder/duplicate havoc would resurrect a closed
+        // position or erase an open one, persistently (nothing corrects it
+        // until the next fill-driven snapshot, which may be never). Skip any
+        // snapshot below the applied watermark - and skip forwarding it to
+        // nautilus too, since nautilus applies account states in arrival order
+        // with no staleness guard of its own. Equal-ts duplicates pass; they
+        // re-apply idempotently. The check and the apply share one lock so
+        // concurrent HTTP dispatch drains cannot interleave between them.
+        if ts_event < mirror.account_ts_last {
+            tracing::warn!(
+                ts_event = ts_event.as_u64(),
+                last_applied = mirror.account_ts_last.as_u64(),
+                "dropping stale account snapshot: older than the last applied one"
+            );
+            return;
+        }
+        mirror.account_ts_last = ts_event;
         // The engine reports a COMPLETE set of its non-zero positions in every
         // snapshot, and signals a flat instrument by OMITTING it: a position
         // closed to zero is removed from the engine's map, never reported as a
@@ -4664,5 +4901,424 @@ mod tests {
             positions.is_empty(),
             "a flattened position must not survive as a phantom reconciliation report"
         );
+    }
+
+    fn wire_fill(
+        trade_id: &str,
+        leaves_qty: Decimal,
+        ts_event: u64,
+    ) -> mogwai_protocol::OrderFilled {
+        mogwai_protocol::OrderFilled {
+            client_order_id: "O-1".into(),
+            venue_order_id: "V-1".into(),
+            trade_id: trade_id.into(),
+            symbol: "BTCUSDT".into(),
+            side: Side::Buy,
+            last_qty: Decimal::new(1, 0),
+            last_px: Decimal::new(10_000, 2),
+            leaves_qty,
+            commission: Decimal::ZERO,
+            ts_event,
+        }
+    }
+
+    #[test]
+    fn reordered_terminal_events_cannot_regress_the_mirror() {
+        // Reorder havoc transposes the engine's adjacent Accepted+Filled pair
+        // (immediate fills), so the mirror sees Filled first and the Accepted
+        // arrives late. The old unconditional overwrite regressed the mirror
+        // to Accepted FOREVER (nothing later corrects a terminal order), and
+        // generate_order_status_reports(open_only) then reported a phantom
+        // open order with full filled_qty. The mirror must be at least as
+        // strict as nautilus's own FSM, which has no terminal-to-Accepted arm.
+        let (ctx, mut rx) = exec_context();
+
+        handle_exec_message(
+            ServerMessage::OrderAccepted {
+                client_order_id: "O-1".into(),
+                venue_order_id: "V-1".into(),
+                ts_event: 10,
+            },
+            &ctx,
+        );
+        handle_exec_message(
+            ServerMessage::OrderFilled(wire_fill("T-1", Decimal::ZERO, 11)),
+            &ctx,
+        );
+        let _ = rx.try_recv().expect("accepted");
+        let _ = rx.try_recv().expect("filled");
+
+        // The reordered duplicate Accepted lands after the fill: the wire
+        // event is still forwarded (nautilus's FSM refuses it on its own),
+        // but the mirror keeps its terminal status and timestamps.
+        handle_exec_message(
+            ServerMessage::OrderAccepted {
+                client_order_id: "O-1".into(),
+                venue_order_id: "V-1".into(),
+                ts_event: 10,
+            },
+            &ctx,
+        );
+        assert!(matches!(
+            rx.try_recv().expect("late accepted still forwarded"),
+            ExecutionEvent::Order(OrderEventAny::Accepted(_))
+        ));
+        let record = order_record(&ctx.state, ClientOrderId::from("O-1")).expect("order record");
+        assert_eq!(
+            record.status,
+            OrderStatus::Filled,
+            "a late Accepted must not regress a Filled mirror record"
+        );
+        assert_eq!(record.ts_last, UnixNanos::from(11));
+
+        // A Canceled transposed behind the fill likewise must not overwrite.
+        handle_exec_message(
+            ServerMessage::OrderCanceled {
+                client_order_id: "O-1".into(),
+                venue_order_id: "V-1".into(),
+                ts_event: 12,
+            },
+            &ctx,
+        );
+        let record = order_record(&ctx.state, ClientOrderId::from("O-1")).expect("order record");
+        assert_eq!(
+            record.status,
+            OrderStatus::Filled,
+            "a late Canceled must not overwrite a Filled mirror record"
+        );
+
+        // And an amend ack reordered behind the terminal event must not
+        // recompute a non-terminal status from leaves_qty.
+        handle_exec_message(
+            ServerMessage::OrderUpdated {
+                client_order_id: "O-1".into(),
+                venue_order_id: "V-1".into(),
+                quantity: Decimal::new(2, 0),
+                price: Some(Decimal::new(10_000, 2)),
+                leaves_qty: Decimal::new(2, 0),
+                ts_event: 9,
+            },
+            &ctx,
+        );
+        let record = order_record(&ctx.state, ClientOrderId::from("O-1")).expect("order record");
+        assert_eq!(
+            record.status,
+            OrderStatus::Filled,
+            "a late Updated must not regress a Filled mirror record"
+        );
+        assert_eq!(
+            record.quantity,
+            Decimal::new(1, 0),
+            "a late amend must not rewrite a terminal record's quantity"
+        );
+    }
+
+    #[test]
+    fn late_fill_after_cancel_books_economics_without_reopening() {
+        // The engine's partial-fill-then-cancel pair (e.g. IOC remainder)
+        // transposed by reorder havoc: Canceled first, then the partial fill.
+        // Money moved at the venue, so the fill's economics must book into
+        // the mirror - but the terminal Canceled status must survive, and
+        // ts_last must not walk backward to the fill's older stamp.
+        let (ctx, mut rx) = exec_context();
+
+        handle_exec_message(
+            ServerMessage::OrderAccepted {
+                client_order_id: "O-1".into(),
+                venue_order_id: "V-1".into(),
+                ts_event: 10,
+            },
+            &ctx,
+        );
+        handle_exec_message(
+            ServerMessage::OrderCanceled {
+                client_order_id: "O-1".into(),
+                venue_order_id: "V-1".into(),
+                ts_event: 12,
+            },
+            &ctx,
+        );
+        let _ = rx.try_recv().expect("accepted");
+        let _ = rx.try_recv().expect("canceled");
+
+        // The partial fill (leaves > 0) arrives late.
+        handle_exec_message(
+            ServerMessage::OrderFilled(wire_fill("T-1", Decimal::new(1, 0), 11)),
+            &ctx,
+        );
+        assert!(matches!(
+            rx.try_recv().expect("late fill still forwarded"),
+            ExecutionEvent::Order(OrderEventAny::Filled(_))
+        ));
+        let record = order_record(&ctx.state, ClientOrderId::from("O-1")).expect("order record");
+        assert_eq!(
+            record.status,
+            OrderStatus::Canceled,
+            "a late partial fill must not re-open a Canceled mirror record"
+        );
+        assert_eq!(
+            record.filled_qty,
+            Decimal::new(1, 0),
+            "the late fill's economics must still book"
+        );
+        assert_eq!(
+            record.ts_last,
+            UnixNanos::from(12),
+            "ts_last must not walk backward to the reordered fill's stamp"
+        );
+        let state = ctx.state.lock().expect("execution state mutex");
+        assert_eq!(state.fills.len(), 1, "the fill record must still be kept");
+    }
+
+    #[test]
+    fn stale_account_snapshot_is_dropped_entirely() {
+        // Two adjacent AccountStates transposed by reorder havoc: the close
+        // snapshot (newer, position gone) arrives first, then the entry
+        // snapshot (older, position open). Applying the older one in arrival
+        // order resurrected the closed position - the phantom-EXTERNAL class -
+        // and moved the mirror's watermark backward. The stale snapshot must
+        // be skipped wholesale: no mirror mutation, no account event forwarded
+        // (nautilus has no staleness guard of its own).
+        let (ctx, mut rx) = exec_context();
+
+        handle_exec_message(
+            ServerMessage::AccountState(mogwai_protocol::AccountState {
+                balances: Vec::new(),
+                positions: Vec::new(),
+                ts_event: 13,
+            }),
+            &ctx,
+        );
+        assert!(matches!(
+            rx.try_recv().expect("fresh snapshot forwards"),
+            ExecutionEvent::Account(_)
+        ));
+
+        handle_exec_message(
+            ServerMessage::AccountState(mogwai_protocol::AccountState {
+                balances: Vec::new(),
+                positions: vec![mogwai_protocol::Position {
+                    symbol: "BTCUSDT".into(),
+                    quantity: Decimal::new(1, 0),
+                    avg_px: Decimal::new(10_000, 2),
+                }],
+                ts_event: 12,
+            }),
+            &ctx,
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a stale snapshot must not forward an account event"
+        );
+        let state = ctx.state.lock().expect("execution state mutex");
+        assert!(
+            state.positions.is_empty(),
+            "a stale snapshot must not resurrect a closed position"
+        );
+        assert_eq!(
+            state.account_ts_last,
+            UnixNanos::from(13),
+            "the applied watermark must not move backward"
+        );
+    }
+
+    #[test]
+    fn modify_reject_falls_back_to_mirror_venue_id() {
+        // The engine omits the venue id on a reject for an order that has
+        // gone terminal even though the id is known. emit_cancel_rejected
+        // already falls back to the mirror's id; the modify path must match,
+        // so a known order's modify-reject carries the id the adapter holds.
+        let (ctx, mut rx) = exec_context();
+
+        handle_exec_message(
+            ServerMessage::OrderAccepted {
+                client_order_id: "O-1".into(),
+                venue_order_id: "V-1".into(),
+                ts_event: 10,
+            },
+            &ctx,
+        );
+        let _ = rx.try_recv().expect("accepted");
+
+        handle_exec_message(
+            ServerMessage::OrderModifyRejected {
+                client_order_id: "O-1".into(),
+                venue_order_id: None,
+                reason: "order already terminal (filled or canceled)".into(),
+                ts_event: 42,
+            },
+            &ctx,
+        );
+        match rx.try_recv().expect("modify rejected event") {
+            ExecutionEvent::Order(OrderEventAny::ModifyRejected(event)) => {
+                assert_eq!(
+                    event.venue_order_id,
+                    Some(VenueOrderId::from("V-1")),
+                    "a wire None must fall back to the mirror's venue id"
+                );
+            }
+            other => panic!("expected modify rejected event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hostile_fill_trade_id_drops_fill_without_panicking() {
+        // Nautilus caps TradeId at 36 non-empty ASCII chars and the panicking
+        // From impl asserts past that. A server-sent or havoc-corrupted id
+        // must drop the fill with a warning instead of panicking the
+        // unsupervised exec task; the mirror stays untouched.
+        let (ctx, mut rx) = exec_context();
+        let long_id = "T-".repeat(30);
+
+        handle_exec_message(
+            ServerMessage::OrderFilled(wire_fill(&long_id, Decimal::ZERO, 11)),
+            &ctx,
+        );
+
+        assert!(
+            rx.try_recv().is_err(),
+            "an unrepresentable trade id must not emit a fill event"
+        );
+        let record = order_record(&ctx.state, ClientOrderId::from("O-1")).expect("order record");
+        assert_eq!(
+            record.filled_qty,
+            Decimal::ZERO,
+            "mirror must stay unadvanced"
+        );
+        assert_eq!(record.status, OrderStatus::Submitted);
+        let state = ctx.state.lock().expect("execution state mutex");
+        assert!(state.fills.is_empty(), "no fill record for a dropped fill");
+    }
+
+    #[tokio::test]
+    async fn generate_mass_status_composes_the_three_report_sets() {
+        // The trait default returns Ok(None), which the live node's startup
+        // reconciliation logs as "no mass status available" and reconciles
+        // NOTHING. The implementation must compose the three report
+        // generators: open orders, their fills, current positions.
+        let mut client = execution_client();
+        client.instruments = instruments_map();
+        seed_order(&client.state);
+        let (ctx, _rx) = exec_context();
+        let ctx = ExecContext {
+            emitter: ctx.emitter,
+            state: Arc::clone(&client.state),
+            instruments: Arc::clone(&client.instruments),
+            trader_id: ctx.trader_id,
+            account_id: ctx.account_id,
+            account_type: ctx.account_type,
+            sim: ctx.sim,
+        };
+
+        handle_exec_message(
+            ServerMessage::OrderAccepted {
+                client_order_id: "O-1".into(),
+                venue_order_id: "V-1".into(),
+                ts_event: 10,
+            },
+            &ctx,
+        );
+        // A partial fill keeps the order open, so it passes the open_only
+        // filter the canonical mass-status shape applies to order reports.
+        handle_exec_message(
+            ServerMessage::OrderFilled(wire_fill("T-1", Decimal::new(1, 0), 11)),
+            &ctx,
+        );
+        handle_exec_message(
+            ServerMessage::AccountState(mogwai_protocol::AccountState {
+                balances: Vec::new(),
+                positions: vec![mogwai_protocol::Position {
+                    symbol: "BTCUSDT".into(),
+                    quantity: Decimal::new(1, 0),
+                    avg_px: Decimal::new(10_000, 2),
+                }],
+                ts_event: 12,
+            }),
+            &ctx,
+        );
+
+        let mass = client
+            .generate_mass_status(None)
+            .await
+            .expect("mass status generates")
+            .expect("mass status is Some, not the trait's None default");
+
+        assert_eq!(mass.client_id, client.core.client_id);
+        assert_eq!(mass.account_id, client.core.account_id);
+        assert_eq!(mass.venue, *MOGWAI_VENUE);
+        let orders = mass.order_reports();
+        assert_eq!(orders.len(), 1, "the open order must report");
+        let order = orders
+            .get(&VenueOrderId::from("V-1"))
+            .expect("keyed by venue order id");
+        assert_eq!(order.order_status, OrderStatus::PartiallyFilled);
+        let fills = mass.fill_reports();
+        assert_eq!(
+            fills.get(&VenueOrderId::from("V-1")).map(Vec::len),
+            Some(1),
+            "the order's fill must report under its venue id"
+        );
+        assert_eq!(mass.position_reports().len(), 1, "the position must report");
+
+        // The lookback maps onto the same start bound the three generators
+        // already apply (ts within [start, end]): a 1-minute lookback against
+        // sim-now excludes every mirrored record stamped near the epoch.
+        let bounded = client
+            .generate_mass_status(Some(1))
+            .await
+            .expect("bounded mass status generates")
+            .expect("bounded mass status is Some");
+        assert!(bounded.order_reports().is_empty());
+        assert!(bounded.fill_reports().is_empty());
+        assert!(bounded.position_reports().is_empty());
+    }
+
+    #[tokio::test]
+    async fn http_post_failure_reject_bypasses_client_drop_havoc() {
+        // A synthesized POST-failure reject models a purely local transport
+        // failure - it never traveled the wire - so it must NOT pass through
+        // the per-dispatch HavocFilter: with drop_prob = 1.0 the filter would
+        // discard the terminal event and wedge the order in Submitted forever
+        // (the cancel branch already bypasses for the same reason).
+        let mut client = execution_client_with_config(MogwaiExecClientConfig {
+            transport_profile: TransportProfile::HttpOrders,
+            // Loopback port 1: nothing listens there, so the POST fails fast
+            // with a transport error instead of waiting out a timeout.
+            base_url: "ws://127.0.0.1:1".to_string(),
+            havoc: Some(HavocSpec {
+                client: ClientHavoc {
+                    drop_prob: 1.0,
+                    ..ClientHavoc::default()
+                },
+                ..HavocSpec::default()
+            }),
+            ..MogwaiExecClientConfig::default()
+        });
+        let (tx, mut rx) = unbounded_channel();
+        client.emitter.set_sender(tx);
+        seed_order(&client.state);
+
+        client
+            .dispatch_order(ExecWsCommand::Submit(mogwai_protocol::SubmitOrder {
+                client_order_id: "O-1".into(),
+                symbol: "BTCUSDT".into(),
+                side: Side::Buy,
+                order_type: mogwai_protocol::OrderType::Limit,
+                quantity: Decimal::new(1, 0),
+                price: Some(Decimal::new(10_000, 2)),
+                time_in_force: mogwai_protocol::TimeInForce::Gtc,
+            }))
+            .expect("HTTP dispatch spawns");
+
+        let event = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("the synthesized reject must arrive despite drop_prob = 1.0")
+            .expect("event channel stays open");
+        assert!(matches!(
+            event,
+            ExecutionEvent::Order(OrderEventAny::Rejected(_))
+        ));
+        let record = order_record(&client.state, ClientOrderId::from("O-1")).expect("order record");
+        assert_eq!(record.status, OrderStatus::Rejected);
     }
 }

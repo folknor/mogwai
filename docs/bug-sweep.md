@@ -15,44 +15,22 @@ Wave 2 (complete): adapter execution half, adapter data half, cross-boundary
 contract audit against research/.
 Fix batch 1 (complete): E1, E2, E6, E8/AE11, E12, E13, E14, D1, D2, D3, S1,
 S2, S3, S4, S6, AD1, AD20 verified-and-fixed (every one confirmed real), plus
-a lateral TradeId-length panic found and fixed in convert.rs. See "Found
+a lateral TradeId-length panic found and fixed in convert.rs.
+Fix batch 2 (complete): E3, E15, AE1, AE3, AE4, AE5, AE7, AE12, F1, F2, F3,
+S5, S8, S9, X1 verified-and-fixed (every one confirmed real). See "Found
 during fix batches" and "Upstream candidates" at the bottom for new entries.
 
 IDs: E = engine/protocol, D = data path, S = server, AD = adapter data half,
-AE = adapter exec half, X = cross-boundary seams. Wave-2 dedupe notes: the
-serial havoc-latency throughput cap was reported independently by both adapter
-agents (recorded once as AD4); the mirror terminal-state regression by the
-exec and seam agents (AE3); the request_bars truncation by the data and seam
-agents (AD3); the ModifyRejected venue-id fallback asymmetry by the exec and
-seam agents (AE7); the submit-before-dispatch OrderSubmitted by the exec and
-data agents (AE8); the min-start_ts cursor drag by the data and exec agents
-(AD7).
+AE = adapter exec half, X = cross-boundary seams, F = found during fix
+batches. Wave-2 dedupe notes for surviving entries: the serial havoc-latency
+throughput cap was reported independently by both adapter agents (recorded
+once as AD4); the request_bars truncation by the data and seam agents (AD3);
+the submit-before-dispatch OrderSubmitted by the exec and data agents (AE8);
+the min-start_ts cursor drag by the data and exec agents (AD7).
 
 ---
 
 ## Engine + protocol (crates/mogwai-engine, crates/mogwai-protocol)
-
-### E3. bug (doc/code contradiction) - known-but-terminal rejects violate the documented `venue_order_id` presence rule
-
-`mogwai-engine` `on_cancel`/`on_modify` vs `mogwai-protocol`
-`OrderModifyRejected`/`OrderCancelRejected` field docs and
-`reference/architecture.md` ("venue_order_id is absent only when the order id
-is unknown"). Severity medium for any consumer keying off presence, confidence
-high.
-
-For an id that was accepted but has gone terminal, the engine emits
-`venue_order_id: None` with reason "order already terminal (filled or
-canceled)" - the id is known (the reason string proves it, via
-`seen_client_order_ids`), yet the venue id is absent, because the engine keeps
-only a `HashSet` of seen ids and discards the venue id when the order leaves
-`open`. An adapter following the documented rule will misclassify
-terminal-order rejects as unknown-order rejects. Either the doc rule weakens or
-the engine needs an id-to-venue-id map for terminal orders.
-
-Wave-2 resolution: the adapter does NOT rely on wire presence - it keys
-known/unknown off its own mirror, so no misbehavior today. But the two reject
-paths compensate asymmetrically (see AE7), and the doc/code contradiction
-stands.
 
 ### E4. gap - Validator disagreement on priceless Market orders; "share the same validators" is not literally true
 
@@ -104,11 +82,9 @@ misleads for a perfectly-validated fraction.
   commission sign handling (buy adds, sell subtracts - correct) is never
   exercised with a non-zero value anywhere in the crate.
 - E11. smell - `seen_client_order_ids` grows forever (documented as
-  intentional for terminal-vs-unknown discrimination; also the natural home
-  for the venue-id retention fix in E3).
-- E15. nit - `validate_submit`'s "market order requires positive price" branch
-  is live only as a message differentiator; the generic `price <= ZERO` check
-  below covers the same condition.
+  intentional for terminal-vs-unknown discrimination). Since fix batch 2 it is
+  a map retaining a venue id per entry (the E3 fix), so the deliberate
+  unbounded growth now carries slightly more per-entry weight.
 - E16. nit - protocol's `#[cfg(test)] mod tests` sits mid-file with
   `SubmitOrder`, `ServerMessage`, and the `control` module defined after it -
   legal but disorienting in a 2000-line file.
@@ -237,23 +213,6 @@ divergence from the protocol's zeroing variant is deliberate and documented.
 
 ## Server (crates/mogwai-server)
 
-### S5. bug - Live subscription can silently stream zero frames when the seek exceeds the caps; no error frame, no log
-
-`source.rs` + `main.rs` `spawn_replay`. Severity moderate, confidence high.
-
-Two paths: (a) a regime'd subscribe always takes the fresh from-origin drain;
-once `sim_now - data_origin` exceeds `MAX_HISTORY_SEEK_TICKS` (about two wall
-hours of uptime at speed 100; identity mode is protected by the default 24 h
-horizon), `BoundedSeek::seek_to` returns `None`, MergeSource yields nothing,
-and the replay thread logs started/finished back to back while the client sees
-a healthy-but-idle feed - exactly the failure mode the ProtocolError work was
-done to eliminate. (b) the clean path after long idle: `extend_to` walks at
-most 190k ticks per call, then BoundedSeek caps another 190k; a frontier
-lagging sim-now by more gives the same silent dead subscribe, and only
-repeated resubscribes ratchet the frontier forward. Contradicts
-architecture.md's "a fresh subscribe's seek is flat in K no matter how long
-the session has run" (true only while the index is kept warm).
-
 ### S7. bug (low) - flock/unlink race in `stop` can leave a live daemon unguarded
 
 `main.rs`, `stop`. Severity low (narrow window), confidence high on the
@@ -266,22 +225,6 @@ its lock on a ghost file, the path is free, and a second `serve` (fresh inode)
 can also start - two daemons, and `stop` cannot see the first. Same race class
 between `stop`'s unlink and `serve`'s open. The classic
 flock-on-unlinkable-pidfile hazard.
-
-### S8. gap - /trades serves the future (look-ahead leak)
-
-`main.rs`, `trades`. Refuses `start < data_origin` but nothing bounds
-`start`/`end` at sim-now. A request for a future window extends the shared
-index into the future (up to the extension cap) and returns deterministic
-FUTURE ticks - a client can read tomorrow's tape. architecture.md says
-legitimate windows live in `[data_origin, sim_now]` "by construction", but the
-upper bound is unenforced.
-
-### S9. gap - Subscribe with `start_ts < data_origin` silently clamps to the origin
-
-`build_live_source`/`positioned_generator`: a pre-origin target skips the
-checkpoint path, the fresh generator starts at origin, the seek trivially
-succeeds - the client gets an origin-anchored stream with no indication.
-Asymmetric with /trades, which refuses the same window loudly with a 422.
 
 ### S10. gap - ProtocolError is execution-category but bypasses the DelayAcks pump
 
@@ -371,12 +314,12 @@ NTP-immune anchor pairing in spawn_replay is sound.
 
 ## Cross-wave thread resolutions
 
-- E3 (venue_order_id presence rule): resolved harmless today - the adapter
-  keys off its mirror, not wire presence. Asymmetric compensation recorded as
-  AE7; the engine/doc contradiction stands.
+- E3 (venue_order_id presence rule): FIXED in fix batch 2 - the engine now
+  retains venue ids for terminal orders and the wire contract's presence rule
+  holds; the adapter's fallback (old AE7) is aligned on both reject paths as
+  defense in depth.
 - E8 / AE11 (zero-initial backoff spin): confirmed and FIXED in fix batch 1
-  at the validator. Residual lifecycle comment cleanup recorded under "Found
-  during fix batches" below.
+  at the validator; lifecycle comments trued up in batch 2 (old F2).
 - D1 (exact-ts seek off-by-one): confirmed and FIXED in fix batch 1. The
   adapter-side defense-in-depth gap remains as the downgraded AD8.
 - D3 (ReopenGap at_ts at or before the anchor): FIXED in fix batch 1 at the
@@ -387,9 +330,11 @@ NTP-immune anchor pairing in spawn_replay is sound.
   (resume floor read after quiesce). The adapter-side stale-start_ts
   duplication paths remain - see AD5, AD7 - and the WS drain still has zero
   dedup.
-- S5 (silent zero-frame subscription): the adapter has no dead-feed watchdog
-  on either transport, so a dead feed is structurally indistinguishable from
-  a quiet market - see AD12.
+- S5 (silent zero-frame subscription): server half FIXED in fix batch 2 -
+  unservable subscribes (unknown symbol, exhausted seek, pre-origin start_ts)
+  now warn and emit ProtocolError frames. But the adapter's data drain
+  swallows ProtocolError (X8, upgraded), so broadarrow still cannot see the
+  diagnostics; AD12 remains open with X8 as its cheapest first step.
 - S11 (HTTP carriers exempt from temporal divergences): CONFIRMED at the seam,
   undocumented.
 
@@ -571,15 +516,19 @@ Day/hour/minute/second are correctly UTC-aligned.
 
 `client.rs`, both transports. Severity medium, confidence high.
 
-Per S5 the server can ack a subscribe and stream zero frames. On the WS path
-the default ConnHavoc has idle_timeout_ms = 0 (disabled), and even when
-armed, the idle clock resets on ANY application frame (heartbeat, exec
+The server used to be able to ack a subscribe and stream zero frames (old
+S5); since fix batch 2 it emits a ProtocolError frame on an unservable
+subscribe, so the WS wire now carries the diagnostic. But the adapter's data
+drain SWALLOWS ProtocolError (X8), so nothing downstream sees it yet. On the
+WS path the default ConnHavoc has idle_timeout_ms = 0 (disabled), and even
+when armed, the idle clock resets on ANY application frame (heartbeat, exec
 traffic), so a data-silent-but-frame-active socket never trips it -
 deliberate for the 4255 reproduction, but it means the CLEAN default has no
 watchdog, no counter, no periodic "0 ticks in N s for subscribed symbol" log.
 On the polling path errors are fully silent (AD6, AD13). broadarrow cannot
 distinguish dead feed from quiet market by design, and there is no
-adapter-side diagnostic to consult after the fact.
+adapter-side diagnostic to consult after the fact. Fixing X8 is now the
+cheapest first step.
 
 ### AD13. gap - Poll-loop fetch failures are swallowed with no log whatsoever
 
@@ -701,26 +650,6 @@ blocking calls in create.
 
 ## Adapter, exec half (crates/mogwai-adapter: client.rs exec side, lifecycle.rs, clock.rs)
 
-### AE1. bug - Synthesized POST-failure rejects pass through the HavocFilter, so drop_prob can permanently wedge an order in Submitted
-
-`client.rs` `dispatch_order` (HTTP error branch). Severity high under armed
-drop havoc, zero impact with a clean spec. Confidence high.
-
-On a failed POST for Submit/Modify, `reject_for(...)` is routed through
-`dispatch_havoc(&mut filter, ...)` - the same per-dispatch HavocFilter used
-for real wire events. A drop_prob draw discards the synthesized
-OrderRejected/OrderModifyRejected entirely: nautilus never sees a terminal
-event, and the mirror stays Submitted with no venue id (so it is also omitted
-from order-status reports). This defeats the documented contract ("a failed
-POST synthesizes the matching reject so the order reaches a terminal state
-instead of wedging in Submitted"). It is also semantically wrong: the reject
-never traveled the wire - it models a purely local transport failure - and
-the cancel branch right next to it deliberately bypasses the filter for
-exactly that reason (`emit_cancel_rejected`, "the failure is purely local...
-nothing for the venue-havoc pipeline to model"). Submit/Modify should get the
-same bypass. duplicate_prob similarly double-emits the reject (invalid-
-transition log noise); reorder_prob can hold it until the flush.
-
 ### AE2. gap - Lost-response desync is unrecoverable: reconciliation reports rebuild from the same corrupted client-side mirror, and the venue has no order-status query surface
 
 `client.rs` report generators; mogwai-server routing (no GET /orders).
@@ -742,53 +671,6 @@ venue-truth source: the server exposes only POST /orders. Also: the adapter
 never re-pulls GET /account on an internal reconnect, so an account snapshot
 lost to a blackout stays lost until the next fill-driven snapshot.
 
-### AE3. bug - Mirror status regresses on reordered/duplicated exec events: no terminal-state guard, no ts ordering guard
-
-`client.rs` `handle_exec_message` (OrderAccepted, OrderCanceled, OrderUpdated
-arms), `handle_order_filled`. Severity medium-high under reorder/duplicate
-havoc. Confidence high. (Reported independently by the exec and seam agents;
-the seam agent notes nautilus's own FSM refuses exactly this regression - no
-(Filled, Accepted) arm exists in its transition table.)
-
-OrderAccepted unconditionally sets `record.status = Accepted`; OrderCanceled
-sets Canceled; OrderUpdated recomputes from leaves_qty. The engine emits
-Accepted and Filled adjacently (immediate fills) - precisely the pair
-reorder_prob transposes: the mirror ends Filled then regresses to Accepted
-and is stuck non-terminal FOREVER (nothing later corrects it; the order is
-terminal at the venue). generate_order_status_reports(open_only) then reports
-a phantom open order with full filled_qty - the same phantom-EXTERNAL failure
-class the position-drop fix was landed to prevent. Nautilus's own order ends
-correctly Filled (Submitted to Filled is legal), so the mirror alone is
-corrupted. Impact today is muted only because of X1 (order reports are never
-consumed in a real broadarrow run). Cheap fix: never overwrite a terminal
-mirror status from Accepted/Updated, and/or ignore events with ts_event <
-record.ts_last.
-
-### AE4. bug - handle_account_state applies snapshots in arrival order with no ts_event monotonicity check; reorder/duplicate havoc regresses the position mirror persistently
-
-`client.rs` `handle_account_state`. Severity medium-high under reorder havoc,
-benign for exact duplicates (idempotent). Confidence high.
-
-The drop-absent-symbols rule assumes each inbound snapshot is the newest. Two
-adjacent AccountStates (two fills in a burst) transposed by reorder_prob
-leave the mirror holding the OLDER snapshot: a just-closed position
-resurrected (phantom EXTERNAL - exactly the desync the retain exists to kill)
-or a just-opened one dropped, and ts_last moves backward (additionally
-perturbing in_time_range filtering). Nothing corrects it until the next
-fill-driven snapshot, which may be never. Guard: skip any snapshot whose
-ts_event is less than the last applied one.
-
-### AE5. gap - Unknown-order OrderAccepted / OrderCanceled / OrderUpdated / OrderFilled are dropped silently, unlike the reject paths which warn
-
-`client.rs` `handle_exec_message`, `handle_order_filled`. Severity low-medium
-(observability), confidence high.
-
-The three reject arms log an explicit A.11 warning when the mirror lacks the
-order; the Accepted/Canceled/Updated arms return from the else with no log,
-and a fill for an unknown order likewise vanishes silently. A fill is the
-case where silence hurts most - money moved at the venue and the adapter said
-nothing. Matters for any event arriving after reset() cleared the mirror.
-
 ### AE6. smell - ExecState grows without bound
 
 `client.rs` ExecState. Severity low, confidence high.
@@ -798,18 +680,6 @@ from failed WS sends live forever) and `fills` is an append-only Vec. A
 long-lived forward run accumulates memory linearly and every report
 generation scans it all; every report also re-warns "omitting order status
 report" for each venue-id-less stray.
-
-### AE7. nit - OrderModifyRejected does not fall back to the mirror's venue id, unlike the cancel path
-
-`client.rs` ModifyRejected arm vs `emit_cancel_rejected`. Confidence high.
-(Reported independently by the exec and seam agents; see also E3.)
-
-`emit_cancel_rejected` does `wire_venue_order_id.or(record.venue_order_id)`
-while the ModifyRejected arm emits the wire Option bare, so a known order's
-modify-reject reaches nautilus with venue_order_id: None where the equivalent
-cancel-reject would carry the id. Harmless to nautilus (optional field,
-modify_rejected only restores status) but inconsistent; align when the
-engine-side E3 fix lands.
 
 ### AE8. smell - submit_order emits OrderSubmitted before conversion/dispatch can fail
 
@@ -850,21 +720,10 @@ mass-status endpoints return all open orders regardless of last-activity
 time. (The seam agent's check found nautilus's manager tolerates this for
 open_only=true - it only logs - so no false venue-cancels today.)
 
-### AE12. bug/smell - No backoff at all on the first reconnect after an established connection drops, and the attempt cap can never exhaust under accept-then-die
-
-`lifecycle.rs` `run_ws_connection`. Severity medium, confidence high on
-behavior, medium on whether it is intended semantics.
-
-`attempt` resets to 0 on every successful connect_async, and after the inner
-loop breaks (Close, error, idle timeout) the outer loop re-dials immediately
-- the backoff sleep exists only on the connect_async Err arm. Consequences:
-(a) a venue that accepts the WS handshake and immediately closes (or a short
-idle_timeout against a stalled server) produces an unthrottled
-connect/teardown flood with zero delay between cycles; (b)
-reconnect_max_attempts semantically becomes "consecutive failed dials" and
-never trips in that scenario. Most production reconnect loops sleep the
-backoff after ANY disconnect and only reset the attempt counter after the
-connection has stayed up for a grace period.
+Priority bump after fix batch 2: `generate_mass_status` (the X1 fix) now
+composes the order reports with this same lookback filter and startup
+reconciliation actually consumes it, so a long-quiet resting order can now be
+hidden from a REAL consumer, not a hypothetical one.
 
 ### AE13. nit - HttpQuota::wait holds the tokio Mutex across the sleep; quota accounting is inconsistent across call sites
 
@@ -956,34 +815,7 @@ excluded via ts_event + 1.
 
 ## Cross-boundary seams (wire protocol, nautilus FSM/traits, broadarrow expectations)
 
-### X1. gap - Startup reconciliation is a silent no-op for MOGWAI: generate_mass_status never implemented
-
-Adapter: `client.rs` implements the three generate_*_reports but NOT
-generate_mass_status. Nautilus: the trait default returns Ok(None)
-(research common/src/clients/execution.rs), and the live node's
-perform_startup_reconciliation calls ONLY generate_mass_status per client -
-on None it logs "No mass status available... (likely adapter error)" and
-reconciles NOTHING. Canonical adapters implement it by composing the three
-report sets (e.g. the kraken spot adapter). Broadarrow: run-prep enables
-reconciliation and continuous position checks but sets
-open_check_interval_secs: None - the open-order poll is deliberately off.
-Severity high; confidence high on mechanism (traced call-by-call),
-medium-high on operational impact (fresh forward runs with no prior position
-never notice).
-
-Failure scenario: at every boot, startup reconciliation for MOGWAI warns and
-skips. A worker restarted while holding an open mogwai position boots with an
-empty cache; the bridge's restart path adopts flat. The venue net is
-discovered only by the first periodic position poll (10 s startup delay plus
-30 s or more interval), which lands mid-run as an out-of-band venue move /
-synthesized reconciliation fill - the late-EXTERNAL-adoption desync the
-mirror's phantom-position drop rule was specifically built to avoid.
-
-Corollary: with mass status unimplemented and the open-order poll off,
-generate_order_status_reports and generate_fill_reports are NEVER called in a
-real broadarrow run (only generate_position_status_reports is, every 30 s or
-more). architecture.md's "the three reconciliation report generators rebuild
-from that mirror" oversells what is actually consumed.
+### X1. (fixed in batch 2 - generate_mass_status now composes the three report sets. Residuals: the mirror is in-memory, so after a true process restart mass status is honest-but-empty - healing that needs the AE2/X3 venue-truth source - and broadarrow's disabled open-order poll is tracked as U4.)
 
 ### X2. (merged into AD3 - request_bars unit mismatch and single-page truncation)
 
@@ -1042,12 +874,18 @@ across the two carriers"; the ordering guarantee is not.
 
 ### X7. (merged into S11 - temporal divergences do not apply to the HTTP carriers; confirmed and expanded there)
 
-### X8. nit - ProtocolError frames are silently swallowed on the data path
+### X8. gap (upgraded from nit) - ProtocolError frames are silently swallowed on the data path
 
 `client.rs` `handle_market_message`: the catch-all arm swallows
 ProtocolError; the exec path warns. A version-skewed/malformed Subscribe
 rejected by the server is invisible on the data client - the feed just stays
 silent until the warmup watchdog fires.
+
+Priority bump after fix batch 2: the server now actively uses ProtocolError
+for unservable-subscribe diagnostics (unknown symbol, exhausted positioning
+seek, pre-origin start_ts clamp), so this swallow now hides real, deliberate
+dead-feed diagnostics from broadarrow - fixing it is the cheapest first step
+on AD12.
 
 ### X9. nit/doc - OMS type: docs say Netting, broadarrow always runs the mogwai exec client at Hedging
 
@@ -1098,36 +936,6 @@ partial-then-cancel pair, pending-restore on both reject kinds, and the
 
 ## Found during fix batches (new, unresolved)
 
-### F1. bug - Wire fill trade ids convert through the panicking TradeId::From on the exec drain
-
-`client.rs` (exec side), the `TradeId::from(fill.trade_id)` in fill handling.
-Found by the batch-1 convert agent while fixing the data-side TradeId panic.
-Severity medium-high (same feed-killing class as the fixed AD1), confidence
-high.
-
-A server-sent (or havoc-corrupted) trade id over 36 chars, empty, or
-non-ASCII panics the exec task through nautilus's panicking `From<String>`.
-Route through `TradeId::new_checked` with a drop-and-warn like the data side
-now does. Belongs to the client.rs batch.
-
-### F2. gap - lifecycle.rs comments and defensive floor are stale against the new conn-havoc validator rule
-
-`lifecycle.rs` `ReconnectPolicy::backoff` doc comment and the
-`reconnect_policy_zero_initial_stays_zero` test comment describe the
-initial==0-with-max>0 combination the validator now rejects. The test itself
-still pins the valid both-zero case and passes. Decide whether the
-belt-and-suspenders lifecycle guard wants a nonzero floor for
-validation-bypassing callers, and update both comments. Belongs to the
-lifecycle.rs batch.
-
-### F3. nit - A market order whose price synthesis fails is rejected with the misleading "submit price required"
-
-`mogwai-server` order path. After the batch-1 stale-price fix, a seek-cap
-failure leaves `current_price` returning None and the engine rejects the
-price-less order with "submit price required" - wrong story for a client
-that correctly sent no price. A dedicated "could not synthesize a market
-price" rejection would be honest (adjacent to the S5 silent-empty family).
-
 ### F4. gap - Daemon-log integration pin missing
 
 The batch-1 S6 fix logs child startup failures to the configured log, but
@@ -1153,6 +961,63 @@ the closed-window gate (arrival multiplier < 0.01). A drought's thin_factor
 stretch on an open-hour gap is still a once-sampled multiplier, now capped at
 366 days. Deliberate (thin tape is a venue-wide divergence, not a session
 curve); recorded as behavior, not a bug.
+
+### F7. bug - VenueOrderId::from and ClientOrderId::from on wire strings are still panicking constructors throughout the exec drain
+
+`client.rs` exec drain. Found by the batch-2 client agent while fixing F1.
+Severity medium (same feed-killing class as the two fixed TradeId panics),
+confidence high.
+
+The F1 fix routed the fill's trade id through new_checked, but every other
+wire id in the exec drain (`VenueOrderId::from`, `ClientOrderId::from`,
+including `VenueOrderId::from(fill.venue_order_id)`) still uses the panicking
+From on server-sent strings. A corrupted over-long or empty id panics the
+exec task. Same drop-and-warn treatment wanted.
+
+### F8. gap - Subscribe with a FUTURE start_ts is the unfixed WS twin of the /trades look-ahead leak
+
+`mogwai-server` `handle_socket`/`resume_seek_target`. Found by the batch-2
+server agent while fixing S8. Severity low-medium, confidence high.
+
+A live Subscribe with explicit start_ts beyond sim-now is honored as given:
+the checkpoint index extends toward the future, and in identity mode the
+first future-stamped tick emits unpaced (accelerated mode is protected by
+deadline pacing). The /trades side now refuses future starts; the WS side
+does not. Fixing touches resume_seek_target and pacing semantics.
+
+### F9. gap - Adapter clock skew against the new /trades sim-now refusal lands on the silent poll swallow
+
+Cross-crate (server 422 vs adapter poll loop). Found by the batch-2 server
+agent. Severity low (same-machine deployments safe), confidence medium.
+
+If the adapter's sim-now anchor ever runs ahead of the server's (cross-machine
+NTP skew), its poll `start` can trip the new start-beyond-sim-now 422 - and
+per AD6/AD13 the poll loop swallows fetch errors silently, so the feed dies
+with no diagnostic. Amplifies the case for fixing AD13's silent error
+handling.
+
+### F10. note - The OrderRejected arm still overwrites mirror status unconditionally
+
+`client.rs`. Deliberately left by the batch-2 client agent: the engine emits
+Rejected as an order's sole lifecycle event so no reorder pair exists; the
+only reachable overwrite is the HTTP synthesized-reject-after-processed case,
+which is AE2's documented unrecoverable-desync class. Recorded so the
+asymmetry with the new terminal-state guards reads as a decision, not an
+oversight.
+
+### F11. smell - Non-terminal reorders can still move ts_last backward for open orders
+
+`client.rs`. The batch-2 fill handler got a forward-only ts_last guard, but
+Accepted/Updated on a still-open order can still move ts_last backward under
+reorder havoc, perturbing in_time_range filtering. The full ts-ordering guard
+from AE3's original suggestion is only partially applied.
+
+### F12. nit - The reconnect loop sleeps one final backoff before returning exhausted
+
+`lifecycle.rs` `run_ws_connection`. Pre-existing shape the batch-2 lifecycle
+agent kept (mirrors the Err-arm): after the last permitted cycle dies, the
+loop sleeps its backoff once more before the loop-top exhausted check
+returns. Harmless delay of the exhausted return by one backoff.
 
 ---
 
