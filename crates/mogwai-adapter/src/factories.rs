@@ -49,8 +49,14 @@ impl DataClientFactory for MogwaiDataClientFactory {
                 )
             })?
             .clone();
-        config.validate()?;
 
+        // No `config.validate()?` here: `MogwaiDataClient::new` validates the
+        // config as its first step and propagates any error through the `?`
+        // below, so a second validation at the factory is pure redundancy
+        // (AD26). The constructor is the single validation site - it is the
+        // real entry point, callable directly, not just via this factory - and
+        // the factory's own reject tests exercise that path, so a regression
+        // that dropped the constructor's check would still turn them red.
         let client = MogwaiDataClient::new(ClientId::from(name), config)?;
         Ok(Box::new(client))
     }
@@ -97,8 +103,13 @@ impl ExecutionClientFactory for MogwaiExecutionClientFactory {
                 )
             })?
             .clone();
-        config.validate()?;
 
+        // No `config.validate()?` here: `MogwaiExecutionClient::new` validates
+        // the config as its first step and propagates any error through the `?`
+        // below (AD26). Building `ExecutionClientCore` first for a config that
+        // `new` then rejects only happens on the error path and touches none of
+        // the validated fields, so it is harmless. Validating in the
+        // constructor keeps a single validation site - see the data factory.
         let core = ExecutionClientCore::new(
             config.trader_id,
             ClientId::from(name),
@@ -267,9 +278,10 @@ mod tests {
 
     #[test]
     fn mogwai_factory_rejects_empty_base_url() {
-        // `create` runs `config.validate()?` after the downcast; pin that a
-        // blank mogwai-server URL is rejected so a misconfigured client never
-        // reaches the later transport landing with nowhere to connect.
+        // `create` delegates validation to `Mogwai*Client::new` (AD26); pin
+        // that a blank mogwai-server URL is still rejected through that path so
+        // a misconfigured client never reaches the later transport landing with
+        // nowhere to connect.
         let data_factory = MogwaiDataClientFactory::new();
         let data_config = MogwaiDataClientConfig {
             base_url: "   ".to_string(),

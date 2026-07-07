@@ -85,6 +85,60 @@ impl ReconnectPolicy {
     }
 }
 
+/// Backs off before the next reconnect, unless the attempt cap is already
+/// spent. Computes the backoff for the current `*attempt`, advances the
+/// counter, and returns whether the ADVANCED counter has hit
+/// `reconnect_max_attempts`. When it has, the sleep is SKIPPED and `true` is
+/// returned: the caller must return instead of looping, because the loop-top
+/// exhausted check would return anyway and sleeping a final backoff first only
+/// delays that exhausted return by one pointless interval (F12). When the cap
+/// is not yet reached, the current attempt's backoff is slept and `false` is
+/// returned so the caller re-dials. `connected` is already stored `false` on
+/// both reconnect paths, so an exhausted return needs no further store here.
+async fn backoff_or_exhausted(
+    policy: &ReconnectPolicy,
+    attempt: &mut u32,
+    rng: &mut StdRng,
+) -> bool {
+    let delay = policy.backoff(*attempt, rng);
+    *attempt = attempt.saturating_add(1);
+    if policy.exhausted(*attempt) {
+        return true;
+    }
+    tokio::time::sleep(delay).await;
+    false
+}
+
+/// Per-connection HTTP rate limiter enforcing `max_requests_per_second`.
+///
+/// Accounting contract - which HTTP calls this meters, and which are exempt
+/// (AE13). Keep call sites consistent with this list, since the meter itself
+/// cannot see who bypasses it:
+///
+/// METERED (steady-state data-plane and order-plane). Every
+/// `fetch_instruments` / `fetch_account` / `fetch_trades` / `post_order` in
+/// `client.rs` awaits `wait()` before issuing its request, so the configured
+/// ceiling governs the ongoing request stream a running strategy generates.
+///
+/// EXEMPT (connect-time bootstrap, deliberately un-metered):
+///   - the clock fetch (`clock::fetch_clock`) - it runs BEFORE this quota
+///     exists, because the quota's spacing is `sim`-scaled and `sim` is exactly
+///     what the clock fetch returns; `connect()` builds the quota FROM that
+///     result. Metering it is a chicken-and-egg: there is no quota to wait on
+///     yet.
+///   - `ship_server_havoc` - a bounded, one-shot control-plane POST loop that
+///     arms divergences at connect, not part of the steady request stream.
+///
+/// Both exemptions are connect-time and bounded, so neither contributes to the
+/// sustained rate the ceiling exists to bound. Routing them through the meter
+/// too would be strictly consistent but is a `client.rs` call-site change, not
+/// something this type can enforce.
+///
+/// Known shape, not fixed here: `wait()` holds the mutex across its sleep to
+/// enforce FIFO spacing across concurrent callers, so a burst of N dispatches
+/// queues linearly with no cap and no timeout. An order can sit in the queue
+/// while nautilus sees only `Submitted`. A queue cap/timeout would be a design
+/// change; the spacing-via-held-mutex is intentional.
 #[derive(Clone, Debug)]
 pub(crate) struct HttpQuota {
     min_interval: Option<Duration>,
@@ -188,9 +242,9 @@ pub(crate) async fn run_ws_connection<
             Ok((ws, _)) => ws,
             Err(_) => {
                 connected.store(false, Ordering::Relaxed);
-                let delay = policy.backoff(attempt, &mut rng);
-                attempt = attempt.saturating_add(1);
-                tokio::time::sleep(delay).await;
+                if backoff_or_exhausted(&policy, &mut attempt, &mut rng).await {
+                    return;
+                }
                 continue;
             }
         };
@@ -338,9 +392,12 @@ pub(crate) async fn run_ws_connection<
         // (the counter was reset by its first inbound frame), while unproven
         // cycles compound toward `reconnect_max_attempts`. The delay is
         // sim-clock-scaled inside `backoff`, like every other lifecycle sleep.
-        let delay = policy.backoff(attempt, &mut rng);
-        attempt = attempt.saturating_add(1);
-        tokio::time::sleep(delay).await;
+        // If advancing the counter here spends the last permitted attempt, the
+        // loop returns immediately rather than sleeping a final backoff before
+        // the loop-top exhausted check would return anyway (F12).
+        if backoff_or_exhausted(&policy, &mut attempt, &mut rng).await {
+            return;
+        }
     }
 }
 
@@ -668,8 +725,11 @@ mod tests {
             "a three-attempt cap must dial exactly three unproven connections"
         );
         assert!(
-            elapsed >= Duration::from_millis(300),
-            "each unproven drop must sleep the 100ms backoff before redialing \
+            (Duration::from_millis(200)..Duration::from_millis(300)).contains(&elapsed),
+            "three dials span exactly two 100ms backoffs (~200ms): the first two \
+             unproven drops sleep before redialing, but the third, exhausting \
+             cycle returns immediately instead of sleeping a pointless final \
+             backoff (F12) - a third sleep would push elapsed to ~300ms \
              (elapsed {elapsed:?})"
         );
         server.abort();
