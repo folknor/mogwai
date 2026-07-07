@@ -28,8 +28,12 @@ AE8, AE9, AE10, AE18, AE19, F8, F11, F12, F13, F14 fixed; E4, S17 refuted;
 E9, E10, D13, D14, D15, S18, AE13, AE14, AE15, AE16, AE17 resolved as
 documented-deferrals; F15 was already fixed in an earlier batch. Remaining
 open items are the design-scoped ones (AD4, AD12, AE2, X3), the flagged
-follow-ups, and the doc-drift items the orchestrator owns. See "Found during
-fix batches" and "Upstream candidates" at the bottom.
+follow-ups, and the doc-drift items the orchestrator owns.
+Post-batch-4 (orchestrator solo): S14/D7 the unbounded checkpoint-index
+memory fixed via geometric coarsening (a hard MAX_CHECKPOINTS ceiling,
+byte-identity preserved); the reference-doc drift resolved (S11, S12, AD18,
+X9, F17, S18); F18 assessed as no-autonomous-change. See "Found during fix
+batches" and "Upstream candidates" at the bottom.
 
 IDs: E = engine/protocol, D = data path, S = server, AD = adapter data half,
 AE = adapter exec half, X = cross-boundary seams, F = found during fix
@@ -78,13 +82,6 @@ serde round-trips and partial-payload defaults hold on both crates.
 
 ### Data-path smells and nits
 
-- D7. smell - CheckpointIndex memory grows without bound: one full
-  `GeneratedSource` clone (rng, distributions, scalars incl. a heap String)
-  pushed every K ticks forever, nothing prunes. Also `max_extend` is per-call:
-  repeated far-future polls drag the frontier further per request, so the
-  backstop bounds latency per call but not cumulative work. (Same defect
-  reported independently by the server agent - see S14; recorded once here,
-  server angle there.)
 - D11. nit - VolStorm's clamp lift touches the feedback path: `base_return`
   (the GARCH feedback) is clamped at the LIFTED cap, and sigma2's cap is
   lifted too, so under a storm the recursion state can differ from clean
@@ -143,19 +140,14 @@ topic list gained `clock`.)
   ticks). Every live subscribe, seeked /trades, and price-less market order
   for ANY symbol queues behind it. Within stated per-call budget; bursty
   concurrency stacks.
-- S14. smell - Checkpoint index grows without bound over uptime: one
-  GeneratedSource clone per K ticks per (symbol, data_origin), never pruned;
-  a long accelerated run is a slow unbounded memory ratchet (hundreds of
-  clones per day per symbol at speed 100). (Same defect as D7, server angle.)
 - S17. nit (refuted) - Divergence atomics are all Relaxed. Batch 4 refuted
   this as a defect: the three atomics are independent with no cross-location
   invariant, and the arm and the order arrive over separate connections, so
   Release/Acquire would establish a happens-before nothing consumes. Left
   Relaxed on purpose.
-- S18. nit (documented) - Re-arming GoDark/StallData replaces the window (a
-  smaller ms SHORTENS an in-flight blackout). Batch 4 documented this
-  store-not-extend semantics in code as deliberate; havoc.md could note it
-  too (orchestrator doc item).
+- S18. nit (resolved) - Re-arming GoDark/StallData replaces the window (a
+  smaller ms SHORTENS an in-flight blackout). Documented as deliberate
+  store-not-extend semantics in code (batch 4) and in havoc.md.
 - S22a. nit (flagged) - A subscribe of N symbols spawns N OS threads,
   client-controlled and unbounded. Batch 4 fixed the S22b half (unknown
   symbols are pre-filtered and no longer spawn a throwaway thread or leave a

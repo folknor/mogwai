@@ -919,6 +919,16 @@ impl TickSource for GeneratedSource {
 /// state, so resuming it and replaying yields the same ticks a from-origin run
 /// would (the golden sequence is unchanged, and `checkpoint_resume_is_byte_identical`
 /// pins the resume path directly).
+/// Hard ceiling on the number of snapshots one `CheckpointIndex` retains. Once
+/// `extend_to` would push past this, `coarsen` halves the count and doubles the
+/// spacing, so the index's memory is bounded by `MAX_CHECKPOINTS` generator
+/// clones regardless of how long an accelerated session runs - closing the
+/// unbounded per-`k`-ticks growth. 4096 keeps coarsening rare (the first only
+/// after `4096 * k` ticks, ~34M ticks at the server's K = 8192) so the residual
+/// drain stays at the base `k` for any realistic run, while capping worst-case
+/// memory at a few tens of MB.
+const MAX_CHECKPOINTS: usize = 4096;
+
 pub struct CheckpointIndex {
     /// A generator advanced to the frontier; cloned to extend the chain and to
     /// hand out positioned sources. Carries the immutable config every snapshot
@@ -980,8 +990,37 @@ impl CheckpointIndex {
             if self.since_snapshot >= self.k {
                 self.checkpoints.push(self.lead.clone());
                 self.since_snapshot = 0;
+                if self.checkpoints.len() > MAX_CHECKPOINTS {
+                    self.coarsen();
+                }
             }
         }
+    }
+
+    /// Halve the snapshot count once it exceeds `MAX_CHECKPOINTS` by dropping
+    /// every other checkpoint and doubling the spacing `k`. This is what makes
+    /// the index's memory a HARD ceiling (`MAX_CHECKPOINTS` generator clones)
+    /// over any session length, rather than a clone per `k` ticks growing
+    /// without bound.
+    ///
+    /// It is correctness-preserving: every retained checkpoint is still the
+    /// EXACT walk state at its `clock_ns`, so resuming from the coarser grid and
+    /// replaying reproduces the identical tape - dropping an intermediate
+    /// snapshot only lengthens the residual drain (`source_at_or_before` now
+    /// resumes up to the new, larger `k` ticks before the target), it never
+    /// changes which ticks are emitted. The origin (index 0) is always retained
+    /// as the pre-first-tick fallback. The residual drain stays bounded by the
+    /// caller's `BoundedSeek`; `k` grows only logarithmically in session length
+    /// (a doubling costs `MAX_CHECKPOINTS * k` more ticks), so it never
+    /// realistically approaches that cap.
+    fn coarsen(&mut self) {
+        let mut idx = 0usize;
+        self.checkpoints.retain(|_| {
+            let keep = idx.is_multiple_of(2);
+            idx += 1;
+            keep
+        });
+        self.k = self.k.saturating_mul(2);
     }
 
     /// A fresh generator positioned at the latest checkpoint strictly before
@@ -1780,6 +1819,65 @@ mod tests {
                 "checkpoint resume diverged from the from-origin tape"
             );
             tick = resumed.next_tick().expect("trade");
+        }
+    }
+
+    // Coarsening bounds the index's memory (its unbounded per-`k`-ticks growth
+    // was the S14/D7 finding) without breaking the byte-identity guarantee.
+    // Drive the index past `MAX_CHECKPOINTS` at k=1 (a snapshot every tick) so
+    // `coarsen` fires, then assert the snapshot count stayed capped AND that
+    // resumes off the coarsened grid still reproduce the from-origin tape.
+    #[test]
+    fn checkpoint_index_coarsens_to_bound_memory_and_stays_byte_identical() {
+        let fp = Fingerprint::from_repo_json();
+        let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+        let origin_ts = 1_000u64;
+        let seed = 42u64;
+
+        // Enough ticks that a k=1 index would hold more than MAX_CHECKPOINTS
+        // snapshots, so at least one coarsening pass must run.
+        let n = MAX_CHECKPOINTS + 500;
+        let mut reference = GeneratedSource::new(scalars.clone(), seed, origin_ts, &fp, None);
+        let ref_ticks: Vec<(u64, String)> = (0..n)
+            .map(|_| {
+                let tick = reference.next_tick().expect("trade");
+                (tick.ts_event(), format!("{tick:?}"))
+            })
+            .collect();
+
+        let origin = GeneratedSource::new(scalars, seed, origin_ts, &fp, None);
+        let mut index = CheckpointIndex::new(origin, 1, 10_000_000);
+        let _ = index.source_at_or_before(ref_ticks[n - 1].0);
+        // Without coarsening a k=1 walk of `n > MAX_CHECKPOINTS` ticks would hold
+        // n+1 snapshots; the cap proves coarsen() ran and holds the ceiling.
+        assert!(
+            index.checkpoint_count() <= MAX_CHECKPOINTS,
+            "coarsening must hold the snapshot count at or below the cap, got {}",
+            index.checkpoint_count()
+        );
+
+        // Correctness survives coarsening: resume to several interior targets -
+        // including exact emitted-tick ts_events (the D1 boundary case) - off the
+        // now-sparse grid and assert byte-identical tails.
+        for &probe in &[n / 4, n / 2, (3 * n) / 4, n - 100] {
+            let probe_target = ref_ticks[probe].0;
+            let mut resumed = index.source_at_or_before(probe_target);
+            assert!(
+                resumed.clock_ns() < probe_target,
+                "resume starts strictly before the target after coarsening"
+            );
+            let mut tick = resumed.next_tick().expect("trade");
+            while tick.ts_event() < probe_target {
+                tick = resumed.next_tick().expect("trade");
+            }
+            for expected in &ref_ticks[probe..probe + 50] {
+                assert_eq!(
+                    (tick.ts_event(), format!("{tick:?}")),
+                    *expected,
+                    "coarsened resume diverged from the from-origin tape at probe {probe}"
+                );
+                tick = resumed.next_tick().expect("trade");
+            }
         }
     }
 
