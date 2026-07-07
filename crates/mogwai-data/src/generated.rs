@@ -47,6 +47,19 @@ const SIZE_LOG_SIGMA: f64 = 1.15;
 const SIZE_DECIMALS: u32 = 8;
 const MAX_ABS_RETURN: f64 = 0.000_02;
 const GARCH_SIGMA_CAP: f64 = 0.000_001;
+// Hard ceiling `next_latent_mid` clamps the latent mid to (the modal tick is
+// the matching floor). Hoisted so the two clamp sites and `start_price`
+// validation cannot drift: a `start_price` above this is silently collapsed on
+// the very first tick (a start_price of 5e9 becomes an ~80 percent crash).
+const MID_CEILING: f64 = 1_000_000_000.0;
+// Session-share sum invariants the modulator relies on. `intensity_hour` and
+// `dow_weight` are per-period FRACTIONS the modulator re-centers on 1.0 by
+// multiplying by the period count (24, 7), so a well-formed curve sums to
+// ~1.0. `vol_hour` is a per-mean RMS ratio used raw, so its mean is 1.0 and it
+// sums to ~24. The committed fingerprint hits these exactly (1.0 / 1.0 / 24.0).
+const SESSION_SHARE_SUM: f64 = 1.0;
+const VOL_HOUR_SUM: f64 = 24.0;
+const SESSION_SUM_TOL: f64 = 0.02;
 // Shared price/size axes both generator constructors pin identically. Hoisted to
 // module consts so from_fingerprint_medians and xbtusd_anchor cannot drift apart:
 // the start price the GARCH mid walks from, the lognormal size median, and the
@@ -179,6 +192,52 @@ impl SessionProfile {
                 });
             }
         }
+        // Normalization guard. Per-element positivity is not enough: the
+        // modulator assumes `intensity_hour` / `dow_weight` are fractions
+        // summing to ~1 (it multiplies by 24 / 7 to center each multiplier on
+        // 1.0) and `vol_hour` is a per-mean ratio summing to ~24. A plausible
+        // "no modulation" config of all-ones intensity passes every per-element
+        // check yet yields a 24x (168x with dow) arrival multiplier, silently
+        // compressing the validated `mean_duration_s` from seconds to
+        // milliseconds; an un-normalized vol curve silently rescales overall
+        // volatility even though `vol_scalar` validated. The on-grid and
+        // positivity invariants still hold, so the golden stream would never
+        // reveal either bug - only a sum check does.
+        //
+        // The bound is ONE-SIDED for the two distributions and two-sided for
+        // vol: a sum ABOVE 1.0 is the compression pathology and is rejected,
+        // but a sum BELOW 1.0 is the deliberate near-zero-share encoding of
+        // closed sessions (a closed hour carries ~0 mass) and, at the
+        // degenerate extreme, the every-hour-closed profile that
+        // `closed_window_gap_ns`' cap machinery exists to survive - so a low
+        // sum stays legal. `vol_hour` has no closed-hour use (a closed hour
+        // prints no trades, so its vol value is irrelevant), so both an
+        // inflated and a deflated curve are misconfigurations and get a
+        // symmetric band. The sentinel `index` of `usize::MAX` marks a
+        // whole-array (sum) violation rather than a single bad element.
+        let intensity_sum: f64 = self.intensity_hour.iter().sum();
+        if intensity_sum > SESSION_SHARE_SUM * (1.0 + SESSION_SUM_TOL) {
+            return Err(SessionProfileError {
+                field: "intensity_hour",
+                index: usize::MAX,
+            });
+        }
+        let dow_sum: f64 = self.dow_weight.iter().sum();
+        if dow_sum > SESSION_SHARE_SUM * (1.0 + SESSION_SUM_TOL) {
+            return Err(SessionProfileError {
+                field: "dow_weight",
+                index: usize::MAX,
+            });
+        }
+        let vol_sum: f64 = self.vol_hour.iter().sum();
+        if vol_sum < VOL_HOUR_SUM * (1.0 - SESSION_SUM_TOL)
+            || vol_sum > VOL_HOUR_SUM * (1.0 + SESSION_SUM_TOL)
+        {
+            return Err(SessionProfileError {
+                field: "vol_hour",
+                index: usize::MAX,
+            });
+        }
         Ok(())
     }
 }
@@ -186,6 +245,8 @@ impl SessionProfile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionProfileError {
     pub field: &'static str,
+    /// Index of the offending element within `field`, or `usize::MAX` to denote
+    /// a whole-array normalization (sum) violation with no single bad element.
     pub index: usize,
 }
 
@@ -314,6 +375,13 @@ impl GeneratorScalars {
     }
 
     pub fn validate(&self, fp: &Fingerprint) -> Result<(), ScalarError> {
+        // A `symbol` omitted from config serde-defaults to "". Every trade this
+        // source emits would then carry an empty symbol, keying
+        // `TickRuleAggressor` per-symbol state and any symbol-keyed consumer on
+        // the same empty string and cross-contaminating instruments. Reject it.
+        if self.symbol.is_empty() {
+            return Err(ScalarError { field: "symbol" });
+        }
         validate_f64(
             "modal_tick",
             decimal_to_f64(self.modal_tick),
@@ -324,6 +392,20 @@ impl GeneratorScalars {
             f64::from(self.price_decimals),
             &fp.scalar_ranges.price_decimals,
         )?;
+        // `modal_tick` must be representable at `price_decimals`. `next_price`
+        // snaps every quote with `round_dp(price_decimals)`; a tick carrying
+        // more decimal places than that is silently coarsened to the
+        // 10^-price_decimals grid, so the configured modal_tick stops being the
+        // real tick (modal_tick 1e-7 with price_decimals 1 collapses every
+        // price onto a 0.1 grid). The on-grid invariant still holds against the
+        // COARSER grid, so no test or runtime check catches it - only this does.
+        // The server enforces the same relationship on its instrument defs via
+        // `on_increment`; this is the generator-layer twin.
+        if self.modal_tick.normalize().scale() > self.price_decimals {
+            return Err(ScalarError {
+                field: "modal_tick",
+            });
+        }
         validate_f64(
             "mean_duration_s",
             self.mean_duration_s,
@@ -334,7 +416,14 @@ impl GeneratorScalars {
             self.size_round_frac,
             &fp.scalar_ranges.size_round_frac,
         )?;
-        if self.start_price <= Decimal::ZERO {
+        // `start_price` seeds `vol.mid`, which `next_latent_mid` clamps to
+        // [modal_tick, MID_CEILING] on the very first tick. A start_price above
+        // the ceiling instantly collapses the mid (an ~80 percent crash for
+        // 5e9); one below a single tick instantly jumps up. Both are silent, so
+        // keep start_price inside the clamp band (this subsumes the old
+        // strictly-positive check, since modal_tick is already validated > 0).
+        if self.start_price < self.modal_tick || self.start_price > Decimal::from(1_000_000_000_i64)
+        {
             return Err(ScalarError {
                 field: "start_price",
             });
@@ -345,6 +434,19 @@ impl GeneratorScalars {
             });
         }
         if !strictly_positive_finite(self.vol_scalar) {
+            return Err(ScalarError {
+                field: "vol_scalar",
+            });
+        }
+        // `vol_scalar` feeds GarchVol's unconditional variance (vol_scalar^2),
+        // which `next_latent_mid` caps at (GARCH_SIGMA_CAP * clamp_mult)^2. In
+        // the base (no-regime) path clamp_mult is 1.0, so any vol_scalar above
+        // GARCH_SIGMA_CAP is pinned at the cap on the first tick and the knob's
+        // documented per-tick-volatility meaning silently stops holding. Reject
+        // a value the base regime cannot honor rather than accept a dead knob (a
+        // VolStorm can lift the cap, but that is a transient per-subscription
+        // overlay, not the construction-time scalar's contract).
+        if self.vol_scalar > GARCH_SIGMA_CAP {
             return Err(ScalarError {
                 field: "vol_scalar",
             });
@@ -608,8 +710,14 @@ impl GeneratedSource {
             + self.vol.b1 * self.vol.sigma2;
         let sigma_cap = (GARCH_SIGMA_CAP * self.regime.clamp_mult).powi(2);
         self.vol.sigma2 = self.vol.sigma2.min(sigma_cap);
-        let return_cap = MAX_ABS_RETURN * self.regime.clamp_mult;
-        let base_return = (self.vol.sigma2.sqrt() * student_t).clamp(-return_cap, return_cap);
+        // FEEDBACK clamp: `base_return` (which feeds `prev_return`) and the
+        // sigma2 cap above use the regime's BASE clamp lift (vol_mult for a
+        // storm, the test override, or 1.0). A SessionEdgeSpike deliberately
+        // does NOT lift this - keeping the GARCH recursion state (sigma2,
+        // prev_return) byte-identical to a clean run is what lets the spike
+        // leave zero trace outside its hour window.
+        let feedback_cap = MAX_ABS_RETURN * self.regime.clamp_mult;
+        let base_return = (self.vol.sigma2.sqrt() * student_t).clamp(-feedback_cap, feedback_cap);
         // GARCH feedback sees the un-modulated return so volatility clustering
         // is unchanged; the session envelope scales the realized RMS on top,
         // then the hard clamp still bounds the mid update.
@@ -624,10 +732,20 @@ impl GeneratedSource {
         // (a future regime that set both vol_mult and an edge spike would want the
         // add re-examined - today the match is exclusive so only one is non-unit).
         let vol_mult = self.session.vol_mult(self.clock_ns) * self.regime.vol_mult(self.clock_ns);
-        let return_n = (base_return * vol_mult).clamp(-return_cap, return_cap);
+        // REALIZED clamp: the composed return that actually moves the mid uses
+        // the WINDOWED clamp. For VolStorm and the clean/drought/reopen regimes
+        // this equals `feedback_cap` bit for bit (edge_extra is 0), so their
+        // streams are unchanged. A SessionEdgeSpike lifts it only INSIDE its
+        // hour window, by exactly the same (1.0 + extra_vol_mult) that amplifies
+        // vol_mult there - so a large extra_vol_mult no longer saturates the
+        // realized spike against MAX_ABS_RETURN the way it did when this clamp
+        // was pinned at 1.0. Outside the window `realized_clamp_mult` returns the
+        // base clamp, so every out-of-window return stays byte-identical.
+        let realized_cap = MAX_ABS_RETURN * self.regime.realized_clamp_mult(self.clock_ns);
+        let return_n = (base_return * vol_mult).clamp(-realized_cap, realized_cap);
         self.vol.mid = (self.vol.mid * return_n.exp())
             .max(self.tick_f64)
-            .min(1_000_000_000.0);
+            .min(MID_CEILING);
         self.vol.mid
     }
 
@@ -686,7 +804,7 @@ impl TickSource for GeneratedSource {
             self.clock_ns = self.clock_ns.saturating_add(reopen.halt_ns);
             self.vol.mid = (self.vol.mid * reopen.gap_frac.exp())
                 .max(self.tick_f64)
-                .min(1_000_000_000.0);
+                .min(MID_CEILING);
         }
         let mid = self.next_latent_mid();
         let (price, aggressor) = self.next_price(mid);
@@ -943,22 +1061,44 @@ impl RegimeState {
         state
     }
 
-    fn vol_mult(&self, clock_ns: u64) -> f64 {
-        let edge_mult = self.edge.as_ref().map_or(0.0, |edge| {
+    // `extra_vol_mult` inside a SessionEdgeSpike's UTC hour window, 0.0 outside
+    // it (and 0.0 when no edge spike is armed). Shared by `vol_mult` and
+    // `realized_clamp_mult` so the RMS amplification and the clamp lift track
+    // the exact same window, by construction, and cannot drift apart.
+    fn edge_extra(&self, clock_ns: u64) -> f64 {
+        self.edge.as_ref().map_or(0.0, |edge| {
             let hour = utc_hour(clock_ns);
             if usize::from(edge.start_hour) <= hour && hour < usize::from(edge.end_hour) {
                 edge.extra_vol_mult
             } else {
                 0.0
             }
-        });
+        })
+    }
+
+    fn vol_mult(&self, clock_ns: u64) -> f64 {
         // ADDITIVE within the regime envelope: the neutral value is 1.0 (set in
         // `new`), and a SessionEdgeSpike layers its extra_vol_mult on top by
-        // addition (out of window edge_mult is 0.0, leaving the baseline). The
+        // addition (out of window edge_extra is 0.0, leaving the baseline). The
         // RESULT is then composed MULTIPLICATIVELY with the session envelope in
         // next_latent_mid - see the convention note there. The mix is deliberate
         // and load-bearing on both neutral values being 1.0.
-        self.vol_mult + edge_mult
+        self.vol_mult + self.edge_extra(clock_ns)
+    }
+
+    // Clamp multiplier for the REALIZED return (the one that moves the mid), as
+    // opposed to the GARCH feedback which uses `self.clamp_mult` raw. Mirrors
+    // `vol_mult`'s additive structure so the realized clamp is lifted exactly
+    // where and by exactly how much the realized RMS is amplified: the base
+    // clamp (vol_mult for a storm, the test override, or 1.0) plus a
+    // SessionEdgeSpike's in-window `extra_vol_mult`. Keeping this SEPARATE from
+    // the feedback clamp is what lets the edge spike lift its in-window ceiling
+    // while leaving the recursion state - and therefore every out-of-window
+    // tick - byte-identical to a clean run. For VolStorm and the
+    // clean/drought/reopen regimes `edge_extra` is 0.0, so this equals
+    // `self.clamp_mult` and their streams are unchanged.
+    fn realized_clamp_mult(&self, clock_ns: u64) -> f64 {
+        self.clamp_mult + self.edge_extra(clock_ns)
     }
 
     fn take_reopen_crossed(&mut self, old_clock_ns: u64, new_clock_ns: u64) -> Option<Reopen> {
@@ -1166,6 +1306,135 @@ mod tests {
                 field: "mean_duration_s"
             })
         );
+    }
+
+    #[test]
+    fn session_profile_rejects_non_normalized_curves() {
+        let fp = Fingerprint::from_repo_json();
+        // The committed fingerprint profile normalizes exactly (sums 1/1/24)
+        // and must keep passing.
+        assert!(fp.session_profile.validate().is_ok());
+
+        // A plausible "no modulation" attempt: all-ones intensity sums to 24, a
+        // 24x arrival multiplier that silently compresses the validated
+        // mean_duration into milliseconds. Rejected as a whole-array violation.
+        let mut all_ones = fp.session_profile.clone();
+        all_ones.intensity_hour = [1.0; 24];
+        assert_eq!(
+            all_ones.validate(),
+            Err(SessionProfileError {
+                field: "intensity_hour",
+                index: usize::MAX,
+            })
+        );
+
+        // All-ones dow (sum 7) is the same pathology on the day axis.
+        let mut all_ones_dow = fp.session_profile.clone();
+        all_ones_dow.dow_weight = [1.0; 7];
+        assert_eq!(
+            all_ones_dow.validate(),
+            Err(SessionProfileError {
+                field: "dow_weight",
+                index: usize::MAX,
+            })
+        );
+
+        // An un-normalized vol curve silently rescales overall volatility even
+        // though vol_scalar validated. vol_hour is held to a symmetric band, so
+        // both an inflated (sum 48) and a deflated (sum 12) curve are rejected.
+        let mut hot_vol = fp.session_profile.clone();
+        hot_vol.vol_hour = [2.0; 24];
+        assert_eq!(
+            hot_vol.validate(),
+            Err(SessionProfileError {
+                field: "vol_hour",
+                index: usize::MAX,
+            })
+        );
+        let mut cold_vol = fp.session_profile.clone();
+        cold_vol.vol_hour = [0.5; 24];
+        assert_eq!(
+            cold_vol.validate(),
+            Err(SessionProfileError {
+                field: "vol_hour",
+                index: usize::MAX,
+            })
+        );
+
+        // A legitimate closed-session profile sums BELOW 1.0 on intensity (a
+        // closed hour carries ~0 mass) and must stay legal - the near-zero
+        // mechanism and the fully-closed cap machinery both depend on the
+        // one-sided bound admitting sub-1 intensity/dow sums.
+        let mut closed = fp.session_profile.clone();
+        closed.intensity_hour = [1e-9; 24];
+        assert!(
+            closed.validate().is_ok(),
+            "a closed-session profile with sub-1 intensity sum must validate"
+        );
+    }
+
+    #[test]
+    fn scalars_reject_coverage_holes() {
+        let fp = Fingerprint::from_repo_json();
+        let good = GeneratorScalars::xbtusd_anchor(&fp);
+        assert!(good.validate(&fp).is_ok());
+
+        // (d) an omitted symbol serde-defaults to "" and cross-contaminates
+        // every symbol-keyed consumer.
+        let mut no_symbol = good.clone();
+        no_symbol.symbol = String::new();
+        assert_eq!(
+            no_symbol.validate(&fp),
+            Err(ScalarError { field: "symbol" })
+        );
+
+        // (a) modal_tick 1e-7 is in range and price_decimals 1 is in range, but
+        // together round_dp(1) silently coarsens the grid to 0.1.
+        let mut fine_tick = good.clone();
+        fine_tick.modal_tick = Decimal::new(1, 7);
+        fine_tick.price_decimals = 1;
+        assert_eq!(
+            fine_tick.validate(&fp),
+            Err(ScalarError {
+                field: "modal_tick"
+            })
+        );
+
+        // (b) start_price outside the [modal_tick, MID_CEILING] clamp band: a
+        // value above the ceiling instantly collapses the mid, one below a tick
+        // instantly jumps up.
+        let mut high_start = good.clone();
+        high_start.start_price = Decimal::from(5_000_000_000_i64);
+        assert_eq!(
+            high_start.validate(&fp),
+            Err(ScalarError {
+                field: "start_price"
+            })
+        );
+        let mut low_start = good.clone();
+        low_start.start_price = good.modal_tick / Decimal::from(2);
+        assert_eq!(
+            low_start.validate(&fp),
+            Err(ScalarError {
+                field: "start_price"
+            })
+        );
+
+        // (c) vol_scalar above the sigma cap is silently pinned at the cap on
+        // the first tick and does nothing in the base regime.
+        let mut hot_vol = good.clone();
+        hot_vol.vol_scalar = GARCH_SIGMA_CAP * 10.0;
+        assert_eq!(
+            hot_vol.validate(&fp),
+            Err(ScalarError {
+                field: "vol_scalar"
+            })
+        );
+
+        // The fingerprint-median construction (a fine 4-decimal grid) still
+        // passes: its modal_tick scale (4) equals price_decimals (4).
+        let medians = GeneratorScalars::from_fingerprint_medians("ETHUSD", &fp);
+        assert!(medians.validate(&fp).is_ok());
     }
 
     #[test]
@@ -1528,6 +1797,73 @@ mod tests {
         let in_rms = rms(&in_window);
         let out_rms = rms(&out_window);
         assert!(in_rms >= out_rms * 2.0, "in_rms={in_rms} out_rms={out_rms}");
+    }
+
+    // Companion to vol_storm_lifts_realized_rms for the OTHER vol regime.
+    // Pre-fix, SessionEdgeSpike left the realized clamp pinned at 1.0, so a
+    // large extra_vol_mult saturated every in-window return against
+    // MAX_ABS_RETURN and the realized spike stopped tracking the requested
+    // amplification (the existing localizes test uses 6.0, below where the pin
+    // binds). Post-fix the realized clamp is lifted in-window by
+    // (1.0 + extra_vol_mult), so a near-ceiling extra_vol_mult both breaks the
+    // old MAX_ABS_RETURN ceiling and scales the in-window RMS with the knob.
+    #[test]
+    fn session_edge_spike_lifts_realized_clamp() {
+        let fp = Fingerprint::from_repo_json();
+        let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+        let (start_hour, end_hour) = (14u8, 16u8);
+        let big = 90.0;
+        let small = 6.0;
+        let spike = |extra_vol_mult| MarketRegime::SessionEdgeSpike {
+            start_hour,
+            end_hour,
+            extra_vol_mult,
+        };
+
+        let mut big_src =
+            GeneratedSource::new(scalars.clone(), 42, SESSION_START_TS, &fp, Some(spike(big)));
+        let mut small_src = GeneratedSource::new(
+            scalars.clone(),
+            42,
+            SESSION_START_TS,
+            &fp,
+            Some(spike(small)),
+        );
+
+        let (big_in, _) = windowed_latent_returns(&mut big_src, 250_000, start_hour, end_hour);
+        let (small_in, _) = windowed_latent_returns(&mut small_src, 250_000, start_hour, end_hour);
+        let big_in_rms = rms(&big_in);
+        let small_in_rms = rms(&small_in);
+        let big_in_max = big_in
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0_f64, f64::max);
+
+        // Decisive: the old pinned clamp forced |return| <= MAX_ABS_RETURN
+        // in-window, which is impossible to exceed. The lift breaks that ceiling.
+        assert!(
+            big_in_max > MAX_ABS_RETURN,
+            "in-window return never exceeded the old ceiling: big_in_max={big_in_max}"
+        );
+        // The realized spike tracks the amplification instead of flattening:
+        // 90 vs 6 is ~13x more amplification, so the RMS grows well past the ~1x
+        // ratio a saturated ceiling would produce.
+        assert!(
+            big_in_rms > small_in_rms * 3.0,
+            "big_in_rms={big_in_rms} small_in_rms={small_in_rms}"
+        );
+
+        // The in-window lift stays deterministic (it draws no extra RNG): two
+        // fresh sources reproduce the stream tick for tick.
+        let mut a =
+            GeneratedSource::new(scalars.clone(), 42, SESSION_START_TS, &fp, Some(spike(big)));
+        let mut b = GeneratedSource::new(scalars, 42, SESSION_START_TS, &fp, Some(spike(big)));
+        for _ in 0..2_000 {
+            assert_eq!(
+                format!("{:?}", a.next_tick()),
+                format!("{:?}", b.next_tick())
+            );
+        }
     }
 
     #[test]
