@@ -43,6 +43,11 @@ struct PositionState {
 struct Warned {
     missing_instrument: HashSet<Symbol>,
     zero_px: HashSet<Symbol>,
+    /// Symbols/currencies whose ledger arithmetic has saturated at the Decimal
+    /// range boundary (see `add_clamped` and friends). Once a key clips, its
+    /// stored value is a boundary, not a true total, so the condition persists
+    /// across every later snapshot - warn once per key, not once per event.
+    saturated: HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -424,11 +429,15 @@ impl Engine {
             }];
         }
 
+        // `<=`, not `<`: a new total EQUAL to the filled amount would leave
+        // zero remaining - shrinking an order to nothing is a cancel, not a
+        // modify - so equality is rejected too, and the reason says "at or
+        // below" to match what the condition actually fires on.
         if quantity.is_some() && new_total <= filled {
             return vec![ServerMessage::OrderModifyRejected {
                 client_order_id,
                 venue_order_id: Some(venue_order_id),
-                reason: "modify below already-filled quantity".into(),
+                reason: "modify to at or below already-filled quantity".into(),
                 ts_event: ts,
             }];
         }
@@ -533,16 +542,33 @@ impl Engine {
 
         let base = instrument.base.clone();
         let quote = instrument.quote.clone();
-        let notional = fill.last_qty * fill.last_px;
+        // This fill's own notional is representable (`validate_submit` /
+        // `on_modify` checked `quantity * price`, and `last_qty <= quantity`),
+        // but the running balance totals accumulate notionals across every
+        // fill the account has ever taken, and no validator bounds that sum -
+        // two individually-valid orders can push a total past `Decimal::MAX`.
+        // Saturate instead of letting the operator forms panic; `clipped`
+        // surfaces the (persistent) corruption as a once-per-symbol warning.
+        let mut clipped = false;
+        let notional = mul_clamped(fill.last_qty, fill.last_px, &mut clipped);
         match fill.side {
             Side::Buy => {
-                *self.account.balances.entry(base).or_default() += fill.last_qty;
-                *self.account.balances.entry(quote).or_default() -= notional + fill.commission;
+                let base_total = self.account.balances.entry(base).or_default();
+                *base_total = add_clamped(*base_total, fill.last_qty, &mut clipped);
+                let spend = add_clamped(notional, fill.commission, &mut clipped);
+                let quote_total = self.account.balances.entry(quote).or_default();
+                *quote_total = sub_clamped(*quote_total, spend, &mut clipped);
             }
             Side::Sell => {
-                *self.account.balances.entry(base).or_default() -= fill.last_qty;
-                *self.account.balances.entry(quote).or_default() += notional - fill.commission;
+                let base_total = self.account.balances.entry(base).or_default();
+                *base_total = sub_clamped(*base_total, fill.last_qty, &mut clipped);
+                let proceeds = sub_clamped(notional, fill.commission, &mut clipped);
+                let quote_total = self.account.balances.entry(quote).or_default();
+                *quote_total = add_clamped(*quote_total, proceeds, &mut clipped);
             }
+        }
+        if clipped {
+            self.warn_saturated(&fill.symbol);
         }
     }
 
@@ -558,7 +584,11 @@ impl Engine {
             .cloned()
             .unwrap_or_default();
 
-        let next = next_position(&current, delta, fill.last_px);
+        let mut clipped = false;
+        let next = next_position(&current, delta, fill.last_px, &mut clipped);
+        if clipped {
+            self.warn_saturated(&fill.symbol);
+        }
         if next.qty == Decimal::ZERO {
             self.account.positions.remove(&fill.symbol);
         } else {
@@ -566,8 +596,10 @@ impl Engine {
         }
     }
 
-    fn snapshot(&self, ts: u64) -> AccountState {
-        let locked = self.locked_balances();
+    // `&mut self` purely for the once-per-currency saturation warning below;
+    // the account state itself is only read.
+    fn snapshot(&mut self, ts: u64) -> AccountState {
+        let (locked, mut clipped_currencies) = self.locked_balances();
         let mut currencies: Vec<String> = self.account.balances.keys().cloned().collect();
         for currency in locked.keys() {
             if !currencies.contains(currency) {
@@ -585,14 +617,28 @@ impl Engine {
                     .get(&currency)
                     .unwrap_or(&Decimal::ZERO);
                 let locked = *locked.get(&currency).unwrap_or(&Decimal::ZERO);
+                // `total` and `locked` are each in range, but they can sit
+                // near opposite Decimal boundaries (a huge short spend vs a
+                // huge buy reservation), so the difference itself can
+                // overflow. Saturate rather than panic; a clipped `free` is
+                // already implied by the clipped inputs it derives from.
+                let mut clipped = false;
+                let free = sub_clamped(total, locked, &mut clipped);
+                if clipped {
+                    clipped_currencies.push(currency.clone());
+                }
                 Balance {
                     currency,
                     total,
-                    free: total - locked,
+                    free,
                     locked,
                 }
             })
             .collect();
+
+        for currency in clipped_currencies {
+            self.warn_saturated(&currency);
+        }
 
         AccountState {
             balances,
@@ -601,8 +647,13 @@ impl Engine {
         }
     }
 
-    fn locked_balances(&self) -> HashMap<String, Decimal> {
+    /// Sums the per-order reservations. Returns the locked totals plus the
+    /// currencies whose accumulation clipped at the Decimal boundary, so the
+    /// caller (`snapshot`, which holds `&mut self`) can warn once per key -
+    /// this stays `&self` because it runs inside iteration over `self.open`.
+    fn locked_balances(&self) -> (HashMap<String, Decimal>, Vec<String>) {
         let mut locked = HashMap::new();
+        let mut clipped_currencies = Vec::new();
 
         for order in &self.open {
             let Some(instrument) = self.instruments.get(&order.submit.symbol) else {
@@ -619,16 +670,30 @@ impl Engine {
                         .submit
                         .price
                         .expect("resting order price is always Some");
-                    *locked.entry(instrument.quote.clone()).or_default() +=
-                        order.leaves_qty * price;
+                    // One order's `leaves_qty * price` is representable
+                    // (submit and modify both `checked_mul` the full
+                    // notional), but the SUM across all resting buys is
+                    // unbounded - saturate instead of letting `+=` panic.
+                    let mut clipped = false;
+                    let reserve = mul_clamped(order.leaves_qty, price, &mut clipped);
+                    let total = locked.entry(instrument.quote.clone()).or_default();
+                    *total = add_clamped(*total, reserve, &mut clipped);
+                    if clipped {
+                        clipped_currencies.push(instrument.quote.clone());
+                    }
                 }
                 Side::Sell => {
-                    *locked.entry(instrument.base.clone()).or_default() += order.leaves_qty;
+                    let mut clipped = false;
+                    let total = locked.entry(instrument.base.clone()).or_default();
+                    *total = add_clamped(*total, order.leaves_qty, &mut clipped);
+                    if clipped {
+                        clipped_currencies.push(instrument.base.clone());
+                    }
                 }
             }
         }
 
-        locked
+        (locked, clipped_currencies)
     }
 
     fn warn_missing_instrument(&mut self, symbol: &str) {
@@ -643,7 +708,22 @@ impl Engine {
         }
     }
 
-    pub fn account_snapshot(&self, ts: u64) -> AccountState {
+    /// `key` is a symbol on the position path, a currency on the balance
+    /// paths. Saturation is sticky - a clipped total stays at the boundary -
+    /// so this fires once per key rather than flooding the log on every
+    /// subsequent fill and snapshot.
+    fn warn_saturated(&mut self, key: &str) {
+        if self.warned.saturated.insert(key.into()) {
+            tracing::warn!(
+                %key,
+                "ledger arithmetic saturated at the Decimal range boundary; \
+                 the stored value is clipped, not an exact total"
+            );
+        }
+    }
+
+    // `&mut self` only for the saturation warning bookkeeping in `snapshot`.
+    pub fn account_snapshot(&mut self, ts: u64) -> AccountState {
         self.snapshot(ts)
     }
 
@@ -667,7 +747,12 @@ impl Engine {
     }
 }
 
-fn next_position(current: &PositionState, delta: Decimal, px: Decimal) -> PositionState {
+fn next_position(
+    current: &PositionState,
+    delta: Decimal,
+    px: Decimal,
+    clipped: &mut bool,
+) -> PositionState {
     if current.qty == Decimal::ZERO {
         return PositionState {
             qty: delta,
@@ -676,16 +761,38 @@ fn next_position(current: &PositionState, delta: Decimal, px: Decimal) -> Positi
     }
 
     if same_sign(current.qty, delta) {
+        // The VWAP numerator is a sum of notionals: each product is bounded
+        // by its own order's `checked_mul` at submit time, but the running
+        // position can carry an arbitrary accumulated notional, so both
+        // products and the sum can overflow on input every validator rightly
+        // accepted. Saturate rather than panic (this was a caller-reachable
+        // panic through `process` with two individually-valid orders).
         let current_abs = current.qty.abs();
         let delta_abs = delta.abs();
+        let numerator = add_clamped(
+            mul_clamped(current_abs, current.avg_px, clipped),
+            mul_clamped(delta_abs, px, clipped),
+            clipped,
+        );
+        let denominator = add_clamped(current_abs, delta_abs, clipped);
+        // The true VWAP is a weighted average of `avg_px` and `px`, so it is
+        // always representable; the division fails only when the numerator
+        // itself already saturated, and then the newest fill's price is as
+        // honest an estimate as any other clipped value.
+        let avg_px = numerator.checked_div(denominator).unwrap_or_else(|| {
+            *clipped = true;
+            px
+        });
         return PositionState {
-            qty: current.qty + delta,
-            avg_px: ((current_abs * current.avg_px) + (delta_abs * px)) / (current_abs + delta_abs),
+            qty: add_clamped(current.qty, delta, clipped),
+            avg_px,
         };
     }
 
     let current_abs = current.qty.abs();
     let delta_abs = delta.abs();
+    // Opposite signs: the magnitude shrinks (or flips within the larger
+    // operand's range), so this addition cannot overflow.
     let qty = current.qty + delta;
     if delta_abs < current_abs {
         PositionState {
@@ -706,11 +813,57 @@ fn same_sign(a: Decimal, b: Decimal) -> bool {
     (a > Decimal::ZERO && b > Decimal::ZERO) || (a < Decimal::ZERO && b < Decimal::ZERO)
 }
 
+// Overflow-tolerant arithmetic for the ledger accumulation paths.
+//
+// `validate_submit` and `on_modify` bound a SINGLE order's notional with
+// `checked_mul`, so any one fill's arithmetic is representable - but nothing
+// bounds what many individually-valid orders accumulate to. Balance totals,
+// locked reservations, the position VWAP numerator and the snapshot's
+// `total - locked` all combine values across fills and orders, and
+// rust_decimal's operator forms panic on overflow, so two orders the
+// validators rightly accept could crash the engine mid-fill. These helpers
+// compute checked first and saturate at the Decimal range boundary on
+// overflow, flagging `clipped` so the caller can surface a once-per-key
+// warning through `Engine::warn_saturated`: a saturated ledger is
+// numerically wrong, and clipping silently would corrupt the accounting
+// invisibly, but a loudly-wrong fake venue beats one that panics
+// mid-scenario.
+
+fn add_clamped(a: Decimal, b: Decimal, clipped: &mut bool) -> Decimal {
+    a.checked_add(b).unwrap_or_else(|| {
+        *clipped = true;
+        a.saturating_add(b)
+    })
+}
+
+fn sub_clamped(a: Decimal, b: Decimal, clipped: &mut bool) -> Decimal {
+    a.checked_sub(b).unwrap_or_else(|| {
+        *clipped = true;
+        a.saturating_sub(b)
+    })
+}
+
+fn mul_clamped(a: Decimal, b: Decimal, clipped: &mut bool) -> Decimal {
+    a.checked_mul(b).unwrap_or_else(|| {
+        *clipped = true;
+        a.saturating_mul(b)
+    })
+}
+
 fn fill_quantity(order: &SubmitOrder, fill_fraction: Decimal, size_increment: Decimal) -> Decimal {
     // Defensive guard against an unvalidated `PartialFillNext.fraction`.
-    // Public control validation rejects out-of-range fractions, but the engine
-    // still protects its arithmetic so direct callers cannot emit zero,
-    // negative, or over-sized fills.
+    // Public control validation rejects out-of-range fractions, but
+    // `Engine::arm` performs no range check of its own, so the engine still
+    // protects its arithmetic so direct callers cannot emit zero, negative,
+    // or over-sized fills - or panic it. The clamp must run BEFORE the
+    // multiply: rust_decimal's `Mul` panics on overflow, so an extreme
+    // fraction (e.g. `Decimal::MAX`) would take the engine down before
+    // `.min(order.quantity)` ever saw the product. With the fraction confined
+    // to [0, 1] the product's magnitude is bounded by the already-validated
+    // order quantity and cannot overflow. A negative fraction clamps to zero
+    // on purpose: that routes it into the existing non-positive fallback
+    // below, preserving its full-fill-plus-warn semantics.
+    let fill_fraction = fill_fraction.clamp(Decimal::ZERO, Decimal::ONE);
     let candidate = (order.quantity * fill_fraction).min(order.quantity);
     // Re-align to the instrument's size grid: `quantity * fraction` has no
     // reason to land on a size-increment multiple, and a real venue's tick
@@ -826,7 +979,7 @@ mod tests {
 
     #[test]
     fn account_snapshot_is_empty_before_any_fill() {
-        let e = Engine::new();
+        let mut e = Engine::new();
         let state = e.account_snapshot(7);
         assert!(state.balances.is_empty());
         assert!(state.positions.is_empty());
@@ -1251,6 +1404,31 @@ mod tests {
     }
 
     #[test]
+    fn extreme_unvalidated_fractions_full_fill_instead_of_panicking() {
+        // `Engine::arm` is public and performs no range check of its own
+        // (`validate_divergence` is a free function a direct caller may
+        // skip), so a fraction far outside the wire-validated (0, 1] can
+        // reach `fill_quantity`. The clamp must run before the multiply:
+        // `quantity * Decimal::MAX` used to panic inside `fill_quantity`
+        // ahead of the `.min(order.quantity)` that was supposed to guard it.
+        // `Decimal::MAX` clamps to a plain full fill; `Decimal::MIN` clamps
+        // to zero and rides the existing non-positive full-fill fallback.
+        for fraction in [Decimal::MAX, Decimal::MIN] {
+            let mut e = Engine::new();
+            e.arm(Divergence::PartialFillNext {
+                client_order_id: "O1".into(),
+                fraction,
+            });
+            let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+
+            let f = fill(&out, 1);
+            assert_eq!(f.last_qty, Decimal::from(10));
+            assert_eq!(f.leaves_qty, Decimal::ZERO);
+            assert!(e.open_orders().is_empty());
+        }
+    }
+
+    #[test]
     fn buy_fill_moves_base_and_quote_balances() {
         let mut e = Engine::new();
         let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
@@ -1283,6 +1461,87 @@ mod tests {
         assert_eq!(usdt.total, Decimal::from(1000));
         assert_eq!(usdt.locked, Decimal::ZERO);
         assert_eq!(usdt.free, Decimal::from(1000));
+    }
+
+    #[test]
+    fn accumulated_notional_saturates_instead_of_panicking() {
+        // Two individually-valid orders whose COMBINED notional exceeds
+        // `Decimal::MAX` (~7.92e28): qty 7e20 is on the 1e-8 size grid (the
+        // ratio, 7e28, still divides without overflowing), price 1e8 is on
+        // the 0.01 grid, and the per-order notional 7e28 passes
+        // `validate_submit`'s `checked_mul`. Before the clamped accumulation
+        // helpers the second fill panicked in `next_position`'s VWAP
+        // numerator (7e28 + 7e28) - a caller-reachable panic through the
+        // public `process` API on wire-valid input.
+        let qty: Decimal = "700000000000000000000".parse().unwrap();
+        let px: Decimal = "100000000".parse().unwrap();
+
+        let mut e = Engine::new();
+        let first = e.process(
+            ClientMessage::SubmitOrder(order_decimal("O1", Side::Buy, "BTCUSDT", qty, Some(px))),
+            1,
+        );
+        assert!(matches!(first[0], ServerMessage::OrderAccepted { .. }));
+
+        let out = e.process(
+            ClientMessage::SubmitOrder(order_decimal("O2", Side::Buy, "BTCUSDT", qty, Some(px))),
+            2,
+        );
+
+        assert_eq!(out.len(), 3);
+        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        let state = account(&out, 2);
+        // The quote spend (-7e28 then -7e28 again) clips at the lower
+        // Decimal boundary instead of panicking the `-=`.
+        assert_eq!(balance(state, "USDT").total, Decimal::MIN);
+        // Quantities never came near the boundary, so they stay exact -
+        // only the overflowing notional legs clip.
+        assert_eq!(balance(state, "BTC").total, qty + qty);
+        let pos = position(state, "BTCUSDT");
+        assert_eq!(pos.quantity, qty + qty);
+        // The VWAP numerator saturated at `Decimal::MAX`, so the average
+        // lands below the true 1e8 - clipped and warned about, but finite.
+        assert!(pos.avg_px > Decimal::ZERO);
+        assert!(pos.avg_px <= px);
+    }
+
+    #[test]
+    fn resting_reservations_saturate_locked_instead_of_panicking() {
+        // Two resting buys whose SUMMED reservations (`leaves_qty * price`,
+        // each individually within range and `checked_mul`-approved at
+        // submit) exceed `Decimal::MAX`. A tiny armed partial (1e-9 of 7e20
+        // = 7e11, still on the 1e-8 grid) leaves almost the whole quantity
+        // resting, so each order locks just under 7e28 of quote. Before the
+        // clamped helpers the second snapshot panicked in `locked_balances`'
+        // `+=` accumulation; the `free = total - locked` subtraction then
+        // also needs clamping (small negative total minus a boundary lock).
+        let qty: Decimal = "700000000000000000000".parse().unwrap();
+        let px: Decimal = "100000000".parse().unwrap();
+        let fraction = Decimal::new(1, 9);
+
+        let mut e = Engine::new();
+        for id in ["O1", "O2"] {
+            e.arm(Divergence::PartialFillNext {
+                client_order_id: id.into(),
+                fraction,
+            });
+        }
+
+        e.process(
+            ClientMessage::SubmitOrder(order_decimal("O1", Side::Buy, "BTCUSDT", qty, Some(px))),
+            1,
+        );
+        let out = e.process(
+            ClientMessage::SubmitOrder(order_decimal("O2", Side::Buy, "BTCUSDT", qty, Some(px))),
+            2,
+        );
+
+        assert_eq!(out.len(), 3);
+        let state = account(&out, 2);
+        let usdt = balance(state, "USDT");
+        assert_eq!(usdt.locked, Decimal::MAX);
+        assert_eq!(usdt.free, Decimal::MIN);
+        assert_eq!(e.open_orders().len(), 2);
     }
 
     #[test]
@@ -1518,26 +1777,32 @@ mod tests {
         });
         e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
 
-        let out = e.process(
-            ClientMessage::ModifyOrder {
-                client_order_id: "O1".into(),
-                price: None,
-                quantity: Some(Decimal::from(3)),
-            },
-            2,
-        );
+        // Both the equality case (new total == 3 filled, zero would remain)
+        // and the strictly-below case must reject, and the reason must say
+        // "at or below" - the guard is `<=`, so a message claiming only
+        // "below" would misdescribe the equality rejection.
+        for new_total in [Decimal::from(3), Decimal::from(2)] {
+            let out = e.process(
+                ClientMessage::ModifyOrder {
+                    client_order_id: "O1".into(),
+                    price: None,
+                    quantity: Some(new_total),
+                },
+                2,
+            );
 
-        assert_eq!(out.len(), 1);
-        assert!(matches!(
-            &out[0],
-            ServerMessage::OrderModifyRejected {
-                venue_order_id: Some(_),
-                reason,
-                ..
-            } if reason == "modify below already-filled quantity"
-        ));
-        assert_eq!(e.open_orders()[0].submit.quantity, Decimal::from(10));
-        assert_eq!(e.open_orders()[0].leaves_qty, Decimal::from(7));
+            assert_eq!(out.len(), 1);
+            assert!(matches!(
+                &out[0],
+                ServerMessage::OrderModifyRejected {
+                    venue_order_id: Some(_),
+                    reason,
+                    ..
+                } if reason == "modify to at or below already-filled quantity"
+            ));
+            assert_eq!(e.open_orders()[0].submit.quantity, Decimal::from(10));
+            assert_eq!(e.open_orders()[0].leaves_qty, Decimal::from(7));
+        }
     }
 
     #[test]
