@@ -84,34 +84,74 @@ pub(crate) fn instrument_id(def: &InstrumentDef) -> InstrumentId {
     InstrumentId::new(NautilusSymbol::from(def.symbol.as_str()), *MOGWAI_VENUE)
 }
 
+/// Builds the synthetic nautilus `TradeId` for a wire trade.
+///
+/// The wire `TradeTick` carries no exchange-assigned trade id or sequence
+/// number, and the adapter's own `PollCursor` explicitly tolerates multiple
+/// trades sharing one `ts_event` (see its doc comment in client.rs), so the
+/// id must be derived from the tick's own fields. Keying on symbol+ts_event
+/// alone collides for any two such trades; folding in price/size/aggressor
+/// closes the collision for the common case PollCursor exists to handle -
+/// genuinely distinct trades landing on the same nanosecond.
+///
+/// Nautilus caps a `TradeId` at 36 ASCII chars and the panicking
+/// constructors (`TradeId::new`, the `From<String>` impl) assert past that.
+/// A readable composition of all five fields
+/// (`symbol-ts-price-size-aggressor`) blows the cap for any realistic
+/// nanosecond timestamp plus an 8-decimal size - 40+ chars - which would
+/// panic on essentially every live trade. So the id keeps the decimal
+/// `ts_event` for debuggability and compresses the full field tuple into a
+/// 56-bit FNV-1a hash: at most 20 digits + 1 dash + 14 hex chars = 35, so
+/// the length cap can never trip. Two same-nanosecond trades now collide
+/// only on a 56-bit hash collision of their full field tuples.
+fn trade_id(t: &mogwai_protocol::TradeTick) -> anyhow::Result<TradeId> {
+    let key = format!(
+        "{}-{}-{}-{}-{:?}",
+        t.symbol, t.ts_event, t.price, t.size, t.aggressor
+    );
+    // 64-bit FNV-1a, truncated below. Deterministic across processes and
+    // platforms (unlike std's RandomState-seeded hasher), so a replayed
+    // stream re-derives identical ids.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in key.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    // `new_checked` is belt-and-braces: the format above is structurally
+    // non-empty ASCII within the length cap, but the trade path must never
+    // hold a panicking constructor even if the format drifts.
+    TradeId::new_checked(format!(
+        "{}-{:014x}",
+        t.ts_event,
+        hash & 0x00ff_ffff_ffff_ffff
+    ))
+    .context("convert trade id")
+}
+
 pub(crate) fn trade_tick(
     t: &mogwai_protocol::TradeTick,
     id: InstrumentId,
     def: &InstrumentDef,
     ts_init: UnixNanos,
 ) -> anyhow::Result<NautilusTradeTick> {
-    Ok(NautilusTradeTick::new(
+    // `quantity` correctly accepts zero (QUANTITY_MIN is 0 in nautilus, and a
+    // zero Quantity is legitimate elsewhere, e.g. a filled order's
+    // leaves_qty), but the panicking `TradeTick::new` asserts a positive size
+    // on the *raw* fixed-point value. That trips on a wire size of exactly
+    // zero and on any positive size small enough to round to raw 0 at the
+    // instrument's size_precision. Route through `new_checked` so the caller
+    // drops the offending tick with a warning instead of panicking the
+    // spawned reader/poll task that has no supervisor.
+    NautilusTradeTick::new_checked(
         id,
         price(t.price, def.price_precision)?,
         quantity(t.size, def.size_precision)?,
         aggressor(t.aggressor),
-        // The wire `TradeTick` carries no exchange-assigned sequence number,
-        // and the adapter's own `PollCursor` explicitly tolerates multiple
-        // trades sharing one `ts_event` (see its doc comment in client.rs).
-        // Keying the id on symbol+ts_event alone collides for any two such
-        // trades. Folding in price/size/aggressor as well does not make the
-        // id truly unique (two distinct trades could in principle share all
-        // five fields at the same nanosecond), but it closes the collision
-        // for the common case PollCursor exists to handle - genuinely
-        // distinct trades landing on the same tick - at zero cost, since all
-        // five fields are already on the wire.
-        TradeId::from(format!(
-            "{}-{}-{}-{}-{:?}",
-            t.symbol, t.ts_event, t.price, t.size, t.aggressor
-        )),
+        trade_id(t)?,
         UnixNanos::from(t.ts_event),
         ts_init,
-    ))
+    )
+    .context("convert trade tick")
 }
 
 pub(crate) fn quote_tick(
@@ -201,12 +241,39 @@ mod tests {
 
         assert_eq!(tick.price.precision, 2);
         assert_eq!(tick.size.precision, 8);
-        assert_eq!(
-            tick.trade_id,
-            TradeId::from("BTCUSDT-42-123.456-0.001-Buyer")
-        );
+        // The id is ts_event plus a 14-hex-char hash of the full field tuple
+        // (see `trade_id`); pin the shape rather than the hash value.
+        let id = tick.trade_id.to_string();
+        assert!(id.starts_with("42-"), "id keeps decimal ts_event: {id}");
+        assert_eq!(id.len(), "42-".len() + 14, "ts plus 56-bit hex hash: {id}");
         assert_eq!(tick.ts_event, UnixNanos::from(42));
         assert_eq!(tick.ts_init, UnixNanos::from(7));
+    }
+
+    #[test]
+    fn trade_id_fits_nautilus_length_cap_for_realistic_ticks() {
+        // Nautilus caps TradeId at 36 ASCII chars and panics past it. The old
+        // readable id (symbol-ts-price-size-aggressor) exceeded the cap for
+        // any realistic nanosecond timestamp plus 8-decimal size, panicking
+        // the reader/poll task on essentially every live trade. The hashed id
+        // is bounded at 35 chars even for a u64::MAX timestamp.
+        let def = def();
+        let trade = mogwai_protocol::TradeTick {
+            symbol: "BTCUSDT".into(),
+            price: Decimal::new(6_512_345, 2),
+            size: Decimal::new(32_332_866, 8),
+            aggressor: MogwaiAggressorSide::Seller,
+            ts_event: u64::MAX,
+        };
+
+        let tick = trade_tick(&trade, instrument_id(&def), &def, UnixNanos::from(0))
+            .expect("realistic trade converts without tripping the id cap");
+
+        assert!(
+            tick.trade_id.to_string().len() <= 36,
+            "id must fit the nautilus cap: {}",
+            tick.trade_id
+        );
     }
 
     #[test]
@@ -253,5 +320,54 @@ mod tests {
         // size/leaves_qty under market-regime havoc.
         let err = quantity(Decimal::new(-1, 0), 8);
         assert!(err.is_err(), "negative quantity must be rejected");
+    }
+
+    #[test]
+    fn quantity_accepts_zero() {
+        // QUANTITY_MIN is 0 in nautilus: a zero Quantity is legitimate in
+        // general (a filled order's leaves_qty, an empty book level), so the
+        // positive-size guard belongs to the trade path, not here.
+        assert!(quantity(Decimal::ZERO, 8).is_ok());
+    }
+
+    #[test]
+    fn trade_tick_rejects_zero_size_without_panicking() {
+        // A zero size passes `quantity` (see `quantity_accepts_zero`) but the
+        // panicking `TradeTick::new` asserts a positive size, which would down
+        // the unsupervised reader/poll task. `trade_tick` must surface it as
+        // an error instead.
+        let def = def();
+        let trade = mogwai_protocol::TradeTick {
+            symbol: "BTCUSDT".into(),
+            price: Decimal::new(10_000, 2),
+            size: Decimal::ZERO,
+            aggressor: MogwaiAggressorSide::Buyer,
+            ts_event: 42,
+        };
+
+        let err = trade_tick(&trade, instrument_id(&def), &def, UnixNanos::from(0));
+        assert!(err.is_err(), "zero-size trade must be rejected, not panic");
+    }
+
+    #[test]
+    fn trade_tick_rejects_size_that_rounds_to_zero() {
+        // Nautilus checks positivity on the raw fixed-point value, so a
+        // positive wire size below half a step at the instrument's
+        // size_precision (0.000000004 at precision 8) rounds to raw 0 and is
+        // the same panic hazard as an exact zero.
+        let def = def();
+        let trade = mogwai_protocol::TradeTick {
+            symbol: "BTCUSDT".into(),
+            price: Decimal::new(10_000, 2),
+            size: Decimal::new(4, 9),
+            aggressor: MogwaiAggressorSide::Buyer,
+            ts_event: 42,
+        };
+
+        let err = trade_tick(&trade, instrument_id(&def), &def, UnixNanos::from(0));
+        assert!(
+            err.is_err(),
+            "rounds-to-zero size must be rejected, not panic"
+        );
     }
 }

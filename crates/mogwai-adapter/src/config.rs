@@ -53,8 +53,16 @@ impl MogwaiDataClientConfig {
         validate_havoc(&self.havoc)
     }
 
+    /// Returns the ws/wss URL to hand to the transport, trimmed of
+    /// surrounding whitespace. `validate_base_url` and `http_base_url` both
+    /// trim; if this did not, a whitespace-padded `base_url` would pass
+    /// validation and work over HTTP while `connect_async` fails on the
+    /// padded ws URL silently inside the reconnect loop - the exact
+    /// never-connects-with-no-diagnostic failure mode (D.4) the validator
+    /// exists to rule out.
+    #[must_use]
     pub fn ws_url(&self) -> String {
-        self.base_url.clone()
+        self.base_url.trim().to_string()
     }
 
     /// Derives the HTTP base URL from the configured ws/wss `base_url`.
@@ -134,8 +142,12 @@ impl MogwaiExecClientConfig {
         validate_havoc(&self.havoc)
     }
 
+    /// Returns the ws/wss URL to hand to the transport, trimmed of
+    /// surrounding whitespace. See `MogwaiDataClientConfig::ws_url` for why
+    /// the trim matters (a padded URL passes validation but never connects).
+    #[must_use]
     pub fn ws_url(&self) -> String {
-        self.base_url.clone()
+        self.base_url.trim().to_string()
     }
 
     /// Derives the HTTP base URL from the configured ws/wss `base_url`.
@@ -296,6 +308,30 @@ mod tests {
 
         assert!(ws.validate().is_ok());
         assert!(wss.validate().is_ok());
+    }
+
+    #[test]
+    fn ws_url_trims_whitespace_padding() {
+        // A whitespace-padded base_url passes validation (which trims) and
+        // derives a clean HTTP base (which trims), so ws_url must trim too or
+        // the padded value reaches connect_async and fails silently forever
+        // inside the reconnect loop.
+        let data = MogwaiDataClientConfig {
+            base_url: "  ws://example.test:8787  ".into(),
+            ..MogwaiDataClientConfig::default()
+        };
+        let exec = MogwaiExecClientConfig {
+            base_url: "\twss://example.test:9443\n".into(),
+            ..MogwaiExecClientConfig::default()
+        };
+
+        assert!(data.validate().is_ok());
+        assert_eq!(data.ws_url(), "ws://example.test:8787");
+        assert_eq!(data.http_base_url(), "http://example.test:8787");
+
+        assert!(exec.validate().is_ok());
+        assert_eq!(exec.ws_url(), "wss://example.test:9443");
+        assert_eq!(exec.http_base_url(), "https://example.test:9443");
     }
 
     #[test]
