@@ -483,7 +483,18 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
             nix::unistd::setsid()?;
             redirect_stdio_to_devnull()?;
             init_logging(&args.log_file)?;
-            run_runtime(args, Ready::Pipe(PipeReady::new(write)), Some(lock))
+            // From here on stderr points at /dev/null, so an `Err` propagating
+            // out of `main` (malformed config, failed instrument validation, a
+            // bind failure) would print to a discarded stream - while the
+            // parent's failure message tells the operator to "see mogwai.log".
+            // Mirror the failure into the tracing log (initialized just above)
+            // before the process exits so that pointer is honest; `{:#}`
+            // flattens the whole anyhow context chain into the one line.
+            let result = run_runtime(args, Ready::Pipe(PipeReady::new(write)), Some(lock));
+            if let Err(err) = &result {
+                tracing::error!("daemon exiting on startup/runtime failure: {err:#}");
+            }
+            result
         }
     }
 }
@@ -1232,8 +1243,8 @@ async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
 /// against the engine; `Subscribe` spawns a replay feeding the same channel.
 /// Execution events (the engine's own output) take one extra hop through a
 /// dedicated delay pump before landing in that channel, so an armed
-/// `DelayAcks` window paces only execution traffic - see the pump below for
-/// why that hop exists.
+/// `DelayAcks` window paces only execution traffic - see `spawn_exec_pump`
+/// for why that hop exists and for the per-event delay contract.
 async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::channel::<ServerMessage>(1024);
@@ -1256,8 +1267,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // onto the socket - market data (replay threads, heartbeat) sends land in
     // it directly. Execution events take one extra hop through `exec_tx`/
     // `exec_pump` so a `DelayAcks` sleep never blocks the writer's own
-    // `rx.recv()` loop (see the pump below).
-    let (exec_tx, mut exec_rx) = mpsc::channel::<ServerMessage>(1024);
+    // `rx.recv()` loop (see `spawn_exec_pump`). Each event rides with the
+    // `Instant` it was enqueued at, so the pump can anchor its delay deadline
+    // at production time rather than at whenever it gets around to dequeuing.
+    let (exec_tx, exec_rx) = mpsc::channel::<(Instant, ServerMessage)>(1024);
 
     let writer = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
@@ -1284,33 +1297,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     });
 
-    // Delays queued execution events without head-of-line-blocking the
-    // market-data feed behind them. The writer above used to `sleep` inline
-    // on an execution event before its next `rx.recv()`, which stalled every
-    // tick already queued behind it for the entire armed `DelayAcks` window
-    // (up to one hour) - and, on disconnect, kept the writer (and this
-    // connection's teardown) parked for whatever remained of that sleep even
-    // though the socket was already gone. This dedicated pump instead reads
-    // exec events (only ever sent here, via `exec_tx`, by the order-entry
-    // handling below) off its own channel, sleeps for the currently-armed
-    // delay, then forwards into `tx` - so a long delay only holds up further
-    // exec traffic, never the ticks/heartbeats flowing straight into `tx`.
-    // Sequential by construction (one `while` loop over `exec_rx`), so
-    // exec-event order is preserved exactly as it was in the old inline path.
-    let exec_delay_ms = Arc::clone(&state.delay_ms);
-    let exec_sim = state.sim;
-    let exec_out = tx.clone();
-    let exec_pump = tokio::spawn(async move {
-        while let Some(msg) = exec_rx.recv().await {
-            let delay = exec_delay_ms.load(Ordering::Relaxed);
-            if delay > 0 {
-                tokio::time::sleep(exec_sim.wall_duration(sim_duration_from_millis(delay))).await;
-            }
-            if exec_out.send(msg).await.is_err() {
-                break; // writer gone
-            }
-        }
-    });
+    let exec_pump = spawn_exec_pump(exec_rx, Arc::clone(&state.delay_ms), state.sim, tx.clone());
 
     let heartbeat = if state.cfg.server_heartbeat_ms > 0 {
         Some(spawn_heartbeat(
@@ -1367,11 +1354,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     // successfully-sent `ts_event` (if it sent one) forward, so
                     // the replacement's own seek starts strictly past it instead
                     // of re-sampling a `sim_now` that could land at-or-before an
-                    // already-delivered tick.
+                    // already-delivered tick. The floor is read only AFTER the
+                    // join (see `quiesce_and_resume_floor` for why the order is
+                    // load-bearing).
                     let resume_floor = if let Some(old) = replays.remove(&symbol) {
-                        let last_sent = old.last_sent_ts.load(Ordering::Relaxed);
-                        quiesce_replay(old).await;
-                        (last_sent != NO_TICK_SENT).then_some(last_sent)
+                        quiesce_and_resume_floor(old).await
                     } else {
                         None
                     };
@@ -1410,12 +1397,18 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             }
             order_cmd => {
                 let events = process_order_cmd(order_cmd, &state).await;
+                // One arrival instant for the whole batch: the engine produced
+                // these events together in one `process` call, so under an
+                // armed `DelayAcks` they share one deadline and land together
+                // ~ms late (see `spawn_exec_pump` for the per-event-deadline
+                // contract this anchors).
+                let arrived = Instant::now();
                 for ev in events {
                     debug_assert!(
                         is_execution_event(&ev),
                         "order-entry events are always execution-category, never market data"
                     );
-                    if exec_tx.send(ev).await.is_err() {
+                    if exec_tx.send((arrived, ev)).await.is_err() {
                         break;
                     }
                 }
@@ -1459,6 +1452,59 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     if let Err(e) = writer.await {
         tracing::warn!(%e, "writer task did not shut down cleanly");
     }
+}
+
+/// Delay queued execution events without head-of-line-blocking the market-data
+/// feed behind them, honoring the `DelayAcks` contract per event.
+///
+/// The hop exists because the writer used to `sleep` inline on an execution
+/// event before its next `rx.recv()`, which stalled every tick already queued
+/// behind it for the entire armed `DelayAcks` window (up to one hour) - and,
+/// on disconnect, kept the writer (and the connection's teardown) parked for
+/// whatever remained of that sleep even though the socket was already gone.
+/// This pump reads exec events (only ever sent here, via the paired sender,
+/// by the order-entry handling in `handle_socket`) off their own channel and
+/// forwards into `out`, so a long delay only holds up further exec traffic.
+///
+/// The delay deadline is PER EVENT, anchored at the instant the event was
+/// enqueued: `arrival + armed delay`. Sleeping the full window between
+/// consecutive dequeues would compound instead - a single submit produces
+/// OrderAccepted + OrderFilled + AccountState, and under `DelayAcks ms` a
+/// serial per-dequeue sleep delivered them at +ms, +2ms, +3ms while the
+/// contract holds EVERY outbound execution event by ms. Anchoring each
+/// deadline at arrival delivers all three ~ms late: an event whose deadline
+/// already elapsed while a predecessor slept has no remaining wait and
+/// forwards immediately. Arrival order is preserved (one `while` loop over
+/// the channel) and arrival instants are monotone, so same-delay deadlines
+/// are monotone too and the wire order matches the engine's event order
+/// exactly as it did in the old inline path. The armed value is read per
+/// event at dequeue, so re-arming or `ClearDivergences` applies to everything
+/// still queued; the window rides the sim axis via `wall_duration`, matching
+/// every other ms-window control.
+fn spawn_exec_pump(
+    mut exec_rx: mpsc::Receiver<(Instant, ServerMessage)>,
+    delay_ms: Arc<AtomicU64>,
+    sim: SimClock,
+    out: mpsc::Sender<ServerMessage>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some((arrived, msg)) = exec_rx.recv().await {
+            let delay = delay_ms.load(Ordering::Relaxed);
+            if delay > 0 {
+                // `deadline - now` phrased as a saturating remainder so a
+                // deadline already in the past sleeps zero, and a pathological
+                // `arrival + delay` can never overflow `Instant` arithmetic.
+                let hold = sim.wall_duration(sim_duration_from_millis(delay));
+                let remaining = hold.saturating_sub(arrived.elapsed());
+                if !remaining.is_zero() {
+                    tokio::time::sleep(remaining).await;
+                }
+            }
+            if out.send(msg).await.is_err() {
+                break; // writer gone
+            }
+        }
+    })
 }
 
 /// Feed per-session server liveness frames into the same channel the writer
@@ -1513,12 +1559,56 @@ const NO_TICK_SENT: u64 = u64::MAX;
 /// stay parked in backpressure, so a quiesce/join completes promptly (E.7).
 const REPLAY_SEND_POLL: Duration = Duration::from_millis(5);
 
+/// Maximum wall time one slice of a pacing sleep runs before the replay
+/// thread re-checks its cancel flag. Pacing deadlines are unbounded in
+/// principle: the accelerated branch deadline-paces every tick with no cap
+/// (a session-profile trough or a Subscribe with a future `start_ts` can put
+/// the next deadline minutes to days out), and identity mode with
+/// `gap_cap_ms = 0` (the documented "0 disables the cap") is just as
+/// unbounded. `quiesce_replay` joins the thread inline in the connection's
+/// read loop, so one uninterruptible `thread::sleep` that long would stall
+/// every Unsubscribe/resubscribe/disconnect for the whole connection until
+/// the sleep expired. Slicing the sleep bounds cancel-observation latency to
+/// this constant, at a cost of at most ~50 wakeups/sec while pacing -
+/// negligible against per-tick synthesis.
+const REPLAY_SLEEP_POLL: Duration = Duration::from_millis(20);
+
+/// Sleep until `target_wall_ns` - a unix-ns wall deadline mapped through the
+/// replay's NTP-immune `(wall_anchor, instant_anchor)` pairing - in bounded
+/// slices of at most [`REPLAY_SLEEP_POLL`], returning early the moment
+/// `cancel` is raised. Both pacing branches of `spawn_replay` (accelerated
+/// deadline pacing and identity gap pacing) sleep exclusively through this,
+/// so a cancelled replay parked mid-gap wakes within one slice instead of
+/// holding `quiesce_replay`'s join for the full inter-tick wall gap.
+fn sleep_until_wall_cancellable(
+    target_wall_ns: u64,
+    wall_anchor: u64,
+    instant_anchor: Instant,
+    cancel: &AtomicBool,
+) {
+    if target_wall_ns <= wall_anchor {
+        return;
+    }
+    let target = instant_anchor + Duration::from_nanos(target_wall_ns - wall_anchor);
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let now = Instant::now();
+        if target <= now {
+            return;
+        }
+        std::thread::sleep((target - now).min(REPLAY_SLEEP_POLL));
+    }
+}
+
 /// Cancel a replay and join its thread, off the async worker.
 ///
 /// The join can block briefly (until the thread observes the cancel between
-/// generated ticks or within one [`REPLAY_SEND_POLL`] of a full-channel park),
-/// so it runs on a blocking thread rather than stalling the tokio worker driving
-/// this connection. Returning only once the thread has exited is what guarantees
+/// generated ticks, within one [`REPLAY_SEND_POLL`] of a full-channel park, or
+/// within one [`REPLAY_SLEEP_POLL`] slice of a pacing sleep), so it runs on a
+/// blocking thread rather than stalling the tokio worker driving this
+/// connection. Returning only once the thread has exited is what guarantees
 /// quiescence: callers rely on it so a replaced stream cannot interleave a stale
 /// tick after its successor begins (E.6), and so disconnect reaps every thread.
 async fn quiesce_replay(replay: Replay) {
@@ -1526,6 +1616,27 @@ async fn quiesce_replay(replay: Replay) {
     if let Err(e) = tokio::task::spawn_blocking(move || replay.handle.join()).await {
         tracing::warn!(%e, "replay join task panicked");
     }
+}
+
+/// Quiesce a symbol's in-flight replay and return its resume floor: the last
+/// `ts_event` it successfully sent, or `None` if it never sent one.
+///
+/// The floor is loaded only AFTER the join, and that ordering is load-bearing.
+/// The replay thread's cancel checks bracket the send, but a send already past
+/// its check completes and stores `last_sent_ts` even if `cancel` lands
+/// mid-flight - so between a pre-join load and the thread's exit, one more
+/// tick (T2) can enter the shared channel and advance `last_sent_ts` past the
+/// loaded value (T1). A floor of T1 makes the replacement seek `T1 + 1` and
+/// regenerate everything in `(T1, T2]`: duplicate frames on the wire, breaking
+/// the ascending-`ts_event` ordering the adapter's cursor relies on - exactly
+/// the E.5/E.6 seam the resume floor exists to close. Once the join returns
+/// the thread has exited and `last_sent_ts` is final, so a floor read here
+/// covers every tick that could ever have reached the channel.
+async fn quiesce_and_resume_floor(old: Replay) -> Option<u64> {
+    let last_sent_ts = Arc::clone(&old.last_sent_ts);
+    quiesce_replay(old).await;
+    let last_sent = last_sent_ts.load(Ordering::Relaxed);
+    (last_sent != NO_TICK_SENT).then_some(last_sent)
 }
 
 /// Sort + dedup the requested symbols so a single subscription naming a symbol
@@ -1644,18 +1755,15 @@ fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
         // NTP/leap step mid-session: nothing after this line consults
         // `CLOCK_REALTIME` again, so a backward step can no longer make the
         // feed stall (a huge `deadline - now`) and a forward step can no longer
-        // make it burst (`deadline <= now` unpaced).
+        // make it burst (`deadline <= now` unpaced). The sleep itself is the
+        // sliced, cancel-aware `sleep_until_wall_cancellable`, so an unbounded
+        // pacing gap cannot hold a quiesce hostage; a sleep cut short by cancel
+        // falls through to the pre-send cancel check below and exits before
+        // emitting the tick it was pacing.
         let wall_anchor = now_ns();
         let instant_anchor = Instant::now();
         let sleep_until_wall = |target_wall_ns: u64| {
-            if target_wall_ns <= wall_anchor {
-                return;
-            }
-            let target = instant_anchor + Duration::from_nanos(target_wall_ns - wall_anchor);
-            let now = Instant::now();
-            if target > now {
-                std::thread::sleep(target - now);
-            }
+            sleep_until_wall_cancellable(target_wall_ns, wall_anchor, instant_anchor, &cancel);
         };
 
         // Identity pacing (the `else if speed > 0.0` branch below) sleeps the
@@ -2513,5 +2621,172 @@ mod tests {
             last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
         })
         .await;
+    }
+
+    /// The resume floor must be read AFTER the old replay is joined. This
+    /// thread models the interleaving the ordering closes: a replay whose
+    /// send is already past its cancel check when the resubscribe cancels it
+    /// still completes that send and advances `last_sent_ts` before exiting.
+    /// A floor loaded before the join misses that final tick (here it would
+    /// read the NO_TICK_SENT sentinel and yield `None`), so the replacement
+    /// re-serves it as a duplicate frame; loaded after the join the value is
+    /// final and the floor covers everything that reached the channel.
+    #[tokio::test]
+    async fn resume_floor_reads_last_sent_after_quiesce() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let last_sent_ts = Arc::new(AtomicU64::new(NO_TICK_SENT));
+        let thread_cancel = Arc::clone(&cancel);
+        let thread_last_sent = Arc::clone(&last_sent_ts);
+        let handle = std::thread::spawn(move || {
+            while !thread_cancel.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            // The in-flight send completes after cancel lands, exactly like a
+            // `try_send` that succeeded an instant before the flag was raised.
+            thread_last_sent.store(42, Ordering::Relaxed);
+        });
+
+        let floor = quiesce_and_resume_floor(Replay {
+            cancel,
+            handle,
+            last_sent_ts,
+        })
+        .await;
+
+        assert_eq!(
+            floor,
+            Some(42),
+            "the floor must include the tick sent while the quiesce was in flight"
+        );
+    }
+
+    /// `DelayAcks` holds every execution event by ~ms from its own enqueue
+    /// instant, not by ms times its queue position: a burst of three events
+    /// (one submit's Accepted + Filled + AccountState) sleeps its windows
+    /// concurrently, so the whole batch lands ~delay after enqueue instead of
+    /// +delay/+2*delay/+3*delay off a serial per-dequeue sleep.
+    #[tokio::test]
+    async fn delay_acks_does_not_compound_across_queued_events() {
+        const DELAY_MS: u64 = 100;
+        let delay_ms = Arc::new(AtomicU64::new(DELAY_MS));
+        let (exec_tx, exec_rx) = mpsc::channel::<(Instant, ServerMessage)>(8);
+        let (tx, mut rx) = mpsc::channel::<ServerMessage>(8);
+        let pump = spawn_exec_pump(exec_rx, delay_ms, SimClock::identity(), tx);
+
+        let started = Instant::now();
+        for i in 0..3u64 {
+            exec_tx
+                .send((
+                    started,
+                    ServerMessage::OrderAccepted {
+                        client_order_id: format!("O{i}"),
+                        venue_order_id: format!("V{i}"),
+                        ts_event: i,
+                    },
+                ))
+                .await
+                .expect("enqueue exec event");
+        }
+        for _ in 0..3 {
+            rx.recv().await.expect("delayed exec event");
+        }
+        let elapsed = started.elapsed();
+
+        // The armed window must be honored at all (lower bound)...
+        assert!(
+            elapsed >= Duration::from_millis(DELAY_MS - 20),
+            "batch released after {elapsed:?}, before the armed {DELAY_MS} ms window"
+        );
+        // ...but once per batch, not once per event: 3 serial sleeps would
+        // take ~300 ms. Generous slack for slow CI, still far under 2x delay.
+        assert!(
+            elapsed < Duration::from_millis(2 * DELAY_MS),
+            "batch took {elapsed:?}; per-dequeue sleeps compound the armed delay"
+        );
+
+        drop(exec_tx);
+        pump.await.expect("pump drains cleanly");
+    }
+
+    /// A pacing sleep must observe cancellation within one poll slice, not
+    /// after the full inter-tick wall gap: a 60s deadline here would hold the
+    /// join for a minute under a plain uninterruptible `thread::sleep`.
+    #[test]
+    fn pacing_sleep_returns_promptly_on_cancel() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let wall_anchor = now_ns();
+        let instant_anchor = Instant::now();
+        let target = wall_anchor + 60_000_000_000; // 60s of pacing
+        let thread_cancel = Arc::clone(&cancel);
+        let sleeper = std::thread::spawn(move || {
+            sleep_until_wall_cancellable(target, wall_anchor, instant_anchor, &thread_cancel);
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+        cancel.store(true, Ordering::Relaxed);
+        let cancelled_at = Instant::now();
+        sleeper.join().expect("sleeper joins");
+
+        assert!(
+            cancelled_at.elapsed() < Duration::from_secs(1),
+            "cancelled pacing sleep took {:?} to return",
+            cancelled_at.elapsed()
+        );
+    }
+
+    /// End-to-end on the accelerated deadline branch: a replay parked in its
+    /// first pacing sleep (wall deadline 60s out via a future clock anchor,
+    /// the same construction as `replay_deadline_paces_against_sim_clock`)
+    /// must still quiesce promptly. `quiesce_replay` joins the thread inline
+    /// in the connection's read loop, so before the sliced cancel-aware sleep
+    /// this join - and with it every Unsubscribe/resubscribe/disconnect on
+    /// the connection - stalled for the full remaining gap.
+    #[tokio::test]
+    async fn replay_parked_in_deadline_pacing_quiesces_promptly() {
+        const EPOCH: u64 = 1_900_000_000_000_000_000;
+        let anchor = now_ns() + 60_000_000_000; // first tick's wall deadline 60s out
+        let sim = SimClock {
+            sim_epoch_ns: EPOCH,
+            wall_anchor_ns: anchor,
+            speed: 1_000.0,
+        };
+        let profiles = default_profiles();
+        let (tx, _rx) = mpsc::channel::<ServerMessage>(8);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let last_sent_ts = Arc::new(AtomicU64::new(NO_TICK_SENT));
+        let handle = spawn_replay(ReplaySpawn {
+            symbol: "BTCUSDT".to_string(),
+            start_ts: Some(EPOCH),
+            regime: None,
+            speed: 1_000.0,
+            gap_cap_ms: 1_000,
+            profiles,
+            sim,
+            // Origin AT the seek target so the source builds instantly and the
+            // thread's first act is the 60s pacing sleep this test interrupts.
+            data_origin: EPOCH,
+            tx,
+            cancel: Arc::clone(&cancel),
+            resume_floor: None,
+            last_sent_ts: Arc::clone(&last_sent_ts),
+        });
+
+        // Let the thread reach the pacing sleep before cancelling, so the
+        // prompt return below is the sliced sleep observing the flag, not the
+        // loop-top check winning a race.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let started = Instant::now();
+        quiesce_replay(Replay {
+            cancel,
+            handle,
+            last_sent_ts,
+        })
+        .await;
+
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "replay parked in deadline pacing took {:?} to quiesce",
+            started.elapsed()
+        );
     }
 }

@@ -208,8 +208,11 @@ fn positioned_generator(
 /// MARKET order with - the wire's `SubmitOrder.price` is `None` for a market
 /// order (mirroring Nautilus, which never stamps one), and the venue is the
 /// only side with the synthesized tape, so it stamps the order before the
-/// engine ever validates it. Returns `None` for an unconfigured symbol,
-/// leaving the engine's "unknown instrument" rejection to fire as normal.
+/// engine ever validates it. Returns `None` for an unconfigured symbol
+/// (leaving the engine's "unknown instrument" rejection to fire as normal)
+/// or when the bounded drain below cannot reach `sim_now` (the order stays
+/// price-less and the engine's "submit price required" rejection fires - an
+/// honest refusal rather than a fill at a price hours behind the clock).
 pub(crate) fn current_price(
     symbol: &str,
     profiles: &InstrumentProfiles,
@@ -218,15 +221,26 @@ pub(crate) fn current_price(
 ) -> Option<Decimal> {
     let fp = fingerprint();
     let profile = profiles.get(symbol)?;
-    let mut source = positioned_generator(
-        profile,
-        seed_for(symbol),
-        data_origin,
-        fp,
-        None,
-        Some(sim_now),
-    );
-    let TickEvent::Trade(trade) = source.next_tick()? else {
+    // `positioned_generator` only restores the nearest checkpoint AT OR BEFORE
+    // the target; the residual walk up to the target itself is the caller's to
+    // drain. The live and history paths drain it via `MergeSource::starting_at`
+    // -> `BoundedSeek::seek_to`; composing the identical `BoundedSeek` here
+    // keeps the stamped price on the identical walk. Taking one bare
+    // `next_tick()` instead would return the first tick after the last
+    // checkpoint - up to `CHECKPOINT_K` ticks (hours of tape at the default
+    // cadence) behind the price a live subscriber sees at the same instant.
+    let mut source = BoundedSeek {
+        inner: Box::new(positioned_generator(
+            profile,
+            seed_for(symbol),
+            data_origin,
+            fp,
+            None,
+            Some(sim_now),
+        )),
+        cap: MAX_HISTORY_SEEK_TICKS,
+    };
+    let TickEvent::Trade(trade) = source.seek_to(sim_now)? else {
         return None;
     };
     Some(trade.price)
@@ -593,6 +607,40 @@ mod tests {
         println!(
             "  checkpoints held: {} (flat seek independent of distance)",
             index.checkpoint_count()
+        );
+    }
+
+    // The MARKET-order price stamp and a live subscriber sample the same
+    // checkpointed tape at the same instant, so they must agree exactly. The
+    // target sits 24h (~12k ticks at the default cadence) past the origin -
+    // beyond CHECKPOINT_K, so the nearest checkpoint is thousands of ticks
+    // behind the target and a `current_price` that skips the residual drain
+    // (taking the first tick after the checkpoint instead of the first tick at
+    // or after sim-now) returns a price from hours earlier on the walk.
+    #[test]
+    fn current_price_matches_live_subscriber_at_same_instant() {
+        const HOUR_NS: u64 = 3_600_000_000_000;
+        let profiles = InstrumentProfiles::defaults();
+        let sim_now = TEST_ORIGIN + 24 * HOUR_NS;
+        let symbols = ["BTCUSDT".to_string()];
+
+        let stamped =
+            current_price("BTCUSDT", &profiles, TEST_ORIGIN, sim_now).expect("stamped price");
+        let mut live = build_live_source(&symbols, None, None, &profiles, TEST_ORIGIN, sim_now)
+            .expect("live source");
+        let TickEvent::Trade(first) = live.next_tick().expect("first live tick") else {
+            panic!("generated source emits trades");
+        };
+
+        assert!(
+            first.ts_event >= sim_now,
+            "live subscriber's first tick {} precedes sim_now {sim_now}",
+            first.ts_event
+        );
+        assert_eq!(
+            stamped, first.price,
+            "a MARKET order stamped at sim_now must fill at the price a live \
+             subscriber at the same instant sees, not a checkpoint-stale one"
         );
     }
 
