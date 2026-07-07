@@ -17,8 +17,12 @@ Fix batch 1 (complete): E1, E2, E6, E8/AE11, E12, E13, E14, D1, D2, D3, S1,
 S2, S3, S4, S6, AD1, AD20 verified-and-fixed (every one confirmed real), plus
 a lateral TradeId-length panic found and fixed in convert.rs.
 Fix batch 2 (complete): E3, E15, AE1, AE3, AE4, AE5, AE7, AE12, F1, F2, F3,
-S5, S8, S9, X1 verified-and-fixed (every one confirmed real). See "Found
-during fix batches" and "Upstream candidates" at the bottom for new entries.
+S5, S8, S9, X1 verified-and-fixed (every one confirmed real).
+Fix batch 3 (complete): AD2, AD3 (subsumes AD23), AD8, AD9, AD13, AD14, AD15,
+X8, F7, D4, D5, D6 verified-and-fixed (every one confirmed real); a
+non-normalized-flat-session test in mogwai-server that had encoded the D4
+footgun was reworked to exercise genuine intraday shape. See "Found during
+fix batches" and "Upstream candidates" at the bottom for new entries.
 
 IDs: E = engine/protocol, D = data path, S = server, AD = adapter data half,
 AE = adapter exec half, X = cross-boundary seams, F = found during fix
@@ -103,56 +107,6 @@ serde round-trips and partial-payload defaults hold on both crates.
 ---
 
 ## Data path (crates/mogwai-data)
-
-### D4. gap - SessionProfile::validate does not check normalization; a non-normalized profile silently rescales mean duration and vol
-
-`SessionProfile::validate` + `SessionModulator::new`, `generated.rs`. Severity
-medium for the config path, confidence high.
-
-The modulator computes `share * 24.0` and `share * 7.0` assuming shares are
-fractions summing to ~1 (the fingerprint's do). Validation only requires
-strictly-positive-finite. A user config with `intensity_hour = [1.0; 24]` (a
-plausible "no modulation" attempt) yields a 24 * 7 = 168x arrival multiplier,
-silently compressing the validated `mean_duration_s` from ~7 s to ~43 ms;
-`vol_hour` is used raw as a per-mean ratio, so a non-normalized vol curve
-silently rescales overall volatility even though `vol_scalar` passed
-validation. Either validate sums within tolerance or normalize in
-`SessionModulator::new`.
-
-### D5. gap - GeneratorScalars::validate coverage holes vs what the generator assumes
-
-`GeneratorScalars::validate`, `generated.rs`. Severity low-medium each,
-confidence high. Fields that pass validation but silently misbehave:
-
-- `modal_tick` vs `price_decimals` consistency unchecked: modal_tick 1e-7
-  (in range) with price_decimals 1 (in range) makes `round_dp(1)` collapse
-  every price to a 0.1 grid - the configured tick is silently coarsened, and
-  the on-grid invariant still holds so tests will not catch it.
-- `start_price` unbounded against the hard mid clamps in `next_latent_mid`
-  (`.max(tick_f64).min(1_000_000_000.0)`): start_price 5e9 validates, then the
-  first tick collapses the mid to 1e9 (an instant 80 percent crash);
-  start_price below one tick silently jumps up to the tick.
-- `vol_scalar` only checked strictly-positive-finite, but any value above
-  ~1e-6 is silently neutered by the sigma2 cap (`(GARCH_SIGMA_CAP *
-  clamp_mult)^2`); the knob's documented meaning stops being true above the
-  cap.
-- `symbol` (serde-defaulted to the empty string) never checked non-empty; a
-  config omitting it emits trades with an empty symbol, cross-contaminating
-  `TickRuleAggressor` per-symbol state and any symbol-keyed consumer.
-
-### D6. gap - SessionEdgeSpike does not lift the return clamp the way VolStorm does
-
-`RegimeState::new` / `next_latent_mid`, `generated.rs`. Severity low-medium,
-medium confidence it is unintentional.
-
-VolStorm sets `clamp_mult = vol_mult` so the lifted RMS is not strangled by
-`MAX_ABS_RETURN` (2e-5) - a dedicated test exists to disprove the bare
-multiply. SessionEdgeSpike leaves `clamp_mult = 1.0`, so a large
-`extra_vol_mult` (validator allows up to 100; combined with the session peak
-hour ~2.46 that is ~250x base RMS) clamps a substantial fraction of in-window
-draws and the realized spike saturates well below the requested
-amplification. The existing test uses 6.0, far below where clamping binds.
-Undocumented asymmetry between the two vol regimes.
 
 ### Data-path smells and nits
 
@@ -320,8 +274,8 @@ NTP-immune anchor pairing in spawn_replay is sound.
   defense in depth.
 - E8 / AE11 (zero-initial backoff spin): confirmed and FIXED in fix batch 1
   at the validator; lifecycle comments trued up in batch 2 (old F2).
-- D1 (exact-ts seek off-by-one): confirmed and FIXED in fix batch 1. The
-  adapter-side defense-in-depth gap remains as the downgraded AD8.
+- D1 (exact-ts seek off-by-one): confirmed and FIXED in fix batch 1; the
+  adapter-side rewind guard (old AD8) was added in fix batch 3.
 - D3 (ReopenGap at_ts at or before the anchor): FIXED in fix batch 1 at the
   generator (consumed at construction with a warning, byte-identical to a
   clean run). Whether the server should ALSO reject it loudly at the API
@@ -330,54 +284,17 @@ NTP-immune anchor pairing in spawn_replay is sound.
   (resume floor read after quiesce). The adapter-side stale-start_ts
   duplication paths remain - see AD5, AD7 - and the WS drain still has zero
   dedup.
-- S5 (silent zero-frame subscription): server half FIXED in fix batch 2 -
-  unservable subscribes (unknown symbol, exhausted seek, pre-origin start_ts)
-  now warn and emit ProtocolError frames. But the adapter's data drain
-  swallows ProtocolError (X8, upgraded), so broadarrow still cannot see the
-  diagnostics; AD12 remains open with X8 as its cheapest first step.
+- S5 (silent zero-frame subscription): server half FIXED in fix batch 2
+  (warn plus ProtocolError frame on unservable subscribes), adapter half
+  FIXED in fix batch 3 (the data drain now warns on ProtocolError instead of
+  swallowing it, old X8). AD12 remains open only for the POSITIVE watchdog
+  (no counter / heartbeat proving a subscribed-but-silent feed is alive).
 - S11 (HTTP carriers exempt from temporal divergences): CONFIRMED at the seam,
   undocumented.
 
 ---
 
 ## Adapter, data half (crates/mogwai-adapter: client.rs data side, convert.rs, config.rs, factories.rs)
-
-### AD2. bug - `aggregate_bars` drops the final COMPLETED window of every historical bars request
-
-`client.rs` `aggregate_bars` / `request_bars`. Severity medium-high (warmup
-shortfall / always-stale last bar), confidence high.
-
-A bar is only emitted when a later trade crosses `close_ts`; the trailing
-`state.active` is never flushed, even when the request's `end` proves the
-window fully elapsed. A warmup requesting bars over `[start, end)`
-systematically gets the newest bar missing - trades in the last window are
-aggregated and discarded. The test
-`request_bar_aggregation_closes_on_window_and_drops_partial` pins only the
-genuinely-partial case; the complete-but-unflushed case is the same code path
-and is wrong. `request_bars` computes `end` but `aggregate_bars` never uses
-it.
-
-### AD3. bug - Historical requests silently truncate to one 1000-trade page; request_bars compounds it with a bars-vs-trades unit mismatch
-
-`client.rs` `request_trades`, `request_bars`, `fetch_trades`, `capped_limit`;
-seam side: research/broadarrow bridge strategy actor warmup. Severity high
-for warmup correctness, confidence high on behavior. (Reported independently
-by the data-half and cross-boundary agents.)
-
-Both request handlers issue exactly ONE `GET /trades` page, clamped to
-`MAX_HISTORY_LIMIT = 1_000` trades, no pagination loop over `[start, end)`. A
-window with more than 1000 trades returns a prefix, and the response still
-claims the full start/end - the caller cannot tell it was truncated. For
-`request_bars` this compounds: `request.limit` semantically counts BARS to
-nautilus (broadarrow's warmup issues `request_bars(..., limit =
-warmup.bars)`) but is applied to TRADES here. A warmup asking for N
-one-minute bars fetches at most N trades (never more than 1000); on the
-fitted tape (~5 trades per bar) that aggregates into roughly N/5 bars, and
-because `end = None` with a single page they cover only the OLDEST edge of
-the window with a gap up to live. The warmup under-delivers or times out
-(`warmup_timeout_live_bars` fatal), and the promised warmup/live splice is
-not contiguous. The ceiling belongs per-page with an overlap-and-skip loop -
-machinery the adapter already has in `PollCursor`.
 
 ### AD4. bug - Serial per-message havoc sleep caps the drain at ~33 msg/s and lets the inbound queue grow unboundedly
 
@@ -454,36 +371,6 @@ double-counted bars, unless a trade arrived in between and
 subscribe and max-on-delivery write the same field with opposing policies;
 the result depends on interleaving.
 
-### AD8. gap (downgraded) - The poll cursor has no guard against a server that rewinds: `unseen_from_batch` does not filter `ts_event < last_ts`
-
-`client.rs` `poll_market_data` / `unseen_from_batch`. Severity low (was
-medium when the checkpoint off-by-one was live), confidence high on the
-missing filter.
-
-The primary trigger - the data-crate checkpoint off-by-one at exact-ts seek
-targets (old D1) - was fixed in fix batch 1, so the poll cursor's exact-ts
-`start = entry.last_ts` is now served correctly. What remains is the
-defense-in-depth gap: if any server bug ever returns a trade with `ts_event <
-last_ts` again, `unseen_from_batch` does not filter it (it only skips `ts ==
-last_ts` prefixes) and the stale trade is emitted as a duplicate. A one-line
-`ts_event < last_ts -> skip` guard would make the cursor robust against
-rewinds by construction.
-
-### AD9. bug - Unsubscribe racing an in-flight poll fetch resurrects a stale cursor that a later resubscribe silently resumes from
-
-`client.rs` `poll_market_data` / `unsubscribe_symbol`. Severity low-medium,
-confidence high on mechanism; the race window is real but narrow.
-
-The cursor map is locked twice per symbol with an awaited HTTP fetch between.
-If the last unsubscribe lands in that window it removes the cursor (and subs
-entry), but the post-fetch lock does `entry(symbol).or_insert_with(...)` -
-re-creating the entry and advancing it with the fetched batch. The entry then
-leaks (poll_symbols no longer lists the symbol), and a later fresh subscribe
-finds the stale cursor via or_insert_with and resumes from the OLD position
-instead of the new start_ts/sim-now anchor - a surprise history flood or an
-ignored requested start. Fix shape: second lock uses get_mut and drops the
-batch if the entry is gone.
-
 ### AD10. bug - Cross-table bars refcount desync: an unmatched unsubscribe_bars can kill the symbol's live feed for the remaining subscriber
 
 `client.rs` `unsubscribe_bars`. Severity low (requires a misbehaving caller,
@@ -525,41 +412,13 @@ when armed, the idle clock resets on ANY application frame (heartbeat, exec
 traffic), so a data-silent-but-frame-active socket never trips it -
 deliberate for the 4255 reproduction, but it means the CLEAN default has no
 watchdog, no counter, no periodic "0 ticks in N s for subscribed symbol" log.
-On the polling path errors are fully silent (AD6, AD13). broadarrow cannot
-distinguish dead feed from quiet market by design, and there is no
-adapter-side diagnostic to consult after the fact. Fixing X8 is now the
-cheapest first step.
-
-### AD13. gap - Poll-loop fetch failures are swallowed with no log whatsoever
-
-`client.rs` `poll_market_data`: `let Ok(batch) = fetch_trades(...) else {
-continue; }`. Severity low-medium (amplifies AD6), confidence high.
-
-Contrast `request_trades`, which was explicitly fixed to log loudly
-("Surface the failure instead of the old silent if-let-Ok drop"). The same
-silent-drop anti-pattern the codebase already identified survives here.
-
-### AD14. gap - Missing InstrumentDef on the drain path silently black-holes all data for the symbol
-
-`client.rs` `emit_trade` / `handle_market_message` early-return None from
-`instrument_def` with no warning. Severity low-medium, confidence high.
-
-The instruments map is seeded once at connect; a symbol subscribed but absent
-from the seed (server config change, later-added instrument) streams into
-nothing with zero diagnostics. `ensure_instrument` (which re-seeds on miss)
-is used only by request handlers, never by subscribe or the drain.
-
-### AD15. gap - Instruments with currencies unknown to nautilus are dropped silently, cascading into every bar being refused
-
-`convert.rs` `instrument_any` errors on `Currency::from_str` failure
-(correct), but `emit_seeded_instruments`, `subscribe_instruments`,
-`request_instruments` all swallow it (if-let-Ok / .ok() with no warn).
-Severity low-medium, confidence high.
-
-A configured `[[instrument]]` with an exotic base/quote never reaches the
-Nautilus cache, so broadarrow's executor refuses every bar for it - the exact
-failure mode emit_seeded_instruments's own doc comment exists to prevent -
-with no log line pointing at the cause.
+Now that fix batch 3 fixed X8 (the drain warns on ProtocolError), the
+server's unservable-subscribe diagnostics DO reach the adapter log, and the
+poll-path silent-drop (old AD13) now logs rate-limited. What remains open is
+the AD6 family: a persistently failing poll (server restart, clock skew) is
+now VISIBLE in the log but still not self-healed - no cursor reset, no clock
+re-fetch, no disconnect signal. And there is still no positive watchdog
+(counter / "0 ticks in N s" heartbeat) on either transport.
 
 ### AD16. gap - /clock fetch failure falls back to the identity SimClock while the server may run at speed != 1
 
@@ -614,9 +473,6 @@ quiet tape.
   post-2262) to None silently: a far-future start becomes "from origin" and a
   pre-epoch end becomes unbounded rather than an error; combined with
   ensure_on_tape(start=None) passing, a nonsense request degrades quietly.
-- AD23. nit - `capped_limit` clamps a 5000-trade request to 1000 with no
-  warning and no truncation marker in the response (subsumed by AD3 but
-  independently worth a warn).
 - AD24. nit - `#[allow(dead_code)]` on both MogwaiDataClient and
   MogwaiExecutionClient struct definitions hides genuinely dead fields from
   clippy forever.
@@ -630,11 +486,11 @@ quiet tape.
 
 Per the reporting agent: `PollCursor::unseen_from_batch` is correct for the
 intended stable-ascending server contract, including cap-mid-timestamp and
-empty pages (failure modes are all at the contract edges: 1000+ trades
+empty pages (remaining failure modes at the contract edges: 1000+ trades
 sharing one ts wedges the cursor forever, inherent to ts-cursors and
-undetected; server restart AD6; rewind AD8; duplicates AD5/AD7). Tick and
-volume bar specs are refused with ensure! (good); bar ts_event = window
-close, correct. Convert precision uses rounding (not truncation) via nautilus
+undetected; server restart AD6; duplicates AD5/AD7 - the rewind guard was
+added in fix batch 3). Tick and volume bar specs are refused with ensure!
+(good); bar ts_event = window close, correct. Convert precision uses rounding (not truncation) via nautilus
 f64_to_fixed, monotonic so Bar OHLC invariants survive re-rounding;
 magnitude/precision overflows handled via new_checked for
 Price/Quantity/Money. (The sweep's claim that the zero-size trade was "the
@@ -874,19 +730,6 @@ across the two carriers"; the ordering guarantee is not.
 
 ### X7. (merged into S11 - temporal divergences do not apply to the HTTP carriers; confirmed and expanded there)
 
-### X8. gap (upgraded from nit) - ProtocolError frames are silently swallowed on the data path
-
-`client.rs` `handle_market_message`: the catch-all arm swallows
-ProtocolError; the exec path warns. A version-skewed/malformed Subscribe
-rejected by the server is invisible on the data client - the feed just stays
-silent until the warmup watchdog fires.
-
-Priority bump after fix batch 2: the server now actively uses ProtocolError
-for unservable-subscribe diagnostics (unknown symbol, exhausted positioning
-seek, pre-origin start_ts clamp), so this swallow now hides real, deliberate
-dead-feed diagnostics from broadarrow - fixing it is the cheapest first step
-on AD12.
-
 ### X9. nit/doc - OMS type: docs say Netting, broadarrow always runs the mogwai exec client at Hedging
 
 architecture.md: "exec building an ExecutionClientCore at OmsType::Netting".
@@ -962,18 +805,6 @@ stretch on an open-hour gap is still a once-sampled multiplier, now capped at
 366 days. Deliberate (thin tape is a venue-wide divergence, not a session
 curve); recorded as behavior, not a bug.
 
-### F7. bug - VenueOrderId::from and ClientOrderId::from on wire strings are still panicking constructors throughout the exec drain
-
-`client.rs` exec drain. Found by the batch-2 client agent while fixing F1.
-Severity medium (same feed-killing class as the two fixed TradeId panics),
-confidence high.
-
-The F1 fix routed the fill's trade id through new_checked, but every other
-wire id in the exec drain (`VenueOrderId::from`, `ClientOrderId::from`,
-including `VenueOrderId::from(fill.venue_order_id)`) still uses the panicking
-From on server-sent strings. A corrupted over-long or empty id panics the
-exec task. Same drop-and-warn treatment wanted.
-
 ### F8. gap - Subscribe with a FUTURE start_ts is the unfixed WS twin of the /trades look-ahead leak
 
 `mogwai-server` `handle_socket`/`resume_seek_target`. Found by the batch-2
@@ -991,10 +822,10 @@ Cross-crate (server 422 vs adapter poll loop). Found by the batch-2 server
 agent. Severity low (same-machine deployments safe), confidence medium.
 
 If the adapter's sim-now anchor ever runs ahead of the server's (cross-machine
-NTP skew), its poll `start` can trip the new start-beyond-sim-now 422 - and
-per AD6/AD13 the poll loop swallows fetch errors silently, so the feed dies
-with no diagnostic. Amplifies the case for fixing AD13's silent error
-handling.
+NTP skew), its poll `start` can trip the new start-beyond-sim-now 422. Since
+fix batch 3 the poll loop logs this rate-limited instead of swallowing it, so
+the feed is now VISIBLY dead rather than silently dead - but still not
+self-healed (no cursor reset / clock re-fetch), the AD6 residual.
 
 ### F10. note - The OrderRejected arm still overwrites mirror status unconditionally
 
@@ -1018,6 +849,32 @@ from AE3's original suggestion is only partially applied.
 agent kept (mirrors the Err-arm): after the last permitted cycle dies, the
 loop sleeps its backoff once more before the loop-top exhausted check
 returns. Harmless delay of the exhausted return by one backoff.
+
+### F13. smell - poll_failures map leaks an entry for a symbol unsubscribed while failing
+
+`client.rs` `poll_market_data`. Found by the batch-3 data agent. The
+rate-limited poll-failure counter (old AD13 fix) is removed only on a
+successful fetch, so a symbol unsubscribed while its poll is failing leaves a
+stale counter entry. Trivial memory, bounded by symbol count.
+
+### F14. gap (doc) - mogwai-server session-validation message renders the D4 sum-violation sentinel index literally
+
+`mogwai-server` config validation formats `err.index` into
+`session.intensity_hour[18446744073709551615] must be finite and > 0` for a
+D4 sum violation (the fix batch 3 SessionProfileError uses `index:
+usize::MAX` as the "whole-array sum" sentinel). The field name is right; the
+`[index]` text and the "finite and > 0" wording are misleading for a sum
+violation. Wants a branch on `index == usize::MAX`. Found by the batch-3
+generator agent.
+
+### F15. gap - mogwai-server does not reject an empty instrument symbol before it reaches the generator's expect
+
+`mogwai-server` `validate_instrument_def` checks base/quote non-empty but not
+`symbol`. The batch-3 D5(d) fix now rejects an empty symbol at
+`GeneratorScalars::validate`, but a config path that skips pre-validation
+hits the generator's `.expect` panic instead of a clean error. The server
+should reject an empty `def.symbol` explicitly. Found by the batch-3
+generator agent.
 
 ---
 

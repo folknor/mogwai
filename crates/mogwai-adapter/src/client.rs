@@ -424,7 +424,7 @@ impl DataClient for MogwaiDataClient {
                 cache_instruments(&instruments, defs.clone());
                 let ts_init = now_unix_nanos(sim);
                 for def in defs {
-                    if let Ok(instrument) = convert::instrument_any(&def, ts_init) {
+                    if let Some(instrument) = instrument_any_or_warn(&def, ts_init) {
                         drop(sink.send(DataEvent::Instrument(instrument)));
                     }
                 }
@@ -447,7 +447,7 @@ impl DataClient for MogwaiDataClient {
                 let ts_init = now_unix_nanos(sim);
                 for def in defs {
                     if def.symbol == symbol
-                        && let Ok(instrument) = convert::instrument_any(&def, ts_init)
+                        && let Some(instrument) = instrument_any_or_warn(&def, ts_init)
                     {
                         drop(sink.send(DataEvent::Instrument(instrument)));
                     }
@@ -540,7 +540,13 @@ impl DataClient for MogwaiDataClient {
                     return;
                 }
             };
-            let trades = match fetch_trades(
+            // Page the window rather than issuing one MAX_HISTORY_LIMIT-capped
+            // request: a window with more than 1000 trades used to return only
+            // its oldest 1000, with the response still claiming the full range.
+            // `request.limit` counts TRADES here, so it becomes the pagination
+            // ceiling.
+            let max_trades = request.limit.map(std::num::NonZeroUsize::get);
+            let (mut trades, truncated) = match fetch_trades_windowed(
                 &http,
                 &http_quota,
                 &base,
@@ -548,13 +554,14 @@ impl DataClient for MogwaiDataClient {
                     symbol: &symbol,
                     start,
                     end,
-                    limit: request.limit,
+                    limit: None,
                     regime,
                 },
+                |out| max_trades.is_some_and(|m| out.len() >= m),
             )
             .await
             {
-                Ok(trades) => trades,
+                Ok(result) => result,
                 Err(err) => {
                     // Surface the failure instead of the old silent `if let Ok`
                     // drop: a server 422 (off-tape) or any fetch error must be
@@ -563,6 +570,19 @@ impl DataClient for MogwaiDataClient {
                     return;
                 }
             };
+            if let Some(m) = max_trades {
+                // Paging overshoots the trade ceiling by up to one page; trim to
+                // the requested count (from the oldest edge) so the response
+                // honors the limit exactly.
+                trades.truncate(m);
+            }
+            if truncated {
+                tracing::warn!(
+                    %symbol,
+                    trades = trades.len(),
+                    "request_trades: window truncated before its end (trade limit reached or same-ts wedge); the warmup/live splice may not be contiguous"
+                );
+            }
             let data = trades
                 .iter()
                 .filter_map(|t| {
@@ -643,7 +663,14 @@ impl DataClient for MogwaiDataClient {
                     return;
                 }
             };
-            let trades = match fetch_trades(
+            // Page the window, translating nautilus's BAR-count limit into a
+            // bar-span pagination target: the old single request applied a
+            // BAR-count limit as a TRADE-page limit, so a warmup for N bars
+            // fetched at most N trades (~N/5 bars on the fitted tape) covering
+            // only the oldest edge, under-delivering or timing out the warmup.
+            let bar_limit = request.limit.map(std::num::NonZeroUsize::get);
+            let interval = get_bar_interval_ns(&request.bar_type).as_u64();
+            let (trades, truncated) = match fetch_trades_windowed(
                 &http,
                 &http_quota,
                 &base,
@@ -651,19 +678,32 @@ impl DataClient for MogwaiDataClient {
                     symbol: &symbol,
                     start,
                     end,
-                    limit: request.limit,
+                    limit: None,
                     regime,
                 },
+                |out| bar_span_reached(out, interval, bar_limit),
             )
             .await
             {
-                Ok(trades) => trades,
+                Ok(result) => result,
                 Err(err) => {
                     tracing::error!(%symbol, error = %err, "request_bars: trade fetch failed; the server may have refused an off-tape window");
                     return;
                 }
             };
-            let bars = aggregate_bars(&request.bar_type, &trades, &def, sim);
+            if truncated {
+                tracing::warn!(
+                    %symbol,
+                    "request_bars: window truncated before its end (bar limit reached or same-ts wedge); the warmup may not splice contiguously into live"
+                );
+            }
+            let mut bars = aggregate_bars(&request.bar_type, &trades, &def, sim, end);
+            if let Some(m) = bar_limit {
+                // Paging spans at least `bar_limit` intervals, so it may produce
+                // a few extra bars; trim to the requested count (oldest edge,
+                // from the window start) so the response honors the bar limit.
+                bars.truncate(m);
+            }
             let response = BarsResponse::new(
                 request.request_id,
                 client_id,
@@ -693,7 +733,7 @@ impl DataClient for MogwaiDataClient {
                 let ts_init = now_unix_nanos(sim);
                 let data = defs
                     .iter()
-                    .filter_map(|def| convert::instrument_any(def, ts_init).ok())
+                    .filter_map(|def| instrument_any_or_warn(def, ts_init))
                     .collect();
                 let response = InstrumentsResponse::new(
                     request.request_id,
@@ -725,7 +765,7 @@ impl DataClient for MogwaiDataClient {
                 ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await
             {
                 let ts_init = now_unix_nanos(sim);
-                if let Ok(data) = convert::instrument_any(&def, ts_init) {
+                if let Some(data) = instrument_any_or_warn(&def, ts_init) {
                     let response = InstrumentResponse::new(
                         request.request_id,
                         client_id,
@@ -825,6 +865,17 @@ impl PollCursor {
         let mut skipped = 0;
         let mut out = Vec::new();
         for trade in batch {
+            // Defense in depth against a server that rewinds: a trade stamped
+            // BEFORE the cursor's high-water mark was already delivered (or
+            // belongs to a window the cursor has moved past), so re-emitting it
+            // would duplicate ticks downstream. The primary trigger (the data
+            // crate's exact-ts checkpoint off-by-one) is fixed server-side, so
+            // this only fires if some future server bug returns descending ts;
+            // skipping it keeps the cursor robust against rewinds by
+            // construction rather than trusting the contract.
+            if trade.ts_event < self.last_ts {
+                continue;
+            }
             if trade.ts_event == self.last_ts && skipped < self.emitted_at_last_ts {
                 skipped += 1;
                 continue;
@@ -953,6 +1004,7 @@ async fn handle_market_message(
         }
         ServerMessage::Quote(quote) => {
             let Some(def) = instrument_def(instruments, &quote.symbol) else {
+                warn_missing_instrument_once(&quote.symbol);
                 return;
             };
             let state = sub_state(subs, &quote.symbol);
@@ -971,6 +1023,18 @@ async fn handle_market_message(
         ServerMessage::Heartbeat { .. } => {
             tracing::trace!("ignoring server heartbeat on data path");
         }
+        ServerMessage::ProtocolError { reason, .. } => {
+            // The server sends ProtocolError to diagnose an unservable subscribe
+            // (unknown symbol, exhausted positioning seek, pre-origin start_ts
+            // clamp) as well as a decode failure. Swallowing it here left the
+            // feed silent with no downstream signal, indistinguishable from a
+            // quiet market. Match the exec path and surface the reason so a dead
+            // feed is visible in the adapter's own logs.
+            tracing::warn!(
+                %reason,
+                "venue reported a protocol error on the data path; a subscribe may have been refused (unknown symbol, exhausted seek, or pre-origin start)"
+            );
+        }
         _ => {}
     }
 }
@@ -984,6 +1048,7 @@ fn emit_trade(
     sim: SimClock,
 ) {
     let Some(def) = instrument_def(instruments, &trade.symbol) else {
+        warn_missing_instrument_once(&trade.symbol);
         return;
     };
     // Advance this subscription's resume cursor to just past the delivered tick.
@@ -1029,9 +1094,41 @@ struct DataPollContext {
 }
 
 async fn poll_market_data(mut ctx: DataPollContext) {
+    // Per-symbol consecutive fetch-failure counters. A persistent failure means
+    // a dead feed (the server-restart/off-tape-cursor class): the poll cursor
+    // and clock are fetched once at connect, so a restarted server with a fresh
+    // data_origin 422s every `GET /trades` forever, indistinguishable from a
+    // quiet market. The old `let Ok(batch) = ... else { continue }` swallowed it
+    // silently; we now warn - but rate-limited, so a wedged feed does not emit
+    // ~4 warns/sec/symbol. Warn on the first failure (onset) and roughly every
+    // 10s thereafter (POLL_INTERVAL is 250ms), and log a one-line recovery when
+    // a previously-failing symbol fetches cleanly again.
+    let mut poll_failures: HashMap<Symbol, u64> = HashMap::new();
     while ctx.connected.load(Ordering::Relaxed) {
         let symbols = poll_symbols(&ctx.subs);
         for (symbol, start_ts) in symbols {
+            // Self-heal a missing instrument def on the poll path: a symbol
+            // streaming without a seeded def is otherwise silently black-holed
+            // by `emit_trade`. `ensure_instrument` is a cheap map hit when the
+            // def is already present and re-seeds only on a genuine miss; the
+            // async/HTTP context the drain lacks lives here, so this is where
+            // the re-seed belongs. A genuine miss still surfaces once per symbol
+            // via the drain's warn.
+            if instrument_def(&ctx.instruments, &symbol).is_none()
+                && let Err(err) = ensure_instrument(
+                    &ctx.http,
+                    &ctx.http_quota,
+                    &ctx.base,
+                    &ctx.instruments,
+                    &symbol,
+                )
+                .await
+            {
+                // Best-effort re-seed: a still-missing def falls through to the
+                // drain's once-per-symbol warn below, so swallow the fetch error
+                // here at debug rather than warn twice for the same cause.
+                tracing::debug!(%symbol, error = %err, "poll-path instrument re-seed failed");
+            }
             // A fresh subscribe carries no start (the server seeks live to
             // sim-now); the poll cursor must anchor there too. Defaulting to 0
             // would send `start=0`, which the boot-derived-origin server refuses
@@ -1046,7 +1143,7 @@ async fn poll_market_data(mut ctx: DataPollContext) {
                     .or_insert_with(|| PollCursor::new(poll_anchor));
                 UnixNanos::from(entry.last_ts)
             };
-            let Ok(batch) = fetch_trades(
+            let batch = match fetch_trades(
                 &ctx.http,
                 &ctx.http_quota,
                 &ctx.base,
@@ -1059,14 +1156,40 @@ async fn poll_market_data(mut ctx: DataPollContext) {
                 },
             )
             .await
-            else {
-                continue;
+            {
+                Ok(batch) => {
+                    if poll_failures.remove(&symbol).is_some() {
+                        tracing::info!(%symbol, "poll fetch recovered");
+                    }
+                    batch
+                }
+                Err(err) => {
+                    let count = poll_failures.entry(symbol.clone()).or_insert(0);
+                    *count += 1;
+                    if *count == 1 || count.is_multiple_of(40) {
+                        tracing::warn!(
+                            %symbol,
+                            error = %err,
+                            failures = *count,
+                            "poll fetch failed; the feed may be dead (server restart with a \
+                             fresh data_origin, or an off-tape cursor)"
+                        );
+                    }
+                    continue;
+                }
             };
             let trades = {
                 let mut cursors = lock_recover(&ctx.cursor, "poll cursor");
-                let entry = cursors
-                    .entry(symbol.clone())
-                    .or_insert_with(|| PollCursor::new(poll_anchor));
+                // get_mut, not entry().or_insert_with: a last unsubscribe landing
+                // in the fetch window removes this cursor (and the subs entry). A
+                // resurrecting or_insert_with here would leak the entry
+                // (poll_symbols no longer lists the symbol, so it is never polled
+                // or removed again) and let a later fresh subscribe silently
+                // resume from this stale position instead of its requested
+                // start/sim-now anchor. Drop the batch when the entry is gone.
+                let Some(entry) = cursors.get_mut(&symbol) else {
+                    continue;
+                };
                 entry.unseen_from_batch(batch)
             };
             for trade in trades {
@@ -1165,12 +1288,31 @@ fn aggregate_bars(
     trades: &[mogwai_protocol::TradeTick],
     def: &InstrumentDef,
     sim: SimClock,
+    end: Option<UnixNanos>,
 ) -> Vec<Bar> {
     let mut state = BarSubState::default();
     let mut out = Vec::new();
     for trade in trades {
         if let Some(bar) = update_bar_state(*bar_type, &mut state, trade, def, sim) {
             out.push(bar);
+        }
+    }
+    // Flush the trailing window ONLY when the request's `end` proves it fully
+    // elapsed. A window's bar is otherwise emitted lazily, when a LATER trade
+    // crosses its `close_ts` - but a historical request over a window that has
+    // already passed gets no such trade, so the newest COMPLETE window would be
+    // silently dropped (the always-stale/missing last bar of every warmup). If
+    // `end >= active.close_ts` the window closed within the requested range and
+    // must be emitted; a genuinely-partial trailing window (`end` inside it, or
+    // an unknown `end`) is still dropped, matching the live path.
+    if let (Some(active), Some(end)) = (&state.active, end)
+        && end.as_u64() >= active.close_ts
+    {
+        match active_to_bar(*bar_type, active, def, sim) {
+            Ok(bar) => out.push(bar),
+            Err(err) => {
+                tracing::warn!(%bar_type, error = %err, "dropping unrepresentable trailing bar");
+            }
         }
     }
     out
@@ -1266,6 +1408,33 @@ fn instrument_def(
     lock_recover(instruments, "instrument").get(symbol).cloned()
 }
 
+/// Warns exactly once per symbol that a streamed frame arrived with no seeded
+/// `InstrumentDef`, so the symbol's data is being black-holed. The instruments
+/// map is seeded once at connect; a symbol subscribed but absent from that seed
+/// (a server config change or a later-added instrument) otherwise streams into
+/// nothing with zero diagnostics. The drain (`emit_trade`, the quote arm) has
+/// no HTTP handle to re-seed, so it can only surface the miss - the poll path,
+/// which does have async/HTTP context, self-heals via `ensure_instrument`. The
+/// dedup keeps a per-trade warn from flooding the log for a genuinely-missing
+/// symbol; it is process-global, which is acceptable for a diagnostic that only
+/// wants to fire on the transition into the black-holed state.
+fn warn_missing_instrument_once(symbol: &str) {
+    static WARNED: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let mut warned = lock_recover(
+        WARNED.get_or_init(|| Mutex::new(std::collections::HashSet::new())),
+        "missing-instrument warn set",
+    );
+    if warned.insert(symbol.to_string()) {
+        tracing::warn!(
+            %symbol,
+            "no instrument def for a streamed symbol; its data is black-holed \
+             until the instrument is seeded (server config change or later-added \
+             instrument)"
+        );
+    }
+}
+
 async fn seed_instruments(
     http: &HttpClient,
     quota: &HttpQuota,
@@ -1299,10 +1468,34 @@ fn emit_seeded_instruments(
         .cloned()
         .collect();
     for def in defs {
-        if let Ok(instrument) = convert::instrument_any(&def, ts_init) {
+        if let Some(instrument) = instrument_any_or_warn(&def, ts_init) {
             drop(sink.send(DataEvent::Instrument(instrument)));
         }
     }
+}
+
+/// Converts a seeded/fetched `InstrumentDef` into a nautilus instrument,
+/// warning loudly on failure instead of swallowing it. `convert::instrument_any`
+/// errors when the def carries a base/quote currency unknown to nautilus (an
+/// exotic pair), and a silent drop here cascades: the instrument never reaches
+/// the Nautilus cache, so broadarrow's executor refuses EVERY bar for the
+/// symbol with no log line pointing at the cause - the exact failure
+/// `emit_seeded_instruments` exists to prevent. Naming the symbol and the error
+/// at every swallow site turns that into a diagnosable log.
+fn instrument_any_or_warn(
+    def: &InstrumentDef,
+    ts_init: UnixNanos,
+) -> Option<nautilus_model::instruments::InstrumentAny> {
+    convert::instrument_any(def, ts_init)
+        .map_err(|err| {
+            tracing::warn!(
+                symbol = %def.symbol,
+                error = %err,
+                "dropping instrument: unrepresentable (currency unknown to nautilus?); \
+                 broadarrow will refuse every bar for this symbol"
+            );
+        })
+        .ok()
 }
 
 async fn ensure_instrument(
@@ -1455,6 +1648,106 @@ async fn fetch_trades(
         response.status.as_u16()
     );
     serde_json::from_slice(&response.body).context("decode trades")
+}
+
+/// Pages the server's bounded `/trades` scan across `[start, end]`, following
+/// the same overlap-and-skip cursor discipline the live poll path uses
+/// (`PollCursor`): each page re-fetches from the last seen `ts_event` and skips
+/// the already-emitted prefix at that timestamp, so trades sharing a `ts_event`
+/// across a page boundary are neither dropped nor duplicated. `MAX_HISTORY_LIMIT`
+/// is the per-page size - a single unpaged request silently truncated any
+/// window of more than 1000 trades to its oldest 1000, under-delivering every
+/// warmup (and, for `request_bars`, applying a BAR-count limit as a TRADE-page
+/// limit,
+/// so a warmup for N bars fetched at most N trades covering only the oldest
+/// edge). `stop` decides after each page whether enough has been collected: a
+/// trade ceiling for `request_trades`, a bar-span target for `request_bars`. The
+/// loop also stops when a short page proves the window is exhausted at the
+/// server frontier - the server clamps `end` at sim-now and refuses a start
+/// beyond it, so a forward-walking cursor always reaches a short page and
+/// terminates cleanly. Returns the accumulated trades and whether collection was
+/// cut short before the window end (`stop` fired, or the same-ts wedge), so the
+/// caller can warn that the delivered range is a truncated prefix.
+async fn fetch_trades_windowed(
+    http: &HttpClient,
+    quota: &HttpQuota,
+    base: &str,
+    fetch: TradeFetch<'_>,
+    mut stop: impl FnMut(&[mogwai_protocol::TradeTick]) -> bool,
+) -> anyhow::Result<(Vec<mogwai_protocol::TradeTick>, bool)> {
+    let TradeFetch {
+        symbol,
+        start,
+        end,
+        regime,
+        // The per-page size is always MAX_HISTORY_LIMIT (fetch_trades defaults a
+        // `None` limit to the ceiling), so the caller's `limit` is ignored here -
+        // pagination, not a single-request cap, bounds the result.
+        limit: _,
+    } = fetch;
+    let mut cursor = PollCursor::new(start.map(|s| s.as_u64()));
+    // The first page honors the caller's start verbatim: a `None` means "from
+    // origin" and must NOT be sent as start=0 (the boot-origin server 422s it).
+    // Subsequent pages re-fetch from the advancing cursor boundary.
+    let mut next_start = start;
+    let mut out = Vec::new();
+    loop {
+        let page = fetch_trades(
+            http,
+            quota,
+            base,
+            TradeFetch {
+                symbol,
+                start: next_start,
+                end,
+                limit: None,
+                regime,
+            },
+        )
+        .await?;
+        let raw_len = page.len();
+        let prev_last_ts = cursor.last_ts;
+        out.extend(cursor.unseen_from_batch(page));
+        if raw_len < mogwai_protocol::MAX_HISTORY_LIMIT {
+            // Short page: the server returned everything left in the window.
+            return Ok((out, false));
+        }
+        if cursor.last_ts == prev_last_ts {
+            // A full page that did not advance the cursor: every trade in it
+            // shares one `ts_event` and the ts-cursor cannot page past it (the
+            // inherent >1000-trades-at-one-ns wedge). Stop rather than spin
+            // forever, and report the window as truncated.
+            return Ok((out, true));
+        }
+        if stop(&out) {
+            return Ok((out, true));
+        }
+        next_start = Some(UnixNanos::from(cursor.last_ts));
+    }
+}
+
+/// Stop predicate for `request_bars`' pagination: true once the accumulated
+/// trades span at least `bar_limit` bar intervals. Translating nautilus's
+/// BAR-count limit into a window span (rather than an exact bar count) bounds
+/// the loop without aggregating incrementally; a sparse tape with empty windows
+/// may yield slightly fewer than `bar_limit` actual bars (the tape simply did
+/// not trade in those windows), which is correct - the warmup gets the bars that
+/// exist. `None` bar_limit never stops early (page to the frontier).
+fn bar_span_reached(
+    trades: &[mogwai_protocol::TradeTick],
+    interval: u64,
+    bar_limit: Option<usize>,
+) -> bool {
+    let Some(limit) = bar_limit else {
+        return false;
+    };
+    match (trades.first(), trades.last()) {
+        (Some(first), Some(last)) if interval > 0 => {
+            let spanned = (last.ts_event / interval).saturating_sub(first.ts_event / interval);
+            usize::try_from(spanned).unwrap_or(usize::MAX) >= limit
+        }
+        _ => false,
+    }
 }
 
 fn trade_query_params(
@@ -1896,13 +2189,15 @@ impl MogwaiExecutionClient {
                             // there is nothing for the venue-havoc pipeline
                             // to model; report it straight to nautilus as a
                             // cancel rejection instead.
-                            emit_cancel_rejected(
-                                ClientOrderId::from(client_order_id.as_str()),
-                                None,
-                                err.to_string(),
-                                now_unix_nanos(ctx.sim),
-                                &ctx,
-                            );
+                            if let Some(client_order_id) = wire_client_order_id(client_order_id) {
+                                emit_cancel_rejected(
+                                    client_order_id,
+                                    None,
+                                    err.to_string(),
+                                    now_unix_nanos(ctx.sim),
+                                    &ctx,
+                                );
+                            }
                         } else {
                             // A failed Submit/Modify POST synthesizes the
                             // matching reject so the order reaches a terminal
@@ -2730,8 +3025,12 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
             venue_order_id,
             ts_event,
         } => {
-            let client_order_id = ClientOrderId::from(client_order_id);
-            let venue_order_id = VenueOrderId::from(venue_order_id);
+            let Some(client_order_id) = wire_client_order_id(&client_order_id) else {
+                return;
+            };
+            let Some(venue_order_id) = wire_venue_order_id(&venue_order_id) else {
+                return;
+            };
             let Some((record, stale)) = with_order_record(&ctx.state, client_order_id, |record| {
                 // Terminal-state guard: reorder/duplicate havoc can deliver this
                 // Accepted AFTER the fill or cancel that ended the order (the
@@ -2791,7 +3090,9 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
             reason,
             ts_event,
         } => {
-            let client_order_id = ClientOrderId::from(client_order_id);
+            let Some(client_order_id) = wire_client_order_id(&client_order_id) else {
+                return;
+            };
             let Some(record) = with_order_record(&ctx.state, client_order_id, |record| {
                 record.status = OrderStatus::Rejected;
                 record.ts_last = UnixNanos::from(ts_event);
@@ -2835,8 +3136,12 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
             venue_order_id,
             ts_event,
         } => {
-            let client_order_id = ClientOrderId::from(client_order_id);
-            let venue_order_id = VenueOrderId::from(venue_order_id);
+            let Some(client_order_id) = wire_client_order_id(&client_order_id) else {
+                return;
+            };
+            let Some(venue_order_id) = wire_venue_order_id(&venue_order_id) else {
+                return;
+            };
             let Some((record, stale)) = with_order_record(&ctx.state, client_order_id, |record| {
                 // Terminal-state guard, same as the OrderAccepted arm: a
                 // Canceled transposed behind the fill that actually ended the
@@ -2891,8 +3196,12 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
             leaves_qty,
             ts_event,
         } => {
-            let client_order_id = ClientOrderId::from(client_order_id);
-            let venue_order_id = VenueOrderId::from(venue_order_id);
+            let Some(client_order_id) = wire_client_order_id(&client_order_id) else {
+                return;
+            };
+            let Some(venue_order_id) = wire_venue_order_id(&venue_order_id) else {
+                return;
+            };
             let Some(known) = order_record(&ctx.state, client_order_id) else {
                 // Same A.11 limitation as the reject arms: no real strategy_id/
                 // instrument_id to emit with. Make the drop visible.
@@ -3016,7 +3325,9 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
             reason,
             ts_event,
         } => {
-            let client_order_id = ClientOrderId::from(client_order_id);
+            let Some(client_order_id) = wire_client_order_id(&client_order_id) else {
+                return;
+            };
             let Some(record) = order_record(&ctx.state, client_order_id) else {
                 // Same limitation as OrderRejected (A.11): the mirror lacks the
                 // order, so we have no real strategy_id/instrument_id, and a
@@ -3052,7 +3363,8 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 // with no venue id where the equivalent cancel-reject carries
                 // one. The fallback also covers any future wire omission.
                 venue_order_id
-                    .map(VenueOrderId::from)
+                    .as_deref()
+                    .and_then(wire_venue_order_id)
                     .or(record.venue_order_id),
                 Some(ctx.account_id),
             );
@@ -3070,15 +3382,18 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
             // status) and handles the unknown-order (A.11) drop, exactly as the
             // transport-failure path does - the only differences are the wire
             // timestamp and the possibly-named venue id, both passed through.
+            let Some(client_order_id) = wire_client_order_id(&client_order_id) else {
+                return;
+            };
             emit_cancel_rejected(
-                ClientOrderId::from(client_order_id),
-                venue_order_id.map(VenueOrderId::from),
+                client_order_id,
+                venue_order_id.as_deref().and_then(wire_venue_order_id),
                 reason,
                 UnixNanos::from(ts_event),
                 ctx,
             );
         }
-        ServerMessage::OrderFilled(fill) => handle_order_filled(fill, ctx),
+        ServerMessage::OrderFilled(fill) => handle_order_filled(&fill, ctx),
         ServerMessage::AccountState(state) => handle_account_state(state, ctx),
         ServerMessage::Heartbeat { .. } => {
             tracing::trace!("ignoring server heartbeat on execution path");
@@ -3094,8 +3409,10 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
     }
 }
 
-fn handle_order_filled(fill: mogwai_protocol::OrderFilled, ctx: &ExecContext) {
-    let client_order_id = ClientOrderId::from(fill.client_order_id);
+fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
+    let Some(client_order_id) = wire_client_order_id(&fill.client_order_id) else {
+        return;
+    };
     let Some(def) = instrument_def(&ctx.instruments, &fill.symbol) else {
         // A missing instrument def here is a legitimate miss (the instrument
         // cache has not been seeded yet), not a divergence: dropping a real
@@ -3119,7 +3436,9 @@ fn handle_order_filled(fill: mogwai_protocol::OrderFilled, ctx: &ExecContext) {
         );
         return;
     };
-    let venue_order_id = VenueOrderId::from(fill.venue_order_id);
+    let Some(venue_order_id) = wire_venue_order_id(&fill.venue_order_id) else {
+        return;
+    };
     // Nautilus caps a `TradeId` at 36 non-empty ASCII chars and the panicking
     // constructors (`TradeId::new`, the `From` impls) assert past that. The
     // engine's ids are short, but this is a wire value: a server bug or havoc
@@ -3407,6 +3726,42 @@ fn handle_account_state(state: mogwai_protocol::AccountState, ctx: &ExecContext)
         now_unix_nanos(ctx.sim),
         None,
     ));
+}
+
+/// Converts a server-sent `client_order_id` string into a nautilus
+/// `ClientOrderId`, dropping the event with a warning instead of panicking.
+/// `ClientOrderId::from` routes through the panicking `new`, which nautilus's
+/// `check_valid_string_ascii` rejects on an empty, whitespace-only, or
+/// non-ASCII string (there is no length cap, unlike `TradeId`). These are wire
+/// values, so a server bug or havoc corruption sending a malformed id must not
+/// panic the unsupervised exec task - the same drop-and-warn discipline the
+/// fill's `trade_id` already gets.
+fn wire_client_order_id(raw: &str) -> Option<ClientOrderId> {
+    ClientOrderId::new_checked(raw)
+        .map_err(|err| {
+            tracing::warn!(
+                order = %raw,
+                error = %err,
+                "dropping exec event: unrepresentable client order id"
+            );
+        })
+        .ok()
+}
+
+/// Converts a server-sent `venue_order_id` string into a nautilus
+/// `VenueOrderId`, dropping it with a warning instead of panicking. Same
+/// rationale as `wire_client_order_id`: `VenueOrderId::from` panics on empty,
+/// whitespace-only, or non-ASCII wire strings.
+fn wire_venue_order_id(raw: &str) -> Option<VenueOrderId> {
+    VenueOrderId::new_checked(raw)
+        .map_err(|err| {
+            tracing::warn!(
+                venue_order_id = %raw,
+                error = %err,
+                "dropping exec event: unrepresentable venue order id"
+            );
+        })
+        .ok()
 }
 
 fn with_order_record<T>(
@@ -3879,7 +4234,8 @@ mod data_client_tests {
             trade(interval + 5, 30_000, 1), // window [interval, 2*interval)
         ];
 
-        let bars = aggregate_bars(&bar_type, &trades, &def, SimClock::identity());
+        // `end` is None (unknown), so the trailing partial window is dropped.
+        let bars = aggregate_bars(&bar_type, &trades, &def, SimClock::identity(), None);
 
         assert_eq!(bars.len(), 1, "only the closed window emits a bar");
         let bar = bars[0];
@@ -3893,6 +4249,56 @@ mod data_client_tests {
         assert_eq!(bar.low.as_f64(), 100.0);
         assert_eq!(bar.close.as_f64(), 200.0);
         assert_eq!(bar.volume.as_f64(), 3.0);
+    }
+
+    // AD2: a historical window whose `end` proves the trailing window fully
+    // elapsed must flush that COMPLETE window's bar - it is the newest bar of a
+    // warmup, and the lazy "emit when a later trade crosses close_ts" rule would
+    // otherwise drop it (no later trade exists in an already-passed window). The
+    // genuinely-partial case (end inside the window) still drops.
+    #[test]
+    fn request_bar_aggregation_flushes_trailing_completed_window() {
+        let bar_type = time_bar_type(1, BarAggregation::Second);
+        let interval = get_bar_interval_ns(&bar_type).as_u64();
+        let def = def();
+
+        // Two trades in window [0, interval), one in window [interval,
+        // 2*interval). No trade crosses the second window's close, so only `end`
+        // can prove it closed.
+        let trades = vec![
+            trade(10, 10_000, 1),
+            trade(interval - 5, 20_000, 2),
+            trade(interval + 5, 30_000, 3),
+        ];
+
+        // end at exactly the second window's close (2*interval): both windows
+        // are complete, so both flush.
+        let closed = aggregate_bars(
+            &bar_type,
+            &trades,
+            &def,
+            SimClock::identity(),
+            Some(UnixNanos::from(2 * interval)),
+        );
+        assert_eq!(closed.len(), 2, "end proves the trailing window closed");
+        assert_eq!(closed[1].ts_event, UnixNanos::from(2 * interval));
+        assert_eq!(closed[1].open.as_f64(), 300.0);
+        assert_eq!(closed[1].close.as_f64(), 300.0);
+        assert_eq!(closed[1].volume.as_f64(), 3.0);
+
+        // end INSIDE the trailing window: it is genuinely partial and dropped.
+        let partial = aggregate_bars(
+            &bar_type,
+            &trades,
+            &def,
+            SimClock::identity(),
+            Some(UnixNanos::from(interval + 6)),
+        );
+        assert_eq!(
+            partial.len(),
+            1,
+            "an end inside the trailing window drops the partial"
+        );
     }
 
     // Brick-3 bars (live path): a bar only reaches the sink when its window
@@ -4046,6 +4452,45 @@ mod data_client_tests {
                 emitted_at_last_ts: 1,
             }
         );
+    }
+
+    // AD8: defense in depth against a server that rewinds. A trade stamped below
+    // the cursor's high-water mark was already delivered (or belongs to a window
+    // the cursor has moved past), so it must be skipped rather than re-emitted as
+    // a duplicate - the guard makes the cursor robust against a descending-ts
+    // server bug by construction.
+    #[test]
+    fn poll_cursor_skips_rewound_trades_below_last_ts() {
+        let mut cursor = PollCursor::new(Some(20));
+        let first = cursor.unseen_from_batch(vec![trade(20, 20_000, 1)]);
+        assert_eq!(first.len(), 1);
+        assert_eq!(cursor.last_ts, 20);
+
+        let rewound = cursor.unseen_from_batch(vec![trade(15, 15_000, 1), trade(25, 25_000, 1)]);
+        assert_eq!(
+            rewound.iter().map(|t| t.ts_event).collect::<Vec<_>>(),
+            vec![25],
+            "a trade below the cursor high-water mark must not be re-emitted"
+        );
+        assert_eq!(cursor.last_ts, 25);
+    }
+
+    // AD3: `request_bars`' pagination stops once the accumulated trades span at
+    // least the requested number of bar intervals, translating nautilus's
+    // BAR-count limit into a window target rather than the old TRADE-page cap.
+    #[test]
+    fn bar_span_stops_once_enough_intervals_are_covered() {
+        let interval = 1_000;
+        // Three bars requested; trades spanning three intervals satisfy it.
+        let spanning = vec![trade(0, 1, 1), trade(3_500, 1, 1)];
+        assert!(bar_span_reached(&spanning, interval, Some(3)));
+        // Only two intervals spanned: keep paging.
+        let short = vec![trade(0, 1, 1), trade(2_500, 1, 1)];
+        assert!(!bar_span_reached(&short, interval, Some(3)));
+        // No bar limit never stops early (page to the frontier).
+        assert!(!bar_span_reached(&spanning, interval, None));
+        // Empty accumulation never stops.
+        assert!(!bar_span_reached(&[], interval, Some(1)));
     }
 }
 
@@ -5188,6 +5633,63 @@ mod tests {
         assert_eq!(record.status, OrderStatus::Submitted);
         let state = ctx.state.lock().expect("execution state mutex");
         assert!(state.fills.is_empty(), "no fill record for a dropped fill");
+    }
+
+    #[test]
+    fn hostile_wire_order_ids_drop_exec_events_without_panicking() {
+        // F7: VenueOrderId::from / ClientOrderId::from panic on empty,
+        // whitespace-only, or non-ASCII wire strings (no length cap, unlike
+        // TradeId). A server bug or havoc corruption sending such an id must drop
+        // the event with a warning, not panic the unsupervised exec task, and
+        // must leave the mirror untouched.
+        let (ctx, mut rx) = exec_context();
+
+        // Empty venue id on an Accepted: the panicking From would abort here.
+        handle_exec_message(
+            ServerMessage::OrderAccepted {
+                client_order_id: "O-1".into(),
+                venue_order_id: String::new(),
+                ts_event: 10,
+            },
+            &ctx,
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "an empty venue id must not emit an accepted event"
+        );
+        let record = order_record(&ctx.state, ClientOrderId::from("O-1")).expect("order record");
+        assert_eq!(
+            record.status,
+            OrderStatus::Submitted,
+            "a dropped accepted must leave the mirror untouched"
+        );
+
+        // Empty client id on a fill: guarded at the very top of the fill drain.
+        handle_exec_message(
+            ServerMessage::OrderFilled(mogwai_protocol::OrderFilled {
+                client_order_id: String::new(),
+                venue_order_id: "V-1".into(),
+                trade_id: "T-1".into(),
+                symbol: "BTCUSDT".into(),
+                side: Side::Buy,
+                last_qty: Decimal::new(1, 0),
+                last_px: Decimal::new(10_000, 2),
+                leaves_qty: Decimal::ZERO,
+                commission: Decimal::ZERO,
+                ts_event: 11,
+            }),
+            &ctx,
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "an empty client id must not emit a fill event"
+        );
+        let record = order_record(&ctx.state, ClientOrderId::from("O-1")).expect("order record");
+        assert_eq!(
+            record.filled_qty,
+            Decimal::ZERO,
+            "a dropped fill must leave the mirror unadvanced"
+        );
     }
 
     #[tokio::test]
