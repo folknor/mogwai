@@ -86,17 +86,15 @@ impl Clock for MogwaiClock {
     }
 
     fn timer_exists(&self, name: &Ustr) -> bool {
-        // Asymmetry with `timer_names`/`timer_count` above, which filter out
-        // expired timers: `timer_exists` is a bare `contains_key`, so a
-        // fired-and-finished one-shot still reports as present until the next
-        // arm's `clear_expired_timers` prunes it, even though the count/name
-        // surfaces already exclude it. This exactly mirrors nautilus
-        // `LiveClock` (common/src/clock.rs, where timer_exists is a bare
-        // contains_key while timer_names/timer_count filter `!is_expired`), so
-        // mogwai is bug-compatible with the clock it imitates rather than
-        // independently wrong. Filed upstream as U2; left as-is so the sim
-        // clock's introspection stays identical to the live clock's (AE17).
-        self.timers.contains_key(name)
+        // Filters expired timers exactly like `timer_names`/`timer_count`
+        // above, mirroring nautilus `LiveClock` (common/src/live/clock.rs),
+        // where all three introspection surfaces agree that a fired-and-done
+        // timer no longer exists. LiveClock used to leave `timer_exists` as a
+        // bare `contains_key` while the other two filtered; that asymmetry was
+        // reported upstream and fixed, and this mirror follows it.
+        self.timers
+            .get(name)
+            .is_some_and(|timer| !timer.is_expired())
     }
 
     fn register_default_handler(&mut self, callback: TimeEventCallback) {
@@ -148,7 +146,14 @@ impl Clock for MogwaiClock {
                 start_time_ns: ts_now,
                 stop_time_ns: Some(alert_time_ns),
                 callback,
-                fire_immediately: false,
+                // An alert exactly at (or adjusted-to) now has a zero interval
+                // that `create_valid_interval` coerces to 1ns, which would push
+                // the scheduled fire PAST the stop bound and the pre-fire stop
+                // check would swallow the alert. Fire immediately instead so
+                // the event lands exactly ON the inclusive stop boundary,
+                // mirroring nautilus `LiveClock::set_time_alert_ns`
+                // (common/src/live/clock.rs).
+                fire_immediately: alert_time_ns == ts_now,
             },
             self.sim,
             self.sender.clone(),
@@ -321,6 +326,20 @@ impl MogwaiTimer {
             // design rather than mirroring the live clock here.
             loop {
                 let fire_ns = next_time.load(Ordering::SeqCst);
+
+                // Check-then-fire: never emit an event scheduled past the stop
+                // bound. The bound is enforced on the scheduled `ts_event`
+                // (inclusive at the stop boundary, so a fire landing exactly ON
+                // the stop is emitted and then the timer expires), matching
+                // nautilus `LiveTimer`'s `should_fire_scheduled_time` gate
+                // (common/src/live/timer.rs) and `TestTimer`'s property-tested
+                // `ts_event <= stop_time_ns` invariant. LiveTimer used to be
+                // fire-then-check and could emit one event past its stop; that
+                // was reported upstream and fixed, and this mirror follows it.
+                if stop_time_ns.is_some_and(|stop| fire_ns > stop.as_u64()) {
+                    break;
+                }
+
                 sleep_until_sim(sim, fire_ns).await;
                 let ts_event = UnixNanos::from(fire_ns);
                 let ts_init = sim_now(sim);
@@ -351,24 +370,12 @@ impl MogwaiTimer {
                     break;
                 }
 
-                // Fire-then-check (AE14): the loop already fired at `fire_ns`
-                // above and only now tests the stop bound, against the NEXT
-                // fire. A repeating timer whose `stop_time_ns` sits below
-                // `start + interval` therefore fires once PAST its stop bound.
-                // This mirrors nautilus `LiveTimer`, which likewise advances
-                // next_time and only then breaks on `max(next, now) >= stop`
-                // AFTER emitting the event (common/src/live/timer.rs), so mogwai
-                // is bug-compatible with the live clock by design; the only
-                // divergence is from `TestTimer`, whose property test asserts
-                // `ts_event <= stop_time_ns`. Filed upstream as U1 - do not
-                // tighten this to a pre-fire stop check without fixing LiveTimer
-                // too, or the sim clock would silently disagree with the live
-                // clock it exists to imitate.
+                // Advance to the next scheduled fire; the pre-fire stop check
+                // at the top of the loop decides whether it is emitted. The
+                // atomic stores the advanced value even when it lies past the
+                // stop, matching LiveTimer's `next_time_ns` bookkeeping.
                 let next = fire_ns.saturating_add(interval_ns);
                 next_time.store(next, Ordering::SeqCst);
-                if stop_time_ns.is_some_and(|stop| next >= stop.as_u64()) {
-                    break;
-                }
             }
         });
         self.task_handle = Some(handle);
@@ -532,6 +539,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn past_alert_adjusted_to_now_fires_immediately() {
+        // A past alert is adjusted to now by validate_and_prepare_time_alert
+        // (allow_past defaults to true), making stop == start. The zero
+        // interval is coerced to 1ns, so without fire_immediately the only
+        // scheduled fire would sit past the stop and the pre-fire stop check
+        // would swallow the alert entirely. Pin that the alert fires exactly
+        // on the inclusive stop boundary instead, mirroring nautilus
+        // LiveClock::set_time_alert_ns.
+        let wall = mogwai_protocol::now_unix_nanos();
+        let sim = SimClock {
+            sim_epoch_ns: wall,
+            wall_anchor_ns: wall,
+            speed: 1.0,
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sender = Arc::new(CollectingSender {
+            events: Arc::clone(&events),
+        });
+        let mut clock = MogwaiClock::new(sim, Some(sender));
+        clock.register_default_handler(TimeEventCallback::from(|_| {}));
+        let target = clock.timestamp_ns().as_u64().saturating_sub(5_000_000);
+        let started = Instant::now();
+
+        clock
+            .set_time_alert_ns("immediate", UnixNanos::from(target), None, None)
+            .expect("timer arms");
+
+        while events.lock().expect("events lock").is_empty() {
+            assert!(
+                started.elapsed() < Duration::from_millis(200),
+                "the adjusted-to-now alert never fired"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let event = events.lock().expect("events lock")[0].clone();
+        assert!(
+            event.ts_event.as_u64() >= target,
+            "the fire carries the adjusted (now) timestamp, not the past target"
+        );
+    }
+
+    #[tokio::test]
     async fn cancel_timer_stops_future_events() {
         let wall = mogwai_protocol::now_unix_nanos();
         let sim = SimClock {
@@ -557,11 +606,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repeating_timer_fires_once_past_stop_bound() {
-        // AE14 (bug-compatible with nautilus LiveTimer): a repeating timer whose
-        // stop bound sits BELOW start + interval still fires once, past its
-        // stop, because the loop tests the stop only after firing. Pin the shape
-        // so a future divergence from the live clock trips this test.
+    async fn repeating_timer_never_fires_past_stop_bound() {
+        // A repeating timer whose stop bound sits BELOW start + interval never
+        // fires: the loop checks the stop against the scheduled fire BEFORE
+        // emitting, so no event carries a ts_event past the stop. Mirrors the
+        // fixed nautilus LiveTimer (which used to fire once past stop) and
+        // TestTimer's `ts_event <= stop_time_ns` invariant. Pin the shape so a
+        // regression back to fire-then-check trips this test.
         let wall = mogwai_protocol::now_unix_nanos();
         let sim = SimClock {
             sim_epoch_ns: wall,
@@ -590,19 +641,19 @@ mod tests {
             )
             .expect("timer arms");
 
-        let started = Instant::now();
-        while events.lock().expect("events lock").is_empty() {
-            assert!(started.elapsed() < Duration::from_millis(500));
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-        // Give any erroneous second fire time to appear before asserting.
+        // The would-be first fire sits at start + interval (4ms wall at speed
+        // 10); wait an order of magnitude past it before asserting silence.
         tokio::time::sleep(Duration::from_millis(40)).await;
 
         let fired = events.lock().expect("events lock").clone();
-        assert_eq!(fired.len(), 1, "the timer fires exactly once");
         assert!(
-            fired[0].ts_event.as_u64() > stop,
-            "the single fire lands past the stop bound (bug-compatible with LiveTimer)"
+            fired.is_empty(),
+            "no fire may land past the stop bound, got {fired:?}"
+        );
+        assert_eq!(
+            clock.timer_count(),
+            0,
+            "the timer expires without ever firing"
         );
     }
 
@@ -644,24 +695,25 @@ mod tests {
             .expect("timer arms");
 
         let deadline = Instant::now() + Duration::from_millis(500);
-        while events.lock().expect("events lock").len() < 2 {
+        while events.lock().expect("events lock").len() < 3 {
             assert!(
                 Instant::now() < deadline,
                 "catch-up burst did not replay the elapsed intervals"
             );
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
-        // Confirm no third fire past the stop bound.
+        // Confirm no fourth fire past the stop bound.
         tokio::time::sleep(Duration::from_millis(30)).await;
 
         let fired = events.lock().expect("events lock").clone();
         assert_eq!(
             fired.len(),
-            2,
-            "exactly the two past intervals below stop replay"
+            3,
+            "exactly the three past intervals at or below stop replay (the stop boundary is inclusive)"
         );
         assert_eq!(fired[0].ts_event, UnixNanos::from(start + interval_ns));
         assert_eq!(fired[1].ts_event, UnixNanos::from(start + 2 * interval_ns));
+        assert_eq!(fired[2].ts_event, UnixNanos::from(stop));
         // The past fires do not wait wall time, so the burst is near-instant
         // rather than paced one interval apart - the catch-up, not a skip-to-now.
         assert!(
@@ -671,11 +723,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timer_exists_reports_a_fired_and_done_timer_that_count_excludes() {
-        // AE17 (bug-compatible with nautilus LiveClock): `timer_exists` is a
-        // bare contains_key, so a fired-and-finished one-shot still "exists"
-        // until the next arm prunes it, even though timer_count/timer_names
-        // already exclude it. Pin the asymmetry.
+    async fn timer_exists_excludes_a_fired_and_done_timer_like_count_and_names() {
+        // All three introspection surfaces agree: a fired-and-finished one-shot
+        // no longer exists, is not counted, and is not named. Mirrors the fixed
+        // nautilus LiveClock (whose timer_exists used to be a bare contains_key
+        // while the other two filtered expired timers). Pin the consistency.
         let wall = mogwai_protocol::now_unix_nanos();
         let sim = SimClock {
             sim_epoch_ns: wall,
@@ -695,7 +747,7 @@ mod tests {
             .expect("timer arms");
 
         // Poll until the fired one-shot's task finishes and the count reflects
-        // its expiry, then assert timer_exists still reports it.
+        // its expiry, then assert timer_exists agrees.
         let deadline = Instant::now() + Duration::from_millis(500);
         while clock.timer_count() != 0 {
             assert!(
@@ -707,8 +759,8 @@ mod tests {
 
         let name = Ustr::from("oneshot");
         assert!(
-            clock.timer_exists(&name),
-            "timer_exists still reports the fired one-shot (bug-compatible with LiveClock)"
+            !clock.timer_exists(&name),
+            "timer_exists excludes the fired one-shot, consistent with the other surfaces"
         );
         assert!(
             clock.timer_names().is_empty(),

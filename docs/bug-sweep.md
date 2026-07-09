@@ -34,6 +34,15 @@ memory fixed via geometric coarsening (a hard MAX_CHECKPOINTS ceiling,
 byte-identity preserved); the reference-doc drift resolved (S11, S12, AD18,
 X9, F17, S18); F18 assessed as no-autonomous-change. See "Found during fix
 batches" and "Upstream candidates" at the bottom.
+Upstream follow-through (complete): the U1/U2 nautilus fixes verified merged
+(LiveTimer is check-then-fire with an inclusive stop boundary; LiveClock's
+timer_exists filters expired timers), so the mogwai clock's deliberately
+bug-compatible AE14/AE17 mirrors were flipped to match the FIXED behavior:
+check-then-fire in the MogwaiTimer loop, expiry-filtered timer_exists, and
+fire_immediately on an at-now alert (mirroring LiveClock's set_time_alert_ns,
+without which the new pre-fire stop check would swallow an adjusted-to-now
+alert). Pin tests inverted; AE15's catch-up burst now includes the fire ON
+the stop boundary. AE15/AE16 remain deliberate as documented.
 
 IDs: E = engine/protocol, D = data path, S = server, AD = adapter data half,
 AE = adapter exec half, X = cross-boundary seams, F = found during fix
@@ -342,17 +351,14 @@ and the AE18 silent unrepresentable-currency drop were all fixed in batch 4.
 AE13 the HttpQuota-mutex-across-sleep and inconsistent accounting was
 documented as its deliberate metered-vs-exempt contract - the clock-fetch
 bypass is an unavoidable chicken-and-egg; routing ship_server_havoc through
-the quota is a client.rs follow-up, F18. AE14 fire-past-stop and AE15
-past-start catch-up are documented as deliberate mirrors of nautilus
-LiveTimer, AE16 the senderless clock is documented as reachable only off the
-canonical wiring path, and AE17 mirrors LiveClock - all with pin tests. The
-AD17/AE19 spawned-task-tracking twin was fixed in batch 4: request_ and
-dispatch tasks are now tracked and aborted on stop.)
-
-### AE-clock deferrals kept upstream
-
-AE14 and AE17 remain tracked as the upstream nautilus items U1 and U2 (the
-mogwai clock deliberately matches the nautilus behavior being reported).
+the quota is a client.rs follow-up, F18. AE14 and AE17 were bug-compatible
+mirrors of nautilus LiveTimer/LiveClock tracked upstream as U1/U2; the
+upstream fixes are merged and the mirrors flipped to match the FIXED
+behavior. AE15 past-start catch-up remains a deliberate deviation from
+LiveTimer and AE16 the senderless clock is documented as reachable only off
+the canonical wiring path - both with pin tests. The AD17/AE19
+spawned-task-tracking twin was fixed in batch 4: request_ and dispatch tasks
+are now tracked and aborted on stop.)
 
 ### Adapter exec-half verified-correct notes
 
@@ -612,27 +618,18 @@ Findings whose root cause or better fix lives in a dependency. Each needs a
 written report (or a direct fix) in the dependency's own repo; the research/
 copies are read-only mirrors, the sibling checkouts are the real trees.
 
-Status: all five triaged. U1, U2 fixed upstream (nautilus PRs submitted). U3
-withdrawn (not an upstream bug; the fix was mogwai-side X1; residue F16). U4,
-U5 verified by the broadarrow developer as deliberate C5d decisions and
+Status: all five triaged and closed. U1, U2 fixed upstream and verified
+merged (the live timer moved to common/src/live/timer.rs and is
+check-then-fire with an inclusive stop boundary; LiveClock's timer_exists in
+common/src/live/clock.rs filters expired timers consistently with
+timer_names/timer_count, both with upstream pin tests) - mogwai's AE14/AE17
+mirrors were flipped to match, so nothing remains tracked here. U3 withdrawn
+(not an upstream bug; the fix was mogwai-side X1; residue F16). U4, U5
+verified by the broadarrow developer as deliberate C5d decisions and
 resolved by documentation on the broadarrow side, no behavior change; their
 mogwai-side residues are X3 (both) and F17 (U5). The two broadarrow BEHAVIORAL
 options below (enable the continuous poll; per-venue inflight ceiling) remain
 open as broadarrow decisions, not mogwai work.
-
-### U1. nautilus - LiveTimer fires once past stop_time_ns while TestTimer's property test asserts the opposite invariant
-
-`crates/common/src/timer.rs` (live timer fire-then-check loop) vs the
-TestTimer property test asserting `ts_event <= stop_time_ns`. A repeating
-timer with `stop < start + interval` fires once beyond its stop bound on the
-live clock but never on the test clock - components validated against
-TestTimer semantics can be surprised in live runs. mogwai's own clock
-mirrors the live behavior deliberately (bug-compatible; AE14).
-
-### U2. nautilus - LiveClock timer_exists counts expired timers while timer_names/timer_count filter them
-
-`crates/common/src/clock.rs`. The three introspection surfaces disagree about
-whether a fired-and-done timer still "exists". mogwai mirrors it (AE17).
 
 ### U3. WITHDRAWN - "the node should fall back to the three generators" is not an upstream bug; the fix was correctly mogwai-side (X1)
 
