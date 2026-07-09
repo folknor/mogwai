@@ -1486,11 +1486,16 @@ mod tests {
     // The look-ahead clamp: a window whose tail crosses sim-now (here an `end`
     // a full hour into the future) is served only up to the clock. Unfixed,
     // the synthesis loop ground toward `end` and returned ticks stamped in
-    // the future.
+    // the future. The on-tape half spans six hours, not minutes: the
+    // generator's ACD clustering realizes multi-hour thin deserts (a fixed
+    // property of the symbol's seeded duration sequence, see bug D16), so a
+    // narrow window sliding with wall-time boot instants sometimes lands in a
+    // desert and catches zero trades - the wide window keeps the clamp under
+    // test without asserting on tape density.
     #[tokio::test]
     async fn trades_window_is_clamped_at_sim_now() {
         let state = state();
-        let start = now_ns().saturating_sub(600_000_000_000); // 10 min of tape
+        let start = now_ns().saturating_sub(6 * 3_600_000_000_000); // 6h of tape
         let end = now_ns() + 3_600_000_000_000; // 1h past the clock
         let query = HistoryQuery {
             symbol: "BTCUSDT".to_string(),
@@ -1506,10 +1511,7 @@ mod tests {
         // every legitimately-served tick from above.
         let ceiling = now_ns();
 
-        assert!(
-            !ticks.is_empty(),
-            "ten minutes of on-tape window has trades"
-        );
+        assert!(!ticks.is_empty(), "six hours of on-tape window has trades");
         assert!(
             ticks.iter().all(|t| t.ts_event <= ceiling),
             "no served tick may be stamped past sim-now"
@@ -1620,6 +1622,50 @@ mod tests {
         let regime = parse_history_regime(Some(r#"{"type":"Bogus"}"#));
 
         assert_eq!(regime, None);
+    }
+
+    #[test]
+    fn reopen_gap_at_or_before_the_origin_is_stripped_and_reported() {
+        // D3's API-boundary half: a gap the generator could never fire is
+        // stripped at the boundary (returning its at_ts so the WS carrier can
+        // announce it), while a fireable gap passes through untouched.
+        let gap = |at_ts| MarketRegime::ReopenGap {
+            at_ts,
+            halt_secs: 60,
+            gap_frac: 0.05,
+        };
+
+        let mut at_origin = Some(gap(TEST_DATA_ORIGIN));
+        assert_eq!(
+            strip_unfireable_reopen_gap(&mut at_origin, TEST_DATA_ORIGIN),
+            Some(TEST_DATA_ORIGIN)
+        );
+        assert_eq!(at_origin, None, "the doomed gap is stripped to clean");
+
+        let mut before_origin = Some(gap(TEST_DATA_ORIGIN - 1));
+        assert_eq!(
+            strip_unfireable_reopen_gap(&mut before_origin, TEST_DATA_ORIGIN),
+            Some(TEST_DATA_ORIGIN - 1)
+        );
+        assert_eq!(before_origin, None);
+
+        let mut fireable = Some(gap(TEST_DATA_ORIGIN + 1));
+        assert_eq!(
+            strip_unfireable_reopen_gap(&mut fireable, TEST_DATA_ORIGIN),
+            None
+        );
+        assert_eq!(
+            fireable,
+            Some(gap(TEST_DATA_ORIGIN + 1)),
+            "a fireable gap passes through untouched"
+        );
+
+        let mut other = Some(MarketRegime::VolStorm { vol_mult: 2.0 });
+        assert_eq!(
+            strip_unfireable_reopen_gap(&mut other, TEST_DATA_ORIGIN),
+            None
+        );
+        assert_eq!(other, Some(MarketRegime::VolStorm { vol_mult: 2.0 }));
     }
 
     fn trade_signatures(trades: &[TradeTick]) -> Vec<(String, String, String, u64)> {

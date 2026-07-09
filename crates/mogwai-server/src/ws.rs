@@ -25,7 +25,9 @@ use mogwai_protocol::{ClientMessage, MarketRegime, ServerMessage, SimClock};
 use tokio::sync::mpsc;
 
 use crate::config::{now_ns, sim_duration_from_millis, sim_now_ns};
-use crate::http::{AppState, process_order_cmd, validate_regime_or_clean};
+use crate::http::{
+    AppState, process_order_cmd, strip_unfireable_reopen_gap, validate_regime_or_clean,
+};
 use crate::source;
 
 pub(crate) async fn ws_upgrade(
@@ -218,7 +220,24 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 start_ts,
                 regime,
             } => {
-                let regime = validate_regime_or_clean(regime);
+                let mut regime = validate_regime_or_clean(regime);
+                // A ReopenGap anchored at or before the tape origin can never
+                // fire; strip it (D3) and say so on the wire - the stream
+                // still starts, serving the clean tape the generator would
+                // have realized anyway.
+                if let Some(at_ts) = strip_unfireable_reopen_gap(&mut regime, state.data_origin_ns)
+                {
+                    send_exec_protocol_error(
+                        &exec_tx,
+                        sim_now_ns(state.sim),
+                        format!(
+                            "ReopenGap at_ts {at_ts} is at or before data_origin_ns {}; \
+                             the halt can never fire, streaming the clean tape",
+                            state.data_origin_ns
+                        ),
+                    )
+                    .await;
+                }
                 // Reconcile the requested window against the tape bounds up front:
                 // a start below the origin anchors at the origin, a start beyond
                 // sim-now clamps to a live stream from the clock (F8), each with a

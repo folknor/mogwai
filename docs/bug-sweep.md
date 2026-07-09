@@ -47,6 +47,14 @@ DuplicateNextFill is structurally inert against the nautilus stack, and
 architecture.md scopes the byte-identical claim to single-command semantics
 and discloses the HTTP inter-command ordering race. X6's behavioral fix
 (sequencing HttpOrders dispatch) stays flagged as a design option.
+Mechanical batch 6 (complete): D3's API-boundary half built (a ReopenGap
+anchored at or before the tape origin is stripped at both carriers, keeping
+the checkpoint fast path, with a ProtocolError announce on the WS wire and a
+unit test). While validating it, a time-of-day-dependent failure of
+`trades_window_is_clamped_at_sim_now` exposed the NEW finding D16 (multi-hour
+ACD trade deserts baked into the seeded tape); the test was widened from a
+10-minute to a 6-hour window as mitigation and D16 recorded for design
+sign-off.
 Upstream follow-through (complete): the U1/U2 nautilus fixes verified merged
 (LiveTimer is check-then-fire with an inclusive stop boundary; LiveClock's
 timer_exists filters expired timers), so the mogwai clock's deliberately
@@ -101,6 +109,41 @@ serde round-trips and partial-payload defaults hold on both crates.
 ---
 
 ## Data path (crates/mogwai-data)
+
+### D16. gap (NEW, batch 6) - ACD clustering realizes multi-hour trade deserts; the live region of the tape can be near-silent for most of a day
+
+`crates/mogwai-data/src/generated/source.rs` (`next_duration_ns`) with the
+committed `ACD_PERSISTENCE = 0.9935`, `ACD_FEEDBACK_SHARE = 0.08`, and
+Weibull shape 0.6 innovations. Severity medium-high for live-feed fidelity;
+confidence high on mechanism (measured, anchor-independent). Found in batch 6
+when `trades_window_is_clamped_at_sim_now` started failing time-of-day
+dependently.
+
+Measured on the default BTCUSDT profile (fixed FNV symbol seed, so this shape
+is baked into the tape): hours 0-5 of tape run dense (460-1000 ticks/hour,
+the expected ~7s cadence), then the walk enters a slow ACD excursion and
+hours 6-23 realize 2-70 ticks/hour with inter-trade gaps up to ~48 minutes.
+Over 96h the tape alternates bursts and 6-18-hour deserts; the mean per-tick
+duration stays ~7-8s (so the per-tick realism gate is blind to it), but
+wall-clock-wise the venue goes near-silent for most of a day at a stretch -
+nothing a real BTCUSD tape does.
+
+Mechanism: psi decays per TICK (persistence 0.9935, ~106-tick half-life), so
+a high-psi state self-prolongs in wall time - at 30 min/tick a hundred ticks
+of decay is days of tape. Heavy-tailed shape-0.6 innovations kick psi up by
+~alpha times a single huge draw, entering the state; the per-tick fit never
+constrained the wall-clock dwell. Consequences: a live subscribe anchored
+sim-now (always ~backfill_horizon past origin) can sit hours between ticks
+(making AD12's missing dead-feed watchdog bite harder); `current_price` for
+a market order in a desert stamps the NEXT tick's price, up to ~48 min ahead
+of the clock; density-sensitive tests are inherently flaky (the trades-clamp
+test was widened to a 6h window in batch 6 as mitigation).
+
+NOT fixed mechanically: any retune of the ACD constants or an excursion
+bound breaks the committed fingerprint's byte-identical golden stream and
+re-opens the realism-gate anchors - a design decision (retune + regenerate
+golden stream, or bound psi's wall-clock dwell explicitly, or accept and
+document the deserts as venue behavior). Flagged for sign-off.
 
 ### Data-path smells and nits
 
@@ -596,6 +639,9 @@ decision or a non-trivial build, so they were flagged rather than forced:
   NEW WIRE PROTOCOL SURFACE (a `GET /orders` endpoint + `query_order` messages
   + adapter impl) and is NOT being built autonomously - it needs sign-off
   because it changes the protocol. See X3 for the full shape and options.
+- D16: the multi-hour ACD trade deserts baked into the seeded tape. Any fix
+  (retune, excursion bound, or accept-and-document) breaks or re-anchors the
+  committed golden stream - see D16 for the measurements and options.
 
 ---
 

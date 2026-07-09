@@ -300,7 +300,8 @@ pub(crate) async fn trades(
     axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
 ) -> Result<Json<Vec<TradeTick>>, (StatusCode, String)> {
     let limit = normalize_limit(query.limit);
-    let regime = parse_history_regime(query.regime.as_deref());
+    let mut regime = parse_history_regime(query.regime.as_deref());
+    strip_unfireable_reopen_gap(&mut regime, state.data_origin_ns);
     let profiles = Arc::clone(&state.profiles);
     let data_origin = state.data_origin_ns;
     let sim_now = sim_now_ns(state.sim);
@@ -434,6 +435,34 @@ pub(crate) fn parse_history_regime(raw: Option<&str>) -> Option<MarketRegime> {
         return None;
     };
     validate_regime_or_clean(Some(regime))
+}
+
+/// D3's API-boundary half: a `ReopenGap` whose `at_ts` sits at or before the
+/// tape origin can never fire - the generator consumes it at construction
+/// with a warning and the realized tape is byte-identical to clean - so
+/// decide the degradation loudly here at the boundary instead of deep in the
+/// generator. Stripping also keeps the request on the checkpoint-index fast
+/// path: any `Some(regime)` bypasses the shared index (a regime'd realization
+/// is a different tape), so a doomed gap would otherwise buy the slow
+/// from-origin drain for a tape identical to clean. Returns the stripped
+/// `at_ts` so the WS carrier can announce the strip on the wire; the HTTP
+/// history path has no diagnostic side channel and ignores it.
+pub(crate) fn strip_unfireable_reopen_gap(
+    regime: &mut Option<MarketRegime>,
+    data_origin_ns: u64,
+) -> Option<u64> {
+    if let Some(MarketRegime::ReopenGap { at_ts, .. }) = *regime
+        && at_ts <= data_origin_ns
+    {
+        tracing::warn!(
+            at_ts,
+            data_origin_ns,
+            "ReopenGap at or before the tape origin can never fire; serving the clean tape"
+        );
+        *regime = None;
+        return Some(at_ts);
+    }
+    None
 }
 
 pub(crate) fn validate_regime_or_clean(regime: Option<MarketRegime>) -> Option<MarketRegime> {
