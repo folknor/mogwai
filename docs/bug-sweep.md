@@ -149,12 +149,13 @@ topic list gained `clock`.)
 
 ### Server smells and nits
 
-- S13. smell - One global checkpoint mutex serializes all symbols and holds
-  through ~100 ms extensions: `positioned_generator` keeps the
-  `checkpoint_store()` guard across `extend_to` (up to 190k synthesized
-  ticks). Every live subscribe, seeked /trades, and price-less market order
-  for ANY symbol queues behind it. Within stated per-call budget; bursty
-  concurrency stacks.
+(S13 was fixed in batch 5: the checkpoint store is now two-level - the global
+map lock covers only the entry lookup/insert, and each `(symbol,
+data_origin)` index sits behind its own `Arc<Mutex<..>>` held across the
+extension. Same-symbol requests still serialize on their shared index, as
+they must; other symbols no longer queue. Both mutexes keep the
+poison-recovery behavior.)
+
 - S17. nit (refuted) - Divergence atomics are all Relaxed. Batch 4 refuted
   this as a defect: the three atomics are independent with no cross-location
   invariant, and the arm and the order arrive over separate connections, so

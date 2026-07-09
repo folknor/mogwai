@@ -156,13 +156,14 @@ pub(crate) async fn clock(State(state): State<AppState>) -> Json<ServerClock> {
 /// limit, it only over-reached for the price-less market case.
 ///
 /// Synthesis (`positioned_generator` -> `source_at_or_before`) locks the
-/// process-global checkpoint mutex and, on a cold/deep index, walks up to
+/// symbol's own checkpoint mutex and, on a cold/deep index, walks up to
 /// `MAX_HISTORY_SEEK_TICKS`. `/trades` already pushes the identical synthesis
 /// onto `spawn_blocking` rather than running it inline on the tokio worker
 /// (see `trades` above); this does the same, so a burst of price-less market
 /// orders cannot stall the runtime's worker pool or serialize behind a seeked
-/// `/trades` request (or vice versa) any longer than the shared mutex itself
-/// requires.
+/// `/trades` request (or vice versa) any longer than the symbol's shared
+/// index itself requires - other symbols' requests do not queue here at all
+/// (S13).
 async fn stamp_market_price(msg: ClientMessage, state: &AppState) -> ClientMessage {
     let ClientMessage::SubmitOrder(mut order) = msg else {
         return msg;

@@ -206,7 +206,10 @@ Owns the sockets, the clock, and replay pacing.
   each poll, and a live resubscribe no longer resets the price walk. A
   process-global checkpoint index keyed by `(symbol, data_origin)` snapshots the
   walk every K ticks, so a fresh subscribe's seek is flat in K no matter how long
-  the session has run; the seek is bounded by a `BoundedSeek` wrapper
+  the session has run; each symbol's index sits behind its own mutex (the global
+  map lock covers only the entry lookup), so one symbol's deep extension never
+  queues another symbol's subscribe, seeked `/trades`, or market-order price
+  stamp behind it; the seek is bounded by a `BoundedSeek` wrapper
   (`MAX_HISTORY_SEEK_TICKS`) as a runaway backstop, and `MAX_HISTORY_LIMIT` is
   `1_000`, so a default-limit `/trades` call synthesizes a bounded number of ticks
   and returns well inside the adapter's poll interval (measured well under a

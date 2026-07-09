@@ -5,7 +5,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use mogwai_data::{
@@ -46,8 +46,19 @@ const CHECKPOINT_K: usize = 8192;
 // eventually blows the cap; a checkpoint resume is flat in K). Regime'd
 // realizations are rare havoc requests on a different tape and are not cached;
 // they take the plain from-origin drain, still bounded by the backstop cap.
-fn checkpoint_store() -> &'static Mutex<HashMap<(String, u64), CheckpointIndex>> {
-    static STORE: OnceLock<Mutex<HashMap<(String, u64), CheckpointIndex>>> = OnceLock::new();
+//
+// Two-level locking (S13): each entry is its own `Arc<Mutex<CheckpointIndex>>`
+// so the outer map lock is held only for the entry lookup/insert (the
+// constructor is one generator clone - cheap), never across
+// `source_at_or_before`'s extension, which can synthesize up to
+// `MAX_HISTORY_SEEK_TICKS` ticks (~100 ms). Requests for the SAME symbol still
+// serialize on the entry's own mutex - they share one index and must - but a
+// long extension for one symbol no longer queues every other symbol's live
+// subscribe, seeked /trades, and price-less market order behind it.
+type CheckpointStore = Mutex<HashMap<(String, u64), Arc<Mutex<CheckpointIndex>>>>;
+
+fn checkpoint_store() -> &'static CheckpointStore {
+    static STORE: OnceLock<CheckpointStore> = OnceLock::new();
     STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -172,31 +183,48 @@ fn positioned_generator(
         && target > data_origin
     {
         // A panic mid-synthesis (a pathological configured scalar/regime,
-        // arithmetic overflow) while this `std::Mutex` is held would otherwise
-        // poison it permanently: every later checkpoint-path call - price-less
-        // market orders, seeked `/trades`, every live `Subscribe` - would
-        // `.expect` its way into the same panic forever, turning one transient
-        // fault into a standing partial outage. Recovering the guard instead
-        // means at worst the entry the panicking call was updating is left
-        // stale (a later seek against exactly that `(symbol, data_origin)` can
-        // repeat the fault), while every other entry, and that one once it is
-        // naturally re-derived, keeps serving.
-        let mut store = checkpoint_store().lock().unwrap_or_else(|poisoned| {
-            tracing::error!("checkpoint store mutex recovered from a prior panic");
+        // arithmetic overflow) while either `std::Mutex` is held would
+        // otherwise poison it permanently: every later checkpoint-path call -
+        // price-less market orders, seeked `/trades`, every live `Subscribe` -
+        // would `.expect` its way into the same panic forever, turning one
+        // transient fault into a standing partial outage. Recovering the guard
+        // instead means at worst the entry the panicking call was updating is
+        // left stale (a later seek against exactly that `(symbol,
+        // data_origin)` can repeat the fault), while every other entry, and
+        // that one once it is naturally re-derived, keeps serving.
+        //
+        // The outer map guard is scoped to the entry fetch and dropped before
+        // the entry lock below, so the extension work never runs under the
+        // map lock (S13). No deadlock is possible: the entry mutex never
+        // acquires the map mutex.
+        let index = {
+            let mut store = checkpoint_store().lock().unwrap_or_else(|poisoned| {
+                tracing::error!("checkpoint store mutex recovered from a prior panic");
+                poisoned.into_inner()
+            });
+            Arc::clone(
+                store
+                    .entry((profile.def.symbol.clone(), data_origin))
+                    .or_insert_with(|| {
+                        Arc::new(Mutex::new(CheckpointIndex::new(
+                            fresh_generator(profile, seed, data_origin, fp, None),
+                            CHECKPOINT_K,
+                            // The from-origin backstop doubles as the index's
+                            // per-call extension cap: a `start` past the live
+                            // frontier walks at most this far before the seek
+                            // gives up, never spinning.
+                            MAX_HISTORY_SEEK_TICKS,
+                        )))
+                    }),
+            )
+        };
+        let mut index = index.lock().unwrap_or_else(|poisoned| {
+            tracing::error!(
+                symbol = %profile.def.symbol,
+                "per-symbol checkpoint mutex recovered from a prior panic"
+            );
             poisoned.into_inner()
         });
-        let index = store
-            .entry((profile.def.symbol.clone(), data_origin))
-            .or_insert_with(|| {
-                CheckpointIndex::new(
-                    fresh_generator(profile, seed, data_origin, fp, None),
-                    CHECKPOINT_K,
-                    // The from-origin backstop doubles as the index's per-call
-                    // extension cap: a `start` past the live frontier walks at
-                    // most this far before the seek gives up, never spinning.
-                    MAX_HISTORY_SEEK_TICKS,
-                )
-            });
         return index.source_at_or_before(target);
     }
     fresh_generator(profile, seed, data_origin, fp, regime)
