@@ -82,6 +82,66 @@ fn serve_refuses_second_start() {
     );
 }
 
+/// A daemonized child that fails at startup must land the failure in the
+/// configured log file: by the time the child runs, its stderr points at
+/// /dev/null and the parent's failure message tells the operator to look in
+/// the log, so a silent log would make that pointer a lie. Known residual:
+/// failures BEFORE init_logging in the child (setsid/redirect errors) still
+/// print to the inherited stderr, and an init_logging failure itself is
+/// silent post-redirect - a narrow window with no log to write to.
+#[test]
+fn daemon_startup_failure_lands_in_the_log() {
+    let addr = pick_addr();
+    let tmp = target_tmp_dir();
+    let pid_file = tmp.join(format!("bad-{}.pid", addr.port()));
+    let log_file = tmp.join(format!("bad-{}.log", addr.port()));
+    let config_file = tmp.join(format!("bad-{}.toml", addr.port()));
+    cleanup_existing(&pid_file);
+    ignore_error(fs::remove_file(&log_file));
+    fs::write(&config_file, "this is not [valid toml").expect("write malformed config");
+
+    let child = Command::new(bin())
+        .arg("serve")
+        .arg("--addr")
+        .arg(addr.to_string())
+        .arg("--log-file")
+        .arg(&log_file)
+        .arg("--pid-file")
+        .arg(&pid_file)
+        .arg("--config")
+        .arg(&config_file)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn mogwai serve");
+    let output = wait_output(child, COMMAND_TIMEOUT);
+
+    assert!(
+        !output.status.success(),
+        "serve with a malformed config unexpectedly started\nstdout:\n{}\nstderr:\n{}",
+        stdout(&output),
+        stderr(&output),
+    );
+
+    // The child's log write races the parent's exit; poll briefly rather than
+    // asserting on the first read.
+    let deadline = Instant::now() + HEALTH_TIMEOUT;
+    loop {
+        let log = fs::read_to_string(&log_file).unwrap_or_default();
+        if log.contains("daemon exiting on startup/runtime failure") {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "startup failure never landed in {}\nlog contents:\n{log}",
+                log_file.display()
+            );
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+    ignore_error(fs::remove_file(&pid_file));
+}
+
 #[test]
 fn stop_removes_a_stale_pid_file() {
     // A pid file with no live daemon behind it: `stop` acquires the (unheld)

@@ -430,10 +430,27 @@ pub(crate) fn join_url(base: &str, path: &str) -> String {
 pub(crate) fn symbol_from_instrument(instrument_id: InstrumentId) -> String {
     instrument_id.symbol.to_string()
 }
+/// Maps an optional request bound onto the u64 nanosecond axis, SATURATING
+/// out-of-range datetimes at the axis bounds instead of dropping them to
+/// `None`. `None` means "unbounded" to every caller, so silently mapping a
+/// pre-epoch end to `None` would widen the request (an end of 1950 becoming
+/// "until forever") and a post-2262 start would become "from origin"; clamping
+/// preserves the requester's intent (a pre-epoch bound is the epoch, a
+/// far-future bound is the axis ceiling) and lets a nonsense range come back
+/// loudly empty rather than quietly full.
 pub(crate) fn date_to_unix_nanos(date: Option<chrono::DateTime<chrono::Utc>>) -> Option<UnixNanos> {
-    date.and_then(|dt| dt.timestamp_nanos_opt())
-        .and_then(|ns| u64::try_from(ns).ok())
-        .map(UnixNanos::from)
+    date.map(|dt| {
+        // `timestamp_nanos_opt` is `None` outside ~1677..=2262; pick the side
+        // by comparing against the epoch, then clamp negatives to zero.
+        let ns = dt.timestamp_nanos_opt().unwrap_or_else(|| {
+            if dt >= chrono::DateTime::<chrono::Utc>::UNIX_EPOCH {
+                i64::MAX
+            } else {
+                i64::MIN
+            }
+        });
+        UnixNanos::from(u64::try_from(ns).unwrap_or(0))
+    })
 }
 /// Refuse an off-tape warmup BEFORE spending a round trip on it. A `start`
 /// below the published `data_origin` can never be served (the tape begins at the
@@ -477,4 +494,47 @@ pub(crate) async fn wait_connected(
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     anyhow::bail!("connect websocket {ws_url} timed out")
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+
+    use super::*;
+
+    #[test]
+    fn date_to_unix_nanos_maps_in_range_datetimes_exactly() {
+        let dt = chrono::Utc.timestamp_nanos(1_234_567_890_123_456_789);
+        assert_eq!(
+            date_to_unix_nanos(Some(dt)),
+            Some(UnixNanos::from(1_234_567_890_123_456_789u64))
+        );
+        assert_eq!(date_to_unix_nanos(None), None);
+    }
+
+    #[test]
+    fn date_to_unix_nanos_saturates_out_of_range_instead_of_unbounding() {
+        // Pre-epoch (in i64-nanos range but negative): clamps to the epoch, so
+        // an end of 1950 stays an empty range rather than becoming "forever".
+        let pre_epoch = chrono::Utc.with_ymd_and_hms(1950, 1, 1, 0, 0, 0).unwrap();
+        assert_eq!(
+            date_to_unix_nanos(Some(pre_epoch)),
+            Some(UnixNanos::from(0u64))
+        );
+
+        // Pre-1677 (outside i64-nanos range entirely): same clamp to epoch.
+        let ancient = chrono::Utc.with_ymd_and_hms(1500, 1, 1, 0, 0, 0).unwrap();
+        assert_eq!(
+            date_to_unix_nanos(Some(ancient)),
+            Some(UnixNanos::from(0u64))
+        );
+
+        // Post-2262: clamps to the axis ceiling, so a far-future start stays a
+        // loud empty range rather than becoming "from origin".
+        let far_future = chrono::Utc.with_ymd_and_hms(3000, 1, 1, 0, 0, 0).unwrap();
+        assert_eq!(
+            date_to_unix_nanos(Some(far_future)),
+            Some(UnixNanos::from(u64::try_from(i64::MAX).expect("fits")))
+        );
+    }
 }

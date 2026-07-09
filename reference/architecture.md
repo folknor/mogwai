@@ -184,8 +184,13 @@ Owns the sockets, the clock, and replay pacing.
 - **Routes.** `/health`; `/ws` (order entry plus market-data replay);
   `/control/divergence` (arm divergences); `POST /orders` (an order-bearing
   `ClientMessage` in, the engine's `ServerMessage` events out as a JSON array -
-  the identical `engine.process` call the `/ws` order arm makes, so order
-  semantics are byte-identical across the two carriers); `GET /instruments`;
+  the identical `engine.process` call the `/ws` order arm makes, so a single
+  command's semantics are byte-identical across the two carriers; what the
+  HTTP carrier does NOT share is inter-command ordering: the adapter's
+  `HttpOrders` profile dispatches each POST from its own detached task, so a
+  submit chased by a modify/cancel can arrive reversed - a spurious
+  unknown-order reject followed by the accept - where the WS carrier's single
+  command channel preserves submission order); `GET /instruments`;
   `GET /account` (the current `AccountState` snapshot); `GET /trades` and
   `GET /quotes` (bounded historical fetch keyed by symbol/start/end/limit;
   `/quotes` is always empty because generated history is trades-only).

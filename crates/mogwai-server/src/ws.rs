@@ -279,6 +279,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         sim: state.sim,
                         data_origin: state.data_origin_ns,
                         tx: tx.clone(),
+                        exec_tx: exec_tx.clone(),
                         cancel: Arc::clone(&cancel),
                         resume_floor,
                         last_sent_ts: Arc::clone(&last_sent_ts),
@@ -617,6 +618,11 @@ pub(crate) struct ReplaySpawn {
     /// The boot-derived tape origin every generator anchors at.
     pub(crate) data_origin: u64,
     pub(crate) tx: mpsc::Sender<ServerMessage>,
+    /// The session's execution-delay pump. `ProtocolError` classifies as
+    /// execution (`ServerMessage::category`), so the thread's diagnostics ride
+    /// this channel - where an armed `DelayAcks` holds them - instead of the
+    /// market-data `tx` (S10).
+    pub(crate) exec_tx: mpsc::Sender<(Instant, ServerMessage)>,
     pub(crate) cancel: Arc<AtomicBool>,
     /// The predecessor stream's last successfully-sent `ts_event` for this
     /// symbol, when this spawn replaces one quiesced just now. `None` for a
@@ -670,6 +676,7 @@ pub(crate) fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
         sim,
         data_origin,
         tx,
+        exec_tx,
         cancel,
         resume_floor,
         last_sent_ts,
@@ -699,16 +706,23 @@ pub(crate) fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
             tracing::warn!(%symbol, "subscribe for unknown symbol streams nothing");
             // Best-effort diagnostic: an Err means the client is already gone
             // (channel closed or subscription cancelled), so there is nobody
-            // left to tell - the thread exits either way.
+            // left to tell - the thread exits either way. Rides the exec pump
+            // (not `tx`) so DelayAcks holds it like every execution event
+            // (S10). Production cannot reach this branch anymore - the
+            // subscribe handler pre-filters unknown symbols (S22) - but the
+            // guard stays for any other `spawn_replay` caller.
             if send_cancellable(
-                &tx,
-                ServerMessage::ProtocolError {
-                    reason: format!(
-                        "subscribe for unknown symbol {symbol}: the venue does not list it, \
-                         no data will stream"
-                    ),
-                    ts_event: sim.sim_ns(now_ns()),
-                },
+                &exec_tx,
+                (
+                    Instant::now(),
+                    ServerMessage::ProtocolError {
+                        reason: format!(
+                            "subscribe for unknown symbol {symbol}: the venue does not list it, \
+                             no data will stream"
+                        ),
+                        ts_event: sim.sim_ns(now_ns()),
+                    },
+                ),
                 &cancel,
             )
             .is_err()
@@ -740,17 +754,21 @@ pub(crate) fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
             );
             // Best-effort diagnostic: an Err means the client is already gone
             // (channel closed or subscription cancelled), so there is nobody
-            // left to tell - the thread exits either way.
+            // left to tell - the thread exits either way. Rides the exec pump
+            // (not `tx`) so DelayAcks holds it like every execution event (S10).
             if send_cancellable(
-                &tx,
-                ServerMessage::ProtocolError {
-                    reason: format!(
-                        "subscription for {symbol} could not be positioned: the seek toward \
-                         its start exhausted the {}-tick budget, no data will stream",
-                        source::MAX_HISTORY_SEEK_TICKS
-                    ),
-                    ts_event: sim.sim_ns(now_ns()),
-                },
+                &exec_tx,
+                (
+                    Instant::now(),
+                    ServerMessage::ProtocolError {
+                        reason: format!(
+                            "subscription for {symbol} could not be positioned: the seek toward \
+                             its start exhausted the {}-tick budget, no data will stream",
+                            source::MAX_HISTORY_SEEK_TICKS
+                        ),
+                        ts_event: sim.sim_ns(now_ns()),
+                    },
+                ),
                 &cancel,
             )
             .is_err()
@@ -860,11 +878,7 @@ pub(crate) fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
 /// `try_send`, sleeping at most [`REPLAY_SEND_POLL`] when the channel is full and
 /// re-checking `cancel` between attempts. `Err(())` means the stream should stop
 /// (client gone, or cancelled while parked).
-fn send_cancellable(
-    tx: &mpsc::Sender<ServerMessage>,
-    msg: ServerMessage,
-    cancel: &AtomicBool,
-) -> Result<(), ()> {
+fn send_cancellable<T>(tx: &mpsc::Sender<T>, msg: T, cancel: &AtomicBool) -> Result<(), ()> {
     use mpsc::error::TrySendError;
     let mut msg = msg;
     loop {

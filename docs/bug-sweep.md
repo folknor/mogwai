@@ -34,6 +34,19 @@ memory fixed via geometric coarsening (a hard MAX_CHECKPOINTS ceiling,
 byte-identity preserved); the reference-doc drift resolved (S11, S12, AD18,
 X9, F17, S18); F18 assessed as no-autonomous-change. See "Found during fix
 batches" and "Upstream candidates" at the bottom.
+Mechanical batch 5 (complete): S10 residual fixed (the replay thread's
+dead-seek and unknown-symbol ProtocolError diagnostics now ride an exec_tx
+threaded through ReplaySpawn, so DelayAcks holds them); AD22 fixed
+(date_to_unix_nanos saturates out-of-range datetimes at the axis bounds
+instead of silently unbounding the request); AD25 fixed (ship_server_havoc
+uses the configured request timeout like dispatch_order); F4's pin test added
+(daemon startup failure asserted to land in the configured log). AD24 and
+AD26 were already fixed in batch 4 but had stale entries in the nits list -
+removed. X5 and X6 resolved by documentation: havoc.md now states
+DuplicateNextFill is structurally inert against the nautilus stack, and
+architecture.md scopes the byte-identical claim to single-command semantics
+and discloses the HTTP inter-command ordering race. X6's behavioral fix
+(sequencing HttpOrders dispatch) stays flagged as a design option.
 Upstream follow-through (complete): the U1/U2 nautilus fixes verified merged
 (LiveTimer is check-then-fire with an inclusive stop boundary; LiveClock's
 timer_exists filters expired timers), so the mogwai clock's deliberately
@@ -124,17 +137,10 @@ divergence from the protocol's zeroing variant is deliberate and documented.
 
 ## Server (crates/mogwai-server)
 
-### S10 residual. gap - one dead-seek ProtocolError diagnostic still rides the data channel
-
-Batch 4 fixed the main S10: ProtocolError now routes through the exec pump so
-DelayAcks holds it, at both `handle_socket` sites. RESIDUAL: the two
-diagnostics emitted inside `spawn_replay` (unknown-symbol, dead-seek) still
-ride the data channel `tx` because the replay OS thread only holds `tx`. The
-unknown-symbol one is now production-unreachable (S22b pre-filters it), but the
-dead-seek ProtocolError remains on `tx` - routing it through exec would need
-threading an exec sender through `spawn_replay`. Low severity.
-
-(S11 the HTTP-carrier exemption from the temporal divergences and S12 the
+(S10 is now fully closed: batch 4 routed the two `handle_socket` diagnostics
+through the exec pump, and batch 5 threaded an exec sender through
+`ReplaySpawn` so the replay thread's dead-seek and unknown-symbol diagnostics
+ride it too. S11 the HTTP-carrier exemption from the temporal divergences and S12 the
 config.md/cli.md omissions were resolved by documentation: havoc.md now states
 the writer-only / WS-only scope of DelayAcks/GoDark/StallData as a deliberate
 connection-scoped behavior and an operator trap, config.md gained the
@@ -287,18 +293,11 @@ should know bars can stall on quiet tape.
   update_bar_state folds any ts < close_ts trade into the current window,
   including trades before the window's start. Defensible modeling choice;
   worth a deliberate decision.
-- AD22. nit - `date_to_unix_nanos` maps out-of-range datetimes (pre-1970,
-  post-2262) to None silently: a far-future start becomes "from origin" and a
-  pre-epoch end becomes unbounded rather than an error; combined with
-  ensure_on_tape(start=None) passing, a nonsense request degrades quietly.
-- AD24. nit - `#[allow(dead_code)]` on both MogwaiDataClient and
-  MogwaiExecutionClient struct definitions hides genuinely dead fields from
-  clippy forever.
-- AD25. nit - `ship_server_havoc` uses `request_timeout_secs(&None, sim)`,
-  ignoring the configured conn.request_timeout_secs - inconsistent with
-  dispatch_order.
-- AD26. nit - Double validation in factories: create runs config.validate()?
-  and then Mogwai*Client::new validates again. Harmless, mildly misleading.
+(AD22 and AD25 were fixed in batch 5: date_to_unix_nanos saturates
+out-of-range datetimes at the axis bounds with a unit test pinning both
+sides, and ship_server_havoc takes the configured request timeout. AD24 and
+AD26 turned out already fixed in batch 4 - their nit entries here were stale
+and are removed.)
 
 ### Adapter data-half verified-correct notes
 
@@ -413,22 +412,9 @@ mirror is not blind). No doc mentions the ~30 s cliff.
 
 ### X4. (merged into AE3 - mirror terminal-state regression)
 
-### X5. gap/observation - DuplicateNextFill (and duplicate_prob on fills) can never corrupt downstream state; it only exercises dedup logging
+### X5. (resolved by documentation in batch 5 - havoc.md's DuplicateNextFill entry now states the duplicate is structurally inert against the nautilus stack, exercising the dedup path and its logging only. The open design OPTION remains: distinct trade_ids on the duplicate would be a genuine double-fill/overfill divergence - the interesting path under broadarrow's allow_overfills=false - but that is a new divergence, not a doc fix.)
 
-Engine: the duplicate is fill.clone(), same trade_id. Nautilus: the duplicate
-is warn-dropped (OrderError::DuplicateFill) BEFORE the
-portfolio/position/msgbus, so broadarrow's classify layer never sees it. The
-adapter's mirror also dedups (seen_trades). Severity low (design-intent
-question); confidence high on mechanics.
-
-A robust OMS should dedup, and it does - but mogwai's docs sell duplicate
-fills as an account-corrupting divergence a sandbox cannot produce; on this
-stack it is structurally inert beyond a warn line. To drive a broadarrow
-verdict the engine would need distinct trade_ids on the duplicate - which
-would instead be a genuine double-fill/overfill (note allow_overfills=false
-in broadarrow makes THAT path the interesting one).
-
-### X6. smell - HttpOrders profile loses order-command ordering
+### X6. smell (doc half resolved) - HttpOrders profile loses order-command ordering
 
 `client.rs` `dispatch_order`: each Submit/Modify/Cancel spawns a detached
 task doing its own POST; nothing sequences them (the HttpQuota mutex is not
@@ -439,8 +425,12 @@ medium that broadarrow hits it.
 Failure scenario: submit immediately followed by modify/cancel (e.g.
 broadarrow's stale-order reconciliation cancel) can arrive at /orders
 reversed - a spurious "unknown order" cancel-reject followed by an
-accept/fill. architecture.md claims order semantics are "byte-identical
-across the two carriers"; the ordering guarantee is not.
+accept/fill. Batch 5 trued up architecture.md: the byte-identical claim is
+now scoped to single-command semantics and the inter-command ordering race is
+disclosed. The BEHAVIORAL fix - sequencing HttpOrders dispatch (a per-client
+ordered queue in front of the spawned POSTs) - remains flagged as a design
+option; it trades the profile's deliberate fire-and-forget concurrency for
+ordering.
 
 ### X7. (merged into S11 - temporal divergences do not apply to the HTTP carriers; confirmed and expanded there)
 
@@ -487,15 +477,11 @@ partial-then-cancel pair, pending-restore on both reject kinds, and the
 
 ## Found during fix batches (new, unresolved)
 
-### F4. gap - Daemon-log integration pin missing
-
-The batch-1 S6 fix logs child startup failures to the configured log, but
-nothing integration-tests it. A pin in crates/mogwai-server/tests/daemon.rs
-(daemonize with a malformed config, assert the failure lands in mogwai.log)
-would keep it honest. Residual: failures BEFORE init_logging in the child
-(setsid/redirect errors print to the still-inherited stderr; an init_logging
-failure itself is silent post-redirect) remain unlogged - narrow window, no
-log exists to write to at that point.
+(F4 was closed in batch 5: `daemon_startup_failure_lands_in_the_log` in
+crates/mogwai-server/tests/daemon.rs daemonizes with a malformed config and
+asserts the failure lands in the configured log. The narrow
+pre-init_logging window remains unlogged by nature and is documented in the
+test's comment.)
 
 ### F5. note - Engine ledger saturation is sticky by design
 

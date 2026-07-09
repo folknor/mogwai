@@ -203,8 +203,15 @@ head-of-line-block the ones behind it.
   with `reason`, emitting an `OrderRejected` and nothing else. Untargeted: it
   applies to whatever submit arrives next.
 - **`DuplicateNextFill`** - emits the next fill event twice on the wire (same
-  `trade_id`, `last_qty`, `last_px`, `leaves_qty`), so a downstream client may
-  double-count. Untargeted: applies to the next fill produced.
+  `trade_id`, `last_qty`, `last_px`, `leaves_qty`), so a naive downstream
+  client would double-count. Untargeted: applies to the next fill produced.
+  Operator note: against the nautilus adapter stack this can never corrupt
+  state - the adapter's mirror dedups on `trade_id` and nautilus itself
+  warn-drops the duplicate before the portfolio sees it - so what it exercises
+  is the dedup path and its logging, not an account divergence. Corrupting a
+  robust OMS would need distinct trade ids, which is a genuine double-fill
+  (overfill), a different divergence. The same applies to the client-side
+  `duplicate_prob` when the duplicated event is a fill.
 - **`DropNextAccountUpdate`** - swallows the next fill-driven `AccountState`
   snapshot, so the account drifts out of sync with the fills the client did see.
   Untargeted: applies to the next submit's snapshot.

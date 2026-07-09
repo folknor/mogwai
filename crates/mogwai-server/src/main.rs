@@ -1687,6 +1687,7 @@ mod tests {
         };
         let profiles = default_profiles();
         let (tx, mut rx) = mpsc::channel::<ServerMessage>(8);
+        let (exec_tx, _exec_rx) = mpsc::channel::<(Instant, ServerMessage)>(8);
         let cancel = Arc::new(AtomicBool::new(false));
         let handle = spawn_replay(ReplaySpawn {
             symbol: "BTCUSDT".to_string(),
@@ -1700,6 +1701,7 @@ mod tests {
             // this test only checks the stream is live and cancellable.
             data_origin: now_ns(),
             tx,
+            exec_tx,
             cancel: Arc::clone(&cancel),
             resume_floor: None,
             last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
@@ -1733,6 +1735,7 @@ mod tests {
     #[tokio::test]
     async fn dead_subscribe_reports_protocol_error_instead_of_silence() {
         let (tx, mut rx) = mpsc::channel::<ServerMessage>(8);
+        let (exec_tx, mut exec_rx) = mpsc::channel::<(Instant, ServerMessage)>(8);
         let cancel = Arc::new(AtomicBool::new(false));
         let handle = spawn_replay(ReplaySpawn {
             symbol: "BTCUSDT".to_string(),
@@ -1744,12 +1747,15 @@ mod tests {
             sim: SimClock::identity(),
             data_origin: now_ns().saturating_sub(60 * 86_400_000_000_000),
             tx,
+            exec_tx,
             cancel: Arc::clone(&cancel),
             resume_floor: None,
             last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
         });
 
-        let frame = rx.recv().await.expect("a frame, not silence");
+        // The diagnostic classifies as execution, so it rides the exec pump
+        // channel - where DelayAcks holds it - not the market-data channel (S10).
+        let (_enqueued, frame) = exec_rx.recv().await.expect("a frame, not silence");
         let ServerMessage::ProtocolError { reason, .. } = frame else {
             panic!("expected ProtocolError, got {frame:?}");
         };
@@ -1759,6 +1765,10 @@ mod tests {
         );
         assert!(
             rx.recv().await.is_none(),
+            "a dead stream sends no market data at all"
+        );
+        assert!(
+            exec_rx.recv().await.is_none(),
             "a dead stream sends nothing after the error frame"
         );
         quiesce_replay(Replay {
@@ -1776,6 +1786,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_symbol_subscribe_reports_protocol_error() {
         let (tx, mut rx) = mpsc::channel::<ServerMessage>(8);
+        let (exec_tx, mut exec_rx) = mpsc::channel::<(Instant, ServerMessage)>(8);
         let cancel = Arc::new(AtomicBool::new(false));
         let handle = spawn_replay(ReplaySpawn {
             symbol: "FAKE".to_string(),
@@ -1787,12 +1798,14 @@ mod tests {
             sim: SimClock::identity(),
             data_origin: now_ns(),
             tx,
+            exec_tx,
             cancel: Arc::clone(&cancel),
             resume_floor: None,
             last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
         });
 
-        let frame = rx.recv().await.expect("a frame, not silence");
+        // Rides the exec pump channel like every execution-category event (S10).
+        let (_enqueued, frame) = exec_rx.recv().await.expect("a frame, not silence");
         let ServerMessage::ProtocolError { reason, .. } = frame else {
             panic!("expected ProtocolError, got {frame:?}");
         };
@@ -1802,6 +1815,10 @@ mod tests {
         );
         assert!(
             rx.recv().await.is_none(),
+            "an unknown-symbol subscribe streams no market data at all"
+        );
+        assert!(
+            exec_rx.recv().await.is_none(),
             "an unknown-symbol subscribe streams nothing after the error frame"
         );
         quiesce_replay(Replay {
@@ -1829,6 +1846,7 @@ mod tests {
         // Capacity 1 so the generator fills the channel and parks in
         // `send_cancellable` almost immediately, never draining.
         let (tx, _rx) = mpsc::channel::<ServerMessage>(1);
+        let (exec_tx, _exec_rx) = mpsc::channel::<(Instant, ServerMessage)>(8);
         let cancel = Arc::new(AtomicBool::new(false));
         let handle = spawn_replay(ReplaySpawn {
             symbol: "BTCUSDT".to_string(),
@@ -1840,6 +1858,7 @@ mod tests {
             sim: SimClock::identity(),
             data_origin: now_ns(),
             tx,
+            exec_tx,
             cancel: Arc::clone(&cancel),
             resume_floor: None,
             last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
@@ -1891,6 +1910,7 @@ mod tests {
         };
         let profiles = default_profiles();
         let (tx, mut rx) = mpsc::channel::<ServerMessage>(8);
+        let (exec_tx, _exec_rx) = mpsc::channel::<(Instant, ServerMessage)>(8);
         let cancel = Arc::new(AtomicBool::new(false));
         let started = Instant::now();
         let handle = spawn_replay(ReplaySpawn {
@@ -1905,6 +1925,7 @@ mod tests {
             // wall deadline is the anchor - the delay this test measures.
             data_origin: EPOCH,
             tx,
+            exec_tx,
             cancel: Arc::clone(&cancel),
             resume_floor: None,
             last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
@@ -2065,6 +2086,7 @@ mod tests {
         };
         let profiles = default_profiles();
         let (tx, _rx) = mpsc::channel::<ServerMessage>(8);
+        let (exec_tx, _exec_rx) = mpsc::channel::<(Instant, ServerMessage)>(8);
         let cancel = Arc::new(AtomicBool::new(false));
         let last_sent_ts = Arc::new(AtomicU64::new(NO_TICK_SENT));
         let handle = spawn_replay(ReplaySpawn {
@@ -2079,6 +2101,7 @@ mod tests {
             // thread's first act is the 60s pacing sleep this test interrupts.
             data_origin: EPOCH,
             tx,
+            exec_tx,
             cancel: Arc::clone(&cancel),
             resume_floor: None,
             last_sent_ts: Arc::clone(&last_sent_ts),

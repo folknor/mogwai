@@ -156,7 +156,7 @@ async fn ship_server_havoc(
     http: &HttpClient,
     http_base: &str,
     spec: &HavocSpec,
-    sim: SimClock,
+    timeout_secs: u64,
 ) -> anyhow::Result<()> {
     let url = join_url(http_base, "control/divergence");
     for divergence in &spec.server {
@@ -169,7 +169,7 @@ async fn ship_server_havoc(
                 None,
                 Some(headers),
                 Some(body),
-                Some(request_timeout_secs(&None, sim)),
+                Some(timeout_secs),
                 None,
             )
             .await
@@ -455,7 +455,10 @@ impl ExecutionClient for MogwaiExecutionClient {
         )
         .await?;
         if let Some(havoc) = &self.config.havoc {
-            ship_server_havoc(&self.http, &http_base_url, havoc, sim).await?;
+            // Same scaled timeout as dispatch_order: the configured
+            // conn.request_timeout_secs, not the default (AD25).
+            let timeout_secs = request_timeout_secs(&self.config.havoc, sim);
+            ship_server_havoc(&self.http, &http_base_url, havoc, timeout_secs).await?;
         }
         // Seed the bridge's account row before any order is worked. Pull the
         // venue's current snapshot and forward it through the same exec dispatch
