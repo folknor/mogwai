@@ -55,6 +55,23 @@ unit test). While validating it, a time-of-day-dependent failure of
 ACD trade deserts baked into the seeded tape); the test was widened from a
 10-minute to a 6-hour window as mitigation and D16 recorded for design
 sign-off.
+Design item AD4 (complete): the serial per-message havoc-latency sleep no
+longer caps drain throughput. The three streaming drains (data WS, exec WS,
+poll page) were rearchitected to deliver latency as PARALLEL pipeline delay:
+each frame's release deadline is anchored at its own arrival, so a burst
+drains at full throughput with every frame delayed by the modeled latency
+instead of serializing into a ~33 msg/s ceiling that head-of-line-blocked
+pings and commands. The WS drains enqueue arrival-anchored frames into a
+per-connection latency pump (spawn_latency_pump in client/shared.rs, mirroring
+the server's spawn_exec_pump and abort-tracked on stop); the poll drain
+anchors a whole fetched page at its fetch instant via an inline anchored drain
+(kept inline because its sim can change mid-run under the AD6 self-heal). The
+short per-order HTTP-dispatch response drain keeps the simple inline sleep (a
+few causally-ordered events, no select loop or ping to block). Pinned by
+latency_pump_pipelines_a_burst_instead_of_serializing and
+drain_havoc_anchored_does_not_compound_a_page. Docs updated in havoc.md and
+architecture.md.
+
 Design item S22a (complete): the unbounded OS-thread-per-subscribed-symbol
 fan-out is now bounded by a global replay-capacity pool. A configurable
 `max_concurrent_replays` (default 1024, `0` disables) sizes an
@@ -77,11 +94,10 @@ the stop boundary. AE15/AE16 remain deliberate as documented.
 
 IDs: E = engine/protocol, D = data path, S = server, AD = adapter data half,
 AE = adapter exec half, X = cross-boundary seams, F = found during fix
-batches. Wave-2 dedupe notes for surviving entries: the serial havoc-latency
-throughput cap was reported independently by both adapter agents (recorded
-once as AD4); the request_bars truncation by the data and seam agents (AD3);
-the submit-before-dispatch OrderSubmitted by the exec and data agents (AE8);
-the min-start_ts cursor drag by the data and exec agents (AD7).
+batches. Wave-2 dedupe notes for surviving entries: the request_bars
+truncation was reported by the data and seam agents (AD3); the
+submit-before-dispatch OrderSubmitted by the exec and data agents (AE8); the
+min-start_ts cursor drag by the data and exec agents (AD7).
 
 ---
 
@@ -267,28 +283,6 @@ NTP-immune anchor pairing in spawn_replay is sound.
 ---
 
 ## Adapter, data half (crates/mogwai-adapter: client.rs data side, convert.rs, config.rs, factories.rs)
-
-### AD4. bug - Serial per-message havoc sleep caps the drain at ~33 msg/s and lets the inbound queue grow unboundedly
-
-`client.rs` `dispatch_havoc` / `sleep_havoc_delay`; `lifecycle.rs`
-`run_ws_connection` handler await; affects the WS drain, the poll drain, and
-the exec drain alike. Severity medium-high (data-path fidelity), confidence
-high on mechanism, medium on how often real runs exceed 33 msg/s. (Reported
-independently by both adapter agents.)
-
-The mandatory 30 ms BASELINE_LATENCY is realized as an inline
-`tokio::time::sleep` per message, awaited serially inside the single
-reader/poll loop (the handler holds the shared filter mutex across the
-sleep). Latency thus behaves as inter-message SPACING, not pipeline delay:
-throughput ceiling ~1/30ms ~33 ticks/s on the sim axis. A burst above that
-(VolStorm, catch-up backfill after reconnect, a 1000-trade poll page = 30+ s
-to drain) backs up in the unbounded `in_rx` channel; queueing delay compounds
-far beyond the modeled 30 ms and memory grows without bound. A real network
-delays every frame ~30 ms in parallel at full throughput. While the WS select
-loop sleeps, Ping replies, idle-reset processing, and outbound
-commands/heartbeats are head-of-line blocked behind the backlog. At high
-`speed` the wall sleep compresses and this vanishes; at speed 1 with an
-active tape it materially distorts delivery timing.
 
 ### AD12. gap - No dead-feed detection anywhere; a zero-frame subscription is structurally invisible
 
@@ -627,10 +621,6 @@ remain:
 Recorded so they are not mistaken for oversights. Each needs a design
 decision or a non-trivial build, so they were flagged rather than forced:
 
-- AD4: the serial per-message havoc-latency sleep behaves as a throughput cap
-  rather than pipelined delay. A faithful fix pipelines the delay across the
-  drain without serializing throughput - a drain rearchitecture spanning
-  client.rs and lifecycle.rs.
 - AD12: a POSITIVE dead-feed watchdog (a per-subscription liveness timer /
   "0 ticks in N s" heartbeat). Diagnostics now reach the log; what is missing
   is a positive proof-of-life. A real feature.

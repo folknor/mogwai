@@ -11,7 +11,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, ensure};
@@ -47,11 +47,12 @@ use tokio::task::JoinHandle;
 use crate::{
     MOGWAI_VENUE, MogwaiDataClientConfig,
     client::shared::{
-        HavocFilter, abort_tasks, cache_instruments, capped_limit, client_havoc, conn_havoc,
-        data_regime, date_to_unix_nanos, dispatch_havoc, emit_seeded_instruments,
-        ensure_instrument, ensure_on_tape, fetch_clock_or_identity, fetch_instruments, flush_havoc,
-        instrument_any_or_warn, instrument_def, join_url, lock_recover, now_unix_nanos,
-        seed_instruments, symbol_from_instrument, track_task, wait_connected,
+        HavocDelivery, HavocFilter, abort_tasks, cache_instruments, capped_limit, client_havoc,
+        conn_havoc, data_regime, date_to_unix_nanos, drain_havoc_anchored, emit_seeded_instruments,
+        enqueue_havoc, ensure_instrument, ensure_on_tape, fetch_clock_or_identity,
+        fetch_instruments, flush_havoc, flush_havoc_into_pump, instrument_any_or_warn,
+        instrument_def, join_url, lock_recover, now_unix_nanos, seed_instruments,
+        spawn_latency_pump, symbol_from_instrument, track_task, wait_connected,
         warn_missing_instrument_once,
     },
     convert,
@@ -372,17 +373,29 @@ impl DataClient for MogwaiDataClient {
         let havoc_filter = Arc::new(tokio::sync::Mutex::new(HavocFilter::from_client(
             &client_havoc,
         )));
+        // The market-data drain no longer sleeps the per-message havoc latency
+        // inline in the reader loop (which capped throughput at ~33 msg/s and
+        // head-of-line-blocked pings/commands - AD4). It enqueues each filtered
+        // message, arrival-anchored, into a latency pump that owns the sink and
+        // paces delivery off-loop. Spawn and track the pump before the reader so
+        // stop() aborts it alongside the connection task.
+        let (deliver_tx, deliver_rx) = unbounded_channel::<HavocDelivery>();
+        let pump_handle = spawn_latency_pump(deliver_rx, move |msg| {
+            let sink = sink.clone();
+            let instruments = Arc::clone(&instruments);
+            let subs = Arc::clone(&subs);
+            let bars = Arc::clone(&bars);
+            async move {
+                handle_market_message(msg, &sink, &instruments, &subs, &bars, sim).await;
+            }
+        });
+        track_task(&self.task_handles, pump_handle);
+
         let handler_filter = Arc::clone(&havoc_filter);
+        let handler_deliver = deliver_tx.clone();
         let disconnect_filter = Arc::clone(&havoc_filter);
-        let handler_sink = sink.clone();
-        let handler_instruments = Arc::clone(&instruments);
-        let handler_subs = Arc::clone(&subs);
-        let handler_bars = Arc::clone(&bars);
-        let disconnect_sink = sink;
-        let disconnect_instruments = Arc::clone(&instruments);
-        let disconnect_subs = Arc::clone(&subs);
-        let disconnect_bars = Arc::clone(&bars);
-        let connect_subs = Arc::clone(&subs);
+        let disconnect_deliver = deliver_tx;
+        let connect_subs = Arc::clone(&self.subs);
         let task_ws_url = ws_url.clone();
         let reader_handle = tokio::spawn(async move {
             run_ws_connection(
@@ -398,30 +411,18 @@ impl DataClient for MogwaiDataClient {
                 move || subscribe_commands(&connect_subs, regime),
                 move |server_msg| {
                     let handler_filter = Arc::clone(&handler_filter);
-                    let sink = handler_sink.clone();
-                    let instruments = Arc::clone(&handler_instruments);
-                    let subs = Arc::clone(&handler_subs);
-                    let bars = Arc::clone(&handler_bars);
+                    let handler_deliver = handler_deliver.clone();
                     async move {
                         let mut filter = handler_filter.lock().await;
-                        dispatch_havoc(&mut filter, server_msg, sim, |msg| {
-                            handle_market_message(msg, &sink, &instruments, &subs, &bars, sim)
-                        })
-                        .await;
+                        enqueue_havoc(&mut filter, server_msg, sim, &handler_deliver);
                     }
                 },
                 move || {
                     let disconnect_filter = Arc::clone(&disconnect_filter);
-                    let sink = disconnect_sink.clone();
-                    let instruments = Arc::clone(&disconnect_instruments);
-                    let subs = Arc::clone(&disconnect_subs);
-                    let bars = Arc::clone(&disconnect_bars);
+                    let disconnect_deliver = disconnect_deliver.clone();
                     async move {
                         let mut filter = disconnect_filter.lock().await;
-                        flush_havoc(&mut filter, sim, |msg| {
-                            handle_market_message(msg, &sink, &instruments, &subs, &bars, sim)
-                        })
-                        .await;
+                        flush_havoc_into_pump(&mut filter, sim, &disconnect_deliver);
                     }
                 },
             )
@@ -1317,13 +1318,21 @@ async fn poll_market_data(mut ctx: DataPollContext) {
                 };
                 entry.unseen_from_batch(batch)
             };
+            // Anchor every trade in this page at one arrival instant so the
+            // per-message havoc latency does not compound across the page: a
+            // 1000-trade page drains in a single delay window rather than
+            // page_len * delay (AD4). The anchor reads ctx.sim live, which can
+            // change under the AD6 self-heal, so the poll path keeps this inline
+            // shape instead of a separate pump.
+            let page_arrival = Instant::now();
             for trade in trades {
                 let (sink, instruments, subs, bars) =
                     (&ctx.sink, &ctx.instruments, &ctx.subs, &ctx.bars);
-                dispatch_havoc(
+                drain_havoc_anchored(
                     &mut ctx.havoc_filter,
                     ServerMessage::Trade(trade),
                     ctx.sim,
+                    page_arrival,
                     |msg| handle_market_message(msg, sink, instruments, subs, bars, ctx.sim),
                 )
                 .await;

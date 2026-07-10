@@ -105,6 +105,21 @@ regardless of transport profile. Knobs:
 - `seed: Option<u64>` - optional deterministic RNG seed for the three
   probabilistic knobs; absent, the filter draws from entropy.
 
+The added delay is delivered as **parallel pipeline latency**, not inter-message
+spacing. Each inbound frame's release deadline is anchored at its own arrival
+(`arrival + delay`) and paced off the reader loop: the streaming drains (the
+data and exec WS readers) enqueue into a per-connection latency pump, and the
+HTTP poll drain anchors a whole fetched page at its fetch instant. Both mirror
+the mogwai server's own `spawn_exec_pump` deadline discipline. A burst therefore
+drains at full throughput with every frame delayed by `delay` - the way a real
+network delays frames in parallel - rather than serializing into a `1/delay`
+message-rate ceiling that would also head-of-line-block Ping/Pong and outbound
+commands behind the backlog. The reorder and duplicate expansions ride the same
+pump, so their timing composes with the latency. (The short per-order
+HTTP-dispatch response drain keeps a simple inline sleep: a handful of
+causally-ordered events on a dedicated task, with no select loop or ping to
+block.)
+
 The event-category split is the protocol's single source of truth:
 `ServerMessage::category()` returns `EventKind::{Exec, Fill, Data}`, and
 `EventKind::is_execution()` is the two-way exec-vs-data fold. `AccountState` is

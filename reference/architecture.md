@@ -347,7 +347,12 @@ validation boundaries). A single `HavocSpec` on both client configs
   corruption, but still carries the honest baseline inbound network latency: 30
   ms one-way on every inbound event. Armed `ClientHavoc.latency` adds on top of
   that baseline rather than replacing it; drop, duplicate, and reorder remain
-  opt-in.
+  opt-in. The delay is delivered as parallel pipeline latency, not inter-message
+  spacing: the streaming drains enqueue each arrival-anchored frame into an
+  off-loop latency pump and the poll drain anchors a whole page at its fetch
+  instant, so a burst drains at full throughput (mirroring the server's
+  `spawn_exec_pump`) instead of capping the message rate at `1/delay` and
+  head-of-line-blocking pings and commands.
 - **Data half.** A `MarketRegime` on `HavocSpec.data` that corrupts the *market
   before it is produced*, perturbing the generator's parameters at
   source-construction time rather than corrupting events after they exist. Four

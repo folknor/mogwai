@@ -48,10 +48,11 @@ use tokio::task::JoinHandle;
 use crate::{
     MOGWAI_VENUE, MogwaiExecClientConfig,
     client::shared::{
-        HavocFilter, abort_tasks, client_havoc, client_havoc_for_dispatch, conn_havoc,
-        dispatch_havoc, fetch_clock_or_identity, flush_havoc, instrument_def, join_url,
-        lock_recover, now_unix_nanos, request_timeout_secs, seed_instruments,
-        symbol_from_instrument, track_task, wait_connected,
+        HavocDelivery, HavocFilter, abort_tasks, client_havoc, client_havoc_for_dispatch,
+        conn_havoc, dispatch_havoc, enqueue_havoc, fetch_clock_or_identity, flush_havoc,
+        flush_havoc_into_pump, instrument_def, join_url, lock_recover, now_unix_nanos,
+        request_timeout_secs, seed_instruments, spawn_latency_pump, symbol_from_instrument,
+        track_task, wait_connected,
     },
     convert,
     lifecycle::{HttpQuota, WsConnectionConfig, run_ws_connection},
@@ -508,14 +509,30 @@ impl ExecutionClient for MogwaiExecutionClient {
         self.ws_cmd = Some(cmd_tx);
 
         let connected = Arc::clone(&self.connected);
-        let ctx = self.exec_context();
         let havoc_filter = Arc::new(tokio::sync::Mutex::new(HavocFilter::from_client(
             &client_havoc,
         )));
+        // Exec drain pipelines the per-message havoc latency through a pump
+        // rather than sleeping inline in the reader loop, which capped throughput
+        // and head-of-line-blocked pings/commands (AD4 - see the data client and
+        // spawn_latency_pump). The pump owns a clone of the exec context and
+        // applies each event to the mirror off-loop. handle_exec_message is
+        // already called concurrently from the HTTP order-dispatch tasks, so
+        // moving the WS drain's calls onto the pump task adds no new sharing.
+        let (deliver_tx, deliver_rx) = unbounded_channel::<HavocDelivery>();
+        let pump_ctx = self.exec_context();
+        let pump_handle = spawn_latency_pump(deliver_rx, move |msg| {
+            let ctx = pump_ctx.clone();
+            async move {
+                handle_exec_message(msg, &ctx);
+            }
+        });
+        track_task(&self.task_handles, pump_handle);
+
         let handler_filter = Arc::clone(&havoc_filter);
+        let handler_deliver = deliver_tx.clone();
         let disconnect_filter = Arc::clone(&havoc_filter);
-        let handler_ctx = ctx.clone();
-        let disconnect_ctx = ctx;
+        let disconnect_deliver = deliver_tx;
         let task_ws_url = ws_url.clone();
         let reader_handle = tokio::spawn(async move {
             run_ws_connection(
@@ -531,24 +548,18 @@ impl ExecutionClient for MogwaiExecutionClient {
                 Vec::new,
                 move |server_msg| {
                     let handler_filter = Arc::clone(&handler_filter);
-                    let ctx = handler_ctx.clone();
+                    let handler_deliver = handler_deliver.clone();
                     async move {
                         let mut filter = handler_filter.lock().await;
-                        dispatch_havoc(&mut filter, server_msg, sim, |msg| async {
-                            handle_exec_message(msg, &ctx);
-                        })
-                        .await;
+                        enqueue_havoc(&mut filter, server_msg, sim, &handler_deliver);
                     }
                 },
                 move || {
                     let disconnect_filter = Arc::clone(&disconnect_filter);
-                    let ctx = disconnect_ctx.clone();
+                    let disconnect_deliver = disconnect_deliver.clone();
                     async move {
                         let mut filter = disconnect_filter.lock().await;
-                        flush_havoc(&mut filter, sim, |msg| async {
-                            handle_exec_message(msg, &ctx);
-                        })
-                        .await;
+                        flush_havoc_into_pump(&mut filter, sim, &disconnect_deliver);
                     }
                 },
             )

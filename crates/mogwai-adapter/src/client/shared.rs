@@ -11,7 +11,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, ensure};
@@ -24,18 +24,135 @@ use nautilus_core::UnixNanos;
 use nautilus_model::identifiers::InstrumentId;
 use nautilus_network::http::HttpClient;
 use rand::{RngExt, SeedableRng, rngs::StdRng};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
 use crate::{clock::fetch_clock, convert, lifecycle::HttpQuota};
 
+/// One message queued for timed delivery through the latency pump: the wall
+/// deadline it must not be released before, and the message to hand to the sink.
+pub(crate) type HavocDelivery = (Instant, ServerMessage);
+
+/// Wall deadline for a per-message havoc delay, anchored at NOW. Call it the
+/// moment the message arrives (i.e. right after `filter.apply`); a zero delay
+/// yields a deadline of now, so the pump releases the message immediately.
+pub(crate) fn havoc_deadline(sim: SimClock, delay: Duration) -> Instant {
+    Instant::now() + sim.wall_duration(duration_to_nanos(delay))
+}
+
+/// Sleep until a wall `deadline`, returning immediately if it has already
+/// elapsed. Shared by the latency pump and the poll drain's anchored delivery.
+async fn sleep_until_wall(deadline: Instant) {
+    let now = Instant::now();
+    if deadline > now {
+        tokio::time::sleep(deadline - now).await;
+    }
+}
+
+/// Drain one inbound `msg`'s filtered expansion inline, sleeping only until each
+/// message's deadline relative to a shared `arrival` anchor before handing it to
+/// `handle`. Anchoring every message of a batch at one arrival instant is what
+/// stops the per-message delays from compounding: a fetched page of trades all
+/// anchor at the fetch instant, so the first sleeps out the delay and the rest
+/// find their deadline already elapsed and forward at once - one delay window
+/// for the page instead of `page_len * delay` (AD4). Used by the poll transport,
+/// which drains a fetched page sequentially on its own task (no select loop or
+/// ping to keep responsive, and its `sim` can change mid-run via the AD6
+/// self-heal), so it keeps the inline shape and reads the live `sim` here rather
+/// than handing delivery to a separate pump that captured `sim` at spawn.
+pub(crate) async fn drain_havoc_anchored<F, Fut>(
+    filter: &mut HavocFilter,
+    msg: ServerMessage,
+    sim: SimClock,
+    arrival: Instant,
+    mut handle: F,
+) where
+    F: FnMut(ServerMessage) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    for (msg, delay) in filter.apply(msg) {
+        sleep_until_wall(arrival + sim.wall_duration(duration_to_nanos(delay))).await;
+        handle(msg).await;
+    }
+}
+
+/// Apply the filter to one inbound `msg` and queue each resulting wire message
+/// for timed delivery through [`spawn_latency_pump`], anchoring every message's
+/// release deadline at its arrival. Unlike the inline-sleep `dispatch_havoc`,
+/// this does NOT block on the delay - the enqueue is immediate, so the caller's
+/// select loop stays responsive to pings/commands and a burst pipelines instead
+/// of serializing (AD4). A dropped receiver (the pump gone) discards the
+/// message, which only happens during teardown.
+pub(crate) fn enqueue_havoc(
+    filter: &mut HavocFilter,
+    msg: ServerMessage,
+    sim: SimClock,
+    deliver_tx: &UnboundedSender<HavocDelivery>,
+) {
+    for (msg, delay) in filter.apply(msg) {
+        drop(deliver_tx.send((havoc_deadline(sim, delay), msg)));
+    }
+}
+
+/// The `flush()` twin of [`enqueue_havoc`] for disconnect teardown: queues any
+/// reorder-held message through the same pump so it stays ordered behind the
+/// events already enqueued from this connection.
+pub(crate) fn flush_havoc_into_pump(
+    filter: &mut HavocFilter,
+    sim: SimClock,
+    deliver_tx: &UnboundedSender<HavocDelivery>,
+) {
+    for (msg, delay) in filter.flush() {
+        drop(deliver_tx.send((havoc_deadline(sim, delay), msg)));
+    }
+}
+
+/// The inbound latency pump: drains queued `(deadline, message)` deliveries in
+/// order, sleeping only until each message's own arrival-anchored deadline
+/// before handing it to `sink`.
+///
+/// Because deadlines are anchored at arrival (not at the previous message's
+/// release), a burst of same-delay messages collapses to a single delay window
+/// instead of compounding: the first sleeps out the delay, and each subsequent
+/// message finds its deadline already elapsed and forwards at once. This models
+/// a network that delays every frame in parallel at full throughput, replacing
+/// the old inline `sleep_havoc_delay` that realized the delay as inter-message
+/// SPACING - a ~33 msg/s ceiling that head-of-line-blocked pings/commands and
+/// grew the inbound queue without bound under any burst (AD4). It mirrors the
+/// deadline discipline of the mogwai server's own `spawn_exec_pump`.
+///
+/// Ordering is preserved by construction (a single task over an ordered
+/// channel, and arrival-anchored deadlines are monotone for equal delays). The
+/// pump ends when every `deliver_tx` is dropped (its receiver closes); `stop()`
+/// also aborts it via task tracking, discarding any still-in-flight delayed
+/// messages exactly as the server's pump does on disconnect.
+pub(crate) fn spawn_latency_pump<F, Fut>(
+    mut deliver_rx: UnboundedReceiver<HavocDelivery>,
+    mut sink: F,
+) -> JoinHandle<()>
+where
+    F: FnMut(ServerMessage) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    tokio::spawn(async move {
+        while let Some((deadline, msg)) = deliver_rx.recv().await {
+            sleep_until_wall(deadline).await;
+            sink(msg).await;
+        }
+    })
+}
+
 /// Drains the havoc-mangled expansion of one inbound `msg` and routes each
 /// resulting wire message through `handle`, sleeping the per-message delay
-/// first. Generic over the per-message sink so the market path (which forwards
-/// to `handle_market_message`, async) and the exec path (which forwards to
-/// `handle_exec_message`, wrapped in an async block) share one control flow.
-/// `flush_havoc` is the same loop over `filter.flush()` for the disconnect
-/// teardown that emits any divergence-held events.
+/// first. Retained for the short-lived HTTP order-dispatch response drain
+/// (a handful of causally-ordered events on a dedicated task, with no select
+/// loop or ping to head-of-line-block); the live streaming drains use the
+/// pipelined [`spawn_latency_pump`] instead (AD4). Generic over the per-message
+/// sink so the market path (which forwards to `handle_market_message`, async)
+/// and the exec path (which forwards to `handle_exec_message`, wrapped in an
+/// async block) share one control flow. `flush_havoc` is the same loop over
+/// `filter.flush()` for the disconnect teardown that emits any
+/// divergence-held events.
 pub(crate) async fn dispatch_havoc<F, Fut>(
     filter: &mut HavocFilter,
     msg: ServerMessage,
@@ -535,6 +652,101 @@ mod tests {
         assert_eq!(
             date_to_unix_nanos(Some(far_future)),
             Some(UnixNanos::from(u64::try_from(i64::MAX).expect("fits")))
+        );
+    }
+
+    #[tokio::test]
+    async fn latency_pump_pipelines_a_burst_instead_of_serializing() {
+        // AD4: messages that arrive together must drain in ~one delay window, not
+        // one-delay-per-message. The old inline sleep serialized the 30 ms
+        // baseline latency into inter-message spacing (~33 msg/s); the pump
+        // anchors each deadline at arrival, so a simultaneous burst collapses to
+        // a single window while preserving order.
+        let sim = SimClock::identity();
+        let mut filter = HavocFilter::from_client(&ClientHavoc::default());
+        let per_msg = filter.delay_for(&ServerMessage::Heartbeat { ts_event: 0 });
+        assert!(
+            !per_msg.is_zero(),
+            "baseline latency must be nonzero for this test"
+        );
+
+        let (deliver_tx, deliver_rx) = tokio::sync::mpsc::unbounded_channel::<HavocDelivery>();
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
+        let pump = spawn_latency_pump(deliver_rx, move |msg| {
+            let out_tx = out_tx.clone();
+            async move {
+                drop(out_tx.send(msg));
+            }
+        });
+
+        const N: u64 = 40;
+        let start = Instant::now();
+        for i in 0..N {
+            enqueue_havoc(
+                &mut filter,
+                ServerMessage::Heartbeat { ts_event: i },
+                sim,
+                &deliver_tx,
+            );
+        }
+        drop(deliver_tx);
+
+        for expected in 0..N {
+            let got = out_rx.recv().await.expect("every message is delivered");
+            let ServerMessage::Heartbeat { ts_event } = got else {
+                panic!("unexpected message on the pump output");
+            };
+            assert_eq!(ts_event, expected, "the pump preserves arrival order");
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < per_msg * 3,
+            "the burst drained in {elapsed:?}; a serial drain would need ~{:?}",
+            per_msg * u32::try_from(N).unwrap()
+        );
+        drop(pump);
+    }
+
+    #[tokio::test]
+    async fn drain_havoc_anchored_does_not_compound_a_page() {
+        // The poll path anchors a whole fetched page at one arrival instant, so
+        // the per-message latency is paid once for the page, not once per trade
+        // (AD4). Draining N messages against a single anchor must take ~one delay
+        // window, and deliver them in order.
+        let sim = SimClock::identity();
+        let mut filter = HavocFilter::from_client(&ClientHavoc::default());
+        let per_msg = filter.delay_for(&ServerMessage::Heartbeat { ts_event: 0 });
+
+        let arrival = Instant::now();
+        const N: u64 = 30;
+        let mut delivered: Vec<u64> = Vec::new();
+        let start = Instant::now();
+        for i in 0..N {
+            drain_havoc_anchored(
+                &mut filter,
+                ServerMessage::Heartbeat { ts_event: i },
+                sim,
+                arrival,
+                |msg| {
+                    if let ServerMessage::Heartbeat { ts_event } = msg {
+                        delivered.push(ts_event);
+                    }
+                    std::future::ready(())
+                },
+            )
+            .await;
+        }
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            delivered,
+            (0..N).collect::<Vec<_>>(),
+            "the page drains in order"
+        );
+        assert!(
+            elapsed < per_msg * 3,
+            "the page drained in {elapsed:?}; per-trade compounding would need ~{:?}",
+            per_msg * u32::try_from(N).unwrap()
         );
     }
 }
