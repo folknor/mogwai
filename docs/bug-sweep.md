@@ -182,11 +182,88 @@ a market order in a desert stamps the NEXT tick's price, up to ~48 min ahead
 of the clock; density-sensitive tests are inherently flaky (the trades-clamp
 test was widened to a 6h window in batch 6 as mitigation).
 
-NOT fixed mechanically: any retune of the ACD constants or an excursion
-bound breaks the committed fingerprint's byte-identical golden stream and
-re-opens the realism-gate anchors - a design decision (retune + regenerate
-golden stream, or bound psi's wall-clock dwell explicitly, or accept and
-document the deserts as venue behavior). Flagged for sign-off.
+Why this is NOT a clean, separable bug (the load-bearing finding): the three
+ACD constants are not fitted per-symbol - they are hand-tuned in
+`generated/consts.rs` specifically to land TWO committed fingerprint duration
+bands, `duration_dispersion_index` in [131.7 .. 4608.9] and the
+`duration_acf_anchor` vector. The `consts.rs` comment states the tension in so
+many words: the dispersion statistic `var(d)/mean(d)` "is dominated by the
+single largest gap" under a shape-0.6 (heavy) innovation tail, and the pair was
+deliberately backed OFF the anchor extreme (4608.9) toward the band's lower
+interior (~190) to keep unlucky seeds from exploding past the band. The
+`realism()` gate (`generated/tests.rs`) then measures BOTH bands on the REALIZED
+tick-to-tick gaps (`tick.ts_event` differences, not the internal event-time
+`duration_s`) over a DRAW of 2,000,000 ticks - at ~7s mean cadence that is ~160
+days of tape, so the deserts sit squarely inside the gated sample and are what
+push the measured dispersion (~190 on seed 42) and the duration-ACF up into
+band. So the deserts are not an artifact bolted onto the fit - they ARE the
+realized mechanism that achieves the committed duration realism. Remove or bound
+them and the dispersion very likely falls through the 131.7 floor and the
+duration-ACF signature collapses; `realism()` goes red.
+
+Sharper decomposition of the two bands: the DISPERSION band only needs big gaps
+to EXIST (isolated heavy-tailed gaps are realistic - real tapes have them). The
+duration-ACF band is what demands they CLUMP TOGETHER (autocorrelated gaps: quiet
+begets quiet), and clumped big gaps ARE the deserts. So it is specifically the
+committed duration-ACF target - the near-unit-root persistence 0.9935 - that
+mandates deserts; isolated big gaps alone would satisfy dispersion without them.
+If the ACF target is faithful to Kraken (plausibly - real durations autocorrelate),
+the deserts are faithful in KIND and wrong only in wall-clock SCALE (18h, which
+real BTCUSD never does), because NEITHER committed target constrains wall-time
+dwell. That wall-clock-blindness of the duration targets is the actual root gap.
+
+Purpose framing (what the duration model is FOR): mogwai exists to exercise
+broadarrow's LIVE path with a realistic market-data backdrop plus adversarial
+execution divergences. The duration model serves the BACKDROP - realistic
+arrival cadence (bursts and lulls, not a metronome) so the live path runs
+against a believable feed. The fingerprint duration bands are a CREDIBILITY
+PROXY for that backdrop, not the product; broadarrow does not care whether
+dispersion is 190 or 150, it cares that the feed paces believably and the
+divergences fire. A silent feed is a legitimate TEST CONDITION in the abstract
+(it should stress the AD12 dead-feed watchdog, the AD19 bar-stall, and
+market-order `current_price` staleness). BUT an 18h desert on the DEFAULT tape
+means that for most of a day mogwai serves almost nothing, which defeats its
+own purpose of exercising the live path: you subscribe to run a strategy against
+divergences and the venue is asleep. So the dispersion band is INSTRUMENTAL, and
+when hitting it produces a backdrop that is unusable for the actual job,
+loosening the band is legitimate - the proxy overshot, the product is unharmed.
+
+Options, with honest costs:
+- A. Accept and document. Zero code risk. Frame the deserts as the cost of the
+  committed duration realism and document the consequences (a live subscribe can
+  idle for hours; market-order price staleness up to ~48min; AD12 must tolerate
+  it; AD19 bars stall; density tests need wide windows). The unrealistic 18h
+  magnitude stays.
+- B. Wall-clock gap cap (cap the realized inter-tick gap at a few minutes, feed
+  the ACD the UNCAPPED duration so state dynamics are unchanged). Looks surgical
+  but is NOT: the gate measures REALIZED gaps, so capping lowers the very
+  dispersion/ACF it validates - it breaks the same bands it appears to dodge,
+  and would still require regenerating the golden stream and re-tuning to
+  re-land the bands (perhaps impossible if the bands genuinely need the big
+  gaps).
+- C. Re-derive the duration model against a wall-clock-aware target (add a dwell
+  constraint and refit): the only REAL fix, but a genuine offline-analysis
+  project touching `analysis/build_fingerprint.py`, the committed fingerprint
+  targets, `consts.rs`, the golden stream, and every coupled realism anchor
+  (returns / abs-return ACF ride the same walk). High effort, high blast radius,
+  and it partly relitigates whether the committed duration bands are the right
+  targets.
+- D. Split the concern: keep the realism gate on the PURE fitted dynamics (seed
+  42, golden stream byte-identical) and apply a wall-clock dwell governor only on
+  the SERVING path. Cheaper and keeps byte-identity, but then the validated tape
+  is no longer the served tape - it breaks the premise that the committed
+  fingerprint IS what ships, which is exactly where the byte-identical discipline
+  and the usable-venue goal collide.
+
+Current lean (discussion, not yet decided): the purpose framing pushes off "A
+accept" toward a bounded fix, and treats the committed dispersion band as fair
+game to loosen because it is a means (credibility) not the end (a venue you can
+run against for a full day). B is a trap. The open decision is C vs D - i.e.
+whether the tape that ships must stay the tape that `realism()` validates
+(regenerate + re-anchor, the clean heavy path) or whether a serving-only governor
+the gate does not see is acceptable (cheap, but validated tape != served tape).
+Still flagged for sign-off. See also the AD19 live-bar-close deferral, which is
+downstream of this decision.
 
 ### Data-path smells and nits
 
