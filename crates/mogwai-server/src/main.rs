@@ -10,6 +10,10 @@
 compile_error!("mogwai-server requires a Unix target");
 
 mod config;
+// `gen` is a reserved keyword in the 2024 edition (generator blocks), so the
+// module is declared via the raw identifier; `crate::r#gen` is otherwise the
+// plain `crate::gen` module the spec names throughout.
+mod r#gen;
 mod http;
 mod man;
 mod source;
@@ -76,6 +80,8 @@ enum Command {
     Serve(ServeArgs),
     /// Stop a daemon started by `mogwai serve`, by its PID file.
     Stop(StopArgs),
+    /// Dump the offline generator as CSV (trades or bars).
+    Gen(r#gen::GenArgs),
     /// Render a bundled reference doc, or list the topics when none is given.
     Man {
         /// Reference topic to display. Omit to list the available topics.
@@ -198,6 +204,7 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Stop(args) => stop(args),
         Command::Serve(args) => serve(args),
+        Command::Gen(args) => r#gen::run(args),
     }
 }
 

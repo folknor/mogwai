@@ -62,12 +62,17 @@ fn checkpoint_store() -> &'static CheckpointStore {
     STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn fingerprint() -> &'static Fingerprint {
+// `pub(crate)`: `crate::gen` reuses the one parsed committed fingerprint that
+// `InstrumentProfiles::defaults()` already loads through, rather than a second
+// `Fingerprint::from_repo_json()` parse.
+pub(crate) fn fingerprint() -> &'static Fingerprint {
     static FP: OnceLock<Fingerprint> = OnceLock::new();
     FP.get_or_init(Fingerprint::from_repo_json)
 }
 
-fn seed_for(symbol: &str) -> u64 {
+// `pub(crate)`: `crate::gen` must key each symbol's walk on the SAME FNV the
+// running server uses, to reproduce the served walk rather than re-deriving it.
+pub(crate) fn seed_for(symbol: &str) -> u64 {
     const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
