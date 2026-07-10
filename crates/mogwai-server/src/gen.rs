@@ -16,7 +16,10 @@ use std::path::PathBuf;
 use anyhow::{Context, bail};
 use clap::{Args, ValueEnum};
 use mogwai_data::{BarAcc, TickEvent, TickSource, fold_trade};
-use mogwai_protocol::{AggressorSide, MarketRegime, TradeTick, validate_market_regime};
+use mogwai_protocol::{
+    AggressorSide, ClientHavoc, ConnHavoc, HavocSpec, MarketRegime, TradeTick,
+    validate_client_havoc, validate_conn_havoc, validate_divergence, validate_market_regime,
+};
 use rust_decimal::Decimal;
 
 use crate::source::{InstrumentProfiles, fingerprint, seed_for};
@@ -59,6 +62,13 @@ pub(crate) struct GenArgs {
     /// `validate_market_regime`.
     #[arg(long)]
     regime: Option<String>,
+    /// Read a full HavocSpec from this JSON file and apply its `data` market
+    /// regime. The whole spec is validated (a file broadarrow would reject is
+    /// rejected here), but the client, conn, and server surfaces do not affect an
+    /// offline tape dump and are noted on stderr. Mutually exclusive with
+    /// --regime.
+    #[arg(long, value_name = "PATH", conflicts_with = "regime")]
+    havoc: Option<PathBuf>,
     /// Write CSV here instead of stdout.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -172,6 +182,49 @@ fn parse_regime(raw: &str) -> anyhow::Result<MarketRegime> {
     Ok(regime)
 }
 
+/// The market regime to build the generator with, from `--regime` (inline JSON)
+/// or `--havoc <file>` (a HavocSpec JSON whose `data` surface is used), or
+/// neither. `--regime`/`--havoc` are clap-exclusive, so at most one is set.
+fn resolve_regime(args: &GenArgs) -> anyhow::Result<Option<MarketRegime>> {
+    if let Some(path) = &args.havoc {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("reading havoc file {}", path.display()))?;
+        return resolve_havoc_regime(&text)
+            .with_context(|| format!("in havoc file {}", path.display()));
+    }
+    args.regime.as_deref().map(parse_regime).transpose()
+}
+
+/// Parse a HavocSpec from JSON `text`, validate the whole spec, note the
+/// offline-inapplicable surfaces on stderr, and return the `data` regime. Pure
+/// over the text (no filesystem), so tests drive it directly.
+fn resolve_havoc_regime(text: &str) -> anyhow::Result<Option<MarketRegime>> {
+    let spec: HavocSpec = serde_json::from_str(text).context("parsing havoc JSON")?;
+    validate_client_havoc(&spec.client)
+        .map_err(|e| anyhow::anyhow!("invalid client havoc: {e}"))?;
+    validate_conn_havoc(&spec.conn).map_err(|e| anyhow::anyhow!("invalid conn havoc: {e}"))?;
+    for div in &spec.server {
+        validate_divergence(div).map_err(|e| anyhow::anyhow!("invalid server divergence: {e}"))?;
+    }
+    if let Some(regime) = &spec.data {
+        validate_market_regime(regime).map_err(|e| anyhow::anyhow!("invalid regime: {e}"))?;
+    }
+    if havoc_has_offline_inapplicable_surfaces(&spec) {
+        eprintln!(
+            "note: --havoc applies only the data (market regime) surface offline; \
+             the client, conn, and server surfaces are ignored"
+        );
+    }
+    Ok(spec.data)
+}
+
+/// True when a loaded HavocSpec carries a surface a tape dump cannot honor.
+fn havoc_has_offline_inapplicable_surfaces(spec: &HavocSpec) -> bool {
+    spec.client != ClientHavoc::default()
+        || spec.conn != ConnHavoc::default()
+        || !spec.server.is_empty()
+}
+
 /// Resolve profile + seed + start-price override + regime and build the walk via
 /// the fallible constructor (a bad `--start-price` is an error, not a panic).
 fn build_source(args: &GenArgs) -> anyhow::Result<mogwai_data::GeneratedSource> {
@@ -188,7 +241,7 @@ fn build_source(args: &GenArgs) -> anyhow::Result<mogwai_data::GeneratedSource> 
     if let Some(p) = args.start_price {
         scalars.start_price = p;
     }
-    let regime = args.regime.as_deref().map(parse_regime).transpose()?;
+    let regime = resolve_regime(args)?;
 
     mogwai_data::GeneratedSource::try_new_with_session_profile(
         scalars,
@@ -584,6 +637,7 @@ mod tests {
             start: 0,
             start_price: None,
             regime: None,
+            havoc: None,
             out: None,
         };
         let mut cli_source = build_source(&args).expect("cli source");
@@ -626,6 +680,7 @@ mod tests {
             start: 0,
             start_price: None,
             regime: None,
+            havoc: None,
             out: None,
         };
         let mut buf = Vec::new();
@@ -648,5 +703,125 @@ mod tests {
             let _volume: Decimal = cols[6].parse().expect("volume parses");
             let _count: u64 = cols[7].parse().expect("trade_count parses");
         }
+    }
+
+    #[test]
+    fn resolve_havoc_regime_string_driven_cases() {
+        let ok = resolve_havoc_regime(r#"{"data":{"type":"LiquidityDrought","thin_factor":5.0}}"#)
+            .expect("valid data-only spec");
+        match ok {
+            Some(MarketRegime::LiquidityDrought { thin_factor }) => {
+                assert_eq!(thin_factor, 5.0);
+            }
+            other => panic!("expected LiquidityDrought, got {other:?}"),
+        }
+
+        let no_data =
+            resolve_havoc_regime(r#"{"client":{"drop_prob":0.5}}"#).expect("valid client, no data");
+        assert_eq!(no_data, None);
+
+        assert!(
+            resolve_havoc_regime(r#"{"data":{"type":"LiquidityDrought","thin_factor":0.0}}"#)
+                .is_err(),
+            "out-of-range data must error"
+        );
+
+        assert!(
+            resolve_havoc_regime(r#"{"client":{"drop_prob":7.0}}"#).is_err(),
+            "whole-spec validation must reject an invalid inapplicable surface"
+        );
+
+        assert!(resolve_havoc_regime("not json").is_err());
+
+        assert!(
+            resolve_havoc_regime(r#"{"data":{"type":"Nonsense"}}"#).is_err(),
+            "unknown regime tag must error"
+        );
+    }
+
+    #[test]
+    fn havoc_file_missing_returns_err_with_context() {
+        let args = GenArgs {
+            kind: GenType::Trades,
+            length: "1d".to_string(),
+            interval: None,
+            symbol: "BTCUSDT".to_string(),
+            seed: None,
+            start: 0,
+            start_price: None,
+            regime: None,
+            havoc: Some(PathBuf::from(
+                "does/not/exist/mogwai-gen-havoc-test-nonexistent.json",
+            )),
+            out: None,
+        };
+        let err = resolve_regime(&args).expect_err("nonexistent havoc path must error");
+        assert!(
+            err.chain()
+                .any(|e| e.to_string().contains("reading havoc file")),
+            "expected the reading-havoc-file context in the chain: {err:?}"
+        );
+    }
+
+    #[test]
+    fn havoc_has_offline_inapplicable_surfaces_cases() {
+        assert!(!havoc_has_offline_inapplicable_surfaces(
+            &HavocSpec::default()
+        ));
+
+        let client_armed = HavocSpec {
+            client: ClientHavoc {
+                drop_prob: 0.5,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(havoc_has_offline_inapplicable_surfaces(&client_armed));
+
+        let server_armed = HavocSpec {
+            server: vec![
+                serde_json::from_str(r#"{"type":"DuplicateNextFill"}"#).expect("divergence"),
+            ],
+            ..Default::default()
+        };
+        assert!(havoc_has_offline_inapplicable_surfaces(&server_armed));
+
+        let conn_armed = HavocSpec {
+            conn: ConnHavoc {
+                request_timeout_secs: 1,
+                ..ConnHavoc::default()
+            },
+            ..Default::default()
+        };
+        assert!(havoc_has_offline_inapplicable_surfaces(&conn_armed));
+
+        let data_only = HavocSpec {
+            data: Some(MarketRegime::LiquidityDrought { thin_factor: 5.0 }),
+            ..Default::default()
+        };
+        assert!(!havoc_has_offline_inapplicable_surfaces(&data_only));
+    }
+
+    #[test]
+    fn havoc_regime_conflict_is_a_parse_error() {
+        use clap::Parser as _;
+
+        #[derive(clap::Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            g: GenArgs,
+        }
+
+        let result = Wrap::try_parse_from([
+            "gen",
+            "--regime",
+            r#"{"type":"LiquidityDrought","thin_factor":5.0}"#,
+            "--havoc",
+            "p",
+        ]);
+        assert!(
+            result.is_err(),
+            "--regime and --havoc together must be a parse error"
+        );
     }
 }
