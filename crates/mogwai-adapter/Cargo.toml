@@ -8,6 +8,7 @@ license.workspace = true
 # stay protocol-native; this adapter is the broadarrow-facing client pair and
 # path-depends the sibling checkout, not the read-only research snapshot.
 [dependencies]
+mogwai-data.workspace = true
 mogwai-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true

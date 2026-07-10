@@ -22,6 +22,7 @@
 //! [`MergeSource`] k-way merges several single-symbol sources into one
 //! time-ordered stream, and [`MemorySource`] backs tests and the wiring skeleton.
 
+mod bars;
 mod generated;
 
 use std::{
@@ -34,6 +35,7 @@ use std::{
 use mogwai_protocol::{AggressorSide, QuoteTick, TradeTick};
 use rust_decimal::Decimal;
 
+pub use bars::{BarAcc, fold_trade, window_close_ns};
 pub use generated::{
     AbsReturnAcf, AnchorRange, CheckpointIndex, Fingerprint, GeneratedSource, GeneratedSourceError,
     GeneratorScalars, GoldenTargets, MinMedianMax, ScalarError, ScalarRanges, SessionProfile,

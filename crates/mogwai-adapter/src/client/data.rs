@@ -7,6 +7,7 @@
 
 use std::{
     collections::HashMap,
+    num::NonZeroU64,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -16,6 +17,7 @@ use std::{
 
 use anyhow::{Context, ensure};
 use async_trait::async_trait;
+use mogwai_data::{BarAcc, fold_trade};
 use mogwai_protocol::{
     ClientMessage, InstrumentDef, MarketRegime, ServerMessage, SimClock, Symbol, TradeTick,
 };
@@ -40,6 +42,7 @@ use nautilus_model::{
     identifiers::{ClientId, Venue},
 };
 use nautilus_network::http::HttpClient;
+#[cfg(test)]
 use rust_decimal::Decimal;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
@@ -285,7 +288,7 @@ impl MogwaiDataClient {
             let Some(def) = instrument_def(&self.instruments, &symbol) else {
                 continue;
             };
-            match active_to_bar(*bar_type, active, &def, self.sim) {
+            match acc_to_bar(*bar_type, active, &def, self.sim) {
                 Ok(bar) => drop(sink.send(DataEvent::Data(Data::Bar(bar)))),
                 Err(err) => tracing::warn!(
                     %bar_type,
@@ -649,7 +652,7 @@ impl DataClient for MogwaiDataClient {
                 if active.close_ts <= now
                     && let Some(def) = instrument_def(&self.instruments, &symbol)
                 {
-                    match active_to_bar(cmd.bar_type, &active, &def, self.sim) {
+                    match acc_to_bar(cmd.bar_type, &active, &def, self.sim) {
                         Ok(bar) => {
                             if let Ok(sink) = self.sink() {
                                 drop(sink.send(DataEvent::Data(Data::Bar(bar))));
@@ -1000,7 +1003,7 @@ impl SubState {
 #[derive(Debug, Default)]
 struct BarSubState {
     refs: usize,
-    active: Option<ActiveBar>,
+    active: Option<BarAcc>,
 }
 
 /// Per-symbol resume cursor for the HTTP-polling data path.
@@ -1068,16 +1071,6 @@ impl PollCursor {
 
         out
     }
-}
-
-#[derive(Debug)]
-struct ActiveBar {
-    open: Decimal,
-    high: Decimal,
-    low: Decimal,
-    close: Decimal,
-    volume: Decimal,
-    close_ts: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1447,6 +1440,13 @@ fn is_calendar_anchored(aggregation: BarAggregation) -> bool {
     )
 }
 
+// The `expect` below is on a genuine invariant (every admitted bar aggregation
+// has a positive interval - see the Caller contract in
+// docs/shared-bar-aggregator-spec.md), not a fallible path this function's
+// `Option<Bar>` return is meant to surface, so `clippy::unwrap_in_result`'s
+// default suggestion (propagate it as the returned `None`) does not apply
+// here.
+#[allow(clippy::unwrap_in_result)]
 fn update_bar_state(
     bar_type: BarType,
     state: &mut BarSubState,
@@ -1454,34 +1454,27 @@ fn update_bar_state(
     def: &InstrumentDef,
     sim: SimClock,
 ) -> Option<Bar> {
-    let interval = get_bar_interval_ns(&bar_type).as_u64();
-    let close_ts = ((trade.ts_event / interval) + 1) * interval;
-    if let Some(active) = &mut state.active {
-        if trade.ts_event >= active.close_ts {
-            // Build the closed window's bar before rotating to the new one. A
-            // hostile open/high/low/close/volume that overflows nautilus
-            // Price/Quantity drops just this bar with a warning rather than
-            // panicking the reader/poll task; the window still rotates so a
-            // single bad bar does not wedge aggregation.
-            let bar = match active_to_bar(bar_type, active, def, sim) {
-                Ok(bar) => Some(bar),
-                Err(err) => {
-                    tracing::warn!(%bar_type, error = %err, "dropping unrepresentable bar");
-                    None
-                }
-            };
-            state.active = Some(new_active_bar(trade, close_ts));
-            bar
-        } else {
-            active.high = active.high.max(trade.price);
-            active.low = active.low.min(trade.price);
-            active.close = trade.price;
-            active.volume += trade.size;
+    let interval_ns = get_bar_interval_ns(&bar_type).as_u64();
+    let interval =
+        NonZeroU64::new(interval_ns).expect("admitted bar aggregations have a positive interval");
+    // The window has already rotated inside `fold_trade` by the time this
+    // returns, so the "one bad bar doesn't wedge aggregation" property is
+    // structural: the rotation no longer depends on the conversion below
+    // succeeding. A hostile open/high/low/close/volume that overflows
+    // nautilus Price/Quantity just drops this one bar with a warning.
+    let closed = fold_trade(
+        &mut state.active,
+        trade.price,
+        trade.size,
+        trade.ts_event,
+        interval,
+    )?;
+    match acc_to_bar(bar_type, &closed, def, sim) {
+        Ok(bar) => Some(bar),
+        Err(err) => {
+            tracing::warn!(%bar_type, error = %err, "dropping unrepresentable bar");
             None
         }
-    } else {
-        state.active = Some(new_active_bar(trade, close_ts));
-        None
     }
 }
 
@@ -1504,13 +1497,13 @@ fn aggregate_bars(
     // crosses its `close_ts` - but a historical request over a window that has
     // already passed gets no such trade, so the newest COMPLETE window would be
     // silently dropped (the always-stale/missing last bar of every warmup). If
-    // `end >= active.close_ts` the window closed within the requested range and
+    // `end >= acc.close_ts` the window closed within the requested range and
     // must be emitted; a genuinely-partial trailing window (`end` inside it, or
     // an unknown `end`) is still dropped, matching the live path.
-    if let (Some(active), Some(end)) = (&state.active, end)
-        && end.as_u64() >= active.close_ts
+    if let (Some(acc), Some(end)) = (&state.active, end)
+        && end.as_u64() >= acc.close_ts
     {
-        match active_to_bar(*bar_type, active, def, sim) {
+        match acc_to_bar(*bar_type, acc, def, sim) {
             Ok(bar) => out.push(bar),
             Err(err) => {
                 tracing::warn!(%bar_type, error = %err, "dropping unrepresentable trailing bar");
@@ -1520,31 +1513,20 @@ fn aggregate_bars(
     out
 }
 
-fn new_active_bar(trade: &mogwai_protocol::TradeTick, close_ts: u64) -> ActiveBar {
-    ActiveBar {
-        open: trade.price,
-        high: trade.price,
-        low: trade.price,
-        close: trade.price,
-        volume: trade.size,
-        close_ts,
-    }
-}
-
-fn active_to_bar(
+fn acc_to_bar(
     bar_type: BarType,
-    active: &ActiveBar,
+    acc: &BarAcc,
     def: &InstrumentDef,
     sim: SimClock,
 ) -> anyhow::Result<Bar> {
     Ok(Bar::new(
         bar_type,
-        convert::price(active.open, def.price_precision)?,
-        convert::price(active.high, def.price_precision)?,
-        convert::price(active.low, def.price_precision)?,
-        convert::price(active.close, def.price_precision)?,
-        convert::quantity(active.volume, def.size_precision)?,
-        UnixNanos::from(active.close_ts),
+        convert::price(acc.open, def.price_precision)?,
+        convert::price(acc.high, def.price_precision)?,
+        convert::price(acc.low, def.price_precision)?,
+        convert::price(acc.close, def.price_precision)?,
+        convert::quantity(acc.volume, def.size_precision)?,
+        UnixNanos::from(acc.close_ts),
         now_unix_nanos(sim),
     ))
 }
@@ -2228,6 +2210,51 @@ mod data_client_tests {
         assert_eq!(bar.volume.as_f64(), 3.0);
     }
 
+    // Brick 4 (byte-identity gate): the pre-existing bar tests above use round
+    // values (100.0, 200.0, whole-number volumes) that are f64-exact, so a
+    // sub-unit precision bug in `fold_trade` would slip past them undetected.
+    // This regression exercises NONTRIVIAL sub-unit decimals at the
+    // instrument's declared price_precision (2) and size_precision (8), so a
+    // divergence between the shared core and the pre-refactor
+    // `update_bar_state` arithmetic shows up in the converted OHLCV fields.
+    #[test]
+    fn request_bar_aggregation_at_nontrivial_precision_matches_expected_ohlcv() {
+        let bar_type = time_bar_type(1, BarAggregation::Second);
+        let interval = get_bar_interval_ns(&bar_type).as_u64();
+        let def = def();
+
+        fn nontrivial_trade(ts_event: u64, price: &str, size: &str) -> mogwai_protocol::TradeTick {
+            use std::str::FromStr;
+            mogwai_protocol::TradeTick {
+                symbol: "BTCUSDT".into(),
+                price: Decimal::from_str(price).expect("valid price literal"),
+                size: Decimal::from_str(size).expect("valid size literal"),
+                aggressor: AggressorSide::Buyer,
+                ts_event,
+            }
+        }
+
+        // Three trades in the first window at non-round prices/sizes, then a
+        // fourth trade past the boundary rotates and closes it.
+        let trades = vec![
+            nontrivial_trade(10, "100.07", "0.333"),
+            nontrivial_trade(interval - 5, "99.93", "0.333"),
+            nontrivial_trade(interval - 2, "100.50", "0.1"),
+            nontrivial_trade(interval + 5, "99.50", "1.0"),
+        ];
+
+        let bars = aggregate_bars(&bar_type, &trades, &def, SimClock::identity(), None);
+
+        assert_eq!(bars.len(), 1, "only the closed window emits a bar");
+        let bar = bars[0];
+        assert_eq!(bar.ts_event, UnixNanos::from(interval));
+        assert_eq!(bar.open.as_f64(), 100.07);
+        assert_eq!(bar.high.as_f64(), 100.50);
+        assert_eq!(bar.low.as_f64(), 99.93);
+        assert_eq!(bar.close.as_f64(), 100.50);
+        assert_eq!(bar.volume.as_f64(), 0.766);
+    }
+
     // AD2: a historical window whose `end` proves the trailing window fully
     // elapsed must flush that COMPLETE window's bar - it is the newest bar of a
     // warmup, and the lazy "emit when a later trade crosses close_ts" rule would
@@ -2665,13 +2692,14 @@ mod data_client_tests {
     // shipped as a future-stamped partial bar.
     #[test]
     fn unsubscribe_bars_flushes_completed_window_but_not_in_progress() {
-        fn active_bar(close_ts: u64) -> ActiveBar {
-            ActiveBar {
+        fn active_bar(close_ts: u64) -> BarAcc {
+            BarAcc {
                 open: Decimal::new(10_000, 2),
                 high: Decimal::new(10_000, 2),
                 low: Decimal::new(10_000, 2),
                 close: Decimal::new(10_000, 2),
                 volume: Decimal::new(1, 0),
+                count: 1,
                 close_ts,
             }
         }
@@ -2757,13 +2785,14 @@ mod data_client_tests {
     // window is cleared so a second teardown cannot double-emit.
     #[test]
     fn stop_flushes_completed_bar_windows_but_not_in_progress() {
-        fn active_bar(close_ts: u64) -> ActiveBar {
-            ActiveBar {
+        fn active_bar(close_ts: u64) -> BarAcc {
+            BarAcc {
                 open: Decimal::new(10_000, 2),
                 high: Decimal::new(10_000, 2),
                 low: Decimal::new(10_000, 2),
                 close: Decimal::new(10_000, 2),
                 volume: Decimal::new(1, 0),
+                count: 1,
                 close_ts,
             }
         }
