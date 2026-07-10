@@ -55,6 +55,16 @@ unit test). While validating it, a time-of-day-dependent failure of
 ACD trade deserts baked into the seeded tape); the test was widened from a
 10-minute to a 6-hour window as mitigation and D16 recorded for design
 sign-off.
+Design item S22a (complete): the unbounded OS-thread-per-subscribed-symbol
+fan-out is now bounded by a global replay-capacity pool. A configurable
+`max_concurrent_replays` (default 1024, `0` disables) sizes an
+`Arc<Semaphore>` in the shared state; each spawned replay holds one permit for
+its OS-thread lifetime and releases it on reap, and a subscribe that cannot
+take a permit is refused for the over-limit symbols with a ProtocolError on
+the wire while running streams stay untouched. The cap spans connections
+(a per-connection cap would not bound the aggregate). Pinned by
+`replay_cap_refuses_subscribe_across_connections`.
+
 Upstream follow-through (complete): the U1/U2 nautilus fixes verified merged
 (LiveTimer is check-then-fire with an inclusive stop boundary; LiveClock's
 timer_exists filters expired timers), so the mogwai clock's deliberately
@@ -207,13 +217,6 @@ poison-recovery behavior.)
 - S18. nit (resolved) - Re-arming GoDark/StallData replaces the window (a
   smaller ms SHORTENS an in-flight blackout). Documented as deliberate
   store-not-extend semantics in code (batch 4) and in havoc.md.
-- S22a. nit (flagged) - A subscribe of N symbols spawns N OS threads,
-  client-controlled and unbounded. Batch 4 fixed the S22b half (unknown
-  symbols are pre-filtered and no longer spawn a throwaway thread or leave a
-  dead `replays` entry); the unbounded-thread-per-symbol shape remains and
-  needs a concurrency-cap / behavior decision, so it is flagged rather than
-  fixed.
-
 (S15 silent panicking replay thread, S16 pre-synthesis timestamp sampling,
 S19 the BoundedSeek off-by-one, S20 the missing deny_unknown_fields, S21 the
 heartbeat cadence edges, and S23 the flat nested-list rendering were all
@@ -633,8 +636,6 @@ decision or a non-trivial build, so they were flagged rather than forced:
   is a positive proof-of-life. A real feature.
 - AD19 residual: a clock timer that closes a live in-progress bar window on
   time, plus a stop()-teardown flush.
-- S22a: the unbounded-OS-thread-per-subscribed-symbol shape needs a
-  concurrency-cap / behavior decision.
 - AE2 / X3: the venue-truth source (an order-status query surface). This is a
   NEW WIRE PROTOCOL SURFACE (a `GET /orders` endpoint + `query_order` messages
   + adapter impl) and is NOT being built autonomously - it needs sign-off

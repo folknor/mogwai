@@ -39,7 +39,9 @@ use nix::{
 };
 use tokio::sync::Mutex;
 
-use crate::config::{Config, build_instrument_profiles, build_sim_clock, now_ns};
+use crate::config::{
+    Config, build_instrument_profiles, build_replay_permits, build_sim_clock, now_ns,
+};
 use crate::http::{
     AppState, account, arm_divergence, clock, instruments, quotes, submit_order_http, trades,
 };
@@ -289,6 +291,7 @@ async fn serve_async(
         "data origin"
     );
 
+    let replay_permits = build_replay_permits(&cfg);
     let state = AppState {
         engine: Arc::new(Mutex::new(Engine::with_instruments(
             profiles.instrument_defs(),
@@ -300,6 +303,7 @@ async fn serve_async(
         delay_ms: Arc::new(AtomicU64::new(0)),
         dark_until_ns: Arc::new(AtomicU64::new(0)),
         stall_until_ns: Arc::new(AtomicU64::new(0)),
+        replay_permits,
     };
 
     let app = Router::new()
@@ -740,6 +744,7 @@ mod tests {
                 gap_cap_ms: 0,
                 server_heartbeat_ms: 0,
                 backfill_horizon_ns: 86_400_000_000_000,
+                max_concurrent_replays: 1024,
                 instruments: Vec::new(),
             },
             profiles,
@@ -751,6 +756,7 @@ mod tests {
             delay_ms: Arc::new(AtomicU64::new(0)),
             dark_until_ns: Arc::new(AtomicU64::new(0)),
             stall_until_ns: Arc::new(AtomicU64::new(0)),
+            replay_permits: Arc::new(tokio::sync::Semaphore::new(1024)),
         }
     }
 
@@ -1109,6 +1115,109 @@ mod tests {
             reason.expect("a ProtocolError diagnostic must arrive"),
             first_trade_ts.expect("a trade must arrive"),
         )
+    }
+
+    /// Read frames until the first `Trade`, returning its `ts_event`. Bounded so
+    /// a silent feed fails the caller rather than hanging.
+    fn read_until_trade<S: std::io::Read + std::io::Write>(
+        socket: &mut tungstenite::WebSocket<S>,
+    ) -> u64 {
+        for _ in 0..2_000 {
+            match socket.read().expect("read ws frame") {
+                tungstenite::Message::Text(text) => {
+                    if let ServerMessage::Trade(t) =
+                        serde_json::from_str::<ServerMessage>(&text).expect("decode ServerMessage")
+                    {
+                        return t.ts_event;
+                    }
+                }
+                tungstenite::Message::Close(_) => panic!("socket closed before any trade"),
+                _ => {}
+            }
+        }
+        panic!("no trade arrived within the frame budget");
+    }
+
+    /// Read frames until the first `ProtocolError`, returning its reason. Bounded
+    /// so an absent diagnostic fails the caller rather than hanging.
+    fn read_until_error<S: std::io::Read + std::io::Write>(
+        socket: &mut tungstenite::WebSocket<S>,
+    ) -> String {
+        for _ in 0..2_000 {
+            match socket.read().expect("read ws frame") {
+                tungstenite::Message::Text(text) => {
+                    if let ServerMessage::ProtocolError { reason, .. } =
+                        serde_json::from_str::<ServerMessage>(&text).expect("decode ServerMessage")
+                    {
+                        return reason;
+                    }
+                }
+                tungstenite::Message::Close(_) => panic!("socket closed before any error"),
+                _ => {}
+            }
+        }
+        panic!("no ProtocolError arrived within the frame budget");
+    }
+
+    #[tokio::test]
+    async fn replay_cap_refuses_subscribe_across_connections() {
+        // S22a: every subscribed symbol runs on its own OS thread, so the global
+        // `max_concurrent_replays` pool is what keeps a fleet of connections from
+        // spawning replay threads without bound. With a cap of one, the first
+        // connection's live BTCUSDT stream holds the only permit; a SECOND
+        // connection subscribing the same symbol cannot take one and is refused
+        // with a `ProtocolError` on the wire while the first stream keeps running
+        // untouched. The permit pool is an `Arc<Semaphore>` in the shared state,
+        // so the cap spans connections - which is the whole point, a per-
+        // connection cap would not bound the aggregate thread count.
+        let mut state = state();
+        state.cfg.max_concurrent_replays = 1;
+        state.replay_permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let app = Router::new()
+            .route("/ws", get(ws_upgrade))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            drop(axum::serve(listener, app).await);
+        });
+
+        let reason = tokio::task::spawn_blocking(move || {
+            let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
+                symbols: vec!["BTCUSDT".to_string()],
+                start_ts: None,
+                regime: None,
+            })
+            .expect("encode subscribe");
+
+            // Connection one takes the only permit and must reach a live trade
+            // before connection two races in - that proves the permit is HELD,
+            // not merely requested. Its socket stays in scope for the rest of the
+            // closure so the replay thread, and thus the permit, lives on.
+            let (mut hold, _) =
+                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect one");
+            hold.send(tungstenite::Message::Text(subscribe.clone().into()))
+                .expect("send subscribe one");
+            read_until_trade(&mut hold);
+
+            // Connection two cannot get a permit, so its subscribe is refused and
+            // no data ever streams for it.
+            let (mut denied, _) =
+                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect two");
+            denied
+                .send(tungstenite::Message::Text(subscribe.into()))
+                .expect("send subscribe two");
+            read_until_error(&mut denied)
+        })
+        .await
+        .expect("blocking ws client");
+
+        assert!(
+            reason.contains("capacity"),
+            "the refused subscribe names the capacity ceiling: {reason}"
+        );
     }
 
     #[tokio::test]
@@ -1729,6 +1838,7 @@ mod tests {
             gap_cap_ms: 0,
             server_heartbeat_ms: 0,
             backfill_horizon_ns: 86_400_000_000_000,
+            max_concurrent_replays: 1024,
             instruments: Vec::new(),
         };
         let profiles = default_profiles();
@@ -1751,6 +1861,7 @@ mod tests {
             cancel: Arc::clone(&cancel),
             resume_floor: None,
             last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
+            permit: None,
         });
         // First tick arrives, confirming the stream is live and feeding the
         // default instrument.
@@ -1797,6 +1908,7 @@ mod tests {
             cancel: Arc::clone(&cancel),
             resume_floor: None,
             last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
+            permit: None,
         });
 
         // The diagnostic classifies as execution, so it rides the exec pump
@@ -1848,6 +1960,7 @@ mod tests {
             cancel: Arc::clone(&cancel),
             resume_floor: None,
             last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
+            permit: None,
         });
 
         // Rides the exec pump channel like every execution-category event (S10).
@@ -1886,6 +1999,7 @@ mod tests {
             gap_cap_ms: 0,
             server_heartbeat_ms: 0,
             backfill_horizon_ns: 86_400_000_000_000,
+            max_concurrent_replays: 1024,
             instruments: Vec::new(),
         };
         let profiles = default_profiles();
@@ -1908,6 +2022,7 @@ mod tests {
             cancel: Arc::clone(&cancel),
             resume_floor: None,
             last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
+            permit: None,
         });
 
         let started = Instant::now();
@@ -1952,6 +2067,7 @@ mod tests {
             gap_cap_ms: 1_000,
             server_heartbeat_ms: 0,
             backfill_horizon_ns: 86_400_000_000_000,
+            max_concurrent_replays: 1024,
             instruments: Vec::new(),
         };
         let profiles = default_profiles();
@@ -1975,6 +2091,7 @@ mod tests {
             cancel: Arc::clone(&cancel),
             resume_floor: None,
             last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
+            permit: None,
         });
 
         let first = rx.recv().await.expect("a tick");
@@ -2151,6 +2268,7 @@ mod tests {
             cancel: Arc::clone(&cancel),
             resume_floor: None,
             last_sent_ts: Arc::clone(&last_sent_ts),
+            permit: None,
         });
 
         // Let the thread reach the pacing sleep before cancelling, so the

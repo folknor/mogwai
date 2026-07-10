@@ -4,10 +4,11 @@
 //! server (the HTTP routes, the websocket replay) only ever reads back
 //! through `AppState`/`SimClock`, never mutates.
 
-use std::{collections::HashSet, path::PathBuf};
+use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 use mogwai_protocol::{InstrumentDef, SimClock};
 use rust_decimal::Decimal;
+use tokio::sync::Semaphore;
 
 use crate::source;
 
@@ -45,6 +46,18 @@ pub(crate) struct Config {
     /// so this default need not be exact - 24h covers a day's warmup. Documented
     /// next to `sim_epoch_ns`: both anchor the run's timelines.
     pub(crate) backfill_horizon_ns: u64,
+    /// Global ceiling on concurrently-live per-symbol replay streams across
+    /// every websocket connection. Each subscribed symbol runs on its own OS
+    /// thread (see `spawn_replay`), so without a ceiling the aggregate thread
+    /// count is `connections * subscribed-symbols` - entirely client-driven,
+    /// and a fleet of connections each subscribing the whole catalog can
+    /// exhaust the process thread limit (S22a). A subscribe that would exceed
+    /// this cap is refused for the over-limit symbols with a `ProtocolError`
+    /// diagnostic on the wire, exactly like an unservable subscribe; the
+    /// connection stays up and its already-running streams are untouched. `0`
+    /// disables the cap (unbounded), matching the `0`-disables convention of
+    /// `gap_cap_ms` and `server_heartbeat_ms`.
+    pub(crate) max_concurrent_replays: usize,
     /// Optional explicit venue instrument set. When empty, the server seeds the
     /// protocol default set. When present, this is authoritative for
     /// `/instruments`, order validation, and data generation.
@@ -69,6 +82,12 @@ impl Default for Config {
             // loud (off-tape requests are refused, not silently under-served), so
             // the default's exactness is low-stakes.
             backfill_horizon_ns: 86_400_000_000_000,
+            // 1024 concurrent replay threads: generous for the intended
+            // single-broadarrow-node deployment (one node subscribes a handful
+            // of symbols) while still bounding a runaway fan-out well under a
+            // typical process thread limit. Operators driving many connections
+            // against a large catalog raise it; `0` lifts it entirely.
+            max_concurrent_replays: 1024,
             instruments: Vec::new(),
         }
     }
@@ -90,6 +109,20 @@ impl Config {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+/// Build the global replay-stream permit pool from the configured cap. A cap of
+/// `0` maps to `Semaphore::MAX_PERMITS`, i.e. effectively unbounded, so the
+/// acquire path stays uniform (a permit is always taken; unlimited just never
+/// runs dry) rather than branching on an `Option` at every subscribe. See
+/// `Config::max_concurrent_replays` for the rationale.
+pub(crate) fn build_replay_permits(cfg: &Config) -> Arc<Semaphore> {
+    let permits = if cfg.max_concurrent_replays == 0 {
+        Semaphore::MAX_PERMITS
+    } else {
+        cfg.max_concurrent_replays
+    };
+    Arc::new(Semaphore::new(permits))
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]

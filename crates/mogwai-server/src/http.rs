@@ -18,7 +18,7 @@ use mogwai_protocol::{
     validate_divergence, validate_market_regime, validate_modify_order, validate_submit_order,
 };
 use serde::Deserialize;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 
 use crate::config::{Config, sim_now_ns, window_until_ns};
 use crate::source;
@@ -41,6 +41,13 @@ pub(crate) struct AppState {
     pub(crate) dark_until_ns: Arc<AtomicU64>,
     /// Sim-time unix-ns instant before which writers drop market-data frames.
     pub(crate) stall_until_ns: Arc<AtomicU64>,
+    /// Global permit pool rationing concurrently-live per-symbol replay threads
+    /// across every websocket connection (S22a). Each spawned replay holds one
+    /// permit for its whole life and releases it when reaped, so a subscribe
+    /// that cannot take a permit is refused for the over-limit symbols. Built
+    /// from `Config::max_concurrent_replays`; a `0` cap yields a pool sized at
+    /// `Semaphore::MAX_PERMITS`, i.e. never runs dry.
+    pub(crate) replay_permits: Arc<Semaphore>,
 }
 
 /// Control plane: arm a divergence to fire on its next trigger.

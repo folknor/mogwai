@@ -22,7 +22,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use mogwai_data::TickEvent;
 use mogwai_protocol::{ClientMessage, MarketRegime, ServerMessage, SimClock};
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, mpsc};
 
 use crate::config::{now_ns, sim_duration_from_millis, sim_now_ns};
 use crate::http::{
@@ -286,6 +286,39 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     } else {
                         None
                     };
+                    // Ration the global replay-thread pool (S22a): every symbol
+                    // stream is a dedicated OS thread, so without a ceiling a
+                    // fleet of connections each subscribing the whole catalog
+                    // exhausts the process thread limit. Acquire AFTER the
+                    // quiesce above so a resubscribe of THIS symbol - which just
+                    // released the predecessor's permit as it joined - reclaims
+                    // it here rather than deadlocking against its own cap-of-one.
+                    // A cap of 0 sizes the pool at MAX_PERMITS, so this branch
+                    // never trips when the cap is disabled. On exhaustion, refuse
+                    // this symbol with a ProtocolError (the same wire signal an
+                    // unservable subscribe uses) and leave the running streams
+                    // untouched.
+                    let permit = match Arc::clone(&state.replay_permits).try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            tracing::warn!(
+                                %symbol,
+                                cap = state.cfg.max_concurrent_replays,
+                                "replay capacity reached; subscribe refused"
+                            );
+                            send_exec_protocol_error(
+                                &exec_tx,
+                                sim_now_ns(state.sim),
+                                format!(
+                                    "replay capacity reached ({} concurrent streams); \
+                                     symbol {symbol} not started",
+                                    state.cfg.max_concurrent_replays
+                                ),
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
                     let cancel = Arc::new(AtomicBool::new(false));
                     let last_sent_ts = Arc::new(AtomicU64::new(NO_TICK_SENT));
                     let handle = spawn_replay(ReplaySpawn {
@@ -302,6 +335,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         cancel: Arc::clone(&cancel),
                         resume_floor,
                         last_sent_ts: Arc::clone(&last_sent_ts),
+                        permit: Some(permit),
                     });
                     replays.insert(
                         symbol,
@@ -650,6 +684,13 @@ pub(crate) struct ReplaySpawn {
     /// Where this stream records its own last successfully-sent `ts_event`,
     /// read back by the handler if IT is quiesced by a future resubscribe.
     pub(crate) last_sent_ts: Arc<AtomicU64>,
+    /// The global replay-capacity permit this stream holds for its whole life
+    /// (S22a). Moved into the OS thread so it releases exactly when the thread
+    /// exits - whether reaped by a quiesce/join or, defensively, if a handle is
+    /// ever dropped without joining. `None` when the cap is not being enforced
+    /// for this spawn (the direct-`spawn_replay` unit tests), which simply
+    /// never rations.
+    pub(crate) permit: Option<OwnedSemaphorePermit>,
 }
 
 /// The seek target a replay thread hands to `build_live_source`.
@@ -699,8 +740,12 @@ pub(crate) fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
         cancel,
         resume_floor,
         last_sent_ts,
+        permit,
     } = spawn;
     std::thread::spawn(move || {
+        // Held for the thread's whole life and released the instant it exits,
+        // so the global replay-capacity pool (S22a) tracks live threads exactly.
+        let _permit = permit;
         let symbols = [symbol.clone()];
         // Seek the shared tape to sim-now (or the resume cursor) instead of
         // re-anchoring a fresh generator behind now. Computed here, at the start of
