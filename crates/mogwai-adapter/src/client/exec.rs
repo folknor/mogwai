@@ -1831,6 +1831,7 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
         false,
         None,
         commission,
+        None,
     );
     ctx.emitter.send_order_event(OrderEventAny::Filled(event));
 }
