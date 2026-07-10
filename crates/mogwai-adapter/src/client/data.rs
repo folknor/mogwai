@@ -252,6 +252,50 @@ impl MogwaiDataClient {
             .cloned()
             .context("data event sink not initialized")
     }
+
+    /// Flush every completed-but-withheld bar window on teardown (AD19). A time
+    /// window whose `close_ts` has already passed but that never got a later
+    /// trade to cross its boundary is a GENUINELY COMPLETE bar that the lazy
+    /// emit-on-next-trade rule would otherwise discard when the subscription
+    /// state is torn down (`stop`, and through it `reset`/`dispose`) - the same
+    /// discard `unsubscribe_bars` already guards for a single removed bar type,
+    /// generalized to the whole table so a shutdown or a reconnect-driven
+    /// `reset` does not silently drop the newest complete bar of every live bar
+    /// feed. An IN-PROGRESS window (close_ts still in the future) is left
+    /// untouched: shipping it would inject a future-stamped, incomplete bar a
+    /// consumer could not tell from a real one. Each flushed window is cleared
+    /// so a second teardown call cannot double-emit, and the send is
+    /// best-effort: if the egress receiver is already gone the bar simply drops.
+    fn flush_completed_bars(&mut self) {
+        let Ok(sink) = self.sink() else {
+            return;
+        };
+        let now = now_unix_nanos(self.sim).as_u64();
+        let Ok(mut bars) = self.bars.lock() else {
+            return;
+        };
+        for (bar_type, state) in bars.iter_mut() {
+            let Some(active) = &state.active else {
+                continue;
+            };
+            if active.close_ts > now {
+                continue;
+            }
+            let symbol = symbol_from_instrument(bar_type.instrument_id());
+            let Some(def) = instrument_def(&self.instruments, &symbol) else {
+                continue;
+            };
+            match active_to_bar(*bar_type, active, &def, self.sim) {
+                Ok(bar) => drop(sink.send(DataEvent::Data(Data::Bar(bar)))),
+                Err(err) => tracing::warn!(
+                    %bar_type,
+                    error = %err,
+                    "dropping unrepresentable bar on teardown flush"
+                ),
+            }
+            state.active = None;
+        }
+    }
 }
 
 #[async_trait(?Send)]
@@ -273,6 +317,11 @@ impl DataClient for MogwaiDataClient {
         self.connected.store(false, Ordering::Relaxed);
         self.ws_cmd = None;
         abort_tasks(&self.task_handles);
+        // Emit any completed-but-withheld bar windows before the drain tasks are
+        // gone and `reset` clears the table (AD19). Done after abort so no drain
+        // task races a fresh trade into the same window; the shared bar mutex
+        // keeps the flush idempotent regardless.
+        self.flush_completed_bars();
         Ok(())
     }
 
@@ -591,9 +640,10 @@ impl DataClient for MogwaiDataClient {
             // A genuinely in-progress window (close_ts still in the future) is
             // dropped, not emitted: shipping it would inject a future-stamped,
             // incomplete bar a consumer could not tell from a real completed one.
-            // Closing live in-progress windows on a clock timer (the general
-            // AD19 fix, and the stop()-teardown flush) is a larger feature,
-            // flagged rather than built here.
+            // The teardown twin of this flush lives in `flush_completed_bars`
+            // (called from `stop`). Closing a live in-progress window ON TIME on
+            // a clock timer is a separate feature, deliberately not built - see
+            // `flush_completed_bars` and the AD19 note in havoc.md.
             if let Some(active) = to_flush {
                 let now = now_unix_nanos(self.sim).as_u64();
                 if active.close_ts <= now
@@ -2697,6 +2747,70 @@ mod data_client_tests {
         assert!(
             rx.try_recv().is_err(),
             "an in-progress window must not ship a future-stamped partial bar"
+        );
+    }
+
+    // AD19 (teardown): stop() flushes every completed-but-withheld window across
+    // the whole bar table - not just a single unsubscribed type - so a shutdown
+    // or a reconnect-driven reset does not silently drop the newest complete bar
+    // of a live feed. In-progress windows are left unshipped, and a flushed
+    // window is cleared so a second teardown cannot double-emit.
+    #[test]
+    fn stop_flushes_completed_bar_windows_but_not_in_progress() {
+        fn active_bar(close_ts: u64) -> ActiveBar {
+            ActiveBar {
+                open: Decimal::new(10_000, 2),
+                high: Decimal::new(10_000, 2),
+                low: Decimal::new(10_000, 2),
+                close: Decimal::new(10_000, 2),
+                volume: Decimal::new(1, 0),
+                close_ts,
+            }
+        }
+
+        let mut client = data_client();
+        let (tx, mut rx) = unbounded_channel();
+        client.sink = Some(tx);
+        client.instruments = instruments_map();
+
+        let completed = time_bar_type(1, BarAggregation::Second);
+        let in_progress = time_bar_type(5, BarAggregation::Minute);
+        {
+            let mut bars = client.bars.lock().expect("bars");
+            bars.insert(
+                completed,
+                BarSubState {
+                    refs: 1,
+                    active: Some(active_bar(1)),
+                },
+            );
+            bars.insert(
+                in_progress,
+                BarSubState {
+                    refs: 1,
+                    active: Some(active_bar(u64::MAX)),
+                },
+            );
+        }
+
+        client.stop().expect("stop");
+
+        match rx
+            .try_recv()
+            .expect("the completed withheld window is flushed at stop")
+        {
+            DataEvent::Data(Data::Bar(bar)) => assert_eq!(bar.ts_event, UnixNanos::from(1)),
+            other => panic!("expected a bar, got {other:?}"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "the in-progress window is not shipped and nothing is double-emitted"
+        );
+
+        client.stop().expect("stop again");
+        assert!(
+            rx.try_recv().is_err(),
+            "a second teardown must not re-emit the already-flushed window"
         );
     }
 }

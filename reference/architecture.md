@@ -290,9 +290,18 @@ messages. The only crate that path-deps the sibling `../nautilus_trader` checkou
   change mid-session. Bars
   are venue-delivered: the adapter aggregates the drained trade stream into
   time-based `Bar` values rather than relying on nautilus's internal aggregator,
-  which never reaches an external-bar client. The `request_` handlers follow the
-  databento spawn-and-respond idiom over the HTTP surface, with a mandatory limit
-  ceiling.
+  which never reaches an external-bar client. A time window's bar is emitted
+  lazily, when a LATER trade crosses its `close_ts`; on teardown
+  (`unsubscribe_bars`, and `stop` via `flush_completed_bars` for the whole
+  table) a window that has already closed but was withheld for lack of that
+  later trade is flushed rather than dropped, while an in-progress window is
+  discarded rather than shipped as a future-stamped partial. Closing a live
+  in-progress window ON TIME on a clock timer is deliberately NOT built: on a
+  quiet tape the bar stalls until the next trade, which reads as a venue going
+  quiet rather than a defect - the same realistic-pathology-over-correctness
+  stance as the D16 trade deserts it is downstream of. The `request_` handlers
+  follow the databento spawn-and-respond idiom over the HTTP surface, with a
+  mandatory limit ceiling.
 - **convert.** A pure module mapping mogwai `Decimal` ticks to nautilus
   `Price`/`Quantity`/`TradeTick`/`QuoteTick`/`InstrumentAny` at the instrument's
   declared precision.

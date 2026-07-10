@@ -55,6 +55,23 @@ unit test). While validating it, a time-of-day-dependent failure of
 ACD trade deserts baked into the seeded tape); the test was widened from a
 10-minute to a 6-hour window as mitigation and D16 recorded for design
 sign-off.
+Design item AD19 (complete): the teardown half was built and the live-timer
+half resolved as a deliberate deferral. `flush_completed_bars` (called from
+`stop`, so `reset`/`dispose` inherit it) now flushes every completed-but-
+withheld bar window across the whole bar table on teardown, not just the
+single removed type `unsubscribe_bars` already handled, so a shutdown or a
+reconnect-driven reset no longer drops the newest complete bar of a live
+feed; in-progress windows stay unshipped and a flushed window is cleared so a
+second teardown cannot double-emit. Closing a LIVE in-progress window ON TIME
+on a clock timer is deliberately NOT built: it makes the adapter-fabricated-
+bar venue more correct (against mogwai's realistic-pathology-over-correctness
+stance), and the stall it would remove is downstream of the D16 trade deserts,
+which are themselves flagged for sign-off - so a bar stalling on a quiet tape
+reads as the venue going quiet, and revisiting it belongs with the D16
+decision, not ahead of it. Pinned by
+`stop_flushes_completed_bar_windows_but_not_in_progress`; docs updated in
+architecture.md.
+
 Design item AD4 (complete): the serial per-message havoc-latency sleep no
 longer caps drain throughput. The three streaming drains (data WS, exec WS,
 poll page) were rearchitected to deliver latency as PARALLEL pipeline delay:
@@ -310,20 +327,6 @@ than built.
 (AD18 the architecture.md instruments-subscription drift was resolved: the doc
 now states instrument subscriptions are one-shot fetch-and-emit and NOT on the
 refcount table, which is correct for a static venue.)
-
-### AD19. gap (downgraded) - Live in-progress bars still have no timer-based close
-
-`client.rs` `update_bar_state`. Severity low-medium, design-adjacent.
-
-Batch 4 built the safe half: on the final `unsubscribe_bars`, a window that
-has already closed (close_ts <= sim-now) but was withheld for lack of a later
-trade is now flushed instead of discarded. RESIDUAL (flagged, not built): a
-clock timer that closes a LIVE in-progress window on time is a real feature,
-and a `stop()`-teardown flush touches the delicate stop/reset/dispose path -
-both left unbuilt. So under a thin tape or a halt, a live window's bar is
-still emitted late (on the next trade) or, for the genuinely in-progress
-window at teardown, dropped. Arguably realistic venue behavior; broadarrow
-should know bars can stall on quiet tape.
 
 ### Adapter data-half smells and nits
 
@@ -624,8 +627,6 @@ decision or a non-trivial build, so they were flagged rather than forced:
 - AD12: a POSITIVE dead-feed watchdog (a per-subscription liveness timer /
   "0 ticks in N s" heartbeat). Diagnostics now reach the log; what is missing
   is a positive proof-of-life. A real feature.
-- AD19 residual: a clock timer that closes a live in-progress bar window on
-  time, plus a stop()-teardown flush.
 - AE2 / X3: the venue-truth source (an order-status query surface). This is a
   NEW WIRE PROTOCOL SURFACE (a `GET /orders` endpoint + `query_order` messages
   + adapter impl) and is NOT being built autonomously - it needs sign-off
