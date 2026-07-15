@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use mogwai_protocol::{
-    ClientOrderId, OrderFilled, ServerMessage, SubmitOrder, TimeInForce, VenueOrderId,
+    ClientOrderId, OrderFilled, ServerMessage, Side, SubmitOrder, TimeInForce, VenueOrderId,
     control::Divergence,
 };
 use rust_decimal::Decimal;
@@ -196,8 +196,25 @@ impl Engine {
         // through must be one `apply_fill` can actually compute. Reject here,
         // at the venue's front door, rather than let a single oversized order
         // panic the engine mid-fill.
-        if order.quantity.checked_mul(price).is_none() {
+        let Some(notional) = order.quantity.checked_mul(price) else {
             return Err("order notional exceeds maximum representable value".into());
+        };
+
+        // Funded accounts are honest cash accounts: an order the free balance
+        // cannot cover is rejected at the door, exactly like a real exchange.
+        // A buy requires the full quote notional (the immediate synthetic fill
+        // spends it, or the resting remainder reserves it - same requirement
+        // either way); a sell requires the base quantity. Unfunded accounts
+        // skip this entirely and keep the permissive delta-off-zero ledger -
+        // see `Engine::enforce_funds`.
+        if self.enforce_funds {
+            let (currency, required) = match order.side {
+                Side::Buy => (&instrument.quote, notional),
+                Side::Sell => (&instrument.base, order.quantity),
+            };
+            if self.free_balance(currency) < required {
+                return Err(format!("insufficient {currency} balance"));
+            }
         }
 
         Ok(())
@@ -379,6 +396,39 @@ impl Engine {
                     reason: "order notional exceeds maximum representable value".into(),
                     ts_event: ts,
                 }];
+            }
+
+            // Funded accounts check the amended reservation against free
+            // balance, mirroring the submit-side funds check: an amend that
+            // grows a reservation past what the account holds is refused, or
+            // the venue would advertise free < 0 in its own snapshot. The
+            // order's CURRENT reservation is excluded from the comparison
+            // (it is being replaced, not added to), so free-plus-own-hold
+            // must cover the new hold. Both products are bounded: the new
+            // one by the checked_mul just above (leaves <= total), the old
+            // one by the same check at its own submit/amend time.
+            if self.enforce_funds {
+                let order = &self.open[pos];
+                let new_leaves = new_total - filled;
+                let (currency, held, required) = match order.submit.side {
+                    Side::Buy => {
+                        let old_price = order.submit.price.unwrap_or_default();
+                        (
+                            &instrument.quote,
+                            order.leaves_qty * old_price,
+                            new_leaves * effective_price,
+                        )
+                    }
+                    Side::Sell => (&instrument.base, order.leaves_qty, new_leaves),
+                };
+                if self.free_balance(currency).saturating_add(held) < required {
+                    return vec![ServerMessage::OrderModifyRejected {
+                        client_order_id,
+                        venue_order_id: Some(venue_order_id),
+                        reason: format!("insufficient {currency} balance"),
+                        ts_event: ts,
+                    }];
+                }
             }
         }
 

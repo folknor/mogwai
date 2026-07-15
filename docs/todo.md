@@ -23,8 +23,31 @@ Or both. There are no exceptions.
   Closing it means introducing a position-size or notional cap - a design
   decision, not a local fix.
 
+- ProtocolError diagnostics have no per-connection rate limit. Every refused or
+  clamped subscribe emits one diagnostic; ba's watchdog-driven resubscribe
+  churn turned that into a ~1,700-line storm during a venue restart (QA
+  finding, mechanism now removed by the pinned `wall_anchor_ns`). Any future
+  repeated-subscribe pathology will storm the same way - a per-connection
+  dedup or rate limit on identical diagnostic reasons would cap it.
+
 ## Notes / gotchas
 
+- broadarrow-side follow-ups from the 2026-07-15 QA findings (their repo, listed
+  here so the coordination is not lost): (a) the data-path WARN template names
+  three causes ("unknown symbol, exhausted seek, or pre-origin start") while
+  discarding mogwai's actual `reason` string, and does not know the fourth
+  "start_ts exceeds sim-now" clamp class; (b) the feed-stale message hard-codes
+  the issue-4255 hypothesis ("the connection looks healthy...") as fact even
+  when the venue process is dead; (c) `reference/mogwai.md` / `ba man mogwai`
+  still describe the venue as unfundable - stale once the `[balances]` seed
+  lands; (d) any stored scenario TOMLs arming `GoDark`/`DelayAcks` under an
+  HTTP transport profile now fail scenario load by design (create-time
+  deliverability refusal) and need a sweep.
+- Arming havoc via raw `POST /control/divergence` bypasses the adapter's
+  create-time deliverability check by construction: the windows are
+  venue-global and the server cannot know which transport each connected
+  client rides. External armers (the QA probes do this) remain responsible for
+  matching windows to carriers; `reference/havoc.md` says so explicitly.
 - The offline Kraken corpus is trades only - no quotes, no L2, no aggressor side.
   This shapes the offline analysis only; the running server synthesizes trades
   with a native `Buyer`/`Seller` aggressor and serves no quotes (`/quotes` is
@@ -106,8 +129,6 @@ Inline literals (no named const):
 - `commission: Decimal::ZERO` booked on every fill unconditionally - no fee policy
   or divergence path exists (notable for a crate whose stated purpose is injecting
   realistic execution divergences).
-- No starting-balance concept: accounts start empty, balances derive purely from
-  fills; no funded-account setter exists.
 - Venue/trade id prefixes `V`/`T` as inline magic strings.
 - Test fixtures repeat `BTCUSDT`/`BTC`/`USDT`, a base price of 100, and
   partial-fill fractions 0.3/0.4/0.5 across dozens of sites (no shared consts).
@@ -189,5 +210,6 @@ golden-test seed.
   and the rest) centralised as workspace deps; `[profile.release]` opt-level 3 /
   lto fat / codegen-units 1; `rust-version 1.96`, `resolver 3`. The nautilus
   path-dep lives in `mogwai-adapter/Cargo.toml`, not root. `brokkr.toml` only sets
-  `project = "mogwai"`. Root `mogwai.toml` carries the four run knobs (`sim_epoch_ns
-  0`, `speed 1.0`, `gap_cap_ms 1000`, `server_heartbeat_ms 0`).
+  `project = "mogwai"`. Root `mogwai.toml` carries the run knobs (`sim_epoch_ns 0`,
+  `wall_anchor_ns 0`, `speed 1.0`, `gap_cap_ms 1000`, `server_heartbeat_ms 0`,
+  `max_concurrent_replays 1024`, and the funded `balances` table).

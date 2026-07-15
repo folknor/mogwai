@@ -75,9 +75,14 @@ sockets, timers and the clock; the engine owns order and account state.
   non-positive quantity or price, a missing price, and a quantity or price off
   the instrument's size/price increment are all rejected on the wire with
   `OrderRejected` and never touch the ledger. (A duplicate id is one already
-  accepted; a rejected submit does not reserve its id.) The neutral baseline is
-  the full fill *of a well-formed order*, so a nonsensical submit is a reject, not
-  a corrupt fill.
+  accepted; a rejected submit does not reserve its id.) On a FUNDED account the
+  funds check joins them: a buy whose quote notional (or a sell whose base
+  quantity) exceeds the free balance - total minus resting-order reservations -
+  is rejected with `insufficient <currency> balance`, and an amend that would
+  grow a resting order's reservation past free-plus-its-own-hold is refused the
+  same way, so the venue never advertises `free < 0` in its own snapshot. The
+  neutral baseline is the full fill *of a well-formed order*, so a nonsensical
+  submit is a reject, not a corrupt fill.
 - **Time in force.** `Gtc` rests any unfilled remainder. `Ioc` fills what it can
   immediately and cancels the rest (`OrderCanceled`, nothing left resting). `Fok`
   is all-or-nothing: if the order cannot fully fill - only possible under an armed
@@ -97,10 +102,15 @@ sockets, timers and the clock; the engine owns order and account state.
   `[balances]` table in `mogwai.toml` (default: 1,000,000 USDT, matching the
   built-in BTCUSDT instrument): funding is initial state with no runtime
   deposit surface, so every balance the venue ever reports is explained by the
-  seed plus fills alone. An explicitly empty `[balances]` table runs the
-  account unfunded, where the first buy drives the quote leg negative - which
-  a nautilus CASH account (the adapter's default) refuses to apply; run
-  unfunded only to exercise exactly that refusal.
+  seed plus fills alone. A funded account is an honest cash venue - funds are
+  ENFORCED, per the order-validation bullet above. An explicitly empty
+  `[balances]` table runs the account unfunded AND unenforced: the permissive
+  delta-off-zero ledger, where the first buy drives the quote leg negative -
+  which a nautilus CASH account (the adapter's default) refuses to apply; run
+  unfunded only to exercise exactly that refusal (enforcement would make the
+  path unreachable, which is why the two modes are one switch). The server
+  warns at boot when a configured instrument's quote currency is unfunded,
+  since every buy on it would reject.
 - **Amend.** `ModifyOrder` is a real amend of a resting order: it reprices and/or
   resizes in place (the wire `quantity` is the order's total, so leaves is
   re-derived as total minus already-filled), re-derives the backing reservation,

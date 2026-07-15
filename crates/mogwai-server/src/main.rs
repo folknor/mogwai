@@ -45,7 +45,7 @@ use tokio::sync::Mutex;
 
 use crate::config::{
     Config, build_instrument_profiles, build_replay_permits, build_sim_clock, now_ns,
-    validate_balances,
+    warn_unfunded_quotes,
 };
 use crate::http::{
     AppState, account, arm_divergence, clock, instruments, quotes, submit_order_http, trades,
@@ -273,7 +273,6 @@ async fn serve_async(
 ) -> anyhow::Result<()> {
     let cfg = Config::load(args.config.clone())?;
     let profiles = Arc::new(build_instrument_profiles(&cfg)?);
-    validate_balances(&cfg)?;
     let sim = build_sim_clock(&cfg, now_ns())?;
     tracing::info!(
         sim_epoch_ns = cfg.sim_epoch_ns,
@@ -306,6 +305,7 @@ async fn serve_async(
     let mut funded: Vec<&String> = cfg.balances.keys().collect();
     funded.sort();
     tracing::info!(balances = ?funded, "account funding");
+    warn_unfunded_quotes(&cfg, &profiles.instrument_defs());
     let replay_permits = build_replay_permits(&cfg);
     let state = AppState {
         engine: Arc::new(Mutex::new(Engine::with_instruments_and_balances(

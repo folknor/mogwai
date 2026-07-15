@@ -54,6 +54,18 @@ pub struct OpenOrder {
 pub struct Engine {
     open: Vec<OpenOrder>,
     account: Account,
+    /// Whether submits and amends are checked against free balance. Set once
+    /// at construction: a FUNDED account (non-empty seed) is an honest cash
+    /// venue, so an order the account cannot cover is rejected like a real
+    /// exchange would - otherwise the ledger goes negative and a nautilus
+    /// cash-account consumer refuses every snapshot after it, silently
+    /// desyncing. An UNFUNDED account keeps the permissive delta-off-zero
+    /// ledger with no funds checks: its documented purpose is exercising
+    /// exactly that negative-balance path, which enforcement would make
+    /// unreachable. Constructor-time, not derived from the live balance map:
+    /// fills create balance entries as they book, so a dynamic check would
+    /// silently flip an unfunded account into enforcing after its first fill.
+    enforce_funds: bool,
     /// `InstrumentDef` (from `mogwai-protocol`) is used directly as the engine's
     /// instrument representation - it carries exactly the base/quote and
     /// precision/increment fields the fill and reservation path needs, so the
@@ -97,6 +109,11 @@ impl Engine {
     /// from the venue's. Funding is initial state, not a mutation: there is no
     /// deposit surface at runtime, so a scenario's capital is fixed at boot
     /// and every balance the venue ever reports is explained by fills alone.
+    ///
+    /// A non-empty seed also arms funds ENFORCEMENT: a funded venue rejects
+    /// submits and amends the free balance cannot cover, like a real cash
+    /// exchange. An empty seed keeps the permissive unfunded ledger - see
+    /// `enforce_funds`.
     pub fn with_instruments_and_balances(
         instruments: Vec<InstrumentDef>,
         balances: HashMap<String, Decimal>,
@@ -108,6 +125,7 @@ impl Engine {
 
         Self {
             open: Vec::new(),
+            enforce_funds: !balances.is_empty(),
             account: Account {
                 balances,
                 positions: HashMap::new(),
@@ -257,6 +275,135 @@ mod tests {
         let state = account(&out, out.len() - 1);
         assert_eq!(balance(state, "USDT").total, Decimal::from(800));
         assert_eq!(balance(state, "BTC").total, Decimal::from(2));
+    }
+
+    fn funded(usdt: i64) -> Engine {
+        Engine::with_instruments_and_balances(
+            default_instruments(),
+            HashMap::from([("USDT".to_string(), Decimal::from(usdt))]),
+        )
+    }
+
+    #[test]
+    fn funded_account_rejects_orders_it_cannot_cover() {
+        // A funded account is an honest cash venue: submits the free balance
+        // cannot cover are rejected at the door instead of booking a negative
+        // leg (which a nautilus cash consumer would refuse to apply).
+        let mut e = funded(1_000);
+
+        // Buy past the quote balance: 11 * 100 > 1000.
+        let out = e.process(ClientMessage::SubmitOrder(order("B1", 11)), 1);
+        assert_eq!(reject_reason(&out), "insufficient USDT balance");
+
+        // Sell with no base at all.
+        let out = e.process(
+            ClientMessage::SubmitOrder(order_with(
+                "S1",
+                Side::Sell,
+                "BTCUSDT",
+                1,
+                Some(Decimal::from(100)),
+            )),
+            2,
+        );
+        assert_eq!(reject_reason(&out), "insufficient BTC balance");
+
+        // Spend-then-overspend: a 5 @ 100 buy leaves 500 free, so a second
+        // 6 @ 100 buy is refused while a 5 @ 100 one still clears.
+        let out = e.process(ClientMessage::SubmitOrder(order("B2", 5)), 3);
+        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        let out = e.process(ClientMessage::SubmitOrder(order("B3", 6)), 4);
+        assert_eq!(reject_reason(&out), "insufficient USDT balance");
+        let out = e.process(ClientMessage::SubmitOrder(order("B4", 5)), 5);
+        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+
+        // The acquired base is spendable: selling it back clears.
+        let out = e.process(
+            ClientMessage::SubmitOrder(order_with(
+                "S2",
+                Side::Sell,
+                "BTCUSDT",
+                10,
+                Some(Decimal::from(100)),
+            )),
+            6,
+        );
+        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+    }
+
+    #[test]
+    fn funded_account_counts_reservations_and_gates_amends() {
+        // A resting buy's reservation reduces free balance for later submits,
+        // and an amend that grows the reservation past free-plus-own-hold is
+        // refused - the venue must never advertise free < 0 in its own
+        // snapshot.
+        let mut e = funded(1_000);
+
+        // Rest half of a 4 @ 100 buy: 200 spent on the fill, 200 locked for
+        // the remainder, so free is 600.
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "R1".into(),
+            fraction: Decimal::new(5, 1),
+        });
+        let out = e.process(ClientMessage::SubmitOrder(order("R1", 4)), 1);
+        let state = account(&out, out.len() - 1);
+        assert_eq!(balance(state, "USDT").free, Decimal::from(600));
+        assert_eq!(balance(state, "USDT").locked, Decimal::from(200));
+
+        // 7 @ 100 exceeds the 600 free even though the total is 800.
+        let out = e.process(ClientMessage::SubmitOrder(order("B1", 7)), 2);
+        assert_eq!(reject_reason(&out), "insufficient USDT balance");
+
+        // Amending the resting order up to 8 total (6 leaves = 600 hold) fits:
+        // 600 free plus its own 200 hold covers it. Afterwards the whole 800
+        // of unspent quote backs this one order (free 200, hold 600).
+        let out = e.process(
+            ClientMessage::ModifyOrder {
+                client_order_id: "R1".into(),
+                price: None,
+                quantity: Some(Decimal::from(8)),
+            },
+            3,
+        );
+        updated(&out, 0);
+
+        // 11 total (9 leaves = 900 hold) exceeds the 800 the account has left.
+        let out = e.process(
+            ClientMessage::ModifyOrder {
+                client_order_id: "R1".into(),
+                price: None,
+                quantity: Some(Decimal::from(11)),
+            },
+            4,
+        );
+        let [ServerMessage::OrderModifyRejected { reason, .. }] = &out[..] else {
+            panic!("expected one modify reject, got {out:?}")
+        };
+        assert_eq!(reason, "insufficient USDT balance");
+
+        // Canceling the resting order frees its hold; the refused submit now
+        // clears (a rejected id is free to reuse).
+        let out = e.process(
+            ClientMessage::CancelOrder {
+                client_order_id: "R1".into(),
+            },
+            5,
+        );
+        assert!(matches!(out[0], ServerMessage::OrderCanceled { .. }));
+        let out = e.process(ClientMessage::SubmitOrder(order("B1", 7)), 6);
+        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+    }
+
+    #[test]
+    fn unfunded_account_stays_permissive() {
+        // The empty-seed account keeps the delta-off-zero ledger with no funds
+        // checks: its documented purpose is exercising the negative-balance
+        // path, which enforcement would make unreachable.
+        let mut e = Engine::new();
+        let out = e.process(ClientMessage::SubmitOrder(order("U1", 5)), 1);
+        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        let state = account(&out, out.len() - 1);
+        assert_eq!(balance(state, "USDT").total, Decimal::from(-500));
     }
 
     fn fill(out: &[ServerMessage], index: usize) -> &OrderFilled {

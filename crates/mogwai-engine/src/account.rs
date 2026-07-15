@@ -174,6 +174,23 @@ impl Engine {
         }
     }
 
+    /// The spendable amount of one currency: the booked total minus every
+    /// resting order's reservation. This is what the funds checks in
+    /// `validate_submit` and `on_modify` compare an order's requirement
+    /// against, and it matches the `free` the snapshot reports for the same
+    /// currency (both derive from `locked_balances` with clamped arithmetic).
+    pub(crate) fn free_balance(&self, currency: &str) -> Decimal {
+        let total = *self
+            .account
+            .balances
+            .get(currency)
+            .unwrap_or(&Decimal::ZERO);
+        let (locked, _) = self.locked_balances();
+        let locked = *locked.get(currency).unwrap_or(&Decimal::ZERO);
+        let mut clipped = false;
+        sub_clamped(total, locked, &mut clipped)
+    }
+
     /// Sums the per-order reservations. Returns the locked totals plus the
     /// currencies whose accumulation clipped at the Decimal boundary, so the
     /// caller (`snapshot`, which holds `&mut self`) can warn once per key -

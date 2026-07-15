@@ -39,12 +39,15 @@ server_heartbeat_ms = 0
 max_concurrent_replays = 1024
 
 # Initial per-currency account funding - the deposit made before the run. The
-# ledger books only fill deltas on top of this seed, so an unfunded account
-# goes negative on its first buy, which a nautilus cash account (the adapter's
-# default) refuses to apply. Amounts are decimal strings. Omitting the table
-# keeps this same funded default; an explicitly empty [balances] table runs
-# the account unfunded on purpose. Fund the quote currency of every instrument
-# the run trades (and the base currency too if a strategy sells first).
+# ledger books only fill deltas on top of this seed. A funded account is an
+# honest cash venue: orders the free balance cannot cover are rejected with
+# insufficient balance. An explicitly empty [balances] table runs the account
+# unfunded and unenforced instead - the permissive ledger where the first buy
+# goes negative, which a nautilus cash account (the adapter's default) refuses
+# to apply; use that only to exercise the refusal itself. Amounts are decimal
+# strings. Omitting the table keeps this same funded default. Fund the quote
+# currency of every instrument the run trades (the server warns at boot if one
+# is missing), and the base currency too if a strategy sells first.
 [balances]
 USDT = "1000000"
 

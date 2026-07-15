@@ -127,6 +127,37 @@ fn default_balances() -> HashMap<String, Decimal> {
     HashMap::from([("USDT".to_string(), Decimal::from(1_000_000))])
 }
 
+/// Warns at boot about funding gaps the funded-account enforcement will turn
+/// into rejections. A funded venue refuses any order its free balance cannot
+/// cover, so an instrument whose QUOTE currency carries no funding can never
+/// buy - every order on it rejects with "insufficient balance", and without
+/// this warning the first sign is a rejected order minutes into a run. (Base
+/// funding is only needed by sell-first strategies, so its absence is not
+/// warned - a long-only run acquires base through its own buys.) The
+/// deliberately unfunded account gets one warning stating the consequence
+/// instead: funds are unenforced, and the first buy books a negative quote
+/// leg a nautilus cash consumer will refuse to apply.
+pub(crate) fn warn_unfunded_quotes(cfg: &Config, defs: &[InstrumentDef]) {
+    if cfg.balances.is_empty() {
+        tracing::warn!(
+            "account is UNFUNDED (empty balances table): funds checks are off, and the \
+             first buy drives the quote leg negative - a nautilus cash account will \
+             refuse every snapshot after it"
+        );
+        return;
+    }
+    for def in defs {
+        if !cfg.balances.contains_key(&def.quote) {
+            tracing::warn!(
+                symbol = %def.symbol,
+                quote = %def.quote,
+                "instrument quote currency is unfunded; every buy on it will be \
+                 rejected with insufficient balance - add it to [balances]"
+            );
+        }
+    }
+}
+
 /// Validates the `[balances]` funding table: currencies must be non-blank and
 /// amounts non-negative. Zero is allowed (it pins a currency into every
 /// snapshot without funding it); negative initial funding has no venue meaning
@@ -153,11 +184,17 @@ impl Config {
     /// environment.
     pub(crate) fn load(path: Option<PathBuf>) -> anyhow::Result<Self> {
         let path = path.unwrap_or_else(|| PathBuf::from("mogwai.toml"));
-        match std::fs::read_to_string(&path) {
-            Ok(text) => Ok(toml::from_str(&text)?),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e.into()),
-        }
+        let cfg: Self = match std::fs::read_to_string(&path) {
+            Ok(text) => toml::from_str(&text)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(e) => return Err(e.into()),
+        };
+        // Validate here, not at the call site, so a validated `Config` is the
+        // only kind `load` ever hands out - a future second consumer cannot
+        // forget the check. (The clock and instrument validations stay with
+        // their builders: they need boot-time inputs this loader lacks.)
+        validate_balances(&cfg)?;
+        Ok(cfg)
     }
 }
 
