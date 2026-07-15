@@ -9,6 +9,14 @@
 # clock, where simulated time equals wall time.
 sim_epoch_ns = 0
 
+# Wall instant the accelerated clock anchors to. 0 anchors at server boot,
+# which rewinds sim time to sim_epoch_ns on every restart (each boot is a
+# fresh scenario). Pin a past wall instant to put every boot on the same
+# simulated axis, so a restarted venue resumes where a monotonic exchange
+# would be and a surviving worker rides through the bounce. Requires
+# sim_epoch_ns; see reference/clock.md, "Restarts".
+wall_anchor_ns = 0
+
 # Replay speed multiplier. With sim_epoch_ns = 0, 1.0 paces inter-tick wall
 # delay to the real gaps between ticks, and 0.0 streams unthrottled. Any other
 # speed requires sim_epoch_ns to be set so all timestamps and timers share one

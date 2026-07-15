@@ -821,6 +821,42 @@ mod tests {
     }
 
     #[test]
+    fn sim_clock_pinned_wall_anchor_survives_restarts() {
+        // A pinned anchor puts every boot on the same affine axis: two boots at
+        // different wall instants build the identical clock, so a venue restart
+        // does not rewind sim-now to the epoch (the default boot anchor does).
+        let cfg = Config {
+            sim_epoch_ns: 1_700_438_400_000_000_000,
+            wall_anchor_ns: 1_000,
+            speed: 120.0,
+            ..Config::default()
+        };
+
+        let first_boot = build_sim_clock(&cfg, 2_000).expect("first boot");
+        let restart = build_sim_clock(&cfg, 900_000).expect("restart");
+        assert_eq!(first_boot, restart);
+        assert_eq!(first_boot.wall_anchor_ns, 1_000);
+
+        // A pinned anchor in the future would freeze the venue at the epoch
+        // until the wall catches up - refused as a misconfiguration.
+        let err = build_sim_clock(&cfg, 500)
+            .expect_err("future anchor refused")
+            .to_string();
+        assert!(err.contains("in the future"));
+
+        // The anchor is meaningless without an epoch to anchor.
+        let identity = Config {
+            sim_epoch_ns: 0,
+            wall_anchor_ns: 1_000,
+            ..Config::default()
+        };
+        let err = build_sim_clock(&identity, 2_000)
+            .expect_err("anchor without epoch refused")
+            .to_string();
+        assert!(err.contains("requires sim_epoch_ns"));
+    }
+
+    #[test]
     fn config_rejects_unknown_top_level_key() {
         // S20: a typo'd knob must be a hard error, not a silent fallback to the
         // field default - making config.md's "malformed file is a hard error"

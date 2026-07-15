@@ -15,7 +15,7 @@ frames - while advancing one shared simulated time axis faster than the wall.
 A real exchange forces 1x; mogwai's clock is fake, so it has no lower bound.
 
 Simulated time is an affine function of wall-clock time, defined by three
-numbers captured once at server boot and served to every consumer over
+numbers fixed once at server boot and served to every consumer over
 `GET /clock`:
 
 ```
@@ -24,7 +24,10 @@ sim_ns(wall_ns) = sim_epoch_ns + (wall_ns - wall_anchor_ns) * speed
 
 - `sim_epoch_ns` - the simulated instant the run starts from. `0` selects the
   identity clock (sim == wall); a nonzero value selects accelerated mode.
-- `wall_anchor_ns` - the wall instant the clock was anchored (server boot).
+- `wall_anchor_ns` - the wall instant the clock is anchored. By default this is
+  captured at server boot; the `wall_anchor_ns` config knob pins it to a fixed
+  past instant instead. Which one you choose decides what a RESTART means -
+  see "Restarts" below.
 - `speed` - the acceleration factor (`1.0` honest live; `3600.0` a simulated
   hour per wall second).
 
@@ -60,6 +63,60 @@ is `speed != 1.0` with `sim_epoch_ns == 0`: the clock would stay the identity
 rejects `sim_epoch_ns == 0 && speed != 1.0 && speed != 0.0` at startup, and also
 `sim_epoch_ns != 0 && speed <= 0.0`. `speed == 0.0` stays the legacy unthrottled
 firehose, valid only at `sim_epoch_ns == 0`.
+
+## Restarts: boot-anchored rewind vs a pinned anchor
+
+`sim_epoch_ns` is fixed config; the anchor is not, unless you pin it. That
+asymmetry is the whole story of what a venue restart does to the axis:
+
+- **Default (`wall_anchor_ns = 0`): every boot re-anchors, so a restart REWINDS
+  sim-now back to `sim_epoch_ns`.** The rewind equals the previous instance's
+  uptime times `speed` - the longer the venue ran, the further back it jumps.
+  This makes each boot a fresh deterministic scenario (same epoch, same tape
+  origin `sim_epoch - backfill_horizon`), which is the right semantic for
+  repeatable single-run tests. It is the WRONG semantic for any client that
+  survives the restart: a real exchange's clock is monotonic, and a surviving
+  client's cursors and watermarks now sit in the restarted venue's FUTURE. The
+  venue clamps such a subscribe to live-from-now ("start_ts exceeds sim-now")
+  and streams from the rewound instant, but the client discards the
+  backwards-stamped data until sim-now catches its old watermark - observed as
+  a subscribe/diagnostic storm and a recovery lag of (rewind / speed) wall
+  seconds.
+- **Pinned (`wall_anchor_ns` set to a fixed past instant): every boot computes
+  the SAME affine map, so sim time is monotonic across restarts.** A bounced
+  venue resumes at the sim instant a monotonic exchange would have reached,
+  as though it had kept running through the outage; a surviving worker's
+  cursors stay in the past and are served normally. Note the tape origin
+  follows sim-now at each boot (`data_origin = sim_now_at_boot -
+  backfill_horizon`), so after a long outage a surviving cursor is servable
+  only within the backfill horizon. This is the mode for exercising venue
+  bounces, deploys, and any scenario where the client outlives the server.
+
+### Why the worker cannot adopt a rewound axis (the nautilus side)
+
+It is tempting to instead have the ADAPTER re-sync: detect the reconnect,
+re-fetch `GET /clock`, and adopt the restarted server's rewound map. That is
+not viable, and the reason is nautilus, not mogwai:
+
+- The adapter's `mogwai_clock_factory` fetches `/clock` ONCE at worker boot
+  and every `MogwaiClock` the node ever builds - the kernel clock and every
+  component clock - captures that one map. There is no rebind surface: nautilus
+  constructs clocks from the factory as components come up, and the clocks are
+  the node's time authority for the life of the process.
+- More fundamentally, nautilus requires time to be MONOTONIC. Its clocks drive
+  timer deadlines, event ordering, cache staleness guards, and bar watermarks;
+  `ts_event`/`ts_init` stamps are compared across the whole run. Stepping the
+  node clock backward by the rewind would violate every one of those
+  comparisons at once - resting timers would sit un-fireable for
+  (rewind / speed) wall seconds, and freshly stamped events would sort BEFORE
+  events already processed. A rewound axis is not a value a live nautilus node
+  can adopt; the only consistent choices are "the worker keeps the old axis"
+  (the default today, with the storm above) or "the venue never rewinds" (the
+  pinned anchor).
+
+So: restart the venue under a surviving worker only with a pinned
+`wall_anchor_ns`. The boot-anchored default remains right for fresh-scenario
+runs where venue and workers start together.
 
 ## What rides the axis, and its floor
 

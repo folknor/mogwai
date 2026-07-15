@@ -31,6 +31,16 @@ use crate::source;
 pub(crate) struct Config {
     /// Simulated start instant. `0` keeps the identity wall-time clock.
     pub(crate) sim_epoch_ns: u64,
+    /// Wall instant the accelerated clock anchors to. `0` (the default)
+    /// anchors at server boot, which REWINDS sim time to `sim_epoch_ns` on
+    /// every restart: each boot is a fresh deterministic scenario, and a
+    /// client that survives the restart lands on a rewound axis. A nonzero
+    /// value pins the anchor so every boot lands on the SAME axis - a
+    /// restarted venue resumes at the sim instant a monotonic exchange would
+    /// have reached, which is what lets a surviving worker ride through a
+    /// venue bounce (see reference/clock.md, "Restarts"). Requires
+    /// `sim_epoch_ns` to be set, and must not be in the future at boot.
+    pub(crate) wall_anchor_ns: u64,
     /// Replay speed multiplier. `0.0` means unthrottled (stream as fast as the client
     /// drains). `1.0` is the default and paces to real wall-clock gaps; otherwise
     /// inter-tick wall delay = (tick gap) / speed.
@@ -82,6 +92,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             sim_epoch_ns: 0,
+            wall_anchor_ns: 0,
             // Honest-by-default: wall-clock pace the generator's inter-arrival
             // gaps so a no-config server serves a realistic live feed, matching
             // the committed mogwai.toml. 0.0 remains available as an explicit
@@ -314,11 +325,26 @@ pub(crate) fn window_until_ns(now: u64, ms: u64) -> u64 {
     now.saturating_add(ms.saturating_mul(1_000_000))
 }
 
-pub(crate) fn build_sim_clock(cfg: &Config, wall_anchor_ns: u64) -> anyhow::Result<SimClock> {
+/// Derives the run's `SimClock` from config. `boot_wall_ns` is the wall
+/// instant of this boot; it anchors the clock unless the config pins
+/// `wall_anchor_ns` explicitly. The pinned form is what makes sim time
+/// monotonic ACROSS restarts: with the default boot anchor, every boot
+/// re-anchors and so rewinds sim-now back to `sim_epoch_ns`, while a pinned
+/// anchor puts every boot on the same affine axis (reference/clock.md,
+/// "Restarts"). A pinned anchor in the future is refused rather than served:
+/// `sim_ns` clamps pre-anchor reads to the epoch, so the venue would sit
+/// frozen at `sim_epoch_ns` until the wall catches up - a misconfiguration
+/// (most likely a seconds-vs-nanos slip), not a schedulable start.
+pub(crate) fn build_sim_clock(cfg: &Config, boot_wall_ns: u64) -> anyhow::Result<SimClock> {
     if !cfg.speed.is_finite() {
         anyhow::bail!("speed must be finite");
     }
     if cfg.sim_epoch_ns == 0 {
+        if cfg.wall_anchor_ns != 0 {
+            anyhow::bail!(
+                "wall_anchor_ns requires sim_epoch_ns (the identity clock has no anchor)"
+            );
+        }
         if cfg.speed != 1.0 && cfg.speed != 0.0 {
             anyhow::bail!("sim_epoch_ns must be set when speed is neither 0.0 nor 1.0");
         }
@@ -327,6 +353,19 @@ pub(crate) fn build_sim_clock(cfg: &Config, wall_anchor_ns: u64) -> anyhow::Resu
     if cfg.speed <= 0.0 {
         anyhow::bail!("speed must be > 0.0 when sim_epoch_ns is set");
     }
+    let wall_anchor_ns = if cfg.wall_anchor_ns == 0 {
+        boot_wall_ns
+    } else {
+        if cfg.wall_anchor_ns > boot_wall_ns {
+            anyhow::bail!(
+                "wall_anchor_ns {} is in the future (wall now {}); \
+                 a pinned anchor must be a past instant",
+                cfg.wall_anchor_ns,
+                boot_wall_ns
+            );
+        }
+        cfg.wall_anchor_ns
+    };
     Ok(SimClock {
         sim_epoch_ns: cfg.sim_epoch_ns,
         wall_anchor_ns,
