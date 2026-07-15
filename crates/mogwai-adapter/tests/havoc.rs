@@ -197,13 +197,16 @@ async fn submit_exec_client(
 async fn ships_server_havoc() {
     let state = Arc::new(StubState::default());
     let base_url = bound_stub(Arc::clone(&state)).await;
+    // Engine-side single-shots only: this spec rides HTTP transport profiles
+    // below, and validate() now refuses a server temporal window (GoDark,
+    // DelayAcks, StallData under polling) the chosen carrier cannot deliver.
     let havoc = HavocSpec {
         client: ClientHavoc::default(),
         server: vec![
             Divergence::RejectNextSubmit {
                 reason: "nope".into(),
             },
-            Divergence::GoDark { ms: 25 },
+            Divergence::DropNextAccountUpdate,
         ],
         data: None,
         conn: ConnHavoc::default(),
@@ -253,8 +256,8 @@ async fn ships_server_havoc() {
         assert!(
             reject
                 .iter()
-                .any(|d| matches!(d, Divergence::GoDark { ms } if *ms == 25)),
-            "GoDark did not round-trip its ms"
+                .any(|d| matches!(d, Divergence::DropNextAccountUpdate)),
+            "DropNextAccountUpdate did not round-trip"
         );
     }
 

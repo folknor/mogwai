@@ -280,16 +280,31 @@ is deliberate so a test can shorten a window it armed; arm `ms: 0` (or
 `ClearDivergences`) to lift one immediately.
 
 **These windows live only in the `/ws` outbound writer, so they apply only to
-the WS-streaming transport.** Under `HttpOrders` the exec client's order events
-are returned synchronously in the `POST /orders` response, and under
-`HttpPolling` market data is fetched over `GET /trades` - neither path passes
-through the writer, so an armed `DelayAcks`/`GoDark`/`StallData` has NO effect on
-an HTTP carrier. This is faithful to the connection-scoped framing of these
-divergences (they model a sick socket, and the HTTP carriers do not hold one),
-but it is a real operator trap: arming `GoDark` against a `transport_profile =
-"HttpOrders"` client exercises a clean path while the operator believes a
-blackout is running. Use the WS-streaming profile to exercise the temporal
-divergences.
+legs carried over WS.** Under `HttpOrders` the exec client's order events are
+returned synchronously in the `POST /orders` response, and under `HttpPolling`
+market data is fetched over `GET /trades` - neither path passes through the
+writer, so an armed `DelayAcks`/`GoDark`/`StallData` has NO effect on an HTTP
+carrier. This is faithful to the connection-scoped framing of these divergences
+(they model a sick socket, and the HTTP carriers do not hold one), but it used
+to be a real operator trap: arming `GoDark` against a `transport_profile =
+"HttpOrders"` client exercised a clean order path while the operator believed a
+blackout was running. The adapter configs now REFUSE the undeliverable
+combinations at create time, exactly like every other impossible spec:
+
+- `DelayAcks` under `HttpOrders` or `HttpPolling` - order events return in the
+  `POST /orders` response; there is no WS exec leg to delay.
+- `GoDark` under `HttpOrders` or `HttpPolling` - the order path rides HTTP and
+  stays live through the window, so the documented TOTAL blackout can never be
+  total.
+- `StallData` under `HttpPolling` - market data never passes the writer. It
+  stays LEGAL under `HttpOrders`, whose market data still streams over WS: that
+  is the deliverable data-only stall on a mixed carrier.
+
+The refusal guards the adapter config path (`validate`, which broadarrow's
+scenario loader runs before any run starts). A raw `POST /control/divergence`
+still arms whatever it is sent: the windows are venue-global and the server
+cannot know which transport each connected client rides, so an external armer
+remains responsible for matching windows to carriers.
 
 Operator note on long delay windows: any nautilus consumer runs an
 execution-manager inflight check that re-queries a still-unacked order and,

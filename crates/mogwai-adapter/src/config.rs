@@ -2,8 +2,8 @@ use std::any::Any;
 
 use anyhow::ensure;
 use mogwai_protocol::{
-    HavocSpec, TransportProfile, validate_client_havoc, validate_conn_havoc, validate_divergence,
-    validate_market_regime,
+    HavocSpec, TransportProfile, control::Divergence, validate_client_havoc, validate_conn_havoc,
+    validate_divergence, validate_market_regime,
 };
 use nautilus_common::factories::ClientConfig;
 use nautilus_model::{
@@ -50,7 +50,7 @@ impl MogwaiDataClientConfig {
     /// out of range.
     pub fn validate(&self) -> anyhow::Result<()> {
         validate_base_url(&self.base_url)?;
-        validate_havoc(&self.havoc)
+        validate_havoc(&self.havoc, self.transport_profile)
     }
 
     /// Returns the ws/wss URL to hand to the transport, trimmed of
@@ -139,7 +139,7 @@ impl MogwaiExecClientConfig {
     /// out of range.
     pub fn validate(&self) -> anyhow::Result<()> {
         validate_base_url(&self.base_url)?;
-        validate_havoc(&self.havoc)
+        validate_havoc(&self.havoc, self.transport_profile)
     }
 
     /// Returns the ws/wss URL to hand to the transport, trimmed of
@@ -231,7 +231,10 @@ fn http_base_url(base_url: &str) -> String {
 /// two configs from drifting and means an out-of-range knob (an unbounded
 /// `PartialFillNext.fraction`, a degenerate regime, a zeroed rate limit) is
 /// rejected at config time rather than detonating later on the live path.
-fn validate_havoc(havoc: &Option<HavocSpec>) -> anyhow::Result<()> {
+fn validate_havoc(
+    havoc: &Option<HavocSpec>,
+    transport_profile: TransportProfile,
+) -> anyhow::Result<()> {
     if let Some(havoc) = havoc {
         validate_client_havoc(&havoc.client).map_err(anyhow::Error::msg)?;
         validate_conn_havoc(&havoc.conn).map_err(anyhow::Error::msg)?;
@@ -240,9 +243,63 @@ fn validate_havoc(havoc: &Option<HavocSpec>) -> anyhow::Result<()> {
         }
         for divergence in &havoc.server {
             validate_divergence(divergence).map_err(anyhow::Error::msg)?;
+            validate_window_deliverable(divergence, transport_profile)?;
         }
     }
     Ok(())
+}
+
+/// Refuses a server temporal window the chosen transport carrier provably
+/// cannot deliver. The windows live only in the server's `/ws` outbound
+/// writer, so a leg carried over HTTP request/response never passes through
+/// them: arming such a window constructs a client that runs a clean path
+/// while the operator believes havoc is live - a blackout test that passes
+/// green against a path that was never dark. Every other impossible spec is
+/// already refused at create, and both contradicting fields sit in this one
+/// config, so the contradiction is refused at the same boundary:
+///
+/// - `DelayAcks` paces execution frames on the WS socket; under
+///   `HttpOrders`/`HttpPolling` order events return synchronously in the
+///   `POST /orders` response and there is no WS exec leg to delay.
+/// - `GoDark` is documented as a TOTAL venue blackout; under either HTTP
+///   orders profile the order path rides HTTP and stays live through the
+///   window, so the blackout can never be total (under `HttpOrders` a
+///   data-only stall is deliverable - arm `StallData` instead).
+/// - `StallData` gates WS market-data frames; under `HttpPolling` data is
+///   fetched over `GET /trades` and never passes the writer. It stays legal
+///   under `HttpOrders`, whose market data still streams over WS.
+///
+/// `ClearDivergences` and the engine-side single-shots are carrier-agnostic
+/// and pass unconditionally.
+fn validate_window_deliverable(
+    divergence: &Divergence,
+    transport_profile: TransportProfile,
+) -> anyhow::Result<()> {
+    match divergence {
+        Divergence::DelayAcks { .. } if transport_profile.orders_over_http() => {
+            anyhow::bail!(
+                "DelayAcks delays execution frames on the /ws socket, but \
+                 transport_profile {transport_profile:?} carries order entry over HTTP \
+                 request/response - the delay can never fire; use WsStreaming"
+            )
+        }
+        Divergence::GoDark { .. } if transport_profile.orders_over_http() => {
+            anyhow::bail!(
+                "GoDark is a total venue blackout on the /ws writer, but \
+                 transport_profile {transport_profile:?} carries order entry over HTTP and \
+                 stays live through the window; use WsStreaming (or StallData under \
+                 HttpOrders for a data-only stall)"
+            )
+        }
+        Divergence::StallData { .. } if transport_profile.data_by_polling() => {
+            anyhow::bail!(
+                "StallData gates market-data frames on the /ws socket, but \
+                 transport_profile {transport_profile:?} polls market data over GET /trades - \
+                 the stall can never fire; use WsStreaming or HttpOrders"
+            )
+        }
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -332,6 +389,105 @@ mod tests {
         assert!(exec.validate().is_ok());
         assert_eq!(exec.ws_url(), "wss://example.test:9443");
         assert_eq!(exec.http_base_url(), "https://example.test:9443");
+    }
+
+    #[test]
+    fn validate_refuses_undeliverable_temporal_windows() {
+        use mogwai_protocol::control::Divergence;
+
+        let config = |divergence: Divergence, profile: TransportProfile| MogwaiExecClientConfig {
+            transport_profile: profile,
+            havoc: Some(HavocSpec {
+                server: vec![divergence],
+                ..HavocSpec::default()
+            }),
+            ..MogwaiExecClientConfig::default()
+        };
+
+        // The full deliverability matrix. A window a carrier cannot pass is a
+        // create-time refusal, exactly like every other impossible spec.
+        let cases = [
+            (
+                Divergence::DelayAcks { ms: 100 },
+                TransportProfile::WsStreaming,
+                true,
+            ),
+            (
+                Divergence::DelayAcks { ms: 100 },
+                TransportProfile::HttpOrders,
+                false,
+            ),
+            (
+                Divergence::DelayAcks { ms: 100 },
+                TransportProfile::HttpPolling,
+                false,
+            ),
+            (
+                Divergence::GoDark { ms: 100 },
+                TransportProfile::WsStreaming,
+                true,
+            ),
+            (
+                Divergence::GoDark { ms: 100 },
+                TransportProfile::HttpOrders,
+                false,
+            ),
+            (
+                Divergence::GoDark { ms: 100 },
+                TransportProfile::HttpPolling,
+                false,
+            ),
+            (
+                Divergence::StallData { ms: 100 },
+                TransportProfile::WsStreaming,
+                true,
+            ),
+            // HttpOrders still streams market data over WS, so a data-only
+            // stall is deliverable there.
+            (
+                Divergence::StallData { ms: 100 },
+                TransportProfile::HttpOrders,
+                true,
+            ),
+            (
+                Divergence::StallData { ms: 100 },
+                TransportProfile::HttpPolling,
+                false,
+            ),
+            // Carrier-agnostic controls pass under every profile.
+            (
+                Divergence::ClearDivergences,
+                TransportProfile::HttpPolling,
+                true,
+            ),
+            (
+                Divergence::RejectNextSubmit {
+                    reason: "nope".into(),
+                },
+                TransportProfile::HttpPolling,
+                true,
+            ),
+        ];
+        for (divergence, profile, ok) in cases {
+            let result = config(divergence.clone(), profile).validate();
+            assert_eq!(
+                result.is_ok(),
+                ok,
+                "{divergence:?} under {profile:?}: {result:?}"
+            );
+        }
+
+        // The data config shares the same validator, so the same contradiction
+        // is refused there too.
+        let data = MogwaiDataClientConfig {
+            transport_profile: TransportProfile::HttpPolling,
+            havoc: Some(HavocSpec {
+                server: vec![Divergence::GoDark { ms: 100 }],
+                ..HavocSpec::default()
+            }),
+            ..MogwaiDataClientConfig::default()
+        };
+        assert!(data.validate().is_err());
     }
 
     #[test]
