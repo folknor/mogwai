@@ -35,7 +35,7 @@ owo-colors = "4"
 pulldown-cmark = "0.13"
 
 [dev-dependencies]
-tungstenite = "0.29"
+tungstenite = "0.30.0"
 
 [lints]
 workspace = true

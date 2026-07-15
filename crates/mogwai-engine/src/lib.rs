@@ -86,6 +86,21 @@ impl Engine {
     }
 
     pub fn with_instruments(instruments: Vec<InstrumentDef>) -> Self {
+        Self::with_instruments_and_balances(instruments, HashMap::new())
+    }
+
+    /// Constructs the engine with the account pre-funded per currency, the
+    /// venue's equivalent of a deposit made before the run. The ledger itself
+    /// only ever books fill deltas, so without a seed the first buy drives the
+    /// quote leg negative - which a nautilus CASH account (the adapter's
+    /// default) refuses to apply, silently desyncing the consumer's account
+    /// from the venue's. Funding is initial state, not a mutation: there is no
+    /// deposit surface at runtime, so a scenario's capital is fixed at boot
+    /// and every balance the venue ever reports is explained by fills alone.
+    pub fn with_instruments_and_balances(
+        instruments: Vec<InstrumentDef>,
+        balances: HashMap<String, Decimal>,
+    ) -> Self {
         let instruments = instruments
             .into_iter()
             .map(|instrument| (instrument.symbol.clone(), instrument))
@@ -93,7 +108,10 @@ impl Engine {
 
         Self {
             open: Vec::new(),
-            account: Account::default(),
+            account: Account {
+                balances,
+                positions: HashMap::new(),
+            },
             instruments,
             seen_client_order_ids: HashMap::new(),
             armed: VecDeque::new(),
@@ -213,6 +231,32 @@ mod tests {
         assert!(state.balances.is_empty());
         assert!(state.positions.is_empty());
         assert_eq!(state.ts_event, 7);
+    }
+
+    #[test]
+    fn seeded_balances_fund_the_account_and_fills_ride_the_seed() {
+        // The funded account is the initial condition, not a booked event: the
+        // seed shows up in the first snapshot untouched, and a fill's delta
+        // applies ON TOP of it - a buy's spend debits the funded quote leg
+        // instead of driving it negative from zero.
+        let mut e = Engine::with_instruments_and_balances(
+            default_instruments(),
+            HashMap::from([("USDT".to_string(), Decimal::from(1_000))]),
+        );
+
+        let state = e.account_snapshot(1);
+        assert_eq!(state.balances.len(), 1);
+        let usdt = balance(&state, "USDT");
+        assert_eq!(usdt.total, Decimal::from(1_000));
+        assert_eq!(usdt.free, Decimal::from(1_000));
+        assert_eq!(usdt.locked, Decimal::ZERO);
+        assert!(state.positions.is_empty());
+
+        // Buy 2 @ 100: quote debits to 800, base credits to 2.
+        let out = e.process(ClientMessage::SubmitOrder(order("F1", 2)), 2);
+        let state = account(&out, out.len() - 1);
+        assert_eq!(balance(state, "USDT").total, Decimal::from(800));
+        assert_eq!(balance(state, "BTC").total, Decimal::from(2));
     }
 
     fn fill(out: &[ServerMessage], index: usize) -> &OrderFilled {

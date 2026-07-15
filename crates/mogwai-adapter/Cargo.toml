@@ -19,7 +19,7 @@ futures-util.workspace = true
 rand = "0.10.2"
 rust_decimal.workspace = true
 tokio.workspace = true
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30.0"
 # The `log` feature bridges this crate's `tracing` diagnostics onto the `log`
 # facade. The adapter's only runtime host is the broadarrow ba-worker, which
 # installs nautilus_common's global `log` backend and NO tracing subscriber, so

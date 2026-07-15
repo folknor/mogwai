@@ -4,7 +4,11 @@
 //! server (the HTTP routes, the websocket replay) only ever reads back
 //! through `AppState`/`SimClock`, never mutates.
 
-use std::{collections::HashSet, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use mogwai_protocol::{InstrumentDef, SimClock};
 use rust_decimal::Decimal;
@@ -63,6 +67,15 @@ pub(crate) struct Config {
     /// `/instruments`, order validation, and data generation.
     #[serde(rename = "instrument")]
     pub(crate) instruments: Vec<ConfiguredInstrument>,
+    /// Initial per-currency account funding, currency -> amount (a decimal
+    /// string, like the instrument increments). The venue's equivalent of a
+    /// deposit made before the run: the ledger only ever books fill deltas, so
+    /// an unfunded account goes negative on its first buy - which a nautilus
+    /// CASH account (the adapter's default) refuses to apply, silently
+    /// desyncing the consumer from the venue. An ABSENT table keeps the funded
+    /// built-in default (matching the committed mogwai.toml); an explicitly
+    /// EMPTY `[balances]` table runs the account unfunded on purpose.
+    pub(crate) balances: HashMap<String, Decimal>,
 }
 
 impl Default for Config {
@@ -89,8 +102,34 @@ impl Default for Config {
             // against a large catalog raise it; `0` lifts it entirely.
             max_concurrent_replays: 1024,
             instruments: Vec::new(),
+            balances: default_balances(),
         }
     }
+}
+
+/// The funded built-in default: 1,000,000 USDT, the quote currency of the
+/// built-in BTCUSDT instrument. Mirrors the committed mogwai.toml so a
+/// no-config checkout serves an account that can actually trade; operators
+/// running a custom instrument set fund their own quote currencies via the
+/// `[balances]` table (or set it empty to run unfunded deliberately).
+fn default_balances() -> HashMap<String, Decimal> {
+    HashMap::from([("USDT".to_string(), Decimal::from(1_000_000))])
+}
+
+/// Validates the `[balances]` funding table: currencies must be non-blank and
+/// amounts non-negative. Zero is allowed (it pins a currency into every
+/// snapshot without funding it); negative initial funding has no venue meaning
+/// and is refused at startup like every other malformed knob.
+pub(crate) fn validate_balances(cfg: &Config) -> anyhow::Result<()> {
+    for (currency, amount) in &cfg.balances {
+        if currency.trim().is_empty() {
+            anyhow::bail!("balances currency must not be blank");
+        }
+        if *amount < Decimal::ZERO {
+            anyhow::bail!("balances.{currency} must not be negative");
+        }
+    }
+    Ok(())
 }
 
 impl Config {

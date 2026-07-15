@@ -39,6 +39,7 @@ realistic paced live feed out of the box.
 | `server_heartbeat_ms` | integer ms | `0` | Server-originated websocket heartbeat cadence in simulated milliseconds. `0` keeps it off. When set, each `/ws` session receives liveness frames that survive `StallData` but not `GoDark` - enable it to test liveness frames that outlive a data stall (the issue-4255 reproduction). |
 | `backfill_horizon_ns` | integer ns | `86_400_000_000_000` (24h) | How far before sim-now-at-boot the synthetic tape begins. The boot `data_origin = sim_now_at_boot - backfill_horizon_ns` is the earliest instant any source can serve, shared by every symbol's generator so the timeline tracks the advertised clock. A request straddling the floor is refused loudly (a `/trades` 422, a WS `ProtocolError` clamp) rather than served short, so the default need not be exact - 24h covers a day's warmup. |
 | `max_concurrent_replays` | integer | `1024` | Global ceiling on concurrently-live per-symbol replay streams, summed across every `/ws` connection. Each subscribed symbol runs on its own OS thread, so without a ceiling the aggregate thread count is `connections * subscribed-symbols` - entirely client-driven, and a fleet of connections each subscribing the whole catalog can exhaust the process thread limit. A subscribe that would exceed the cap is refused for the over-limit symbols with a `ProtocolError` on the wire, exactly like an unservable subscribe; the connection stays up and its already-running streams are untouched. `0` disables the cap (unbounded). |
+| `[balances]` | table of decimal strings | `USDT = "1000000"` | Initial per-currency account funding, the venue's equivalent of a deposit made before the run. The ledger books only fill deltas on top of this seed, so an unfunded account goes negative on its first buy - which a nautilus cash account (the adapter's default `AccountType::Cash`, where borrowing is forbidden) refuses to apply, silently desyncing the consumer's account from the venue's. The seed rides the first `GET /account` snapshot, so adapters register a funded account before any order is worked. An absent table keeps the funded default; an explicitly empty `[balances]` table runs the account unfunded on purpose. Fund the quote currency of every instrument the run trades (and the base currency too if a strategy sells first). Negative amounts and blank currencies are refused at startup. |
 | `[[instrument]]` | array of tables | built-in BTCUSDT | Optional authoritative instrument set. When present, each table carries the wire `InstrumentDef`, a `generator` table, and a `session` table. The server uses this same set for `GET /instruments`, order validation, live subscriptions, and historical `/trades`. Unknown top-level keys are rejected, but a typo'd sub-field inside an `[[instrument]]` table is still tolerated (serde cannot combine strict-unknown-field checking with the flattened instrument record). |
 
 ## Instrument Profiles
@@ -115,6 +116,9 @@ sim_epoch_ns = 0
 speed = 1.0
 gap_cap_ms = 1000
 server_heartbeat_ms = 0
+
+[balances]
+USDT = "1000000"
 ```
 
 The heartbeat reproduction config (`scripts/smoke-heartbeat.toml`), driving

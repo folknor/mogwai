@@ -30,6 +30,16 @@ server_heartbeat_ms = 0
 # with a ProtocolError while running streams keep going. 0 disables the cap.
 max_concurrent_replays = 1024
 
+# Initial per-currency account funding - the deposit made before the run. The
+# ledger books only fill deltas on top of this seed, so an unfunded account
+# goes negative on its first buy, which a nautilus cash account (the adapter's
+# default) refuses to apply. Amounts are decimal strings. Omitting the table
+# keeps this same funded default; an explicitly empty [balances] table runs
+# the account unfunded on purpose. Fund the quote currency of every instrument
+# the run trades (and the base currency too if a strategy sells first).
+[balances]
+USDT = "1000000"
+
 # Omit [[instrument]] tables to use the built-in BTCUSDT profile. Add explicit
 # profiles when a run needs a custom instrument set, generator scale, or session
 # shape; see reference/config.md.

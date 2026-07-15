@@ -92,8 +92,15 @@ sockets, timers and the clock; the engine owns order and account state.
   instrument-decomposition table. `AccountState` is pushed after fills and after
   reservation-freeing cancels, and is pullable over `GET /account` so live
   adapters can register the venue account before the first order is worked.
-  free/locked is derived from resting-order reservations; the ledger is a pure
-  delta off zero, so an unfunded buy drives the quote leg negative.
+  free/locked is derived from resting-order reservations. The ledger books only
+  fill deltas, applied on top of the initial funding seeded from the
+  `[balances]` table in `mogwai.toml` (default: 1,000,000 USDT, matching the
+  built-in BTCUSDT instrument): funding is initial state with no runtime
+  deposit surface, so every balance the venue ever reports is explained by the
+  seed plus fills alone. An explicitly empty `[balances]` table runs the
+  account unfunded, where the first buy drives the quote leg negative - which
+  a nautilus CASH account (the adapter's default) refuses to apply; run
+  unfunded only to exercise exactly that refusal.
 - **Amend.** `ModifyOrder` is a real amend of a resting order: it reprices and/or
   resizes in place (the wire `quantity` is the order's total, so leaves is
   re-derived as total minus already-filled), re-derives the backing reservation,

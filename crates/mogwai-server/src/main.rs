@@ -45,6 +45,7 @@ use tokio::sync::Mutex;
 
 use crate::config::{
     Config, build_instrument_profiles, build_replay_permits, build_sim_clock, now_ns,
+    validate_balances,
 };
 use crate::http::{
     AppState, account, arm_divergence, clock, instruments, quotes, submit_order_http, trades,
@@ -272,6 +273,7 @@ async fn serve_async(
 ) -> anyhow::Result<()> {
     let cfg = Config::load(args.config.clone())?;
     let profiles = Arc::new(build_instrument_profiles(&cfg)?);
+    validate_balances(&cfg)?;
     let sim = build_sim_clock(&cfg, now_ns())?;
     tracing::info!(
         sim_epoch_ns = cfg.sim_epoch_ns,
@@ -298,10 +300,17 @@ async fn serve_async(
         "data origin"
     );
 
+    // Fund the venue account before the first client connects: the adapter
+    // pulls GET /account at connect and registers what it sees, so the seed
+    // must be in the very first snapshot, not booked later.
+    let mut funded: Vec<&String> = cfg.balances.keys().collect();
+    funded.sort();
+    tracing::info!(balances = ?funded, "account funding");
     let replay_permits = build_replay_permits(&cfg);
     let state = AppState {
-        engine: Arc::new(Mutex::new(Engine::with_instruments(
+        engine: Arc::new(Mutex::new(Engine::with_instruments_and_balances(
             profiles.instrument_defs(),
+            cfg.balances.clone(),
         ))),
         cfg,
         profiles,
@@ -753,6 +762,7 @@ mod tests {
                 backfill_horizon_ns: 86_400_000_000_000,
                 max_concurrent_replays: 1024,
                 instruments: Vec::new(),
+                ..Config::default()
             },
             profiles,
             sim: SimClock::identity(),
@@ -824,6 +834,44 @@ mod tests {
         );
         // A correctly-spelled key still parses (missing keys keep their defaults).
         assert!(toml::from_str::<Config>("gap_cap_ms = 5\n").is_ok());
+    }
+
+    #[test]
+    fn balances_default_funded_and_empty_table_unfunds() {
+        // An absent [balances] table keeps the funded built-in default (the
+        // committed mogwai.toml parity), while an explicitly EMPTY table is the
+        // deliberate unfunded account.
+        let absent: Config = toml::from_str("").expect("empty config");
+        assert_eq!(absent.balances.get("USDT"), Some(&Decimal::from(1_000_000)));
+
+        let empty: Config = toml::from_str("[balances]\n").expect("empty balances table");
+        assert!(empty.balances.is_empty());
+
+        let custom: Config =
+            toml::from_str("[balances]\nUSDT = \"250000\"\nBTC = \"2.5\"\n").expect("custom");
+        assert_eq!(custom.balances.get("USDT"), Some(&Decimal::from(250_000)));
+        assert_eq!(
+            custom.balances.get("BTC"),
+            Some(&Decimal::new(25, 1)),
+            "decimal strings parse exactly"
+        );
+    }
+
+    #[test]
+    fn balances_validation_refuses_negative_and_blank() {
+        let mut cfg = Config {
+            balances: std::collections::HashMap::from([("USDT".to_string(), Decimal::from(-1))]),
+            ..Config::default()
+        };
+        let err = validate_balances(&cfg).expect_err("negative funding refused");
+        assert!(err.to_string().contains("must not be negative"));
+
+        cfg.balances = std::collections::HashMap::from([(" ".to_string(), Decimal::ONE)]);
+        let err = validate_balances(&cfg).expect_err("blank currency refused");
+        assert!(err.to_string().contains("must not be blank"));
+
+        cfg.balances = std::collections::HashMap::from([("USDT".to_string(), Decimal::ZERO)]);
+        validate_balances(&cfg).expect("zero funding is allowed");
     }
 
     #[tokio::test]
@@ -1847,6 +1895,7 @@ mod tests {
             backfill_horizon_ns: 86_400_000_000_000,
             max_concurrent_replays: 1024,
             instruments: Vec::new(),
+            ..Config::default()
         };
         let profiles = default_profiles();
         let (tx, mut rx) = mpsc::channel::<ServerMessage>(8);
@@ -2008,6 +2057,7 @@ mod tests {
             backfill_horizon_ns: 86_400_000_000_000,
             max_concurrent_replays: 1024,
             instruments: Vec::new(),
+            ..Config::default()
         };
         let profiles = default_profiles();
         // Capacity 1 so the generator fills the channel and parks in
@@ -2076,6 +2126,7 @@ mod tests {
             backfill_horizon_ns: 86_400_000_000_000,
             max_concurrent_replays: 1024,
             instruments: Vec::new(),
+            ..Config::default()
         };
         let profiles = default_profiles();
         let (tx, mut rx) = mpsc::channel::<ServerMessage>(8);
