@@ -93,8 +93,6 @@ in `mogwai.toml`. The only reads:
   server runtime knob. The default path string is duplicated verbatim in both
   files (`recon.py` re-reads the env var instead of importing
   `characterize.DATA_DIR` the way `run_corpus.py` does).
-- `CODEX_HOME` - `scripts/codex_common.py`, default `~/.codex`, orchestration
-  wrapper only.
 - Compile-time only (not runtime): `env!("CARGO_MANIFEST_DIR")` in
   `mogwai-data/src/generated.rs` locates the baked-in `analysis/fingerprint.json`;
   the server build script bakes `MOGWAI_LONG_VERSION` from `CARGO_PKG_VERSION`;
@@ -206,10 +204,11 @@ golden-test seed.
   (`BTCUSDT`/`Limit`/qty 10/px 100), plus many inline per-assertion socket
   timeouts and latency tolerances (not centralised; first place to look if
   the smoke ever gets flaky).
-- Orchestration: `scripts/codex_common.py` `MODEL "gpt-5.5"` (workspace-wide pin,
-  no override), sandbox `workspace-write`, 30s transcript-match slack;
-  `codex-implement.py` effort `medium`, `codex-review.py` effort `xhigh`;
-  `prevent-harness-bug.sh` default sleep `60`.
+- Orchestration: the `review` tool, configured from `.review.toml` - the codex
+  wrapper scripts were removed in favour of it. Critique runs `review bare
+  --profile deep` (gpt-5.6-sol, xhigh, read-only); implement runs `review goal
+  --profile build` (gpt-5.6-terra, medium, workspace-write). `[_defaults]`
+  pins the provider to `codex`. `prevent-harness-bug.sh` default sleep `60`.
 - Smoke fixture configs `smoke-accelerated.toml` (`speed 100.0`) and
   `smoke-heartbeat.toml` (`server_heartbeat_ms 100`) - by-design knobs.
 - `analysis/`: `MAX_LAG 50` in `characterize.py` with `build_fingerprint.py`

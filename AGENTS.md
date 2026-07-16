@@ -38,7 +38,9 @@ A Cargo workspace, five crates under `crates/`:
   `../nautilus_trader` checkout (default-features off, no pyo3); the other four
   build nautilus-free.
 
-`scripts/` holds the end-to-end smoke test and the orchestration codex wrappers;
+`scripts/` holds the end-to-end smoke test and the harness-bug flush the
+orchestration loop uses (codex is now driven by the `review` tool, configured
+from `.review.toml`, not by wrapper scripts);
 `analysis/` is the offline Python that fits the fingerprint; `docs/` is the
 transient TODO; `reference/` is durable docs - `architecture.md` describes how
 the system works, the others are process docs.

@@ -12,6 +12,17 @@ goal with the user before launching anything. The orchestrate.md workflow,
 once invoked, overrides the foreground-subagent rule below (its launches are
 background by design, per the user's standing instruction in that document).
 
+**The `review` tool** fans a prompt out to fresh codex sessions, configured
+from `.review.toml`: an archetype is a priming prompt, a profile a
+model/effort/sandbox tier. Invoke as `echo '<prompt>' | review <archetype>
+[--profile <p>]` (the one pipe the bash rules exempt). Archetypes: `bare`
+(empty prime - the orchestrate loop critiques specs with it), `goal` (prepends
+`/goal `, used for implement runs), `bugs` (correctness-bug hunter),
+`broadarrow` and `nautilus` (consultants grounded in the vendored `research/`
+copies). Profiles: `deep` (gpt-5.6-sol, xhigh, read-only) and `build`
+(gpt-5.6-terra, medium, workspace-write). It replaced the old
+`scripts/codex-*.py` wrappers.
+
 **Always get permission from the user before launching subagents - ASK FIRST,
 EVERY TIME.** This is not satisfied by the user approving the underlying task.
 "Yes, fix the bug" authorizes the work, NOT the fan-out: spawning Agent/Task
@@ -45,6 +56,7 @@ Subagent prompt rules:
 ### Communication rules
 
 - Never use the `AskUserQuestion` tool - the harness runs in don't-ask mode and it will be denied. When you need a decision from the user, just ask in chat with the options laid out in prose.
+- Never offer to commit or tell the user "per your rules I've left things uncommitted". Don't mention git commits, ever. The user will instruct you when to commit.
 
 ### General rules
 
