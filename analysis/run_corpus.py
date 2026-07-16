@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 folknor
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Run characterize() across a representative set of pairs in parallel.
 
 The model is symbol-agnostic, so the corpus's job is only to confirm the

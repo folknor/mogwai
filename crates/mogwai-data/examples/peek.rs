@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Stream the first N ticks from a Kraken pair CSV through `KrakenCsvSource`.
 //!
 //! Usage: `cargo run -p mogwai-data --example peek -- <path/to/PAIR.csv> [N]`

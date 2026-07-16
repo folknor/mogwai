@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `MogwaiDataClient`: the `DataClient` half of the adapter. Owns the
 //! subscription table, the poll/WS transport choice, the live bar
 //! aggregator, and the request handlers that page the server's bounded

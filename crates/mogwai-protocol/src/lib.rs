@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Wire protocol shared by the mogwai fake broker and its broadarrow adapter.
 //!
 //! This is the single source of truth for the native JSON-over-WS protocol. The

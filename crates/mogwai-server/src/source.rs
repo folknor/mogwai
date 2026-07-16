@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Selects the market-data source the server replays.
 //!
 //! Every tick is generated from the committed fingerprint; the server opens no

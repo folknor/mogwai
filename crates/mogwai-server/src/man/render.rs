@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Markdown -> ANSI terminal renderer for `mogwai man` (bundled reference docs).
 //
 // A pulldown_cmark event emitter that styles headings, code, tables, lists,

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The committed fingerprint's config schema: the `Deserialize` types parsed
 //! straight from `analysis/fingerprint.json`, plus the validation that keeps
 //! caller-supplied [`GeneratorScalars`] and [`SessionProfile`] inputs inside

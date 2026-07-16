@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The armed-divergence queue: arming, the explicit flush, and the
 //! first-applicable-entry consumption the submit path drives.
 

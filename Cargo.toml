@@ -4,10 +4,10 @@ members = ["crates/*"]
 
 [workspace.package]
 edition = "2024"
-license = "MIT"
+license = "AGPL-3.0-only"
 rust-version = "1.96"
-authors = ["folk <folk@folk.wtf>"]
-repository = "https://github.com/folknor/piners"
+authors = ["folknor"]
+repository = "https://github.com/folknor/mogwai"
 
 [workspace.dependencies]
 mogwai-protocol = { path = "crates/mogwai-protocol" }

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Plumbing shared by both [`super::data::MogwaiDataClient`] and
 //! [`super::exec::MogwaiExecutionClient`]: the havoc dispatch pipeline
 //! (`HavocFilter`, `dispatch_havoc`/`flush_havoc`), the lock/task-tracking

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! HTTP surface: shared app state plus every plain request/response route
 //! (`/instruments`, `/account`, `/clock`, `/trades`, `/quotes`, `/orders`,
 //! `/control/divergence`). The stateful, streaming websocket surface

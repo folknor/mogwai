@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Tick storage + replay. A [`TickSource`] yields ticks in time order and the
 //! server fans them out to subscribers as market data; a [`Permutation`] can
 //! transform them in flight (e.g. tick-rule aggressor inference).

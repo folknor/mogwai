@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Ignored havoc tests for the mogwai adapter.
 //!
 //! These bind a real TCP listener and exercise behavior that unit tests cannot

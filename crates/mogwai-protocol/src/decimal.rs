@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use rust_decimal::Decimal;
 
 /// Saturating `Decimal` -> `f64`. `Decimal`'s max magnitude (~7.9e28) sits

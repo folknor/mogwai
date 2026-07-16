@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 folknor
+# SPDX-License-Identifier: AGPL-3.0-only
+
 # prevent-harness-bug.sh - the "flush" for the spec-loop orchestration.
 #
 # Recent Claude harness versions leave a completed background agent lingering

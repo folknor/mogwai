@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `mogwai gen` - runs the synthetic generator OFFLINE (no server, no sockets,
 //! no adapter) and writes its output as CSV, either raw trades or aggregated
 //! OHLCV bars, so the generated tape can be charted and inspected. Reuses the

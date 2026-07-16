@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Run configuration: the `mogwai.toml` schema, instrument-profile
 //! construction/validation, and the sim-clock derivation that reads it. Split
 //! out of `main.rs` because these are the load-time knobs the rest of the

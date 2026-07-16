@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `GeneratedSource` lineage: synthesizes market data from a committed
 //! fingerprint fitted offline to Kraken trade history. Split by concern:
 //!

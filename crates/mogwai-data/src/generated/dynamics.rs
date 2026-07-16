@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The three stochastic building blocks the core walk composes each tick:
 //! [`AcdClock`] (duration clustering), [`GarchVol`] (latent volatility and the
 //! walking mid) and [`BounceState`] (the high/low bounce regime and its

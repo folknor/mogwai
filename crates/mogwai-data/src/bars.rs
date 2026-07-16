@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Shared trade-to-OHLCV time-bar aggregation core. Nautilus-free; lifted out
 //! of `mogwai-adapter` so a second consumer (the future `mogwai gen` CLI) folds
 //! bars through the SAME implementation instead of a hand-rolled copy. See

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The nautilus client pair for the `MOGWAI` venue: [`MogwaiDataClient`] and
 //! [`MogwaiExecutionClient`]. Split along the natural data/exec/shared seam:
 //!

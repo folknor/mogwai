@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 folknor
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Synthesize the generator fingerprint from the per-pair characterizations.
 
 Reads every char_<PAIR>.json under analysis/ and produces two artifacts:

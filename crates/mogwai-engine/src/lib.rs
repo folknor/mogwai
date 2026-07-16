@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The venue-agnostic exchange core: open orders, accounts, and the divergence
 //! injection layer. Protocol gateways (native JSON-over-WS, or a future Binance
 //! facade) drive this engine and serialize whatever it emits.

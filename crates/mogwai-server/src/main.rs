@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! mogwai fake-broker server.
 //!
 //! Hosts the native JSON-over-WS gateway (`/ws`) that the broadarrow adapter

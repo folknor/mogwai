@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The optional per-subscription market regime overlay: [`RegimeState`]
 //! derives the walk's arrival/vol/clamp multipliers from a
 //! [`mogwai_protocol::MarketRegime`] at construction time, and exposes the

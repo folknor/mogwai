@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `MogwaiExecutionClient`: the `ExecutionClient` half of the adapter. Owns
 //! the order/fill/position mirror (`ExecState`), the HTTP-or-WS order
 //! dispatch, the venue-message-to-nautilus-event translation, and the

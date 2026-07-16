@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use mogwai_protocol::{AggressorSide, MarketRegime, decimal_to_f64};
 
 use crate::{TickEvent, TickSource};

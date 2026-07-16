@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Wall-clock derivation and the precomputed per-tick session multipliers.
 //! [`utc_hour_dow`] turns the nanosecond clock into civil hour/day-of-week
 //! fields with no chrono dependency; [`SessionModulator`] turns a

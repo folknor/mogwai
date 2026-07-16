@@ -1,0 +1,10 @@
+mogwai
+Copyright (C) 2026 folknor
+
+Licensed under the GNU Affero General Public License v3.0 only
+(AGPL-3.0-only); see LICENSE. Commercial licenses are available
+separately; see COMMERCIAL-LICENSE.md.
+
+Third-party dependencies are governed by their own licenses (all
+permissive, plus nautilus under LGPL-3.0-or-later), which continue to
+apply; see each crate's own metadata.

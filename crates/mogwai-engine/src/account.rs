@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The account ledger: balances, positions, locked reservations, and the
 //! `AccountState` snapshot. Includes the saturating arithmetic that keeps
 //! unbounded cross-fill accumulation from panicking the engine.

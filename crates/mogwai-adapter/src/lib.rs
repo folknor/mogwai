@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Nautilus client adapter for a running mogwai-server.
 //!
 //! The rest of mogwai remains independent of nautilus and speaks the native

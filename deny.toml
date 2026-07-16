@@ -1,0 +1,113 @@
+# cargo-deny configuration
+# https://embarkstudios.github.io/cargo-deny/
+#
+# This enforces Step 1 of open-source-procedure.md: the commercial license can
+# only free a buyer from copyleft if every dependency is permissive. The one
+# deliberate copyleft dependency is nautilus (LGPL-3.0-or-later, path-dep'd by
+# mogwai-adapter) - LGPL permits linking from otherwise-proprietary code, so it
+# is an accepted carve-out, not a blocker. mogwai's own workspace crates are
+# AGPL-3.0-only. Everything else must be permissive.
+
+[graph]
+all-features = true
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+# =============================================================================
+# Security Advisories
+# =============================================================================
+[advisories]
+# Empty by design: mogwai's closure is small (nautilus with default-features
+# off, no pyo3, plus light transitive deps). Add { id, reason } entries here
+# only when an advisory has no fix and the exposure is documented.
+ignore = []
+
+# =============================================================================
+# License Configuration
+# =============================================================================
+[licenses]
+# Every license actually present in mogwai's dependency closure, all permissive,
+# plus LGPL-3.0-or-later (nautilus, link-compatible). The list is kept to what
+# the tree encounters so an unexpected license fails loudly rather than slipping
+# through a generous allowance. BSD-2-Clause-Patent (ustr) and CDLA-Permissive-2.0
+# (the webpki root-cert bundle via the TLS stack) are permissive despite the
+# tools flagging them for review.
+#
+# AGPL-3.0-only - mogwai's own license - is deliberately NOT here yet: the
+# workspace crates carry no license field until Step 5 of open-source-procedure.md
+# stamps it, so `[licenses.private] ignore` skips them for now. When Step 5 lands,
+# add "AGPL-3.0-only" here and flip that ignore to false so the crates are
+# verified rather than skipped.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-2-Clause-Patent",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "ISC",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "Zlib",
+  "Unicode-3.0",
+  "Unlicense",
+  "LGPL-3.0-or-later",
+]
+
+confidence-threshold = 0.8
+
+# implied-vol 2.0.0 ships no SPDX metadata, so the tools report "unknown
+# license"; its LICENSE file is MIT, manually verified both upstream by
+# nautilus_trader (whose deny.toml carries the same clarification) and locally.
+# The file hash pins that verification - a version bump that changes LICENSE
+# fails the check loudly rather than silently re-asserting MIT.
+[[licenses.clarify]]
+name = "implied-vol"
+version = "*"
+expression = "MIT"
+license-files = [{ path = "LICENSE", hash = 0xb0803f0e }]
+
+[licenses.private]
+# mogwai's workspace crates are unpublished and do not declare a license field
+# until Step 5 stamps AGPL-3.0-only, so skip them for now. Flip to false once
+# that lands (and add AGPL-3.0-only to the allow list above) to verify them.
+ignore = true
+registries = []
+
+# =============================================================================
+# Banned / Duplicate Crates
+# =============================================================================
+[bans]
+# Wildcard version requirements are a supply-chain and drift hazard - deny them
+# outright. Duplicate versions are only warned: they are transitive artefacts of
+# upstream pins, not a licensing concern, so they inform rather than gate.
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+workspace-default-features = "allow"
+external-default-features = "allow"
+
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+# =============================================================================
+# Dependency Sources
+# =============================================================================
+[sources]
+# Only crates.io. The nautilus and broadarrow siblings are path dependencies,
+# not registry or git sources, so they are not subject to this gate.
+unknown-registry = "deny"
+unknown-git = "deny"
+
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[sources.allow-org]
+github = []
+gitlab = []
+bitbucket = []

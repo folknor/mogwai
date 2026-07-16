@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Out-of-band control plane: arm deterministic divergences for tests.
 //!
 //! This is the reason mogwai exists as an external process - it can emit ugly,

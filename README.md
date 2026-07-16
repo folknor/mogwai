@@ -77,3 +77,20 @@ them.
 
 Codebase conventions and build rules live in `AGENTS.md`. The transient TODO is
 `docs/todo.md`; the offline fingerprint-fitting pipeline is `analysis/`.
+
+## License
+
+mogwai is dual-licensed:
+
+- **AGPL-3.0-only** for everyone - see [LICENSE](LICENSE). If you convey the
+  software or offer it over a network, the AGPL's source-sharing obligations
+  apply to your work.
+- **Commercial licenses** for proprietary use without copyleft obligations -
+  see [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md).
+
+All versions in this repository's history, including commits that predate the
+LICENSE file, are licensed under the AGPL-3.0-only.
+
+Contributions require agreeing to the [CLA](CLA.md), which assigns copyright to
+the project owner and keeps dual licensing possible. You retain a full license
+back to your own contributions.

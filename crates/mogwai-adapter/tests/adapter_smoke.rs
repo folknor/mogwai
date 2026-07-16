@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Ignored execution transport smoke test for the mogwai execution client.
 //!
 //! It uses the shared self-contained HTTP and WebSocket stub (`tests/common`)

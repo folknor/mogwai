@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Stamp the binary's version string into a compile-time env var that
 //! `main.rs` reads for `--version`.
 //!

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 folknor
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Reconnaissance pass over the Kraken trade-history dump.
 
 Phase 0, step 0: before any statistical characterization, learn the lay of the

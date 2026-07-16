@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Order lifecycle: submit (validation, divergence gates, fills, resting),
 //! cancel, and modify. Fills are synthetic - the size/price grid, the
 //! partial-fill divergence, and the FOK all-or-nothing gate all live here.

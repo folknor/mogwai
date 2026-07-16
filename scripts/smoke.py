@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 folknor
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """End-to-end smoke test of the mogwai fake broker.
 
 Arms divergences over the control plane, then submits orders over the native WS

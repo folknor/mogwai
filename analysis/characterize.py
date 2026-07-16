@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 folknor
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Streaming stylized-fact characterization of one Kraken pair file.
 
 Phase 0: measure the stylized facts that define "looks real" in one streaming

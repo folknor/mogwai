@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `mogwai man [TOPIC]` - the bundled reference docs.
 //!
 //! The durable `reference/*.md` docs are compiled into the binary with

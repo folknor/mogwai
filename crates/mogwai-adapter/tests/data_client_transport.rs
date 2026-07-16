@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! End-to-end transport test for the mogwai `DataClient`.
 //!
 //! Exercises the public adapter surface against the shared self-contained stub

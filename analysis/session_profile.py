@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 folknor
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Render the UTC session profile from a characterize.py report.
 
 Reads char_<PAIR>.json (no re-scan of the dump) and collapses the 24x7

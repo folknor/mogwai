@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Tuning constants for the fingerprint-fitted synthetic generator. Grouped
 //! here, separate from the types that consume them, so the calibration
 //! knobs and their fingerprint-band rationale stay easy to scan as a unit.

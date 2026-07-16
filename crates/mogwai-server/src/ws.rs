@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `/ws` gateway: one task per connection multiplexing order entry,
 //! per-symbol market-data replay, the execution-delay pump, and the optional
 //! heartbeat onto a single outbound channel. Everything here exists to serve

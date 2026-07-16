@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Small numeric helpers shared across the generator: fingerprint-range
 //! membership checks, the saturating f64-to-Decimal conversion the walk uses
 //! for prices/sizes, round-lot snapping, and the one derived constant

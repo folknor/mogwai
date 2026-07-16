@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Shared test-support harness for the ignored adapter integration tests.
 //!
 //! All three adapter test binaries (`adapter_smoke`, `data_client_transport`,

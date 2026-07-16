@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The core path-dependent walk: [`GeneratedSource`] composes the ACD
 //! duration clock, the GARCH latent mid, the bounce/drift price process and
 //! the optional regime overlay into the [`crate::TickSource`] the running
