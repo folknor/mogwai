@@ -12,8 +12,20 @@ Or both. There are no exceptions.
 
 ## Open issues
 
-- The accelerated smoke (a coherent-clock-spec gate, not a forward-origin gate)
-  times out on its market-data subscribe.
+- Decide whether the fitted tape's multi-minute lulls are desirable realism
+  (surfaced 2026-07-16 while fixing the accelerated smoke). The ACD duration
+  process (persistence 0.9935, Weibull shape 0.60, dispersion band 131.7 to
+  4608.9 s) is heavy-tailed: per-tick mean cadence stays ~7 s, but slow
+  excursions last ~150 ticks - hours of tape time at minutes per tick - so a
+  subscriber landing at a random sim instant sits mid-lull with high
+  probability (the gap straddling an instant is length-biased toward the
+  dispersion index, i.e. minutes). Consequence: at high speed a fresh
+  subscribe can legitimately stay silent for tens of wall-seconds (deadline
+  pacing ignores gap_cap_ms by design), which will trip broadarrow's
+  feed-stale watchdog on an honestly healthy venue. The accelerated smoke now
+  anchors on a real tape tick so it no longer trips on this; bounding lulls in
+  the generator would break the committed byte-identical golden stream, so
+  this is a fingerprint refit decision, not a local fix.
 
 - mogwai-engine `next_position` unbounded accumulation. The per-fill weighted-
   average is now overflow-guarded (a single oversized order is rejected before
@@ -189,9 +201,10 @@ golden-test seed.
 ### Non-crate (scripts, analysis, root config)
 
 - `scripts/smoke.py`: `HOST/PORT 127.0.0.1:8787` (no `--host`/`--port` override),
-  `WINDOW_LOOKBACK_NS 1h`, `ACCEL_DELAY_MS 1000`, `FIRST_GAP_SLACK_NS 2s`, fixed
-  order shape (`BTCUSDT`/`Limit`/qty 10/px 100), plus many inline per-assertion
-  socket timeouts and latency tolerances (not centralised; first place to look if
+  `WINDOW_LOOKBACK_NS 1h`, `ACCEL_DELAY_MS 1000`, `ACCEL_CLOCK_SLACK_WALL_NS
+  50ms`, `ACCEL_ANCHOR_TIMEOUT_S 120`, fixed order shape
+  (`BTCUSDT`/`Limit`/qty 10/px 100), plus many inline per-assertion socket
+  timeouts and latency tolerances (not centralised; first place to look if
   the smoke ever gets flaky).
 - Orchestration: `scripts/codex_common.py` `MODEL "gpt-5.5"` (workspace-wide pin,
   no override), sandbox `workspace-write`, 30s transcript-match slack;

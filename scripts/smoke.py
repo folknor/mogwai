@@ -51,6 +51,18 @@ HOST, PORT = "127.0.0.1", 8787
 # the live clock at runtime.
 WINDOW_LOOKBACK_NS = 3_600_000_000_000
 ACCEL_DELAY_MS = 1000
+# Slack for comparing client-side wall reads against server-stamped sim
+# instants, expressed as WALL nanoseconds and projected onto the sim axis at
+# the run's speed. Covers the client and server sampling the wall clock a few
+# ms apart plus scheduling jitter; at speed 100 every wall ms is 100 sim-ms,
+# so an unslacked window edge would flake.
+ACCEL_CLOCK_SLACK_WALL_NS = 50_000_000
+# How long the accelerated gate polls /trades for its anchor tick before
+# declaring the tape broken. The fitted ACD duration process is heavy-tailed
+# (dispersion band up to ~4600s), so right after boot the window
+# [sim_epoch, sim_now] can legitimately stay empty for a while: a worst-band
+# lull is ~46 wall-seconds at speed 100. Twice that plus margin.
+ACCEL_ANCHOR_TIMEOUT_S = 120.0
 
 
 def post_divergence(payload: dict) -> int:
@@ -645,7 +657,14 @@ def main_accelerated() -> None:
     assert sim["sim_epoch_ns"] > 0, clock
     assert sim["speed"] > 1.0, clock
     assert post_divergence({"type": "ClearDivergences"}) == 202
+    slack_ns = int(ACCEL_CLOCK_SLACK_WALL_NS * sim["speed"])
 
+    # Execution-side coherence: the engine stamps every event at sim-now while
+    # the request is in flight, so each ts_event must land inside the
+    # roundtrip's wall window projected onto the sim axis (plus the wall-read
+    # slack). This asserts the execution path rides the advertised clock
+    # directly, rather than comparing it against a market-data timestamp whose
+    # distance is a property of the tape.
     order_start_wall = time.time_ns()
     msgs = ws_roundtrip(submit_order("ACCEL1"), expect=3)
     order_end_wall = time.time_ns()
@@ -656,22 +675,49 @@ def main_accelerated() -> None:
         "OrderFilled",
         "AccountState",
     ], msgs
-    filled = msgs[1]
-    account = msgs[2]
-    assert filled["ts_event"] >= sim["sim_epoch_ns"], filled
-    assert account["ts_event"] >= sim["sim_epoch_ns"], account
-    assert filled["ts_event"] > order_start_wall, (filled, order_start_wall)
-    expected_order_sim = sim_now(clock, (order_start_wall + order_end_wall) // 2)
-    order_error = abs(filled["ts_event"] - expected_order_sim)
-    print("accel-order-error-ns:", order_error)
+    exec_lo = sim_now(clock, order_start_wall) - slack_ns
+    exec_hi = sim_now(clock, order_end_wall) + slack_ns
+    for msg in msgs:
+        assert exec_lo <= msg["ts_event"] <= exec_hi, (msg, exec_lo, exec_hi)
+    print("PASS: execution events are stamped on the advertised sim axis")
 
+    # Market-data anchor: the first REAL tick on the tape at-or-after
+    # sim_epoch, found via /trades. A previous version subscribed at sim_epoch
+    # and bounded the first frame's arrival with a fixed ~2s first-gap slack,
+    # but the fitted ACD duration process is heavy-tailed (dispersion index in
+    # the hundreds of seconds): the tape realizes multi-minute lulls, and a
+    # random sim instant sits mid-lull with high probability (the expected gap
+    # straddling an instant is length-biased), so ANY fixed first-gap constant
+    # only passes when the tape near epoch happens to be dense. /trades caps
+    # its window at sim-now, so an empty page just means the tape is still
+    # mid-lull and sim time has to advance; poll until the tick exists.
+    anchor_deadline = time.monotonic() + ACCEL_ANCHOR_TIMEOUT_S
+    while True:
+        page = fetch_trades("BTCUSDT", sim["sim_epoch_ns"], 1)
+        if page:
+            anchor = page[0]
+            break
+        assert time.monotonic() < anchor_deadline, (
+            f"no on-tape tick at-or-after sim_epoch within {ACCEL_ANCHOR_TIMEOUT_S}s; "
+            "a lull this long is outside the fitted dispersion band"
+        )
+        time.sleep(0.25)
+    print("anchor:  ", anchor)
+
+    # Subscribing from the anchor's exact ts_event must (a) replay the SAME
+    # tick first - the live replay and /trades are seeks into one shared tape,
+    # and a seek to an emitted tick's exact ts_event re-emits that boundary
+    # tick - and (b) deliver it immediately: the anchor is at-or-behind
+    # sim-now, so its deadline-pacing target is already in the past. Backfill
+    # immediacy is the delivery property the old fixed-slack version was
+    # actually after, now asserted with no assumption about tape density.
     ws = WsClient(timeout=2.0)
     data_start_wall = time.time_ns()
     ws.send(
         {
             "type": "Subscribe",
             "symbols": ["BTCUSDT"],
-            "start_ts": sim["sim_epoch_ns"],
+            "start_ts": anchor["ts_event"],
         }
     )
     trade = ws.read()
@@ -679,38 +725,14 @@ def main_accelerated() -> None:
     ws.close()
     print("accel-md:", trade)
     assert trade["type"] == "Trade", trade
-    assert trade["ts_event"] >= sim["sim_epoch_ns"], trade
-    assert (data_end_wall - data_start_wall) < 250_000_000, trade
-
-    # Coherence budget, all terms in SIMULATED nanoseconds (skew is a sim-ns
-    # difference). Three components, each justified rather than a fudge factor:
-    #
-    #   measured_wall_latency * speed
-    #     The real round-trip wall latency projected onto the sim axis - the
-    #     irreducible delivery cost that does not compress with speed.
-    #   connect_catchup = (data_start_wall - wall_anchor) * speed
-    #     The order fill is stamped sim_now at order time, while the FIRST trade
-    #     read is the generator's first tick at ~sim_epoch. Their difference is
-    #     dominated by the sim-time elapsed between the boot anchor and the
-    #     connect, which this term bounds from above (data subscribe happens
-    #     after the order, so it over-covers the order's own catch-up).
-    #   FIRST_GAP_SLACK_NS
-    #     The generator's first inter-arrival gap. trade.ts_event is
-    #     sim_epoch + first_gap; in a sparse regime that gap can exceed the
-    #     connect catch-up, flipping the sign of the skew, so the budget must
-    #     also bound the largest plausible first gap (~2 simulated seconds).
-    FIRST_GAP_SLACK_NS = 2_000_000_000
-    measured_wall_latency = max(order_end_wall - order_start_wall, data_end_wall - data_start_wall)
-    connect_catchup = int(
-        max(0, data_start_wall - sim["wall_anchor_ns"]) * sim["speed"]
+    assert {key: trade[key] for key in anchor} == anchor, (trade, anchor)
+    assert (data_end_wall - data_start_wall) < 250_000_000, (
+        data_end_wall - data_start_wall
     )
-    budget = int(measured_wall_latency * sim["speed"]) + connect_catchup + FIRST_GAP_SLACK_NS
-    skew = abs(filled["ts_event"] - trade["ts_event"])
-    print(
-        "accel-coherence:",
-        {"skew_ns": skew, "budget_ns": budget, "catchup_ns": connect_catchup},
-    )
-    assert skew <= budget, (skew, budget, filled, trade)
+    # Data-side coherence: a served tick is stamped on the sim axis and the
+    # tape never runs ahead of the clock.
+    assert trade["ts_event"] <= sim_now(clock, data_end_wall) + slack_ns, trade
+    print("PASS: live replay serves the shared tape from a real anchor tick")
 
     assert post_divergence({"type": "DelayAcks", "ms": ACCEL_DELAY_MS}) == 202
     ws = WsClient(timeout=2.0)
