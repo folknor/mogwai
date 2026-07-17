@@ -45,16 +45,16 @@ Or both. There are no exceptions.
 ## Notes / gotchas
 
 - broadarrow-side follow-ups from the 2026-07-15 QA findings (their repo, listed
-  here so the coordination is not lost): (a) the data-path WARN template names
-  three causes ("unknown symbol, exhausted seek, or pre-origin start") while
-  discarding mogwai's actual `reason` string, and does not know the fourth
-  "start_ts exceeds sim-now" clamp class; (b) the feed-stale message hard-codes
+  here so the coordination is not lost): (a) the feed-stale message hard-codes
   the issue-4255 hypothesis ("the connection looks healthy...") as fact even
-  when the venue process is dead; (c) `reference/mogwai.md` / `ba man mogwai`
+  when the venue process is dead; (b) `reference/mogwai.md` / `ba man mogwai`
   still describe the venue as unfundable - stale once the `[balances]` seed
-  lands; (d) any stored scenario TOMLs arming `GoDark`/`DelayAcks` under an
+  lands; (c) any stored scenario TOMLs arming `GoDark`/`DelayAcks` under an
   HTTP transport profile now fail scenario load by design (create-time
-  deliverability refusal) and need a sweep.
+  deliverability refusal) and need a sweep. (The data-path WARN template that
+  named three wrong causes turned out to live in mogwai-adapter, not ba - fixed
+  here: it now defers to the venue's `reason`, and the WS lifecycle logs
+  disconnect/backoff/reconnect/exhaustion per socket.)
 - Arming havoc via raw `POST /control/divergence` bypasses the adapter's
   create-time deliverability check by construction: the windows are
   venue-global and the server cannot know which transport each connected
@@ -68,7 +68,8 @@ Or both. There are no exceptions.
 - `MOGWAI_DATA_DIR` (default `/media/folk/Banan/Kraken_Trading_History`) is an
   offline-analysis input only (`analysis/`), never a server runtime knob.
 - `research/` (the nautilus and broadarrow clones) is gitignored; read those APIs
-  from there, depend on the sibling `../` checkouts.
+  from there. mogwai builds against the pinned crates.io nautilus, not a `../`
+  checkout.
 
 ## Hardcoded-value and env-var inventory (read-only sweep, 2026-07-01)
 
@@ -221,7 +222,7 @@ golden-test seed.
   rust_decimal 1 with serde-with-str, rand 0.10, rand_distr 0.6, rand_chacha 0.10,
   and the rest) centralised as workspace deps; `[profile.release]` opt-level 3 /
   lto fat / codegen-units 1; `rust-version 1.96`, `resolver 3`. The nautilus
-  path-dep lives in `mogwai-adapter/Cargo.toml`, not root. `brokkr.toml` only sets
+  crates.io dep (pinned) lives in `mogwai-adapter/Cargo.toml`, not root. `brokkr.toml` only sets
   `project = "mogwai"`. Root `mogwai.toml` carries the run knobs (`sim_epoch_ns 0`,
   `wall_anchor_ns 0`, `speed 1.0`, `gap_cap_ms 1000`, `server_heartbeat_ms 0`,
   `max_concurrent_replays 1024`, and the funded `balances` table).

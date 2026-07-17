@@ -545,6 +545,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                     seed: client_havoc.seed,
                     connected,
                     sim,
+                    label: "exec",
                 },
                 cmd_rx,
                 exec_command_to_client_message,

@@ -191,6 +191,16 @@ timeout fields). It is consumed entirely inside the adapter's `lifecycle.rs`:
 A clean `ConnHavoc::default` is a real reconnecting transport; hostile values
 make the adapter behave like a venue connection with broken lifecycle settings.
 
+Every lifecycle transition logs, tagged with a `socket` field naming the
+connection (`data` / `exec`): a failed dial and the disconnect cause (peer
+close, read error, idle timeout, writer death) at WARN, each backoff before a
+re-dial and every successful connect at INFO (a nonzero `attempt` on the
+connect line marks a re-attach after an outage), and attempt-cap exhaustion -
+which permanently stops the socket - at ERROR. A venue outage and recovery is
+therefore readable from the log after the fact instead of only inferable from
+bars resuming. Deliberately NOT logged: individual heartbeat pings and pongs
+(at a 1 s cadence they would out-shout the events that matter).
+
 ## The divergence catalog
 
 `control::Divergence` (in `mogwai-protocol`'s `control` module) is the catalog
@@ -246,10 +256,13 @@ every live writer.
 
 - **`DelayAcks { ms }`** - holds every outbound **execution** event by `ms`
   before sending it; market data is untouched. Implemented as a shared
-  `delay_ms` atomic the writer reads per frame: an execution frame
-  (`category().is_execution()`) sleeps `ms` first, a data frame does not. Arm
-  with `ms: 0` to clear the delay, or post `ClearDivergences`. The heartbeat is
-  explicitly exempt - `DelayAcks` must not perturb its cadence.
+  `delay_ms` atomic read per execution frame (`category().is_execution()`) by
+  the session's exec delay pump, which anchors each frame's deadline at its
+  production instant - so a whole order-entry batch, produced at one instant,
+  shares one deadline and lands together `ms` late rather than serialized a
+  window apart - without head-of-line-blocking market data behind the sleep.
+  Arm with `ms: 0` to clear the delay, or post `ClearDivergences`. The
+  heartbeat is explicitly exempt - `DelayAcks` must not perturb its cadence.
 - **`GoDark { ms }`** - drops **everything** (market data and execution) for a
   `ms` blackout window: a total venue blackout. Implemented as a `dark_until_ns`
   absolute wall-clock deadline; the writer drops every frame while `now_ns() <

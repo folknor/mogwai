@@ -20,13 +20,14 @@ the commercial-licensing option. New dependencies are checked against
 
 ## Building and testing
 
-The four broker crates build nautilus-free; `mogwai-adapter` needs a sibling
-`../nautilus_trader` checkout (default-features off, no pyo3). Use `brokkr`, not
-raw `cargo`:
+The four broker crates build nautilus-free; `mogwai-adapter` pulls the pinned
+nautilus crates from crates.io (default-features off, no pyo3). Build and test
+with `cargo`:
 
 ```sh
-brokkr check   # gremlins + clippy + tests, changed-files scope
-brokkr test -p <crate> <NAME>   # focused single-test runner
+cargo clippy --all-targets       # lints
+cargo test                       # the test suite
+cargo test -p <crate> <NAME>     # focused tests by name filter
 ```
 
 See [`AGENTS.md`](AGENTS.md) for the full codebase conventions and build rules.

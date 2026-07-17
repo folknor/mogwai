@@ -172,6 +172,13 @@ async fn http_polling_subscribe_fetches_trades_without_ws() {
 
     client.start().expect("start grabs the sink");
     client.connect().await.expect("connect starts polling");
+    // Anchor the poll cursor BELOW the stub's fixed trade: a subscribe without
+    // a start anchors at sim-now (wall now, against this stub's identity
+    // clock), and the cursor's rewind guard would then skip the ts_event=10
+    // body forever - the stub serves it verbatim regardless of the requested
+    // window, unlike the real server.
+    let params: nautilus_core::Params =
+        serde_json::from_value(serde_json::json!({ "start_ts": 5 })).expect("params decode");
     client
         .subscribe_trades(SubscribeTrades::new(
             instrument_id(),
@@ -180,7 +187,7 @@ async fn http_polling_subscribe_fetches_trades_without_ws() {
             UUID4::new(),
             UnixNanos::default(),
             None,
-            None,
+            Some(params),
         ))
         .expect("subscribe trades");
 

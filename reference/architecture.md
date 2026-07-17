@@ -277,8 +277,9 @@ Owns the sockets, the clock, and replay pacing.
 The one deliberate exception to "the broker crates never import nautilus": a
 `DataClient` + `ExecutionClient` pair plus their factories, each a client of
 mogwai-server that translates nautilus commands to and from `mogwai-protocol`
-messages. The only crate that path-deps the sibling `../nautilus_trader` checkout
-(default-features off, no pyo3); read its API from the in-tree `research/` copy.
+messages. The only crate that depends on nautilus - the published crates.io
+crates pinned in its `Cargo.toml`, default-features off, no pyo3; read its API
+from the in-tree `research/` copy.
 
 - **Factories.** `MogwaiDataClientFactory` / `MogwaiExecutionClientFactory`
   downcast their serde `ClientConfig`-downcastable configs, validate, and

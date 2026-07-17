@@ -18,19 +18,17 @@ A Cargo workspace of five crates under `crates/`:
 
 ## Building
 
-The four broker crates build nautilus-free. `mogwai-adapter` path-depends a
-sibling `nautilus_trader` checkout (default-features off, no pyo3), so a full
-build needs that checkout present next to this repo:
+The four broker crates build nautilus-free. `mogwai-adapter` depends on the
+published nautilus crates from crates.io, pinned in its `Cargo.toml`
+(default-features off, no pyo3), so a full build needs no sibling checkout -
+cargo fetches nautilus like any other dependency.
 
-```
-../nautilus_trader   # required to build mogwai-adapter
-```
-
-Use `brokkr` (not raw `cargo`) for check/test/run:
+Use `cargo` for check/test/run:
 
 ```sh
-brokkr check                         # gremlins + clippy + tests, changed-files scope
-brokkr run -p mogwai-server -- serve -f  # foreground gateway on 127.0.0.1:8787
+cargo clippy --all-targets               # lints
+cargo test                               # the test suite
+cargo run -p mogwai-server -- serve -f   # foreground gateway on 127.0.0.1:8787
 ```
 
 To put a `mogwai` binary on your `PATH` instead, install it from the crate path
@@ -51,7 +49,7 @@ daemon; see [`reference/cli.md`](reference/cli.md).
 
 ## Smoke test
 
-With a server running (`brokkr run -p mogwai-server -- serve -f`, which paces
+With a server running (`cargo run -p mogwai-server -- serve -f`, which paces
 correctly at the default `speed = 1.0`):
 
 ```sh

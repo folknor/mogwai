@@ -10,7 +10,7 @@ delays,
 duplicate fills, dropped account updates, venue blackouts) that an in-process
 backtest sandbox structurally cannot produce. The broker core never imports
 nautilus; the `mogwai-adapter` crate is the lone, deliberate exception - it
-path-deps nautilus to ship the `ExecutionClient`/`DataClient` pair broadarrow
+depends on the published nautilus crates to ship the `ExecutionClient`/`DataClient` pair broadarrow
 constructs to drive the `MOGWAI` venue over this workspace's native JSON-over-WS
 protocol.
 
@@ -34,9 +34,9 @@ A Cargo workspace, five crates under `crates/`:
   `/instruments` and `/trades`.
 - `mogwai-adapter` - the nautilus venue adapter: the `MogwaiDataClientFactory` /
   `MogwaiExecutionClientFactory`, their configs, and the client pair broadarrow
-  registers for the `MOGWAI` venue. The only crate that path-deps the sibling
-  `../nautilus_trader` checkout (default-features off, no pyo3); the other four
-  build nautilus-free.
+  registers for the `MOGWAI` venue. The only crate that depends on nautilus -
+  the published crates.io crates pinned in its `Cargo.toml`, default-features
+  off, no pyo3; the other four build nautilus-free.
 
 `scripts/` holds the end-to-end smoke test and the harness-bug flush the
 orchestration loop uses (codex is now driven by the `review` tool, configured
@@ -65,14 +65,19 @@ or broadarrow APIs) has two distinct access paths - never conflate them:
 - Read the source from the in-tree copies `research/nautilus_trader` and
   `research/broadarrow`. Agents cannot read anything outside this repo, so these
   copies are the only place to study those APIs.
-- Cargo path-dependencies point at the sibling checkouts `../nautilus_trader` and
-  `../broadarrow` (nautilus with default-features off, so no pyo3 or Python
-  linkage is pulled in), mirroring the split broadarrow itself uses. `research/`
+- Build against the PUBLISHED nautilus crates from crates.io, pinned in
+  `mogwai-adapter/Cargo.toml` with default-features off so no pyo3 or Python
+  linkage is pulled in. There is no sibling-checkout path dependency: a build
+  needs no `../nautilus_trader`. broadarrow is never a build input at all - it
+  is the consumer that depends on this workspace, not the reverse. `research/`
   is read-only reference, never a build input; `members = ["crates/*"]` already
   excludes it, so no workspace `exclude` is needed.
 
-Every implementation spec that references these APIs states both paths, so the
-implementer reads from `research/` and depends on `../`.
+Every implementation spec that references these APIs states both: the
+implementer reads from `research/` and builds against the pinned crates.io
+nautilus version. Note the vendored `research/nautilus_trader` snapshot may sit
+at a different version than the pinned build; when they diverge, the pinned
+crates.io version is what actually compiles.
 
 ### Bash rules
 

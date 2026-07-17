@@ -460,6 +460,7 @@ impl DataClient for MogwaiDataClient {
                     seed: client_havoc.seed,
                     connected,
                     sim,
+                    label: "data",
                 },
                 cmd_rx,
                 ws_command_to_client_message,
@@ -1157,15 +1158,20 @@ async fn handle_market_message(
             tracing::trace!("ignoring server heartbeat on data path");
         }
         ServerMessage::ProtocolError { reason, .. } => {
-            // The server sends ProtocolError to diagnose an unservable subscribe
-            // (unknown symbol, exhausted positioning seek, pre-origin start_ts
-            // clamp) as well as a decode failure. Swallowing it here left the
-            // feed silent with no downstream signal, indistinguishable from a
-            // quiet market. Match the exec path and surface the reason so a dead
-            // feed is visible in the adapter's own logs.
+            // The server sends ProtocolError to diagnose an unservable or
+            // degraded subscribe (unknown symbol, exhausted positioning seek,
+            // a start_ts clamped to the tape origin or to sim-now) as well as
+            // a decode failure. Swallowing it here left the feed silent with
+            // no downstream signal, indistinguishable from a quiet market.
+            // Surface the venue's reason VERBATIM and do not guess at causes:
+            // an earlier version of this line enumerated three candidates, and
+            // when a venue restart rewound sim-now under a surviving client's
+            // cursor the enumeration named only wrong ones - at ~11 WARN/s it
+            // was the loudest thing in the log, pointing every operator at a
+            // phantom subscription bug instead of the venue bounce.
             tracing::warn!(
                 %reason,
-                "venue reported a protocol error on the data path; a subscribe may have been refused (unknown symbol, exhausted seek, or pre-origin start)"
+                "venue reported a protocol error on the data path; the reason is the venue's own diagnosis"
             );
         }
         _ => {}

@@ -24,7 +24,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use common::{StubState, bound_stub, cached_order, instrument_id, next_exec_event, trade_json};
+use common::{
+    StubState, bound_stub, cached_order, instrument_id, next_exec_event,
+    next_non_instrument_data_event, trade_json,
+};
 use mogwai_adapter::{
     MOGWAI_VENUE, MogwaiDataClient, MogwaiDataClientConfig, MogwaiExecClientConfig,
     MogwaiExecutionClient,
@@ -124,13 +127,33 @@ async fn connect_data_client(
 }
 
 async fn next_trade(rx: &mut UnboundedReceiver<DataEvent>) -> nautilus_model::data::TradeTick {
-    let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-        .await
-        .expect("data event arrives")
-        .expect("sink open");
-    match event {
+    // Skips the connect-time instrument prologue (`emit_seeded_instruments`
+    // publishes the seeded defs to the sink before any trade), like the
+    // transport tests do.
+    match next_non_instrument_data_event(rx, Duration::from_secs(2)).await {
         DataEvent::Data(Data::Trade(trade)) => trade,
         other => panic!("expected trade event, got {other:?}"),
+    }
+}
+
+/// Asserts nothing except the connect-time instrument prologue reaches the
+/// data sink within `window`. The prologue is emitted by `connect()` straight
+/// to the sink - it neither passes the `HavocFilter` nor rides the WS stream -
+/// so "the havoc/stub suppressed everything" tests must tolerate it while
+/// still failing on any trade, bar, or quote that leaks through.
+async fn assert_only_instrument_prologue(rx: &mut UnboundedReceiver<DataEvent>, window: Duration) {
+    let deadline = Instant::now() + window;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            // Elapsed silent, or sink closed: nothing (more) can leak through.
+            Err(_) | Ok(None) => return,
+            Ok(Some(DataEvent::Instrument(_))) => continue,
+            Ok(Some(other)) => panic!("expected no data events within the window, got {other:?}"),
+        }
     }
 }
 
@@ -343,11 +366,9 @@ async fn havoc_drop_prob_one_drops_all() {
 
     let mut rx = subscribed_data_client(state, Some(havoc)).await;
 
-    let result = tokio::time::timeout(Duration::from_millis(400), rx.recv()).await;
-    assert!(
-        result.is_err(),
-        "none of the five dropped trades may reach the sink"
-    );
+    // Panics if any of the five dropped trades reaches the sink; only the
+    // connect-time instrument prologue may arrive.
+    assert_only_instrument_prologue(&mut rx, Duration::from_millis(400)).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -910,12 +931,10 @@ async fn divergence_go_dark_suppresses_stream_during_window() {
     let start = Instant::now();
     let mut rx = subscribed_data_client(state, None).await;
 
-    // Within the dark window nothing arrives.
-    let during = tokio::time::timeout(Duration::from_millis(150), rx.recv()).await;
-    assert!(
-        during.is_err(),
-        "the stream must be suppressed during the GoDark window"
-    );
+    // Within the dark window no stream frame arrives - the instrument
+    // prologue does (connect() emits it to the sink directly, not over the
+    // suppressed WS leg), so tolerate exactly that.
+    assert_only_instrument_prologue(&mut rx, Duration::from_millis(150)).await;
 
     // After the window lifts, the held trade is delivered.
     let trade = next_trade(&mut rx).await;

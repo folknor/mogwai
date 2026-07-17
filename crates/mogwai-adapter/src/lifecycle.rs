@@ -98,16 +98,35 @@ impl ReconnectPolicy {
 /// is not yet reached, the current attempt's backoff is slept and `false` is
 /// returned so the caller re-dials. `connected` is already stored `false` on
 /// both reconnect paths, so an exhausted return needs no further store here.
+///
+/// Both outcomes log: exhaustion permanently stops the socket (the loop
+/// returns and nothing restarts it), which without an ERROR line looks
+/// identical to a quiet venue, and the backoff INFO line is what makes a
+/// reconnect-in-progress readable in the worker log at all - a venue outage
+/// used to leave zero connection-lifecycle lines while the client silently
+/// re-attached.
 async fn backoff_or_exhausted(
     policy: &ReconnectPolicy,
     attempt: &mut u32,
     rng: &mut StdRng,
+    label: &'static str,
 ) -> bool {
     let delay = policy.backoff(*attempt, rng);
     *attempt = attempt.saturating_add(1);
     if policy.exhausted(*attempt) {
+        tracing::error!(
+            socket = label,
+            attempts = *attempt,
+            "reconnect attempts exhausted; giving up on the venue websocket"
+        );
         return true;
     }
+    tracing::info!(
+        socket = label,
+        attempt = *attempt,
+        delay_ms = delay.as_millis() as u64,
+        "venue websocket down; backing off before reconnect"
+    );
     tokio::time::sleep(delay).await;
     false
 }
@@ -194,6 +213,11 @@ pub(crate) struct WsConnectionConfig {
     pub(crate) seed: Option<u64>,
     pub(crate) connected: Arc<AtomicBool>,
     pub(crate) sim: SimClock,
+    /// Names this socket in the connection-lifecycle log lines ("data" /
+    /// "exec"). A venue outage hits both sockets concurrently, so without the
+    /// tag the interleaved disconnect/backoff/reconnect lines cannot be told
+    /// apart.
+    pub(crate) label: &'static str,
 }
 
 pub(crate) async fn run_ws_connection<
@@ -226,6 +250,7 @@ pub(crate) async fn run_ws_connection<
         seed,
         connected,
         sim,
+        label,
     } = config;
     let policy = ReconnectPolicy::from_conn(&conn, sim);
     // The reconnect-jitter RNG is seeded from the configured havoc seed when one
@@ -237,20 +262,40 @@ pub(crate) async fn run_ws_connection<
 
     loop {
         if policy.exhausted(attempt) {
+            // Only reachable with `reconnect_max_attempts = 0` (the true-return
+            // from `backoff_or_exhausted` already logged and returned for every
+            // other exhaustion), but a socket that never dials still deserves
+            // its ERROR line.
+            tracing::error!(
+                socket = label,
+                attempts = attempt,
+                "reconnect attempts exhausted; giving up on the venue websocket"
+            );
             connected.store(false, Ordering::Relaxed);
             return;
         }
 
         let ws = match connect_async(&ws_url).await {
             Ok((ws, _)) => ws,
-            Err(_) => {
+            Err(error) => {
+                tracing::warn!(
+                    socket = label,
+                    url = %ws_url,
+                    attempt,
+                    %error,
+                    "venue websocket dial failed"
+                );
                 connected.store(false, Ordering::Relaxed);
-                if backoff_or_exhausted(&policy, &mut attempt, &mut rng).await {
+                if backoff_or_exhausted(&policy, &mut attempt, &mut rng, label).await {
                     return;
                 }
                 continue;
             }
         };
+        // `attempt` counts dials since the last PROVEN connection, so a nonzero
+        // value here marks this line as a re-attach after an outage rather than
+        // the boot-time connect.
+        tracing::info!(socket = label, url = %ws_url, attempt, "venue websocket connected");
 
         // A successful dial alone does NOT reset the attempt counter: a venue
         // that accepts the handshake and immediately dies would otherwise
@@ -311,7 +356,12 @@ pub(crate) async fn run_ws_connection<
 
             match action {
                 WsAction::Inbound(inbound) => {
-                    if inbound_is_disconnected(&inbound) {
+                    if let Some(cause) = disconnect_cause(&inbound) {
+                        tracing::warn!(
+                            socket = label,
+                            %cause,
+                            "venue websocket disconnected"
+                        );
                         break;
                     }
                     match inbound.expect("inbound close and errors returned above") {
@@ -348,6 +398,10 @@ pub(crate) async fn run_ws_connection<
                         }
                         Ok(Message::Ping(payload)) => {
                             if out_tx.send(Message::Pong(payload)).is_err() {
+                                tracing::warn!(
+                                    socket = label,
+                                    "websocket writer is gone; dropping the connection to re-dial"
+                                );
                                 break;
                             }
                         }
@@ -357,6 +411,10 @@ pub(crate) async fn run_ws_connection<
                 }
                 WsAction::Command(Some(cmd)) => {
                     if send_command(&out_tx, &serialize, cmd).is_err() {
+                        tracing::warn!(
+                            socket = label,
+                            "websocket writer is gone; dropping the connection to re-dial"
+                        );
                         break;
                     }
                 }
@@ -365,10 +423,21 @@ pub(crate) async fn run_ws_connection<
                 }
                 WsAction::Heartbeat => {
                     if out_tx.send(Message::Ping(Vec::new().into())).is_err() {
+                        tracing::warn!(
+                            socket = label,
+                            "websocket writer is gone; dropping the connection to re-dial"
+                        );
                         break;
                     }
                 }
-                WsAction::Idle => break,
+                WsAction::Idle => {
+                    tracing::warn!(
+                        socket = label,
+                        idle_timeout_ms = conn.idle_timeout_ms,
+                        "no inbound frame within the idle timeout; dropping the connection to re-dial"
+                    );
+                    break;
+                }
             }
         }
 
@@ -398,24 +467,34 @@ pub(crate) async fn run_ws_connection<
         // If advancing the counter here spends the last permitted attempt, the
         // loop returns immediately rather than sleeping a final backoff before
         // the loop-top exhausted check would return anyway (F12).
-        if backoff_or_exhausted(&policy, &mut attempt, &mut rng).await {
+        if backoff_or_exhausted(&policy, &mut attempt, &mut rng, label).await {
             return;
         }
     }
 }
 
-fn inbound_is_disconnected(
+/// Classifies an inbound reader item: `None` for a live frame the select loop
+/// should process, otherwise the operator-facing cause of the disconnect. The
+/// cause matters because a venue outage-and-recovery used to leave ZERO
+/// connection-lifecycle lines in the log - the reconnect machinery worked
+/// silently while an unrelated WARN storm named phantom causes - so the one
+/// line announcing the disconnect must say what actually happened on the
+/// socket.
+fn disconnect_cause(
     inbound: &Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
-) -> bool {
-    if inbound.is_none() {
-        return true;
+) -> Option<String> {
+    match inbound {
+        None => Some("stream ended without a close frame".to_string()),
+        Some(Err(error)) => Some(format!("read error: {error}")),
+        Some(Ok(Message::Close(frame))) => Some(match frame {
+            Some(frame) => format!(
+                "peer sent close (code {:?}, reason {:?})",
+                frame.code, frame.reason
+            ),
+            None => "peer sent close".to_string(),
+        }),
+        Some(Ok(_)) => None,
     }
-    if inbound.as_ref().is_some_and(Result::is_err) {
-        return true;
-    }
-    inbound
-        .as_ref()
-        .is_some_and(|msg| matches!(msg, Ok(Message::Close(_))))
 }
 
 fn send_command<Cmd, Serialize>(
@@ -675,6 +754,7 @@ mod tests {
                 seed: Some(1),
                 connected: Arc::new(AtomicBool::new(false)),
                 sim: SimClock::identity(),
+                label: "test",
             },
             cmd_rx,
             |cmd: ClientMessage| cmd,

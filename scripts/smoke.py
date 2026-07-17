@@ -272,9 +272,16 @@ def main_default() -> None:
     # the clock now, so a frozen constant would fall before data_origin and be
     # refused. One hour behind sim-now is on-tape under the 24h horizon.
     window_start_ts = sim_now(fetch_clock()) - WINDOW_LOOKBACK_NS
+    # The committed mogwai.toml (and the built-in default) fund the account
+    # with 1,000,000 USDT before the run; the ledger books fill deltas on top
+    # of that seed, and the funded account enforces free-balance checks.
     initial_account = fetch_account()
     print("initial:", initial_account)
-    assert initial_account["balances"] == [], initial_account
+    initial_usdt = find_balance(initial_account, "USDT")
+    assert float(initial_usdt["total"]) == 1_000_000.0, initial_usdt
+    assert float(initial_usdt["free"]) == 1_000_000.0, initial_usdt
+    assert float(initial_usdt["locked"]) == 0.0, initial_usdt
+    assert len(initial_account["balances"]) == 1, initial_account
     assert initial_account["positions"] == [], initial_account
 
     assert post_divergence(
@@ -303,10 +310,12 @@ def main_default() -> None:
     assert float(btc["locked"]) == 0.0, btc
     assert float(btc["free"]) == 3.0, btc
 
+    # Off the 1,000,000 seed: the 3-lot fill spends 300, the resting 7-lot
+    # remainder reserves 700, and free is total minus the reservation.
     usdt = find_balance(account, "USDT")
-    assert float(usdt["total"]) == -300.0, usdt
+    assert float(usdt["total"]) == 999_700.0, usdt
     assert float(usdt["locked"]) == 700.0, usdt
-    assert float(usdt["free"]) == -1000.0, usdt
+    assert float(usdt["free"]) == 999_000.0, usdt
 
     pulled_account = fetch_account()
     print("pulled:  ", pulled_account)
@@ -452,13 +461,13 @@ def main_default() -> None:
 
     assert post_divergence({"type": "DelayAcks", "ms": 300}) == 202
     ws = WsClient(timeout=2.0)
+    send_instant = time.monotonic()
     ws.send(submit_order("D1"))
     delay_msgs = []
-    gaps = []
+    arrivals = []
     for _ in range(3):
-        start = time.monotonic()
         delay_msgs.append(ws.read())
-        gaps.append(time.monotonic() - start)
+        arrivals.append(time.monotonic() - send_instant)
     ws.close()
     for msg in delay_msgs:
         print("delay:   ", msg)
@@ -467,8 +476,15 @@ def main_default() -> None:
         "OrderFilled",
         "AccountState",
     ], delay_msgs
-    for gap in gaps:
-        assert gap >= 0.25, gaps
+    # DelayAcks holds every execution event `ms` from its PRODUCTION instant
+    # (the exec pump anchors each event's deadline at enqueue). The engine
+    # emits the whole order-entry batch at one instant, so the three events
+    # share one deadline: each arrives >= ~250ms after submit (slack under the
+    # armed 300), and the batch lands together rather than serialized a
+    # further window per event (serialized would put the third past ~900ms).
+    for arrival in arrivals:
+        assert arrival >= 0.25, arrivals
+    assert arrivals[-1] < 0.6, arrivals
 
     # Probe that DelayAcks delays execution events but NOT market data. Use a
     # WINDOWED subscribe: its first tick is historical backfill seeked from a past
