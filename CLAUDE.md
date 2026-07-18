@@ -5,10 +5,10 @@
 ### Multi-Agent Orchestration
 
 **The spec-loop**: when the user asks to orchestrate, to run the loop, or to
-work a goal down to landed commits, read `reference/orchestrate.md` FIRST and
+work a goal down to landed commits, run `orchestrate` FIRST and
 follow it exactly - it is the standing procedure (roles, the seven steps, the
 waiting discipline, codex invocation). Note its Input section: confirm the
-goal with the user before launching anything. The orchestrate.md workflow,
+goal with the user before launching anything. The orchestrate workflow,
 once invoked, overrides the foreground-subagent rule below (its launches are
 background by design, per the user's standing instruction in that document).
 
@@ -30,7 +30,7 @@ subagents (Explore, general-purpose, fork, anything) is a separate decision the
 user makes explicitly. Before any `Agent`/`Task` launch, stop and ask in chat -
 name what you want to spawn and why - then wait for a yes. Doing the
 investigation yourself with Read/Grep/Bash needs no permission; only delegating
-to subagents does. The sole exception is the orchestrate.md spec-loop, which the
+to subagents does. The sole exception is the orchestrate spec-loop, which the
 user invokes by name and which carries its own standing authorization.
 
 **Do NOT use git worktree isolation for parallel agents.** Worktrees create merge conflicts that silently drop agent work. Instead, launch agents in the same tree with strict file ownership - zero overlap.
