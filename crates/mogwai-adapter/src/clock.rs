@@ -16,8 +16,7 @@ use anyhow::{Context, ensure};
 use mogwai_protocol::{ServerClock, SimClock};
 use nautilus_common::{
     clock::{CallbackRegistry, Clock, validate_and_prepare_time_alert, validate_and_prepare_timer},
-    live::get_runtime,
-    runner::{TimeEventSender, try_get_time_event_sender},
+    runner::{TimeEventMessage, TimeEventSender, try_get_time_event_sender},
     timer::{TimeEvent, TimeEventCallback, TimeEventHandler, create_valid_interval},
 };
 use nautilus_core::{UUID4, UnixNanos};
@@ -26,6 +25,18 @@ use ustr::Ustr;
 
 use crate::client::join_url;
 
+/// The nautilus `Clock` mogwai injects into a broadarrow node, reading and
+/// firing on the shared simulated axis (`reference/clock.md`).
+///
+/// Host requirement: its timers fire from a `tokio::task::spawn_local` task (see
+/// `MogwaiTimer::start`), so every timer-setting call (`set_timer_ns`,
+/// `set_time_alert_ns`) MUST run on a thread driving a `tokio::task::LocalSet`,
+/// or `spawn_local` panics. That is the only way a `TimeEventCallback::RustLocal`
+/// (an `Rc`, `!Send` since nautilus PR 4496) - e.g. a bar aggregator's callback -
+/// can be dispatched at all: the fire loop stays on the callback's owner thread
+/// where nautilus's thread-local time-event registry resolves it. Broadarrow's
+/// current-thread worker satisfies this; the unit tests wrap their bodies in a
+/// `LocalSet`.
 #[derive(Debug)]
 pub struct MogwaiClock {
     sim: SimClock,
@@ -306,6 +317,16 @@ impl MogwaiTimer {
     }
 
     fn start(&mut self, repeat: bool) {
+        // Restart semantics: a still-active task from a previous `start` must
+        // not race the new one over the shared `next_time_ns`. Abort it first
+        // (a bare reassignment of `task_handle` only DETACHES the old task, it
+        // does not stop it). Any event that task already handed to the sender
+        // stays queued on the runner channel and still dispatches, matching
+        // nautilus `LiveTimer::start` (common/src/live/timer.rs).
+        if let Some(handle) = self.task_handle.take() {
+            handle.abort();
+        }
+
         let name = self.name;
         let interval_ns = self.interval_ns;
         let stop_time_ns = self.stop_time_ns;
@@ -314,7 +335,23 @@ impl MogwaiTimer {
         let sender = self.sender.clone();
         let sim = self.sim;
 
-        let handle = get_runtime().spawn(async move {
+        // `spawn_local`, NOT the multi-threaded runtime: the fire loop must run
+        // on the same thread that binds and drains the time-event sender. That
+        // is the only way a `TimeEventCallback::RustLocal` (an `Rc`, `!Send`
+        // since nautilus PR 4496 removed its unsound `Send` impl) can be
+        // dispatched at all - nautilus routes local callbacks through a
+        // thread-local registry keyed by owner `ThreadId`, and that machinery
+        // (`register_time_event_callback`, `TimeEventCallbackToken`,
+        // `TimeEventMessage::registered`) is crate-private, so an out-of-tree
+        // adapter cannot cross the worker/drain boundary the way `LiveTimer`
+        // does. Running on the owner thread lets `TimeEventMessage::new`
+        // register the callback where the runner will later drain it, so its
+        // owner-thread check passes (common/src/runner.rs). Bar-aggregation
+        // timers register exactly such local callbacks on this clock, so this
+        // is load-bearing, not a corner case. This requires the host to run a
+        // `LocalSet` on that thread; broadarrow's worker does, and the unit
+        // tests below wrap their bodies in one.
+        let handle = tokio::task::spawn_local(async move {
             // Past-start catch-up (AE15) is a DELIBERATE deviation from nautilus
             // `LiveTimer`. `LiveTimer::start` CAS-adjusts an observed next_time
             // that is `<= now` forward to now (with a warning) and then fires
@@ -322,11 +359,11 @@ impl MogwaiTimer {
             // does NOT skip forward: for a timer armed with an explicit past
             // start (allow_past), `sleep_until_sim` returns immediately for each
             // already-elapsed fire, so the timer replays one event per elapsed
-            // interval as fast as the runtime schedules it, each carrying its
-            // historically-correct sim `ts_event`. On a simulation axis that
-            // deterministic replay is more faithful than collapsing the missed
-            // fires into a single "now" event, so mogwai keeps the burst by
-            // design rather than mirroring the live clock here.
+            // interval, each carrying its historically-correct sim `ts_event`.
+            // On a simulation axis that deterministic replay is more faithful
+            // than collapsing the missed fires into a single "now" event, so
+            // mogwai keeps the burst by design rather than mirroring the live
+            // clock here.
             loop {
                 let fire_ns = next_time.load(Ordering::SeqCst);
 
@@ -348,37 +385,53 @@ impl MogwaiTimer {
                 let ts_init = sim_now(sim);
                 let event = TimeEvent::new(name, UUID4::new(), ts_event, ts_init);
 
+                // Advance the schedule and dispatch. The atomic stores the next
+                // fire even when it lies past the stop; the pre-fire check at the
+                // top of the loop decides whether that fire is emitted, matching
+                // LiveTimer's `next_time_ns` bookkeeping. A one-shot never
+                // advances (it breaks below before looping).
+                //
+                // The advance ORDER follows nautilus `LiveTimer` and matters only
+                // for a reentrant callback that re-reads `next_time_ns` or re-arms
+                // this timer: the sender path advances BEFORE the send, so a
+                // synchronous `TimeEventSender` (the trait permits one - the test
+                // mock is synchronous) observes the NEXT fire, not the one being
+                // emitted; the senderless path advances AFTER the inline invoke,
+                // so a reentrant callback there still sees the pre-advance value.
+                // Production's async sender queues, so it already observes the
+                // advance before the runner drains and dispatches.
+                let next = fire_ns.saturating_add(interval_ns);
                 if let Some(sender) = sender.as_ref() {
-                    sender.send(TimeEventHandler::new(event, callback.clone()));
-                } else if callback.is_local() {
-                    // A `RustLocal` callback wraps an `Rc`, sound to create,
-                    // clone, drop, and invoke only from its originating
-                    // thread (nautilus_common::timer's own doc comment on
-                    // `TimeEventCallback::is_local`). This loop runs inside a
-                    // spawned tokio task, which the multi-threaded runtime is
-                    // free to schedule onto any worker thread, so without a
-                    // sender to hand the event back to the originating
-                    // thread there is no safe way to invoke a local callback
-                    // here. Drop it with a warning rather than risk a
-                    // cross-thread `Rc` race.
-                    tracing::warn!(
-                        timer = %name,
-                        "dropping time event: no time event sender and callback is thread-local"
-                    );
+                    if repeat {
+                        next_time.store(next, Ordering::SeqCst);
+                    }
+                    // `TimeEventMessage::new` wraps a `Rust`/`Python` callback in
+                    // a `Direct` message and registers a `RustLocal` one in the
+                    // thread-local registry on THIS thread; the runner drains and
+                    // runs it back on the same thread, so both dispatch correctly.
+                    sender.send(TimeEventMessage::new(event, callback.clone()));
                 } else {
+                    // No sender bound (a senderless clock off the canonical live
+                    // path, e.g. a test that never binds a runner). Invoke inline
+                    // on this task's own thread - sound for a local callback too.
+                    // This inline path still requires the host `LocalSet` the
+                    // `spawn_local` task runs in.
                     callback.call(event);
+                    if repeat {
+                        next_time.store(next, Ordering::SeqCst);
+                    }
                 }
 
                 if !repeat {
                     break;
                 }
 
-                // Advance to the next scheduled fire; the pre-fire stop check
-                // at the top of the loop decides whether it is emitted. The
-                // atomic stores the advanced value even when it lies past the
-                // stop, matching LiveTimer's `next_time_ns` bookkeeping.
-                let next = fire_ns.saturating_add(interval_ns);
-                next_time.store(next, Ordering::SeqCst);
+                // Sharing the runner's single thread (spawn_local), a past-start
+                // catch-up burst fires without ever awaiting `sleep_until_sim`,
+                // which would monopolize the executor and starve the very drain
+                // that dispatches the events just sent. Yield once per fire so
+                // the runner interleaves them.
+                tokio::task::yield_now().await;
             }
         });
         self.task_handle = Some(handle);
@@ -457,17 +510,16 @@ pub async fn mogwai_clock_factory(
         // already set for the kernel clock and for every component clock created
         // afterward on the same runner thread. A senderless `MogwaiClock` can
         // therefore only arise OFF this path (e.g. a unit test that never binds
-        // a runner), where the drop-with-warn fallback in `MogwaiTimer::start`
+        // a runner), where the inline-invoke fallback in `MogwaiTimer::start`
         // is the correct behavior - AE16.
         //
-        // A per-FIRE re-lookup (re-querying the sender each time a timer fires
-        // rather than at clock creation) is NOT a viable "improvement":
-        // `TIME_EVENT_SENDER` is a thread-local bound on the runner thread,
-        // while the timer loop runs inside a spawned tokio task the
-        // multi-threaded runtime may place on any worker thread, where
-        // `try_get_time_event_sender()` is always `None`. Capturing the sender
-        // here, on the thread that constructs the clock, is the only point at
-        // which the thread-local is observable at all.
+        // Capturing the sender here (rather than per fire) also pins this clock
+        // permanently to the runner channel that was bound when it was created,
+        // so it cannot be misrouted if another runner later overwrites the
+        // thread-local sender. The timer fire loop runs on this same thread via
+        // `spawn_local` (see `MogwaiTimer::start`), so `try_get_time_event_sender()`
+        // would in fact be observable at fire time too; capturing once is the
+        // deliberate choice, not a workaround for a worker-thread blind spot.
         let clock: Rc<RefCell<dyn Clock>> = Rc::new(RefCell::new(MogwaiClock::new(
             sim,
             try_get_time_event_sender(),
@@ -479,9 +531,12 @@ pub async fn mogwai_clock_factory(
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::Cell,
         sync::Mutex,
         time::{Duration, Instant},
     };
+
+    use tokio::task::LocalSet;
 
     use super::*;
 
@@ -491,10 +546,40 @@ mod tests {
     }
 
     impl TimeEventSender for CollectingSender {
-        fn send(&self, handler: TimeEventHandler) {
-            let TimeEventHandler { event, callback } = handler;
-            callback.call(event.clone());
+        fn send(&self, message: TimeEventMessage) {
+            // Dispatch on THIS thread exactly as the live runner's drain does:
+            // the timer fire loop is a `spawn_local` task on the same thread, so
+            // a `RustLocal` message registered at fire time dispatches here with
+            // its owner-thread check satisfied. `dispatch` returns false only when
+            // it could not run the callback (e.g. a registered message drained off
+            // its owner thread), so assert it ran - a silent drop is the RustLocal
+            // regression this guards. Record the event only AFTER a successful
+            // dispatch, so the recorded order matches the runner's.
+            let event = message.event().clone();
+            assert!(
+                message.dispatch(),
+                "time event message failed to dispatch on the owner thread"
+            );
             self.events.lock().expect("events lock").push(event);
+        }
+    }
+
+    // Unlike `CollectingSender`, this only ENQUEUES; the test drains and
+    // dispatches from its outer `LocalSet` future. That models nautilus's real
+    // producer(fire task)/drain(node-run future) split - both on the one
+    // LocalSet thread - which the synchronous `CollectingSender` cannot.
+    #[derive(Debug)]
+    struct ChannelSender {
+        tx: Mutex<std::sync::mpsc::Sender<TimeEventMessage>>,
+    }
+
+    impl TimeEventSender for ChannelSender {
+        fn send(&self, message: TimeEventMessage) {
+            self.tx
+                .lock()
+                .expect("tx lock")
+                .send(message)
+                .expect("channel send");
         }
     }
 
@@ -511,8 +596,18 @@ mod tests {
         assert!(clock.timestamp_ns().as_u64() >= 1_020);
     }
 
+    // Each timer test runs its body on a `LocalSet` because `MogwaiTimer::start`
+    // now uses `spawn_local` (see its doc comment); the free `spawn_local`
+    // panics without a local task set, which broadarrow's current-thread worker
+    // provides in production but `#[tokio::test]` does not.
     #[tokio::test]
     async fn alert_timer_fires_with_sim_event_timestamp() {
+        LocalSet::new()
+            .run_until(alert_timer_fires_with_sim_event_timestamp_inner())
+            .await;
+    }
+
+    async fn alert_timer_fires_with_sim_event_timestamp_inner() {
         let wall = mogwai_protocol::now_unix_nanos();
         let sim = SimClock {
             sim_epoch_ns: wall,
@@ -543,6 +638,12 @@ mod tests {
 
     #[tokio::test]
     async fn past_alert_adjusted_to_now_fires_immediately() {
+        LocalSet::new()
+            .run_until(past_alert_adjusted_to_now_fires_immediately_inner())
+            .await;
+    }
+
+    async fn past_alert_adjusted_to_now_fires_immediately_inner() {
         // A past alert is adjusted to now by validate_and_prepare_time_alert
         // (allow_past defaults to true), making stop == start. The zero
         // interval is coerced to 1ns, so without fire_immediately the only
@@ -585,6 +686,12 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_timer_stops_future_events() {
+        LocalSet::new()
+            .run_until(cancel_timer_stops_future_events_inner())
+            .await;
+    }
+
+    async fn cancel_timer_stops_future_events_inner() {
         let wall = mogwai_protocol::now_unix_nanos();
         let sim = SimClock {
             sim_epoch_ns: wall,
@@ -610,6 +717,12 @@ mod tests {
 
     #[tokio::test]
     async fn repeating_timer_never_fires_past_stop_bound() {
+        LocalSet::new()
+            .run_until(repeating_timer_never_fires_past_stop_bound_inner())
+            .await;
+    }
+
+    async fn repeating_timer_never_fires_past_stop_bound_inner() {
         // A repeating timer whose stop bound sits BELOW start + interval never
         // fires: the loop checks the stop against the scheduled fire BEFORE
         // emitting, so no event carries a ts_event past the stop. Mirrors the
@@ -662,6 +775,12 @@ mod tests {
 
     #[tokio::test]
     async fn past_start_repeating_timer_replays_a_catch_up_burst() {
+        LocalSet::new()
+            .run_until(past_start_repeating_timer_replays_a_catch_up_burst_inner())
+            .await;
+    }
+
+    async fn past_start_repeating_timer_replays_a_catch_up_burst_inner() {
         // AE15 (deliberate deviation from nautilus LiveTimer): a repeating timer
         // armed with an explicit past start replays one fire per elapsed
         // interval, each carrying its historically-correct ts_event, instead of
@@ -727,6 +846,12 @@ mod tests {
 
     #[tokio::test]
     async fn timer_exists_excludes_a_fired_and_done_timer_like_count_and_names() {
+        LocalSet::new()
+            .run_until(timer_exists_excludes_a_fired_and_done_timer_like_count_and_names_inner())
+            .await;
+    }
+
+    async fn timer_exists_excludes_a_fired_and_done_timer_like_count_and_names_inner() {
         // All three introspection surfaces agree: a fired-and-finished one-shot
         // no longer exists, is not counted, and is not named. Mirrors the fixed
         // nautilus LiveClock (whose timer_exists used to be a bare contains_key
@@ -769,5 +894,172 @@ mod tests {
             clock.timer_names().is_empty(),
             "timer_names excludes the expired timer"
         );
+    }
+
+    #[tokio::test]
+    async fn local_callback_dispatches_through_sender_on_owner_thread() {
+        LocalSet::new()
+            .run_until(local_callback_dispatches_through_sender_on_owner_thread_inner())
+            .await;
+    }
+
+    async fn local_callback_dispatches_through_sender_on_owner_thread_inner() {
+        // Regression guard for nautilus PR 4496. A `RustLocal` callback is an
+        // `Rc`, `!Send`, so it cannot cross into a runtime worker; the fire loop
+        // therefore runs on the owner thread (`spawn_local`), where
+        // `TimeEventMessage::new` registers it in the thread-local registry and
+        // the sender drains and dispatches it on the same thread, satisfying the
+        // owner-thread check. Bar aggregation registers exactly this callback
+        // kind. Before the fix the event was dropped and this counter stayed 0.
+        let wall = mogwai_protocol::now_unix_nanos();
+        let sim = SimClock {
+            sim_epoch_ns: wall,
+            wall_anchor_ns: wall,
+            speed: 10.0,
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sender = Arc::new(CollectingSender {
+            events: Arc::clone(&events),
+        });
+        let mut clock = MogwaiClock::new(sim, Some(sender));
+        let count = Rc::new(Cell::new(0_u32));
+        let cb_count = Rc::clone(&count);
+        let callback: Rc<dyn Fn(TimeEvent)> = Rc::new(move |_| cb_count.set(cb_count.get() + 1));
+        let target = clock.timestamp_ns().as_u64() + 20_000_000;
+        let started = Instant::now();
+
+        clock
+            .set_time_alert_ns(
+                "local",
+                UnixNanos::from(target),
+                Some(TimeEventCallback::RustLocal(callback)),
+                None,
+            )
+            .expect("timer arms");
+
+        while events.lock().expect("events lock").is_empty() {
+            assert!(
+                started.elapsed() < Duration::from_millis(200),
+                "the local-callback alert never fired"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        assert_eq!(
+            count.get(),
+            1,
+            "the RustLocal callback ran on the owner thread instead of being dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_callback_dispatches_across_the_queue_drain_boundary() {
+        LocalSet::new()
+            .run_until(local_callback_dispatches_across_the_queue_drain_boundary_inner())
+            .await;
+    }
+
+    async fn local_callback_dispatches_across_the_queue_drain_boundary_inner() {
+        // Stronger than the synchronous-mock test: the sender only ENQUEUES, and
+        // the drain happens here in the outer future - modeling the real
+        // producer(fire task)/drain(node-run future) split. Both run on the one
+        // LocalSet thread, so a RustLocal message registered at fire time still
+        // dispatches here with its owner-thread check satisfied.
+        let wall = mogwai_protocol::now_unix_nanos();
+        let sim = SimClock {
+            sim_epoch_ns: wall,
+            wall_anchor_ns: wall,
+            speed: 10.0,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sender = Arc::new(ChannelSender { tx: Mutex::new(tx) });
+        let mut clock = MogwaiClock::new(sim, Some(sender));
+        let count = Rc::new(Cell::new(0_u32));
+        let cb_count = Rc::clone(&count);
+        let callback: Rc<dyn Fn(TimeEvent)> = Rc::new(move |_| cb_count.set(cb_count.get() + 1));
+        let target = clock.timestamp_ns().as_u64() + 20_000_000;
+
+        clock
+            .set_time_alert_ns(
+                "queued-local",
+                UnixNanos::from(target),
+                Some(TimeEventCallback::RustLocal(callback)),
+                None,
+            )
+            .expect("timer arms");
+
+        let started = Instant::now();
+        let message = loop {
+            if let Ok(message) = rx.try_recv() {
+                break message;
+            }
+            assert!(
+                started.elapsed() < Duration::from_millis(200),
+                "the fire task never queued a message"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        };
+
+        assert!(
+            message.dispatch(),
+            "the queued local message dispatches on its owner thread"
+        );
+        assert_eq!(count.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn queued_local_message_dispatches_after_cancel() {
+        LocalSet::new()
+            .run_until(queued_local_message_dispatches_after_cancel_inner())
+            .await;
+    }
+
+    async fn queued_local_message_dispatches_after_cancel_inner() {
+        // Canceling a timer aborts its fire task but must not strip the lease from
+        // a message already queued: nautilus keeps queued events dispatchable
+        // across cancel. Receive the queued local message, cancel, then dispatch
+        // and assert the callback still runs.
+        let wall = mogwai_protocol::now_unix_nanos();
+        let sim = SimClock {
+            sim_epoch_ns: wall,
+            wall_anchor_ns: wall,
+            speed: 10.0,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sender = Arc::new(ChannelSender { tx: Mutex::new(tx) });
+        let mut clock = MogwaiClock::new(sim, Some(sender));
+        let count = Rc::new(Cell::new(0_u32));
+        let cb_count = Rc::clone(&count);
+        let callback: Rc<dyn Fn(TimeEvent)> = Rc::new(move |_| cb_count.set(cb_count.get() + 1));
+        let target = clock.timestamp_ns().as_u64() + 20_000_000;
+
+        clock
+            .set_time_alert_ns(
+                "cancel-queued",
+                UnixNanos::from(target),
+                Some(TimeEventCallback::RustLocal(callback)),
+                None,
+            )
+            .expect("timer arms");
+
+        let started = Instant::now();
+        let message = loop {
+            if let Ok(message) = rx.try_recv() {
+                break message;
+            }
+            assert!(
+                started.elapsed() < Duration::from_millis(200),
+                "the fire task never queued a message"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        };
+
+        clock.cancel_timer("cancel-queued");
+
+        assert!(
+            message.dispatch(),
+            "a message queued before cancel still dispatches"
+        );
+        assert_eq!(count.get(), 1);
     }
 }
