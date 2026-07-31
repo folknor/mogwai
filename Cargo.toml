@@ -5,7 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 edition = "2024"
 license = "AGPL-3.0-only"
-rust-version = "1.96"
+rust-version = "1.97"
 authors = ["folknor"]
 repository = "https://github.com/folknor/mogwai"
 
@@ -15,7 +15,7 @@ mogwai-engine = { path = "crates/mogwai-engine" }
 mogwai-data = { path = "crates/mogwai-data" }
 
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = "1.0.151"
 toml = "1"
 rust_decimal = { version = "1", features = ["serde-with-str"] }
 rand = "0.10.2"
@@ -26,7 +26,7 @@ rand_distr = "0.6"
 # position), seedable and deterministic - the substrate the checkpointed seek
 # (CheckpointIndex) needs. rand_core 0.10, so rand_distr 0.6 sampling composes.
 rand_chacha = "0.10"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.53.1", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
 tracing = "0.1"

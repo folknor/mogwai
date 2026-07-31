@@ -13,7 +13,7 @@ mogwai-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
-async-trait = "=0.1.89"
+async-trait = "0.1.91"
 chrono = "0.4.45"
 futures-util.workspace = true
 rand = "0.10.2"
