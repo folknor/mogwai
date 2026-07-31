@@ -4,11 +4,11 @@
 use std::str::FromStr;
 
 use anyhow::Context;
-use mogwai_protocol::{AggressorSide as MogwaiAggressorSide, InstrumentDef, Side};
+use mogwai_protocol::{AggressorSide as MogwaiAggressorSide, InstrumentDef, Side, WireOrderStatus};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{QuoteTick as NautilusQuoteTick, TradeTick as NautilusTradeTick},
-    enums::{AggressorSide, OrderSide, OrderType, TimeInForce},
+    enums::{AggressorSide, OrderSide, OrderStatus, OrderType, TimeInForce},
     identifiers::{InstrumentId, Symbol as NautilusSymbol, TradeId},
     instruments::{InstrumentAny, currency_pair::CurrencyPair},
     types::{Money, Price, Quantity, currency::Currency},
@@ -80,6 +80,40 @@ pub(crate) fn wire_time_in_force(tif: TimeInForce) -> anyhow::Result<mogwai_prot
         TimeInForce::Ioc => Ok(mogwai_protocol::TimeInForce::Ioc),
         TimeInForce::Fok => Ok(mogwai_protocol::TimeInForce::Fok),
         other => anyhow::bail!("unsupported time in force {other:?}"),
+    }
+}
+
+/// Wire-to-nautilus twins of the `wire_*` converters above, used by the
+/// venue-truth report generators to translate `QueryOrders`/`QueryFills`
+/// reply rows. Infallible: the wire enums are strict subsets of nautilus'.
+pub(crate) fn nautilus_side(side: Side) -> OrderSide {
+    match side {
+        Side::Buy => OrderSide::Buy,
+        Side::Sell => OrderSide::Sell,
+    }
+}
+
+pub(crate) fn nautilus_order_type(order_type: mogwai_protocol::OrderType) -> OrderType {
+    match order_type {
+        mogwai_protocol::OrderType::Market => OrderType::Market,
+        mogwai_protocol::OrderType::Limit => OrderType::Limit,
+    }
+}
+
+pub(crate) fn nautilus_time_in_force(tif: mogwai_protocol::TimeInForce) -> TimeInForce {
+    match tif {
+        mogwai_protocol::TimeInForce::Gtc => TimeInForce::Gtc,
+        mogwai_protocol::TimeInForce::Ioc => TimeInForce::Ioc,
+        mogwai_protocol::TimeInForce::Fok => TimeInForce::Fok,
+    }
+}
+
+pub(crate) fn nautilus_order_status(status: WireOrderStatus) -> OrderStatus {
+    match status {
+        WireOrderStatus::Accepted => OrderStatus::Accepted,
+        WireOrderStatus::PartiallyFilled => OrderStatus::PartiallyFilled,
+        WireOrderStatus::Filled => OrderStatus::Filled,
+        WireOrderStatus::Canceled => OrderStatus::Canceled,
     }
 }
 

@@ -62,6 +62,120 @@ pub enum ClientMessage {
         price: Option<Decimal>,
         quantity: Option<Decimal>,
     },
+    /// Reconciliation query: ask the venue for the CURRENT status of its
+    /// orders, answered from the engine's own book - not from any event the
+    /// client may or may not have received. This is the second, independent
+    /// witness Nautilus' reconciliation (startup mass-status and the
+    /// continuous open-order poll) consumes: after a havoc scenario cancels a
+    /// resting order server-side and drops the lifecycle event, this query
+    /// still reports the truth.
+    ///
+    /// Honest-content invariant: the reply's CONTENT is always a truthful
+    /// read of the venue book. Havoc may delay or drop the reply's DELIVERY
+    /// (the snapshot classifies as execution, so `DelayAcks` holds it and
+    /// `GoDark` drops it - transport faults are fair game and exercise the
+    /// consumer's query-timeout path), but no divergence may ever alter what
+    /// it says. A venue that lies on the reconciliation channel collapses the
+    /// two witnesses into one adversary and makes any poll-heal test
+    /// unprovable; a lying venue-truth source is a different fault class that
+    /// would need its own explicitly-named havoc, never a side effect here.
+    QueryOrders {
+        /// Client-chosen correlation id echoed verbatim on the reply, so a
+        /// requester sharing the socket with unsolicited events can match
+        /// replies to requests.
+        request_id: String,
+        /// Restrict the reply to this one order. `None` reports every order
+        /// the venue has ever accepted (open and terminal).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_order_id: Option<ClientOrderId>,
+        /// Restrict the reply to currently-open orders. Terminal orders are
+        /// omitted; an id queried directly still reports its terminal state.
+        #[serde(default)]
+        open_only: bool,
+    },
+    /// Reconciliation query for the venue's fill history, the fill-report
+    /// twin of [`ClientMessage::QueryOrders`] with the same honest-content /
+    /// havoc-able-delivery contract. The venue records each fill ONCE as it
+    /// books - a `DuplicateNextFill` doubles the wire event, not the truth -
+    /// so this reply is the ground truth a dropped or duplicated
+    /// `OrderFilled` stream can be reconciled against.
+    QueryFills {
+        /// Correlation id echoed verbatim on the reply.
+        request_id: String,
+        /// Restrict the reply to fills of this one order. `None` reports all.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_order_id: Option<ClientOrderId>,
+    },
+}
+
+/// Venue-side order status as reported on an [`OrderStatusSnapshot`]. Only
+/// states the venue itself can attest to: a submit that never passed the
+/// accept gate leaves no record (its id is absent from the snapshot), so
+/// there is no `Rejected` variant - "absent" is the truthful answer for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WireOrderStatus {
+    /// Accepted and resting, nothing filled yet.
+    Accepted,
+    /// Resting with some quantity filled.
+    PartiallyFilled,
+    /// Terminal: fully filled.
+    Filled,
+    /// Terminal: canceled (client cancel, IOC remainder, or a server-side
+    /// havoc cancel).
+    Canceled,
+}
+
+impl WireOrderStatus {
+    #[must_use]
+    pub fn is_open(self) -> bool {
+        matches!(self, Self::Accepted | Self::PartiallyFilled)
+    }
+}
+
+/// One order's venue-truth status row on an [`OrderStatusSnapshot`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderStatusInfo {
+    pub client_order_id: ClientOrderId,
+    pub venue_order_id: VenueOrderId,
+    pub symbol: Symbol,
+    pub side: Side,
+    pub order_type: OrderType,
+    pub time_in_force: TimeInForce,
+    pub status: WireOrderStatus,
+    /// Current total order quantity (post-amend, if any).
+    pub quantity: Decimal,
+    /// Quantity filled so far.
+    pub filled_qty: Decimal,
+    /// Current order price. Always present in practice (the server stamps
+    /// Market orders before the engine sees them), optional on the wire to
+    /// mirror `SubmitOrder`.
+    pub price: Option<Decimal>,
+    /// When the venue accepted the order (sim unix-ns).
+    pub ts_accepted: u64,
+    /// Last lifecycle activity: accept, fill, amend, or terminal transition.
+    pub ts_last: u64,
+}
+
+/// Reply to [`ClientMessage::QueryOrders`]: the venue's truthful order book
+/// read at `ts_event`. An empty `orders` for a targeted query means the venue
+/// never accepted that id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderStatusSnapshot {
+    /// The request's correlation id, echoed verbatim.
+    pub request_id: String,
+    pub orders: Vec<OrderStatusInfo>,
+    pub ts_event: u64,
+}
+
+/// Reply to [`ClientMessage::QueryFills`]: the venue's booked fills in the
+/// order they booked. Each fill appears exactly once regardless of how many
+/// `OrderFilled` events the wire carried for it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FillSnapshot {
+    /// The request's correlation id, echoed verbatim.
+    pub request_id: String,
+    pub fills: Vec<OrderFilled>,
+    pub ts_event: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,6 +305,11 @@ pub enum ServerMessage {
         ts_event: u64,
     },
     OrderFilled(OrderFilled),
+    /// Truthful venue book read answering a `QueryOrders` - see that variant
+    /// for the honest-content / havoc-able-delivery contract.
+    OrderStatusSnapshot(OrderStatusSnapshot),
+    /// Truthful venue fill history answering a `QueryFills`.
+    FillSnapshot(FillSnapshot),
     AccountState(AccountState),
     Trade(TradeTick),
     Quote(QuoteTick),
@@ -241,7 +360,13 @@ impl ServerMessage {
             ServerMessage::Trade(_) | ServerMessage::Quote(_) | ServerMessage::Heartbeat { .. } => {
                 EventKind::Data
             }
+            // The query replies are execution-channel traffic: `DelayAcks`
+            // holds them and `GoDark` drops them (delivery is havoc-able),
+            // while their content stays a truthful book read - the invariant
+            // documented on `ClientMessage::QueryOrders`.
             ServerMessage::AccountState(_)
+            | ServerMessage::OrderStatusSnapshot(_)
+            | ServerMessage::FillSnapshot(_)
             | ServerMessage::OrderAccepted { .. }
             | ServerMessage::OrderRejected { .. }
             | ServerMessage::OrderCanceled { .. }
@@ -503,6 +628,101 @@ mod tests {
         assert_eq!(heartbeat.category(), EventKind::Data);
         assert!(!heartbeat.category().is_execution());
         assert!(!heartbeat.is_market_data());
+    }
+
+    #[test]
+    fn query_messages_round_trip_and_default_their_filters() {
+        let targeted = ClientMessage::QueryOrders {
+            request_id: "Q1".into(),
+            client_order_id: Some("O1".into()),
+            open_only: true,
+        };
+        let json = serde_json::to_string(&targeted).unwrap();
+        let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            decoded,
+            ClientMessage::QueryOrders {
+                request_id,
+                client_order_id: Some(id),
+                open_only: true,
+            } if request_id == "Q1" && id == "O1"
+        ));
+
+        // A bare query decodes with both filters defaulted: all orders.
+        let bare = r#"{"type":"QueryOrders","request_id":"Q2"}"#;
+        let decoded: ClientMessage = serde_json::from_str(bare).unwrap();
+        assert!(matches!(
+            decoded,
+            ClientMessage::QueryOrders {
+                request_id,
+                client_order_id: None,
+                open_only: false,
+            } if request_id == "Q2"
+        ));
+
+        let fills = r#"{"type":"QueryFills","request_id":"Q3"}"#;
+        let decoded: ClientMessage = serde_json::from_str(fills).unwrap();
+        assert!(matches!(
+            decoded,
+            ClientMessage::QueryFills {
+                request_id,
+                client_order_id: None,
+            } if request_id == "Q3"
+        ));
+    }
+
+    #[test]
+    fn snapshot_replies_round_trip_and_classify_as_execution() {
+        let snapshot = ServerMessage::OrderStatusSnapshot(OrderStatusSnapshot {
+            request_id: "Q1".into(),
+            orders: vec![OrderStatusInfo {
+                client_order_id: "O1".into(),
+                venue_order_id: "V1".into(),
+                symbol: "BTCUSDT".into(),
+                side: Side::Buy,
+                order_type: OrderType::Limit,
+                time_in_force: TimeInForce::Gtc,
+                status: WireOrderStatus::PartiallyFilled,
+                quantity: Decimal::from(10),
+                filled_qty: Decimal::from(3),
+                price: Some(Decimal::from(100)),
+                ts_accepted: 5,
+                ts_last: 7,
+            }],
+            ts_event: 9,
+        });
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
+        let ServerMessage::OrderStatusSnapshot(decoded) = decoded else {
+            panic!("expected order status snapshot")
+        };
+        assert_eq!(decoded.request_id, "Q1");
+        assert_eq!(decoded.orders.len(), 1);
+        assert_eq!(decoded.orders[0].status, WireOrderStatus::PartiallyFilled);
+        assert_eq!(decoded.orders[0].filled_qty, Decimal::from(3));
+
+        // Both replies ride the execution channel: DelayAcks holds them and
+        // GoDark drops them (havoc-able delivery), and they are not market
+        // data, so StallData leaves them alone.
+        assert_eq!(snapshot.category(), EventKind::Exec);
+        assert!(snapshot.category().is_execution());
+        assert!(!snapshot.is_market_data());
+
+        let fills = ServerMessage::FillSnapshot(FillSnapshot {
+            request_id: "Q2".into(),
+            fills: Vec::new(),
+            ts_event: 9,
+        });
+        assert_eq!(fills.category(), EventKind::Exec);
+        assert!(!fills.is_market_data());
+    }
+
+    #[test]
+    fn wire_order_status_open_matches_variants() {
+        assert!(WireOrderStatus::Accepted.is_open());
+        assert!(WireOrderStatus::PartiallyFilled.is_open());
+        assert!(!WireOrderStatus::Filled.is_open());
+        assert!(!WireOrderStatus::Canceled.is_open());
     }
 
     #[test]

@@ -275,6 +275,12 @@ pub fn validate_divergence(div: &control::Divergence) -> Result<(), &'static str
             }
             Ok(())
         }
+        control::Divergence::CancelOpenOrderSilently { client_order_id } => {
+            if client_order_id.trim().is_empty() {
+                return Err("CancelOpenOrderSilently client_order_id must be non-empty");
+            }
+            Ok(())
+        }
         control::Divergence::RejectNextSubmit { .. }
         | control::Divergence::DuplicateNextFill
         | control::Divergence::DropNextAccountUpdate

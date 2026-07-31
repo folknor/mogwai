@@ -19,13 +19,16 @@ use std::{
 
 use anyhow::{Context, ensure};
 use async_trait::async_trait;
-use mogwai_protocol::{ClientMessage, HavocSpec, InstrumentDef, ServerMessage, SimClock, Symbol};
+use mogwai_protocol::{
+    ClientMessage, FillSnapshot, HavocSpec, InstrumentDef, OrderStatusInfo, OrderStatusSnapshot,
+    ServerMessage, SimClock, Symbol,
+};
 use nautilus_common::{
     clients::ExecutionClient,
     live::{get_runtime, try_get_exec_event_sender},
     messages::execution::{
-        CancelOrder, GenerateFillReports, GenerateOrderStatusReports,
-        GeneratePositionStatusReports, ModifyOrder, SubmitOrder,
+        CancelOrder, GenerateFillReports, GenerateOrderStatusReport, GenerateOrderStatusReports,
+        GeneratePositionStatusReports, ModifyOrder, QueryOrder, SubmitOrder,
     },
 };
 use nautilus_core::{UUID4, UnixNanos, time::get_atomic_clock_realtime};
@@ -198,6 +201,11 @@ pub struct MogwaiExecutionClient {
     ws_cmd: Option<UnboundedSender<ExecWsCommand>>,
     state: Arc<Mutex<ExecState>>,
     instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
+    /// In-flight `QueryOrders`/`QueryFills` waiters keyed by correlation id.
+    /// The WS reader (via `handle_exec_message`) resolves each waiter when
+    /// the venue's snapshot reply lands; `stop()` drains the maps so a waiter
+    /// blocked on a dead socket errors out instead of waiting out its timeout.
+    pending: Arc<Mutex<PendingQueries>>,
     http_dispatch_counter: Arc<AtomicU64>,
     /// Handles for the WS reader and every spawned HTTP order dispatch. Shared
     /// behind an `Arc<Mutex<..>>` so the `&self` `dispatch_order` can record its
@@ -242,6 +250,7 @@ impl MogwaiExecutionClient {
             ws_cmd: None,
             state: Arc::new(Mutex::new(ExecState::default())),
             instruments: Arc::new(Mutex::new(HashMap::new())),
+            pending: Arc::new(Mutex::new(PendingQueries::default())),
             http_dispatch_counter: Arc::new(AtomicU64::new(0)),
             task_handles: Arc::new(Mutex::new(Vec::new())),
         })
@@ -270,6 +279,7 @@ impl MogwaiExecutionClient {
             emitter: self.emitter.clone(),
             state: Arc::clone(&self.state),
             instruments: Arc::clone(&self.instruments),
+            pending: Arc::clone(&self.pending),
             trader_id: self.core.trader_id,
             account_id: self.core.account_id,
             account_type: self.config.account_type,
@@ -352,6 +362,330 @@ impl MogwaiExecutionClient {
             tokio::time::sleep(ACCOUNT_REGISTRATION_POLL).await;
         }
     }
+
+    /// Snapshot the transport pieces one venue-truth query needs, cloneable
+    /// into spawned tasks (`query_order`). Built per call so it always sees
+    /// the current WS command channel and havoc-scaled timeout.
+    fn venue_query(&self) -> VenueQuery {
+        let http = self
+            .config
+            .transport_profile
+            .orders_over_http()
+            .then(|| HttpQueryTransport {
+                http: self.http.clone(),
+                quota: self.http_quota.clone(),
+                url: join_url(&self.config.http_base_url(), "orders"),
+            });
+        VenueQuery {
+            http,
+            ws_cmd: self.ws_cmd.clone(),
+            pending: Arc::clone(&self.pending),
+            timeout_secs: request_timeout_secs(&self.config.havoc, self.sim),
+        }
+    }
+}
+
+/// The request/reply transport for the venue-truth queries. Under an HTTP
+/// orders profile the venue answers synchronously in the `POST /orders`
+/// response body; under WS the query is correlated to its reply through
+/// `pending` by the echoed `request_id`, since the reply shares the socket
+/// with unsolicited execution events.
+///
+/// Delivery is havoc-able, content is not: the reply is always a truthful
+/// engine book read, but on the WS carrier it classifies as execution, so an
+/// armed `DelayAcks` holds it and `GoDark` drops it - a lost or late reply
+/// surfaces here as a timeout, exercising the consumer's query-timeout path
+/// without ever letting havoc alter what the venue says.
+#[derive(Clone)]
+struct VenueQuery {
+    http: Option<HttpQueryTransport>,
+    ws_cmd: Option<UnboundedSender<ExecWsCommand>>,
+    pending: Arc<Mutex<PendingQueries>>,
+    timeout_secs: u64,
+}
+
+#[derive(Clone)]
+struct HttpQueryTransport {
+    http: HttpClient,
+    quota: HttpQuota,
+    url: String,
+}
+
+impl VenueQuery {
+    async fn order_status(
+        &self,
+        client_order_id: Option<String>,
+        open_only: bool,
+    ) -> anyhow::Result<OrderStatusSnapshot> {
+        let request_id = UUID4::new().to_string();
+        if let Some(transport) = &self.http {
+            let msg = ClientMessage::QueryOrders {
+                request_id: request_id.clone(),
+                client_order_id,
+                open_only,
+            };
+            let events = post_order(
+                &transport.http,
+                &transport.quota,
+                &transport.url,
+                &msg,
+                self.timeout_secs,
+            )
+            .await?;
+            return events
+                .into_iter()
+                .find_map(|event| match event {
+                    ServerMessage::OrderStatusSnapshot(snapshot)
+                        if snapshot.request_id == request_id =>
+                    {
+                        Some(snapshot)
+                    }
+                    _ => None,
+                })
+                .context("venue reply carried no matching order status snapshot");
+        }
+        let reply_rx = self.register_ws_query(
+            |pending, tx| drop(pending.orders.insert(request_id.clone(), tx)),
+            ExecWsCommand::QueryOrders {
+                request_id: request_id.clone(),
+                client_order_id,
+                open_only,
+            },
+        )?;
+        self.await_reply(reply_rx, &request_id, |pending, id| {
+            pending.orders.remove(id);
+        })
+        .await
+    }
+
+    async fn fill_history(&self, client_order_id: Option<String>) -> anyhow::Result<FillSnapshot> {
+        let request_id = UUID4::new().to_string();
+        if let Some(transport) = &self.http {
+            let msg = ClientMessage::QueryFills {
+                request_id: request_id.clone(),
+                client_order_id,
+            };
+            let events = post_order(
+                &transport.http,
+                &transport.quota,
+                &transport.url,
+                &msg,
+                self.timeout_secs,
+            )
+            .await?;
+            return events
+                .into_iter()
+                .find_map(|event| match event {
+                    ServerMessage::FillSnapshot(snapshot) if snapshot.request_id == request_id => {
+                        Some(snapshot)
+                    }
+                    _ => None,
+                })
+                .context("venue reply carried no matching fill snapshot");
+        }
+        let reply_rx = self.register_ws_query(
+            |pending, tx| drop(pending.fills.insert(request_id.clone(), tx)),
+            ExecWsCommand::QueryFills {
+                request_id: request_id.clone(),
+                client_order_id,
+            },
+        )?;
+        self.await_reply(reply_rx, &request_id, |pending, id| {
+            pending.fills.remove(id);
+        })
+        .await
+    }
+
+    /// Register the waiter BEFORE sending the command, so a reply racing back
+    /// faster than this task resumes still finds its slot; unregister on a
+    /// send failure so a dead socket does not leak the entry.
+    fn register_ws_query<T>(
+        &self,
+        register: impl FnOnce(&mut PendingQueries, tokio::sync::oneshot::Sender<T>),
+        cmd: ExecWsCommand,
+    ) -> anyhow::Result<tokio::sync::oneshot::Receiver<T>> {
+        let tx = self
+            .ws_cmd
+            .as_ref()
+            .context("mogwai execution client is not connected")?;
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        register(
+            &mut lock_recover(&self.pending, "pending queries"),
+            reply_tx,
+        );
+        tx.send(cmd)
+            .context("send execution websocket query command")?;
+        Ok(reply_rx)
+    }
+
+    /// Await the correlated reply, bounding the wait by the (havoc-scaled)
+    /// request timeout - the same ceiling the HTTP carrier gets from its
+    /// client - and clean the pending slot up on timeout so a reply that
+    /// straggles in later is logged as unsolicited rather than leaking.
+    async fn await_reply<T>(
+        &self,
+        reply_rx: tokio::sync::oneshot::Receiver<T>,
+        request_id: &str,
+        unregister: impl FnOnce(&mut PendingQueries, &str),
+    ) -> anyhow::Result<T> {
+        let timeout = std::time::Duration::from_secs(self.timeout_secs.max(1));
+        match tokio::time::timeout(timeout, reply_rx).await {
+            Ok(Ok(snapshot)) => Ok(snapshot),
+            // The sender was dropped without a reply: stop() drained the
+            // pending map (client stopping), so fail fast.
+            Ok(Err(_)) => anyhow::bail!("venue query abandoned: execution client stopped"),
+            Err(_) => {
+                unregister(
+                    &mut lock_recover(&self.pending, "pending queries"),
+                    request_id,
+                );
+                anyhow::bail!(
+                    "venue query {request_id} timed out after {}s (reply delayed or dropped)",
+                    self.timeout_secs.max(1)
+                )
+            }
+        }
+    }
+}
+
+/// In-flight venue-truth query waiters, correlation id -> reply sender.
+#[derive(Debug, Default)]
+struct PendingQueries {
+    orders: HashMap<String, tokio::sync::oneshot::Sender<OrderStatusSnapshot>>,
+    fills: HashMap<String, tokio::sync::oneshot::Sender<FillSnapshot>>,
+}
+
+/// Converts one venue-truth `QueryOrders` row into the nautilus report,
+/// dropping the row with a warning when a wire value cannot represent - the
+/// same discipline every other wire-to-nautilus conversion in this module
+/// applies.
+fn order_status_report_from_info(
+    info: &OrderStatusInfo,
+    instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
+    account_id: AccountId,
+    ts_init: UnixNanos,
+) -> Option<OrderStatusReport> {
+    let client_order_id = wire_client_order_id(&info.client_order_id)?;
+    let venue_order_id = wire_venue_order_id(&info.venue_order_id)?;
+    let Some(def) = instrument_def(instruments, &info.symbol) else {
+        tracing::warn!(
+            symbol = %info.symbol,
+            order = %info.client_order_id,
+            "dropping order status report: no instrument def (cache not seeded?)"
+        );
+        return None;
+    };
+    let convert_qty = |value, label| {
+        convert::quantity(value, def.size_precision)
+            .map_err(|err| {
+                tracing::warn!(
+                    order = %info.client_order_id,
+                    field = label,
+                    error = %err,
+                    "dropping order status report: unrepresentable quantity"
+                );
+            })
+            .ok()
+    };
+    let quantity = convert_qty(info.quantity, "quantity")?;
+    let filled = convert_qty(info.filled_qty, "filled_qty")?;
+    Some(OrderStatusReport::new(
+        account_id,
+        convert::instrument_id(&def),
+        Some(client_order_id),
+        venue_order_id,
+        convert::nautilus_side(info.side),
+        convert::nautilus_order_type(info.order_type),
+        convert::nautilus_time_in_force(info.time_in_force),
+        convert::nautilus_order_status(info.status),
+        quantity,
+        filled,
+        UnixNanos::from(info.ts_accepted),
+        UnixNanos::from(info.ts_last),
+        ts_init,
+        None,
+    ))
+}
+
+/// Converts one venue-truth `QueryFills` row into the nautilus fill report,
+/// with the same drop-and-warn discipline as `order_status_report_from_info`.
+fn fill_report_from_wire(
+    fill: &mogwai_protocol::OrderFilled,
+    instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
+    account_id: AccountId,
+    ts_init: UnixNanos,
+) -> Option<FillReport> {
+    let client_order_id = wire_client_order_id(&fill.client_order_id)?;
+    let venue_order_id = wire_venue_order_id(&fill.venue_order_id)?;
+    let Some(def) = instrument_def(instruments, &fill.symbol) else {
+        tracing::warn!(
+            symbol = %fill.symbol,
+            trade = %fill.trade_id,
+            "dropping fill report: no instrument def (cache not seeded?)"
+        );
+        return None;
+    };
+    let warn_drop = |label: &str, err: &dyn std::fmt::Display| {
+        tracing::warn!(
+            trade = %fill.trade_id,
+            field = label,
+            error = %err,
+            "dropping fill report: unrepresentable value"
+        );
+    };
+    let quote_currency = match Currency::from_str(&def.quote) {
+        Ok(currency) => currency,
+        Err(err) => {
+            warn_drop("quote currency", &err);
+            return None;
+        }
+    };
+    let trade_id = match TradeId::new_checked(&fill.trade_id) {
+        Ok(trade_id) => trade_id,
+        Err(err) => {
+            warn_drop("trade_id", &err);
+            return None;
+        }
+    };
+    let last_qty = match convert::quantity(fill.last_qty, def.size_precision) {
+        Ok(last_qty) => last_qty,
+        Err(err) => {
+            warn_drop("last_qty", &err);
+            return None;
+        }
+    };
+    let last_px = match convert::price(fill.last_px, def.price_precision) {
+        Ok(last_px) => last_px,
+        Err(err) => {
+            warn_drop("last_px", &err);
+            return None;
+        }
+    };
+    let commission = match convert::money(fill.commission, quote_currency) {
+        Ok(commission) => commission,
+        Err(err) => {
+            warn_drop("commission", &err);
+            return None;
+        }
+    };
+    // Taker unconditionally: the wire carries no maker/taker flag (see the
+    // fill event handler's identical, deliberately lossy mapping).
+    Some(FillReport::new(
+        account_id,
+        convert::instrument_id(&def),
+        venue_order_id,
+        trade_id,
+        convert::nautilus_side(fill.side),
+        last_qty,
+        last_px,
+        commission,
+        LiquiditySide::Taker,
+        Some(client_order_id),
+        None,
+        UnixNanos::from(fill.ts_event),
+        ts_init,
+        None,
+    ))
 }
 
 #[async_trait(?Send)]
@@ -421,6 +755,14 @@ impl ExecutionClient for MogwaiExecutionClient {
         self.connected.store(false, Ordering::Relaxed);
         self.ws_cmd = None;
         abort_tasks(&self.task_handles);
+        // Drop every in-flight query waiter's sender so a report generator
+        // blocked on a reply over the now-dead socket errors out immediately
+        // (oneshot RecvError) instead of waiting out its full timeout.
+        {
+            let mut pending = lock_recover(&self.pending, "pending queries");
+            pending.orders.clear();
+            pending.fills.clear();
+        }
         self.core.set_stopped();
         self.core.set_disconnected();
         Ok(())
@@ -635,7 +977,6 @@ impl ExecutionClient for MogwaiExecutionClient {
                     instrument_id: cmd.instrument_id,
                     order_side: cmd.order_init.order_side,
                     order_type: cmd.order_init.order_type,
-                    time_in_force: cmd.order_init.time_in_force,
                     status: OrderStatus::Submitted,
                     quantity: cmd.order_init.quantity.as_decimal(),
                     price: cmd.order_init.price.map(|p| p.as_decimal()),
@@ -675,143 +1016,157 @@ impl ExecutionClient for MogwaiExecutionClient {
         })
     }
 
+    /// The execution manager's in-flight probe: query the venue's truth for
+    /// one order and emit the report if the venue knows it. Follows the
+    /// canonical adapter shape (e.g. kraken): spawn the async query, emit via
+    /// the report channel, log-and-drop on failure (the manager retries on
+    /// its own cadence). A venue that reports no such order emits nothing -
+    /// "absent" is the truthful answer for a submit that never reached the
+    /// accept gate.
+    fn query_order(&self, cmd: QueryOrder) -> anyhow::Result<()> {
+        let query = self.venue_query();
+        let instruments = Arc::clone(&self.instruments);
+        let account_id = self.core.account_id;
+        let emitter = self.emitter.clone();
+        let sim = self.sim;
+        let client_order_id = cmd.client_order_id.to_string();
+        track_task(
+            &self.task_handles,
+            get_runtime().spawn(async move {
+                match query
+                    .order_status(Some(client_order_id.clone()), false)
+                    .await
+                {
+                    Ok(snapshot) => {
+                        let ts_init = now_unix_nanos(sim);
+                        let report = snapshot.orders.first().and_then(|info| {
+                            order_status_report_from_info(info, &instruments, account_id, ts_init)
+                        });
+                        match report {
+                            Some(report) => emitter.send_order_status_report(report),
+                            None => tracing::warn!(
+                                order = %client_order_id,
+                                "query_order: venue has no record of this order"
+                            ),
+                        }
+                    }
+                    Err(err) => tracing::warn!(
+                        order = %client_order_id,
+                        error = %err,
+                        "query_order failed; the manager will retry on its own cadence"
+                    ),
+                }
+            }),
+        );
+        Ok(())
+    }
+
+    /// Order status reports from VENUE TRUTH, not the client-side mirror.
+    ///
+    /// The mirror is populated by the same lifecycle stream havoc corrupts,
+    /// so a report built from it can only repeat the client's (possibly
+    /// stale) belief - in the exact fault class reconciliation exists to
+    /// catch (a server-side cancel whose event was dropped), a mirror-based
+    /// report confidently confirms the stale open order. Querying the venue
+    /// over the wire makes this generator a second, independent witness: the
+    /// reply content is always a truthful engine book read (honest-content
+    /// contract on `ClientMessage::QueryOrders`), while havoc may still
+    /// delay or drop its DELIVERY - which surfaces here as a query timeout,
+    /// exercising the consumer's own timeout path.
     async fn generate_order_status_reports(
         &self,
         cmd: &GenerateOrderStatusReports,
     ) -> anyhow::Result<Vec<OrderStatusReport>> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("execution state mutex poisoned"))?;
-        let reports = state
+        let snapshot = self.venue_query().order_status(None, cmd.open_only).await?;
+        let ts_init = now_unix_nanos(self.sim);
+        let reports = snapshot
             .orders
             .iter()
-            .filter(|(_, record)| !cmd.open_only || record.status.is_open())
-            .filter(|(_, record)| {
+            .filter(|info| {
                 cmd.instrument_id
-                    .is_none_or(|id| id == record.instrument_id)
+                    .is_none_or(|id| symbol_from_instrument(id) == info.symbol)
             })
-            .filter(|(_, record)| {
+            .filter(|info| {
                 // An open order requested under open_only is always included,
                 // regardless of when it last had activity: a real venue
                 // mass-status returns every resting order, and reconciliation
                 // passes a lookback-bounded `start`, so filtering a long-quiet
-                // open order by `ts_last` used to hide it - and the manager then
-                // infers it canceled-at-venue (AE10). The time filter still
-                // applies to closed/historical records (open_only false).
-                (cmd.open_only && record.status.is_open())
-                    || in_time_range(record.ts_last, cmd.start, cmd.end)
+                // open order by `ts_last` used to hide it - and the manager
+                // then inferred it canceled-at-venue (AE10). The time filter
+                // still applies to closed/historical records (open_only false).
+                (cmd.open_only && info.status.is_open())
+                    || in_time_range(UnixNanos::from(info.ts_last), cmd.start, cmd.end)
             })
-            .filter_map(|(client_order_id, record)| {
-                // A Submitted order with no venue ack yet carries no
-                // venue_order_id. `VenueOrderId::from("")` routes through the
-                // panicking `VenueOrderId::new`, which nautilus's own
-                // `#[should_panic]` empty-string test confirms rejects the
-                // empty string - so a `None` cannot be papered over with a
-                // placeholder here. There is also nothing venue-side to
-                // reconcile yet for an order the venue has not acknowledged,
-                // so the record is dropped from this report set (with a
-                // warning) rather than risk a bogus/duplicate venue id
-                // corrupting the reconciliation manager's venue-order-id
-                // index.
-                let venue_order_id = record.venue_order_id.or_else(|| {
-                    tracing::warn!(
-                        order = %client_order_id,
-                        status = ?record.status,
-                        "omitting order status report: no venue order id yet (unacked submit)"
-                    );
-                    None
-                })?;
-                // A record whose mirrored quantity/filled_qty cannot represent
-                // as a nautilus Quantity (hostile magnitude/precision off the
-                // wire) is dropped from the report set with a warning rather
-                // than panicking the report generator.
-                let quantity = record
-                    .quantity_for_report(&self.instruments)
-                    .map_err(|err| {
-                        tracing::warn!(
-                            order = %client_order_id,
-                            error = %err,
-                            "dropping order status report: unrepresentable quantity"
-                        );
-                    })
-                    .ok()?;
-                let filled = record
-                    .filled_quantity_for_report(&self.instruments)
-                    .map_err(|err| {
-                        tracing::warn!(
-                            order = %client_order_id,
-                            error = %err,
-                            "dropping order status report: unrepresentable filled quantity"
-                        );
-                    })
-                    .ok()?;
-                Some(OrderStatusReport::new(
+            .filter_map(|info| {
+                order_status_report_from_info(
+                    info,
+                    &self.instruments,
                     self.core.account_id,
-                    record.instrument_id,
-                    Some(*client_order_id),
-                    venue_order_id,
-                    record.order_side,
-                    record.order_type,
-                    record.time_in_force,
-                    record.status,
-                    quantity,
-                    filled,
-                    record.ts_accepted,
-                    record.ts_last,
-                    now_unix_nanos(self.sim),
-                    None,
-                ))
+                    ts_init,
+                )
             })
             .collect();
         Ok(reports)
     }
 
+    /// The singular twin, backing the execution manager's in-flight re-query
+    /// (`QueryOrder` probes past the inflight threshold) - previously the
+    /// trait's log-and-`None` default, which left mogwai unable to resolve an
+    /// in-flight order and forced the consumer's local INFLIGHT_TIMEOUT
+    /// reject. Same venue-truth source as the plural generator.
+    async fn generate_order_status_report(
+        &self,
+        cmd: &GenerateOrderStatusReport,
+    ) -> anyhow::Result<Option<OrderStatusReport>> {
+        let target = cmd.client_order_id.map(|id| id.to_string());
+        let snapshot = self.venue_query().order_status(target, false).await?;
+        let ts_init = now_unix_nanos(self.sim);
+        let report = snapshot
+            .orders
+            .iter()
+            .filter(|info| {
+                cmd.venue_order_id
+                    .is_none_or(|id| info.venue_order_id == id.as_str())
+            })
+            .filter(|info| {
+                cmd.instrument_id
+                    .is_none_or(|id| symbol_from_instrument(id) == info.symbol)
+            })
+            .find_map(|info| {
+                order_status_report_from_info(
+                    info,
+                    &self.instruments,
+                    self.core.account_id,
+                    ts_init,
+                )
+            });
+        Ok(report)
+    }
+
+    /// Fill reports from VENUE TRUTH (see `generate_order_status_reports`):
+    /// the engine books each fill exactly once regardless of how many
+    /// `OrderFilled` events the wire carried, so this reply is the ground
+    /// truth a duplicated or dropped fill stream reconciles against.
     async fn generate_fill_reports(
         &self,
         cmd: GenerateFillReports,
     ) -> anyhow::Result<Vec<FillReport>> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("execution state mutex poisoned"))?;
-        let reports = state
+        let snapshot = self.venue_query().fill_history(None).await?;
+        let ts_init = now_unix_nanos(self.sim);
+        let reports = snapshot
             .fills
             .iter()
-            .filter(|fill| cmd.instrument_id.is_none_or(|id| id == fill.instrument_id))
+            .filter(|fill| {
+                cmd.instrument_id
+                    .is_none_or(|id| symbol_from_instrument(id) == fill.symbol)
+            })
             .filter(|fill| {
                 cmd.venue_order_id
-                    .is_none_or(|id| id == fill.venue_order_id)
+                    .is_none_or(|id| fill.venue_order_id == id.as_str())
             })
-            .filter(|fill| in_time_range(fill.ts_event, cmd.start, cmd.end))
+            .filter(|fill| in_time_range(UnixNanos::from(fill.ts_event), cmd.start, cmd.end))
             .filter_map(|fill| {
-                // A commission that cannot represent as nautilus Money drops
-                // just this fill report with a warning; the rest still report.
-                let commission = convert::money(fill.commission, fill.quote_currency)
-                    .map_err(|err| {
-                        tracing::warn!(
-                            trade = %fill.trade_id,
-                            error = %err,
-                            "dropping fill report: unrepresentable commission"
-                        );
-                    })
-                    .ok()?;
-                Some(FillReport::new(
-                    self.core.account_id,
-                    fill.instrument_id,
-                    fill.venue_order_id,
-                    fill.trade_id,
-                    fill.order_side,
-                    fill.last_qty,
-                    fill.last_px,
-                    commission,
-                    LiquiditySide::Taker,
-                    Some(fill.client_order_id),
-                    None,
-                    fill.ts_event,
-                    now_unix_nanos(self.sim),
-                    None,
-                ))
+                fill_report_from_wire(fill, &self.instruments, self.core.account_id, ts_init)
             })
             .collect();
         Ok(reports)
@@ -957,6 +1312,18 @@ enum ExecWsCommand {
         price: Option<Decimal>,
         quantity: Option<Decimal>,
     },
+    /// Venue-truth order status query (see `VenueQuery`): sent over the exec
+    /// socket, correlated to its reply by `request_id`.
+    QueryOrders {
+        request_id: String,
+        client_order_id: Option<String>,
+        open_only: bool,
+    },
+    /// Venue-truth fill history query, the `QueryOrders` twin.
+    QueryFills {
+        request_id: String,
+        client_order_id: Option<String>,
+    },
 }
 
 fn exec_command_to_client_message(cmd: ExecWsCommand) -> ClientMessage {
@@ -971,6 +1338,22 @@ fn exec_command_to_client_message(cmd: ExecWsCommand) -> ClientMessage {
             client_order_id,
             price,
             quantity,
+        },
+        ExecWsCommand::QueryOrders {
+            request_id,
+            client_order_id,
+            open_only,
+        } => ClientMessage::QueryOrders {
+            request_id,
+            client_order_id,
+            open_only,
+        },
+        ExecWsCommand::QueryFills {
+            request_id,
+            client_order_id,
+        } => ClientMessage::QueryFills {
+            request_id,
+            client_order_id,
         },
     }
 }
@@ -1002,6 +1385,10 @@ fn reject_for(cmd: &ExecWsCommand, err: &anyhow::Error, sim: SimClock) -> Server
         ExecWsCommand::Cancel { client_order_id } => unreachable!(
             "cancel transport failures are reported via emit_cancel_rejected, \
              not reject_for (client_order_id={client_order_id})"
+        ),
+        ExecWsCommand::QueryOrders { .. } | ExecWsCommand::QueryFills { .. } => unreachable!(
+            "queries never pass through dispatch_order; their transport \
+             failures surface as errors from VenueQuery itself"
         ),
     }
 }
@@ -1093,6 +1480,9 @@ struct ExecContext {
     emitter: ExecutionEventEmitter,
     state: Arc<Mutex<ExecState>>,
     instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
+    /// Shared with `MogwaiExecutionClient.pending`: the WS reader resolves
+    /// venue-truth query waiters here as snapshot replies land.
+    pending: Arc<Mutex<PendingQueries>>,
     trader_id: nautilus_model::identifiers::TraderId,
     account_id: AccountId,
     account_type: nautilus_model::enums::AccountType,
@@ -1102,7 +1492,6 @@ struct ExecContext {
 #[derive(Debug, Default)]
 struct ExecState {
     orders: HashMap<ClientOrderId, OrderRecord>,
-    fills: Vec<FillRecord>,
     positions: HashMap<Symbol, PositionRecord>,
     /// `ts_event` of the last account snapshot applied to the position mirror.
     /// Snapshots carry the venue's COMPLETE non-zero position set and are
@@ -1117,31 +1506,20 @@ struct ExecState {
 
 /// Cap on retained terminal order records. Open orders are never pruned (they
 /// are live reconciliation truth); only closed records beyond this many are
-/// dropped, oldest-by-`ts_last` first, so a report over the retained window
-/// keeps every record it needs while a long forward run cannot accumulate
-/// terminal orders without bound (AE6).
+/// dropped, oldest-by-`ts_last` first, so a long forward run cannot
+/// accumulate terminal orders without bound (AE6). (The mirror once kept an
+/// append-only fill Vec with its own cap; fill reports now come from the
+/// venue-truth `QueryFills`, so no fill store remains to bound.)
 const MAX_TERMINAL_ORDERS: usize = 10_000;
-
-/// Cap on the append-only `fills` Vec, pruned oldest-first past this bound.
-/// Fill reports are lookback-bounded, so the oldest fills beyond this many are
-/// never needed by a report within the retained window (AE6).
-const MAX_FILLS: usize = 10_000;
 
 impl ExecState {
     /// Bounds the mirror's memory: an unpruned `orders` map (terminal records
-    /// and permanently-Submitted strays live forever) and an append-only `fills`
-    /// Vec otherwise grow linearly over a long forward run, and every report
-    /// generation scans them all. Prunes the oldest terminal orders and the
-    /// oldest fills past their caps; open orders are always retained. Called
-    /// after each mirror mutation that can grow the maps (a submit insert, a fill
-    /// push), and does real work only when a cap is exceeded.
+    /// and permanently-Submitted strays live forever) otherwise grows
+    /// linearly over a long forward run. Prunes the oldest terminal orders
+    /// past the cap; open orders are always retained. Called after each
+    /// mirror mutation that can grow the map (a submit insert), and does real
+    /// work only when the cap is exceeded.
     fn prune(&mut self) {
-        if self.fills.len() > MAX_FILLS {
-            // `fills` is appended in arrival order (ascending ts on the clean
-            // path), so draining the front drops the oldest.
-            let excess = self.fills.len() - MAX_FILLS;
-            self.fills.drain(0..excess);
-        }
         // Cheap length gate before the O(n) terminal scan: the terminal count
         // cannot exceed the cap unless the whole map does, so this keeps prune
         // O(1) on the hot submit/fill paths until the mirror genuinely grows
@@ -1176,7 +1554,6 @@ struct OrderRecord {
     instrument_id: InstrumentId,
     order_side: OrderSide,
     order_type: OrderType,
-    time_in_force: nautilus_model::enums::TimeInForce,
     status: OrderStatus,
     quantity: Decimal,
     price: Option<Decimal>,
@@ -1192,55 +1569,6 @@ struct OrderRecord {
     /// but it must not double-apply to the mirror, so the second sighting of a
     /// `trade_id` skips the filled_qty/avg_px/fills mutation.
     seen_trades: std::collections::HashSet<TradeId>,
-}
-
-impl OrderRecord {
-    fn quantity_for_report(
-        &self,
-        instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
-    ) -> anyhow::Result<nautilus_model::types::Quantity> {
-        let precision = report_size_precision(instruments, self.instrument_id)?;
-        convert::quantity(self.quantity, precision)
-    }
-
-    fn filled_quantity_for_report(
-        &self,
-        instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
-    ) -> anyhow::Result<nautilus_model::types::Quantity> {
-        let precision = report_size_precision(instruments, self.instrument_id)?;
-        convert::quantity(self.filled_qty, precision)
-    }
-}
-
-/// The instrument's real `size_precision`, or an error on a cache miss.
-///
-/// A guessed default (this used to fall back to a bare `8`) can silently
-/// misrepresent a report's quantity precision against the real instrument -
-/// exactly the class of hostile/unrepresentable-data problem `convert.rs`
-/// otherwise takes care to surface rather than paper over. Both call sites
-/// already thread the `anyhow::Result` through a `filter_map` that warns and
-/// drops the one report on error, so surfacing the miss here costs nothing.
-fn report_size_precision(
-    instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
-    instrument_id: InstrumentId,
-) -> anyhow::Result<u8> {
-    instrument_def(instruments, &symbol_from_instrument(instrument_id))
-        .map(|def| def.size_precision)
-        .with_context(|| format!("no instrument def cached for {instrument_id}"))
-}
-
-#[derive(Debug, Clone)]
-struct FillRecord {
-    client_order_id: ClientOrderId,
-    instrument_id: InstrumentId,
-    venue_order_id: VenueOrderId,
-    trade_id: TradeId,
-    order_side: OrderSide,
-    last_qty: nautilus_model::types::Quantity,
-    last_px: nautilus_model::types::Price,
-    commission: Decimal,
-    quote_currency: Currency,
-    ts_event: UnixNanos,
 }
 
 #[derive(Debug, Clone)]
@@ -1636,6 +1964,49 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
             );
         }
         ServerMessage::OrderFilled(fill) => handle_order_filled(&fill, ctx),
+        // Venue-truth query replies: resolve the waiter registered under the
+        // echoed correlation id. A reply with no waiter is a straggler whose
+        // requester already timed out (client havoc delayed it past the
+        // request timeout) or a duplicate - log it and move on; the content
+        // was truthful either way, only the delivery was havoc'd.
+        ServerMessage::OrderStatusSnapshot(snapshot) => {
+            let waiter = lock_recover(&ctx.pending, "pending queries")
+                .orders
+                .remove(&snapshot.request_id);
+            match waiter {
+                Some(reply_tx) => {
+                    if let Err(snapshot) = reply_tx.send(snapshot) {
+                        tracing::warn!(
+                            request_id = %snapshot.request_id,
+                            "order status reply arrived after its requester gave up"
+                        );
+                    }
+                }
+                None => tracing::warn!(
+                    request_id = %snapshot.request_id,
+                    "unsolicited order status snapshot (timed-out or duplicate reply)"
+                ),
+            }
+        }
+        ServerMessage::FillSnapshot(snapshot) => {
+            let waiter = lock_recover(&ctx.pending, "pending queries")
+                .fills
+                .remove(&snapshot.request_id);
+            match waiter {
+                Some(reply_tx) => {
+                    if let Err(snapshot) = reply_tx.send(snapshot) {
+                        tracing::warn!(
+                            request_id = %snapshot.request_id,
+                            "fill snapshot reply arrived after its requester gave up"
+                        );
+                    }
+                }
+                None => tracing::warn!(
+                    request_id = %snapshot.request_id,
+                    "unsolicited fill snapshot (timed-out or duplicate reply)"
+                ),
+            }
+        }
         ServerMessage::AccountState(state) => handle_account_state(state, ctx),
         ServerMessage::Heartbeat { .. } => {
             tracing::trace!("ignoring server heartbeat on execution path");
@@ -1731,7 +2102,11 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
     // OrderFilled wire event is still forwarded below (the intended divergence),
     // but the reconciliation mirror (filled_qty/avg_px/fills) must apply each
     // economic fill exactly once, so the second sighting skips the mutation.
-    let Some((record, is_duplicate)) = with_order_record(&ctx.state, client_order_id, |record| {
+    // The duplicate flag guards only the mirror mutation inside the closure;
+    // the wire event is forwarded either way (the intended divergence), and
+    // fill REPORTS now come from the venue-truth QueryFills rather than any
+    // mirror fill store, so nothing outside the closure branches on it.
+    let Some((record, _is_duplicate)) = with_order_record(&ctx.state, client_order_id, |record| {
         let is_duplicate = !record.seen_trades.insert(trade_id);
         if !is_duplicate {
             // Terminal-state guard (see the OrderAccepted arm): a partial fill
@@ -1784,23 +2159,6 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
         );
         return;
     };
-
-    if !is_duplicate {
-        let mut state = lock_recover(&ctx.state, "execution state");
-        state.fills.push(FillRecord {
-            client_order_id,
-            instrument_id: record.instrument_id,
-            venue_order_id,
-            trade_id,
-            order_side: record.order_side,
-            last_qty,
-            last_px,
-            commission: fill.commission,
-            quote_currency,
-            ts_event: UnixNanos::from(fill.ts_event),
-        });
-        state.prune();
-    }
 
     let commission = if fill.commission.is_zero() {
         None
@@ -2061,13 +2419,12 @@ fn in_time_range(ts: UnixNanos, start: Option<UnixNanos>, end: Option<UnixNanos>
 mod tests {
     use std::{cell::RefCell, rc::Rc, time::Duration};
 
-    use mogwai_protocol::{ClientHavoc, HavocLatency, Side, TradeTick, TransportProfile};
+    use mogwai_protocol::{
+        ClientHavoc, HavocLatency, Side, TradeTick, TransportProfile, WireOrderStatus,
+    };
     use nautilus_common::{cache::Cache, clients::ExecutionClient, messages::ExecutionEvent};
     use nautilus_live::{ExecutionClientCore, ExecutionEventEmitter};
-    use nautilus_model::{
-        enums::TimeInForce,
-        identifiers::{ClientId, StrategyId, TraderId},
-    };
+    use nautilus_model::identifiers::{ClientId, StrategyId, TraderId};
 
     use super::*;
 
@@ -2122,7 +2479,6 @@ mod tests {
                 instrument_id: instrument_id(),
                 order_side: OrderSide::Buy,
                 order_type: OrderType::Limit,
-                time_in_force: TimeInForce::Gtc,
                 status: OrderStatus::Submitted,
                 quantity: Decimal::new(1, 0),
                 price: Some(Decimal::new(10_000, 2)),
@@ -2157,6 +2513,7 @@ mod tests {
                 emitter,
                 state,
                 instruments: instruments_map(),
+                pending: Arc::new(Mutex::new(PendingQueries::default())),
                 trader_id: config.trader_id,
                 account_id: config.account_id,
                 account_type: config.account_type,
@@ -2164,6 +2521,101 @@ mod tests {
             },
             rx,
         )
+    }
+
+    /// A fake venue behind the exec command channel: answers the venue-truth
+    /// queries from canned rows (applying the same id/open_only filtering the
+    /// engine does), resolving waiters through the same pending map the real
+    /// WS reader uses. Every other command is swallowed.
+    fn install_fake_venue(
+        client: &mut MogwaiExecutionClient,
+        orders: Vec<OrderStatusInfo>,
+        fills: Vec<mogwai_protocol::OrderFilled>,
+    ) -> tokio::task::JoinHandle<()> {
+        let (tx, mut rx) = unbounded_channel::<ExecWsCommand>();
+        client.ws_cmd = Some(tx);
+        let pending = Arc::clone(&client.pending);
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    ExecWsCommand::QueryOrders {
+                        request_id,
+                        client_order_id,
+                        open_only,
+                    } => {
+                        let rows = orders
+                            .iter()
+                            .filter(|info| match &client_order_id {
+                                Some(id) => info.client_order_id == *id,
+                                None => !open_only || info.status.is_open(),
+                            })
+                            .cloned()
+                            .collect();
+                        let waiter = pending
+                            .lock()
+                            .expect("pending queries mutex")
+                            .orders
+                            .remove(&request_id);
+                        if let Some(reply) = waiter {
+                            drop(reply.send(OrderStatusSnapshot {
+                                request_id,
+                                orders: rows,
+                                ts_event: 99,
+                            }));
+                        }
+                    }
+                    ExecWsCommand::QueryFills {
+                        request_id,
+                        client_order_id,
+                    } => {
+                        let rows = fills
+                            .iter()
+                            .filter(|fill| {
+                                client_order_id
+                                    .as_ref()
+                                    .is_none_or(|id| fill.client_order_id == *id)
+                            })
+                            .cloned()
+                            .collect();
+                        let waiter = pending
+                            .lock()
+                            .expect("pending queries mutex")
+                            .fills
+                            .remove(&request_id);
+                        if let Some(reply) = waiter {
+                            drop(reply.send(FillSnapshot {
+                                request_id,
+                                fills: rows,
+                                ts_event: 99,
+                            }));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        })
+    }
+
+    fn wire_order_info(
+        id: &str,
+        status: WireOrderStatus,
+        filled: Decimal,
+        ts: u64,
+    ) -> OrderStatusInfo {
+        OrderStatusInfo {
+            client_order_id: id.into(),
+            venue_order_id: "V-1".into(),
+            symbol: "BTCUSDT".into(),
+            side: Side::Buy,
+            order_type: mogwai_protocol::OrderType::Limit,
+            time_in_force: mogwai_protocol::TimeInForce::Gtc,
+            status,
+            quantity: Decimal::new(1, 0),
+            filled_qty: filled,
+            price: Some(Decimal::new(10_000, 2)),
+            ts_accepted: ts,
+            ts_last: ts,
+        }
     }
 
     #[test]
@@ -2193,25 +2645,22 @@ mod tests {
             .state
             .lock()
             .expect("execution state mutex")
-            .fills
-            .push(FillRecord {
-                client_order_id: ClientOrderId::from("O-1"),
-                instrument_id: instrument_id(),
-                venue_order_id: VenueOrderId::from("V-1"),
-                trade_id: TradeId::from("T-1"),
-                order_side: OrderSide::Buy,
-                last_qty: nautilus_model::types::Quantity::new(1.0, 8),
-                last_px: nautilus_model::types::Price::new(100.0, 2),
-                commission: Decimal::ZERO,
-                quote_currency: Currency::from_str("USDT").expect("usdt"),
-                ts_event: UnixNanos::from(1),
-            });
+            .positions
+            .insert(
+                "BTCUSDT".to_string(),
+                PositionRecord {
+                    symbol: "BTCUSDT".to_string(),
+                    instrument_id: instrument_id(),
+                    quantity: Decimal::new(1, 0),
+                    avg_px: Decimal::new(10_000, 2),
+                    ts_last: UnixNanos::from(1),
+                },
+            );
 
         client.reset().expect("reset succeeds");
 
         let state = client.state.lock().expect("execution state mutex");
         assert!(state.orders.is_empty(), "orders cleared on reset");
-        assert!(state.fills.is_empty(), "fills cleared on reset");
         assert!(state.positions.is_empty(), "positions cleared on reset");
     }
 
@@ -2747,55 +3196,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reports_reconstruct_from_mirror() {
+    async fn reports_repeat_venue_truth_not_the_mirror() {
+        // The poll-heal fault class end to end at the adapter seam: the
+        // mirror believes O-1 still rests open (its cancel event was
+        // dropped), while the venue's truth says Canceled. The report
+        // generators must repeat the venue - a mirror-based report would
+        // confidently confirm the stale open order, which is exactly the
+        // corruption reconciliation exists to catch (AE2).
         let mut client = execution_client();
         client.instruments = instruments_map();
         seed_order(&client.state);
-        let (ctx, _rx) = exec_context();
-        let ctx = ExecContext {
-            emitter: ctx.emitter,
-            state: Arc::clone(&client.state),
-            instruments: Arc::clone(&client.instruments),
-            trader_id: ctx.trader_id,
-            account_id: ctx.account_id,
-            account_type: ctx.account_type,
-            sim: ctx.sim,
-        };
-
-        handle_exec_message(
-            ServerMessage::OrderAccepted {
-                client_order_id: "O-1".into(),
-                venue_order_id: "V-1".into(),
-                ts_event: 10,
+        client
+            .state
+            .lock()
+            .expect("state")
+            .orders
+            .get_mut(&ClientOrderId::from("O-1"))
+            .expect("seeded order")
+            .status = OrderStatus::Accepted;
+        let _venue = install_fake_venue(
+            &mut client,
+            vec![wire_order_info(
+                "O-1",
+                WireOrderStatus::Canceled,
+                Decimal::ZERO,
+                11,
+            )],
+            vec![wire_fill("T-1", Decimal::ZERO, 11)],
+        );
+        client.state.lock().expect("state").positions.insert(
+            "BTCUSDT".to_string(),
+            PositionRecord {
+                symbol: "BTCUSDT".to_string(),
+                instrument_id: instrument_id(),
+                quantity: Decimal::new(1, 0),
+                avg_px: Decimal::new(10_000, 2),
+                ts_last: UnixNanos::from(12),
             },
-            &ctx,
-        );
-        handle_exec_message(
-            ServerMessage::OrderFilled(mogwai_protocol::OrderFilled {
-                client_order_id: "O-1".into(),
-                venue_order_id: "V-1".into(),
-                trade_id: "T-1".into(),
-                symbol: "BTCUSDT".into(),
-                side: Side::Buy,
-                last_qty: Decimal::new(1, 0),
-                last_px: Decimal::new(10_000, 2),
-                leaves_qty: Decimal::ZERO,
-                commission: Decimal::ZERO,
-                ts_event: 11,
-            }),
-            &ctx,
-        );
-        handle_exec_message(
-            ServerMessage::AccountState(mogwai_protocol::AccountState {
-                balances: Vec::new(),
-                positions: vec![mogwai_protocol::Position {
-                    symbol: "BTCUSDT".into(),
-                    quantity: Decimal::new(1, 0),
-                    avg_px: Decimal::new(10_000, 2),
-                }],
-                ts_event: 12,
-            }),
-            &ctx,
         );
 
         let orders = client
@@ -2838,11 +3275,104 @@ mod tests {
             .expect("position reports");
 
         assert_eq!(orders.len(), 1);
-        assert_eq!(orders[0].order_status, OrderStatus::Filled);
+        assert_eq!(
+            orders[0].order_status,
+            OrderStatus::Canceled,
+            "the report must repeat the venue's Canceled, not the mirror's stale Accepted"
+        );
         assert_eq!(fills.len(), 1);
         assert_eq!(fills[0].trade_id, TradeId::from("T-1"));
         assert_eq!(positions.len(), 1);
         assert_eq!(positions[0].position_side, PositionSideSpecified::Long);
+    }
+
+    #[tokio::test]
+    async fn singular_report_and_unanswered_query_paths() {
+        // The singular generator (backing the in-flight re-query) resolves a
+        // targeted order from venue truth; a venue that knows nothing of the
+        // id yields Ok(None), and a venue that never replies at all surfaces
+        // as a timeout error - the delivery-havoc path (DelayAcks/GoDark on
+        // the reply) that exercises the consumer's own query timeout.
+        let mut client = execution_client();
+        client.instruments = instruments_map();
+        let _venue = install_fake_venue(
+            &mut client,
+            vec![wire_order_info(
+                "O-1",
+                WireOrderStatus::PartiallyFilled,
+                Decimal::new(1, 0),
+                11,
+            )],
+            Vec::new(),
+        );
+
+        let report = client
+            .generate_order_status_report(&GenerateOrderStatusReport::new(
+                UUID4::new(),
+                UnixNanos::from(20),
+                None,
+                Some(ClientOrderId::from("O-1")),
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("targeted report generates");
+        let report = report.expect("the venue knows O-1");
+        assert_eq!(report.order_status, OrderStatus::PartiallyFilled);
+        assert_eq!(report.venue_order_id, VenueOrderId::from("V-1"));
+
+        let ghost = client
+            .generate_order_status_report(&GenerateOrderStatusReport::new(
+                UUID4::new(),
+                UnixNanos::from(20),
+                None,
+                Some(ClientOrderId::from("GHOST")),
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("unknown id still generates");
+        assert!(
+            ghost.is_none(),
+            "an id the venue never accepted reports as absent, not as an error"
+        );
+    }
+
+    #[tokio::test]
+    async fn unanswered_ws_query_times_out_instead_of_hanging() {
+        // A venue that swallows the reply (GoDark on the exec socket): the
+        // query must fail with a timeout after the request-timeout window,
+        // and the pending slot must be cleaned up rather than leaked. Built
+        // directly with a 1s timeout so the test does not wait out the
+        // production 30s default.
+        let client = execution_client();
+        let (tx, _rx) = unbounded_channel::<ExecWsCommand>();
+        let query = VenueQuery {
+            http: None,
+            ws_cmd: Some(tx),
+            pending: Arc::clone(&client.pending),
+            timeout_secs: 1,
+        };
+
+        let err = query
+            .order_status(None, true)
+            .await
+            .expect_err("no reply must time out");
+        assert!(
+            err.to_string().contains("timed out"),
+            "the error names the timeout: {err}"
+        );
+        assert!(
+            client
+                .pending
+                .lock()
+                .expect("pending queries mutex")
+                .orders
+                .is_empty(),
+            "a timed-out query must not leak its pending slot"
+        );
     }
 
     #[tokio::test]
@@ -2861,6 +3391,7 @@ mod tests {
             emitter: ctx.emitter,
             state: Arc::clone(&client.state),
             instruments: Arc::clone(&client.instruments),
+            pending: Arc::clone(&client.pending),
             trader_id: ctx.trader_id,
             account_id: ctx.account_id,
             account_type: ctx.account_type,
@@ -3074,8 +3605,6 @@ mod tests {
             UnixNanos::from(12),
             "ts_last must not walk backward to the reordered fill's stamp"
         );
-        let state = ctx.state.lock().expect("execution state mutex");
-        assert_eq!(state.fills.len(), 1, "the fill record must still be kept");
     }
 
     #[test]
@@ -3194,8 +3723,6 @@ mod tests {
             "mirror must stay unadvanced"
         );
         assert_eq!(record.status, OrderStatus::Submitted);
-        let state = ctx.state.lock().expect("execution state mutex");
-        assert!(state.fills.is_empty(), "no fill record for a dropped fill");
     }
 
     #[test]
@@ -3260,46 +3787,31 @@ mod tests {
         // The trait default returns Ok(None), which the live node's startup
         // reconciliation logs as "no mass status available" and reconciles
         // NOTHING. The implementation must compose the three report
-        // generators: open orders, their fills, current positions.
+        // generators: open orders and fills from venue truth, current
+        // positions from the account-snapshot mirror.
         let mut client = execution_client();
         client.instruments = instruments_map();
-        seed_order(&client.state);
-        let (ctx, _rx) = exec_context();
-        let ctx = ExecContext {
-            emitter: ctx.emitter,
-            state: Arc::clone(&client.state),
-            instruments: Arc::clone(&client.instruments),
-            trader_id: ctx.trader_id,
-            account_id: ctx.account_id,
-            account_type: ctx.account_type,
-            sim: ctx.sim,
-        };
-
-        handle_exec_message(
-            ServerMessage::OrderAccepted {
-                client_order_id: "O-1".into(),
-                venue_order_id: "V-1".into(),
-                ts_event: 10,
-            },
-            &ctx,
-        );
         // A partial fill keeps the order open, so it passes the open_only
         // filter the canonical mass-status shape applies to order reports.
-        handle_exec_message(
-            ServerMessage::OrderFilled(wire_fill("T-1", Decimal::new(1, 0), 11)),
-            &ctx,
+        let _venue = install_fake_venue(
+            &mut client,
+            vec![wire_order_info(
+                "O-1",
+                WireOrderStatus::PartiallyFilled,
+                Decimal::new(1, 0),
+                10,
+            )],
+            vec![wire_fill("T-1", Decimal::new(1, 0), 11)],
         );
-        handle_exec_message(
-            ServerMessage::AccountState(mogwai_protocol::AccountState {
-                balances: Vec::new(),
-                positions: vec![mogwai_protocol::Position {
-                    symbol: "BTCUSDT".into(),
-                    quantity: Decimal::new(1, 0),
-                    avg_px: Decimal::new(10_000, 2),
-                }],
-                ts_event: 12,
-            }),
-            &ctx,
+        client.state.lock().expect("state").positions.insert(
+            "BTCUSDT".to_string(),
+            PositionRecord {
+                symbol: "BTCUSDT".to_string(),
+                instrument_id: instrument_id(),
+                quantity: Decimal::new(1, 0),
+                avg_px: Decimal::new(10_000, 2),
+                ts_last: UnixNanos::from(12),
+            },
         );
 
         let mass = client
@@ -3408,7 +3920,6 @@ mod tests {
             instrument_id: instrument_id(),
             order_side: OrderSide::Buy,
             order_type: OrderType::Limit,
-            time_in_force: TimeInForce::Gtc,
             status,
             quantity: Decimal::new(1, 0),
             price: Some(Decimal::new(10_000, 2)),
@@ -3513,17 +4024,14 @@ mod tests {
     async fn open_only_keeps_long_quiet_open_order_but_time_filters_the_rest() {
         let mut client = execution_client();
         client.instruments = instruments_map();
-        {
-            let mut state = client.state.lock().expect("state");
-            state.orders.insert(
-                ClientOrderId::from("O-OPEN"),
-                order_at(OrderStatus::Accepted, UnixNanos::from(1)),
-            );
-            state.orders.insert(
-                ClientOrderId::from("O-CLOSED"),
-                order_at(OrderStatus::Canceled, UnixNanos::from(1)),
-            );
-        }
+        let _venue = install_fake_venue(
+            &mut client,
+            vec![
+                wire_order_info("O-OPEN", WireOrderStatus::Accepted, Decimal::ZERO, 1),
+                wire_order_info("O-CLOSED", WireOrderStatus::Canceled, Decimal::ZERO, 1),
+            ],
+            Vec::new(),
+        );
 
         let start = Some(UnixNanos::from(1_000_000));
         let open = client
@@ -3602,25 +4110,11 @@ mod tests {
         );
     }
 
-    // AE6: ExecState.prune bounds the append-only fills Vec and terminal-order
-    // records past their caps (oldest-first) while never dropping an open order.
+    // AE6: ExecState.prune bounds the terminal-order records past their cap
+    // (oldest-first) while never dropping an open order.
     #[test]
-    fn exec_state_prune_bounds_fills_and_terminal_orders_keeping_open() {
+    fn exec_state_prune_bounds_terminal_orders_keeping_open() {
         let mut state = ExecState::default();
-        for i in 0..(MAX_FILLS as u64 + 3) {
-            state.fills.push(FillRecord {
-                client_order_id: ClientOrderId::from("O-1"),
-                instrument_id: instrument_id(),
-                venue_order_id: VenueOrderId::from("V-1"),
-                trade_id: TradeId::from("T-1"),
-                order_side: OrderSide::Buy,
-                last_qty: nautilus_model::types::Quantity::new(1.0, 8),
-                last_px: nautilus_model::types::Price::new(100.0, 2),
-                commission: Decimal::ZERO,
-                quote_currency: Currency::from_str("USDT").expect("usdt"),
-                ts_event: UnixNanos::from(i),
-            });
-        }
         for i in 0..(MAX_TERMINAL_ORDERS as u64 + 2) {
             state.orders.insert(
                 ClientOrderId::from(format!("C-{i}").as_str()),
@@ -3634,12 +4128,6 @@ mod tests {
 
         state.prune();
 
-        assert_eq!(state.fills.len(), MAX_FILLS, "fills capped at MAX_FILLS");
-        assert_eq!(
-            state.fills.first().map(|fill| fill.ts_event),
-            Some(UnixNanos::from(3)),
-            "the oldest 3 fills were dropped"
-        );
         let terminal = state
             .orders
             .values()

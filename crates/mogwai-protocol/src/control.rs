@@ -56,4 +56,15 @@ pub enum Divergence {
     /// (`PartialFillNext`, `RejectNextSubmit`, `DuplicateNextFill`,
     /// `DropNextAccountUpdate`), which self-disarm on their own trigger.
     ClearDivergences,
+    /// Cancel a RESTING order server-side, immediately, emitting NO lifecycle
+    /// event - the out-of-band cancel with a lost `OrderCanceled` that the
+    /// consumer's reconciliation poll exists to catch. Unlike the armed
+    /// single-shot divergences this is not queued for a trigger: it acts on
+    /// the book the moment it is posted (there is no client action to key
+    /// off), frees the order's reservation, and leaves the client believing
+    /// the order still rests until it reconciles - a `QueryOrders` reply
+    /// truthfully reports the order `Canceled` from then on. Posting it for
+    /// an id that is not currently resting is refused with a 4xx, so a
+    /// scenario cannot silently arm a no-op.
+    CancelOpenOrderSilently { client_order_id: ClientOrderId },
 }

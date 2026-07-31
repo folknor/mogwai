@@ -21,8 +21,9 @@
 use std::collections::{HashMap, VecDeque};
 
 use mogwai_protocol::{
-    AccountState, ClientMessage, ClientOrderId, InstrumentDef, Position, ServerMessage,
-    SubmitOrder, Symbol, VenueOrderId, control::Divergence, default_instruments,
+    AccountState, ClientMessage, ClientOrderId, FillSnapshot, InstrumentDef, OrderFilled,
+    OrderStatusInfo, OrderStatusSnapshot, Position, ServerMessage, SubmitOrder, Symbol,
+    VenueOrderId, WireOrderStatus, control::Divergence, default_instruments,
 };
 use rust_decimal::Decimal;
 
@@ -51,6 +52,11 @@ pub struct OpenOrder {
     pub venue_order_id: VenueOrderId,
     pub submit: SubmitOrder,
     pub leaves_qty: Decimal,
+    /// Sim unix-ns instant the venue accepted the order.
+    pub ts_accepted: u64,
+    /// Sim unix-ns instant of the last lifecycle activity (accept, fill,
+    /// amend). Reported on `QueryOrders` replies as the row's `ts_last`.
+    pub ts_last: u64,
 }
 
 #[derive(Debug)]
@@ -81,6 +87,19 @@ pub struct Engine {
     /// reject for a terminal order still name the order it targets - the wire
     /// contract says `venue_order_id` is absent ONLY for genuinely unknown ids.
     seen_client_order_ids: HashMap<ClientOrderId, VenueOrderId>,
+    /// Terminal order records, the closed half of the `QueryOrders` truth
+    /// store: every order that reached `Filled` or `Canceled`, frozen at its
+    /// terminal transition. Retention is unbounded on purpose, matching
+    /// `seen_client_order_ids`: reconciliation must be able to ask about an
+    /// order regardless of how long ago it closed, and a test-lifetime venue
+    /// accumulates orders at test scale, not exchange scale.
+    closed: HashMap<ClientOrderId, OrderStatusInfo>,
+    /// Every fill as it BOOKED, in booking order - the `QueryFills` truth
+    /// store. One entry per booked fill regardless of wire duplication (a
+    /// `DuplicateNextFill` doubles the event, not this record), so the reply
+    /// is the ground truth a corrupted `OrderFilled` stream reconciles
+    /// against. Unbounded for the same reason as `closed`.
+    fills: Vec<OrderFilled>,
     /// Armed divergences, consumed as their trigger fires.
     armed: VecDeque<Divergence>,
     seq: u64,
@@ -135,6 +154,8 @@ impl Engine {
             },
             instruments,
             seen_client_order_ids: HashMap::new(),
+            closed: HashMap::new(),
+            fills: Vec::new(),
             armed: VecDeque::new(),
             seq: 0,
             warned: Warned::default(),
@@ -166,9 +187,129 @@ impl Engine {
                 price,
                 quantity,
             } => self.on_modify(client_order_id, price, quantity, ts),
+            ClientMessage::QueryOrders {
+                request_id,
+                client_order_id,
+                open_only,
+            } => vec![ServerMessage::OrderStatusSnapshot(
+                self.order_status_snapshot(request_id, client_order_id.as_deref(), open_only, ts),
+            )],
+            ClientMessage::QueryFills {
+                request_id,
+                client_order_id,
+            } => vec![ServerMessage::FillSnapshot(self.fill_snapshot(
+                request_id,
+                client_order_id.as_deref(),
+                ts,
+            ))],
             // Subscriptions are intercepted by the server for replay control.
             ClientMessage::Subscribe { .. } | ClientMessage::Unsubscribe { .. } => Vec::new(),
         }
+    }
+
+    /// Answer a `QueryOrders` truthfully from the book: the currently-open
+    /// orders plus the retained terminal records. This is the reconciliation
+    /// witness, so its content is NEVER touched by divergences - havoc may
+    /// only delay or drop the reply's delivery (the server's writer windows),
+    /// per the honest-content contract on `ClientMessage::QueryOrders`.
+    ///
+    /// A targeted query (`client_order_id: Some`) ignores `open_only`: asking
+    /// about one specific order deserves its terminal state, not an empty
+    /// reply that would misread as "unknown order".
+    pub fn order_status_snapshot(
+        &self,
+        request_id: String,
+        client_order_id: Option<&str>,
+        open_only: bool,
+        ts: u64,
+    ) -> OrderStatusSnapshot {
+        let mut orders: Vec<OrderStatusInfo> = self
+            .open
+            .iter()
+            .map(open_order_status)
+            .chain(self.closed.values().cloned())
+            .filter(|info| match client_order_id {
+                Some(id) => info.client_order_id == id,
+                None => !open_only || info.status.is_open(),
+            })
+            .collect();
+        // `open` and the `closed` map iterate in unrelated orders; sort so
+        // the reply is deterministic for goldens and diffable in logs.
+        orders.sort_by(|a, b| {
+            a.ts_accepted
+                .cmp(&b.ts_accepted)
+                .then_with(|| a.client_order_id.cmp(&b.client_order_id))
+        });
+        OrderStatusSnapshot {
+            request_id,
+            orders,
+            ts_event: ts,
+        }
+    }
+
+    /// Answer a `QueryFills` truthfully from the booking-order fill store.
+    /// Same honest-content contract as `order_status_snapshot`.
+    pub fn fill_snapshot(
+        &self,
+        request_id: String,
+        client_order_id: Option<&str>,
+        ts: u64,
+    ) -> FillSnapshot {
+        let fills = self
+            .fills
+            .iter()
+            .filter(|fill| client_order_id.is_none_or(|id| fill.client_order_id == id))
+            .cloned()
+            .collect();
+        FillSnapshot {
+            request_id,
+            fills,
+            ts_event: ts,
+        }
+    }
+
+    /// The control-plane out-of-band cancel (`CancelOpenOrderSilently`):
+    /// remove a RESTING order from the book and free its reservation,
+    /// emitting no lifecycle event - the fault class where the venue
+    /// cancelled and the client never heard. The truth store records the
+    /// order `Canceled` at `ts`, so a later `QueryOrders` reports it
+    /// honestly while the event stream stays silent. Errs when the id is not
+    /// currently resting (unknown or already terminal), so the control plane
+    /// can refuse a no-op arm loudly.
+    pub fn cancel_open_order_silently(
+        &mut self,
+        client_order_id: &str,
+        ts: u64,
+    ) -> Result<(), String> {
+        let Some(pos) = self
+            .open
+            .iter()
+            .position(|o| o.submit.client_order_id == client_order_id)
+        else {
+            return Err(match self.seen_client_order_ids.get(client_order_id) {
+                Some(_) => "order already terminal (filled or canceled)".into(),
+                None => "unknown order".into(),
+            });
+        };
+        let order = self.open.remove(pos);
+        self.record_closed(&order, WireOrderStatus::Canceled, ts);
+        Ok(())
+    }
+
+    /// Freeze a just-removed open order into the terminal truth store.
+    pub(crate) fn record_closed(&mut self, order: &OpenOrder, status: WireOrderStatus, ts: u64) {
+        debug_assert!(!status.is_open(), "closed records are terminal only");
+        let mut info = open_order_status(order);
+        info.status = status;
+        info.ts_last = ts;
+        self.closed
+            .insert(order.submit.client_order_id.clone(), info);
+    }
+
+    /// Record a booked fill into the `QueryFills` truth store. Called once
+    /// per booking, never per wire event.
+    pub(crate) fn record_fill(&mut self, fill: &OrderFilled) {
+        self.fills.push(fill.clone());
     }
 
     // `&mut self` only for the saturation warning bookkeeping in `snapshot`.
@@ -193,6 +334,31 @@ impl Engine {
 
     pub fn open_orders(&self) -> &[OpenOrder] {
         &self.open
+    }
+}
+
+/// Map a resting order onto its truthful `QueryOrders` row. Status derives
+/// from fill progress: untouched leaves is `Accepted`, anything partially
+/// filled is `PartiallyFilled`.
+fn open_order_status(order: &OpenOrder) -> OrderStatusInfo {
+    let filled_qty = order.submit.quantity - order.leaves_qty;
+    OrderStatusInfo {
+        client_order_id: order.submit.client_order_id.clone(),
+        venue_order_id: order.venue_order_id.clone(),
+        symbol: order.submit.symbol.clone(),
+        side: order.submit.side,
+        order_type: order.submit.order_type,
+        time_in_force: order.submit.time_in_force,
+        status: if filled_qty > Decimal::ZERO {
+            WireOrderStatus::PartiallyFilled
+        } else {
+            WireOrderStatus::Accepted
+        },
+        quantity: order.submit.quantity,
+        filled_qty,
+        price: order.submit.price,
+        ts_accepted: order.ts_accepted,
+        ts_last: order.ts_last,
     }
 }
 
@@ -1540,6 +1706,199 @@ mod tests {
         assert!(e.account_snapshot(2).balances.is_empty());
         assert!(e.positions().is_empty());
         assert!(e.open_orders().is_empty());
+    }
+
+    #[test]
+    fn query_orders_reports_truth_for_open_terminal_and_unknown() {
+        let mut e = Engine::new();
+        // O1 rests partially filled, O2 fills fully, O3 rests then cancels.
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "O1".into(),
+            fraction: Decimal::from_f64(0.3).unwrap(),
+        });
+        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        e.process(ClientMessage::SubmitOrder(order("O2", 5)), 2);
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "O3".into(),
+            fraction: Decimal::from_f64(0.5).unwrap(),
+        });
+        e.process(ClientMessage::SubmitOrder(order("O3", 4)), 3);
+        e.process(
+            ClientMessage::CancelOrder {
+                client_order_id: "O3".into(),
+            },
+            4,
+        );
+
+        let out = e.process(
+            ClientMessage::QueryOrders {
+                request_id: "Q1".into(),
+                client_order_id: None,
+                open_only: false,
+            },
+            9,
+        );
+        let [ServerMessage::OrderStatusSnapshot(snap)] = &out[..] else {
+            panic!("expected one snapshot, got {out:?}")
+        };
+        assert_eq!(snap.request_id, "Q1");
+        assert_eq!(snap.ts_event, 9);
+        assert_eq!(snap.orders.len(), 3, "open and terminal orders all report");
+        // Sorted by ts_accepted, so O1, O2, O3.
+        let o1 = &snap.orders[0];
+        assert_eq!(o1.client_order_id, "O1");
+        assert_eq!(o1.status, mogwai_protocol::WireOrderStatus::PartiallyFilled);
+        assert_eq!(o1.quantity, Decimal::from(10));
+        assert_eq!(o1.filled_qty, Decimal::from(3));
+        assert_eq!(o1.ts_accepted, 1);
+        let o2 = &snap.orders[1];
+        assert_eq!(o2.status, mogwai_protocol::WireOrderStatus::Filled);
+        assert_eq!(o2.filled_qty, Decimal::from(5));
+        let o3 = &snap.orders[2];
+        assert_eq!(o3.status, mogwai_protocol::WireOrderStatus::Canceled);
+        assert_eq!(o3.filled_qty, Decimal::from(2));
+        assert_eq!(o3.ts_last, 4, "terminal record freezes at the cancel");
+
+        // open_only hides the terminal records.
+        let snap = e.order_status_snapshot("Q2".into(), None, true, 10);
+        assert_eq!(snap.orders.len(), 1);
+        assert_eq!(snap.orders[0].client_order_id, "O1");
+
+        // A targeted query ignores open_only: asking about one specific order
+        // deserves its terminal state, not an empty reply that would misread
+        // as "unknown order".
+        let snap = e.order_status_snapshot("Q3".into(), Some("O2"), true, 11);
+        assert_eq!(snap.orders.len(), 1);
+        assert_eq!(
+            snap.orders[0].status,
+            mogwai_protocol::WireOrderStatus::Filled
+        );
+
+        // An id the venue never accepted is truthfully absent.
+        let snap = e.order_status_snapshot("Q4".into(), Some("GHOST"), false, 12);
+        assert!(snap.orders.is_empty());
+    }
+
+    #[test]
+    fn query_orders_reflects_amends_in_quantity_and_ts_last() {
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "O1".into(),
+            fraction: Decimal::from_f64(0.3).unwrap(),
+        });
+        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        e.process(
+            ClientMessage::ModifyOrder {
+                client_order_id: "O1".into(),
+                price: Some(Decimal::from(200)),
+                quantity: Some(Decimal::from(20)),
+            },
+            5,
+        );
+
+        let snap = e.order_status_snapshot("Q".into(), Some("O1"), false, 6);
+        let row = &snap.orders[0];
+        assert_eq!(row.quantity, Decimal::from(20));
+        assert_eq!(row.price, Some(Decimal::from(200)));
+        assert_eq!(row.filled_qty, Decimal::from(3));
+        assert_eq!(row.ts_accepted, 1, "the accept stamp survives the amend");
+        assert_eq!(row.ts_last, 5, "the amend advances ts_last");
+    }
+
+    #[test]
+    fn query_fills_books_each_fill_once_despite_duplicate_wire_events() {
+        let mut e = Engine::new();
+        e.arm(Divergence::DuplicateNextFill);
+        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        // The wire carried the fill twice (the injected lie)...
+        assert_eq!(
+            out.iter()
+                .filter(|m| matches!(m, ServerMessage::OrderFilled(_)))
+                .count(),
+            2
+        );
+        e.process(ClientMessage::SubmitOrder(order("O2", 5)), 2);
+
+        // ...but the truth store booked it once.
+        let out = e.process(
+            ClientMessage::QueryFills {
+                request_id: "Q1".into(),
+                client_order_id: None,
+            },
+            9,
+        );
+        let [ServerMessage::FillSnapshot(snap)] = &out[..] else {
+            panic!("expected one fill snapshot, got {out:?}")
+        };
+        assert_eq!(snap.request_id, "Q1");
+        assert_eq!(snap.fills.len(), 2, "one booked fill per order, no dupes");
+        assert_eq!(snap.fills[0].client_order_id, "O1");
+        assert_eq!(snap.fills[1].client_order_id, "O2");
+
+        let snap = e.fill_snapshot("Q2".into(), Some("O2"), 10);
+        assert_eq!(snap.fills.len(), 1);
+        assert_eq!(snap.fills[0].client_order_id, "O2");
+    }
+
+    #[test]
+    fn silent_cancel_removes_the_order_wordlessly_and_query_tells_the_truth() {
+        // The poll-heal fault: the venue cancels a resting order out-of-band
+        // and no lifecycle event is emitted - the client's belief and the
+        // venue's book now disagree, and only a QueryOrders reply tells the
+        // truth.
+        let mut e = funded(1_000);
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "R1".into(),
+            fraction: Decimal::new(5, 1),
+        });
+        e.process(ClientMessage::SubmitOrder(order("R1", 4)), 1);
+        assert_eq!(e.open_orders().len(), 1);
+
+        e.cancel_open_order_silently("R1", 7)
+            .expect("resting order cancels");
+
+        assert!(e.open_orders().is_empty(), "the book no longer holds R1");
+        // The reservation is freed: only the filled half's spend remains.
+        let state = e.account_snapshot(8);
+        let usdt = balance(&state, "USDT");
+        assert_eq!(usdt.locked, Decimal::ZERO);
+        assert_eq!(usdt.total, Decimal::from(800));
+
+        let snap = e.order_status_snapshot("Q".into(), Some("R1"), false, 9);
+        let row = &snap.orders[0];
+        assert_eq!(row.status, mogwai_protocol::WireOrderStatus::Canceled);
+        assert_eq!(row.filled_qty, Decimal::from(2));
+        assert_eq!(
+            row.ts_last, 7,
+            "the terminal record stamps the cancel instant"
+        );
+
+        // Misses are refused loudly: already terminal, and never accepted.
+        assert_eq!(
+            e.cancel_open_order_silently("R1", 10),
+            Err("order already terminal (filled or canceled)".to_string())
+        );
+        assert_eq!(
+            e.cancel_open_order_silently("GHOST", 11),
+            Err("unknown order".to_string())
+        );
+    }
+
+    #[test]
+    fn ioc_partial_remainder_records_terminal_cancel_in_the_truth_store() {
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "O1".into(),
+            fraction: Decimal::from_f64(0.4).unwrap(),
+        });
+        let mut order = order("O1", 10);
+        order.time_in_force = TimeInForce::Ioc;
+        e.process(ClientMessage::SubmitOrder(order), 1);
+
+        let snap = e.order_status_snapshot("Q".into(), Some("O1"), false, 2);
+        let row = &snap.orders[0];
+        assert_eq!(row.status, mogwai_protocol::WireOrderStatus::Canceled);
+        assert_eq!(row.filled_qty, Decimal::from(4));
     }
 
     #[test]

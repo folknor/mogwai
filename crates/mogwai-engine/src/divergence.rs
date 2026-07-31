@@ -16,10 +16,15 @@ impl Engine {
             // trigger, so `take_armed` would never consume them. Dropping them
             // here keeps them from accumulating as dead entries in the armed
             // queue.
+            // `CancelOpenOrderSilently` is immediate-action, not armed: the
+            // server routes it to `cancel_open_order_silently` at post time.
+            // Reaching `arm` with it would leak a dead queue entry, so it is
+            // dropped alongside the server-owned temporal variants.
             Divergence::DelayAcks { .. }
             | Divergence::GoDark { .. }
             | Divergence::StallData { .. }
-            | Divergence::ClearDivergences => {}
+            | Divergence::ClearDivergences
+            | Divergence::CancelOpenOrderSilently { .. } => {}
             other => {
                 // Bound the queue so control-plane arms cannot accumulate
                 // without limit. At the cap, shed the OLDEST entry: a

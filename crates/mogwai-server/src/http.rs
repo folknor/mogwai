@@ -90,6 +90,24 @@ pub(crate) async fn arm_divergence(
                 Ordering::Relaxed,
             );
         }
+        // Immediate book action, not an armed trigger: cancel the resting
+        // order right now, silently (no lifecycle event - that lost event IS
+        // the injected fault; the truth surfaces only via QueryOrders). A
+        // miss - unknown id, or already terminal - is refused with a 404 so
+        // a scenario cannot believe it armed a fault that never happened.
+        Divergence::CancelOpenOrderSilently { client_order_id } => {
+            let ts = sim_now_ns(state.sim);
+            if let Err(reason) = state
+                .engine
+                .lock()
+                .await
+                .cancel_open_order_silently(&client_order_id, ts)
+            {
+                tracing::warn!(%client_order_id, reason, "refusing silent cancel");
+                return (StatusCode::NOT_FOUND, reason);
+            }
+            tracing::info!(%client_order_id, "silently canceled resting order server-side");
+        }
         Divergence::ClearDivergences => {
             // Lift both server-owned temporal windows process-wide. `0` is the
             // cleared sentinel: `delay_ms == 0` skips the exec pump's delay sleep,
@@ -116,8 +134,9 @@ pub(crate) async fn arm_divergence(
                         | Divergence::GoDark { .. }
                         | Divergence::StallData { .. }
                         | Divergence::ClearDivergences
+                        | Divergence::CancelOpenOrderSilently { .. }
                 ),
-                "DelayAcks/GoDark/StallData/ClearDivergences are server-owned and must not be forwarded to engine.arm()",
+                "DelayAcks/GoDark/StallData/ClearDivergences/CancelOpenOrderSilently are server-owned or immediate and must not be forwarded to engine.arm()",
             );
             state.engine.lock().await.arm(engine_div);
         }
@@ -241,7 +260,13 @@ pub(crate) async fn process_order_cmd(
                 }];
             }
         }
-        ClientMessage::CancelOrder { .. } => {}
+        // Cancels and the reconciliation queries have no protocol-boundary
+        // validator: a cancel's only failure modes are venue-side, and a
+        // query is answered truthfully whatever it asks (an unknown id is an
+        // empty snapshot, not an error).
+        ClientMessage::CancelOrder { .. }
+        | ClientMessage::QueryOrders { .. }
+        | ClientMessage::QueryFills { .. } => {}
         ClientMessage::Subscribe { .. } | ClientMessage::Unsubscribe { .. } => {
             unreachable!("callers route Subscribe/Unsubscribe away before process_order_cmd")
         }

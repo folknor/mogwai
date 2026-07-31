@@ -42,7 +42,29 @@ Or both. There are no exceptions.
   repeated-subscribe pathology will storm the same way - a per-connection
   dedup or rate limit on identical diagnostic reasons would cap it.
 
+- Position status reports are still rebuilt from the adapter's account-snapshot
+  mirror, unlike the order/fill reports (flipped to the venue-truth
+  QueryOrders/QueryFills surface, 2026-07-31). A dropped account snapshot can
+  therefore still make position reconciliation confirm a stale position. The
+  truthful source already exists (`GET /account`); flipping the generator is a
+  small change, deferred until broadarrow asks for it.
+
+- The adapter integration-test stub (`crates/mogwai-adapter/tests/common`) does
+  not answer `QueryOrders`/`QueryFills`; the venue-truth report generators are
+  covered by unit tests with an in-process fake venue instead. Extend the stub
+  when an integration test needs to drive reconciliation end to end.
+
 ## Notes / gotchas
+
+- broadarrow standing notes (2026-07-31, their request that landed the
+  order-status query surface): (a) the ack-delay havoc band above their ~25 s
+  INFLIGHT_TIMEOUT is deliberately unserved - they permanently declined a
+  per-venue ceiling on that safety timeout, so do not invest in DelayAcks/
+  GoDark scenarios past it (also recorded in reference/havoc.md's operator
+  note); (b) the once-floated MarketIfTouched order-type extension is dead
+  (the triggering Pine shape is invalid on TradingView and nautilus cannot
+  rest an MIT faithfully) - the protocol owes no order-type growth beyond
+  Market and Limit.
 
 - broadarrow-side follow-ups from the 2026-07-15 QA findings (their repo, listed
   here so the coordination is not lost): (a) the feed-stale message hard-codes

@@ -37,6 +37,17 @@ never imports nautilus.
   pre-cancel status), so reusing `OrderRejected` would wrongly flip a live or
   already-filled order to Rejected. Plus `OrderFilled`.
 - `AccountState` carries balances *and* positions; `Position` is its own type.
+- **The reconciliation queries.** `ClientMessage::QueryOrders` (by
+  `client_order_id`, or an all/open-orders snapshot) and
+  `ClientMessage::QueryFills` ask the venue for its CURRENT truth, answered by
+  `ServerMessage::OrderStatusSnapshot` / `FillSnapshot` - each echoing the
+  request's client-chosen `request_id` so a reply is matchable on a socket
+  shared with unsolicited events. `OrderStatusInfo` is the per-order row
+  (`WireOrderStatus`: Accepted / PartiallyFilled / Filled / Canceled; a never-
+  accepted id is truthfully absent, so there is no Rejected variant). Replies
+  are always a truthful engine book read; havoc may delay or drop their
+  DELIVERY (both classify as execution) but never alter their content - the
+  honest-content invariant `reference/havoc.md` documents in full.
 - `InstrumentDef` is the shared instrument record - base/quote plus price and
   size precision and tick/lot increments - so the adapter can translate mogwai
   `Decimal` ticks into nautilus `Price`/`Quantity` at a stable per-symbol
@@ -93,6 +104,20 @@ sockets, timers and the clock; the engine owns order and account state.
   and `DropNextAccountUpdate` are the four engine-side divergences. The two
   temporal, connection-scoped divergences (`DelayAcks`, `GoDark`) are filtered
   out of the engine queue and applied in the server's outbound writer instead.
+  `CancelOpenOrderSilently` is immediate-action, not armed: the server routes it
+  straight to `cancel_open_order_silently`, which removes a resting order and
+  frees its reservation with NO lifecycle event - the out-of-band cancel whose
+  lost event the consumer's reconciliation poll exists to catch.
+- **The truth stores behind the queries.** Open orders carry
+  `ts_accepted`/`ts_last`; every order that reaches `Filled` or `Canceled`
+  (client cancel, IOC remainder, or the silent cancel) freezes into a terminal
+  record, and every fill is recorded once as it books (a `DuplicateNextFill`
+  doubles the wire event, not the record). `QueryOrders`/`QueryFills` answer
+  from these stores, never from anything a divergence can touch; retention is
+  unbounded on purpose, matching the accepted-id map (test-scale, and
+  reconciliation must be able to ask about arbitrarily old orders). A targeted
+  `QueryOrders` ignores `open_only` so asking about one specific order gets its
+  terminal state rather than an empty reply misreading as "unknown".
 - **Account model.** Per-currency balances and per-symbol VWAP positions off an
   instrument-decomposition table. `AccountState` is pushed after fills and after
   reservation-freeing cancels, and is pullable over `GET /account` so live
@@ -335,8 +360,22 @@ from the in-tree `research/` copy.
   never touches the cache: it builds events from raw wire fields plus an
   `Arc<Mutex<ExecState>>` reconciliation mirror seeded at `submit` time, and
   resolves a fill's quote currency and precision from the `GET /instruments`
-  table. The three reconciliation report generators rebuild from that mirror,
-  filtered by the request's start/end bounds. The mirror's position view follows
+  table. The order and fill report generators do NOT read that mirror: the
+  mirror is fed by the same lifecycle stream havoc corrupts, so a mirror-based
+  report could only repeat the client's stale belief - in the dropped-cancel
+  fault class, confidently confirming the very corruption reconciliation
+  exists to catch. Instead they query the venue's truth over the wire
+  (`QueryOrders`/`QueryFills`; request/reply correlated by `request_id` on the
+  shared WS socket via a pending-waiter map, or carried synchronously in the
+  `POST /orders` body under `HttpOrders`), bounded by the same request
+  timeout the HTTP carrier uses - so a havoc-delayed or dropped reply
+  surfaces as a query timeout. This backs the plural generators (startup
+  mass-status and the continuous open-order poll), the singular
+  `generate_order_status_report`, and `query_order` (the execution manager's
+  in-flight probe, which emits the found report). Position reports still
+  rebuild from the mirror's account-snapshot view, and every report remains
+  filtered by the request's start/end bounds (open orders exempt from the
+  lookback under `open_only`, per AE10). The mirror's position view follows
   the engine's convention that a flat instrument is OMITTED from the snapshot (a
   position closed to zero is removed, never reported as zero qty): each inbound
   `AccountState` is authoritative, so the mirror drops any symbol absent from it

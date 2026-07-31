@@ -29,8 +29,9 @@ pub use havoc::{
 };
 pub use instruments::{InstrumentDef, default_instruments};
 pub use messages::{
-    AccountState, AggressorSide, Balance, ClientMessage, OrderFilled, OrderType, Position,
-    QuoteTick, ServerMessage, Side, SubmitOrder, TimeInForce, TradeTick, validate_modify_order,
+    AccountState, AggressorSide, Balance, ClientMessage, FillSnapshot, OrderFilled,
+    OrderStatusInfo, OrderStatusSnapshot, OrderType, Position, QuoteTick, ServerMessage, Side,
+    SubmitOrder, TimeInForce, TradeTick, WireOrderStatus, validate_modify_order,
     validate_submit_order,
 };
 pub use transport::TransportProfile;

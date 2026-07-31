@@ -204,10 +204,12 @@ bars resuming. Deliberately NOT logged: individual heartbeat pings and pongs
 ## The divergence catalog
 
 `control::Divergence` (in `mogwai-protocol`'s `control` module) is the catalog
-the `server` surface arms. There are eight variants, split by *who owns them*:
+the `server` surface arms. There are nine variants, split by *who owns them*:
 the engine owns the single-shot, order-triggered divergences; the server owns
-the temporal, connection-scoped windows plus the clear control. Every variant,
-its trigger, and its semantics:
+the temporal, connection-scoped windows plus the clear control; and one
+immediate-action variant (`CancelOpenOrderSilently`) acts on the book the
+moment it is posted rather than arming anything. Every variant, its trigger,
+and its semantics:
 
 ### Engine-owned (single-shot, order-triggered)
 
@@ -321,15 +323,75 @@ remains responsible for matching windows to carriers.
 
 Operator note on long delay windows: any nautilus consumer runs an
 execution-manager inflight check that re-queries a still-unacked order and,
-after a bounded retry budget, synthesizes a local reject. A `DelayAcks` (or
-`GoDark`, or client `latency`) window longer than that consumer-configured
-threshold is therefore NOT exercised as a delay - past the threshold the
-consumer locally rejects the order and the later real ack lands on an
-already-rejected order. mogwai has no order-status query surface to answer the
-re-query and resolve the inflight instead (an open item). Arm ack-delay havoc
-inside the consumer's inflight threshold to exercise the delay path; longer
-windows exercise the consumer's brake. The specific threshold is the consumer's
-to document.
+after a bounded retry budget, synthesizes a local reject. The adapter now
+answers that re-query from venue truth (`query_order` and the singular report
+generator ride the `QueryOrders` wire surface - see the reconciliation-witness
+section below), so an inflight order whose ack is merely delayed can resolve
+instead of being locally rejected - but the query REPLY rides the execution
+channel too, so the same `DelayAcks`/`GoDark` window that holds the ack also
+holds the answer. A window longer than the consumer's inflight threshold
+therefore still ends in the consumer's local reject, with the later real ack
+landing on an already-rejected order. Arm ack-delay havoc inside the consumer's
+inflight threshold to exercise the delay path; longer windows exercise the
+consumer's brake (and its query-timeout handling). The specific threshold is
+the consumer's to document - and per broadarrow's standing note (2026-07-31),
+the band above their ~25 s inflight threshold is deliberately unserved: they
+declined a per-venue ceiling on a safety timeout, so mogwai does not invest in
+exercising ack delays past it.
+
+### Immediate action - the out-of-band silent cancel
+
+- **`CancelOpenOrderSilently { client_order_id }`** - cancels a RESTING order
+  server-side the moment it is posted, emitting **no lifecycle event**: the
+  lost `OrderCanceled` IS the injected fault. The engine removes the order
+  from its book and frees its reservation; the client keeps believing the
+  order rests until it reconciles. This is the fault class nautilus'
+  continuous open-order poll exists to catch - a protective order cancelled
+  out-of-band with its event dropped, a position the operator believes
+  protected and is not - and it was previously unprovokable anywhere. Unlike
+  the armed single-shots it has no trigger to wait for (no client action is
+  involved), so the `/control/divergence` handler routes it straight to
+  `Engine::cancel_open_order_silently` instead of `arm`; a post naming an id
+  that is not currently resting (unknown, or already terminal) is refused
+  with a 404 so a scenario cannot silently arm a no-op. The account snapshot
+  is not pushed either - the freed reservation surfaces on the next
+  fill-driven snapshot or `GET /account` pull, which is honest drift, and a
+  `QueryOrders` reply reports the order `Canceled` from the instant of the
+  cancel.
+
+## The reconciliation witness - QueryOrders and QueryFills
+
+The wire carries two reconciliation queries (`ClientMessage::QueryOrders`,
+`ClientMessage::QueryFills`) answered by `ServerMessage::OrderStatusSnapshot` /
+`FillSnapshot`, correlated by a client-chosen `request_id` echoed verbatim.
+The engine answers them from its own book and its booking-order fill store -
+each fill is recorded once as it books, so a `DuplicateNextFill`'s doubled
+wire event never doubles the truth. The adapter's report generators (the
+plural set that startup mass-status and the continuous open-order poll
+consume, the singular one behind the inflight re-query, and `query_order`)
+all ride this surface; they no longer read the adapter's client-side mirror,
+which is fed by the same lifecycle stream havoc corrupts and so could only
+confirm a corrupted belief.
+
+**The design invariant: honest content, havoc-able delivery.** The query path
+is the reconciliation channel, and its whole value is being a second,
+independent witness while the event channel lies. No divergence may ever
+alter what a reply SAYS - a havoc knob on the witness would collapse the two
+channels into one adversary and make any poll-heal scenario unprovable ("the
+heal works" vs "both channels agreed on the same lie" become
+indistinguishable). Delivery, though, is fair game: the snapshot replies
+classify as execution (`ServerMessage::category`), so `DelayAcks` holds them,
+`GoDark` drops them, and client-side inbound latency/drop applies - a lost or
+late reply surfaces in the adapter as a query timeout, exercising the
+consumer's own query-timeout behavior. If someone later genuinely wants a
+lying reconciliation source (venue-truth corruption - on a real venue that
+means venue bugs), that is a different fault class deserving its own
+explicitly-named havoc, never a side effect of the query transport.
+
+The payoff scenario this enables end to end: post
+`CancelOpenOrderSilently` against a resting protective order, and assert the
+consumer's reconciliation poll detects the vanished order within one cycle -
+a real proof of the poll heal, previously impossible against any venue.
 
 Under acceleration these `ms` are **simulated** milliseconds. The deadlines and
 the `DelayAcks` sleep are computed on the one sim axis (the `wall-clock` wording
@@ -344,19 +406,22 @@ each duration's wall lower bound live in `reference/clock.md`.
 
 The catalog is split deliberately, and the split is enforced at two points:
 
-- **The engine refuses the server-owned variants.** `Engine::arm` matches
-  `DelayAcks`, `GoDark`, `StallData`, and `ClearDivergences` and **drops them**
-  rather than queueing them. They have no engine-side trigger, so `take_armed`
-  would never consume them - queueing them would leak dead entries that could
-  silently disarm real engine divergences behind them. Only the four single-shot
-  variants ever enter the armed queue.
+- **The engine refuses the non-armable variants.** `Engine::arm` matches
+  `DelayAcks`, `GoDark`, `StallData`, `ClearDivergences`, and
+  `CancelOpenOrderSilently` and **drops them** rather than queueing them. The
+  temporal windows have no engine-side trigger and the silent cancel is
+  immediate-action (the server routes it to `cancel_open_order_silently` at
+  post time), so `take_armed` would never consume any of them - queueing them
+  would leak dead entries that could silently disarm real engine divergences
+  behind them. Only the four single-shot variants ever enter the armed queue.
 - **The server routes them and never forwards them to `arm`.** The
   `/control/divergence` handler (`arm_divergence`) intercepts `DelayAcks`,
-  `GoDark`, `StallData`, and `ClearDivergences` before the catch-all and applies
-  each to the shared atomics; only an engine-side variant reaches
-  `engine.arm()`. A `debug_assert` in the catch-all makes any future refactor
-  that forwarded a whole `HavocSpec.server` vec straight to `engine.arm()` fail
-  loudly rather than silently lose the temporal knobs.
+  `GoDark`, `StallData`, `ClearDivergences`, and `CancelOpenOrderSilently`
+  before the catch-all and applies each (the windows to the shared atomics,
+  the silent cancel to the engine book directly); only an engine-side armed
+  variant reaches `engine.arm()`. A `debug_assert` in the catch-all makes any
+  future refactor that forwarded a whole `HavocSpec.server` vec straight to
+  `engine.arm()` fail loudly rather than silently lose these knobs.
 
 The reason for the split is structural. The single-shot divergences are
 deterministic functions of order flow - "the next fill", "this named order" -

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use mogwai_protocol::{
     ClientOrderId, OrderFilled, ServerMessage, Side, SubmitOrder, TimeInForce, VenueOrderId,
-    control::Divergence,
+    WireOrderStatus, control::Divergence,
 };
 use rust_decimal::Decimal;
 
@@ -107,6 +107,11 @@ impl Engine {
             };
 
             self.apply_fill(&fill);
+            // Booked exactly once into the QueryFills truth store, BEFORE the
+            // duplicate divergence below doubles the wire event: the
+            // duplication is the lie this venue injects, the store keeps the
+            // truth a reconciler checks against.
+            self.record_fill(&fill);
             // Untargeted: applies to the fill just produced. Scanned (not peeked
             // at `front()`) so a non-matching targeted `PartialFillNext` parked
             // ahead of it in the queue cannot block it - see `take_armed`.
@@ -119,24 +124,34 @@ impl Engine {
             out.push(ServerMessage::OrderFilled(fill));
         }
 
+        // Freeze the accepted order's state once, then route it: rest it
+        // (GTC remainder), or close it into the terminal truth store (full
+        // fill, or an IOC's canceled remainder) so a `QueryOrders` reply can
+        // attest to it after it leaves the book.
+        let record = OpenOrder {
+            venue_order_id,
+            submit: order,
+            leaves_qty,
+            ts_accepted: ts,
+            ts_last: ts,
+        };
         if leaves_qty > Decimal::ZERO {
-            match order.time_in_force {
+            match record.submit.time_in_force {
                 TimeInForce::Gtc => {
-                    self.open.push(OpenOrder {
-                        venue_order_id,
-                        submit: order,
-                        leaves_qty,
-                    });
+                    self.open.push(record);
                 }
                 TimeInForce::Ioc => {
                     out.push(ServerMessage::OrderCanceled {
-                        client_order_id: order.client_order_id,
-                        venue_order_id,
+                        client_order_id: record.submit.client_order_id.clone(),
+                        venue_order_id: record.venue_order_id.clone(),
                         ts_event: ts,
                     });
+                    self.record_closed(&record, WireOrderStatus::Canceled, ts);
                 }
                 TimeInForce::Fok => unreachable!("FOK partials are rejected before acceptance"),
             }
+        } else {
+            self.record_closed(&record, WireOrderStatus::Filled, ts);
         }
 
         // Untargeted: applies to this submit's account-state snapshot. Scanned
@@ -252,6 +267,7 @@ impl Engine {
             .position(|o| o.submit.client_order_id == client_order_id)
         {
             let o = self.open.remove(pos);
+            self.record_closed(&o, WireOrderStatus::Canceled, ts);
             vec![
                 ServerMessage::OrderCanceled {
                     client_order_id,
@@ -442,6 +458,7 @@ impl Engine {
             }
             order.submit.quantity = new_total;
             order.leaves_qty = new_total - filled;
+            order.ts_last = ts;
             (order.submit.quantity, order.submit.price, order.leaves_qty)
         };
 
