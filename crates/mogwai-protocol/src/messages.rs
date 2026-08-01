@@ -504,6 +504,21 @@ pub enum QueryKind {
 /// exactly as asked. A closed set rather than prose: the client's handling is a
 /// match, not a string search, and a fixed set is what keeps
 /// `ADMISSION_FRAME_MAX_BYTES` provable now that issues are per entry.
+///
+/// THREE classes, and the third is the one that matters most to a consumer.
+/// REFUSED and DEGRADED are both mogwai OPERATING NORMALLY: the venue declined
+/// or altered a request, deliberately, and said so. A VENUE FAULT is mogwai
+/// FAILING - it promised data and then lost it, through no client action and no
+/// armed scenario.
+///
+/// A client connects to this venue knowing it deliberately misbehaves, which is
+/// exactly why it cannot infer the difference from symptoms: a gap in the tape
+/// looks the same whether a blackout was armed or the process broke. So the
+/// distinction is explicit on the wire and machine-readable via `is_refusal`
+/// and `is_venue_fault`, rather than left to be guessed from prose or from
+/// which frames stopped arriving. Deliberate misbehavior is the product; a
+/// fault is a bug in mogwai or the host under it, and a run that saw one should
+/// be discarded rather than believed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum SubscriptionIssue {
@@ -521,8 +536,17 @@ pub enum SubscriptionIssue {
     /// could not be placed. Discovered asynchronously on the replay thread,
     /// which is why this issue in particular must carry a generation.
     SeekBudgetExhausted,
-    /// REFUSED: the subscriber fell behind the shared tape's bounded fanout
-    /// buffer. Nothing further streams for this generation.
+    /// VENUE FAULT: the subscriber fell behind the shared tape's bounded fanout
+    /// buffer, so the venue lost `skipped` ticks it had already promised to
+    /// deliver in ascending order. Nothing further streams for this generation,
+    /// and the connection is closed behind this frame.
+    ///
+    /// NOT a divergence and NOT a refusal. Nobody armed this, no request caused
+    /// it, and no client can plan around it - it is the venue (or the host under
+    /// it) failing. At the shipped ring depth it is unreachable on a loopback
+    /// deployment short of a consumer wedging for hours, so treat its arrival as
+    /// evidence that something is broken, not as a scenario to handle: any run
+    /// that observed it has holes in its market data and its results are void.
     FeedLagged { skipped: u64 },
     /// DEGRADED: `start_ts` preceded the tape origin; the venue clamped the
     /// request to `effective_start_ts` (the tape origin) and the stream runs
@@ -547,6 +571,10 @@ impl SubscriptionIssue {
     /// `true` when nothing streams for this entry; `false` when the stream
     /// runs, altered. The one bit a client needs to decide whether to keep
     /// waiting for data.
+    ///
+    /// Deliberately includes the venue fault: nothing streams either way, so a
+    /// consumer waiting on data must stop waiting on both. It is the WRONG bit
+    /// for deciding whether the venue is healthy - see `is_venue_fault`.
     #[must_use]
     pub fn is_refusal(self) -> bool {
         matches!(
@@ -557,6 +585,25 @@ impl SubscriptionIssue {
                 | Self::SeekBudgetExhausted
                 | Self::FeedLagged { .. }
         )
+    }
+
+    /// `true` when this entry reports mogwai FAILING rather than mogwai
+    /// operating: the venue lost data it had already promised, unprompted by
+    /// any request and unarmed by any scenario.
+    ///
+    /// This is the bit that separates "the fake venue is misbehaving on
+    /// purpose, as advertised" from "the fake venue is broken". Every other
+    /// issue, refusal or degradation alike, is normal operation and a run that
+    /// saw one is still valid. A run that saw THIS has gaps in its market data
+    /// and should be discarded, because the venue cannot say what was in them.
+    ///
+    /// Kept as a classifier rather than a separate message type because the
+    /// report is still per subscription - it has to name the generation and
+    /// symbol whose feed died - and because a closed set with two predicates
+    /// keeps the client's handling a match rather than a string search.
+    #[must_use]
+    pub fn is_venue_fault(self) -> bool {
+        matches!(self, Self::FeedLagged { .. })
     }
 }
 

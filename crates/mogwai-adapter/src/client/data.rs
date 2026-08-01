@@ -1796,6 +1796,23 @@ fn handle_subscription_issue(
         SubscriptionIssue::StartAfterSimNow { sim_now } => {
             tracing::warn!(%symbol, generation, sim_now, "venue discarded a future start_ts and streams live; cursor unchanged");
         }
+        // FIRST, because a venue fault is also a refusal and the refusal arm
+        // below would otherwise swallow it into the ordinary-operation log line.
+        // That conflation is the whole point of the distinction: a consumer of
+        // this venue KNOWS it misbehaves deliberately, so it cannot tell an
+        // armed blackout from a broken venue by symptom - only by being told.
+        // ERROR, not warn: every other issue here is mogwai working as
+        // advertised, and this one means mogwai (or the host under it) failed
+        // and silently lost market data it had already promised.
+        issue if issue.is_venue_fault() => {
+            tracing::error!(
+                %symbol,
+                generation,
+                ?issue,
+                "VENUE FAULT: mogwai lost market data it had promised, unprompted and unarmed. \
+                 This is the venue failing, not a scenario - discard any result from this run"
+            );
+        }
         // A refusal means nothing streams for this symbol until something
         // resubscribes. The adapter deliberately does not retry - see the
         // refusal-triggered-resubscribe non-goal.
@@ -2991,14 +3008,36 @@ mod data_client_tests {
         assert_eq!(subs["BTCUSDT"].start_ts, Some(100));
     }
 
-    /// `FeedLagged` reaches the adapter through the refusal CATCH-ALL rather
-    /// than a bespoke arm, which is exactly the claim that silently rots: a
-    /// variant whose `is_refusal` ever returned false would fall into the
-    /// "degraded, the stream runs" arm and leave a dead feed looking healthy.
-    /// It must also leave the cursor alone - a refusal moves nothing.
+    /// `FeedLagged` must classify as BOTH, and the pairing is load-bearing in
+    /// two directions. It is a refusal, so a consumer waiting on data stops
+    /// waiting; and it is a venue FAULT, so it takes the error arm instead of
+    /// being logged as mogwai operating normally. If `is_venue_fault` ever
+    /// stopped covering it, the refusal arm below would silently swallow a
+    /// broken venue into the same warn line as an unknown symbol - which is the
+    /// exact conflation a client of a deliberately-misbehaving venue cannot
+    /// detect for itself. It must also leave the cursor alone: nothing streamed.
     #[test]
-    fn subscription_issue_feed_lagged_is_a_refusal_and_moves_no_cursor() {
+    fn subscription_issue_feed_lagged_is_a_venue_fault_and_moves_no_cursor() {
         assert!(SubscriptionIssue::FeedLagged { skipped: 12 }.is_refusal());
+        assert!(SubscriptionIssue::FeedLagged { skipped: 12 }.is_venue_fault());
+        // And nothing else is a fault: every other issue is normal operation.
+        for issue in [
+            SubscriptionIssue::UnknownSymbol,
+            SubscriptionIssue::ReplayCapacity,
+            SubscriptionIssue::StaleGeneration { current: 3 },
+            SubscriptionIssue::SeekBudgetExhausted,
+            SubscriptionIssue::StartBeforeOrigin {
+                effective_start_ts: 5,
+            },
+            SubscriptionIssue::StartAfterSimNow { sim_now: 5 },
+            SubscriptionIssue::InvalidRegime,
+            SubscriptionIssue::ReopenGapUnfireable { at_ts: 5 },
+        ] {
+            assert!(
+                !issue.is_venue_fault(),
+                "{issue:?} is normal operation, not a venue fault"
+            );
+        }
         let subs = two_symbol_subs();
         let issued = issuance_history(&[(2, "BTCUSDT")]);
 

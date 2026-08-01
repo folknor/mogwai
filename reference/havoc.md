@@ -51,6 +51,39 @@ direction (per the `docs/todo.md` Direction note) is richer, more realistic
 venue pathologies - not making the fake venue more correct - and the lodestar is
 a real venue misbehaving in a way the client cannot detect.
 
+## Misbehaving is not failing
+
+The lodestar above has a sharp edge. Because a client connects to this venue
+KNOWING it misbehaves on purpose, that client cannot tell a deliberate pathology
+from a genuine breakage by symptom - a hole in the tape looks identical whether a
+blackout was armed or the process broke. Every armed divergence is designed to be
+indistinguishable from a real venue behaving badly. That is the product.
+
+So mogwai owes its clients one distinction it must never leave implicit: **is
+this mogwai operating, or mogwai failing?** Operating covers everything armed and
+everything refused - latency, drops, blackouts, stalls, unknown symbols, capacity
+refusals, clamped windows. Failing means the venue promised data and then lost it,
+unprompted by any request and unarmed by any scenario. It may be mogwai's own bug
+or the host underneath it; from the client's side that is the same thing and the
+same consequence.
+
+The distinction is explicit and machine-readable rather than inferable:
+
+- `SubscriptionIssue::is_venue_fault()` separates a fault from every other issue,
+  which `is_venue_fault` returning `false` marks as normal operation. `is_refusal`
+  is the different question of whether anything will still stream, and a fault
+  answers `true` to both.
+- Today exactly one condition qualifies: `FeedLagged`, a shared tape's ring
+  turning over under a subscriber that stopped reading. At the shipped depth that
+  is unreachable on a loopback deployment short of a consumer wedging for hours.
+- The connection is then closed with WS 1011 and a reason naming the fault, and
+  the adapter logs it at ERROR while every other issue logs at warn.
+
+The consequence a consumer should encode: a run that saw a refusal or a
+degradation is still valid - the venue told the truth about what it did. A run
+that saw a venue fault has unexplained gaps in its market data and its results
+are void, because the venue cannot say what was in them.
+
 ## One HavocSpec, four surfaces
 
 A single `mogwai_protocol::HavocSpec` value is carried on both adapter client
