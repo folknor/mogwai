@@ -496,6 +496,10 @@ Owns the sockets, the clock, and replay pacing.
   blackout on one fleet worker leaves the others running clean. An opt-in server heartbeat can emit
   liveness frames that survive `StallData`, so the socket remains frame-active
   while channel data is withheld.
+- **Command latency splits venue action from acknowledgement.** A nonzero ACT
+  delay detaches an order command from the serial WS read loop before it reaches
+  market-price stamping and the engine; zero delay keeps the synchronous path.
+  Per-command ACK latency is applied by the FIFO execution pump.
 - **Run config** comes from a `mogwai.toml` read at startup (replay `speed`,
   the `gap_cap_ms` paced-sleep cap, and `server_heartbeat_ms` for optional
   server-originated liveness frames), carried in explicit input rather than the

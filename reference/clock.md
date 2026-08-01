@@ -131,6 +131,7 @@ irreducible floor below which no sleep or interval can resolve, regardless of
 | Knob | Owner | Realized via | Wall floor |
 | --- | --- | --- | --- |
 | `DelayAcks { ms }` | server writer | `sim.wall_duration` sleep | 1ns code / ~1ms tokio |
+| `CommandLatency { .. }` act / ack | server order path / writer | `sim.wall_duration` sleep | 1ns code / ~1ms tokio |
 | `server_heartbeat_ms` | server heartbeat | `sim.wall_duration` interval | 1ns code / ~1ms tokio |
 | `BASELINE_LATENCY` (30ms) + armed `HavocLatency` | adapter inbound | `sleep_havoc_delay` -> `sim.wall_duration` | 1ns code / ~1ms tokio |
 | `reconnect_delay_initial_ms` / `reconnect_delay_max_ms` / `reconnect_jitter_ms` | adapter lifecycle | `ReconnectPolicy::backoff` -> `sim.wall_duration` | 1ns code / ~1ms tokio |

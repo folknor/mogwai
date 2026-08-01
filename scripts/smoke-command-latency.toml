@@ -1,0 +1,5 @@
+# Command-latency smoke uses the normal paced venue with a small per-socket
+# pending-act budget so capacity refusal remains easy to exercise manually.
+speed = 1.0
+pending_command_acts = 1
+global_pending_command_acts = 16

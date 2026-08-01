@@ -30,6 +30,7 @@ impl Engine {
             // Reaching `arm` with it would leak a dead queue entry, so it is
             // dropped alongside the server-owned temporal variants.
             Divergence::DelayAcks { .. }
+            | Divergence::CommandLatency { .. }
             | Divergence::GoDark { .. }
             | Divergence::StallData { .. }
             | Divergence::ClearDivergences

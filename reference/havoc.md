@@ -359,6 +359,35 @@ one fleet worker leaves the rest running clean.
   submit's `AdmissionRejected` arrives immediately while the held acks stay
   held. `ProtocolError` used to ride the pump and be held by this window; it no
   longer is.
+- **`CommandLatency { submit_act_ms, modify_act_ms, cancel_act_ms,
+  submit_ack_ms, modify_ack_ms, cancel_ack_ms }`** - per-account, store-not-
+  merge venue latency. ACT delays detach a nonzero-delay order command from the
+  socket read loop, sleep on the sim axis before market-price stamping, then
+  mutate the book; concurrent delayed commands are intentionally unordered.
+  ACK delays are ADDED to any armed `DelayAcks` rather than replacing it - the
+  same composition rule `BASELINE_LATENCY` states for the adapter's inbound
+  latency - but that addition happens in the WS pump, which is the only place
+  `DelayAcks` applies at all. The wire stays FIFO per connection: the pump is one
+  serial loop, so a submit holding a 300 ms ack window keeps a following cancel's
+  100 ms frames behind it. Head-of-line blocking is the honest behavior of a
+  single ordered venue socket and is deliberately not engineered away, so a
+  per-class ACK difference is observable either across two connections
+  (independent pumps) or with the SLOW class arriving second; overtaking is what
+  the ACT half is for. This is the one server-owned window that is NOT WS-only:
+  `POST /orders` applies both halves inline (the response is the ack) and gets
+  `ack_ms` alone, never `DelayAcks`, which the adapter already refuses under an
+  HTTP-orders profile. Each field is bounded by `MAX_DIVERGENCE_MS` (one hour).
+  Pending acts are admission-controlled per connection (`pending_command_acts`)
+  and process-wide (`global_pending_command_acts`, which is what covers
+  `POST /orders`); over either budget the command is refused visibly - an
+  `AdmissionRejected` on the priority lane, a `503` carrying the same body on
+  HTTP - and the engine never sees it. A pending act SURVIVES the disconnect of
+  the socket that sent it: the command is past the protocol boundary, so the
+  venue has received it, the mutation lands and only the acknowledgment is
+  dropped. A boundary refusal is never delayed and burns no pending-act slot -
+  the protocol refusing a malformed command is not a venue act.
+  `ClearDivergences` clears the six windows and lifts an ACK hold off frames
+  already queued, but never interrupts an ACT sleep already in flight.
 - **`GoDark { ms }`** - drops **everything** (market data and execution) for a
   `ms` blackout window: a total venue blackout. Implemented as a `dark_until_ns`
   absolute wall-clock deadline; the writer drops every frame while `now_ns() <
@@ -371,12 +400,16 @@ one fleet worker leaves the rest running clean.
   frames; execution traffic and the heartbeat are unaffected. Like `GoDark`,
   stalled frames are dropped, not buffered. This is the surface that reproduces
   the issue-4255 class of failure - see the heartbeat section.
-- **`ClearDivergences`** - lifts all three server-owned temporal windows of the
+- **`ClearDivergences`** - lifts all server-owned temporal windows of the
   arming account at once: stores `0` into its `delay_ms`, `dark_until_ns`, and
-  `stall_until_ns`
+  `stall_until_ns`, plus all six `CommandLatency` fields
   (`delay_ms == 0` skips the delay sleep; `now_ns() < 0` is never true, so the
   dark and stall guards are off). It does **not** flush the engine-side
-  single-shot divergences - those self-disarm on their own trigger. There is no
+  single-shot divergences - those self-disarm on their own trigger - and it does
+  **not** lift a `CommandLatency` ACT delay the venue has already begun serving:
+  that command sleeps out its full window and then mutates. Clearing governs
+  commands the venue has not started acting on yet; making it reach into flight
+  would turn the control into a time machine. There is no
   backlog to replay because gated frames were dropped.
 
 ### Admission control, and the one honest exception to honest content

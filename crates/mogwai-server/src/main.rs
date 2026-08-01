@@ -328,6 +328,7 @@ async fn serve_async(
         sim,
         data_origin_ns,
         tapes,
+        pending_acts: Arc::new(tokio::sync::Semaphore::new(cfg.global_pending_command_acts)),
     };
 
     let app = Router::new()
@@ -831,6 +832,9 @@ mod tests {
                 &Config::default(),
                 Arc::new(tokio::sync::Semaphore::new(1024)),
             ),
+            pending_acts: Arc::new(tokio::sync::Semaphore::new(
+                crate::admission::GLOBAL_PENDING_ACT_SLOTS,
+            )),
         }
     }
 
@@ -866,6 +870,7 @@ mod tests {
     fn tape_state_with(mut cfg: Config, profiles: Arc<source::InstrumentProfiles>) -> AppState {
         cfg.server_heartbeat_ms = 0;
         let (tapes, _reaper) = crate::tape::TapeRegistry::new(&cfg, build_tape_permits(&cfg));
+        let pending_act_slots = cfg.global_pending_command_acts;
         AppState {
             accounts: Arc::new(AccountRegistry::new(
                 AccountTemplate {
@@ -879,6 +884,7 @@ mod tests {
             data_origin_ns: now_ns().saturating_sub(cfg.backfill_horizon_ns),
             cfg,
             tapes,
+            pending_acts: Arc::new(tokio::sync::Semaphore::new(pending_act_slots)),
         }
     }
 
@@ -1677,7 +1683,8 @@ mod tests {
                 Json(limit_order("X"))
             )
             .await
-            .unwrap_err(),
+            .unwrap_err()
+            .status(),
             StatusCode::BAD_REQUEST
         );
         let response = arm_divergence(
@@ -1788,6 +1795,896 @@ mod tests {
         assert_eq!(b.delay_ms.load(Ordering::Relaxed), 0);
     }
 
+    /// Every `CommandLatency` field of one account, in arm order.
+    fn command_latency_fields(slot: &crate::accounts::AccountSlot) -> [u64; 6] {
+        [
+            slot.submit_act_ms.load(Ordering::Relaxed),
+            slot.modify_act_ms.load(Ordering::Relaxed),
+            slot.cancel_act_ms.load(Ordering::Relaxed),
+            slot.submit_ack_ms.load(Ordering::Relaxed),
+            slot.modify_ack_ms.load(Ordering::Relaxed),
+            slot.cancel_ack_ms.load(Ordering::Relaxed),
+        ]
+    }
+
+    async fn arm(
+        app: &AppState,
+        account: &str,
+        div: mogwai_protocol::control::Divergence,
+    ) -> StatusCode {
+        arm_divergence(State(app.clone()), account_headers_for(account), Json(div))
+            .await
+            .into_response()
+            .status()
+    }
+
+    /// One arm REPLACES all six values: an omitted field is armed as zero, not
+    /// left standing from an earlier arm. Store-not-merge, like every other
+    /// server-owned window. `ClearDivergences` then zeroes all six.
+    #[tokio::test]
+    async fn arming_command_latency_replaces_every_field() {
+        let app = state();
+        assert_eq!(
+            arm(
+                &app,
+                "ACC-A",
+                mogwai_protocol::control::Divergence::CommandLatency {
+                    submit_act_ms: 1,
+                    modify_act_ms: 2,
+                    cancel_act_ms: 3,
+                    submit_ack_ms: 4,
+                    modify_ack_ms: 5,
+                    cancel_ack_ms: 6,
+                }
+            )
+            .await,
+            StatusCode::ACCEPTED
+        );
+        let slot = app
+            .accounts
+            .get(&mogwai_protocol::AccountId::parse("ACC-A").unwrap())
+            .unwrap();
+        assert_eq!(command_latency_fields(&slot), [1, 2, 3, 4, 5, 6]);
+
+        assert_eq!(
+            arm(
+                &app,
+                "ACC-A",
+                mogwai_protocol::control::Divergence::CommandLatency {
+                    submit_act_ms: 5,
+                    modify_act_ms: 0,
+                    cancel_act_ms: 0,
+                    submit_ack_ms: 0,
+                    modify_ack_ms: 0,
+                    cancel_ack_ms: 0,
+                }
+            )
+            .await,
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            command_latency_fields(&slot),
+            [5, 0, 0, 0, 0, 0],
+            "a partial arm must not leave the other five standing"
+        );
+
+        // Armed windows on a neighbouring account are untouched by either arm.
+        let other = app
+            .accounts
+            .acquire(
+                &mogwai_protocol::AccountId::parse("ACC-B").unwrap(),
+                now_ns(),
+            )
+            .unwrap();
+        assert_eq!(command_latency_fields(&other), [0; 6]);
+
+        assert_eq!(
+            arm(
+                &app,
+                "ACC-A",
+                mogwai_protocol::control::Divergence::ClearDivergences
+            )
+            .await,
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            command_latency_fields(&slot),
+            [0; 6],
+            "ClearDivergences zeroes all six alongside the existing three"
+        );
+    }
+
+    /// `CommandLatency` is server-owned: it must be intercepted before the
+    /// engine catch-all, never queued as an armed engine divergence. Posting it
+    /// more than the queue cap proves it: an engine-side arm afterwards reports
+    /// no eviction, so none of those posts occupied a queue slot. (A debug build
+    /// also trips the catch-all's `debug_assert!` if it ever reaches there.)
+    #[tokio::test]
+    async fn command_latency_never_reaches_the_engine_queue() {
+        let app = state();
+        for _ in 0..=mogwai_engine::MAX_ARMED_DIVERGENCES {
+            assert_eq!(
+                arm(
+                    &app,
+                    "ACC-A",
+                    mogwai_protocol::control::Divergence::CommandLatency {
+                        submit_act_ms: 1,
+                        modify_act_ms: 0,
+                        cancel_act_ms: 0,
+                        submit_ack_ms: 0,
+                        modify_ack_ms: 0,
+                        cancel_ack_ms: 0,
+                    }
+                )
+                .await,
+                StatusCode::ACCEPTED
+            );
+        }
+        let response = arm_divergence(
+            State(app.clone()),
+            account_headers_for("ACC-A"),
+            Json(mogwai_protocol::control::Divergence::DuplicateNextFill),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("arming ack body");
+        assert!(
+            body.is_empty(),
+            "an engine arm reported an eviction, so CommandLatency was filling the queue: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+
+    /// Serve `state`, connect one socket to `TEST-001`, send `sends` in order
+    /// and read back `expect` decoded frames. Nothing subscribes, so every frame
+    /// read is execution-category and the sequence is the venue's own ordering.
+    async fn command_latency_session(
+        state: AppState,
+        sends: Vec<String>,
+        expect: usize,
+    ) -> Vec<ServerMessage> {
+        let addr = serve_ws(state).await;
+        tokio::task::spawn_blocking(move || {
+            let (mut socket, _) = tungstenite::connect(format!("ws://{addr}/ws?account=TEST-001"))
+                .expect("ws connect");
+            if let tungstenite::stream::MaybeTlsStream::Plain(tcp) = socket.get_ref() {
+                tcp.set_read_timeout(Some(Duration::from_secs(10)))
+                    .expect("set read timeout");
+            }
+            for send in sends {
+                socket
+                    .send(tungstenite::Message::Text(send.into()))
+                    .expect("send");
+            }
+            let mut frames = Vec::new();
+            while frames.len() < expect {
+                match socket.read().expect("read a frame, not a timeout") {
+                    tungstenite::Message::Text(text) => {
+                        frames.push(serde_json::from_str(&text).expect("decodable frame"));
+                    }
+                    _ => continue,
+                }
+            }
+            frames
+        })
+        .await
+        .expect("blocking ws client")
+    }
+
+    /// The armed act delay, on the account every socket test binds to.
+    fn arm_submit_act(state: &AppState, ms: u64) {
+        state
+            .accounts
+            .acquire(
+                &mogwai_protocol::AccountId::parse("TEST-001").unwrap(),
+                now_ns(),
+            )
+            .unwrap()
+            .submit_act_ms
+            .store(ms, Ordering::Relaxed);
+    }
+
+    fn cancel_frame(id: &str) -> String {
+        serde_json::to_string(&ClientMessage::CancelOrder {
+            client_order_id: id.into(),
+        })
+        .expect("encode cancel")
+    }
+
+    fn query_orders_frame(request_id: &str) -> String {
+        serde_json::to_string(&ClientMessage::QueryOrders {
+            request_id: request_id.into(),
+            client_order_id: None,
+            open_only: false,
+        })
+        .expect("encode query")
+    }
+
+    /// The head-of-line claim, pinned directly rather than inferred from the
+    /// race below: a command sleeping out its act delay must be OFF the read
+    /// loop, so a query sent right behind it is answered first.
+    #[tokio::test]
+    async fn a_delayed_submit_does_not_stall_the_read_loop() {
+        let state = state();
+        arm_submit_act(&state, 800);
+        let frames = command_latency_session(
+            state,
+            vec![resting_submit("O-SLOW"), query_orders_frame("Q-1")],
+            1,
+        )
+        .await;
+        assert!(
+            matches!(frames[0], ServerMessage::OrderStatusSnapshot(_)),
+            "the query was answered behind the delayed submit: {:?}",
+            frames[0]
+        );
+    }
+
+    /// The outcome that is impossible without an act latency: a cancel sent one
+    /// frame after a submit reaches the book FIRST, finds no such order, and is
+    /// rejected - the cancel loses the race by winning it.
+    #[tokio::test]
+    async fn a_delayed_submit_loses_the_race_to_an_immediate_cancel() {
+        let state = state();
+        arm_submit_act(&state, 800);
+        let frames = command_latency_session(
+            state,
+            vec![resting_submit("O-RACE"), cancel_frame("O-RACE")],
+            2,
+        )
+        .await;
+        match &frames[0] {
+            ServerMessage::OrderCancelRejected {
+                client_order_id,
+                venue_order_id,
+                ..
+            } => {
+                assert_eq!(client_order_id, "O-RACE");
+                assert!(
+                    venue_order_id.is_none(),
+                    "the venue never accepted the order, so it has no id to name"
+                );
+            }
+            other => panic!("expected the cancel to arrive first, got {other:?}"),
+        }
+        assert!(
+            matches!(frames[1], ServerMessage::OrderAccepted { .. }),
+            "the delayed submit must still land, late: {:?}",
+            frames[1]
+        );
+    }
+
+    /// Guards the zero-delay steady state: with nothing armed the order path is
+    /// the unchanged synchronous one, so the cancel finds the order.
+    #[tokio::test]
+    async fn zero_act_latency_keeps_the_synchronous_path() {
+        let frames = command_latency_session(
+            state(),
+            // Accepted, Filled, AccountState, then the cancel's own outcome.
+            vec![resting_submit("O-SYNC"), cancel_frame("O-SYNC")],
+            4,
+        )
+        .await;
+        assert!(
+            matches!(frames[0], ServerMessage::OrderAccepted { .. }),
+            "expected the ordinary ordering, got {:?}",
+            frames[0]
+        );
+        // The cancel arrives at a venue that has already accepted the order, so
+        // it NAMES it - the exact opposite of the race above, where the cancel
+        // reaches an empty book and can name nothing.
+        match frames.last().expect("the cancel's outcome") {
+            ServerMessage::OrderCanceled { .. } => {}
+            ServerMessage::OrderCancelRejected {
+                venue_order_id,
+                client_order_id,
+                ..
+            } => {
+                assert_eq!(client_order_id, "O-SYNC");
+                assert!(
+                    venue_order_id.is_some(),
+                    "the cancel must find the order with nothing armed"
+                );
+            }
+            other => panic!("expected the cancel's outcome, got {other:?}"),
+        }
+    }
+
+    /// A delayed act is dated at the instant the venue ACTED, not the instant
+    /// the command arrived: the sleep sits before the market-price stamp, so the
+    /// existing `ts` re-sample covers it.
+    #[tokio::test]
+    async fn a_delayed_act_is_stamped_at_act_time() {
+        const ACT_MS: u64 = 500;
+        let state = state();
+        arm_submit_act(&state, ACT_MS);
+        let sent_at = sim_now_ns(state.sim);
+        let frames = command_latency_session(state, vec![resting_submit("O-TS")], 1).await;
+        let ServerMessage::OrderAccepted { ts_event, .. } = &frames[0] else {
+            panic!("expected an acceptance, got {:?}", frames[0])
+        };
+        assert!(
+            ts_event.saturating_sub(sent_at) >= ACT_MS * 1_000_000,
+            "event dated {ts_event} is not at least {ACT_MS} sim-ms after the send at {sent_at}"
+        );
+    }
+
+    /// A pending act is outstanding work with a lifetime of up to an hour, so it
+    /// is admission-controlled like everything else the venue holds: over the
+    /// per-connection budget the refusal is VISIBLE, names its own subject, and
+    /// the engine never sees the command.
+    #[tokio::test]
+    async fn pending_act_budget_refuses_visibly() {
+        let mut state = state();
+        state.cfg.pending_command_acts = 1;
+        arm_submit_act(&state, 800);
+        let frames = command_latency_session(
+            state,
+            vec![
+                resting_submit("O-FIRST"),
+                resting_submit("O-SECOND"),
+                query_orders_frame("Q-1"),
+            ],
+            3,
+        )
+        .await;
+        match &frames[0] {
+            ServerMessage::AdmissionRejected { subject, .. } => assert!(
+                matches!(
+                    subject,
+                    mogwai_protocol::AdmissionSubject::Submit { client_order_id }
+                        if client_order_id == "O-SECOND"
+                ),
+                "the refusal must name the command it refused: {subject:?}"
+            ),
+            other => panic!("expected the second submit to be refused, got {other:?}"),
+        }
+        let ServerMessage::OrderStatusSnapshot(snapshot) = &frames[1] else {
+            panic!("expected the query's answer, got {:?}", frames[1])
+        };
+        assert!(
+            snapshot.orders.is_empty(),
+            "neither submit has acted yet, so the venue must know of no order: {:?}",
+            snapshot.orders
+        );
+        assert!(
+            matches!(frames[2], ServerMessage::OrderAccepted { .. }),
+            "the admitted submit still lands, late: {:?}",
+            frames[2]
+        );
+    }
+
+    /// A pending act OUTLIVES the socket that sent it. The command is past the
+    /// protocol boundary, so the venue has RECEIVED it; abandoning it on
+    /// disconnect would model request loss, which is a separate divergence
+    /// mogwai already has. Three things are pinned here, all of 3.8:
+    ///
+    /// - teardown neither awaits nor aborts the detached task, so the handler
+    ///   releases its session lease well inside the armed act window;
+    /// - the mutation still lands, on the venue's own schedule rather than at
+    ///   the disconnect - the book is empty right after the socket goes and
+    ///   carries the order once the window elapses;
+    /// - a SECOND session bound to the same account sees it, because a
+    ///   `SessionLease` is only a counter on `AccountSlot.sessions` and never
+    ///   ownership of the account.
+    ///
+    /// Only the acknowledgment is discarded, having no lane left to ride.
+    #[tokio::test]
+    async fn a_disconnect_completes_a_pending_act() {
+        const ACT_MS: u64 = 1_500;
+
+        /// Open a fresh session on the same account and ask the venue what it
+        /// holds. This is the second session of 3.8, and it is also the only
+        /// witness available once the sender's lane is closed.
+        async fn orders_seen(addr: std::net::SocketAddr) -> Vec<mogwai_protocol::OrderStatusInfo> {
+            tokio::task::spawn_blocking(move || {
+                let (mut socket, _) =
+                    tungstenite::connect(format!("ws://{addr}/ws?account=TEST-001"))
+                        .expect("a second session connects");
+                if let tungstenite::stream::MaybeTlsStream::Plain(tcp) = socket.get_ref() {
+                    tcp.set_read_timeout(Some(Duration::from_secs(10)))
+                        .expect("set read timeout");
+                }
+                socket
+                    .send(tungstenite::Message::Text(query_orders_frame("Q-1").into()))
+                    .expect("send query");
+                loop {
+                    if let tungstenite::Message::Text(text) =
+                        socket.read().expect("a reply, not a timeout")
+                        && let ServerMessage::OrderStatusSnapshot(snapshot) =
+                            serde_json::from_str(&text).expect("decodable frame")
+                    {
+                        return snapshot.orders;
+                    }
+                }
+            })
+            .await
+            .expect("blocking ws client")
+        }
+
+        let state = state();
+        arm_submit_act(&state, ACT_MS);
+        let slot = state
+            .accounts
+            .get(&mogwai_protocol::AccountId::parse("TEST-001").unwrap())
+            .unwrap();
+        let addr = serve_ws(state).await;
+
+        // The sender submits and vanishes mid-delay.
+        let started = Instant::now();
+        tokio::task::spawn_blocking(move || {
+            let (mut socket, _) = tungstenite::connect(format!("ws://{addr}/ws?account=TEST-001"))
+                .expect("ws connect");
+            if let tungstenite::stream::MaybeTlsStream::Plain(tcp) = socket.get_ref() {
+                tcp.set_read_timeout(Some(Duration::from_secs(10)))
+                    .expect("set read timeout");
+            }
+            socket
+                .send(tungstenite::Message::Text(
+                    resting_submit("O-ORPHAN").into(),
+                ))
+                .expect("send the submit the venue will act on late");
+            socket.close(None).expect("close the socket mid-delay");
+            // Drain to the close handshake so the server has really lost the peer.
+            while socket.read().is_ok() {}
+        })
+        .await
+        .expect("blocking ws client");
+
+        // Teardown does not wait on the detached task: the lease comes back
+        // long before the act window is served.
+        while slot.sessions.load(Ordering::Relaxed) > 0
+            && started.elapsed() < Duration::from_millis(ACT_MS)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            slot.sessions.load(Ordering::Relaxed),
+            0,
+            "the handler was still running {:?} in, inside the armed {ACT_MS} ms window: \
+             teardown must not wait on a pending act",
+            started.elapsed()
+        );
+
+        // The venue has not acted yet, so the mutation is genuinely still
+        // pending rather than something that landed before the disconnect.
+        assert!(
+            orders_seen(addr).await.is_empty(),
+            "the act window is still being served, so the book must be empty"
+        );
+
+        while started.elapsed() < Duration::from_millis(ACT_MS + 500) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let orders = orders_seen(addr).await;
+        assert_eq!(
+            orders.len(),
+            1,
+            "the pending act must complete its mutation even though the sender is gone: {orders:?}"
+        );
+        assert_eq!(orders[0].client_order_id, "O-ORPHAN");
+    }
+
+    /// A malformed command is refused by the PROTOCOL BOUNDARY, which is not a
+    /// venue act: it is prompt under an armed act delay and it does not consume
+    /// a pending-act slot - with a budget of one, the well-formed submit behind
+    /// it still gets that slot.
+    #[tokio::test]
+    async fn a_boundary_refusal_is_prompt_under_an_armed_act_delay() {
+        let mut state = state();
+        state.cfg.pending_command_acts = 1;
+        arm_submit_act(&state, 800);
+        let malformed = serde_json::to_string(&ClientMessage::SubmitOrder(SubmitOrder {
+            client_order_id: "O-BAD".into(),
+            symbol: "BTCUSDT".into(),
+            side: Side::Buy,
+            order_type: OrderType::Limit,
+            quantity: Decimal::ZERO,
+            price: Some(Decimal::from(100)),
+            time_in_force: TimeInForce::Gtc,
+        }))
+        .expect("encode malformed submit");
+        let started = Instant::now();
+        let frames =
+            command_latency_session(state, vec![malformed, resting_submit("O-GOOD")], 2).await;
+        assert!(
+            matches!(frames[0], ServerMessage::OrderRejected { .. }),
+            "expected the boundary refusal first, got {:?}",
+            frames[0]
+        );
+        assert!(
+            matches!(frames[1], ServerMessage::OrderAccepted { .. }),
+            "the boundary refusal burned the only pending-act slot: {:?}",
+            frames[1]
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(4_000),
+            "the whole exchange took {:?}; a boundary refusal must not be delayed",
+            started.elapsed()
+        );
+    }
+
+    /// `POST /orders` applies both halves INLINE - no read loop to free, and the
+    /// response IS the ack - and does NOT add `DelayAcks`, which is the WS
+    /// pump's window alone.
+    #[tokio::test]
+    async fn http_applies_both_halves_and_never_delay_acks() {
+        const ACT_MS: u64 = 200;
+        const ACK_MS: u64 = 200;
+        let app = state();
+        assert_eq!(
+            arm(
+                &app,
+                "ACC-A",
+                mogwai_protocol::control::Divergence::CommandLatency {
+                    submit_act_ms: ACT_MS,
+                    modify_act_ms: 0,
+                    cancel_act_ms: 0,
+                    submit_ack_ms: ACK_MS,
+                    modify_ack_ms: 0,
+                    cancel_ack_ms: 0,
+                }
+            )
+            .await,
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            arm(
+                &app,
+                "ACC-A",
+                mogwai_protocol::control::Divergence::DelayAcks { ms: 30_000 }
+            )
+            .await,
+            StatusCode::ACCEPTED
+        );
+        let started = Instant::now();
+        let Json(events) = submit_order_http(
+            State(app.clone()),
+            account_headers_for("ACC-A"),
+            Json(limit_order("HTTP-LATE")),
+        )
+        .await
+        .expect("the order is served, late");
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(events.first(), Some(ServerMessage::OrderAccepted { .. })),
+            "expected an acceptance, got {events:?}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(ACT_MS + ACK_MS - 20),
+            "the response came back after {elapsed:?}; both halves must apply"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the response took {elapsed:?}: DelayAcks must NOT reach the HTTP surface"
+        );
+
+        // A cancel carries no armed window of its own, so it is prompt: the
+        // knobs really are per command class on this carrier too.
+        let started = Instant::now();
+        let Json(_canceled) = submit_order_http(
+            State(app),
+            account_headers_for("ACC-A"),
+            Json(ClientMessage::CancelOrder {
+                client_order_id: "HTTP-LATE".into(),
+            }),
+        )
+        .await
+        .expect("the cancel is served");
+        assert!(
+            started.elapsed() < Duration::from_millis(ACT_MS),
+            "an unarmed class must be prompt, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The process-wide budget covers `POST /orders`, which has no
+    /// per-connection lane: without it an armed hour-long act delay plus a flood
+    /// of requests would park unbounded axum tasks, each holding a socket.
+    #[tokio::test]
+    async fn global_pending_act_budget_refuses_http() {
+        let mut app = state();
+        app.cfg.global_pending_command_acts = 1;
+        app.pending_acts = Arc::new(tokio::sync::Semaphore::new(1));
+        assert_eq!(
+            arm(
+                &app,
+                "ACC-A",
+                mogwai_protocol::control::Divergence::CommandLatency {
+                    submit_act_ms: 1_500,
+                    modify_act_ms: 0,
+                    cancel_act_ms: 0,
+                    submit_ack_ms: 0,
+                    modify_ack_ms: 0,
+                    cancel_ack_ms: 0,
+                }
+            )
+            .await,
+            StatusCode::ACCEPTED
+        );
+        let first = tokio::spawn(submit_order_http(
+            State(app.clone()),
+            account_headers_for("ACC-A"),
+            Json(limit_order("HTTP-ONE")),
+        ));
+        // Let the first request take the only permit before the second asks.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let refused = submit_order_http(
+            State(app.clone()),
+            account_headers_for("ACC-A"),
+            Json(limit_order("HTTP-TWO")),
+        )
+        .await
+        .expect_err("the second request has no permit to take");
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let Json(events) = first.await.expect("first request").expect("served");
+        assert!(matches!(
+            events.first(),
+            Some(ServerMessage::OrderAccepted { .. })
+        ));
+    }
+
+    /// Arm `class` alone: its two windows carry the delays, the other four
+    /// fields are zero, so anything late in the tests below is late because of
+    /// THIS class and nothing else.
+    fn command_latency_for(
+        class: mogwai_protocol::CommandClass,
+        act_ms: u64,
+        ack_ms: u64,
+    ) -> mogwai_protocol::control::Divergence {
+        use mogwai_protocol::CommandClass::{Cancel, Modify, Submit};
+        mogwai_protocol::control::Divergence::CommandLatency {
+            submit_act_ms: if class == Submit { act_ms } else { 0 },
+            modify_act_ms: if class == Modify { act_ms } else { 0 },
+            cancel_act_ms: if class == Cancel { act_ms } else { 0 },
+            submit_ack_ms: if class == Submit { ack_ms } else { 0 },
+            modify_ack_ms: if class == Modify { ack_ms } else { 0 },
+            cancel_ack_ms: if class == Cancel { ack_ms } else { 0 },
+        }
+    }
+
+    fn modify_frame(id: &str) -> String {
+        serde_json::to_string(&ClientMessage::ModifyOrder {
+            client_order_id: id.into(),
+            price: Some(Decimal::new(9_900, 2)),
+            quantity: None,
+        })
+        .expect("encode modify")
+    }
+
+    /// The order-entry frame of `class`, targeting `id`. A submit rests; a
+    /// modify and a cancel name an order the caller has already seeded.
+    fn command_frame(class: mogwai_protocol::CommandClass, id: &str) -> String {
+        match class {
+            mogwai_protocol::CommandClass::Submit => resting_submit(id),
+            mogwai_protocol::CommandClass::Modify => modify_frame(id),
+            mogwai_protocol::CommandClass::Cancel => cancel_frame(id),
+        }
+    }
+
+    /// The same thing as a `ClientMessage`, for the HTTP carrier, which takes
+    /// the command as JSON rather than as a socket frame.
+    fn command_message(class: mogwai_protocol::CommandClass, id: &str) -> ClientMessage {
+        serde_json::from_str(&command_frame(class, id)).expect("re-decode the command")
+    }
+
+    /// Whether `msg` is the venue's OUTCOME for a `class` command on `id`.
+    ///
+    /// Both the honored and the refused outcome count: what is under test is
+    /// WHEN the venue answers, not what it decided, and a modify that meets an
+    /// already-terminal order is still an act of the venue and still carries
+    /// the class's windows.
+    fn is_outcome_for(msg: &ServerMessage, id: &str, class: mogwai_protocol::CommandClass) -> bool {
+        match (class, msg) {
+            (
+                mogwai_protocol::CommandClass::Submit,
+                ServerMessage::OrderAccepted {
+                    client_order_id, ..
+                }
+                | ServerMessage::OrderRejected {
+                    client_order_id, ..
+                },
+            )
+            | (
+                mogwai_protocol::CommandClass::Modify,
+                ServerMessage::OrderUpdated {
+                    client_order_id, ..
+                }
+                | ServerMessage::OrderModifyRejected {
+                    client_order_id, ..
+                },
+            )
+            | (
+                mogwai_protocol::CommandClass::Cancel,
+                ServerMessage::OrderCanceled {
+                    client_order_id, ..
+                }
+                | ServerMessage::OrderCancelRejected {
+                    client_order_id, ..
+                },
+            ) => client_order_id == id,
+            _ => false,
+        }
+    }
+
+    /// One live socket, driven command by command rather than by sending a
+    /// whole script up front: a per-class timing reading needs the NEXT command
+    /// sent only after the previous outcome has landed, which is what keeps a
+    /// prompt class from being measured behind a slow one's frames on the FIFO
+    /// wire.
+    struct LatencySocket(
+        tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+    );
+
+    impl LatencySocket {
+        /// Send `frame` and return how long the venue took to answer with the
+        /// `class` outcome naming `id`. Frames that are not that outcome (a
+        /// fill, an account state) are read past.
+        fn round_trip(
+            &mut self,
+            frame: String,
+            id: &str,
+            class: mogwai_protocol::CommandClass,
+        ) -> Duration {
+            let started = Instant::now();
+            self.0
+                .send(tungstenite::Message::Text(frame.into()))
+                .expect("send");
+            loop {
+                let tungstenite::Message::Text(text) =
+                    self.0.read().expect("read a frame, not a timeout")
+                else {
+                    continue;
+                };
+                let msg: ServerMessage = serde_json::from_str(&text).expect("decodable frame");
+                assert!(
+                    !matches!(msg, ServerMessage::AdmissionRejected { .. }),
+                    "the venue refused admission during a latency reading: {msg:?}"
+                );
+                if is_outcome_for(&msg, id, class) {
+                    return started.elapsed();
+                }
+            }
+        }
+    }
+
+    /// Serve `state`, connect one socket to `TEST-001`, and hand it to `drive`
+    /// on a blocking thread.
+    async fn latency_socket<T: Send + 'static>(
+        state: AppState,
+        drive: impl FnOnce(&mut LatencySocket) -> T + Send + 'static,
+    ) -> T {
+        let addr = serve_ws(state).await;
+        tokio::task::spawn_blocking(move || {
+            let (socket, _) = tungstenite::connect(format!("ws://{addr}/ws?account=TEST-001"))
+                .expect("ws connect");
+            if let tungstenite::stream::MaybeTlsStream::Plain(tcp) = socket.get_ref() {
+                tcp.set_read_timeout(Some(Duration::from_secs(10)))
+                    .expect("set read timeout");
+            }
+            drive(&mut LatencySocket(socket))
+        })
+        .await
+        .expect("blocking ws client")
+    }
+
+    /// Both halves fire for EVERY command class on BOTH order-entry carriers.
+    ///
+    /// The cross product is the point: `CommandLatency` is carrier-agnostic (the
+    /// act half is applied where the engine processes the command, shared by
+    /// `/ws` and `POST /orders`; the ack half either shifts the WS frame or
+    /// delays the HTTP response), and the adapter refuses it under no transport
+    /// profile on the strength of that claim. Without this table the MODIFY
+    /// class has no functional coverage at all and the HTTP carrier rests on the
+    /// claim alone.
+    ///
+    /// Each case arms ONE class and asserts both directions: that class's
+    /// outcome is late by act + ack, and the other two classes - probed after
+    /// the late outcome has landed, so the serial WS pump cannot hold them
+    /// behind it - are prompt.
+    #[tokio::test]
+    async fn every_class_is_delayed_on_every_carrier() {
+        use mogwai_protocol::CommandClass::{Cancel, Modify, Submit};
+        const ACT_MS: u64 = 250;
+        const ACK_MS: u64 = 150;
+        // The floor a delayed outcome must clear, and the ceiling a prompt one
+        // must stay under. The gap between them is the whole reading, so it is
+        // kept wide: no unarmed command on either carrier does anything that
+        // takes 200 ms (a limit order carries its own price, so nothing here
+        // reaches the checkpoint mutex).
+        let late = Duration::from_millis(ACT_MS + ACK_MS - 20);
+        let prompt = Duration::from_millis(200);
+
+        for class in [Submit, Modify, Cancel] {
+            // A modify or a cancel needs an order to name; a submit brings its
+            // own. The seed is sent under the armed window of a DIFFERENT class,
+            // so it doubles as the promptness reading for `Submit`.
+            let seeded = class != Submit;
+            let target = if seeded { "O-SEED" } else { "O-ARMED" };
+            let probes: Vec<mogwai_protocol::CommandClass> = [Submit, Modify, Cancel]
+                .into_iter()
+                .filter(|c| *c != class)
+                .collect();
+
+            // --- carrier one: /ws ---
+            let ws_state = state();
+            assert_eq!(
+                arm(
+                    &ws_state,
+                    "TEST-001",
+                    command_latency_for(class, ACT_MS, ACK_MS)
+                )
+                .await,
+                StatusCode::ACCEPTED
+            );
+            let probes_ws = probes.clone();
+            latency_socket(ws_state, move |socket| {
+                if seeded {
+                    let elapsed = socket.round_trip(resting_submit(target), target, Submit);
+                    assert!(
+                        elapsed < prompt,
+                        "{class:?}/ws: seeding an unarmed submit took {elapsed:?}"
+                    );
+                }
+                let elapsed = socket.round_trip(command_frame(class, target), target, class);
+                assert!(
+                    elapsed >= late,
+                    "{class:?}/ws: the armed class answered after {elapsed:?}, \
+                     which is short of act {ACT_MS} ms plus ack {ACK_MS} ms"
+                );
+                for probe in probes_ws {
+                    let id = if probe == Submit { "O-PROBE" } else { target };
+                    let elapsed = socket.round_trip(command_frame(probe, id), id, probe);
+                    assert!(
+                        elapsed < prompt,
+                        "{class:?}/ws: an unarmed {probe:?} took {elapsed:?}"
+                    );
+                }
+            })
+            .await;
+
+            // --- carrier two: POST /orders ---
+            let app = state();
+            assert_eq!(
+                arm(&app, "ACC-A", command_latency_for(class, ACT_MS, ACK_MS)).await,
+                StatusCode::ACCEPTED
+            );
+            let post = async |cmd: ClientMessage| {
+                let started = Instant::now();
+                drop(
+                    submit_order_http(State(app.clone()), account_headers_for("ACC-A"), Json(cmd))
+                        .await
+                        .expect("the command is served"),
+                );
+                started.elapsed()
+            };
+            if seeded {
+                let elapsed = post(command_message(Submit, target)).await;
+                assert!(
+                    elapsed < prompt,
+                    "{class:?}/http: seeding an unarmed submit took {elapsed:?}"
+                );
+            }
+            let elapsed = post(command_message(class, target)).await;
+            assert!(
+                elapsed >= late,
+                "{class:?}/http: the armed class answered after {elapsed:?}, \
+                 which is short of act {ACT_MS} ms plus ack {ACK_MS} ms"
+            );
+            for probe in probes {
+                let id = if probe == Submit { "O-PROBE" } else { target };
+                let elapsed = post(command_message(probe, id)).await;
+                assert!(
+                    elapsed < prompt,
+                    "{class:?}/http: an unarmed {probe:?} took {elapsed:?}"
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn teardown_during_an_in_flight_order_does_not_fill_a_phantom() {
         let app = state();
@@ -1826,7 +2723,8 @@ mod tests {
                 })
             )
             .await
-            .unwrap_err(),
+            .unwrap_err()
+            .status(),
             StatusCode::BAD_REQUEST
         );
         assert_eq!(app.accounts.len(), 0);
@@ -1924,7 +2822,7 @@ mod tests {
         assert!(app.accounts.destroy(&id));
         let (lanes, _receivers) = ExecLanes::detached();
         assert!(matches!(
-            process_order_cmd(limit_order("DOOMED"), &app, &slot, &lanes).await,
+            process_order_cmd(limit_order("DOOMED"), &app, &slot, &lanes, ActDelay::Paid).await,
             OrderOutcome::Gone(_)
         ));
     }
@@ -2198,6 +3096,33 @@ mod tests {
         };
         let err = validate_admission_limits(&cfg).expect_err("a zero promise pool is refused");
         assert!(err.to_string().contains("admission_promise_tickets"));
+
+        // A zero pending-act budget would refuse every delayed command, so the
+        // control could be armed but never served.
+        cfg = Config {
+            pending_command_acts: 0,
+            ..Config::default()
+        };
+        let err =
+            validate_admission_limits(&cfg).expect_err("a zero pending-act budget is refused");
+        assert!(err.to_string().contains("pending_command_acts"));
+
+        // A global ceiling below the per-connection one makes the
+        // per-connection budget unreachable, and therefore a lie.
+        cfg = Config {
+            pending_command_acts: 8,
+            global_pending_command_acts: 7,
+            ..Config::default()
+        };
+        let err =
+            validate_admission_limits(&cfg).expect_err("a global ceiling below the local one");
+        assert!(err.to_string().contains("global_pending_command_acts"));
+
+        assert_eq!(
+            build_admission_limits(&Config::default()).pending_act_slots,
+            crate::admission::PENDING_ACT_SLOTS,
+            "the config default IS the shipped constant"
+        );
 
         // The floor binds operator config only: a test that needs a refusal
         // reachable over a socket builds the value directly, which is what
@@ -4216,7 +5141,7 @@ mod tests {
         .await
         .expect_err("subscribe rejected");
 
-        assert_eq!(err, StatusCode::BAD_REQUEST);
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]
@@ -5015,6 +5940,7 @@ mod tests {
             exec_tx
                 .send(HeldFrame {
                     arrived: started,
+                    class: None,
                     frame: OutboundFrame {
                         payload: Arc::from(
                             serde_json::to_string(&ServerMessage::OrderAccepted {
@@ -5050,6 +5976,235 @@ mod tests {
 
         drop(exec_tx);
         pump.await.expect("pump drains cleanly");
+    }
+
+    /// One execution frame for the pump, stamped with the command class that
+    /// produced it - which is what selects its ack window.
+    fn held_exec_frame(
+        arrived: Instant,
+        class: Option<mogwai_protocol::CommandClass>,
+        id: &str,
+    ) -> HeldFrame {
+        HeldFrame {
+            arrived,
+            class,
+            frame: OutboundFrame {
+                payload: Arc::from(
+                    serde_json::to_string(&ServerMessage::OrderAccepted {
+                        client_order_id: id.to_string(),
+                        venue_order_id: format!("V-{id}"),
+                        ts_event: 0,
+                    })
+                    .expect("serializes"),
+                ),
+                is_market_data: false,
+                charge: None,
+                slot: None,
+            },
+        }
+    }
+
+    /// A per-command ACK latency ADDS to an armed `DelayAcks` rather than
+    /// replacing it, matching the composition rule the adapter's inbound
+    /// `BASELINE_LATENCY` already states.
+    #[tokio::test]
+    async fn command_ack_latency_adds_to_delay_acks() {
+        const DELAY_MS: u64 = 100;
+        const ACK_MS: u64 = 200;
+        let slot = crate::accounts::AccountSlot::detached_for_tests();
+        slot.delay_ms.store(DELAY_MS, Ordering::Relaxed);
+        slot.submit_ack_ms.store(ACK_MS, Ordering::Relaxed);
+        let (exec_tx, exec_rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel::<Outbound>(8);
+        let pump = spawn_exec_pump(exec_rx, slot, SimClock::identity(), tx);
+
+        let started = Instant::now();
+        exec_tx
+            .send(held_exec_frame(
+                started,
+                Some(mogwai_protocol::CommandClass::Submit),
+                "SUM",
+            ))
+            .expect("enqueue");
+        rx.recv().await.expect("delayed exec event");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed >= Duration::from_millis(DELAY_MS + ACK_MS - 20),
+            "released after {elapsed:?}; the two windows must compose, not replace"
+        );
+
+        drop(exec_tx);
+        pump.await.expect("pump drains cleanly");
+    }
+
+    /// The same-socket form the FIFO wire DOES permit: the fast class first.
+    /// A cancel with no ack window must not be held by a submit's window, which
+    /// is only observable when the cancel arrives ahead of it - the pump is one
+    /// serial loop and never reorders (a slow class arriving FIRST holds the
+    /// tail behind it, by design).
+    #[tokio::test]
+    async fn ack_latency_is_per_class_on_one_socket() {
+        const ACK_MS: u64 = 400;
+        let slot = crate::accounts::AccountSlot::detached_for_tests();
+        slot.submit_ack_ms.store(ACK_MS, Ordering::Relaxed);
+        let (exec_tx, exec_rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel::<Outbound>(8);
+        let pump = spawn_exec_pump(exec_rx, slot, SimClock::identity(), tx);
+
+        let started = Instant::now();
+        exec_tx
+            .send(held_exec_frame(
+                started,
+                Some(mogwai_protocol::CommandClass::Cancel),
+                "CXL",
+            ))
+            .expect("enqueue cancel");
+        exec_tx
+            .send(held_exec_frame(
+                started,
+                Some(mogwai_protocol::CommandClass::Submit),
+                "SUM",
+            ))
+            .expect("enqueue submit");
+        rx.recv().await.expect("the cancel's frame");
+        let cancel_at = started.elapsed();
+        rx.recv().await.expect("the submit's frame");
+        let submit_at = started.elapsed();
+
+        assert!(
+            cancel_at < Duration::from_millis(ACK_MS / 2),
+            "the cancel carried no ack window but waited {cancel_at:?}"
+        );
+        assert!(
+            submit_at >= Duration::from_millis(ACK_MS - 20),
+            "the submit's own {ACK_MS} ms window was not honored: {submit_at:?}"
+        );
+
+        drop(exec_tx);
+        pump.await.expect("pump drains cleanly");
+    }
+
+    /// The `ClearDivergences` asymmetry, both halves, in one test because the
+    /// point IS the asymmetry:
+    ///
+    /// - an ACK window is lifted off frames ALREADY QUEUED, because the pump
+    ///   reads it per event at dequeue - the same liftability `DelayAcks` has;
+    /// - an ACT delay already being SERVED is not lifted. `delayed_act` reads
+    ///   `act_ms` once, at spawn, and sleeps it out; the venue has begun acting
+    ///   on that command and a clear that reached into flight would be a time
+    ///   machine. Clearing governs commands the venue has not started on yet.
+    ///
+    /// Making the act sleep interruptible is explicitly out of scope, so this
+    /// pins it in the direction the design chose rather than leaving the
+    /// `reference/havoc.md` claim to drift.
+    #[tokio::test]
+    async fn clear_divergences_lifts_a_queued_ack_but_not_a_pending_act() {
+        let app = state();
+        let slot = app
+            .accounts
+            .acquire(
+                &mogwai_protocol::AccountId::parse("ACC-A").unwrap(),
+                now_ns(),
+            )
+            .unwrap();
+        slot.submit_ack_ms.store(30_000, Ordering::Relaxed);
+        let (exec_tx, exec_rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel::<Outbound>(8);
+        let pump = spawn_exec_pump(exec_rx, Arc::clone(&slot), SimClock::identity(), tx);
+
+        let started = Instant::now();
+        exec_tx
+            .send(held_exec_frame(
+                started,
+                Some(mogwai_protocol::CommandClass::Submit),
+                "SUM",
+            ))
+            .expect("enqueue");
+        assert_eq!(
+            arm(
+                &app,
+                "ACC-A",
+                mogwai_protocol::control::Divergence::ClearDivergences
+            )
+            .await,
+            StatusCode::ACCEPTED
+        );
+        let frame = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("the queued frame is released, not held for the armed 30 s");
+        assert!(frame.is_some());
+
+        drop(exec_tx);
+        pump.await.expect("pump drains cleanly");
+
+        // The act half, over a real socket: a submit detached onto its own task,
+        // cleared mid-sleep. Both windows are armed on this account, so the one
+        // acceptance frame reports on both - it must arrive on the ACT window's
+        // original schedule (not lifted) and must not carry the 30 s ack window
+        // that was armed alongside it (lifted).
+        const ACT_MS: u64 = 1_500;
+        assert_eq!(
+            arm(
+                &app,
+                "TEST-001",
+                mogwai_protocol::control::Divergence::CommandLatency {
+                    submit_act_ms: ACT_MS,
+                    modify_act_ms: 0,
+                    cancel_act_ms: 0,
+                    submit_ack_ms: 30_000,
+                    modify_ack_ms: 0,
+                    cancel_ack_ms: 0,
+                }
+            )
+            .await,
+            StatusCode::ACCEPTED
+        );
+        let inflight = app
+            .accounts
+            .get(&mogwai_protocol::AccountId::parse("TEST-001").unwrap())
+            .unwrap();
+
+        let started = Instant::now();
+        let session = tokio::spawn(command_latency_session(
+            app.clone(),
+            vec![resting_submit("O-INFLIGHT")],
+            1,
+        ));
+        // Well inside the act window, and long enough for the command to be past
+        // the read loop and sleeping on its own task.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            arm(
+                &app,
+                "TEST-001",
+                mogwai_protocol::control::Divergence::ClearDivergences
+            )
+            .await,
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            command_latency_fields(&inflight),
+            [0; 6],
+            "ClearDivergences zeroes every field, whatever is in flight"
+        );
+
+        let frames = session.await.expect("the ws session");
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(frames[0], ServerMessage::OrderAccepted { .. }),
+            "the pending act still lands: {:?}",
+            frames[0]
+        );
+        assert!(
+            elapsed >= Duration::from_millis(ACT_MS - 100),
+            "the acceptance came back after {elapsed:?}: a clear must NOT lift an act \
+             the venue has already begun serving"
+        );
+        assert!(
+            elapsed < Duration::from_millis(ACT_MS + 5_000),
+            "the acceptance took {elapsed:?}: the queued ACK window must have been lifted"
+        );
     }
 
     /// A pacing sleep must observe cancellation within one poll slice, not

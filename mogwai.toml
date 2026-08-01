@@ -81,6 +81,17 @@ admission_lane_frames = 64
 # leave no room for an actual refusal. Sized at MAX_SUBSCRIBE_SYMBOLS.
 admission_promise_tickets = 256
 
+# Order commands sleeping out an armed CommandLatency ACT delay - the venue has
+# received them but has not touched the book yet. A COMMAND is the bounded unit
+# here, not a payload: a pending act holds no frame, it holds future work, and
+# an armed hour-long delay would otherwise let one connection park unbounded
+# tasks. The first is per connection; the second bounds the whole box and is the
+# only ceiling covering POST /orders, which has no per-connection lane. Lowering
+# pending_command_acts is how scripts/smoke.py reaches the refusal. The global
+# value must be at least the per-connection one, or the local budget is a lie.
+pending_command_acts = 256
+global_pending_command_acts = 4096
+
 # Initial per-currency account funding - the deposit made before the run. The
 # ledger books only fill deltas on top of this seed. A funded account is an
 # honest cash venue: orders the free balance cannot cover are rejected with

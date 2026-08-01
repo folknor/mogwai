@@ -25,8 +25,8 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use mogwai_data::TickEvent;
 use mogwai_protocol::{
-    ACCOUNT_QUERY_PARAM, AccountId, ClientMessage, MarketRegime, ServerMessage, SimClock,
-    SubscriptionIssue, SubscriptionOutcome,
+    ACCOUNT_QUERY_PARAM, AccountId, ClientMessage, CommandClass, MarketRegime, ServerMessage,
+    SimClock, SubscriptionIssue, SubscriptionOutcome,
 };
 use tokio::sync::{Notify, mpsc};
 
@@ -36,8 +36,8 @@ use crate::admission::{
 };
 use crate::config::{build_admission_limits, now_ns, sim_duration_from_millis, sim_now_ns};
 use crate::http::{
-    AppState, OrderOutcome, process_order_cmd, strip_unfireable_reopen_gap,
-    validate_regime_or_clean,
+    ActDelay, AppState, OrderOutcome, boundary_error, process_order_cmd,
+    strip_unfireable_reopen_gap, validate_regime_or_clean,
 };
 use crate::source;
 use crate::tape::{CursorState, RegimeKey, TapeKey, TapeLease, TapeSpawn};
@@ -705,42 +705,119 @@ async fn handle_socket(socket: WebSocket, state: AppState, slot: Arc<AccountSlot
                     }
                 }
             }
-            order_cmd => match process_order_cmd(order_cmd, &state, lease.slot(), &lanes).await {
-                OrderOutcome::Produced {
-                    events,
-                    reservation,
+            order_cmd => {
+                let class = CommandClass::of(&order_cmd);
+                let act_ms = class.map_or(0, |class| lease.slot().act_ms(class));
+                // A malformed command is refused by the PROTOCOL BOUNDARY, which
+                // is not a venue act: it must be equally prompt on both carriers
+                // and must not burn a pending-act slot. `boundary_error` takes no
+                // reservation and touches no account, so consulting it here is
+                // free, and `process_order_cmd` still runs the real boundary gate
+                // on whichever path is taken.
+                if act_ms > 0 && boundary_error(&order_cmd).is_none() {
+                    // Bounded twice: a per-connection ticket so one client cannot
+                    // spawn unbounded pending tasks under an armed hour-long act
+                    // delay, and a process-wide permit so the whole box cannot be
+                    // flooded across connections and carriers. Either refusal is
+                    // visible and the engine never sees the command.
+                    let Some(ticket) = lanes.reserve_act() else {
+                        if let Err(close) = send_admission(
+                            &lanes,
+                            ServerMessage::AdmissionRejected {
+                                subject: crate::http::admission_subject(&order_cmd),
+                                reason: "pending command-latency queue saturated".into(),
+                                ts_event: sim_now_ns(state.sim),
+                            },
+                        ) {
+                            break Some(close);
+                        }
+                        continue;
+                    };
+                    let Ok(permit) = Arc::clone(&state.pending_acts).try_acquire_owned() else {
+                        drop(ticket);
+                        if let Err(close) = send_admission(
+                            &lanes,
+                            ServerMessage::AdmissionRejected {
+                                subject: crate::http::admission_subject(&order_cmd),
+                                reason: "venue pending-act capacity exhausted".into(),
+                                ts_event: sim_now_ns(state.sim),
+                            },
+                        ) {
+                            break Some(close);
+                        }
+                        continue;
+                    };
+                    // A pending act OUTLIVES the socket that sent it, so it is
+                    // spawned bare rather than onto anything the connection owns:
+                    // teardown neither awaits nor aborts it. The command is past
+                    // the protocol boundary, so the venue has RECEIVED it, and
+                    // dropping it on disconnect would model request loss - a
+                    // different divergence mogwai already has. The mutation
+                    // therefore lands and only the acknowledgment is discarded,
+                    // because `lanes` is closed by then. Two existing facts make
+                    // that safe: the task holds an `Arc<AccountSlot>` so the slot
+                    // cannot be freed under it, and `process_order_cmd` rechecks
+                    // the tombstone under the engine lock so a destroyed account
+                    // refuses rather than resurrects. Other sessions may be bound
+                    // to the same account and MUST see the mutation - a
+                    // `SessionLease` is a counter on `AccountSlot.sessions`, never
+                    // ownership of the account. The lifetime is bounded by the two
+                    // budgets above, not by the connection.
+                    tokio::spawn(delayed_act(DelayedAct {
+                        cmd: order_cmd,
+                        class: class.expect("a nonzero act delay implies an order-entry class"),
+                        act_ms,
+                        state: state.clone(),
+                        slot: Arc::clone(lease.slot()),
+                        lanes: lanes.clone(),
+                        _ticket: ticket,
+                        _permit: permit,
+                    }));
+                    continue;
                 }
-                | OrderOutcome::Refused {
-                    events,
-                    reservation,
-                } => {
-                    debug_assert!(
-                        events.iter().all(is_execution_event),
-                        "order-entry events are always execution-category, never market data"
-                    );
-                    // One arrival instant for the whole batch: the engine
-                    // produced these events together in one `process` call, so
-                    // under an armed `DelayAcks` they share one deadline and
-                    // land together ~ms late (see `spawn_exec_pump` for the
-                    // per-event-deadline contract this anchors). The send
-                    // cannot block - the held lane is unbounded by channel
-                    // capacity, bounded by the byte budget already reserved
-                    // above - so this arm never stalls the reader.
-                    if lanes
-                        .submit_produced(reservation, Instant::now(), events)
-                        .is_err()
-                    {
-                        break None; // writer gone; the connection is tearing down
+                // The read loop NEVER sleeps an act delay itself: `Paid` is
+                // passed even when `act_ms` is zero, so a re-arm landing between
+                // the load above and `process_order_cmd`'s own load cannot turn
+                // this arm into an inline hold.
+                match process_order_cmd(order_cmd, &state, lease.slot(), &lanes, ActDelay::Paid)
+                    .await
+                {
+                    OrderOutcome::Produced {
+                        events,
+                        reservation,
+                    }
+                    | OrderOutcome::Refused {
+                        events,
+                        reservation,
+                    } => {
+                        debug_assert!(
+                            events.iter().all(is_execution_event),
+                            "order-entry events are always execution-category, never market data"
+                        );
+                        // One arrival instant for the whole batch: the engine
+                        // produced these events together in one `process` call, so
+                        // under an armed `DelayAcks` they share one deadline and
+                        // land together ~ms late (see `spawn_exec_pump` for the
+                        // per-event-deadline contract this anchors). The send
+                        // cannot block - the held lane is unbounded by channel
+                        // capacity, bounded by the byte budget already reserved
+                        // above - so this arm never stalls the reader.
+                        if lanes
+                            .submit_produced(reservation, Instant::now(), class, events)
+                            .is_err()
+                        {
+                            break None; // writer gone; the connection is tearing down
+                        }
+                    }
+                    OrderOutcome::NotAdmitted(frame)
+                    | OrderOutcome::Diagnostic(frame)
+                    | OrderOutcome::Gone(frame) => {
+                        if let Err(close) = send_admission(&lanes, frame) {
+                            break Some(close);
+                        }
                     }
                 }
-                OrderOutcome::NotAdmitted(frame)
-                | OrderOutcome::Diagnostic(frame)
-                | OrderOutcome::Gone(frame) => {
-                    if let Err(close) = send_admission(&lanes, frame) {
-                        break Some(close);
-                    }
-                }
-            },
+            }
         }
     };
 
@@ -751,6 +828,22 @@ async fn handle_socket(socket: WebSocket, state: AppState, slot: Arc<AccountSlot
     if let Some(close) = overload {
         tracing::warn!(reason = %close.reason, "closing connection: admission overload");
         drop(lanes.send_close(close));
+    } else {
+        // The ordinary disconnect ALSO has to stop the writer explicitly, and
+        // it did not have to before pending acts existed. The writer's loop ends
+        // when both of its receivers close, i.e. when the last `Outbound` sender
+        // is dropped - and a command detached by an armed act latency holds an
+        // `ExecLanes` clone (hence a priority-lane sender) for as long as the
+        // venue takes to act, which is up to an hour. Without this the teardown
+        // below would park in `writer.await` for the whole remaining act window,
+        // holding the session lease open and making teardown WAIT on a detached
+        // task that is documented not to be waited on. A close on the priority
+        // lane breaks the writer at once; the peer is already gone, so the frame
+        // itself is best-effort and its send error is ignored.
+        drop(lanes.send_close(CloseSpec {
+            code: axum::extract::ws::close_code::NORMAL,
+            reason: "session closed".into(),
+        }));
     }
 
     // Cancel every replay first so the threads stop generating, then join them
@@ -816,6 +909,75 @@ async fn handle_socket(socket: WebSocket, state: AppState, slot: Arc<AccountSlot
     }
 }
 
+/// One order command the venue is taking `act_ms` to act on, detached from the
+/// read loop so later commands can reach the engine first - which is the whole
+/// point of an act latency and cannot happen while the command occupies the
+/// strictly serial read loop. Everything after the sleep is exactly what the
+/// inline path does, so the two cannot drift in WHAT they produce, only in when.
+struct DelayedAct {
+    cmd: ClientMessage,
+    class: CommandClass,
+    act_ms: u64,
+    state: AppState,
+    slot: Arc<AccountSlot>,
+    lanes: ExecLanes,
+    /// Per-connection pending-act ticket, released when the task ends wherever
+    /// it ends.
+    _ticket: Ticket,
+    /// Process-wide pending-act permit, likewise.
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+/// Sleep the venue's act window off the read loop, then run the ordinary order
+/// path and dispatch its outcome.
+///
+/// The sleep is read ONCE, at spawn: a `ClearDivergences` posted mid-sleep zeroes
+/// the atomic but does not lift an act already being served, because the venue
+/// has begun acting on this command. That is the deliberate opposite of the ACK
+/// half, which the pump reads per event at dequeue and which therefore IS
+/// liftable.
+///
+/// Two differences from the inline dispatch, both forced by being off the loop:
+/// there is no read loop to break, so a `LaneClosed` simply returns (the
+/// connection is already tearing down), and an overload `CloseSpec` is handed to
+/// `send_close` directly, because no task can break another task's loop.
+async fn delayed_act(act: DelayedAct) {
+    tokio::time::sleep(
+        act.state
+            .sim
+            .wall_duration(sim_duration_from_millis(act.act_ms)),
+    )
+    .await;
+    match process_order_cmd(act.cmd, &act.state, &act.slot, &act.lanes, ActDelay::Paid).await {
+        OrderOutcome::Produced {
+            events,
+            reservation,
+        }
+        | OrderOutcome::Refused {
+            events,
+            reservation,
+        } => {
+            debug_assert!(
+                events.iter().all(is_execution_event),
+                "order-entry events are always execution-category, never market data"
+            );
+            // `Err` is `LaneClosed`: the client is gone, the mutation already
+            // landed, and only the acknowledgment has nowhere to go.
+            drop(
+                act.lanes
+                    .submit_produced(reservation, Instant::now(), Some(act.class), events),
+            );
+        }
+        OrderOutcome::NotAdmitted(frame)
+        | OrderOutcome::Diagnostic(frame)
+        | OrderOutcome::Gone(frame) => {
+            if let Err(close) = send_admission(&act.lanes, frame) {
+                drop(act.lanes.send_close(close));
+            }
+        }
+    }
+}
+
 /// Delay queued execution events without head-of-line-blocking the market-data
 /// feed behind them, honoring the `DelayAcks` contract per event.
 ///
@@ -852,8 +1014,21 @@ pub(crate) fn spawn_exec_pump(
     out: mpsc::Sender<Outbound>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some(HeldFrame { arrived, frame }) = exec_rx.recv().await {
-            let delay = slot.delay_ms.load(Ordering::Relaxed);
+        while let Some(HeldFrame {
+            arrived,
+            class,
+            frame,
+        }) = exec_rx.recv().await
+        {
+            // The two windows COMPOSE: a per-command ack latency ADDS to any
+            // armed `DelayAcks` rather than replacing it, matching the rule
+            // `BASELINE_LATENCY` states for the adapter's inbound latency. Both
+            // operands are bounded by `MAX_DIVERGENCE_MS`, so the sum cannot
+            // overflow; the saturating add is belt and braces.
+            let delay = slot
+                .delay_ms
+                .load(Ordering::Relaxed)
+                .saturating_add(class.map_or(0, |class| slot.ack_ms(class)));
             if delay > 0 {
                 // `deadline - now` phrased as a saturating remainder so a
                 // deadline already in the past sleeps zero, and a pathological

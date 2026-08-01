@@ -159,26 +159,6 @@ Or both. There are no exceptions.
   not taken here: the venue says clearly what happened, what the consumer does
   with that is the consumer's call.
 
-- BUILD: outbound per-command latency, the venue acting late rather than the
-  client learning late. Raised by nautilus RFC 4631 (Execution Realism Layer)
-  as its phase C, and the one phase of that RFC that fits mogwai without
-  qualification. What exists today is INBOUND only: `HavocLatency` in
-  `mogwai-protocol/src/havoc.rs` carries `base_nanos` plus per-category
-  `exec_event_nanos` / `fill_nanos` / `data_nanos`, `BASELINE_LATENCY` sets a
-  30 ms honest floor, and its own doc comment calls the knob "an adapter-side
-  consumer knob, not a venue contract". Server-side there is only
-  `Divergence::DelayAcks`, one uniform hold on EVERY outbound execution event.
-  Neither models what a real venue does: take a different amount of time to
-  ACT on a submit than on a cancel. Missing is a per-command split - submit,
-  modify, cancel, and the ack of each - applied where the engine processes the
-  command, so a cancel racing a fill can genuinely lose. Note the RFC's own
-  open question 4, whether response latency should compose `base_latency` or
-  be a separate additive field: mogwai already answered the analogous question
-  for the inbound side (armed havoc ADDS to the baseline rather than replacing
-  it, see `BASELINE_LATENCY`'s doc comment), and the outbound side should
-  match that convention rather than invent a second one. Not blocked on
-  anything; the drought work does not touch it.
-
 - BUILD, SEQUENCED after the drought elimination above lands: penetration-gated
   fills. RFC 4631's phase A, and the highest-value fill-fidelity item available
   to us -
@@ -199,7 +179,11 @@ Or both. There are no exceptions.
   site, so the divergence belongs in `reference/architecture.md` and in the RFC
   thread, not only here. Sequencing: this must NOT land before the default tape
   is desert-free, because a penetration gate makes resting fills strictly rarer
-  and a desert starves them silently.
+  and a desert starves them silently. Phase C (outbound per-command latency) has
+  LANDED as `Divergence::CommandLatency`, and the two compose: a submit held by
+  an armed act delay meets a tape that has moved further, so a penetration gate
+  and an act latency stack into "the order was late AND had to be traded
+  through" rather than either alone.
 
 - DECIDE, then write up and delete this entry: how much of RFC 4631's phase B
   (shared queue position) mogwai can honestly build. The RFC asks for a FIFO
@@ -220,8 +204,9 @@ Or both. There are no exceptions.
   would itself be a free parameter, which is the same credibility test the
   refusal above applies - if it is a free parameter, decline it too and say so.
 
-- After the two BUILD items above land: Criterion benches on the fill path, and
-  golden-file fill distributions if and only if fills have become stochastic.
+- After the penetration gate and the queue-ahead decision above land: Criterion
+  benches on the fill path, and golden-file fill distributions if and only if
+  fills have become stochastic.
   RFC 4631's phase D. The benches are cheap and can land any time, guarding the
   fill hot path against a silent throughput regression as the gates above make
   it fatter. The golden fill CDFs are NOT meaningful yet and must not be built

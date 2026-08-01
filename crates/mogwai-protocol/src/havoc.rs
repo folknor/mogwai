@@ -275,6 +275,33 @@ pub fn validate_divergence(div: &control::Divergence) -> Result<(), &'static str
             }
             Ok(())
         }
+        // Bounded by `MAX_DIVERGENCE_MS`, the same ceiling as every other ms
+        // window, and deliberately NOT `MAX_LATENCY_NANOS`: that 60 s ceiling is
+        // argued from a per-event network delay on the INBOUND stream, while
+        // these are venue windows on the same axis as `DelayAcks`.
+        control::Divergence::CommandLatency {
+            submit_act_ms,
+            modify_act_ms,
+            cancel_act_ms,
+            submit_ack_ms,
+            modify_ack_ms,
+            cancel_ack_ms,
+        } => {
+            if [
+                *submit_act_ms,
+                *modify_act_ms,
+                *cancel_act_ms,
+                *submit_ack_ms,
+                *modify_ack_ms,
+                *cancel_ack_ms,
+            ]
+            .iter()
+            .any(|ms| *ms > control::MAX_DIVERGENCE_MS)
+            {
+                return Err("CommandLatency fields must each be <= 3600000 (one hour)");
+            }
+            Ok(())
+        }
         control::Divergence::CancelOpenOrderSilently { client_order_id } => {
             if client_order_id.trim().is_empty() {
                 return Err("CancelOpenOrderSilently client_order_id must be non-empty");
@@ -844,6 +871,43 @@ mod tests {
             assert_eq!(
                 validate_divergence(&div),
                 Err("DelayAcks/GoDark/StallData ms must be <= 3600000 (one hour)")
+            );
+        }
+
+        // Each of the six `CommandLatency` fields carries the same one-hour
+        // ceiling, checked independently: a single over-range field refuses the
+        // whole arm, and an all-zero arm is the disarm.
+        validate_divergence(&control::Divergence::CommandLatency {
+            submit_act_ms: 0,
+            modify_act_ms: 0,
+            cancel_act_ms: 0,
+            submit_ack_ms: 0,
+            modify_ack_ms: 0,
+            cancel_ack_ms: 0,
+        })
+        .expect("an all-zero arm is the disarm");
+        let at_ceiling = control::Divergence::CommandLatency {
+            submit_act_ms: control::MAX_DIVERGENCE_MS,
+            modify_act_ms: control::MAX_DIVERGENCE_MS,
+            cancel_act_ms: control::MAX_DIVERGENCE_MS,
+            submit_ack_ms: control::MAX_DIVERGENCE_MS,
+            modify_ack_ms: control::MAX_DIVERGENCE_MS,
+            cancel_ack_ms: control::MAX_DIVERGENCE_MS,
+        };
+        validate_divergence(&at_ceiling).expect("the ceiling itself is valid");
+        for over in 0..6 {
+            let mut fields = [0u64; 6];
+            fields[over] = control::MAX_DIVERGENCE_MS + 1;
+            assert_eq!(
+                validate_divergence(&control::Divergence::CommandLatency {
+                    submit_act_ms: fields[0],
+                    modify_act_ms: fields[1],
+                    cancel_act_ms: fields[2],
+                    submit_ack_ms: fields[3],
+                    modify_ack_ms: fields[4],
+                    cancel_ack_ms: fields[5],
+                }),
+                Err("CommandLatency fields must each be <= 3600000 (one hour)")
             );
         }
 

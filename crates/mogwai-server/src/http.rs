@@ -18,11 +18,11 @@ use axum::{
 use mogwai_data::TickEvent;
 use mogwai_engine::MAX_ARMED_DIVERGENCES;
 use mogwai_protocol::{
-    ACCOUNT_HEADER, AccountId, AccountState, AdmissionSubject, ClientMessage, InstrumentDef,
-    MAX_HISTORY_LIMIT, MarketRegime, OrderType, QuoteTick, ServerClock, ServerMessage, SimClock,
-    TradeTick, control::Divergence, truncate_client_id, truncate_reason, validate_client_order_id,
-    validate_divergence, validate_market_regime, validate_modify_order, validate_request_id,
-    validate_submit_order,
+    ACCOUNT_HEADER, AccountId, AccountState, AdmissionSubject, ClientMessage, CommandClass,
+    InstrumentDef, MAX_HISTORY_LIMIT, MarketRegime, OrderType, QuoteTick, ServerClock,
+    ServerMessage, SimClock, TradeTick, control::Divergence, truncate_client_id, truncate_reason,
+    validate_client_order_id, validate_divergence, validate_market_regime, validate_modify_order,
+    validate_request_id, validate_submit_order,
 };
 use serde::Deserialize;
 
@@ -65,7 +65,7 @@ pub(crate) enum OrderOutcome {
 
 /// Name what a refusal refused, so the consumer can translate it per command -
 /// a refused cancel must not read as a rejected order.
-fn admission_subject(cmd: &ClientMessage) -> AdmissionSubject {
+pub(crate) fn admission_subject(cmd: &ClientMessage) -> AdmissionSubject {
     match cmd {
         ClientMessage::SubmitOrder(o) => AdmissionSubject::Submit {
             client_order_id: o.client_order_id.clone(),
@@ -93,7 +93,7 @@ fn admission_subject(cmd: &ClientMessage) -> AdmissionSubject {
 /// The protocol-boundary verdict on one order-entry command: `Some(reason)`
 /// when it is malformed. Ids are length-checked here, alongside the numeric
 /// checks that were always here, because both are malformed-request failures.
-fn boundary_error(cmd: &ClientMessage) -> Option<&'static str> {
+pub(crate) fn boundary_error(cmd: &ClientMessage) -> Option<&'static str> {
     match cmd {
         ClientMessage::SubmitOrder(order) => validate_submit_order(order).err(),
         ClientMessage::ModifyOrder {
@@ -235,12 +235,33 @@ pub(crate) async fn process_order_cmd(
     state: &AppState,
     slot: &Arc<AccountSlot>,
     lanes: &ExecLanes,
+    act_delay: ActDelay,
 ) -> OrderOutcome {
     // Sampled at entry for the boundary rejections below: they return before
     // any price synthesis, so entry-time is when they logically occur.
     let ts = sim_now_ns(state.sim);
     if let Some(outcome) = boundary_outcome(&order_cmd, lanes, ts) {
         return outcome;
+    }
+    // The venue's ACT delay sits BETWEEN the protocol boundary and the market
+    // price stamp, on both carriers. After the boundary, because a malformed
+    // command is refused by the protocol and a refusal is not a venue act.
+    // Before the stamp, because a delayed submit must meet the tape as it is
+    // when the venue ACTS, not as it was when the command arrived - and because
+    // the step-2 `ts` re-sample below then dates the engine's events at act time
+    // with no second re-sample needed.
+    if matches!(act_delay, ActDelay::PayHere)
+        && let Some(class) = CommandClass::of(&order_cmd)
+    {
+        let ms = slot.act_ms(class);
+        if ms > 0 {
+            tokio::time::sleep(
+                state
+                    .sim
+                    .wall_duration(crate::config::sim_duration_from_millis(ms)),
+            )
+            .await;
+        }
     }
     let order_cmd = stamp_market_price(order_cmd, state).await;
     // Re-sample after the market-price synthesis, which for a price-less MARKET
@@ -325,6 +346,58 @@ pub(crate) struct AppState {
     pub(crate) data_origin_ns: u64,
     /// Process-wide registry of shared synthesized tapes.
     pub(crate) tapes: Arc<crate::tape::TapeRegistry>,
+    /// Process-wide ceiling on order commands sleeping out an armed ACT delay,
+    /// across every connection and BOTH order-entry surfaces. The per-connection
+    /// `pending_command_acts` bounds one client; this bounds the box, and it is
+    /// what stops an armed hour-long act delay plus a `POST /orders` flood from
+    /// parking unbounded axum tasks - `mogwai-server` installs no `tower`
+    /// concurrency or timeout layer that would catch that.
+    pub(crate) pending_acts: Arc<tokio::sync::Semaphore>,
+}
+
+/// A non-200 answer from `POST /orders`, boxed so the ordinary `Ok` path is not
+/// charged for the size of a whole `Response`.
+///
+/// It is a `Response` rather than a bare `StatusCode` because one refusal - the
+/// pending-act capacity refusal - owes the caller the same `AdmissionRejected`
+/// body the WS surface sends; every other refusal is still status-only.
+#[derive(Debug)]
+pub(crate) struct OrderHttpError(Box<axum::response::Response>);
+
+impl OrderHttpError {
+    /// The status this refusal will render. Only the tests ask: axum renders
+    /// the whole response on the serving path.
+    #[cfg(test)]
+    pub(crate) fn status(&self) -> StatusCode {
+        self.0.status()
+    }
+}
+
+impl From<StatusCode> for OrderHttpError {
+    fn from(status: StatusCode) -> Self {
+        Self(Box::new(status.into_response()))
+    }
+}
+
+impl IntoResponse for OrderHttpError {
+    fn into_response(self) -> axum::response::Response {
+        *self.0
+    }
+}
+
+/// Whether the venue's ACT delay for this command has already been served.
+///
+/// Not a bare bool: the two call sites mean opposite things and a silent mix-up
+/// reintroduces the head-of-line stall the whole feature exists to avoid. `Paid`
+/// is what the detached act task passes AND what the WS inline (zero-delay) arm
+/// passes - the read loop must NEVER sleep here, even if a re-arm lands between
+/// the loop's `act_ms` load and this one.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ActDelay {
+    /// The caller already slept it off the read loop, or there was none.
+    Paid,
+    /// Sleep it here, inline: `POST /orders` has no read loop to free.
+    PayHere,
 }
 
 /// Identity resolution, step one: parse only. No slot is created, so a caller
@@ -414,6 +487,24 @@ pub(crate) async fn arm_divergence(
         Divergence::DelayAcks { ms } => {
             slot.delay_ms.store(ms, Ordering::Relaxed);
         }
+        // STORE-not-merge, like every other server-owned window: one arm
+        // REPLACES all six values, so an omitted field is armed as zero rather
+        // than left standing from an earlier arm.
+        Divergence::CommandLatency {
+            submit_act_ms,
+            modify_act_ms,
+            cancel_act_ms,
+            submit_ack_ms,
+            modify_ack_ms,
+            cancel_ack_ms,
+        } => {
+            slot.submit_act_ms.store(submit_act_ms, Ordering::Relaxed);
+            slot.modify_act_ms.store(modify_act_ms, Ordering::Relaxed);
+            slot.cancel_act_ms.store(cancel_act_ms, Ordering::Relaxed);
+            slot.submit_ack_ms.store(submit_ack_ms, Ordering::Relaxed);
+            slot.modify_ack_ms.store(modify_ack_ms, Ordering::Relaxed);
+            slot.cancel_ack_ms.store(cancel_ack_ms, Ordering::Relaxed);
+        }
         // GoDark/StallData windows are STORE-not-extend (S18): each arm overwrites
         // the absolute deadline with `now + ms`, so re-arming with a SMALLER `ms`
         // shortens an in-flight blackout rather than lengthening it. This is
@@ -459,6 +550,18 @@ pub(crate) async fn arm_divergence(
             slot.delay_ms.store(0, Ordering::Relaxed);
             slot.dark_until_ns.store(0, Ordering::Relaxed);
             slot.stall_until_ns.store(0, Ordering::Relaxed);
+            // All six `CommandLatency` fields go with them. This clears what the
+            // venue will do to commands it has NOT started acting on yet, and it
+            // lifts an ack window off frames already queued (the pump reads that
+            // one per event at dequeue). It does NOT reach into an act delay
+            // already being served: that command's sleep was read once, at
+            // detach, and a venue that has begun acting does not un-begin.
+            slot.submit_act_ms.store(0, Ordering::Relaxed);
+            slot.modify_act_ms.store(0, Ordering::Relaxed);
+            slot.cancel_act_ms.store(0, Ordering::Relaxed);
+            slot.submit_ack_ms.store(0, Ordering::Relaxed);
+            slot.modify_ack_ms.store(0, Ordering::Relaxed);
+            slot.cancel_ack_ms.store(0, Ordering::Relaxed);
         }
         // Server-ownership contract (pins B.4 / E.11): `DelayAcks`, `GoDark`,
         // `StallData`, and `ClearDivergences` are server-owned controls with no
@@ -473,12 +576,13 @@ pub(crate) async fn arm_divergence(
                 !matches!(
                     engine_div,
                     Divergence::DelayAcks { .. }
+                        | Divergence::CommandLatency { .. }
                         | Divergence::GoDark { .. }
                         | Divergence::StallData { .. }
                         | Divergence::ClearDivergences
                         | Divergence::CancelOpenOrderSilently { .. }
                 ),
-                "DelayAcks/GoDark/StallData/ClearDivergences/CancelOpenOrderSilently are server-owned or immediate and must not be forwarded to engine.arm()",
+                "server-owned divergences must not be forwarded to engine.arm()",
             );
             // Relay an eviction in the ack body. The queue is bounded
             // (`MAX_ARMED_DIVERGENCES`), and at the cap `arm` sheds the OLDEST
@@ -612,44 +716,101 @@ async fn stamp_market_price(msg: ClientMessage, state: &AppState) -> ClientMessa
 /// A refusal is therefore unreachable by construction - a per-request budget
 /// starts empty of charges - and is mapped to a 500 with its reason rather than
 /// silently unwrapped.
+///
+/// Both halves of an armed `CommandLatency` are applied INLINE here: there is no
+/// read loop to free and the response IS the ack, so the act delay makes the
+/// mutation late and the ack delay makes the response late. It does take the
+/// process-wide pending-act permit while it sleeps, because the socket this
+/// request holds is exactly the resource the WS ticket protects, and a refused
+/// permit answers `503` with the same `AdmissionRejected` body the WS surface
+/// sends. Per the control's contract it does NOT add `DelayAcks`: that window
+/// belongs to the WS pump alone, and the adapter refuses to arm it under an
+/// HTTP-orders profile for that very reason.
 pub(crate) async fn submit_order_http(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(msg): Json<ClientMessage>,
-) -> Result<Json<Vec<ServerMessage>>, StatusCode> {
+) -> Result<Json<Vec<ServerMessage>>, OrderHttpError> {
     match msg {
         ClientMessage::Subscribe { .. } | ClientMessage::Unsubscribe { .. } => {
-            Err(StatusCode::BAD_REQUEST)
+            Err(StatusCode::BAD_REQUEST.into())
         }
         order_cmd => {
             // Identity is PARSED before anything else and the slot is acquired
             // only on the path that will actually serve the request: the
             // boundary gate runs first, so a malformed command carrying a
             // well-formed id leaves no account behind (spec 3.2).
-            let id = account_id_from_headers(&headers).map_err(|(status, _)| status)?;
+            let id = account_id_from_headers(&headers)
+                .map_err(|(status, _)| OrderHttpError::from(status))?;
             let (lanes, _receivers) = ExecLanes::detached();
+            // A boundary refusal is answered before an account is resolved at
+            // all, so no slot exists and no armed window applies: these responses
+            // are prompt and undelayed, matching the WS surface, where the
+            // boundary check also runs before the detach decision.
             if let Some(outcome) = boundary_outcome(&order_cmd, &lanes, sim_now_ns(state.sim)) {
                 return http_order_response(outcome);
             }
-            let slot = acquire_account(&state, &id).map_err(|(status, _)| status)?;
-            http_order_response(process_order_cmd(order_cmd, &state, &slot, &lanes).await)
+            let slot =
+                acquire_account(&state, &id).map_err(|(status, _)| OrderHttpError::from(status))?;
+            let class = CommandClass::of(&order_cmd);
+            let act_ms = class.map_or(0, |class| slot.act_ms(class));
+            // The permit and the sleep are decided from ONE load: passing
+            // `PayHere` only when this load saw a nonzero delay means a re-arm
+            // racing this request can never make it sleep without a permit.
+            let permit = if act_ms > 0 {
+                let Ok(permit) = Arc::clone(&state.pending_acts).try_acquire_owned() else {
+                    return Err(OrderHttpError(Box::new(
+                        (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(vec![ServerMessage::AdmissionRejected {
+                                subject: admission_subject(&order_cmd),
+                                reason: "venue pending-act capacity exhausted".into(),
+                                ts_event: sim_now_ns(state.sim),
+                            }]),
+                        )
+                            .into_response(),
+                    )));
+                };
+                Some(permit)
+            } else {
+                None
+            };
+            let act_delay = if permit.is_some() {
+                ActDelay::PayHere
+            } else {
+                ActDelay::Paid
+            };
+            let outcome = process_order_cmd(order_cmd, &state, &slot, &lanes, act_delay).await;
+            let ack_ms = class.map_or(0, |class| slot.ack_ms(class));
+            if ack_ms > 0 {
+                tokio::time::sleep(
+                    state
+                        .sim
+                        .wall_duration(crate::config::sim_duration_from_millis(ack_ms)),
+                )
+                .await;
+            }
+            // Held across the ack sleep too: the request is still parked on a
+            // socket until the response is rendered.
+            drop(permit);
+            http_order_response(outcome)
         }
     }
 }
 
-fn http_order_response(outcome: OrderOutcome) -> Result<Json<Vec<ServerMessage>>, StatusCode> {
+fn http_order_response(outcome: OrderOutcome) -> Result<Json<Vec<ServerMessage>>, OrderHttpError> {
     match outcome {
         OrderOutcome::Produced { events, .. } | OrderOutcome::Refused { events, .. } => {
             Ok(Json(events))
         }
         OrderOutcome::Diagnostic(frame) => Ok(Json(vec![frame])),
-        OrderOutcome::Gone(_) => Err(StatusCode::GONE),
+        OrderOutcome::Gone(_) => Err(StatusCode::GONE.into()),
         OrderOutcome::NotAdmitted(frame) => {
             tracing::error!(
                 ?frame,
                 "per-request lanes refused admission; this should be unreachable"
             );
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            Err(StatusCode::INTERNAL_SERVER_ERROR.into())
         }
     }
 }

@@ -139,6 +139,15 @@ pub(crate) struct Config {
     /// one per live replay, accounted separately from queue depth. See
     /// `admission::ADMISSION_PROMISE_TICKETS`.
     pub(crate) admission_promise_tickets: usize,
+    /// Per-connection ceiling on order commands detached by an armed
+    /// `CommandLatency` act delay and not yet acted on. One COMMAND, not one
+    /// payload. See `admission::PENDING_ACT_SLOTS`; lowering it is how the smoke
+    /// test reaches the refusal.
+    pub(crate) pending_command_acts: usize,
+    /// Process-wide ceiling on the same, across every connection AND the
+    /// `POST /orders` surface, which has no per-connection lane to draw on. See
+    /// `admission::GLOBAL_PENDING_ACT_SLOTS`.
+    pub(crate) global_pending_command_acts: usize,
     /// Optional explicit venue instrument set. When empty, the server seeds the
     /// protocol default set. When present, this is authoritative for
     /// `/instruments`, order validation, and data generation.
@@ -194,6 +203,8 @@ impl Default for Config {
             exec_held_budget_bytes: crate::admission::EXEC_HELD_BUDGET_BYTES,
             admission_lane_frames: crate::admission::ADMISSION_LANE_FRAMES,
             admission_promise_tickets: crate::admission::ADMISSION_PROMISE_TICKETS,
+            pending_command_acts: crate::admission::PENDING_ACT_SLOTS,
+            global_pending_command_acts: crate::admission::GLOBAL_PENDING_ACT_SLOTS,
             instruments: Vec::new(),
             balances: default_balances(),
         }
@@ -300,6 +311,16 @@ pub(crate) fn validate_admission_limits(cfg: &Config) -> anyhow::Result<()> {
     if cfg.admission_promise_tickets == 0 {
         anyhow::bail!("admission_promise_tickets must be at least 1");
     }
+    // A zero budget would refuse every delayed command, so the control could be
+    // armed but never served.
+    if cfg.pending_command_acts == 0 {
+        anyhow::bail!("pending_command_acts must be at least 1");
+    }
+    // A global ceiling below the per-connection one would make the
+    // per-connection budget unreachable, and therefore a lie.
+    if cfg.global_pending_command_acts < cfg.pending_command_acts {
+        anyhow::bail!("global_pending_command_acts must be at least pending_command_acts");
+    }
     Ok(())
 }
 
@@ -324,6 +345,7 @@ pub(crate) fn build_admission_limits(cfg: &Config) -> AdmissionLimits {
         held_budget_bytes: cfg.exec_held_budget_bytes,
         lane_frames: cfg.admission_lane_frames,
         promise_tickets: cfg.admission_promise_tickets,
+        pending_act_slots: cfg.pending_command_acts,
     }
 }
 

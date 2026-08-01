@@ -31,6 +31,29 @@ pub enum Divergence {
     /// `MAX_DIVERGENCE_MS`. Arm with `ms: 0` to clear, or post
     /// `ClearDivergences`.
     DelayAcks { ms: u64 },
+    /// Per-command venue latency: how long the venue takes to ACT on each order
+    /// command, and how long it then takes to ACK what it did.
+    ///
+    /// Every field is milliseconds on the sim axis, bounded by
+    /// `MAX_DIVERGENCE_MS`, and ADDS to any armed `DelayAcks` rather than
+    /// replacing it (the same composition rule `BASELINE_LATENCY` states for the
+    /// adapter's inbound latency) - though that addition happens in the WS pump,
+    /// which is the only place `DelayAcks` applies at all. An arm REPLACES all
+    /// six values; an omitted field is zero.
+    CommandLatency {
+        #[serde(default)]
+        submit_act_ms: u64,
+        #[serde(default)]
+        modify_act_ms: u64,
+        #[serde(default)]
+        cancel_act_ms: u64,
+        #[serde(default)]
+        submit_ack_ms: u64,
+        #[serde(default)]
+        modify_ack_ms: u64,
+        #[serde(default)]
+        cancel_ack_ms: u64,
+    },
     /// Emit the next fill event twice.
     DuplicateNextFill,
     /// Swallow the next fill-driven account-state update (induce account drift).
@@ -50,11 +73,18 @@ pub enum Divergence {
     /// `Heartbeat`.
     StallData { ms: u64 },
     /// Clear the server-owned temporal windows: cancel any armed
-    /// `DelayAcks`, any armed `GoDark`, and any armed `StallData`.
+    /// `DelayAcks`, any armed `GoDark`, any armed `StallData`, and every
+    /// `CommandLatency` field.
     ///
     /// This does not flush engine-side single-shot divergences
     /// (`PartialFillNext`, `RejectNextSubmit`, `DuplicateNextFill`,
     /// `DropNextAccountUpdate`), which self-disarm on their own trigger.
+    ///
+    /// Nor does it lift a `CommandLatency` ACT delay the venue has already begun
+    /// serving: that command sleeps out its full window and then mutates. A
+    /// queued ACK hold IS lifted, because the writer reads that window per event
+    /// at dequeue. Clearing governs commands the venue has not started acting on
+    /// yet; it is not a time machine.
     ClearDivergences,
     /// Cancel a RESTING order server-side, immediately, emitting NO lifecycle
     /// event - the out-of-band cancel with a lost `OrderCanceled` that the

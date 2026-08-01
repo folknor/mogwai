@@ -341,6 +341,35 @@ pub enum ClientMessage {
     },
 }
 
+/// Which order command produced an execution frame, so the outbound path can
+/// apply that command class's ack latency. `None` on the wire-diagnostic and
+/// query paths, which carry no per-command latency.
+///
+/// Never serialized. It lives here, next to `ClientMessage` and `EventKind`, for
+/// the same reason `EventKind` does: the classification of a wire type belongs
+/// with the wire type, so the two ends cannot disagree about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandClass {
+    Submit,
+    Modify,
+    Cancel,
+}
+
+impl CommandClass {
+    /// The class of an order-entry command, or `None` for anything else -
+    /// queries, subscribe/unsubscribe. Queries are deliberately classless: the
+    /// reconciliation witness is never made the slowest thing on the venue.
+    #[must_use]
+    pub fn of(cmd: &ClientMessage) -> Option<Self> {
+        match cmd {
+            ClientMessage::SubmitOrder(_) => Some(Self::Submit),
+            ClientMessage::ModifyOrder { .. } => Some(Self::Modify),
+            ClientMessage::CancelOrder { .. } => Some(Self::Cancel),
+            _ => None,
+        }
+    }
+}
+
 /// Venue-side order status as reported on an [`OrderStatusSnapshot`]. Only
 /// states the venue itself can attest to: a submit that never passed the
 /// accept gate leaves no record (its id is absent from the snapshot), so

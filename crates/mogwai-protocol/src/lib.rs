@@ -31,8 +31,8 @@ pub use havoc::{
 pub use instruments::{InstrumentDef, default_instruments};
 pub use messages::{
     ADMISSION_FRAME_MAX_BYTES, AccountId, AccountIdError, AccountState, AdmissionSubject,
-    AggressorSide, Balance, ClientMessage, FillSnapshot, JSON_ESCAPE_FACTOR, MAX_ACCOUNT_ID_LEN,
-    MAX_CLIENT_ID_LEN, MAX_CURRENCY_LEN, MAX_REASON_LEN, MAX_SUBSCRIBE_SYMBOLS,
+    AggressorSide, Balance, ClientMessage, CommandClass, FillSnapshot, JSON_ESCAPE_FACTOR,
+    MAX_ACCOUNT_ID_LEN, MAX_CLIENT_ID_LEN, MAX_CURRENCY_LEN, MAX_REASON_LEN, MAX_SUBSCRIBE_SYMBOLS,
     MAX_SUBSCRIPTION_ISSUES_LISTED, MAX_SYMBOL_LEN, OrderFilled, OrderStatusInfo,
     OrderStatusSnapshot, OrderType, Position, QueryKind, QuoteTick, ServerMessage, Side,
     SubmitOrder, SubscriptionIssue, SubscriptionOutcome, SubscriptionRequest, TimeInForce,

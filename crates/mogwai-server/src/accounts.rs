@@ -12,7 +12,7 @@ use std::{
 };
 
 use mogwai_engine::Engine;
-use mogwai_protocol::{AccountId, InstrumentDef};
+use mogwai_protocol::{AccountId, CommandClass, InstrumentDef};
 use rust_decimal::Decimal;
 use serde::Serialize;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
@@ -24,6 +24,17 @@ pub(crate) struct AccountSlot {
     pub(crate) closed: Notify,
     pub(crate) engine: AsyncMutex<Engine>,
     pub(crate) delay_ms: AtomicU64,
+    /// The six armed `CommandLatency` windows, in sim-ms, `0` when nothing is
+    /// armed. ACT delays are how long the venue takes to touch the book after
+    /// the command reaches it; ACK delays are how long it then takes to report
+    /// what it did, on top of any armed `DelayAcks`. Read through `act_ms` and
+    /// `ack_ms` rather than matched on at each call site.
+    pub(crate) submit_act_ms: AtomicU64,
+    pub(crate) modify_act_ms: AtomicU64,
+    pub(crate) cancel_act_ms: AtomicU64,
+    pub(crate) submit_ack_ms: AtomicU64,
+    pub(crate) modify_ack_ms: AtomicU64,
+    pub(crate) cancel_ack_ms: AtomicU64,
     pub(crate) dark_until_ns: AtomicU64,
     pub(crate) stall_until_ns: AtomicU64,
     pub(crate) sessions: AtomicUsize,
@@ -46,6 +57,26 @@ impl SessionLease {
 impl Drop for SessionLease {
     fn drop(&mut self) {
         self.slot.sessions.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+impl AccountSlot {
+    /// Armed ACT delay in sim-ms for `class`, `0` when nothing is armed.
+    pub(crate) fn act_ms(&self, class: CommandClass) -> u64 {
+        match class {
+            CommandClass::Submit => self.submit_act_ms.load(Ordering::Relaxed),
+            CommandClass::Modify => self.modify_act_ms.load(Ordering::Relaxed),
+            CommandClass::Cancel => self.cancel_act_ms.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Armed ACK delay in sim-ms for `class`, `0` when nothing is armed.
+    pub(crate) fn ack_ms(&self, class: CommandClass) -> u64 {
+        match class {
+            CommandClass::Submit => self.submit_ack_ms.load(Ordering::Relaxed),
+            CommandClass::Modify => self.modify_ack_ms.load(Ordering::Relaxed),
+            CommandClass::Cancel => self.cancel_ack_ms.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -110,6 +141,12 @@ impl AccountRegistry {
                 self.template.balances.clone(),
             )),
             delay_ms: AtomicU64::new(0),
+            submit_act_ms: AtomicU64::new(0),
+            modify_act_ms: AtomicU64::new(0),
+            cancel_act_ms: AtomicU64::new(0),
+            submit_ack_ms: AtomicU64::new(0),
+            modify_ack_ms: AtomicU64::new(0),
+            cancel_ack_ms: AtomicU64::new(0),
             dark_until_ns: AtomicU64::new(0),
             stall_until_ns: AtomicU64::new(0),
             sessions: AtomicUsize::new(0),
@@ -226,6 +263,12 @@ impl AccountSlot {
                 HashMap::new(),
             )),
             delay_ms: AtomicU64::new(0),
+            submit_act_ms: AtomicU64::new(0),
+            modify_act_ms: AtomicU64::new(0),
+            cancel_act_ms: AtomicU64::new(0),
+            submit_ack_ms: AtomicU64::new(0),
+            modify_ack_ms: AtomicU64::new(0),
+            cancel_ack_ms: AtomicU64::new(0),
             dark_until_ns: AtomicU64::new(0),
             stall_until_ns: AtomicU64::new(0),
             sessions: AtomicUsize::new(0),

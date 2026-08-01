@@ -43,6 +43,11 @@ refuses after a dozen orders instead of twelve thousand:
     brokkr run mogwai -- serve -f --config scripts/smoke-admission.toml
 
 then run `python3 scripts/smoke.py --admission`.
+
+Outbound command latency runs against `scripts/smoke-command-latency.toml`:
+
+    brokkr run mogwai -- serve -f --config scripts/smoke-command-latency.toml
+    python3 scripts/smoke.py --command-latency
 """
 import json
 import socket
@@ -977,6 +982,51 @@ def main_admission() -> None:
     print("PASS: admission refuses visibly and promptly under an armed DelayAcks")
 
 
+def main_command_latency() -> None:
+    """Prove a delayed submit yields to an immediate cancel on one socket.
+
+    Looped five times inside the step rather than left to the operator to
+    repeat: a race that only sometimes reverses at an 800:0 ratio is not a knob
+    anyone can build a scenario on, so the threshold is one command.
+    """
+    for attempt in range(5):
+        raced = f"O-RACE-{attempt}"
+        assert post_divergence({"type": "CommandLatency", "submit_act_ms": 800}) == 202
+        ws = WsClient()
+        ws.send(submit_order(raced))
+        ws.send({"type": "CancelOrder", "client_order_id": raced})
+
+        # The cancel reaches a book the submit has not touched yet, so it is
+        # rejected against an unknown order - it names no venue id, because the
+        # venue has never issued one. This is the outcome that is impossible
+        # without an act latency.
+        first = read_non_heartbeat(ws, 3.0)
+        assert first["type"] == "OrderCancelRejected", first
+        assert first["client_order_id"] == raced, first
+        assert first.get("venue_order_id") is None, first
+
+        # ...and only then does the delayed submit land.
+        accepted = read_non_heartbeat(ws, 3.0)
+        assert accepted["type"] == "OrderAccepted", accepted
+        assert accepted["client_order_id"] == raced, accepted
+
+        # Disarm proof, in the shape the DelayAcks step already uses: with all
+        # six fields zero the ordinary ordering returns and the cancel finds the
+        # order it names.
+        assert post_divergence({"type": "CommandLatency"}) == 202
+        ordinary = f"O-ORDINARY-{attempt}"
+        ws.send(submit_order(ordinary))
+        ws.send({"type": "CancelOrder", "client_order_id": ordinary})
+        frame = read_non_heartbeat(ws, 3.0)
+        while frame["type"] not in ("OrderCanceled", "OrderCancelRejected"):
+            assert frame["type"] != "OrderAccepted" or frame["client_order_id"] == ordinary, frame
+            frame = read_non_heartbeat(ws, 3.0)
+        assert frame["client_order_id"] == ordinary, frame
+        assert frame.get("venue_order_id") is not None, frame
+        ws.close()
+    print("PASS: command latency detaches delayed submits from the socket read loop")
+
+
 def main() -> None:
     args = sys.argv[1:]
     if args == ["--heartbeat"]:
@@ -985,10 +1035,12 @@ def main() -> None:
         main_accelerated()
     elif args == ["--admission"]:
         main_admission()
+    elif args == ["--command-latency"]:
+        main_command_latency()
     elif not args:
         main_default()
     else:
-        raise SystemExit("usage: smoke.py [--heartbeat|--accelerated|--admission]")
+        raise SystemExit("usage: smoke.py [--heartbeat|--accelerated|--admission|--command-latency]")
 
 
 if __name__ == "__main__":

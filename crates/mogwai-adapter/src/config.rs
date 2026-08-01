@@ -301,8 +301,11 @@ fn validate_havoc(
 ///   fetched over `GET /trades` and never passes the writer. It stays legal
 ///   under `HttpOrders`, whose market data still streams over WS.
 ///
-/// `ClearDivergences` and the engine-side single-shots are carrier-agnostic
-/// and pass unconditionally.
+/// `CommandLatency` is carrier-agnostic: its act half runs in the shared order
+/// path and its ack half delays either the WS writer or the HTTP response. Its
+/// additive composition with `DelayAcks` is WS-only, because `DelayAcks` is
+/// refused for HTTP orders. `ClearDivergences` and the engine-side single-shots
+/// also pass unconditionally.
 fn validate_window_deliverable(
     divergence: &Divergence,
     transport_profile: TransportProfile,
@@ -545,6 +548,48 @@ mod tests {
             // Carrier-agnostic controls pass under every profile.
             (
                 Divergence::ClearDivergences,
+                TransportProfile::HttpPolling,
+                true,
+            ),
+            // `CommandLatency` is the one server-owned WINDOW that is not
+            // WS-only: the act half runs in the shared order path and the ack
+            // half delays either the WS writer or the HTTP response, so it is
+            // refused under NO profile. Its additive composition with
+            // `DelayAcks` is WS-only, but that is a property of `DelayAcks`,
+            // which the arm above already refuses for HTTP orders.
+            (
+                Divergence::CommandLatency {
+                    submit_act_ms: 100,
+                    modify_act_ms: 100,
+                    cancel_act_ms: 100,
+                    submit_ack_ms: 100,
+                    modify_ack_ms: 100,
+                    cancel_ack_ms: 100,
+                },
+                TransportProfile::WsStreaming,
+                true,
+            ),
+            (
+                Divergence::CommandLatency {
+                    submit_act_ms: 100,
+                    modify_act_ms: 0,
+                    cancel_act_ms: 0,
+                    submit_ack_ms: 100,
+                    modify_ack_ms: 0,
+                    cancel_ack_ms: 0,
+                },
+                TransportProfile::HttpOrders,
+                true,
+            ),
+            (
+                Divergence::CommandLatency {
+                    submit_act_ms: 100,
+                    modify_act_ms: 0,
+                    cancel_act_ms: 0,
+                    submit_ack_ms: 100,
+                    modify_ack_ms: 0,
+                    cancel_ack_ms: 0,
+                },
                 TransportProfile::HttpPolling,
                 true,
             ),

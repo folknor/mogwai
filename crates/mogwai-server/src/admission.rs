@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use mogwai_protocol::{
-    ClientMessage, ServerMessage,
+    ClientMessage, CommandClass, ServerMessage,
     sizing::{BOUNDARY_REFUSAL_BYTES, BookShape, worst_case_output_bytes},
     truncate_reason,
 };
@@ -49,6 +49,17 @@ pub(crate) const ADMISSION_LANE_FRAMES: usize = 64;
 /// priority lane is completely empty. Sized at `MAX_SUBSCRIBE_SYMBOLS` because
 /// that is exactly how many replays one connection can have.
 pub(crate) const ADMISSION_PROMISE_TICKETS: usize = mogwai_protocol::MAX_SUBSCRIBE_SYMBOLS;
+/// Per-connection ceiling on order commands detached by an armed act latency
+/// and not yet acted on. An armed hour-long act delay would otherwise let one
+/// connection spawn unbounded pending tasks. A pending act is one COMMAND, not
+/// a payload, so a frame count is the right unit here.
+pub(crate) const PENDING_ACT_SLOTS: usize = 256;
+/// Process-wide ceiling on commands sleeping out an armed act delay, across
+/// every connection and both order-entry surfaces. `PENDING_ACT_SLOTS` bounds
+/// one client; this bounds the box, and it is what stops an armed hour-long act
+/// delay plus a `POST /orders` flood from parking unbounded axum tasks - there
+/// is no `tower` concurrency or timeout layer on this server.
+pub(crate) const GLOBAL_PENDING_ACT_SLOTS: usize = 4096;
 
 /// WS 1013 "Try Again Later": the venue is refusing further work on this
 /// connection because its admission path is saturated. Deliberately not a
@@ -99,6 +110,8 @@ pub(crate) struct AdmissionLimits {
     pub(crate) held_budget_bytes: usize,
     pub(crate) lane_frames: usize,
     pub(crate) promise_tickets: usize,
+    /// Per-connection pending-act ceiling. See `PENDING_ACT_SLOTS`.
+    pub(crate) pending_act_slots: usize,
 }
 
 impl Default for AdmissionLimits {
@@ -107,6 +120,7 @@ impl Default for AdmissionLimits {
             held_budget_bytes: EXEC_HELD_BUDGET_BYTES,
             lane_frames: ADMISSION_LANE_FRAMES,
             promise_tickets: ADMISSION_PROMISE_TICKETS,
+            pending_act_slots: PENDING_ACT_SLOTS,
         }
     }
 }
@@ -328,6 +342,10 @@ impl CloseSpec {
 /// instant the batch arrived so the pump stays a pure time shift.
 pub(crate) struct HeldFrame {
     pub(crate) arrived: Instant,
+    /// Which order command produced this frame, so the pump can add that class's
+    /// ack latency. `None` on everything that is not order-entry (protocol
+    /// diagnostics), which carries no per-command latency.
+    pub(crate) class: Option<CommandClass>,
     pub(crate) frame: OutboundFrame,
 }
 
@@ -342,6 +360,10 @@ pub(crate) struct ExecLanes {
     prio_tx: mpsc::UnboundedSender<Outbound>,
     prio_budget: FrameBudget,
     promise_budget: FrameBudget,
+    /// Commands this connection has detached under an armed act latency and
+    /// that have not finished acting. Accounted separately from queue depth: a
+    /// pending act holds no frame, it holds future work.
+    act_budget: FrameBudget,
 }
 
 /// The receiving halves of a detached `ExecLanes`, kept alive by its owner.
@@ -367,6 +389,7 @@ impl ExecLanes {
             held_budget: ByteBudget::new(limits.held_budget_bytes),
             prio_budget: FrameBudget::new(limits.lane_frames),
             promise_budget: FrameBudget::new(limits.promise_tickets),
+            act_budget: FrameBudget::new(limits.pending_act_slots),
         }
     }
 
@@ -417,6 +440,12 @@ impl ExecLanes {
     /// frame, and that conversion re-checks the queue budget.
     pub(crate) fn reserve_promise(&self) -> Option<Ticket> {
         self.promise_budget.try_ticket()
+    }
+    /// Take this connection's ticket for one order command about to be detached
+    /// by an armed act latency. `None` is the visible refusal: the command is
+    /// answered with an `AdmissionRejected` and the engine never sees it.
+    pub(crate) fn reserve_act(&self) -> Option<Ticket> {
+        self.act_budget.try_ticket()
     }
 
     /// Emit an admission frame against a queue slot. Never blocks.
@@ -488,10 +517,15 @@ impl ExecLanes {
     /// charging actual serialized bytes per frame and releasing the remainder.
     /// Infallible on capacity by construction - the reservation dominates the
     /// batch - and fallible only on a lane whose receiver is already gone.
+    ///
+    /// `class` stamps every frame of the batch with the order command that
+    /// produced it, which is what lets the pump add that class's ack latency.
+    /// Callers that are not order-entry pass `None`.
     pub(crate) fn submit_produced(
         &self,
         mut reservation: Reservation,
         arrived: Instant,
+        class: Option<CommandClass>,
         events: Vec<ServerMessage>,
     ) -> Result<(), LaneClosed> {
         for event in events {
@@ -509,6 +543,7 @@ impl ExecLanes {
             self.held_tx
                 .send(HeldFrame {
                     arrived,
+                    class,
                     frame: OutboundFrame {
                         payload: Arc::from(payload),
                         is_market_data: false,
@@ -580,7 +615,7 @@ mod tests {
             .try_reserve(EXEC_HELD_BUDGET_BYTES)
             .expect("whole budget");
         lanes
-            .submit_produced(reservation, Instant::now(), events)
+            .submit_produced(reservation, Instant::now(), None, events)
             .expect("held lane accepts the batch");
         assert_eq!(
             lanes.held_budget.available(),
