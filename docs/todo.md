@@ -12,91 +12,61 @@ Or both. There are no exceptions.
 
 ## Open issues
 
-- DECIDE: are the fitted tape's arrival droughts desirable realism? The oldest
-  open question here, and now the highest-severity one. Surfaced 2026-07-16
-  while fixing the accelerated smoke, re-measured twice since; this entry
-  absorbs the former sweep item D16, which tracked the same
-  decision separately.
+- BUILD: eliminate arrival droughts from the default tape; keep the drought as
+  an armable havoc scenario. DECIDED 2026-08-01, closing the oldest open
+  question here (formerly a DECIDE entry that had absorbed sweep item D16).
+  What settled it: charting the default tape at 1m and 15m over 4 days shows a
+  desert no symbol we care about ever prints - but symbols that DO trade like
+  this exist and are easy to find (a front-month future dying after rollover,
+  an abandoned crypto pair, a near-dead exchange), so the shape is worth
+  keeping. The deserts are realism attached to the wrong symbol: the default
+  profile claims BTCUSDT, which never behaves this way, so droughts leave the
+  ambient tape and become an opt-in divergence - "validate against a dying
+  symbol" turns into a deliberate scenario instead of an ambush. Mechanism and
+  measurements are written up in `reference/architecture.md` ("Tape arrival
+  droughts"); the short version is that psi decays per TICK so a high-psi
+  state self-prolongs in WALL time, and neither committed duration band
+  constrains wall-clock dwell (the `Measured` struct has no dwell statistic at
+  all), so the per-tick fit is structurally blind to an 18 h desert.
 
-  MECHANISM. The ACD duration process (persistence 0.9935, Weibull shape 0.60,
-  dispersion band 131.7 to 4608.9 s) is heavy-tailed. Psi decays per TICK, so a
-  high-psi state self-prolongs in WALL time - at 30 min/tick a hundred ticks of
-  decay is days of tape - and the per-tick fit never constrained wall-clock
-  dwell. Per-tick mean cadence stays ~7 s throughout, which is exactly why a
-  per-tick view of the fit is blind to this: the deserts hide in the wall-clock
-  projection, not in the duration distribution.
+  Generator work, in order:
+  1. Measure the Kraken corpus's own wall-clock dwell in `analysis/` (trades
+     per hour, zero-window fraction, max inter-trade gap on the anchor
+     series) - an increment to `characterize.py`, and it sets the target the
+     retune aims at. The anchor series satisfies the dispersion band, the
+     duration ACF, and realistic dwell simultaneously, so the joint target is
+     achievable by construction; what is open is only whether the
+     three-constant ACD family reaches it.
+  2. Make the duration mechanism wall-clock-aware (leading candidate: psi
+     decay in wall time rather than per tick), retune ACD_PERSISTENCE /
+     ACD_FEEDBACK_SHARE / ACD_WEIBULL_SHAPE against the SAME committed bands
+     plus the new dwell band, regenerate the golden stream, and re-anchor the
+     coupled realism tests. Serving-side caps stay REJECTED: `realism()`
+     measures realized gaps, so any cap outside the fitted mechanism lowers
+     the very statistics it validates - the fix goes through the mechanism
+     and the refit, not around it.
+  3. Add the dwell statistic to `measure()` as an ASSERTING gate - the
+     regression pin for this decision (the default tape may never desert
+     again). Not before the fix lands: on today's constants it is a red gate.
 
-  MEASURED, two independent ways. Counted per simulated hour off `/trades` with
-  `scripts/probe_warmup_window.py`, the default 24 h-horizon tape opens at ~660
-  trades/hour then sits at 3-16 trades/hour for eighteen straight hours; over a
-  7-day horizon the pattern repeats with droughts of 15+ simulated hours.
-  Independently, `mogwai gen --type bars --length 4d --interval 1h` on the
-  default BTCUSDT profile at anchor 0 shows hours 0-5 dense (806, 641, 501, 749,
-  864, 738 trades/hour), hours 6-25 collapsing to 2-85 with a single hour holding
-  2 trades, a milder patch at hours 30-36, then dense for the remaining ~60. No
-  hour is completely empty, so this is near-silence rather than a true gap - but
-  an hour holding 2 trades means inter-trade gaps in the tens of minutes, which
-  no real BTCUSD tape does. Because `data_origin` and the seed are fixed by the
-  boot config, a pinned `sim_epoch_ns` lands EVERY boot of that config on the
-  same stretch, so it reproduces per-config rather than intermittently.
+  Havoc side: `MarketRegime::LiquidityDrought { thin_factor }` (validated
+  [1, 1000], carried per subscription on `Subscribe` and per request on
+  `GET /trades`, whole-tape, never on `/control/divergence` - so no
+  divergence-window ceiling applies) is the home for the dying-symbol
+  scenario. `arrival_thin` multiplies only the REALIZED gap while the ACD
+  feedback sees the un-modulated duration, so a thinned tape keeps the fitted
+  clustering stretched intact - which IS the dying-symbol shape. thin_factor
+  1000 on a ~7 s cadence is a ~2 h mean gap with much longer clustered
+  excursions; pin that shape with a test once the default tape is dense.
 
-  WHY IT IS NOT SEPARABLE. The three ACD constants are hand-tuned in
-  `generated/consts.rs` to land two committed fingerprint duration bands, and
-  `realism()` measures BOTH on the REALIZED tick-to-tick gaps - `measure` pushes
-  `trade.ts_event` into `timestamps` and derives the dispersion index and the
-  duration ACF from consecutive differences of that vector. So the gate reads
-  exactly the wall-clock gaps any cap would shorten; it never sees the
-  generator's internal `duration_s`. The deserts are not an artifact bolted onto
-  the fit, they ARE the realized mechanism that achieves the committed duration
-  realism. Sharper still: the DISPERSION band only needs big gaps to EXIST, but
-  the duration-ACF band demands they CLUMP, and clumped big gaps are the
-  deserts. If the ACF target is faithful to Kraken, the deserts are faithful in
-  KIND and wrong only in wall-clock SCALE, because neither committed target
-  constrains dwell. That wall-clock-blindness is the actual root gap.
+  Spec: `docs/arrival-drought-elimination-spec.md`.
 
-  WHY IT IS NOW PIPELINE-BLOCKING, not a fidelity blemish. The venue is the
-  forward-validation gate, and the gate exists to validate what a backtest
-  cannot: resting-order exit behavior. A strategy whose validation window lands
-  in a desert gets no resting-order fills, so the very property being measured is
-  never exercised - and it fails SILENTLY, the run completing and reporting
-  nothing wrong. At batch scale that is a page of null results indistinguishable
-  from strategies that genuinely never triggered. Acceleration shortens the
-  wall-clock cost of a desert but not its effect. Consequences already seen: a
-  fresh subscribe can stay silent for tens of wall-seconds at high speed
-  (deadline pacing ignores `gap_cap_ms` by design), tripping a consumer's
-  feed-stale watchdog on an honestly healthy venue; a short historical window
-  inside a drought returns zero trades, so a nautilus bar warmup gets an empty
-  batch and times out fatally; and density-sensitive tests are inherently flaky.
-  Mitigations already landed: the accelerated smoke anchors on a real tape tick,
-  the adapter names tape sparsity when an on-tape warmup window yields no bars,
-  `trades_window_is_clamped_at_sim_now` was widened to 6 h, and the mechanism is
-  written up in `reference/architecture.md` ("Tape arrival droughts").
-
-  THE DECISION, four options with honest costs. (A) Accept and document: zero
-  code risk, the unrealistic 18 h magnitude stays. (B) Cap the realized
-  inter-tick gap while feeding the ACD the uncapped duration: looks surgical, is
-  a TRAP - the gate measures realized gaps, so capping lowers the very statistics
-  it validates. (C) Re-derive the duration model against a wall-clock-aware
-  target: the only real fix, a genuine offline-analysis project touching
-  `analysis/build_fingerprint.py`, the committed fingerprint targets,
-  `consts.rs`, the golden stream, and every coupled realism anchor, and it partly
-  relitigates whether the committed duration bands are the right targets. (D)
-  Split the concern: gate `realism()` on the pure fitted dynamics and apply a
-  wall-clock dwell governor only on the SERVING path - cheap, keeps
-  byte-identity, but then the validated tape is no longer the served tape, which
-  is where the byte-identical discipline and the usable-venue goal collide.
-
-  Current lean: the purpose framing pushes off (A), since the fingerprint
-  duration bands are a CREDIBILITY PROXY for a believable backdrop rather than
-  the product, and a band that produces an unusable venue is a proxy that
-  overshot. (B) is a trap. The live question is (C) vs (D) - whether the tape
-  that ships must stay the tape `realism()` validates. Downstream of this
-  decision: the AD12 dead-feed watchdog below (a threshold distinguishing "asleep"
-  from "dead" depends on it), closing a live in-progress bar window on a
-  clock timer, deliberately not built for the same reason, and the penetration
-  fill gate below, which makes resting orders strictly HARDER to fill and so
-  compounds a desert's silent no-fill failure rather than merely coexisting
-  with it.
+  Unblocked by this decision: the AD12 dead-feed watchdog below (on a dense
+  default tape honest silence has a hard upper bound, and an armed drought is
+  visible via the control plane), the penetration fill gate below (its
+  sequencing blocker was the desert's silent no-fill starvation), and the
+  declined clock-timer close of a live in-progress bar window, which can be
+  relitigated on the same grounds.
 
 - Move the adapter off the `../nautilus_trader` path dependency onto a pinned
   crates.io release. `crates/mogwai-adapter/Cargo.toml` path-depends five
@@ -138,10 +108,12 @@ Or both. There are no exceptions.
   WS idle timeout does not cover it: `idle_timeout_ms` defaults to 0, and even
   armed the idle clock resets on ANY application frame, so a
   data-silent-but-frame-active socket never trips it, deliberately, because that
-  is what reproduces the 4255 case. Blocked in practice on the drought decision
-  above: on a desert tape a silent feed is often CORRECT, so the threshold that
-  separates "the venue is asleep" from "the subscription is dead" depends on
-  which option lands.
+  is what reproduces the 4255 case. The drought DECISION above unblocks this;
+  the drought ELIMINATION still gates it in practice: the threshold separating
+  "the venue is asleep" from "the subscription is dead" comes from the dense
+  default tape's dwell bound, and an armed LiquidityDrought legitimately
+  silences the feed but is visible via the control plane, so the watchdog can
+  account for it.
 
 - DECIDE: does dup/drop havoc reshaping fabricated bars model the right venue?
   (Formerly sweep item AD21a.) Bars are built AFTER the `HavocFilter` on both the
@@ -205,10 +177,11 @@ Or both. There are no exceptions.
   for the inbound side (armed havoc ADDS to the baseline rather than replacing
   it, see `BASELINE_LATENCY`'s doc comment), and the outbound side should
   match that convention rather than invent a second one. Not blocked on
-  anything; the drought decision does not touch it.
+  anything; the drought work does not touch it.
 
-- BUILD, BLOCKED on the drought decision above: penetration-gated fills. RFC
-  4631's phase A, and the highest-value fill-fidelity item available to us -
+- BUILD, SEQUENCED after the drought elimination above lands: penetration-gated
+  fills. RFC 4631's phase A, and the highest-value fill-fidelity item available
+  to us -
   at-touch filling is the specific lie that flatters maker strategies. Today
   `mogwai-engine/src/orders.rs` fills synthetically at the ORDER'S OWN price on
   submit ("No order-type special case: this venue prices Market orders like any
@@ -224,9 +197,9 @@ Or both. There are no exceptions.
   but it is NOT the same predicate nautilus would implement upstream. If both
   ship, the two disagree about fills for a reason that is invisible at the call
   site, so the divergence belongs in `reference/architecture.md` and in the RFC
-  thread, not only here. Sequencing: this must NOT land before the arrival
-  drought decision, because a penetration gate makes resting fills strictly
-  rarer and a desert already starves them silently.
+  thread, not only here. Sequencing: this must NOT land before the default tape
+  is desert-free, because a penetration gate makes resting fills strictly rarer
+  and a desert starves them silently.
 
 - DECIDE, then write up and delete this entry: how much of RFC 4631's phase B
   (shared queue position) mogwai can honestly build. The RFC asks for a FIFO
