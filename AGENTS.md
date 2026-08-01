@@ -41,9 +41,10 @@ A Cargo workspace, five crates under `crates/`:
 `scripts/` holds the end-to-end smoke test and the harness-bug flush the
 orchestration loop uses (codex is now driven by the `review` tool, configured
 from `.review.toml`, not by wrapper scripts);
-`analysis/` is the offline Python that fits the fingerprint; `docs/` is the
-transient TODO; `reference/` is durable docs - `architecture.md` describes how
-the system works, the others are process docs.
+`analysis/` is the offline Python that fits the fingerprint; `notes/` holds the
+transient work items and plans; `reference/` is durable docs - `architecture.md`
+describes how the system works, the others are process docs. See the Document
+folders section below for what each folder may and may not contain.
 
 ## Rules
 
