@@ -33,10 +33,12 @@ Or both. There are no exceptions.
   1. Measure the Kraken corpus's own wall-clock dwell in `analysis/` (trades
      per hour, zero-window fraction, max inter-trade gap on the anchor
      series) - an increment to `characterize.py`, and it sets the target the
-     retune aims at. The anchor series satisfies the dispersion band, the
-     duration ACF, and realistic dwell simultaneously, so the joint target is
-     achievable by construction; what is open is only whether the
-     three-constant ACD family reaches it.
+     retune aims at. The dwell measurement is ERA-WINDOWED behind a declared
+     boundary constant: the full-span anchor series does NOT satisfy realistic
+     dwell (its infancy/outage years desert - decoded from the committed
+     histograms, no corpus disk needed), so the joint target is claimed only
+     of the modern-era window, L1 verifies that claim, and what is open is
+     only whether the three-constant ACD family reaches it.
   2. Make the duration mechanism wall-clock-aware (leading candidate: psi
      decay in wall time rather than per tick), retune ACD_PERSISTENCE /
      ACD_FEEDBACK_SHARE / ACD_WEIBULL_SHAPE against the SAME committed bands

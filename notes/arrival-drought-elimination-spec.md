@@ -6,25 +6,48 @@ keep the drought as an armable havoc scenario" (decided 2026-08-01). The
 mechanism background lives in `reference/architecture.md` ("Tape arrival
 droughts"); this spec does not restate it beyond what each brick needs.
 
+Revised 2026-08-02: folds the validated findings of
+`notes/arrival-drought-review-r1.md` and `notes/arrival-drought-review-r2.md`.
+Section 8 records what was rejected and why.
+
 ## 1. The item
 
-The fitted default tape prints 15-18 h near-silent stretches that real BTCUSD
-never prints, because the ACD duration memory decays per TICK: a high-psi
-excursion persists ~1/(1-phi) = ~154 ticks regardless of how long each tick
-takes in wall time, so hour-scale gaps self-prolong into days. Neither
-committed duration target (dispersion band, duration ACF) constrains
-wall-clock dwell, so the realism gate is structurally blind to the deserts.
+The fitted default tape prints 15-18 h near-silent stretches, because the ACD
+duration memory decays per TICK: a high-psi excursion persists
+~1/(1-phi) = ~154 ticks regardless of how long each tick takes in wall time,
+so hour-scale gaps self-prolong into days. Neither committed duration target
+(dispersion band, duration ACF) constrains wall-clock dwell, so the realism
+gate is structurally blind to the deserts.
+
+The premise, stated carefully because the committed corpus complicates it: the
+FULL-SPAN anchor series does contain hour-to-day-scale gaps. Decoding the
+committed `char_XBTUSD.json` duration histogram (no corpus disk needed;
+`analysis/decode_dwell_bins.py` is the helper) shows ~3050 gaps of an hour or
+more over the 4194-day span, 94 of them in the top, SATURATING bin (>= 15 h,
+unbounded above - `log_bin` folds everything past 24 h into it). Those are
+venue-history artifacts: Kraken's 2013-2015 infancy and its outage record
+(including a ~48 h total shutdown in January 2018), an era the default
+profile does not claim to model. The default tape claims a PRESENT-DAY liquid
+major, and the modern era of the anchor is the behavior to hold it to:
+quiet regimes exist, deserts do not. So the dwell target is measured from an
+era-windowed anchor - the era boundary is a declared constant
+(`DWELL_ERA_START_TS`, 2019-01-01 UTC), and everything inside it is measured,
+not judged.
 
 Done means:
 
 1. The default tape's wall-clock dwell is bounded by a target measured from
-   the real Kraken anchor series, not chosen by judgement.
+   the modern-era window of the real Kraken anchor series.
 2. The bound is enforced by the realism gate itself (`measure()` gains dwell
-   statistics, asserted), so the tape can never desert again silently.
+   statistics, asserted), and the asserted gate covers the seed the served
+   default tape actually runs (the server keys each symbol's walk on an
+   FNV-1a hash of the symbol - the BTCUSDT tape is NOT seed 42), so the
+   default tape can never desert again silently.
 3. The committed duration bands (dispersion, ACF) still hold - the fix goes
    through the mechanism and a retune, never through a serving-side cap.
 4. The dying-symbol shape stays available, armable via
-   `MarketRegime::LiquidityDrought`, and is pinned by a test.
+   `MarketRegime::LiquidityDrought`, and is pinned by a test that checks the
+   clustering survives thinning, not just that gaps stretch.
 5. The golden stream is re-blessed once, and every doc describing droughts as
    ambient default behavior is rewritten.
 
@@ -39,12 +62,13 @@ the `next_position` accumulation item.
 `source.rs` `next_duration_ns` is the entire arrival process:
 
 - eps: `Weibull(1.0, ACD_WEIBULL_SHAPE=0.60)` draw, normalized by
-  `WEIBULL_MEAN_SHAPE_060` so its mean is 1.
+  `WEIBULL_MEAN_SHAPE_060` (`numeric.rs`, shape-specific, pinned by
+  `weibull_mean_matches_known_constant`) so its mean is 1.
 - recursion: `psi = omega + alpha * prev_duration_s + beta * psi`, applied
   once per tick. `alpha = ACD_PERSISTENCE * ACD_FEEDBACK_SHARE`
   (0.9935 * 0.08), `beta = ACD_PERSISTENCE - alpha`,
   `omega = mean_duration_s * (1 - ACD_PERSISTENCE)`, so the unconditional
-  mean of psi is `scalars.mean_duration_s` (the fingerprint's fitted ~7 s).
+  mean of psi is `scalars.mean_duration_s`.
 - `duration_s = psi * eps`, floored at 1 ns; `prev_duration_s = duration_s`
   BEFORE any modulation - the recursion never sees the session envelope or an
   armed regime. This invariant ("ACD feedback sees the un-modulated
@@ -65,6 +89,14 @@ whole-tape regime carried per subscription on `Subscribe` and per request on
 never armed via `/control/divergence`, so no divergence-window ceiling
 applies to it.
 
+Cadence caveat that matters for dwell absolutes: `GeneratorScalars` (both
+`xbtusd_anchor` and the server's `from_fingerprint_medians`) seed
+`mean_duration_s` from the CROSS-PAIR MEDIAN (7.19 s), while the anchor's own
+full-span mean is 4.44 s - the tape runs ~1.6x slower than the anchor by
+construction (and the modern-era anchor mean will be lower still). Any gate
+comparing realized dwell against anchor absolutes must scale by this cadence
+ratio explicitly; a flat slack that silently absorbs it is not allowed.
+
 ### 2.2 The gate (`crates/mogwai-data/src/generated/tests.rs`)
 
 - `realism()`: seed 42, `DRAW = 2_000_000` ticks, `xbtusd_anchor` scalars,
@@ -75,15 +107,29 @@ applies to it.
   `consts.rs` comment); duration ACF lag1/lag5 within
   `DURATION_ACF_ABS_TOL = 0.14` of the anchors 0.194 / 0.136; the return,
   zero-change, round-lot, size and on-grid gates. `Measured` has twelve
-  fields; none is a function of wall-clock density.
-- `clean_regime_is_byte_identical` pins the golden tick sequence; the
-  checkpoint tests pin byte-identical resumed tails; the `#[ignore]`d
-  `session_curves` test (5M ticks) pins the session envelope.
+  fields; none is a function of wall-clock density. Note on the dispersion
+  band's lower side: the 131.7 floor is DOTUSD's number, not the anchor's, so
+  it polices "too dense to be credible" only weakly - seed 42 sits near it,
+  and the ACF band does most of the lower-side work.
+- The gate's seed is NOT the production seed: the server derives each
+  symbol's seed from an FNV-1a hash (`seed_for` in
+  `mogwai-server/src/source.rs`), so the served BTCUSDT walk is a different
+  realization from every committed test. Nothing today asserts anything about
+  the tape broadarrow actually consumes.
+- `clean_regime_is_byte_identical` pins the golden tick sequence in literal
+  strings - it is the ONLY test carrying pinned stream bytes. The checkpoint
+  tests (`checkpoint_resume_is_byte_identical` and siblings) compute a fresh
+  from-origin reference from the live generator at runtime and compare the
+  resumed tail against it, so they follow any mechanism change with no
+  re-bless. The `#[ignore]`d `session_modulation_reproduces_curves` test (5M
+  ticks) asserts measured session curves against the fingerprint's profile -
+  re-run, not re-blessed.
 - `liquidity_drought_stretches_durations` pins thin_factor 5 stretching the
   mean gap at least 4x.
 
-Every byte-pinned expectation above changes when the recursion changes; the
-re-bless set is enumerated in L2.
+The re-bless set is therefore exactly: the golden literals in
+`clean_regime_is_byte_identical`, plus any literal-bearing session/gap test
+the new stream shifts. It is enumerated in L2.
 
 ### 2.3 The offline pipeline (`analysis/`)
 
@@ -91,10 +137,21 @@ re-bless set is enumerated in L2.
   `char_<PAIR>.json` with a `duration` dict (`mean_s`, `var_s2`,
   `dispersion_index`, `log_hist`, `acf`). Tracks `first_ts`/`last_ts`
   already. Memory O(1) over multi-GB files - the new dwell stats must keep
-  that property.
+  that property. `log_bin` saturates: any gap >= 86400 s lands in the top
+  bin, so the committed histograms cannot say how long the longest gaps are.
+- What the committed reports already show about dwell (decoded, full span):
+  XBTUSD is the MOST desert-prone pair in the corpus - 3050 gaps >= 1 h and
+  top-4-bin counts [551, 298, 142, 94], against ETHUSD [135, 87, 52, 53],
+  XDGUSD [157, 46, 13, 7], and single digits for ADAUSD/DOTUSD/SOLUSD/
+  XRPUSD/USDTUSD. The full-span dispersion anchor 4608.9 IS the cross-pair
+  band max. Both facts are era artifacts (XBTUSD has the longest history,
+  reaching deepest into the infancy/outage years), and both are why the
+  dwell measurement is era-windowed rather than full-span.
 - `run_corpus.py` fans over `DEFAULT_PAIRS` (8 pairs, pool capped at 6);
   `build_fingerprint.py` assembles `analysis/fingerprint.json` from the
-  `char_*.json` reports (anchor XBTUSD, cross-pair min/median/max bands).
+  `char_*.json` reports (anchor XBTUSD, cross-pair min/median/max bands) and
+  ALSO regenerates the tracked `analysis/findings.md` human-readable summary
+  on every run.
 - The corpus lives at `MOGWAI_DATA_DIR` (default
   `/media/folk/Banan/Kraken_Trading_History`), offline-analysis input only.
   L1 requires that disk mounted; nothing else in this spec does.
@@ -108,17 +165,40 @@ re-bless set is enumerated in L2.
 - `scalars.mean_duration_s` and every non-duration target are untouched, so
   tick-count budgets hold: `MAX_HISTORY_SEEK_TICKS 190_000`,
   `CHECKPOINT_K 8192`, the server's 24 h `backfill_horizon_ns`, and the
-  smoke's window sizes all stay valid.
+  smoke's window sizes all stay valid. This claim is now GUARDED rather than
+  assumed: `measure()` gains an asserted realized mean-gap statistic (4.6),
+  because the D2 relaxation does not preserve the mean exactly (D2's
+  caveat) and the budgets above all price ticks-per-wall-hour.
 - The adapter's tape-sparsity warning on an empty warmup window stays: it is
   still the correct diagnosis under an ARMED drought.
 - `trades_window_is_clamped_at_sim_now` (widened to 6 h because of the
   deserts) stays at 6 h; tightening it is a follow-up nicety, not this spec.
-- `scripts/smoke.py` anchors on a real tape tick and is density-robust.
-- Docs describing droughts as ambient: `reference/architecture.md` ("Tape
-  arrival droughts"),
-  and the drift-comment in `dynamics.rs` / session comments that cite the
-  byte-identical golden stream as the reason not to touch the walk (those
-  reasons survive; only the drought section's "plan for it" framing dies).
+- `scripts/smoke.py` anchors on a real tape tick and is density-robust; that
+  includes the `--command-latency` step, which asserts command ordering rather
+  than tape content.
+- `Divergence::CommandLatency` stamps the market price after its ACT sleep, so
+  a denser tape only makes the "the venue acted on a moved market" story it
+  models truer. Nothing on that path pins a price or a gap literal, so it is
+  outside the re-bless set.
+- One server test is ALREADY a live casualty of the ambient drought:
+  `subscribe_beyond_sim_now_clamps_to_a_live_stream` anchors on the real
+  wall clock and asserts the first live trade prints within 1 h of sim-now.
+  On 2026-08-02 the BTCUSDT walk's desert put the first trade ~1 h 12 min
+  out and the suite went red on an untouched tree. Wall-time-dependent, so
+  it self-heals when the clock exits the desert; the L2 dwell bound is what
+  makes it deterministic again. Known, not fixed here - it is the defect's
+  own evidence.
+- Docs describing droughts as ambient: `reference/architecture.md` has THREE
+  sites, not one - the "Tape arrival droughts" section, the reconnect/
+  generation discussion's "a generation became current DURING a tape arrival
+  drought" clause, and the bars/history discussion's "inside one of the
+  tape's arrival droughts a request for N bars typically..." clause. All
+  three become wrong under this landing. The drift-comment in `dynamics.rs`
+  and the session comments cite the byte-identical golden stream as the
+  reason not to touch the walk - those reasons survive; only the drought
+  section's "plan for it" framing dies. `notes/todo.md`'s AD12 entry also
+  leans on the old framing ("the drought ELIMINATION still gates it") and
+  resolves against the landed dwell bound.
 
 ## 3. Design decisions, resolved here
 
@@ -144,7 +224,19 @@ Properties, each load-bearing:
   toward the mean by `exp(-gap/tau)`, so an excursion's WALL dwell is bounded
   by a few tau regardless of how many ticks it spans. The tick-domain
   clustering the ACF band demands survives (it lives in the sub-minute bulk);
-  what dies is only the wall-clock compounding of the tail.
+  what dies is only the wall-clock compounding of the tail. Stated honestly:
+  tau bounds the PERSISTENCE of an excursion (the empty-hour statistics), not
+  any single draw - `psi * eps` keeps an unbounded Weibull tail, so the
+  one-draw maximum is bounded only in distribution, which is why the gate's
+  hard asserts are quantile- and run-based rather than a sample-max (D4).
+- Mean caveat, stated so the retune is honest about it: with constant `w` the
+  fixed point is exactly `mean_s` for any `w`, but `w` is correlated with the
+  state it damps (a long `prev_duration_s` produces a small `w`), so
+  `E[psi]` sits below `mean_s` by a Jensen-style term that grows as the gap
+  distribution fattens. The retune absorbs it - which means the landed
+  `ACD_*` values are COMPENSATING constants, no longer the raw fit; the
+  `consts.rs` comment must say so, and the realized mean-gap assert (4.6) is
+  what keeps the compensation honest.
 - `w` is computed from the UN-MODULATED `prev_duration_s`, preserving the
   invariant that the recursion never sees the session envelope or an armed
   regime. This is sufficient - desert gaps are hour-scale before modulation
@@ -162,90 +254,185 @@ but couples the dwell horizon to the persistence constant, and the two must
 be tunable independently - dispersion wants phi high, dwell wants the memory
 horizon short).
 
-**D3 - the dwell target is measured from the corpus, and the gate reads the
-ANCHOR, not the cross-pair band.** This is deliberately unlike the dispersion
-band: the cross-pair spread includes near-dead pairs whose dwell is exactly
-the behavior being evicted from the default tape, so a cross-pair max would
-gate nothing. The fingerprint records both (anchor + range, matching every
-other target's shape, and the range documents what the havoc knob may
-imitate); `realism()` asserts against the anchor values only.
+**D3 - the dwell target is the ERA-WINDOWED anchor.** Two choices folded into
+one decision:
 
-**D4 - the dwell gate is one-sided.** Two statistics, both upper bounds:
+- Era window: dwell statistics are computed only over trades at or after
+  `DWELL_ERA_START_TS = 1_546_300_800` (2019-01-01T00:00:00Z), a named
+  constant in `characterize.py` recorded in the fingerprint. Rationale: the
+  full-span anchor is the most desert-prone series in the corpus (2.3), but
+  its deserts are infancy/outage history, and the default profile claims a
+  modern liquid major. The window is the declared judgement; everything
+  inside it is measured. The boundary is load-bearing and named as such:
+  pull it back to 2017 and the outage-era dwell re-enters the target, so
+  relitigating the era means moving the declared constant, never pretending
+  the corpus chose it. A gap belongs to the trade that CLOSES it: a gap is
+  in-window iff its closing trade's timestamp is >= the era start (so the
+  outage that STRADDLES the boundary is excluded only if it closes before
+  it - deterministic and stated).
+- Anchor, not the cross-pair band - but for the honest reason: the default
+  tape claims to BE the anchor symbol, so the anchor's modern era is the
+  behavior it must reproduce. (The previous draft's reason - "the cross-pair
+  spread includes near-dead pairs whose dwell is the behavior being
+  evicted" - is factually inverted on full-span data and is retired.) The
+  fingerprint records both anchor and range, matching every other target's
+  shape; the cross-pair range documents the dying-symbol spread the
+  `LiquidityDrought` knob may imitate; `realism()` asserts against the
+  anchor values only.
 
-- `max_gap_s`: the largest realized inter-trade gap in the draw.
-- `empty_hour_frac`: the fraction of whole simulated hours in the draw's
-  span containing zero trades.
+**D4 - the dwell gate: quantile and run statistics, cadence-scaled,
+one-sided.** The gated statistics, chosen for cross-sample-size stability
+(the corpus window holds tens of millions of gaps, the test draw 2M - a
+sample MAX is not comparable across that ratio, so `max_gap_s` is recorded
+but never asserted):
 
-Upper bounds only, because the failure mode is silence, and the lower side is
-already policed: the dispersion floor (131.7) requires the big-gap mass to
-exist, so a tape too dense to be credible fails the existing band. Slack: the
-gate asserts `max_gap_s <= 2.0 * anchor.max_gap_s` and
-`empty_hour_frac <= anchor.empty_hour_frac + 0.01`, the factor-of-two and
-absolute point covering seed wobble on a 2M draw the same way
-`DURATION_ACF_ABS_TOL` does; both slack constants live next to it in
-`tests.rs` with this rationale.
+- `gap_p999_s`: the 99.9th-percentile inter-trade gap. Corpus side: read
+  from a NEW `dwell_hist` (160 log bins over [1 s, 604800 s), top bin
+  saturating, populated only in-window) at the UPPER edge of the first bin
+  where the cumulative fraction reaches 0.999 - biased conservatively high
+  by at most one ~8.7% bin width; the read must not land in the saturated
+  bin (if it does, the measurement itself fails loudly). Generator side:
+  exact nearest-rank (`ceil(0.999 * n)`) over the draw's durations.
+- `empty_hour_frac`: zero-trade hours over the span. Exact rule, identical
+  in Python and Rust and pinned by a small hand-built fixture on each side:
+  the population is every complete UTC hour bucket `[k*3600, (k+1)*3600)`
+  lying fully inside the observation span (corpus: `[max(first_ts,
+  DWELL_ERA_START_TS), last_ts]`; generator: first to last emitted
+  `ts_event`); the numerator is the buckets containing zero trades. A span
+  shorter than one complete hour defines the statistic as 0 (the corpus
+  path can never hit this; the rule exists so the Rust helper is total).
+- `max_empty_hour_run_h`: the longest run of CONSECUTIVE empty hours in the
+  same population - the direct desert statistic, and the shape the 1m/15m
+  charts surfaced.
 
-**D5 - retune procedure and levers.** Order of operations: set tau to land
-the dwell bounds first (tau directly bounds `max_gap_s`; start at 1800 s and
-move by factors of 2), then restore any degraded duration statistic:
-dispersion low -> raise `ACD_PERSISTENCE` toward 0.995 or lower
-`ACD_WEIBULL_SHAPE` toward 0.55 (both fatten realized variance); ACF low ->
-raise `ACD_FEEDBACK_SHARE`. Acceptance is the full `realism()` gate at seed
-42 / 2M draws; during tuning also spot-check seeds 7 and 1337 with the same
-`measure()` harness (not asserted - the committed gate stays seed 42, per the
-existing convention) so the landed constants are not a seed-42 accident. The
-`consts.rs` block comment is rewritten to document the new joint tuning
-story: persistence/shape land dispersion+ACF, tau lands dwell.
+Asserts in `realism()`, all upper bounds, with
+`cadence = scalars.mean_duration_s / dwell.mean_s.anchor` (the windowed
+anchor mean recorded in the fingerprint; the ~1.6x-or-more handicap of 2.1
+made explicit instead of absorbed):
 
-**D6 - feasibility, stated so failure is recognizable.** The anchor series
-itself satisfies dispersion, duration ACF, and realistic dwell
-simultaneously - the joint target is achievable by construction. Open is only
-whether THIS parametric family reaches it. Back-of-envelope says yes:
-dispersion ~190 at 7 s mean needs realized variance ~1300 s^2, which ~200
-hour-scale gaps per 2M draws deliver without any day-scale desert. If an
-honest search (D5's levers, a day of iteration) cannot land all bands plus
-dwell, L2 is REVERTED whole and the todo entry reopens with the failed
-constants recorded - that evidence, not judgement, is what would justify
-revisiting the serving-path split rejected in D1.
+    measured.gap_p999_s        <= DWELL_P999_SLACK * cadence * anchor.gap_p999_s
+    measured.empty_hour_frac   <= anchor.empty_hour_frac + EMPTY_HOUR_FRAC_SLACK
+    measured.max_empty_hour_run_h <= anchor.max_empty_hour_run_h + EMPTY_HOUR_RUN_SLACK_H
+
+with `DWELL_P999_SLACK = 2.0`, `EMPTY_HOUR_FRAC_SLACK = 0.01`,
+`EMPTY_HOUR_RUN_SLACK_H = 2`, living next to the asserts in `tests.rs` with
+this rationale (the slack covers seed wobble on a 2M draw plus the residual
+population mismatch - the draw runs ~160 simulated days under the session
+envelope, the window spans years). Upper bounds only, because the failure
+mode is silence; the lower side is policed by the ACF band and (weakly) the
+dispersion floor, per 2.2.
+
+Also asserted, two-sided, guarding the budget claims of 2.4 against D2's
+mean caveat:
+
+    (measured.mean_gap_s - scalars.mean_duration_s).abs()
+        <= MEAN_GAP_REL_TOL * scalars.mean_duration_s
+
+with `MEAN_GAP_REL_TOL = 0.10`.
+
+**D5 - retune procedure: a deterministic grid, not a manual search.** Two
+implementers must land the same constants, so the search is a finite grid
+with a stated order and a first-hit-wins rule:
+
+- Stage 1, `ACD_WEIBULL_SHAPE` FROZEN at 0.60. Frozen for two coupled
+  reasons: lowering the shape fattens the eps tail and directly re-inflates
+  the realized gap quantiles tau just suppressed (the levers fight), and the
+  shape is normalized by the shape-specific `WEIBULL_MEAN_SHAPE_060` in
+  `numeric.rs`, so moving it drags a derived constant and its pinning test
+  along. Grid, iterated in this nested order, outermost first:
+  `ACD_WALL_RELAX_TAU_S` in [7200, 3600, 1800, 900] (descending: prefer the
+  weakest relaxation - the dynamics closest to today's fit - that passes);
+  `ACD_PERSISTENCE` in [0.9935, 0.9945, 0.9950];
+  `ACD_FEEDBACK_SHARE` in [0.08, 0.10, 0.12].
+  The winner is the FIRST tuple where the full `realism()` gate (all existing
+  bands plus D4's dwell and mean-gap asserts) passes at seed 42 AND the
+  dwell/mean-gap asserts pass at the production BTCUSDT seed (4.6). During
+  tuning also spot-check seeds 7 and 1337 with the same `measure()` harness
+  (not asserted - the committed gate stays per convention) so the landed
+  constants are not a seed accident.
+- Stage 2, only if stage 1 exhausts: `ACD_WEIBULL_SHAPE = 0.55`, which
+  REQUIRES recomputing the unit-mean normalizer (Gamma(1 + 1/shape)),
+  renaming/updating the `numeric.rs` constant, its doc comment, its imports,
+  and the `weibull_mean_matches_known_constant` literal - the coupled
+  artifact set, named here so it cannot be forgotten. Re-run the stage-1
+  grid.
+- Stage 3: no tuple passes - revert per D6.
+
+The `consts.rs` block comment is rewritten to document the joint tuning
+story: persistence/feedback land dispersion+ACF, tau lands dwell, the landed
+values are compensating (D2's mean caveat), and the grid above is the
+procedure that selected them.
+
+**D6 - feasibility, stated so failure is recognizable.** The claim "the
+anchor series satisfies dispersion, duration ACF, and realistic dwell
+simultaneously" is now a claim about the ERA-WINDOWED anchor, and it is not
+assumed - L1 measures it, and L1's threshold (section 5) closes the item if
+the windowed anchor itself deserts. Given L1 passes, what remains open is
+only whether THIS parametric family reaches the joint target.
+Back-of-envelope says yes: dispersion ~190 at 7 s mean needs realized
+variance ~1300 s^2, which ~200 hour-scale gaps per 2M draws deliver without
+any day-scale desert. If the D5 grid exhausts, L2 is REVERTED whole and the
+todo entry reopens with the failed grid recorded - that evidence, not
+judgement, is what would justify revisiting the serving-path split rejected
+in D1.
 
 **D7 - `thin_factor` bounds stay [1.0, 1000.0].** On the dense default tape,
 thin 1000 is a ~2 h mean gap with much longer clustered excursions - the
 dying-symbol shape the decision preserves. No protocol change; the scenario
-is pinned by a new test (4.6) rather than by new surface.
+is pinned by a new test (4.6) that checks the CLUSTERING survives thinning
+(the constant multiplier leaves the realized-gap ACF invariant, which is
+exactly D2's un-modulated-feedback invariant made testable), rather than by
+new surface.
 
 ## 4. Target artifacts
 
 ### 4.1 `analysis/characterize.py`
 
-The `duration` dict gains three keys, all computed in the existing single
-streaming pass, O(1) memory except one bitset:
+New module constant `DWELL_ERA_START_TS = 1_546_300_800` (2019-01-01 UTC)
+with D3's rationale. The report's `duration` dict gains a `dwell` sub-dict,
+all computed in the existing single streaming pass, O(1) memory except one
+bounded bitmap:
 
-- `max_gap_s`: running max of the inter-trade gap.
-- `empty_hour_frac`: hours-with-zero-trades over total span hours. Track a
-  `set` (or bytearray bitmap) of `ts // 3600` indices seen; corpus spans are
-  ~10 years = ~90k hour slots, bounded and small. Denominator is
-  `(last_ts - first_ts) // 3600`.
-- `gap_p999_s`: 99.9th percentile gap, read off the existing `log_hist`
-  duration histogram (no new pass) - recorded for the fingerprint's
-  documentation value, not gated on.
+- `era_start_ts`: echo of the constant (provenance in the report).
+- `n_gaps`: in-window gap count (denominator provenance for the quantile).
+- `mean_s`: in-window mean gap - the cadence-ratio denominator of D4.
+- `max_gap_s`: running max of the in-window gap. Recorded for the
+  fingerprint's documentation value, never gated on (sample-size unstable,
+  D4).
+- `gap_p999_s`: read off the new `dwell_hist` per D4's upper-edge rule.
+- `dwell_hist`: 160 log bins over [1 s, 604800 s), top bin saturating,
+  in-window gaps only (the existing coarse `log_hist` stays as-is,
+  full-span).
+- `empty_hour_frac` and `max_empty_hour_run_h`: per D4's exact complete-hour
+  rule, tracked as a `set` (or bytearray bitmap) of `ts // 3600` indices
+  seen in-window; the window spans ~7 years = ~65k hour slots, bounded and
+  small.
 
-The stdout summary line gains `max_gap` and `empty_hours` so a corpus run
-shows the dwell story at a glance.
+The stdout summary line gains `max_gap`, `p999` and `empty_hours` so a
+corpus run shows the dwell story at a glance.
 
 ### 4.2 `analysis/build_fingerprint.py`
 
 `golden_targets` gains:
 
     "dwell": {
-      "max_gap_s":       { "anchor": ..., "range": {min, median, max} },
-      "empty_hour_frac": { "anchor": ..., "range": {min, median, max} },
-      "gap_p999_s":      { "anchor": ..., "range": {min, median, max} },
-      "_doc": "gate reads the ANCHOR; the cross-pair range documents the
-               dying-symbol spread the LiquidityDrought regime imitates"
+      "era_start_ts":        ...,
+      "mean_s":              { "anchor": ..., "range": {min, median, max} },
+      "max_gap_s":           { "anchor": ..., "range": {min, median, max} },
+      "gap_p999_s":          { "anchor": ..., "range": {min, median, max} },
+      "empty_hour_frac":     { "anchor": ..., "range": {min, median, max} },
+      "max_empty_hour_run_h":{ "anchor": ..., "range": {min, median, max} },
+      "_doc": "era-windowed; gate reads the ANCHOR (p999/frac/run, scaled by
+               the cadence ratio against mean_s); max_gap_s is documentation;
+               the cross-pair range documents the dying-symbol spread the
+               LiquidityDrought regime imitates"
     }
 
 Assembled from the reports exactly like the existing targets. The summary
-print gains the anchor dwell numbers.
+print gains the anchor dwell numbers, and the regenerated
+`analysis/findings.md` gains a dwell section (that file is rewritten by every
+`build_fingerprint.py` run, so it moves in L1 whether or not we mean it to -
+mean it to).
 
 ### 4.3 `analysis/fingerprint.json`
 
@@ -253,58 +440,82 @@ Regenerated by rerunning `run_corpus.py` then `build_fingerprint.py` with the
 corpus disk mounted. Every EXISTING target must reproduce byte-for-byte
 modulo float formatting - the code computing them is untouched; a diff
 showing an existing band moved means the corpus or code drifted and stops the
-landing. The only additions are the `dwell` block and per-pair `duration`
-keys inside the regenerated `char_*.json` intermediates.
+landing. The additions are the `dwell` block, the per-pair `duration.dwell`
+keys inside the regenerated `char_*.json` intermediates, and the
+`findings.md` dwell section.
 
 ### 4.4 `crates/mogwai-data/src/generated/fingerprint.rs`
 
-`GoldenTargets` gains `pub dwell: DwellTargets` (struct of three
+`GoldenTargets` gains `pub dwell: DwellTargets` (era scalar plus five
 anchor+range fields, same shape as `duration_dispersion_index`). Lands in L2
 (serde tolerates the unread key during L1).
 
 ### 4.5 `crates/mogwai-data/src/generated/consts.rs` and `dynamics.rs` and `source.rs`
 
 - `consts.rs`: new `ACD_WALL_RELAX_TAU_S: f64` with a doc comment giving
-  D2's story; the ACD block comment rewritten per D5; the three ACD constants
-  updated to the retuned values.
+  D2's story; the ACD block comment rewritten per D5 (including the
+  compensating-constants admission); the ACD constants updated to the
+  grid-selected values.
 - `dynamics.rs`: `AcdClock` gains `mean_s: f64`.
 - `source.rs`: `try_with_clamp_override` seeds `mean_s: mean_duration_s`;
   `next_duration_ns` replaces the recursion line with D2's two lines. The
   "order is load-bearing" comment block is extended one sentence: the
   relaxation weight reads `prev_duration_s` (last tick's un-modulated draw),
   never the realized gap.
+- Stage 2 only (D5): `numeric.rs`'s Weibull mean constant, comment, imports
+  and test move together with the shape.
 
 ### 4.6 `crates/mogwai-data/src/generated/tests.rs`
 
-- `Measured` gains `max_gap_s` and `empty_hour_frac`; `measure()` computes
-  them from the same `timestamps` vector (max of `durations`; hour-bucket
-  scan of the span).
-- `realism()` gains the two one-sided asserts of D4 against
-  `fp.golden_targets.dwell`, with the two slack constants and their rationale
-  comment.
-- Re-bless in place: `clean_regime_is_byte_identical`'s pinned sequence, the
-  checkpoint tests' pinned tails, and any literal-bearing session/gap test
-  the new stream shifts. The re-bless is expected and lands in the same
-  commit as the mechanism - a green suite with the old bytes would mean the
-  mechanism change is not wired.
+- `Measured` gains `mean_gap_s`, `max_gap_s`, `gap_p999_s`,
+  `empty_hour_frac` and `max_empty_hour_run_h`; `measure()` computes them
+  from the same `timestamps` vector (mean/max/nearest-rank quantile of
+  `durations`; complete-hour scan of the span per D4's rule, with a
+  hand-built fixture test pinning the hour rule against the Python
+  definition).
+- `realism()` gains D4's asserts (three one-sided dwell bounds, the
+  two-sided mean-gap band) against `fp.golden_targets.dwell`, with the slack
+  constants and their rationale comment.
+- New `default_symbol_tape_dwell_is_bounded`: the production BTCUSDT walk.
+  Seed is the FNV-1a-64 of "BTCUSDT" - the five-line fold is duplicated in
+  the test with a comment naming `mogwai-server`'s `seed_for` as the source
+  of truth (mogwai-data cannot depend on the server crate); scalars are
+  `GeneratorScalars::from_fingerprint_medians("BTCUSDT", ..)` with
+  `modal_tick`/`price_decimals` overridden to the default instrument's
+  values (0.01 / 2), mirroring the server's `default_profile`. 2M draw,
+  `start_ts 0`, asserting the dwell and mean-gap statistics only - this is
+  the assert that makes done-means item 2 true of the tape actually served.
+- Re-bless in place: `clean_regime_is_byte_identical`'s pinned literals, and
+  any literal-bearing session/gap test the new stream shifts - and nothing
+  else: the checkpoint tests recompute their references (2.2) and follow
+  automatically. The re-bless is expected and lands in the same commit as
+  the mechanism - a green suite with the old bytes would mean the mechanism
+  change is not wired.
 - New `liquidity_drought_imitates_dying_symbol`: thin_factor 1000, ~50k
-  ticks, asserts the realized mean gap lands in the hours (>= 3600 s and
-  <= 4 * 3600 s * thin-scaled slack) and that `max_gap` clumps well past the
-  mean (>= 5x mean gap) - pinning that the havoc knob reproduces the shape
-  the default tape no longer prints.
+  ticks. Asserts: realized mean gap in [3600 s, 14400 s] (thin 1000 on the
+  ~7 s cadence is ~2 h, the band covers seed wobble); realized-gap ACF lag1
+  within `DURATION_ACF_ABS_TOL` of the anchor lag1 (a constant multiplier
+  leaves the ACF invariant, so this pins that the fitted clustering
+  survives thinning - the claimed dying-symbol shape, not just stretched
+  gaps); and `max_gap >= 5 * mean_gap` (the clustered-excursion tail
+  exists).
 
 ### 4.7 Documentation
 
-- `reference/architecture.md` "Tape arrival droughts": rewritten from "a
-  consequence any consumer has to plan for" to: the default tape carries a
-  corpus-anchored dwell bound (state the gate), droughts are the
+- `reference/architecture.md`: all THREE drought-as-ambient sites (2.4) are
+  rewritten - the "Tape arrival droughts" section becomes: the default tape
+  carries a corpus-anchored dwell bound (state the gate), droughts are the
   `LiquidityDrought` regime's job, the two operational consequences move
   under an "under an armed drought" framing, and the "fingerprint-refit
-  decision" closing paragraph dies.
+  decision" closing paragraph dies; the generation-during-drought clause and
+  the bars-request-inside-a-drought clause are reworded to the armed-drought
+  framing.
 - `reference/havoc.md` `LiquidityDrought` bullet gains the dying-symbol
   framing and a pointer to the pinned test.
 - `notes/todo.md`: the drought entry is REMOVED entirely (its unblock notes
-  for AD12 and penetration fills already live in those entries).
+  for AD12 and penetration fills already live in those entries), and the
+  AD12 entry's "the drought ELIMINATION still gates it" clause is updated to
+  cite the landed dwell bound as the threshold source.
 
 ## 5. Landings
 
@@ -313,12 +524,15 @@ anchor+range fields, same shape as `duration_dispersion_index`). Lands in L2
 Artifacts 4.1, 4.2, 4.3. No crate changes. This is the measurement-first
 landing: it prices the premise before the mechanism is touched.
 
-Proceed/close threshold: the premise is "real BTCUSD never deserts". If the
-regenerated anchor report shows `max_gap_s >= 21600` (6 h) or
-`empty_hour_frac >= 0.05` on XBTUSD, the premise is false, the item is
-mispriced, and L2 is never laid - the decision reopens with the numbers.
-Expected reading, for calibration: minutes-scale max gaps and
-`empty_hour_frac` ~0.
+Proceed/close threshold: the premise is "the modern-era anchor never
+deserts". If the regenerated WINDOWED anchor report shows
+`empty_hour_frac >= 0.01`, or `max_empty_hour_run_h >= 6`, or
+`gap_p999_s >= 3600`, the premise is false, the item is mispriced, and L2 is
+never laid - the decision reopens with the numbers. Expected reading, for
+calibration: `gap_p999_s` in the tens of seconds to low minutes,
+`empty_hour_frac` ~0, `max_empty_hour_run_h` 0-2 (outage residue), and a
+`max_gap_s` possibly in the low hours - which is fine, because max_gap is
+documentation, not a gate (D4).
 
 Gates, exact commands:
 
@@ -334,38 +548,43 @@ the suite is green at this boundary because nothing reads `dwell` yet.
 ### L2 - mechanism, retune, gate, re-bless, docs
 
 Artifacts 4.4, 4.5, 4.6, 4.7, as ONE coherent landing: the recursion change,
-the retuned constants, the dwell assertions, the golden re-bless, and the doc
-rewrites are inseparable (each without the others is either a red suite or a
-lie about the tape).
+the grid-selected constants, the dwell assertions, the golden re-bless, and
+the doc rewrites are inseparable (each without the others is either a red
+suite or a lie about the tape).
 
 Gates, exact commands:
 
     brokkr check
     brokkr test -p mogwai-data realism
     brokkr test -p mogwai-data clean_regime_is_byte_identical
+    brokkr test -p mogwai-data default_symbol_tape_dwell_is_bounded
     brokkr test -p mogwai-data liquidity_drought
-    brokkr test -p mogwai-data session_curves
+    brokkr test -p mogwai-data session_modulation_reproduces_curves
 
 (`liquidity_drought` substring-matches both the existing stretch test and the
-new dying-symbol test; `session_curves` is `#[ignore]`d and slow, and the
-envelope interacts with realized gaps, so it runs explicitly here.)
+new dying-symbol test; `session_modulation_reproduces_curves` is the exact
+name of the `#[ignore]`d 5M-tick session test - an earlier draft wrote
+`session_curves`, which matches ZERO tests and would have been a gate that is
+green because it ran nothing; the envelope interacts with realized gaps, so
+it runs explicitly here.)
 
 Advisory, not a gate: `python3 analysis/plot_tape.py --gen --type bars
 --interval 1h --length 4d --open` - the chart that surfaced the decision
 should now show no grey empty-hour bars on the default profile.
 
-Keep/revert: kept when all five commands are green. If D5's search cannot
-land the joint gate, the WHOLE landing reverts (constants, mechanism, gate,
-docs) and the todo entry reopens per D6 - no half-kept state where the
-mechanism landed but the gate is loosened to accommodate it.
+Keep/revert: kept when all six commands are green. If D5's grid exhausts,
+the WHOLE landing reverts (constants, mechanism, gate, docs) and the todo
+entry reopens per D6 - no half-kept state where the mechanism landed but the
+gate is loosened to accommodate it.
 
 ## 6. Ordering argument
 
-L1 before L2 is forced twice over: L2's gate asserts against fingerprint
-fields L1 creates, and L1's threshold can close the item. The suite is green
-at the L1/L2 boundary because serde ignores the unread `dwell` key and no
-generator byte moves in L1. There is no orderable smaller unit inside L2: a
-mechanism change without the re-bless is red, a re-bless without the retune
+L1 before L2 is forced three times over: L2's gate asserts against
+fingerprint fields L1 creates, L1's threshold can close the item, and D5's
+grid needs L1's anchor numbers to evaluate its first tuple. The suite is
+green at the L1/L2 boundary because serde ignores the unread `dwell` key and
+no generator byte moves in L1. There is no orderable smaller unit inside L2:
+a mechanism change without the re-bless is red, a re-bless without the retune
 pins a desert tape, a dwell assert without the mechanism is red by
 construction (today's constants fail it - measured four ways already).
 
@@ -375,11 +594,50 @@ Out of scope, stated flat: the AD12 watchdog and penetration-gated fills
 (separate TODOs, unblocked by this landing); any change to
 `thin_factor` bounds, wire types, or the control plane; the server's
 synthesis limits (`MAX_HISTORY_SEEK_TICKS`, `CHECKPOINT_K`, horizons) - the
-mean cadence is unchanged so their budgets hold; the adapter, including its
-sparsity warning (still correct under an armed drought); `scripts/smoke.py`;
-tightening `trades_window_is_clamped_at_sim_now` back below 6 h; the
+mean cadence is unchanged (now asserted, 4.6) so their budgets hold; the
+adapter, including its sparsity warning (still correct under an armed
+drought); `scripts/smoke.py`; tightening
+`trades_window_is_clamped_at_sim_now` back below 6 h; the
 `closed_window_gap_ns` session path (its budget walk consumes un-modulated
 seconds and is untouched by the relaxation); and the offline
-`KrakenCsvSource` lineage. The teardown stops at the ACD recursion: GARCH,
-bounce/drift, sizes, sessions, and regimes keep their exact draw order so the
-re-bless is a re-seeding of expectations, not a redesign of the walk.
+`KrakenCsvSource` lineage. `numeric.rs` is touched only if D5 reaches stage
+2. The teardown stops at the ACD recursion: GARCH, bounce/drift, sizes,
+sessions, and regimes keep their exact draw order so the re-bless is a
+re-seeding of expectations, not a redesign of the walk.
+
+## 8. Review disposition
+
+Both review rounds were validated against the code and the committed
+`char_*.json` data before folding. Folded (with where): the corpus-contains-
+deserts finding and the anchor-is-most-desert-prone inversion (r1) -> the
+era-windowed premise and D3's rewritten rationale; the `session_curves`
+zero-match gate (r1, r2) -> L2's command list; the tau/shape lever coupling
+and the tau-bounds-persistence-not-max correction (r1, r2) -> D2/D5; the
+sample-max incomparability and p999 promotion (r1, r2) -> D4; the cadence
+mismatch (r1) -> 2.1 and D4's explicit ratio; the Jensen mean drift (r1,
+r2) -> D2's caveat and the asserted mean-gap band; the ungated production
+seed (r2) -> done-means 2 and `default_symbol_tape_dwell_is_bounded`; the
+Weibull normalizer coupling (r2) -> D5 stage 2; the non-reproducible retune
+(r2) -> D5's grid; the imprecise `empty_hour_frac`/percentile definitions
+(r2) -> D4's exact rules; the unpinned drought-test clustering and undefined
+"thin-scaled slack" (r2) -> 4.6's ACF-invariance assert and explicit band;
+the overstated re-bless set and the forgotten `findings.md` (r2) -> 2.2 and
+4.2; the incomplete doc sweep (r1) -> 2.4 and 4.7.
+
+Rejected:
+
+- r1's conclusion that the item closes under its own L1 threshold ("do not
+  lay L1; the item is mispriced"). The data behind it is correct and is now
+  IN the spec, but the conclusion does not follow: the corpus deserts are
+  infancy/outage artifacts of an era the default profile does not claim, so
+  the fix is scoping the measurement to the claimed era, not closing the
+  item. The threshold survives, rewritten against the windowed anchor.
+- r1's implied move off the anchor (since the anchor is the loosest dwell
+  gate available). The anchor stays: the default tape claims to BE the
+  anchor symbol, and the era window - not a different pair - is what evicts
+  the dead-era dwell.
+- r2 finding 1's fallback arm ("or the completion claim must be narrowed").
+  The stronger arm was taken instead: the production seed is asserted.
+- r1's nit that `AGENTS.md` still calls `docs/` "the transient TODO" while
+  its own folder table defines `docs/` as durable usage docs. Real, but a
+  root-convention-file fix with no connection to this spec; not folded.
