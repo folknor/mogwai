@@ -30,6 +30,10 @@ DATA_DIR = os.environ.get(
 )
 MAX_LAG = 50
 LOG_DUR_BINS = 40
+DWELL_ERA_START_TS = 1_546_300_800  # 2019-01-01T00:00:00Z
+DWELL_LOG_BINS = 160
+DWELL_LOG_LO_S = 1.0
+DWELL_LOG_HI_S = 604_800.0
 TICK_DICT_CAP = 500_000  # bound the distinct-increment counter
 
 
@@ -98,6 +102,28 @@ def decimals_used(num_str):
     return len(frac)
 
 
+def dwell_stats(first_ts, last_ts, seen_hours):
+    """Return complete-era-hour dwell statistics from occupied UTC hours."""
+    if first_ts is None or last_ts is None:
+        return 0.0, 0
+    start_hour = math.ceil(max(first_ts, DWELL_ERA_START_TS) / 3600.0)
+    end_hour = math.floor(last_ts / 3600.0) - 1
+    if end_hour < start_hour:
+        return 0.0, 0
+    empty = 0
+    longest = 0
+    run = 0
+    for hour in range(start_hour, end_hour + 1):
+        if hour in seen_hours:
+            run = 0
+        else:
+            empty += 1
+            run += 1
+            longest = max(longest, run)
+    total = end_hour - start_hour + 1
+    return empty / total, longest
+
+
 def characterize(path):
     pair = os.path.splitext(os.path.basename(path))[0]
 
@@ -108,6 +134,11 @@ def characterize(path):
     dur_sum = dur_sumsq = 0.0
     dur_n = 0
     dur_hist = [0] * LOG_DUR_BINS
+    dwell_hist = [0] * DWELL_LOG_BINS
+    dwell_n = 0
+    dwell_sum = 0.0
+    dwell_max = 0.0
+    dwell_seen_hours = set()
 
     ret_acf = AutoCorr(MAX_LAG)
     abs_acf = AutoCorr(MAX_LAG)
@@ -148,6 +179,9 @@ def characterize(path):
                 first_ts = ts
             last_ts = ts
 
+            if ts >= DWELL_ERA_START_TS:
+                dwell_seen_hours.add(int(ts) // 3600)
+
             tsec = int(ts)
             hour = (tsec // 3600) % 24
             dow = ((tsec // 86400) + 4) % 7  # Sun=0 (1970-01-01 Thu -> 4)
@@ -168,6 +202,18 @@ def characterize(path):
                     dur_sumsq += dt * dt
                     dur_hist[log_bin(max(dt, 1e-3), 1e-3, 86400.0, LOG_DUR_BINS)] += 1
                     dur_acf.push(dt)
+                    # A gap belongs to the trade that closes it. Keeping only
+                    # in-window closers makes the era boundary deterministic.
+                    if ts >= DWELL_ERA_START_TS:
+                        dwell_n += 1
+                        dwell_sum += dt
+                        dwell_max = max(dwell_max, dt)
+                        dwell_hist[log_bin(
+                            max(dt, DWELL_LOG_LO_S),
+                            DWELL_LOG_LO_S,
+                            DWELL_LOG_HI_S,
+                            DWELL_LOG_BINS,
+                        )] += 1
 
             if prev_px is not None:
                 dpx = px - prev_px
@@ -213,6 +259,25 @@ def characterize(path):
 
     dur_mean = dur_sum / dur_n if dur_n else 0.0
     dur_var = (dur_sumsq / dur_n - dur_mean**2) if dur_n else 0.0
+    empty_hour_frac, max_empty_hour_run_h = dwell_stats(
+        first_ts, last_ts, dwell_seen_hours
+    )
+    dwell_p999_s = None
+    if dwell_n:
+        threshold = math.ceil(0.999 * dwell_n)
+        cumulative = 0
+        for index, count in enumerate(dwell_hist):
+            cumulative += count
+            if cumulative >= threshold:
+                if index == DWELL_LOG_BINS - 1:
+                    raise ValueError("dwell p999 landed in the saturated bin")
+                dwell_p999_s = math.exp(
+                    math.log(DWELL_LOG_LO_S)
+                    + (index + 1)
+                    * (math.log(DWELL_LOG_HI_S) - math.log(DWELL_LOG_LO_S))
+                    / DWELL_LOG_BINS
+                )
+                break
 
     return {
         "pair": pair,
@@ -229,6 +294,16 @@ def characterize(path):
             "dispersion_index": (dur_var / dur_mean) if dur_mean else None,
             "log_hist": dur_hist,
             "acf": dur_acf.acf(),
+            "dwell": {
+                "era_start_ts": DWELL_ERA_START_TS,
+                "n_gaps": dwell_n,
+                "mean_s": dwell_sum / dwell_n if dwell_n else 0.0,
+                "max_gap_s": dwell_max,
+                "gap_p999_s": dwell_p999_s,
+                "dwell_hist": dwell_hist,
+                "empty_hour_frac": empty_hour_frac,
+                "max_empty_hour_run_h": max_empty_hour_run_h,
+            },
         },
         "returns": {
             "acf": ret_acf.acf(),
@@ -278,6 +353,11 @@ def main():
           f"span={rep['span_days']}d  elapsed={rep['elapsed_s']}s")
     print(f"duration: mean={d['mean_s']:.3f}s  dispersion_index="
           f"{d['dispersion_index']:.1f}")
+    dwell = d["dwell"]
+    print(f"dwell: max_gap={dwell['max_gap_s']:.3f}s  p999="
+          f"{dwell['gap_p999_s']:.3f}s  empty_hours="
+          f"{dwell['empty_hour_frac']:.4f}  max_empty_run="
+          f"{dwell['max_empty_hour_run_h']}h")
     print(f"returns: zero-change={r['zero_change_frac']:.3f}  "
           f"modal_tick={r['modal_tick']}  price_decimals={r['price_decimals_mode']}")
     print(f"  ret  acf1-5: {[round(x, 3) for x in r['acf'][:5]]}")

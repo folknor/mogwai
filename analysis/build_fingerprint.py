@@ -99,6 +99,7 @@ def main():
     abs10 = [r["returns"]["abs_acf"][9] for r in reps.values()]
     abs50 = [r["returns"]["abs_acf"][49] for r in reps.values()]
     zchg = [r["returns"]["zero_change_frac"] for r in reps.values()]
+    dwell = [r["duration"]["dwell"] for r in reps.values()]
 
     fingerprint = {
         "source": {
@@ -129,6 +130,20 @@ def main():
             "duration_acf_anchor": anchor["duration"]["acf"][:10],
             "return_acf_anchor": anchor["returns"]["acf"][:10],
             "abs_return_acf_anchor": anchor["returns"]["abs_acf"],
+            "dwell": {
+                "era_start_ts": anchor["duration"]["dwell"]["era_start_ts"],
+                "mean_s": {"anchor": anchor["duration"]["dwell"]["mean_s"],
+                           "range": rng([d["mean_s"] for d in dwell])},
+                "max_gap_s": {"anchor": anchor["duration"]["dwell"]["max_gap_s"],
+                              "range": rng([d["max_gap_s"] for d in dwell])},
+                "gap_p999_s": {"anchor": anchor["duration"]["dwell"]["gap_p999_s"],
+                               "range": rng([d["gap_p999_s"] for d in dwell])},
+                "empty_hour_frac": {"anchor": anchor["duration"]["dwell"]["empty_hour_frac"],
+                                    "range": rng([d["empty_hour_frac"] for d in dwell])},
+                "max_empty_hour_run_h": {"anchor": anchor["duration"]["dwell"]["max_empty_hour_run_h"],
+                                         "range": rng([d["max_empty_hour_run_h"] for d in dwell])},
+                "_doc": "era-windowed; gate reads the anchor p999, empty-hour fraction, and run, with p999 cadence-scaled against mean_s; max_gap_s is documentation and the range records the dying-symbol spread LiquidityDrought imitates",
+            },
         },
         "session_profile": {
             "_doc": "UTC, instrument-agnostic. intensity[h] and vol[h] index "
@@ -176,6 +191,15 @@ def main():
     for h in range(24):
         bar = "#" * int(round(40 * intensity[h] / peak))
         md.append(f"    {h:02d}:00  {100*intensity[h]:5.2f}%  {bar}")
+    anchor_dwell = anchor["duration"]["dwell"]
+    md.append("\n## Modern-era dwell (anchor)\n")
+    md.append(
+        f"Window starts at {anchor_dwell['era_start_ts']}; mean gap "
+        f"{anchor_dwell['mean_s']:.3f}s, p999 {anchor_dwell['gap_p999_s']:.3f}s, "
+        f"max gap {anchor_dwell['max_gap_s']:.3f}s, empty-hour fraction "
+        f"{anchor_dwell['empty_hour_frac']:.6f}, longest empty run "
+        f"{anchor_dwell['max_empty_hour_run_h']}h.\n"
+    )
     md.append("\nintensity peaks at the London-NY overlap, troughs in the "
               "Asian small hours; weekends lighter (see dow_weight).\n")
     with open(os.path.join(HERE, "findings.md"), "w") as f:
@@ -185,6 +209,10 @@ def main():
     print(f"pairs: {pairs}")
     print(f"golden disp anchor={fingerprint['golden_targets']['duration_dispersion_index']['anchor']:.0f} "
           f"ret1 anchor={fingerprint['golden_targets']['return_acf_lag1']['anchor']:.3f}")
+    print("dwell anchor: "
+          f"p999={anchor_dwell['gap_p999_s']:.3f}s "
+          f"empty_hours={anchor_dwell['empty_hour_frac']:.6f} "
+          f"max_empty_run={anchor_dwell['max_empty_hour_run_h']}h")
     print("findings.md written")
     return 0
 
