@@ -9,9 +9,11 @@
 //! Caller contract, in full: the bar interval is nonzero BY TYPE
 //! (`NonZeroU64`), so the division cannot trap; the window-close arithmetic
 //! saturates, so a pathological interval yields a never-closing window rather
-//! than wrapping; and trade timestamps must be NONDECREASING across a fold
-//! sequence for a given accumulator. The last one is a contract, not a runtime
-//! check - see `fold_trade`.
+//! than wrapping; and trade timestamps are EXPECTED to be nondecreasing across a
+//! fold sequence for a given accumulator. The last one is an expectation with a
+//! defined failure mode rather than an enforced invariant - see `fold_trade`,
+//! which documents exactly what an out-of-order trade does and why the adapter
+//! can legitimately feed it one.
 
 use core::num::NonZeroU64;
 
@@ -54,9 +56,21 @@ pub fn window_close_ns(ts: u64, interval: NonZeroU64) -> u64 {
 /// `high.max` / `low.min` / `close =` / `volume +=` / `count += 1`, and rotate
 /// on `ts >= active.close_ts` returning the old window unchanged.
 ///
-/// PRECONDITION: `ts` is nondecreasing across calls for a given `state` (see the
-/// spec's Caller contract). An out-of-order `ts` folds into or rotates the wrong
-/// window; it is a contract violation, not a checked error.
+/// ORDERING: `ts` is EXPECTED to be nondecreasing across calls for a given
+/// `state`, but an out-of-order trade is a defined, non-fatal outcome rather
+/// than a checked error or a panic. A trade whose `ts` is below the active
+/// window's `close_ts` folds into that (later) window even if it belongs to an
+/// earlier one; a trade at or above `close_ts` rotates. Nothing wedges, no bar
+/// is lost, and the distortion is confined to the window that swallowed it.
+///
+/// Do NOT "fix" this by buffering or rejecting. One consumer violates the
+/// expectation ON PURPOSE: the adapter's live path runs trades through the
+/// client `HavocFilter` BEFORE aggregating, so an armed `reorder_prob` hands
+/// this function out-of-order timestamps by design. Bars are fabricated
+/// adapter-side from the trade feed, so a reordered feed producing a reshaped
+/// bar is the honest consequence a real client-side aggregator would also
+/// suffer; buffering here would silently repair a divergence the operator armed.
+/// The CLI's `GeneratedSource` is monotone, so it never exercises this path.
 ///
 /// `#[must_use]`: ignoring the return silently drops a closed bar.
 #[must_use]
@@ -269,5 +283,82 @@ mod tests {
         assert_eq!(active.open, Decimal::new(9_950, 2));
         assert_eq!(active.count, 1);
         assert_eq!(active.close_ts, 200);
+    }
+
+    /// Pins the DEFINED outcome for an out-of-order trade, which the adapter
+    /// feeds this function on purpose whenever client `reorder_prob` is armed
+    /// (trades pass the `HavocFilter` before aggregation). The point is that the
+    /// distortion is bounded and legible: the stale trade is absorbed by the
+    /// window that was open when it arrived, nothing wedges, and no bar is lost,
+    /// so nobody is tempted to "repair" it with buffering and thereby suppress
+    /// an armed divergence.
+    #[test]
+    fn an_out_of_order_trade_folds_into_the_open_window_without_wedging() {
+        let interval = iv(100);
+        let mut state = None;
+
+        // Window [100, 200) opens.
+        assert_eq!(
+            fold_trade(
+                &mut state,
+                Decimal::new(10_000, 2), // 100.00
+                Decimal::new(1, 0),
+                150,
+                interval,
+            ),
+            None
+        );
+
+        // A trade belonging to the PREVIOUS window [0, 100) arrives late. It is
+        // below the active close_ts, so it folds into the open window instead of
+        // reopening the earlier one: its price moves the high, and it is counted.
+        assert_eq!(
+            fold_trade(
+                &mut state,
+                Decimal::new(12_000, 2), // 120.00, an extreme the real window never saw
+                Decimal::new(2, 0),
+                50,
+                interval,
+            ),
+            None
+        );
+
+        let active = state.clone().expect("the window is still open");
+        assert_eq!(
+            active.close_ts, 200,
+            "the stale trade must not rewind the grid"
+        );
+        assert_eq!(
+            active.open,
+            Decimal::new(10_000, 2),
+            "open stays the first trade seen"
+        );
+        assert_eq!(
+            active.high,
+            Decimal::new(12_000, 2),
+            "the stale price reshapes the window"
+        );
+        assert_eq!(active.close, Decimal::new(12_000, 2));
+        assert_eq!(active.volume, Decimal::new(3, 0));
+        assert_eq!(active.count, 2);
+
+        // Aggregation continues normally: the next in-order trade still rotates
+        // on the ORIGINAL grid, so one reordered trade cannot desynchronize the
+        // window boundaries for everything after it.
+        let closed = fold_trade(
+            &mut state,
+            Decimal::new(10_100, 2),
+            Decimal::new(1, 0),
+            250,
+            interval,
+        )
+        .expect("the next in-order trade rotates the window");
+        assert_eq!(closed.close_ts, 200);
+        assert_eq!(closed.count, 2);
+        assert_eq!(
+            state.expect("a fresh window opened").close_ts,
+            300,
+            "the grid is still epoch-anchored after the disturbance"
+        );
     }
 }

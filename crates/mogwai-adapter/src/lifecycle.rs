@@ -326,6 +326,20 @@ pub(crate) async fn run_ws_connection<
             drop(in_tx.send(None));
         });
 
+        // Reattach state is WS commands only - resubscribes on the data socket,
+        // nothing on the exec socket. In particular the execution client does
+        // NOT re-pull `GET /account` here, so an `AccountState` the venue
+        // dropped during a blackout that spanned this reconnect stays missing
+        // from the pushed account row until the next fill-driven snapshot.
+        //
+        // That is deliberate, not an oversight. A real venue leaves you holding
+        // a stale account view after an outage, and mogwai ships a divergence,
+        // `DropNextAccountUpdate`, whose entire purpose is to inject exactly
+        // this staleness - healing it automatically on every reconnect would
+        // quietly undo the fault the operator armed. The path that must not be
+        // fooled is already immune: `generate_position_status_reports` pulls
+        // `GET /account` fresh on every call, so reconciliation reads venue
+        // truth regardless of how stale the pushed row has become.
         for cmd in on_connect() {
             if send_command(&out_tx, &serialize, cmd).is_err() {
                 break;

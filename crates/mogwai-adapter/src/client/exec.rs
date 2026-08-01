@@ -826,6 +826,14 @@ impl ExecutionClient for MogwaiExecutionClient {
         // pass through, by design: the snapshot is a point-in-time query, not a
         // tape frame, so a DropNextAccountUpdate divergence does not suppress it.
         //
+        // Scope: this runs on CONNECT (and so on reset/reconnect driven by
+        // nautilus, which calls connect again), NOT on the transport's own
+        // internal reconnect - the lifecycle reattach replays WS commands only.
+        // A pushed account update lost to a blackout spanning an internal
+        // reconnect therefore stays lost until the next fill-driven snapshot,
+        // deliberately; see the reattach comment in lifecycle.rs for why
+        // auto-healing it would undo an armed divergence.
+        //
         // Failure policy: a 404 means a server predating GET /account; warn and
         // fall back to the legacy reactive path (the account seeds off the first
         // fill, as before this fix). Any OTHER failure against a server that does

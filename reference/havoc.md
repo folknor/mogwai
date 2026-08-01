@@ -251,6 +251,23 @@ head-of-line-block the ones behind it.
   snapshot, so the account drifts out of sync with the fills the client did see.
   Untargeted: applies to the next submit's snapshot.
 
+  The drift is DURABLE across a transport reconnect, deliberately. The adapter
+  pulls `GET /account` when the execution client connects (and again on any
+  nautilus-driven reset or reconnect, which calls `connect` afresh), but the
+  transport's OWN internal reconnect replays websocket subscriptions only and
+  does not re-pull the account. A dropped snapshot therefore stays missing from
+  the pushed account row until the next fill produces one, rather than being
+  quietly healed by a socket bounce - which is the point, since auto-healing on
+  reconnect would undo the divergence the operator armed. It also matches a real
+  venue, which does not hand you a fresh account snapshot just because your
+  socket came back.
+
+  Reconciliation is NOT fooled by this: `generate_position_status_reports` pulls
+  `GET /account` fresh on every call and reads venue truth regardless of how
+  stale the pushed row is. The staleness this divergence creates lives in the
+  consumer's account/balance view between reconciliations, which is exactly the
+  surface it exists to perturb.
+
 The engine never mutates wall-clock state and is deterministic; the server
 stamps the real timestamps and owns the sockets. An amend (`ModifyOrder`)
 deliberately never touches the armed queue, so an interleaved modify cannot
