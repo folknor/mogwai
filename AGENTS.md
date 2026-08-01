@@ -94,28 +94,16 @@ two are kept in sync, so what you read in `research/` is what compiles.
 - Never read or write from `/tmp`. All data lives in the project.
 - Never run raw `cargo`, `curl`, `pkill`. Use `brokkr`.
 
-### git commit rules
-
-- Always run `brokkr fmt` before a commit.
-- Never commit markdown changes alone. Bundle them with upcoming code commits.
-- When committing other changes: always tag along markdown files if dirty.
-- Write substantive engineering-focused commit messages.
-- Hard-wrap the message body at ~72 columns, matching the existing history; the
-  subject stays one concise line. The wall-of-text we keep producing comes from
-  `git commit -m "<whole paragraph>"`: a single `-m` is recorded as ONE unwrapped
-  line. Embed real line breaks so every body line wraps at ~72 (one `-m` per
-  paragraph is fine only when each paragraph already carries its own newlines).
-  Newlines are not metacharacters, so this composes with the no-metacharacters-in
-  `-m` rule (CLAUDE.md Bash rules) - wrap with literal newlines while still
-  avoiding braces, brackets, parens, angle brackets and the hash sign.
-- Has `Cargo.lock` changed? Commit it.
-- Never `git push` unless the user explicitly asks. Stop after the commit.
-
 ## Commands
 
 Use `brokkr` (not `cargo`) for check/test. By default output is filtered to changed files and capped at 20 diagnostics per phase.
 
-- `brokkr check` - gremlins + clippy + all tests (changed-files scope)
+- `brokkr check` - gremlins + clippy + all tests (changed-files scope). Does NOT
+  run the four socket-backed adapter test binaries (`adapter_smoke`,
+  `data_client_transport`, `havoc`, `reconciliation`): they are `#[ignore]`d
+  because they bind real loopback listeners, so an environment without sockets
+  would fail them for reasons unrelated to the code. Fast and sandbox-safe, and
+  blind to roughly 30 tests.
 - `brokkr check --all` - show every diagnostic, no cap, no scope filter
 - `brokkr check -p <crate>` - scope to one package (e.g. `-p mogwai-engine`). You generally do not want to run this; a single `brokkr check` is faster than 2-3 `-p` runs, and brokkr intelligently filters which warnings and errors to show you
 - `brokkr check -- --test <file>` - forward args to `cargo test` (args after the second `--` go to the test binary)

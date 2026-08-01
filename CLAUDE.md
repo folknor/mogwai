@@ -73,3 +73,26 @@ Do not use your Memory functionality. Do not read, write, or update memories. Do
 - Never run `git` with `-C <path>`
 - One Bash() invocation === one command
 - Keep `git commit -m` messages free of zsh metacharacters - braces `{}`, brackets `[]`, parens `()`, angle brackets `<>`, `#`. They trip the permission matcher and block the commit. Spell lists out (`syntax, vm, data and runner`, not `{syntax,vm,data,runner}`), write `5.1 per bar` not `5.1/bar`, name attributes in prose not `#[attr]`.
+
+### git commit rules
+
+These live here rather than in AGENTS.md because only you commit - codex agents
+never do, so the rules were dead weight in the file both of you read.
+
+- Always run `brokkr fmt` before a commit.
+- Run `brokkr check --gate`, not plain `brokkr check`, before a commit that
+  touches `mogwai-adapter`. The plain check cannot see the four socket-backed
+  adapter test binaries; two regressions have shipped red through that gap.
+- Never commit markdown changes alone. Bundle them with upcoming code commits.
+- When committing other changes: always tag along markdown files if dirty.
+- Write substantive engineering-focused commit messages.
+- Hard-wrap the message body at ~72 columns, matching the existing history; the
+  subject stays one concise line. The wall-of-text we keep producing comes from
+  `git commit -m "<whole paragraph>"`: a single `-m` is recorded as ONE unwrapped
+  line. Embed real line breaks so every body line wraps at ~72 (one `-m` per
+  paragraph is fine only when each paragraph already carries its own newlines).
+  Newlines are not metacharacters, so this composes with the Bash rules above -
+  wrap with literal newlines while still avoiding braces, brackets, parens,
+  angle brackets and the hash sign.
+- Has `Cargo.lock` changed? Commit it.
+- Never `git push` unless the user explicitly asks. Stop after the commit.

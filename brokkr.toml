@@ -1,1 +1,49 @@
 project = "mogwai"
+
+# One sweep, the whole workspace. No `features` list because no crate in this
+# workspace declares any cargo feature, so this is exactly the legacy
+# `--all-features` default it replaces - declared explicitly only so the
+# profiles below have an entry to reference.
+[[check]]
+name = "workspace"
+
+[test]
+gate_profile = "gate"
+
+# `brokkr check --gate` - the complete answer, and the only invocation that
+# runs the adapter's socket-backed integration tests.
+#
+# Those four binaries (`adapter_smoke`, `data_client_transport`, `havoc`,
+# `reconciliation`) are `#[ignore]`d because they bind real loopback listeners,
+# which not every environment allows - a sandbox without sockets fails them for
+# reasons that have nothing to do with the code. So plain `brokkr check` stays
+# as it was: fast, sandbox-safe, and blind to them.
+#
+# That blindness has cost real bugs. The `account_id` field the multi-account
+# landing added to `AccountState`, and the websocket URL that landing broke by
+# appending the path after the query string, both shipped RED and stayed red
+# across three commits, because the only tests that exercised them never ran.
+# Each was found by hand. `include_ignored` here is what makes them a gate
+# rather than a thing someone remembers to run.
+#
+# `certifies = "complete"` also turns on the coverage audit: any (build shape,
+# test) pair no lane runs must be justified below or `#[ignore]`d at the
+# source, so a test quietly dropping out of the run is an error rather than a
+# silence.
+[test.profiles.gate]
+description = "Everything, including the socket-backed adapter tests"
+sweeps = ["workspace"]
+include_ignored = true
+certifies = "complete"
+
+# Doctests are off (the `[test] doctests` default) to match CI, which runs
+# under cargo-nextest and never executes them; running them here would gate on
+# a signal CI cannot see. The complete profile's coverage audit refuses to
+# certify without that choice declared - it is invisible to the enumeration, so
+# an undeclared `doctests = false` would be an unaudited hole rather than a
+# decision. This workspace has no doctests today, so the entry justifies zero
+# pairs; it is the declaration that is load-bearing, not the count.
+[[quarantine]]
+category = "doctests"
+issue = "n/a"
+reason = "CI runs cargo-nextest, which never executes doctests; gating on them here would test a signal CI cannot see"

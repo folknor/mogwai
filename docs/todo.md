@@ -126,17 +126,6 @@ Or both. There are no exceptions.
   better trait default protects the next adapter author, not this repo): give
   the Rust trait default the same composing behavior as the Python base.
 
-- BUILD: give the ignored adapter transport tests a reason to run. All four
-  adapter test binaries are `#[ignore]`d because they bind real loopback
-  sockets, so `brokkr check` never executes them - which means the
-  reconciliation guard above, the whole point of which is catching a silent
-  degrade, is itself silent. This is not hypothetical: the account-id field and
-  the websocket-URL path bug both shipped and sat red across three commits
-  precisely because the workspace gate cannot see these binaries, and each was
-  found by hand rather than by a gate. Wanted: a socket-capable sweep that runs
-  them (a `brokkr` profile, a CI job, or a deliberate `--include-ignored` step in
-  the release ritual), so a guard nobody runs stops counting as a guard.
-
 - BUILD: a positive dead-feed watchdog (formerly sweep item AD12). No liveness
   timer, tick counter, or "0 ticks in N s" log exists on either transport. The
   negative diagnostics are all in place - the server emits a `ProtocolError` on
