@@ -1609,8 +1609,9 @@ fn is_calendar_anchored(aggregation: BarAggregation) -> bool {
 }
 
 // The `expect` below is on a genuine invariant (every admitted bar aggregation
-// has a positive interval - see the Caller contract in
-// docs/shared-bar-aggregator-spec.md), not a fallible path this function's
+// has a positive interval; tick, volume and calendar-anchored aggregations are
+// refused upstream, which is what `mogwai_data::bars` takes a `NonZeroU64`
+// interval to encode), not a fallible path this function's
 // `Option<Bar>` return is meant to surface, so `clippy::unwrap_in_result`'s
 // default suggestion (propagate it as the returned `None`) does not apply
 // here.

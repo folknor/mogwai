@@ -901,6 +901,62 @@ mod tests {
         assert!(toml::from_str::<Config>("gap_cap_ms = 5\n").is_ok());
     }
 
+    /// A minimal valid `[[instrument]]` table, mirroring reference/config.md's
+    /// worked example. `{extra}` is spliced in so one template serves both the
+    /// clean parse and the typo case.
+    fn instrument_toml(extra: &str) -> String {
+        format!(
+            "[[instrument]]\n\
+             symbol = \"EURUSD\"\n\
+             base = \"EUR\"\n\
+             quote = \"USD\"\n\
+             price_precision = 4\n\
+             size_precision = 8\n\
+             price_increment = \"0.0001\"\n\
+             size_increment = \"0.00000001\"\n\
+             {extra}\n\
+             [instrument.generator]\n\
+             modal_tick = \"0.0001\"\n\
+             price_decimals = 4\n\
+             mean_duration_s = 7.194349711185499\n\
+             size_round_frac = 0.20856767610054022\n\
+             start_price = \"1.1000\"\n\
+             typical_size = \"100000.0\"\n\
+             vol_scalar = 0.00000005\n\
+             \n\
+             [instrument.session]\n\
+             intensity_hour = [{ones24}]\n\
+             vol_hour = [{ones24}]\n\
+             dow_weight = [{ones7}]\n",
+            extra = extra,
+            ones24 = ["1.0"; 24].join(", "),
+            ones7 = ["1.0"; 7].join(", "),
+        )
+    }
+
+    #[test]
+    fn config_rejects_unknown_instrument_key() {
+        // The instrument half of S20. The def used to arrive via
+        // `#[serde(flatten)]`, which serde cannot combine with
+        // `deny_unknown_fields`, so every unknown key in the table was
+        // swallowed: `price_precison = 4` silently ran the venue at the default
+        // precision. The fields are spelled out on `ConfiguredInstrument` now,
+        // so the typo is a hard error like any top-level knob.
+        let clean = instrument_toml("");
+        assert!(
+            toml::from_str::<Config>(&clean).is_ok(),
+            "the worked example from reference/config.md must still parse"
+        );
+
+        let err = toml::from_str::<Config>(&instrument_toml("price_precison = 4"))
+            .expect_err("an unknown instrument key is rejected")
+            .to_string();
+        assert!(
+            err.contains("price_precison") || err.contains("unknown"),
+            "the error names the bad key: {err}"
+        );
+    }
+
     #[test]
     fn balances_default_funded_and_empty_table_unfunds() {
         // An absent [balances] table keeps the funded built-in default (the
@@ -1152,7 +1208,7 @@ mod tests {
 
     /// MEASUREMENT: does an armed `DelayAcks` stop the venue READING?
     ///
-    /// `docs/protocol-problem.md` problem 1. The exec delay pump USED to be a
+    /// The exec delay pump USED to be a
     /// bounded channel (1024) whose producers - order-entry events and
     /// `ProtocolError` diagnostics alike - `.await`ed their send from inside the
     /// socket read loop. If the pump filled, those sends blocked and the session
@@ -1173,7 +1229,7 @@ mod tests {
     /// processed while execution frames sat delayed. An order ack would prove
     /// nothing: it is delayed by design.
     ///
-    /// Fill condition, per the doc: the pump holds every event that arrived
+    /// Fill condition: the pump holds every event that arrived
     /// within the last `ms`, so saturation needs more than ~1025 events inside
     /// one window (1024 queued plus the one the pump task is sleeping on). Each
     /// submit yields three execution events - OrderAccepted, OrderFilled,
@@ -1189,8 +1245,8 @@ mod tests {
             "an armed DelayAcks must delay OUTPUT only: the venue has to keep reading \
              client frames while execution events sit held, so a Subscribe sent behind a \
              saturated held lane must still produce market data. No trade arrived, so \
-             output delay stopped input processing - see docs/protocol-problem.md \
-             problem 1. Its control, saturation_witness_control_is_sound, proves the \
+             output delay stopped input processing. \
+             Its control, saturation_witness_control_is_sound, proves the \
              witness itself works with no delay armed"
         );
     }

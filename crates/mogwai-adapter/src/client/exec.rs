@@ -1706,6 +1706,14 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 return;
             };
             let Some(record) = with_order_record(&ctx.state, client_order_id, |record| {
+                // Unconditional, unlike the terminal-state guards on the other
+                // arms, and deliberately so: the engine emits `Rejected` as an
+                // order's SOLE lifecycle event, so no reordered pair can arrive
+                // to regress a later terminal state. The one reachable overwrite
+                // is the HTTP carrier synthesizing a reject for an order the
+                // venue actually processed, which is the known unrecoverable
+                // desync (the mirror cannot heal it without a venue-truth query
+                // surface) and not something a guard here would fix.
                 record.status = OrderStatus::Rejected;
                 record.ts_last = UnixNanos::from(ts_event);
                 record.clone()

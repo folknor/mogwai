@@ -250,6 +250,13 @@ impl GeneratedSource {
             // the gate and the validated thin_factor range it is far out of
             // reach of realistic draws, so it never alters an open-market gap;
             // it only guarantees the cast can never saturate to u64::MAX.
+            //
+            // Note the asymmetry with the closed-window path below, which
+            // integrates the session envelope hour by hour: here an armed
+            // `LiquidityDrought` stretch stays a ONCE-SAMPLED multiplier on the
+            // whole gap. That is deliberate - thin tape is a venue-wide
+            // divergence the operator armed, not a session curve the generator
+            // is meant to trace - and it is bounded by the cap above.
             let duration_s =
                 ((duration_s / arr_mult) * self.regime.arrival_thin).max(0.000_000_001);
             return (duration_s * 1_000_000_000.0)

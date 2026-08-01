@@ -2,10 +2,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Shared trade-to-OHLCV time-bar aggregation core. Nautilus-free; lifted out
-//! of `mogwai-adapter` so a second consumer (the future `mogwai gen` CLI) folds
-//! bars through the SAME implementation instead of a hand-rolled copy. See
-//! `docs/shared-bar-aggregator-spec.md` for the caller contract this module
-//! implements.
+//! of `mogwai-adapter` so its second consumer (the `mogwai gen` CLI in
+//! `mogwai-server`) folds bars through the SAME implementation instead of a
+//! hand-rolled copy.
+//!
+//! Caller contract, in full: the bar interval is nonzero BY TYPE
+//! (`NonZeroU64`), so the division cannot trap; the window-close arithmetic
+//! saturates, so a pathological interval yields a never-closing window rather
+//! than wrapping; and trade timestamps must be NONDECREASING across a fold
+//! sequence for a given accumulator. The last one is a contract, not a runtime
+//! check - see `fold_trade`.
 
 use core::num::NonZeroU64;
 

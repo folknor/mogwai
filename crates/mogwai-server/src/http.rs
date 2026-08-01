@@ -291,10 +291,21 @@ pub(crate) struct AppState {
     /// data origin and the advertised clock cannot diverge.
     pub(crate) data_origin_ns: u64,
     /// Execution-event delay in milliseconds, shared by all live writers.
+    ///
+    /// These three temporal-divergence atomics are all read and written
+    /// `Relaxed`, deliberately. They are INDEPENDENT locations with no
+    /// cross-location invariant between them, and the arming request arrives on
+    /// a different connection from the order it perturbs, so `Release`/`Acquire`
+    /// would establish a happens-before edge nothing on either side consumes.
+    /// The only ordering that matters - an arm landing before or after a given
+    /// order - is decided by the socket the arm arrives on, not by the memory
+    /// ordering here.
     pub(crate) delay_ms: Arc<AtomicU64>,
     /// Sim-time unix-ns instant before which writers drop all outbound frames.
+    /// `Relaxed` for the reason on `delay_ms`.
     pub(crate) dark_until_ns: Arc<AtomicU64>,
     /// Sim-time unix-ns instant before which writers drop market-data frames.
+    /// `Relaxed` for the reason on `delay_ms`.
     pub(crate) stall_until_ns: Arc<AtomicU64>,
     /// Global permit pool rationing concurrently-live per-symbol replay threads
     /// across every websocket connection (S22a). Each spawned replay holds one

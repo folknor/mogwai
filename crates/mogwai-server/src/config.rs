@@ -27,10 +27,8 @@ use crate::source;
 // promise literally true for top-level knobs: a typo'd key (`gap_cap_m = 0`)
 // used to fall through to the field default silently, so the operator ran with a
 // value they never set (S20). `default` (missing keys keep built-in defaults) and
-// `deny` (unknown keys are rejected) are orthogonal and compose. NOTE: this does
-// not reach the flattened `InstrumentDef` inside a `[[instrument]]` table - serde
-// cannot combine `deny_unknown_fields` with `flatten` - so a typo'd instrument
-// field is still tolerated; only the top-level run knobs are guarded here.
+// `deny` (unknown keys are rejected) are orthogonal and compose. Each
+// `[[instrument]]` table is guarded the same way, by `ConfiguredInstrument`.
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Config {
     /// Simulated start instant. `0` keeps the identity wall-time clock.
@@ -299,12 +297,55 @@ pub(crate) fn build_replay_permits(cfg: &Config) -> Arc<Semaphore> {
     Arc::new(Semaphore::new(permits))
 }
 
+/// One `[[instrument]]` table: an `InstrumentDef` spelled out inline, plus its
+/// generator and session profiles.
+///
+/// The def's seven fields are RESTATED here rather than pulled in with
+/// `#[serde(flatten)]` because serde cannot combine `flatten` with
+/// `deny_unknown_fields` - under the flattened form every unknown key in the
+/// table was swallowed, so a typo'd `price_precison` silently ran the venue at
+/// the field's default precision instead of failing the boot (the instrument
+/// half of S20; the top-level knobs on `Config` were already guarded). Spelling
+/// the fields out is what buys the `deny` below.
+///
+/// Drift between this list and `InstrumentDef` is compile-caught, not a
+/// maintenance hazard: `def` builds the struct literal, so a field added
+/// upstream fails to build here until it is mirrored.
+///
+/// NOTE the guard stops at this table's own keys. `generator` and `session`
+/// deserialize into `GeneratorScalars` / `SessionProfile`, which are shared with
+/// the committed fingerprint JSON parse and so are deliberately NOT denied here,
+/// meaning a typo inside those sub-tables is still tolerated. Their VALUES are
+/// validated at load (`build_instrument_profiles` runs `scalars.validate` and
+/// `session.validate`), so the exposure is a silently defaulted field, not a
+/// nonsense one.
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ConfiguredInstrument {
-    #[serde(flatten)]
-    pub(crate) def: InstrumentDef,
+    pub(crate) symbol: mogwai_protocol::Symbol,
+    pub(crate) base: String,
+    pub(crate) quote: String,
+    pub(crate) price_precision: u8,
+    pub(crate) size_precision: u8,
+    pub(crate) price_increment: Decimal,
+    pub(crate) size_increment: Decimal,
     pub(crate) generator: mogwai_data::GeneratorScalars,
     pub(crate) session: mogwai_data::SessionProfile,
+}
+
+impl ConfiguredInstrument {
+    /// The wire/engine-facing definition this table describes.
+    pub(crate) fn def(&self) -> InstrumentDef {
+        InstrumentDef {
+            symbol: self.symbol.clone(),
+            base: self.base.clone(),
+            quote: self.quote.clone(),
+            price_precision: self.price_precision,
+            size_precision: self.size_precision,
+            price_increment: self.price_increment,
+            size_increment: self.size_increment,
+        }
+    }
 }
 
 pub(crate) fn build_instrument_profiles(
@@ -319,8 +360,8 @@ pub(crate) fn build_instrument_profiles(
     let mut profiles = Vec::with_capacity(cfg.instruments.len());
 
     for configured in &cfg.instruments {
-        let def = &configured.def;
-        validate_instrument_def(def)?;
+        let def = configured.def();
+        validate_instrument_def(&def)?;
 
         if !seen.insert(def.symbol.clone()) {
             anyhow::bail!("duplicate instrument symbol {}", def.symbol);
@@ -353,7 +394,7 @@ pub(crate) fn build_instrument_profiles(
             .map_err(|err| anyhow::anyhow!(session_error_message(&def.symbol, err)))?;
 
         profiles.push(source::InstrumentProfile::new(
-            def.clone(),
+            def,
             scalars,
             configured.session.clone(),
         ));

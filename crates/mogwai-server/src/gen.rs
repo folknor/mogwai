@@ -5,12 +5,13 @@
 //! no adapter) and writes its output as CSV, either raw trades or aggregated
 //! OHLCV bars, so the generated tape can be charted and inspected. Reuses the
 //! server's own generation plumbing (`InstrumentProfiles`, `seed_for`,
-//! `fingerprint()`, `GeneratedSource`) and the Spec-1 shared bar core
+//! `fingerprint()`, `GeneratedSource`) and the shared bar-aggregation core
 //! (`mogwai_data::{BarAcc, fold_trade}`) so this CLI never diverges from the
-//! walk the running server would produce at the same anchor. See
-//! `docs/gen-cli-spec.md` for the design this module implements, in particular
-//! the empty-window-fill rule that renders D16 trade deserts as flat
-//! zero-volume runs on a chart.
+//! walk the running server would produce at the same anchor.
+//!
+//! The load-bearing piece is the empty-window-fill rule in `write_bars`, which
+//! renders multi-hour trade deserts as flat zero-volume runs on a chart -
+//! making them visible is why this command exists.
 
 use std::io::Write;
 use std::num::NonZeroU64;

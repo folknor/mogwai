@@ -357,6 +357,12 @@ fn same_sign(a: Decimal, b: Decimal) -> bool {
 // numerically wrong, and clipping silently would corrupt the accounting
 // invisibly, but a loudly-wrong fake venue beats one that panics
 // mid-scenario.
+//
+// The wrongness is STICKY, and the warning must not be read as a transient:
+// once a value has clipped, a later opposite-direction fill moves off the
+// clipped base rather than back toward the true one, so the ledger stays wrong
+// for the rest of the run. The saturation is a loud failure mode, not a
+// self-healing one.
 
 fn add_clamped(a: Decimal, b: Decimal, clipped: &mut bool) -> Decimal {
     a.checked_add(b).unwrap_or_else(|| {
