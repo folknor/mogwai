@@ -560,6 +560,7 @@ Gates, exact commands:
     brokkr test -p mogwai-data default_symbol_tape_dwell_is_bounded
     brokkr test -p mogwai-data liquidity_drought
     brokkr test -p mogwai-data session_modulation_reproduces_curves
+    brokkr test -p mogwai-server subscribe_beyond_sim_now_clamps_to_a_live_stream
 
 (`liquidity_drought` substring-matches both the existing stretch test and the
 new dying-symbol test; `session_modulation_reproduces_curves` is the exact
@@ -567,6 +568,21 @@ name of the `#[ignore]`d 5M-tick session test - an earlier draft wrote
 `session_curves`, which matches ZERO tests and would have been a gate that is
 green because it ran nothing; the envelope interacts with realized gaps, so
 it runs explicitly here.)
+
+`subscribe_beyond_sim_now_clamps_to_a_live_stream` is RED on an untouched
+tree before this landing, for the reason the blast-radius survey records: it
+anchors on the real wall clock, and the ambient desert put the first live
+trade past its 1 h bound. It is gated here because the survey claims the L2
+dwell bound is what makes it deterministic again, and an unverified claim
+about the landing's own central effect is exactly what a gate is for. It is
+also the ONLY check in the tree that judges the SERVED tape, at the
+production FNV seed, against the real clock rather than a sampled statistic
+- so it is the closest thing to end-to-end evidence this item can produce.
+Read it together with `default_symbol_tape_dwell_is_bounded`: because the
+test is wall-time-dependent it could in principle go green by the clock
+wandering clear of a desert, so green here counts as landing evidence only
+while the dwell assertions are also green. Still red after the retune means
+the item failed, not that the clock was unlucky.
 
 Advisory, not a gate: `python3 analysis/plot_tape.py --gen --type bars
 --interval 1h --length 4d --open` - the chart that surfaced the decision
