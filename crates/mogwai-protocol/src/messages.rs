@@ -14,6 +14,55 @@ use crate::{ClientOrderId, Symbol, VenueOrderId};
 /// would make that bound unprovable (and let one 8 MiB order id exhaust a
 /// connection's whole execution budget).
 pub const MAX_CLIENT_ID_LEN: usize = 64;
+/// Maximum byte length of the account identity carried by the transport.
+pub const MAX_ACCOUNT_ID_LEN: usize = 64;
+
+/// A venue account identity. Kept deliberately small and log-safe because it
+/// is accepted at every stateful transport boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AccountId(pub String);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountIdError {
+    Empty,
+    TooLong,
+    IllegalChar(char),
+}
+
+impl std::fmt::Display for AccountIdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => f.write_str("must not be empty"),
+            Self::TooLong => write!(f, "exceeds MAX_ACCOUNT_ID_LEN ({MAX_ACCOUNT_ID_LEN})"),
+            Self::IllegalChar(ch) => write!(f, "contains illegal character {ch:?}"),
+        }
+    }
+}
+
+impl std::error::Error for AccountIdError {}
+
+impl AccountId {
+    pub fn parse(raw: &str) -> Result<Self, AccountIdError> {
+        if raw.is_empty() {
+            return Err(AccountIdError::Empty);
+        }
+        if raw.len() > MAX_ACCOUNT_ID_LEN {
+            return Err(AccountIdError::TooLong);
+        }
+        for ch in raw.chars() {
+            if !ch.is_ascii_alphanumeric() && !matches!(ch, '.' | '_' | ':' | '-') {
+                return Err(AccountIdError::IllegalChar(ch));
+            }
+        }
+        Ok(Self(raw.to_owned()))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 /// Maximum byte length of a symbol on the wire, same reasoning as
 /// `MAX_CLIENT_ID_LEN`.
@@ -764,6 +813,7 @@ pub struct OrderFilled {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountState {
+    pub account_id: AccountId,
     pub balances: Vec<Balance>,
     pub positions: Vec<Position>,
     pub ts_event: u64,
@@ -808,6 +858,29 @@ pub struct QuoteTick {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_id_round_trips_as_bare_string() {
+        let id = AccountId::parse("ACC-1").expect("valid account id");
+        let json = serde_json::to_string(&id).expect("serialize account id");
+        assert_eq!(json, r#""ACC-1""#);
+        assert_eq!(serde_json::from_str::<AccountId>(&json).unwrap(), id);
+    }
+
+    #[test]
+    fn account_id_parse_rejects_empty_overlong_and_illegal() {
+        for raw in ["", &"A".repeat(MAX_ACCOUNT_ID_LEN + 1), "a/b", "a b"] {
+            assert!(AccountId::parse(raw).is_err(), "{raw:?} must be refused");
+        }
+        assert!(AccountId::parse("WYRD-042:BTCUSDT").is_ok());
+    }
+
+    #[test]
+    fn account_state_carries_its_account_id() {
+        let json = r#"{"account_id":"ACC-42","balances":[],"positions":[],"ts_event":7}"#;
+        let state: AccountState = serde_json::from_str(json).expect("decode snapshot");
+        assert_eq!(state.account_id.as_str(), "ACC-42");
+    }
 
     #[test]
     fn subscribe_round_trips_per_entry_generations() {
@@ -887,6 +960,7 @@ mod tests {
     #[test]
     fn account_state_with_positions_round_trips() {
         let state = AccountState {
+            account_id: AccountId::parse("ACC-1").unwrap(),
             balances: vec![Balance {
                 currency: "USDT".into(),
                 total: Decimal::from(-300),
@@ -923,6 +997,7 @@ mod tests {
         // the account snapshot are `Exec`.
         let exec = [
             ServerMessage::AccountState(AccountState {
+                account_id: AccountId::parse("ACC-1").unwrap(),
                 balances: Vec::new(),
                 positions: Vec::new(),
                 ts_event: 1,

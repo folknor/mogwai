@@ -119,7 +119,10 @@ impl MogwaiDataClient {
     pub fn new(client_id: ClientId, config: MogwaiDataClientConfig) -> anyhow::Result<Self> {
         config.validate()?;
         let http = HttpClient::new(
-            HashMap::new(),
+            HashMap::from([(
+                mogwai_protocol::ACCOUNT_HEADER.to_string(),
+                config.account_id.to_string(),
+            )]),
             Vec::new(),
             Vec::new(),
             None,

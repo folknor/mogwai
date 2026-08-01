@@ -53,6 +53,8 @@ import urllib.parse
 import urllib.request
 
 HOST, PORT = "127.0.0.1", 8787
+ACCOUNT_HEADER = "x-mogwai-account"
+SMOKE_ACCOUNT = "SMOKE-001"
 # How far behind sim-now the windowed-subscribe / history probes anchor their
 # start. The server now derives the tape origin from the clock at boot
 # (data_origin = sim_now - backfill_horizon, 24h by default) and refuses a
@@ -76,11 +78,15 @@ ACCEL_CLOCK_SLACK_WALL_NS = 50_000_000
 ACCEL_ANCHOR_TIMEOUT_S = 120.0
 
 
-def post_divergence(payload: dict) -> int:
+def account_headers(account_id: str) -> dict:
+    return {"content-type": "application/json", ACCOUNT_HEADER: account_id}
+
+
+def post_divergence(payload: dict, account_id: str = SMOKE_ACCOUNT) -> int:
     req = urllib.request.Request(
         f"http://{HOST}:{PORT}/control/divergence",
         data=json.dumps(payload).encode(),
-        headers={"content-type": "application/json"},
+        headers=account_headers(account_id),
         method="POST",
     )
     try:
@@ -90,11 +96,11 @@ def post_divergence(payload: dict) -> int:
         return e.code
 
 
-def post_order(payload: dict) -> list:
+def post_order(payload: dict, account_id: str = SMOKE_ACCOUNT) -> list:
     req = urllib.request.Request(
         f"http://{HOST}:{PORT}/orders",
         data=json.dumps(payload).encode(),
-        headers={"content-type": "application/json"},
+        headers=account_headers(account_id),
         method="POST",
     )
     with urllib.request.urlopen(req) as r:
@@ -120,8 +126,29 @@ def fetch_clock() -> dict:
         return json.loads(r.read().decode())
 
 
-def fetch_account() -> dict:
-    with urllib.request.urlopen(f"http://{HOST}:{PORT}/account") as r:
+def list_accounts() -> list:
+    with urllib.request.urlopen(f"http://{HOST}:{PORT}/accounts") as r:
+        assert r.status == 200, r.status
+        return json.loads(r.read().decode())
+
+
+def delete_account(account_id: str) -> int:
+    req = urllib.request.Request(
+        f"http://{HOST}:{PORT}/accounts/{urllib.parse.quote(account_id)}",
+        method="DELETE",
+    )
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
+def fetch_account(account_id: str = SMOKE_ACCOUNT) -> dict:
+    req = urllib.request.Request(
+        f"http://{HOST}:{PORT}/account", headers={ACCOUNT_HEADER: account_id}
+    )
+    with urllib.request.urlopen(req) as r:
         assert r.status == 200, r.status
         return json.loads(r.read().decode())
 
@@ -211,17 +238,17 @@ def sim_now(clock: dict, wall_ns: int | None = None) -> int:
 
 
 class WsClient:
-    def __init__(self, timeout: float | None = None) -> None:
+    def __init__(self, timeout: float | None = None, account_id: str = SMOKE_ACCOUNT) -> None:
         self.s = socket.create_connection((HOST, PORT))
         if timeout is not None:
             self.s.settimeout(timeout)
-        self._handshake()
+        self._handshake(account_id)
         self.generation = 0
 
-    def _handshake(self) -> None:
+    def _handshake(self, account_id: str) -> None:
         key = "x3JJHMbDL1EzLkh9GBhXDw=="  # static key is fine for a smoke test
         self.s.sendall(
-            f"GET /ws HTTP/1.1\r\nHost: {HOST}:{PORT}\r\nUpgrade: websocket\r\n"
+            f"GET /ws?account={urllib.parse.quote(account_id)} HTTP/1.1\r\nHost: {HOST}:{PORT}\r\nUpgrade: websocket\r\n"
             f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\n"
             f"Sec-WebSocket-Version: 13\r\n\r\n".encode()
         )
@@ -687,6 +714,46 @@ def main_default() -> None:
     assert recovered["symbol"] == "BTCUSDT", recovered
     assert recovered["ts_event"] >= window_start_ts, recovered
     print("PASS: StallData drops market data while execution frames flow")
+
+    # The live isolation proof: distinct websocket account identities share a
+    # venue but never an execution ledger or execution stream.
+    second_account = "SMOKE-002"
+    second_before = fetch_account(second_account)
+    first_ws = WsClient(timeout=1.0, account_id=SMOKE_ACCOUNT)
+    second_ws = WsClient(timeout=0.2, account_id=second_account)
+    first_ws.send(submit_order("MULTI-ACCOUNT-1"))
+    first_events = [first_ws.read() for _ in range(3)]
+    first_ws.close()
+    try:
+        second_event = second_ws.read()
+    except socket.timeout:
+        second_event = None
+    second_ws.close()
+    second_after = fetch_account(second_account)
+    assert [event["type"] for event in first_events] == [
+        "OrderAccepted", "OrderFilled", "AccountState"
+    ], first_events
+    assert second_after["account_id"] == second_account, second_after
+    assert second_after["balances"] == second_before["balances"], (second_before, second_after)
+    assert second_after["positions"] == second_before["positions"], (second_before, second_after)
+    assert second_event is None or second_event["type"] not in {
+        "OrderAccepted", "OrderFilled", "AccountState"
+    }, second_event
+    print("PASS: two live accounts keep execution state and streams isolated")
+
+    # The account control plane, over the live socket rather than a handler
+    # test: a listing names both accounts, teardown reclaims the ledger, and a
+    # request under the destroyed id auto-creates a FRESH account rather than
+    # resurrecting the old one.
+    listed = {row["account_id"] for row in list_accounts()}
+    assert {SMOKE_ACCOUNT, second_account} <= listed, listed
+    assert delete_account(second_account) == 200
+    assert second_account not in {row["account_id"] for row in list_accounts()}
+    assert delete_account(second_account) == 404
+    reborn = fetch_account(second_account)
+    assert reborn["positions"] == [], reborn
+    assert delete_account(second_account) == 200
+    print("PASS: account listing, teardown and re-creation behave over the live socket")
 
 
 def main_heartbeat() -> None:

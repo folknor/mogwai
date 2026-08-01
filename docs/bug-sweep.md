@@ -18,10 +18,6 @@ Each item carries a VERDICT from a re-investigation against the current tree
 (and against `research/nautilus_trader`, which is up to date), so what follows
 is what the code says today rather than what the original sweep reported.
 
-One entry, X11, is no longer a finding at all: the re-investigation turned it
-into a REQUIREMENT (multi-account support). It stays here until its spec exists
-so it is not lost, but it belongs to feature work rather than to this sweep.
-
 ---
 
 ## D16. The seeded tape realizes multi-hour trade deserts, so the live region can be near-silent for most of a day
@@ -32,8 +28,10 @@ shape 0.6 innovations. Confidence high on mechanism (measured,
 anchor-independent).
 
 SEVERITY, RAISED: this was filed as a live-feed FIDELITY concern. Under the
-forward-validation gate model (see X11) it is closer to PIPELINE-BLOCKING. The
-gate exists to validate what a backtest cannot - resting-order exit behavior -
+forward-validation gate model (the venue now serves the multi-account fleet
+described in `reference/architecture.md`'s account registry section) it is
+closer to PIPELINE-BLOCKING. The gate exists to validate what a backtest
+cannot - resting-order exit behavior -
 and a strategy whose validation window lands in a multi-hour desert gets no
 resting-order fills at all, so the very property being measured is never
 exercised. It fails SILENTLY: the run completes and reports nothing wrong. At
@@ -373,139 +371,6 @@ Two exposures remain:
   less: the report paths now ARE the venue-truth query surface, so
   they carry real reconciliation weight rather than echoing a mirror, and a
   silent degrade costs more.
-
----
-
-## X11. The venue is single-account and must become multi-account (200+ concurrent)
-
-REQUIREMENT, not a constraint to document. Supporting 200+ simultaneous accounts
-against one mogwai-server is load-bearing for the intended deployment. An earlier
-revision of this entry proposed documenting the single-account limit and closing
-the item; that was wrong, built on an unchecked assumption that the venue fronts
-one trading node. It fronts a fleet.
-
-VERDICT: CONFIRMED, and the split runs right down the middle of the stack.
-
-The CLIENT side is already multi-account and needs nothing. A nautilus
-`ExecutionClient` carries one `account_id`, and N accounts means N clients, so
-200 broadarrow workers with 200 `MogwaiExecClientConfig`s already have 200
-distinct identities, each registering its own account in its own node's cache.
-
-The VENUE side is single-account, and nautilus has no bearing on it - mogwai-
-server is the exchange, not a client, so whether it keeps 200 ledgers or one is
-entirely ours to build. Today it is one: `main.rs` constructs a single
-`Engine` into `AppState` and hands it to axum via `.with_state`, so the `Arc` in
-every request and every websocket session points at the SAME engine. There is no
-`Engine::new` anywhere on the connection path.
-
-Nothing on the wire connects the two halves. No `ClientMessage` variant carries
-an `account_id`, and neither does `POST /orders` or `GET /account`. The adapter's
-configured `account_id` never leaves the adapter - it is a label stamped on
-responses that came from a shared ledger.
-
-Concrete failure today with a fleet: worker 47 submits an order, and worker 112's
-`GET /account` sees that fill in its balances and its position. Every worker
-reports the whole fleet's net as its own and adopts it.
-
-WHY 200+ (the deployment model, which settles several design questions):
-mogwai is the FORWARD-VALIDATION GATE of the strategy pipeline. `wyrd` deals a
-reproducible batch of N strategy-design assignments, one driver builds a strategy
-per slate, piners compiles and backtests it, and broadarrow then runs it live
-through nautilus against mogwai before any real capital. The doctrine `wyrd`
-prints says so directly: bar-close signal exits are the bit-equivalent regime
-where the backtest means what it says, but RESTING-ORDER exits are validated in
-forward, against an accelerated synthetic tape - that tape is this venue. A
-dealt batch therefore forward-validates CONCURRENTLY, one account per strategy,
-and a single-account venue caps the batch at one. The accelerated clock exists
-to make this gate fast.
-
-GATE, NOT CONTINUOUS - confirmed, and it is load-bearing for the design. A
-strategy validates against mogwai once and graduates to real venues; it does not
-stay connected. So accounts are TRANSIENT: created for a validation run,
-destroyed when it ends. Consequences:
-
-- The unbounded retention on `seen_client_order_ids`, `closed` and `fills` keeps
-  its in-code justification (test-lifetime, test-scale) ONLY IF teardown
-  actually reclaims the account. Reclaim-on-teardown is therefore load-bearing,
-  not a nicety - without it a long-lived daemon accumulates every order and fill
-  of every batch it has ever run.
-- The lifecycle needs CREATE AND DESTROY, plus a policy for a run abandoned
-  mid-flight (a driver that dies without tearing down). Without that, dead
-  accounts pile up and reintroduce the same leak by another route.
-- Implicit auto-creation (design question 2) fits the churn better than
-  pre-declaration: batches turn over constantly and nobody wants to edit
-  `mogwai.toml` per batch.
-
-THE ACCOUNT UNIT IS (STRATEGY, SYMBOL), not strategy. The decisive reason is
-SIZING, not attribution: `wyrd` deals equity-dependent sizing components as
-LOAD-BEARING roles - TIPP (floor ratchets with the high-water mark), CPPI
-(exposure = m x (equity - floor)), Kelly adds (fraction x current bankroll). One
-account trading a strategy across ten symbols would make every scope's position
-sizing depend on every other scope's PnL, so a drawdown on one symbol shrinks
-exposure on another and the scopes stop being independent experiments. Since the
-pipeline's terminal output is a SCOPE-QUALIFIED claim ("works during $session on
-$symbol under $conditions"), contaminated scopes make the claim unfalsifiable.
-One ledger per pair is therefore required for the result to mean anything.
-
-That multiplies the ceiling: a 200-slate batch across ten symbol scopes is 2000
-concurrent accounts, not 200. The number is strategies x scopes.
-
-FIRST BRICK: account identity on the wire, plus a per-account engine. Everything
-below is DOWNSTREAM of it and is recorded here as a consequence to expect, NOT as
-design to settle now - each one is phrased in terms of an account the protocol
-currently has no way to name, so pre-solving them means guessing at the brick's
-shape and then discovering the guesses were load-bearing.
-
-Recorded consequences, downstream:
-
-- `Engine` is already a self-contained per-account unit - `open`, `account`,
-  `seen_client_order_ids`, `closed`, `fills`, `armed`, `seq`. A keyed map of
-  engines therefore leaves essentially all engine logic untouched, and it
-  IMPROVES on today: the process-global mutex becomes a per-account one, so
-  unrelated workers stop serializing against each other. Engines are small and
-  independent, so this half scales fine. Instruments, the tape, and the clock
-  stay genuinely shared.
-- THE TAPE IS THE HARD HALF, and probably the real redesign. Because an account
-  is one (strategy, symbol) pair, each account subscribes exactly ONE symbol -
-  but `spawn_replay` gives every subscription its own OS thread with its own
-  generator, so 2000 accounts means 2000 replay threads against a
-  `max_concurrent_replays` default of 1024 that starts REFUSING subscribes (and
-  refuses them in a way a driver may not notice, given AD12). It is also pure
-  waste: 200 strategies validating on BTCUSDT need ONE BTCUSDT tape, not 200 -
-  same symbol, same `data_origin`, same seed, so those generators are producing
-  byte-identical streams in parallel. The likely answer is multiplexing one
-  replay per `(symbol, data_origin)` to N subscribers, collapsing thread count
-  from accounts to distinct symbols. This may split out into its own item once
-  the first brick lands; its shape depends on how identity is scoped.
-- Sharing a tape constrains DATA-surface havoc. If one replay feeds N
-  subscribers, a `LiquidityDrought` armed by one account would perturb every
-  account on that symbol. Data havoc likely has to stay per-subscriber even when
-  the underlying tape is shared - reachable, since the client `HavocFilter`
-  already sits per-connection, but the spec has to state it rather than discover
-  it.
-Open design questions, all "what should the venue do", none answerable from
-nautilus. Question 1 IS the first brick and is the only one that has to be
-answered to start; 2-4 are downstream of it and are listed so they are not
-forgotten, not so they can be settled in advance.
-
-1. THE BRICK - how identity travels. An `account_id` on the relevant
-   `ClientMessage` variants plus an HTTP header, versus a connect-time handshake
-   minting a session the HTTP calls carry. The HTTP order profiles are the
-   binding constraint - they are stateless, so WS-session-scoped identity does
-   not generalize. Mirroring how a real venue does it (an identity on every
-   request) collapses most of this space.
-2. Whether accounts are implicit (auto-created on first use from a
-   `mogwai.toml` template) or pre-declared. Implicit fits the batch churn;
-   declared catches a typo'd id instead of silently spawning an extra account.
-3. Whether divergences are global or per-account. With a fleet this is likely
-   the point - arming `DelayAcks` on one worker while the rest run clean - and
-   it changes `/control/divergence` and the `HavocSpec` surface.
-4. Account lifecycle mechanics. The gate model settles WHAT is needed
-   (transient accounts, create and destroy, reclaim on teardown, and a policy
-   for abandoned runs); what is open is HOW a run declares itself finished,
-   and whether an idle account is reaped on a timer or only on an explicit
-   teardown. Retention itself is no longer an open question - it is bounded by
-   the run, provided reclaim actually happens.
 
 ---
 

@@ -7,23 +7,27 @@
 //! (`/ws`) lives in `ws.rs`; both share `AppState` and the order-entry
 //! validation gate (`process_order_cmd`) defined here.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::{Arc, atomic::Ordering};
 
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    Json,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+};
 use mogwai_data::TickEvent;
-use mogwai_engine::{Engine, MAX_ARMED_DIVERGENCES};
+use mogwai_engine::MAX_ARMED_DIVERGENCES;
 use mogwai_protocol::{
-    AccountState, AdmissionSubject, ClientMessage, InstrumentDef, MAX_HISTORY_LIMIT, MarketRegime,
-    OrderType, QuoteTick, ServerClock, ServerMessage, SimClock, TradeTick, control::Divergence,
-    truncate_client_id, truncate_reason, validate_client_order_id, validate_divergence,
-    validate_market_regime, validate_modify_order, validate_request_id, validate_submit_order,
+    ACCOUNT_HEADER, AccountId, AccountState, AdmissionSubject, ClientMessage, InstrumentDef,
+    MAX_HISTORY_LIMIT, MarketRegime, OrderType, QuoteTick, ServerClock, ServerMessage, SimClock,
+    TradeTick, control::Divergence, truncate_client_id, truncate_reason, validate_client_order_id,
+    validate_divergence, validate_market_regime, validate_modify_order, validate_request_id,
+    validate_submit_order,
 };
 use serde::Deserialize;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Semaphore;
 
+use crate::accounts::{AccountRegistry, AccountSlot, AccountSummary, RegistryError};
 use crate::admission::{ExecLanes, Reservation};
 use crate::config::{Config, sim_now_ns, window_until_ns};
 use crate::source;
@@ -52,6 +56,12 @@ pub(crate) enum OrderOutcome {
     /// an `AdmissionRejected`: conflating malformed with over-capacity would
     /// make an admission refusal unreadable as a load signal.
     Diagnostic(ServerMessage),
+    /// The account was destroyed between identity resolution and winning the
+    /// engine lock. Nothing was processed. Distinct from `Diagnostic` because
+    /// the HTTP surface owes this one a `410 Gone` status rather than a `200`
+    /// carrying a diagnostic body: a caller told "OK" would believe its order
+    /// was booked into a ledger nobody will ever read again.
+    Gone(ServerMessage),
 }
 
 /// Name what a refusal refused, so the consumer can translate it per command -
@@ -191,33 +201,47 @@ fn boundary_refusal(cmd: &ClientMessage, reason: &str, ts: u64) -> ServerMessage
 ///
 /// Shared by both order-entry surfaces (`POST /orders` and `/ws`) so the gate
 /// lives in exactly one place; the HTTP surface passes per-request lanes.
+/// The protocol-boundary gate, split out of `process_order_cmd` because it
+/// needs NO account: `submit_order_http` runs it before resolving identity, so
+/// a request refused here mints no slot. Section 3.2 of the multi-account spec
+/// requires that a rejected request create nothing, and a well-formed id on a
+/// malformed body would otherwise fill the registry to `max_accounts` with
+/// ghosts. `None` means the command cleared the boundary.
+fn boundary_outcome(order_cmd: &ClientMessage, lanes: &ExecLanes, ts: u64) -> Option<OrderOutcome> {
+    let reason = boundary_error(order_cmd)?;
+    let Some(reservation) = lanes.try_reserve_boundary() else {
+        return Some(OrderOutcome::NotAdmitted(
+            ServerMessage::AdmissionRejected {
+                subject: admission_subject(order_cmd),
+                reason: "execution output admission budget exhausted".into(),
+                ts_event: ts,
+            },
+        ));
+    };
+    let event = boundary_refusal(order_cmd, reason, ts);
+    if matches!(event, ServerMessage::ProtocolError { .. }) {
+        // The reservation is not needed after all: nothing goes on the
+        // held lane, so drop it and give the bytes straight back.
+        drop(reservation);
+        return Some(OrderOutcome::Diagnostic(event));
+    }
+    Some(OrderOutcome::Refused {
+        events: vec![event],
+        reservation,
+    })
+}
+
 pub(crate) async fn process_order_cmd(
     order_cmd: ClientMessage,
     state: &AppState,
+    slot: &Arc<AccountSlot>,
     lanes: &ExecLanes,
 ) -> OrderOutcome {
     // Sampled at entry for the boundary rejections below: they return before
     // any price synthesis, so entry-time is when they logically occur.
     let ts = sim_now_ns(state.sim);
-    if let Some(reason) = boundary_error(&order_cmd) {
-        let Some(reservation) = lanes.try_reserve_boundary() else {
-            return OrderOutcome::NotAdmitted(ServerMessage::AdmissionRejected {
-                subject: admission_subject(&order_cmd),
-                reason: "execution output admission budget exhausted".into(),
-                ts_event: ts,
-            });
-        };
-        let event = boundary_refusal(&order_cmd, reason, ts);
-        if matches!(event, ServerMessage::ProtocolError { .. }) {
-            // The reservation is not needed after all: nothing goes on the
-            // held lane, so drop it and give the bytes straight back.
-            drop(reservation);
-            return OrderOutcome::Diagnostic(event);
-        }
-        return OrderOutcome::Refused {
-            events: vec![event],
-            reservation,
-        };
+    if let Some(outcome) = boundary_outcome(&order_cmd, lanes, ts) {
+        return outcome;
     }
     let order_cmd = stamp_market_price(order_cmd, state).await;
     // Re-sample after the market-price synthesis, which for a price-less MARKET
@@ -259,7 +283,17 @@ pub(crate) async fn process_order_cmd(
             reservation,
         };
     }
-    let mut engine = state.engine.lock().await;
+    let mut engine = slot.engine.lock().await;
+    // Rechecked HERE, holding the engine lock: `acquire` handing back a live
+    // slot is no guarantee it is still live by the time this lock is won, and a
+    // DELETE racing an in-flight order would otherwise fill into a removed
+    // engine while the caller is told it succeeded.
+    if slot.tombstoned.load(Ordering::Relaxed) {
+        return OrderOutcome::Gone(ServerMessage::ProtocolError {
+            reason: "account has been destroyed".into(),
+            ts_event: ts,
+        });
+    }
     let shape = engine.book_shape();
     let Some(reservation) = lanes.reserve(&order_cmd, &shape) else {
         // The engine has NOT been asked to process anything, so nothing
@@ -280,7 +314,7 @@ pub(crate) async fn process_order_cmd(
 
 #[derive(Clone)]
 pub(crate) struct AppState {
-    pub(crate) engine: Arc<Mutex<Engine>>,
+    pub(crate) accounts: Arc<AccountRegistry>,
     pub(crate) cfg: Config,
     pub(crate) profiles: Arc<source::InstrumentProfiles>,
     /// Run clock shared with adapters over `/clock`.
@@ -290,23 +324,6 @@ pub(crate) struct AppState {
     /// for `/trades` and the anchor both source builders generate from, so the
     /// data origin and the advertised clock cannot diverge.
     pub(crate) data_origin_ns: u64,
-    /// Execution-event delay in milliseconds, shared by all live writers.
-    ///
-    /// These three temporal-divergence atomics are all read and written
-    /// `Relaxed`, deliberately. They are INDEPENDENT locations with no
-    /// cross-location invariant between them, and the arming request arrives on
-    /// a different connection from the order it perturbs, so `Release`/`Acquire`
-    /// would establish a happens-before edge nothing on either side consumes.
-    /// The only ordering that matters - an arm landing before or after a given
-    /// order - is decided by the socket the arm arrives on, not by the memory
-    /// ordering here.
-    pub(crate) delay_ms: Arc<AtomicU64>,
-    /// Sim-time unix-ns instant before which writers drop all outbound frames.
-    /// `Relaxed` for the reason on `delay_ms`.
-    pub(crate) dark_until_ns: Arc<AtomicU64>,
-    /// Sim-time unix-ns instant before which writers drop market-data frames.
-    /// `Relaxed` for the reason on `delay_ms`.
-    pub(crate) stall_until_ns: Arc<AtomicU64>,
     /// Global permit pool rationing concurrently-live per-symbol replay threads
     /// across every websocket connection (S22a). Each spawned replay holds one
     /// permit for its whole life and releases it when reaped, so a subscribe
@@ -316,21 +333,76 @@ pub(crate) struct AppState {
     pub(crate) replay_permits: Arc<Semaphore>,
 }
 
+/// Identity resolution, step one: parse only. No slot is created, so a caller
+/// that may still refuse the request for an unrelated reason can check the id
+/// first and acquire later.
+pub(crate) fn account_id_from_headers(
+    headers: &HeaderMap,
+) -> Result<AccountId, (StatusCode, String)> {
+    let raw = headers
+        .get(ACCOUNT_HEADER)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, format!("missing {ACCOUNT_HEADER}")))?
+        .to_str()
+        .map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("invalid {ACCOUNT_HEADER}: not printable ASCII"),
+            )
+        })?;
+    AccountId::parse(raw).map_err(|err| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid {ACCOUNT_HEADER}: {err}"),
+        )
+    })
+}
+
+/// Identity resolution, step two: get-or-create. Called only on the path that
+/// will actually serve the request, so no 4xx leaves a slot behind.
+pub(crate) fn acquire_account(
+    state: &AppState,
+    id: &AccountId,
+) -> Result<Arc<AccountSlot>, (StatusCode, String)> {
+    state
+        .accounts
+        .acquire(id, crate::config::now_ns())
+        .map_err(|RegistryError::AtCapacity| {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                "account capacity exhausted".into(),
+            )
+        })
+}
+
+pub(crate) fn account_from_headers(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Arc<AccountSlot>, (StatusCode, String)> {
+    acquire_account(state, &account_id_from_headers(headers)?)
+}
+
 /// Control plane: arm a divergence to fire on its next trigger.
 pub(crate) async fn arm_divergence(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(div): Json<Divergence>,
 ) -> impl IntoResponse {
+    // Reject an invalid control payload before admission can create a slot.
+    // A typo must be a no-op, including for an otherwise valid account id.
+    if let Err(err) = validate_divergence(&div) {
+        tracing::warn!(?div, err, "rejecting out-of-range divergence");
+        return (StatusCode::BAD_REQUEST, err.to_string());
+    }
+    let slot = match account_from_headers(&state, &headers) {
+        Ok(slot) => slot,
+        Err(err) => return err,
+    };
     tracing::info!(?div, "arming divergence");
     // Validate at the arming boundary so an out-of-range knob (e.g. a
     // `PartialFillNext.fraction` outside `(0, 1]`) is rejected before it is
     // stored into server state or armed on the engine, rather than surfacing
     // as a degenerate fill downstream. Mirrors the `validate_market_regime`
     // gate on the subscription/history paths.
-    if let Err(err) = validate_divergence(&div) {
-        tracing::warn!(?div, err, "rejecting out-of-range divergence");
-        return (StatusCode::BAD_REQUEST, err.to_string());
-    }
     // The operator-supplied reject reason is truncated HERE, at the arming
     // boundary, before the divergence is stored: the engine echoes it verbatim
     // into `OrderRejected.reason`, so an uncapped one would make a produced
@@ -346,7 +418,7 @@ pub(crate) async fn arm_divergence(
     };
     match div {
         Divergence::DelayAcks { ms } => {
-            state.delay_ms.store(ms, Ordering::Relaxed);
+            slot.delay_ms.store(ms, Ordering::Relaxed);
         }
         // GoDark/StallData windows are STORE-not-extend (S18): each arm overwrites
         // the absolute deadline with `now + ms`, so re-arming with a SMALLER `ms`
@@ -355,13 +427,13 @@ pub(crate) async fn arm_divergence(
         // a test cut a window short by re-posting a small one; an operator wanting a
         // longer window re-arms with the longer `ms`.
         Divergence::GoDark { ms } => {
-            state.dark_until_ns.store(
+            slot.dark_until_ns.store(
                 window_until_ns(sim_now_ns(state.sim), ms),
                 Ordering::Relaxed,
             );
         }
         Divergence::StallData { ms } => {
-            state.stall_until_ns.store(
+            slot.stall_until_ns.store(
                 window_until_ns(sim_now_ns(state.sim), ms),
                 Ordering::Relaxed,
             );
@@ -373,7 +445,7 @@ pub(crate) async fn arm_divergence(
         // a scenario cannot believe it armed a fault that never happened.
         Divergence::CancelOpenOrderSilently { client_order_id } => {
             let ts = sim_now_ns(state.sim);
-            if let Err(reason) = state
+            if let Err(reason) = slot
                 .engine
                 .lock()
                 .await
@@ -385,14 +457,14 @@ pub(crate) async fn arm_divergence(
             tracing::info!(%client_order_id, "silently canceled resting order server-side");
         }
         Divergence::ClearDivergences => {
-            // Lift both server-owned temporal windows process-wide. `0` is the
+            // Lift both server-owned temporal windows FOR THIS ACCOUNT. `0` is the
             // cleared sentinel: `delay_ms == 0` skips the exec pump's delay sleep,
             // and `now_ns() < 0` is never true so the dark and data-stall
             // guards are off. There is no backlog to replay because gated
             // frames are dropped.
-            state.delay_ms.store(0, Ordering::Relaxed);
-            state.dark_until_ns.store(0, Ordering::Relaxed);
-            state.stall_until_ns.store(0, Ordering::Relaxed);
+            slot.delay_ms.store(0, Ordering::Relaxed);
+            slot.dark_until_ns.store(0, Ordering::Relaxed);
+            slot.stall_until_ns.store(0, Ordering::Relaxed);
         }
         // Server-ownership contract (pins B.4 / E.11): `DelayAcks`, `GoDark`,
         // `StallData`, and `ClearDivergences` are server-owned controls with no
@@ -424,7 +496,7 @@ pub(crate) async fn arm_divergence(
             // does not fire") was wrong - the arm had been evicted. The status
             // stays `202` because the requested arm WAS accepted; the body is
             // where the collateral damage is named.
-            if let Some(shed) = state.engine.lock().await.arm(engine_div) {
+            if let Some(shed) = slot.engine.lock().await.arm(engine_div) {
                 let body = format!(
                     "armed; the engine queue was at its {MAX_ARMED_DIVERGENCES}-entry cap, \
                      so the oldest armed divergence was discarded to make room: {shed:?}"
@@ -438,7 +510,7 @@ pub(crate) async fn arm_divergence(
 }
 
 pub(crate) async fn instruments(State(state): State<AppState>) -> Json<Vec<InstrumentDef>> {
-    Json(state.engine.lock().await.instrument_defs())
+    Json(state.profiles.instrument_defs())
 }
 
 /// Pull route for the venue's current account snapshot.
@@ -449,9 +521,36 @@ pub(crate) async fn instruments(State(state): State<AppState>) -> Json<Vec<Instr
 /// learning the account only when the first fill's AccountState arrives. The
 /// route is transport-agnostic, so it also serves the HttpOrders execution
 /// profile that opens no /ws socket and never sends Subscribe.
-pub(crate) async fn account(State(state): State<AppState>) -> Json<AccountState> {
+pub(crate) async fn account(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AccountState>, (StatusCode, String)> {
+    let slot = account_from_headers(&state, &headers)?;
     let ts = sim_now_ns(state.sim);
-    Json(state.engine.lock().await.account_snapshot(ts))
+    let mut engine = slot.engine.lock().await;
+    // Checked under the engine lock, like the order path: a DELETE that lands
+    // between `acquire` and this lock has already tombstoned the slot, and
+    // answering from a removed ledger would tell the caller its run is alive.
+    if slot.tombstoned.load(Ordering::Relaxed) {
+        return Err((StatusCode::GONE, "account has been destroyed".into()));
+    }
+    Ok(Json(engine.account_snapshot(ts)))
+}
+
+pub(crate) async fn list_accounts(State(state): State<AppState>) -> Json<Vec<AccountSummary>> {
+    Json(state.accounts.summaries().await)
+}
+
+pub(crate) async fn delete_account(
+    State(state): State<AppState>,
+    axum::extract::Path(raw): axum::extract::Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let id = AccountId::parse(&raw).map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    state
+        .accounts
+        .destroy(&id)
+        .then_some(StatusCode::OK)
+        .ok_or((StatusCode::NOT_FOUND, "account not found".into()))
 }
 
 pub(crate) async fn clock(State(state): State<AppState>) -> Json<ServerClock> {
@@ -521,6 +620,7 @@ async fn stamp_market_price(msg: ClientMessage, state: &AppState) -> ClientMessa
 /// silently unwrapped.
 pub(crate) async fn submit_order_http(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(msg): Json<ClientMessage>,
 ) -> Result<Json<Vec<ServerMessage>>, StatusCode> {
     match msg {
@@ -528,20 +628,34 @@ pub(crate) async fn submit_order_http(
             Err(StatusCode::BAD_REQUEST)
         }
         order_cmd => {
+            // Identity is PARSED before anything else and the slot is acquired
+            // only on the path that will actually serve the request: the
+            // boundary gate runs first, so a malformed command carrying a
+            // well-formed id leaves no account behind (spec 3.2).
+            let id = account_id_from_headers(&headers).map_err(|(status, _)| status)?;
             let (lanes, _receivers) = ExecLanes::detached();
-            match process_order_cmd(order_cmd, &state, &lanes).await {
-                OrderOutcome::Produced { events, .. } | OrderOutcome::Refused { events, .. } => {
-                    Ok(Json(events))
-                }
-                OrderOutcome::Diagnostic(frame) => Ok(Json(vec![frame])),
-                OrderOutcome::NotAdmitted(frame) => {
-                    tracing::error!(
-                        ?frame,
-                        "per-request lanes refused admission; this should be unreachable"
-                    );
-                    Err(StatusCode::INTERNAL_SERVER_ERROR)
-                }
+            if let Some(outcome) = boundary_outcome(&order_cmd, &lanes, sim_now_ns(state.sim)) {
+                return http_order_response(outcome);
             }
+            let slot = acquire_account(&state, &id).map_err(|(status, _)| status)?;
+            http_order_response(process_order_cmd(order_cmd, &state, &slot, &lanes).await)
+        }
+    }
+}
+
+fn http_order_response(outcome: OrderOutcome) -> Result<Json<Vec<ServerMessage>>, StatusCode> {
+    match outcome {
+        OrderOutcome::Produced { events, .. } | OrderOutcome::Refused { events, .. } => {
+            Ok(Json(events))
+        }
+        OrderOutcome::Diagnostic(frame) => Ok(Json(vec![frame])),
+        OrderOutcome::Gone(_) => Err(StatusCode::GONE),
+        OrderOutcome::NotAdmitted(frame) => {
+            tracing::error!(
+                ?frame,
+                "per-request lanes refused admission; this should be unreachable"
+            );
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
 }

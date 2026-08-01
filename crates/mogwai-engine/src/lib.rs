@@ -21,9 +21,9 @@
 use std::collections::{HashMap, VecDeque};
 
 use mogwai_protocol::{
-    AccountState, ClientMessage, ClientOrderId, FillSnapshot, InstrumentDef, OrderFilled,
-    OrderStatusInfo, OrderStatusSnapshot, Position, ServerMessage, SubmitOrder, Symbol,
-    VenueOrderId, WireOrderStatus, control::Divergence, default_instruments,
+    AccountId, AccountState, ClientMessage, ClientOrderId, FillSnapshot, InstrumentDef,
+    OrderFilled, OrderStatusInfo, OrderStatusSnapshot, Position, ServerMessage, SubmitOrder,
+    Symbol, VenueOrderId, WireOrderStatus, control::Divergence, default_instruments,
 };
 use rust_decimal::Decimal;
 
@@ -65,6 +65,7 @@ pub struct OpenOrder {
 
 #[derive(Debug)]
 pub struct Engine {
+    account_id: AccountId,
     open: Vec<OpenOrder>,
     account: Account,
     /// Whether submits and amends are checked against free balance. Set once
@@ -134,8 +135,19 @@ impl Engine {
         Self::with_instruments(default_instruments())
     }
 
+    /// Placeholder identity for the two id-less constructors. Production always
+    /// goes through `with_instruments_and_balances`, which REQUIRES the real id:
+    /// an engine that guessed its own identity would stamp a wrong
+    /// `AccountState.account_id` on the wire, and a snapshot is only
+    /// self-describing if that field is the account the ledger belongs to.
+    pub const UNBOUND_ACCOUNT_ID: &'static str = "UNBOUND";
+
     pub fn with_instruments(instruments: Vec<InstrumentDef>) -> Self {
-        Self::with_instruments_and_balances(instruments, HashMap::new())
+        Self::with_instruments_and_balances(
+            AccountId::parse(Self::UNBOUND_ACCOUNT_ID).expect("static account id"),
+            instruments,
+            HashMap::new(),
+        )
     }
 
     /// Constructs the engine with the account pre-funded per currency, the
@@ -151,7 +163,12 @@ impl Engine {
     /// submits and amends the free balance cannot cover, like a real cash
     /// exchange. An empty seed keeps the permissive unfunded ledger - see
     /// `enforce_funds`.
+    ///
+    /// `account_id` is stored, not threaded through `account_snapshot`, so the
+    /// engine is the single source of truth for the identity it stamps on every
+    /// `AccountState` it produces.
     pub fn with_instruments_and_balances(
+        account_id: AccountId,
         instruments: Vec<InstrumentDef>,
         balances: HashMap<String, Decimal>,
     ) -> Self {
@@ -161,6 +178,7 @@ impl Engine {
             .collect();
 
         Self {
+            account_id,
             open: Vec::new(),
             enforce_funds: !balances.is_empty(),
             account: Account {
@@ -442,6 +460,7 @@ mod tests {
         // applies ON TOP of it - a buy's spend debits the funded quote leg
         // instead of driving it negative from zero.
         let mut e = Engine::with_instruments_and_balances(
+            test_account_id(),
             default_instruments(),
             HashMap::from([("USDT".to_string(), Decimal::from(1_000))]),
         );
@@ -461,8 +480,29 @@ mod tests {
         assert_eq!(balance(state, "BTC").total, Decimal::from(2));
     }
 
+    #[test]
+    fn snapshot_stamps_the_engines_own_account_id() {
+        // The snapshot is the wire's only statement of whose ledger it is, and
+        // the consumer rejects a mismatch, so a wrong stamp here is a run that
+        // errors on its first fill rather than a silent relabel.
+        let mut e = Engine::with_instruments_and_balances(
+            AccountId::parse("WYRD-042:BTCUSDT").expect("deployment-shaped id"),
+            default_instruments(),
+            HashMap::new(),
+        );
+        assert_eq!(
+            e.account_snapshot(1).account_id.as_str(),
+            "WYRD-042:BTCUSDT"
+        );
+    }
+
+    fn test_account_id() -> AccountId {
+        AccountId::parse("TEST-001").expect("static account id")
+    }
+
     fn funded(usdt: i64) -> Engine {
         Engine::with_instruments_and_balances(
+            test_account_id(),
             default_instruments(),
             HashMap::from([("USDT".to_string(), Decimal::from(usdt))]),
         )
@@ -1992,11 +2032,21 @@ mod tests {
         // Book 1: an empty venue, and a submit that fills - the first fill in a
         // fresh pair, which introduces TWO balance rows and one position the
         // pre-command shape never had.
-        let mut fresh = Engine::new();
+        let max_account_id = AccountId::parse(&"Z".repeat(mogwai_protocol::MAX_ACCOUNT_ID_LEN))
+            .expect("max length account id");
+        let mut fresh = Engine::with_instruments_and_balances(
+            max_account_id.clone(),
+            default_instruments(),
+            HashMap::new(),
+        );
 
         // Book 2: deep - hundreds of open and closed orders and a long fill
         // history, so the per-row snapshot terms actually carry the bound.
-        let mut deep = Engine::new();
+        let mut deep = Engine::with_instruments_and_balances(
+            max_account_id,
+            default_instruments(),
+            HashMap::new(),
+        );
         for i in 0..200 {
             // A far-from-market limit rests; a marketable one fills and closes.
             deep.process(

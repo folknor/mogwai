@@ -171,6 +171,7 @@ impl Engine {
         }
 
         AccountState {
+            account_id: self.account_id.clone(),
             balances,
             positions: self.positions(),
             ts_event: ts,

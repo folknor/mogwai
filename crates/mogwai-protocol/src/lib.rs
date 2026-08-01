@@ -30,15 +30,20 @@ pub use havoc::{
 };
 pub use instruments::{InstrumentDef, default_instruments};
 pub use messages::{
-    ADMISSION_FRAME_MAX_BYTES, AccountState, AdmissionSubject, AggressorSide, Balance,
-    ClientMessage, FillSnapshot, JSON_ESCAPE_FACTOR, MAX_CLIENT_ID_LEN, MAX_CURRENCY_LEN,
-    MAX_REASON_LEN, MAX_SUBSCRIBE_SYMBOLS, MAX_SUBSCRIPTION_ISSUES_LISTED, MAX_SYMBOL_LEN,
-    OrderFilled, OrderStatusInfo, OrderStatusSnapshot, OrderType, Position, QueryKind, QuoteTick,
-    ServerMessage, Side, SubmitOrder, SubscriptionIssue, SubscriptionOutcome, SubscriptionRequest,
-    TimeInForce, TradeTick, WireOrderStatus, truncate_client_id, truncate_reason,
-    validate_client_order_id, validate_modify_order, validate_request_id, validate_submit_order,
-    validate_subscriptions, validate_symbols,
+    ADMISSION_FRAME_MAX_BYTES, AccountId, AccountIdError, AccountState, AdmissionSubject,
+    AggressorSide, Balance, ClientMessage, FillSnapshot, JSON_ESCAPE_FACTOR, MAX_ACCOUNT_ID_LEN,
+    MAX_CLIENT_ID_LEN, MAX_CURRENCY_LEN, MAX_REASON_LEN, MAX_SUBSCRIBE_SYMBOLS,
+    MAX_SUBSCRIPTION_ISSUES_LISTED, MAX_SYMBOL_LEN, OrderFilled, OrderStatusInfo,
+    OrderStatusSnapshot, OrderType, Position, QueryKind, QuoteTick, ServerMessage, Side,
+    SubmitOrder, SubscriptionIssue, SubscriptionOutcome, SubscriptionRequest, TimeInForce,
+    TradeTick, WireOrderStatus, truncate_client_id, truncate_reason, validate_client_order_id,
+    validate_modify_order, validate_request_id, validate_submit_order, validate_subscriptions,
+    validate_symbols,
 };
+/// HTTP header carrying an acting account on stateful venue requests.
+pub const ACCOUNT_HEADER: &str = "x-mogwai-account";
+/// Websocket query parameter carrying the account bound to a session.
+pub const ACCOUNT_QUERY_PARAM: &str = "account";
 pub use transport::TransportProfile;
 
 pub type Symbol = String;

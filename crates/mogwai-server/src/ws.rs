@@ -17,7 +17,7 @@ use std::{
 
 use axum::{
     extract::{
-        State,
+        Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
@@ -25,10 +25,12 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use mogwai_data::TickEvent;
 use mogwai_protocol::{
-    ClientMessage, MarketRegime, ServerMessage, SimClock, SubscriptionIssue, SubscriptionOutcome,
+    ACCOUNT_QUERY_PARAM, AccountId, ClientMessage, MarketRegime, ServerMessage, SimClock,
+    SubscriptionIssue, SubscriptionOutcome,
 };
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
 
+use crate::accounts::{AccountSlot, SessionLease};
 use crate::admission::{
     CLOSE_GRACE, CloseSpec, ExecLanes, HeldFrame, Outbound, OutboundFrame, Ticket,
 };
@@ -42,8 +44,35 @@ use crate::source;
 pub(crate) async fn ws_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+    Query(params): Query<AccountParams>,
+) -> Result<impl IntoResponse, (axum::http::StatusCode, String)> {
+    let raw = params.account.ok_or_else(|| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("missing {ACCOUNT_QUERY_PARAM}"),
+        )
+    })?;
+    let id = AccountId::parse(&raw).map_err(|err| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("invalid {ACCOUNT_QUERY_PARAM}: {err}"),
+        )
+    })?;
+    let slot = state
+        .accounts
+        .acquire(&id, crate::config::now_ns())
+        .map_err(|_| {
+            (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                "account capacity exhausted".into(),
+            )
+        })?;
+    Ok(ws.on_upgrade(move |socket| handle_socket(socket, state, slot)))
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct AccountParams {
+    account: Option<String>,
 }
 
 /// Queue one admission frame on the PRIORITY lane, reserving its queue slot
@@ -155,8 +184,7 @@ pub(crate) async fn run_writer<S>(
     mut prio_rx: mpsc::UnboundedReceiver<Outbound>,
     mut rx: mpsc::Receiver<Outbound>,
     sim: SimClock,
-    dark_until_ns: Arc<AtomicU64>,
-    stall_until_ns: Arc<AtomicU64>,
+    slot: Arc<AccountSlot>,
 ) where
     S: SinkExt<Message> + Unpin,
 {
@@ -201,10 +229,10 @@ pub(crate) async fn run_writer<S>(
         // one honest exception to "produced execution truth is delivered",
         // pre-existing and documented in reference/havoc.md.
         let now = sim_now_ns(sim);
-        if now < dark_until_ns.load(Ordering::Relaxed) {
+        if now < slot.dark_until_ns.load(Ordering::Relaxed) {
             continue;
         }
-        if frame.is_market_data && now < stall_until_ns.load(Ordering::Relaxed) {
+        if frame.is_market_data && now < slot.stall_until_ns.load(Ordering::Relaxed) {
             continue;
         }
         if sink
@@ -227,7 +255,8 @@ pub(crate) async fn run_writer<S>(
 /// dedicated delay pump before landing in that channel, so an armed
 /// `DelayAcks` window paces only execution traffic - see `spawn_exec_pump`
 /// for why that hop exists and for the per-event delay contract.
-async fn handle_socket(socket: WebSocket, state: AppState) {
+async fn handle_socket(socket: WebSocket, state: AppState, slot: Arc<AccountSlot>) {
+    let lease = SessionLease::acquire(Arc::clone(&slot), crate::config::now_ns());
     let (sink, mut stream) = socket.split();
     let (tx, rx) = mpsc::channel::<Outbound>(1024);
     let (prio_tx, prio_rx) = mpsc::unbounded_channel::<Outbound>();
@@ -251,8 +280,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // under connect/subscribe/disconnect churn (E.7).
     let mut replays: HashMap<String, Replay> = HashMap::new();
     let mut generations: HashMap<String, u64> = HashMap::new();
-    let dark_until_ns = Arc::clone(&state.dark_until_ns);
-    let stall_until_ns = Arc::clone(&state.stall_until_ns);
     let sim = state.sim;
 
     // `tx`/`rx` carries everything the writer paces normally: market data
@@ -264,16 +291,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // already-delayed execution output. Frames arrive pre-serialized: the
     // producers render them, which is what makes the byte budget charge real
     // bytes and keeps JSON cost off this single task.
-    let writer = tokio::spawn(run_writer(
-        sink,
-        prio_rx,
-        rx,
-        sim,
-        dark_until_ns,
-        stall_until_ns,
-    ));
+    let writer = tokio::spawn(run_writer(sink, prio_rx, rx, sim, Arc::clone(&slot)));
 
-    let exec_pump = spawn_exec_pump(held_rx, Arc::clone(&state.delay_ms), state.sim, tx.clone());
+    let exec_pump = spawn_exec_pump(held_rx, Arc::clone(&slot), state.sim, tx.clone());
 
     let heartbeat = if state.cfg.server_heartbeat_ms > 0 {
         Some(spawn_heartbeat(
@@ -290,8 +310,35 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // refusal. Every producer below reserves or refuses; none of them awaits a
     // full channel, which is what keeps the reader alive under an armed
     // `DelayAcks` no matter how deep the held backlog gets.
+    // Teardown of the bound account must reach this session even if it never
+    // makes another engine access - a market-data-only socket makes none, so
+    // lazy discovery would leave it trading a phantom and pinning the removed
+    // engine's retention (`seen_client_order_ids` / `closed` / `fills`) for the
+    // daemon's life. Created once and polled by the select below, so the
+    // registration survives across iterations.
+    let teardown = slot.wait_for_teardown();
+    tokio::pin!(teardown);
+
     let overload: Option<CloseSpec> = loop {
-        let Some(Ok(msg)) = stream.next().await else {
+        let msg = tokio::select! {
+            biased;
+            () = &mut teardown => {
+                tracing::info!(account = %slot.id.as_str(), "closing session: account destroyed");
+                // On the priority lane, not the exec lane: teardown is transport
+                // truth, and an armed DelayAcks on the doomed account must not
+                // hold the notice behind it.
+                drop(send_admission(
+                    &lanes,
+                    ServerMessage::ProtocolError {
+                        reason: "account destroyed by the venue control plane".into(),
+                        ts_event: sim_now_ns(state.sim),
+                    },
+                ));
+                break None;
+            }
+            msg = stream.next() => msg,
+        };
+        let Some(Ok(msg)) = msg else {
             break None;
         };
         let Message::Text(text) = msg else { continue };
@@ -611,7 +658,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     }
                 }
             }
-            order_cmd => match process_order_cmd(order_cmd, &state, &lanes).await {
+            order_cmd => match process_order_cmd(order_cmd, &state, lease.slot(), &lanes).await {
                 OrderOutcome::Produced {
                     events,
                     reservation,
@@ -639,7 +686,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         break None; // writer gone; the connection is tearing down
                     }
                 }
-                OrderOutcome::NotAdmitted(frame) | OrderOutcome::Diagnostic(frame) => {
+                OrderOutcome::NotAdmitted(frame)
+                | OrderOutcome::Diagnostic(frame)
+                | OrderOutcome::Gone(frame) => {
                     if let Err(close) = send_admission(&lanes, frame) {
                         break Some(close);
                     }
@@ -750,13 +799,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 /// every other ms-window control.
 pub(crate) fn spawn_exec_pump(
     mut exec_rx: mpsc::UnboundedReceiver<HeldFrame>,
-    delay_ms: Arc<AtomicU64>,
+    slot: Arc<AccountSlot>,
     sim: SimClock,
     out: mpsc::Sender<Outbound>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(HeldFrame { arrived, frame }) = exec_rx.recv().await {
-            let delay = delay_ms.load(Ordering::Relaxed);
+            let delay = slot.delay_ms.load(Ordering::Relaxed);
             if delay > 0 {
                 // `deadline - now` phrased as a saturating remainder so a
                 // deadline already in the past sleeps zero, and a pathological

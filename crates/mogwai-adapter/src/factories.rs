@@ -148,7 +148,7 @@ mod tests {
     };
     use nautilus_model::{
         enums::OmsType,
-        identifiers::{ClientId, TraderId},
+        identifiers::{AccountId, ClientId, TraderId},
     };
 
     use super::*;
@@ -317,6 +317,7 @@ mod tests {
     #[test]
     fn mogwai_configs_round_trip_json() {
         let data_config = MogwaiDataClientConfig {
+            account_id: AccountId::from("MOGWAI-001"),
             base_url: "ws://example.invalid:9999".to_string(),
             transport_profile: TransportProfile::HttpPolling,
             havoc: Some(havoc_spec()),
@@ -351,6 +352,17 @@ mod tests {
             exec_config.transport_profile
         );
         assert_eq!(exec_round_trip.havoc, exec_config.havoc);
+    }
+
+    #[test]
+    fn data_client_config_round_trips_account_id() {
+        let config = MogwaiDataClientConfig {
+            account_id: AccountId::from("WYRD-042:BTCUSDT"),
+            ..Default::default()
+        };
+        let decoded: MogwaiDataClientConfig =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(decoded.account_id, config.account_id);
     }
 
     #[test]

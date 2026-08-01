@@ -130,6 +130,19 @@ async fn fetch_account(
         .context("decode account")
         .map_err(FetchAccountError::Other)
 }
+
+fn validate_account_snapshot(
+    state: &mogwai_protocol::AccountState,
+    expected: AccountId,
+) -> anyhow::Result<()> {
+    ensure!(
+        state.account_id.as_str() == expected.as_ref(),
+        "account snapshot belongs to {}, expected {}",
+        state.account_id.as_str(),
+        expected,
+    );
+    Ok(())
+}
 async fn post_order(
     http: &HttpClient,
     quota: &HttpQuota,
@@ -231,7 +244,10 @@ impl MogwaiExecutionClient {
             None,
         );
         let http = HttpClient::new(
-            HashMap::new(),
+            HashMap::from([(
+                mogwai_protocol::ACCOUNT_HEADER.to_string(),
+                config.account_id.to_string(),
+            )]),
             Vec::new(),
             Vec::new(),
             None,
@@ -841,6 +857,7 @@ impl ExecutionClient for MogwaiExecutionClient {
         // recreate the exact first-fill cache-miss this fix exists to eliminate.
         match fetch_account(&self.http, &self.http_quota, &http_base_url).await {
             Ok(state) => {
+                validate_account_snapshot(&state, self.config.account_id)?;
                 handle_exec_message(ServerMessage::AccountState(state), &self.exec_context());
                 self.await_account_registered().await?;
             }
@@ -1225,6 +1242,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                     return Err(anyhow::Error::new(err).context("position status venue truth"));
                 }
             };
+        validate_account_snapshot(&state, self.config.account_id)?;
         // The venue's snapshot instant is the honest `ts_last` for every row:
         // the wire `Position` carries no per-symbol activity timestamp, and
         // dating a report off the client's own last-seen event would put a
@@ -2347,6 +2365,19 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
 }
 
 fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext) {
+    // The pushed path is the one that would contaminate SILENTLY: below, the
+    // CONFIGURED id is stamped onto the nautilus event regardless of what the
+    // wire said, so a misrouted snapshot would be adopted and relabelled as
+    // one's own. Compared borrowed, not through `to_string`: this runs on every
+    // account frame of every fill.
+    if state.account_id.as_str() != ctx.account_id.as_ref() {
+        tracing::error!(
+            wire_account = %state.account_id.as_str(),
+            expected_account = %ctx.account_id,
+            "dropping account snapshot routed to a different account"
+        );
+        return;
+    }
     let ts_event = UnixNanos::from(state.ts_event);
     let balances = state
         .balances
@@ -2585,6 +2616,7 @@ mod tests {
         let port = listener.local_addr().expect("account venue addr").port();
         client.config.base_url = format!("ws://127.0.0.1:{port}");
         let body = serde_json::to_string(&mogwai_protocol::AccountState {
+            account_id: mogwai_protocol::AccountId::parse("MOGWAI-001").unwrap(),
             balances: Vec::new(),
             positions,
             ts_event,
@@ -2671,6 +2703,37 @@ mod tests {
             },
             rx,
         )
+    }
+
+    #[test]
+    fn account_snapshot_with_a_foreign_account_id_is_an_error() {
+        let state = mogwai_protocol::AccountState {
+            account_id: mogwai_protocol::AccountId::parse("FOREIGN").unwrap(),
+            balances: Vec::new(),
+            positions: Vec::new(),
+            ts_event: 1,
+        };
+        let err = validate_account_snapshot(&state, AccountId::from("MOGWAI-001"))
+            .expect_err("a snapshot for another account must not be adopted");
+        assert!(err.to_string().contains("FOREIGN"));
+    }
+
+    #[test]
+    fn pushed_account_state_with_a_foreign_account_id_is_rejected() {
+        let (ctx, mut events) = exec_context();
+        handle_exec_message(
+            ServerMessage::AccountState(mogwai_protocol::AccountState {
+                account_id: mogwai_protocol::AccountId::parse("FOREIGN").unwrap(),
+                balances: Vec::new(),
+                positions: Vec::new(),
+                ts_event: 1,
+            }),
+            &ctx,
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "foreign account state must not reach nautilus"
+        );
     }
 
     #[test]
@@ -2959,6 +3022,7 @@ mod tests {
         let filter = HavocFilter::from_client(&havoc);
 
         let account = ServerMessage::AccountState(mogwai_protocol::AccountState {
+            account_id: mogwai_protocol::AccountId::parse("MOGWAI-001").unwrap(),
             balances: Vec::new(),
             positions: Vec::new(),
             ts_event: 1,
@@ -3209,6 +3273,7 @@ mod tests {
         );
         handle_exec_message(
             ServerMessage::AccountState(mogwai_protocol::AccountState {
+                account_id: mogwai_protocol::AccountId::parse("MOGWAI-001").unwrap(),
                 balances: vec![mogwai_protocol::Balance {
                     currency: "USDT".into(),
                     total: Decimal::new(10_000, 0),
@@ -3400,6 +3465,7 @@ mod tests {
 
         handle_exec_message(
             ServerMessage::AccountState(mogwai_protocol::AccountState {
+                account_id: mogwai_protocol::AccountId::parse("MOGWAI-001").unwrap(),
                 balances: Vec::new(),
                 positions: Vec::new(),
                 ts_event: 12,
@@ -3612,6 +3678,7 @@ mod tests {
         };
         handle_exec_message(
             ServerMessage::AccountState(mogwai_protocol::AccountState {
+                account_id: mogwai_protocol::AccountId::parse("MOGWAI-001").unwrap(),
                 balances: Vec::new(),
                 positions: vec![wire_position(Decimal::new(1, 0))],
                 ts_event: 12,
@@ -3821,6 +3888,7 @@ mod tests {
 
         handle_exec_message(
             ServerMessage::AccountState(mogwai_protocol::AccountState {
+                account_id: mogwai_protocol::AccountId::parse("MOGWAI-001").unwrap(),
                 balances: Vec::new(),
                 positions: Vec::new(),
                 ts_event: 13,
@@ -3834,6 +3902,7 @@ mod tests {
 
         handle_exec_message(
             ServerMessage::AccountState(mogwai_protocol::AccountState {
+                account_id: mogwai_protocol::AccountId::parse("MOGWAI-001").unwrap(),
                 balances: Vec::new(),
                 positions: vec![mogwai_protocol::Position {
                     symbol: "BTCUSDT".into(),

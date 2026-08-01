@@ -74,6 +74,12 @@ pub(crate) struct Config {
     /// disables the cap (unbounded), matching the `0`-disables convention of
     /// `gap_cap_ms` and `server_heartbeat_ms`.
     pub(crate) max_concurrent_replays: usize,
+    /// Hard ceiling on simultaneously live ledgers. Zero disables the cap.
+    pub(crate) max_accounts: usize,
+    /// Wall-clock idle lifetime for accounts without a live session. Zero disables reaping.
+    pub(crate) account_idle_timeout_ms: u64,
+    /// Wall-clock interval at which the account reaper runs.
+    pub(crate) account_reap_interval_ms: u64,
     /// Per-connection byte ceiling on execution output that has been produced
     /// but not yet written to the socket, i.e. the HELD lane's budget. See
     /// `admission::EXEC_HELD_BUDGET_BYTES`, which is this field's default and
@@ -137,6 +143,9 @@ impl Default for Config {
             // typical process thread limit. Operators driving many connections
             // against a large catalog raise it; `0` lifts it entirely.
             max_concurrent_replays: 1024,
+            max_accounts: 4096,
+            account_idle_timeout_ms: 3_600_000,
+            account_reap_interval_ms: 60_000,
             exec_held_budget_bytes: crate::admission::EXEC_HELD_BUDGET_BYTES,
             admission_lane_frames: crate::admission::ADMISSION_LANE_FRAMES,
             admission_promise_tickets: crate::admission::ADMISSION_PROMISE_TICKETS,
@@ -249,6 +258,21 @@ pub(crate) fn validate_admission_limits(cfg: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The account-lifecycle knobs. `account_reap_interval_ms == 0` is REFUSED
+/// rather than given a meaning: read as "never" it silently disables the only
+/// teardown mechanism that fires without a driver calling
+/// `DELETE /accounts/<id>`, and read as "every tick" it is a busy loop.
+/// Disabling the reaper has exactly one spelling, `account_idle_timeout_ms = 0`.
+pub(crate) fn validate_account_lifecycle(cfg: &Config) -> anyhow::Result<()> {
+    if cfg.account_reap_interval_ms == 0 {
+        anyhow::bail!(
+            "account_reap_interval_ms must be > 0; set account_idle_timeout_ms = 0 to \
+             disable the idle reaper"
+        );
+    }
+    Ok(())
+}
+
 /// The per-connection budget sizes every websocket session is built with.
 pub(crate) fn build_admission_limits(cfg: &Config) -> AdmissionLimits {
     AdmissionLimits {
@@ -279,6 +303,7 @@ impl Config {
         // their builders: they need boot-time inputs this loader lacks.)
         validate_balances(&cfg)?;
         validate_admission_limits(&cfg)?;
+        validate_account_lifecycle(&cfg)?;
         Ok(cfg)
     }
 }

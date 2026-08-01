@@ -16,6 +16,7 @@ mod config;
 // `gen` is a reserved keyword in the 2024 edition (generator blocks), so the
 // module is declared via the raw identifier; `crate::r#gen` is otherwise the
 // plain `crate::gen` module the spec names throughout.
+mod accounts;
 mod admission;
 mod r#gen;
 mod http;
@@ -29,7 +30,7 @@ use std::{
     net::SocketAddr,
     os::fd::{AsRawFd, OwnedFd},
     path::{Path, PathBuf},
-    sync::{Arc, atomic::AtomicU64},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -38,21 +39,21 @@ use axum::{
     routing::{get, post},
 };
 use clap::{Args, Parser, Subcommand};
-use mogwai_engine::Engine;
 use nix::{
     errno::Errno,
     fcntl::{Flock, FlockArg},
     sys::signal::{Signal, kill},
     unistd::{ForkResult, Pid},
 };
-use tokio::sync::Mutex;
 
+use crate::accounts::{AccountRegistry, AccountTemplate};
 use crate::config::{
     Config, build_instrument_profiles, build_replay_permits, build_sim_clock, now_ns,
     warn_unfunded_quotes,
 };
 use crate::http::{
-    AppState, account, arm_divergence, clock, instruments, quotes, submit_order_http, trades,
+    AppState, account, arm_divergence, clock, delete_account, instruments, list_accounts, quotes,
+    submit_order_http, trades,
 };
 use crate::ws::ws_upgrade;
 
@@ -311,24 +312,27 @@ async fn serve_async(
     tracing::info!(balances = ?funded, "account funding");
     warn_unfunded_quotes(&cfg, &profiles.instrument_defs());
     let replay_permits = build_replay_permits(&cfg);
+    let accounts = Arc::new(AccountRegistry::new(
+        AccountTemplate {
+            instruments: Arc::from(profiles.instrument_defs()),
+            balances: cfg.balances.clone(),
+        },
+        cfg.max_accounts,
+    ));
     let state = AppState {
-        engine: Arc::new(Mutex::new(Engine::with_instruments_and_balances(
-            profiles.instrument_defs(),
-            cfg.balances.clone(),
-        ))),
-        cfg,
+        accounts: Arc::clone(&accounts),
+        cfg: cfg.clone(),
         profiles,
         sim,
         data_origin_ns,
-        delay_ms: Arc::new(AtomicU64::new(0)),
-        dark_until_ns: Arc::new(AtomicU64::new(0)),
-        stall_until_ns: Arc::new(AtomicU64::new(0)),
         replay_permits,
     };
 
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/account", get(account))
+        .route("/accounts", get(list_accounts))
+        .route("/accounts/{id}", axum::routing::delete(delete_account))
         .route("/instruments", get(instruments))
         .route("/trades", get(trades))
         .route("/quotes", get(quotes))
@@ -337,6 +341,19 @@ async fn serve_async(
         .route("/ws", get(ws_upgrade))
         .route("/control/divergence", post(arm_divergence))
         .with_state(state);
+
+    if cfg.account_idle_timeout_ms != 0 {
+        let reaper = Arc::clone(&accounts);
+        let interval = cfg.account_reap_interval_ms;
+        let idle_ns = cfg.account_idle_timeout_ms.saturating_mul(1_000_000);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(interval));
+            loop {
+                tick.tick().await;
+                reaper.reap_idle(now_ns(), idle_ns);
+            }
+        });
+    }
 
     let listener = tokio::net::TcpListener::bind(args.addr).await?;
     tracing::info!(addr = %args.addr, "mogwai listening");
@@ -736,14 +753,14 @@ mod tests {
     use crate::config::*;
     use crate::http::*;
     use crate::ws::*;
-    use axum::{Json, extract::State, http::StatusCode};
+    use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
     use mogwai_data::TickEvent;
     use mogwai_protocol::{
         ClientMessage, MAX_HISTORY_LIMIT, MarketRegime, OrderType, ServerMessage, Side, SimClock,
         SubmitOrder, SubscriptionIssue, TimeInForce, TradeTick,
     };
     use rust_decimal::Decimal;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::Instant;
     use tokio::sync::mpsc;
 
@@ -779,10 +796,15 @@ mod tests {
 
     fn state() -> AppState {
         let profiles = default_profiles();
+        let accounts = Arc::new(AccountRegistry::new(
+            AccountTemplate {
+                instruments: Arc::from(profiles.instrument_defs()),
+                balances: std::collections::HashMap::new(),
+            },
+            4096,
+        ));
         AppState {
-            engine: Arc::new(Mutex::new(Engine::with_instruments(
-                profiles.instrument_defs(),
-            ))),
+            accounts,
             cfg: Config {
                 sim_epoch_ns: 0,
                 speed: 0.0,
@@ -799,11 +821,456 @@ mod tests {
             // is wall-now, so the tape origin sits 24h behind. A handler test that
             // needs a different floor overrides `data_origin_ns` after building.
             data_origin_ns: now_ns().saturating_sub(86_400_000_000_000),
-            delay_ms: Arc::new(AtomicU64::new(0)),
-            dark_until_ns: Arc::new(AtomicU64::new(0)),
-            stall_until_ns: Arc::new(AtomicU64::new(0)),
             replay_permits: Arc::new(tokio::sync::Semaphore::new(1024)),
         }
+    }
+
+    fn account_headers() -> axum::http::HeaderMap {
+        account_headers_for("TEST-001")
+    }
+
+    fn account_headers_for(account: &str) -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            mogwai_protocol::ACCOUNT_HEADER,
+            axum::http::HeaderValue::from_str(account).expect("valid header"),
+        );
+        headers
+    }
+
+    fn limit_order(id: &str) -> ClientMessage {
+        ClientMessage::SubmitOrder(SubmitOrder {
+            client_order_id: id.into(),
+            symbol: "BTCUSDT".into(),
+            side: Side::Buy,
+            order_type: OrderType::Limit,
+            quantity: Decimal::ONE,
+            price: Some(Decimal::from(100)),
+            time_in_force: TimeInForce::Gtc,
+        })
+    }
+
+    #[tokio::test]
+    async fn two_accounts_have_independent_ledgers() {
+        let app = state();
+        let _events = submit_order_http(
+            State(app.clone()),
+            account_headers_for("ACC-A"),
+            Json(limit_order("A-1")),
+        )
+        .await
+        .expect("A order accepted");
+        let Json(a) = account(State(app.clone()), account_headers_for("ACC-A"))
+            .await
+            .unwrap();
+        let Json(b) = account(State(app), account_headers_for("ACC-B"))
+            .await
+            .unwrap();
+        assert!(!a.positions.is_empty());
+        assert!(b.positions.is_empty());
+        assert!(b.balances.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_order_is_invisible_to_another_accounts_query() {
+        let app = state();
+        let _events = submit_order_http(
+            State(app.clone()),
+            account_headers_for("ACC-A"),
+            Json(limit_order("SAME")),
+        )
+        .await
+        .unwrap();
+        let Json(orders) = submit_order_http(
+            State(app.clone()),
+            account_headers_for("ACC-B"),
+            Json(ClientMessage::QueryOrders {
+                request_id: "Q1".into(),
+                client_order_id: None,
+                open_only: false,
+            }),
+        )
+        .await
+        .unwrap();
+        let Json(fills) = submit_order_http(
+            State(app),
+            account_headers_for("ACC-B"),
+            Json(ClientMessage::QueryFills {
+                request_id: "Q2".into(),
+                client_order_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(&orders[0], ServerMessage::OrderStatusSnapshot(snapshot) if snapshot.orders.is_empty())
+        );
+        assert!(
+            matches!(&fills[0], ServerMessage::FillSnapshot(snapshot) if snapshot.fills.is_empty())
+        );
+    }
+
+    #[tokio::test]
+    async fn same_client_order_id_in_two_accounts_both_accepted() {
+        let app = state();
+        for account_id in ["ACC-A", "ACC-B"] {
+            let Json(events) = submit_order_http(
+                State(app.clone()),
+                account_headers_for(account_id),
+                Json(limit_order("REUSED")),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(events[0], ServerMessage::OrderAccepted { .. }));
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_across_accounts_is_refused() {
+        let app = state();
+        let _events = submit_order_http(
+            State(app.clone()),
+            account_headers_for("ACC-A"),
+            Json(limit_order("A-ONLY")),
+        )
+        .await
+        .unwrap();
+        let Json(events) = submit_order_http(
+            State(app),
+            account_headers_for("ACC-B"),
+            Json(ClientMessage::CancelOrder {
+                client_order_id: "A-ONLY".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            events[0],
+            ServerMessage::OrderCancelRejected { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn missing_account_header_is_rejected() {
+        let app = state();
+        assert_eq!(
+            account(State(app.clone()), axum::http::HeaderMap::new())
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            submit_order_http(
+                State(app.clone()),
+                axum::http::HeaderMap::new(),
+                Json(limit_order("X"))
+            )
+            .await
+            .unwrap_err(),
+            StatusCode::BAD_REQUEST
+        );
+        let response = arm_divergence(
+            State(app),
+            axum::http::HeaderMap::new(),
+            Json(mogwai_protocol::control::Divergence::ClearDivergences),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn ws_upgrade_without_the_account_param_is_rejected_before_handshake() {
+        let addr = serve_ws(state()).await;
+        let result =
+            tokio::task::spawn_blocking(move || tungstenite::connect(format!("ws://{addr}/ws")))
+                .await
+                .expect("blocking websocket client");
+        let err = result.expect_err("missing account query parameter must refuse the upgrade");
+        match err {
+            tungstenite::Error::Http(response) => {
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                let body = response.body().as_ref().expect("error body");
+                let body = std::str::from_utf8(body).expect("UTF-8 error body");
+                assert!(body.contains(mogwai_protocol::ACCOUNT_QUERY_PARAM));
+            }
+            other => panic!("expected an HTTP handshake refusal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_permits_are_unchanged_by_account_scoping() {
+        let mut app_state = state();
+        app_state.replay_permits = Arc::new(tokio::sync::Semaphore::new(4));
+        let permits = Arc::clone(&app_state.replay_permits);
+        let addr = serve_ws(app_state).await;
+        let held_permits = tokio::task::spawn_blocking(move || {
+            let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
+                subscriptions: subscribe_entries(["BTCUSDT"], None),
+            })
+            .expect("encode subscribe");
+            let (mut a, _) =
+                tungstenite::connect(format!("ws://{addr}/ws?account=ACC-A")).expect("A connects");
+            a.send(tungstenite::Message::Text(subscribe.clone().into()))
+                .expect("A subscribes");
+            read_until_trade(&mut a);
+            let (mut b, _) =
+                tungstenite::connect(format!("ws://{addr}/ws?account=ACC-B")).expect("B connects");
+            b.send(tungstenite::Message::Text(subscribe.into()))
+                .expect("B subscribes");
+            read_until_trade(&mut b);
+            permits.available_permits()
+        })
+        .await
+        .expect("blocking websocket clients");
+        assert_eq!(
+            held_permits, 2,
+            "each subscription consumes exactly one global replay permit"
+        );
+    }
+
+    #[tokio::test]
+    async fn go_dark_is_scoped_to_the_arming_account() {
+        let app = state();
+        let response = arm_divergence(
+            State(app.clone()),
+            account_headers_for("ACC-A"),
+            Json(mogwai_protocol::control::Divergence::GoDark { ms: 1_000 }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let a = app
+            .accounts
+            .get(&mogwai_protocol::AccountId::parse("ACC-A").unwrap())
+            .unwrap();
+        let b = app
+            .accounts
+            .acquire(
+                &mogwai_protocol::AccountId::parse("ACC-B").unwrap(),
+                now_ns(),
+            )
+            .unwrap();
+        assert!(a.dark_until_ns.load(Ordering::Relaxed) > sim_now_ns(app.sim));
+        assert_eq!(b.dark_until_ns.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn delay_acks_is_scoped_to_the_arming_account() {
+        let app = state();
+        let response = arm_divergence(
+            State(app.clone()),
+            account_headers_for("ACC-A"),
+            Json(mogwai_protocol::control::Divergence::DelayAcks { ms: 1_000 }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let a = app
+            .accounts
+            .get(&mogwai_protocol::AccountId::parse("ACC-A").unwrap())
+            .unwrap();
+        let b = app
+            .accounts
+            .acquire(
+                &mogwai_protocol::AccountId::parse("ACC-B").unwrap(),
+                now_ns(),
+            )
+            .unwrap();
+        assert_eq!(a.delay_ms.load(Ordering::Relaxed), 1_000);
+        assert_eq!(b.delay_ms.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn teardown_during_an_in_flight_order_does_not_fill_a_phantom() {
+        let app = state();
+        let id = mogwai_protocol::AccountId::parse("ACC-A").unwrap();
+        let slot = app.accounts.acquire(&id, now_ns()).unwrap();
+        let engine = slot.engine.lock().await;
+        assert!(app.accounts.destroy(&id));
+        drop(engine);
+        assert!(slot.tombstoned.load(Ordering::Relaxed));
+        assert!(
+            slot.engine
+                .lock()
+                .await
+                .account_snapshot(now_ns())
+                .positions
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn malformed_account_header_is_rejected() {
+        let app = state();
+        assert!(account_from_headers(&app, &account_headers_for("bad/id")).is_err());
+        assert_eq!(app.accounts.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_request_with_a_valid_id_creates_no_account() {
+        let app = state();
+        assert_eq!(
+            submit_order_http(
+                State(app.clone()),
+                account_headers_for("ACC-A"),
+                Json(ClientMessage::Subscribe {
+                    subscriptions: Vec::new()
+                })
+            )
+            .await
+            .unwrap_err(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(app.accounts.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn teardown_destroys_the_account_and_its_state() {
+        let app = state();
+        let _events = submit_order_http(
+            State(app.clone()),
+            account_headers_for("ACC-A"),
+            Json(limit_order("OLD")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            delete_account(State(app.clone()), axum::extract::Path("ACC-A".into()))
+                .await
+                .unwrap(),
+            StatusCode::OK
+        );
+        let Json(fresh) = account(State(app), account_headers_for("ACC-A"))
+            .await
+            .unwrap();
+        assert!(fresh.positions.is_empty());
+        assert!(fresh.balances.is_empty());
+    }
+
+    #[tokio::test]
+    async fn teardown_of_unknown_account_is_404() {
+        assert_eq!(
+            delete_account(State(state()), axum::extract::Path("MISSING".into()))
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn teardown_of_a_malformed_id_is_400() {
+        assert_eq!(
+            delete_account(State(state()), axum::extract::Path("bad/id".into()))
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn an_http_only_account_stays_alive_while_polling() {
+        let app = state();
+        for now in [20_u64, 40, 60] {
+            let idle = mogwai_protocol::AccountId::parse(&format!("IDLE-{now}")).unwrap();
+            app.accounts.acquire(&idle, 1).unwrap();
+            let _snapshot = account(State(app.clone()), account_headers_for("POLL"))
+                .await
+                .unwrap();
+            assert_eq!(app.accounts.reap_idle(now, 15), vec![idle.clone()]);
+            assert!(
+                app.accounts
+                    .get(&mogwai_protocol::AccountId::parse("POLL").unwrap())
+                    .is_some()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn instruments_match_the_configured_profiles() {
+        // `/instruments` answers from the shared profiles, not from an engine:
+        // with a registry there is no non-arbitrary account to ask for a
+        // venue-global fact. The two lists must stay byte-identical.
+        let app = state();
+        let Json(listed) = instruments(State(app.clone())).await;
+        assert_eq!(
+            serde_json::to_string(&listed).unwrap(),
+            serde_json::to_string(&app.profiles.instrument_defs()).unwrap()
+        );
+        assert_eq!(
+            app.accounts.len(),
+            0,
+            "a venue-global listing must create no account"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_order_into_a_destroyed_account_is_gone() {
+        // A DELETE landing between identity resolution and the engine lock must
+        // not answer 200: the caller would believe its order was booked into a
+        // ledger nobody will ever read again.
+        let app = state();
+        let id = mogwai_protocol::AccountId::parse("ACC-A").unwrap();
+        let slot = app.accounts.acquire(&id, now_ns()).unwrap();
+        assert!(app.accounts.destroy(&id));
+        let (lanes, _receivers) = ExecLanes::detached();
+        assert!(matches!(
+            process_order_cmd(limit_order("DOOMED"), &app, &slot, &lanes).await,
+            OrderOutcome::Gone(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn teardown_closes_a_data_only_session() {
+        // Deliberately data-only: a session that sent an order would also pass
+        // under lazy discover-on-next-engine-access, which is the design this
+        // test exists to forbid. A market-data-only socket makes no engine
+        // access at all, so only the `closed` notification can reach it.
+        let app = state();
+        let accounts = Arc::clone(&app.accounts);
+        let addr = serve_ws(app).await;
+        let reason = tokio::task::spawn_blocking(move || {
+            let (mut socket, _) =
+                tungstenite::connect(format!("ws://{addr}/ws?account=DOOMED")).expect("ws connect");
+            let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
+                subscriptions: subscribe_entries(["BTCUSDT"], None),
+            })
+            .expect("encode subscribe");
+            socket
+                .send(tungstenite::Message::Text(subscribe.into()))
+                .expect("send subscribe");
+            read_until_trade(&mut socket);
+            assert!(accounts.destroy(&mogwai_protocol::AccountId::parse("DOOMED").unwrap()));
+            loop {
+                let msg = socket.read().expect("read after teardown");
+                let tungstenite::Message::Text(text) = msg else {
+                    continue;
+                };
+                if let Ok(ServerMessage::ProtocolError { reason, .. }) =
+                    serde_json::from_str::<ServerMessage>(&text)
+                {
+                    break reason;
+                }
+            }
+        })
+        .await
+        .expect("blocking websocket client");
+        assert!(reason.contains("destroyed"), "{reason}");
+    }
+
+    #[test]
+    fn zero_reap_interval_is_a_config_error() {
+        let err = validate_account_lifecycle(&Config {
+            account_reap_interval_ms: 0,
+            ..Config::default()
+        })
+        .expect_err("a zero reap interval has no sound reading")
+        .to_string();
+        assert!(err.contains("account_reap_interval_ms"), "{err}");
+        assert!(validate_account_lifecycle(&Config::default()).is_ok());
     }
 
     #[test]
@@ -1064,6 +1531,7 @@ mod tests {
     async fn http_orders_route_processes_order_commands() {
         let response = submit_order_http(
             State(state()),
+            account_headers(),
             Json(ClientMessage::SubmitOrder(SubmitOrder {
                 client_order_id: "HTTP1".into(),
                 symbol: "BTCUSDT".into(),
@@ -1091,6 +1559,7 @@ mod tests {
         // unfixed, this rejects with "submit price required" instead of filling.
         let response = submit_order_http(
             State(state()),
+            account_headers(),
             Json(ClientMessage::SubmitOrder(SubmitOrder {
                 client_order_id: "HTTP-MKT1".into(),
                 symbol: "BTCUSDT".into(),
@@ -1129,6 +1598,7 @@ mod tests {
         state.data_origin_ns = now_ns().saturating_sub(90 * 86_400_000_000_000);
         let response = submit_order_http(
             State(state),
+            account_headers(),
             Json(ClientMessage::SubmitOrder(SubmitOrder {
                 client_order_id: "HTTP-MKT-DEAD".into(),
                 symbol: "BTCUSDT".into(),
@@ -1172,8 +1642,8 @@ mod tests {
         });
 
         let frame = tokio::task::spawn_blocking(move || {
-            let (mut socket, _) =
-                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            let (mut socket, _) = tungstenite::connect(format!("ws://{addr}/ws?account=TEST-001"))
+                .expect("ws connect");
             socket
                 .send(tungstenite::Message::Text(r#"{"type":"Subscribe"}"#.into()))
                 .expect("send malformed subscribe");
@@ -1279,7 +1749,15 @@ mod tests {
         // Arm the delay directly rather than POSTing /control/divergence: the
         // atomic IS the armed state (see `arm_divergence`), and this test is
         // about the pump, not the control plane.
-        state.delay_ms.store(delay_ms, Ordering::Relaxed);
+        state
+            .accounts
+            .acquire(
+                &mogwai_protocol::AccountId::parse("TEST-001").unwrap(),
+                now_ns(),
+            )
+            .unwrap()
+            .delay_ms
+            .store(delay_ms, Ordering::Relaxed);
         let app = Router::new()
             .route("/ws", get(ws_upgrade))
             .with_state(state);
@@ -1292,8 +1770,8 @@ mod tests {
         });
 
         tokio::task::spawn_blocking(move || {
-            let (mut socket, _) =
-                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            let (mut socket, _) = tungstenite::connect(format!("ws://{addr}/ws?account=TEST-001"))
+                .expect("ws connect");
 
             // Saturate the pump. Nothing is read back meanwhile; with a delay
             // armed every one of these events is held, so they accumulate.
@@ -1378,8 +1856,8 @@ mod tests {
         });
 
         let frames = tokio::task::spawn_blocking(move || {
-            let (mut socket, _) =
-                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            let (mut socket, _) = tungstenite::connect(format!("ws://{addr}/ws?account=TEST-001"))
+                .expect("ws connect");
             let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
                 subscriptions: vec![mogwai_protocol::SubscriptionRequest {
                     generation: 1,
@@ -1436,8 +1914,8 @@ mod tests {
         });
 
         let frames = tokio::task::spawn_blocking(move || {
-            let (mut socket, _) =
-                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            let (mut socket, _) = tungstenite::connect(format!("ws://{addr}/ws?account=TEST-001"))
+                .expect("ws connect");
             let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
                 subscriptions: subscribe_entries(["BTCUSDT"], Some(future)),
             })
@@ -1601,16 +2079,16 @@ mod tests {
             // before connection two races in - that proves the permit is HELD,
             // not merely requested. Its socket stays in scope for the rest of the
             // closure so the replay thread, and thus the permit, lives on.
-            let (mut hold, _) =
-                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect one");
+            let (mut hold, _) = tungstenite::connect(format!("ws://{addr}/ws?account=TEST-001"))
+                .expect("ws connect one");
             hold.send(tungstenite::Message::Text(subscribe.clone().into()))
                 .expect("send subscribe one");
             read_until_trade(&mut hold);
 
             // Connection two cannot get a permit, so its subscribe is refused and
             // no data ever streams for it.
-            let (mut denied, _) =
-                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect two");
+            let (mut denied, _) = tungstenite::connect(format!("ws://{addr}/ws?account=TEST-002"))
+                .expect("ws connect two");
             denied
                 .send(tungstenite::Message::Text(subscribe.into()))
                 .expect("send subscribe two");
@@ -1653,8 +2131,8 @@ mod tests {
         });
 
         let frames = tokio::task::spawn_blocking(move || {
-            let (mut socket, _) =
-                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            let (mut socket, _) = tungstenite::connect(format!("ws://{addr}/ws?account=TEST-001"))
+                .expect("ws connect");
             let unknown = (0..mogwai_protocol::MAX_SUBSCRIBE_SYMBOLS).map(|i| format!("NOPE{i}"));
             let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
                 subscriptions: subscribe_entries(unknown, None),
@@ -1773,8 +2251,8 @@ mod tests {
         });
 
         let (entries, trade_ts) = tokio::task::spawn_blocking(move || {
-            let (mut socket, _) =
-                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            let (mut socket, _) = tungstenite::connect(format!("ws://{addr}/ws?account=TEST-001"))
+                .expect("ws connect");
             socket
                 .send(tungstenite::Message::Text(
                     subscribe_at_generation("BTCUSDT", 5).into(),
@@ -1822,8 +2300,8 @@ mod tests {
         });
 
         let entries = tokio::task::spawn_blocking(move || {
-            let (mut socket, _) =
-                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            let (mut socket, _) = tungstenite::connect(format!("ws://{addr}/ws?account=TEST-001"))
+                .expect("ws connect");
             socket
                 .send(tungstenite::Message::Text(
                     subscribe_at_generation("BTCUSDT", 5).into(),
@@ -1876,8 +2354,8 @@ mod tests {
         });
 
         let messages = tokio::task::spawn_blocking(move || {
-            let (mut socket, _) =
-                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            let (mut socket, _) = tungstenite::connect(format!("ws://{addr}/ws?account=TEST-001"))
+                .expect("ws connect");
             let duplicated = serde_json::to_string(&ClientMessage::Subscribe {
                 subscriptions: vec![
                     mogwai_protocol::SubscriptionRequest {
@@ -1944,8 +2422,8 @@ mod tests {
         });
 
         let (outcomes, trade_ts) = tokio::task::spawn_blocking(move || {
-            let (mut socket, _) =
-                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            let (mut socket, _) = tungstenite::connect(format!("ws://{addr}/ws?account=TEST-001"))
+                .expect("ws connect");
             let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
                 subscriptions: vec![mogwai_protocol::SubscriptionRequest {
                     generation: 9,
@@ -2042,8 +2520,8 @@ mod tests {
         let addr = serve_ws(state).await;
 
         let (refusal, snapshot) = tokio::task::spawn_blocking(move || {
-            let (mut socket, _) =
-                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            let (mut socket, _) = tungstenite::connect(format!("ws://{addr}/ws?account=TEST-001"))
+                .expect("ws connect");
             socket
                 .send(tungstenite::Message::Text(
                     resting_submit("UNRESERVABLE").into(),
@@ -2105,8 +2583,8 @@ mod tests {
         let addr = serve_ws(state).await;
 
         let close = tokio::task::spawn_blocking(move || {
-            let (mut socket, _) =
-                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            let (mut socket, _) = tungstenite::connect(format!("ws://{addr}/ws?account=TEST-001"))
+                .expect("ws connect");
             park_the_writer(&mut socket);
             // Undecodable frames: each is admission truth the venue must state,
             // and each takes a priority slot it cannot get back while the writer
@@ -2164,8 +2642,8 @@ mod tests {
         let addr = serve_ws(state).await;
 
         let (trade_ts, wedged_end) = tokio::task::spawn_blocking(move || {
-            let (mut wedged, _) =
-                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect one");
+            let (mut wedged, _) = tungstenite::connect(format!("ws://{addr}/ws?account=TEST-002"))
+                .expect("ws connect one");
             park_the_writer(&mut wedged);
             for _ in 0..2 {
                 wedged
@@ -2176,8 +2654,8 @@ mod tests {
             // exactly the peer 5.8 describes.
             std::thread::sleep(CLOSE_GRACE + Duration::from_secs(2));
 
-            let (mut fresh, _) =
-                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect two");
+            let (mut fresh, _) = tungstenite::connect(format!("ws://{addr}/ws?account=TEST-001"))
+                .expect("ws connect two");
             let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
                 subscriptions: subscribe_entries(["BTCUSDT"], None),
             })
@@ -2227,7 +2705,14 @@ mod tests {
     #[tokio::test]
     async fn held_budget_is_returned_on_write_and_on_disconnect() {
         let state = state();
-        let delay_ms = Arc::clone(&state.delay_ms);
+        let slot = state
+            .accounts
+            .acquire(
+                &mogwai_protocol::AccountId::parse("TEST-001").unwrap(),
+                now_ns(),
+            )
+            .unwrap();
+        let delay_ms = Arc::clone(&slot);
         let mut state = state;
         // One submit's worst case, against the widest book these submits can
         // produce: accepting an order can introduce the balance and position
@@ -2236,7 +2721,7 @@ mod tests {
         // shape would leave the budget a few hundred bytes short of the SECOND
         // command and the test would fail for arithmetic rather than for a leak.
         // It is still one command's budget: two of these never fit.
-        let shape = state.engine.lock().await.book_shape();
+        let shape = slot.engine.lock().await.book_shape();
         state.cfg.exec_held_budget_bytes = mogwai_protocol::sizing::worst_case_output_bytes(
             &serde_json::from_str::<ClientMessage>(&resting_submit("SIZE")).expect("decode"),
             &mogwai_protocol::sizing::BookShape {
@@ -2249,8 +2734,8 @@ mod tests {
         let addr = serve_ws(state).await;
 
         tokio::task::spawn_blocking(move || {
-            let (mut socket, _) =
-                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            let (mut socket, _) = tungstenite::connect(format!("ws://{addr}/ws?account=TEST-002"))
+                .expect("ws connect");
             for i in 0..5 {
                 socket
                     .send(tungstenite::Message::Text(
@@ -2269,7 +2754,7 @@ mod tests {
             // clearing the divergence reaches frames still queued, not the one
             // in the pump's hand - so a 30 s arm would make the drain below a
             // 30 s wait rather than a test.
-            delay_ms.store(2_000, Ordering::Relaxed);
+            delay_ms.delay_ms.store(2_000, Ordering::Relaxed);
             socket
                 .send(tungstenite::Message::Text(resting_submit("HELD").into()))
                 .expect("send held submit");
@@ -2292,7 +2777,7 @@ mod tests {
             // The held batch reaches the writer when its own deadline expires,
             // and the writer returns its bytes as it writes them; the cleared
             // delay keeps the final submit prompt.
-            delay_ms.store(0, Ordering::Relaxed);
+            delay_ms.delay_ms.store(0, Ordering::Relaxed);
             read_until_account_state(&mut socket, "HELD");
             socket
                 .send(tungstenite::Message::Text(
@@ -2336,8 +2821,8 @@ mod tests {
         let addr = serve_ws(state).await;
 
         let (trades_before, trades_after, close) = tokio::task::spawn_blocking(move || {
-            let (mut socket, _) =
-                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            let (mut socket, _) = tungstenite::connect(format!("ws://{addr}/ws?account=TEST-001"))
+                .expect("ws connect");
             let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
                 subscriptions: subscribe_entries(["BTCUSDT"], None),
             })
@@ -2441,8 +2926,7 @@ mod tests {
                     prio_rx,
                     held_rx,
                     SimClock::identity(),
-                    Arc::new(std::sync::atomic::AtomicU64::new(0)),
-                    Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    crate::accounts::AccountSlot::detached_for_tests(),
                 ));
                 // One lane closes; the priority lane stays open, which is the
                 // exact asymmetry the naive select! spins on.
@@ -2507,8 +2991,8 @@ mod tests {
         let addr = serve_ws(state()).await;
 
         let (undecodable, unknown_symbol) = tokio::task::spawn_blocking(move || {
-            let (mut socket, _) =
-                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            let (mut socket, _) = tungstenite::connect(format!("ws://{addr}/ws?account=TEST-001"))
+                .expect("ws connect");
             // A megabyte of client-controlled text inside serde's own error
             // message: the variant name is echoed back verbatim by
             // `serde_json::Error::to_string`.
@@ -2591,6 +3075,7 @@ mod tests {
         let state = state();
         let response = arm_divergence(
             State(state.clone()),
+            account_headers(),
             Json(mogwai_protocol::control::Divergence::RejectNextSubmit {
                 reason: "R".repeat(1024 * 1024),
             }),
@@ -2605,6 +3090,7 @@ mod tests {
 
         let events = submit_order_http(
             State(state),
+            account_headers(),
             Json(ClientMessage::SubmitOrder(SubmitOrder {
                 client_order_id: "ARMED-REJECT".into(),
                 symbol: "BTCUSDT".into(),
@@ -2927,6 +3413,7 @@ mod tests {
         // the shared `ServerMessage::category` classification; the adapter buckets
         // the same frame into exec latency from the same source of truth.
         let account = ServerMessage::AccountState(mogwai_protocol::AccountState {
+            account_id: mogwai_protocol::AccountId::parse("MOGWAI-001").unwrap(),
             balances: Vec::new(),
             positions: Vec::new(),
             ts_event: 1,
@@ -2970,6 +3457,7 @@ mod tests {
         assert!(is_execution_event(&accepted));
 
         let account = ServerMessage::AccountState(mogwai_protocol::AccountState {
+            account_id: mogwai_protocol::AccountId::parse("MOGWAI-001").unwrap(),
             balances: Vec::new(),
             positions: Vec::new(),
             ts_event: 1,
@@ -3023,6 +3511,7 @@ mod tests {
     async fn http_orders_route_rejects_subscription_messages() {
         let err = submit_order_http(
             State(state()),
+            account_headers(),
             Json(ClientMessage::Subscribe {
                 subscriptions: subscribe_entries(["BTCUSDT"], None),
             }),
@@ -3760,7 +4249,8 @@ mod tests {
     #[tokio::test]
     async fn delay_acks_does_not_compound_across_queued_events() {
         const DELAY_MS: u64 = 100;
-        let delay_ms = Arc::new(AtomicU64::new(DELAY_MS));
+        let delay_ms = crate::accounts::AccountSlot::detached_for_tests();
+        delay_ms.delay_ms.store(DELAY_MS, Ordering::Relaxed);
         let (exec_tx, exec_rx) = mpsc::unbounded_channel();
         let (tx, mut rx) = mpsc::channel::<Outbound>(8);
         let pump = spawn_exec_pump(exec_rx, delay_ms, SimClock::identity(), tx);

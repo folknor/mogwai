@@ -15,8 +15,8 @@
 //! numerics only; they are rounded generously upward, because over-reserving
 //! costs a connection some budget while under-reserving voids the bound.
 use crate::{
-    ClientMessage, JSON_ESCAPE_FACTOR, MAX_CLIENT_ID_LEN, MAX_CURRENCY_LEN, MAX_REASON_LEN,
-    MAX_SYMBOL_LEN,
+    ClientMessage, JSON_ESCAPE_FACTOR, MAX_ACCOUNT_ID_LEN, MAX_CLIENT_ID_LEN, MAX_CURRENCY_LEN,
+    MAX_REASON_LEN, MAX_SYMBOL_LEN,
 };
 
 /// The engine-state facts a reservation must know to bound a command's output.
@@ -85,7 +85,9 @@ pub const BOUNDARY_REFUSAL_BYTES: usize = ORDER_EVENT_MAX_BYTES;
 /// balance and position row the book currently carries.
 #[must_use]
 pub fn account_state_max_bytes(shape: &BookShape) -> usize {
-    128 + shape.balances * BALANCE_ROW_MAX_BYTES + shape.positions * POSITION_ROW_MAX_BYTES
+    144 + ESC * MAX_ACCOUNT_ID_LEN
+        + shape.balances * BALANCE_ROW_MAX_BYTES
+        + shape.positions * POSITION_ROW_MAX_BYTES
 }
 
 /// Upper bound on the total serialized bytes `Engine::process` can produce for
@@ -127,5 +129,32 @@ pub fn worst_case_output_bytes(cmd: &ClientMessage, shape: &BookShape) -> usize 
         // subscribe's diagnostics are priority-lane frames, reserved from a
         // different pool entirely.
         ClientMessage::Subscribe { .. } | ClientMessage::Unsubscribe { .. } => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AccountId, AccountState};
+
+    #[test]
+    fn account_state_bound_covers_a_max_length_account_id() {
+        let shape = BookShape {
+            balances: 0,
+            positions: 0,
+            open_orders: 0,
+            closed_orders: 0,
+            recorded_fills: 0,
+        };
+        let state = AccountState {
+            account_id: AccountId::parse(&"Z".repeat(MAX_ACCOUNT_ID_LEN)).unwrap(),
+            balances: Vec::new(),
+            positions: Vec::new(),
+            ts_event: u64::MAX,
+        };
+        assert!(
+            account_state_max_bytes(&shape) >= serde_json::to_vec(&state).unwrap().len(),
+            "account snapshot bound must dominate its wire bytes"
+        );
     }
 }

@@ -47,7 +47,7 @@ use nautilus_model::{
     data::Data,
     enums::{AccountType, OmsType},
     events::OrderEventAny,
-    identifiers::{ClientId, StrategyId, TraderId},
+    identifiers::{AccountId, ClientId, StrategyId, TraderId},
     orders::Order,
     types::Quantity,
 };
@@ -62,6 +62,7 @@ async fn subscribed_data_client(
     replace_data_event_sender(sink_tx);
 
     let config = MogwaiDataClientConfig {
+        account_id: AccountId::from("MOGWAI-001"),
         base_url,
         havoc,
         ..MogwaiDataClientConfig::default()
@@ -288,6 +289,7 @@ async fn ships_server_havoc() {
     }
 
     let data_config = MogwaiDataClientConfig {
+        account_id: AccountId::from("MOGWAI-001"),
         base_url,
         transport_profile: TransportProfile::HttpPolling,
         havoc: Some(havoc),
@@ -522,6 +524,7 @@ async fn conn_reconnect_respects_max_attempts() {
     replace_data_event_sender(sink_tx);
 
     let config = MogwaiDataClientConfig {
+        account_id: AccountId::from("MOGWAI-001"),
         base_url,
         havoc: Some(conn_havoc(ConnHavoc {
             reconnect_max_attempts: Some(3),
@@ -647,6 +650,7 @@ async fn conn_http_quota_spaces_data_requests() {
     replace_data_event_sender(sink_tx);
 
     let config = MogwaiDataClientConfig {
+        account_id: AccountId::from("MOGWAI-001"),
         base_url,
         transport_profile: TransportProfile::HttpPolling,
         havoc: Some(conn_havoc(ConnHavoc {

@@ -312,7 +312,47 @@ Owns the sockets, the clock, and replay pacing.
   command channel preserves submission order); `GET /instruments`;
   `GET /account` (the current `AccountState` snapshot); `GET /trades` and
   `GET /quotes` (bounded historical fetch keyed by symbol/start/end/limit;
-  `/quotes` is always empty because generated history is trades-only).
+  `/quotes` is always empty because generated history is trades-only);
+  `GET /accounts` and `DELETE /accounts/<id>` (the account control plane below).
+- **The account registry.** One process serves N independent ledgers. `AppState`
+  carries an `AccountRegistry` (`accounts.rs`) rather than a single engine: each
+  `AccountSlot` owns its own `Engine`, its own `delay_ms` / `dark_until_ns` /
+  `stall_until_ns` havoc windows, and its own session count. Everything genuinely
+  shared - the instrument profiles, the `SimClock`, the tape origin, the replay
+  permit pool - stays on `AppState`. An account is a LEDGER, not a world, so two
+  accounts trading the same symbol see nothing of each other and the formerly
+  process-global engine mutex is now per-account.
+  - **Identity is a transport attribute**, never a `ClientMessage` field: the
+    `x-mogwai-account` header on every stateful HTTP call, and the `account`
+    query parameter on the `/ws` upgrade, which binds a socket to one account
+    for its lifetime. `/health`, `/clock`, `/instruments`, `/trades`, `/quotes`
+    and `GET /accounts` need no identity; `GET /account`, `POST /orders`,
+    `POST /control/divergence` and `GET /ws` require it. A missing or malformed
+    id is a `400` naming the header (or the parameter) and the reason - never a
+    default account, which is precisely the fleet-contamination bug this design
+    exists to prevent. Identity is resolved before anything else and the slot is
+    acquired only on the path that will actually serve the request, so no 4xx
+    leaves a slot behind. `AccountState` carries its own `account_id`, so a
+    misrouted snapshot is detectable by the client rather than silently adopted.
+  - **Lifecycle: implicit create, explicit destroy, idle reap.** An unknown but
+    well-formed id auto-creates an account from the `[balances]` /
+    `[[instrument]]` template, up to `max_accounts` (beyond which a NEW account
+    is refused `429` while existing ones keep trading). `DELETE /accounts/<id>`
+    is the normal teardown: the slot is tombstoned and removed under the
+    registry lock, and every bound session wakes on its `closed` notification
+    and closes with a `ProtocolError` - it does NOT wait to discover teardown on
+    its next engine access, because a market-data-only session makes none. The
+    idle reaper (`account_reap_interval_ms`) destroys session-less accounts
+    idle past `account_idle_timeout_ms` of WALL time, which is the policy for a
+    driver that dies without tearing down. Reclaim is by drop: the engine and
+    its unbounded `seen_client_order_ids` / closed-order / fill retention go
+    with the last `Arc<AccountSlot>`. Re-creating a destroyed id yields a NEW
+    generation with an empty ledger; sockets bound to the old one are never
+    adopted by it.
+  - **Not done here.** Replay threads are still per subscription, not per
+    account, so 2000 workers need `max_concurrent_replays` raised (see
+    `reference/config.md`); the header is an identity, not a credential, and
+    any id may act as any account on this trusted-network test venue.
 - **Generated market data, two carriers.** A server-owned `source` module owns
   both. Both anchor every generator at the boot-derived `data_origin` (the server
   derives it once from the boot clock and threads it in) and SEEK into that one
@@ -394,7 +434,8 @@ Owns the sockets, the clock, and replay pacing.
   `DelayAcks` holds each execution event (market data untouched); `GoDark` drops
   everything for the blackout window; `StallData` drops only market-data frames
   while execution frames continue to flow. They are armed over
-  `/control/divergence` via shared atomics. An opt-in server heartbeat can emit
+  `/control/divergence` and live as atomics on the ARMING ACCOUNT's slot, so a
+  blackout on one fleet worker leaves the others running clean. An opt-in server heartbeat can emit
   liveness frames that survive `StallData`, so the socket remains frame-active
   while channel data is withheld.
 - **Run config** comes from a `mogwai.toml` read at startup (replay `speed`,

@@ -38,6 +38,12 @@ server_heartbeat_ms = 0
 # with a ProtocolError while running streams keep going. 0 disables the cap.
 max_concurrent_replays = 1024
 
+# Per-account ledger registry. Idle timeout uses wall time; 0 disables its
+# respective account cap or timeout. The reap interval must remain nonzero.
+max_accounts = 4096
+account_idle_timeout_ms = 3600000
+account_reap_interval_ms = 60000
+
 # Admission control, per websocket connection. The HELD lane carries engine
 # output through the DelayAcks shift and is bounded in BYTES, because an
 # AccountState or a venue-truth snapshot has no per-frame size ceiling a count

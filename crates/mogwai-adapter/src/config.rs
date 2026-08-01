@@ -20,6 +20,8 @@ const DEFAULT_BASE_URL: &str = "ws://127.0.0.1:8787";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MogwaiDataClientConfig {
+    /// Account whose websocket session this data client is bound to.
+    pub account_id: AccountId,
     /// Base URL of the running mogwai-server.
     ///
     /// Later data handlers derive the `/ws` market-data path from this value.
@@ -36,6 +38,7 @@ pub struct MogwaiDataClientConfig {
 impl Default for MogwaiDataClientConfig {
     fn default() -> Self {
         Self {
+            account_id: AccountId::from("MOGWAI-001"),
             base_url: DEFAULT_BASE_URL.to_string(),
             transport_profile: TransportProfile::default(),
             havoc: None,
@@ -53,6 +56,7 @@ impl MogwaiDataClientConfig {
     /// out of range.
     pub fn validate(&self) -> anyhow::Result<()> {
         validate_base_url(&self.base_url)?;
+        mogwai_protocol::AccountId::parse(self.account_id.as_ref())?;
         validate_havoc(&self.havoc, self.transport_profile)
     }
 
@@ -65,7 +69,12 @@ impl MogwaiDataClientConfig {
     /// exists to rule out.
     #[must_use]
     pub fn ws_url(&self) -> String {
-        self.base_url.trim().to_string()
+        format!(
+            "{}?{}={}",
+            self.base_url.trim(),
+            mogwai_protocol::ACCOUNT_QUERY_PARAM,
+            self.account_id
+        )
     }
 
     /// Derives the HTTP base URL from the configured ws/wss `base_url`.
@@ -142,6 +151,7 @@ impl MogwaiExecClientConfig {
     /// out of range.
     pub fn validate(&self) -> anyhow::Result<()> {
         validate_base_url(&self.base_url)?;
+        mogwai_protocol::AccountId::parse(self.account_id.as_ref())?;
         validate_havoc(&self.havoc, self.transport_profile)
     }
 
@@ -150,7 +160,12 @@ impl MogwaiExecClientConfig {
     /// the trim matters (a padded URL passes validation but never connects).
     #[must_use]
     pub fn ws_url(&self) -> String {
-        self.base_url.trim().to_string()
+        format!(
+            "{}?{}={}",
+            self.base_url.trim(),
+            mogwai_protocol::ACCOUNT_QUERY_PARAM,
+            self.account_id
+        )
     }
 
     /// Derives the HTTP base URL from the configured ws/wss `base_url`.
@@ -313,7 +328,7 @@ mod tests {
     fn default_base_url_uses_server_port() {
         let cfg = MogwaiDataClientConfig::default();
 
-        assert_eq!(cfg.ws_url(), "ws://127.0.0.1:8787");
+        assert_eq!(cfg.ws_url(), "ws://127.0.0.1:8787?account=MOGWAI-001");
         assert_eq!(cfg.http_base_url(), "http://127.0.0.1:8787");
     }
 
@@ -324,8 +339,55 @@ mod tests {
             ..MogwaiDataClientConfig::default()
         };
 
-        assert_eq!(cfg.ws_url(), "wss://example.test:9443");
+        assert_eq!(cfg.ws_url(), "wss://example.test:9443?account=MOGWAI-001");
         assert_eq!(cfg.http_base_url(), "https://example.test:9443");
+    }
+
+    #[test]
+    fn a_config_id_illegal_to_the_venue_fails_client_construction() {
+        // The two charsets do not agree: nautilus `AccountId::new_checked` wants
+        // only a non-empty ASCII string with a `-` and non-empty parts either
+        // side, so it accepts spaces and slashes the venue refuses. Left
+        // unchecked, a perfectly legal nautilus config yields a client that
+        // 400s on every request, first observed under live trading.
+        for illegal in ["WYRD 042-A", "WYRD-042/BTCUSDT"] {
+            let data = MogwaiDataClientConfig {
+                account_id: AccountId::from(illegal),
+                ..MogwaiDataClientConfig::default()
+            };
+            let exec = MogwaiExecClientConfig {
+                account_id: AccountId::from(illegal),
+                ..MogwaiExecClientConfig::default()
+            };
+            let err = data
+                .validate()
+                .expect_err("a venue-illegal id must fail the data client build")
+                .to_string();
+            assert!(err.contains("illegal character"), "{err}");
+            assert!(exec.validate().is_err(), "{illegal}");
+        }
+        // The deployment shape stays legal to both ends.
+        assert!(
+            MogwaiExecClientConfig {
+                account_id: AccountId::from("WYRD-042:BTCUSDT"),
+                ..MogwaiExecClientConfig::default()
+            }
+            .validate()
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn websocket_upgrade_carries_the_account_query_param() {
+        let cfg = MogwaiExecClientConfig {
+            account_id: AccountId::from("WYRD-042:BTCUSDT"),
+            base_url: "ws://example.test:8787  ".into(),
+            ..MogwaiExecClientConfig::default()
+        };
+        assert_eq!(
+            cfg.ws_url(),
+            "ws://example.test:8787?account=WYRD-042:BTCUSDT"
+        );
     }
 
     #[test]
@@ -386,11 +448,11 @@ mod tests {
         };
 
         assert!(data.validate().is_ok());
-        assert_eq!(data.ws_url(), "ws://example.test:8787");
+        assert_eq!(data.ws_url(), "ws://example.test:8787?account=MOGWAI-001");
         assert_eq!(data.http_base_url(), "http://example.test:8787");
 
         assert!(exec.validate().is_ok());
-        assert_eq!(exec.ws_url(), "wss://example.test:9443");
+        assert_eq!(exec.ws_url(), "wss://example.test:9443?account=MOGWAI-001");
         assert_eq!(exec.http_base_url(), "https://example.test:9443");
     }
 

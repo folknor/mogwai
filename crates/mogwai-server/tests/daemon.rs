@@ -40,7 +40,7 @@ fn daemon_detaches_and_serves_then_stops() {
 #[test]
 fn daemon_stops_with_live_subscription() {
     let daemon = Daemon::start();
-    let url = format!("ws://{}/ws", daemon.addr);
+    let url = format!("ws://{}/ws?account=DAEMON-001", daemon.addr);
     let (mut socket, _) = tungstenite::connect(url.as_str()).expect("websocket connect");
     let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
         subscriptions: vec![mogwai_protocol::SubscriptionRequest {

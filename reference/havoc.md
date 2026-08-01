@@ -297,15 +297,17 @@ a partial - the failure looks exactly like "armed divergences do not fire".
 
 ### Server-owned (temporal windows and the clear control)
 
-These have no synchronous engine-side trigger; they arm shared atomic state on
-the server and are applied in the server's outbound writer task (in
-`mogwai-server`'s `main.rs`), gating frames as they pass through. They are
-*process-wide*, not per-connection: a single `/control/divergence` POST affects
-every live writer.
+These have no synchronous engine-side trigger; they arm atomic state on the
+account's registry slot and are applied in the server's outbound writer task (in
+`mogwai-server`'s `ws.rs`), gating frames as they pass through. They are
+*per-account*: a `/control/divergence` POST carries the `x-mogwai-account`
+header like every other stateful request, and the window it arms applies to
+every live session bound to THAT account and to no other. Arming a blackout on
+one fleet worker leaves the rest running clean.
 
 - **`DelayAcks { ms }`** - holds every outbound **execution** event by `ms`
-  before sending it; market data is untouched. Implemented as a shared
-  `delay_ms` atomic read per execution frame (`category().is_execution()`) by
+  before sending it; market data is untouched. Implemented as the arming
+  account's `delay_ms` atomic, read per execution frame (`category().is_execution()`) by
   the session's exec delay pump, which anchors each frame's deadline at its
   production instant - so a whole order-entry batch, produced at one instant,
   shares one deadline and lands together `ms` late rather than serialized a
@@ -336,8 +338,9 @@ every live writer.
   frames; execution traffic and the heartbeat are unaffected. Like `GoDark`,
   stalled frames are dropped, not buffered. This is the surface that reproduces
   the issue-4255 class of failure - see the heartbeat section.
-- **`ClearDivergences`** - lifts all three server-owned temporal windows at
-  once: stores `0` into `delay_ms`, `dark_until_ns`, and `stall_until_ns`
+- **`ClearDivergences`** - lifts all three server-owned temporal windows of the
+  arming account at once: stores `0` into its `delay_ms`, `dark_until_ns`, and
+  `stall_until_ns`
   (`delay_ms == 0` skips the delay sleep; `now_ns() < 0` is never true, so the
   dark and stall guards are off). It does **not** flush the engine-side
   single-shot divergences - those self-disarm on their own trigger. There is no
@@ -450,7 +453,10 @@ exercising ack delays past it.
   involved), so the `/control/divergence` handler routes it straight to
   `Engine::cancel_open_order_silently` instead of `arm`; a post naming an id
   that is not currently resting (unknown, or already terminal) is refused
-  with a 404 so a scenario cannot silently arm a no-op. The account snapshot
+  with a 404 so a scenario cannot silently arm a no-op. The lookup is scoped
+  to the arming account's book, so an id belonging to a DIFFERENT account is
+  also a 404 - correct, since the arming account has no such order. The
+  account snapshot
   is not pushed either - the freed reservation surfaces on the next
   fill-driven snapshot or `GET /account` pull, which is honest drift, and a
   `QueryOrders` reply reports the order `Canceled` from the instant of the
