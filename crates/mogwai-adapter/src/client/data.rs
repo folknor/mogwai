@@ -878,6 +878,30 @@ impl DataClient for MogwaiDataClient {
                 // from the window start) so the response honors the bar limit.
                 bars.truncate(m);
             }
+            // An on-tape window that yields nothing is a real, reachable state,
+            // not an error: mogwai's fitted arrival process is heavy-tailed, and
+            // a measured sweep of the default 24h-horizon tape found stretches
+            // of 15+ SIMULATED HOURS running at 3-10 trades per hour, inside
+            // which a few-minute warmup window is empty more often than not
+            // (see reference/architecture.md, "Tape arrival droughts"). Left
+            // undiagnosed it surfaces to the consumer as nautilus' bare
+            // "Received empty Bar response" and then a fatal warmup timeout,
+            // which reads like a broken venue. Say WHY here, where the window
+            // and the trade count are both in hand.
+            if bars.is_empty() {
+                tracing::warn!(
+                    %symbol,
+                    bar_type = %request.bar_type,
+                    ?start,
+                    ?end,
+                    trades = trades.len(),
+                    "request_bars: the window is on-tape but produced no bars; \
+                     mogwai's synthetic tape has multi-hour arrival droughts, so a \
+                     short warmup window can legitimately be empty - widen the \
+                     window, lower the bar interval, or let the venue run further \
+                     past its epoch before starting the warmup"
+                );
+            }
             let response = BarsResponse::new(
                 request.request_id,
                 client_id,

@@ -70,7 +70,20 @@ pub(crate) fn wire_order_type(order_type: OrderType) -> anyhow::Result<mogwai_pr
     match order_type {
         OrderType::Market => Ok(mogwai_protocol::OrderType::Market),
         OrderType::Limit => Ok(mogwai_protocol::OrderType::Limit),
-        other => anyhow::bail!("unsupported order type {other:?}"),
+        // Market and Limit is the whole set, permanently: mogwai keeps no order
+        // book, so a conditional order (StopMarket, StopLimit, MarketIfTouched)
+        // has nothing to rest against and no trigger to watch, and faking one
+        // would teach a strategy fill semantics no venue would honor. Name the
+        // replacement in the refusal - this reaches the operator as a
+        // `SUBMIT_FAILED` denial, and "unsupported order type StopMarket" alone
+        // leaves them to guess whether the venue, the adapter or their script
+        // is at fault. See reference/architecture.md, "mogwai-protocol".
+        other => anyhow::bail!(
+            "unsupported order type {other:?}: the MOGWAI venue holds no order book, \
+             so it serves Market and Limit only and cannot rest a conditional order. \
+             Express the protective leg as a limit for forward testing, noting that a \
+             bookless venue fills it immediately at its own price"
+        ),
     }
 }
 

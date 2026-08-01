@@ -44,7 +44,11 @@ use account::{Account, Warned};
 /// it means the queue is leaking; `arm` sheds the OLDEST entry at the cap,
 /// exactly the accumulated never-triggered leftovers. `clear_armed` is the
 /// explicit flush for the same leak.
-const MAX_ARMED_DIVERGENCES: usize = 1_024;
+///
+/// Public because the control-plane ack names it: an armer that learns its
+/// post evicted an older entry needs the cap in the same breath to know what
+/// it hit.
+pub const MAX_ARMED_DIVERGENCES: usize = 1_024;
 
 /// A resting order tracked by the venue.
 #[derive(Debug, Clone)]
@@ -1127,6 +1131,51 @@ mod tests {
                 fraction: Decimal::ONE,
             });
         }
+        assert_eq!(e.armed.len(), MAX_ARMED_DIVERGENCES);
+    }
+
+    #[test]
+    fn arm_reports_the_entry_it_shed_at_the_cap() {
+        // The eviction must be VISIBLE, not just logged: the control-plane ack
+        // is built from this return value, so an armer learns that its post
+        // discarded an older armed divergence instead of reading a bare `202`
+        // and later concluding that armed divergences do not fire.
+        let mut e = Engine::new();
+        for i in 0..MAX_ARMED_DIVERGENCES {
+            assert!(
+                e.arm(Divergence::PartialFillNext {
+                    client_order_id: format!("O-{i}"),
+                    fraction: Decimal::ONE,
+                })
+                .is_none(),
+                "arming below the cap must not shed anything"
+            );
+        }
+        let shed = e.arm(Divergence::PartialFillNext {
+            client_order_id: "OVERFLOW".to_string(),
+            fraction: Decimal::ONE,
+        });
+        // The OLDEST entry is the one that goes.
+        assert!(matches!(
+            shed,
+            Some(Divergence::PartialFillNext { ref client_order_id, .. }) if client_order_id == "O-0"
+        ));
+    }
+
+    #[test]
+    fn arm_of_a_server_owned_variant_sheds_nothing() {
+        // The server-owned and immediate variants never enter the queue, so
+        // they can neither displace an entry nor report one - the ack for them
+        // must stay a bare accept.
+        let mut e = Engine::new();
+        for i in 0..MAX_ARMED_DIVERGENCES {
+            e.arm(Divergence::PartialFillNext {
+                client_order_id: format!("O-{i}"),
+                fraction: Decimal::ONE,
+            });
+        }
+        assert!(e.arm(Divergence::ClearDivergences).is_none());
+        assert!(e.arm(Divergence::DelayAcks { ms: 10 }).is_none());
         assert_eq!(e.armed.len(), MAX_ARMED_DIVERGENCES);
     }
 

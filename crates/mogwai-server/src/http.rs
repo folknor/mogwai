@@ -14,7 +14,7 @@ use std::sync::{
 
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use mogwai_data::TickEvent;
-use mogwai_engine::Engine;
+use mogwai_engine::{Engine, MAX_ARMED_DIVERGENCES};
 use mogwai_protocol::{
     AccountState, ClientMessage, InstrumentDef, MAX_HISTORY_LIMIT, MarketRegime, OrderType,
     QuoteTick, ServerClock, ServerMessage, SimClock, TradeTick, control::Divergence,
@@ -138,7 +138,24 @@ pub(crate) async fn arm_divergence(
                 ),
                 "DelayAcks/GoDark/StallData/ClearDivergences/CancelOpenOrderSilently are server-owned or immediate and must not be forwarded to engine.arm()",
             );
-            state.engine.lock().await.arm(engine_div);
+            // Relay an eviction in the ack body. The queue is bounded
+            // (`MAX_ARMED_DIVERGENCES`), and at the cap `arm` sheds the OLDEST
+            // entry - so a bare `202` with an empty body would tell an armer
+            // "accepted" while an earlier armed divergence it is still counting
+            // on has just been discarded. That silence cost a QA run a full
+            // misdiagnosis: a bracket of arms was posted, the order it targeted
+            // filled in FULL, and the obvious reading ("an armed PartialFillNext
+            // does not fire") was wrong - the arm had been evicted. The status
+            // stays `202` because the requested arm WAS accepted; the body is
+            // where the collateral damage is named.
+            if let Some(shed) = state.engine.lock().await.arm(engine_div) {
+                let body = format!(
+                    "armed; the engine queue was at its {MAX_ARMED_DIVERGENCES}-entry cap, \
+                     so the oldest armed divergence was discarded to make room: {shed:?}"
+                );
+                tracing::warn!(?shed, "arming ack reports an evicted divergence");
+                return (StatusCode::ACCEPTED, body);
+            }
         }
     }
     (StatusCode::ACCEPTED, String::new())

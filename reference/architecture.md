@@ -36,6 +36,21 @@ never imports nautilus.
   cancel leaves the order in whatever state it was (nautilus restores the
   pre-cancel status), so reusing `OrderRejected` would wrongly flip a live or
   already-filled order to Rejected. Plus `OrderFilled`.
+- **The order-type set is Market and Limit, deliberately and permanently.**
+  mogwai keeps no order book (see the engine below), so a conditional order -
+  stop-market, stop-limit, market-if-touched - has nothing to rest against and
+  no trigger to watch; the adapter refuses any other nautilus `OrderType` at
+  conversion with `SUBMIT_FAILED: unsupported order type <T>` and the bridge
+  fails closed rather than trading unprotected. That refusal is correct, but
+  note what it costs the consumer: a nautilus/broadarrow strategy whose
+  protective leg is a stop-MARKET (the shape `ba man execution` recommends when
+  bounding loss matters) cannot be forward-tested on MOGWAI at all, and MOGWAI
+  is the only keyless venue available for forward testing. The replacement on
+  this venue is a protective LIMIT, remembering that a bookless venue fills it
+  instantly at its own price. Per broadarrow's standing note (2026-07-31) the
+  protocol owes no order-type growth beyond Market and Limit, so this is a
+  documented coverage hole on the consumer's pre-deployment procedure, not
+  pending work here.
 - `AccountState` carries balances *and* positions; `Position` is its own type.
 - **The reconciliation queries.** `ClientMessage::QueryOrders` (by
   `client_order_id`, or an all/open-orders snapshot) and
@@ -213,6 +228,47 @@ sources into one time-ordered stream.
   `SessionProfile::validate` rejects any non-positive or non-finite share or
   multiplier, and both the fingerprint loader and the per-instrument config path
   route through it.
+
+### Tape arrival droughts
+
+A consequence of the ACD layer that any consumer of the tape has to plan for.
+The fitted duration process is persistent (0.9935) and heavy-tailed (Weibull
+shape 0.60), so the realized arrival rate does not hover around its ~7 s mean
+cadence - it wanders, and the slow excursions are LONG. Measured on the served
+tape via `scripts/probe_warmup_window.py` (default BTCUSDT profile, epoch
+2023-11-20T00:00:00Z, trades counted per simulated hour off `/trades`):
+
+- with the default 24 h `backfill_horizon_ns`, the tape opens dense (~660
+  trades/hour for the first eight hours) and then collapses to 3-16
+  trades/hour for the remaining eighteen, with the final hour empty outright;
+- over a 7-day horizon the rate recovers and collapses repeatedly - dense
+  stretches above 500/hour interleaved with droughts of 15+ simulated hours
+  running at under 20/hour.
+
+Two operational consequences:
+
+1. **A short historical window can legitimately return zero trades**, and
+   therefore zero bars. Inside a drought a 5-minute window is empty more often
+   than not, and `/trades` answers `200 []` for it - correct, and NOT
+   distinguishable from a defect without knowing the local rate. A nautilus
+   warmup asking for a handful of 1-minute bars against a fresh venue is
+   exactly this case, and it surfaces downstream as an empty bar response and
+   then a fatal warmup timeout. The adapter's `request_bars` warns and names
+   this cause when an on-tape window yields no bars.
+2. **Where sim-now sits on the tape is fixed by the boot config, not by luck.**
+   `data_origin = sim_now_at_boot - backfill_horizon_ns` and the generator is
+   seeded deterministically, so a pinned `sim_epoch_ns` puts every boot on the
+   same stretch of tape: if that stretch is a drought, every run of that config
+   starts in it and stays there until the clock walks out. This is why "the
+   venue had just restarted" correlates with empty warmups while a venue that
+   has been up a while succeeds - uptime is a proxy for distance travelled out
+   of the opening drought, not a cause.
+
+Widening the window, using a coarser bar interval, moving `sim_epoch_ns`, or
+letting the venue run further past its epoch all avoid it. Bounding the lulls in
+the generator would change the on-grid walk and break the committed
+fingerprint's byte-identical golden stream, so it is a fingerprint-refit
+decision rather than a local fix (see `docs/todo.md`).
 
 The realism gate is a self-contained Rust test that draws a long stream and
 asserts each measured stylized fact lands inside the fingerprint's cross-pair

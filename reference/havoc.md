@@ -248,6 +248,28 @@ stamps the real timestamps and owns the sockets. An amend (`ModifyOrder`)
 deliberately never touches the armed queue, so an interleaved modify cannot
 consume a divergence armed for a fill.
 
+**The armed queue is BOUNDED at 1024 entries** (`MAX_ARMED_DIVERGENCES`), and
+"stays armed" above is bounded by that cap, not a promise of durability. A
+targeted `PartialFillNext` whose order never arrives has no trigger and would
+otherwise sit armed forever, so an unbounded queue is a harness DoS; at the cap
+each new arm sheds the OLDEST entry, which is exactly the accumulated
+never-triggered leftovers. `clear_armed` between scenarios is the explicit
+flush.
+
+An arm that displaces an entry still answers `202 Accepted` - the arm that was
+just posted really was accepted - but the response BODY names the evicted
+divergence:
+
+```
+armed; the engine queue was at its 1024-entry cap, so the oldest armed
+divergence was discarded to make room: PartialFillNext { ... }
+```
+
+An empty body means nothing was displaced. Read the body: an armer that posts a
+large bracket of targeted partials (a coid sweep, say) and ignores it will see
+its early arms silently discarded and then measure a full fill where it expected
+a partial - the failure looks exactly like "armed divergences do not fire".
+
 ### Server-owned (temporal windows and the clear control)
 
 These have no synchronous engine-side trigger; they arm shared atomic state on

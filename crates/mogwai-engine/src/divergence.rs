@@ -10,7 +10,16 @@ use crate::{Engine, MAX_ARMED_DIVERGENCES};
 
 impl Engine {
     /// Arm a divergence to fire on the next matching trigger (control plane).
-    pub fn arm(&mut self, d: Divergence) {
+    ///
+    /// Returns the entry SHED to make room, if the queue was already at
+    /// `MAX_ARMED_DIVERGENCES`. The caller is expected to relay that upward:
+    /// an arming ack that says only "accepted" while an older armed divergence
+    /// was silently discarded is an ack that lies about what it did, and a
+    /// scenario then spends its debugging budget on "why did my armed partial
+    /// never fire" instead of "my queue overflowed". `None` means nothing was
+    /// displaced (including for the server-owned variants this drops outright,
+    /// which never enter the queue at all).
+    pub fn arm(&mut self, d: Divergence) -> Option<Divergence> {
         match d {
             // Server-owned temporal/control divergences have no engine-side
             // trigger, so `take_armed` would never consume them. Dropping them
@@ -24,7 +33,7 @@ impl Engine {
             | Divergence::GoDark { .. }
             | Divergence::StallData { .. }
             | Divergence::ClearDivergences
-            | Divergence::CancelOpenOrderSilently { .. } => {}
+            | Divergence::CancelOpenOrderSilently { .. } => None,
             other => {
                 // Bound the queue so control-plane arms cannot accumulate
                 // without limit. At the cap, shed the OLDEST entry: a
@@ -32,14 +41,19 @@ impl Engine {
                 // (its order may never arrive), so dropping the front sheds the
                 // accumulated stale leftovers rather than the arm just
                 // requested. See `MAX_ARMED_DIVERGENCES` and `clear_armed`.
-                if self.armed.len() >= MAX_ARMED_DIVERGENCES {
-                    self.armed.pop_front();
+                let shed = if self.armed.len() >= MAX_ARMED_DIVERGENCES {
+                    let shed = self.armed.pop_front();
                     tracing::warn!(
                         cap = MAX_ARMED_DIVERGENCES,
+                        ?shed,
                         "armed divergence queue at capacity; dropped the oldest entry"
                     );
-                }
+                    shed
+                } else {
+                    None
+                };
                 self.armed.push_back(other);
+                shed
             }
         }
     }

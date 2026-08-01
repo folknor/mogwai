@@ -1,0 +1,8 @@
+# Fixture for scripts/probe_warmup_window.py: same clock as probe-warmup.toml
+# but a 7-day backfill horizon, so the per-hour density sweep can see whether
+# the synthetic tape's arrival rate recovers over a long run or keeps decaying.
+sim_epoch_ns = 1700438400000000000
+speed = 60.0
+gap_cap_ms = 1000
+server_heartbeat_ms = 0
+backfill_horizon_ns = 604800000000000

@@ -12,20 +12,29 @@ Or both. There are no exceptions.
 
 ## Open issues
 
-- Decide whether the fitted tape's multi-minute lulls are desirable realism
-  (surfaced 2026-07-16 while fixing the accelerated smoke). The ACD duration
+- Decide whether the fitted tape's arrival droughts are desirable realism
+  (surfaced 2026-07-16 while fixing the accelerated smoke; re-measured
+  2026-08-01, and they are much larger than first recorded). The ACD duration
   process (persistence 0.9935, Weibull shape 0.60, dispersion band 131.7 to
-  4608.9 s) is heavy-tailed: per-tick mean cadence stays ~7 s, but slow
-  excursions last ~150 ticks - hours of tape time at minutes per tick - so a
-  subscriber landing at a random sim instant sits mid-lull with high
-  probability (the gap straddling an instant is length-biased toward the
-  dispersion index, i.e. minutes). Consequence: at high speed a fresh
-  subscribe can legitimately stay silent for tens of wall-seconds (deadline
-  pacing ignores gap_cap_ms by design), which will trip broadarrow's
-  feed-stale watchdog on an honestly healthy venue. The accelerated smoke now
-  anchors on a real tape tick so it no longer trips on this; bounding lulls in
-  the generator would break the committed byte-identical golden stream, so
-  this is a fingerprint refit decision, not a local fix.
+  4608.9 s) is heavy-tailed: per-tick mean cadence stays ~7 s, but the slow
+  excursions are not the "~150 ticks" originally written down. Counted per
+  simulated hour off `/trades` with `scripts/probe_warmup_window.py`, the
+  default 24 h-horizon tape opens at ~660 trades/hour and then sits at 3-16
+  trades/hour for eighteen straight hours; over a 7-day horizon the pattern
+  repeats, with droughts of 15+ simulated hours. Consequences: at high speed a
+  fresh subscribe can legitimately stay silent for tens of wall-seconds
+  (deadline pacing ignores gap_cap_ms by design), which will trip broadarrow's
+  feed-stale watchdog on an honestly healthy venue; and a short historical
+  window inside a drought returns zero trades, so a nautilus bar warmup gets an
+  empty batch and times out fatally. Because `data_origin` and the seed are
+  fixed by the boot config, a pinned `sim_epoch_ns` lands EVERY boot of that
+  config on the same stretch - so this reproduces per-config rather than
+  intermittently. The accelerated smoke anchors on a real tape tick so it no
+  longer trips on this, the adapter now names tape sparsity when an on-tape
+  warmup window yields no bars, and the mechanism is written up in
+  `reference/architecture.md` ("Tape arrival droughts"). What is left is the
+  decision: bounding the lulls in the generator would break the committed
+  byte-identical golden stream, so it is a fingerprint refit, not a local fix.
 
 - mogwai-engine `next_position` unbounded accumulation. The per-fill weighted-
   average is now overflow-guarded (a single oversized order is rejected before
@@ -64,7 +73,13 @@ Or both. There are no exceptions.
   note); (b) the once-floated MarketIfTouched order-type extension is dead
   (the triggering Pine shape is invalid on TradingView and nautilus cannot
   rest an MIT faithfully) - the protocol owes no order-type growth beyond
-  Market and Limit.
+  Market and Limit. Standing consequence for them, surfaced by QA 2026-08-01
+  and now written up in `reference/architecture.md`: a strategy whose
+  protective leg is a stop-MARKET cannot be forward-tested on MOGWAI at all,
+  because the adapter refuses the type and MOGWAI is the only keyless venue
+  `ba forward` can use. Nothing to build here - the refusal message now names
+  the limit replacement - but their pre-deployment procedure documents a shape
+  their own tooling cannot exercise.
 
 - broadarrow-side follow-ups from the 2026-07-15 QA findings (their repo, listed
   here so the coordination is not lost): (a) the feed-stale message hard-codes
