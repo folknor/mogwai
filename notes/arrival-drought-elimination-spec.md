@@ -153,7 +153,7 @@ the new stream shifts. It is enumerated in L2.
   ALSO regenerates the tracked `analysis/findings.md` human-readable summary
   on every run.
 - The corpus lives at `MOGWAI_DATA_DIR` (default
-  `/media/folk/Banan/Kraken_Trading_History`), offline-analysis input only.
+  `/home/folk/Kraken`), offline-analysis input only.
   L1 requires that disk mounted; nothing else in this spec does.
 - `fingerprint.json` is embedded via `include_str!` and parsed by
   `fingerprint.rs`. The serde structs do not set `deny_unknown_fields`, so a

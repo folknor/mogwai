@@ -26,7 +26,7 @@ import sys
 import time
 
 DATA_DIR = os.environ.get(
-    "MOGWAI_DATA_DIR", "/media/folk/Banan/Kraken_Trading_History"
+    "MOGWAI_DATA_DIR", "/home/folk/Kraken"
 )
 MAX_LAG = 50
 LOG_DUR_BINS = 40

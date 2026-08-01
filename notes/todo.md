@@ -269,7 +269,7 @@ Or both. There are no exceptions.
   with a native `Buyer`/`Seller` aggressor and serves no quotes (`/quotes` is
   always empty). `KrakenCsvSource` and `TickRuleAggressor` survive in
   `mogwai-data` for the offline lineage and its unit tests.
-- `MOGWAI_DATA_DIR` (default `/media/folk/Banan/Kraken_Trading_History`) is an
+- `MOGWAI_DATA_DIR` (default `/home/folk/Kraken`) is an
   offline-analysis input only (`analysis/`), never a server runtime knob.
 - `research/` (the nautilus and broadarrow clones) is gitignored; read those APIs
   from there. mogwai builds against the pinned crates.io nautilus, not a `../`
@@ -294,7 +294,7 @@ in `mogwai.toml`. The only reads:
   `mogwai.toml`.
 - `NO_COLOR` - `mogwai-server/src/man.rs`, standard convention, `man`-output only.
 - `MOGWAI_DATA_DIR` - `analysis/characterize.py` and `analysis/recon.py`, default
-  `/media/folk/Banan/Kraken_Trading_History`. Offline-analysis input only, never a
+  `/home/folk/Kraken`. Offline-analysis input only, never a
   server runtime knob. The default path string is duplicated verbatim in both
   files (`recon.py` re-reads the env var instead of importing
   `characterize.DATA_DIR` the way `run_corpus.py` does).

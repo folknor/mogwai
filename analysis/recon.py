@@ -22,7 +22,7 @@ import os
 import sys
 
 DATA_DIR = os.environ.get(
-    "MOGWAI_DATA_DIR", "/media/folk/Banan/Kraken_Trading_History"
+    "MOGWAI_DATA_DIR", "/home/folk/Kraken"
 )
 OUT = os.path.join(os.path.dirname(__file__), "recon.json")
 TAIL_BYTES = 8192  # enough to capture the final newline-terminated record
