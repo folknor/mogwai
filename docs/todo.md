@@ -36,20 +36,18 @@ Or both. There are no exceptions.
   decision: bounding the lulls in the generator would break the committed
   byte-identical golden stream, so it is a fingerprint refit, not a local fix.
 
-- The adapter manifest contradicts the documented build contract. `AGENTS.md`
-  states the workspace builds against the PUBLISHED nautilus crates from
-  crates.io and that "there is no sibling-checkout path dependency: a build
-  needs no `../nautilus_trader`". But `crates/mogwai-adapter/Cargo.toml:35-39`
-  path-depends `../../../nautilus_trader/crates/{common,core,live,model,network}`,
-  and the file's own comment at line 9 says it "path-depends the sibling
-  checkout, not the read-only research snapshot". One of the two is wrong, and
-  which one is a decision: either the manifest moves to pinned crates.io
-  versions or `AGENTS.md` stops claiming it already has. Surfaced 2026-08-01 by
-  the exec-pump spec critique, which flagged that the spec never reconciled the
-  discrepancy. Deliberately NOT folded into that spec's landings - changing what
-  the whole workspace builds against would confound every gate in it. Note the
-  build works today, so this is a contract/documentation defect rather than a
-  broken tree.
+- Move the adapter off the `../nautilus_trader` path dependency onto a pinned
+  crates.io release. `crates/mogwai-adapter/Cargo.toml` path-depends five
+  nautilus crates from the sibling checkout, which is deliberate: the published
+  release still carries bugs this project hits. Those are being fixed upstream
+  (60+ PRs merged as of 2026-08-01, roughly 15-20 more queued), and once they
+  land in a release the manifest pins that version instead. Until then the
+  build is not reproducible - a path dep has no version requirement and no
+  checksum, so `Cargo.lock` records the crates with no `source` and cannot pin
+  them, and whatever sits in the sibling checkout at build time is what
+  compiles. A fresh clone also cannot build `mogwai-adapter` without that
+  checkout present. Blocked on upstream, not on a decision here; `AGENTS.md`
+  describes the current path-dep arrangement rather than the intended one.
 
 - mogwai-engine `next_position` unbounded accumulation. The per-fill weighted-
   average is now overflow-guarded (a single oversized order is rejected before

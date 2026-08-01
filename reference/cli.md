@@ -15,21 +15,22 @@ HTTP/WS routes it serves.
 so a bare `mogwai` prints help. Start a daemon with `serve`:
 
 ```sh
-brokkr run -p mogwai-server -- serve
+brokkr run mogwai -- serve
 ```
 
-`-p mogwai-server` is the package (cargo scopes by package name); the binary it
-runs is `mogwai`. The command returns after the socket is bound and the daemon
-keeps running. Stop it with `brokkr run -p mogwai-server -- stop`, or use
-`serve -f` when a foreground process is wanted. An installed build (`cargo
-install --path crates/mogwai-server`) is invoked directly, e.g. `mogwai serve`
-and `mogwai stop`.
+`mogwai` is the bin TARGET name, not the package: `brokkr run` discovers every
+bin and example across the workspace from cargo metadata and selects by target
+name, and a bare `brokkr run` lists what is runnable. The command returns after
+the socket is bound and the daemon keeps running. Stop it with
+`brokkr run mogwai -- stop`, or use `serve -f` when a foreground process is
+wanted. An installed build (`cargo install --path crates/mogwai-server`) is
+invoked directly, e.g. `mogwai serve` and `mogwai stop`.
 
-`brokkr run` is a thin wrapper over `cargo run`; arguments after a `--`
-separator are forwarded to the binary, not to cargo:
+Arguments after the `--` separator are forwarded raw to the binary, not to
+cargo; brokkr's own flags (`--debug` / `--release`) go BEFORE the target name:
 
 ```sh
-brokkr run -p mogwai-server -- serve -f --config scripts/smoke-heartbeat.toml
+brokkr run mogwai -- serve -f --config scripts/smoke-heartbeat.toml
 ```
 
 ## Global flags

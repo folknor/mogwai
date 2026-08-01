@@ -65,19 +65,25 @@ or broadarrow APIs) has two distinct access paths - never conflate them:
 - Read the source from the in-tree copies `research/nautilus_trader` and
   `research/broadarrow`. Agents cannot read anything outside this repo, so these
   copies are the only place to study those APIs.
-- Build against the PUBLISHED nautilus crates from crates.io, pinned in
+- Build against the SIBLING CHECKOUT `../nautilus_trader`, path-depended from
   `mogwai-adapter/Cargo.toml` with default-features off so no pyo3 or Python
-  linkage is pulled in. There is no sibling-checkout path dependency: a build
-  needs no `../nautilus_trader`. broadarrow is never a build input at all - it
-  is the consumer that depends on this workspace, not the reverse. `research/`
-  is read-only reference, never a build input; `members = ["crates/*"]` already
-  excludes it, so no workspace `exclude` is needed.
+  linkage is pulled in. A build therefore REQUIRES that checkout to exist
+  alongside this repo; it is not optional and it is not the `research/` copy.
+  broadarrow is never a build input at all - it is the consumer that depends on
+  this workspace, not the reverse. `research/` is read-only reference, never a
+  build input; `members = ["crates/*"]` already excludes it, so no workspace
+  `exclude` is needed.
 
-Every implementation spec that references these APIs states both: the
-implementer reads from `research/` and builds against the pinned crates.io
-nautilus version. Note the vendored `research/nautilus_trader` snapshot may sit
-at a different version than the pinned build; when they diverge, the pinned
-crates.io version is what actually compiles.
+The path dependency is deliberate and temporary. The published nautilus release
+still carries bugs this project hits, which are being fixed upstream; once the
+queued fixes land in a release, the manifest moves to pinned crates.io versions
+and this section changes with it. Until then a path dep is the honest
+description: it carries no version requirement and no checksum, so `Cargo.lock`
+cannot pin it and whatever sits in that checkout at build time is what compiles.
+
+Every implementation spec that references these APIs states both paths: the
+implementer reads from `research/` and builds against the sibling checkout. The
+two are kept in sync, so what you read in `research/` is what compiles.
 
 ### Bash rules
 
@@ -120,4 +126,4 @@ Use `brokkr` (not `cargo`) for check/test. By default output is filtered to chan
   - `--raw` - bypass output filtering, print everything cargo emits.
   - `--debug` - build and run the test in dev profile instead of release. Use this for subprocess-lifecycle / IPC / boot-path tests where release-LTO compile time (3-4 min for the full workspace) dominates wall time and the optimization level doesn't change the behavior under test. `BROKKR_TEST_BIN_DIR` points at `<target>/debug` accordingly.
   - Example: `brokkr test -p mogwai-data memory_source_replays_in_time_order` or `brokkr test -p mogwai-data parses_integer_and_fractional_timestamps -N 5`.
-- `brokkr run [ARGS]...` - thin wrapper over `cargo run`; forwards all arguments raw. Use instead of `cargo run` for the same reason as `brokkr check`/`brokkr test`.
+- `brokkr run [NAME] [ARGS]...` - runs a bin or example by TARGET NAME, discovered from cargo metadata across the whole workspace. This server is `brokkr run mogwai -- serve` (`mogwai` is the bin target, not the package). A bare `brokkr run` lists what is runnable, or runs `[bin] default` if set. Arguments after `--` are forwarded raw to the program; brokkr's own `--debug`/`--release` go before the name. Use instead of `cargo run` for the same reason as `brokkr check`/`brokkr test`.

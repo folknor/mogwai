@@ -15,9 +15,9 @@ the generated stream. The built-in default and the committed mogwai.toml both
 set speed = 1.0, so a plain launch paces correctly (unthrottled speed 0.0 makes
 those steps race and fail spuriously):
 
-    brokkr run -p mogwai-server -- serve -f
+    brokkr run mogwai -- serve -f
 
-then run this script.
+then run this script (`mogwai` is the bin target name, not the package).
 
 The default run keeps the server heartbeat off, so every step reads exactly
 one frame per assertion without an interleaved Heartbeat. The StallData /
@@ -26,13 +26,13 @@ heartbeat step against a server started with server_heartbeat_ms enabled. The
 `serve --config` flag is consumed by the server binary, not cargo, so it must
 follow a `--` separator:
 
-    brokkr run -p mogwai-server -- serve -f --config scripts/smoke-heartbeat.toml
+    brokkr run mogwai -- serve -f --config scripts/smoke-heartbeat.toml
 
 then run `python3 scripts/smoke.py --heartbeat`.
 
 Accelerated coherent-clock smoke:
 
-    brokkr run -p mogwai-server -- serve -f --config scripts/smoke-accelerated.toml
+    brokkr run mogwai -- serve -f --config scripts/smoke-accelerated.toml
 
 then run `python3 scripts/smoke.py --accelerated`.
 
@@ -40,7 +40,7 @@ Admission control (a refusal under an armed DelayAcks) runs behind
 `--admission`, against a server whose held-lane budget is shrunk so the venue
 refuses after a dozen orders instead of twelve thousand:
 
-    brokkr run -p mogwai-server -- serve -f --config scripts/smoke-admission.toml
+    brokkr run mogwai -- serve -f --config scripts/smoke-admission.toml
 
 then run `python3 scripts/smoke.py --admission`.
 """
@@ -850,7 +850,7 @@ def main_admission() -> None:
     Needs the small-budget server config, or saturating the shipped 8 MiB budget
     would take twelve thousand orders:
 
-        brokkr run -p mogwai-server -- serve -f --config scripts/smoke-admission.toml
+        brokkr run mogwai -- serve -f --config scripts/smoke-admission.toml
     """
     assert post_divergence({"type": "ClearDivergences"}) == 202
     # Long enough that nothing drains while the submits are in flight, short

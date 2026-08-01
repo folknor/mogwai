@@ -335,7 +335,7 @@ trades.
   `brokkr test -p mogwai-server gen_run`
 - Whole-landing gate (gremlins, clippy, all crates' tests):
   `brokkr check`
-- Manual eyeball (not a gate): `brokkr run -p mogwai-server -- gen --type bars
+- Manual eyeball (not a gate): `brokkr run mogwai -- gen --type bars
   --length 1d --interval 5m` prints a day of 5-minute bars whose `trade_count`
   column maps the deserts.
 

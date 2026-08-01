@@ -199,7 +199,7 @@ clap exclusivity is tested through a `Parser` wrapper.
 - Whole-landing gate (gremlins, clippy, all crates' tests):
   `brokkr check`
 - Manual eyeball (not a gate): with an operator-supplied `spec.json` carrying a
-  `LiquidityDrought` data surface, `brokkr run -p mogwai-server -- gen --type
+  `LiquidityDrought` data surface, `brokkr run mogwai -- gen --type
   bars --length 1d --interval 5m --havoc spec.json` prints a visibly thinner tape
   than the same run without it.
 

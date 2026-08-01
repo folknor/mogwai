@@ -41,7 +41,7 @@ the same artifact.
    the EXACT command to run - copy-pasteable, flags and all, not "run the
    relevant tests". Concretely that is `brokkr check` (gremlins, clippy and
    all tests), `brokkr test -p mogwai-engine <NAME>` for a focused engine
-   test, or launching the server (`brokkr run -p mogwai-server -- serve`) and
+   test, or launching the server (`brokkr run mogwai -- serve`) and
    running `python3 scripts/smoke.py` for the live end-to-end path. If no command exists that can verify a gate
    (no test pins the behavior, no harness measures the path), building that
    instrument is itself a brick of the spec - specified to the same standard
