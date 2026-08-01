@@ -108,7 +108,7 @@ async fn adapter_submit_drives_live_exec_events() {
                 .to_string(),
         );
         frames.push(
-            r#"{"type":"AccountState","balances":[{"currency":"USDT","total":"9900","free":"9900","locked":"0"}],"positions":[{"symbol":"BTCUSDT","quantity":"1","avg_px":"100.00"}],"ts_event":12}"#
+            r#"{"type":"AccountState","account_id":"MOGWAI-001","balances":[{"currency":"USDT","total":"9900","free":"9900","locked":"0"}],"positions":[{"symbol":"BTCUSDT","quantity":"1","avg_px":"100.00"}],"ts_event":12}"#
                 .to_string(),
         );
     }

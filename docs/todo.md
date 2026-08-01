@@ -12,29 +12,88 @@ Or both. There are no exceptions.
 
 ## Open issues
 
-- Decide whether the fitted tape's arrival droughts are desirable realism
-  (surfaced 2026-07-16 while fixing the accelerated smoke; re-measured
-  2026-08-01, and they are much larger than first recorded). The ACD duration
-  process (persistence 0.9935, Weibull shape 0.60, dispersion band 131.7 to
-  4608.9 s) is heavy-tailed: per-tick mean cadence stays ~7 s, but the slow
-  excursions are not the "~150 ticks" originally written down. Counted per
-  simulated hour off `/trades` with `scripts/probe_warmup_window.py`, the
-  default 24 h-horizon tape opens at ~660 trades/hour and then sits at 3-16
-  trades/hour for eighteen straight hours; over a 7-day horizon the pattern
-  repeats, with droughts of 15+ simulated hours. Consequences: at high speed a
-  fresh subscribe can legitimately stay silent for tens of wall-seconds
-  (deadline pacing ignores gap_cap_ms by design), which will trip broadarrow's
-  feed-stale watchdog on an honestly healthy venue; and a short historical
-  window inside a drought returns zero trades, so a nautilus bar warmup gets an
-  empty batch and times out fatally. Because `data_origin` and the seed are
-  fixed by the boot config, a pinned `sim_epoch_ns` lands EVERY boot of that
-  config on the same stretch - so this reproduces per-config rather than
-  intermittently. The accelerated smoke anchors on a real tape tick so it no
-  longer trips on this, the adapter now names tape sparsity when an on-tape
-  warmup window yields no bars, and the mechanism is written up in
-  `reference/architecture.md` ("Tape arrival droughts"). What is left is the
-  decision: bounding the lulls in the generator would break the committed
-  byte-identical golden stream, so it is a fingerprint refit, not a local fix.
+- DECIDE: are the fitted tape's arrival droughts desirable realism? The oldest
+  open question here, and now the highest-severity one. Surfaced 2026-07-16
+  while fixing the accelerated smoke, re-measured twice since; this entry
+  absorbs the former sweep item D16, which tracked the same
+  decision separately.
+
+  MECHANISM. The ACD duration process (persistence 0.9935, Weibull shape 0.60,
+  dispersion band 131.7 to 4608.9 s) is heavy-tailed. Psi decays per TICK, so a
+  high-psi state self-prolongs in WALL time - at 30 min/tick a hundred ticks of
+  decay is days of tape - and the per-tick fit never constrained wall-clock
+  dwell. Per-tick mean cadence stays ~7 s throughout, which is exactly why a
+  per-tick view of the fit is blind to this: the deserts hide in the wall-clock
+  projection, not in the duration distribution.
+
+  MEASURED, two independent ways. Counted per simulated hour off `/trades` with
+  `scripts/probe_warmup_window.py`, the default 24 h-horizon tape opens at ~660
+  trades/hour then sits at 3-16 trades/hour for eighteen straight hours; over a
+  7-day horizon the pattern repeats with droughts of 15+ simulated hours.
+  Independently, `mogwai gen --type bars --length 4d --interval 1h` on the
+  default BTCUSDT profile at anchor 0 shows hours 0-5 dense (806, 641, 501, 749,
+  864, 738 trades/hour), hours 6-25 collapsing to 2-85 with a single hour holding
+  2 trades, a milder patch at hours 30-36, then dense for the remaining ~60. No
+  hour is completely empty, so this is near-silence rather than a true gap - but
+  an hour holding 2 trades means inter-trade gaps in the tens of minutes, which
+  no real BTCUSD tape does. Because `data_origin` and the seed are fixed by the
+  boot config, a pinned `sim_epoch_ns` lands EVERY boot of that config on the
+  same stretch, so it reproduces per-config rather than intermittently.
+
+  WHY IT IS NOT SEPARABLE. The three ACD constants are hand-tuned in
+  `generated/consts.rs` to land two committed fingerprint duration bands, and
+  `realism()` measures BOTH on the REALIZED tick-to-tick gaps - `measure` pushes
+  `trade.ts_event` into `timestamps` and derives the dispersion index and the
+  duration ACF from consecutive differences of that vector. So the gate reads
+  exactly the wall-clock gaps any cap would shorten; it never sees the
+  generator's internal `duration_s`. The deserts are not an artifact bolted onto
+  the fit, they ARE the realized mechanism that achieves the committed duration
+  realism. Sharper still: the DISPERSION band only needs big gaps to EXIST, but
+  the duration-ACF band demands they CLUMP, and clumped big gaps are the
+  deserts. If the ACF target is faithful to Kraken, the deserts are faithful in
+  KIND and wrong only in wall-clock SCALE, because neither committed target
+  constrains dwell. That wall-clock-blindness is the actual root gap.
+
+  WHY IT IS NOW PIPELINE-BLOCKING, not a fidelity blemish. The venue is the
+  forward-validation gate, and the gate exists to validate what a backtest
+  cannot: resting-order exit behavior. A strategy whose validation window lands
+  in a desert gets no resting-order fills, so the very property being measured is
+  never exercised - and it fails SILENTLY, the run completing and reporting
+  nothing wrong. At batch scale that is a page of null results indistinguishable
+  from strategies that genuinely never triggered. Acceleration shortens the
+  wall-clock cost of a desert but not its effect. Consequences already seen: a
+  fresh subscribe can stay silent for tens of wall-seconds at high speed
+  (deadline pacing ignores `gap_cap_ms` by design), tripping a consumer's
+  feed-stale watchdog on an honestly healthy venue; a short historical window
+  inside a drought returns zero trades, so a nautilus bar warmup gets an empty
+  batch and times out fatally; and density-sensitive tests are inherently flaky.
+  Mitigations already landed: the accelerated smoke anchors on a real tape tick,
+  the adapter names tape sparsity when an on-tape warmup window yields no bars,
+  `trades_window_is_clamped_at_sim_now` was widened to 6 h, and the mechanism is
+  written up in `reference/architecture.md` ("Tape arrival droughts").
+
+  THE DECISION, four options with honest costs. (A) Accept and document: zero
+  code risk, the unrealistic 18 h magnitude stays. (B) Cap the realized
+  inter-tick gap while feeding the ACD the uncapped duration: looks surgical, is
+  a TRAP - the gate measures realized gaps, so capping lowers the very statistics
+  it validates. (C) Re-derive the duration model against a wall-clock-aware
+  target: the only real fix, a genuine offline-analysis project touching
+  `analysis/build_fingerprint.py`, the committed fingerprint targets,
+  `consts.rs`, the golden stream, and every coupled realism anchor, and it partly
+  relitigates whether the committed duration bands are the right targets. (D)
+  Split the concern: gate `realism()` on the pure fitted dynamics and apply a
+  wall-clock dwell governor only on the SERVING path - cheap, keeps
+  byte-identity, but then the validated tape is no longer the served tape, which
+  is where the byte-identical discipline and the usable-venue goal collide.
+
+  Current lean: the purpose framing pushes off (A), since the fingerprint
+  duration bands are a CREDIBILITY PROXY for a believable backdrop rather than
+  the product, and a band that produces an unusable venue is a proxy that
+  overshot. (B) is a trap. The live question is (C) vs (D) - whether the tape
+  that ships must stay the tape `realism()` validates. Downstream of this
+  decision: the AD12 dead-feed watchdog below (a threshold distinguishing "asleep"
+  from "dead" depends on it), and closing a live in-progress bar window on a
+  clock timer, deliberately not built for the same reason.
 
 - Move the adapter off the `../nautilus_trader` path dependency onto a pinned
   crates.io release. `crates/mogwai-adapter/Cargo.toml` path-depends five
@@ -57,10 +116,96 @@ Or both. There are no exceptions.
   Closing it means introducing a position-size or notional cap - a design
   decision, not a local fix.
 
-- The adapter integration-test stub (`crates/mogwai-adapter/tests/common`) does
-  not answer `QueryOrders`/`QueryFills`; the venue-truth report generators are
-  covered by unit tests with an in-process fake venue instead. Extend the stub
-  when an integration test needs to drive reconciliation end to end.
+- BUILD: an end-to-end guard that startup reconciliation actually runs
+  (`crates/mogwai-adapter/src/client/exec.rs`, formerly sweep item F16). The
+  nautilus Rust `ExecutionClient` trait defaults are silent no-ops -
+  `generate_mass_status` returns `Ok(None)`, the three granular generators
+  return empty vecs - and the live node's `Ok(None)` arm only warns "likely
+  adapter error" and reconciles nothing. Python's `LiveExecutionClient` base
+  composes the three for you, so a Python adapter cannot fall into this; the
+  Rust trait does not, which is why mogwai hit it. mogwai overrides the method
+  (unit-tested by `generate_mass_status_composes_the_three_report_sets`), so the
+  instance is fixed - but nothing proves a seeded venue produces a NON-EMPTY
+  mass status through the real transport, so a refactor that drops the override,
+  breaks the compose, or leaves one generator returning empty reverts startup
+  reconciliation to zero with only a warn line and no test going red.
+
+  DECIDED, shape agreed: extend the self-contained stub in
+  `crates/mogwai-adapter/tests/common` to answer `QueryOrders`/`QueryFills` over
+  both carriers, then assert all THREE report sets non-empty - and assert each
+  generator INDIVIDUALLY, not just the composite, which is what turns the
+  class-of-risk observation below into a gate. Rejected as disproportionate:
+  booting a real `mogwai-server` from the adapter crate, or a full nautilus
+  `LiveNode`. The only thing a live node catches beyond this is "nautilus stopped
+  calling mass status at startup", which is upstream behavior with its own tests.
+  Known limitation to keep recorded: the guard proves the adapter WOULD answer
+  when asked, not that the node asks.
+
+  The exposure is a CLASS, not one method: every report path mogwai relies on
+  shares the silent-degrade property, and this got MORE important since filing,
+  because those paths are now the venue-truth reconciliation surface rather than
+  a mirror echo. Related upstream, queued in the maintainer's PR tracker and NOT
+  a substitute for this guard (mogwai overrides the method, so a better trait
+  default protects the next adapter author, not this repo): give the Rust trait
+  default the same composing behavior as the Python base.
+
+- BUILD: a positive dead-feed watchdog (formerly sweep item AD12). No liveness
+  timer, tick counter, or "0 ticks in N s" log exists on either transport. The
+  negative diagnostics are all in place - the server emits a `ProtocolError` on
+  an unservable subscribe, the adapter's data drain warns rather than swallowing
+  it, and the poll loop self-heals after a server restart - but nothing
+  positively proves a subscribed feed is alive rather than genuinely quiet. The
+  WS idle timeout does not cover it: `idle_timeout_ms` defaults to 0, and even
+  armed the idle clock resets on ANY application frame, so a
+  data-silent-but-frame-active socket never trips it, deliberately, because that
+  is what reproduces the 4255 case. Blocked in practice on the drought decision
+  above: on a desert tape a silent feed is often CORRECT, so the threshold that
+  separates "the venue is asleep" from "the subscription is dead" depends on
+  which option lands.
+
+- DECIDE: does dup/drop havoc reshaping fabricated bars model the right venue?
+  (Formerly sweep item AD21a.) Bars are built AFTER the `HavocFilter` on both the
+  WS and poll paths, so a dup or drop of one trade silently reshapes OHLCV rather
+  than duplicating or dropping a whole bar frame. Bars here are FABRICATED by the
+  adapter - the server never ships one - so deriving them from a corrupted trade
+  feed is what a real client-side aggregator on a lossy feed experiences, and is
+  arguably the honest simulation; the alternative models a venue that ships bars
+  natively, which mogwai is not. Leaning accept-and-document, on the same
+  principle that settled the reconnect account staleness: mogwai injects faults
+  and declines to repair them downstream. (The reorder half of the original item
+  was a different finding and is closed - `fold_trade` now documents an ordering
+  EXPECTATION with a defined failure mode, names the adapter as a deliberate
+  violator under `reorder_prob`, and is pinned by
+  `an_out_of_order_trade_folds_into_the_open_window_without_wedging`.)
+
+- WRITE UP, then delete this entry: why unordered HttpOrders dispatch is fidelity
+  rather than a defect (formerly sweep item X6). `dispatch_order` hands each
+  Submit/Modify/Cancel to `get_runtime().spawn` with no sequencing, so a submit
+  followed immediately by a cancel can arrive at `/orders` reversed. That is
+  exactly what nautilus's own production adapters do - the Binance futures client
+  sends every order command through `spawn_task`, a bare `runtime.spawn` onto an
+  abort list, with no cross-command sequencing anywhere - so real REST order
+  entry has no ordering guarantee and sequencing mogwai would make its HTTP
+  profile MORE orderly than the venues it stands in for. Blast radius is narrow:
+  `TransportProfile::default()` is `WsStreaming` and broadarrow does not override
+  it, so an HTTP profile is opt-in per scenario. `reference/architecture.md`
+  already discloses the race; what it lacks is this REASON. The per-client
+  ordered queue previously floated is explicitly REJECTED so it is not
+  re-proposed. A genuinely separate feature, only if wanted in practice: an
+  opt-in ordering mode to tell a strategy bug from a transport race while
+  debugging.
+
+- DECIDE (client side, spans two repos): should a venue fault be terminal for the
+  consumer? mogwai now distinguishes failing from misbehaving on the wire -
+  `SubscriptionIssue::is_venue_fault()` alongside `is_refusal()`, a WS 1011 close
+  naming the fault, and an adapter error arm ahead of the refusal catch-all (see
+  `reference/havoc.md`, "Misbehaving is not failing"). But the adapter's ordinary
+  reconnect logic still fires on that close, so the client reconnects,
+  resubscribes, and carries on with a hole in its history. Making the fault
+  terminal end to end means the adapter treating 1011 differently from a routine
+  disconnect AND broadarrow failing the run rather than resuming. Deliberately
+  not taken here: the venue says clearly what happened, what the consumer does
+  with that is the consumer's call.
 
 ## Notes / gotchas
 
@@ -79,6 +224,18 @@ Or both. There are no exceptions.
   `ba forward` can use. Nothing to build here - the refusal message now names
   the limit replacement - but their pre-deployment procedure documents a shape
   their own tooling cannot exercise.
+
+- Two broadarrow decisions their developer flagged, recorded so the mogwai-side
+  residues read as connected rather than orphaned. (a) Enabling the continuous
+  open-order poll closes the mid-run dropped-resting-cancel window for real
+  venues, at REST-budget cost and needing a per-venue reconciliation override
+  that does not exist; it was recorded as inert against mogwai because there was
+  nothing for it to call, which is no longer true - the venue-truth order query
+  exists, so mogwai would answer it. (b) Raising the inflight ceiling for mogwai
+  only is largely moot now: the ceiling was a problem because mogwai could not
+  answer `QueryOrder` and every inflight order escalated to a synthesized
+  timeout, and it answers now, so the brake fires only when havoc actually
+  withholds the reply - which is what the brake is for.
 
 - broadarrow-side follow-ups from the 2026-07-15 QA findings (their repo, listed
   here so the coordination is not lost): (a) the feed-stale message hard-codes

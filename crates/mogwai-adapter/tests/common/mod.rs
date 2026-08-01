@@ -156,10 +156,16 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
         serve_ws(stream, head, state).await;
     } else if path.starts_with("/account") {
         if state.serve_account.load(Ordering::Relaxed) {
+            // `account_id` is REQUIRED on the wire since the venue became
+            // multi-account, and the adapter echo-checks it against its own
+            // configured id. Omitting it makes the body undecodable, which
+            // surfaces as `connect` timing out waiting for an account event
+            // rather than as a parse error - so keep this matching
+            // `MogwaiExecClientConfig::default().account_id`.
             respond_json(
                 stream,
                 "200 OK",
-                r#"{"balances":[],"positions":[],"ts_event":0}"#,
+                r#"{"account_id":"MOGWAI-001","balances":[],"positions":[],"ts_event":0}"#,
             )
             .await;
         } else {

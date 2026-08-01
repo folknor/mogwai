@@ -433,7 +433,9 @@ impl DataClient for MogwaiDataClient {
             return Ok(());
         }
 
-        let ws_url = join_url(&self.config.ws_url(), "ws");
+        // `ws_url` already carries the `/ws` path and the account query; do not
+        // join a path onto it (see its comment).
+        let ws_url = self.config.ws_url();
         let (cmd_tx, cmd_rx) = unbounded_channel::<WsCommand>();
         self.ws_cmd = Some(cmd_tx);
 

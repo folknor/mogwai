@@ -69,9 +69,16 @@ impl MogwaiDataClientConfig {
     /// exists to rule out.
     #[must_use]
     pub fn ws_url(&self) -> String {
+        // The PATH goes on before the query string, which is the whole reason
+        // this builds the socket URL rather than returning a base for a caller
+        // to append to. Appending `/ws` to a value already ending in
+        // `?account=...` yields `ws://host?account=X/ws`, whose account is the
+        // literal `X/ws` and whose path is `/` - a URL the venue rejects, and
+        // which fails as a connect timeout inside the reconnect loop rather
+        // than as anything that names the cause.
         format!(
-            "{}?{}={}",
-            self.base_url.trim(),
+            "{}/ws?{}={}",
+            self.base_url.trim().trim_end_matches('/'),
             mogwai_protocol::ACCOUNT_QUERY_PARAM,
             self.account_id
         )
@@ -160,9 +167,16 @@ impl MogwaiExecClientConfig {
     /// the trim matters (a padded URL passes validation but never connects).
     #[must_use]
     pub fn ws_url(&self) -> String {
+        // The PATH goes on before the query string, which is the whole reason
+        // this builds the socket URL rather than returning a base for a caller
+        // to append to. Appending `/ws` to a value already ending in
+        // `?account=...` yields `ws://host?account=X/ws`, whose account is the
+        // literal `X/ws` and whose path is `/` - a URL the venue rejects, and
+        // which fails as a connect timeout inside the reconnect loop rather
+        // than as anything that names the cause.
         format!(
-            "{}?{}={}",
-            self.base_url.trim(),
+            "{}/ws?{}={}",
+            self.base_url.trim().trim_end_matches('/'),
             mogwai_protocol::ACCOUNT_QUERY_PARAM,
             self.account_id
         )
@@ -328,7 +342,7 @@ mod tests {
     fn default_base_url_uses_server_port() {
         let cfg = MogwaiDataClientConfig::default();
 
-        assert_eq!(cfg.ws_url(), "ws://127.0.0.1:8787?account=MOGWAI-001");
+        assert_eq!(cfg.ws_url(), "ws://127.0.0.1:8787/ws?account=MOGWAI-001");
         assert_eq!(cfg.http_base_url(), "http://127.0.0.1:8787");
     }
 
@@ -339,7 +353,7 @@ mod tests {
             ..MogwaiDataClientConfig::default()
         };
 
-        assert_eq!(cfg.ws_url(), "wss://example.test:9443?account=MOGWAI-001");
+        assert_eq!(cfg.ws_url(), "wss://example.test:9443/ws?account=MOGWAI-001");
         assert_eq!(cfg.http_base_url(), "https://example.test:9443");
     }
 
@@ -386,7 +400,7 @@ mod tests {
         };
         assert_eq!(
             cfg.ws_url(),
-            "ws://example.test:8787?account=WYRD-042:BTCUSDT"
+            "ws://example.test:8787/ws?account=WYRD-042:BTCUSDT"
         );
     }
 
@@ -448,11 +462,11 @@ mod tests {
         };
 
         assert!(data.validate().is_ok());
-        assert_eq!(data.ws_url(), "ws://example.test:8787?account=MOGWAI-001");
+        assert_eq!(data.ws_url(), "ws://example.test:8787/ws?account=MOGWAI-001");
         assert_eq!(data.http_base_url(), "http://example.test:8787");
 
         assert!(exec.validate().is_ok());
-        assert_eq!(exec.ws_url(), "wss://example.test:9443?account=MOGWAI-001");
+        assert_eq!(exec.ws_url(), "wss://example.test:9443/ws?account=MOGWAI-001");
         assert_eq!(exec.http_base_url(), "https://example.test:9443");
     }
 
