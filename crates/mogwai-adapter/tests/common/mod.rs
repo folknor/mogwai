@@ -81,6 +81,16 @@ pub struct StubState {
     pub ws_server_pings: AtomicUsize,
     /// JSON body of each HTTP `GET /trades` response. Defaults to `[]`.
     pub trades_body: Mutex<Option<String>>,
+    /// When true, `GET /trades` answers `500`, modelling a venue that refuses
+    /// the history fetch. The request generators must still emit a (empty)
+    /// response rather than leaving the nautilus request unresolved.
+    pub fail_trades: AtomicBool,
+    /// JSON body of `GET /clock`. Unset falls through to the catch-all `[]`,
+    /// which the client cannot decode and so treats as an identity clock with
+    /// an UNKNOWN tape floor (`data_origin_ns` 0) - fine for most tests, but it
+    /// disables the adapter's off-tape window guard, so any test exercising
+    /// that guard must publish a real envelope here.
+    pub clock_body: Mutex<Option<String>>,
     /// When true, `GET /account` returns an empty account snapshot. Defaults to
     /// false so older-server compatibility remains the default stub behavior.
     pub serve_account: AtomicBool,
@@ -155,6 +165,12 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
         } else {
             respond_json(stream, "404 Not Found", "").await;
         }
+    } else if path.starts_with("/clock") {
+        let body = state.clock_body.lock().expect("clock body mutex").clone();
+        match body {
+            Some(body) => respond_json(stream, "200 OK", &body).await,
+            None => respond_json(stream, "200 OK", "[]").await,
+        }
     } else if path.starts_with("/instruments") {
         respond_json(stream, "200 OK", INSTRUMENTS_JSON).await;
     } else if path.starts_with("/trades") {
@@ -164,13 +180,17 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
             .lock()
             .expect("http request times mutex")
             .push(Instant::now());
-        let body = state
-            .trades_body
-            .lock()
-            .expect("trades body mutex")
-            .clone()
-            .unwrap_or_else(|| "[]".to_string());
-        respond_json(stream, "200 OK", &body).await;
+        if state.fail_trades.load(Ordering::Relaxed) {
+            respond_json(stream, "500 Internal Server Error", "").await;
+        } else {
+            let body = state
+                .trades_body
+                .lock()
+                .expect("trades body mutex")
+                .clone()
+                .unwrap_or_else(|| "[]".to_string());
+            respond_json(stream, "200 OK", &body).await;
+        }
     } else if path.starts_with("/orders") {
         state
             .http_request_times

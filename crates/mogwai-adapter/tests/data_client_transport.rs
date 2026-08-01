@@ -51,6 +51,18 @@ use tokio::sync::mpsc::unbounded_channel;
 
 const TRADES_JSON: &str = r#"[{"symbol":"BTCUSDT","price":"100.00","size":"1","aggressor":"Buyer","ts_event":10},{"symbol":"BTCUSDT","price":"101.00","size":"2","aggressor":"Seller","ts_event":20}]"#;
 
+fn bar_type() -> nautilus_model::data::BarType {
+    nautilus_model::data::BarType::new(
+        instrument_id(),
+        nautilus_model::data::BarSpecification::new(
+            1,
+            nautilus_model::enums::BarAggregation::Minute,
+            nautilus_model::enums::PriceType::Last,
+        ),
+        nautilus_model::enums::AggregationSource::External,
+    )
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn subscribe_and_request_drive_data_events() {
@@ -223,4 +235,179 @@ async fn http_polling_subscribe_fetches_trades_without_ws() {
     );
 
     client.disconnect().await.expect("disconnect stops polling");
+}
+
+/// A failed history fetch must still RESOLVE the nautilus request.
+///
+/// The failure arms of `request_trades`/`request_bars` used to log and return
+/// straight out of the spawned task, so no `DataResponse` was ever emitted and
+/// the request hung forever. From the consumer that is indistinguishable from a
+/// dead venue: broadarrow burns its entire warmup timeout and dies
+/// `WarmupHandoffFailed` with nothing to go on but a line in the worker log.
+/// An empty response is the truthful answer that at least completes the
+/// exchange.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn failed_history_fetch_still_answers_the_request() {
+    use std::sync::atomic::Ordering;
+
+    use nautilus_common::messages::data::{RequestBars, RequestTrades};
+
+    let state = Arc::new(StubState::default());
+    state.fail_trades.store(true, Ordering::Relaxed);
+    let base_url = bound_stub(Arc::clone(&state)).await;
+
+    let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
+    replace_data_event_sender(sink_tx);
+
+    let config = MogwaiDataClientConfig {
+        base_url,
+        ..MogwaiDataClientConfig::default()
+    };
+    let mut client =
+        MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
+    client.start().expect("start grabs the sink");
+    client.connect().await.expect("connect opens transports");
+
+    let timeout = Duration::from_secs(2);
+
+    client
+        .request_trades(RequestTrades::new(
+            instrument_id(),
+            None,
+            None,
+            None,
+            Some(ClientId::from("MOGWAI-DATA")),
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+        ))
+        .expect("request trades dispatches");
+    loop {
+        if let DataEvent::Response(DataResponse::Trades(resp)) =
+            next_data_event(&mut sink_rx, timeout).await
+        {
+            assert!(
+                resp.data.is_empty(),
+                "a refused fetch answers empty, not with invented trades"
+            );
+            break;
+        }
+    }
+
+    let bar_type = bar_type();
+    client
+        .request_bars(RequestBars::new(
+            bar_type,
+            None,
+            None,
+            None,
+            Some(ClientId::from("MOGWAI-DATA")),
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+        ))
+        .expect("request bars dispatches");
+    loop {
+        if let DataEvent::Response(DataResponse::Bars(resp)) =
+            next_data_event(&mut sink_rx, timeout).await
+        {
+            assert!(
+                resp.data.is_empty(),
+                "a refused fetch answers empty, not with invented bars"
+            );
+            break;
+        }
+    }
+}
+
+/// An OFF-TAPE window must answer too, for the same reason.
+///
+/// The adapter refuses a `start` below the venue's published `data_origin_ns`
+/// at the request boundary. Returning that refusal to nautilus does not reach
+/// the requester: `DataEngine::execute` logs a synchronous client error and
+/// emits no correlated response, so the loud refusal read downstream as a hang.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn off_tape_window_still_answers_the_request() {
+    use nautilus_common::messages::data::{RequestBars, RequestTrades};
+
+    const ORIGIN: u64 = 2_000_000_000_000_000_000;
+
+    let state = Arc::new(StubState::default());
+    // Publish a real clock envelope: without one the client cannot decode a
+    // floor, falls back to "unknown" (0), and the off-tape guard never fires.
+    *state.clock_body.lock().expect("clock body mutex") = Some(format!(
+        r#"{{"sim":{{"sim_epoch_ns":0,"wall_anchor_ns":0,"speed":1.0}},"server_now_ns":{},"data_origin_ns":{ORIGIN},"backfill_horizon_ns":86400000000000}}"#,
+        ORIGIN + 86_400_000_000_000
+    ));
+    let base_url = bound_stub(Arc::clone(&state)).await;
+
+    let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
+    replace_data_event_sender(sink_tx);
+
+    let config = MogwaiDataClientConfig {
+        base_url,
+        ..MogwaiDataClientConfig::default()
+    };
+    let mut client =
+        MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
+    client.start().expect("start grabs the sink");
+    client.connect().await.expect("connect opens transports");
+
+    // One nanosecond below the floor: as off-tape as it gets.
+    let off_tape = chrono::DateTime::from_timestamp_nanos((ORIGIN - 1) as i64);
+    let timeout = Duration::from_secs(2);
+
+    client
+        .request_trades(RequestTrades::new(
+            instrument_id(),
+            Some(off_tape),
+            None,
+            None,
+            Some(ClientId::from("MOGWAI-DATA")),
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+        ))
+        .expect("an off-tape request must not error out of the handler");
+    loop {
+        if let DataEvent::Response(DataResponse::Trades(resp)) =
+            next_data_event(&mut sink_rx, timeout).await
+        {
+            assert!(resp.data.is_empty(), "an off-tape window answers empty");
+            break;
+        }
+    }
+
+    client
+        .request_bars(RequestBars::new(
+            bar_type(),
+            Some(off_tape),
+            None,
+            None,
+            Some(ClientId::from("MOGWAI-DATA")),
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+        ))
+        .expect("an off-tape request must not error out of the handler");
+    loop {
+        if let DataEvent::Response(DataResponse::Bars(resp)) =
+            next_data_event(&mut sink_rx, timeout).await
+        {
+            assert!(resp.data.is_empty(), "an off-tape window answers empty");
+            break;
+        }
+    }
+
+    // Proves the empty responses above came from the off-tape GUARD and not
+    // merely from a stub that happens to serve no trades: a refused window is
+    // never fetched at all. Without this the test passes vacuously whenever the
+    // clock envelope fails to decode and the floor reads as unknown.
+    assert_eq!(
+        state.trades_hits.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "an off-tape window must be refused before any /trades fetch"
+    );
 }

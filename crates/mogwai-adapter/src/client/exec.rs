@@ -771,9 +771,11 @@ impl ExecutionClient for MogwaiExecutionClient {
     fn reset(&mut self) -> anyhow::Result<()> {
         // Mirror MogwaiDataClient::reset: stop first (abort tasks, drop the WS
         // command channel), then clear the reconciliation mirror. Without this
-        // the default no-op `reset` leaves ExecState.orders/fills/positions
-        // populated across a stop/start, so a prior session's orders leak into
-        // the next session's status/fill/position reports.
+        // the default no-op `reset` leaves ExecState.orders and the account
+        // staleness watermark populated across a stop/start, so a prior
+        // session's orders leak into the next session's status/fill reports and
+        // its watermark makes the new session's first account snapshot look
+        // stale.
         self.stop()?;
         let mut state = self
             .state
@@ -1172,30 +1174,76 @@ impl ExecutionClient for MogwaiExecutionClient {
         Ok(reports)
     }
 
+    /// Position status reports from VENUE TRUTH, completing the set alongside
+    /// `generate_order_status_reports` and `generate_fill_reports`.
+    ///
+    /// These used to be rebuilt from the client-side account-snapshot mirror,
+    /// which is populated by the same pushed `AccountState` stream havoc
+    /// corrupts - and mogwai ships a divergence, `DropNextAccountUpdate`, whose
+    /// entire purpose is swallowing one of those pushes. A mirror-built report
+    /// therefore confidently CONFIRMS a stale position in precisely the fault
+    /// class position reconciliation exists to catch, which is the same
+    /// argument that moved the order and fill generators onto the venue-truth
+    /// surface.
+    ///
+    /// `GET /account` is the truthful source and is deliberately not the pushed
+    /// frame: it is a point-in-time pull that bypasses the `HavocFilter`, so an
+    /// armed `DropNextAccountUpdate` cannot suppress it (see `connect`'s
+    /// initial snapshot). The route is transport-agnostic, so this works
+    /// unchanged under the HTTP order profiles that never open a `/ws` socket.
+    ///
+    /// A failed pull propagates rather than falling back to any client-side
+    /// belief: an error makes reconciliation fail loudly, whereas a silent
+    /// fallback would reintroduce the stale confirmation this exists to remove.
+    /// The ONE exception is a 404, which `connect` already treats as a server
+    /// predating the route and continues past - failing here would turn that
+    /// documented legacy path into a hard failure of the whole mass status,
+    /// taking the order and fill reports down with it.
     async fn generate_position_status_reports(
         &self,
         cmd: &GeneratePositionStatusReports,
     ) -> anyhow::Result<Vec<PositionStatusReport>> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("execution state mutex poisoned"))?;
+        let state =
+            match fetch_account(&self.http, &self.http_quota, &self.config.http_base_url()).await {
+                Ok(state) => state,
+                Err(FetchAccountError::NotFound) => {
+                    tracing::warn!(
+                        "server predates GET /account; reporting no positions rather than failing \
+                     the whole mass status - position reconciliation is blind against this server"
+                    );
+                    return Ok(Vec::new());
+                }
+                Err(err) => {
+                    return Err(anyhow::Error::new(err).context("position status venue truth"));
+                }
+            };
+        // The venue's snapshot instant is the honest `ts_last` for every row:
+        // the wire `Position` carries no per-symbol activity timestamp, and
+        // dating a report off the client's own last-seen event would put a
+        // mirror timestamp on a venue-sourced number.
+        let ts_event = UnixNanos::from(state.ts_event);
+        let ts_init = now_unix_nanos(self.sim);
         let reports = state
             .positions
-            .values()
+            .iter()
             .filter(|position| {
-                cmd.instrument_id
-                    .is_none_or(|id| id == position.instrument_id)
+                // Match the WHOLE instrument id, venue included. The wire rows
+                // carry only a symbol, so comparing symbols alone would let a
+                // request scoped to BTCUSDT on some other venue match this
+                // venue's BTCUSDT position - a filter the caller asked for and
+                // did not get. Every row here is by construction a MOGWAI one.
+                cmd.instrument_id.is_none_or(|id| {
+                    id.venue == *MOGWAI_VENUE && symbol_from_instrument(id) == position.symbol
+                })
             })
             .filter(|position| {
-                // Every position the mirror holds is a current open (nonzero)
-                // venue position - the account-snapshot apply drops flat
-                // instruments - so a lookback-bounded `start` must not hide a
-                // long-quiet resting position (reconciliation would otherwise
-                // have to re-adopt it as EXTERNAL mid-run) (AE10). Include any
-                // open position regardless of last-activity time; the time filter
-                // still applies to a defensive flat entry.
-                !position.quantity.is_zero() || in_time_range(position.ts_last, cmd.start, cmd.end)
+                // Every position the venue reports is a current OPEN (nonzero)
+                // one - the engine removes a symbol from its position map the
+                // moment it goes flat - so a lookback-bounded `start` must not
+                // hide a long-quiet resting position; reconciliation would
+                // otherwise have to re-adopt it as EXTERNAL mid-run (AE10).
+                // The time filter therefore only guards a defensive flat row.
+                !position.quantity.is_zero() || in_time_range(ts_event, cmd.start, cmd.end)
             })
             .filter_map(|position| {
                 let def = instrument_def(&self.instruments, &position.symbol)?;
@@ -1210,11 +1258,11 @@ impl ExecutionClient for MogwaiExecutionClient {
                     .ok()?;
                 Some(PositionStatusReport::new(
                     self.core.account_id,
-                    position.instrument_id,
+                    convert::instrument_id(&def),
                     position_side(position.quantity),
                     quantity,
-                    position.ts_last,
-                    now_unix_nanos(self.sim),
+                    ts_event,
+                    ts_init,
                     None,
                     None,
                     Some(position.avg_px),
@@ -1492,15 +1540,22 @@ struct ExecContext {
 #[derive(Debug, Default)]
 struct ExecState {
     orders: HashMap<ClientOrderId, OrderRecord>,
-    positions: HashMap<Symbol, PositionRecord>,
-    /// `ts_event` of the last account snapshot applied to the position mirror.
-    /// Snapshots carry the venue's COMPLETE non-zero position set and are
-    /// applied destructively (absent symbols are dropped as flat), which is
-    /// only sound if each applied snapshot is at least as new as the last:
-    /// reorder/duplicate havoc delivering an OLDER snapshot would resurrect a
-    /// just-closed position (the phantom-EXTERNAL desync class the drop rule
-    /// exists to kill), erase a just-opened one, and move ts_last backward.
-    /// `handle_account_state` skips any snapshot below this watermark.
+    /// `ts_event` of the last account snapshot forwarded to nautilus.
+    ///
+    /// Snapshots must apply in VENUE order, not arrival order: nautilus applies
+    /// account states in arrival order with no staleness guard of its own, so
+    /// an older snapshot delivered late by reorder or duplicate havoc would
+    /// overwrite newer balances and stay wrong until the next fill-driven
+    /// snapshot - which may never come. `handle_account_state` skips any
+    /// snapshot below this watermark.
+    ///
+    /// There is deliberately no position mirror behind this watermark any more.
+    /// One existed to serve `generate_position_status_reports`, and it was that
+    /// generator's only reader; since the generator now pulls venue truth from
+    /// `GET /account`, a client-side copy could only ever be a second, staler
+    /// answer to a question the venue already answers - and mogwai's own
+    /// `DropNextAccountUpdate` divergence exists to make exactly that copy
+    /// wrong.
     account_ts_last: UnixNanos,
 }
 
@@ -1569,15 +1624,6 @@ struct OrderRecord {
     /// but it must not double-apply to the mirror, so the second sighting of a
     /// `trade_id` skips the filled_qty/avg_px/fills mutation.
     seen_trades: std::collections::HashSet<TradeId>,
-}
-
-#[derive(Debug, Clone)]
-struct PositionRecord {
-    symbol: Symbol,
-    instrument_id: InstrumentId,
-    quantity: Decimal,
-    avg_px: Decimal,
-    ts_last: UnixNanos,
 }
 
 fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
@@ -2007,7 +2053,7 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 ),
             }
         }
-        ServerMessage::AccountState(state) => handle_account_state(state, ctx),
+        ServerMessage::AccountState(state) => handle_account_state(&state, ctx),
         ServerMessage::Heartbeat { .. } => {
             tracing::trace!("ignoring server heartbeat on execution path");
         }
@@ -2209,7 +2255,7 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
     ctx.emitter.send_order_event(OrderEventAny::Filled(event));
 }
 
-fn handle_account_state(state: mogwai_protocol::AccountState, ctx: &ExecContext) {
+fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext) {
     let ts_event = UnixNanos::from(state.ts_event);
     let balances = state
         .balances
@@ -2272,16 +2318,13 @@ fn handle_account_state(state: mogwai_protocol::AccountState, ctx: &ExecContext)
 
     {
         let mut mirror = lock_recover(&ctx.state, "execution state");
-        // Snapshots must apply in venue order, not arrival order: the retain
-        // below treats each snapshot as the newest truth, so an OLDER snapshot
-        // delivered late by reorder/duplicate havoc would resurrect a closed
-        // position or erase an open one, persistently (nothing corrects it
-        // until the next fill-driven snapshot, which may be never). Skip any
-        // snapshot below the applied watermark - and skip forwarding it to
-        // nautilus too, since nautilus applies account states in arrival order
-        // with no staleness guard of its own. Equal-ts duplicates pass; they
-        // re-apply idempotently. The check and the apply share one lock so
-        // concurrent HTTP dispatch drains cannot interleave between them.
+        // Snapshots must forward in venue order, not arrival order: nautilus
+        // applies account states in arrival order with no staleness guard of
+        // its own, so an OLDER snapshot delivered late by reorder/duplicate
+        // havoc would overwrite newer balances and stay wrong until the next
+        // fill-driven snapshot, which may be never. Skip any snapshot below the
+        // applied watermark. Equal-ts duplicates pass; they re-apply
+        // idempotently.
         if ts_event < mirror.account_ts_last {
             tracing::warn!(
                 ts_event = ts_event.as_u64(),
@@ -2291,45 +2334,6 @@ fn handle_account_state(state: mogwai_protocol::AccountState, ctx: &ExecContext)
             return;
         }
         mirror.account_ts_last = ts_event;
-        // The engine reports a COMPLETE set of its non-zero positions in every
-        // snapshot, and signals a flat instrument by OMITTING it: a position
-        // closed to zero is removed from the engine's map, never reported as a
-        // zero-qty entry. So the snapshot is authoritative - any symbol the
-        // mirror still holds that is absent here has gone flat at the venue and
-        // must be dropped. Without this drop the insert-only mirror keeps the
-        // stale non-zero PositionRecord from the entry after the close, and
-        // generate_position_status_reports then hands broadarrow a phantom
-        // venue net it can only adopt as an EXTERNAL position - desyncing
-        // reconciliation (slices no longer sum to net) and halting the account.
-        let present: std::collections::HashSet<Symbol> =
-            state.positions.iter().map(|p| p.symbol.clone()).collect();
-        mirror
-            .positions
-            .retain(|symbol, _| present.contains(symbol));
-        for position in state.positions {
-            let Some(def) = instrument_def(&ctx.instruments, &position.symbol) else {
-                // A legitimate missing def (instrument cache not yet seeded)
-                // silently drops a real position from the account snapshot,
-                // leaving the mirror inconsistent. The DropNextAccountUpdate
-                // divergence drops the whole snapshot upstream, not individual
-                // positions here, so warning does not mask it.
-                tracing::warn!(
-                    symbol = %position.symbol,
-                    "dropping account position: no instrument def (cache not seeded?)"
-                );
-                continue;
-            };
-            mirror.positions.insert(
-                position.symbol.clone(),
-                PositionRecord {
-                    symbol: position.symbol,
-                    instrument_id: convert::instrument_id(&def),
-                    quantity: position.quantity,
-                    avg_px: position.avg_px,
-                    ts_last: ts_event,
-                },
-            );
-        }
     }
     ctx.emitter.send_account_state(NautilusAccountState::new(
         ctx.account_id,
@@ -2469,6 +2473,61 @@ mod tests {
 
     fn instruments_map() -> Arc<Mutex<HashMap<Symbol, InstrumentDef>>> {
         Arc::new(Mutex::new(HashMap::from([("BTCUSDT".to_string(), def())])))
+    }
+
+    /// Serves `GET /account` from a canned snapshot on an ephemeral loopback
+    /// port and points the client's `base_url` at it.
+    ///
+    /// Position reports come from venue truth over HTTP, not from any
+    /// client-side state, so a test that wants the venue to hold a position has
+    /// to say so HERE - there is nothing left to seed on the client. Answers
+    /// every request with the same body (the tests only ever fetch `/account`),
+    /// one connection at a time, for as long as the returned handle lives.
+    async fn install_account_venue(
+        client: &mut MogwaiExecutionClient,
+        positions: Vec<mogwai_protocol::Position>,
+        ts_event: u64,
+    ) -> tokio::task::JoinHandle<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind account venue");
+        let port = listener.local_addr().expect("account venue addr").port();
+        client.config.base_url = format!("ws://127.0.0.1:{port}");
+        let body = serde_json::to_string(&mogwai_protocol::AccountState {
+            balances: Vec::new(),
+            positions,
+            ts_event,
+        })
+        .expect("encode account snapshot");
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let body = body.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    // Read and discard the request head; the body is fixed.
+                    let mut buf = [0_u8; 1024];
+                    drop(stream.read(&mut buf).await);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    drop(stream.write_all(response.as_bytes()).await);
+                    drop(stream.flush().await);
+                });
+            }
+        })
+    }
+
+    fn wire_position(quantity: Decimal) -> mogwai_protocol::Position {
+        mogwai_protocol::Position {
+            symbol: "BTCUSDT".into(),
+            quantity,
+            avg_px: Decimal::new(10_000, 2),
+        }
     }
 
     fn seed_order(state: &Arc<Mutex<ExecState>>) {
@@ -2645,23 +2704,18 @@ mod tests {
             .state
             .lock()
             .expect("execution state mutex")
-            .positions
-            .insert(
-                "BTCUSDT".to_string(),
-                PositionRecord {
-                    symbol: "BTCUSDT".to_string(),
-                    instrument_id: instrument_id(),
-                    quantity: Decimal::new(1, 0),
-                    avg_px: Decimal::new(10_000, 2),
-                    ts_last: UnixNanos::from(1),
-                },
-            );
+            .account_ts_last = UnixNanos::from(42);
 
         client.reset().expect("reset succeeds");
 
         let state = client.state.lock().expect("execution state mutex");
         assert!(state.orders.is_empty(), "orders cleared on reset");
-        assert!(state.positions.is_empty(), "positions cleared on reset");
+        assert_eq!(
+            state.account_ts_last,
+            UnixNanos::default(),
+            "the account staleness watermark resets with the session; carrying it \
+             over would make a new session's first snapshot look stale and drop it"
+        );
     }
 
     #[test]
@@ -3224,16 +3278,8 @@ mod tests {
             )],
             vec![wire_fill("T-1", Decimal::ZERO, 11)],
         );
-        client.state.lock().expect("state").positions.insert(
-            "BTCUSDT".to_string(),
-            PositionRecord {
-                symbol: "BTCUSDT".to_string(),
-                instrument_id: instrument_id(),
-                quantity: Decimal::new(1, 0),
-                avg_px: Decimal::new(10_000, 2),
-                ts_last: UnixNanos::from(12),
-            },
-        );
+        let _account =
+            install_account_venue(&mut client, vec![wire_position(Decimal::new(1, 0))], 12).await;
 
         let orders = client
             .generate_order_status_reports(&GenerateOrderStatusReports::new(
@@ -3376,13 +3422,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closed_position_drops_from_mirror_so_reconciliation_reports_none() {
-        // Regression: the engine omits a flat instrument from its account
-        // snapshot (it removes a position closed to zero rather than reporting
-        // zero qty). The insert-only mirror used to keep the stale entry
-        // PositionRecord, so generate_position_status_reports handed broadarrow
-        // a phantom venue net it adopted as an EXTERNAL position -> attribution
-        // desync -> halted account. The close snapshot must clear the mirror.
+    async fn position_report_follows_the_venue_when_the_closing_snapshot_is_dropped() {
+        // The DropNextAccountUpdate fault class, which is the whole reason
+        // these reports moved off the client-side mirror. The client sees the
+        // ENTRY snapshot (long 1) and then never sees the CLOSE - that push is
+        // the one the divergence swallows - so any client-side belief about
+        // this position is stale-long forever. The venue is flat, and the
+        // report must say flat: a stale-long report is adopted downstream as a
+        // phantom EXTERNAL position, which desyncs attribution (slices no
+        // longer sum to net) and halts the account.
         let mut client = execution_client();
         client.instruments = instruments_map();
         seed_order(&client.state);
@@ -3397,31 +3445,19 @@ mod tests {
             account_type: ctx.account_type,
             sim: ctx.sim,
         };
-
-        // Entry snapshot carries the open long.
         handle_exec_message(
             ServerMessage::AccountState(mogwai_protocol::AccountState {
                 balances: Vec::new(),
-                positions: vec![mogwai_protocol::Position {
-                    symbol: "BTCUSDT".into(),
-                    quantity: Decimal::new(1, 0),
-                    avg_px: Decimal::new(10_000, 2),
-                }],
+                positions: vec![wire_position(Decimal::new(1, 0))],
                 ts_event: 12,
             }),
             &ctx,
         );
 
-        // Close snapshot: the engine has dropped the now-flat position, so the
-        // snapshot lists none. The mirror must follow and drop BTCUSDT too.
-        handle_exec_message(
-            ServerMessage::AccountState(mogwai_protocol::AccountState {
-                balances: Vec::new(),
-                positions: Vec::new(),
-                ts_event: 13,
-            }),
-            &ctx,
-        );
+        // The venue's own truth: flat. The engine removes a position closed to
+        // zero rather than reporting a zero-qty row, so "flat" is an absent
+        // row, not a zero one.
+        let _account = install_account_venue(&mut client, Vec::new(), 13).await;
 
         let positions = client
             .generate_position_status_reports(&GeneratePositionStatusReports::new(
@@ -3438,7 +3474,7 @@ mod tests {
 
         assert!(
             positions.is_empty(),
-            "a flattened position must not survive as a phantom reconciliation report"
+            "the report must follow the venue's flat truth, not the last snapshot the client happened to see"
         );
     }
 
@@ -3648,10 +3684,6 @@ mod tests {
             "a stale snapshot must not forward an account event"
         );
         let state = ctx.state.lock().expect("execution state mutex");
-        assert!(
-            state.positions.is_empty(),
-            "a stale snapshot must not resurrect a closed position"
-        );
         assert_eq!(
             state.account_ts_last,
             UnixNanos::from(13),
@@ -3787,8 +3819,8 @@ mod tests {
         // The trait default returns Ok(None), which the live node's startup
         // reconciliation logs as "no mass status available" and reconciles
         // NOTHING. The implementation must compose the three report
-        // generators: open orders and fills from venue truth, current
-        // positions from the account-snapshot mirror.
+        // generators, all three now from venue truth: open orders and fills
+        // off the query surface, current positions off GET /account.
         let mut client = execution_client();
         client.instruments = instruments_map();
         // A partial fill keeps the order open, so it passes the open_only
@@ -3803,16 +3835,8 @@ mod tests {
             )],
             vec![wire_fill("T-1", Decimal::new(1, 0), 11)],
         );
-        client.state.lock().expect("state").positions.insert(
-            "BTCUSDT".to_string(),
-            PositionRecord {
-                symbol: "BTCUSDT".to_string(),
-                instrument_id: instrument_id(),
-                quantity: Decimal::new(1, 0),
-                avg_px: Decimal::new(10_000, 2),
-                ts_last: UnixNanos::from(12),
-            },
-        );
+        let _account =
+            install_account_venue(&mut client, vec![wire_position(Decimal::new(1, 0))], 12).await;
 
         let mass = client
             .generate_mass_status(None)
@@ -4073,23 +4097,16 @@ mod tests {
         );
     }
 
-    // AE10 (positions): every mirrored position is a current open venue position
-    // (flat ones are dropped on snapshot apply), so a lookback-bounded start must
-    // not hide a long-quiet resting position.
+    // AE10 (positions): every position the venue reports is a current open one
+    // (the engine drops a symbol the moment it goes flat), so a lookback-bounded
+    // start must not hide a long-quiet resting position. The snapshot here is
+    // stamped near the epoch, far below the requested `start`.
     #[tokio::test]
     async fn position_report_keeps_long_quiet_open_position() {
         let mut client = execution_client();
         client.instruments = instruments_map();
-        client.state.lock().expect("state").positions.insert(
-            "BTCUSDT".to_string(),
-            PositionRecord {
-                symbol: "BTCUSDT".to_string(),
-                instrument_id: instrument_id(),
-                quantity: Decimal::new(1, 0),
-                avg_px: Decimal::new(10_000, 2),
-                ts_last: UnixNanos::from(1),
-            },
-        );
+        let _account =
+            install_account_venue(&mut client, vec![wire_position(Decimal::new(1, 0))], 1).await;
 
         let reports = client
             .generate_position_status_reports(&GeneratePositionStatusReports::new(
@@ -4108,6 +4125,81 @@ mod tests {
             1,
             "a long-quiet open position must still report (AE10)"
         );
+    }
+
+    #[tokio::test]
+    async fn position_report_filter_matches_the_whole_instrument_id() {
+        // The wire rows carry only a symbol, so a symbol-only comparison would
+        // hand a request scoped to BTCUSDT on ANOTHER venue this venue's
+        // BTCUSDT position - silently ignoring the filter the caller asked for.
+        let mut client = execution_client();
+        client.instruments = instruments_map();
+        let _account =
+            install_account_venue(&mut client, vec![wire_position(Decimal::new(1, 0))], 12).await;
+
+        let foreign = InstrumentId::new(
+            nautilus_model::identifiers::Symbol::from("BTCUSDT"),
+            Venue::from("BINANCE"),
+        );
+        let reports = client
+            .generate_position_status_reports(&GeneratePositionStatusReports::new(
+                UUID4::new(),
+                UnixNanos::from(20),
+                Some(foreign),
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("position reports");
+        assert!(
+            reports.is_empty(),
+            "a same-symbol, different-venue filter must match nothing here"
+        );
+    }
+
+    #[tokio::test]
+    async fn position_reports_survive_a_server_without_the_account_route() {
+        // `connect` treats a 404 as a server predating GET /account and carries
+        // on; this generator must agree. Failing here would take the whole mass
+        // status down - orders and fills included - over a route the server was
+        // never expected to have.
+        let mut client = execution_client();
+        client.instruments = instruments_map();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind 404 venue");
+        let port = listener.local_addr().expect("addr").port();
+        client.config.base_url = format!("ws://127.0.0.1:{port}");
+        let _venue = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0_u8; 1024];
+                drop(stream.read(&mut buf).await);
+                drop(
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await,
+                );
+            }
+        });
+
+        let reports = client
+            .generate_position_status_reports(&GeneratePositionStatusReports::new(
+                UUID4::new(),
+                UnixNanos::from(20),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .expect("a 404 must not fail the generator");
+        assert!(reports.is_empty(), "a blind generator reports nothing");
     }
 
     // AE6: ExecState.prune bounds the terminal-order records past their cap

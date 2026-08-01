@@ -50,5 +50,15 @@ model = "gpt-5.6-terra"
 effort = "medium"
 sandbox = "workspace-write"
 
+[bygg.codex.deep]
+model = "gpt-5.6-sol"
+effort = "xhigh"
+sandbox = "read-only"
+
+[bygg.codex.build]
+model = "gpt-5.6-terra"
+effort = "medium"
+sandbox = "workspace-write"
+
 [_audit]
 id = "59c6"

@@ -51,13 +51,6 @@ Or both. There are no exceptions.
   repeated-subscribe pathology will storm the same way - a per-connection
   dedup or rate limit on identical diagnostic reasons would cap it.
 
-- Position status reports are still rebuilt from the adapter's account-snapshot
-  mirror, unlike the order/fill reports (flipped to the venue-truth
-  QueryOrders/QueryFills surface, 2026-07-31). A dropped account snapshot can
-  therefore still make position reconciliation confirm a stale position. The
-  truthful source already exists (`GET /account`); flipping the generator is a
-  small change, deferred until broadarrow asks for it.
-
 - The adapter integration-test stub (`crates/mogwai-adapter/tests/common`) does
   not answer `QueryOrders`/`QueryFills`; the venue-truth report generators are
   covered by unit tests with an in-process fake venue instead. Extend the stub

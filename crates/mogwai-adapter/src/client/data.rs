@@ -692,77 +692,101 @@ impl DataClient for MogwaiDataClient {
         let sim = self.sim;
         let start = date_to_unix_nanos(request.start);
         let end = date_to_unix_nanos(request.end);
-        // Refuse an off-tape window at the boundary, loudly, rather than spawning
-        // a doomed fetch the warmup would read as an empty page.
-        ensure_on_tape(start, self.data_origin_ns)?;
+        // Refuse an off-tape window at the boundary, loudly - but ANSWER it.
+        // Returning the error to nautilus is not a refusal the requester ever
+        // sees: `DataEngine::execute` log::error!s a synchronous client error
+        // and emits no correlated response, so `?` here leaves the request
+        // outstanding forever and the consumer burns its whole timeout on what
+        // looks like a hung venue. Log the named diagnostic and answer empty.
+        if let Err(err) = ensure_on_tape(start, self.data_origin_ns) {
+            tracing::error!(error = %err, "request_trades: refusing an off-tape window; answering with an empty trade response so the request resolves");
+            drop(sink.send(DataEvent::Response(DataResponse::Trades(
+                TradesResponse::new(
+                    request.request_id,
+                    client_id,
+                    request.instrument_id,
+                    Vec::new(),
+                    start,
+                    end,
+                    now_unix_nanos(sim),
+                    request.params,
+                ),
+            ))));
+            return Ok(());
+        }
         track_task(&self.task_handles, get_runtime().spawn(async move {
             let symbol = symbol_from_instrument(request.instrument_id);
-            let def = match ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await
-            {
-                Ok(def) => def,
-                Err(err) => {
-                    tracing::error!(%symbol, error = %err, "request_trades: instrument lookup failed");
-                    return;
-                }
-            };
             // Page the window rather than issuing one MAX_HISTORY_LIMIT-capped
             // request: a window with more than 1000 trades used to return only
             // its oldest 1000, with the response still claiming the full range.
             // `request.limit` counts TRADES here, so it becomes the pagination
             // ceiling.
             let max_trades = request.limit.map(std::num::NonZeroUsize::get);
-            let (mut trades, truncated) = match fetch_trades_windowed(
-                &http,
-                &http_quota,
-                &base,
-                TradeFetch {
-                    symbol: &symbol,
-                    start,
-                    end,
-                    limit: None,
-                    regime,
-                },
-                |out| max_trades.is_some_and(|m| out.len() >= m),
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(err) => {
-                    // Surface the failure instead of the old silent `if let Ok`
-                    // drop: a server 422 (off-tape) or any fetch error must be
-                    // visible, not mistaken for "no trades in the window".
-                    tracing::error!(%symbol, error = %err, "request_trades: trade fetch failed; the server may have refused an off-tape window");
-                    return;
+            // Always-yields block, for the reason spelled out in `request_bars`:
+            // a failure arm that returned from the task left the nautilus
+            // request unresolved, which the consumer cannot tell from a hang.
+            let data = 'trades: {
+                let def = match ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await
+                {
+                    Ok(def) => def,
+                    Err(err) => {
+                        tracing::error!(%symbol, error = %err, "request_trades: instrument lookup failed; answering with an empty trade response so the request resolves");
+                        break 'trades Vec::new();
+                    }
+                };
+                let (mut trades, truncated) = match fetch_trades_windowed(
+                    &http,
+                    &http_quota,
+                    &base,
+                    TradeFetch {
+                        symbol: &symbol,
+                        start,
+                        end,
+                        limit: None,
+                        regime,
+                    },
+                    |out| max_trades.is_some_and(|m| out.len() >= m),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(err) => {
+                        // Surface the failure instead of the old silent `if let Ok`
+                        // drop: a server 422 (off-tape) or any fetch error must be
+                        // visible, not mistaken for "no trades in the window".
+                        tracing::error!(%symbol, error = %err, "request_trades: trade fetch failed (the server may have refused an off-tape window); answering with an empty trade response so the request resolves");
+                        break 'trades Vec::new();
+                    }
+                };
+                if let Some(m) = max_trades {
+                    // Paging overshoots the trade ceiling by up to one page; trim to
+                    // the requested count (from the oldest edge) so the response
+                    // honors the limit exactly.
+                    trades.truncate(m);
                 }
+                if truncated {
+                    tracing::warn!(
+                        %symbol,
+                        trades = trades.len(),
+                        "request_trades: window truncated before its end (trade limit reached or same-ts wedge); the warmup/live splice may not be contiguous"
+                    );
+                }
+                trades
+                    .iter()
+                    .filter_map(|t| {
+                        convert::trade_tick(t, request.instrument_id, &def, now_unix_nanos(sim))
+                            .map_err(|err| {
+                                tracing::warn!(
+                                    symbol = %t.symbol,
+                                    ts_event = t.ts_event,
+                                    error = %err,
+                                    "dropping historical trade: unrepresentable tick"
+                                );
+                            })
+                            .ok()
+                    })
+                    .collect()
             };
-            if let Some(m) = max_trades {
-                // Paging overshoots the trade ceiling by up to one page; trim to
-                // the requested count (from the oldest edge) so the response
-                // honors the limit exactly.
-                trades.truncate(m);
-            }
-            if truncated {
-                tracing::warn!(
-                    %symbol,
-                    trades = trades.len(),
-                    "request_trades: window truncated before its end (trade limit reached or same-ts wedge); the warmup/live splice may not be contiguous"
-                );
-            }
-            let data = trades
-                .iter()
-                .filter_map(|t| {
-                    convert::trade_tick(t, request.instrument_id, &def, now_unix_nanos(sim))
-                        .map_err(|err| {
-                            tracing::warn!(
-                                symbol = %t.symbol,
-                                ts_event = t.ts_event,
-                                error = %err,
-                                "dropping historical trade: unrepresentable tick"
-                            );
-                        })
-                        .ok()
-                })
-                .collect();
             let response = TradesResponse::new(
                 request.request_id,
                 client_id,
@@ -822,21 +846,29 @@ impl DataClient for MogwaiDataClient {
         let sim = self.sim;
         let start = date_to_unix_nanos(request.start);
         let end = date_to_unix_nanos(request.end);
-        // Refuse an off-tape warmup window at the boundary, naming the floor,
-        // rather than spawning a fetch that returns an empty page the warmup
-        // can never complete on (the #13 failure mode this spec closes).
-        ensure_on_tape(start, self.data_origin_ns)?;
+        // Refuse an off-tape warmup window at the boundary, naming the floor -
+        // but ANSWER it, for the reason spelled out in `request_trades`: a
+        // synchronous `Err` is logged by the data engine and never turned into
+        // a response, so `?` here would hang the warmup rather than refuse it.
+        if let Err(err) = ensure_on_tape(start, self.data_origin_ns) {
+            tracing::error!(error = %err, "request_bars: refusing an off-tape warmup window; answering with an empty bar response so the request resolves");
+            drop(
+                sink.send(DataEvent::Response(DataResponse::Bars(BarsResponse::new(
+                    request.request_id,
+                    client_id,
+                    request.bar_type,
+                    Vec::new(),
+                    start,
+                    end,
+                    now_unix_nanos(sim),
+                    request.params,
+                )))),
+            );
+            return Ok(());
+        }
         track_task(&self.task_handles, get_runtime().spawn(async move {
             let instrument_id = request.bar_type.instrument_id();
             let symbol = symbol_from_instrument(instrument_id);
-            let def = match ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await
-            {
-                Ok(def) => def,
-                Err(err) => {
-                    tracing::error!(%symbol, error = %err, "request_bars: instrument lookup failed");
-                    return;
-                }
-            };
             // Page the window, translating nautilus's BAR-count limit into a
             // bar-span pagination target: the old single request applied a
             // BAR-count limit as a TRADE-page limit, so a warmup for N bars
@@ -844,64 +876,87 @@ impl DataClient for MogwaiDataClient {
             // only the oldest edge, under-delivering or timing out the warmup.
             let bar_limit = request.limit.map(std::num::NonZeroUsize::get);
             let interval = get_bar_interval_ns(&request.bar_type).as_u64();
-            let (trades, truncated) = match fetch_trades_windowed(
-                &http,
-                &http_quota,
-                &base,
-                TradeFetch {
-                    symbol: &symbol,
-                    start,
-                    end,
-                    limit: None,
-                    regime,
-                },
-                |out| bar_span_reached(out, interval, bar_limit),
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(err) => {
-                    tracing::error!(%symbol, error = %err, "request_bars: trade fetch failed; the server may have refused an off-tape window");
-                    return;
+            // Every exit from this block yields bars, so the response below is
+            // ALWAYS sent. A failure arm used to `return` straight out of the
+            // task, which left the nautilus request unresolved forever: from the
+            // consumer that is indistinguishable from a hang, and it burns the
+            // whole warmup timeout before dying with nothing but a line in the
+            // worker log to show for it. An empty response is a truthful answer
+            // that at least RESOLVES; the error detail rides the log.
+            let bars: Vec<Bar> = 'bars: {
+                let def = match ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await
+                {
+                    Ok(def) => def,
+                    Err(err) => {
+                        tracing::error!(%symbol, error = %err, "request_bars: instrument lookup failed; answering with an empty bar response so the request resolves");
+                        break 'bars Vec::new();
+                    }
+                };
+                let (trades, truncated) = match fetch_trades_windowed(
+                    &http,
+                    &http_quota,
+                    &base,
+                    TradeFetch {
+                        symbol: &symbol,
+                        start,
+                        end,
+                        limit: None,
+                        regime,
+                    },
+                    |out| bar_span_reached(out, interval, bar_limit),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(err) => {
+                        tracing::error!(%symbol, error = %err, "request_bars: trade fetch failed (the server may have refused an off-tape window); answering with an empty bar response so the request resolves");
+                        break 'bars Vec::new();
+                    }
+                };
+                if truncated {
+                    tracing::warn!(
+                        %symbol,
+                        "request_bars: window truncated before its end (bar limit reached or same-ts wedge); the warmup may not splice contiguously into live"
+                    );
                 }
+                let mut bars = aggregate_bars(&request.bar_type, &trades, &def, sim, end);
+                if let Some(m) = bar_limit {
+                    // Paging spans at least `bar_limit` intervals, so it may produce
+                    // a few extra bars; trim to the requested count (oldest edge,
+                    // from the window start) so the response honors the bar limit.
+                    bars.truncate(m);
+                }
+                // An on-tape window that under-delivers is a real, reachable
+                // state, not an error: mogwai's fitted arrival process is
+                // heavy-tailed, and a measured sweep of the default 24h-horizon
+                // tape found stretches of 15+ SIMULATED HOURS running at 3-10
+                // trades per hour (see reference/architecture.md, "Tape arrival
+                // droughts"). Bars exist only for intervals that CONTAIN a
+                // trade, so inside a drought a request for N bars typically
+                // comes back with a handful - non-empty, so nothing downstream
+                // objects, and the strategy silently warms from a fraction of
+                // its configured history. That short case is the dangerous one
+                // precisely because it does not stop anything, so it warns on
+                // the same footing as the empty case. The venue side is where
+                // the trade count and the drought context actually live.
+                let short = bar_limit.is_some_and(|m| bars.len() < m);
+                if bars.is_empty() || short {
+                    tracing::warn!(
+                        %symbol,
+                        bar_type = %request.bar_type,
+                        ?start,
+                        ?end,
+                        requested = ?bar_limit,
+                        produced = bars.len(),
+                        trades = trades.len(),
+                        "request_bars: the window is on-tape but produced fewer bars than requested; \
+                         mogwai's synthetic tape has multi-hour arrival droughts, so a short warmup \
+                         window can legitimately be sparse or empty - widen the window, lower the bar \
+                         interval, or let the venue run further past its epoch before starting the warmup"
+                    );
+                }
+                bars
             };
-            if truncated {
-                tracing::warn!(
-                    %symbol,
-                    "request_bars: window truncated before its end (bar limit reached or same-ts wedge); the warmup may not splice contiguously into live"
-                );
-            }
-            let mut bars = aggregate_bars(&request.bar_type, &trades, &def, sim, end);
-            if let Some(m) = bar_limit {
-                // Paging spans at least `bar_limit` intervals, so it may produce
-                // a few extra bars; trim to the requested count (oldest edge,
-                // from the window start) so the response honors the bar limit.
-                bars.truncate(m);
-            }
-            // An on-tape window that yields nothing is a real, reachable state,
-            // not an error: mogwai's fitted arrival process is heavy-tailed, and
-            // a measured sweep of the default 24h-horizon tape found stretches
-            // of 15+ SIMULATED HOURS running at 3-10 trades per hour, inside
-            // which a few-minute warmup window is empty more often than not
-            // (see reference/architecture.md, "Tape arrival droughts"). Left
-            // undiagnosed it surfaces to the consumer as nautilus' bare
-            // "Received empty Bar response" and then a fatal warmup timeout,
-            // which reads like a broken venue. Say WHY here, where the window
-            // and the trade count are both in hand.
-            if bars.is_empty() {
-                tracing::warn!(
-                    %symbol,
-                    bar_type = %request.bar_type,
-                    ?start,
-                    ?end,
-                    trades = trades.len(),
-                    "request_bars: the window is on-tape but produced no bars; \
-                     mogwai's synthetic tape has multi-hour arrival droughts, so a \
-                     short warmup window can legitimately be empty - widen the \
-                     window, lower the bar interval, or let the venue run further \
-                     past its epoch before starting the warmup"
-                );
-            }
             let response = BarsResponse::new(
                 request.request_id,
                 client_id,
@@ -928,25 +983,34 @@ impl DataClient for MogwaiDataClient {
         track_task(
             &self.task_handles,
             get_runtime().spawn(async move {
-                if let Ok(defs) = fetch_instruments(&http, &http_quota, &base).await {
-                    cache_instruments(&instruments, defs.clone());
-                    let ts_init = now_unix_nanos(sim);
-                    let data = defs
-                        .iter()
-                        .filter_map(|def| instrument_any_or_warn(def, ts_init))
-                        .collect();
-                    let response = InstrumentsResponse::new(
-                        request.request_id,
-                        client_id,
-                        request.venue.unwrap_or(*MOGWAI_VENUE),
-                        data,
-                        date_to_unix_nanos(request.start),
-                        date_to_unix_nanos(request.end),
-                        ts_init,
-                        request.params,
-                    );
-                    drop(sink.send(DataEvent::Response(DataResponse::Instruments(response))));
-                }
+                // Same always-answer rule as `request_bars`/`request_trades`:
+                // the old `if let Ok` swallowed a failed fetch entirely, and
+                // the nautilus request then never resolved. Answer with an
+                // empty set and put the reason in the log.
+                let ts_init = now_unix_nanos(sim);
+                let data = match fetch_instruments(&http, &http_quota, &base).await {
+                    Ok(defs) => {
+                        cache_instruments(&instruments, defs.clone());
+                        defs.iter()
+                            .filter_map(|def| instrument_any_or_warn(def, ts_init))
+                            .collect()
+                    }
+                    Err(err) => {
+                        tracing::error!(error = %err, "request_instruments: instrument fetch failed; answering with an empty instrument response so the request resolves");
+                        Vec::new()
+                    }
+                };
+                let response = InstrumentsResponse::new(
+                    request.request_id,
+                    client_id,
+                    request.venue.unwrap_or(*MOGWAI_VENUE),
+                    data,
+                    date_to_unix_nanos(request.start),
+                    date_to_unix_nanos(request.end),
+                    ts_init,
+                    request.params,
+                );
+                drop(sink.send(DataEvent::Response(DataResponse::Instruments(response))));
             }),
         );
         Ok(())
@@ -964,27 +1028,43 @@ impl DataClient for MogwaiDataClient {
             &self.task_handles,
             get_runtime().spawn(async move {
                 let symbol = symbol_from_instrument(request.instrument_id);
-                if let Ok(def) =
-                    ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await
-                {
-                    let ts_init = now_unix_nanos(sim);
-                    if let Some(data) = instrument_any_or_warn(&def, ts_init) {
-                        let response = InstrumentResponse::new(
-                            request.request_id,
-                            client_id,
-                            request.instrument_id,
-                            data,
-                            date_to_unix_nanos(request.start),
-                            date_to_unix_nanos(request.end),
-                            ts_init,
-                            request.params,
-                        );
-                        drop(
-                            sink.send(DataEvent::Response(DataResponse::Instrument(Box::new(
-                                response,
-                            )))),
-                        );
+                // The one generator that CANNOT answer on failure:
+                // `InstrumentResponse` carries exactly one `InstrumentAny` and
+                // has no empty form, so there is no truthful response to send
+                // when the instrument cannot be resolved - unlike the bars,
+                // trades and instruments generators, which all answer empty
+                // rather than leaving the request unresolved. Log loudly at
+                // both failure points so the unresolved request is at least
+                // diagnosable.
+                match ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await {
+                    Ok(def) => {
+                        let ts_init = now_unix_nanos(sim);
+                        if let Some(data) = instrument_any_or_warn(&def, ts_init) {
+                            let response = InstrumentResponse::new(
+                                request.request_id,
+                                client_id,
+                                request.instrument_id,
+                                data,
+                                date_to_unix_nanos(request.start),
+                                date_to_unix_nanos(request.end),
+                                ts_init,
+                                request.params,
+                            );
+                            drop(sink.send(DataEvent::Response(DataResponse::Instrument(
+                                Box::new(response),
+                            ))));
+                        } else {
+                            tracing::error!(
+                                %symbol,
+                                "request_instrument: the venue's definition is unrepresentable as a nautilus instrument; the request cannot be answered and will not resolve"
+                            );
+                        }
                     }
+                    Err(err) => tracing::error!(
+                        %symbol,
+                        error = %err,
+                        "request_instrument: instrument lookup failed; the request cannot be answered and will not resolve"
+                    ),
                 }
             }),
         );

@@ -401,6 +401,33 @@ from the in-tree `research/` copy.
   stance as the D16 trade deserts it is downstream of. The `request_` handlers
   follow the databento spawn-and-respond idiom over the HTTP surface, with a
   mandatory limit ceiling.
+
+  **Every request generator answers, including on failure.** The nautilus
+  request resolves only when a `DataResponse` is emitted, and there are two
+  ways to fail to emit one - both of which read downstream as a hung venue,
+  with the consumer burning its whole timeout and dying with a log line to
+  show for it:
+
+  - a spawned task's failure arm that logs and returns, and
+  - a SYNCHRONOUS `Err` out of the handler. `DataEngine::execute` merely
+    `log::error!`s a client error and emits nothing correlated, so `?` at the
+    request boundary is not a refusal the requester ever sees.
+
+  So `request_bars`, `request_trades` and `request_instruments` answer with an
+  EMPTY payload on a failed lookup or fetch, and put the reason in the log -
+  and the off-tape window guard (a `start` below the venue's published
+  `data_origin_ns`) likewise logs its named diagnostic and answers empty rather
+  than returning the error. `request_instrument` is the sole exception and
+  deliberately so: `InstrumentResponse` carries exactly one `InstrumentAny`
+  with no empty form, so there is no truthful response to send - both its
+  failure paths log at ERROR instead.
+
+  `request_bars` additionally warns whenever it produces FEWER bars than were
+  requested, not merely zero. Bars exist only for intervals containing a trade,
+  so inside one of the tape's arrival droughts a request for N bars typically
+  returns a handful - non-empty, so nothing downstream objects, and the strategy
+  silently warms off a fraction of its configured history. That short case is
+  the more dangerous one precisely because it does not stop anything.
 - **convert.** A pure module mapping mogwai `Decimal` ticks to nautilus
   `Price`/`Quantity`/`TradeTick`/`QuoteTick`/`InstrumentAny` at the instrument's
   declared precision.
@@ -428,16 +455,32 @@ from the in-tree `research/` copy.
   surfaces as a query timeout. This backs the plural generators (startup
   mass-status and the continuous open-order poll), the singular
   `generate_order_status_report`, and `query_order` (the execution manager's
-  in-flight probe, which emits the found report). Position reports still
-  rebuild from the mirror's account-snapshot view, and every report remains
-  filtered by the request's start/end bounds (open orders exempt from the
-  lookback under `open_only`, per AE10). The mirror's position view follows
-  the engine's convention that a flat instrument is OMITTED from the snapshot (a
-  position closed to zero is removed, never reported as zero qty): each inbound
-  `AccountState` is authoritative, so the mirror drops any symbol absent from it
-  before upserting the rest. Without that drop a closed position would linger as a
-  phantom venue net and broadarrow would adopt it as an `EXTERNAL` position,
-  desyncing reconciliation and halting the account.
+  in-flight probe, which emits the found report).
+
+  **Position reports come from venue truth too**, off `GET /account` rather
+  than any client-side copy, for the same reason and one sharper: mogwai ships
+  a `DropNextAccountUpdate` divergence whose entire purpose is swallowing a
+  pushed `AccountState`, so a client-side position view is not merely
+  theoretically stale but deliberately falsifiable - and a stale-long report is
+  adopted downstream as a phantom `EXTERNAL` position, desyncing attribution
+  and halting the account. The pull is a point-in-time query that bypasses the
+  `HavocFilter`, so the divergence cannot suppress it, and the route is
+  transport-agnostic so it serves the HTTP profiles unchanged. A failed pull
+  propagates as an error rather than falling back, since a silent fallback
+  would reintroduce exactly the stale confirmation this removes. There is
+  consequently NO position mirror in `ExecState` any more - the generator was
+  its only reader, and a second, staler answer to a question the venue already
+  answers is a liability, not a cache. `ExecState` retains only the order
+  records and the account staleness watermark that keeps out-of-order snapshots
+  from being forwarded to nautilus.
+
+  Every report is filtered by the request's start/end bounds, with open orders
+  and open positions exempt from the lookback (AE10): the engine drops a
+  position from its map the moment it goes flat, so every position the venue
+  reports is a current open one and a short lookback must not hide a long-quiet
+  one. A position report is stamped with the venue snapshot's own `ts_event`,
+  since the wire `Position` carries no per-symbol activity time and dating it
+  off a client-seen event would put a client timestamp on a venue number.
 - **Transport profile.** Both configs carry a `transport_profile`; `connect`
   branches on it. Under `HttpOrders` the exec client opens no `/ws` socket: the
   three order methods POST to `/orders` and drain the returned events through the
