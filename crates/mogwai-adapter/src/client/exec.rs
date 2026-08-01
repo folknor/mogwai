@@ -2132,12 +2132,14 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                     "venue refused a venue-truth query; failing its waiter now"
                 );
             }
-            mogwai_protocol::AdmissionSubject::Subscribe { .. }
-            | mogwai_protocol::AdmissionSubject::Frame => {
+            mogwai_protocol::AdmissionSubject::Frame => {
                 tracing::warn!(?subject, %reason, "venue refused request admission");
             }
         },
-        ServerMessage::Trade(_) | ServerMessage::Quote(_) => {}
+        // Subscription diagnostics are handled by the data client.
+        ServerMessage::Trade(_)
+        | ServerMessage::Quote(_)
+        | ServerMessage::SubscriptionIssues { .. } => {}
     }
 }
 

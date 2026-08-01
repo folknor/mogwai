@@ -216,6 +216,7 @@ class WsClient:
         if timeout is not None:
             self.s.settimeout(timeout)
         self._handshake()
+        self.generation = 0
 
     def _handshake(self) -> None:
         key = "x3JJHMbDL1EzLkh9GBhXDw=="  # static key is fine for a smoke test
@@ -228,6 +229,19 @@ class WsClient:
         assert b"101 Switching Protocols" in buf, buf
 
     def send(self, obj: dict) -> None:
+        if obj.get("type") == "Subscribe" and "symbols" in obj:
+            start_ts = obj.pop("start_ts", None)
+            regime = obj.pop("regime", None)
+            subscriptions = []
+            for symbol in obj.pop("symbols"):
+                self.generation += 1
+                entry = {"generation": self.generation, "symbol": symbol}
+                if start_ts is not None:
+                    entry["start_ts"] = start_ts
+                if regime is not None:
+                    entry["regime"] = regime
+                subscriptions.append(entry)
+            obj["subscriptions"] = subscriptions
         self.s.sendall(_encode(json.dumps(obj)))
 
     def read(self) -> dict:
@@ -422,6 +436,46 @@ def main_default() -> None:
     assert windowed["symbol"] == "BTCUSDT", windowed
     assert windowed["ts_event"] >= window_start_ts, windowed
     print("PASS: Subscribe.start_ts is wired through live replay")
+
+    # Attributability end to end: ONE Subscribe naming a listed symbol and an
+    # unlisted one gets exactly one coalesced SubscriptionIssues frame, whose
+    # single outcome names the SECOND entry's generation and symbol - while the
+    # first entry's ticks keep arriving. No unit test spans this whole path, and
+    # before the per-entry generation the diagnostic named no subscription at all.
+    attrib = WsClient(timeout=1.5)
+    attrib.send(
+        {
+            "type": "Subscribe",
+            "subscriptions": [
+                {"generation": 900, "symbol": "BTCUSDT"},
+                {"generation": 901, "symbol": "NOPECOIN"},
+            ],
+        }
+    )
+    issues = None
+    traded = False
+    for _ in range(200):
+        frame = attrib.read()
+        if frame["type"] == "SubscriptionIssues":
+            assert issues is None, ("exactly one coalesced frame", issues, frame)
+            issues = frame
+        elif frame["type"] == "Trade":
+            assert frame["symbol"] == "BTCUSDT", frame
+            traded = True
+        if issues is not None and traded:
+            break
+    print("issues:  ", issues)
+    assert issues is not None, "no SubscriptionIssues frame arrived"
+    assert issues["issues_total"] == 1, issues
+    assert issues["refusals_total"] == 1, issues
+    assert len(issues["entries"]) == 1, issues
+    entry = issues["entries"][0]
+    assert entry["generation"] == 901, entry
+    assert entry["symbol"] == "NOPECOIN", entry
+    assert entry["issue"]["kind"] == "UnknownSymbol", entry
+    assert traded, "the listed symbol's ticks must keep arriving"
+    attrib.close()
+    print("PASS: a subscription diagnostic names the entry it describes")
 
     # Measure the regime effect from the tape HEAD (start omitted = from origin),
     # not from a windowed start. Clean and drought are independent realizations of

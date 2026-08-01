@@ -9,11 +9,11 @@
 //! `super::shared`.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     num::NonZeroU64,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -22,7 +22,8 @@ use anyhow::{Context, ensure};
 use async_trait::async_trait;
 use mogwai_data::{BarAcc, fold_trade};
 use mogwai_protocol::{
-    ClientMessage, InstrumentDef, MarketRegime, ServerMessage, SimClock, Symbol, TradeTick,
+    ClientMessage, InstrumentDef, MAX_SUBSCRIBE_SYMBOLS, MarketRegime, ServerMessage, SimClock,
+    SubscriptionIssue, SubscriptionRequest, Symbol, TradeTick,
 };
 use nautilus_common::{
     clients::DataClient,
@@ -73,6 +74,7 @@ use crate::{
 /// acceleration without producing on-axis data. The accelerated vehicle is the
 /// WS push path, which deadline-paces server-side.
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+const GENERATION_HISTORY: usize = 4 * MAX_SUBSCRIBE_SYMBOLS;
 /// Consecutive poll-failure count at which the wedged-feed warning re-fires and
 /// the AD6 self-heal (clock re-fetch + cursor reset) runs - onset (count 1),
 /// then every this-many failures (~10s at the 250ms POLL_INTERVAL).
@@ -94,6 +96,8 @@ pub struct MogwaiDataClient {
     ws_cmd: Option<UnboundedSender<WsCommand>>,
     instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     subs: Arc<Mutex<HashMap<Symbol, SubState>>>,
+    generation_seq: Arc<AtomicU64>,
+    issued: Arc<Mutex<BTreeMap<u64, Symbol>>>,
     bars: Arc<Mutex<HashMap<BarType, BarSubState>>>,
     poll_cursor: Arc<Mutex<HashMap<Symbol, PollCursor>>>,
     /// Handles for every task this client spawns (the WS reader, the poll loop,
@@ -135,6 +139,8 @@ impl MogwaiDataClient {
             ws_cmd: None,
             instruments: Arc::new(Mutex::new(HashMap::new())),
             subs: Arc::new(Mutex::new(HashMap::new())),
+            generation_seq: Arc::new(AtomicU64::new(0)),
+            issued: Arc::new(Mutex::new(BTreeMap::new())),
             bars: Arc::new(Mutex::new(HashMap::new())),
             poll_cursor: Arc::new(Mutex::new(HashMap::new())),
             task_handles: Arc::new(Mutex::new(Vec::new())),
@@ -153,7 +159,7 @@ impl MogwaiDataClient {
         // server replay the whole backfill at once - the catch-up dump. "Live
         // means from now" is now the server's job; the adapter only forwards an
         // explicit caller-supplied start (a resume cursor) unchanged.
-        let (emit, active_start_ts) = {
+        let (emit, active_start_ts, generation) = {
             let mut subs = self
                 .subs
                 .lock()
@@ -177,8 +183,9 @@ impl MogwaiDataClient {
             // subscriber from the cursor forward.
             if emit {
                 state.start_ts = start_ts;
+                state.generation = next_generation(&self.generation_seq);
             }
-            (emit, state.start_ts)
+            (emit, state.start_ts, state.generation)
         };
 
         // Gate the direct Subscribe send on a live connection. A subscribe that
@@ -196,10 +203,14 @@ impl MogwaiDataClient {
             && self.connected.load(Ordering::Relaxed)
         {
             self.send_ws(WsCommand::Subscribe {
-                symbols: vec![symbol],
-                start_ts: active_start_ts,
-                regime: data_regime(&self.config.havoc),
+                subscriptions: vec![SubscriptionRequest {
+                    generation,
+                    symbol: symbol.clone(),
+                    start_ts: active_start_ts,
+                    regime: data_regime(&self.config.havoc),
+                }],
             })?;
+            record_issued(&self.issued, generation, symbol);
         }
         Ok(())
     }
@@ -393,6 +404,7 @@ impl DataClient for MogwaiDataClient {
             let http_quota = self.http_quota.clone();
             let instruments = Arc::clone(&self.instruments);
             let subs = Arc::clone(&self.subs);
+            let issued = Arc::clone(&self.issued);
             let bars = Arc::clone(&self.bars);
             let cursor = Arc::clone(&self.poll_cursor);
             let havoc_filter = HavocFilter::from_client(&client_havoc);
@@ -404,6 +416,7 @@ impl DataClient for MogwaiDataClient {
                     sink,
                     instruments,
                     subs,
+                    issued,
                     bars,
                     cursor,
                     connected,
@@ -424,6 +437,7 @@ impl DataClient for MogwaiDataClient {
         let connected = Arc::clone(&self.connected);
         let instruments = Arc::clone(&self.instruments);
         let subs = Arc::clone(&self.subs);
+        let issued = Arc::clone(&self.issued);
         let bars = Arc::clone(&self.bars);
         let havoc_filter = Arc::new(tokio::sync::Mutex::new(HavocFilter::from_client(
             &client_havoc,
@@ -439,9 +453,10 @@ impl DataClient for MogwaiDataClient {
             let sink = sink.clone();
             let instruments = Arc::clone(&instruments);
             let subs = Arc::clone(&subs);
+            let issued = Arc::clone(&issued);
             let bars = Arc::clone(&bars);
             async move {
-                handle_market_message(msg, &sink, &instruments, &subs, &bars, sim).await;
+                handle_market_message(msg, &sink, &instruments, &subs, &issued, &bars, sim).await;
             }
         });
         track_task(&self.task_handles, pump_handle);
@@ -451,6 +466,8 @@ impl DataClient for MogwaiDataClient {
         let disconnect_filter = Arc::clone(&havoc_filter);
         let disconnect_deliver = deliver_tx;
         let connect_subs = Arc::clone(&self.subs);
+        let connect_generation_seq = Arc::clone(&self.generation_seq);
+        let connect_issued = Arc::clone(&self.issued);
         let task_ws_url = ws_url.clone();
         let reader_handle = tokio::spawn(async move {
             run_ws_connection(
@@ -464,7 +481,14 @@ impl DataClient for MogwaiDataClient {
                 },
                 cmd_rx,
                 ws_command_to_client_message,
-                move || subscribe_commands(&connect_subs, regime),
+                move || {
+                    subscribe_commands(
+                        &connect_subs,
+                        regime,
+                        &connect_generation_seq,
+                        &connect_issued,
+                    )
+                },
                 move |server_msg| {
                     let handler_filter = Arc::clone(&handler_filter);
                     let handler_deliver = handler_deliver.clone();
@@ -1084,6 +1108,7 @@ struct SubState {
     quotes: usize,
     bars: usize,
     start_ts: Option<u64>,
+    generation: u64,
 }
 
 impl SubState {
@@ -1184,9 +1209,7 @@ impl PollCursor {
 #[derive(Debug, Clone, PartialEq)]
 enum WsCommand {
     Subscribe {
-        symbols: Vec<Symbol>,
-        start_ts: Option<u64>,
-        regime: Option<MarketRegime>,
+        subscriptions: Vec<SubscriptionRequest>,
     },
     Unsubscribe {
         symbols: Vec<Symbol>,
@@ -1198,33 +1221,35 @@ enum WsCommand {
 /// unit-testable without a live socket.
 fn ws_command_to_client_message(cmd: WsCommand) -> ClientMessage {
     match cmd {
-        WsCommand::Subscribe {
-            symbols,
-            start_ts,
-            regime,
-        } => ClientMessage::Subscribe {
-            symbols,
-            start_ts,
-            regime,
-        },
+        WsCommand::Subscribe { subscriptions } => ClientMessage::Subscribe { subscriptions },
         WsCommand::Unsubscribe { symbols } => ClientMessage::Unsubscribe { symbols },
     }
 }
 fn subscribe_commands(
     subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
     regime: Option<MarketRegime>,
+    generation_seq: &AtomicU64,
+    issued: &Arc<Mutex<BTreeMap<u64, Symbol>>>,
 ) -> Vec<WsCommand> {
-    let symbols = lock_recover(subs, "subscription")
-        .iter()
+    let mut subscriptions = lock_recover(subs, "subscription")
+        .iter_mut()
         .filter(|(_, state)| state.total() > 0)
-        .map(|(symbol, state)| (symbol.clone(), state.start_ts))
+        .map(|(symbol, state)| {
+            state.generation = next_generation(generation_seq);
+            record_issued(issued, state.generation, symbol.clone());
+            SubscriptionRequest {
+                generation: state.generation,
+                symbol: symbol.clone(),
+                start_ts: state.start_ts,
+                regime,
+            }
+        })
         .collect::<Vec<_>>();
-    symbols
-        .into_iter()
-        .map(|(symbol, start_ts)| WsCommand::Subscribe {
-            symbols: vec![symbol],
-            start_ts,
-            regime,
+    subscriptions.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+    subscriptions
+        .chunks(MAX_SUBSCRIBE_SYMBOLS)
+        .map(|chunk| WsCommand::Subscribe {
+            subscriptions: chunk.to_vec(),
         })
         .collect()
 }
@@ -1233,6 +1258,7 @@ async fn handle_market_message(
     sink: &UnboundedSender<DataEvent>,
     instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
+    issued: &Arc<Mutex<BTreeMap<u64, Symbol>>>,
     bars: &Arc<Mutex<HashMap<BarType, BarSubState>>>,
     sim: SimClock,
 ) {
@@ -1262,10 +1288,11 @@ async fn handle_market_message(
             tracing::trace!("ignoring server heartbeat on data path");
         }
         ServerMessage::ProtocolError { reason, .. } => {
-            // The server sends ProtocolError to diagnose an unservable or
-            // degraded subscribe (unknown symbol, exhausted positioning seek,
-            // a start_ts clamped to the tape origin or to sim-now) as well as
-            // a decode failure. Swallowing it here left the feed silent with
+            // ProtocolError is now narrowed to WHOLE-FRAME faults the venue
+            // could not attribute to any entry (a Subscribe refused at the
+            // validation boundary, an unsupported carrier). Per-entry subscribe
+            // outcomes arrive as SubscriptionIssues, handled below.
+            // Swallowing this here left the feed silent with
             // no downstream signal, indistinguishable from a quiet market.
             // Surface the venue's reason VERBATIM and do not guess at causes:
             // an earlier version of this line enumerated three candidates, and
@@ -1277,6 +1304,17 @@ async fn handle_market_message(
                 %reason,
                 "venue reported a protocol error on the data path; the reason is the venue's own diagnosis"
             );
+        }
+        ServerMessage::SubscriptionIssues { entries, .. } => {
+            for entry in entries {
+                handle_subscription_issue(
+                    subs,
+                    issued,
+                    entry.generation,
+                    &entry.symbol,
+                    entry.issue,
+                );
+            }
         }
         _ => {}
     }
@@ -1327,6 +1365,10 @@ struct DataPollContext {
     sink: UnboundedSender<DataEvent>,
     instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     subs: Arc<Mutex<HashMap<Symbol, SubState>>>,
+    /// Carried only so the poll path can hand `handle_market_message` the same
+    /// arguments the WS path does. The poll loop synthesizes nothing but
+    /// `Trade`, so this history is never consulted on that path.
+    issued: Arc<Mutex<BTreeMap<u64, Symbol>>>,
     bars: Arc<Mutex<HashMap<BarType, BarSubState>>>,
     cursor: Arc<Mutex<HashMap<Symbol, PollCursor>>>,
     connected: Arc<AtomicBool>,
@@ -1482,23 +1524,36 @@ async fn poll_market_data(mut ctx: DataPollContext) {
             // shape instead of a separate pump.
             let page_arrival = Instant::now();
             for trade in trades {
-                let (sink, instruments, subs, bars) =
-                    (&ctx.sink, &ctx.instruments, &ctx.subs, &ctx.bars);
+                let (sink, instruments, subs, issued, bars) = (
+                    &ctx.sink,
+                    &ctx.instruments,
+                    &ctx.subs,
+                    &ctx.issued,
+                    &ctx.bars,
+                );
                 drain_havoc_anchored(
                     &mut ctx.havoc_filter,
                     ServerMessage::Trade(trade),
                     ctx.sim,
                     page_arrival,
-                    |msg| handle_market_message(msg, sink, instruments, subs, bars, ctx.sim),
+                    |msg| {
+                        handle_market_message(msg, sink, instruments, subs, issued, bars, ctx.sim)
+                    },
                 )
                 .await;
             }
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
-    let (sink, instruments, subs, bars) = (&ctx.sink, &ctx.instruments, &ctx.subs, &ctx.bars);
+    let (sink, instruments, subs, issued, bars) = (
+        &ctx.sink,
+        &ctx.instruments,
+        &ctx.subs,
+        &ctx.issued,
+        &ctx.bars,
+    );
     flush_havoc(&mut ctx.havoc_filter, ctx.sim, |msg| {
-        handle_market_message(msg, sink, instruments, subs, bars, ctx.sim)
+        handle_market_message(msg, sink, instruments, subs, issued, bars, ctx.sim)
     })
     .await;
 }
@@ -1654,6 +1709,98 @@ fn advance_sub_start_ts(subs: &Arc<Mutex<HashMap<Symbol, SubState>>>, symbol: &s
     let mut subs = lock_recover(subs, "subscription");
     if let Some(state) = subs.get_mut(symbol) {
         state.start_ts = Some(state.start_ts.map_or(next, |existing| existing.max(next)));
+    }
+}
+
+fn next_generation(seq: &AtomicU64) -> u64 {
+    seq.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+fn record_issued(issued: &Arc<Mutex<BTreeMap<u64, Symbol>>>, generation: u64, symbol: Symbol) {
+    let mut issued = lock_recover(issued, "generation issuance");
+    issued.insert(generation, symbol);
+    if issued.len() > GENERATION_HISTORY {
+        let floor = *issued
+            .keys()
+            .nth(issued.len() - GENERATION_HISTORY)
+            .expect("nonempty issuance history");
+        *issued = issued.split_off(&floor);
+    }
+}
+
+fn handle_subscription_issue(
+    subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
+    issued: &Arc<Mutex<BTreeMap<u64, Symbol>>>,
+    generation: u64,
+    symbol: &str,
+    issue: SubscriptionIssue,
+) {
+    // The cross-check FIRST, and against the issuance history rather than the
+    // live table: the per-symbol comparisons below cannot see it. Counterexample
+    // - BTC was issued generation 2 and ETH generation 3; an outcome naming
+    // (ETH, 2) is classified by the per-symbol rule as an old ETH generation and
+    // discarded at debug, even though generation 2 was never ETH's. Checking the
+    // live table instead of the history only catches the case where the foreign
+    // generation happens to still be current for its own symbol, which the
+    // moment BTC advances to 4 it is not. Do not delete `issued` as redundant.
+    match lock_recover(issued, "generation issuance").get(&generation) {
+        Some(issued_for) if issued_for.as_str() != symbol => {
+            tracing::warn!(
+                %symbol,
+                generation,
+                issued_for = %issued_for,
+                "venue named a subscription generation this client issued for another symbol"
+            );
+            return;
+        }
+        // Either the pair matches what we issued, or the generation is below the
+        // retained floor and unclassifiable. Both fall through to the per-symbol
+        // comparison, which discards an unclassifiable one at debug - the same
+        // action the superseded case takes, so the pruning costs no diagnosis.
+        Some(_) | None => {}
+    }
+    let mut subs = lock_recover(subs, "subscription");
+    let Some(state) = subs.get_mut(symbol) else {
+        tracing::debug!(%symbol, generation, "discarding issue for unsubscribed symbol");
+        return;
+    };
+    if generation < state.generation {
+        tracing::debug!(%symbol, generation, current = state.generation, "discarding superseded subscription issue");
+        return;
+    }
+    if generation > state.generation {
+        tracing::warn!(%symbol, generation, current = state.generation, "venue named a subscription generation never issued by this client");
+        return;
+    }
+    match issue {
+        // The only issue that moves a cursor, and only because the venue
+        // genuinely clamped to this value. Written through the same forward-only
+        // rule `advance_sub_start_ts` uses, so a clamp can never rewind a cursor
+        // that delivered ticks in the interim.
+        SubscriptionIssue::StartBeforeOrigin { effective_start_ts } => {
+            state.start_ts = Some(
+                state
+                    .start_ts
+                    .map_or(effective_start_ts, |old| old.max(effective_start_ts)),
+            );
+            tracing::warn!(%symbol, generation, effective_start_ts, "venue clamped a subscription to the tape origin; cursor adopted");
+        }
+        // `sim_now` is an OBSERVATION of the clock at admission, not the
+        // position the replay took (it seeks sim-now again on its own thread).
+        // Adopting it as a cursor would pin the resume to a stale snapshot, so
+        // this arm deliberately changes nothing.
+        SubscriptionIssue::StartAfterSimNow { sim_now } => {
+            tracing::warn!(%symbol, generation, sim_now, "venue discarded a future start_ts and streams live; cursor unchanged");
+        }
+        // A refusal means nothing streams for this symbol until something
+        // resubscribes. The adapter deliberately does not retry - see the
+        // refusal-triggered-resubscribe non-goal.
+        issue if issue.is_refusal() => {
+            tracing::warn!(%symbol, generation, ?issue, "venue refused a subscription; this feed is dead until it is resubscribed");
+        }
+        issue => {
+            tracing::warn!(%symbol, generation, ?issue, "venue degraded a subscription; the stream runs, altered");
+        }
     }
 }
 
@@ -1910,6 +2057,12 @@ mod data_client_tests {
         Arc::new(Mutex::new(HashMap::from([("BTCUSDT".to_string(), state)])))
     }
 
+    /// An empty issuance history, for the trade/quote/bar paths that never
+    /// consult it.
+    fn no_issuance_history() -> Arc<Mutex<BTreeMap<u64, Symbol>>> {
+        Arc::new(Mutex::new(BTreeMap::new()))
+    }
+
     fn time_bar_type(step: usize, aggregation: BarAggregation) -> BarType {
         BarType::new(
             instrument_id(),
@@ -1963,6 +2116,7 @@ mod data_client_tests {
             &tx,
             &instruments,
             &subs,
+            &no_issuance_history(),
             &bars,
             SimClock::identity(),
         )
@@ -2057,6 +2211,7 @@ mod data_client_tests {
             &tx,
             &instruments,
             &subs,
+            &no_issuance_history(),
             &bars,
             SimClock::identity(),
         )
@@ -2099,11 +2254,8 @@ mod data_client_tests {
         let cmd = rx.try_recv().expect("first subscribe emits a command");
         assert!(matches!(
             ws_command_to_client_message(cmd),
-            ClientMessage::Subscribe {
-                symbols,
-                start_ts: Some(100),
-                regime: None,
-            } if symbols == vec!["BTCUSDT".to_string()]
+            ClientMessage::Subscribe { subscriptions }
+                if subscriptions.len() == 1 && subscriptions[0].symbol == "BTCUSDT" && subscriptions[0].start_ts == Some(100)
         ));
 
         // A second subscribe for the same symbol (quotes) only bumps the
@@ -2160,10 +2312,8 @@ mod data_client_tests {
         let cmd = rx.try_recv().expect("subscribe emits a command");
         assert!(matches!(
             ws_command_to_client_message(cmd),
-            ClientMessage::Subscribe {
-                regime: Some(MarketRegime::LiquidityDrought { thin_factor: 5.0 }),
-                ..
-            }
+            ClientMessage::Subscribe { subscriptions }
+                if matches!(subscriptions[0].regime, Some(MarketRegime::LiquidityDrought { thin_factor }) if thin_factor == 5.0)
         ));
     }
 
@@ -2618,7 +2768,7 @@ mod data_client_tests {
     // disconnected, on_connect is the sole subscribe source and reconstructs the
     // subscription from the table, so nothing is lost.
     #[test]
-    fn subscribe_while_disconnected_defers_to_on_connect() {
+    fn reconnect_sends_one_subscribe_carrying_every_cursor() {
         let mut client = data_client();
         let (tx, mut rx) = unbounded_channel::<WsCommand>();
         client.ws_cmd = Some(tx);
@@ -2641,17 +2791,232 @@ mod data_client_tests {
             "a subscribe while disconnected must not queue a Subscribe (AD5)"
         );
         // The subscription is recorded, so on_connect reconstructs it exactly once.
-        let reconstructed = subscribe_commands(&client.subs, None);
-        assert!(matches!(
-            reconstructed.as_slice(),
-            [
-                WsCommand::Subscribe {
-                    symbols,
+        // Two more symbols with their OWN advanced cursors: the whole point of
+        // the per-entry wire is that one frame carries all three without
+        // clobbering any of them.
+        {
+            let mut subs = lock_recover(&client.subs, "subscription");
+            for (symbol, cursor) in [("ETHUSDT", 200u64), ("SOLUSDT", 300)] {
+                subs.insert(
+                    symbol.to_string(),
+                    SubState {
+                        trades: 1,
+                        start_ts: Some(cursor),
+                        ..SubState::default()
+                    },
+                );
+            }
+        }
+
+        let reconstructed =
+            subscribe_commands(&client.subs, None, &client.generation_seq, &client.issued);
+        let [WsCommand::Subscribe { subscriptions }] = reconstructed.as_slice() else {
+            panic!("a reconnect sends exactly ONE Subscribe, got {reconstructed:?}")
+        };
+        assert_eq!(
+            subscriptions
+                .iter()
+                .map(|entry| (entry.symbol.as_str(), entry.start_ts))
+                .collect::<Vec<_>>(),
+            vec![
+                ("BTCUSDT", Some(100)),
+                ("ETHUSDT", Some(200)),
+                ("SOLUSDT", Some(300)),
+            ],
+            "sorted by symbol, each carrying its own cursor"
+        );
+        let generations: std::collections::HashSet<u64> =
+            subscriptions.iter().map(|entry| entry.generation).collect();
+        assert_eq!(generations.len(), 3, "three distinct fresh generations");
+        // The table and the frame agree, because both are written under one lock.
+        let subs = lock_recover(&client.subs, "subscription");
+        for entry in subscriptions {
+            assert_eq!(subs[&entry.symbol].generation, entry.generation);
+            assert!(
+                entry.generation > 1,
+                "a rebuild generation must exceed the one the 0-to-1 subscribe stamped"
+            );
+        }
+    }
+
+    /// The one case where more than one frame is correct: a subscription set
+    /// larger than the server's own documented per-frame cap. Exercised against
+    /// the pure function, deliberately NOT end to end - 257 live subscriptions
+    /// exhaust the 256 promise tickets and close the connection by design, so an
+    /// end-to-end version would prove the close rather than the chunking.
+    #[test]
+    fn reconnect_chunks_at_the_subscribe_cap() {
+        let subs = Arc::new(Mutex::new(HashMap::new()));
+        {
+            let mut table = lock_recover(&subs, "subscription");
+            for i in 0..=MAX_SUBSCRIBE_SYMBOLS {
+                table.insert(
+                    format!("SYM{i:04}"),
+                    SubState {
+                        trades: 1,
+                        ..SubState::default()
+                    },
+                );
+            }
+        }
+        let seq = AtomicU64::new(0);
+        let issued = Arc::new(Mutex::new(BTreeMap::new()));
+
+        let commands = subscribe_commands(&subs, None, &seq, &issued);
+
+        let lengths: Vec<usize> = commands
+            .iter()
+            .map(|command| match command {
+                WsCommand::Subscribe { subscriptions } => subscriptions.len(),
+                other => panic!("expected only Subscribe commands, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(lengths, vec![MAX_SUBSCRIBE_SYMBOLS, 1]);
+    }
+
+    #[test]
+    fn reconnect_with_nothing_subscribed_sends_no_frame() {
+        let subs = Arc::new(Mutex::new(HashMap::new()));
+        let seq = AtomicU64::new(0);
+        let issued = Arc::new(Mutex::new(BTreeMap::new()));
+
+        assert!(
+            subscribe_commands(&subs, None, &seq, &issued).is_empty(),
+            "an empty table must not send an empty Subscribe"
+        );
+    }
+
+    /// BTC at generation 2, ETH at generation 3, and the venue names (ETH, 2).
+    /// The per-symbol comparison classifies that as an OLD ETH generation and
+    /// discards it silently, even though generation 2 was never ETH's. Only the
+    /// `issued` history catches it, which is why this test cannot pass without
+    /// that map - and why `issued` must not be deleted as redundant.
+    #[test]
+    fn subscription_issue_for_a_foreign_generation_is_a_protocol_inconsistency() {
+        let subs = two_symbol_subs();
+        let issued = issuance_history(&[(2, "BTCUSDT"), (3, "ETHUSDT")]);
+
+        handle_subscription_issue(
+            &subs,
+            &issued,
+            2,
+            "ETHUSDT",
+            SubscriptionIssue::StartBeforeOrigin {
+                effective_start_ts: 999,
+            },
+        );
+
+        let subs = lock_recover(&subs, "subscription");
+        assert_eq!(
+            subs["ETHUSDT"].start_ts,
+            Some(200),
+            "a pair this client never issued must change no state at all"
+        );
+    }
+
+    #[test]
+    fn subscription_issue_for_a_superseded_generation_is_discarded() {
+        let subs = two_symbol_subs();
+        let issued = issuance_history(&[(1, "BTCUSDT"), (2, "BTCUSDT"), (3, "ETHUSDT")]);
+
+        handle_subscription_issue(
+            &subs,
+            &issued,
+            1,
+            "BTCUSDT",
+            SubscriptionIssue::StartBeforeOrigin {
+                effective_start_ts: 999,
+            },
+        );
+
+        let subs = lock_recover(&subs, "subscription");
+        assert_eq!(
+            subs["BTCUSDT"].start_ts,
+            Some(100),
+            "generation 1 is superseded by the table's generation 2"
+        );
+    }
+
+    #[test]
+    fn subscription_issue_for_the_current_generation_moves_the_cursor() {
+        let subs = two_symbol_subs();
+        let issued = issuance_history(&[(2, "BTCUSDT")]);
+
+        handle_subscription_issue(
+            &subs,
+            &issued,
+            2,
+            "BTCUSDT",
+            SubscriptionIssue::StartBeforeOrigin {
+                effective_start_ts: 150,
+            },
+        );
+        // Forward-only, the same rule `advance_sub_start_ts` uses: a later,
+        // smaller clamp must not rewind a cursor that has since moved on.
+        handle_subscription_issue(
+            &subs,
+            &issued,
+            2,
+            "BTCUSDT",
+            SubscriptionIssue::StartBeforeOrigin {
+                effective_start_ts: 120,
+            },
+        );
+
+        let subs = lock_recover(&subs, "subscription");
+        assert_eq!(subs["BTCUSDT"].start_ts, Some(150));
+    }
+
+    /// The negative half of the two-clamp split: `sim_now` is an observation of
+    /// the clock at admission, not the position the replay took, so adopting it
+    /// as a cursor would pin the resume to a stale snapshot.
+    #[test]
+    fn subscription_issue_start_after_sim_now_leaves_the_cursor_alone() {
+        let subs = two_symbol_subs();
+        let issued = issuance_history(&[(2, "BTCUSDT")]);
+
+        handle_subscription_issue(
+            &subs,
+            &issued,
+            2,
+            "BTCUSDT",
+            SubscriptionIssue::StartAfterSimNow { sim_now: 999 },
+        );
+
+        let subs = lock_recover(&subs, "subscription");
+        assert_eq!(subs["BTCUSDT"].start_ts, Some(100));
+    }
+
+    fn two_symbol_subs() -> Arc<Mutex<HashMap<Symbol, SubState>>> {
+        Arc::new(Mutex::new(HashMap::from([
+            (
+                "BTCUSDT".to_string(),
+                SubState {
+                    trades: 1,
                     start_ts: Some(100),
-                    ..
-                }
-            ] if symbols == &vec!["BTCUSDT".to_string()]
-        ));
+                    generation: 2,
+                    ..SubState::default()
+                },
+            ),
+            (
+                "ETHUSDT".to_string(),
+                SubState {
+                    trades: 1,
+                    start_ts: Some(200),
+                    generation: 3,
+                    ..SubState::default()
+                },
+            ),
+        ])))
+    }
+
+    fn issuance_history(pairs: &[(u64, &str)]) -> Arc<Mutex<BTreeMap<u64, Symbol>>> {
+        Arc::new(Mutex::new(
+            pairs
+                .iter()
+                .map(|(generation, symbol)| (*generation, (*symbol).to_string()))
+                .collect(),
+        ))
     }
 
     // AD7: a later subscriber must not pull the symbol's shared resume cursor

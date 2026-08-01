@@ -36,19 +36,6 @@ Or both. There are no exceptions.
   decision: bounding the lulls in the generator would break the committed
   byte-identical golden stream, so it is a fingerprint refit, not a local fix.
 
-- The subscription protocol redesign (workstream B in `docs/protocol-problem.md`):
-  `Subscribe` moves from one request-wide `start_ts` to a per-entry
-  `generation_id`/cursor pair, so a subscription diagnostic can name the
-  generation it describes and an adapter resubscribe can carry every symbol's
-  own cursor in one frame instead of one `Subscribe` per symbol. Workstream A
-  (the exec pump rewrite, the `AdmissionRejected` priority lane) landed and is
-  out of this item's scope; the open questions are the ones workstream A's
-  spec left to workstream B - whether `regime` stays request-wide or moves
-  per-entry, whether `start_ts` stays optional, how an OLDER generation is told
-  from an UNKNOWN one, and whether successful subscriptions gain explicit
-  result frames. Next step is a spec per
-  `reference/technical-implementation-spec.md`, same as workstream A had.
-
 - The adapter manifest contradicts the documented build contract. `AGENTS.md`
   states the workspace builds against the PUBLISHED nautilus crates from
   crates.io and that "there is no sibling-checkout path dependency: a build

@@ -740,7 +740,7 @@ mod tests {
     use mogwai_data::TickEvent;
     use mogwai_protocol::{
         ClientMessage, MAX_HISTORY_LIMIT, MarketRegime, OrderType, ServerMessage, Side, SimClock,
-        SubmitOrder, TimeInForce, TradeTick,
+        SubmitOrder, SubscriptionIssue, TimeInForce, TradeTick,
     };
     use rust_decimal::Decimal;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1261,9 +1261,7 @@ mod tests {
 
             // The question: is the reader still alive behind that backlog?
             let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
-                symbols: vec!["BTCUSDT".to_string()],
-                start_ts: None,
-                regime: None,
+                subscriptions: subscribe_entries(["BTCUSDT"], None),
             })
             .expect("encode subscribe");
             socket
@@ -1300,7 +1298,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscribe_below_data_origin_reports_protocol_error_then_streams() {
+    async fn subscribe_issue_names_its_generation_and_symbol() {
         // A `start_ts` below the tape origin used to clamp to the origin in
         // silence - asymmetric with `/trades`, which refuses the identical
         // window with a 422. The subscribe must now announce the shortfall on
@@ -1327,9 +1325,12 @@ mod tests {
             let (mut socket, _) =
                 tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
             let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
-                symbols: vec!["BTCUSDT".to_string()],
-                start_ts: Some(data_origin - 3_600_000_000_000), // 1h before the origin
-                regime: None,
+                subscriptions: vec![mogwai_protocol::SubscriptionRequest {
+                    generation: 1,
+                    symbol: "BTCUSDT".to_string(),
+                    start_ts: Some(data_origin - 3_600_000_000_000),
+                    regime: None,
+                }],
             })
             .expect("encode subscribe");
             socket
@@ -1343,11 +1344,17 @@ mod tests {
         .await
         .expect("blocking ws client");
 
-        let (reason, _) = frames;
-        assert!(
-            reason.contains(&data_origin.to_string()),
-            "the diagnostic names the origin the stream anchors at: {reason}"
-        );
+        let (outcomes, _) = frames;
+        assert!(matches!(
+            outcomes.as_slice(),
+            [mogwai_protocol::SubscriptionOutcome {
+                generation: 1,
+                symbol,
+                issue: SubscriptionIssue::StartBeforeOrigin {
+                    effective_start_ts,
+                },
+            }] if symbol == "BTCUSDT" && *effective_start_ts == data_origin
+        ));
     }
 
     #[tokio::test]
@@ -1376,9 +1383,7 @@ mod tests {
             let (mut socket, _) =
                 tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
             let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
-                symbols: vec!["BTCUSDT".to_string()],
-                start_ts: Some(future),
-                regime: None,
+                subscriptions: subscribe_entries(["BTCUSDT"], Some(future)),
             })
             .expect("encode subscribe");
             socket
@@ -1389,11 +1394,15 @@ mod tests {
         .await
         .expect("blocking ws client");
 
-        let (reason, first_trade_ts) = frames;
-        assert!(
-            reason.contains("sim-now"),
-            "the diagnostic names the sim-now ceiling: {reason}"
-        );
+        let (outcomes, first_trade_ts) = frames;
+        assert!(matches!(
+            outcomes.as_slice(),
+            [mogwai_protocol::SubscriptionOutcome {
+                generation: 1,
+                symbol,
+                issue: SubscriptionIssue::StartAfterSimNow { .. },
+            }] if symbol == "BTCUSDT"
+        ));
         assert!(
             first_trade_ts < future,
             "the clamped stream must not deliver the requested future tape: \
@@ -1401,34 +1410,28 @@ mod tests {
         );
     }
 
-    /// Read WS frames until both a `ProtocolError` and a `Trade` have arrived,
-    /// returning the diagnostic reason and the first trade's `ts_event`. Bounded
+    /// Read WS frames until both subscription outcomes and a `Trade` arrive,
+    /// returning the outcomes and first trade's `ts_event`. Bounded
     /// so a genuinely absent diagnostic (or trade) fails the test rather than
     /// hanging. Shared by the below-origin and future-clamp subscribe tests, whose
     /// diagnostic (priority lane) and trades (data channel) race onto the socket.
     fn read_until_error_and_trade<S: std::io::Read + std::io::Write>(
         socket: &mut tungstenite::WebSocket<S>,
-    ) -> (String, u64) {
-        let mut reason: Option<String> = None;
+    ) -> (Vec<mogwai_protocol::SubscriptionOutcome>, u64) {
+        let mut outcomes = None;
         let mut first_trade_ts: Option<u64> = None;
         for _ in 0..2_000 {
-            if reason.is_some() && first_trade_ts.is_some() {
+            if outcomes.is_some() && first_trade_ts.is_some() {
                 break;
             }
             match socket.read().expect("read ws frame") {
                 tungstenite::Message::Text(text) => {
-                    match serde_json::from_str::<ServerMessage>(&text)
-                        .expect("decode ServerMessage")
-                    {
-                        // Either shape of refusal counts: a degraded subscribe
-                        // is an untargeted `ProtocolError`, while a refused
-                        // symbol arrives coalesced as `AdmissionRejected`.
-                        ServerMessage::ProtocolError { reason: r, .. }
-                        | ServerMessage::AdmissionRejected { reason: r, .. } => reason = Some(r),
-                        ServerMessage::Trade(t) => {
-                            first_trade_ts.get_or_insert(t.ts_event);
-                        }
-                        _ => {}
+                    let message =
+                        serde_json::from_str::<ServerMessage>(&text).expect("decode ServerMessage");
+                    if let ServerMessage::SubscriptionIssues { entries, .. } = message {
+                        outcomes = Some(entries);
+                    } else if let ServerMessage::Trade(t) = message {
+                        first_trade_ts.get_or_insert(t.ts_event);
                     }
                 }
                 tungstenite::Message::Close(_) => panic!("socket closed prematurely"),
@@ -1436,9 +1439,28 @@ mod tests {
             }
         }
         (
-            reason.expect("a ProtocolError diagnostic must arrive"),
+            outcomes.expect("a subscription issue must arrive"),
             first_trade_ts.expect("a trade must arrive"),
         )
+    }
+
+    /// One `Subscribe` entry per symbol, generations numbered from 1 and one
+    /// shared `start_ts`. The shape almost every test wants; tests that turn on
+    /// a specific generation or a per-entry cursor build their entries by hand.
+    fn subscribe_entries<S: AsRef<str>>(
+        symbols: impl IntoIterator<Item = S>,
+        start_ts: Option<u64>,
+    ) -> Vec<mogwai_protocol::SubscriptionRequest> {
+        symbols
+            .into_iter()
+            .enumerate()
+            .map(|(i, symbol)| mogwai_protocol::SubscriptionRequest {
+                generation: i as u64 + 1,
+                symbol: symbol.as_ref().to_string(),
+                start_ts,
+                regime: None,
+            })
+            .collect()
     }
 
     /// Read frames until the first `Trade`, returning its `ts_event`. Bounded so
@@ -1462,27 +1484,30 @@ mod tests {
         panic!("no trade arrived within the frame budget");
     }
 
-    /// Read frames until the first `ProtocolError`, returning its reason. Bounded
-    /// so an absent diagnostic fails the caller rather than hanging.
-    fn read_until_error<S: std::io::Read + std::io::Write>(
+    /// Read frames until the first typed subscription outcome. Bounded so an
+    /// absent diagnostic fails the caller rather than hanging.
+    fn read_until_subscription_issues<S: std::io::Read + std::io::Write>(
         socket: &mut tungstenite::WebSocket<S>,
-    ) -> String {
+    ) -> (Vec<mogwai_protocol::SubscriptionOutcome>, usize, usize) {
         for _ in 0..2_000 {
             match socket.read().expect("read ws frame") {
                 tungstenite::Message::Text(text) => {
-                    match serde_json::from_str::<ServerMessage>(&text)
-                        .expect("decode ServerMessage")
+                    if let ServerMessage::SubscriptionIssues {
+                        entries,
+                        issues_total,
+                        refusals_total,
+                        ..
+                    } =
+                        serde_json::from_str::<ServerMessage>(&text).expect("decode ServerMessage")
                     {
-                        ServerMessage::ProtocolError { reason, .. }
-                        | ServerMessage::AdmissionRejected { reason, .. } => return reason,
-                        _ => {}
+                        return (entries, issues_total, refusals_total);
                     }
                 }
                 tungstenite::Message::Close(_) => panic!("socket closed before any error"),
                 _ => {}
             }
         }
-        panic!("no refusal arrived within the frame budget");
+        panic!("no subscription issue arrived within the frame budget");
     }
 
     #[tokio::test]
@@ -1510,11 +1535,9 @@ mod tests {
             drop(axum::serve(listener, app).await);
         });
 
-        let reason = tokio::task::spawn_blocking(move || {
+        let outcome = tokio::task::spawn_blocking(move || {
             let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
-                symbols: vec!["BTCUSDT".to_string()],
-                start_ts: None,
-                regime: None,
+                subscriptions: subscribe_entries(["BTCUSDT"], None),
             })
             .expect("encode subscribe");
 
@@ -1535,15 +1558,22 @@ mod tests {
             denied
                 .send(tungstenite::Message::Text(subscribe.into()))
                 .expect("send subscribe two");
-            read_until_error(&mut denied)
+            read_until_subscription_issues(&mut denied)
         })
         .await
         .expect("blocking ws client");
 
-        assert!(
-            reason.contains("capacity"),
-            "the refused subscribe names the capacity ceiling: {reason}"
-        );
+        let (entries, issues_total, refusals_total) = outcome;
+        assert_eq!(issues_total, 1);
+        assert_eq!(refusals_total, 1);
+        assert!(matches!(
+            entries.as_slice(),
+            [mogwai_protocol::SubscriptionOutcome {
+                generation: 1,
+                symbol,
+                issue: SubscriptionIssue::ReplayCapacity,
+            }] if symbol == "BTCUSDT"
+        ));
     }
 
     /// S22a under admission control: a subscribe naming the whole cap in
@@ -1569,13 +1599,9 @@ mod tests {
         let frames = tokio::task::spawn_blocking(move || {
             let (mut socket, _) =
                 tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
-            let unknown: Vec<String> = (0..mogwai_protocol::MAX_SUBSCRIBE_SYMBOLS)
-                .map(|i| format!("NOPE{i}"))
-                .collect();
+            let unknown = (0..mogwai_protocol::MAX_SUBSCRIBE_SYMBOLS).map(|i| format!("NOPE{i}"));
             let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
-                symbols: unknown,
-                start_ts: None,
-                regime: None,
+                subscriptions: subscribe_entries(unknown, None),
             })
             .expect("encode subscribe");
             socket
@@ -1590,9 +1616,7 @@ mod tests {
             // The connection is still usable: a good subscribe sent behind the
             // refusal still streams.
             let good = serde_json::to_string(&ClientMessage::Subscribe {
-                symbols: vec!["BTCUSDT".to_string()],
-                start_ts: None,
-                regime: None,
+                subscriptions: subscribe_entries(["BTCUSDT"], None),
             })
             .expect("encode subscribe");
             socket
@@ -1605,28 +1629,306 @@ mod tests {
         .expect("blocking ws client");
 
         let (refusal, trade_ts) = frames;
-        let ServerMessage::AdmissionRejected {
-            subject:
-                mogwai_protocol::AdmissionSubject::Subscribe {
-                    symbols,
-                    refused_total,
-                },
+        let ServerMessage::SubscriptionIssues {
+            entries,
+            issues_total,
+            refusals_total,
             ..
         } = refusal
         else {
             panic!("expected ONE coalesced Subscribe refusal, got {refusal:?}")
         };
         assert_eq!(
-            refused_total,
+            refusals_total,
             mogwai_protocol::MAX_SUBSCRIBE_SYMBOLS,
             "the true count is reported even though the list is truncated"
         );
         assert_eq!(
-            symbols.len(),
-            mogwai_protocol::MAX_REFUSED_SYMBOLS_LISTED,
+            entries.len(),
+            mogwai_protocol::MAX_SUBSCRIPTION_ISSUES_LISTED,
             "the listed symbols are capped, which is what bounds the frame"
         );
         assert!(trade_ts > 0, "the surviving connection still streams");
+        assert_eq!(
+            issues_total,
+            mogwai_protocol::MAX_SUBSCRIBE_SYMBOLS,
+            "issues_total counts every outcome, truncated or not"
+        );
+    }
+
+    /// The assertion the 16-entry cap is paid for with. A subscribe whose
+    /// degradations outnumber the cap must still list every refusal, because a
+    /// degradation lost to truncation costs a log line and a refusal lost to it
+    /// costs a feed. Driven against the pure coalescer: the venue lists one
+    /// symbol, so 20 degradations cannot be produced over a real socket.
+    #[test]
+    fn subscribe_issues_list_refusals_before_degradations() {
+        let degradations: Vec<mogwai_protocol::SubscriptionOutcome> = (0..20)
+            .map(|i| mogwai_protocol::SubscriptionOutcome {
+                generation: i + 1,
+                symbol: format!("DEGRADED{i}"),
+                issue: SubscriptionIssue::StartBeforeOrigin {
+                    effective_start_ts: 42,
+                },
+            })
+            .collect();
+        let refusals: Vec<mogwai_protocol::SubscriptionOutcome> = (0..3)
+            .map(|i| mogwai_protocol::SubscriptionOutcome {
+                generation: 100 + i,
+                symbol: format!("NOPE{i}"),
+                issue: SubscriptionIssue::UnknownSymbol,
+            })
+            .collect();
+
+        let entries = coalesce_issues(refusals, degradations);
+
+        assert_eq!(
+            entries.len(),
+            mogwai_protocol::MAX_SUBSCRIPTION_ISSUES_LISTED
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.issue.is_refusal())
+                .count(),
+            3,
+            "all three refusals survive the cap despite being discovered last"
+        );
+        assert!(
+            entries[..3].iter().all(|entry| entry.issue.is_refusal()),
+            "refusals lead the list"
+        );
+    }
+
+    /// A generation that does not advance is a client-ordering fault, and the
+    /// answer is to refuse the ENTRY, never to destroy the healthy replay the
+    /// current generation is feeding. The witness is a trade after the refusal.
+    #[tokio::test]
+    async fn subscribe_issue_refuses_a_stale_generation_without_killing_the_stream() {
+        let app = Router::new()
+            .route("/ws", get(ws_upgrade))
+            .with_state(state());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            drop(axum::serve(listener, app).await);
+        });
+
+        let (entries, trade_ts) = tokio::task::spawn_blocking(move || {
+            let (mut socket, _) =
+                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            socket
+                .send(tungstenite::Message::Text(
+                    subscribe_at_generation("BTCUSDT", 5).into(),
+                ))
+                .expect("send generation 5");
+            read_until_trade(&mut socket);
+            socket
+                .send(tungstenite::Message::Text(
+                    subscribe_at_generation("BTCUSDT", 3).into(),
+                ))
+                .expect("send generation 3");
+            let (entries, _, _) = read_until_subscription_issues(&mut socket);
+            // The generation-5 replay is untouched and still delivering.
+            (entries, read_until_trade(&mut socket))
+        })
+        .await
+        .expect("blocking ws client");
+
+        assert!(matches!(
+            entries.as_slice(),
+            [mogwai_protocol::SubscriptionOutcome {
+                generation: 3,
+                symbol,
+                issue: SubscriptionIssue::StaleGeneration { current: 5 },
+            }] if symbol == "BTCUSDT"
+        ));
+        assert!(trade_ts > 0, "the generation-5 stream keeps delivering");
+    }
+
+    /// The high-water map of the monotonicity check is connection-lifetime and
+    /// independent of `replays`. Against `replays` alone the post-unsubscribe
+    /// entry is accepted and the whole generation-reuse hazard is back: a
+    /// delayed diagnostic about the old stream would look current.
+    #[tokio::test]
+    async fn subscribe_issue_remembers_a_generation_across_unsubscribe() {
+        let app = Router::new()
+            .route("/ws", get(ws_upgrade))
+            .with_state(state());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            drop(axum::serve(listener, app).await);
+        });
+
+        let entries = tokio::task::spawn_blocking(move || {
+            let (mut socket, _) =
+                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            socket
+                .send(tungstenite::Message::Text(
+                    subscribe_at_generation("BTCUSDT", 5).into(),
+                ))
+                .expect("send generation 5");
+            read_until_trade(&mut socket);
+            let unsubscribe = serde_json::to_string(&ClientMessage::Unsubscribe {
+                symbols: vec!["BTCUSDT".to_string()],
+            })
+            .expect("encode unsubscribe");
+            socket
+                .send(tungstenite::Message::Text(unsubscribe.into()))
+                .expect("send unsubscribe");
+            socket
+                .send(tungstenite::Message::Text(
+                    subscribe_at_generation("BTCUSDT", 4).into(),
+                ))
+                .expect("send generation 4");
+            let (entries, _, _) = read_until_subscription_issues(&mut socket);
+            entries
+        })
+        .await
+        .expect("blocking ws client");
+
+        assert!(matches!(
+            entries.as_slice(),
+            [mogwai_protocol::SubscriptionOutcome {
+                generation: 4,
+                issue: SubscriptionIssue::StaleGeneration { current: 5 },
+                ..
+            }]
+        ));
+    }
+
+    /// Two entries naming one symbol have no defined meaning - which cursor
+    /// wins, which generation is current - so the whole FRAME is refused at the
+    /// boundary and no replay is spawned for either. The old `dedup_symbols`
+    /// answer silently discarded one of the two cursors.
+    #[tokio::test]
+    async fn subscribe_issue_refuses_a_duplicated_symbol_frame_wide() {
+        let app = Router::new()
+            .route("/ws", get(ws_upgrade))
+            .with_state(state());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            drop(axum::serve(listener, app).await);
+        });
+
+        let messages = tokio::task::spawn_blocking(move || {
+            let (mut socket, _) =
+                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            let duplicated = serde_json::to_string(&ClientMessage::Subscribe {
+                subscriptions: vec![
+                    mogwai_protocol::SubscriptionRequest {
+                        generation: 1,
+                        symbol: "BTCUSDT".to_string(),
+                        start_ts: None,
+                        regime: None,
+                    },
+                    mogwai_protocol::SubscriptionRequest {
+                        generation: 2,
+                        symbol: "BTCUSDT".to_string(),
+                        start_ts: None,
+                        regime: None,
+                    },
+                ],
+            })
+            .expect("encode subscribe");
+            socket
+                .send(tungstenite::Message::Text(duplicated.into()))
+                .expect("send duplicated subscribe");
+            let refusal = read_until_text(&mut socket);
+            // A generation-1 subscribe afterwards must be ACCEPTED. If either
+            // duplicated entry had been processed, the generation high-water map
+            // would already hold 1 or 2 for BTCUSDT and this would come back as
+            // StaleGeneration instead of streaming - so a trade here is the
+            // witness that the frame was refused before any bookkeeping ran.
+            socket
+                .send(tungstenite::Message::Text(
+                    subscribe_at_generation("BTCUSDT", 1).into(),
+                ))
+                .expect("send a clean subscribe");
+            (refusal, read_until_trade(&mut socket))
+        })
+        .await
+        .expect("blocking ws client");
+
+        let (refusal, trade_ts) = messages;
+        let decoded =
+            serde_json::from_str::<ServerMessage>(&refusal).expect("decode ServerMessage");
+        assert!(
+            matches!(decoded, ServerMessage::ProtocolError { .. }),
+            "a duplicated symbol is a whole-frame fault, not a per-entry one: {decoded:?}"
+        );
+        assert!(
+            trade_ts > 0,
+            "no replay was spawned for either duplicated entry"
+        );
+    }
+
+    /// An out-of-range regime is a DEGRADATION, not a refusal: it is reported
+    /// per entry AND the clean, unhavocked tape still streams. It used to be
+    /// dropped in silence, telling the client nothing.
+    #[tokio::test]
+    async fn subscribe_issue_reports_an_out_of_range_regime_and_still_streams() {
+        let app = Router::new()
+            .route("/ws", get(ws_upgrade))
+            .with_state(state());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            drop(axum::serve(listener, app).await);
+        });
+
+        let (outcomes, trade_ts) = tokio::task::spawn_blocking(move || {
+            let (mut socket, _) =
+                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
+                subscriptions: vec![mogwai_protocol::SubscriptionRequest {
+                    generation: 9,
+                    symbol: "BTCUSDT".to_string(),
+                    start_ts: None,
+                    regime: Some(MarketRegime::LiquidityDrought { thin_factor: 0.5 }),
+                }],
+            })
+            .expect("encode subscribe");
+            socket
+                .send(tungstenite::Message::Text(subscribe.into()))
+                .expect("send subscribe");
+            read_until_error_and_trade(&mut socket)
+        })
+        .await
+        .expect("blocking ws client");
+
+        assert!(matches!(
+            outcomes.as_slice(),
+            [mogwai_protocol::SubscriptionOutcome {
+                generation: 9,
+                symbol,
+                issue: SubscriptionIssue::InvalidRegime,
+            }] if symbol == "BTCUSDT"
+        ));
+        assert!(trade_ts > 0, "the clean tape streams despite the drop");
+    }
+
+    /// One symbol at one generation, encoded for the socket.
+    fn subscribe_at_generation(symbol: &str, generation: u64) -> String {
+        serde_json::to_string(&ClientMessage::Subscribe {
+            subscriptions: vec![mogwai_protocol::SubscriptionRequest {
+                generation,
+                symbol: symbol.to_string(),
+                start_ts: None,
+                regime: None,
+            }],
+        })
+        .expect("encode subscribe")
     }
 
     /// A resting limit buy, priced far under the market so it never fills and
@@ -1821,9 +2123,7 @@ mod tests {
             let (mut fresh, _) =
                 tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect two");
             let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
-                symbols: vec!["BTCUSDT".to_string()],
-                start_ts: None,
-                regime: None,
+                subscriptions: subscribe_entries(["BTCUSDT"], None),
             })
             .expect("encode subscribe");
             fresh
@@ -1983,9 +2283,7 @@ mod tests {
             let (mut socket, _) =
                 tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
             let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
-                symbols: vec!["BTCUSDT".to_string()],
-                start_ts: None,
-                regime: None,
+                subscriptions: subscribe_entries(["BTCUSDT"], None),
             })
             .expect("encode subscribe");
             socket
@@ -1994,8 +2292,17 @@ mod tests {
             // The stream is live, so its promise ticket is genuinely held.
             let first_ts = read_until_trade(&mut socket);
 
+            let resubscribe = serde_json::to_string(&ClientMessage::Subscribe {
+                subscriptions: vec![mogwai_protocol::SubscriptionRequest {
+                    generation: 2,
+                    symbol: "BTCUSDT".to_string(),
+                    start_ts: None,
+                    regime: None,
+                }],
+            })
+            .expect("encode resubscribe");
             socket
-                .send(tungstenite::Message::Text(subscribe.into()))
+                .send(tungstenite::Message::Text(resubscribe.into()))
                 .expect("send resubscribe");
             let mut after: Vec<u64> = Vec::new();
             let mut close = None;
@@ -2158,9 +2465,10 @@ mod tests {
             // A symbol at exactly the wire cap: long enough to pass validation,
             // unknown enough to be refused, and interpolated into the reason.
             let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
-                symbols: vec!["Z".repeat(mogwai_protocol::MAX_SYMBOL_LEN)],
-                start_ts: None,
-                regime: None,
+                subscriptions: subscribe_entries(
+                    [&*"Z".repeat(mogwai_protocol::MAX_SYMBOL_LEN)],
+                    None,
+                ),
             })
             .expect("encode subscribe");
             socket
@@ -2177,7 +2485,9 @@ mod tests {
             assert!(
                 matches!(
                     msg,
-                    ServerMessage::ProtocolError { .. } | ServerMessage::AdmissionRejected { .. }
+                    ServerMessage::ProtocolError { .. }
+                        | ServerMessage::AdmissionRejected { .. }
+                        | ServerMessage::SubscriptionIssues { .. }
                 ),
                 "expected admission truth, got {msg:?}"
             );
@@ -2276,9 +2586,7 @@ mod tests {
     /// a lane into overload without a load generator.
     fn park_the_writer<S: std::io::Read + std::io::Write>(socket: &mut tungstenite::WebSocket<S>) {
         let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
-            symbols: vec!["BTCUSDT".to_string()],
-            start_ts: None,
-            regime: None,
+            subscriptions: subscribe_entries(["BTCUSDT"], None),
         })
         .expect("encode subscribe");
         socket
@@ -2423,40 +2731,40 @@ mod tests {
         None
     }
 
-    #[tokio::test]
-    async fn reconcile_subscribe_start_ts_clamps_future_to_live() {
+    #[test]
+    fn reconcile_subscribe_start_ts_clamps_future_to_live() {
         // The clamp itself, without a socket: a future start returns None (a live
         // stream from the clock), while an in-range start passes through unchanged.
         let state = state();
-        let (lanes, mut lane_rx) = ExecLanes::detached();
-
         let sim_now = sim_now_ns(state.sim);
-        let clamped =
-            reconcile_subscribe_start_ts(Some(sim_now + 3_600_000_000_000), &state, &lanes)
-                .await
-                .expect("the priority lane took the diagnostic");
-        assert_eq!(clamped, None, "a future start clamps to a live stream");
-        let msg = lane_rx
-            .prio_rx
-            .try_recv()
-            .expect("a diagnostic frame was emitted");
-        assert!(
-            matches!(msg, Outbound::Frame(_)),
-            "the clamp is announced on the priority lane, not held behind DelayAcks"
+        let (clamped, issue) = reconcile_entry_start_ts(
+            Some(sim_now + 3_600_000_000_000),
+            state.data_origin_ns,
+            sim_now,
         );
-
-        let in_range = reconcile_subscribe_start_ts(Some(sim_now), &state, &lanes)
-            .await
-            .expect("no diagnostic, no overload");
+        assert_eq!(clamped, None, "a future start clamps to a live stream");
+        assert!(matches!(
+            issue,
+            Some(SubscriptionIssue::StartAfterSimNow { .. })
+        ));
+        let (in_range, issue) =
+            reconcile_entry_start_ts(Some(sim_now), state.data_origin_ns, sim_now);
         assert_eq!(
             in_range,
             Some(sim_now),
             "an in-range start is honored as given"
         );
-        assert!(
-            lane_rx.prio_rx.try_recv().is_err(),
-            "an in-range start emits no diagnostic"
-        );
+        assert_eq!(issue, None);
+    }
+
+    #[test]
+    fn per_entry_start_ts_positions_each_symbol() {
+        let (btc_start, btc_issue) = reconcile_entry_start_ts(Some(200), 100, 1_000);
+        let (eth_start, eth_issue) = reconcile_entry_start_ts(Some(800), 100, 1_000);
+        assert_eq!(btc_start, Some(200));
+        assert_eq!(eth_start, Some(800));
+        assert_eq!(btc_issue, None);
+        assert_eq!(eth_issue, None);
     }
 
     #[test]
@@ -2660,9 +2968,7 @@ mod tests {
         let err = submit_order_http(
             State(state()),
             Json(ClientMessage::Subscribe {
-                symbols: vec!["BTCUSDT".into()],
-                start_ts: None,
-                regime: None,
+                subscriptions: subscribe_entries(["BTCUSDT"], None),
             }),
         )
         .await
@@ -2932,11 +3238,12 @@ mod tests {
     }
 
     #[test]
-    fn subscribe_out_of_range_regime_is_dropped_to_clean() {
-        let regime =
+    fn subscribe_issue_reports_an_out_of_range_regime() {
+        let (regime, dropped) =
             validate_regime_or_clean(Some(MarketRegime::LiquidityDrought { thin_factor: 0.5 }));
 
         assert_eq!(regime, None);
+        assert!(dropped);
     }
 
     #[test]
@@ -3061,6 +3368,7 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let handle = spawn_replay(ReplaySpawn {
             symbol: "BTCUSDT".to_string(),
+            generation: 0,
             start_ts: None,
             regime: None,
             speed: cfg.speed,
@@ -3108,6 +3416,7 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let handle = spawn_replay(ReplaySpawn {
             symbol: "BTCUSDT".to_string(),
+            generation: 0,
             start_ts: None,
             regime: Some(MarketRegime::VolStorm { vol_mult: 2.0 }),
             speed: 0.0,
@@ -3127,13 +3436,15 @@ mod tests {
         // The diagnostic is admission truth, so it rides the PRIORITY lane -
         // ahead of held traffic, exempt from DelayAcks - not the market-data
         // channel, and it spends the promise reserved for this replay.
-        let ServerMessage::ProtocolError { reason, .. } = next_priority_frame(&mut lane_rx).await
+        let ServerMessage::SubscriptionIssues { entries, .. } =
+            next_priority_frame(&mut lane_rx).await
         else {
-            panic!("expected a ProtocolError")
+            panic!("expected SubscriptionIssues")
         };
         assert!(
-            reason.contains("BTCUSDT"),
-            "the frame names the dead symbol: {reason}"
+            matches!(entries.as_slice(), [mogwai_protocol::SubscriptionOutcome {
+            generation: 0, symbol, issue: SubscriptionIssue::SeekBudgetExhausted,
+        }] if symbol == "BTCUSDT")
         );
         assert!(
             rx.recv().await.is_none(),
@@ -3162,6 +3473,7 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let handle = spawn_replay(ReplaySpawn {
             symbol: "FAKE".to_string(),
+            generation: 0,
             start_ts: None,
             regime: None,
             speed: 0.0,
@@ -3179,13 +3491,15 @@ mod tests {
         });
 
         // Rides the priority lane like every admission-category frame.
-        let ServerMessage::ProtocolError { reason, .. } = next_priority_frame(&mut lane_rx).await
+        let ServerMessage::SubscriptionIssues { entries, .. } =
+            next_priority_frame(&mut lane_rx).await
         else {
-            panic!("expected a ProtocolError")
+            panic!("expected SubscriptionIssues")
         };
         assert!(
-            reason.contains("FAKE"),
-            "the frame names the unknown symbol: {reason}"
+            matches!(entries.as_slice(), [mogwai_protocol::SubscriptionOutcome {
+            generation: 0, symbol, issue: SubscriptionIssue::UnknownSymbol,
+        }] if symbol == "FAKE")
         );
         assert!(
             rx.recv().await.is_none(),
@@ -3226,6 +3540,7 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let handle = spawn_replay(ReplaySpawn {
             symbol: "BTCUSDT".to_string(),
+            generation: 0,
             start_ts: None,
             regime: None,
             speed: cfg.speed,
@@ -3295,6 +3610,7 @@ mod tests {
         let started = Instant::now();
         let handle = spawn_replay(ReplaySpawn {
             symbol: "BTCUSDT".to_string(),
+            generation: 0,
             start_ts: Some(EPOCH),
             regime: None,
             speed: cfg.speed,
@@ -3482,6 +3798,7 @@ mod tests {
         let last_sent_ts = Arc::new(AtomicU64::new(NO_TICK_SENT));
         let handle = spawn_replay(ReplaySpawn {
             symbol: "BTCUSDT".to_string(),
+            generation: 0,
             start_ts: Some(EPOCH),
             regime: None,
             speed: 1_000.0,

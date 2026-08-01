@@ -684,7 +684,7 @@ pub(crate) fn parse_history_regime(raw: Option<&str>) -> Option<MarketRegime> {
         tracing::warn!(raw, "dropping malformed market regime");
         return None;
     };
-    validate_regime_or_clean(Some(regime))
+    validate_regime_or_clean(Some(regime)).0
 }
 
 /// D3's API-boundary half: a `ReopenGap` whose `at_ts` sits at or before the
@@ -715,13 +715,17 @@ pub(crate) fn strip_unfireable_reopen_gap(
     None
 }
 
-pub(crate) fn validate_regime_or_clean(regime: Option<MarketRegime>) -> Option<MarketRegime> {
-    let regime = regime?;
+pub(crate) fn validate_regime_or_clean(
+    regime: Option<MarketRegime>,
+) -> (Option<MarketRegime>, bool) {
+    let Some(regime) = regime else {
+        return (None, false);
+    };
     match validate_market_regime(&regime) {
-        Ok(()) => Some(regime),
+        Ok(()) => (Some(regime), false),
         Err(err) => {
             tracing::warn!(?regime, err, "dropping out-of-range market regime");
-            None
+            (None, true)
         }
     }
 }

@@ -70,9 +70,10 @@ never imports nautilus.
 - **`AdmissionRejected` and the admission category.** `ServerMessage::
   AdmissionRejected { subject, reason, ts_event }` is the venue REFUSING work
   before any engine state is touched, with `AdmissionSubject` naming what was
-  refused (submit / cancel / modify / query / a coalesced subscribe / an
+  refused (submit / cancel / modify / query / an
   undecodable frame) because the translation is not uniform - a refused cancel
-  must become a cancel reject, never an order reject. It and `ProtocolError`
+  must become a cancel reject, never an order reject. It, `ProtocolError`, and
+  `SubscriptionIssues`
   classify `EventKind::Admission`, a category that is neither execution nor
   market data, which is what exempts them from `DelayAcks` in exactly one place
   (`is_execution()`, now a positive list so a new kind must opt IN to being
@@ -337,7 +338,25 @@ Owns the sockets, the clock, and replay pacing.
   and a `/trades` request returns an empty page rather than synthesizing a phantom
   BTC-scaled tape.
 - **Pacing and windowing.** Replay runs on a blocking thread with backpressure.
-  Per-subscription windowing (`start_ts` on `Subscribe`), `Unsubscribe`
+  `Subscribe` carries self-contained entries, each with a client-chosen
+  generation, symbol, optional `start_ts`, and optional regime. Server
+  degradations and refusals are coalesced as typed `SubscriptionIssues` whose
+  outcomes echo the entry generation - one frame per `Subscribe`, refusals listed
+  first, so a 256-entry subscribe of unknown symbols costs one priority frame
+  rather than 256. A replay records the generation that spawned it and carries it
+  into its thread, so the asynchronous dead-seek diagnostic names the generation
+  it actually describes rather than whatever is current when it is discovered,
+  and the server keeps a connection-lifetime high-water generation per symbol so
+  an `Unsubscribe` cannot let a generation be reused.
+
+  Successful subscriptions get NO acknowledgment frame. The client's own record
+  of the last generation it issued per symbol is the whole decision table, so a
+  success frame would be a wire frame no rule consumes, and it would cost a
+  priority-lane frame per subscribe on the healthy path - the lane the coalescing
+  exists to protect. What would reopen the question: a client needing positive
+  confirmation that a generation became current DURING a tape arrival drought,
+  where the first tick (today's implicit success signal) can be hours of sim time
+  away. `Unsubscribe`
   cancellation (a shared atomic flag the replay loop polls), and the paced
   inter-tick sleep cap are all pinned by `scripts/smoke.py`.
 - **A session's outbound path is a writer plus two accounted lanes.** Producers
@@ -345,7 +364,8 @@ Owns the sockets, the clock, and replay pacing.
   path, the heartbeat), so the single writer task does no JSON work and a byte
   budget can charge REAL bytes. The HELD lane carries engine output through the
   `DelayAcks` shift under a per-connection BYTE budget; the PRIORITY lane
-  carries admission truth (`AdmissionRejected`, `ProtocolError`) under a
+  carries admission truth (`AdmissionRejected`, `ProtocolError`,
+  `SubscriptionIssues`) under a
   per-connection FRAME budget and is drained first by a biased `select!`, so a
   refusal overtakes queued market data and queued already-delayed execution
   output. Both channels are UNBOUNDED, which is the point: the bound is the
@@ -432,7 +452,9 @@ from the in-tree `research/` copy.
   `subscribe_`/`unsubscribe_` for trades/quotes/bars use an adapter-owned
   per-symbol refcount table that only sends `Subscribe`/`Unsubscribe` on the
   0-to-1 transition (so one symbol's subscriptions do not clobber the server's
-  set-keyed replay), keeping the earliest `start_ts` on conflict. Instrument
+  set-keyed replay). It advances each symbol cursor forward-only and rebuilds
+  reconnect subscriptions as sorted, chunked entry lists with fresh generations.
+  Instrument
   subscriptions are NOT on that table: `subscribe_instruments` /
   `subscribe_instrument` are one-shot fetch-and-emit and their unsubscribes are
   no-ops, which is correct for a static venue whose instrument set does not
@@ -577,8 +599,11 @@ validation boundaries). A single `HavocSpec` on both client configs
   `SessionEdgeSpike` amplifies the session vol curve inside a UTC hour window; and
   `ReopenGap` injects a halt-then-gap discontinuity (silent halt, then a resume at
   a price gapped off the pre-halt mid) - the one stylized fact a 24/7 spot tape
-  structurally never shows. The regime is venue-wide, not per-symbol, and rides
-  per subscription on `Subscribe` and per request on `GET /trades`; it never
+  structurally never shows. The regime rides per SUBSCRIPTION ENTRY on
+  `Subscribe` and per request on `GET /trades`, so a per-symbol regime is
+  expressible on the wire; the adapter sends one value for every entry today, so
+  it is effectively venue-wide and a per-symbol regime is a client-side change
+  only. It never
   travels the `/control/divergence` control plane (that plane arms global
   connection-scoped state, while market regime must be baked into the
   `GeneratedSource` a subscription spins up). It is decomposed into a private

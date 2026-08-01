@@ -423,6 +423,13 @@ impl ExecLanes {
                 reason: truncate_reason(reason),
                 ts_event,
             },
+            // No free-text `reason` field, BY DESIGN: every outcome is a typed
+            // `SubscriptionIssue` and the entry list is capped at
+            // `MAX_SUBSCRIPTION_ISSUES_LISTED`, which is what keeps the frame
+            // under `ADMISSION_FRAME_MAX_BYTES` without a truncation step.
+            // Named explicitly rather than left to the catch-all so the next
+            // reason-carrying variant is not silently emitted untruncated.
+            issues @ ServerMessage::SubscriptionIssues { .. } => issues,
             other => other,
         };
         // Unreachable by construction (every field is a String, a number or a

@@ -43,9 +43,12 @@ fn daemon_stops_with_live_subscription() {
     let url = format!("ws://{}/ws", daemon.addr);
     let (mut socket, _) = tungstenite::connect(url.as_str()).expect("websocket connect");
     let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
-        symbols: vec!["BTCUSDT".into()],
-        start_ts: None,
-        regime: None,
+        subscriptions: vec![mogwai_protocol::SubscriptionRequest {
+            generation: 1,
+            symbol: "BTCUSDT".into(),
+            start_ts: None,
+            regime: None,
+        }],
     })
     .expect("subscribe json");
     socket

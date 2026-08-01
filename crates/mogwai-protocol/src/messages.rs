@@ -39,10 +39,26 @@ pub const MAX_CURRENCY_LEN: usize = 16;
 /// reservations.
 pub const MAX_SUBSCRIBE_SYMBOLS: usize = 256;
 
-/// How many refused symbols a coalesced `AdmissionSubject::Subscribe` names
-/// before it falls back to `refused_total` alone. The truncation is what keeps
-/// `ADMISSION_FRAME_MAX_BYTES` provable.
-pub const MAX_REFUSED_SYMBOLS_LISTED: usize = 16;
+/// Maximum outcomes listed on one coalesced `SubscriptionIssues` frame.
+///
+/// The cap is LOSSY and deliberately so. A subscribe producing more than this
+/// many outcomes drops the surplus, and those entries get no `(symbol,
+/// generation, issue)` at all - a genuine attribution hole that can swallow the
+/// news that a feed is dead. It is kept because the cap is what makes
+/// `ADMISSION_FRAME_MAX_BYTES` provable and what keeps a `MAX_SUBSCRIBE_SYMBOLS`
+/// subscribe to ONE priority frame, both load-bearing.
+///
+/// Two things pay for it: `entries` is filled with REFUSALS first, so the
+/// outcomes that kill a feed are the ones that survive truncation (a lost
+/// degradation costs a log line, a lost refusal costs a feed); and the frame
+/// carries `issues_total` AND `refusals_total`, so a client seeing more refusals
+/// counted than listed knows attributably that some feed it asked for is dead
+/// and can resubscribe the set rather than guess.
+///
+/// Pagination and a larger frame were both rejected: pagination puts multi-frame
+/// sequencing state on the priority lane the coalescing exists to protect, and a
+/// larger frame reopens a currently-proven ceiling.
+pub const MAX_SUBSCRIPTION_ISSUES_LISTED: usize = 16;
 
 /// Worst-case expansion factor `serde_json` applies to an arbitrary string of
 /// N bytes: a byte that must be escaped as `\uXXXX` costs six output bytes.
@@ -54,15 +70,12 @@ pub const MAX_REFUSED_SYMBOLS_LISTED: usize = 16;
 pub const JSON_ESCAPE_FACTOR: usize = 6;
 
 /// Upper bound on the serialized bytes of any `EventKind::Admission` frame -
-/// `AdmissionRejected` AND `ProtocolError`, since both ride the server's
+/// `AdmissionRejected`, `ProtocolError`, and `SubscriptionIssues`, since all ride the server's
 /// priority lane. Proven by `admission_frames_fit_their_ceiling`: the widest
-/// subject is `Subscribe` with `MAX_REFUSED_SYMBOLS_LISTED` symbols of
-/// `MAX_SYMBOL_LEN`, every embedded string charged at `JSON_ESCAPE_FACTOR`
-/// times its cap, the reason `truncate_reason`d to `MAX_REASON_LEN`, and the
-/// rest a u64, a usize and fixed JSON scaffolding:
-/// `JSON_ESCAPE_FACTOR * (MAX_REFUSED_SYMBOLS_LISTED * MAX_SYMBOL_LEN +
-/// MAX_REASON_LEN)` = 6 * (512 + 512) = 6144, plus under 300 bytes of keys,
-/// punctuation and numerics, rounded up to the constant below. This bound is
+/// widest frame is `SubscriptionIssues` with
+/// `MAX_SUBSCRIPTION_ISSUES_LISTED` entries. Each charges its symbol at
+/// `JSON_ESCAPE_FACTOR * MAX_SYMBOL_LEN`, two u64 values and fixed issue JSON,
+/// keeping the list below 5600 bytes plus envelope. This bound is
 /// what makes the priority lane's FRAME count a memory bound, so every
 /// `ProtocolError` construction site must route its reason through
 /// `truncate_reason`.
@@ -131,6 +144,60 @@ pub fn validate_symbols(symbols: &[Symbol]) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Boundary guard for a `Subscribe`'s entry list: cardinality, per-symbol
+/// length, and DUPLICATE SYMBOLS. Two entries naming one symbol with different
+/// generations have no defined meaning - which cursor wins, which generation is
+/// current - so the whole frame is refused rather than silently deduplicated.
+/// `dedup_symbols` was the old answer and it silently discarded a cursor; a
+/// refusal is the honest one. (`dedup_symbols` survives on the `Unsubscribe`
+/// path, where a duplicate genuinely is a no-op.)
+pub fn validate_subscriptions(subs: &[SubscriptionRequest]) -> Result<(), &'static str> {
+    if subs.len() > MAX_SUBSCRIBE_SYMBOLS {
+        return Err("subscriptions exceeds MAX_SUBSCRIBE_SYMBOLS");
+    }
+    if subs.iter().any(|entry| entry.symbol.len() > MAX_SYMBOL_LEN) {
+        return Err("symbol exceeds MAX_SYMBOL_LEN");
+    }
+    let mut symbols: Vec<&str> = subs.iter().map(|entry| entry.symbol.as_str()).collect();
+    symbols.sort_unstable();
+    if symbols.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err("subscriptions names a symbol twice");
+    }
+    Ok(())
+}
+
+/// One symbol's subscription within a `Subscribe`. Self-contained: identity,
+/// cursor and regime all per entry, so a client may resubscribe one symbol
+/// without restating any other's state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubscriptionRequest {
+    /// Client-chosen identity for THIS generation of this symbol's stream.
+    ///
+    /// The client is OBLIGED to make it strictly increasing per symbol within a
+    /// connection; the venue enforces the obligation and refuses any entry that
+    /// breaks it with `SubscriptionIssue::StaleGeneration`, because a reused
+    /// generation makes a stale diagnostic look current. A monotone counter that
+    /// never resets - not even across reconnects - trivially conforms.
+    ///
+    /// The venue never interprets it beyond ordering it against the generation
+    /// it recorded for the symbol, and echoing it on every diagnostic about this
+    /// subscription. Ordering is what lets a client tell a diagnostic about a
+    /// superseded generation from one about a generation it never issued, which
+    /// an opaque identifier cannot.
+    pub generation: u64,
+    pub symbol: Symbol,
+    /// Replay from this unix-nanosecond instant forward. `None` positions the
+    /// stream at sim-now (a live subscribe, the shape that avoids a catch-up
+    /// dump); `Some` is a historical window or a resume cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_ts: Option<u64>,
+    /// Generator-level market regime for THIS symbol's stream only. The regime
+    /// is per entry on the wire; the adapter today sends one value for every
+    /// entry, so a genuinely per-symbol regime is a client-side change only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regime: Option<MarketRegime>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Side {
     Buy,
@@ -165,14 +232,7 @@ pub enum TimeInForce {
 #[serde(tag = "type")]
 pub enum ClientMessage {
     Subscribe {
-        symbols: Vec<Symbol>,
-        /// Replay from this unix-nanosecond instant forward. `None` starts at
-        /// the beginning of available history.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        start_ts: Option<u64>,
-        /// Optional generator-level market regime for this subscription.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        regime: Option<MarketRegime>,
+        subscriptions: Vec<SubscriptionRequest>,
     },
     Unsubscribe {
         symbols: Vec<Symbol>,
@@ -379,18 +439,6 @@ pub enum AdmissionSubject {
         request_id: String,
         query: QueryKind,
     },
-    /// Subscriptions the venue would not admit, COALESCED into one frame per
-    /// `Subscribe`: the per-symbol loop accumulates and emits once, so a
-    /// 256-symbol subscribe of unknown symbols costs one priority frame rather
-    /// than 256 and cannot close a connection the `S22a` contract says stays
-    /// up. `symbols` lists at most `MAX_REFUSED_SYMBOLS_LISTED` of them and
-    /// `refused_total` is the true count. An empty `symbols` with a non-zero
-    /// `refused_total` is impossible; `refused_total == 0` means the whole
-    /// frame was refused before any symbol was reached.
-    Subscribe {
-        symbols: Vec<Symbol>,
-        refused_total: usize,
-    },
     /// A frame the venue could not decode, or could not attribute at all.
     Frame,
 }
@@ -401,6 +449,72 @@ pub enum AdmissionSubject {
 pub enum QueryKind {
     Orders,
     Fills,
+}
+
+/// What the venue did to one requested subscription that it did not serve
+/// exactly as asked. A closed set rather than prose: the client's handling is a
+/// match, not a string search, and a fixed set is what keeps
+/// `ADMISSION_FRAME_MAX_BYTES` provable now that issues are per entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum SubscriptionIssue {
+    /// REFUSED: the venue does not list this symbol. Nothing streams.
+    UnknownSymbol,
+    /// REFUSED: the global replay-thread pool is exhausted. Nothing streams;
+    /// running streams are untouched.
+    ReplayCapacity,
+    /// REFUSED: `generation` is not strictly greater than the generation the
+    /// venue currently records for this symbol on this connection. The live
+    /// stream is untouched - this is a client-ordering fault, and destroying a
+    /// healthy replay over one would be a worse answer than refusing it.
+    StaleGeneration { current: u64 },
+    /// REFUSED: the positioning seek exhausted its tick budget, so the stream
+    /// could not be placed. Discovered asynchronously on the replay thread,
+    /// which is why this issue in particular must carry a generation.
+    SeekBudgetExhausted,
+    /// DEGRADED: `start_ts` preceded the tape origin; the venue clamped the
+    /// request to `effective_start_ts` (the tape origin) and the stream runs
+    /// from there. This value IS the position the venue used, so a client may
+    /// safely adopt it as a cursor.
+    StartBeforeOrigin { effective_start_ts: u64 },
+    /// DEGRADED: `start_ts` exceeded sim-now; the venue discarded the requested
+    /// start and the stream is live from the clock. `sim_now` is the clock
+    /// reading at admission - an OBSERVATION, not a position the venue
+    /// promises, because the replay seeks sim-now again on its own thread. A
+    /// client must NOT adopt it as a cursor.
+    StartAfterSimNow { sim_now: u64 },
+    /// DEGRADED: the entry's `regime` failed `validate_market_regime` and was
+    /// dropped; the clean, unhavocked tape streams.
+    InvalidRegime,
+    /// DEGRADED: the entry's `ReopenGap` is anchored at or before the tape
+    /// origin and can never fire; it was stripped and the clean tape streams.
+    ReopenGapUnfireable { at_ts: u64 },
+}
+
+impl SubscriptionIssue {
+    /// `true` when nothing streams for this entry; `false` when the stream
+    /// runs, altered. The one bit a client needs to decide whether to keep
+    /// waiting for data.
+    #[must_use]
+    pub fn is_refusal(self) -> bool {
+        matches!(
+            self,
+            Self::UnknownSymbol
+                | Self::ReplayCapacity
+                | Self::StaleGeneration { .. }
+                | Self::SeekBudgetExhausted
+        )
+    }
+}
+
+/// One entry's outcome on a `SubscriptionIssues` frame. The `generation` echoes
+/// the `SubscriptionRequest` this describes, which is what lets a client discard
+/// a diagnostic about a generation it has already superseded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscriptionOutcome {
+    pub generation: u64,
+    pub symbol: Symbol,
+    pub issue: SubscriptionIssue,
 }
 
 /// API-boundary guard for a `ClientMessage::ModifyOrder`'s `price`/`quantity`
@@ -518,25 +632,24 @@ pub enum ServerMessage {
     Heartbeat {
         ts_event: u64,
     },
-    /// A `/ws` request the server could not decode OR could not serve: a
+    /// A whole frame the server could not decode or attribute to an entry: a
     /// frame that is not a `ClientMessage` (bad JSON, unknown `type`, or a
-    /// known `type` missing a required field, e.g. `{"type":"Subscribe"}`
-    /// with no `symbols`), a `Subscribe` for a symbol the venue does not
-    /// list, a subscription whose positioning seek exhausted its tick budget,
-    /// or a `start_ts` below the tape's data origin (diagnosed, then
-    /// clamped). Emitted in place of the old silent drop: without it, an
-    /// unservable live request and a healthy-but-idle feed were
-    /// indistinguishable on the wire. Untargeted - the offending frame
-    /// carries no `client_order_id` to echo, unlike `OrderRejected`.
+    /// known `type` missing required fields), a `Subscribe`/`Unsubscribe`
+    /// refused whole at the `validate_subscriptions`/`validate_symbols`
+    /// boundary, or a request on a carrier that does not support it. Emitted in
+    /// place of a silent drop: without it, an unservable request and a
+    /// healthy-but-idle feed were indistinguishable on the wire.
+    ///
+    /// Untargeted, and now only where untargetedness is honest: a whole-frame
+    /// fault HAS no entry to name. Everything per-entry - unknown symbols, dead
+    /// seeks, clamped starts, dropped regimes - moved to `SubscriptionIssues`,
+    /// which echoes the `(symbol, generation)` it describes. The correlation
+    /// field that was future work is that generation, and it exists.
     ///
     /// Classifies `EventKind::Admission`, not `Exec`: it reports what the
-    /// venue's REQUEST HANDLING refused or clamped, which is never something
-    /// the matching engine produced, so `DelayAcks` (a hold on engine output)
-    /// no longer reaches it and it rides the server's priority lane ahead of
-    /// held traffic. The untargetedness argument above therefore no longer
-    /// rests on lateness under `DelayAcks`; network reordering and the
-    /// quiesce-and-replace race remain the open half, and a correlation field
-    /// is future work.
+    /// venue's REQUEST HANDLING refused, which is never something the matching
+    /// engine produced, so `DelayAcks` (a hold on engine output) does not reach
+    /// it and it rides the server's priority lane ahead of held traffic.
     ///
     /// `reason` is server-generated prose and MUST be routed through
     /// `truncate_reason` at every construction site: serde's decode-error text
@@ -545,6 +658,38 @@ pub enum ServerMessage {
     /// memory bound - is unproven.
     ProtocolError {
         reason: String,
+        ts_event: u64,
+    },
+    /// Per-entry truth about a `Subscribe` the venue could not serve exactly as
+    /// asked. COALESCED: one frame per `Subscribe` for every synchronously
+    /// discovered issue, so a `MAX_SUBSCRIBE_SYMBOLS`-entry subscribe of unknown
+    /// symbols costs one priority frame, not 256. The asynchronous
+    /// `SeekBudgetExhausted` arrives later in its own single-entry frame, paid
+    /// for by the replay's promise ticket.
+    ///
+    /// `entries` lists at most `MAX_SUBSCRIPTION_ISSUES_LISTED`, REFUSALS
+    /// FIRST; `issues_total` is the true count and `refusals_total` the count
+    /// of those that killed a feed, so a client can tell "some feed I asked for
+    /// is dead but was truncated away" from "everything listed is what
+    /// happened".
+    ///
+    /// One entry may produce more than one outcome (a clamped start on an entry
+    /// whose regime was also dropped), so `issues_total >= entries.len()` says
+    /// nothing about how many ENTRIES were affected.
+    ///
+    /// Classifies `EventKind::Admission`, rides the priority lane, exempt from
+    /// `DelayAcks` - it reports what request handling did, never engine output.
+    ///
+    /// Successful subscriptions gain NO acknowledgment frame: a client's own
+    /// record of the last generation it issued per symbol is the whole decision
+    /// table, and a success frame would cost a priority-lane frame per subscribe
+    /// on the healthy path. What would reopen that: a client needing positive
+    /// confirmation during a tape arrival drought, where the first tick - the
+    /// implicit success signal - can be hours of sim time away.
+    SubscriptionIssues {
+        entries: Vec<SubscriptionOutcome>,
+        issues_total: usize,
+        refusals_total: usize,
         ts_event: u64,
     },
 }
@@ -586,9 +731,9 @@ impl ServerMessage {
             | ServerMessage::OrderUpdated { .. }
             | ServerMessage::OrderModifyRejected { .. }
             | ServerMessage::OrderCancelRejected { .. } => EventKind::Exec,
-            ServerMessage::AdmissionRejected { .. } | ServerMessage::ProtocolError { .. } => {
-                EventKind::Admission
-            }
+            ServerMessage::AdmissionRejected { .. }
+            | ServerMessage::ProtocolError { .. }
+            | ServerMessage::SubscriptionIssues { .. } => EventKind::Admission,
         }
     }
 
@@ -665,50 +810,78 @@ mod tests {
     use super::*;
 
     #[test]
-    fn subscribe_start_ts_round_trips_and_legacy_payloads_default() {
+    fn subscribe_round_trips_per_entry_generations() {
         let with_start = ClientMessage::Subscribe {
-            symbols: vec!["X".into()],
-            start_ts: Some(123),
-            regime: None,
+            subscriptions: vec![
+                SubscriptionRequest {
+                    generation: 1,
+                    symbol: "X".into(),
+                    start_ts: None,
+                    regime: None,
+                },
+                SubscriptionRequest {
+                    generation: 2,
+                    symbol: "Y".into(),
+                    start_ts: Some(123),
+                    regime: None,
+                },
+            ],
         };
         let json = serde_json::to_string(&with_start).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"Subscribe","subscriptions":[{"generation":1,"symbol":"X"},{"generation":2,"symbol":"Y","start_ts":123}]}"#
+        );
         let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(
-            decoded,
-            ClientMessage::Subscribe {
-                symbols,
-                start_ts: Some(123),
-                regime: None
-            } if symbols == vec!["X"]
-        ));
+        // `ClientMessage` is not `PartialEq`, so the round trip is proven by
+        // re-serializing to the identical bytes.
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), json);
 
-        let without_start = ClientMessage::Subscribe {
-            symbols: vec!["X".into()],
-            start_ts: None,
-            regime: None,
+        // Every issue variant, both directions: the tags and payload field
+        // names are wire contract, and a client's handling is a match on them.
+        let issues = [
+            SubscriptionIssue::UnknownSymbol,
+            SubscriptionIssue::ReplayCapacity,
+            SubscriptionIssue::StaleGeneration { current: 7 },
+            SubscriptionIssue::SeekBudgetExhausted,
+            SubscriptionIssue::StartBeforeOrigin {
+                effective_start_ts: 11,
+            },
+            SubscriptionIssue::StartAfterSimNow { sim_now: 13 },
+            SubscriptionIssue::InvalidRegime,
+            SubscriptionIssue::ReopenGapUnfireable { at_ts: 17 },
+        ];
+        let refusals_total = issues.iter().filter(|issue| issue.is_refusal()).count();
+        assert_eq!(refusals_total, 4, "four of the eight kill a feed");
+        let frame = ServerMessage::SubscriptionIssues {
+            entries: issues
+                .iter()
+                .enumerate()
+                .map(|(i, issue)| SubscriptionOutcome {
+                    generation: i as u64 + 1,
+                    symbol: format!("SYM{i}"),
+                    issue: *issue,
+                })
+                .collect(),
+            issues_total: issues.len(),
+            refusals_total,
+            ts_event: 99,
         };
-        let json = serde_json::to_string(&without_start).unwrap();
-        assert_eq!(json, r#"{"type":"Subscribe","symbols":["X"]}"#);
-        let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(
-            decoded,
-            ClientMessage::Subscribe {
-                symbols,
-                start_ts: None,
-                regime: None
-            } if symbols == vec!["X"]
-        ));
-
-        let legacy = r#"{"type":"Subscribe","symbols":["X"]}"#;
-        let decoded: ClientMessage = serde_json::from_str(legacy).unwrap();
-        assert!(matches!(
-            decoded,
-            ClientMessage::Subscribe {
-                symbols,
-                start_ts: None,
-                regime: None
-            } if symbols == vec!["X"]
-        ));
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(
+            json.contains(r#"{"kind":"StartAfterSimNow","sim_now":13}"#),
+            "the issue tag and its payload name are wire contract: {json}"
+        );
+        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
+        let ServerMessage::SubscriptionIssues { entries, .. } = &decoded else {
+            panic!("expected SubscriptionIssues, got {decoded:?}")
+        };
+        assert_eq!(
+            entries.iter().map(|e| e.issue).collect::<Vec<_>>(),
+            issues.to_vec(),
+            "every variant survives the round trip"
+        );
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), json);
     }
 
     #[test]
@@ -866,10 +1039,6 @@ mod tests {
                 request_id: escaped.clone(),
                 query: QueryKind::Fills,
             },
-            AdmissionSubject::Subscribe {
-                symbols: vec!["\u{0001}".repeat(MAX_SYMBOL_LEN); MAX_REFUSED_SYMBOLS_LISTED],
-                refused_total: MAX_SUBSCRIBE_SYMBOLS,
-            },
             AdmissionSubject::Frame,
         ];
         for subject in subjects {
@@ -910,10 +1079,6 @@ mod tests {
                 request_id: escaped_id.clone(),
                 query: QueryKind::Fills,
             },
-            AdmissionSubject::Subscribe {
-                symbols: vec![escaped_symbol; MAX_REFUSED_SYMBOLS_LISTED],
-                refused_total: MAX_SUBSCRIBE_SYMBOLS,
-            },
             AdmissionSubject::Frame,
         ];
         for subject in subjects {
@@ -930,6 +1095,25 @@ mod tests {
                 "{msg:?} exceeds the admission-frame ceiling"
             );
         }
+        let issues = ServerMessage::SubscriptionIssues {
+            entries: vec![
+                SubscriptionOutcome {
+                    generation: u64::MAX,
+                    symbol: escaped_symbol,
+                    issue: SubscriptionIssue::StartBeforeOrigin {
+                        effective_start_ts: u64::MAX
+                    }
+                };
+                MAX_SUBSCRIPTION_ISSUES_LISTED
+            ],
+            issues_total: MAX_SUBSCRIBE_SYMBOLS,
+            refusals_total: MAX_SUBSCRIBE_SYMBOLS,
+            ts_event: u64::MAX,
+        };
+        assert!(
+            serde_json::to_vec(&issues).expect("serialize issues").len()
+                <= ADMISSION_FRAME_MAX_BYTES
+        );
     }
 
     #[test]

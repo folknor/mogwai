@@ -24,7 +24,9 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use mogwai_data::TickEvent;
-use mogwai_protocol::{ClientMessage, MarketRegime, ServerMessage, SimClock};
+use mogwai_protocol::{
+    ClientMessage, MarketRegime, ServerMessage, SimClock, SubscriptionIssue, SubscriptionOutcome,
+};
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
 
 use crate::admission::{
@@ -75,41 +77,53 @@ fn send_exec_protocol_error(
     send_admission(lanes, ServerMessage::ProtocolError { reason, ts_event })
 }
 
-/// Reconcile a live `Subscribe`'s `start_ts` against the tape bounds, mirroring
-/// the `/trades` handler's refusals but as a DEGRADATION - the live feed still
-/// starts, because a subscribe carries the client's real want (the feed itself).
-/// Either shortfall goes out as a `ProtocolError` diagnostic so a healthy-looking
-/// feed cannot hide it. Returns the effective `start_ts` to hand the replay, or
-/// the overload close if the priority lane could not take the diagnostic - the
-/// degradation is never announced silently.
-pub(crate) async fn reconcile_subscribe_start_ts(
+/// Reconcile ONE `Subscribe` entry's `start_ts` against the tape bounds,
+/// mirroring the `/trades` handler's refusals but as a DEGRADATION - the live
+/// feed still starts, because a subscribe carries the client's real want (the
+/// feed itself). PURE: it returns the effective start plus the issue to report,
+/// and the caller accumulates issues across entries and emits ONE coalesced
+/// frame per `Subscribe`. Emitting here would cost one priority frame per entry,
+/// which a 256-entry subscribe would turn into a deterministic overload close.
+/// Build one `SubscriptionIssues` entry list from a subscribe's accumulated
+/// outcomes: REFUSALS FIRST, then degradations, truncated at
+/// `MAX_SUBSCRIPTION_ISSUES_LISTED`.
+///
+/// The ordering is what pays for keeping a lossy cap. The `if entries.len() <
+/// CAP` guard the old refusal list used cannot do this on its own - it fills in
+/// discovery order, so 16 clamped starts discovered before one unknown symbol
+/// would truncate away the only outcome that killed a feed. A degradation lost
+/// to the cap costs a log line; a refusal lost to the cap costs a feed.
+pub(crate) fn coalesce_issues(
+    mut refusals: Vec<SubscriptionOutcome>,
+    degradations: Vec<SubscriptionOutcome>,
+) -> Vec<SubscriptionOutcome> {
+    refusals.extend(degradations);
+    refusals.truncate(mogwai_protocol::MAX_SUBSCRIPTION_ISSUES_LISTED);
+    refusals
+}
+
+pub(crate) fn reconcile_entry_start_ts(
     start_ts: Option<u64>,
-    state: &AppState,
-    lanes: &ExecLanes,
-) -> Result<Option<u64>, CloseSpec> {
+    data_origin_ns: u64,
+    sim_now: u64,
+) -> (Option<u64>, Option<SubscriptionIssue>) {
     let Some(ts) = start_ts else {
-        return Ok(None);
+        return (None, None);
     };
     // Below the tape origin: `/trades` refuses the identical window with a 422,
     // but here the stream is kept and the generator anchors at the origin
-    // naturally (its first tick lands at or after the origin) - only announce the
-    // shortfall. `start_ts` passes through unchanged.
-    if ts < state.data_origin_ns {
-        tracing::warn!(
-            start_ts = ts,
-            data_origin = state.data_origin_ns,
-            "subscribe start_ts precedes the tape origin; stream anchors at the origin"
+    // naturally (its first tick lands at or after the origin). This CLAMPS to the
+    // origin rather than passing `start_ts` through, so the reported
+    // `effective_start_ts` is genuinely the position the venue used and a client
+    // may safely adopt it as a resume cursor. Observationally equivalent for the
+    // generator, whose first tick already lands at or after the origin.
+    if ts < data_origin_ns {
+        return (
+            Some(data_origin_ns),
+            Some(SubscriptionIssue::StartBeforeOrigin {
+                effective_start_ts: data_origin_ns,
+            }),
         );
-        send_exec_protocol_error(
-            lanes,
-            sim_now_ns(state.sim),
-            format!(
-                "subscribe start_ts {ts} precedes data_origin_ns {}; \
-                 the tape begins at its origin and the stream anchors there",
-                state.data_origin_ns
-            ),
-        )?;
-        return Ok(start_ts);
     }
     // Beyond sim-now: the WS twin of the `/trades` future refusal (F8). Honoring
     // it as given would extend the shared index into the future and, in identity
@@ -119,24 +133,10 @@ pub(crate) async fn reconcile_subscribe_start_ts(
     // the replay seek sim-now and seed its pacer there, so the first tick is
     // paced like any live subscribe, and resumes past a quiesced predecessor
     // rather than jumping to the future. Announce the clamp.
-    let sim_now = sim_now_ns(state.sim);
     if ts > sim_now {
-        tracing::warn!(
-            start_ts = ts,
-            sim_now,
-            "subscribe start_ts exceeds sim-now; clamping to a live stream from the clock"
-        );
-        send_exec_protocol_error(
-            lanes,
-            sim_now,
-            format!(
-                "subscribe start_ts {ts} exceeds sim-now {sim_now}; \
-                 the tape cannot serve past the clock, streaming live from now"
-            ),
-        )?;
-        return Ok(None);
+        return (None, Some(SubscriptionIssue::StartAfterSimNow { sim_now }));
     }
-    Ok(start_ts)
+    (start_ts, None)
 }
 
 /// The single writer task: the one owner of the socket's sink.
@@ -250,6 +250,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // seam (E.6); the handles are tracked and reaped so threads cannot pile up
     // under connect/subscribe/disconnect churn (E.7).
     let mut replays: HashMap<String, Replay> = HashMap::new();
+    let mut generations: HashMap<String, u64> = HashMap::new();
     let dark_until_ns = Arc::clone(&state.dark_until_ns);
     let stall_until_ns = Arc::clone(&state.stall_until_ns);
     let sim = state.sim;
@@ -324,19 +325,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         };
 
         match client_msg {
-            ClientMessage::Subscribe {
-                symbols,
-                start_ts,
-                regime,
-            } => {
+            ClientMessage::Subscribe { subscriptions } => {
                 // Cardinality and per-symbol length are capped at the boundary
                 // (a malformed request, answered with the untargeted
                 // diagnostic) so one read-loop iteration cannot be made to
                 // demand 100k per-symbol reservations, and so a symbol that
                 // reaches the wire is bounded by `MAX_SYMBOL_LEN` - which is
                 // what makes the coalesced refusal frame's ceiling provable.
-                if let Err(reason) = mogwai_protocol::validate_symbols(&symbols) {
-                    tracing::warn!(reason, count = symbols.len(), "refusing subscribe");
+                if let Err(reason) = mogwai_protocol::validate_subscriptions(&subscriptions) {
+                    tracing::warn!(reason, count = subscriptions.len(), "refusing subscribe");
                     if let Err(close) = send_exec_protocol_error(
                         &lanes,
                         sim_now_ns(state.sim),
@@ -346,46 +343,23 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     }
                     continue;
                 }
-                let mut regime = validate_regime_or_clean(regime);
-                // A ReopenGap anchored at or before the tape origin can never
-                // fire; strip it (D3) and say so on the wire - the stream
-                // still starts, serving the clean tape the generator would
-                // have realized anyway.
-                if let Some(at_ts) = strip_unfireable_reopen_gap(&mut regime, state.data_origin_ns)
-                    && let Err(close) = send_exec_protocol_error(
-                        &lanes,
-                        sim_now_ns(state.sim),
-                        format!(
-                            "ReopenGap at_ts {at_ts} is at or before data_origin_ns {}; \
-                             the halt can never fire, streaming the clean tape",
-                            state.data_origin_ns
-                        ),
-                    )
-                {
-                    break Some(close);
-                }
-                // Reconcile the requested window against the tape bounds up front:
-                // a start below the origin anchors at the origin, a start beyond
-                // sim-now clamps to a live stream from the clock (F8), each with a
-                // ProtocolError diagnostic. The effective start_ts drives every
-                // symbol's replay below.
-                let start_ts = match reconcile_subscribe_start_ts(start_ts, &state, &lanes).await {
-                    Ok(start_ts) => start_ts,
-                    Err(close) => break Some(close),
-                };
-                // Per-symbol refusals COALESCE into one priority frame at the
-                // end of this subscribe: a 256-symbol subscribe of unknown
-                // symbols must cost ONE queued frame, not 256, or it would
+                // Per-entry outcomes COALESCE into ONE priority frame at the end
+                // of this subscribe: a 256-entry subscribe of unknown symbols
+                // must cost ONE queued frame, not 256, or it would
                 // deterministically close a connection that `S22a` promises
-                // stays up (an over-cap or unservable subscribe refuses the
-                // symbol; the connection and its running streams are
-                // untouched). `refused_total` carries the true count while the
-                // listed symbols stay bounded.
-                let mut refused: Vec<String> = Vec::new();
-                let mut refused_total = 0usize;
-                let mut refused_capacity = 0usize;
+                // stays up. Accumulated in two vecs so the frame can list
+                // REFUSALS FIRST when the fixed cap truncates - a degradation
+                // lost to the cap costs a log line, a refusal lost to the cap
+                // costs a feed. `issues_total` and `refusals_total` carry the
+                // true counts either way, so a client seeing more refusals than
+                // it can read knows some feed it asked for is dead.
+                let mut refusals: Vec<SubscriptionOutcome> = Vec::new();
+                let mut degradations: Vec<SubscriptionOutcome> = Vec::new();
+                let mut issues_total = 0usize;
+                let mut refusals_total = 0usize;
                 let mut overload_close = None;
-                for symbol in dedup_symbols(symbols) {
+                for entry in subscriptions {
+                    let symbol = entry.symbol;
                     // Unknown symbols get their diagnostic here rather than from a
                     // spawned replay thread: whether the venue lists a symbol is a
                     // cheap synchronous check, so there is no reason to spin up an
@@ -399,11 +373,108 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     // promise ticket either.
                     if state.profiles.get(&symbol).is_none() {
                         tracing::warn!(%symbol, "subscribe for unknown symbol streams nothing");
-                        refused_total += 1;
-                        if refused.len() < mogwai_protocol::MAX_REFUSED_SYMBOLS_LISTED {
-                            refused.push(symbol);
-                        }
+                        issues_total += 1;
+                        refusals_total += 1;
+                        refusals.push(SubscriptionOutcome {
+                            generation: entry.generation,
+                            symbol,
+                            issue: SubscriptionIssue::UnknownSymbol,
+                        });
                         continue;
+                    }
+                    // Monotonicity is enforced against a connection-lifetime
+                    // high-water map, not against `replays`: an Unsubscribe, or
+                    // a quiesce followed by a capacity refusal, removes the
+                    // replay, and enforcing off `replays` would then accept a
+                    // REUSED generation and let a delayed diagnostic about an
+                    // old stream look current. No recorded generation means any
+                    // generation is acceptable, so a first subscribe on a fresh
+                    // connection never trips this. A refused entry leaves any
+                    // running replay strictly alone - destroying a healthy
+                    // stream over a client-ordering fault would be worse.
+                    if let Some(&current) = generations.get(&symbol)
+                        && current >= entry.generation
+                    {
+                        tracing::warn!(
+                            %symbol,
+                            generation = entry.generation,
+                            current,
+                            "subscribe generation is not ahead of the current one; refusing the entry"
+                        );
+                        issues_total += 1;
+                        refusals_total += 1;
+                        refusals.push(SubscriptionOutcome {
+                            generation: entry.generation,
+                            symbol,
+                            issue: SubscriptionIssue::StaleGeneration { current },
+                        });
+                        continue;
+                    }
+                    // Record the generation IMMEDIATELY, before this entry's
+                    // outcome is known, so a capacity refusal or a dead seek
+                    // still burns it and a later reuse of it is refused.
+                    generations.insert(symbol.clone(), entry.generation);
+                    // An out-of-range regime is a DEGRADATION, not a refusal:
+                    // the clean tape still streams. It used to be dropped in
+                    // silence, which contradicts the per-entry truth this frame
+                    // promises.
+                    let (mut regime, invalid_regime) = validate_regime_or_clean(entry.regime);
+                    if invalid_regime {
+                        issues_total += 1;
+                        degradations.push(SubscriptionOutcome {
+                            generation: entry.generation,
+                            symbol: symbol.clone(),
+                            issue: SubscriptionIssue::InvalidRegime,
+                        });
+                    }
+                    if let Some(at_ts) =
+                        strip_unfireable_reopen_gap(&mut regime, state.data_origin_ns)
+                    {
+                        issues_total += 1;
+                        degradations.push(SubscriptionOutcome {
+                            generation: entry.generation,
+                            symbol: symbol.clone(),
+                            issue: SubscriptionIssue::ReopenGapUnfireable { at_ts },
+                        });
+                    }
+                    let (start_ts, issue) = reconcile_entry_start_ts(
+                        entry.start_ts,
+                        state.data_origin_ns,
+                        sim_now_ns(state.sim),
+                    );
+                    if let Some(issue) = issue {
+                        match issue {
+                            SubscriptionIssue::StartBeforeOrigin { effective_start_ts } => {
+                                tracing::warn!(
+                                    %symbol,
+                                    generation = entry.generation,
+                                    start_ts = entry.start_ts,
+                                    data_origin = effective_start_ts,
+                                    "subscribe start_ts precedes the tape origin; clamping to the origin"
+                                );
+                            }
+                            SubscriptionIssue::StartAfterSimNow { sim_now } => {
+                                tracing::warn!(
+                                    %symbol,
+                                    generation = entry.generation,
+                                    start_ts = entry.start_ts,
+                                    sim_now,
+                                    "subscribe start_ts exceeds sim-now; clamping to a live stream from the clock"
+                                );
+                            }
+                            other => tracing::warn!(
+                                %symbol,
+                                generation = entry.generation,
+                                ?other,
+                                "subscribe start_ts reconciliation reported an unexpected issue"
+                            ),
+                        }
+                        issues_total += 1;
+                        degradations.push(SubscriptionOutcome {
+                            generation: entry.generation,
+                            symbol: symbol.clone(),
+                            issue,
+                        });
                     }
                     // Quiesce any in-flight stream for this symbol BEFORE the
                     // replacement emits: cancel the old thread and join it (off
@@ -462,11 +533,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 cap = state.cfg.max_concurrent_replays,
                                 "replay capacity reached; subscribe refused"
                             );
-                            refused_total += 1;
-                            refused_capacity += 1;
-                            if refused.len() < mogwai_protocol::MAX_REFUSED_SYMBOLS_LISTED {
-                                refused.push(symbol);
-                            }
+                            issues_total += 1;
+                            refusals_total += 1;
+                            refusals.push(SubscriptionOutcome {
+                                generation: entry.generation,
+                                symbol,
+                                issue: SubscriptionIssue::ReplayCapacity,
+                            });
                             continue;
                         }
                     };
@@ -474,6 +547,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     let last_sent_ts = Arc::new(AtomicU64::new(NO_TICK_SENT));
                     let handle = spawn_replay(ReplaySpawn {
                         symbol: symbol.clone(),
+                        generation: entry.generation,
                         start_ts,
                         regime,
                         speed: state.cfg.speed,
@@ -498,25 +572,14 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         },
                     );
                 }
-                // One frame for however many symbols this subscribe refused,
-                // naming at most `MAX_REFUSED_SYMBOLS_LISTED` of them.
-                if refused_total > 0 {
-                    let listed = refused.len();
-                    let unknown = refused_total - refused_capacity;
+                if issues_total > 0 {
+                    let entries = coalesce_issues(refusals, degradations);
                     if let Err(close) = send_admission(
                         &lanes,
-                        ServerMessage::AdmissionRejected {
-                            subject: mogwai_protocol::AdmissionSubject::Subscribe {
-                                symbols: refused,
-                                refused_total,
-                            },
-                            reason: format!(
-                                "{refused_total} of the requested symbols could not be \
-                                 served: {unknown} unknown to the venue, \
-                                 {refused_capacity} refused because replay capacity \
-                                 is reached; {listed} named here, the running \
-                                 streams are untouched"
-                            ),
+                        ServerMessage::SubscriptionIssues {
+                            entries,
+                            issues_total,
+                            refusals_total,
                             ts_event: sim_now_ns(state.sim),
                         },
                     ) {
@@ -920,6 +983,7 @@ pub(crate) fn is_execution_event(msg: &ServerMessage) -> bool {
 
 pub(crate) struct ReplaySpawn {
     pub(crate) symbol: String,
+    pub(crate) generation: u64,
     pub(crate) start_ts: Option<u64>,
     pub(crate) regime: Option<MarketRegime>,
     pub(crate) speed: f64,
@@ -983,7 +1047,15 @@ pub(crate) fn resume_seek_target(start_ts: Option<u64>, resume_floor: Option<u64
     }
 }
 
-/// Spend a replay's reserved diagnostic promise on one `ProtocolError`.
+/// Spend a replay's reserved diagnostic promise on one single-entry
+/// `SubscriptionIssues`. The entry carries the generation the replay was
+/// spawned with, not whatever is current by the time the fault is discovered:
+/// this is the ASYNCHRONOUS diagnostic the whole per-entry generation exists to
+/// make discardable by a client that has since resubscribed.
+///
+/// Returns `()`, never a `Result<(), CloseSpec>`: it runs on the replay OS
+/// thread, which has no channel by which a close decision could reach the socket
+/// owner, so every failure here is best-effort logging.
 ///
 /// Converting a promise into a queued frame re-checks the QUEUE budget: a
 /// promise guarantees the venue has ACCOUNTED for this diagnostic, not that the
@@ -997,8 +1069,9 @@ pub(crate) fn resume_seek_target(start_ts: Option<u64>, resume_floor: Option<u64
 fn spend_diagnostic(
     lanes: &ExecLanes,
     promise: &mut Option<Ticket>,
+    generation: u64,
     symbol: &str,
-    reason: String,
+    issue: SubscriptionIssue,
     ts_event: u64,
 ) {
     let Some(promise) = promise.take() else {
@@ -1016,10 +1089,22 @@ fn spend_diagnostic(
         return;
     };
     if lanes
-        .emit_admission(slot, ServerMessage::ProtocolError { reason, ts_event })
+        .emit_admission(
+            slot,
+            ServerMessage::SubscriptionIssues {
+                entries: vec![SubscriptionOutcome {
+                    generation,
+                    symbol: symbol.to_owned(),
+                    issue,
+                }],
+                issues_total: 1,
+                refusals_total: 1,
+                ts_event,
+            },
+        )
         .is_err()
     {
-        tracing::debug!(%symbol, "protocol error frame undeliverable; client gone");
+        tracing::debug!(%symbol, generation, "subscription issue undeliverable; client gone");
     }
 }
 
@@ -1034,6 +1119,7 @@ fn spend_diagnostic(
 pub(crate) fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
     let ReplaySpawn {
         symbol,
+        generation,
         start_ts,
         regime,
         speed,
@@ -1092,11 +1178,9 @@ pub(crate) fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
             spend_diagnostic(
                 &lanes,
                 &mut diag_ticket,
+                generation,
                 &symbol,
-                format!(
-                    "subscribe for unknown symbol {symbol}: the venue does not list it, \
-                     no data will stream"
-                ),
+                SubscriptionIssue::UnknownSymbol,
                 sim.sim_ns(now_ns()),
             );
             return;
@@ -1128,12 +1212,9 @@ pub(crate) fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
             spend_diagnostic(
                 &lanes,
                 &mut diag_ticket,
+                generation,
                 &symbol,
-                format!(
-                    "subscription for {symbol} could not be positioned: the seek toward \
-                     its start exhausted the {}-tick budget, no data will stream",
-                    source::MAX_HISTORY_SEEK_TICKS
-                ),
+                SubscriptionIssue::SeekBudgetExhausted,
                 sim.sim_ns(now_ns()),
             );
             return;

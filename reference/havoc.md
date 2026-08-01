@@ -147,7 +147,7 @@ source-construction time, rather than corrupting events after they have been
 produced. It does not travel the `/control/divergence` plane (that plane arms
 global, connection-scoped state; a regime must instead be baked into the
 `GeneratedSource` a subscription spins up). It rides per subscription on the
-`Subscribe` message (`ClientMessage::Subscribe { regime }`) and per request on
+`Subscribe` entry (`SubscriptionRequest { regime, .. }`) and per request on
 `GET /trades` (the `regime` query parameter). The `MarketRegime` axis is the
 subject of its own section below.
 
@@ -593,9 +593,14 @@ A new variant or a renamed field must be mirrored in both. On the server's
 ingress paths an out-of-band regime is dropped to a clean replay rather than
 panicking: `validate_regime_or_clean` (the `Subscribe` path) and
 `parse_history_regime` (the `/trades` path) both validate and fail closed to
-`None` on an out-of-range or unparseable regime.
+`None` on an out-of-range or unparseable regime. On the `Subscribe` path the
+drop is now a reported `SubscriptionIssue::InvalidRegime` degradation rather
+than a silent one; the stream still runs clean, unhavocked.
 
-The regime is venue-wide, not per-symbol.
+The wire carries a regime per SUBSCRIPTION ENTRY (`SubscriptionRequest.regime`),
+so a per-symbol regime is expressible. The adapter today sends the same value for
+every entry, so behavior is unchanged and the regime is effectively venue-wide; a
+genuinely per-symbol regime is now a client-side change only.
 
 ## Validation boundaries
 
