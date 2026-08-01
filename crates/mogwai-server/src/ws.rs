@@ -27,9 +27,13 @@ use mogwai_data::TickEvent;
 use mogwai_protocol::{ClientMessage, MarketRegime, ServerMessage, SimClock};
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
 
-use crate::config::{now_ns, sim_duration_from_millis, sim_now_ns};
+use crate::admission::{
+    CLOSE_GRACE, CloseSpec, ExecLanes, HeldFrame, Outbound, OutboundFrame, Ticket,
+};
+use crate::config::{build_admission_limits, now_ns, sim_duration_from_millis, sim_now_ns};
 use crate::http::{
-    AppState, process_order_cmd, strip_unfireable_reopen_gap, validate_regime_or_clean,
+    AppState, OrderOutcome, process_order_cmd, strip_unfireable_reopen_gap,
+    validate_regime_or_clean,
 };
 use crate::source;
 
@@ -40,40 +44,52 @@ pub(crate) async fn ws_upgrade(
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
-/// Emit a `ProtocolError` diagnostic through the execution-delay pump rather
-/// than straight onto the writer channel. `ServerMessage::category` classifies
-/// `ProtocolError` as execution, and havoc.md says `DelayAcks` holds EVERY
-/// outbound execution event, so routing it here is what makes the route match
-/// the classification (S10): an armed `DelayAcks` now holds these diagnostics
-/// too, and the writer's `GoDark` gate still applies downstream. `drop(...await)`
-/// because a send error just means the writer already gave up on this socket -
-/// the read loop observes the same and exits.
-async fn send_exec_protocol_error(
-    exec_tx: &mpsc::Sender<(Instant, ServerMessage)>,
+/// Queue one admission frame on the PRIORITY lane, reserving its queue slot
+/// first. Never blocks and never awaits, so it is safe on the read loop.
+///
+/// `Err` is the overload condition: the lane is full (the peer is not reading)
+/// or the writer is gone. The caller must then stop reading and close with a
+/// reason - the one thing it must NOT do is drop the refusal silently, which is
+/// the failure mode this whole path exists to prevent. The writer's `GoDark`
+/// gate still applies downstream; `DelayAcks` deliberately does not, because
+/// admission truth is not engine output.
+fn send_admission(lanes: &ExecLanes, msg: ServerMessage) -> Result<(), CloseSpec> {
+    let Some(ticket) = lanes.reserve_admission() else {
+        return Err(CloseSpec::overload(
+            "priority admission lane saturated: the peer is not reading",
+        ));
+    };
+    lanes
+        .emit_admission(ticket, msg)
+        .map_err(|_| CloseSpec::overload("outbound writer is gone"))
+}
+
+/// Emit an untargeted diagnostic on the priority lane. `Err` means the lane is
+/// saturated, which is the overload condition: the caller must stop reading and
+/// close, never silently drop the diagnostic.
+fn send_exec_protocol_error(
+    lanes: &ExecLanes,
     ts_event: u64,
     reason: String,
-) {
-    drop(
-        exec_tx
-            .send((
-                Instant::now(),
-                ServerMessage::ProtocolError { reason, ts_event },
-            ))
-            .await,
-    );
+) -> Result<(), CloseSpec> {
+    send_admission(lanes, ServerMessage::ProtocolError { reason, ts_event })
 }
 
 /// Reconcile a live `Subscribe`'s `start_ts` against the tape bounds, mirroring
 /// the `/trades` handler's refusals but as a DEGRADATION - the live feed still
 /// starts, because a subscribe carries the client's real want (the feed itself).
 /// Either shortfall goes out as a `ProtocolError` diagnostic so a healthy-looking
-/// feed cannot hide it. Returns the effective `start_ts` to hand the replay.
+/// feed cannot hide it. Returns the effective `start_ts` to hand the replay, or
+/// the overload close if the priority lane could not take the diagnostic - the
+/// degradation is never announced silently.
 pub(crate) async fn reconcile_subscribe_start_ts(
     start_ts: Option<u64>,
     state: &AppState,
-    exec_tx: &mpsc::Sender<(Instant, ServerMessage)>,
-) -> Option<u64> {
-    let ts = start_ts?;
+    lanes: &ExecLanes,
+) -> Result<Option<u64>, CloseSpec> {
+    let Some(ts) = start_ts else {
+        return Ok(None);
+    };
     // Below the tape origin: `/trades` refuses the identical window with a 422,
     // but here the stream is kept and the generator anchors at the origin
     // naturally (its first tick lands at or after the origin) - only announce the
@@ -85,16 +101,15 @@ pub(crate) async fn reconcile_subscribe_start_ts(
             "subscribe start_ts precedes the tape origin; stream anchors at the origin"
         );
         send_exec_protocol_error(
-            exec_tx,
+            lanes,
             sim_now_ns(state.sim),
             format!(
                 "subscribe start_ts {ts} precedes data_origin_ns {}; \
                  the tape begins at its origin and the stream anchors there",
                 state.data_origin_ns
             ),
-        )
-        .await;
-        return start_ts;
+        )?;
+        return Ok(start_ts);
     }
     // Beyond sim-now: the WS twin of the `/trades` future refusal (F8). Honoring
     // it as given would extend the shared index into the future and, in identity
@@ -112,17 +127,94 @@ pub(crate) async fn reconcile_subscribe_start_ts(
             "subscribe start_ts exceeds sim-now; clamping to a live stream from the clock"
         );
         send_exec_protocol_error(
-            exec_tx,
+            lanes,
             sim_now,
             format!(
                 "subscribe start_ts {ts} exceeds sim-now {sim_now}; \
                  the tape cannot serve past the clock, streaming live from now"
             ),
-        )
-        .await;
-        return None;
+        )?;
+        return Ok(None);
     }
-    start_ts
+    Ok(start_ts)
+}
+
+/// The single writer task: the one owner of the socket's sink.
+///
+/// Two inputs. `prio_rx` is the priority lane, drained FIRST by the biased
+/// select so an admission refusal overtakes queued market data and queued
+/// already-delayed execution output; `held_rx` (here `rx`) is everything the
+/// venue paces normally. Frames arrive pre-serialized from their producers,
+/// which is what makes the byte budget charge real bytes and keeps JSON cost
+/// off this task.
+///
+/// Generic over the sink so the lane-closure behavior below is reachable from a
+/// test without a real socket; production passes the split `WebSocket` half.
+pub(crate) async fn run_writer<S>(
+    mut sink: S,
+    mut prio_rx: mpsc::UnboundedReceiver<Outbound>,
+    mut rx: mpsc::Receiver<Outbound>,
+    sim: SimClock,
+    dark_until_ns: Arc<AtomicU64>,
+    stall_until_ns: Arc<AtomicU64>,
+) where
+    S: SinkExt<Message> + Unpin,
+{
+    // The per-branch disable flags are load-bearing, not style. A bare
+    // `select!` over both receivers busy-spins the moment ONE side closes:
+    // a closed receiver returns `None` immediately and forever, so with the
+    // priority lane still alive and `tx` dropped the loop would burn a core
+    // until teardown - never yielding, so on a single-threaded runtime it
+    // starves every other task on the same thread. "Both receivers returning
+    // None ends the loop" is a property these flags create.
+    let mut prio_open = true;
+    let mut held_open = true;
+    while prio_open || held_open {
+        let outbound = tokio::select! {
+            biased;
+            msg = prio_rx.recv(), if prio_open => match msg {
+                Some(v) => v,
+                None => { prio_open = false; continue; }
+            },
+            msg = rx.recv(), if held_open => match msg {
+                Some(v) => v,
+                None => { held_open = false; continue; }
+            },
+        };
+        let frame = match outbound {
+            Outbound::Frame(frame) => frame,
+            // The writer owns the sink, so it is the only task that can
+            // state a reason on the way out.
+            Outbound::Close(close) => {
+                drop(
+                    sink.send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: close.code,
+                        reason: close.reason.into(),
+                    })))
+                    .await,
+                );
+                break;
+            }
+        };
+        // Both havoc gates drop the frame, which releases its held-lane
+        // charge and its priority slot through `OutboundFrame`'s Drop - the
+        // one honest exception to "produced execution truth is delivered",
+        // pre-existing and documented in reference/havoc.md.
+        let now = sim_now_ns(sim);
+        if now < dark_until_ns.load(Ordering::Relaxed) {
+            continue;
+        }
+        if frame.is_market_data && now < stall_until_ns.load(Ordering::Relaxed) {
+            continue;
+        }
+        if sink
+            .send(Message::Text(frame.payload.into()))
+            .await
+            .is_err()
+        {
+            break; // client gone
+        }
+    }
 }
 
 /// One client session.
@@ -136,8 +228,17 @@ pub(crate) async fn reconcile_subscribe_start_ts(
 /// `DelayAcks` window paces only execution traffic - see `spawn_exec_pump`
 /// for why that hop exists and for the per-event delay contract.
 async fn handle_socket(socket: WebSocket, state: AppState) {
-    let (mut sink, mut stream) = socket.split();
-    let (tx, mut rx) = mpsc::channel::<ServerMessage>(1024);
+    let (sink, mut stream) = socket.split();
+    let (tx, rx) = mpsc::channel::<Outbound>(1024);
+    let (prio_tx, prio_rx) = mpsc::unbounded_channel::<Outbound>();
+    let (held_tx, held_rx) = mpsc::unbounded_channel::<HeldFrame>();
+    // Budget sizes come from the run config, whose defaults ARE the constants in
+    // `admission`. They are configurable so this connection's refusal behavior
+    // is reachable: at the shipped 8 MiB held budget and 64 queued priority
+    // frames, driving a real socket into a refused reservation or a saturated
+    // lane takes megabytes of engine output and a TCP window's worth of timing
+    // luck, so the invariants would have no end-to-end gate at all.
+    let lanes = ExecLanes::new(held_tx, prio_tx, build_admission_limits(&state.cfg));
     // One replay stream PER SYMBOL, not per sorted symbol-set. Keying per set let
     // overlapping subscriptions (`[A,B]` then `[B,C]`) spawn two independent
     // replays both emitting `B` from independent generators/clocks, so the client
@@ -153,41 +254,25 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let stall_until_ns = Arc::clone(&state.stall_until_ns);
     let sim = state.sim;
 
-    // `tx`/`rx` is the single channel the writer below drains and serializes
-    // onto the socket - market data (replay threads, heartbeat) sends land in
-    // it directly. Execution events take one extra hop through `exec_tx`/
-    // `exec_pump` so a `DelayAcks` sleep never blocks the writer's own
-    // `rx.recv()` loop (see `spawn_exec_pump`). Each event rides with the
-    // `Instant` it was enqueued at, so the pump can anchor its delay deadline
-    // at production time rather than at whenever it gets around to dequeuing.
-    let (exec_tx, exec_rx) = mpsc::channel::<(Instant, ServerMessage)>(1024);
+    // `tx`/`rx` carries everything the writer paces normally: market data
+    // straight from the replay threads and the heartbeat, and execution output
+    // after it has cleared the `DelayAcks` shift in `spawn_exec_pump` (the hop
+    // exists so a delay sleep never blocks the writer's own recv loop). The
+    // priority lane is the second input, drained FIRST by the biased select
+    // below, so an admission refusal overtakes queued market data and queued
+    // already-delayed execution output. Frames arrive pre-serialized: the
+    // producers render them, which is what makes the byte budget charge real
+    // bytes and keeps JSON cost off this single task.
+    let writer = tokio::spawn(run_writer(
+        sink,
+        prio_rx,
+        rx,
+        sim,
+        dark_until_ns,
+        stall_until_ns,
+    ));
 
-    let writer = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            let now = sim_now_ns(sim);
-            if now < dark_until_ns.load(Ordering::Relaxed) {
-                continue;
-            }
-            if msg.is_market_data() && now < stall_until_ns.load(Ordering::Relaxed) {
-                continue;
-            }
-            // Skip an un-serializable frame rather than panicking the writer
-            // task: this runs in a detached `tokio::spawn`, so an `expect` here
-            // would silently tear down the whole connection's outbound stream.
-            let payload = match serde_json::to_string(&msg) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::error!(%e, "dropping un-serializable ServerMessage");
-                    continue;
-                }
-            };
-            if sink.send(Message::Text(payload.into())).await.is_err() {
-                break; // client gone
-            }
-        }
-    });
-
-    let exec_pump = spawn_exec_pump(exec_rx, Arc::clone(&state.delay_ms), state.sim, tx.clone());
+    let exec_pump = spawn_exec_pump(held_rx, Arc::clone(&state.delay_ms), state.sim, tx.clone());
 
     let heartbeat = if state.cfg.server_heartbeat_ms > 0 {
         Some(spawn_heartbeat(
@@ -199,7 +284,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         None
     };
 
-    while let Some(Ok(msg)) = stream.next().await {
+    // The read loop breaks with the reason it stopped: `None` for an ordinary
+    // disconnect, `Some(close)` when the priority lane could not take a
+    // refusal. Every producer below reserves or refuses; none of them awaits a
+    // full channel, which is what keeps the reader alive under an armed
+    // `DelayAcks` no matter how deep the held backlog gets.
+    let overload: Option<CloseSpec> = loop {
+        let Some(Ok(msg)) = stream.next().await else {
+            break None;
+        };
         let Message::Text(text) = msg else { continue };
 
         let client_msg: ClientMessage = match serde_json::from_str(&text) {
@@ -209,10 +302,23 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 // Surface the decode failure on the wire instead of dropping it
                 // silently: previously a malformed/under-specified frame (e.g.
                 // `{"type":"Subscribe"}` missing `symbols`) looked identical to a
-                // healthy-but-idle feed. Routed through the exec pump so this
-                // execution-category diagnostic honors DelayAcks like every other
-                // execution event (S10).
-                send_exec_protocol_error(&exec_tx, sim_now_ns(state.sim), e.to_string()).await;
+                // healthy-but-idle feed. It is the purest transport truth there
+                // is - the venue could not even decode the frame - so it goes
+                // out unattributed on the PRIORITY lane, ahead of held traffic
+                // and exempt from `DelayAcks`: a client whose frames do not
+                // decode learns so promptly instead of after an armed window.
+                // `emit_admission` truncates serde's error text, which echoes
+                // client-controlled field names.
+                if let Err(close) = send_admission(
+                    &lanes,
+                    ServerMessage::AdmissionRejected {
+                        subject: mogwai_protocol::AdmissionSubject::Frame,
+                        reason: e.to_string(),
+                        ts_event: sim_now_ns(state.sim),
+                    },
+                ) {
+                    break Some(close);
+                }
                 continue;
             }
         };
@@ -223,15 +329,31 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 start_ts,
                 regime,
             } => {
+                // Cardinality and per-symbol length are capped at the boundary
+                // (a malformed request, answered with the untargeted
+                // diagnostic) so one read-loop iteration cannot be made to
+                // demand 100k per-symbol reservations, and so a symbol that
+                // reaches the wire is bounded by `MAX_SYMBOL_LEN` - which is
+                // what makes the coalesced refusal frame's ceiling provable.
+                if let Err(reason) = mogwai_protocol::validate_symbols(&symbols) {
+                    tracing::warn!(reason, count = symbols.len(), "refusing subscribe");
+                    if let Err(close) = send_exec_protocol_error(
+                        &lanes,
+                        sim_now_ns(state.sim),
+                        format!("subscribe refused: {reason}"),
+                    ) {
+                        break Some(close);
+                    }
+                    continue;
+                }
                 let mut regime = validate_regime_or_clean(regime);
                 // A ReopenGap anchored at or before the tape origin can never
                 // fire; strip it (D3) and say so on the wire - the stream
                 // still starts, serving the clean tape the generator would
                 // have realized anyway.
                 if let Some(at_ts) = strip_unfireable_reopen_gap(&mut regime, state.data_origin_ns)
-                {
-                    send_exec_protocol_error(
-                        &exec_tx,
+                    && let Err(close) = send_exec_protocol_error(
+                        &lanes,
                         sim_now_ns(state.sim),
                         format!(
                             "ReopenGap at_ts {at_ts} is at or before data_origin_ns {}; \
@@ -239,14 +361,30 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             state.data_origin_ns
                         ),
                     )
-                    .await;
+                {
+                    break Some(close);
                 }
                 // Reconcile the requested window against the tape bounds up front:
                 // a start below the origin anchors at the origin, a start beyond
                 // sim-now clamps to a live stream from the clock (F8), each with a
                 // ProtocolError diagnostic. The effective start_ts drives every
                 // symbol's replay below.
-                let start_ts = reconcile_subscribe_start_ts(start_ts, &state, &exec_tx).await;
+                let start_ts = match reconcile_subscribe_start_ts(start_ts, &state, &lanes).await {
+                    Ok(start_ts) => start_ts,
+                    Err(close) => break Some(close),
+                };
+                // Per-symbol refusals COALESCE into one priority frame at the
+                // end of this subscribe: a 256-symbol subscribe of unknown
+                // symbols must cost ONE queued frame, not 256, or it would
+                // deterministically close a connection that `S22a` promises
+                // stays up (an over-cap or unservable subscribe refuses the
+                // symbol; the connection and its running streams are
+                // untouched). `refused_total` carries the true count while the
+                // listed symbols stay bounded.
+                let mut refused: Vec<String> = Vec::new();
+                let mut refused_total = 0usize;
+                let mut refused_capacity = 0usize;
+                let mut overload_close = None;
                 for symbol in dedup_symbols(symbols) {
                     // Unknown symbols get their diagnostic here rather than from a
                     // spawned replay thread: whether the venue lists a symbol is a
@@ -255,17 +393,16 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     // `replays` (S22). The dead-SEEK diagnostic - knowable only by
                     // actually running the positioning seek - still comes from the
                     // thread in `spawn_replay`.
+                    //
+                    // Note this arm `continue`s BEFORE the quiesce and before
+                    // the permit acquire, so a refused symbol never consumes a
+                    // promise ticket either.
                     if state.profiles.get(&symbol).is_none() {
                         tracing::warn!(%symbol, "subscribe for unknown symbol streams nothing");
-                        send_exec_protocol_error(
-                            &exec_tx,
-                            sim_now_ns(state.sim),
-                            format!(
-                                "subscribe for unknown symbol {symbol}: the venue does not \
-                                 list it, no data will stream"
-                            ),
-                        )
-                        .await;
+                        refused_total += 1;
+                        if refused.len() < mogwai_protocol::MAX_REFUSED_SYMBOLS_LISTED {
+                            refused.push(symbol);
+                        }
                         continue;
                     }
                     // Quiesce any in-flight stream for this symbol BEFORE the
@@ -284,6 +421,22 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     // already-delivered tick. The floor is read only AFTER the
                     // join (see `quiesce_and_resume_floor` for why the order is
                     // load-bearing).
+                    //
+                    // Capacity for this replay's ONE possible diagnostic (the
+                    // dead-seek) is reserved BEFORE the quiesce, and from the
+                    // separate promise pool rather than the 64-slot queue: a
+                    // promise is held for the replay's whole life, so drawn
+                    // from queue depth 64 healthy replays would leave no room
+                    // for any actual refusal. Reserving after the quiesce would
+                    // mean the old stream is already destroyed when the refusal
+                    // is discovered - the client would have lost a live feed to
+                    // a capacity problem it was never told about.
+                    let Some(diag_ticket) = lanes.reserve_promise() else {
+                        overload_close = Some(CloseSpec::overload(
+                            "subscribe diagnostic capacity exhausted",
+                        ));
+                        break;
+                    };
                     let resume_floor = if let Some(old) = replays.remove(&symbol) {
                         quiesce_and_resume_floor(old).await
                     } else {
@@ -309,16 +462,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 cap = state.cfg.max_concurrent_replays,
                                 "replay capacity reached; subscribe refused"
                             );
-                            send_exec_protocol_error(
-                                &exec_tx,
-                                sim_now_ns(state.sim),
-                                format!(
-                                    "replay capacity reached ({} concurrent streams); \
-                                     symbol {symbol} not started",
-                                    state.cfg.max_concurrent_replays
-                                ),
-                            )
-                            .await;
+                            refused_total += 1;
+                            refused_capacity += 1;
+                            if refused.len() < mogwai_protocol::MAX_REFUSED_SYMBOLS_LISTED {
+                                refused.push(symbol);
+                            }
                             continue;
                         }
                     };
@@ -334,7 +482,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         sim: state.sim,
                         data_origin: state.data_origin_ns,
                         tx: tx.clone(),
-                        exec_tx: exec_tx.clone(),
+                        lanes: lanes.clone(),
+                        diag_ticket: Some(diag_ticket),
                         cancel: Arc::clone(&cancel),
                         resume_floor,
                         last_sent_ts: Arc::clone(&last_sent_ts),
@@ -349,33 +498,100 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         },
                     );
                 }
+                // One frame for however many symbols this subscribe refused,
+                // naming at most `MAX_REFUSED_SYMBOLS_LISTED` of them.
+                if refused_total > 0 {
+                    let listed = refused.len();
+                    let unknown = refused_total - refused_capacity;
+                    if let Err(close) = send_admission(
+                        &lanes,
+                        ServerMessage::AdmissionRejected {
+                            subject: mogwai_protocol::AdmissionSubject::Subscribe {
+                                symbols: refused,
+                                refused_total,
+                            },
+                            reason: format!(
+                                "{refused_total} of the requested symbols could not be \
+                                 served: {unknown} unknown to the venue, \
+                                 {refused_capacity} refused because replay capacity \
+                                 is reached; {listed} named here, the running \
+                                 streams are untouched"
+                            ),
+                            ts_event: sim_now_ns(state.sim),
+                        },
+                    ) {
+                        break Some(close);
+                    }
+                }
+                if let Some(close) = overload_close {
+                    break Some(close);
+                }
             }
             ClientMessage::Unsubscribe { symbols } => {
+                // Same cardinality/length cap as `Subscribe`: an unsubscribe
+                // naming 100k symbols would make one read-loop iteration do
+                // 100k map lookups and joins.
+                if let Err(reason) = mogwai_protocol::validate_symbols(&symbols) {
+                    tracing::warn!(reason, count = symbols.len(), "refusing unsubscribe");
+                    if let Err(close) = send_exec_protocol_error(
+                        &lanes,
+                        sim_now_ns(state.sim),
+                        format!("unsubscribe refused: {reason}"),
+                    ) {
+                        break Some(close);
+                    }
+                    continue;
+                }
                 for symbol in dedup_symbols(symbols) {
                     if let Some(old) = replays.remove(&symbol) {
                         quiesce_replay(old).await;
                     }
                 }
             }
-            order_cmd => {
-                let events = process_order_cmd(order_cmd, &state).await;
-                // One arrival instant for the whole batch: the engine produced
-                // these events together in one `process` call, so under an
-                // armed `DelayAcks` they share one deadline and land together
-                // ~ms late (see `spawn_exec_pump` for the per-event-deadline
-                // contract this anchors).
-                let arrived = Instant::now();
-                for ev in events {
+            order_cmd => match process_order_cmd(order_cmd, &state, &lanes).await {
+                OrderOutcome::Produced {
+                    events,
+                    reservation,
+                }
+                | OrderOutcome::Refused {
+                    events,
+                    reservation,
+                } => {
                     debug_assert!(
-                        is_execution_event(&ev),
+                        events.iter().all(is_execution_event),
                         "order-entry events are always execution-category, never market data"
                     );
-                    if exec_tx.send((arrived, ev)).await.is_err() {
-                        break;
+                    // One arrival instant for the whole batch: the engine
+                    // produced these events together in one `process` call, so
+                    // under an armed `DelayAcks` they share one deadline and
+                    // land together ~ms late (see `spawn_exec_pump` for the
+                    // per-event-deadline contract this anchors). The send
+                    // cannot block - the held lane is unbounded by channel
+                    // capacity, bounded by the byte budget already reserved
+                    // above - so this arm never stalls the reader.
+                    if lanes
+                        .submit_produced(reservation, Instant::now(), events)
+                        .is_err()
+                    {
+                        break None; // writer gone; the connection is tearing down
                     }
                 }
-            }
+                OrderOutcome::NotAdmitted(frame) | OrderOutcome::Diagnostic(frame) => {
+                    if let Err(close) = send_admission(&lanes, frame) {
+                        break Some(close);
+                    }
+                }
+            },
         }
+    };
+
+    // The overload close jumps the held queue by the writer's biased select, so
+    // it does not need a lane slot: the read loop has already stopped taking new
+    // work and the writer stops on it.
+    let closing = overload.is_some();
+    if let Some(close) = overload {
+        tracing::warn!(reason = %close.reason, "closing connection: admission overload");
+        drop(lanes.send_close(close));
     }
 
     // Cancel every replay first so the threads stop generating, then join them
@@ -411,8 +627,32 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         tracing::warn!(%e, "exec delay pump did not shut down cleanly");
     }
     drop(tx);
-    if let Err(e) = writer.await {
-        tracing::warn!(%e, "writer task did not shut down cleanly");
+    drop(lanes);
+    // Awaiting the writer unconditionally is not a terminal path when the
+    // connection is being closed for overload: the writer may already be parked
+    // in `sink.send()` against a peer that stopped reading, in which case the
+    // close frame is never written and teardown blocks behind it forever - the
+    // same hang, one layer down. A reasoned close is best-effort by nature;
+    // releasing the connection's resources is not, so on timeout the writer is
+    // aborted and the socket dropped. The ordinary-disconnect path keeps the
+    // plain await: there is no peer to wait on, so it returns at once.
+    let mut writer = writer;
+    let joined = if closing {
+        tokio::time::timeout(CLOSE_GRACE, &mut writer).await
+    } else {
+        Ok((&mut writer).await)
+    };
+    match joined {
+        Ok(Err(e)) => tracing::warn!(%e, "writer task did not shut down cleanly"),
+        Err(_) => {
+            writer.abort();
+            tracing::warn!(
+                grace_ms = CLOSE_GRACE.as_millis(),
+                "peer did not accept the overload close within the grace window; \
+                 dropping the socket"
+            );
+        }
+        Ok(Ok(())) => {}
     }
 }
 
@@ -446,13 +686,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 /// still queued; the window rides the sim axis via `wall_duration`, matching
 /// every other ms-window control.
 pub(crate) fn spawn_exec_pump(
-    mut exec_rx: mpsc::Receiver<(Instant, ServerMessage)>,
+    mut exec_rx: mpsc::UnboundedReceiver<HeldFrame>,
     delay_ms: Arc<AtomicU64>,
     sim: SimClock,
-    out: mpsc::Sender<ServerMessage>,
+    out: mpsc::Sender<Outbound>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some((arrived, msg)) = exec_rx.recv().await {
+        while let Some(HeldFrame { arrived, frame }) = exec_rx.recv().await {
             let delay = delay_ms.load(Ordering::Relaxed);
             if delay > 0 {
                 // `deadline - now` phrased as a saturating remainder so a
@@ -464,7 +704,7 @@ pub(crate) fn spawn_exec_pump(
                     tokio::time::sleep(remaining).await;
                 }
             }
-            if out.send(msg).await.is_err() {
+            if out.send(Outbound::Frame(frame)).await.is_err() {
                 break; // writer gone
             }
         }
@@ -492,7 +732,7 @@ pub(crate) fn heartbeat_period(interval_ms: u64, sim: SimClock) -> Duration {
 fn spawn_heartbeat(
     interval_ms: u64,
     sim: SimClock,
-    tx: mpsc::Sender<ServerMessage>,
+    tx: mpsc::Sender<Outbound>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let period = heartbeat_period(interval_ms, sim);
@@ -509,10 +749,20 @@ fn spawn_heartbeat(
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            // Serialized here like every other producer, and charged to no
+            // budget: the heartbeat is server-generated at a bounded cadence,
+            // it is not engine output, and it predates the lanes. The `expect`
+            // is a `{ts_event: u64}` - unserializable by construction.
             if tx
-                .send(ServerMessage::Heartbeat {
-                    ts_event: sim_now_ns(sim),
-                })
+                .send(Outbound::Frame(OutboundFrame {
+                    payload: serde_json::to_string(&ServerMessage::Heartbeat {
+                        ts_event: sim_now_ns(sim),
+                    })
+                    .expect("Heartbeat serializes"),
+                    is_market_data: false,
+                    charge: None,
+                    slot: None,
+                }))
                 .await
                 .is_err()
             {
@@ -653,13 +903,18 @@ pub(crate) fn dedup_symbols(mut symbols: Vec<String>) -> Vec<String> {
     symbols
 }
 
+/// Whether a frame is order-lifecycle/account traffic, as opposed to market
+/// data OR admission truth.
+///
+/// Delegates to the protocol's shared classifier (`ServerMessage::category`) so
+/// the server's `DelayAcks` delay path and the adapter's inbound latency
+/// bucketing decide this from one source of truth - notably `AccountState`, an
+/// account event that reports balances and positions moved by fills, which both
+/// ends agree rides the execution path. Note the three-way split: an admission
+/// frame (`AdmissionRejected`, `ProtocolError`) is NEITHER execution nor market
+/// data, because it is not something the engine produced, which is exactly what
+/// exempts it from the knob that holds engine output.
 pub(crate) fn is_execution_event(msg: &ServerMessage) -> bool {
-    // Delegates to the protocol's shared classifier (`ServerMessage::category`)
-    // so the server's `DelayAcks` delay path and the adapter's inbound latency
-    // bucketing decide exec-vs-data from one source of truth. Execution traffic
-    // is everything but market data - notably `AccountState`, an account event
-    // that reports balances and positions moved by fills, which both ends now
-    // agree rides the execution path.
     msg.category().is_execution()
 }
 
@@ -673,12 +928,20 @@ pub(crate) struct ReplaySpawn {
     pub(crate) sim: SimClock,
     /// The boot-derived tape origin every generator anchors at.
     pub(crate) data_origin: u64,
-    pub(crate) tx: mpsc::Sender<ServerMessage>,
-    /// The session's execution-delay pump. `ProtocolError` classifies as
-    /// execution (`ServerMessage::category`), so the thread's diagnostics ride
-    /// this channel - where an armed `DelayAcks` holds them - instead of the
-    /// market-data `tx` (S10).
-    pub(crate) exec_tx: mpsc::Sender<(Instant, ServerMessage)>,
+    pub(crate) tx: mpsc::Sender<Outbound>,
+    /// The session's outbound lanes. The thread's diagnostics are admission
+    /// truth (`ProtocolError` classifies `EventKind::Admission`), so they ride
+    /// the PRIORITY lane - ahead of held traffic and exempt from `DelayAcks` -
+    /// instead of the market-data `tx`.
+    pub(crate) lanes: ExecLanes,
+    /// The promise reserved for this replay's ONE possible diagnostic (the
+    /// dead-seek), taken by the handler BEFORE it quiesced whatever stream this
+    /// one replaces. Moved into the OS thread so it is released exactly when the
+    /// thread exits, whether or not it ever fired. Single-use by type: spending
+    /// it consumes it, which is what makes "at most one diagnostic per replay"
+    /// a fact rather than a hope. `None` for the direct-`spawn_replay` unit
+    /// tests, which do not ration.
+    pub(crate) diag_ticket: Option<Ticket>,
     pub(crate) cancel: Arc<AtomicBool>,
     /// The predecessor stream's last successfully-sent `ts_event` for this
     /// symbol, when this spawn replaces one quiesced just now. `None` for a
@@ -720,6 +983,46 @@ pub(crate) fn resume_seek_target(start_ts: Option<u64>, resume_floor: Option<u64
     }
 }
 
+/// Spend a replay's reserved diagnostic promise on one `ProtocolError`.
+///
+/// Converting a promise into a queued frame re-checks the QUEUE budget: a
+/// promise guarantees the venue has ACCOUNTED for this diagnostic, not that the
+/// priority queue can never be full. Conflating those two is what makes a
+/// single-pool design wrong. A full queue or a closed lane means the client is
+/// already gone or is not reading at all, and the thread exits either way -
+/// this runs on its own OS thread, so it may neither block nor stall anything.
+///
+/// Takes the ticket by `&mut Option` so spending it CONSUMES it: a second call
+/// finds `None`, logs loudly, and does not silently emit an unaccounted frame.
+fn spend_diagnostic(
+    lanes: &ExecLanes,
+    promise: &mut Option<Ticket>,
+    symbol: &str,
+    reason: String,
+    ts_event: u64,
+) {
+    let Some(promise) = promise.take() else {
+        tracing::error!(
+            %symbol,
+            "replay diagnostic promise already spent; a second diagnostic is unaccounted for"
+        );
+        return;
+    };
+    // The promise is released here regardless: it has done its job, and the
+    // queue slot is what bounds the frame from here on.
+    drop(promise);
+    let Some(slot) = lanes.reserve_admission() else {
+        tracing::warn!(%symbol, "priority lane full; replay diagnostic undeliverable");
+        return;
+    };
+    if lanes
+        .emit_admission(slot, ServerMessage::ProtocolError { reason, ts_event })
+        .is_err()
+    {
+        tracing::debug!(%symbol, "protocol error frame undeliverable; client gone");
+    }
+}
+
 /// Stream generated trades for one symbol as market data into `tx`, returning
 /// the joinable thread handle so the caller can reap it.
 ///
@@ -739,7 +1042,8 @@ pub(crate) fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
         sim,
         data_origin,
         tx,
-        exec_tx,
+        lanes,
+        diag_ticket,
         cancel,
         resume_floor,
         last_sent_ts,
@@ -749,6 +1053,10 @@ pub(crate) fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
         // Held for the thread's whole life and released the instant it exits,
         // so the global replay-capacity pool (S22a) tracks live threads exactly.
         let _permit = permit;
+        // Likewise for the promise: unspent, it is returned to the pool when
+        // this thread exits, so a healthy replay costs the connection nothing
+        // permanent.
+        let mut diag_ticket = diag_ticket;
         let symbols = [symbol.clone()];
         // Seek the shared tape to sim-now (or the resume cursor) instead of
         // re-anchoring a fresh generator behind now. Computed here, at the start of
@@ -771,31 +1079,26 @@ pub(crate) fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
             // the data plane - a silent return here left the subscribe
             // indistinguishable from a healthy-but-idle feed.
             tracing::warn!(%symbol, "subscribe for unknown symbol streams nothing");
-            // Best-effort diagnostic: an Err means the client is already gone
-            // (channel closed or subscription cancelled), so there is nobody
-            // left to tell - the thread exits either way. Rides the exec pump
-            // (not `tx`) so DelayAcks holds it like every execution event
-            // (S10). Production cannot reach this branch anymore - the
-            // subscribe handler pre-filters unknown symbols (S22) - but the
-            // guard stays for any other `spawn_replay` caller.
-            if send_cancellable(
-                &exec_tx,
-                (
-                    Instant::now(),
-                    ServerMessage::ProtocolError {
-                        reason: format!(
-                            "subscribe for unknown symbol {symbol}: the venue does not list it, \
-                             no data will stream"
-                        ),
-                        ts_event: sim.sim_ns(now_ns()),
-                    },
+            // Best-effort diagnostic on the PRIORITY lane, spending this
+            // replay's promise. Production cannot reach this branch - the
+            // subscribe handler pre-filters unknown symbols (S22), which is
+            // what makes ONE promise per replay sufficient - but the guard
+            // stays for any other `spawn_replay` caller, and it asserts rather
+            // than silently under-covering if that pre-filtering ever regresses.
+            debug_assert!(
+                diag_ticket.is_some(),
+                "an unknown-symbol replay spent its diagnostic promise already"
+            );
+            spend_diagnostic(
+                &lanes,
+                &mut diag_ticket,
+                &symbol,
+                format!(
+                    "subscribe for unknown symbol {symbol}: the venue does not list it, \
+                     no data will stream"
                 ),
-                &cancel,
-            )
-            .is_err()
-            {
-                tracing::debug!(%symbol, "protocol error frame undeliverable; client gone");
-            }
+                sim.sim_ns(now_ns()),
+            );
             return;
         };
         tracing::info!(%symbol, ?start_ts, sim_now, data_origin, ?regime, "replay started");
@@ -819,29 +1122,20 @@ pub(crate) fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
                 budget = source::MAX_HISTORY_SEEK_TICKS,
                 "live subscription could not be positioned; the seek exhausted its tick budget"
             );
-            // Best-effort diagnostic: an Err means the client is already gone
-            // (channel closed or subscription cancelled), so there is nobody
-            // left to tell - the thread exits either way. Rides the exec pump
-            // (not `tx`) so DelayAcks holds it like every execution event (S10).
-            if send_cancellable(
-                &exec_tx,
-                (
-                    Instant::now(),
-                    ServerMessage::ProtocolError {
-                        reason: format!(
-                            "subscription for {symbol} could not be positioned: the seek toward \
-                             its start exhausted the {}-tick budget, no data will stream",
-                            source::MAX_HISTORY_SEEK_TICKS
-                        ),
-                        ts_event: sim.sim_ns(now_ns()),
-                    },
+            // The dead-seek diagnostic: THE one this replay's promise was
+            // reserved for, before the handler quiesced whatever stream this
+            // one replaced.
+            spend_diagnostic(
+                &lanes,
+                &mut diag_ticket,
+                &symbol,
+                format!(
+                    "subscription for {symbol} could not be positioned: the seek toward \
+                     its start exhausted the {}-tick budget, no data will stream",
+                    source::MAX_HISTORY_SEEK_TICKS
                 ),
-                &cancel,
-            )
-            .is_err()
-            {
-                tracing::debug!(%symbol, "protocol error frame undeliverable; client gone");
-            }
+                sim.sim_ns(now_ns()),
+            );
             return;
         };
 
@@ -927,7 +1221,25 @@ pub(crate) fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
                 TickEvent::Trade(t) => ServerMessage::Trade(t),
                 TickEvent::Quote(q) => ServerMessage::Quote(q),
             };
-            if send_cancellable(&tx, msg, &cancel).is_err() {
+            let payload = match serde_json::to_string(&msg) {
+                Ok(payload) => payload,
+                Err(e) => {
+                    tracing::error!(%e, "could not serialize market-data frame");
+                    break;
+                }
+            };
+            if send_cancellable(
+                &tx,
+                Outbound::Frame(OutboundFrame {
+                    payload,
+                    is_market_data: true,
+                    charge: None,
+                    slot: None,
+                }),
+                &cancel,
+            )
+            .is_err()
+            {
                 break; // client gone or stream cancelled
             }
             last_sent_ts.store(ts_event, Ordering::Relaxed);

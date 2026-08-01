@@ -16,6 +16,7 @@ mod config;
 // `gen` is a reserved keyword in the 2024 edition (generator blocks), so the
 // module is declared via the raw identifier; `crate::r#gen` is otherwise the
 // plain `crate::gen` module the spec names throughout.
+mod admission;
 mod r#gen;
 mod http;
 mod man;
@@ -728,6 +729,10 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admission::{
+        CLOSE_ADMISSION_OVERLOAD, CLOSE_GRACE, ExecLanes, HeldFrame, LaneReceivers, Outbound,
+        OutboundFrame,
+    };
     use crate::config::*;
     use crate::http::*;
     use crate::ws::*;
@@ -749,6 +754,27 @@ mod tests {
 
     fn default_profiles() -> Arc<source::InstrumentProfiles> {
         Arc::new(source::InstrumentProfiles::defaults())
+    }
+
+    /// Lanes for a directly-spawned replay, WITH their receivers: a lane whose
+    /// receiver was dropped refuses every send, which would make a test that
+    /// asserts on a diagnostic assert on nothing.
+    fn replay_lanes() -> (ExecLanes, LaneReceivers) {
+        ExecLanes::detached()
+    }
+
+    /// The one diagnostic a replay thread may emit, decoded off the priority
+    /// lane.
+    async fn next_priority_frame(rx: &mut LaneReceivers) -> ServerMessage {
+        let frame = rx
+            .prio_rx
+            .recv()
+            .await
+            .expect("a diagnostic frame, not silence");
+        let Outbound::Frame(frame) = frame else {
+            panic!("expected a frame, got a close")
+        };
+        serde_json::from_str(&frame.payload).expect("a decodable diagnostic")
     }
 
     fn state() -> AppState {
@@ -913,6 +939,48 @@ mod tests {
         validate_balances(&cfg).expect("zero funding is allowed");
     }
 
+    /// The admission budgets are operator config, so a configured venue that
+    /// could never admit anything must die at startup rather than answer every
+    /// order with a capacity refusal. The floor is one boundary refusal - the
+    /// single frame a malformed order produces - because below it even saying
+    /// no is unaffordable.
+    #[test]
+    fn admission_limits_validation_refuses_a_venue_that_cannot_answer() {
+        let defaults = Config::default();
+        validate_admission_limits(&defaults).expect("the shipped defaults are valid");
+
+        let mut cfg = Config {
+            exec_held_budget_bytes: mogwai_protocol::sizing::BOUNDARY_REFUSAL_BYTES - 1,
+            ..Config::default()
+        };
+        let err = validate_admission_limits(&cfg).expect_err("a sub-refusal budget is refused");
+        assert!(err.to_string().contains("exec_held_budget_bytes"));
+
+        cfg = Config {
+            admission_lane_frames: 0,
+            ..Config::default()
+        };
+        let err = validate_admission_limits(&cfg).expect_err("a zero-slot lane is refused");
+        assert!(err.to_string().contains("admission_lane_frames"));
+
+        cfg = Config {
+            admission_promise_tickets: 0,
+            ..Config::default()
+        };
+        let err = validate_admission_limits(&cfg).expect_err("a zero promise pool is refused");
+        assert!(err.to_string().contains("admission_promise_tickets"));
+
+        // The floor binds operator config only: a test that needs a refusal
+        // reachable over a socket builds the value directly, which is what
+        // `reservation_failure_leaves_engine_state_untouched` does.
+        let limits = build_admission_limits(&Config::default());
+        assert_eq!(
+            limits.held_budget_bytes,
+            crate::admission::EXEC_HELD_BUDGET_BYTES,
+            "the config default IS the shipped constant"
+        );
+    }
+
     #[tokio::test]
     async fn clock_route_returns_stored_run_clock_and_tape_boundary() {
         let sim = SimClock {
@@ -1067,19 +1135,32 @@ mod tests {
         .await
         .expect("blocking ws client");
 
+        // Now named for what it is: a frame the venue could not decode is
+        // admission truth, so it comes back attributed to the FRAME subject and
+        // rides the priority lane, exempt from DelayAcks.
         assert!(
-            matches!(frame, ServerMessage::ProtocolError { .. }),
-            "expected ProtocolError, got {frame:?}"
+            matches!(
+                frame,
+                ServerMessage::AdmissionRejected {
+                    subject: mogwai_protocol::AdmissionSubject::Frame,
+                    ..
+                }
+            ),
+            "expected an AdmissionRejected for the undecodable frame, got {frame:?}"
         );
     }
 
     /// MEASUREMENT: does an armed `DelayAcks` stop the venue READING?
     ///
-    /// `docs/protocol-problem.md` problem 1. The exec delay pump is a bounded
-    /// channel (1024) and both of its producers - order-entry events and
-    /// `ProtocolError` diagnostics - `.await` their send from inside the socket
-    /// read loop. If the pump fills, those sends block, and the session stops
-    /// reading client frames entirely. `reference/havoc.md` documents
+    /// `docs/protocol-problem.md` problem 1. The exec delay pump USED to be a
+    /// bounded channel (1024) whose producers - order-entry events and
+    /// `ProtocolError` diagnostics alike - `.await`ed their send from inside the
+    /// socket read loop. If the pump filled, those sends blocked and the session
+    /// stopped reading client frames entirely. Admission control is the answer:
+    /// the held lane is unbounded by channel capacity and bounded by a BYTE
+    /// budget reserved before the engine mutates, so a read-loop send can never
+    /// block, and diagnostics left the pump for the priority lane
+    /// altogether. `reference/havoc.md` documents
     /// `DelayAcks` as holding outbound EXECUTION events by `ms`; it does not say
     /// the venue stops accepting commands. An output-latency fault that silently
     /// becomes an input-refusal fault is indistinguishable from the blackout
@@ -1098,18 +1179,16 @@ mod tests {
     /// submit yields three execution events - OrderAccepted, OrderFilled,
     /// AccountState - so 400 submits is ~1200.
     ///
-    /// `#[ignore]`: this is a proceed/close gate, run deliberately, not a
-    /// regression. It binds a real listener, and while problem 1 stands it is
-    /// expected to FAIL - which is the reading, not a broken suite. Run with
-    /// `brokkr test -p mogwai-server delayed_acks_must_not_stall --debug`.
+    /// Admission control may refuse some of the 400 submits rather than hold
+    /// them, which is also proof the reader remained alive. This remains a
+    /// real listener regression gate: only a silent reader stall fails it.
     #[tokio::test]
-    #[ignore = "measurement gate for docs/protocol-problem.md problem 1; binds a real listener"]
     async fn delayed_acks_must_not_stall_the_socket_read_loop() {
         assert!(
             reader_survives_saturation(30_000).await,
             "an armed DelayAcks must delay OUTPUT only: the venue has to keep reading \
              client frames while execution events sit held, so a Subscribe sent behind a \
-             saturated exec pump must still produce market data. No trade arrived, so \
+             saturated held lane must still produce market data. No trade arrived, so \
              output delay stopped input processing - see docs/protocol-problem.md \
              problem 1. Its control, saturation_witness_control_is_sound, proves the \
              witness itself works with no delay armed"
@@ -1129,7 +1208,7 @@ mod tests {
     async fn saturation_witness_control_is_sound() {
         assert!(
             reader_survives_saturation(0).await,
-            "with no delay armed the exec pump cannot block the reader, so the witness \
+            "with no delay armed the held lane cannot block the reader, so the witness \
              trade must arrive; if this fails the measurement gate above proves nothing"
         );
     }
@@ -1226,11 +1305,11 @@ mod tests {
         // silence - asymmetric with `/trades`, which refuses the identical
         // window with a 422. The subscribe must now announce the shortfall on
         // the wire AND still deliver the origin-anchored stream: the frame is a
-        // diagnostic, not a refusal of the live feed. The diagnostic rides the
-        // exec pump (ProtocolError is execution-category, S10), so it and the
-        // data-channel trades race onto the socket - assert both are present
-        // rather than pinning a strict interleave the exec/data split does not
-        // guarantee.
+        // diagnostic, not a refusal of the live feed. The diagnostic is
+        // admission truth, so it rides the PRIORITY lane while the trades ride
+        // the data channel; the two race onto the socket - assert both are
+        // present rather than pinning a strict interleave the lane split does
+        // not guarantee.
         let state = state();
         let data_origin = state.data_origin_ns;
         let app = Router::new()
@@ -1256,9 +1335,9 @@ mod tests {
             socket
                 .send(tungstenite::Message::Text(subscribe.into()))
                 .expect("send pre-origin subscribe");
-            // The diagnostic rides the exec pump and the trades the data channel,
-            // so they race; read until both have appeared (bounded so a genuinely
-            // missing diagnostic still fails rather than hangs).
+            // The diagnostic rides the priority lane and the trades the data
+            // channel, so they race; read until both have appeared (bounded so a
+            // genuinely missing diagnostic still fails rather than hangs).
             read_until_error_and_trade(&mut socket)
         })
         .await
@@ -1326,7 +1405,7 @@ mod tests {
     /// returning the diagnostic reason and the first trade's `ts_event`. Bounded
     /// so a genuinely absent diagnostic (or trade) fails the test rather than
     /// hanging. Shared by the below-origin and future-clamp subscribe tests, whose
-    /// diagnostic (exec pump) and trades (data channel) race onto the socket.
+    /// diagnostic (priority lane) and trades (data channel) race onto the socket.
     fn read_until_error_and_trade<S: std::io::Read + std::io::Write>(
         socket: &mut tungstenite::WebSocket<S>,
     ) -> (String, u64) {
@@ -1341,7 +1420,11 @@ mod tests {
                     match serde_json::from_str::<ServerMessage>(&text)
                         .expect("decode ServerMessage")
                     {
-                        ServerMessage::ProtocolError { reason: r, .. } => reason = Some(r),
+                        // Either shape of refusal counts: a degraded subscribe
+                        // is an untargeted `ProtocolError`, while a refused
+                        // symbol arrives coalesced as `AdmissionRejected`.
+                        ServerMessage::ProtocolError { reason: r, .. }
+                        | ServerMessage::AdmissionRejected { reason: r, .. } => reason = Some(r),
                         ServerMessage::Trade(t) => {
                             first_trade_ts.get_or_insert(t.ts_event);
                         }
@@ -1387,17 +1470,19 @@ mod tests {
         for _ in 0..2_000 {
             match socket.read().expect("read ws frame") {
                 tungstenite::Message::Text(text) => {
-                    if let ServerMessage::ProtocolError { reason, .. } =
-                        serde_json::from_str::<ServerMessage>(&text).expect("decode ServerMessage")
+                    match serde_json::from_str::<ServerMessage>(&text)
+                        .expect("decode ServerMessage")
                     {
-                        return reason;
+                        ServerMessage::ProtocolError { reason, .. }
+                        | ServerMessage::AdmissionRejected { reason, .. } => return reason,
+                        _ => {}
                     }
                 }
                 tungstenite::Message::Close(_) => panic!("socket closed before any error"),
                 _ => {}
             }
         }
-        panic!("no ProtocolError arrived within the frame budget");
+        panic!("no refusal arrived within the frame budget");
     }
 
     #[tokio::test]
@@ -1461,28 +1546,915 @@ mod tests {
         );
     }
 
+    /// S22a under admission control: a subscribe naming the whole cap in
+    /// unknown symbols must cost ONE priority frame and leave the connection up.
+    ///
+    /// Per-symbol refusals coalesce for exactly this reason. Emitted one frame
+    /// per symbol they would overrun the 64-slot priority lane on the 65th
+    /// symbol and close a connection that `config.rs`'s S22a contract promises
+    /// stays open - a capacity bound turning into a functional refusal.
+    #[tokio::test]
+    async fn coalesced_subscribe_refusal_keeps_the_connection_up() {
+        let app = Router::new()
+            .route("/ws", get(ws_upgrade))
+            .with_state(state());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            drop(axum::serve(listener, app).await);
+        });
+
+        let frames = tokio::task::spawn_blocking(move || {
+            let (mut socket, _) =
+                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            let unknown: Vec<String> = (0..mogwai_protocol::MAX_SUBSCRIBE_SYMBOLS)
+                .map(|i| format!("NOPE{i}"))
+                .collect();
+            let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
+                symbols: unknown,
+                start_ts: None,
+                regime: None,
+            })
+            .expect("encode subscribe");
+            socket
+                .send(tungstenite::Message::Text(subscribe.into()))
+                .expect("send all-unknown subscribe");
+            let refusal = match socket.read().expect("read ws frame") {
+                tungstenite::Message::Text(text) => {
+                    serde_json::from_str::<ServerMessage>(&text).expect("decode ServerMessage")
+                }
+                other => panic!("expected the coalesced refusal, got {other:?}"),
+            };
+            // The connection is still usable: a good subscribe sent behind the
+            // refusal still streams.
+            let good = serde_json::to_string(&ClientMessage::Subscribe {
+                symbols: vec!["BTCUSDT".to_string()],
+                start_ts: None,
+                regime: None,
+            })
+            .expect("encode subscribe");
+            socket
+                .send(tungstenite::Message::Text(good.into()))
+                .expect("the connection is still up");
+            let trade_ts = read_until_trade(&mut socket);
+            (refusal, trade_ts)
+        })
+        .await
+        .expect("blocking ws client");
+
+        let (refusal, trade_ts) = frames;
+        let ServerMessage::AdmissionRejected {
+            subject:
+                mogwai_protocol::AdmissionSubject::Subscribe {
+                    symbols,
+                    refused_total,
+                },
+            ..
+        } = refusal
+        else {
+            panic!("expected ONE coalesced Subscribe refusal, got {refusal:?}")
+        };
+        assert_eq!(
+            refused_total,
+            mogwai_protocol::MAX_SUBSCRIBE_SYMBOLS,
+            "the true count is reported even though the list is truncated"
+        );
+        assert_eq!(
+            symbols.len(),
+            mogwai_protocol::MAX_REFUSED_SYMBOLS_LISTED,
+            "the listed symbols are capped, which is what bounds the frame"
+        );
+        assert!(trade_ts > 0, "the surviving connection still streams");
+    }
+
+    /// A resting limit buy, priced far under the market so it never fills and
+    /// the book's shape (balances, positions) stays put between submits.
+    fn resting_submit(id: &str) -> String {
+        serde_json::to_string(&ClientMessage::SubmitOrder(SubmitOrder {
+            client_order_id: id.to_string(),
+            symbol: "BTCUSDT".to_string(),
+            side: Side::Buy,
+            order_type: OrderType::Limit,
+            quantity: Decimal::new(1, 0),
+            price: Some(Decimal::new(10_000, 2)),
+            time_in_force: TimeInForce::Gtc,
+        }))
+        .expect("encode submit")
+    }
+
+    /// Serve `state` on an ephemeral port and return its address. The four
+    /// admission tests below all need the same three lines.
+    async fn serve_ws(state: AppState) -> std::net::SocketAddr {
+        let app = Router::new()
+            .route("/ws", get(ws_upgrade))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            drop(axum::serve(listener, app).await);
+        });
+        addr
+    }
+
+    /// I2 over a real socket: a command whose worst-case output cannot be
+    /// reserved never reaches the engine.
+    ///
+    /// The held budget is set below one submit's worst case, so the reservation
+    /// in `process_order_cmd` fails BEFORE the engine lock's `process` call. The
+    /// refusal is visible (I5) and, crucially, the venue's own truth channel
+    /// agrees: a `QueryOrders` afterwards reports an empty book - no venue order
+    /// id burned, no order resting. A refusal that had let the engine mutate
+    /// first would show the order here and leave the client and the venue
+    /// permanently disagreeing about whether it exists.
+    ///
+    /// The budget is a config knob for exactly this reason: at the shipped 8 MiB
+    /// this branch is reachable only by first pushing megabytes of held output
+    /// through a stalled connection, and the resulting test would measure timing
+    /// luck rather than the invariant. `QueryOrders` still fits the small budget
+    /// (an empty book's snapshot is a few hundred bytes), so the witness is not
+    /// itself refused.
+    #[tokio::test]
+    async fn reservation_failure_leaves_engine_state_untouched() {
+        let mut state = state();
+        state.cfg.exec_held_budget_bytes = 4096;
+        let addr = serve_ws(state).await;
+
+        let (refusal, snapshot) = tokio::task::spawn_blocking(move || {
+            let (mut socket, _) =
+                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            socket
+                .send(tungstenite::Message::Text(
+                    resting_submit("UNRESERVABLE").into(),
+                ))
+                .expect("send submit");
+            let refusal = read_until_admission_rejected(&mut socket);
+            let query = serde_json::to_string(&ClientMessage::QueryOrders {
+                request_id: "Q-AFTER-REFUSAL".to_string(),
+                client_order_id: None,
+                open_only: false,
+            })
+            .expect("encode query");
+            socket
+                .send(tungstenite::Message::Text(query.into()))
+                .expect("send query");
+            let snapshot = read_until_order_snapshot(&mut socket);
+            (refusal, snapshot)
+        })
+        .await
+        .expect("blocking ws client");
+
+        let ServerMessage::AdmissionRejected { subject, .. } = &refusal else {
+            unreachable!("the reader returns only AdmissionRejected")
+        };
+        assert!(
+            matches!(
+                subject,
+                mogwai_protocol::AdmissionSubject::Submit { client_order_id }
+                    if client_order_id == "UNRESERVABLE"
+            ),
+            "the refusal is attributed to the submit it refused: {subject:?}"
+        );
+        assert!(
+            snapshot.orders.is_empty(),
+            "a refused submit must not have reached the engine, yet the venue \
+             reports {:?}",
+            snapshot.orders
+        );
+    }
+
+    /// I6 over a real socket: when the priority lane cannot take a refusal, the
+    /// connection ends with a STATED reason rather than a silent stall.
+    ///
+    /// Reaching the condition needs the priority lane to actually back up, and a
+    /// queued frame only holds its slot until the writer writes it - so the
+    /// writer has to be parked. The peer subscribes the firehose and then stops
+    /// reading, which fills its receive window and parks the writer inside
+    /// `sink.send`; the refusals it then provokes with undecodable frames pile up
+    /// unwritten, and the lane (two slots here, 64 in production) runs out. The
+    /// peer resumes reading only to collect what the venue said on the way out.
+    ///
+    /// `admission_lane_frames` is a config knob because at 64 this setup would
+    /// need 64 refusals to survive a race against a writer that may drain at any
+    /// moment; at two it is deterministic and tests the identical branch.
+    #[tokio::test]
+    async fn admission_lane_overload_closes_with_a_reason() {
+        let mut state = state();
+        state.cfg.admission_lane_frames = 2;
+        let addr = serve_ws(state).await;
+
+        let close = tokio::task::spawn_blocking(move || {
+            let (mut socket, _) =
+                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            park_the_writer(&mut socket);
+            // Undecodable frames: each is admission truth the venue must state,
+            // and each takes a priority slot it cannot get back while the writer
+            // is parked. Exactly one more than the lane holds, and not one
+            // further: the read loop stops at the overload, so any extra frames
+            // sit unread in the venue's receive queue and make the kernel answer
+            // the socket's drop with an RST - which discards this client's
+            // receive buffer, close frame and all. The reasoned close would then
+            // be lost to the transport rather than to the venue.
+            for _ in 0..3 {
+                socket
+                    .send(tungstenite::Message::Text("{\"type\":\"Nonsense\"}".into()))
+                    .expect("send undecodable frame");
+            }
+            read_until_close(&mut socket)
+        })
+        .await
+        .expect("blocking ws client");
+
+        let close = close.expect("an overload close, not a silent stall or a drop");
+        assert_eq!(
+            u16::from(close.code),
+            CLOSE_ADMISSION_OVERLOAD,
+            "the close names the overload with WS 1013 Try Again Later"
+        );
+        assert!(
+            !close.reason.is_empty(),
+            "a close without a reason is the silence this invariant forbids"
+        );
+    }
+
+    /// The other half of 5.8: the reasoned close is best-effort, releasing the
+    /// connection's resources is not.
+    ///
+    /// The peer here never reads at all, so the writer stays parked in
+    /// `sink.send` and the close frame is never written. Teardown must not block
+    /// behind it: after `CLOSE_GRACE` the writer is aborted and the socket
+    /// dropped. Two things a client can see prove it happened:
+    ///
+    /// - the replay pool, capped at one, hands its permit to a SECOND connection
+    ///   - so the wedged connection's replay threads were cancelled and joined;
+    /// - the wedged socket itself is dead, and dead WITHOUT a reasoned close on
+    ///   it. That absence is the load-bearing half. Had teardown awaited the
+    ///   writer unconditionally, the writer would still be parked when this peer
+    ///   finally reads, would then unpark, and would deliver its whole backlog
+    ///   AND the close - so "ended, with no close" distinguishes the forced
+    ///   teardown from the patient one, which is exactly 5.8's claim: the
+    ///   reasoned close is attempted, the teardown does not depend on it.
+    #[tokio::test]
+    async fn overload_close_terminates_against_a_nonreading_peer() {
+        let mut state = state();
+        state.cfg.admission_lane_frames = 1;
+        state.cfg.max_concurrent_replays = 1;
+        state.replay_permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let addr = serve_ws(state).await;
+
+        let (trade_ts, wedged_end) = tokio::task::spawn_blocking(move || {
+            let (mut wedged, _) =
+                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect one");
+            park_the_writer(&mut wedged);
+            for _ in 0..2 {
+                wedged
+                    .send(tungstenite::Message::Text("{\"type\":\"Nonsense\"}".into()))
+                    .expect("send undecodable frame");
+            }
+            // Nothing is read from `wedged` while the venue gives up on it -
+            // exactly the peer 5.8 describes.
+            std::thread::sleep(CLOSE_GRACE + Duration::from_secs(2));
+
+            let (mut fresh, _) =
+                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect two");
+            let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
+                symbols: vec!["BTCUSDT".to_string()],
+                start_ts: None,
+                regime: None,
+            })
+            .expect("encode subscribe");
+            fresh
+                .send(tungstenite::Message::Text(subscribe.into()))
+                .expect("send subscribe");
+            let ts = read_until_trade(&mut fresh);
+
+            // A read timeout turns "the venue is still holding this socket open"
+            // into a failure rather than a hang.
+            if let tungstenite::stream::MaybeTlsStream::Plain(tcp) = wedged.get_ref() {
+                tcp.set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("set read timeout");
+            }
+            let end = drain_until_end(&mut wedged);
+            (ts, end)
+        })
+        .await
+        .expect("blocking ws client");
+
+        assert!(
+            trade_ts > 0,
+            "the only replay permit was still held, so the overloaded connection \
+             never finished tearing down"
+        );
+        assert_eq!(
+            wedged_end,
+            PeerEnd::Dropped,
+            "the venue must have given up on this peer within CLOSE_GRACE and \
+             dropped the socket: StillOpen means teardown is waiting on it, and \
+             Close means the writer was never parked so the setup proved nothing"
+        );
+    }
+
+    /// The held budget is a ceiling on produced-but-UNWRITTEN bytes, so writing
+    /// a frame must give its bytes back - end to end, through the real writer.
+    ///
+    /// Sized at exactly one submit's worst case, five sequential submits are
+    /// possible only if each batch's charge returns as the writer puts it on the
+    /// socket. A leak of a single byte refuses the second one. The same budget
+    /// then proves the other direction: with a 30 s `DelayAcks` armed nothing is
+    /// written, the budget stays charged, and the next submit is refused - the
+    /// refusal itself arriving promptly, because admission is not held (I4).
+    /// Clearing the delay drains the held frames and the budget comes back, so
+    /// submits are admitted again.
+    #[tokio::test]
+    async fn held_budget_is_returned_on_write_and_on_disconnect() {
+        let state = state();
+        let delay_ms = Arc::clone(&state.delay_ms);
+        let mut state = state;
+        // One submit's worst case, against the widest book these submits can
+        // produce: accepting an order can introduce the balance and position
+        // rows the empty book has not got yet, and `worst_case_output_bytes`
+        // widens by exactly that much itself, so sizing against the pre-command
+        // shape would leave the budget a few hundred bytes short of the SECOND
+        // command and the test would fail for arithmetic rather than for a leak.
+        // It is still one command's budget: two of these never fit.
+        let shape = state.engine.lock().await.book_shape();
+        state.cfg.exec_held_budget_bytes = mogwai_protocol::sizing::worst_case_output_bytes(
+            &serde_json::from_str::<ClientMessage>(&resting_submit("SIZE")).expect("decode"),
+            &mogwai_protocol::sizing::BookShape {
+                balances: shape.balances + 2,
+                positions: shape.positions + 1,
+                ..shape
+            },
+        );
+        let budget = state.cfg.exec_held_budget_bytes;
+        let addr = serve_ws(state).await;
+
+        tokio::task::spawn_blocking(move || {
+            let (mut socket, _) =
+                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            for i in 0..5 {
+                socket
+                    .send(tungstenite::Message::Text(
+                        resting_submit(&format!("DRAIN-{i}")).into(),
+                    ))
+                    .expect("send submit");
+                // Read the whole batch out (the AccountState is its last frame),
+                // which is what makes the budget available for the next one.
+                read_until_account_state(&mut socket, &format!("DRAIN-{i}"));
+            }
+
+            // Nothing is written while the delay is armed, so the budget stays
+            // charged and the SECOND submit cannot be reserved. The window is
+            // seconds rather than the spec's illustrative 30 s because a frame
+            // already dequeued by the pump is sleeping out ITS deadline -
+            // clearing the divergence reaches frames still queued, not the one
+            // in the pump's hand - so a 30 s arm would make the drain below a
+            // 30 s wait rather than a test.
+            delay_ms.store(2_000, Ordering::Relaxed);
+            socket
+                .send(tungstenite::Message::Text(resting_submit("HELD").into()))
+                .expect("send held submit");
+            socket
+                .send(tungstenite::Message::Text(resting_submit("REFUSED").into()))
+                .expect("send unreservable submit");
+            let refusal = read_until_admission_rejected(&mut socket);
+            let ServerMessage::AdmissionRejected { subject, .. } = &refusal else {
+                unreachable!("the reader returns only AdmissionRejected")
+            };
+            assert!(
+                matches!(
+                    subject,
+                    mogwai_protocol::AdmissionSubject::Submit { client_order_id }
+                        if client_order_id == "REFUSED"
+                ),
+                "the refusal arrives while the held batch is still held: {subject:?}"
+            );
+
+            // The held batch reaches the writer when its own deadline expires,
+            // and the writer returns its bytes as it writes them; the cleared
+            // delay keeps the final submit prompt.
+            delay_ms.store(0, Ordering::Relaxed);
+            read_until_account_state(&mut socket, "HELD");
+            socket
+                .send(tungstenite::Message::Text(
+                    resting_submit("AFTER-DRAIN").into(),
+                ))
+                .expect("send post-drain submit");
+            read_until_account_state(&mut socket, "AFTER-DRAIN");
+        })
+        .await
+        .expect("blocking ws client");
+
+        assert!(
+            budget > 0,
+            "the test is only meaningful against a real one-command budget"
+        );
+    }
+
+    /// 3.3a's not-optional clause: a resubscribe reserves the promise of its
+    /// replay's ONE possible diagnostic (the dead-seek) BEFORE it quiesces the
+    /// stream that replay replaces.
+    ///
+    /// The promise pool is sized at one here, so the live BTCUSDT stream holds
+    /// the only ticket and the resubscribe of that same symbol cannot get one.
+    /// Reserving after the quiesce would destroy a healthy stream and only then
+    /// discover it has nothing to say about why; reserving first means the
+    /// connection ends with the overload reason STATED while the in-flight
+    /// replay is still running.
+    ///
+    /// The ORDER is what this measures, and the close is what measures it: a
+    /// quiesce joins the old replay thread, which drops that replay's promise
+    /// ticket - so a handler that quiesced first would find the pool free again
+    /// and sail through, tearing down a live stream on a connection that never
+    /// learned it was at its limit. The close therefore only exists in the
+    /// correct ordering. The trade assertions carry the rest of the clause: the
+    /// original stream was live and stayed ascending, i.e. it was not replaced
+    /// by a re-seeking one on the way out.
+    #[tokio::test]
+    async fn subscribe_reserves_diagnostic_capacity_before_quiescing() {
+        let mut state = state();
+        state.cfg.admission_promise_tickets = 1;
+        let addr = serve_ws(state).await;
+
+        let (trades_before, trades_after, close) = tokio::task::spawn_blocking(move || {
+            let (mut socket, _) =
+                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
+                symbols: vec!["BTCUSDT".to_string()],
+                start_ts: None,
+                regime: None,
+            })
+            .expect("encode subscribe");
+            socket
+                .send(tungstenite::Message::Text(subscribe.clone().into()))
+                .expect("send subscribe");
+            // The stream is live, so its promise ticket is genuinely held.
+            let first_ts = read_until_trade(&mut socket);
+
+            socket
+                .send(tungstenite::Message::Text(subscribe.into()))
+                .expect("send resubscribe");
+            let mut after: Vec<u64> = Vec::new();
+            let mut close = None;
+            for _ in 0..200_000 {
+                match socket.read() {
+                    Ok(tungstenite::Message::Text(text)) => {
+                        if let ServerMessage::Trade(t) =
+                            serde_json::from_str::<ServerMessage>(&text)
+                                .expect("decode ServerMessage")
+                        {
+                            after.push(t.ts_event);
+                        }
+                    }
+                    Ok(tungstenite::Message::Close(frame)) => {
+                        close = frame;
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+            (first_ts, after, close)
+        })
+        .await
+        .expect("blocking ws client");
+
+        let close = close.expect("the refused resubscribe must state its reason, not go silent");
+        assert_eq!(
+            u16::from(close.code),
+            CLOSE_ADMISSION_OVERLOAD,
+            "the close names the admission overload"
+        );
+        assert!(
+            close.reason.contains("diagnostic capacity"),
+            "the close names the promise pool it could not draw from: {}",
+            close.reason
+        );
+        assert!(trades_before > 0, "the original stream was live");
+        assert!(
+            trades_after.iter().all(|ts| *ts > trades_before),
+            "the in-flight replay was neither torn down nor replaced by a \
+             re-seeking one: its trades stay ahead of the last pre-resubscribe \
+             tick, got {trades_after:?} after {trades_before}"
+        );
+        assert!(
+            trades_after.windows(2).all(|w| w[1] > w[0]),
+            "a stream quiesced and replaced before the refusal would seam here: \
+             {trades_after:?}"
+        );
+    }
+
+    /// 5.7: with one lane's sender dropped and the other still alive, the writer
+    /// PARKS. The per-branch disable flags are what create that property - a
+    /// bare `biased` select over both receivers sees the closed one answer
+    /// `None` instantly and forever, and never reaches an await that yields.
+    ///
+    /// The failure is not a hang - tokio's cooperative budget makes even a
+    /// tight `recv()` loop yield every so often, so a starvation probe would
+    /// pass against the naive shape. It is a BURNED CORE, so this measures CPU:
+    /// the writer gets a dedicated thread with its own current-thread runtime,
+    /// and that thread's own utime+stime (from `/proc/thread-self/stat`, so no
+    /// other test's load is in the reading) is sampled across a wall window in
+    /// which the venue has nothing whatsoever to write. A parked writer spends
+    /// approximately none of it; the flagless `select!` spends all of it.
+    #[test]
+    fn writer_does_not_spin_when_one_lane_closes() {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .expect("current-thread runtime");
+            rt.block_on(async move {
+                let (held_tx, held_rx) = mpsc::channel::<Outbound>(8);
+                let (prio_tx, prio_rx) = mpsc::unbounded_channel::<Outbound>();
+                // Same thread as the measurement: `spawn` on a current-thread
+                // runtime, so the writer's CPU is this thread's CPU.
+                let writer = tokio::spawn(run_writer(
+                    futures_util::sink::drain(),
+                    prio_rx,
+                    held_rx,
+                    SimClock::identity(),
+                    Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                ));
+                // One lane closes; the priority lane stays open, which is the
+                // exact asymmetry the naive select! spins on.
+                drop(held_tx);
+                let before = thread_cpu_ticks();
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                let burned = thread_cpu_ticks() - before;
+                // The parked writer is still a writer: the surviving lane still
+                // reaches it, and its close still ends the task.
+                prio_tx
+                    .send(Outbound::Close(crate::admission::CloseSpec::overload(
+                        "end of test",
+                    )))
+                    .expect("the priority lane is still open");
+                writer.await.expect("the writer ends on the close");
+                done_tx.send(burned).ok();
+            });
+        });
+
+        let burned = done_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the writer thread never reported");
+        // Ticks, not seconds, so no assumption about `_SC_CLK_TCK` beyond it
+        // being coarse: 400 ms of wall with nothing to write is tens of ticks
+        // when the loop spins and zero or one when it parks.
+        assert!(
+            burned <= 4,
+            "the writer burned {burned} CPU ticks with both lanes idle and one \
+             closed: it is spinning on the closed receiver rather than parking"
+        );
+    }
+
+    /// This thread's own CPU time (utime + stime) in kernel ticks. Per-thread
+    /// rather than per-process because the test binary's other threads would
+    /// otherwise drown the signal.
+    fn thread_cpu_ticks() -> u64 {
+        let stat = std::fs::read_to_string("/proc/thread-self/stat").expect("read thread stat");
+        // The comm field is parenthesized and may itself contain spaces, so
+        // fields are counted from after its closing paren: utime and stime are
+        // the 12th and 13th from there.
+        let rest = stat
+            .rsplit_once(')')
+            .expect("stat carries a parenthesized comm")
+            .1;
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        let utime: u64 = fields[11].parse().expect("utime");
+        let stime: u64 = fields[12].parse().expect("stime");
+        utime + stime
+    }
+
+    /// 5.3's ceiling is only provable if EVERY admission frame's reason is
+    /// truncated, and the two `ProtocolError` sites are the ones that carry
+    /// client-controlled text: serde's decode-error string quotes the unknown
+    /// variant it was handed, and the unservable-subscribe diagnostic
+    /// interpolates the client's symbol. Both come back under
+    /// `ADMISSION_FRAME_MAX_BYTES`, which is what makes the priority lane's
+    /// FRAME count a memory bound (3.3). Measured on the bytes the client
+    /// actually received, over a real socket, so it gates the production sites
+    /// rather than `truncate_reason` itself.
+    #[tokio::test]
+    async fn protocol_error_reasons_are_truncated() {
+        let addr = serve_ws(state()).await;
+
+        let (undecodable, unknown_symbol) = tokio::task::spawn_blocking(move || {
+            let (mut socket, _) =
+                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+            // A megabyte of client-controlled text inside serde's own error
+            // message: the variant name is echoed back verbatim by
+            // `serde_json::Error::to_string`.
+            let nonsense = format!("{{\"type\":\"{}\"}}", "N".repeat(1024 * 1024));
+            socket
+                .send(tungstenite::Message::Text(nonsense.into()))
+                .expect("send undecodable frame");
+            let undecodable = read_until_text(&mut socket);
+
+            // A symbol at exactly the wire cap: long enough to pass validation,
+            // unknown enough to be refused, and interpolated into the reason.
+            let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
+                symbols: vec!["Z".repeat(mogwai_protocol::MAX_SYMBOL_LEN)],
+                start_ts: None,
+                regime: None,
+            })
+            .expect("encode subscribe");
+            socket
+                .send(tungstenite::Message::Text(subscribe.into()))
+                .expect("send unknown-symbol subscribe");
+            let unknown_symbol = read_until_text(&mut socket);
+            (undecodable, unknown_symbol)
+        })
+        .await
+        .expect("blocking ws client");
+
+        for frame in [&undecodable, &unknown_symbol] {
+            let msg = serde_json::from_str::<ServerMessage>(frame).expect("decode ServerMessage");
+            assert!(
+                matches!(
+                    msg,
+                    ServerMessage::ProtocolError { .. } | ServerMessage::AdmissionRejected { .. }
+                ),
+                "expected admission truth, got {msg:?}"
+            );
+            assert!(
+                frame.len() <= mogwai_protocol::ADMISSION_FRAME_MAX_BYTES,
+                "an admission frame of {} bytes breaks the lane's frame-count \
+                 bound: {frame}",
+                frame.len()
+            );
+        }
+        assert!(
+            !undecodable.contains(&"N".repeat(1024)),
+            "the undecodable-frame diagnostic echoed the client's text back \
+             unbounded"
+        );
+    }
+
+    /// Read the next text frame, returning it raw: the SERIALIZED bytes are what
+    /// a per-frame ceiling is a claim about.
+    fn read_until_text<S: std::io::Read + std::io::Write>(
+        socket: &mut tungstenite::WebSocket<S>,
+    ) -> String {
+        for _ in 0..2_000 {
+            match socket.read().expect("read ws frame") {
+                tungstenite::Message::Text(text) => return text.to_string(),
+                tungstenite::Message::Close(_) => panic!("socket closed with no reply"),
+                _ => {}
+            }
+        }
+        panic!("no frame arrived within the frame budget");
+    }
+
+    /// 5.1's control-plane clause: `RejectNextSubmit.reason` is operator-supplied
+    /// and the engine echoes it VERBATIM into `OrderRejected.reason`, so it is
+    /// truncated at the arming boundary or the size model is not an upper bound
+    /// at all - a 1 MiB armed reason would make a produced frame exceed the
+    /// reservation `worst_case_output_bytes` granted for it.
+    ///
+    /// Both halves are asserted on the frame the venue actually produced: its
+    /// reason stops at `MAX_REASON_LEN` (only the boundary can have done that -
+    /// nothing downstream touches the stored string) and the whole frame fits
+    /// `ORDER_EVENT_MAX_BYTES`.
+    #[tokio::test]
+    async fn armed_reject_reason_is_truncated_at_the_control_boundary() {
+        let state = state();
+        let response = arm_divergence(
+            State(state.clone()),
+            Json(mogwai_protocol::control::Divergence::RejectNextSubmit {
+                reason: "R".repeat(1024 * 1024),
+            }),
+        )
+        .await;
+        let response = axum::response::IntoResponse::into_response(response);
+        assert_eq!(
+            response.status(),
+            StatusCode::ACCEPTED,
+            "the arm is accepted"
+        );
+
+        let events = submit_order_http(
+            State(state),
+            Json(ClientMessage::SubmitOrder(SubmitOrder {
+                client_order_id: "ARMED-REJECT".into(),
+                symbol: "BTCUSDT".into(),
+                side: Side::Buy,
+                order_type: OrderType::Limit,
+                quantity: "1".parse().expect("decimal"),
+                price: Some("100".parse().expect("decimal")),
+                time_in_force: TimeInForce::Gtc,
+            })),
+        )
+        .await
+        .expect("route answers");
+
+        let ServerMessage::OrderRejected { reason, .. } = &events.0[0] else {
+            panic!("expected the armed rejection, got {:?}", events.0[0]);
+        };
+        assert_eq!(
+            reason.len(),
+            mogwai_protocol::MAX_REASON_LEN,
+            "the operator's megabyte was truncated where it was armed, not \
+             echoed at full length"
+        );
+        let frame = serde_json::to_string(&events.0[0]).expect("serialize the rejection");
+        assert!(
+            frame.len() <= mogwai_protocol::sizing::ORDER_EVENT_MAX_BYTES,
+            "an armed reason must not push a produced frame past the bytes \
+             reserved for it: {} bytes",
+            frame.len()
+        );
+    }
+
+    /// Subscribe the firehose and stop reading until the venue's writer is
+    /// parked in `sink.send` against a full receive window. Everything the venue
+    /// produces afterwards stays queued, holding its budget - which is what puts
+    /// a lane into overload without a load generator.
+    fn park_the_writer<S: std::io::Read + std::io::Write>(socket: &mut tungstenite::WebSocket<S>) {
+        let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
+            symbols: vec!["BTCUSDT".to_string()],
+            start_ts: None,
+            regime: None,
+        })
+        .expect("encode subscribe");
+        socket
+            .send(tungstenite::Message::Text(subscribe.into()))
+            .expect("send subscribe");
+        // The unthrottled generator fills the socket in well under this; the
+        // wait is wall time because a TCP window is a transport fact, not a
+        // simulated one.
+        std::thread::sleep(Duration::from_millis(750));
+    }
+
+    /// Read until the first `AdmissionRejected`. Bounded, and a close or a read
+    /// error fails rather than hangs.
+    fn read_until_admission_rejected<S: std::io::Read + std::io::Write>(
+        socket: &mut tungstenite::WebSocket<S>,
+    ) -> ServerMessage {
+        for _ in 0..2_000 {
+            match socket.read().expect("read ws frame") {
+                tungstenite::Message::Text(text) => {
+                    let msg =
+                        serde_json::from_str::<ServerMessage>(&text).expect("decode ServerMessage");
+                    if matches!(msg, ServerMessage::AdmissionRejected { .. }) {
+                        return msg;
+                    }
+                }
+                tungstenite::Message::Close(_) => panic!("socket closed before any refusal"),
+                _ => {}
+            }
+        }
+        panic!("no admission refusal arrived within the frame budget");
+    }
+
+    /// Read until the venue's order-book snapshot for `request_id`.
+    fn read_until_order_snapshot<S: std::io::Read + std::io::Write>(
+        socket: &mut tungstenite::WebSocket<S>,
+    ) -> mogwai_protocol::OrderStatusSnapshot {
+        for _ in 0..2_000 {
+            match socket.read().expect("read ws frame") {
+                tungstenite::Message::Text(text) => {
+                    if let ServerMessage::OrderStatusSnapshot(snapshot) =
+                        serde_json::from_str::<ServerMessage>(&text).expect("decode ServerMessage")
+                    {
+                        return snapshot;
+                    }
+                }
+                tungstenite::Message::Close(_) => panic!("socket closed before the snapshot"),
+                _ => {}
+            }
+        }
+        panic!("no order snapshot arrived within the frame budget");
+    }
+
+    /// Read a submit's batch out to its trailing `AccountState`, asserting the
+    /// order was accepted rather than refused on the way. Draining the batch is
+    /// what returns its held-budget charge.
+    fn read_until_account_state<S: std::io::Read + std::io::Write>(
+        socket: &mut tungstenite::WebSocket<S>,
+        client_order_id: &str,
+    ) {
+        for _ in 0..2_000 {
+            match socket.read().expect("read ws frame") {
+                tungstenite::Message::Text(text) => {
+                    match serde_json::from_str::<ServerMessage>(&text)
+                        .expect("decode ServerMessage")
+                    {
+                        // The batch's trailing frame has reached this client,
+                        // but the venue releases its charge when the WRITER
+                        // drops it - a hair after its `send` returns, which is
+                        // concurrent with this read. Against a budget sized at
+                        // exactly one command that hair is the difference
+                        // between admitted and refused, so let the writer finish
+                        // rather than racing it.
+                        ServerMessage::AccountState(_) => {
+                            std::thread::sleep(Duration::from_millis(150));
+                            return;
+                        }
+                        ServerMessage::AdmissionRejected {
+                            subject, reason, ..
+                        } => panic!(
+                            "{client_order_id} was refused for capacity - the budget did \
+                             not come back: {subject:?} {reason}"
+                        ),
+                        _ => {}
+                    }
+                }
+                tungstenite::Message::Close(_) => panic!("socket closed mid-batch"),
+                _ => {}
+            }
+        }
+        panic!("no AccountState arrived for {client_order_id}");
+    }
+
+    /// How a connection ended, from the client's side.
+    #[derive(Debug, PartialEq, Eq)]
+    enum PeerEnd {
+        /// A websocket close frame arrived - the reasoned exit.
+        Close,
+        /// The transport ended with no close frame: the venue dropped the
+        /// socket.
+        Dropped,
+        /// Neither, within the socket's read timeout: the venue is still holding
+        /// the connection open.
+        StillOpen,
+    }
+
+    /// Drain a socket until it ends, reporting how. Requires a read timeout on
+    /// the underlying stream, or `StillOpen` would hang instead of being
+    /// reported.
+    fn drain_until_end<S: std::io::Read + std::io::Write>(
+        socket: &mut tungstenite::WebSocket<S>,
+    ) -> PeerEnd {
+        for _ in 0..200_000 {
+            match socket.read() {
+                Ok(tungstenite::Message::Close(_)) => return PeerEnd::Close,
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(e))
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return PeerEnd::StillOpen;
+                }
+                Err(_) => return PeerEnd::Dropped,
+            }
+        }
+        PeerEnd::StillOpen
+    }
+
+    /// Read until the venue closes, returning its close frame. `None` means the
+    /// socket ended without one.
+    fn read_until_close<S: std::io::Read + std::io::Write>(
+        socket: &mut tungstenite::WebSocket<S>,
+    ) -> Option<tungstenite::protocol::frame::CloseFrame> {
+        for _ in 0..200_000 {
+            match socket.read() {
+                Ok(tungstenite::Message::Close(frame)) => return frame,
+                Ok(_) => {}
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
     #[tokio::test]
     async fn reconcile_subscribe_start_ts_clamps_future_to_live() {
         // The clamp itself, without a socket: a future start returns None (a live
         // stream from the clock), while an in-range start passes through unchanged.
         let state = state();
-        let (exec_tx, mut exec_rx) = mpsc::channel::<(Instant, ServerMessage)>(8);
+        let (lanes, mut lane_rx) = ExecLanes::detached();
 
         let sim_now = sim_now_ns(state.sim);
         let clamped =
-            reconcile_subscribe_start_ts(Some(sim_now + 3_600_000_000_000), &state, &exec_tx).await;
+            reconcile_subscribe_start_ts(Some(sim_now + 3_600_000_000_000), &state, &lanes)
+                .await
+                .expect("the priority lane took the diagnostic");
         assert_eq!(clamped, None, "a future start clamps to a live stream");
-        let (_, msg) = exec_rx.try_recv().expect("a diagnostic frame was emitted");
-        assert!(matches!(msg, ServerMessage::ProtocolError { .. }));
+        let msg = lane_rx
+            .prio_rx
+            .try_recv()
+            .expect("a diagnostic frame was emitted");
+        assert!(
+            matches!(msg, Outbound::Frame(_)),
+            "the clamp is announced on the priority lane, not held behind DelayAcks"
+        );
 
-        let in_range = reconcile_subscribe_start_ts(Some(sim_now), &state, &exec_tx).await;
+        let in_range = reconcile_subscribe_start_ts(Some(sim_now), &state, &lanes)
+            .await
+            .expect("no diagnostic, no overload");
         assert_eq!(
             in_range,
             Some(sim_now),
             "an in-range start is honored as given"
         );
         assert!(
-            exec_rx.try_recv().is_err(),
+            lane_rx.prio_rx.try_recv().is_err(),
             "an in-range start emits no diagnostic"
         );
     }
@@ -2084,8 +3056,8 @@ mod tests {
             ..Config::default()
         };
         let profiles = default_profiles();
-        let (tx, mut rx) = mpsc::channel::<ServerMessage>(8);
-        let (exec_tx, _exec_rx) = mpsc::channel::<(Instant, ServerMessage)>(8);
+        let (tx, mut rx) = mpsc::channel::<Outbound>(8);
+        let (lanes, _lane_rx) = replay_lanes();
         let cancel = Arc::new(AtomicBool::new(false));
         let handle = spawn_replay(ReplaySpawn {
             symbol: "BTCUSDT".to_string(),
@@ -2099,7 +3071,8 @@ mod tests {
             // this test only checks the stream is live and cancellable.
             data_origin: now_ns(),
             tx,
-            exec_tx,
+            lanes,
+            diag_ticket: None,
             cancel: Arc::clone(&cancel),
             resume_floor: None,
             last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
@@ -2108,10 +3081,7 @@ mod tests {
         // First tick arrives, confirming the stream is live and feeding the
         // default instrument.
         let first = rx.recv().await.expect("a tick");
-        assert!(matches!(
-            first,
-            ServerMessage::Trade(_) | ServerMessage::Quote(_)
-        ));
+        assert!(matches!(first, Outbound::Frame(_)));
 
         // Cancel + join must complete: the thread, even if parked behind the
         // bounded channel, observes the flag within one send-poll and exits.
@@ -2133,8 +3103,8 @@ mod tests {
     /// healthy-but-idle feed - exactly the ambiguity ProtocolError exists for.
     #[tokio::test]
     async fn dead_subscribe_reports_protocol_error_instead_of_silence() {
-        let (tx, mut rx) = mpsc::channel::<ServerMessage>(8);
-        let (exec_tx, mut exec_rx) = mpsc::channel::<(Instant, ServerMessage)>(8);
+        let (tx, mut rx) = mpsc::channel::<Outbound>(8);
+        let (lanes, mut lane_rx) = replay_lanes();
         let cancel = Arc::new(AtomicBool::new(false));
         let handle = spawn_replay(ReplaySpawn {
             symbol: "BTCUSDT".to_string(),
@@ -2146,18 +3116,20 @@ mod tests {
             sim: SimClock::identity(),
             data_origin: now_ns().saturating_sub(60 * 86_400_000_000_000),
             tx,
-            exec_tx,
+            diag_ticket: lanes.reserve_promise(),
+            lanes,
             cancel: Arc::clone(&cancel),
             resume_floor: None,
             last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
             permit: None,
         });
 
-        // The diagnostic classifies as execution, so it rides the exec pump
-        // channel - where DelayAcks holds it - not the market-data channel (S10).
-        let (_enqueued, frame) = exec_rx.recv().await.expect("a frame, not silence");
-        let ServerMessage::ProtocolError { reason, .. } = frame else {
-            panic!("expected ProtocolError, got {frame:?}");
+        // The diagnostic is admission truth, so it rides the PRIORITY lane -
+        // ahead of held traffic, exempt from DelayAcks - not the market-data
+        // channel, and it spends the promise reserved for this replay.
+        let ServerMessage::ProtocolError { reason, .. } = next_priority_frame(&mut lane_rx).await
+        else {
+            panic!("expected a ProtocolError")
         };
         assert!(
             reason.contains("BTCUSDT"),
@@ -2168,7 +3140,7 @@ mod tests {
             "a dead stream sends no market data at all"
         );
         assert!(
-            exec_rx.recv().await.is_none(),
+            lane_rx.prio_rx.recv().await.is_none(),
             "a dead stream sends nothing after the error frame"
         );
         quiesce_replay(Replay {
@@ -2185,8 +3157,8 @@ mod tests {
     /// plane.
     #[tokio::test]
     async fn unknown_symbol_subscribe_reports_protocol_error() {
-        let (tx, mut rx) = mpsc::channel::<ServerMessage>(8);
-        let (exec_tx, mut exec_rx) = mpsc::channel::<(Instant, ServerMessage)>(8);
+        let (tx, mut rx) = mpsc::channel::<Outbound>(8);
+        let (lanes, mut lane_rx) = replay_lanes();
         let cancel = Arc::new(AtomicBool::new(false));
         let handle = spawn_replay(ReplaySpawn {
             symbol: "FAKE".to_string(),
@@ -2198,17 +3170,18 @@ mod tests {
             sim: SimClock::identity(),
             data_origin: now_ns(),
             tx,
-            exec_tx,
+            diag_ticket: lanes.reserve_promise(),
+            lanes,
             cancel: Arc::clone(&cancel),
             resume_floor: None,
             last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
             permit: None,
         });
 
-        // Rides the exec pump channel like every execution-category event (S10).
-        let (_enqueued, frame) = exec_rx.recv().await.expect("a frame, not silence");
-        let ServerMessage::ProtocolError { reason, .. } = frame else {
-            panic!("expected ProtocolError, got {frame:?}");
+        // Rides the priority lane like every admission-category frame.
+        let ServerMessage::ProtocolError { reason, .. } = next_priority_frame(&mut lane_rx).await
+        else {
+            panic!("expected a ProtocolError")
         };
         assert!(
             reason.contains("FAKE"),
@@ -2219,7 +3192,7 @@ mod tests {
             "an unknown-symbol subscribe streams no market data at all"
         );
         assert!(
-            exec_rx.recv().await.is_none(),
+            lane_rx.prio_rx.recv().await.is_none(),
             "an unknown-symbol subscribe streams nothing after the error frame"
         );
         quiesce_replay(Replay {
@@ -2248,8 +3221,8 @@ mod tests {
         let profiles = default_profiles();
         // Capacity 1 so the generator fills the channel and parks in
         // `send_cancellable` almost immediately, never draining.
-        let (tx, _rx) = mpsc::channel::<ServerMessage>(1);
-        let (exec_tx, _exec_rx) = mpsc::channel::<(Instant, ServerMessage)>(8);
+        let (tx, _rx) = mpsc::channel::<Outbound>(1);
+        let (lanes, _lane_rx) = replay_lanes();
         let cancel = Arc::new(AtomicBool::new(false));
         let handle = spawn_replay(ReplaySpawn {
             symbol: "BTCUSDT".to_string(),
@@ -2261,7 +3234,8 @@ mod tests {
             sim: SimClock::identity(),
             data_origin: now_ns(),
             tx,
-            exec_tx,
+            lanes,
+            diag_ticket: None,
             cancel: Arc::clone(&cancel),
             resume_floor: None,
             last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
@@ -2315,8 +3289,8 @@ mod tests {
             ..Config::default()
         };
         let profiles = default_profiles();
-        let (tx, mut rx) = mpsc::channel::<ServerMessage>(8);
-        let (exec_tx, _exec_rx) = mpsc::channel::<(Instant, ServerMessage)>(8);
+        let (tx, mut rx) = mpsc::channel::<Outbound>(8);
+        let (lanes, _lane_rx) = replay_lanes();
         let cancel = Arc::new(AtomicBool::new(false));
         let started = Instant::now();
         let handle = spawn_replay(ReplaySpawn {
@@ -2331,7 +3305,8 @@ mod tests {
             // wall deadline is the anchor - the delay this test measures.
             data_origin: EPOCH,
             tx,
-            exec_tx,
+            lanes,
+            diag_ticket: None,
             cancel: Arc::clone(&cancel),
             resume_floor: None,
             last_sent_ts: Arc::new(AtomicU64::new(NO_TICK_SENT)),
@@ -2340,11 +3315,15 @@ mod tests {
 
         let first = rx.recv().await.expect("a tick");
         let elapsed = started.elapsed();
-        let ts_event = match first {
-            ServerMessage::Trade(t) => t.ts_event,
-            ServerMessage::Quote(q) => q.ts_event,
-            other => panic!("unexpected first frame: {other:?}"),
+        let Outbound::Frame(frame) = first else {
+            panic!("unexpected close")
         };
+        let ts_event =
+            match serde_json::from_str::<ServerMessage>(&frame.payload).expect("tick payload") {
+                ServerMessage::Trade(t) => t.ts_event,
+                ServerMessage::Quote(q) => q.ts_event,
+                other => panic!("unexpected first frame: {other:?}"),
+            };
         // Deadline-paced to the future anchor (generous lower bound for slow CI).
         assert!(
             elapsed >= Duration::from_millis(80),
@@ -2410,22 +3389,27 @@ mod tests {
     async fn delay_acks_does_not_compound_across_queued_events() {
         const DELAY_MS: u64 = 100;
         let delay_ms = Arc::new(AtomicU64::new(DELAY_MS));
-        let (exec_tx, exec_rx) = mpsc::channel::<(Instant, ServerMessage)>(8);
-        let (tx, mut rx) = mpsc::channel::<ServerMessage>(8);
+        let (exec_tx, exec_rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel::<Outbound>(8);
         let pump = spawn_exec_pump(exec_rx, delay_ms, SimClock::identity(), tx);
 
         let started = Instant::now();
         for i in 0..3u64 {
             exec_tx
-                .send((
-                    started,
-                    ServerMessage::OrderAccepted {
-                        client_order_id: format!("O{i}"),
-                        venue_order_id: format!("V{i}"),
-                        ts_event: i,
+                .send(HeldFrame {
+                    arrived: started,
+                    frame: OutboundFrame {
+                        payload: serde_json::to_string(&ServerMessage::OrderAccepted {
+                            client_order_id: format!("O{i}"),
+                            venue_order_id: format!("V{i}"),
+                            ts_event: i,
+                        })
+                        .expect("serializes"),
+                        is_market_data: false,
+                        charge: None,
+                        slot: None,
                     },
-                ))
-                .await
+                })
                 .expect("enqueue exec event");
         }
         for _ in 0..3 {
@@ -2492,8 +3476,8 @@ mod tests {
             speed: 1_000.0,
         };
         let profiles = default_profiles();
-        let (tx, _rx) = mpsc::channel::<ServerMessage>(8);
-        let (exec_tx, _exec_rx) = mpsc::channel::<(Instant, ServerMessage)>(8);
+        let (tx, _rx) = mpsc::channel::<Outbound>(8);
+        let (lanes, _lane_rx) = replay_lanes();
         let cancel = Arc::new(AtomicBool::new(false));
         let last_sent_ts = Arc::new(AtomicU64::new(NO_TICK_SENT));
         let handle = spawn_replay(ReplaySpawn {
@@ -2508,7 +3492,8 @@ mod tests {
             // thread's first act is the 60s pacing sleep this test interrupts.
             data_origin: EPOCH,
             tx,
-            exec_tx,
+            lanes,
+            diag_ticket: None,
             cancel: Arc::clone(&cancel),
             resume_floor: None,
             last_sent_ts: Arc::clone(&last_sent_ts),

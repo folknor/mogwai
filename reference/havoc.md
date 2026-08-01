@@ -228,7 +228,15 @@ head-of-line-block the ones behind it.
   `fraction <= 0` becomes a full fill with a warning).
 - **`RejectNextSubmit { reason }`** - rejects the next submitted order outright
   with `reason`, emitting an `OrderRejected` and nothing else. Untargeted: it
-  applies to whatever submit arrives next.
+  applies to whatever submit arrives next. The operator-supplied `reason` is
+  TRUNCATED to `MAX_REASON_LEN` (512 bytes, on a char boundary) by the
+  `/control/divergence` handler before the divergence is stored, so an armed
+  reason that comes back clipped is doing what it says here. The truncation is
+  not cosmetic: the engine echoes the reason verbatim into `OrderRejected`, and
+  a connection's admission reservation sizes that frame against
+  `sizing::ORDER_EVENT_MAX_BYTES`, which charges exactly `MAX_REASON_LEN` for
+  it. An uncapped reason would make produced output exceed its own reservation
+  and void the size model.
 - **`DuplicateNextFill`** - emits the next fill event twice on the wire (same
   `trade_id`, `last_qty`, `last_px`, `leaves_qty`), so a naive downstream
   client would double-count. Untargeted: applies to the next fill produced.
@@ -287,6 +295,18 @@ every live writer.
   window apart - without head-of-line-blocking market data behind the sleep.
   Arm with `ms: 0` to clear the delay, or post `ClearDivergences`. The
   heartbeat is explicitly exempt - `DelayAcks` must not perturb its cadence.
+
+  `DelayAcks` holds **delivery of engine output**. It never holds, delays or
+  gates **admission**, and it never touches the priority lane. An
+  `AdmissionRejected` (and a `ProtocolError`) classifies `EventKind::Admission`,
+  which is not engine output at all - it reports what the venue's request
+  handling refused, clamped or could not decode - so the knob that holds engine
+  output legitimately does not reach it. That exemption lives in exactly one
+  place, `EventKind::is_execution()`, so the two ends cannot disagree about it.
+  Concretely: with a 30 s `DelayAcks` armed and a saturated held lane, a refused
+  submit's `AdmissionRejected` arrives immediately while the held acks stay
+  held. `ProtocolError` used to ride the pump and be held by this window; it no
+  longer is.
 - **`GoDark { ms }`** - drops **everything** (market data and execution) for a
   `ms` blackout window: a total venue blackout. Implemented as a `dark_until_ns`
   absolute wall-clock deadline; the writer drops every frame while `now_ns() <
@@ -306,6 +326,41 @@ every live writer.
   single-shot divergences - those self-disarm on their own trigger. There is no
   backlog to replay because gated frames were dropped.
 
+### Admission control, and the one honest exception to honest content
+
+A `/ws` session's outbound path is two lanes with explicit accounting. The HELD
+lane carries engine output through the `DelayAcks` shift under a per-connection
+BYTE budget (`EXEC_HELD_BUDGET_BYTES`, 8 MiB); the PRIORITY lane carries
+admission truth under a per-connection FRAME budget (`ADMISSION_LANE_FRAMES`,
+64) and is drained first. Both sizes are run config
+(`exec_held_budget_bytes`, `admission_lane_frames` in `reference/config.md`);
+the constants above are the defaults, and lowering them makes the venue refuse
+sooner without changing what it does when it refuses - which is how
+`scripts/smoke.py --admission` exercises a refusal over a live socket. Both channels are unbounded, because the bound is the
+budget: that is what lets every producer on the socket read loop reserve
+worst-case output BEFORE the engine mutates, and never await a full channel. A
+command whose worst case cannot be reserved is refused with
+`ServerMessage::AdmissionRejected { subject, reason, ts_event }` and the engine
+is never asked, so nothing mutated - no venue order id burned, no order resting.
+`subject` names what was refused (submit, cancel, modify, query, a coalesced
+subscribe, or an undecodable frame) so a consumer can translate it per command;
+a refused cancel must not read as a rejected order.
+
+If the priority lane itself cannot take a refusal, the connection is closed with
+`CLOSE_ADMISSION_OVERLOAD` (WS 1013, "Try Again Later") and a stated reason -
+never a silent stall. That close is best-effort by nature: the writer may
+already be parked against a peer that stopped reading, so the teardown waits
+`CLOSE_GRACE` (2 s of WALL time - a transport deadline, not a sim one) and then
+aborts the writer and drops the socket. The reasoned close is attempted; the
+release of the connection's resources is not optional.
+
+Admission control never drops an execution event the engine has produced.
+Refusal happens BEFORE production; after production the frame is delivered,
+dropped by an ARMED HAVOC WINDOW, or the connection dies. The havoc exception is
+explicit and pre-existing: `GoDark` still drops produced execution frames in the
+writer and `StallData` still gates market data, and admission control does not
+change that. What is ruled out is a silent, capacity-driven drop.
+
 The `ms` windows of `DelayAcks`, `GoDark`, and `StallData` are all bounded by
 `control::MAX_DIVERGENCE_MS` (3 600 000 ms = one hour), so a single request
 cannot arm an effectively permanent window or saturate a writer deadline.
@@ -321,7 +376,10 @@ legs carried over WS.** Under `HttpOrders` the exec client's order events are
 returned synchronously in the `POST /orders` response, and under `HttpPolling`
 market data is fetched over `GET /trades` - neither path passes through the
 writer, so an armed `DelayAcks`/`GoDark`/`StallData` has NO effect on an HTTP
-carrier. This is faithful to the connection-scoped framing of these divergences
+carrier. Admission control is scoped the same way: the HTTP order path gets
+lanes constructed fresh per request and dropped with it, so it has no pump, no
+socket and no backlog for admission control to protect, and it can never refuse
+a command. Refusing there would be inventing a fault. This is faithful to the connection-scoped framing of these divergences
 (they model a sick socket, and the HTTP carriers do not hold one), but it used
 to be a real operator trap: arming `GoDark` against a `transport_profile =
 "HttpOrders"` client exercised a clean order path while the operator believed a

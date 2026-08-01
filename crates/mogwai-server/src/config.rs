@@ -17,6 +17,7 @@ use mogwai_protocol::{InstrumentDef, SimClock};
 use rust_decimal::Decimal;
 use tokio::sync::Semaphore;
 
+use crate::admission::AdmissionLimits;
 use crate::source;
 
 /// Replay/runtime configuration, loaded from a TOML config file at startup
@@ -75,6 +76,29 @@ pub(crate) struct Config {
     /// disables the cap (unbounded), matching the `0`-disables convention of
     /// `gap_cap_ms` and `server_heartbeat_ms`.
     pub(crate) max_concurrent_replays: usize,
+    /// Per-connection byte ceiling on execution output that has been produced
+    /// but not yet written to the socket, i.e. the HELD lane's budget. See
+    /// `admission::EXEC_HELD_BUDGET_BYTES`, which is this field's default and
+    /// the shipped value.
+    ///
+    /// Configurable because the venue's own refusal behavior is otherwise
+    /// unreachable: at 8 MiB, reaching a refused reservation over a real socket
+    /// means driving megabytes of engine output through a stalled connection,
+    /// which is a load generator, not a gate. A small budget puts the same
+    /// branch one order away. Operators have a legitimate use too - a host
+    /// running many connections bounds its aggregate exposure here, since the
+    /// budget is per connection and the process-wide ceiling is this times the
+    /// connection count.
+    pub(crate) exec_held_budget_bytes: usize,
+    /// Per-connection ceiling on QUEUED priority (admission-truth) frames. See
+    /// `admission::ADMISSION_LANE_FRAMES`. Same reasoning as
+    /// `exec_held_budget_bytes`: the overload close is only reachable in a test
+    /// when this can be made small.
+    pub(crate) admission_lane_frames: usize,
+    /// Per-connection pool of outstanding PROMISES of a future priority frame,
+    /// one per live replay, accounted separately from queue depth. See
+    /// `admission::ADMISSION_PROMISE_TICKETS`.
+    pub(crate) admission_promise_tickets: usize,
     /// Optional explicit venue instrument set. When empty, the server seeds the
     /// protocol default set. When present, this is authoritative for
     /// `/instruments`, order validation, and data generation.
@@ -115,6 +139,9 @@ impl Default for Config {
             // typical process thread limit. Operators driving many connections
             // against a large catalog raise it; `0` lifts it entirely.
             max_concurrent_replays: 1024,
+            exec_held_budget_bytes: crate::admission::EXEC_HELD_BUDGET_BYTES,
+            admission_lane_frames: crate::admission::ADMISSION_LANE_FRAMES,
+            admission_promise_tickets: crate::admission::ADMISSION_PROMISE_TICKETS,
             instruments: Vec::new(),
             balances: default_balances(),
         }
@@ -161,20 +188,76 @@ pub(crate) fn warn_unfunded_quotes(cfg: &Config, defs: &[InstrumentDef]) {
     }
 }
 
-/// Validates the `[balances]` funding table: currencies must be non-blank and
-/// amounts non-negative. Zero is allowed (it pins a currency into every
-/// snapshot without funding it); negative initial funding has no venue meaning
-/// and is refused at startup like every other malformed knob.
+/// Validates the `[balances]` funding table: currencies must be non-blank,
+/// within `MAX_CURRENCY_LEN`, and amounts non-negative. Zero is allowed (it
+/// pins a currency into every snapshot without funding it); negative initial
+/// funding has no venue meaning and is refused at startup like every other
+/// malformed knob.
+///
+/// The length cap is what makes `sizing::BALANCE_ROW_MAX_BYTES` an upper bound:
+/// a configured currency reaches the wire on every `AccountState` balance row,
+/// and the connection's admission reservation is sized against that constant.
+/// Operator config fails STARTUP rather than a connection, so the venue never
+/// runs in a state where its own reservations under-count.
 pub(crate) fn validate_balances(cfg: &Config) -> anyhow::Result<()> {
     for (currency, amount) in &cfg.balances {
         if currency.trim().is_empty() {
             anyhow::bail!("balances currency must not be blank");
+        }
+        if currency.len() > mogwai_protocol::MAX_CURRENCY_LEN {
+            anyhow::bail!(
+                "balances currency {currency} exceeds MAX_CURRENCY_LEN ({})",
+                mogwai_protocol::MAX_CURRENCY_LEN
+            );
         }
         if *amount < Decimal::ZERO {
             anyhow::bail!("balances.{currency} must not be negative");
         }
     }
     Ok(())
+}
+
+/// Validates the three admission budgets an operator can set.
+///
+/// A budget of zero refuses every command the venue will ever be sent, which is
+/// not a small venue but a dead one; a held budget below
+/// `sizing::BOUNDARY_REFUSAL_BYTES` cannot even reserve the single frame a
+/// malformed-order refusal produces, so every order-entry command - valid or
+/// not - would come back as an admission refusal. Both are misconfigurations an
+/// operator would otherwise discover only as a venue that answers nothing, so
+/// they fail STARTUP instead.
+///
+/// The floor binds operator config, not the type: the server's own tests
+/// construct `Config` directly with budgets deliberately below it, which is how
+/// a refused reservation and a saturated priority lane are reached over a real
+/// socket at all.
+pub(crate) fn validate_admission_limits(cfg: &Config) -> anyhow::Result<()> {
+    if cfg.exec_held_budget_bytes < mogwai_protocol::sizing::BOUNDARY_REFUSAL_BYTES {
+        anyhow::bail!(
+            "exec_held_budget_bytes must be at least {} - the worst case of a single \
+             boundary refusal - or every order-entry command is refused for capacity",
+            mogwai_protocol::sizing::BOUNDARY_REFUSAL_BYTES
+        );
+    }
+    if u32::try_from(cfg.exec_held_budget_bytes).is_err() {
+        anyhow::bail!("exec_held_budget_bytes must fit in 32 bits");
+    }
+    if cfg.admission_lane_frames == 0 {
+        anyhow::bail!("admission_lane_frames must be at least 1");
+    }
+    if cfg.admission_promise_tickets == 0 {
+        anyhow::bail!("admission_promise_tickets must be at least 1");
+    }
+    Ok(())
+}
+
+/// The per-connection budget sizes every websocket session is built with.
+pub(crate) fn build_admission_limits(cfg: &Config) -> AdmissionLimits {
+    AdmissionLimits {
+        held_budget_bytes: cfg.exec_held_budget_bytes,
+        lane_frames: cfg.admission_lane_frames,
+        promise_tickets: cfg.admission_promise_tickets,
+    }
 }
 
 impl Config {
@@ -197,6 +280,7 @@ impl Config {
         // forget the check. (The clock and instrument validations stay with
         // their builders: they need boot-time inputs this loader lacks.)
         validate_balances(&cfg)?;
+        validate_admission_limits(&cfg)?;
         Ok(cfg)
     }
 }
@@ -287,6 +371,27 @@ pub(crate) fn validate_instrument_def(def: &InstrumentDef) -> anyhow::Result<()>
     }
     if def.quote.trim().is_empty() {
         anyhow::bail!("instrument {} quote must not be empty", def.symbol);
+    }
+    // Symbol, base and quote all reach the wire - the symbol on every tick,
+    // order event and position row, the currencies on every balance row - so
+    // the sizing constants the admission reservation is built on are only upper
+    // bounds if the configured strings are capped. Startup is the right place
+    // to refuse: a connection can then never out-produce its own reservation.
+    if def.symbol.len() > mogwai_protocol::MAX_SYMBOL_LEN {
+        anyhow::bail!(
+            "instrument {} symbol exceeds MAX_SYMBOL_LEN ({})",
+            def.symbol,
+            mogwai_protocol::MAX_SYMBOL_LEN
+        );
+    }
+    if def.base.len() > mogwai_protocol::MAX_CURRENCY_LEN
+        || def.quote.len() > mogwai_protocol::MAX_CURRENCY_LEN
+    {
+        anyhow::bail!(
+            "instrument {} base/quote exceeds MAX_CURRENCY_LEN ({})",
+            def.symbol,
+            mogwai_protocol::MAX_CURRENCY_LEN
+        );
     }
     if def.price_increment <= Decimal::ZERO {
         anyhow::bail!("instrument {} price_increment must be positive", def.symbol);

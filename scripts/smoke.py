@@ -35,6 +35,14 @@ Accelerated coherent-clock smoke:
     brokkr run -p mogwai-server -- serve -f --config scripts/smoke-accelerated.toml
 
 then run `python3 scripts/smoke.py --accelerated`.
+
+Admission control (a refusal under an armed DelayAcks) runs behind
+`--admission`, against a server whose held-lane budget is shrunk so the venue
+refuses after a dozen orders instead of twelve thousand:
+
+    brokkr run -p mogwai-server -- serve -f --config scripts/smoke-admission.toml
+
+then run `python3 scripts/smoke.py --admission`.
 """
 import json
 import socket
@@ -769,16 +777,97 @@ def main_accelerated() -> None:
     print("PASS: accelerated coherent-clock smoke")
 
 
+def main_admission() -> None:
+    """Admission control end to end: I4 and I5 together on a live socket.
+
+    Arms a DelayAcks window, then submits until the connection's held-lane byte
+    budget cannot cover another order's worst-case output. Two things must then
+    be true at once, and neither is visible from a unit test:
+
+    - the refusal comes back PROMPTLY, ahead of every execution event still
+      sitting in the delay pump. `DelayAcks` holds the delivery of engine
+      output; it never holds admission, which rides the priority lane (I4).
+    - the refusal is on the wire and attributed to the order it refused, rather
+      than the venue silently dropping the command (I5).
+
+    Then the window is cleared and every admitted order's ack arrives: a refused
+    reservation is a refusal to START work, not a loss of work already done.
+
+    Needs the small-budget server config, or saturating the shipped 8 MiB budget
+    would take twelve thousand orders:
+
+        brokkr run -p mogwai-server -- serve -f --config scripts/smoke-admission.toml
+    """
+    assert post_divergence({"type": "ClearDivergences"}) == 202
+    # Long enough that nothing drains while the submits are in flight, short
+    # enough that the drain below is a wait and not a coffee break. A frame the
+    # pump has already dequeued sleeps out ITS deadline - ClearDivergences
+    # reaches the frames still queued behind it, not that one - so this value,
+    # not the clear, bounds the drain.
+    assert post_divergence({"type": "DelayAcks", "ms": 4_000}) == 202
+
+    ws = WsClient(timeout=0.2)
+    submitted = 0
+    refusal = None
+    first_frame = None
+    # Submit in small batches, checking after each whether the venue has refused
+    # yet. The cap is far above the ~dozen orders the configured budget holds, so
+    # exhausting it means the budget is not bounding anything.
+    while submitted < 400 and refusal is None:
+        for _ in range(4):
+            submitted += 1
+            ws.send(submit_order(f"ADM-{submitted}"))
+        try:
+            msg = ws.read()
+        except socket.timeout:
+            continue
+        if first_frame is None:
+            first_frame = msg
+        if msg["type"] == "AdmissionRejected":
+            refusal = msg
+
+    print("refusal: ", refusal)
+    assert refusal is not None, f"no refusal after {submitted} submits"
+    # The refusal overtook every held ack: nothing else had arrived yet.
+    assert first_frame is refusal, first_frame
+    assert refusal["subject"]["kind"] == "Submit", refusal
+    assert refusal["subject"]["client_order_id"].startswith("ADM-"), refusal
+    assert refusal["reason"], refusal
+
+    # Clear the window and drain: every order the venue admitted is still
+    # answered, and every one it refused said so.
+    assert post_divergence({"type": "ClearDivergences"}) == 202
+    accepted, refused = 0, 1
+    deadline = time.monotonic() + 20.0
+    while accepted + refused < submitted and time.monotonic() < deadline:
+        try:
+            msg = ws.read()
+        except socket.timeout:
+            continue
+        if msg["type"] == "OrderAccepted":
+            accepted += 1
+        elif msg["type"] == "AdmissionRejected":
+            refused += 1
+    ws.close()
+
+    print(f"drained: {accepted} accepted, {refused} refused, {submitted} submitted")
+    assert accepted > 0, "the held acks never arrived after the window cleared"
+    assert accepted + refused == submitted, (accepted, refused, submitted)
+    print("PASS: admission refuses visibly and promptly under an armed DelayAcks")
+
+
 def main() -> None:
     args = sys.argv[1:]
     if args == ["--heartbeat"]:
         main_heartbeat()
     elif args == ["--accelerated"]:
         main_accelerated()
+    elif args == ["--admission"]:
+        main_admission()
     elif not args:
         main_default()
     else:
-        raise SystemExit("usage: smoke.py [--heartbeat|--accelerated]")
+        raise SystemExit("usage: smoke.py [--heartbeat|--accelerated|--admission]")
 
 
 if __name__ == "__main__":

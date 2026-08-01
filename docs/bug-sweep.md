@@ -303,7 +303,10 @@ divergence from the protocol's zeroing variant is deliberate and documented.
 (S10 is now fully closed: batch 4 routed the two `handle_socket` diagnostics
 through the exec pump, and batch 5 threaded an exec sender through
 `ReplaySpawn` so the replay thread's dead-seek and unknown-symbol diagnostics
-ride it too. S11 the HTTP-carrier exemption from the temporal divergences and S12 the
+ride it too. Superseded 2026-08-01 by the exec-pump admission-control landing:
+`ProtocolError` now rides its own priority lane, exempt from `DelayAcks`,
+rather than the exec pump these batches routed it through - see git history
+and `reference/havoc.md`. S11 the HTTP-carrier exemption from the temporal divergences and S12 the
 config.md/cli.md omissions were resolved by documentation: havoc.md now states
 the writer-only / WS-only scope of DelayAcks/GoDark/StallData as a deliberate
 connection-scoped behavior and an operator trap, config.md gained the

@@ -16,15 +16,267 @@ use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use mogwai_data::TickEvent;
 use mogwai_engine::{Engine, MAX_ARMED_DIVERGENCES};
 use mogwai_protocol::{
-    AccountState, ClientMessage, InstrumentDef, MAX_HISTORY_LIMIT, MarketRegime, OrderType,
-    QuoteTick, ServerClock, ServerMessage, SimClock, TradeTick, control::Divergence,
-    validate_divergence, validate_market_regime, validate_modify_order, validate_submit_order,
+    AccountState, AdmissionSubject, ClientMessage, InstrumentDef, MAX_HISTORY_LIMIT, MarketRegime,
+    OrderType, QuoteTick, ServerClock, ServerMessage, SimClock, TradeTick, control::Divergence,
+    truncate_client_id, truncate_reason, validate_client_order_id, validate_divergence,
+    validate_market_regime, validate_modify_order, validate_request_id, validate_submit_order,
 };
 use serde::Deserialize;
 use tokio::sync::{Mutex, Semaphore};
 
+use crate::admission::{ExecLanes, Reservation};
 use crate::config::{Config, sim_now_ns, window_until_ns};
 use crate::source;
+
+/// What one order-entry command came to. Every variant that carries frames also
+/// carries the reservation those frames were produced under: there is no path
+/// where a frame exists against no reservation.
+pub(crate) enum OrderOutcome {
+    /// The engine processed the command and produced these events.
+    Produced {
+        events: Vec<ServerMessage>,
+        reservation: Reservation,
+    },
+    /// The protocol boundary refused it before the engine ever saw it. These
+    /// are engine-free frames and are charged like any other output.
+    Refused {
+        events: Vec<ServerMessage>,
+        reservation: Reservation,
+    },
+    /// Admission refused: outbound capacity could not cover the worst case, so
+    /// the engine was never asked. Carries the frame for the PRIORITY lane.
+    NotAdmitted(ServerMessage),
+    /// A malformed request with no order-shaped frame to answer it (a query
+    /// whose `request_id` is over-length names no order), so the answer is the
+    /// untargeted diagnostic. Also a priority-lane frame, but deliberately NOT
+    /// an `AdmissionRejected`: conflating malformed with over-capacity would
+    /// make an admission refusal unreadable as a load signal.
+    Diagnostic(ServerMessage),
+}
+
+/// Name what a refusal refused, so the consumer can translate it per command -
+/// a refused cancel must not read as a rejected order.
+fn admission_subject(cmd: &ClientMessage) -> AdmissionSubject {
+    match cmd {
+        ClientMessage::SubmitOrder(o) => AdmissionSubject::Submit {
+            client_order_id: o.client_order_id.clone(),
+        },
+        ClientMessage::CancelOrder { client_order_id } => AdmissionSubject::Cancel {
+            client_order_id: client_order_id.clone(),
+        },
+        ClientMessage::ModifyOrder {
+            client_order_id, ..
+        } => AdmissionSubject::Modify {
+            client_order_id: client_order_id.clone(),
+        },
+        ClientMessage::QueryOrders { request_id, .. } => AdmissionSubject::Query {
+            request_id: request_id.clone(),
+            query: mogwai_protocol::QueryKind::Orders,
+        },
+        ClientMessage::QueryFills { request_id, .. } => AdmissionSubject::Query {
+            request_id: request_id.clone(),
+            query: mogwai_protocol::QueryKind::Fills,
+        },
+        _ => AdmissionSubject::Frame,
+    }
+}
+
+/// The protocol-boundary verdict on one order-entry command: `Some(reason)`
+/// when it is malformed. Ids are length-checked here, alongside the numeric
+/// checks that were always here, because both are malformed-request failures.
+fn boundary_error(cmd: &ClientMessage) -> Option<&'static str> {
+    match cmd {
+        ClientMessage::SubmitOrder(order) => validate_submit_order(order).err(),
+        ClientMessage::ModifyOrder {
+            client_order_id,
+            price,
+            quantity,
+        } => validate_client_order_id(client_order_id)
+            .err()
+            .or_else(|| validate_modify_order(*price, *quantity).err()),
+        // A cancel's only failure modes are venue-side, and a query is
+        // answered truthfully whatever it asks (an unknown id is an empty
+        // snapshot, not an error) - so for these the id caps are the whole
+        // boundary check.
+        ClientMessage::CancelOrder { client_order_id } => {
+            validate_client_order_id(client_order_id).err()
+        }
+        ClientMessage::QueryOrders {
+            request_id,
+            client_order_id,
+            ..
+        }
+        | ClientMessage::QueryFills {
+            request_id,
+            client_order_id,
+            ..
+        } => validate_request_id(request_id).err().or_else(|| {
+            client_order_id
+                .as_ref()
+                .and_then(|id| validate_client_order_id(id).err())
+        }),
+        ClientMessage::Subscribe { .. } | ClientMessage::Unsubscribe { .. } => {
+            unreachable!("callers route Subscribe/Unsubscribe away before process_order_cmd")
+        }
+    }
+}
+
+/// The refusal frame for a malformed order-entry command, echoing the offending
+/// id TRUNCATED to `MAX_CLIENT_ID_LEN`. Echoing it at full length would turn an
+/// 8 MiB `client_order_id` into an 8 MiB `OrderRejected`, recreating exactly
+/// the unbounded frame the cap exists to prevent; a truncated echo cannot be
+/// mistaken for a live correlation because the venue would never have accepted
+/// the id under either spelling, and the reason says so.
+fn boundary_refusal(cmd: &ClientMessage, reason: &str, ts: u64) -> ServerMessage {
+    let note = |id: &str| {
+        if id.len() > mogwai_protocol::MAX_CLIENT_ID_LEN {
+            format!(
+                "{reason}; the identifier was truncated for display and no order \
+                 exists under either spelling"
+            )
+        } else {
+            reason.to_string()
+        }
+    };
+    match cmd {
+        ClientMessage::ModifyOrder {
+            client_order_id, ..
+        } => ServerMessage::OrderModifyRejected {
+            client_order_id: truncate_client_id(client_order_id.clone()),
+            venue_order_id: None,
+            reason: note(client_order_id),
+            ts_event: ts,
+        },
+        ClientMessage::CancelOrder { client_order_id } => ServerMessage::OrderCancelRejected {
+            client_order_id: truncate_client_id(client_order_id.clone()),
+            venue_order_id: None,
+            reason: note(client_order_id),
+            ts_event: ts,
+        },
+        ClientMessage::SubmitOrder(order) => ServerMessage::OrderRejected {
+            client_order_id: truncate_client_id(order.client_order_id.clone()),
+            reason: note(&order.client_order_id),
+            ts_event: ts,
+        },
+        // Queries have no order-shaped rejection frame; the caller answers
+        // these with the untargeted diagnostic instead.
+        _ => ServerMessage::ProtocolError {
+            reason: reason.to_string(),
+            ts_event: ts,
+        },
+    }
+}
+
+/// Run one order-entry command (`SubmitOrder`/`ModifyOrder`/`CancelOrder`, and
+/// the two venue-truth queries) through the protocol-boundary validators AND
+/// admission control before the engine is allowed to mutate.
+///
+/// The order of the body is load-bearing:
+///
+/// 1. Validate ids and numerics. A failure refuses here, with its own
+///    fixed-size reservation - a boundary refusal is still a produced frame.
+/// 2. `stamp_market_price` (which may block on the checkpoint mutex), then
+///    re-sample `ts`: stamping the engine's events with the entry-time `ts`
+///    would date them up to a seek's worth of sim-time before they logically
+///    occur.
+/// 3. The post-stamp synthesis-failure refusal (a MARKET order still priceless
+///    for a symbol this venue DOES list), which is the venue's own failure and
+///    is not the engine's to blame on the client.
+/// 4. Take the engine lock, read `book_shape()`, reserve worst-case output.
+///    The lock spans the shape read and the processing, so the shape cannot
+///    drift out from under the reservation that covers it.
+/// 5. Only then `engine.process`. If the reservation failed, the engine was
+///    never asked, so nothing mutated: no venue order id burned, no order
+///    resting.
+///
+/// Shared by both order-entry surfaces (`POST /orders` and `/ws`) so the gate
+/// lives in exactly one place; the HTTP surface passes per-request lanes.
+pub(crate) async fn process_order_cmd(
+    order_cmd: ClientMessage,
+    state: &AppState,
+    lanes: &ExecLanes,
+) -> OrderOutcome {
+    // Sampled at entry for the boundary rejections below: they return before
+    // any price synthesis, so entry-time is when they logically occur.
+    let ts = sim_now_ns(state.sim);
+    if let Some(reason) = boundary_error(&order_cmd) {
+        let Some(reservation) = lanes.try_reserve_boundary() else {
+            return OrderOutcome::NotAdmitted(ServerMessage::AdmissionRejected {
+                subject: admission_subject(&order_cmd),
+                reason: "execution output admission budget exhausted".into(),
+                ts_event: ts,
+            });
+        };
+        let event = boundary_refusal(&order_cmd, reason, ts);
+        if matches!(event, ServerMessage::ProtocolError { .. }) {
+            // The reservation is not needed after all: nothing goes on the
+            // held lane, so drop it and give the bytes straight back.
+            drop(reservation);
+            return OrderOutcome::Diagnostic(event);
+        }
+        return OrderOutcome::Refused {
+            events: vec![event],
+            reservation,
+        };
+    }
+    let order_cmd = stamp_market_price(order_cmd, state).await;
+    // Re-sample after the market-price synthesis, which for a price-less MARKET
+    // order may block ~100 ms on the checkpoint mutex and seek (S16). The
+    // synthesis-failure reject and the engine events below all occur now.
+    let ts = sim_now_ns(state.sim);
+    // A MARKET order still price-less after the stamp, for a symbol this venue
+    // DOES list, means `current_price` failed: the positioning seek could not
+    // reach sim-now within its budget (or the synthesis task itself died).
+    // Reject it here with the honest story - the client correctly sent no price
+    // (nautilus never stamps a market order), so letting the engine's "submit
+    // price required" fire would blame the client for the venue's own synthesis
+    // failure. An UNCONFIGURED symbol is deliberately left price-less: the
+    // engine checks instrument existence before the price, so its "unknown
+    // instrument" rejection tells that story unaltered.
+    if let ClientMessage::SubmitOrder(order) = &order_cmd
+        && order.order_type == OrderType::Market
+        && order.price.is_none()
+        && state.profiles.get(&order.symbol).is_some()
+    {
+        tracing::warn!(
+            symbol = %order.symbol,
+            client_order_id = %order.client_order_id,
+            "rejecting price-less market order: market price synthesis failed"
+        );
+        let Some(reservation) = lanes.try_reserve_boundary() else {
+            return OrderOutcome::NotAdmitted(ServerMessage::AdmissionRejected {
+                subject: admission_subject(&order_cmd),
+                reason: "execution output admission budget exhausted".into(),
+                ts_event: ts,
+            });
+        };
+        return OrderOutcome::Refused {
+            events: vec![ServerMessage::OrderRejected {
+                client_order_id: order.client_order_id.clone(),
+                reason: "venue could not synthesize a market price at sim-now".to_string(),
+                ts_event: ts,
+            }],
+            reservation,
+        };
+    }
+    let mut engine = state.engine.lock().await;
+    let shape = engine.book_shape();
+    let Some(reservation) = lanes.reserve(&order_cmd, &shape) else {
+        // The engine has NOT been asked to process anything, so nothing
+        // mutated: the refusal is the whole effect of this command.
+        return OrderOutcome::NotAdmitted(ServerMessage::AdmissionRejected {
+            subject: admission_subject(&order_cmd),
+            reason: "execution output admission budget exhausted".into(),
+            ts_event: ts,
+        });
+    };
+    let events = engine.process(order_cmd, ts);
+    drop(engine);
+    OrderOutcome::Produced {
+        events,
+        reservation,
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -68,6 +320,19 @@ pub(crate) async fn arm_divergence(
         tracing::warn!(?div, err, "rejecting out-of-range divergence");
         return (StatusCode::BAD_REQUEST, err.to_string());
     }
+    // The operator-supplied reject reason is truncated HERE, at the arming
+    // boundary, before the divergence is stored: the engine echoes it verbatim
+    // into `OrderRejected.reason`, so an uncapped one would make a produced
+    // frame exceed the reservation sized against `ORDER_EVENT_MAX_BYTES` and
+    // void the whole size model. Truncating at the boundary means the engine can
+    // only ever echo an already-bounded string, and no engine change is needed.
+    // Documented alongside the control in reference/havoc.md.
+    let div = match div {
+        Divergence::RejectNextSubmit { reason } => Divergence::RejectNextSubmit {
+            reason: truncate_reason(reason),
+        },
+        other => other,
+    };
     match div {
         Divergence::DelayAcks { ms } => {
             state.delay_ms.store(ms, Ordering::Relaxed);
@@ -234,97 +499,15 @@ async fn stamp_market_price(msg: ClientMessage, state: &AppState) -> ClientMessa
     ClientMessage::SubmitOrder(order)
 }
 
-/// Run one order-entry command (`SubmitOrder`/`ModifyOrder`/`CancelOrder`)
-/// through the protocol-boundary validators before it ever reaches the
-/// engine, the same way `arm_divergence` calls `validate_divergence` and the
-/// subscription/history paths call `validate_market_regime` before touching
-/// server or engine state. A `SubmitOrder` with a non-positive quantity or a
-/// priceless limit, or a `ModifyOrder` that sets neither field, is rejected
-/// right here as a synthesized `OrderRejected`/`OrderModifyRejected` - never
-/// reaching `stamp_market_price` or the engine mutex - instead of leaning on
-/// the engine's own (correct, but redundant) defensive checks. `CancelOrder`
-/// has no protocol-boundary validator and passes straight through. Shared by
-/// both order-entry surfaces (`POST /orders` and the `/ws` handling below) so
-/// the gate lives in exactly one place.
-pub(crate) async fn process_order_cmd(
-    order_cmd: ClientMessage,
-    state: &AppState,
-) -> Vec<ServerMessage> {
-    // Sampled at entry for the protocol-boundary rejections below: they return
-    // before any price synthesis, so entry-time is when they logically occur.
-    let ts = sim_now_ns(state.sim);
-    match &order_cmd {
-        ClientMessage::SubmitOrder(order) => {
-            if let Err(reason) = validate_submit_order(order) {
-                return vec![ServerMessage::OrderRejected {
-                    client_order_id: order.client_order_id.clone(),
-                    reason: reason.to_string(),
-                    ts_event: ts,
-                }];
-            }
-        }
-        ClientMessage::ModifyOrder {
-            client_order_id,
-            price,
-            quantity,
-        } => {
-            if let Err(reason) = validate_modify_order(*price, *quantity) {
-                return vec![ServerMessage::OrderModifyRejected {
-                    client_order_id: client_order_id.clone(),
-                    venue_order_id: None,
-                    reason: reason.to_string(),
-                    ts_event: ts,
-                }];
-            }
-        }
-        // Cancels and the reconciliation queries have no protocol-boundary
-        // validator: a cancel's only failure modes are venue-side, and a
-        // query is answered truthfully whatever it asks (an unknown id is an
-        // empty snapshot, not an error).
-        ClientMessage::CancelOrder { .. }
-        | ClientMessage::QueryOrders { .. }
-        | ClientMessage::QueryFills { .. } => {}
-        ClientMessage::Subscribe { .. } | ClientMessage::Unsubscribe { .. } => {
-            unreachable!("callers route Subscribe/Unsubscribe away before process_order_cmd")
-        }
-    }
-    let order_cmd = stamp_market_price(order_cmd, state).await;
-    // Re-sample after the market-price synthesis, which for a price-less MARKET
-    // order may block ~100 ms on the checkpoint mutex and seek. Stamping the
-    // engine's events with the entry-time `ts` would date them up to a seek's
-    // worth of sim-time before they logically occur - ~10 sim-seconds at speed
-    // 100 (S16). The synthesis-failure reject and the engine events below all
-    // occur now, after synthesis, so they take this fresh instant.
-    let ts = sim_now_ns(state.sim);
-    // A MARKET order still price-less after the stamp, for a symbol this venue
-    // DOES list, means `current_price` failed: the positioning seek could not
-    // reach sim-now within its budget (or the synthesis task itself died).
-    // Reject it here with the honest story - the client correctly sent no
-    // price (Nautilus never stamps a market order), so letting the engine's
-    // "submit price required" fire would blame the client for the venue's own
-    // synthesis failure. An UNCONFIGURED symbol is deliberately left
-    // price-less: the engine checks instrument existence before the price, so
-    // its "unknown instrument" rejection tells that story unaltered.
-    if let ClientMessage::SubmitOrder(order) = &order_cmd
-        && order.order_type == OrderType::Market
-        && order.price.is_none()
-        && state.profiles.get(&order.symbol).is_some()
-    {
-        tracing::warn!(
-            symbol = %order.symbol,
-            client_order_id = %order.client_order_id,
-            "rejecting price-less market order: market price synthesis failed"
-        );
-        return vec![ServerMessage::OrderRejected {
-            client_order_id: order.client_order_id.clone(),
-            reason: "venue could not synthesize a market price at sim-now".to_string(),
-            ts_event: ts,
-        }];
-    }
-    state.engine.lock().await.process(order_cmd, ts)
-}
-
 /// HTTP order-entry surface for profiles that do not use `/ws` for orders.
+///
+/// The events come back in the response body as they always have. This path has
+/// no pump, no socket and no backlog, so there is nothing for admission control
+/// to protect: it gets lanes constructed FRESH PER REQUEST and dropped with it,
+/// holding their own receivers so the forgotten permits are never stranded.
+/// A refusal is therefore unreachable by construction - a per-request budget
+/// starts empty of charges - and is mapped to a 500 with its reason rather than
+/// silently unwrapped.
 pub(crate) async fn submit_order_http(
     State(state): State<AppState>,
     Json(msg): Json<ClientMessage>,
@@ -333,7 +516,22 @@ pub(crate) async fn submit_order_http(
         ClientMessage::Subscribe { .. } | ClientMessage::Unsubscribe { .. } => {
             Err(StatusCode::BAD_REQUEST)
         }
-        order_cmd => Ok(Json(process_order_cmd(order_cmd, &state).await)),
+        order_cmd => {
+            let (lanes, _receivers) = ExecLanes::detached();
+            match process_order_cmd(order_cmd, &state, &lanes).await {
+                OrderOutcome::Produced { events, .. } | OrderOutcome::Refused { events, .. } => {
+                    Ok(Json(events))
+                }
+                OrderOutcome::Diagnostic(frame) => Ok(Json(vec![frame])),
+                OrderOutcome::NotAdmitted(frame) => {
+                    tracing::error!(
+                        ?frame,
+                        "per-request lanes refused admission; this should be unreachable"
+                    );
+                    Err(StatusCode::INTERNAL_SERVER_ERROR)
+                }
+            }
+        }
     }
 }
 

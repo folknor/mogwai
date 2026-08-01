@@ -9,5 +9,8 @@ mogwai-protocol.workspace = true
 rust_decimal.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [lints]
 workspace = true

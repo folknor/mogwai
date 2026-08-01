@@ -180,9 +180,14 @@ brokkr test -p mogwai-server saturation_witness_control_is_sound --debug
 brokkr test -p mogwai-server delayed_acks_must_not_stall --debug
 ```
 
-The gate is `#[ignore]`d deliberately: while problem 1 stands it FAILS, and that
-failure is the reading, not a broken suite. It stops being ignored when the pump
-is fixed, at which point it becomes the regression test.
+The gate was `#[ignore]`d deliberately while problem 1 stood: it FAILED, and
+that failure was the reading, not a broken suite.
+
+**Status, 2026-08-01: fixed.** Workstream A below landed - the pump is now a
+two-lane, admission-controlled path that never awaits a full channel from the
+read loop. `delayed_acks_must_not_stall_the_socket_read_loop` lost its
+`#[ignore]` and is the standing regression test; see git history for the
+landing sequence.
 
 **Reachability prices urgency; it does not decide correctness.** An earlier
 draft of this section made the pump repair conditional on first showing that a
@@ -209,6 +214,14 @@ This is not a defect on its own - it is a defect only in the presence of
 problem 1. If the pump cannot stall the reader, a retry storm is just the venue
 correctly answering a badly-behaved client, and back-pressure against a client
 hammering a venue is honest behavior a real exchange also exhibits.
+
+**Status, 2026-08-01: dissolved as a side effect of workstream A.** With
+`ProtocolError` reclassified onto the admission-controlled priority lane
+(exempt from `DelayAcks`, delivered ahead of held traffic), a retrying client
+now gets its "unservable" answer promptly instead of after the pump's delay, so
+the answer-latency-feeds-retries loop this problem describes has no lever left
+to close. The volume itself - one diagnostic per resubscribe fan-out - is
+unchanged; that is problem 4, still open.
 
 ## Problem 3: `ProtocolError` is untargeted, so a late one is unattributable
 
@@ -273,7 +286,18 @@ control that nobody proposed first. The two-lane structure and
 admission-control argument and were then explicitly accepted by the other, which
 is what makes commitments 4 and 5 agreed rather than merely proposed.
 
-### Workstream A: the exec pump (lands first)
+### Workstream A: the exec pump - LANDED
+
+**Status, 2026-08-01: landed.** Every commitment below is built: the pump is a
+two-lane, byte/frame-budgeted, admission-controlled path (`AdmissionRejected`
+replacing the `OrderAdmissionRejected` name floated here, generalized to a
+`subject` so it can represent a refused cancel, modify, query, or subscribe,
+not only a submit - see the full taxonomy note below), `ProtocolError` rides
+the priority lane, and the overload close is `CLOSE_ADMISSION_OVERLOAD`. See
+git history for the landing sequence and `reference/architecture.md` /
+`reference/havoc.md` for how it behaves today. What follows is kept as the
+design record - the commitments this landing was built to satisfy - not as
+open work.
 
 The confirmed defect, and independent of the subscription redesign - so it goes
 first. It is NOT server-only: commitment 4 adds a variant to `ServerMessage` and
@@ -333,11 +357,12 @@ Two clauses that are easy to miss and are not optional:
   for that replay's possible diagnostics is reserved.
 
 What that second clause exposes: reserve-before-mutation and visible refusal
-were agreed for ALL producers, but only the `SubmitOrder` refusal has a defined
-shape. `OrderAdmissionRejected { client_order_id }` cannot faithfully represent
-a refused `CancelOrder`, `ModifyOrder`, `QueryOrders`/`QueryFills`, or a
-subscribe whose diagnostic reservation failed. The full refusal taxonomy is
-open, below.
+were agreed for ALL producers, but only the `SubmitOrder` refusal had a defined
+shape at the time this was written. `OrderAdmissionRejected { client_order_id }`
+could not faithfully represent a refused `CancelOrder`, `ModifyOrder`,
+`QueryOrders`/`QueryFills`, or a subscribe whose diagnostic reservation failed -
+settled at landing by the single `AdmissionRejected { subject, reason,
+ts_event }` variant noted above.
 
 `delayed_acks_must_not_stall_the_socket_read_loop` stops being `#[ignore]`d and
 becomes the standing regression test. `saturation_witness_control_is_sound`
@@ -411,27 +436,19 @@ mechanism is open. Both reviewers flagged this independently.
 - An unbounded pump buffer.
 - Shedding produced execution events, announced or not.
 
-### Open for the spec to settle
+### Settled by workstream A's landing
 
-- **Which lane subscribe diagnostics ride.** The category argument that exempts
-  `OrderAdmissionRejected` arguably applies to a degraded-subscribe
-  `ProtocolError` too - that is also admission truth rather than engine output.
-  Either answer is defensible; the spec must state which and why, so the
-  category logic is applied once and consistently rather than reinvented.
-- **Where the undecodable-frame diagnostic lives.** It has no `client_order_id`
-  and no subscription entry. Unattributed on the priority lane is the likely
-  answer - it is the purest transport truth there is.
-- **The actual bound, and the unit it is counted in** - events, bytes, or
-  weighted permits - plus the worst-case output the reservation is sized
-  against.
-- **The full refusal taxonomy.** Reserve-before-mutation and visible refusal
-  cover every producer, but only the `SubmitOrder` refusal has a shape.
-  `CancelOrder`, `ModifyOrder`, the query commands, and a subscribe whose
-  diagnostic reservation failed each need a faithful refusal that
-  `OrderAdmissionRejected { client_order_id }` cannot express.
+The four items this list used to carry for workstream A - which lane subscribe
+diagnostics ride, where the undecodable-frame diagnostic lives, the actual
+bound and its unit, and the full refusal taxonomy - are all settled and built.
+See git history for the landing sequence and `reference/architecture.md` /
+`reference/havoc.md` for the resulting behavior; they are not restated here.
+
+### Open for workstream B to settle
+
 - **Whether successful subscriptions gain explicit result frames.** Adding
   success acknowledgments would be new design, not a consequence of anything
-  agreed here.
+  agreed here. Workstream A's landing deliberately did not add them.
 - **How an OLDER generation is distinguished from an UNKNOWN one** - ordered
   ids, retained issuance history, or neither, in which case the adapter's
   decision table shrinks accordingly.
@@ -441,15 +458,15 @@ mechanism is open. Both reviewers flagged this independently.
 ### Documentation that must move with the code
 
 Not optional: a venue that does something deliberate it has not admitted to is
-the one failure this project defines itself against.
+the one failure this project defines itself against. Workstream A's share of
+this (the `reference/havoc.md` admission-control writeup, the `ProtocolError`
+doc-comment rewrite, `reference/architecture.md`'s pump structure) already
+landed with it. What remains, for workstream B:
 
-- `reference/havoc.md`: the admission-control behavior, `OrderAdmissionRejected`
-  and the category rationale for its `DelayAcks` exemption, and the overload
-  close reason. The `DelayAcks` entry needs to say what it now says only by
-  implication - it holds DELIVERY, never ADMISSION.
-- `mogwai-protocol`: the "untargetedness is deliberate" comment on
-  `ProtocolError` inverts and must be rewritten, not amended.
-- `reference/architecture.md`: the pump structure and the wire types.
+- `reference/architecture.md`: the `Subscribe` wire shape once it carries
+  per-entry generation ids and cursors.
+- `mogwai-protocol`: `ProtocolError`'s untargetedness paragraph inverts once
+  per-entry correlation exists - narrowed by workstream A, not yet closed.
 
 ## References
 

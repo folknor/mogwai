@@ -2064,6 +2064,79 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
             // own logs.
             tracing::warn!(%reason, "venue reported a protocol error");
         }
+        ServerMessage::AdmissionRejected {
+            subject,
+            reason,
+            ts_event,
+        } => match subject {
+            mogwai_protocol::AdmissionSubject::Submit { client_order_id } => {
+                handle_exec_message(
+                    ServerMessage::OrderRejected {
+                        client_order_id,
+                        reason,
+                        ts_event,
+                    },
+                    ctx,
+                );
+            }
+            mogwai_protocol::AdmissionSubject::Cancel { client_order_id } => {
+                handle_exec_message(
+                    ServerMessage::OrderCancelRejected {
+                        client_order_id,
+                        venue_order_id: None,
+                        reason,
+                        ts_event,
+                    },
+                    ctx,
+                );
+            }
+            mogwai_protocol::AdmissionSubject::Modify { client_order_id } => {
+                handle_exec_message(
+                    ServerMessage::OrderModifyRejected {
+                        client_order_id,
+                        venue_order_id: None,
+                        reason,
+                        ts_event,
+                    },
+                    ctx,
+                );
+            }
+            mogwai_protocol::AdmissionSubject::Query { request_id, query } => {
+                // DROP the waiter rather than answer it. An empty snapshot
+                // would be a false venue truth - "you have no orders" when the
+                // venue in fact never looked - and the mirror would reconcile
+                // against it. Dropping the oneshot sender wakes the requester
+                // with a RecvError immediately, exactly as a disconnect does,
+                // so it fails fast instead of waiting out its query timeout for
+                // a reply the venue has said it will never send.
+                //
+                // The `query` discriminator is what makes this safe: the two
+                // waiter maps are separate and the protocol nowhere requires
+                // request ids to be unique across them, so probing both could
+                // wake the wrong waiter on a collision.
+                let mut pending = lock_recover(&ctx.pending, "pending queries");
+                let woken = match query {
+                    mogwai_protocol::QueryKind::Orders => {
+                        pending.orders.remove(&request_id).is_some()
+                    }
+                    mogwai_protocol::QueryKind::Fills => {
+                        pending.fills.remove(&request_id).is_some()
+                    }
+                };
+                drop(pending);
+                tracing::warn!(
+                    %request_id,
+                    ?query,
+                    %reason,
+                    woken,
+                    "venue refused a venue-truth query; failing its waiter now"
+                );
+            }
+            mogwai_protocol::AdmissionSubject::Subscribe { .. }
+            | mogwai_protocol::AdmissionSubject::Frame => {
+                tracing::warn!(?subject, %reason, "venue refused request admission");
+            }
+        },
         ServerMessage::Trade(_) | ServerMessage::Quote(_) => {}
     }
 }
@@ -2580,6 +2653,80 @@ mod tests {
             },
             rx,
         )
+    }
+
+    #[test]
+    fn admission_rejected_translates_per_command() {
+        let (ctx, mut events) = exec_context();
+        for subject in [
+            mogwai_protocol::AdmissionSubject::Submit {
+                client_order_id: "O-1".into(),
+            },
+            mogwai_protocol::AdmissionSubject::Cancel {
+                client_order_id: "O-1".into(),
+            },
+            mogwai_protocol::AdmissionSubject::Modify {
+                client_order_id: "O-1".into(),
+            },
+        ] {
+            handle_exec_message(
+                ServerMessage::AdmissionRejected {
+                    subject,
+                    reason: "admission budget exhausted".into(),
+                    ts_event: 2,
+                },
+                &ctx,
+            );
+        }
+        assert!(
+            events.try_recv().is_ok(),
+            "submit refusal raises an order rejection"
+        );
+        assert!(
+            events.try_recv().is_ok(),
+            "cancel refusal raises a cancel rejection"
+        );
+        assert!(
+            events.try_recv().is_ok(),
+            "modify refusal raises a modify rejection"
+        );
+
+        use tokio::sync::oneshot;
+        let (orders_tx, mut orders_rx) = oneshot::channel();
+        let (fills_tx, mut fills_rx) = oneshot::channel();
+        {
+            let mut pending = ctx.pending.lock().expect("pending queries mutex");
+            pending.orders.insert("same-id".into(), orders_tx);
+            pending.fills.insert("same-id".into(), fills_tx);
+        }
+        handle_exec_message(
+            ServerMessage::AdmissionRejected {
+                subject: mogwai_protocol::AdmissionSubject::Query {
+                    request_id: "same-id".into(),
+                    query: mogwai_protocol::QueryKind::Orders,
+                },
+                reason: "admission budget exhausted".into(),
+                ts_event: 3,
+            },
+            &ctx,
+        );
+        // The waiter fails FAST rather than being answered with a fabricated
+        // empty snapshot: its sender is dropped, so the requester sees a closed
+        // channel instead of "the venue says you have no orders".
+        assert!(
+            matches!(
+                orders_rx.try_recv(),
+                Err(oneshot::error::TryRecvError::Closed)
+            ),
+            "the refused order query's waiter is dropped"
+        );
+        assert!(
+            matches!(
+                fills_rx.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ),
+            "the same-id fill waiter is untouched: the wrong map is never probed"
+        );
     }
 
     /// A fake venue behind the exec command channel: answers the venue-truth

@@ -359,7 +359,13 @@ impl HavocLatency {
     #[must_use]
     pub fn delay_for(&self, kind: EventKind) -> std::time::Duration {
         let extra = match kind {
-            EventKind::Exec => self.exec_event_nanos,
+            // Admission frames bucket with exec: the simulated INBOUND latency
+            // is an adapter-side consumer knob, not a venue contract, and a
+            // refusal is exec-adjacent from the consumer's point of view.
+            // Giving it its own configured field would be a knob nobody asked
+            // for. This is unrelated to the server-side `DelayAcks` hold, which
+            // admission traffic is exempt from.
+            EventKind::Exec | EventKind::Admission => self.exec_event_nanos,
             EventKind::Fill => self.fill_nanos,
             EventKind::Data => self.data_nanos,
         };
@@ -404,20 +410,37 @@ pub enum EventKind {
     Exec,
     Fill,
     Data,
+    /// Transport/admission truth: what the venue's request handling refused,
+    /// clamped, or could not decode. Never engine output, so the knob that
+    /// holds engine output (`DelayAcks`) legitimately does not reach it - see
+    /// `reference/havoc.md`. `is_execution()` is FALSE for this kind, which is
+    /// what implements that exemption in one place.
+    Admission,
 }
 
 impl EventKind {
     /// Whether this category is an account/execution event rather than market
     /// data. `Exec` and `Fill` are both order-lifecycle (execution) traffic;
-    /// only `Data` is market data. The server's outbound delay path keys off
-    /// this two-way split, while the adapter's latency bucketing uses the full
-    /// three-way `EventKind` - both consult [`ServerMessage::category`] so the
-    /// two ends can never disagree about which side of the seam a variant sits
-    /// on (the split-brain that classified `AccountState` as data on one end
-    /// and execution on the other).
+    /// `Data` is market data and `Admission` is neither - it is transport truth
+    /// about a request the venue would not serve. The server's outbound delay
+    /// path keys off this split, while the adapter's latency bucketing uses the
+    /// full `EventKind` - both consult [`ServerMessage::category`] so the two
+    /// ends can never disagree about which side of the seam a variant sits on
+    /// (the split-brain that classified `AccountState` as data on one end and
+    /// execution on the other).
+    ///
+    /// Phrased as a positive list rather than `!matches!(Data)` on purpose: a
+    /// new kind must opt IN to being delayed, rather than being delayed by
+    /// default the day it is added.
     #[must_use]
     pub fn is_execution(self) -> bool {
-        !matches!(self, EventKind::Data)
+        matches!(self, EventKind::Exec | EventKind::Fill)
+    }
+    /// Whether this kind rides the priority lane on the server and bypasses the
+    /// execution delay pump.
+    #[must_use]
+    pub fn is_admission(self) -> bool {
+        matches!(self, EventKind::Admission)
     }
 }
 

@@ -67,6 +67,26 @@ never imports nautilus.
   size precision and tick/lot increments - so the adapter can translate mogwai
   `Decimal` ticks into nautilus `Price`/`Quantity` at a stable per-symbol
   precision.
+- **`AdmissionRejected` and the admission category.** `ServerMessage::
+  AdmissionRejected { subject, reason, ts_event }` is the venue REFUSING work
+  before any engine state is touched, with `AdmissionSubject` naming what was
+  refused (submit / cancel / modify / query / a coalesced subscribe / an
+  undecodable frame) because the translation is not uniform - a refused cancel
+  must become a cancel reject, never an order reject. It and `ProtocolError`
+  classify `EventKind::Admission`, a category that is neither execution nor
+  market data, which is what exempts them from `DelayAcks` in exactly one place
+  (`is_execution()`, now a positive list so a new kind must opt IN to being
+  delayed).
+- **Identifier caps and the size model.** `MAX_CLIENT_ID_LEN`,
+  `MAX_SYMBOL_LEN`, `MAX_CURRENCY_LEN`, `MAX_REASON_LEN` and
+  `MAX_SUBSCRIBE_SYMBOLS` exist so a produced frame has a COMPUTABLE upper
+  bound; without them no bound on a produced frame's size exists at all, since
+  client-controlled strings are echoed into server output. The `sizing` module
+  turns those caps into the worst-case byte bounds the server reserves against,
+  every embedded string charged at `JSON_ESCAPE_FACTOR` (6) times its cap
+  because a byte serde escapes to `\uXXXX` costs six output bytes. Each
+  constant carries its own field-by-field derivation; the test matrix checks
+  that derivation, it is not its evidence.
 - `control::Divergence` is the divergence catalog (see the havoc model below).
 - `TransportProfile` (`WsStreaming` / `HttpOrders` / `HttpPolling`) selects the
   adapter's transport archetype.
@@ -320,6 +340,36 @@ Owns the sockets, the clock, and replay pacing.
   Per-subscription windowing (`start_ts` on `Subscribe`), `Unsubscribe`
   cancellation (a shared atomic flag the replay loop polls), and the paced
   inter-tick sleep cap are all pinned by `scripts/smoke.py`.
+- **A session's outbound path is a writer plus two accounted lanes.** Producers
+  serialize their own frames (the replay threads, the order path, the admission
+  path, the heartbeat), so the single writer task does no JSON work and a byte
+  budget can charge REAL bytes. The HELD lane carries engine output through the
+  `DelayAcks` shift under a per-connection BYTE budget; the PRIORITY lane
+  carries admission truth (`AdmissionRejected`, `ProtocolError`) under a
+  per-connection FRAME budget and is drained first by a biased `select!`, so a
+  refusal overtakes queued market data and queued already-delayed execution
+  output. Both channels are UNBOUNDED, which is the point: the bound is the
+  budget, so no producer on the socket read loop can ever block on a full
+  channel - the defect this replaced was a bounded pump channel whose
+  read-loop `send().await` stalled the whole session under an armed `DelayAcks`.
+  Worst-case output is reserved from `mogwai_protocol::sizing` under the same
+  engine lock that then processes the command, so a command whose output cannot
+  be reserved never reaches the engine at all. A byte charge and a priority slot
+  TRAVEL with their frame and are released when the writer drops it, whether it
+  was written or dropped by a havoc window. When the priority lane cannot take a
+  refusal, the session closes with `CLOSE_ADMISSION_OVERLOAD` and a reason,
+  bounded by `CLOSE_GRACE`. Replay threads carry one promise ticket each, from a
+  pool separate from queue depth, reserved BEFORE a resubscribe quiesces the
+  stream it replaces - so a client never loses a live feed to a capacity problem
+  it was not told about. All three budgets are run config
+  (`exec_held_budget_bytes`, `admission_lane_frames`,
+  `admission_promise_tickets`), defaulting to the shipped constants. They are
+  knobs because a per-connection ceiling is a deployment fact - the process-wide
+  exposure is the value times the connection count - and because the refusal
+  behavior is otherwise unreachable end to end: at 8 MiB, driving a live socket
+  into a refused reservation takes twelve thousand orders. See
+  `reference/config.md` for the keys and `reference/havoc.md` for the
+  operator-facing contract.
 - **Temporal divergences live in the outbound writer**, not the engine:
   `DelayAcks` holds each execution event (market data untouched); `GoDark` drops
   everything for the blackout window; `StallData` drops only market-data frames

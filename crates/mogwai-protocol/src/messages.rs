@@ -7,6 +7,130 @@ use serde::{Deserialize, Serialize};
 use crate::havoc::{EventKind, MarketRegime};
 use crate::{ClientOrderId, Symbol, VenueOrderId};
 
+/// Maximum byte length of any client-supplied identifier the venue echoes back
+/// into its own output: `client_order_id`, `request_id`. The cap exists so a
+/// produced frame has a computable upper bound - the admission reservation in
+/// `mogwai-server` sizes worst-case output against it, and an unbounded id
+/// would make that bound unprovable (and let one 8 MiB order id exhaust a
+/// connection's whole execution budget).
+pub const MAX_CLIENT_ID_LEN: usize = 64;
+
+/// Maximum byte length of a symbol on the wire, same reasoning as
+/// `MAX_CLIENT_ID_LEN`.
+pub const MAX_SYMBOL_LEN: usize = 32;
+
+/// Maximum byte length of a server-generated `reason` string. Constructors
+/// truncate to this on a char boundary rather than rejecting: a reason is
+/// diagnostic prose, and a truncated diagnostic is still truthful about what
+/// happened, whereas a refused frame would not be.
+pub const MAX_REASON_LEN: usize = 512;
+
+/// Maximum byte length of a currency code, an instrument base or an instrument
+/// quote as configured. Operator-supplied config strings reach the wire through
+/// `AccountState`'s balance rows and every position row, so
+/// `sizing::BALANCE_ROW_MAX_BYTES` / `sizing::POSITION_ROW_MAX_BYTES` are only
+/// upper bounds if these are capped too. Enforced where the config is loaded
+/// (`mogwai-server/src/config.rs`), which fails startup rather than a
+/// connection.
+pub const MAX_CURRENCY_LEN: usize = 16;
+
+/// Maximum number of symbols one `Subscribe`/`Unsubscribe` may name, so a
+/// single read-loop iteration cannot be made to demand 100k per-symbol
+/// reservations.
+pub const MAX_SUBSCRIBE_SYMBOLS: usize = 256;
+
+/// How many refused symbols a coalesced `AdmissionSubject::Subscribe` names
+/// before it falls back to `refused_total` alone. The truncation is what keeps
+/// `ADMISSION_FRAME_MAX_BYTES` provable.
+pub const MAX_REFUSED_SYMBOLS_LISTED: usize = 16;
+
+/// Worst-case expansion factor `serde_json` applies to an arbitrary string of
+/// N bytes: a byte that must be escaped as `\uXXXX` costs six output bytes.
+/// Every `*_MAX_BYTES` constant is stated in SERIALIZED bytes, so each embedded
+/// string contributes `JSON_ESCAPE_FACTOR * cap`, never its raw cap. Sizing
+/// against raw lengths - which an implementer measuring with ordinary ASCII
+/// test strings would never catch - makes a reservation a typical case rather
+/// than an upper bound.
+pub const JSON_ESCAPE_FACTOR: usize = 6;
+
+/// Upper bound on the serialized bytes of any `EventKind::Admission` frame -
+/// `AdmissionRejected` AND `ProtocolError`, since both ride the server's
+/// priority lane. Proven by `admission_frames_fit_their_ceiling`: the widest
+/// subject is `Subscribe` with `MAX_REFUSED_SYMBOLS_LISTED` symbols of
+/// `MAX_SYMBOL_LEN`, every embedded string charged at `JSON_ESCAPE_FACTOR`
+/// times its cap, the reason `truncate_reason`d to `MAX_REASON_LEN`, and the
+/// rest a u64, a usize and fixed JSON scaffolding:
+/// `JSON_ESCAPE_FACTOR * (MAX_REFUSED_SYMBOLS_LISTED * MAX_SYMBOL_LEN +
+/// MAX_REASON_LEN)` = 6 * (512 + 512) = 6144, plus under 300 bytes of keys,
+/// punctuation and numerics, rounded up to the constant below. This bound is
+/// what makes the priority lane's FRAME count a memory bound, so every
+/// `ProtocolError` construction site must route its reason through
+/// `truncate_reason`.
+pub const ADMISSION_FRAME_MAX_BYTES: usize = 8192;
+
+/// Truncate a server-generated reason to `MAX_REASON_LEN` bytes on a char
+/// boundary, appending nothing (the truncation is visible as an abrupt end).
+#[must_use]
+pub fn truncate_reason(mut reason: String) -> String {
+    if reason.len() <= MAX_REASON_LEN {
+        return reason;
+    }
+    let mut end = MAX_REASON_LEN;
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    reason.truncate(end);
+    reason
+}
+
+/// Truncate a client-supplied identifier to `MAX_CLIENT_ID_LEN` bytes on a
+/// char boundary, for ECHOING back in a refusal. An over-length id is never
+/// accepted, so a truncated echo cannot be mistaken for a live correlation: a
+/// client matching on it finds no order, which is the truth. Echoing the id at
+/// full length would recreate the unbounded frame the cap exists to prevent.
+#[must_use]
+pub fn truncate_client_id(mut id: String) -> String {
+    if id.len() <= MAX_CLIENT_ID_LEN {
+        return id;
+    }
+    let mut end = MAX_CLIENT_ID_LEN;
+    while !id.is_char_boundary(end) {
+        end -= 1;
+    }
+    id.truncate(end);
+    id
+}
+
+/// Boundary guard for a client order id: over-length is a MALFORMED request,
+/// refused with the existing rejection mechanism, never with
+/// `AdmissionRejected` (which reads as a capacity signal).
+pub fn validate_client_order_id(id: &ClientOrderId) -> Result<(), &'static str> {
+    (id.len() <= MAX_CLIENT_ID_LEN)
+        .then_some(())
+        .ok_or("client_order_id exceeds MAX_CLIENT_ID_LEN")
+}
+
+/// Boundary guard for a venue-truth query's `request_id`, which the venue
+/// echoes on its reply and on a refusal.
+pub fn validate_request_id(id: &str) -> Result<(), &'static str> {
+    (id.len() <= MAX_CLIENT_ID_LEN)
+        .then_some(())
+        .ok_or("request_id exceeds MAX_CLIENT_ID_LEN")
+}
+
+/// Boundary guard for a `Subscribe`/`Unsubscribe` symbol list: both the
+/// per-symbol length and the CARDINALITY are capped. Called from the websocket
+/// read loop, not from the order path - subscribes never reach the order path.
+pub fn validate_symbols(symbols: &[Symbol]) -> Result<(), &'static str> {
+    if symbols.len() > MAX_SUBSCRIBE_SYMBOLS {
+        return Err("symbols exceeds MAX_SUBSCRIBE_SYMBOLS");
+    }
+    if symbols.iter().any(|s| s.len() > MAX_SYMBOL_LEN) {
+        return Err("symbol exceeds MAX_SYMBOL_LEN");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Side {
     Buy,
@@ -213,6 +337,10 @@ pub struct SubmitOrder {
 /// PRE-stamp one, and the two are consistent precisely because the stamp sits
 /// between them.
 pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
+    validate_client_order_id(&order.client_order_id)?;
+    if order.symbol.len() > MAX_SYMBOL_LEN {
+        return Err("symbol exceeds MAX_SYMBOL_LEN");
+    }
     if order.quantity <= Decimal::ZERO {
         return Err("quantity must be > 0");
     }
@@ -221,6 +349,58 @@ pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
         None if order.order_type == OrderType::Limit => Err("Limit order must carry a price"),
         _ => Ok(()),
     }
+}
+
+/// What an `AdmissionRejected` refers to. Present because the refusal must be
+/// translatable: the adapter turns a refused submit into nautilus
+/// `OrderRejected` but a refused cancel into `OrderCancelRejected` - flipping a
+/// live order to Rejected because its CANCEL was refused would be an invalid
+/// transition (see `ServerMessage::OrderCancelRejected`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind")]
+pub enum AdmissionSubject {
+    Submit {
+        client_order_id: ClientOrderId,
+    },
+    Cancel {
+        client_order_id: ClientOrderId,
+    },
+    Modify {
+        client_order_id: ClientOrderId,
+    },
+    /// A `QueryOrders` or `QueryFills`; the id is the one that would have been
+    /// echoed on the reply (bounded by `validate_request_id`, which is what
+    /// makes this subject's contribution to `ADMISSION_FRAME_MAX_BYTES`
+    /// computable), so a waiting requester can fail its own wait instead of
+    /// timing out. `query` names WHICH query, because a consumer keeps two
+    /// separate waiter maps keyed by request id and the protocol nowhere
+    /// requires ids to be unique across the two.
+    Query {
+        request_id: String,
+        query: QueryKind,
+    },
+    /// Subscriptions the venue would not admit, COALESCED into one frame per
+    /// `Subscribe`: the per-symbol loop accumulates and emits once, so a
+    /// 256-symbol subscribe of unknown symbols costs one priority frame rather
+    /// than 256 and cannot close a connection the `S22a` contract says stays
+    /// up. `symbols` lists at most `MAX_REFUSED_SYMBOLS_LISTED` of them and
+    /// `refused_total` is the true count. An empty `symbols` with a non-zero
+    /// `refused_total` is impossible; `refused_total == 0` means the whole
+    /// frame was refused before any symbol was reached.
+    Subscribe {
+        symbols: Vec<Symbol>,
+        refused_total: usize,
+    },
+    /// A frame the venue could not decode, or could not attribute at all.
+    Frame,
+}
+
+/// Which venue-truth query a refused `Query` subject refers to. Mirrors a
+/// consumer's two waiter maps one-for-one.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum QueryKind {
+    Orders,
+    Fills,
 }
 
 /// API-boundary guard for a `ClientMessage::ModifyOrder`'s `price`/`quantity`
@@ -251,6 +431,24 @@ pub fn validate_modify_order(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ServerMessage {
+    /// The venue REFUSED to do the work, before any engine state was touched:
+    /// its per-connection outbound capacity could not cover the command's
+    /// worst-case output, or the request could not be decoded at all.
+    /// `subject` names what was refused so the refusal is translatable per
+    /// command (a refused cancel is not a rejected order).
+    ///
+    /// Admission truth, not engine output: it classifies `EventKind::Admission`,
+    /// rides the server's priority lane, and is deliberately NOT held by a
+    /// `DelayAcks` window - the knob that holds engine output does not reach
+    /// something the engine never produced. See `reference/havoc.md`.
+    /// `reason` is server-generated and truncated to `MAX_REASON_LEN`, which
+    /// with the identifier caps is what bounds this frame by
+    /// `ADMISSION_FRAME_MAX_BYTES`.
+    AdmissionRejected {
+        subject: AdmissionSubject,
+        reason: String,
+        ts_event: u64,
+    },
     OrderAccepted {
         client_order_id: ClientOrderId,
         venue_order_id: VenueOrderId,
@@ -330,6 +528,21 @@ pub enum ServerMessage {
     /// unservable live request and a healthy-but-idle feed were
     /// indistinguishable on the wire. Untargeted - the offending frame
     /// carries no `client_order_id` to echo, unlike `OrderRejected`.
+    ///
+    /// Classifies `EventKind::Admission`, not `Exec`: it reports what the
+    /// venue's REQUEST HANDLING refused or clamped, which is never something
+    /// the matching engine produced, so `DelayAcks` (a hold on engine output)
+    /// no longer reaches it and it rides the server's priority lane ahead of
+    /// held traffic. The untargetedness argument above therefore no longer
+    /// rests on lateness under `DelayAcks`; network reordering and the
+    /// quiesce-and-replace race remain the open half, and a correlation field
+    /// is future work.
+    ///
+    /// `reason` is server-generated prose and MUST be routed through
+    /// `truncate_reason` at every construction site: serde's decode-error text
+    /// echoes client-controlled field names, and without the truncation
+    /// `ADMISSION_FRAME_MAX_BYTES` - hence the priority lane's frame count as a
+    /// memory bound - is unproven.
     ProtocolError {
         reason: String,
         ts_event: u64,
@@ -372,8 +585,10 @@ impl ServerMessage {
             | ServerMessage::OrderCanceled { .. }
             | ServerMessage::OrderUpdated { .. }
             | ServerMessage::OrderModifyRejected { .. }
-            | ServerMessage::OrderCancelRejected { .. }
-            | ServerMessage::ProtocolError { .. } => EventKind::Exec,
+            | ServerMessage::OrderCancelRejected { .. } => EventKind::Exec,
+            ServerMessage::AdmissionRejected { .. } | ServerMessage::ProtocolError { .. } => {
+                EventKind::Admission
+            }
         }
     }
 
@@ -628,6 +843,138 @@ mod tests {
         assert_eq!(heartbeat.category(), EventKind::Data);
         assert!(!heartbeat.category().is_execution());
         assert!(!heartbeat.is_market_data());
+    }
+
+    #[test]
+    fn admission_rejected_round_trips() {
+        let escaped = "\u{0001}".repeat(MAX_CLIENT_ID_LEN);
+        let subjects = [
+            AdmissionSubject::Submit {
+                client_order_id: escaped.clone(),
+            },
+            AdmissionSubject::Cancel {
+                client_order_id: escaped.clone(),
+            },
+            AdmissionSubject::Modify {
+                client_order_id: escaped.clone(),
+            },
+            AdmissionSubject::Query {
+                request_id: escaped.clone(),
+                query: QueryKind::Orders,
+            },
+            AdmissionSubject::Query {
+                request_id: escaped.clone(),
+                query: QueryKind::Fills,
+            },
+            AdmissionSubject::Subscribe {
+                symbols: vec!["\u{0001}".repeat(MAX_SYMBOL_LEN); MAX_REFUSED_SYMBOLS_LISTED],
+                refused_total: MAX_SUBSCRIBE_SYMBOLS,
+            },
+            AdmissionSubject::Frame,
+        ];
+        for subject in subjects {
+            let message = ServerMessage::AdmissionRejected {
+                subject,
+                reason: "\u{0001}".repeat(MAX_REASON_LEN),
+                ts_event: u64::MAX,
+            };
+            let wire = serde_json::to_vec(&message).expect("serialize admission rejection");
+            let decoded: ServerMessage =
+                serde_json::from_slice(&wire).expect("deserialize admission rejection");
+            assert_eq!(
+                serde_json::to_vec(&decoded).expect("serialize decoded admission rejection"),
+                wire
+            );
+        }
+    }
+
+    #[test]
+    fn admission_frames_fit_their_ceiling() {
+        let escaped_id = "\u{0001}".repeat(MAX_CLIENT_ID_LEN);
+        let escaped_symbol = "\u{0001}".repeat(MAX_SYMBOL_LEN);
+        let subjects = [
+            AdmissionSubject::Submit {
+                client_order_id: escaped_id.clone(),
+            },
+            AdmissionSubject::Cancel {
+                client_order_id: escaped_id.clone(),
+            },
+            AdmissionSubject::Modify {
+                client_order_id: escaped_id.clone(),
+            },
+            AdmissionSubject::Query {
+                request_id: escaped_id.clone(),
+                query: QueryKind::Orders,
+            },
+            AdmissionSubject::Query {
+                request_id: escaped_id.clone(),
+                query: QueryKind::Fills,
+            },
+            AdmissionSubject::Subscribe {
+                symbols: vec![escaped_symbol; MAX_REFUSED_SYMBOLS_LISTED],
+                refused_total: MAX_SUBSCRIBE_SYMBOLS,
+            },
+            AdmissionSubject::Frame,
+        ];
+        for subject in subjects {
+            let msg = ServerMessage::AdmissionRejected {
+                subject,
+                reason: "\u{0001}".repeat(MAX_REASON_LEN),
+                ts_event: u64::MAX,
+            };
+            assert!(
+                serde_json::to_vec(&msg)
+                    .expect("serialize admission rejection")
+                    .len()
+                    <= ADMISSION_FRAME_MAX_BYTES,
+                "{msg:?} exceeds the admission-frame ceiling"
+            );
+        }
+    }
+
+    #[test]
+    fn admission_is_not_execution_for_delay_purposes() {
+        for msg in [
+            ServerMessage::AdmissionRejected {
+                subject: AdmissionSubject::Frame,
+                reason: "bad frame".into(),
+                ts_event: 1,
+            },
+            ServerMessage::ProtocolError {
+                reason: "bad frame".into(),
+                ts_event: 1,
+            },
+        ] {
+            assert_eq!(msg.category(), EventKind::Admission);
+            assert!(!msg.category().is_execution());
+            assert!(!msg.is_market_data());
+        }
+    }
+
+    #[test]
+    fn oversized_ids_do_not_echo_at_full_length() {
+        let overlong = "x".repeat(8 * 1024 * 1024);
+        let echoed = truncate_client_id(overlong);
+        let msg = ServerMessage::OrderRejected {
+            client_order_id: echoed,
+            reason: truncate_reason("x".repeat(8 * 1024 * 1024)),
+            ts_event: 1,
+        };
+        assert!(
+            serde_json::to_vec(&msg)
+                .expect("serialize bounded rejection")
+                .len()
+                <= crate::sizing::ORDER_EVENT_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn oversized_client_ids_are_refused_at_the_boundary() {
+        let overlong = "x".repeat(MAX_CLIENT_ID_LEN + 1);
+        assert_eq!(
+            validate_client_order_id(&overlong),
+            Err("client_order_id exceeds MAX_CLIENT_ID_LEN")
+        );
     }
 
     #[test]

@@ -38,6 +38,29 @@ server_heartbeat_ms = 0
 # with a ProtocolError while running streams keep going. 0 disables the cap.
 max_concurrent_replays = 1024
 
+# Admission control, per websocket connection. The HELD lane carries engine
+# output through the DelayAcks shift and is bounded in BYTES, because an
+# AccountState or a venue-truth snapshot has no per-frame size ceiling a count
+# could stand in for. The PRIORITY lane carries admission truth (refusals,
+# diagnostics), is exempt from DelayAcks, and is bounded in FRAMES - legitimate
+# there and nowhere else, because every frame on it is under
+# ADMISSION_FRAME_MAX_BYTES. A connection whose held budget cannot cover a
+# command's worst-case output is refused with an AdmissionRejected before the
+# engine sees the command; a connection whose priority lane is full is closed
+# with WS 1013 and a stated reason. These are per connection, so the process
+# ceiling is the value times the live connection count. Raising the held budget
+# lets one stalled connection hold more memory; lowering it refuses sooner.
+exec_held_budget_bytes = 8388608
+
+# Queued priority frames per connection. 64 x 8 KiB = 512 KiB.
+admission_lane_frames = 64
+
+# Outstanding promises of a future priority frame, one per live replay on this
+# connection, pooled separately from queue depth: a promise lives as long as its
+# replay, so drawn from the queue budget a handful of healthy streams would
+# leave no room for an actual refusal. Sized at MAX_SUBSCRIBE_SYMBOLS.
+admission_promise_tickets = 256
+
 # Initial per-currency account funding - the deposit made before the run. The
 # ledger books only fill deltas on top of this seed. A funded account is an
 # honest cash venue: orders the free balance cannot cover are rejected with

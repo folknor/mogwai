@@ -16,6 +16,7 @@ mod decimal;
 mod havoc;
 mod instruments;
 mod messages;
+pub mod sizing;
 mod transport;
 
 pub mod control;
@@ -29,10 +30,13 @@ pub use havoc::{
 };
 pub use instruments::{InstrumentDef, default_instruments};
 pub use messages::{
-    AccountState, AggressorSide, Balance, ClientMessage, FillSnapshot, OrderFilled,
-    OrderStatusInfo, OrderStatusSnapshot, OrderType, Position, QuoteTick, ServerMessage, Side,
-    SubmitOrder, TimeInForce, TradeTick, WireOrderStatus, validate_modify_order,
-    validate_submit_order,
+    ADMISSION_FRAME_MAX_BYTES, AccountState, AdmissionSubject, AggressorSide, Balance,
+    ClientMessage, FillSnapshot, JSON_ESCAPE_FACTOR, MAX_CLIENT_ID_LEN, MAX_CURRENCY_LEN,
+    MAX_REASON_LEN, MAX_REFUSED_SYMBOLS_LISTED, MAX_SUBSCRIBE_SYMBOLS, MAX_SYMBOL_LEN, OrderFilled,
+    OrderStatusInfo, OrderStatusSnapshot, OrderType, Position, QueryKind, QuoteTick, ServerMessage,
+    Side, SubmitOrder, TimeInForce, TradeTick, WireOrderStatus, truncate_client_id,
+    truncate_reason, validate_client_order_id, validate_modify_order, validate_request_id,
+    validate_submit_order, validate_symbols,
 };
 pub use transport::TransportProfile;
 

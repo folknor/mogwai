@@ -36,6 +36,19 @@ Or both. There are no exceptions.
   decision: bounding the lulls in the generator would break the committed
   byte-identical golden stream, so it is a fingerprint refit, not a local fix.
 
+- The subscription protocol redesign (workstream B in `docs/protocol-problem.md`):
+  `Subscribe` moves from one request-wide `start_ts` to a per-entry
+  `generation_id`/cursor pair, so a subscription diagnostic can name the
+  generation it describes and an adapter resubscribe can carry every symbol's
+  own cursor in one frame instead of one `Subscribe` per symbol. Workstream A
+  (the exec pump rewrite, the `AdmissionRejected` priority lane) landed and is
+  out of this item's scope; the open questions are the ones workstream A's
+  spec left to workstream B - whether `regime` stays request-wide or moves
+  per-entry, whether `start_ts` stays optional, how an OLDER generation is told
+  from an UNKNOWN one, and whether successful subscriptions gain explicit
+  result frames. Next step is a spec per
+  `reference/technical-implementation-spec.md`, same as workstream A had.
+
 - The adapter manifest contradicts the documented build contract. `AGENTS.md`
   states the workspace builds against the PUBLISHED nautilus crates from
   crates.io and that "there is no sibling-checkout path dependency: a build
@@ -58,21 +71,6 @@ Or both. There are no exceptions.
   overflow the `current_abs * avg_px + delta_abs * px` computation over time.
   Closing it means introducing a position-size or notional cap - a design
   decision, not a local fix.
-
-- The exec pump couples output latency to input liveness: an armed `DelayAcks`
-  that fills the pump blocks the socket read loop, so the venue stops accepting
-  commands - measured and confirmed 2026-08-01. Full problem statement, the
-  measurement and its control, and the agreed direction (bounded pump with
-  admission control and an `OrderAdmissionRejected` priority lane; a breaking
-  `Subscribe` change carrying per-symbol cursors and generation ids) are in
-  `docs/protocol-problem.md`. That file supersedes this item, which used to
-  read as a request for a `ProtocolError` rate limit - the wrong axis, and a
-  fix that would have violated the honest-content invariant. Next step is a
-  spec per `reference/technical-implementation-spec.md`. Both halves are
-  cross-crate: the pump half adds a wire variant and its adapter translation
-  alongside the server rewrite, and the subscription half breaks `Subscribe`.
-  Both ends of both live in this workspace; deployment compatibility with
-  broadarrow is a release question, not a wire-call-site one.
 
 - The adapter integration-test stub (`crates/mogwai-adapter/tests/common`) does
   not answer `QueryOrders`/`QueryFills`; the venue-truth report generators are

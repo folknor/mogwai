@@ -111,6 +111,17 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Cheap facts used to reserve a bounded wire response before mutation.
+    #[must_use]
+    pub fn book_shape(&self) -> mogwai_protocol::sizing::BookShape {
+        mogwai_protocol::sizing::BookShape {
+            balances: self.account.balances.len(),
+            positions: self.account.positions.len(),
+            open_orders: self.open.len(),
+            closed_orders: self.closed.len(),
+            recorded_fills: self.fills.len(),
+        }
+    }
     // No `Default`: per spec, `new()` is the sole constructor so the instrument
     // table is always seeded. A derived `Default` would yield an empty table
     // whose fill accounting silently diverges (every fill warns, books
@@ -1964,5 +1975,169 @@ mod tests {
         assert!(e.account_snapshot(2).balances.is_empty());
         assert!(e.positions().is_empty());
         assert!(e.open_orders().is_empty());
+    }
+
+    #[test]
+    fn worst_case_reservation_covers_actual_output() {
+        // The sizing model's claim - `worst_case_output_bytes` DOMINATES what
+        // `process` really produces - checked against a matrix of books crossed
+        // with every command class, including the divergence-armed worst cases
+        // and adversarially escaped identifiers. A finite matrix samples the
+        // bound; the per-constant derivations in `mogwai_protocol::sizing`
+        // argue it. Ids and symbols are filled with `\u{0001}`, which serde
+        // escapes to six bytes each: an ASCII fixture would pass a bound six
+        // times too small.
+        let esc_id = "\u{0001}".repeat(mogwai_protocol::MAX_CLIENT_ID_LEN);
+
+        // Book 1: an empty venue, and a submit that fills - the first fill in a
+        // fresh pair, which introduces TWO balance rows and one position the
+        // pre-command shape never had.
+        let mut fresh = Engine::new();
+
+        // Book 2: deep - hundreds of open and closed orders and a long fill
+        // history, so the per-row snapshot terms actually carry the bound.
+        let mut deep = Engine::new();
+        for i in 0..200 {
+            // A far-from-market limit rests; a marketable one fills and closes.
+            deep.process(
+                ClientMessage::SubmitOrder(order_with(
+                    &format!("resting-{i}"),
+                    Side::Buy,
+                    "BTCUSDT",
+                    1,
+                    Some(Decimal::from(1)),
+                )),
+                i,
+            );
+            deep.process(
+                ClientMessage::SubmitOrder(order_with(
+                    &format!("filled-{i}"),
+                    Side::Buy,
+                    "BTCUSDT",
+                    1,
+                    Some(Decimal::from(1_000_000)),
+                )),
+                i,
+            );
+        }
+        let deep_shape = deep.book_shape();
+        assert!(
+            deep_shape.open_orders + deep_shape.closed_orders >= 200,
+            "the deep book must actually be deep: {deep_shape:?}"
+        );
+
+        // An armed reject at the FULL post-truncation reason length: the engine
+        // echoes it verbatim into `OrderRejected.reason`, which is exactly the
+        // term `ORDER_EVENT_MAX_BYTES` charges `MAX_REASON_LEN` for.
+        let mut armed = Engine::new();
+        armed.arm(Divergence::RejectNextSubmit {
+            reason: mogwai_protocol::truncate_reason(
+                "\u{0001}".repeat(mogwai_protocol::MAX_REASON_LEN * 4),
+            ),
+        });
+
+        // The widest submit the engine can answer: a duplicated fill plus a
+        // partial plus an IOC remainder cancel plus the account state.
+        let mut widest = Engine::new();
+        widest.arm(Divergence::DuplicateNextFill);
+        widest.arm(Divergence::PartialFillNext {
+            client_order_id: esc_id.clone(),
+            fraction: Decimal::new(5, 1),
+        });
+
+        let mut ioc = order_with(&esc_id, Side::Buy, "BTCUSDT", 10, Some(Decimal::from(100)));
+        ioc.time_in_force = TimeInForce::Ioc;
+        let query_orders = ClientMessage::QueryOrders {
+            request_id: esc_id.clone(),
+            client_order_id: None,
+            open_only: false,
+        };
+        let query_fills = ClientMessage::QueryFills {
+            request_id: esc_id.clone(),
+            client_order_id: None,
+        };
+
+        let cases: Vec<(&str, &mut Engine, Vec<ClientMessage>)> = vec![
+            (
+                "fresh book, first fill in a new pair",
+                &mut fresh,
+                vec![
+                    ClientMessage::SubmitOrder(order_with(
+                        &esc_id,
+                        Side::Buy,
+                        "BTCUSDT",
+                        10,
+                        Some(Decimal::from(1_000_000)),
+                    )),
+                    ClientMessage::CancelOrder {
+                        client_order_id: esc_id.clone(),
+                    },
+                    ClientMessage::ModifyOrder {
+                        client_order_id: esc_id.clone(),
+                        price: Some(Decimal::from(101)),
+                        quantity: None,
+                    },
+                    query_orders.clone(),
+                    query_fills.clone(),
+                ],
+            ),
+            (
+                "deep book",
+                &mut deep,
+                vec![
+                    query_orders.clone(),
+                    query_fills.clone(),
+                    ClientMessage::CancelOrder {
+                        client_order_id: "resting-7".into(),
+                    },
+                    ClientMessage::SubmitOrder(order_with(
+                        &esc_id,
+                        Side::Sell,
+                        "BTCUSDT",
+                        1,
+                        Some(Decimal::from(1)),
+                    )),
+                ],
+            ),
+            (
+                "armed RejectNextSubmit at MAX_REASON_LEN",
+                &mut armed,
+                vec![ClientMessage::SubmitOrder(order_with(
+                    &esc_id,
+                    Side::Buy,
+                    "BTCUSDT",
+                    1,
+                    Some(Decimal::from(100)),
+                ))],
+            ),
+            (
+                "duplicate + partial + IOC remainder",
+                &mut widest,
+                vec![ClientMessage::SubmitOrder(ioc), query_fills],
+            ),
+        ];
+
+        for (label, engine, commands) in cases {
+            for (ts, cmd) in commands.into_iter().enumerate() {
+                // The shape is read exactly where the real caller reads it -
+                // immediately before processing, under the same lock - so it
+                // cannot drift between the reservation and the production.
+                let shape = engine.book_shape();
+                let bound = mogwai_protocol::sizing::worst_case_output_bytes(&cmd, &shape);
+                let output = engine.process(cmd, ts as u64);
+                let actual: usize = output
+                    .iter()
+                    .map(|event| {
+                        serde_json::to_vec(event)
+                            .expect("engine event serializes")
+                            .len()
+                    })
+                    .sum();
+                assert!(
+                    actual <= bound,
+                    "{label}: produced {actual} bytes against a {bound} byte reservation"
+                );
+            }
+        }
     }
 }
