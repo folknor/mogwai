@@ -92,8 +92,11 @@ Or both. There are no exceptions.
   overshot. (B) is a trap. The live question is (C) vs (D) - whether the tape
   that ships must stay the tape `realism()` validates. Downstream of this
   decision: the AD12 dead-feed watchdog below (a threshold distinguishing "asleep"
-  from "dead" depends on it), and closing a live in-progress bar window on a
-  clock timer, deliberately not built for the same reason.
+  from "dead" depends on it), closing a live in-progress bar window on a
+  clock timer, deliberately not built for the same reason, and the penetration
+  fill gate below, which makes resting orders strictly HARDER to fill and so
+  compounds a desert's silent no-fill failure rather than merely coexisting
+  with it.
 
 - Move the adapter off the `../nautilus_trader` path dependency onto a pinned
   crates.io release. `crates/mogwai-adapter/Cargo.toml` path-depends five
@@ -183,6 +186,77 @@ Or both. There are no exceptions.
   disconnect AND broadarrow failing the run rather than resuming. Deliberately
   not taken here: the venue says clearly what happened, what the consumer does
   with that is the consumer's call.
+
+- BUILD: outbound per-command latency, the venue acting late rather than the
+  client learning late. Raised by nautilus RFC 4631 (Execution Realism Layer)
+  as its phase C, and the one phase of that RFC that fits mogwai without
+  qualification. What exists today is INBOUND only: `HavocLatency` in
+  `mogwai-protocol/src/havoc.rs` carries `base_nanos` plus per-category
+  `exec_event_nanos` / `fill_nanos` / `data_nanos`, `BASELINE_LATENCY` sets a
+  30 ms honest floor, and its own doc comment calls the knob "an adapter-side
+  consumer knob, not a venue contract". Server-side there is only
+  `Divergence::DelayAcks`, one uniform hold on EVERY outbound execution event.
+  Neither models what a real venue does: take a different amount of time to
+  ACT on a submit than on a cancel. Missing is a per-command split - submit,
+  modify, cancel, and the ack of each - applied where the engine processes the
+  command, so a cancel racing a fill can genuinely lose. Note the RFC's own
+  open question 4, whether response latency should compose `base_latency` or
+  be a separate additive field: mogwai already answered the analogous question
+  for the inbound side (armed havoc ADDS to the baseline rather than replacing
+  it, see `BASELINE_LATENCY`'s doc comment), and the outbound side should
+  match that convention rather than invent a second one. Not blocked on
+  anything; the drought decision does not touch it.
+
+- BUILD, BLOCKED on the drought decision above: penetration-gated fills. RFC
+  4631's phase A, and the highest-value fill-fidelity item available to us -
+  at-touch filling is the specific lie that flatters maker strategies. Today
+  `mogwai-engine/src/orders.rs` fills synthetically at the ORDER'S OWN price on
+  submit ("No order-type special case: this venue prices Market orders like any
+  other submit"), with the quantity coming from `fill_fraction`, so a resting
+  limit never has to be traded through to fill. The gate wanted is: fill only
+  once the tape has printed N ticks THROUGH the limit, with N=0 reproducing
+  today's behavior exactly so the default is unchanged. One deviation from the
+  RFC is forced and must be stated wherever this lands: the RFC gates on the
+  best QUOTE moving through, and mogwai has no quotes to gate on - the Kraken
+  corpus is trades-only, the generator synthesizes trades, and `/quotes` is
+  always empty (see the note below). So mogwai gates on traded prices, which is
+  what bar and L1 backtesting does anyway and is defensible on its own terms,
+  but it is NOT the same predicate nautilus would implement upstream. If both
+  ship, the two disagree about fills for a reason that is invisible at the call
+  site, so the divergence belongs in `reference/architecture.md` and in the RFC
+  thread, not only here. Sequencing: this must NOT land before the arrival
+  drought decision, because a penetration gate makes resting fills strictly
+  rarer and a desert already starves them silently.
+
+- DECIDE, then write up and delete this entry: how much of RFC 4631's phase B
+  (shared queue position) mogwai can honestly build. The RFC asks for a FIFO
+  per price level accounting for all resting liquidity, public book included.
+  That full shape is REFUSED here and the refusal is the point: there is no L2
+  anywhere in this project's lineage - the offline corpus is trades only, the
+  committed fingerprint is fitted to trades, and the engine holds no book at
+  all - so a synthesized depth ladder would be INVENTED microstructure shipped
+  under a banner of fitted realism, which is the exact failure the fingerprint
+  discipline exists to prevent. What may be salvageable, and is what this item
+  must decide: a trades-only queue-AHEAD model, where a resting order records
+  the cumulative traded volume at or through its price since it rested and only
+  fills once that volume exceeds a modeled quantity queued ahead of it. That
+  needs no book, only the trade tape mogwai already synthesizes, and it
+  captures the property phase B actually cares about (your order is not first
+  in line) while making no claim about depth it cannot support. Open question
+  is whether the queue-ahead quantity can be grounded in the fingerprint or
+  would itself be a free parameter, which is the same credibility test the
+  refusal above applies - if it is a free parameter, decline it too and say so.
+
+- After the two BUILD items above land: Criterion benches on the fill path, and
+  golden-file fill distributions if and only if fills have become stochastic.
+  RFC 4631's phase D. The benches are cheap and can land any time, guarding the
+  fill hot path against a silent throughput regression as the gates above make
+  it fatter. The golden fill CDFs are NOT meaningful yet and must not be built
+  first: while a fill is a deterministic fraction of the order's own quantity
+  there is no distribution to snapshot, so the artifact would pin a constant and
+  read as coverage. They become worth building once penetration gating (and a
+  queue-ahead model, if it survives its decision) makes the fill outcome depend
+  on the tape.
 
 ## Notes / gotchas
 
