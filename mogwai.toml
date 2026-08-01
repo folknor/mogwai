@@ -33,10 +33,24 @@ gap_cap_ms = 1000
 server_heartbeat_ms = 0
 
 # Global ceiling on concurrently-live per-symbol replay streams, summed across
-# every websocket connection. Each subscribed symbol runs on its own OS thread,
-# so this bounds a client-driven thread fan-out; over-cap subscribes are refused
-# with a ProtocolError while running streams keep going. 0 disables the cap.
-max_concurrent_replays = 1024
+# every websocket connection. A tape is one symbol, one data origin and one
+# bit-identical market regime; every subscription matching an existing tape
+# shares it for free, and only a DISTINCT tape costs an OS thread. Over-cap
+# subscribes are refused per entry while running streams keep going. 0 disables
+# the cap.
+max_concurrent_tapes = 256
+
+# Live subscriptions allowed on ONE websocket. 0 disables the cap.
+max_subscriptions_per_connection = 256
+
+# Pre-serialized frames each tape keeps for its subscribers. A subscriber that
+# falls further behind loses its feed with FeedLagged rather than being handed a
+# silent gap. 0 is INVALID here, not unbounded.
+fanout_depth = 4096
+
+# How long a speed = 0 tape waits for its slowest subscriber before letting that
+# subscriber lag. Only consulted when speed = 0.
+zero_speed_stall_ms = 5000
 
 # Per-account ledger registry. Idle timeout uses wall time; 0 disables its
 # respective account cap or timeout. The reap interval must remain nonzero.

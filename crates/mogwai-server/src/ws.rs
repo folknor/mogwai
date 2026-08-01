@@ -28,7 +28,7 @@ use mogwai_protocol::{
     ACCOUNT_QUERY_PARAM, AccountId, ClientMessage, MarketRegime, ServerMessage, SimClock,
     SubscriptionIssue, SubscriptionOutcome,
 };
-use tokio::sync::{OwnedSemaphorePermit, mpsc};
+use tokio::sync::{Notify, mpsc};
 
 use crate::accounts::{AccountSlot, SessionLease};
 use crate::admission::{
@@ -40,6 +40,7 @@ use crate::http::{
     validate_regime_or_clean,
 };
 use crate::source;
+use crate::tape::{CursorState, RegimeKey, TapeKey, TapeLease, TapeSpawn};
 
 pub(crate) async fn ws_upgrade(
     ws: WebSocketUpgrade,
@@ -236,7 +237,7 @@ pub(crate) async fn run_writer<S>(
             continue;
         }
         if sink
-            .send(Message::Text(frame.payload.into()))
+            .send(Message::Text(frame.payload.as_ref().into()))
             .await
             .is_err()
         {
@@ -270,7 +271,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, slot: Arc<AccountSlot
     let lanes = ExecLanes::new(held_tx, prio_tx, build_admission_limits(&state.cfg));
     // One replay stream PER SYMBOL, not per sorted symbol-set. Keying per set let
     // overlapping subscriptions (`[A,B]` then `[B,C]`) spawn two independent
-    // replays both emitting `B` from independent generators/clocks, so the client
+    // streams both emitting `B` from independent generators/clocks, so the client
     // saw duplicated, interleaved, out-of-order-per-symbol `B` trades - breaking
     // the ascending-`ts_event` ordering the adapter's `PollCursor` relies on
     // (E.5). With a per-symbol map a given symbol is fed by exactly one stream:
@@ -278,12 +279,12 @@ async fn handle_socket(socket: WebSocket, state: AppState, slot: Arc<AccountSlot
     // stream before the replacement emits, so no stale tick interleaves at the
     // seam (E.6); the handles are tracked and reaped so threads cannot pile up
     // under connect/subscribe/disconnect churn (E.7).
-    let mut replays: HashMap<String, Replay> = HashMap::new();
+    let mut subscriptions: HashMap<String, Subscription> = HashMap::new();
     let mut generations: HashMap<String, u64> = HashMap::new();
     let sim = state.sim;
 
     // `tx`/`rx` carries everything the writer paces normally: market data
-    // straight from the replay threads and the heartbeat, and execution output
+    // straight from the fanout tasks and the heartbeat, and execution output
     // after it has cleared the `DelayAcks` shift in `spawn_exec_pump` (the hop
     // exists so a delay sleep never blocks the writer's own recv loop). The
     // priority lane is the second input, drained FIRST by the biased select
@@ -372,15 +373,17 @@ async fn handle_socket(socket: WebSocket, state: AppState, slot: Arc<AccountSlot
         };
 
         match client_msg {
-            ClientMessage::Subscribe { subscriptions } => {
+            ClientMessage::Subscribe {
+                subscriptions: entries_request,
+            } => {
                 // Cardinality and per-symbol length are capped at the boundary
                 // (a malformed request, answered with the untargeted
                 // diagnostic) so one read-loop iteration cannot be made to
                 // demand 100k per-symbol reservations, and so a symbol that
                 // reaches the wire is bounded by `MAX_SYMBOL_LEN` - which is
                 // what makes the coalesced refusal frame's ceiling provable.
-                if let Err(reason) = mogwai_protocol::validate_subscriptions(&subscriptions) {
-                    tracing::warn!(reason, count = subscriptions.len(), "refusing subscribe");
+                if let Err(reason) = mogwai_protocol::validate_subscriptions(&entries_request) {
+                    tracing::warn!(reason, count = entries_request.len(), "refusing subscribe");
                     if let Err(close) = send_exec_protocol_error(
                         &lanes,
                         sim_now_ns(state.sim),
@@ -405,18 +408,18 @@ async fn handle_socket(socket: WebSocket, state: AppState, slot: Arc<AccountSlot
                 let mut issues_total = 0usize;
                 let mut refusals_total = 0usize;
                 let mut overload_close = None;
-                for entry in subscriptions {
+                for entry in entries_request {
                     let symbol = entry.symbol;
                     // Unknown symbols get their diagnostic here rather than from a
-                    // spawned replay thread: whether the venue lists a symbol is a
-                    // cheap synchronous check, so there is no reason to spin up an
-                    // OS thread that immediately exits and leaves a dead entry in
-                    // `replays` (S22). The dead-SEEK diagnostic - knowable only by
-                    // actually running the positioning seek - still comes from the
-                    // thread in `spawn_replay`.
+                    // spawned fanout task: whether the venue lists a symbol is a
+                    // cheap synchronous check, so there is no reason to spin up a
+                    // tape thread that immediately poisons and leaves a dead
+                    // entry in `subscriptions` (S22). The dead-SEEK diagnostic -
+                    // knowable only by actually running the positioning seek -
+                    // stays where it is discovered, on the tape thread.
                     //
                     // Note this arm `continue`s BEFORE the quiesce and before
-                    // the permit acquire, so a refused symbol never consumes a
+                    // the tape attach, so a refused symbol never consumes a
                     // promise ticket either.
                     if state.profiles.get(&symbol).is_none() {
                         tracing::warn!(%symbol, "subscribe for unknown symbol streams nothing");
@@ -430,9 +433,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, slot: Arc<AccountSlot
                         continue;
                     }
                     // Monotonicity is enforced against a connection-lifetime
-                    // high-water map, not against `replays`: an Unsubscribe, or
+                    // high-water map, not against `subscriptions`: an Unsubscribe, or
                     // a quiesce followed by a capacity refusal, removes the
-                    // replay, and enforcing off `replays` would then accept a
+                    // stream, and enforcing off `subscriptions` would then accept a
                     // REUSED generation and let a delayed diagnostic about an
                     // old stream look current. No recorded generation means any
                     // generation is acceptable, so a first subscribe on a fresh
@@ -555,30 +558,72 @@ async fn handle_socket(socket: WebSocket, state: AppState, slot: Arc<AccountSlot
                         ));
                         break;
                     };
-                    let resume_floor = if let Some(old) = replays.remove(&symbol) {
+                    let resume_floor = if let Some(old) = subscriptions.remove(&symbol) {
                         quiesce_and_resume_floor(old).await
                     } else {
                         None
                     };
-                    // Ration the global replay-thread pool (S22a): every symbol
-                    // stream is a dedicated OS thread, so without a ceiling a
-                    // fleet of connections each subscribing the whole catalog
-                    // exhausts the process thread limit. Acquire AFTER the
-                    // quiesce above so a resubscribe of THIS symbol - which just
-                    // released the predecessor's permit as it joined - reclaims
-                    // it here rather than deadlocking against its own cap-of-one.
-                    // A cap of 0 sizes the pool at MAX_PERMITS, so this branch
-                    // never trips when the cap is disabled. On exhaustion, refuse
-                    // this symbol with a ProtocolError (the same wire signal an
-                    // unservable subscribe uses) and leave the running streams
-                    // untouched.
-                    let permit = match Arc::clone(&state.replay_permits).try_acquire_owned() {
-                        Ok(permit) => permit,
+                    // The per-connection subscription cap, counted over the
+                    // entries LIVE in this connection's map. Enforced AFTER the
+                    // quiesce above, which is what makes a resubscribe free: the
+                    // predecessor has already left the map, so a resubscribe at
+                    // the cap replaces rather than being refused by its own
+                    // predecessor. Nothing else bounds a connection's
+                    // subscription count now that the replay-thread pool counts
+                    // tapes rather than subscriptions. `0` is unbounded.
+                    if state.cfg.max_subscriptions_per_connection != 0
+                        && subscriptions.len() >= state.cfg.max_subscriptions_per_connection
+                    {
+                        tracing::warn!(
+                            %symbol,
+                            cap = state.cfg.max_subscriptions_per_connection,
+                            "connection subscription cap reached; subscribe refused"
+                        );
+                        issues_total += 1;
+                        refusals_total += 1;
+                        refusals.push(SubscriptionOutcome {
+                            generation: entry.generation,
+                            symbol,
+                            issue: SubscriptionIssue::ReplayCapacity,
+                        });
+                        continue;
+                    }
+                    // Ration the global tape pool (S22a): every DISTINCT tape is
+                    // a dedicated OS thread, so without a ceiling a fleet of
+                    // connections arming distinct regimes across the whole
+                    // catalog exhausts the process thread limit. Subscribers
+                    // sharing an existing tape never consume a permit. Attach
+                    // AFTER the quiesce above so a resubscribe of THIS symbol -
+                    // which just released the predecessor's lease - reclaims the
+                    // permit here rather than deadlocking against its own
+                    // cap-of-one. A cap of 0 sizes the pool at MAX_PERMITS, so
+                    // this branch never trips when the cap is disabled. On
+                    // exhaustion, refuse this symbol with a per-entry
+                    // `ReplayCapacity` outcome - the wire name is unchanged
+                    // because from the client's side the meaning is unchanged
+                    // ("the venue's replay pool is full, nothing streams") - and
+                    // leave the running streams untouched.
+                    let key = TapeKey {
+                        symbol: symbol.clone(),
+                        data_origin_ns: state.data_origin_ns,
+                        regime: RegimeKey::from_regime(regime.as_ref()),
+                    };
+                    let tape_spawn = TapeSpawn {
+                        profiles: Arc::clone(&state.profiles),
+                        regime,
+                        sim: state.sim,
+                        speed: state.cfg.speed,
+                        gap_cap_ms: state.cfg.gap_cap_ms,
+                        fanout_depth: state.cfg.fanout_depth,
+                        zero_speed_stall_ms: state.cfg.zero_speed_stall_ms,
+                    };
+                    let lease = match state.tapes.attach(key, tape_spawn) {
+                        Ok(lease) => lease,
                         Err(_) => {
                             tracing::warn!(
                                 %symbol,
-                                cap = state.cfg.max_concurrent_replays,
-                                "replay capacity reached; subscribe refused"
+                                cap = state.cfg.max_concurrent_tapes,
+                                "tape capacity reached; subscribe refused"
                             );
                             issues_total += 1;
                             refusals_total += 1;
@@ -591,30 +636,32 @@ async fn handle_socket(socket: WebSocket, state: AppState, slot: Arc<AccountSlot
                         }
                     };
                     let cancel = Arc::new(AtomicBool::new(false));
+                    let cancel_wake = Arc::new(Notify::new());
                     let last_sent_ts = Arc::new(AtomicU64::new(NO_TICK_SENT));
-                    let handle = spawn_replay(ReplaySpawn {
+                    let task = spawn_fanout(FanoutSpawn {
                         symbol: symbol.clone(),
                         generation: entry.generation,
-                        start_ts,
+                        lease,
+                        target: resume_seek_target(start_ts, resume_floor),
                         regime,
-                        speed: state.cfg.speed,
-                        gap_cap_ms: state.cfg.gap_cap_ms,
                         profiles: Arc::clone(&state.profiles),
-                        sim: state.sim,
                         data_origin: state.data_origin_ns,
                         tx: tx.clone(),
                         lanes: lanes.clone(),
                         diag_ticket: Some(diag_ticket),
                         cancel: Arc::clone(&cancel),
-                        resume_floor,
+                        cancel_wake: Arc::clone(&cancel_wake),
                         last_sent_ts: Arc::clone(&last_sent_ts),
-                        permit: Some(permit),
+                        sim: state.sim,
+                        speed: state.cfg.speed,
+                        gap_cap_ms: state.cfg.gap_cap_ms,
                     });
-                    replays.insert(
+                    subscriptions.insert(
                         symbol,
-                        Replay {
+                        Subscription {
                             cancel,
-                            handle,
+                            cancel_wake,
+                            task,
                             last_sent_ts,
                         },
                     );
@@ -653,8 +700,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, slot: Arc<AccountSlot
                     continue;
                 }
                 for symbol in dedup_symbols(symbols) {
-                    if let Some(old) = replays.remove(&symbol) {
-                        quiesce_replay(old).await;
+                    if let Some(old) = subscriptions.remove(&symbol) {
+                        quiesce_subscription(old).await;
                     }
                 }
             }
@@ -709,14 +756,15 @@ async fn handle_socket(socket: WebSocket, state: AppState, slot: Arc<AccountSlot
     // Cancel every replay first so the threads stop generating, then join them
     // (the writer task is still draining `rx`, so a thread blocked in a send
     // unblocks and observes the cancel promptly). Reaping the handles here means
-    // a disconnect leaves no detached replay thread parked in `next_tick`/send
+    // a disconnect leaves no detached fanout task parked in `recv`/send
     // (E.7). Only after the threads are joined do we drop the last `tx` and let
     // the writer task finish.
-    for replay in replays.values() {
-        replay.cancel.store(true, Ordering::Relaxed);
+    for subscription in subscriptions.values() {
+        subscription.cancel.store(true, Ordering::Relaxed);
+        subscription.cancel_wake.notify_waiters();
     }
-    for (_, replay) in replays.drain() {
-        quiesce_replay(replay).await;
+    for (_, subscription) in subscriptions.drain() {
+        quiesce_subscription(subscription).await;
     }
     if let Some(handle) = heartbeat {
         handle.abort();
@@ -867,10 +915,12 @@ fn spawn_heartbeat(
             // is a `{ts_event: u64}` - unserializable by construction.
             if tx
                 .send(Outbound::Frame(OutboundFrame {
-                    payload: serde_json::to_string(&ServerMessage::Heartbeat {
-                        ts_event: sim_now_ns(sim),
-                    })
-                    .expect("Heartbeat serializes"),
+                    payload: Arc::from(
+                        serde_json::to_string(&ServerMessage::Heartbeat {
+                            ts_event: sim_now_ns(sim),
+                        })
+                        .expect("Heartbeat serializes"),
+                    ),
                     is_market_data: false,
                     charge: None,
                     slot: None,
@@ -884,127 +934,529 @@ fn spawn_heartbeat(
     })
 }
 
-/// A live per-symbol replay stream: the cancel flag the handler raises to stop
-/// it, the OS-thread handle so the stream can be joined (reaped) rather than
-/// detached and left to linger, and the last `ts_event` it successfully sent
-/// (or [`NO_TICK_SENT`] if none yet) so a resubscribe of this symbol can seek
-/// its replacement strictly past whatever this stream already delivered.
-pub(crate) struct Replay {
+/// One subscription's live feed: a tokio task fanning one tape's frames into
+/// this connection's outbound channel, after replaying whatever backfill the
+/// subscriber's own seek target demands.
+pub(crate) struct Subscription {
+    /// Retained for the cheap synchronous checks the loop bodies already do,
+    /// but it CANNOT wake a parked task on its own.
     pub(crate) cancel: Arc<AtomicBool>,
-    pub(crate) handle: std::thread::JoinHandle<()>,
+    /// The wakeup half. Raising `cancel` is always followed by
+    /// `cancel_wake.notify_waiters()`, and every await in the task is a
+    /// `select!` against it. Without this, a fanout task parked in `recv` on an
+    /// idle tape (mean cadence ~7 s in identity mode) or in `reserve` on a full
+    /// connection channel would delay unsubscribe, resubscribe and disconnect
+    /// by seconds or indefinitely - and disconnect teardown awaits every task,
+    /// so the delay would compound across subscriptions.
+    pub(crate) cancel_wake: Arc<Notify>,
+    pub(crate) task: tokio::task::JoinHandle<()>,
+    /// The last `ts_event` this subscription successfully sent (or
+    /// [`NO_TICK_SENT`]), so a resubscribe of this symbol can seek its
+    /// replacement strictly past whatever this stream already delivered.
     pub(crate) last_sent_ts: Arc<AtomicU64>,
 }
 
-/// Sentinel `last_sent_ts` for a replay that has not yet sent a tick. A real
-/// `ts_event` this large is not reachable within the tape's lifetime, so it is
-/// distinguishable from any genuine timestamp without an `Option` wrapper.
+/// Sentinel `last_sent_ts` for a subscription that has not yet sent a tick. A
+/// real `ts_event` this large is not reachable within the tape's lifetime, so
+/// it is distinguishable from any genuine timestamp without an `Option`.
 pub(crate) const NO_TICK_SENT: u64 = u64::MAX;
 
-/// Maximum wall time a replay thread parks while the outbound channel is full
-/// before it re-checks its cancel flag. Bounds how long a cancelled stream can
-/// stay parked in backpressure, so a quiesce/join completes promptly (E.7).
-const REPLAY_SEND_POLL: Duration = Duration::from_millis(5);
-
-/// Maximum wall time one slice of a pacing sleep runs before the replay
-/// thread re-checks its cancel flag. Pacing deadlines are unbounded in
-/// principle: the accelerated branch deadline-paces every tick with no cap
-/// (a session-profile trough or a Subscribe with a future `start_ts` can put
-/// the next deadline minutes to days out), and identity mode with
-/// `gap_cap_ms = 0` (the documented "0 disables the cap") is just as
-/// unbounded. `quiesce_replay` joins the thread inline in the connection's
-/// read loop, so one uninterruptible `thread::sleep` that long would stall
-/// every Unsubscribe/resubscribe/disconnect for the whole connection until
-/// the sleep expired. Slicing the sleep bounds cancel-observation latency to
-/// this constant, at a cost of at most ~50 wakeups/sec while pacing -
-/// negligible against per-tick synthesis.
-const REPLAY_SLEEP_POLL: Duration = Duration::from_millis(20);
-
-/// Sleep until `target_wall_ns` - a unix-ns wall deadline mapped through the
-/// replay's NTP-immune `(wall_anchor, instant_anchor)` pairing - in bounded
-/// slices of at most [`REPLAY_SLEEP_POLL`], returning early the moment
-/// `cancel` is raised. Both pacing branches of `spawn_replay` (accelerated
-/// deadline pacing and identity gap pacing) sleep exclusively through this,
-/// so a cancelled replay parked mid-gap wakes within one slice instead of
-/// holding `quiesce_replay`'s join for the full inter-tick wall gap.
-pub(crate) fn sleep_until_wall_cancellable(
-    target_wall_ns: u64,
-    wall_anchor: u64,
-    instant_anchor: Instant,
-    cancel: &AtomicBool,
-) {
-    if target_wall_ns <= wall_anchor {
-        return;
-    }
-    let target = instant_anchor + Duration::from_nanos(target_wall_ns - wall_anchor);
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            return;
-        }
-        let now = Instant::now();
-        if target <= now {
-            return;
-        }
-        std::thread::sleep((target - now).min(REPLAY_SLEEP_POLL));
-    }
-}
-
-/// Cancel a replay and join its thread, off the async worker.
+/// Cancel a subscription's fanout task and await its exit.
 ///
-/// The join can block briefly (until the thread observes the cancel between
-/// generated ticks, within one [`REPLAY_SEND_POLL`] of a full-channel park, or
-/// within one [`REPLAY_SLEEP_POLL`] slice of a pacing sleep), so it runs on a
-/// blocking thread rather than stalling the tokio worker driving this
-/// connection. Returning only once the thread has exited is what guarantees
-/// quiescence: callers rely on it so a replaced stream cannot interleave a stale
-/// tick after its successor begins (E.6), and so disconnect reaps every thread.
-pub(crate) async fn quiesce_replay(replay: Replay) {
-    replay.cancel.store(true, Ordering::Relaxed);
-    match tokio::task::spawn_blocking(move || replay.handle.join()).await {
-        Ok(Ok(())) => {}
-        // The replay OS thread panicked mid-stream. `join()` surfaces the panic
-        // payload here; without logging it, a wedged/panicked replay silently
-        // ended the feed and the client saw an idle-but-healthy socket rather than
-        // any sign the stream died (S15).
-        Ok(Err(panic)) => {
-            tracing::error!(
-                panic = %panic_message(&panic),
-                "replay thread panicked; its market-data feed ended silently"
-            );
-        }
-        // The outer spawn_blocking wrapper (not the replay thread) failed to run.
-        Err(e) => tracing::warn!(%e, "replay join task panicked"),
+/// No `abort`: the task must run to its own exit so the `last_sent_ts` it may
+/// be mid-storing is final. Cancel latency is bounded because EVERY await point
+/// in the task - the `recv`, the `tx.reserve()`, the backfill pacing sleep and
+/// the startup handshake - is a `select!` whose other arm is
+/// `cancel_wake.notified()`. "Woken by the next frame" is explicitly NOT the
+/// bound: an idle tape can be seconds away from its next frame. Returning only
+/// once the task has ended is what guarantees quiescence: callers rely on it so
+/// a replaced stream cannot interleave a stale tick after its successor begins
+/// (E.6), and so disconnect reaps every task.
+pub(crate) async fn quiesce_subscription(subscription: Subscription) {
+    subscription.cancel.store(true, Ordering::Relaxed);
+    subscription.cancel_wake.notify_waiters();
+    if let Err(e) = subscription.task.await
+        && !e.is_cancelled()
+    {
+        tracing::error!(%e, "fanout task panicked; its market-data feed ended silently");
     }
 }
 
-/// Best-effort human-readable text from a `catch_unwind`/`JoinHandle::join`
-/// panic payload - the common `&str` and `String` shapes, else a placeholder.
-pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
-    payload
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-        .unwrap_or("non-string panic payload")
-}
-
-/// Quiesce a symbol's in-flight replay and return its resume floor: the last
-/// `ts_event` it successfully sent, or `None` if it never sent one.
+/// Quiesce a symbol's in-flight subscription and return its resume floor: the
+/// last `ts_event` it successfully sent, or `None` if it never sent one.
 ///
-/// The floor is loaded only AFTER the join, and that ordering is load-bearing.
-/// The replay thread's cancel checks bracket the send, but a send already past
-/// its check completes and stores `last_sent_ts` even if `cancel` lands
-/// mid-flight - so between a pre-join load and the thread's exit, one more
-/// tick (T2) can enter the shared channel and advance `last_sent_ts` past the
-/// loaded value (T1). A floor of T1 makes the replacement seek `T1 + 1` and
-/// regenerate everything in `(T1, T2]`: duplicate frames on the wire, breaking
-/// the ascending-`ts_event` ordering the adapter's cursor relies on - exactly
-/// the E.5/E.6 seam the resume floor exists to close. Once the join returns
-/// the thread has exited and `last_sent_ts` is final, so a floor read here
-/// covers every tick that could ever have reached the channel.
-pub(crate) async fn quiesce_and_resume_floor(old: Replay) -> Option<u64> {
+/// The floor is loaded only AFTER the task has ended, and that ordering is
+/// load-bearing. The task's cancel checks bracket the send, but a send already
+/// past its check completes and stores `last_sent_ts` even if `cancel` lands
+/// mid-flight - so between a pre-join load and the task's exit, one more tick
+/// (T2) can enter the shared channel and advance `last_sent_ts` past the loaded
+/// value (T1). A floor of T1 makes the replacement seek `T1 + 1` and regenerate
+/// everything in `(T1, T2]`: duplicate frames on the wire, breaking the
+/// ascending-`ts_event` ordering the adapter's cursor relies on - exactly the
+/// E.5/E.6 seam the resume floor exists to close.
+pub(crate) async fn quiesce_and_resume_floor(old: Subscription) -> Option<u64> {
     let last_sent_ts = Arc::clone(&old.last_sent_ts);
-    quiesce_replay(old).await;
+    quiesce_subscription(old).await;
     let last_sent = last_sent_ts.load(Ordering::Relaxed);
     (last_sent != NO_TICK_SENT).then_some(last_sent)
+}
+
+pub(crate) struct FanoutSpawn {
+    pub(crate) symbol: String,
+    pub(crate) generation: u64,
+    pub(crate) lease: TapeLease,
+    /// The seek target, from `resume_seek_target(start_ts, resume_floor)`.
+    /// `None` means "start at the tape's attach point".
+    pub(crate) target: Option<u64>,
+    pub(crate) regime: Option<MarketRegime>,
+    pub(crate) profiles: Arc<source::InstrumentProfiles>,
+    pub(crate) data_origin: u64,
+    pub(crate) tx: mpsc::Sender<Outbound>,
+    /// The session's outbound lanes. This task's diagnostics are admission
+    /// truth, so they ride the PRIORITY lane - ahead of held traffic and exempt
+    /// from `DelayAcks` - instead of the market-data `tx`.
+    pub(crate) lanes: ExecLanes,
+    /// The promise reserved for this subscription's ONE possible diagnostic,
+    /// taken by the handler BEFORE it quiesced whatever stream this one
+    /// replaces. A fanout task spends it on `SeekBudgetExhausted` (before any
+    /// frame is delivered) or on `FeedLagged`, never both: the former always
+    /// ends the task, and the latter is only reachable once the feed is
+    /// running. That exclusivity is what makes one ticket sufficient, and it is
+    /// exactly the invariant a future edit adding a third mid-stream diagnostic
+    /// would break.
+    pub(crate) diag_ticket: Option<Ticket>,
+    pub(crate) cancel: Arc<AtomicBool>,
+    pub(crate) cancel_wake: Arc<Notify>,
+    pub(crate) last_sent_ts: Arc<AtomicU64>,
+    pub(crate) sim: SimClock,
+    pub(crate) speed: f64,
+    pub(crate) gap_cap_ms: u64,
+}
+
+/// Register on `notify` BEFORE reading the state it guards.
+///
+/// `Notify::notified()` only enqueues a waiter when the future is first polled,
+/// and `notify_waiters()` leaves no permit behind, so a notification that fires
+/// between a state check and the `select!` that awaits it is LOST - the task
+/// then parks until the next unrelated wakeup, which on a poisoned or idle tape
+/// is never, and the quiesce/disconnect awaiting that task hangs with it.
+/// `enable()` enqueues the waiter up front, so any notification after this
+/// point wakes the returned future no matter when it is first polled.
+fn armed(notify: &Notify) -> std::pin::Pin<Box<tokio::sync::futures::Notified<'_>>> {
+    let mut fut = Box::pin(notify.notified());
+    fut.as_mut().enable();
+    fut
+}
+
+/// One subscription's feed: resolve the tape's startup state, replay whatever
+/// backfill this subscriber's own seek target demands, then forward the tape's
+/// broadcast frames.
+pub(crate) fn spawn_fanout(spawn: FanoutSpawn) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let FanoutSpawn {
+            symbol,
+            generation,
+            mut lease,
+            target,
+            regime,
+            profiles,
+            data_origin,
+            tx,
+            lanes,
+            mut diag_ticket,
+            cancel,
+            cancel_wake,
+            last_sent_ts,
+            sim,
+            speed,
+            gap_cap_ms,
+        } = spawn;
+        let dead_seek = |diag_ticket: &mut Option<Ticket>| {
+            spend_diagnostic(
+                &lanes,
+                diag_ticket,
+                generation,
+                &symbol,
+                SubscriptionIssue::SeekBudgetExhausted,
+                sim.sim_ns(now_ns()),
+            );
+        };
+
+        // Phase 0: fix the two values the rest of the task turns on.
+        //
+        // - `backfill_bound`: the last `ts_event` phase 1 may emit, i.e. the
+        //   frame just before the first one this lease's receiver will hold.
+        // - `attach_floor`: frames at or below this were already delivered by
+        //   whoever this subscription replaced, and are filtered out of the
+        //   live phase.
+        let starting = matches!(lease.attach, CursorState::Starting);
+        let (backfill_bound, attach_floor) = match lease.attach {
+            // Attached mid-stream: the receiver starts after `ts` (modulo the
+            // store-before-send duplicate window), so backfill covers
+            // `(target ..= ts]` and everything at or below `ts` is filtered.
+            CursorState::Live(ts) => (Some(ts), ts),
+            CursorState::Poisoned => {
+                dead_seek(&mut diag_ticket);
+                return;
+            }
+            // Attached before the tape committed anything: this receiver holds
+            // the tape's FIRST frame, whatever it turns out to be, and that
+            // frame is the first tick at or after the tape's seek target. So
+            // the boundary is knowable WITHOUT waiting for the tape to produce
+            // anything, which is what keeps an explicit historical `start_ts`
+            // honest on a brand-new tape: waiting would stall a windowed
+            // subscribe behind the live cadence (up to `gap_cap_ms`), silently
+            // turning it into a live one. The floor stays 0 because nothing has
+            // been delivered to this subscriber by anyone.
+            CursorState::Starting => (Some(lease.seek_target_ns().saturating_sub(1)), 0),
+        };
+        // Everything at or below this has already been delivered by this
+        // subscription or by the predecessor whose floor produced `target`.
+        // The `target - 1` term is not implied by the others: when
+        // `target > backfill_bound` phase 1 is skipped, and filtering on the
+        // attach floor alone would re-deliver the frames in
+        // `(attach_floor, target)` that a predecessor on a DIFFERENT tape (any
+        // regime change on resubscribe) already sent - a duplicated or
+        // regressed `ts_event` across exactly the E.5/E.6 resubscribe seam.
+        let mut high_water = target.map_or(0, |t| t.saturating_sub(1)).max(attach_floor);
+
+        // Phase 1: backfill `(target ..= attach_ts]` from a PRIVATE history
+        // source. The clean case rides the process-global checkpoint index, so
+        // POSITIONING is O(K) rather than O(span); the number of ticks EMITTED
+        // is bounded only by how far behind the cursor the target sits, which is
+        // why this is paced and streamed rather than materialized.
+        if let (Some(target), Some(cursor)) = (target, backfill_bound)
+            && target <= cursor
+        {
+            // The structurally doomed configuration, refused up front rather
+            // than discovered minutes in. Identity gap pacing with the cap
+            // disabled advances the backfill at exactly the sim-rate the live
+            // tape advances at, so the gap never closes and the bounded ring
+            // ends the feed with `FeedLagged` once it has turned over. Only a
+            // span the ring cannot outlive is refused: a short backfill
+            // finishes before the turnover and is perfectly serviceable.
+            if sim.is_identity()
+                && speed > 0.0
+                && gap_cap_ms == 0
+                && lease
+                    .tape
+                    .frames_behind(target)
+                    .is_some_and(|frames| frames > lease.ring_depth() as u64)
+            {
+                tracing::warn!(
+                    %symbol,
+                    target,
+                    cursor,
+                    "backfill cannot catch up under uncapped identity pacing; refusing"
+                );
+                spend_diagnostic(
+                    &lanes,
+                    &mut diag_ticket,
+                    generation,
+                    &symbol,
+                    SubscriptionIssue::FeedLagged { skipped: 0 },
+                    sim.sim_ns(now_ns()),
+                );
+                return;
+            }
+            // Synthesis runs on a blocking thread, feeding a BOUNDED channel:
+            // `MergeSource` is not `Send`, so it could not be held across an
+            // await anyway, and a tokio worker is the wrong place for a walk
+            // that can be millions of ticks long. The bound is what keeps a
+            // long backfill from materializing: the producer parks on a full
+            // channel instead of buffering the whole span in memory, and it
+            // exits the moment this task drops the receiver.
+            let (backfill_tx, mut backfill_rx) = mpsc::channel::<(u64, Arc<str>)>(64);
+            let backfill = {
+                let symbol = symbol.clone();
+                let profiles = Arc::clone(&profiles);
+                tokio::task::spawn_blocking(move || {
+                    let mut history = source::build_history_source(
+                        &symbol,
+                        Some(target),
+                        regime,
+                        &profiles,
+                        data_origin,
+                    )?;
+                    // The generated tape never runs dry on its own, so a `None`
+                    // FIRST tick means the positioning seek exhausted its budget.
+                    let mut tick = history.next_tick()?;
+                    loop {
+                        if tick.ts_event() > cursor {
+                            return Some(());
+                        }
+                        let ts = tick.ts_event();
+                        let msg = match tick {
+                            TickEvent::Trade(t) => ServerMessage::Trade(t),
+                            TickEvent::Quote(q) => ServerMessage::Quote(q),
+                        };
+                        let payload = match serde_json::to_string(&msg) {
+                            Ok(payload) => payload,
+                            Err(e) => {
+                                tracing::error!(%e, "could not serialize backfill frame");
+                                return Some(());
+                            }
+                        };
+                        if backfill_tx.blocking_send((ts, Arc::from(payload))).is_err() {
+                            return Some(());
+                        }
+                        match history.next_tick() {
+                            Some(next) => tick = next,
+                            None => return Some(()),
+                        }
+                    }
+                })
+            };
+            // Same pacing-anchor discipline as the tape thread: one wall read
+            // paired with one monotonic read, so nothing here re-consults
+            // `CLOCK_REALTIME` and an NTP step can neither stall nor burst the
+            // backfill.
+            let wall_anchor = now_ns();
+            let instant_anchor = tokio::time::Instant::now();
+            let mut prev_ts: Option<u64> = None;
+            let mut next_deadline: Option<u64> = None;
+            let mut backfilled = 0usize;
+            loop {
+                let cancelled = armed(&cancel_wake);
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                let Some((ts, payload)) = (tokio::select! {
+                    () = cancelled => return,
+                    frame = backfill_rx.recv() => frame,
+                }) else {
+                    break;
+                };
+                backfilled += 1;
+                // Backfill pacing rules, unchanged from the private replay's
+                // explicit-`start_ts` path: accelerated mode deadline-paces
+                // against `sim.wall_ns`, so already-elapsed deadlines emit at
+                // full speed and catch-up terminates; identity mode gap-paces
+                // capped at `gap_cap_ms`, which at the default 1000 ms against
+                // the tape's multi-second mean cadence catches up several times
+                // faster than the clock.
+                let deadline = if !sim.is_identity() {
+                    Some(sim.wall_ns(ts))
+                } else if speed > 0.0 {
+                    let wait = prev_ts.map(|prev| {
+                        let mut wait_ns = (ts.saturating_sub(prev) as f64 / speed) as u64;
+                        if gap_cap_ms > 0 {
+                            wait_ns = wait_ns.min(gap_cap_ms.saturating_mul(1_000_000));
+                        }
+                        wait_ns
+                    });
+                    prev_ts = Some(ts);
+                    wait.map(|wait_ns| {
+                        let d = next_deadline.unwrap_or(wall_anchor).saturating_add(wait_ns);
+                        next_deadline = Some(d);
+                        d
+                    })
+                } else {
+                    None
+                };
+                if let Some(deadline) = deadline
+                    && sleep_until_wall_cancellable_async(
+                        deadline,
+                        wall_anchor,
+                        instant_anchor,
+                        &cancel,
+                        &cancel_wake,
+                    )
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                if send_cancellable_async(
+                    &tx,
+                    Outbound::Frame(OutboundFrame {
+                        payload,
+                        is_market_data: true,
+                        charge: None,
+                        slot: None,
+                    }),
+                    &cancel,
+                    &cancel_wake,
+                )
+                .await
+                .is_err()
+                {
+                    return;
+                }
+                last_sent_ts.store(ts, Ordering::Relaxed);
+                high_water = high_water.max(ts);
+            }
+            // No source at all, or a first tick that failed the bounded seek:
+            // identical to what a private replay reported today.
+            if backfilled == 0 && !matches!(backfill.await, Ok(Some(()))) {
+                dead_seek(&mut diag_ticket);
+                return;
+            }
+        }
+
+        // The seek verdict, resolved after phase 1 rather than before it: a
+        // `Starting` lease attached while the tape's seek was possibly still in
+        // flight, and this is the ONLY place `SeekBudgetExhausted` is emitted,
+        // so a subscriber attaching during a seek in flight and one attaching
+        // after it failed get the identical answer.
+        if starting {
+            loop {
+                let woken = armed(lease.wake());
+                let cancelled = armed(&cancel_wake);
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                match lease.tape.cursor_state() {
+                    CursorState::Poisoned => {
+                        if last_sent_ts.load(Ordering::Relaxed) == NO_TICK_SENT {
+                            dead_seek(&mut diag_ticket);
+                        } else {
+                            // A backfill this subscriber already received proves
+                            // the walk is servable, so this is not the dead-seek
+                            // signal; the live half is simply over.
+                            tracing::warn!(%symbol, "tape poisoned after a backfill; feed ended");
+                        }
+                        return;
+                    }
+                    CursorState::Live(_) => break,
+                    CursorState::Starting => {
+                        tokio::select! {
+                            () = cancelled => return,
+                            () = woken => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        // Phase 2: the live feed. The two phases are the same deterministic
+        // walk, so the seam is exact - the private backfill reproduced the
+        // tape's own bytes for that interval, and the broadcast ring has been
+        // accumulating live frames throughout.
+        loop {
+            let cancelled = armed(&cancel_wake);
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let frame = tokio::select! {
+                () = cancelled => return,
+                frame = lease.rx.recv() => frame,
+            };
+            match frame {
+                // The store-before-send duplicate window, the pre-`target`
+                // window, and anything the backfill already covered.
+                Ok(frame) if frame.ts_event <= high_water => {
+                    lease.progress.store(frame.seq, Ordering::Relaxed);
+                }
+                Ok(frame) => {
+                    let seq = frame.seq;
+                    let ts_event = frame.ts_event;
+                    if send_cancellable_async(
+                        &tx,
+                        Outbound::Frame(OutboundFrame {
+                            payload: frame.payload,
+                            is_market_data: true,
+                            charge: None,
+                            slot: None,
+                        }),
+                        &cancel,
+                        &cancel_wake,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return;
+                    }
+                    high_water = ts_event;
+                    last_sent_ts.store(ts_event, Ordering::Relaxed);
+                    // The zero-speed headroom throttle's input.
+                    lease.progress.store(seq, Ordering::Relaxed);
+                }
+                // A shared tape cannot be stalled by one slow subscriber the
+                // way a private replay could, so the feed ends rather than
+                // leaving a silent hole in a stream the client reads as
+                // strictly ascending. The client can resubscribe with a higher
+                // generation and a cursor.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(%symbol, skipped, "subscriber fell behind the tape; feed ended");
+                    spend_diagnostic(
+                        &lanes,
+                        &mut diag_ticket,
+                        generation,
+                        &symbol,
+                        SubscriptionIssue::FeedLagged { skipped },
+                        sim.sim_ns(now_ns()),
+                    );
+                    return;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    if last_sent_ts.load(Ordering::Relaxed) == NO_TICK_SENT {
+                        // The dead seek, if nothing else has reported it.
+                        dead_seek(&mut diag_ticket);
+                    } else {
+                        tracing::debug!(%symbol, "tape ended");
+                    }
+                    return;
+                }
+            }
+        }
+    })
+}
+
+/// The async twin of the private replay's blocking send: `tx.reserve()` raced
+/// against cancellation, so a full connection channel applies backpressure to
+/// THIS subscriber only - never to the tape, which every other subscriber on
+/// the symbol shares - and a cancel while parked returns promptly.
+async fn send_cancellable_async<T>(
+    tx: &mpsc::Sender<T>,
+    msg: T,
+    cancel: &AtomicBool,
+    wake: &Notify,
+) -> Result<(), ()> {
+    let cancelled = armed(wake);
+    if cancel.load(Ordering::Relaxed) {
+        return Err(());
+    }
+    tokio::select! {
+        () = cancelled => Err(()),
+        permit = tx.reserve() => match permit {
+            Ok(permit) if !cancel.load(Ordering::Relaxed) => {
+                permit.send(msg);
+                Ok(())
+            }
+            _ => Err(()),
+        },
+    }
+}
+
+/// Sleep until `target_wall_ns`, mapped through the caller's NTP-immune
+/// `(wall_anchor, instant_anchor)` pairing, in slices bounded by
+/// [`crate::tape::TAPE_SLEEP_POLL`] and interruptible by cancellation.
+/// `Err(())` means the subscription was cancelled mid-gap, so a quiesce during
+/// a long backfill is bounded at one slice rather than at the pacing gap.
+async fn sleep_until_wall_cancellable_async(
+    target_wall_ns: u64,
+    wall_anchor: u64,
+    instant_anchor: tokio::time::Instant,
+    cancel: &AtomicBool,
+    wake: &Notify,
+) -> Result<(), ()> {
+    let due = instant_anchor + Duration::from_nanos(target_wall_ns.saturating_sub(wall_anchor));
+    loop {
+        let cancelled = armed(wake);
+        if cancel.load(Ordering::Relaxed) {
+            return Err(());
+        }
+        let now = tokio::time::Instant::now();
+        if now >= due {
+            return Ok(());
+        }
+        let slice = (due - now).min(crate::tape::TAPE_SLEEP_POLL);
+        tokio::select! {
+            () = cancelled => return Err(()),
+            () = tokio::time::sleep(slice) => {}
+        }
+    }
 }
 
 /// Sort + dedup the requested symbols so a single subscription naming a symbol
@@ -1030,49 +1482,7 @@ pub(crate) fn is_execution_event(msg: &ServerMessage) -> bool {
     msg.category().is_execution()
 }
 
-pub(crate) struct ReplaySpawn {
-    pub(crate) symbol: String,
-    pub(crate) generation: u64,
-    pub(crate) start_ts: Option<u64>,
-    pub(crate) regime: Option<MarketRegime>,
-    pub(crate) speed: f64,
-    pub(crate) gap_cap_ms: u64,
-    pub(crate) profiles: Arc<source::InstrumentProfiles>,
-    pub(crate) sim: SimClock,
-    /// The boot-derived tape origin every generator anchors at.
-    pub(crate) data_origin: u64,
-    pub(crate) tx: mpsc::Sender<Outbound>,
-    /// The session's outbound lanes. The thread's diagnostics are admission
-    /// truth (`ProtocolError` classifies `EventKind::Admission`), so they ride
-    /// the PRIORITY lane - ahead of held traffic and exempt from `DelayAcks` -
-    /// instead of the market-data `tx`.
-    pub(crate) lanes: ExecLanes,
-    /// The promise reserved for this replay's ONE possible diagnostic (the
-    /// dead-seek), taken by the handler BEFORE it quiesced whatever stream this
-    /// one replaces. Moved into the OS thread so it is released exactly when the
-    /// thread exits, whether or not it ever fired. Single-use by type: spending
-    /// it consumes it, which is what makes "at most one diagnostic per replay"
-    /// a fact rather than a hope. `None` for the direct-`spawn_replay` unit
-    /// tests, which do not ration.
-    pub(crate) diag_ticket: Option<Ticket>,
-    pub(crate) cancel: Arc<AtomicBool>,
-    /// The predecessor stream's last successfully-sent `ts_event` for this
-    /// symbol, when this spawn replaces one quiesced just now. `None` for a
-    /// symbol with no in-flight predecessor (nothing to resume past).
-    pub(crate) resume_floor: Option<u64>,
-    /// Where this stream records its own last successfully-sent `ts_event`,
-    /// read back by the handler if IT is quiesced by a future resubscribe.
-    pub(crate) last_sent_ts: Arc<AtomicU64>,
-    /// The global replay-capacity permit this stream holds for its whole life
-    /// (S22a). Moved into the OS thread so it releases exactly when the thread
-    /// exits - whether reaped by a quiesce/join or, defensively, if a handle is
-    /// ever dropped without joining. `None` when the cap is not being enforced
-    /// for this spawn (the direct-`spawn_replay` unit tests), which simply
-    /// never rations.
-    pub(crate) permit: Option<OwnedSemaphorePermit>,
-}
-
-/// The seek target a replay thread hands to `build_live_source`.
+/// The seek target a subscription's fanout task backfills from.
 ///
 /// A live continuation (`start_ts: None`) that replaces a just-quiesced stream
 /// for this symbol must not re-seek to a freshly-sampled `sim_now` unguarded:
@@ -1154,253 +1564,5 @@ fn spend_diagnostic(
         .is_err()
     {
         tracing::debug!(%symbol, generation, "subscription issue undeliverable; client gone");
-    }
-}
-
-/// Stream generated trades for one symbol as market data into `tx`, returning
-/// the joinable thread handle so the caller can reap it.
-///
-/// The replay runs on a dedicated OS thread. It applies backpressure by retrying
-/// a `try_send` whenever the channel is full, sleeping at most
-/// [`REPLAY_SEND_POLL`] between attempts and re-checking `cancel` each time, so a
-/// stream blocked behind a slow/stalled client still observes cancellation
-/// promptly instead of parking indefinitely in a plain `blocking_send` (E.7).
-pub(crate) fn spawn_replay(spawn: ReplaySpawn) -> std::thread::JoinHandle<()> {
-    let ReplaySpawn {
-        symbol,
-        generation,
-        start_ts,
-        regime,
-        speed,
-        gap_cap_ms,
-        profiles,
-        sim,
-        data_origin,
-        tx,
-        lanes,
-        diag_ticket,
-        cancel,
-        resume_floor,
-        last_sent_ts,
-        permit,
-    } = spawn;
-    std::thread::spawn(move || {
-        // Held for the thread's whole life and released the instant it exits,
-        // so the global replay-capacity pool (S22a) tracks live threads exactly.
-        let _permit = permit;
-        // Likewise for the promise: unspent, it is returned to the pool when
-        // this thread exits, so a healthy replay costs the connection nothing
-        // permanent.
-        let mut diag_ticket = diag_ticket;
-        let symbols = [symbol.clone()];
-        // Seek the shared tape to sim-now (or the resume cursor) instead of
-        // re-anchoring a fresh generator behind now. Computed here, at the start of
-        // the replay thread (~subscribe time), so a fresh subscribe's first live
-        // tick lands at sim-now: no accelerated catch-up firehose, no identity
-        // backfill replayed at real-time gaps, and a reconnect resumes the same
-        // walk at its cursor rather than resetting the price to `start_price`.
-        let sim_now = sim.sim_ns(now_ns());
-        let seek_start_ts = resume_seek_target(start_ts, resume_floor);
-        let Some(mut merged) = source::build_live_source(
-            &symbols,
-            seek_start_ts,
-            regime,
-            &profiles,
-            data_origin,
-            sim_now,
-        ) else {
-            // No source at all: the symbol is not configured on this venue.
-            // Mirror the engine's loud "unknown instrument" order rejection on
-            // the data plane - a silent return here left the subscribe
-            // indistinguishable from a healthy-but-idle feed.
-            tracing::warn!(%symbol, "subscribe for unknown symbol streams nothing");
-            // Best-effort diagnostic on the PRIORITY lane, spending this
-            // replay's promise. Production cannot reach this branch - the
-            // subscribe handler pre-filters unknown symbols (S22), which is
-            // what makes ONE promise per replay sufficient - but the guard
-            // stays for any other `spawn_replay` caller, and it asserts rather
-            // than silently under-covering if that pre-filtering ever regresses.
-            debug_assert!(
-                diag_ticket.is_some(),
-                "an unknown-symbol replay spent its diagnostic promise already"
-            );
-            spend_diagnostic(
-                &lanes,
-                &mut diag_ticket,
-                generation,
-                &symbol,
-                SubscriptionIssue::UnknownSymbol,
-                sim.sim_ns(now_ns()),
-            );
-            return;
-        };
-        tracing::info!(%symbol, ?start_ts, sim_now, data_origin, ?regime, "replay started");
-
-        // The generated tape never runs dry on its own (`GeneratedSource::
-        // next_tick` always yields), so a `None` FIRST tick has exactly one
-        // meaning: the positioning seek could not reach its target within the
-        // budgets - a regime'd from-origin drain past `MAX_HISTORY_SEEK_TICKS`,
-        // or a cold checkpoint frontier lagging the target by more than one
-        // extension. The stream is dead before it starts; say so on the wire
-        // (the untargeted `ProtocolError` exists for exactly this unservable-
-        // request vs healthy-but-idle ambiguity) instead of logging started/
-        // finished back to back around zero frames.
-        let Some(first_tick) = merged.next_tick() else {
-            tracing::warn!(
-                %symbol,
-                ?seek_start_ts,
-                sim_now,
-                data_origin,
-                ?regime,
-                budget = source::MAX_HISTORY_SEEK_TICKS,
-                "live subscription could not be positioned; the seek exhausted its tick budget"
-            );
-            // The dead-seek diagnostic: THE one this replay's promise was
-            // reserved for, before the handler quiesced whatever stream this
-            // one replaced.
-            spend_diagnostic(
-                &lanes,
-                &mut diag_ticket,
-                generation,
-                &symbol,
-                SubscriptionIssue::SeekBudgetExhausted,
-                sim.sim_ns(now_ns()),
-            );
-            return;
-        };
-
-        // Every pacing deadline below is anchored to ONE monotonic `Instant`,
-        // paired with ONE wall-clock read, taken here at thread start. Each
-        // branch converts a wall-clock deadline (unix-nanos) into an offset from
-        // this pairing and sleeps against the `Instant` rather than re-reading
-        // the wall clock per tick - which is what makes pacing immune to an
-        // NTP/leap step mid-session: nothing after this line consults
-        // `CLOCK_REALTIME` again, so a backward step can no longer make the
-        // feed stall (a huge `deadline - now`) and a forward step can no longer
-        // make it burst (`deadline <= now` unpaced). The sleep itself is the
-        // sliced, cancel-aware `sleep_until_wall_cancellable`, so an unbounded
-        // pacing gap cannot hold a quiesce hostage; a sleep cut short by cancel
-        // falls through to the pre-send cancel check below and exits before
-        // emitting the tick it was pacing.
-        let wall_anchor = now_ns();
-        let instant_anchor = Instant::now();
-        let sleep_until_wall = |target_wall_ns: u64| {
-            sleep_until_wall_cancellable(target_wall_ns, wall_anchor, instant_anchor, &cancel);
-        };
-
-        // Identity pacing (the `else if speed > 0.0` branch below) sleeps the
-        // inter-tick gap measured from the PREVIOUS tick; with no previous tick
-        // the first one emits with no sleep. For a fresh subscribe - which seeks
-        // the tape to sim-now - the first generated tick lands a few seconds PAST
-        // sim-now, so an unpaced emit would hand the client a tick stamped ahead
-        // of the clock. Seed the pacer with the seek target (sim-now) so the first
-        // tick is paced to its own timestamp instead of racing out immediately.
-        // The accelerated branch deadline-paces every tick (including the first)
-        // and ignores `prev_ts`, so this only affects identity mode. An explicit
-        // `start_ts` is a historical window or resume cursor that lands at or
-        // before its target - that is backfill and should replay promptly, so it
-        // keeps the `None` seed and the first tick emits at once.
-        let mut prev_ts: Option<u64> = start_ts.is_none().then_some(sim_now);
-        // Accumulates the identity/speed branch's absolute schedule as
-        // `wall_anchor`-relative deadlines, rather than resetting a fresh
-        // relative sleep off every tick. A per-tick relative sleep never
-        // accounts for the time already spent generating/sending the previous
-        // tick, so over a long session the realized spacing (gap + generation +
-        // scheduling) would progressively lag real wall-clock time. Chaining
-        // deadlines instead - each the last deadline plus this tick's wait -
-        // removes that drift: a slow iteration simply arrives at an
-        // already-past deadline and does not sleep, rather than pushing every
-        // later deadline back by the overrun.
-        let mut next_deadline_wall: Option<u64> = None;
-        // `next` starts as the tick pulled by the dead-subscribe probe above,
-        // then follows the merge; the pacing and send below treat it exactly
-        // as the old loop-top `next_tick` did.
-        let mut next = Some(first_tick);
-        while let Some(tick) = next {
-            if cancel.load(Ordering::Relaxed) {
-                break;
-            }
-            if !sim.is_identity() {
-                sleep_until_wall(sim.wall_ns(tick.ts_event()));
-            } else if speed > 0.0 {
-                if let Some(prev) = prev_ts {
-                    let gap_ns = tick.ts_event().saturating_sub(prev);
-                    // Pace at nanosecond resolution: integer-dividing the scaled
-                    // gap down to whole milliseconds collapses any sub-ms
-                    // inter-tick gap to a zero-delay send, so micros-apart bursts
-                    // (which the generator emits) wouldn't be paced at all and the
-                    // realized timeline would not track original_timeline / speed.
-                    let mut wait_ns = (gap_ns as f64 / speed) as u64;
-                    if gap_cap_ms > 0 {
-                        wait_ns = wait_ns.min(gap_cap_ms.saturating_mul(1_000_000));
-                    }
-                    let deadline = next_deadline_wall
-                        .unwrap_or(wall_anchor)
-                        .saturating_add(wait_ns);
-                    sleep_until_wall(deadline);
-                    next_deadline_wall = Some(deadline);
-                }
-                prev_ts = Some(tick.ts_event());
-            }
-
-            if cancel.load(Ordering::Relaxed) {
-                break;
-            }
-            let ts_event = tick.ts_event();
-            let msg = match tick {
-                TickEvent::Trade(t) => ServerMessage::Trade(t),
-                TickEvent::Quote(q) => ServerMessage::Quote(q),
-            };
-            let payload = match serde_json::to_string(&msg) {
-                Ok(payload) => payload,
-                Err(e) => {
-                    tracing::error!(%e, "could not serialize market-data frame");
-                    break;
-                }
-            };
-            if send_cancellable(
-                &tx,
-                Outbound::Frame(OutboundFrame {
-                    payload,
-                    is_market_data: true,
-                    charge: None,
-                    slot: None,
-                }),
-                &cancel,
-            )
-            .is_err()
-            {
-                break; // client gone or stream cancelled
-            }
-            last_sent_ts.store(ts_event, Ordering::Relaxed);
-            next = merged.next_tick();
-        }
-        tracing::info!(%symbol, "replay finished");
-    })
-}
-
-/// Send `msg` into `tx`, applying backpressure without parking indefinitely.
-///
-/// `Sender::blocking_send` would block until the channel drains, and the replay
-/// thread would only re-check `cancel` at the next loop top - so a stream behind
-/// a stalled client could sit unkillable in a full channel. Instead this retries
-/// `try_send`, sleeping at most [`REPLAY_SEND_POLL`] when the channel is full and
-/// re-checking `cancel` between attempts. `Err(())` means the stream should stop
-/// (client gone, or cancelled while parked).
-fn send_cancellable<T>(tx: &mpsc::Sender<T>, msg: T, cancel: &AtomicBool) -> Result<(), ()> {
-    use mpsc::error::TrySendError;
-    let mut msg = msg;
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(());
-        }
-        match tx.try_send(msg) {
-            Ok(()) => return Ok(()),
-            Err(TrySendError::Full(returned)) => {
-                msg = returned;
-                std::thread::sleep(REPLAY_SEND_POLL);
-            }
-            Err(TrySendError::Closed(_)) => return Err(()),
-        }
     }
 }

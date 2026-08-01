@@ -25,7 +25,6 @@ use mogwai_protocol::{
     validate_submit_order,
 };
 use serde::Deserialize;
-use tokio::sync::Semaphore;
 
 use crate::accounts::{AccountRegistry, AccountSlot, AccountSummary, RegistryError};
 use crate::admission::{ExecLanes, Reservation};
@@ -324,13 +323,8 @@ pub(crate) struct AppState {
     /// for `/trades` and the anchor both source builders generate from, so the
     /// data origin and the advertised clock cannot diverge.
     pub(crate) data_origin_ns: u64,
-    /// Global permit pool rationing concurrently-live per-symbol replay threads
-    /// across every websocket connection (S22a). Each spawned replay holds one
-    /// permit for its whole life and releases it when reaped, so a subscribe
-    /// that cannot take a permit is refused for the over-limit symbols. Built
-    /// from `Config::max_concurrent_replays`; a `0` cap yields a pool sized at
-    /// `Semaphore::MAX_PERMITS`, i.e. never runs dry.
-    pub(crate) replay_permits: Arc<Semaphore>,
+    /// Process-wide registry of shared synthesized tapes.
+    pub(crate) tapes: Arc<crate::tape::TapeRegistry>,
 }
 
 /// Identity resolution, step one: parse only. No slot is created, so a caller

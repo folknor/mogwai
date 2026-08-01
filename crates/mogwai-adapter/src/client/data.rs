@@ -2991,6 +2991,29 @@ mod data_client_tests {
         assert_eq!(subs["BTCUSDT"].start_ts, Some(100));
     }
 
+    /// `FeedLagged` reaches the adapter through the refusal CATCH-ALL rather
+    /// than a bespoke arm, which is exactly the claim that silently rots: a
+    /// variant whose `is_refusal` ever returned false would fall into the
+    /// "degraded, the stream runs" arm and leave a dead feed looking healthy.
+    /// It must also leave the cursor alone - a refusal moves nothing.
+    #[test]
+    fn subscription_issue_feed_lagged_is_a_refusal_and_moves_no_cursor() {
+        assert!(SubscriptionIssue::FeedLagged { skipped: 12 }.is_refusal());
+        let subs = two_symbol_subs();
+        let issued = issuance_history(&[(2, "BTCUSDT")]);
+
+        handle_subscription_issue(
+            &subs,
+            &issued,
+            2,
+            "BTCUSDT",
+            SubscriptionIssue::FeedLagged { skipped: 12 },
+        );
+
+        let subs = lock_recover(&subs, "subscription");
+        assert_eq!(subs["BTCUSDT"].start_ts, Some(100));
+    }
+
     fn two_symbol_subs() -> Arc<Mutex<HashMap<Symbol, SubState>>> {
         Arc::new(Mutex::new(HashMap::from([
             (

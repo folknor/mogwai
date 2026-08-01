@@ -318,8 +318,8 @@ Owns the sockets, the clock, and replay pacing.
   carries an `AccountRegistry` (`accounts.rs`) rather than a single engine: each
   `AccountSlot` owns its own `Engine`, its own `delay_ms` / `dark_until_ns` /
   `stall_until_ns` havoc windows, and its own session count. Everything genuinely
-  shared - the instrument profiles, the `SimClock`, the tape origin, the replay
-  permit pool - stays on `AppState`. An account is a LEDGER, not a world, so two
+  shared - the instrument profiles, the `SimClock`, the tape origin, the tape
+  registry - stays on `AppState`. An account is a LEDGER, not a world, so two
   accounts trading the same symbol see nothing of each other and the formerly
   process-global engine mutex is now per-account.
   - **Identity is a transport attribute**, never a `ClientMessage` field: the
@@ -349,10 +349,50 @@ Owns the sockets, the clock, and replay pacing.
     with the last `Arc<AccountSlot>`. Re-creating a destroyed id yields a NEW
     generation with an empty ledger; sockets bound to the old one are never
     adopted by it.
-  - **Not done here.** Replay threads are still per subscription, not per
-    account, so 2000 workers need `max_concurrent_replays` raised (see
-    `reference/config.md`); the header is an identity, not a credential, and
-    any id may act as any account on this trusted-network test venue.
+  - **Not a credential.** The header is an identity, not a credential, and any
+    id may act as any account on this trusted-network test venue.
+- **Shared tapes, fanned out per subscription.** Synthesis is per TAPE, not per
+  subscription: the number of OS threads producing market data is the number of
+  distinct tapes in flight, and a subscription is a cheap tokio task attached to
+  one (`tape.rs`, `ws.rs::spawn_fanout`).
+  - **Tape identity is `(symbol, data_origin, regime)`.** A `GeneratedSource`'s
+    output is a pure function of `(scalars, seed, start_ts, session_profile,
+    regime)`, and the first three follow from the symbol and the boot-derived
+    origin, so two subscriptions produce byte-identical streams exactly when
+    those three fields match. The regime is part of the IDENTITY rather than a
+    per-subscriber overlay because it is consumed inside the walk (it divides
+    the ACD duration draw, scales and clamps the GARCH return, and a crossed
+    `ReopenGap` advances the generator's clock): a shared generator cannot carry
+    a per-subscriber regime. Consequences: every clean subscriber on a symbol
+    shares one tape (the forward-validation batch case - 200 accounts, one
+    thread); an armed regime costs a tape and therefore cannot perturb anyone
+    else; two subscribers arming bit-identical regimes share, which is correct
+    because each would have computed the same bytes privately.
+  - **Attach is two-phase, and race-free without holding the lock over a send.**
+    A subscriber snapshots `rx = tx.subscribe()` and the tape's cursor under the
+    registry lock, then backfills `(target ..= attach_ts]` from a PRIVATE
+    checkpointed history source (synthesized on a blocking thread, paced by the
+    same accelerated/identity rules a private replay used, streamed through a
+    bounded channel so a long span is never materialized), and finally forwards
+    broadcast frames above its high-water mark. The tape stores its cursor
+    BEFORE broadcasting each frame, so an attacher may see a duplicate - which
+    the high-water filter drops - but never a gap, which nothing could recover
+    and which would break the ascending-`ts_event` contract silently.
+  - **Reaping is refcounted and joined off the async worker.** A `TapeLease`
+    decrements the entry's refcount on drop; at zero the entry leaves the map,
+    the tape is cancelled, and its thread is handed to a single reaper task that
+    joins on `spawn_blocking`. The tape permit is released at map removal, so
+    `max_concurrent_tapes` bounds REACHABLE tapes, not threads that still exist.
+    A tape whose seek dies stores a poisoned cursor, reports
+    `SeekBudgetExhausted` to every attached subscriber, and removes its own
+    entry so a later subscribe retries the seek rather than inheriting it.
+  - **A lagging subscriber loses its feed, loudly.** The broadcast ring is
+    bounded by `fanout_depth`; a subscriber that falls behind it ends with
+    `SubscriptionIssue::FeedLagged { skipped }`. Parking the tape instead would
+    stall every other subscriber on the symbol, and an unbounded queue would
+    convert a stalled client into unbounded server memory. Under `speed = 0`
+    the throttle moves from the connection to the tape, which waits for ring
+    headroom against its slowest subscriber for at most `zero_speed_stall_ms`.
 - **Generated market data, two carriers.** A server-owned `source` module owns
   both. Both anchor every generator at the boot-derived `data_origin` (the server
   derives it once from the boot clock and threads it in) and SEEK into that one
@@ -377,17 +417,20 @@ Owns the sockets, the clock, and replay pacing.
   an unknown symbol yields no source, so a live `Subscribe` to it streams nothing
   and a `/trades` request returns an empty page rather than synthesizing a phantom
   BTC-scaled tape.
-- **Pacing and windowing.** Replay runs on a blocking thread with backpressure.
-  `Subscribe` carries self-contained entries, each with a client-chosen
-  generation, symbol, optional `start_ts`, and optional regime. Server
-  degradations and refusals are coalesced as typed `SubscriptionIssues` whose
-  outcomes echo the entry generation - one frame per `Subscribe`, refusals listed
-  first, so a 256-entry subscribe of unknown symbols costs one priority frame
-  rather than 256. A replay records the generation that spawned it and carries it
-  into its thread, so the asynchronous dead-seek diagnostic names the generation
-  it actually describes rather than whatever is current when it is discovered,
-  and the server keeps a connection-lifetime high-water generation per symbol so
-  an `Unsubscribe` cannot let a generation be reused.
+- **Pacing and windowing.** Live pacing runs on the tape thread (a blocking
+  thread, one per distinct tape); a subscription's own fanout task is a tokio
+  task that forwards the shared frames and, when it must, paces its own private
+  backfill on the same accelerated/identity rules. `Subscribe` carries
+  self-contained entries, each with a client-chosen generation, symbol, optional
+  `start_ts`, and optional regime. Server degradations and refusals are
+  coalesced as typed `SubscriptionIssues` whose outcomes echo the entry
+  generation - one frame per `Subscribe`, refusals listed first, so a 256-entry
+  subscribe of unknown symbols costs one priority frame rather than 256. A
+  fanout task records the generation that spawned it and carries it with it, so
+  the asynchronous dead-seek diagnostic names the generation it actually
+  describes rather than whatever is current when it is discovered, and the
+  server keeps a connection-lifetime high-water generation per symbol so an
+  `Unsubscribe` cannot let a generation be reused.
 
   Successful subscriptions get NO acknowledgment frame. The client's own record
   of the last generation it issued per symbol is the whole decision table, so a
@@ -396,13 +439,15 @@ Owns the sockets, the clock, and replay pacing.
   exists to protect. What would reopen the question: a client needing positive
   confirmation that a generation became current DURING a tape arrival drought,
   where the first tick (today's implicit success signal) can be hours of sim time
-  away. `Unsubscribe`
-  cancellation (a shared atomic flag the replay loop polls), and the paced
-  inter-tick sleep cap are all pinned by `scripts/smoke.py`.
-- **A session's outbound path is a writer plus two accounted lanes.** Producers
-  serialize their own frames (the replay threads, the order path, the admission
-  path, the heartbeat), so the single writer task does no JSON work and a byte
-  budget can charge REAL bytes. The HELD lane carries engine output through the
+  away. `Unsubscribe` cancellation (an `AtomicBool` paired with a `Notify` so a
+  fanout task parked in `recv` or `reserve` wakes promptly rather than at the
+  next frame), and the paced inter-tick sleep cap are all pinned by
+  `scripts/smoke.py`.
+- **A session's outbound path is a writer plus two accounted lanes.** Market
+  data is serialized ONCE per tape tick and fanned out as a shared `Arc<str>`;
+  every other producer still serializes its own frame (the order path, the
+  admission path, the heartbeat), so the single writer task does no JSON work
+  and a byte budget can charge REAL bytes. The HELD lane carries engine output through the
   `DelayAcks` shift under a per-connection BYTE budget; the PRIORITY lane
   carries admission truth (`AdmissionRejected`, `ProtocolError`,
   `SubscriptionIssues`) under a
@@ -418,10 +463,10 @@ Owns the sockets, the clock, and replay pacing.
   TRAVEL with their frame and are released when the writer drops it, whether it
   was written or dropped by a havoc window. When the priority lane cannot take a
   refusal, the session closes with `CLOSE_ADMISSION_OVERLOAD` and a reason,
-  bounded by `CLOSE_GRACE`. Replay threads carry one promise ticket each, from a
-  pool separate from queue depth, reserved BEFORE a resubscribe quiesces the
-  stream it replaces - so a client never loses a live feed to a capacity problem
-  it was not told about. All three budgets are run config
+  bounded by `CLOSE_GRACE`. Each subscription's fanout task carries one promise
+  ticket, from a pool separate from queue depth, reserved BEFORE a resubscribe
+  quiesces the stream it replaces - so a client never loses a live feed to a
+  capacity problem it was not told about. All three budgets are run config
   (`exec_held_budget_bytes`, `admission_lane_frames`,
   `admission_promise_tickets`), defaulting to the shipped constants. They are
   knobs because a per-connection ceiling is a deployment fact - the process-wide

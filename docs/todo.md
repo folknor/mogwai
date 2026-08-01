@@ -194,7 +194,7 @@ Inline literals (no named const):
   `backfill_horizon_ns 86_400_000_000_000` (24h), `sim_epoch_ns 0`.
 - Lifecycle timeout consts: `READY_TIMEOUT 10s`, `SHUTDOWN_GRACE 2s`, `STOP_TIMEOUT
   5s`, `STOP_KILL_GRACE 2s` (same value as SHUTDOWN_GRACE but a distinct phase),
-  `PID_POLL_INTERVAL 25ms`, `REPLAY_SEND_POLL 5ms`.
+  `PID_POLL_INTERVAL 25ms`, `TAPE_SLEEP_POLL 20ms`, `TAPE_HEADROOM_POLL 5ms`.
 - Channel capacity `1024` duplicated inline for the writer channel and the
   exec-delay pump channel (different traffic classes, no shared const).
 - Synthesis limits: `MAX_HISTORY_SEEK_TICKS 190_000`, `CHECKPOINT_K 8192`. The
@@ -261,4 +261,6 @@ golden-test seed.
   crates.io dep (pinned) lives in `mogwai-adapter/Cargo.toml`, not root. `brokkr.toml` only sets
   `project = "mogwai"`. Root `mogwai.toml` carries the run knobs (`sim_epoch_ns 0`,
   `wall_anchor_ns 0`, `speed 1.0`, `gap_cap_ms 1000`, `server_heartbeat_ms 0`,
-  `max_concurrent_replays 1024`, and the funded `balances` table).
+  `max_concurrent_tapes 256`, `max_subscriptions_per_connection 256`,
+  `fanout_depth 4096`, `zero_speed_stall_ms 5000`, and the funded `balances`
+  table).

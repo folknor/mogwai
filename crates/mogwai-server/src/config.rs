@@ -62,18 +62,47 @@ pub(crate) struct Config {
     /// so this default need not be exact - 24h covers a day's warmup. Documented
     /// next to `sim_epoch_ns`: both anchor the run's timelines.
     pub(crate) backfill_horizon_ns: u64,
-    /// Global ceiling on concurrently-live per-symbol replay streams across
-    /// every websocket connection. Each subscribed symbol runs on its own OS
-    /// thread (see `spawn_replay`), so without a ceiling the aggregate thread
-    /// count is `connections * subscribed-symbols` - entirely client-driven,
-    /// and a fleet of connections each subscribing the whole catalog can
-    /// exhaust the process thread limit (S22a). A subscribe that would exceed
-    /// this cap is refused for the over-limit symbols with a `ProtocolError`
-    /// diagnostic on the wire, exactly like an unservable subscribe; the
-    /// connection stays up and its already-running streams are untouched. `0`
-    /// disables the cap (unbounded), matching the `0`-disables convention of
-    /// `gap_cap_ms` and `server_heartbeat_ms`.
-    pub(crate) max_concurrent_replays: usize,
+    /// Global ceiling on concurrently-live TAPES across every websocket
+    /// connection. The unit is a distinct tape, not a subscription: a tape is
+    /// identified by `(symbol, data_origin, regime)` - the regime included
+    /// because it is an input to the generated walk, not a filter over it - and
+    /// every subscription whose triple matches an existing tape shares it for
+    /// free. Each distinct tape runs on its own OS thread, so without a ceiling
+    /// the thread count is client-driven (S22a): a fleet arming distinct
+    /// regimes across the whole catalog can exhaust the process thread limit.
+    /// A subscribe that would need a new tape past the cap is refused for those
+    /// symbols with a per-entry `ReplayCapacity` outcome; the connection stays
+    /// up and its already-running streams are untouched. `0` disables the cap
+    /// (unbounded), matching the `0`-disables convention of `gap_cap_ms` and
+    /// `server_heartbeat_ms`.
+    pub(crate) max_concurrent_tapes: usize,
+    /// Maximum live symbol subscriptions on ONE websocket, counted over the
+    /// entries currently streaming on that connection. The tape cap no longer
+    /// bounds this incidentally - subscriptions are tasks, and many share a
+    /// tape - so this is what stops one connection from opening unbounded
+    /// fanout tasks. Enforced after any predecessor for the symbol has been
+    /// quiesced, so a resubscribe at the cap replaces rather than being refused
+    /// by itself. The overflow is refused with `ReplayCapacity`. `0` is
+    /// unbounded. The default equals `MAX_SUBSCRIBE_SYMBOLS`, so one maximal
+    /// subscribe frame lands exactly at the limit and neither number silently
+    /// shadows the other.
+    pub(crate) max_subscriptions_per_connection: usize,
+    /// Depth of each tape's bounded broadcast ring, in pre-serialized frames.
+    /// A subscriber that falls further behind than this loses its feed with
+    /// `SubscriptionIssue::FeedLagged` rather than being handed a silent hole
+    /// in a stream it reads as strictly ascending - and rather than stalling
+    /// the tape, which every other subscriber on the symbol shares. The default
+    /// 4096 is roughly eight simulated hours at the tape's mean cadence.
+    /// UNLIKE every neighbouring count knob, `0` is NOT "unbounded" here:
+    /// `broadcast::channel(0)` panics, so `validate()` rejects it at load.
+    pub(crate) fanout_depth: usize,
+    /// How long a `speed = 0` tape parks waiting for ring headroom before
+    /// giving up on its slowest subscriber and letting that subscriber lag.
+    /// Only consulted when `speed == 0.0`, where the throttle moves from the
+    /// connection to the tape: long enough that a healthy in-process client is
+    /// never the reason a firehose stalls, short enough that a dead client
+    /// costs one stall and is then refused.
+    pub(crate) zero_speed_stall_ms: u64,
     /// Hard ceiling on simultaneously live ledgers. Zero disables the cap.
     pub(crate) max_accounts: usize,
     /// Wall-clock idle lifetime for accounts without a live session. Zero disables reaping.
@@ -137,12 +166,21 @@ impl Default for Config {
             // loud (off-tape requests are refused, not silently under-served), so
             // the default's exactness is low-stakes.
             backfill_horizon_ns: 86_400_000_000_000,
-            // 1024 concurrent replay threads: generous for the intended
-            // single-broadarrow-node deployment (one node subscribes a handful
-            // of symbols) while still bounding a runaway fan-out well under a
-            // typical process thread limit. Operators driving many connections
-            // against a large catalog raise it; `0` lifts it entirely.
-            max_concurrent_replays: 1024,
+            // 256 distinct tapes: the intended single-broadarrow-node
+            // deployment subscribes a handful of symbols clean plus whatever
+            // distinct regimes QA arms, so this is two orders of magnitude
+            // above the clean-tape need while still an OS-thread count a
+            // process trivially carries. `0` lifts it entirely.
+            max_concurrent_tapes: 256,
+            // Equal to MAX_SUBSCRIBE_SYMBOLS, so one maximal subscribe frame
+            // lands exactly at the limit.
+            max_subscriptions_per_connection: 256,
+            // ~8 simulated hours of the default cadence, ~5 wall minutes at
+            // speed 100. A subscriber that cannot keep up with 4096 queued
+            // pre-serialized frames is not a subscriber whose feed is
+            // meaningful.
+            fanout_depth: 4096,
+            zero_speed_stall_ms: 5000,
             max_accounts: 4096,
             account_idle_timeout_ms: 3_600_000,
             account_reap_interval_ms: 60_000,
@@ -304,20 +342,28 @@ impl Config {
         validate_balances(&cfg)?;
         validate_admission_limits(&cfg)?;
         validate_account_lifecycle(&cfg)?;
+        // Unlike every neighbouring count knob, 0 is not "unbounded" here:
+        // `broadcast::channel(0)` panics, so the key is named in a load error
+        // rather than crashing the first subscribe.
+        if cfg.fanout_depth == 0 {
+            anyhow::bail!(
+                "fanout_depth must be greater than zero; unlike the count caps, 0 does not mean unbounded here"
+            );
+        }
         Ok(cfg)
     }
 }
 
-/// Build the global replay-stream permit pool from the configured cap. A cap of
-/// `0` maps to `Semaphore::MAX_PERMITS`, i.e. effectively unbounded, so the
+/// Build the global tape permit pool from the configured cap. A cap of `0`
+/// maps to `Semaphore::MAX_PERMITS`, i.e. effectively unbounded, so the
 /// acquire path stays uniform (a permit is always taken; unlimited just never
 /// runs dry) rather than branching on an `Option` at every subscribe. See
-/// `Config::max_concurrent_replays` for the rationale.
-pub(crate) fn build_replay_permits(cfg: &Config) -> Arc<Semaphore> {
-    let permits = if cfg.max_concurrent_replays == 0 {
+/// `Config::max_concurrent_tapes` for the rationale.
+pub(crate) fn build_tape_permits(cfg: &Config) -> Arc<Semaphore> {
+    let permits = if cfg.max_concurrent_tapes == 0 {
         Semaphore::MAX_PERMITS
     } else {
-        cfg.max_concurrent_replays
+        cfg.max_concurrent_tapes
     };
     Arc::new(Semaphore::new(permits))
 }

@@ -625,6 +625,11 @@ so a per-symbol regime is expressible. The adapter today sends the same value fo
 every entry, so behavior is unchanged and the regime is effectively venue-wide; a
 genuinely per-symbol regime is now a client-side change only.
 
+Market-data tapes are shared only when their regimes are bit-identical. The
+regime is an input to the generated walk, not a post-generation filter, so a
+different armed regime receives a distinct tape and cannot perturb clean or
+other-regime subscribers.
+
 ## Validation boundaries
 
 Four free validators in `mogwai-protocol` gate the havoc surfaces, one per

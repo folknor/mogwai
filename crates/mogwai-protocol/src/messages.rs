@@ -521,6 +521,9 @@ pub enum SubscriptionIssue {
     /// could not be placed. Discovered asynchronously on the replay thread,
     /// which is why this issue in particular must carry a generation.
     SeekBudgetExhausted,
+    /// REFUSED: the subscriber fell behind the shared tape's bounded fanout
+    /// buffer. Nothing further streams for this generation.
+    FeedLagged { skipped: u64 },
     /// DEGRADED: `start_ts` preceded the tape origin; the venue clamped the
     /// request to `effective_start_ts` (the tape origin) and the stream runs
     /// from there. This value IS the position the venue used, so a client may
@@ -552,6 +555,7 @@ impl SubscriptionIssue {
                 | Self::ReplayCapacity
                 | Self::StaleGeneration { .. }
                 | Self::SeekBudgetExhausted
+                | Self::FeedLagged { .. }
         )
     }
 }
@@ -917,6 +921,7 @@ mod tests {
             SubscriptionIssue::ReplayCapacity,
             SubscriptionIssue::StaleGeneration { current: 7 },
             SubscriptionIssue::SeekBudgetExhausted,
+            SubscriptionIssue::FeedLagged { skipped: 3 },
             SubscriptionIssue::StartBeforeOrigin {
                 effective_start_ts: 11,
             },
@@ -925,7 +930,7 @@ mod tests {
             SubscriptionIssue::ReopenGapUnfireable { at_ts: 17 },
         ];
         let refusals_total = issues.iter().filter(|issue| issue.is_refusal()).count();
-        assert_eq!(refusals_total, 4, "four of the eight kill a feed");
+        assert_eq!(refusals_total, 5, "five of the nine kill a feed");
         let frame = ServerMessage::SubscriptionIssues {
             entries: issues
                 .iter()

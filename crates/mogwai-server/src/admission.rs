@@ -250,7 +250,7 @@ impl FrameBudget {
 /// is what pins the "a replay can emit at most one diagnostic in its life"
 /// claim that a promise's correctness rests on. A ticket may outlive its
 /// producer - the subscribe path reserves one for a replay's possible dead-seek
-/// diagnostic and hands it to the replay thread, which releases it on exit if
+/// diagnostic and hands it to the fanout task, which releases it on exit if
 /// it never fires - so the slot is released by dropping, wherever that happens.
 pub(crate) struct Ticket {
     /// Never read: the permit's whole job is to be RELEASED when this value is
@@ -259,12 +259,12 @@ pub(crate) struct Ticket {
 }
 
 /// A frame already rendered to its wire bytes, plus the facts the writer needs.
-/// Serializing at the PRODUCER (the replay thread, the admission path, the
+/// Serializing at the PRODUCER (the tape thread, the admission path, the
 /// order path) is what makes the byte budget exact rather than estimated: the
 /// charge is the true length of what goes on the socket. It also moves JSON
 /// cost off the single writer task.
 pub(crate) struct OutboundFrame {
-    pub(crate) payload: String,
+    pub(crate) payload: Arc<str>,
     pub(crate) is_market_data: bool,
     /// Held-lane byte charge, released when this frame is dropped. `None` for
     /// frames that were never charged: market data and heartbeats. Never read -
@@ -445,7 +445,7 @@ impl ExecLanes {
         };
         self.prio_tx
             .send(Outbound::Frame(OutboundFrame {
-                payload,
+                payload: Arc::from(payload),
                 is_market_data: false,
                 charge: None,
                 slot: Some(slot),
@@ -488,7 +488,7 @@ impl ExecLanes {
                 .send(HeldFrame {
                     arrived,
                     frame: OutboundFrame {
-                        payload,
+                        payload: Arc::from(payload),
                         is_market_data: false,
                         charge: Some(charge),
                         slot: None,

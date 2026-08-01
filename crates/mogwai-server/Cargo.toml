@@ -36,6 +36,7 @@ pulldown-cmark = "0.13"
 
 [dev-dependencies]
 tungstenite = "0.30.0"
+tokio-tungstenite = "0.30.0"
 
 [lints]
 workspace = true

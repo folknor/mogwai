@@ -143,7 +143,7 @@ irreducible floor below which no sleep or interval can resolve, regardless of
 
 | Quantity | Owner | Realized via | Resolution floor |
 | --- | --- | --- | --- |
-| Replay tick release | server `spawn_replay` | sleep until `sim.wall_ns(ts_event)` | ~1ms tokio |
+| Tape tick release | server tape thread (`tape.rs`) | sleep until `sim.wall_ns(ts_event)` | ~1ms tokio |
 | `GoDark { ms }` / `StallData { ms }` window | server writer | sim-time deadline, per-frame `sim_now` guard | per outbound frame |
 | Timer alerts / interval fires | adapter `MogwaiClock` | sleep until `sim.wall_ns(target)`; event stamped at the sim instant | ~1ms tokio; sub-floor intervals coalesce |
 
