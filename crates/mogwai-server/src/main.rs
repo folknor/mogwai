@@ -1196,7 +1196,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_lagging_subscriber_is_refused_with_feed_lagged() {
+    async fn a_lagged_subscriber_is_a_venue_fault_that_kills_the_connection() {
         let cfg = Config {
             fanout_depth: 2,
             ..Config::default()
@@ -1220,7 +1220,7 @@ mod tests {
         }
 
         let (lanes, mut receivers) = replay_lanes();
-        let (tx, _rx) = mpsc::channel(1);
+        let (tx, mut rx) = mpsc::channel(1);
         let task = spawn_fanout(FanoutSpawn {
             symbol: "BTCUSDT".into(),
             generation: 7,
@@ -1254,7 +1254,24 @@ mod tests {
                 issue: SubscriptionIssue::FeedLagged { skipped },
             }] if symbol == "BTCUSDT" && *skipped > 0
         ));
-        task.await.expect("fanout exits after FeedLagged");
+        // The load-bearing half: a turned-over ring is a VENUE FAULT, not a
+        // recoverable refusal, so the connection dies rather than streaming on
+        // past an unarmed hole. Without this the diagnostic alone would let a
+        // forward-validation run continue against silently-missing ticks.
+        let close = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("close frame")
+            .expect("writer channel open");
+        let Outbound::Close(spec) = close else {
+            panic!("expected a close, got a frame")
+        };
+        assert_eq!(spec.code, crate::admission::CLOSE_VENUE_FAULT);
+        assert!(
+            spec.reason.contains("venue fault") && spec.reason.contains("BTCUSDT"),
+            "the close must name the fault and the symbol: {}",
+            spec.reason
+        );
+        task.await.expect("fanout exits after the venue fault");
     }
 
     #[tokio::test]

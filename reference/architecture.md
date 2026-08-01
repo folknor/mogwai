@@ -386,13 +386,26 @@ Owns the sockets, the clock, and replay pacing.
     A tape whose seek dies stores a poisoned cursor, reports
     `SeekBudgetExhausted` to every attached subscriber, and removes its own
     entry so a later subscribe retries the seek rather than inheriting it.
-  - **A lagging subscriber loses its feed, loudly.** The broadcast ring is
-    bounded by `fanout_depth`; a subscriber that falls behind it ends with
-    `SubscriptionIssue::FeedLagged { skipped }`. Parking the tape instead would
-    stall every other subscriber on the symbol, and an unbounded queue would
-    convert a stalled client into unbounded server memory. Under `speed = 0`
-    the throttle moves from the connection to the tape, which waits for ring
-    headroom against its slowest subscriber for at most `zero_speed_stall_ms`.
+  - **A lagging subscriber is a VENUE FAULT and kills the connection.** The
+    broadcast ring is bounded by `fanout_depth`; a subscriber that falls behind
+    it gets `SubscriptionIssue::FeedLagged { skipped }` on the priority lane and
+    then a WS 1011 close naming the fault. Parking the tape instead would stall
+    every other subscriber on the symbol, and an unbounded queue would convert a
+    stalled client into unbounded server memory. Under `speed = 0` the throttle
+    moves from the connection to the tape, which waits for ring headroom against
+    its slowest subscriber for at most `zero_speed_stall_ms`.
+
+    This is deliberately NOT a divergence, and the distinction is the venue's
+    whole premise. Every modeled pathology here is ARMED - latency, drops,
+    blackouts, stalls - and the honest floor is that nothing perturbs the stream
+    unless it was asked for. A turned-over ring is an UNARMED hole: data the
+    venue promised in ascending order and then lost, which no client caused and
+    none can plan for. It is the exchange crashing, not the exchange
+    misbehaving. Serving on past it would let a forward-validation run finish
+    against silently-missing ticks and report a result that looks clean and is
+    not, so the connection dies instead. At the default ring depth this is
+    unreachable on loopback short of a consumer wedging for hours; if it fires,
+    treat the run as invalid rather than degraded.
 - **Generated market data, two carriers.** A server-owned `source` module owns
   both. Both anchor every generator at the boot-derived `data_origin` (the server
   derives it once from the boot clock and threads it in) and SEEK into that one

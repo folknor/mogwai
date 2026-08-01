@@ -88,11 +88,18 @@ pub(crate) struct Config {
     /// shadows the other.
     pub(crate) max_subscriptions_per_connection: usize,
     /// Depth of each tape's bounded broadcast ring, in pre-serialized frames.
-    /// A subscriber that falls further behind than this loses its feed with
-    /// `SubscriptionIssue::FeedLagged` rather than being handed a silent hole
-    /// in a stream it reads as strictly ascending - and rather than stalling
-    /// the tape, which every other subscriber on the symbol shares. The default
-    /// 4096 is roughly eight simulated hours at the tape's mean cadence.
+    /// A subscriber that falls further behind than this has its CONNECTION
+    /// KILLED as a venue fault (`admission::CLOSE_VENUE_FAULT`), because the
+    /// venue has lost market data it already promised to deliver in ascending
+    /// order and an unarmed hole is not something this venue serves. Stalling
+    /// the tape instead is not an option either - every other subscriber on the
+    /// symbol shares it.
+    ///
+    /// The default 4096 is roughly eight simulated hours at the tape's mean
+    /// cadence, so on a loopback deployment this is unreachable short of a
+    /// client stalling for hours: it is a backstop against a wedged consumer,
+    /// NOT a tuning knob for a modeled pathology. Ordinary slow-consumer
+    /// behavior belongs to the armed havoc surfaces instead.
     /// UNLIKE every neighbouring count knob, `0` is NOT "unbounded" here:
     /// `broadcast::channel(0)` panics, so `validate()` rejects it at load.
     pub(crate) fanout_depth: usize,

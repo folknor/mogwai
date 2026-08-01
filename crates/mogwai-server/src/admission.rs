@@ -56,6 +56,20 @@ pub(crate) const ADMISSION_PROMISE_TICKETS: usize = mogwai_protocol::MAX_SUBSCRI
 /// invariant permits, and it is the least ambiguous signal available.
 pub(crate) const CLOSE_ADMISSION_OVERLOAD: u16 = 1013;
 
+/// WS 1011 "Internal Error": the venue itself failed, in a way no client
+/// behavior caused and none can plan for. Reserved for exactly one condition
+/// today - a subscriber's tape ring turned over, so the venue no longer holds
+/// market data it already promised to deliver in ascending order.
+///
+/// This is NOT a divergence. Every modeled pathology in this venue is armed
+/// deliberately and the honest floor is that nothing perturbs the stream unless
+/// it was asked for (see `reference/havoc.md`). A lagged ring is an unarmed
+/// hole, which makes it a venue fault rather than a scenario: the exchange
+/// crashed. It ends the connection instead of continuing with a gap, because a
+/// forward-validation run that keeps streaming past silently-missing data
+/// produces a result that looks fine and is not.
+pub(crate) const CLOSE_VENUE_FAULT: u16 = 1011;
+
 /// How long the overload close may take to reach a peer before the connection
 /// is torn down anyway. WALL time, not sim time: this is a transport deadline.
 /// The writer may already be parked in `sink.send()` against a full TCP window,
@@ -297,6 +311,14 @@ impl CloseSpec {
     pub(crate) fn overload(reason: impl Into<String>) -> Self {
         Self {
             code: CLOSE_ADMISSION_OVERLOAD,
+            reason: truncate_reason(reason.into()),
+        }
+    }
+
+    /// The venue failed on its own account; see `CLOSE_VENUE_FAULT`.
+    pub(crate) fn venue_fault(reason: impl Into<String>) -> Self {
+        Self {
+            code: CLOSE_VENUE_FAULT,
             reason: truncate_reason(reason.into()),
         }
     }

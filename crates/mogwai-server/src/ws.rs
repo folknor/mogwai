@@ -1372,13 +1372,30 @@ pub(crate) fn spawn_fanout(spawn: FanoutSpawn) -> tokio::task::JoinHandle<()> {
                     // The zero-speed headroom throttle's input.
                     lease.progress.store(seq, Ordering::Relaxed);
                 }
-                // A shared tape cannot be stalled by one slow subscriber the
-                // way a private replay could, so the feed ends rather than
-                // leaving a silent hole in a stream the client reads as
-                // strictly ascending. The client can resubscribe with a higher
-                // generation and a cursor.
+                // A VENUE FAULT, not a divergence and not a refusal the client
+                // could have planned for. A shared tape cannot be stalled by one
+                // slow subscriber the way a private replay could, so a ring that
+                // turns over means the venue has lost market data it already
+                // promised to deliver in ascending order - an unarmed hole in a
+                // stream whose whole contract is that perturbations are
+                // deliberate. On loopback at the default ring depth this is
+                // unreachable short of a client stalling for hours, so if it
+                // fires something is badly wrong rather than merely slow.
+                //
+                // The connection therefore DIES instead of continuing past the
+                // gap: a forward-validation run that keeps streaming with
+                // silently-missing ticks yields a result that looks clean and is
+                // not. The named diagnostic still rides the priority lane so the
+                // cause is on the wire, and the close states it again in case
+                // the socket dies first.
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    tracing::warn!(%symbol, skipped, "subscriber fell behind the tape; feed ended");
+                    tracing::error!(
+                        %symbol,
+                        skipped,
+                        "VENUE FAULT: tape ring turned over and the venue lost \
+                         market data it had promised; killing the connection \
+                         rather than serving a hole"
+                    );
                     spend_diagnostic(
                         &lanes,
                         &mut diag_ticket,
@@ -1386,6 +1403,15 @@ pub(crate) fn spawn_fanout(spawn: FanoutSpawn) -> tokio::task::JoinHandle<()> {
                         &symbol,
                         SubscriptionIssue::FeedLagged { skipped },
                         sim.sim_ns(now_ns()),
+                    );
+                    // A send failure here means the writer is already gone, so
+                    // the connection is dying anyway - which is the outcome.
+                    drop(
+                        tx.send(Outbound::Close(CloseSpec::venue_fault(format!(
+                            "venue fault: lost {skipped} ticks of {symbol}; the tape ring \
+                             turned over and this feed has an unarmed gap"
+                        ))))
+                        .await,
                     );
                     return;
                 }
