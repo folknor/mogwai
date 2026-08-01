@@ -116,20 +116,23 @@ Use `brokkr` (not `cargo`) for check/test. By default output is filtered to chan
 ## Document folders
 
 The standing layout, across every project. Three live folders plus one retired,
-split by durability first, publication second.
+split by durability first, subject second.
 
 | Folder | Contents | Rule |
 |---|---|---|
-| `reference/` | Durable in-repo reference for anyone working on or with the code - `architecture.md`, `technical-implementation-spec.md`, `performance.md` (the durable record of measured numbers over time), invariants, protocol contracts | Citable from source as a source of truth. What it says must be true. |
-| `docs/` | The published VitePress site (gh-pages), hand-edited markdown | Same must-be-true rule. |
+| `reference/` | Durable in-repo reference for anyone working on or with the code - how the thing is built and why: `architecture.md`, `technical-implementation-spec.md`, `performance.md` (the durable record of measured numbers over time), invariants, protocol contracts | Citable from source as a source of truth. What it says must be true. |
+| `docs/` | Durable in-repo documentation of how the thing is used - guides, CLI reference, the consumer-facing API surface. Sometimes exposed as a hand-edited VitePress gh-pages site | Same must-be-true rule. |
 | `notes/` | Transient - work items (`todo.md`), future plans, hypotheticals, bug reports, research, analysis. Things that will die | No truth guarantee. Nothing durable cites it. |
 | `plans/` | Retired | Plan documents are transient: they go in `notes/`. |
 
-`reference/` and `docs/` are both durable and both binding. They differ in
-whether the document ships, not in who reads it - a developer or library
-consumer is the audience for both. `notes/` is neither durable nor binding,
-which is the whole point of keeping it separate: a document that may be wrong
-must not sit where a document that must be right is expected.
+`reference/` and `docs/` are both durable and both binding. The difference is
+subject, not audience: `reference/` covers how the thing is built and why - what
+you need in order to change it safely - while `docs/` covers how it is used. A
+developer or library consumer reads both. Where a project publishes a site,
+`docs/` is what gets published; the folder means the same thing either way.
+`notes/` is neither durable nor binding, which is the whole point of keeping it
+separate: a document that may be wrong must not sit where a document that must
+be right is expected.
 
 The dependency direction is therefore one-way. `notes/` may cite `docs/` and
 `reference/`; nothing durable may cite `notes/` - not a code comment, not
