@@ -9,7 +9,7 @@ work a goal down to landed commits, run `orchestrate` FIRST and
 follow it exactly - it is the standing procedure (roles, the seven steps, the
 waiting discipline, codex invocation). Note its Input section: confirm the
 goal with the user before launching anything. The orchestrate workflow,
-once invoked, overrides the foreground-subagent rule below (its launches are
+once invoked, overrides the global foreground-subagent rule (its launches are
 background by design, per the user's standing instruction in that document).
 
 **The `review` tool** fans a prompt out to fresh codex sessions, configured
@@ -38,7 +38,7 @@ user invokes by name and which carries its own standing authorization.
 Agent coordination rules:
 - Each agent gets exclusive ownership of specific files. No two agents touch the same file.
 - Agents must read their target file FIRST. Do not replace existing code with placeholders or stub it out.
-- Agents must NOT run `brokkr check`, `brokkr test`, or `cargo`. The orchestrator validates between agents.
+- Agents must NOT run `brokkr` or `cargo`. The orchestrator validates between agents.
 
 Audit protocol:
 - Do not trust agent claims of completion. Verify existence + wiring + behavior.
@@ -51,16 +51,11 @@ Subagent prompt rules:
 - Name the question, not the method. Don't prescribe tools ("use `git diff`", "use `Read`"), don't prescribe steps ("read in full, not just hunks"), don't enumerate files when the scope already implies them ("piners-syntax crate only" + the agent's own `ls` / `git diff --name-only` is enough). Prescribing the method wastes tokens and signals distrust.
 - Don't restate rules the agent already inherits. Subagents load the same CLAUDE.md / AGENTS.md as the main session, so the bash rules, no-cargo, no-worktrees, gremlins, etc. are already in scope. Re-listing them is noise.
 - Do pass anything learned in *this* conversation that the agent can't see: the user's framing, prior decisions, what's already been ruled out, the specific claim being audited.
-- For review tasks, ask for findings labeled *bug* / *gap* / *smell* / *nit* so the orchestrator can triage without re-reading the whole report.
 
 ### Communication rules
 
 - Never use the `AskUserQuestion` tool - the harness runs in don't-ask mode and it will be denied. When you need a decision from the user, just ask in chat with the options laid out in prose.
 - Never offer to commit or tell the user "per your rules I've left things uncommitted". Don't mention git commits, ever. The user will instruct you when to commit.
-
-### General rules
-
-- Subagents must always be launched in the foreground, (never use `run_in_background: true`) so the user can approve tool requests.
 
 ### Memory rules
 
