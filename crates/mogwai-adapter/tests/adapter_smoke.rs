@@ -17,8 +17,10 @@ use std::{
     time::Duration,
 };
 
-use common::{StubState, bound_stub, cached_order, instrument_id, next_exec_event};
-use mogwai_adapter::{MOGWAI_VENUE, MogwaiExecClientConfig, MogwaiExecutionClient};
+use common::{
+    StubState, bound_stub, cached_order, connected_exec_client, instrument_id, next_exec_event,
+};
+use mogwai_adapter::MOGWAI_VENUE;
 use mogwai_protocol::TransportProfile;
 use nautilus_common::{
     cache::Cache,
@@ -27,9 +29,7 @@ use nautilus_common::{
     messages::{ExecutionEvent, execution::SubmitOrder},
 };
 use nautilus_core::{UUID4, UnixNanos};
-use nautilus_live::ExecutionClientCore;
 use nautilus_model::{
-    enums::OmsType,
     events::OrderEventAny,
     identifiers::{ClientId, StrategyId, TraderId, VenueOrderId},
     orders::Order,
@@ -49,40 +49,9 @@ async fn connect_seeds_initial_account_state() {
         replace_exec_event_sender(sink_tx);
 
         let cache = Rc::new(RefCell::new(Cache::default()));
-        let config = MogwaiExecClientConfig {
-            base_url,
-            transport_profile,
-            ..MogwaiExecClientConfig::default()
-        };
-        let core = ExecutionClientCore::new(
-            config.trader_id,
-            ClientId::from("MOGWAI-EXEC"),
-            *MOGWAI_VENUE,
-            OmsType::Netting,
-            config.account_id,
-            config.account_type,
-            None,
-            Rc::clone(&cache),
-        );
-        let mut client = MogwaiExecutionClient::new(core, config).expect("client builds");
-
-        client.start().expect("start grabs sink");
-
-        let account_id = client.account_id();
-        let drain_account = async {
-            match next_exec_event(&mut sink_rx, Duration::from_secs(2)).await {
-                ExecutionEvent::Account(account) => {
-                    assert_eq!(account.account_id, account_id);
-                    cache
-                        .borrow_mut()
-                        .add_account(account.into())
-                        .expect("cache account");
-                }
-                other => panic!("expected initial AccountState, got {other:?}"),
-            }
-        };
-        let (connect, ()) = tokio::join!(client.connect(), drain_account);
-        connect.expect("connect seeds account");
+        let client =
+            connected_exec_client(base_url, transport_profile, Rc::clone(&cache), &mut sink_rx)
+                .await;
         assert!(
             client.get_account().is_some(),
             "account registered for {transport_profile:?}"
@@ -97,6 +66,7 @@ async fn adapter_submit_drives_live_exec_events() {
     // and account frames. The fill names order `O-1`, venue id `V-1`, qty `1`,
     // price `100.00`; the account snapshot carries a `9900` USDT balance.
     let state = Arc::new(StubState::default());
+    state.serve_account.store(true, Ordering::Relaxed);
     {
         let mut frames = state.ws_exec_frames.lock().expect("ws exec frames mutex");
         frames.push(
@@ -119,24 +89,8 @@ async fn adapter_submit_drives_live_exec_events() {
 
     let cache = Rc::new(RefCell::new(Cache::default()));
     let order = cached_order(&cache);
-    let config = MogwaiExecClientConfig {
-        base_url,
-        ..MogwaiExecClientConfig::default()
-    };
-    let core = ExecutionClientCore::new(
-        config.trader_id,
-        ClientId::from("MOGWAI-EXEC"),
-        *MOGWAI_VENUE,
-        OmsType::Netting,
-        config.account_id,
-        config.account_type,
-        None,
-        cache,
-    );
-    let mut client = MogwaiExecutionClient::new(core, config).expect("client builds");
-
-    client.start().expect("start grabs sink");
-    client.connect().await.expect("connect opens transports");
+    let client =
+        connected_exec_client(base_url, TransportProfile::WsStreaming, cache, &mut sink_rx).await;
     client
         .submit_order(SubmitOrder::new(
             TraderId::from("MOGWAI-001"),

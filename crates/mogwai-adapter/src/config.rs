@@ -353,7 +353,10 @@ mod tests {
             ..MogwaiDataClientConfig::default()
         };
 
-        assert_eq!(cfg.ws_url(), "wss://example.test:9443/ws?account=MOGWAI-001");
+        assert_eq!(
+            cfg.ws_url(),
+            "wss://example.test:9443/ws?account=MOGWAI-001"
+        );
         assert_eq!(cfg.http_base_url(), "https://example.test:9443");
     }
 
@@ -462,11 +465,17 @@ mod tests {
         };
 
         assert!(data.validate().is_ok());
-        assert_eq!(data.ws_url(), "ws://example.test:8787/ws?account=MOGWAI-001");
+        assert_eq!(
+            data.ws_url(),
+            "ws://example.test:8787/ws?account=MOGWAI-001"
+        );
         assert_eq!(data.http_base_url(), "http://example.test:8787");
 
         assert!(exec.validate().is_ok());
-        assert_eq!(exec.ws_url(), "wss://example.test:9443/ws?account=MOGWAI-001");
+        assert_eq!(
+            exec.ws_url(),
+            "wss://example.test:9443/ws?account=MOGWAI-001"
+        );
         assert_eq!(exec.http_base_url(), "https://example.test:9443");
     }
 

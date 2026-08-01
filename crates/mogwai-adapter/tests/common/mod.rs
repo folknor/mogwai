@@ -33,16 +33,21 @@ use std::{
     time::{Duration, Instant},
 };
 
-use mogwai_adapter::MOGWAI_VENUE;
-use mogwai_protocol::ClientMessage;
+use mogwai_adapter::{MOGWAI_VENUE, MogwaiExecClientConfig, MogwaiExecutionClient};
+use mogwai_protocol::{
+    ClientMessage, FillSnapshot, OrderFilled, OrderStatusInfo, OrderStatusSnapshot, ServerMessage,
+    TransportProfile, WireOrderStatus,
+};
 use nautilus_common::{
     cache::Cache,
+    clients::ExecutionClient,
     clock::TestClock,
     factories::OrderFactory,
     messages::{DataEvent, ExecutionEvent},
 };
+use nautilus_live::ExecutionClientCore;
 use nautilus_model::{
-    enums::{OrderSide, TimeInForce},
+    enums::{OmsType, OrderSide, TimeInForce},
     identifiers::{ClientId, ClientOrderId, InstrumentId, StrategyId, Symbol, TraderId},
     types::{Price, Quantity},
 };
@@ -55,6 +60,9 @@ use tokio_tungstenite::tungstenite::Message;
 
 /// The canonical single-instrument `/instruments` seed both ends agree on.
 pub const INSTRUMENTS_JSON: &str = r#"[{"symbol":"BTCUSDT","base":"BTC","quote":"USDT","price_precision":2,"size_precision":8,"price_increment":"0.01","size_increment":"0.00000001"}]"#;
+
+/// Stable non-zero instant stamped on venue-truth query envelopes.
+pub const VENUE_SNAPSHOT_TS_EVENT: u64 = 1_000_000_000;
 
 /// Test scenario state shared between the stub and the test body. A test mutates
 /// the relevant fields before connecting, then reads the counters/recorded
@@ -94,6 +102,16 @@ pub struct StubState {
     /// When true, `GET /account` returns an empty account snapshot. Defaults to
     /// false so older-server compatibility remains the default stub behavior.
     pub serve_account: AtomicBool,
+    /// Body served for `GET /account` when `serve_account` is set.
+    pub account_body: Mutex<Option<String>>,
+    /// Venue-truth order rows returned to reconciliation queries.
+    pub venue_orders: Mutex<Vec<OrderStatusInfo>>,
+    /// Venue-truth fill rows returned to reconciliation queries.
+    pub venue_fills: Mutex<Vec<OrderFilled>>,
+    /// Number of venue-truth order queries served over either transport.
+    pub order_queries: AtomicUsize,
+    /// Number of venue-truth fill queries served over either transport.
+    pub fill_queries: AtomicUsize,
     /// Timestamps of each HTTP request to `/orders` and `/trades`. The quota
     /// tests assert the gaps between consecutive entries.
     pub http_request_times: Mutex<Vec<Instant>>,
@@ -156,18 +174,13 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
         serve_ws(stream, head, state).await;
     } else if path.starts_with("/account") {
         if state.serve_account.load(Ordering::Relaxed) {
-            // `account_id` is REQUIRED on the wire since the venue became
-            // multi-account, and the adapter echo-checks it against its own
-            // configured id. Omitting it makes the body undecodable, which
-            // surfaces as `connect` timing out waiting for an account event
-            // rather than as a parse error - so keep this matching
-            // `MogwaiExecClientConfig::default().account_id`.
-            respond_json(
-                stream,
-                "200 OK",
-                r#"{"account_id":"MOGWAI-001","balances":[],"positions":[],"ts_event":0}"#,
-            )
-            .await;
+            let body = state
+                .account_body
+                .lock()
+                .expect("account body mutex")
+                .clone()
+                .unwrap_or_else(|| account_json("MOGWAI-001", "[]", 0));
+            respond_json(stream, "200 OK", &body).await;
         } else {
             respond_json(stream, "404 Not Found", "").await;
         }
@@ -210,7 +223,17 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
             tokio::time::sleep(Duration::from_secs(30)).await;
             return;
         }
-        respond_json(stream, "200 OK", "[]").await;
+        let reply = serde_json::from_slice::<ClientMessage>(&body)
+            .ok()
+            .as_ref()
+            .and_then(|message| venue_query_reply(message, &state));
+        match reply {
+            Some(reply) => {
+                let body = serde_json::to_string(&vec![reply]).expect("encode venue query reply");
+                respond_json(stream, "200 OK", &body).await;
+            }
+            None => respond_json(stream, "200 OK", "[]").await,
+        }
     } else if path.starts_with("/control/divergence") {
         state.control_hits.fetch_add(1, Ordering::Relaxed);
         state
@@ -372,12 +395,180 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
                             drop(ws.send(Message::Text(frame.into())).await);
                         }
                     }
+                    Ok(
+                        ref message @ (ClientMessage::QueryOrders { .. }
+                        | ClientMessage::QueryFills { .. }),
+                    ) => {
+                        if let Some(reply) = venue_query_reply(message, &state) {
+                            let json =
+                                serde_json::to_string(&reply).expect("encode venue query reply");
+                            drop(ws.send(Message::Text(json.into())).await);
+                        }
+                    }
                     _ => {}
                 }
             }
             _ => {}
         }
     }
+}
+
+/// Builds the canonical `GET /account` body, including the required account id.
+pub fn account_json(account_id: &str, positions: &str, ts_event: u64) -> String {
+    format!(
+        r#"{{"account_id":"{account_id}","balances":[{{"currency":"USDT","total":"10000","free":"10000","locked":"0"}}],"positions":{positions},"ts_event":{ts_event}}}"#
+    )
+}
+
+/// One venue-truth BTCUSDT position row for an account snapshot.
+pub fn position_json(quantity: &str, avg_px: &str) -> String {
+    format!(r#"{{"symbol":"BTCUSDT","quantity":"{quantity}","avg_px":"{avg_px}"}}"#)
+}
+
+/// Answers a venue-truth query using rows seeded into the shared stub.
+pub fn venue_query_reply(message: &ClientMessage, state: &StubState) -> Option<ServerMessage> {
+    match message {
+        ClientMessage::QueryOrders {
+            request_id,
+            client_order_id,
+            open_only,
+        } => {
+            state.order_queries.fetch_add(1, Ordering::Relaxed);
+            let orders = state
+                .venue_orders
+                .lock()
+                .expect("venue orders mutex")
+                .iter()
+                .filter(|info| {
+                    client_order_id
+                        .as_ref()
+                        .is_some_and(|id| info.client_order_id == *id)
+                        || (client_order_id.is_none() && (!open_only || info.status.is_open()))
+                })
+                .cloned()
+                .collect();
+            Some(ServerMessage::OrderStatusSnapshot(OrderStatusSnapshot {
+                request_id: request_id.clone(),
+                orders,
+                ts_event: VENUE_SNAPSHOT_TS_EVENT,
+            }))
+        }
+        ClientMessage::QueryFills {
+            request_id,
+            client_order_id,
+        } => {
+            state.fill_queries.fetch_add(1, Ordering::Relaxed);
+            let fills = state
+                .venue_fills
+                .lock()
+                .expect("venue fills mutex")
+                .iter()
+                .filter(|fill| {
+                    client_order_id
+                        .as_ref()
+                        .is_none_or(|id| fill.client_order_id == *id)
+                })
+                .cloned()
+                .collect();
+            Some(ServerMessage::FillSnapshot(FillSnapshot {
+                request_id: request_id.clone(),
+                fills,
+                ts_event: VENUE_SNAPSHOT_TS_EVENT,
+            }))
+        }
+        _ => None,
+    }
+}
+
+/// A BTCUSDT venue-truth order row suitable for reconciliation tests.
+pub fn venue_order_row(
+    client_order_id: &str,
+    venue_order_id: &str,
+    status: WireOrderStatus,
+    filled_qty: rust_decimal::Decimal,
+    ts_last: u64,
+) -> OrderStatusInfo {
+    OrderStatusInfo {
+        client_order_id: client_order_id.to_string(),
+        venue_order_id: venue_order_id.to_string(),
+        symbol: mogwai_protocol::Symbol::from("BTCUSDT"),
+        side: mogwai_protocol::Side::Buy,
+        order_type: mogwai_protocol::OrderType::Limit,
+        time_in_force: mogwai_protocol::TimeInForce::Gtc,
+        status,
+        quantity: rust_decimal::Decimal::from(2),
+        filled_qty,
+        price: Some(rust_decimal::Decimal::from(100)),
+        ts_accepted: 10,
+        ts_last,
+    }
+}
+
+/// A BTCUSDT venue-truth fill row suitable for reconciliation tests.
+pub fn venue_fill_row(
+    client_order_id: &str,
+    venue_order_id: &str,
+    trade_id: &str,
+    last_qty: rust_decimal::Decimal,
+    ts_event: u64,
+) -> OrderFilled {
+    OrderFilled {
+        client_order_id: client_order_id.to_string(),
+        venue_order_id: venue_order_id.to_string(),
+        trade_id: trade_id.to_string(),
+        symbol: mogwai_protocol::Symbol::from("BTCUSDT"),
+        side: mogwai_protocol::Side::Buy,
+        last_qty,
+        last_px: rust_decimal::Decimal::from(100),
+        leaves_qty: rust_decimal::Decimal::ONE,
+        commission: rust_decimal::Decimal::ZERO,
+        ts_event,
+    }
+}
+
+/// Builds, starts and connects an execution client, registering its initial
+/// account snapshot in the supplied cache before returning it. The caller
+/// installs the event sink before invoking this helper.
+pub async fn connected_exec_client(
+    base_url: String,
+    transport_profile: TransportProfile,
+    cache: Rc<RefCell<Cache>>,
+    sink_rx: &mut UnboundedReceiver<ExecutionEvent>,
+) -> MogwaiExecutionClient {
+    let config = MogwaiExecClientConfig {
+        base_url,
+        transport_profile,
+        ..MogwaiExecClientConfig::default()
+    };
+    let core = ExecutionClientCore::new(
+        config.trader_id,
+        ClientId::from("MOGWAI-EXEC"),
+        *MOGWAI_VENUE,
+        OmsType::Netting,
+        config.account_id,
+        config.account_type,
+        None,
+        Rc::clone(&cache),
+    );
+    let mut client = MogwaiExecutionClient::new(core, config).expect("client builds");
+    client.start().expect("start grabs sink");
+
+    let account_id = client.account_id();
+    let drain_account = async {
+        match next_exec_event(sink_rx, Duration::from_secs(2)).await {
+            ExecutionEvent::Account(account) => {
+                assert_eq!(account.account_id, account_id);
+                cache
+                    .borrow_mut()
+                    .add_account(account.into())
+                    .expect("cache account");
+            }
+            other => panic!("expected initial AccountState, got {other:?}"),
+        }
+    };
+    let (connect, ()) = tokio::join!(client.connect(), drain_account);
+    connect.expect("connect seeds account");
+    client
 }
 
 /// The single-symbol instrument id every test trades.

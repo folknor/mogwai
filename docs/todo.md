@@ -116,38 +116,26 @@ Or both. There are no exceptions.
   Closing it means introducing a position-size or notional cap - a design
   decision, not a local fix.
 
-- BUILD: an end-to-end guard that startup reconciliation actually runs
-  (`crates/mogwai-adapter/src/client/exec.rs`, formerly sweep item F16). The
-  nautilus Rust `ExecutionClient` trait defaults are silent no-ops -
-  `generate_mass_status` returns `Ok(None)`, the three granular generators
-  return empty vecs - and the live node's `Ok(None)` arm only warns "likely
-  adapter error" and reconciles nothing. Python's `LiveExecutionClient` base
-  composes the three for you, so a Python adapter cannot fall into this; the
-  Rust trait does not, which is why mogwai hit it. mogwai overrides the method
-  (unit-tested by `generate_mass_status_composes_the_three_report_sets`), so the
-  instance is fixed - but nothing proves a seeded venue produces a NON-EMPTY
-  mass status through the real transport, so a refactor that drops the override,
-  breaks the compose, or leaves one generator returning empty reverts startup
-  reconciliation to zero with only a warn line and no test going red.
+- The reconciliation exposure is a CLASS, not one method: every report path
+  mogwai relies on shares the silent-degrade property. The socket-backed guard
+  in `crates/mogwai-adapter/tests/reconciliation.rs` seeds venue truth and pins
+  each granular generator, `query_order`, and their mass-status composition over
+  both query carriers. Known limitation: it proves the adapter WOULD answer when
+  asked, not that the node asks. Related upstream, queued in the maintainer's PR
+  tracker and NOT a substitute for this guard (mogwai overrides the method, so a
+  better trait default protects the next adapter author, not this repo): give
+  the Rust trait default the same composing behavior as the Python base.
 
-  DECIDED, shape agreed: extend the self-contained stub in
-  `crates/mogwai-adapter/tests/common` to answer `QueryOrders`/`QueryFills` over
-  both carriers, then assert all THREE report sets non-empty - and assert each
-  generator INDIVIDUALLY, not just the composite, which is what turns the
-  class-of-risk observation below into a gate. Rejected as disproportionate:
-  booting a real `mogwai-server` from the adapter crate, or a full nautilus
-  `LiveNode`. The only thing a live node catches beyond this is "nautilus stopped
-  calling mass status at startup", which is upstream behavior with its own tests.
-  Known limitation to keep recorded: the guard proves the adapter WOULD answer
-  when asked, not that the node asks.
-
-  The exposure is a CLASS, not one method: every report path mogwai relies on
-  shares the silent-degrade property, and this got MORE important since filing,
-  because those paths are now the venue-truth reconciliation surface rather than
-  a mirror echo. Related upstream, queued in the maintainer's PR tracker and NOT
-  a substitute for this guard (mogwai overrides the method, so a better trait
-  default protects the next adapter author, not this repo): give the Rust trait
-  default the same composing behavior as the Python base.
+- BUILD: give the ignored adapter transport tests a reason to run. All four
+  adapter test binaries are `#[ignore]`d because they bind real loopback
+  sockets, so `brokkr check` never executes them - which means the
+  reconciliation guard above, the whole point of which is catching a silent
+  degrade, is itself silent. This is not hypothetical: the account-id field and
+  the websocket-URL path bug both shipped and sat red across three commits
+  precisely because the workspace gate cannot see these binaries, and each was
+  found by hand rather than by a gate. Wanted: a socket-capable sweep that runs
+  them (a `brokkr` profile, a CI job, or a deliberate `--include-ignored` step in
+  the release ritual), so a guard nobody runs stops counting as a guard.
 
 - BUILD: a positive dead-feed watchdog (formerly sweep item AD12). No liveness
   timer, tick counter, or "0 ticks in N s" log exists on either transport. The
