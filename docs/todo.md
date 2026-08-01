@@ -36,6 +36,21 @@ Or both. There are no exceptions.
   decision: bounding the lulls in the generator would break the committed
   byte-identical golden stream, so it is a fingerprint refit, not a local fix.
 
+- The adapter manifest contradicts the documented build contract. `AGENTS.md`
+  states the workspace builds against the PUBLISHED nautilus crates from
+  crates.io and that "there is no sibling-checkout path dependency: a build
+  needs no `../nautilus_trader`". But `crates/mogwai-adapter/Cargo.toml:35-39`
+  path-depends `../../../nautilus_trader/crates/{common,core,live,model,network}`,
+  and the file's own comment at line 9 says it "path-depends the sibling
+  checkout, not the read-only research snapshot". One of the two is wrong, and
+  which one is a decision: either the manifest moves to pinned crates.io
+  versions or `AGENTS.md` stops claiming it already has. Surfaced 2026-08-01 by
+  the exec-pump spec critique, which flagged that the spec never reconciled the
+  discrepancy. Deliberately NOT folded into that spec's landings - changing what
+  the whole workspace builds against would confound every gate in it. Note the
+  build works today, so this is a contract/documentation defect rather than a
+  broken tree.
+
 - mogwai-engine `next_position` unbounded accumulation. The per-fill weighted-
   average is now overflow-guarded (a single oversized order is rejected before
   it reaches the arithmetic), but `current.qty` still accumulates across many
