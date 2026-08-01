@@ -2,7 +2,7 @@
 
 How the system works, by subsystem. This is the durable companion to the code
 comments (which carry the local mechanics) and to git history (which carries the
-landing-by-landing changelog). The open work lives in `docs/todo.md`; this
+landing-by-landing changelog). This
 document describes what is built, not what is planned.
 
 mogwai is a fake broker/exchange that plugs into broadarrow to exercise the
@@ -289,7 +289,7 @@ Widening the window, using a coarser bar interval, moving `sim_epoch_ns`, or
 letting the venue run further past its epoch all avoid it. Bounding the lulls in
 the generator would change the on-grid walk and break the committed
 fingerprint's byte-identical golden stream, so it is a fingerprint-refit
-decision rather than a local fix (see `docs/todo.md`).
+decision rather than a local fix.
 
 The realism gate is a self-contained Rust test that draws a long stream and
 asserts each measured stylized fact lands inside the fingerprint's cross-pair
@@ -535,7 +535,7 @@ messages. The only crate that depends on nautilus - path-depended from the
 sibling `../nautilus_trader` checkout in its `Cargo.toml`, default-features off,
 no pyo3; read its API from the in-tree `research/` copy, which is kept in sync
 with it. The path dep is temporary, pending upstream fixes reaching a published
-release; see `docs/todo.md`.
+release.
 
 - **Factories.** `MogwaiDataClientFactory` / `MogwaiExecutionClientFactory`
   downcast their serde `ClientConfig`-downcastable configs, validate, and

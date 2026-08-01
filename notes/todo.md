@@ -59,7 +59,7 @@ Or both. There are no exceptions.
   1000 on a ~7 s cadence is a ~2 h mean gap with much longer clustered
   excursions; pin that shape with a test once the default tape is dense.
 
-  Spec: `docs/arrival-drought-elimination-spec.md`.
+  Spec: `notes/arrival-drought-elimination-spec.md`.
 
   Unblocked by this decision: the AD12 dead-feed watchdog below (on a dense
   default tape honest silence has a hard upper bound, and an armed drought is

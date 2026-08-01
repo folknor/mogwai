@@ -73,8 +73,9 @@ These four are bundled into the binary: `mogwai man <topic>` (`cli`, `config`,
 `architecture`, `havoc`) renders them in the terminal, and `mogwai man` lists
 them.
 
-Codebase conventions and build rules live in `AGENTS.md`. The transient TODO is
-`docs/todo.md`; the offline fingerprint-fitting pipeline is `analysis/`.
+Codebase conventions and build rules live in `AGENTS.md`. Transient work items,
+plans and analysis live in `notes/`; the offline fingerprint-fitting pipeline is
+`analysis/`.
 
 ## License
 

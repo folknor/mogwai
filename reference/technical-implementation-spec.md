@@ -72,8 +72,8 @@ the same artifact.
 10. **The standing references.** Every spec MUST cite, by path: this document
     (`reference/technical-implementation-spec.md`) as the contract it is
     written against, AND the document the spec was spawned from (the TODO
-    source naming the item - e.g. the owning `docs/*.md` section or
-    `docs/todo.md` entry), if it exists.
+    source naming the item - e.g. the owning `notes/*.md` section or
+    `notes/todo.md` entry), if it exists.
 
 ## Stance
 

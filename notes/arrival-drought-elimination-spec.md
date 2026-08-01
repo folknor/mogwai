@@ -1,7 +1,7 @@
 # Arrival-drought elimination - implementation spec
 
 Written against `reference/technical-implementation-spec.md`. Spawned from the
-`docs/todo.md` entry "BUILD: eliminate arrival droughts from the default tape;
+`notes/todo.md` entry "BUILD: eliminate arrival droughts from the default tape;
 keep the drought as an armable havoc scenario" (decided 2026-08-01). The
 mechanism background lives in `reference/architecture.md` ("Tape arrival
 droughts"); this spec does not restate it beyond what each brick needs.
@@ -115,7 +115,7 @@ re-bless set is enumerated in L2.
   deserts) stays at 6 h; tightening it is a follow-up nicety, not this spec.
 - `scripts/smoke.py` anchors on a real tape tick and is density-robust.
 - Docs describing droughts as ambient: `reference/architecture.md` ("Tape
-  arrival droughts", plus the two `docs/todo.md`-pointing sentences in it),
+  arrival droughts"),
   and the drift-comment in `dynamics.rs` / session comments that cite the
   byte-identical golden stream as the reason not to touch the walk (those
   reasons survive; only the drought section's "plan for it" framing dies).
@@ -303,7 +303,7 @@ anchor+range fields, same shape as `duration_dispersion_index`). Lands in L2
   decision" closing paragraph dies.
 - `reference/havoc.md` `LiquidityDrought` bullet gains the dying-symbol
   framing and a pointer to the pinned test.
-- `docs/todo.md`: the drought entry is REMOVED entirely (its unblock notes
+- `notes/todo.md`: the drought entry is REMOVED entirely (its unblock notes
   for AD12 and penetration fills already live in those entries).
 
 ## 5. Landings

@@ -3,7 +3,7 @@
 How mogwai produces the messy, realistic divergences that are its reason to
 exist, by surface. This is the durable companion to the wire-type doc comments
 (which carry the local field semantics) and to git history (which carries the
-landing-by-landing changelog). The open work lives in `docs/todo.md`;
+landing-by-landing changelog).
 `reference/architecture.md` describes the system as a whole and gives the havoc
 model a one-page summary - this document is the long form.
 
@@ -47,7 +47,7 @@ Every havoc surface layers **on top of** this honest floor. Armed
 `ClientHavoc.latency` *adds* to the 30 ms baseline rather than replacing it;
 drop, duplicate, and reorder are opt-in and default off; an unset `data` regime
 is a clean draw; the `conn` default is a working transport. The desirable
-direction (per the `docs/todo.md` Direction note) is richer, more realistic
+direction is richer, more realistic
 venue pathologies - not making the fake venue more correct - and the lodestar is
 a real venue misbehaving in a way the client cannot detect.
 
