@@ -44,12 +44,20 @@ Or both. There are no exceptions.
   Closing it means introducing a position-size or notional cap - a design
   decision, not a local fix.
 
-- ProtocolError diagnostics have no per-connection rate limit. Every refused or
-  clamped subscribe emits one diagnostic; ba's watchdog-driven resubscribe
-  churn turned that into a ~1,700-line storm during a venue restart (QA
-  finding, mechanism now removed by the pinned `wall_anchor_ns`). Any future
-  repeated-subscribe pathology will storm the same way - a per-connection
-  dedup or rate limit on identical diagnostic reasons would cap it.
+- The exec pump couples output latency to input liveness: an armed `DelayAcks`
+  that fills the pump blocks the socket read loop, so the venue stops accepting
+  commands - measured and confirmed 2026-08-01. Full problem statement, the
+  measurement and its control, and the agreed direction (bounded pump with
+  admission control and an `OrderAdmissionRejected` priority lane; a breaking
+  `Subscribe` change carrying per-symbol cursors and generation ids) are in
+  `docs/protocol-problem.md`. That file supersedes this item, which used to
+  read as a request for a `ProtocolError` rate limit - the wrong axis, and a
+  fix that would have violated the honest-content invariant. Next step is a
+  spec per `reference/technical-implementation-spec.md`. Both halves are
+  cross-crate: the pump half adds a wire variant and its adapter translation
+  alongside the server rewrite, and the subscription half breaks `Subscribe`.
+  Both ends of both live in this workspace; deployment compatibility with
+  broadarrow is a release question, not a wire-call-site one.
 
 - The adapter integration-test stub (`crates/mogwai-adapter/tests/common`) does
   not answer `QueryOrders`/`QueryFills`; the venue-truth report generators are

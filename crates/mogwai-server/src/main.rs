@@ -1073,6 +1073,153 @@ mod tests {
         );
     }
 
+    /// MEASUREMENT: does an armed `DelayAcks` stop the venue READING?
+    ///
+    /// `docs/protocol-problem.md` problem 1. The exec delay pump is a bounded
+    /// channel (1024) and both of its producers - order-entry events and
+    /// `ProtocolError` diagnostics - `.await` their send from inside the socket
+    /// read loop. If the pump fills, those sends block, and the session stops
+    /// reading client frames entirely. `reference/havoc.md` documents
+    /// `DelayAcks` as holding outbound EXECUTION events by `ms`; it does not say
+    /// the venue stops accepting commands. An output-latency fault that silently
+    /// becomes an input-refusal fault is indistinguishable from the blackout
+    /// `GoDark` models, in the component that exists to keep injected faults
+    /// legible.
+    ///
+    /// The witness is a TRADE, not an order event. Market data is written to the
+    /// writer channel directly by the replay thread and never touches the exec
+    /// pump, so a trade arriving proves the `Subscribe` behind it was READ and
+    /// processed while execution frames sat delayed. An order ack would prove
+    /// nothing: it is delayed by design.
+    ///
+    /// Fill condition, per the doc: the pump holds every event that arrived
+    /// within the last `ms`, so saturation needs more than ~1025 events inside
+    /// one window (1024 queued plus the one the pump task is sleeping on). Each
+    /// submit yields three execution events - OrderAccepted, OrderFilled,
+    /// AccountState - so 400 submits is ~1200.
+    ///
+    /// `#[ignore]`: this is a proceed/close gate, run deliberately, not a
+    /// regression. It binds a real listener, and while problem 1 stands it is
+    /// expected to FAIL - which is the reading, not a broken suite. Run with
+    /// `brokkr test -p mogwai-server delayed_acks_must_not_stall --debug`.
+    #[tokio::test]
+    #[ignore = "measurement gate for docs/protocol-problem.md problem 1; binds a real listener"]
+    async fn delayed_acks_must_not_stall_the_socket_read_loop() {
+        assert!(
+            reader_survives_saturation(30_000).await,
+            "an armed DelayAcks must delay OUTPUT only: the venue has to keep reading \
+             client frames while execution events sit held, so a Subscribe sent behind a \
+             saturated exec pump must still produce market data. No trade arrived, so \
+             output delay stopped input processing - see docs/protocol-problem.md \
+             problem 1. Its control, saturation_witness_control_is_sound, proves the \
+             witness itself works with no delay armed"
+        );
+    }
+
+    /// The control for the measurement above, and NOT ignored - it must stay
+    /// green, because without it a failing gate is unreadable.
+    ///
+    /// Runs the identical saturation with NO delay armed. The pump then drains
+    /// as fast as it fills, so it never blocks the reader and the trade must
+    /// arrive. That rules out the innocent explanations for a silent witness:
+    /// the submits being rejected, the `Subscribe` being malformed, the witness
+    /// window being too short, or - the live one, given this tape's documented
+    /// arrival droughts - the venue simply having no trade to send.
+    #[tokio::test]
+    async fn saturation_witness_control_is_sound() {
+        assert!(
+            reader_survives_saturation(0).await,
+            "with no delay armed the exec pump cannot block the reader, so the witness \
+             trade must arrive; if this fails the measurement gate above proves nothing"
+        );
+    }
+
+    /// Drives the saturation described on `delayed_acks_must_not_stall_the_socket_read_loop`
+    /// at `delay_ms` and reports whether the witness trade arrived.
+    async fn reader_survives_saturation(delay_ms: u64) -> bool {
+        const SUBMITS: usize = 400;
+        const WITNESS_WINDOW: Duration = Duration::from_secs(3);
+
+        let state = state();
+        // Arm the delay directly rather than POSTing /control/divergence: the
+        // atomic IS the armed state (see `arm_divergence`), and this test is
+        // about the pump, not the control plane.
+        state.delay_ms.store(delay_ms, Ordering::Relaxed);
+        let app = Router::new()
+            .route("/ws", get(ws_upgrade))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            drop(axum::serve(listener, app).await);
+        });
+
+        tokio::task::spawn_blocking(move || {
+            let (mut socket, _) =
+                tungstenite::connect(format!("ws://{addr}/ws")).expect("ws connect");
+
+            // Saturate the pump. Nothing is read back meanwhile; with a delay
+            // armed every one of these events is held, so they accumulate.
+            for i in 0..SUBMITS {
+                let submit = serde_json::to_string(&ClientMessage::SubmitOrder(
+                    mogwai_protocol::SubmitOrder {
+                        client_order_id: format!("SAT-{i}"),
+                        symbol: "BTCUSDT".to_string(),
+                        side: mogwai_protocol::Side::Buy,
+                        order_type: OrderType::Limit,
+                        quantity: rust_decimal::Decimal::new(1, 0),
+                        price: Some(rust_decimal::Decimal::new(10_000, 2)),
+                        time_in_force: mogwai_protocol::TimeInForce::Gtc,
+                    },
+                ))
+                .expect("encode submit");
+                socket
+                    .send(tungstenite::Message::Text(submit.into()))
+                    .expect("send submit");
+            }
+
+            // The question: is the reader still alive behind that backlog?
+            let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
+                symbols: vec!["BTCUSDT".to_string()],
+                start_ts: None,
+                regime: None,
+            })
+            .expect("encode subscribe");
+            socket
+                .send(tungstenite::Message::Text(subscribe.into()))
+                .expect("send subscribe");
+
+            // Bounded wait for the witness. A read timeout on the underlying
+            // stream turns "nothing arrived" into an Err rather than a hang, so
+            // the stall is a measurement instead of a wedged test.
+            if let tungstenite::stream::MaybeTlsStream::Plain(tcp) = socket.get_ref() {
+                tcp.set_read_timeout(Some(WITNESS_WINDOW))
+                    .expect("set read timeout");
+            }
+            let deadline = std::time::Instant::now() + WITNESS_WINDOW;
+            while std::time::Instant::now() < deadline {
+                match socket.read() {
+                    Ok(tungstenite::Message::Text(text)) => {
+                        if let ServerMessage::Trade(_) =
+                            serde_json::from_str::<ServerMessage>(&text).expect("decode")
+                        {
+                            return true;
+                        }
+                    }
+                    Ok(_) => continue,
+                    // A close, or a read that timed out with nothing to show:
+                    // either way the reader never got to the Subscribe.
+                    Err(_) => return false,
+                }
+            }
+            false
+        })
+        .await
+        .expect("blocking ws client")
+    }
+
     #[tokio::test]
     async fn subscribe_below_data_origin_reports_protocol_error_then_streams() {
         // A `start_ts` below the tape origin used to clamp to the origin in
