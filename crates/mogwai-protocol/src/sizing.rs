@@ -61,10 +61,11 @@ pub const POSITION_ROW_MAX_BYTES: usize = 128 + ESC * MAX_SYMBOL_LEN;
 /// One `OrderStatusInfo` row inside an `OrderStatusSnapshot`:
 /// `client_order_id`, `venue_order_id`, `symbol`, `side`, `order_type`,
 /// `time_in_force`, `status`, `quantity`, `filled_qty`, `price`,
-/// `ts_accepted`, `ts_last` - ~140 bytes of key names and punctuation, three
-/// decimals (99), two u64s (40) and four short enum spellings (~40): about 320,
-/// rounded to 384 on top of the charged strings.
-pub const ORDER_STATUS_ROW_MAX_BYTES: usize = 384 + ESC * (2 * MAX_CLIENT_ID_LEN + MAX_SYMBOL_LEN);
+/// `trigger_price`, `ts_triggered`, `reduce_only`, `post_only`, `ts_accepted`,
+/// `ts_last` - ~180 bytes of key names and punctuation, four decimals (132),
+/// three u64s (60), four short enum spellings (~40) and two bools (10): about
+/// 430, rounded to 512 on top of the charged strings.
+pub const ORDER_STATUS_ROW_MAX_BYTES: usize = 512 + ESC * (2 * MAX_CLIENT_ID_LEN + MAX_SYMBOL_LEN);
 
 /// One fill row inside a `FillSnapshot`: an `OrderFilled` plus its trade id, so
 /// three client-id-shaped strings (client, venue, trade), one symbol, four
@@ -90,9 +91,11 @@ pub fn account_state_max_bytes(shape: &BookShape) -> usize {
         + shape.positions * POSITION_ROW_MAX_BYTES
 }
 
-/// Upper bound on one trigger sweep's output: per executed order, the fill
-/// plus its possible `DuplicateNextFill` twin, and ONE `AccountState` for the
-/// whole batch (the sweep snapshots once, after every fill it booked).
+/// Upper bound on one trigger sweep's output: per executed order, up to FOUR
+/// order-shaped frames - `OrderTriggered`, the fill, its possible
+/// `DuplicateNextFill` twin, and the `OrderCanceled` that closes a reduce-only
+/// remainder the position cap clamped - and ONE `AccountState` for the whole
+/// batch (the sweep snapshots once, after every transition it booked).
 ///
 /// The account is sized against a shape widened PER ORDER, not per batch: a
 /// sweep can execute `orders` fills across `orders` distinct pairs, and each
@@ -105,7 +108,7 @@ pub fn account_state_max_bytes(shape: &BookShape) -> usize {
 /// of pending scans: a scan below its threshold produces no bytes.
 #[must_use]
 pub fn swept_fill_max_bytes(shape: &BookShape, orders: usize) -> usize {
-    orders * 2 * ORDER_EVENT_MAX_BYTES
+    orders * 4 * ORDER_EVENT_MAX_BYTES
         + account_state_max_bytes(&BookShape {
             balances: shape.balances + 2 * orders,
             positions: shape.positions + orders,
@@ -121,15 +124,20 @@ pub fn swept_fill_max_bytes(shape: &BookShape, orders: usize) -> usize {
 #[must_use]
 pub fn worst_case_output_bytes(cmd: &ClientMessage, shape: &BookShape) -> usize {
     match cmd {
-        // Four order-shaped frames - accepted, a duplicated fill, the fill, and
-        // the canceled IOC remainder - plus one account state. The account is
+        // Five order-shaped frames - accepted, the trigger, a duplicated fill,
+        // the fill, and the cancel that closes the remainder - plus one account
+        // state. Four was the pre-conditional bound (accepted, duplicated fill,
+        // fill, canceled IOC remainder); an arrival-triggered reduce-only stop
+        // whose fill the position cap clamps adds the trigger on top of exactly
+        // that shape, and it cannot also be an IOC because a conditional is
+        // GTC-only. The account is
         // sized against a WIDENED shape: a fill mutates both the base and the
         // quote entry via `entry(..).or_default()`, so a first fill in a new
         // pair introduces up to two currencies and one position the pre-command
         // snapshot never had. Widening by less under-counts by up to two
         // balance rows and makes the domination claim false.
         ClientMessage::SubmitOrder(_) => {
-            4 * ORDER_EVENT_MAX_BYTES
+            5 * ORDER_EVENT_MAX_BYTES
                 + account_state_max_bytes(&BookShape {
                     balances: shape.balances + 2,
                     positions: shape.positions + 1,

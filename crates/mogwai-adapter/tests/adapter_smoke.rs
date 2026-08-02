@@ -18,19 +18,27 @@ use std::{
 };
 
 use common::{
-    StubState, bound_stub, cached_order, connected_exec_client, instrument_id, next_exec_event,
+    StubState, bound_stub, cached_order, cached_stop_limit, cached_stop_market,
+    cached_trailing_stop, connected_exec_client, instrument_id, next_exec_event, submit_command,
 };
 use mogwai_adapter::MOGWAI_VENUE;
 use nautilus_common::{
     cache::Cache,
     clients::ExecutionClient,
     live::runner::replace_exec_event_sender,
-    messages::{ExecutionEvent, execution::SubmitOrder},
+    messages::{
+        ExecutionEvent,
+        execution::{ModifyOrder, SubmitOrder},
+    },
 };
 use nautilus_core::{UUID4, UnixNanos};
 use nautilus_model::{
+    enums::{ContingencyType, OrderStatus, TriggerType},
     events::OrderEventAny,
-    identifiers::{ClientId, StrategyId, TraderId, VenueOrderId},
+    identifiers::{
+        ClientId, ClientOrderId, InstrumentId, OrderListId, StrategyId, Symbol, TraderId,
+        VenueOrderId,
+    },
     orders::Order,
     types::{Price, Quantity},
 };
@@ -139,4 +147,323 @@ async fn adapter_submit_drives_live_exec_events() {
         }
         other => panic!("expected an AccountState, got {other:?}"),
     }
+}
+
+/// The one test that proves the conditional refusal is actually gone end to
+/// end: a real nautilus `StopMarketOrder` through the real `ExecutionClient`,
+/// over a real socket, producing `Submitted -> Accepted -> Triggered -> Filled`
+/// on the emitter. Before this landing the submit failed at `wire_order_type`
+/// and no frame ever left the client.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn adapter_submits_a_stop_market_and_sees_triggered_then_filled() {
+    let state = Arc::new(StubState::default());
+    state.serve_account.store(true, Ordering::Relaxed);
+    {
+        let mut frames = state.ws_exec_frames.lock().expect("ws exec frames mutex");
+        frames.push(
+            r#"{"type":"OrderAccepted","client_order_id":"O-STOP","venue_order_id":"V-9","ts_event":10}"#
+                .to_string(),
+        );
+        frames.push(
+            r#"{"type":"OrderTriggered","client_order_id":"O-STOP","venue_order_id":"V-9","ts_event":11}"#
+                .to_string(),
+        );
+        // Adverse for a sell: the triggering print was 95.00 and the fill lands
+        // below it, which is what the band does to a triggered stop-market.
+        frames.push(
+            r#"{"type":"OrderFilled","client_order_id":"O-STOP","venue_order_id":"V-9","trade_id":"T-9","symbol":"BTCUSDT","side":"Sell","last_qty":"1","last_px":"94.97","leaves_qty":"0","commission":"0","ts_event":12}"#
+                .to_string(),
+        );
+    }
+    let base_url = bound_stub(Arc::clone(&state)).await;
+
+    let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
+    replace_exec_event_sender(sink_tx);
+
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    let order = cached_stop_market(&cache);
+    let client = connected_exec_client(base_url, cache, &mut sink_rx).await;
+    client
+        .submit_order(submit_command(&order, order.init_event().clone()))
+        .expect("a stop-market is no longer refused at conversion");
+
+    let timeout = Duration::from_secs(2);
+    assert!(matches!(
+        next_exec_event(&mut sink_rx, timeout).await,
+        ExecutionEvent::Order(OrderEventAny::Submitted(_))
+    ));
+    match next_exec_event(&mut sink_rx, timeout).await {
+        ExecutionEvent::Order(OrderEventAny::Accepted(accepted)) => {
+            assert_eq!(accepted.client_order_id, order.client_order_id());
+            assert_eq!(accepted.venue_order_id, VenueOrderId::from("V-9"));
+        }
+        other => panic!("expected an OrderAccepted, got {other:?}"),
+    }
+    match next_exec_event(&mut sink_rx, timeout).await {
+        ExecutionEvent::Order(OrderEventAny::Triggered(triggered)) => {
+            assert_eq!(triggered.client_order_id, order.client_order_id());
+            assert_eq!(triggered.venue_order_id, Some(VenueOrderId::from("V-9")));
+            assert_eq!(triggered.instrument_id, instrument_id());
+        }
+        other => panic!("expected an OrderTriggered between accept and fill, got {other:?}"),
+    }
+    match next_exec_event(&mut sink_rx, timeout).await {
+        ExecutionEvent::Order(OrderEventAny::Filled(fill)) => {
+            assert_eq!(fill.client_order_id, order.client_order_id());
+            assert_eq!(fill.instrument_id.venue, *MOGWAI_VENUE);
+            assert_eq!(fill.last_qty, Quantity::from("1"));
+            assert_eq!(fill.last_px, Price::from("94.97"));
+        }
+        other => panic!("expected the fill the trigger produced, got {other:?}"),
+    }
+    assert_eq!(
+        client.mirrored_order_status(order.client_order_id()),
+        Some(OrderStatus::Filled)
+    );
+
+    // The trigger price, the reduce-only flag and the type must have CROSSED
+    // THE WIRE, not merely been accepted by the client: a submit that dropped
+    // them would still produce the event sequence above against this stub.
+    let sent = state
+        .ws_client_messages
+        .lock()
+        .expect("ws client messages mutex")
+        .clone();
+    let submit = sent
+        .iter()
+        .find(|text| text.contains("SubmitOrder"))
+        .expect("the client sent a SubmitOrder");
+    assert!(submit.contains(r#""order_type":"StopMarket""#), "{submit}");
+    assert!(submit.contains(r#""trigger_price":"95.00""#), "{submit}");
+    assert!(submit.contains(r#""reduce_only":true"#), "{submit}");
+}
+
+/// The refusal that REMAINS. Trailing stops need venue-side per-tick high-water
+/// state the venue does not model and were ruled out rather than deferred, so
+/// the refusal has to name what to do instead - and, per the AE8 ordering the
+/// convert-first block exists for, must fail before any `OrderSubmitted` is
+/// emitted.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn a_trailing_stop_is_refused_by_name() {
+    let state = Arc::new(StubState::default());
+    state.serve_account.store(true, Ordering::Relaxed);
+    let base_url = bound_stub(Arc::clone(&state)).await;
+
+    let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
+    replace_exec_event_sender(sink_tx);
+
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    let order = cached_trailing_stop(&cache);
+    let client = connected_exec_client(base_url, cache, &mut sink_rx).await;
+    let err = client
+        .submit_order(submit_command(&order, order.init_event().clone()))
+        .expect_err("a trailing stop is still out of scope")
+        .to_string();
+    assert!(
+        err.contains("TrailingStopMarket"),
+        "the refusal names the shape it refused: {err}"
+    );
+    assert!(
+        err.contains("StopMarket") && err.contains("StopLimit"),
+        "the refusal names the set that IS served: {err}"
+    );
+    assert!(
+        err.contains("re-places"),
+        "the refusal names what to do instead: {err}"
+    );
+    assert_no_exec_event(&mut sink_rx).await;
+    assert_eq!(
+        client.mirrored_order_status(order.client_order_id()),
+        None,
+        "a refused submit leaves no mirror record to leak"
+    );
+}
+
+/// The order-init shapes the venue cannot honor, each refused BEFORE any
+/// `OrderSubmitted`. Table-driven because the three are one rule - the venue
+/// refuses what it cannot serve rather than serving something else quietly -
+/// and because each is built by mutating a legal init, which is the only way
+/// to produce shapes nautilus' own factory will not assemble.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn unsupported_init_shapes_are_refused_before_submitted() {
+    let state = Arc::new(StubState::default());
+    state.serve_account.store(true, Ordering::Relaxed);
+    let base_url = bound_stub(Arc::clone(&state)).await;
+
+    let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
+    replace_exec_event_sender(sink_tx);
+
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    let order = cached_stop_market(&cache);
+    let client = connected_exec_client(base_url, cache, &mut sink_rx).await;
+    let legal = order.init_event().clone();
+
+    let mark_price = {
+        let mut init = legal.clone();
+        init.trigger_type = Some(TriggerType::MarkPrice);
+        init
+    };
+    let foreign_instrument = {
+        let mut init = legal.clone();
+        init.trigger_instrument_id =
+            Some(InstrumentId::new(Symbol::from("ETHUSDT"), *MOGWAI_VENUE));
+        init
+    };
+    let bracket_leg = {
+        let mut init = legal.clone();
+        init.contingency_type = Some(ContingencyType::Oco);
+        init.order_list_id = Some(OrderListId::from("OL-1"));
+        init.linked_order_ids = Some(vec![ClientOrderId::from("O-SIBLING")]);
+        init
+    };
+
+    for (label, init, needle) in [
+        ("a mark-price trigger", mark_price, "trigger"),
+        ("a foreign trigger instrument", foreign_instrument, "tape"),
+        ("a bracket leg", bracket_leg, "order lists"),
+    ] {
+        let err = client
+            .submit_order(submit_command(&order, init))
+            .expect_err(label)
+            .to_string();
+        assert!(
+            err.contains("unsupported"),
+            "{label}: the refusal names itself a refusal: {err}"
+        );
+        assert!(
+            err.contains(needle),
+            "{label}: the refusal names the ruling: {err}"
+        );
+        assert_no_exec_event(&mut sink_rx).await;
+    }
+    assert!(
+        state
+            .ws_client_messages
+            .lock()
+            .expect("ws client messages mutex")
+            .iter()
+            .all(|text| !text.contains("SubmitOrder")),
+        "a refused init must not reach the venue at all"
+    );
+}
+
+/// The mirror regression section 3.5 names: an amend ack recomputes status from
+/// fill progress, and with no `Triggered` case a quantity or price amend on a
+/// TRIGGERED stop-limit walks the mirror back to `Accepted` and desyncs it from
+/// the engine for the rest of the run. Nautilus' own FSM keeps
+/// `(Triggered, Updated) => Triggered`. The amend ack must also carry the new
+/// trigger price, or the amend is unverifiable.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn a_trigger_amend_on_a_triggered_stop_limit_keeps_it_triggered() {
+    let state = Arc::new(StubState::default());
+    state.serve_account.store(true, Ordering::Relaxed);
+    {
+        let mut frames = state.ws_exec_frames.lock().expect("ws exec frames mutex");
+        frames.push(
+            r#"{"type":"OrderAccepted","client_order_id":"O-STOPLIMIT","venue_order_id":"V-7","ts_event":10}"#
+                .to_string(),
+        );
+        frames.push(
+            r#"{"type":"OrderTriggered","client_order_id":"O-STOPLIMIT","venue_order_id":"V-7","ts_event":11}"#
+                .to_string(),
+        );
+    }
+    state
+        .ws_modify_frames
+        .lock()
+        .expect("ws modify frames mutex")
+        .push(
+            r#"{"type":"OrderUpdated","client_order_id":"O-STOPLIMIT","venue_order_id":"V-7","quantity":"1","price":"93.00","trigger_price":"96.00","leaves_qty":"1","ts_event":12}"#
+                .to_string(),
+        );
+    let base_url = bound_stub(Arc::clone(&state)).await;
+
+    let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
+    replace_exec_event_sender(sink_tx);
+
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    let order = cached_stop_limit(&cache);
+    let client = connected_exec_client(base_url, cache, &mut sink_rx).await;
+    client
+        .submit_order(submit_command(&order, order.init_event().clone()))
+        .expect("a stop-limit is no longer refused at conversion");
+
+    let timeout = Duration::from_secs(2);
+    assert!(matches!(
+        next_exec_event(&mut sink_rx, timeout).await,
+        ExecutionEvent::Order(OrderEventAny::Submitted(_))
+    ));
+    assert!(matches!(
+        next_exec_event(&mut sink_rx, timeout).await,
+        ExecutionEvent::Order(OrderEventAny::Accepted(_))
+    ));
+    assert!(matches!(
+        next_exec_event(&mut sink_rx, timeout).await,
+        ExecutionEvent::Order(OrderEventAny::Triggered(_))
+    ));
+    assert_eq!(
+        client.mirrored_order_status(order.client_order_id()),
+        Some(OrderStatus::Triggered)
+    );
+
+    client
+        .modify_order(ModifyOrder::new(
+            TraderId::from("MOGWAI-001"),
+            Some(ClientId::from("MOGWAI-EXEC")),
+            StrategyId::from("S-001"),
+            instrument_id(),
+            order.client_order_id(),
+            Some(VenueOrderId::from("V-7")),
+            None,
+            Some(Price::from("93.00")),
+            Some(Price::from("96.00")),
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        ))
+        .expect("amend dispatches");
+
+    match next_exec_event(&mut sink_rx, timeout).await {
+        ExecutionEvent::Order(OrderEventAny::Updated(updated)) => {
+            assert_eq!(
+                updated.trigger_price,
+                Some(Price::from("96.00")),
+                "the ack forwards the venue's new trigger price into nautilus"
+            );
+            assert_eq!(updated.price, Some(Price::from("93.00")));
+        }
+        other => panic!("expected an OrderUpdated, got {other:?}"),
+    }
+    assert_eq!(
+        client.mirrored_order_status(order.client_order_id()),
+        Some(OrderStatus::Triggered),
+        "the amend walked a triggered order back to Accepted"
+    );
+
+    let sent = state
+        .ws_client_messages
+        .lock()
+        .expect("ws client messages mutex")
+        .clone();
+    let modify = sent
+        .iter()
+        .find(|text| text.contains("ModifyOrder"))
+        .expect("the client sent a ModifyOrder");
+    assert!(modify.contains(r#""trigger_price":"96.00""#), "{modify}");
+}
+
+/// Asserts nothing reaches the execution sink inside a short window. A refusal
+/// that emitted `OrderSubmitted` first would queue an event nautilus then has
+/// to apply to an order it has already denied, which is the AE8 stray.
+async fn assert_no_exec_event(rx: &mut tokio::sync::mpsc::UnboundedReceiver<ExecutionEvent>) {
+    let stray = tokio::time::timeout(Duration::from_millis(250), rx.recv()).await;
+    assert!(
+        stray.is_err(),
+        "a refused submit emitted an execution event: {stray:?}"
+    );
 }

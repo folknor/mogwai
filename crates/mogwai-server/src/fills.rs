@@ -73,7 +73,8 @@ pub(crate) fn scan_triggers(
         .iter()
         .map(|scan| TriggerScan {
             side: scan.side,
-            trigger_px: scan.trigger_px,
+            px: scan.px,
+            kind: scan.kind,
             from_ns: scan.from_ns,
         })
         .collect();
@@ -132,6 +133,7 @@ pub(crate) fn read_market(
     };
     Some(MarketReading {
         last_px: reading.last_px,
+        ts_ns: reading.last_ts_ns,
         band_ticks: ticks,
     })
 }
@@ -189,7 +191,8 @@ mod tests {
             client_order_id: id.into(),
             symbol: "BTCUSDT".into(),
             side,
-            trigger_px,
+            px: trigger_px,
+            kind: mogwai_protocol::ScanKind::FillThrough,
             from_ns,
             revision: 0,
         }
@@ -211,7 +214,24 @@ mod tests {
             scan("below-sell", Side::Sell, tick_price - increment, from),
         ];
         let walk = scan_triggers("BTCUSDT", &probes, to, &profiles(), TEST_ORIGIN).expect("walk");
-        assert_eq!(walk.triggered, vec![false, false, true, false, false, true]);
+        assert_eq!(
+            walk.hits.iter().map(Option::is_some).collect::<Vec<_>>(),
+            vec![false, false, true, false, false, true]
+        );
+    }
+
+    #[test]
+    fn stop_touch_scans_and_limit_through_scans_share_one_walk() {
+        let ticks = trades(TEST_ORIGIN, 2);
+        let (ts, px) = ticks[0];
+        let mut touch = scan("touch", Side::Buy, px, ts.saturating_sub(1));
+        touch.kind = mogwai_protocol::ScanKind::TriggerTouch;
+        let through = scan("through", Side::Buy, px, ts.saturating_sub(1));
+        let walk = scan_triggers("BTCUSDT", &[touch, through], ts, &profiles(), TEST_ORIGIN)
+            .expect("walk");
+        assert!(walk.hits[0].is_some());
+        assert!(walk.hits[1].is_none());
+        assert_eq!(walk.drained, 1);
     }
 
     #[test]
@@ -225,7 +245,7 @@ mod tests {
             TEST_ORIGIN,
         )
         .expect("walk");
-        assert_eq!(walk.triggered, vec![false]);
+        assert!(walk.hits[0].is_none());
     }
 
     #[test]
@@ -234,7 +254,7 @@ mod tests {
         let probe = scan("one", Side::Buy, ticks[0].1 + Decimal::ONE, TEST_ORIGIN);
         let walk =
             scan_triggers("BTCUSDT", &[probe], ticks[3].0, &profiles(), TEST_ORIGIN).expect("walk");
-        assert_eq!(walk.triggered, vec![true]);
+        assert!(walk.hits[0].is_some());
         assert_eq!(walk.reached_ns, ticks[0].0);
     }
 
@@ -249,7 +269,7 @@ mod tests {
         let walk = scan_triggers("BTCUSDT", &probes, to, &profiles(), TEST_ORIGIN).expect("walk");
         assert!(walk.reached_ns < to);
         assert!(walk.reached_ns > first.0);
-        assert_eq!(walk.triggered, vec![false]);
+        assert!(walk.hits[0].is_none());
     }
 
     #[test]
@@ -274,10 +294,14 @@ mod tests {
                     TEST_ORIGIN,
                 )
                 .expect("single")
-                .triggered[0]
+                .hits[0]
+                    .is_some()
             })
             .collect();
-        assert_eq!(batched.triggered, singles);
+        assert_eq!(
+            batched.hits.iter().map(Option::is_some).collect::<Vec<_>>(),
+            singles
+        );
     }
 
     #[test]
@@ -290,7 +314,7 @@ mod tests {
             .iter()
             .filter(|(ts, price)| *ts > TEST_ORIGIN && *price < ticks[0].1 + Decimal::ONE)
             .count() as u32;
-        assert_eq!(walk.triggered, vec![expected > 0]);
+        assert_eq!(walk.hits[0].is_some(), expected > 0);
     }
 
     #[test]

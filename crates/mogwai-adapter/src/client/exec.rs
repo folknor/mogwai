@@ -35,11 +35,14 @@ use nautilus_core::{UUID4, UnixNanos, time::get_atomic_clock_realtime};
 use nautilus_live::{ExecutionClientCore, ExecutionEventEmitter};
 use nautilus_model::{
     accounts::AccountAny,
-    enums::{LiquiditySide, OmsType, OrderSide, OrderStatus, OrderType, PositionSideSpecified},
+    enums::{
+        ContingencyType, LiquiditySide, OmsType, OrderSide, OrderStatus, OrderType,
+        PositionSideSpecified, TriggerType,
+    },
     events::{
         AccountState as NautilusAccountState, OrderAccepted, OrderCancelRejected, OrderCanceled,
         OrderEventAny, OrderFilled, OrderModifyRejected, OrderRejected, OrderSubmitted,
-        OrderUpdated,
+        OrderTriggered, OrderUpdated,
     },
     identifiers::{AccountId, ClientId, ClientOrderId, InstrumentId, TradeId, Venue, VenueOrderId},
     orders::Order,
@@ -235,6 +238,22 @@ impl MogwaiExecutionClient {
             pending: Arc::new(Mutex::new(PendingQueries::default())),
             task_handles: Arc::new(Mutex::new(Vec::new())),
         })
+    }
+
+    /// The status this client's reconciliation mirror currently holds for one
+    /// order, or `None` if the mirror does not know it.
+    ///
+    /// Read-only, and deliberately the mirror rather than venue truth: the
+    /// mirror is the adapter's own belief about an order, and a class of defect
+    /// exists that is invisible from every other surface - an amend ack that
+    /// recomputes status from fill progress alone walks a TRIGGERED conditional
+    /// back to `Accepted`, desyncing the mirror from the engine for the rest of
+    /// the run without changing a single emitted event. Nautilus' own FSM keeps
+    /// `(Triggered, Updated) => Triggered`. Exposed so that invariant can be
+    /// gated; it is never a control surface.
+    #[must_use]
+    pub fn mirrored_order_status(&self, client_order_id: ClientOrderId) -> Option<OrderStatus> {
+        order_record(&self.state, client_order_id).map(|record| record.status)
     }
 
     #[cfg(all(test, any()))]
@@ -471,7 +490,7 @@ fn order_status_report_from_info(
     };
     let quantity = convert_qty(info.quantity, "quantity")?;
     let filled = convert_qty(info.filled_qty, "filled_qty")?;
-    Some(OrderStatusReport::new(
+    let mut report = OrderStatusReport::new(
         account_id,
         convert::instrument_id(&def),
         Some(client_order_id),
@@ -486,7 +505,39 @@ fn order_status_report_from_info(
         UnixNanos::from(info.ts_last),
         ts_init,
         None,
-    ))
+    );
+    let convert_px = |value, label| {
+        convert::price(value, def.price_precision)
+            .map_err(|err| {
+                tracing::warn!(
+                    order = %info.client_order_id,
+                    field = label,
+                    error = %err,
+                    "dropping order status report: unrepresentable price"
+                );
+            })
+            .ok()
+    };
+    // A stop-limit report without its limit price is unreconcilable, and one
+    // without its trigger price says nothing about what the venue is waiting
+    // for - both are set here rather than left at the constructor's `None`.
+    if let Some(value) = info.price {
+        report = report.with_price(convert_px(value, "price")?);
+    }
+    if let Some(value) = info.trigger_price {
+        // The venue has one trigger reference and only one: the last trade.
+        report = report
+            .with_trigger_price(convert_px(value, "trigger_price")?)
+            .with_trigger_type(TriggerType::LastPrice);
+    }
+    if let Some(ts) = info.ts_triggered {
+        report = report.with_ts_triggered(UnixNanos::from(ts));
+    }
+    Some(
+        report
+            .with_reduce_only(info.reduce_only)
+            .with_post_only(info.post_only),
+    )
 }
 
 /// Converts one venue-truth `QueryFills` row into the nautilus fill report,
@@ -832,6 +883,36 @@ impl ExecutionClient for MogwaiExecutionClient {
         // Submitted mirror stray that fed the unbounded ExecState growth.
         // Converting first means a conversion failure returns before any event is
         // emitted or any mirror record exists.
+        convert::wire_trigger_type(cmd.order_init.trigger_type)?;
+        if cmd
+            .order_init
+            .trigger_instrument_id
+            .is_some_and(|id| id != cmd.instrument_id)
+        {
+            anyhow::bail!(
+                "cross-instrument triggers are unsupported: MOGWAI triggers from the order instrument's tape"
+            );
+        }
+        if cmd.order_init.order_list_id.is_some()
+            || cmd
+                .order_init
+                .linked_order_ids
+                .as_ref()
+                .is_some_and(|ids| !ids.is_empty())
+        {
+            anyhow::bail!(
+                "order lists and linked bracket legs are unsupported: place and cancel fixed stops from the strategy"
+            );
+        }
+        if cmd
+            .order_init
+            .contingency_type
+            .is_some_and(|kind| kind != ContingencyType::NoContingency)
+        {
+            anyhow::bail!(
+                "contingent order lists are unsupported: place and cancel fixed stops from the strategy"
+            );
+        }
         let wire = mogwai_protocol::SubmitOrder {
             client_order_id: cmd.client_order_id.to_string(),
             symbol: symbol_from_instrument(cmd.instrument_id),
@@ -839,6 +920,9 @@ impl ExecutionClient for MogwaiExecutionClient {
             order_type: convert::wire_order_type(cmd.order_init.order_type)?,
             quantity: cmd.order_init.quantity.as_decimal(),
             price: cmd.order_init.price.map(|p| p.as_decimal()),
+            trigger_price: cmd.order_init.trigger_price.map(|p| p.as_decimal()),
+            reduce_only: cmd.order_init.reduce_only,
+            post_only: cmd.order_init.post_only,
             time_in_force: convert::wire_time_in_force(cmd.order_init.time_in_force)?,
         };
 
@@ -896,6 +980,7 @@ impl ExecutionClient for MogwaiExecutionClient {
             client_order_id: cmd.client_order_id.to_string(),
             price: cmd.price.map(|p| p.as_decimal()),
             quantity: cmd.quantity.map(|q| q.as_decimal()),
+            trigger_price: cmd.trigger_price.map(|p| p.as_decimal()),
         })
     }
 
@@ -1247,6 +1332,7 @@ enum ExecWsCommand {
         client_order_id: String,
         price: Option<Decimal>,
         quantity: Option<Decimal>,
+        trigger_price: Option<Decimal>,
     },
     /// Venue-truth order status query (see `VenueQuery`): sent over the exec
     /// socket, correlated to its reply by `request_id`.
@@ -1270,10 +1356,12 @@ fn exec_command_to_client_message(cmd: ExecWsCommand) -> ClientMessage {
             client_order_id,
             price,
             quantity,
+            trigger_price,
         } => ClientMessage::ModifyOrder {
             client_order_id,
             price,
             quantity,
+            trigger_price,
         },
         ExecWsCommand::QueryOrders {
             request_id,
@@ -1516,6 +1604,20 @@ struct OrderRecord {
 
 fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
     match msg {
+        ServerMessage::OrderTriggered { client_order_id, venue_order_id, ts_event } => {
+            let Some(client_order_id) = wire_client_order_id(&client_order_id) else { return; };
+            let Some(venue_order_id) = wire_venue_order_id(&venue_order_id) else { return; };
+            let Some((record, stale)) = with_order_record(&ctx.state, client_order_id, |record| {
+                let stale = record.status.is_closed();
+                if !stale { record.status = OrderStatus::Triggered; record.ts_last = UnixNanos::from(ts_event); }
+                (record.clone(), stale)
+            }) else { return; };
+            if stale { tracing::warn!(%client_order_id, "dropping trigger for terminal order"); return; }
+            let event = OrderTriggered::new(ctx.trader_id, record.strategy_id, record.instrument_id,
+                client_order_id, UUID4::new(), UnixNanos::from(ts_event), now_unix_nanos(ctx.sim),
+                false, Some(venue_order_id), Some(ctx.account_id));
+            ctx.emitter.send_order_event(OrderEventAny::Triggered(event));
+        }
         ServerMessage::OrderAccepted {
             client_order_id,
             venue_order_id,
@@ -1702,6 +1804,7 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
             venue_order_id,
             quantity,
             price,
+            trigger_price,
             leaves_qty,
             ts_event,
         } => {
@@ -1765,6 +1868,16 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                     return;
                 }
             };
+            let updated_trigger_price = match trigger_price
+                .map(|p| convert::price(p, def.price_precision))
+                .transpose()
+            {
+                Ok(price) => price,
+                Err(err) => {
+                    tracing::warn!(order = %client_order_id, error = %err, "dropping order update: unrepresentable trigger price");
+                    return;
+                }
+            };
             let Some((record, stale)) = with_order_record(&ctx.state, client_order_id, |record| {
                 // Terminal-state guard, same as the OrderAccepted arm: an amend
                 // ack reordered behind the order's terminal event must not
@@ -1789,7 +1902,7 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                     // when the amend leaves nothing outstanding) so the mirror does
                     // not report Accepted alongside a non-zero filled_qty.
                     record.status = if record.filled_qty.is_zero() {
-                        OrderStatus::Accepted
+                        if record.status == OrderStatus::Triggered { OrderStatus::Triggered } else { OrderStatus::Accepted }
                     } else if leaves_qty.is_zero() {
                         OrderStatus::Filled
                     } else {
@@ -1825,7 +1938,7 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 Some(venue_order_id),
                 Some(ctx.account_id),
                 updated_price,
-                None,
+                updated_trigger_price,
                 None,
                 false,
             );

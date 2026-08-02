@@ -3,7 +3,7 @@
 
 //! Bounded tape walks used by the venue's trigger-price fill model.
 
-use mogwai_protocol::{Side, trades_through};
+use mogwai_protocol::{Hit, ScanKind, Side};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
 use crate::{TickEvent, TickSource};
@@ -27,17 +27,21 @@ pub const MIN_VOL_SAMPLES: usize = 8;
 #[derive(Debug, Clone, Copy)]
 pub struct TriggerScan {
     pub side: Side,
-    /// The drawn trigger price. A print strictly through this fills the order.
-    pub trigger_px: Decimal,
+    /// The price the predicate is applied against: a live limit's drawn band
+    /// trigger, or an untriggered conditional's stop price.
+    pub px: Decimal,
+    /// Which predicate decides this scan - `trades_through` or
+    /// `touches_trigger`. The engine classifies, this walk only evaluates.
+    pub kind: ScanKind,
     /// Exclusive lower bound of the span still to walk.
     pub from_ns: u64,
 }
 
 #[derive(Debug, Clone)]
 pub struct Walk {
-    /// Per scan, in the input's order: whether a print strictly through the
-    /// trigger was seen in `(scan.from_ns, reached_ns]`.
-    pub triggered: Vec<bool>,
+    /// Per scan, in the input's order: the first print in
+    /// `(scan.from_ns, reached_ns]` that satisfied its predicate, or `None`.
+    pub hits: Vec<Option<Hit>>,
     /// Where the drain ACTUALLY got to, which its budget may leave short of
     /// `to_ns`. A caller advances its frontier to exactly this, never past it.
     pub reached_ns: u64,
@@ -50,6 +54,9 @@ pub struct VolReading {
     /// Last print at or before `to_ns`. Only ever produced by a walk that
     /// actually REACHED `to_ns`.
     pub last_px: Decimal,
+    /// Instant of that last print. Carried so a stop that triggers on arrival
+    /// can name a REAL print off the canonical tape rather than inventing one.
+    pub last_ts_ns: u64,
     /// RMS of one print's return, unitless.
     pub rms_return: f64,
     /// `rms_return` scaled to `FILL_HORIZON_NS` by the observed arrival rate.
@@ -78,12 +85,12 @@ pub fn scan_triggers(
 ) -> Walk {
     let Some(earliest) = scans.iter().map(|scan| scan.from_ns).min() else {
         return Walk {
-            triggered: Vec::new(),
+            hits: Vec::new(),
             reached_ns: to_ns,
             drained: 0,
         };
     };
-    let mut triggered = vec![false; scans.len()];
+    let mut hits = vec![None; scans.len()];
     let mut reached_ns = earliest;
     let mut drained = 0;
     for _ in 0..budget {
@@ -97,17 +104,20 @@ pub fn scan_triggers(
         }
         reached_ns = event.ts_event();
         if let TickEvent::Trade(trade) = event {
-            for (hit, scan) in triggered.iter_mut().zip(scans) {
-                if !*hit
+            for (hit, scan) in hits.iter_mut().zip(scans) {
+                if hit.is_none()
                     && trade.ts_event > scan.from_ns
-                    && trades_through(scan.side, scan.trigger_px, trade.price)
+                    && scan.kind.hit(scan.side, scan.px, trade.price)
                 {
-                    *hit = true;
+                    *hit = Some(Hit {
+                        ts_ns: trade.ts_event,
+                        px: trade.price,
+                    });
                 }
             }
-            if triggered.iter().all(|hit| *hit) {
+            if hits.iter().all(Option::is_some) {
                 return Walk {
-                    triggered,
+                    hits,
                     reached_ns,
                     drained,
                 };
@@ -118,7 +128,7 @@ pub fn scan_triggers(
         }
     }
     Walk {
-        triggered,
+        hits,
         reached_ns,
         drained,
     }
@@ -206,6 +216,7 @@ pub fn vol_reading(
     }
     Some(VolReading {
         last_px: last_px?,
+        last_ts_ns: last_ts?,
         rms_return,
         horizon_return,
         samples,
@@ -231,7 +242,8 @@ mod tests {
     fn scan(side: Side, price: i64, from_ns: u64) -> TriggerScan {
         TriggerScan {
             side,
-            trigger_px: Decimal::from(price),
+            px: Decimal::from(price),
+            kind: ScanKind::FillThrough,
             from_ns,
         }
     }
@@ -245,12 +257,64 @@ mod tests {
             2,
             10,
         );
-        assert_eq!(walk.triggered, vec![true, true]);
+        assert!(walk.hits.iter().all(Option::is_some));
+    }
+    #[test]
+    fn a_walk_reports_the_price_and_instant_of_each_hit() {
+        let mut source = MemorySource::new(vec![trade(1, 99), trade(2, 101)]);
+        let walk = scan_triggers(
+            &mut source,
+            &[
+                scan(Side::Buy, 100, 0),
+                scan(Side::Sell, 100, 1),
+                scan(Side::Buy, 90, 0),
+            ],
+            2,
+            10,
+        );
+        assert_eq!(
+            walk.hits[0],
+            Some(Hit {
+                ts_ns: 1,
+                px: Decimal::from(99)
+            })
+        );
+        assert_eq!(
+            walk.hits[1],
+            Some(Hit {
+                ts_ns: 2,
+                px: Decimal::from(101)
+            })
+        );
+        assert_eq!(walk.hits[2], None);
+    }
+
+    #[test]
+    fn a_touch_scan_hits_at_the_price_and_a_through_scan_does_not() {
+        let at = Decimal::from(100);
+        let mut source = MemorySource::new(vec![trade(1, 100)]);
+        let scans = [
+            TriggerScan {
+                side: Side::Buy,
+                px: at,
+                kind: ScanKind::TriggerTouch,
+                from_ns: 0,
+            },
+            TriggerScan {
+                side: Side::Buy,
+                px: at,
+                kind: ScanKind::FillThrough,
+                from_ns: 0,
+            },
+        ];
+        let walk = scan_triggers(&mut source, &scans, 1, 10);
+        assert!(walk.hits[0].is_some());
+        assert!(walk.hits[1].is_none());
     }
     #[test]
     fn a_print_that_jumps_past_a_trigger_still_triggers() {
         let mut source = MemorySource::new(vec![trade(1, 90)]);
-        assert!(scan_triggers(&mut source, &[scan(Side::Buy, 100, 0)], 1, 10).triggered[0]);
+        assert!(scan_triggers(&mut source, &[scan(Side::Buy, 100, 0)], 1, 10).hits[0].is_some());
     }
     #[test]
     fn a_walk_stops_once_every_scan_has_triggered() {
@@ -281,8 +345,8 @@ mod tests {
         for (i, one) in scans.iter().enumerate() {
             let mut source = MemorySource::new(ticks.clone());
             assert_eq!(
-                both.triggered[i],
-                scan_triggers(&mut source, &[*one], 2, 10).triggered[0]
+                both.hits[i].is_some(),
+                scan_triggers(&mut source, &[*one], 2, 10).hits[0].is_some()
             );
         }
     }
@@ -290,7 +354,7 @@ mod tests {
     fn walk_over_an_empty_scan_list_pulls_nothing() {
         let mut source = MemorySource::new(vec![trade(1, 100)]);
         let walk = scan_triggers(&mut source, &[], 9, 10);
-        assert!(walk.triggered.is_empty());
+        assert!(walk.hits.is_empty());
         assert_eq!((walk.reached_ns, walk.drained), (9, 0));
     }
 

@@ -33,6 +33,58 @@ pub fn trades_through(side: Side, limit: Decimal, traded: Decimal) -> bool {
     }
 }
 
+/// True when a traded price has reached or passed a conditional order's
+/// trigger. TOUCH, not through: `trades_through`'s strictness is a QUEUE
+/// argument - at your own limit price you are behind the resting queue, so the
+/// tape merely reaching your price is not evidence flow reached YOU - and a
+/// stop holds no queue position. Its trigger is a pure price predicate the
+/// venue evaluates on its own book, and every real venue fires it on touch.
+///
+/// Note the sides mirror `trades_through`: a buy LIMIT rests below the market
+/// and waits for the tape to come DOWN, a buy STOP rests above and waits for it
+/// to come UP. For the SAME side and the SAME price the two are exact logical
+/// complements, which is precisely why they must not be collapsed into one
+/// function with a strictness flag - they are never handed the same price
+/// (a limit is scanned against its DRAWN band trigger, a conditional against
+/// its STATED stop).
+#[must_use]
+pub fn touches_trigger(side: Side, trigger: Decimal, traded: Decimal) -> bool {
+    match side {
+        Side::Buy => traded >= trigger,
+        Side::Sell => traded <= trigger,
+    }
+}
+
+/// Which predicate a tape walk applies to one resting order. The engine
+/// classifies, the data walk evaluates, and neither owns the enum - it lives
+/// with the two predicate functions so the classification and the predicates
+/// cannot drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanKind {
+    /// `trades_through` against a live limit's drawn band trigger.
+    FillThrough,
+    /// `touches_trigger` against an untriggered conditional's stop price.
+    TriggerTouch,
+}
+
+impl ScanKind {
+    #[must_use]
+    pub fn hit(self, side: Side, px: Decimal, traded: Decimal) -> bool {
+        match self {
+            Self::FillThrough => trades_through(side, px, traded),
+            Self::TriggerTouch => touches_trigger(side, px, traded),
+        }
+    }
+}
+
+/// The print that satisfied a scan: both its instant and its price, because a
+/// triggered stop-market prices its fill off exactly this print.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hit {
+    pub ts_ns: u64,
+    pub px: Decimal,
+}
+
 /// A venue account identity. Kept deliberately small and log-safe because it
 /// is accepted at every stateful transport boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -198,6 +250,13 @@ pub enum AggressorSide {
 pub enum OrderType {
     Market,
     Limit,
+    /// Untriggered conditional carrying a trigger price and NO price: the fill
+    /// comes from the print that triggered it and the reservation from the
+    /// trigger, so a stamped price would be a number nothing reads.
+    StopMarket,
+    /// Untriggered conditional carrying both. `price` is the limit price the
+    /// order takes AFTER it triggers.
+    StopLimit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,6 +279,10 @@ pub enum ClientMessage {
         client_order_id: ClientOrderId,
         price: Option<Decimal>,
         quantity: Option<Decimal>,
+        /// Amending the trigger of an UNTRIGGERED conditional restarts its
+        /// trigger window; on anything else it is rejected.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_price: Option<Decimal>,
     },
     /// Reconciliation query: ask the venue for the CURRENT status of its
     /// orders, answered from the engine's own book - not from any event the
@@ -304,6 +367,10 @@ impl CommandClass {
 pub enum WireOrderStatus {
     /// Accepted and resting, nothing filled yet.
     Accepted,
+    /// A conditional whose trigger has fired, with nothing filled yet. A
+    /// triggered order with a partial fill reports `PartiallyFilled`, because a
+    /// partial fill is the more specific truth.
+    Triggered,
     /// Resting with some quantity filled.
     PartiallyFilled,
     /// Terminal: fully filled.
@@ -311,12 +378,22 @@ pub enum WireOrderStatus {
     /// Terminal: canceled (client cancel, IOC remainder, or a server-side
     /// havoc cancel).
     Canceled,
+    /// Terminal: refused AFTER acceptance - today only a post-only stop-limit
+    /// that would take liquidity against its own triggering print. A
+    /// pre-acceptance refusal never becomes a truth-store row at all.
+    Rejected,
 }
 
 impl WireOrderStatus {
     #[must_use]
     pub fn is_open(self) -> bool {
-        matches!(self, Self::Accepted | Self::PartiallyFilled)
+        // `Triggered` is OPEN: a triggered stop-limit is resting and fillable,
+        // and omitting it would make it vanish from open-order reconciliation
+        // between its trigger and its fill.
+        matches!(
+            self,
+            Self::Accepted | Self::Triggered | Self::PartiallyFilled
+        )
     }
 }
 
@@ -338,6 +415,17 @@ pub struct OrderStatusInfo {
     /// Market orders before the engine sees them), optional on the wire to
     /// mirror `SubmitOrder`.
     pub price: Option<Decimal>,
+    /// The conditional's stop price, `None` for a non-conditional order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_price: Option<Decimal>,
+    /// Sim unix-ns the trigger fired, `None` while untriggered or for a
+    /// non-conditional order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts_triggered: Option<u64>,
+    #[serde(default)]
+    pub reduce_only: bool,
+    #[serde(default)]
+    pub post_only: bool,
     /// When the venue accepted the order (sim unix-ns).
     pub ts_accepted: u64,
     /// Last lifecycle activity: accept, fill, amend, or terminal transition.
@@ -374,7 +462,21 @@ pub struct SubmitOrder {
     pub order_type: OrderType,
     pub quantity: Decimal,
     pub price: Option<Decimal>,
+    /// The price the tape must touch for a conditional to become live.
+    /// REQUIRED on StopMarket/StopLimit, refused on Market/Limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_price: Option<Decimal>,
     pub time_in_force: TimeInForce,
+    /// Fills are clamped to the position this order would close, and the order
+    /// is canceled rather than filled when that position is gone. Exempt from
+    /// the funded-admission check and from `locked_balances`: it can only
+    /// shrink an exposure the position itself already represents.
+    #[serde(default)]
+    pub reduce_only: bool,
+    /// An order that would take liquidity is rejected rather than filled.
+    /// Legal on Limit and StopLimit only.
+    #[serde(default)]
+    pub post_only: bool,
 }
 
 /// API-boundary guard for a `SubmitOrder`, mirroring `validate_conn_havoc` /
@@ -408,9 +510,44 @@ pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
     if order.quantity <= Decimal::ZERO {
         return Err("quantity must be > 0");
     }
-    match order.price {
-        Some(price) if price <= Decimal::ZERO => Err("price must be > 0"),
-        None if order.order_type == OrderType::Limit => Err("Limit order must carry a price"),
+    if order.price.is_some_and(|price| price <= Decimal::ZERO) {
+        return Err("price must be > 0");
+    }
+    if order
+        .trigger_price
+        .is_some_and(|price| price <= Decimal::ZERO)
+    {
+        return Err("trigger_price must be > 0");
+    }
+    match order.order_type {
+        OrderType::Market if order.trigger_price.is_some() => {
+            Err("Market order must not carry trigger_price")
+        }
+        OrderType::Limit if order.price.is_none() => Err("Limit order must carry a price"),
+        OrderType::Limit if order.trigger_price.is_some() => {
+            Err("Limit order must not carry trigger_price")
+        }
+        OrderType::StopMarket if order.price.is_some() => {
+            Err("StopMarket order must not carry a price")
+        }
+        OrderType::StopMarket | OrderType::StopLimit if order.trigger_price.is_none() => {
+            Err("conditional order must carry trigger_price")
+        }
+        OrderType::StopLimit if order.price.is_none() => Err("StopLimit order must carry a price"),
+        _ if order.post_only
+            && !matches!(order.order_type, OrderType::Limit | OrderType::StopLimit) =>
+        {
+            Err("post_only is legal only on Limit and StopLimit")
+        }
+        _ if matches!(
+            order.order_type,
+            OrderType::StopMarket | OrderType::StopLimit
+        ) && order.time_in_force != TimeInForce::Gtc =>
+        {
+            Err(
+                "conditional orders are good-till-cancel only: a now-or-never order cannot wait for a trigger",
+            )
+        }
         _ => Ok(()),
     }
 }
@@ -462,15 +599,19 @@ pub enum QueryKind {
 pub fn validate_modify_order(
     price: Option<Decimal>,
     quantity: Option<Decimal>,
+    trigger_price: Option<Decimal>,
 ) -> Result<(), &'static str> {
-    if price.is_none() && quantity.is_none() {
-        return Err("ModifyOrder must set price and/or quantity");
+    if price.is_none() && quantity.is_none() && trigger_price.is_none() {
+        return Err("ModifyOrder must set price, quantity and/or trigger_price");
     }
     if price.is_some_and(|p| p <= Decimal::ZERO) {
         return Err("price must be > 0");
     }
     if quantity.is_some_and(|q| q <= Decimal::ZERO) {
         return Err("quantity must be > 0");
+    }
+    if trigger_price.is_some_and(|p| p <= Decimal::ZERO) {
+        return Err("trigger_price must be > 0");
     }
     Ok(())
 }
@@ -513,6 +654,16 @@ pub enum ServerMessage {
         venue_order_id: VenueOrderId,
         ts_event: u64,
     },
+    /// A conditional order's trigger fired. Always precedes whatever the
+    /// trigger produced (a fill, or the order resting as a live limit), in the
+    /// same batch. Never duplicated by `DuplicateNextFill`: it is not a fill,
+    /// and a duplicated trigger would be a transition the client's FSM has no
+    /// arm for.
+    OrderTriggered {
+        client_order_id: ClientOrderId,
+        venue_order_id: VenueOrderId,
+        ts_event: u64,
+    },
     OrderRejected {
         client_order_id: ClientOrderId,
         reason: String,
@@ -530,6 +681,10 @@ pub enum ServerMessage {
         quantity: Decimal,
         /// New price after the amend. `None` for a still-priceless order.
         price: Option<Decimal>,
+        /// New trigger price after the amend. `None` for a non-conditional
+        /// order, and for an amend that did not touch the trigger.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_price: Option<Decimal>,
         /// Remaining quantity after the amend.
         leaves_qty: Decimal,
         ts_event: u64,
@@ -648,6 +803,7 @@ impl ServerMessage {
             | ServerMessage::OrderStatusSnapshot(_)
             | ServerMessage::FillSnapshot(_)
             | ServerMessage::OrderAccepted { .. }
+            | ServerMessage::OrderTriggered { .. }
             | ServerMessage::OrderRejected { .. }
             | ServerMessage::OrderCanceled { .. }
             | ServerMessage::OrderUpdated { .. }
@@ -755,6 +911,7 @@ mod tests {
                     client_order_id: "O-1".into(),
                     price: None,
                     quantity: Some(Decimal::from(2)),
+                    trigger_price: None,
                 },
                 r#"{"type":"ModifyOrder","client_order_id":"O-1","price":null,"quantity":"2"}"#,
             ),

@@ -19,14 +19,19 @@ Or both. There are no exceptions.
   end state is still out of reach, the claim was wrong - which is a finding
   worth having, and the reason it is stated as a claim rather than as a list.
 
-  FIVE, DOWN FROM SIX, as of the 2026-08-02 fill-model landing.
+  FOUR, DOWN FROM FIVE, as of the conditional-order-type landing.
   `problem-order-book.md` is deleted: the user's fill model needed no book, and
   what remained open after that ruling - the volatility estimator, the band's
   scale and shape, the derived RNG stream, self-trade impossibility - is now
   landed code (`a214996` and follow-on commits), pinned by the tests and docs
   the landing itself cites. `problem-fees.md` dissolved into the instrument
   model (an exchange charges fees, so the schedule is one more config knob) and
-  was deleted earlier. The MECHANISM half of `problem-instrument-profiles.md`
+  was deleted earlier. `problem-refused-order-types.md` is deleted the same
+  way: the venue now accepts `StopMarket` and `StopLimit`, with reduce-only and
+  post-only as first-class flags and the touch-versus-through trigger
+  distinction, and the adapter stopped refusing them at conversion - landed
+  code, pinned by the engine, server and adapter test suites the landing
+  itself added. The MECHANISM half of `problem-instrument-profiles.md`
   went the same way, but that document SURVIVES and still counts: its empirical
   question - whether the arrival and volatility process constants are
   per-instrument - is untouched by any ruling. Count the files in `notes/`.
@@ -157,10 +162,6 @@ Or both. There are no exceptions.
     that spread across months is an ACQUISITION, not a probe run: aggTrades are
     held for June only, and the April and May archives are 1-second klines that
     cannot describe sub-second structure at all.
-  - `notes/problem-refused-order-types.md` - every conditional type is refused,
-    so a strategy with a protective stop cannot be forward-tested at all. The
-    owed surface is what nautilus expresses, not what today's consumer happens
-    to emit. Its REQUIREMENTS precede the book; its implementation follows it.
   DELETED, not archived: `notes/problem-fees.md`. The engine books zero
   commission on every fill, which biases every claim optimistically and
   systematically - but an exchange charges fees, so under the parameterization
@@ -170,7 +171,16 @@ Or both. There are no exceptions.
   there: nautilus computes commission client-side only in its SIMULATED matching
   engine, so on the live path a venue reporting no commission is
   indistinguishable from one that charges none, and nothing downstream can
-  correct for it.
+  correct for it. Also deleted, its problem fully landed: `notes/problem-
+  refused-order-types.md`. The venue was refusing `StopMarket` and
+  `StopLimit` at conversion; it now serves both, first class - a four-variant
+  `OrderType`, a `Resting` state machine distinguishing a live limit from an
+  untriggered conditional from an inert market remainder, a stop that
+  triggers on TOUCH rather than THROUGH, reduce-only and post-only as wire
+  flags enforced at fill time, and the adapter's `wire_order_type` no longer
+  refuses the two types. Trailing stops and two-leg brackets remain refused
+  by name, and stay refused - the user ruled them out rather than deferred
+  them.
 
   RAISED IN REVIEW AND RULED ON, recorded so they are not raised a third time.
   (a) Three documents each partly re-scope the realism gate - cadence
@@ -193,6 +203,30 @@ Or both. There are no exceptions.
   Also relevant and not a problem statement: `reference/glossary.md` defines the
   identity chain the code builds - now just run, tape and ledger, since the
   lifecycle landing collapsed account, session and subscription out of it.
+
+- GTD / `expire_time` on the wire, with a time-driven expiry pass on the
+  sweeper. Refused today for limits and conditionals alike - the conditional-
+  order-type landing carried a GTC-only rule for stops for exactly this
+  reason, and closing the gap needs a wire expiry field plus an expiry pass
+  that has nothing to do with triggers, so it is its own item rather than
+  bundled with anything else that touches order lifecycle.
+
+- A trigger-act latency havoc arm, if a scenario ever needs a trigger fired
+  later than the sweep interval already allows. Deliberately not built with
+  the rest of the conditional-order-type surface: the sweep interval already
+  bounds how late a trigger can be, and a per-trigger delay knob would be a
+  new arm rather than an extension of an existing one.
+
+- The price-SPAN-per-inferred-match-event measurement, still owed. The
+  triggered-stop fill (like the plain market order before it) slips by the
+  existing fill band, reused rather than separately fitted; how wide that
+  band SHOULD be for a triggered stop is a scale question this measurement
+  would answer, and it has never been computed - the sweep tail quoted
+  elsewhere (up to 2,213 aggTrade rows in one inferred event on BTC) counts
+  rows rather than distinct prices, so it does not establish how far a
+  marketable order actually walks. One probe extension over archives already
+  on disk would settle it; until then the slippage magnitude stays an
+  unquantified mechanism shared by every order type that slips.
 
 - The fill band is INERT about 30% of the time on the default profile, which
   silently restores the defect it was built to remove. Found 2026-08-02 while
@@ -328,17 +362,14 @@ Or both. There are no exceptions.
   extension is dead
   (the triggering Pine shape is invalid on TradingView and nautilus cannot
   rest an MIT faithfully) - and their position was that the protocol owes no
-  order-type growth beyond Market and Limit. SUPERSEDED as of 2026-08-02 by
-  `notes/problem-refused-order-types.md`: that was a consumer's preference, and
-  mogwai is a nautilus adapter whose owed surface follows what nautilus
-  expresses. MarketIfTouched specifically stays dead unless re-argued. Standing
-  consequence for them, surfaced by QA 2026-08-01
-  and now written up in `reference/architecture.md`: a strategy whose
-  protective leg is a stop-MARKET cannot be forward-tested on MOGWAI at all,
-  because the adapter refuses the type and MOGWAI is the only keyless venue
-  `ba forward` can use. Nothing to build here - the refusal message now names
-  the limit replacement - but their pre-deployment procedure documents a shape
-  their own tooling cannot exercise.
+  order-type growth beyond Market and Limit. SUPERSEDED as of 2026-08-02: that
+  was a consumer's preference, and mogwai is a nautilus adapter whose owed
+  surface follows what nautilus expresses. MarketIfTouched specifically stays
+  dead unless re-argued. The standing consequence for them is now RESOLVED: the
+  venue serves `StopMarket` and `StopLimit` first class (`reference/
+  architecture.md`), so a strategy whose protective leg is a stop-MARKET is
+  forward-testable on MOGWAI. Nothing left to build here; their pre-deployment
+  procedure no longer documents a shape their own tooling cannot exercise.
 
 - Two broadarrow decisions their developer flagged, recorded so the mogwai-side
   residues read as connected rather than orphaned. (a) Enabling the continuous

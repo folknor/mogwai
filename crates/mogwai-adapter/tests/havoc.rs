@@ -25,8 +25,8 @@ use std::{
 };
 
 use common::{
-    StubState, bound_stub, cached_order, instrument_id, next_exec_event,
-    next_non_instrument_data_event, trade_json,
+    StubState, bound_stub, cached_order, cached_stop_market, instrument_id, next_exec_event,
+    next_non_instrument_data_event, submit_command, trade_json,
 };
 use mogwai_adapter::{
     MOGWAI_VENUE, MogwaiDataClient, MogwaiDataClientConfig, MogwaiExecClientConfig,
@@ -216,6 +216,44 @@ async fn submit_exec_client(
             None,
         ))
         .expect("submit order");
+    (client, sink_rx)
+}
+
+/// As `submit_exec_client`, but submits a nautilus `StopMarketOrder` under the
+/// supplied client havoc. The order shape is what differs: only a conditional
+/// produces an `OrderTriggered` for havoc to reach.
+async fn submit_stop_exec_client(
+    state: Arc<StubState>,
+    havoc: HavocSpec,
+) -> (MogwaiExecutionClient, UnboundedReceiver<ExecutionEvent>) {
+    let base_url = bound_stub(state).await;
+    let (sink_tx, sink_rx) = unbounded_channel::<ExecutionEvent>();
+    replace_exec_event_sender(sink_tx);
+
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    let order = cached_stop_market(&cache);
+    let config = MogwaiExecClientConfig {
+        account_id: AccountId::from("MOGWAI-001"),
+        base_url,
+        havoc: Some(havoc),
+        ..MogwaiExecClientConfig::default()
+    };
+    let core = ExecutionClientCore::new(
+        config.trader_id,
+        ClientId::from("MOGWAI-EXEC"),
+        *MOGWAI_VENUE,
+        OmsType::Netting,
+        config.account_id,
+        config.account_type,
+        None,
+        cache,
+    );
+    let mut client = MogwaiExecutionClient::new(core, config).expect("client builds");
+    client.start().expect("start grabs sink");
+    client.connect().await.expect("connect opens transports");
+    client
+        .submit_order(submit_command(&order, order.init_event().clone()))
+        .expect("a stop-market is no longer refused at conversion");
     (client, sink_rx)
 }
 
@@ -756,5 +794,103 @@ async fn divergence_go_dark_suppresses_stream_during_window() {
     assert!(
         start.elapsed() >= Duration::from_millis(dark_ms as u64),
         "the trade must not arrive before the dark window elapsed"
+    );
+}
+
+/// Havoc reaches the order a trigger produces, and reaches the trigger itself.
+///
+/// `OrderTriggered` is a new wire variant, and the one thing that decides
+/// whether the ack-holding arms (`DelayAcks` on the venue's writer, the
+/// latency filter on this end) touch it at all is
+/// `ServerMessage::category` - both ends consult that one classifier, which is
+/// exactly why a misfiled variant would be invisible in a single-ended test. A
+/// trigger filed as `Data` would slip past every execution hold while the fill
+/// behind it was held, delivering the two out of order to a strategy.
+///
+/// The gate is two-sided on purpose. The exec buckets are set to a delay the
+/// trigger and the fill must BOTH clear, and the data bucket to one an order
+/// of magnitude larger that they must NOT pay: passing only the first half
+/// would also pass if every frame were delayed, and passing only the second
+/// would also pass if havoc reached nothing.
+///
+/// It drives the client-side filter rather than a venue-armed `DelayAcks`
+/// because the venue here is the test stub, which has no writer windows to
+/// arm - and the classification under test is shared, so the client-side
+/// bucket is the same decision observed from the reachable end.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn havoc_reaches_the_order_a_trigger_produces() {
+    let held = Duration::from_millis(400);
+    let state = Arc::new(StubState::default());
+    {
+        let mut frames = state.ws_exec_frames.lock().expect("ws exec frames mutex");
+        frames.push(
+            r#"{"type":"OrderAccepted","client_order_id":"O-STOP","venue_order_id":"V-9","ts_event":10}"#
+                .to_string(),
+        );
+        frames.push(
+            r#"{"type":"OrderTriggered","client_order_id":"O-STOP","venue_order_id":"V-9","ts_event":11}"#
+                .to_string(),
+        );
+        frames.push(
+            r#"{"type":"OrderFilled","client_order_id":"O-STOP","venue_order_id":"V-9","trade_id":"T-9","symbol":"BTCUSDT","side":"Sell","last_qty":"1","last_px":"94.97","leaves_qty":"0","commission":"0","ts_event":12}"#
+                .to_string(),
+        );
+    }
+    let havoc = HavocSpec {
+        client: ClientHavoc {
+            latency: Some(HavocLatency {
+                base_nanos: 0,
+                exec_event_nanos: 400_000_000,
+                fill_nanos: 400_000_000,
+                // An order of magnitude beyond the exec buckets: a trigger or a
+                // fill misfiled as market data would pay THIS instead, and the
+                // upper bound below would catch it.
+                data_nanos: 4_000_000_000,
+            }),
+            ..ClientHavoc::default()
+        },
+        ..HavocSpec::default()
+    };
+
+    let start = Instant::now();
+    let (_client, mut rx) = submit_stop_exec_client(state, havoc).await;
+
+    // Submitted is emitted locally by the client, never over the wire, so it
+    // pays no inbound latency. The clock starts before connect, which only ever
+    // ADDS setup time to the measurement - the lower bound stays honest and the
+    // upper bound is loose enough to absorb it.
+    assert!(matches!(
+        next_exec_event(&mut rx, Duration::from_secs(6)).await,
+        ExecutionEvent::Order(OrderEventAny::Submitted(_))
+    ));
+    assert!(matches!(
+        next_exec_event(&mut rx, Duration::from_secs(6)).await,
+        ExecutionEvent::Order(OrderEventAny::Accepted(_))
+    ));
+    match next_exec_event(&mut rx, Duration::from_secs(6)).await {
+        ExecutionEvent::Order(OrderEventAny::Triggered(_)) => {}
+        other => panic!("expected the held OrderTriggered, got {other:?}"),
+    }
+    let triggered_at = start.elapsed();
+    match next_exec_event(&mut rx, Duration::from_secs(6)).await {
+        ExecutionEvent::Order(OrderEventAny::Filled(_)) => {}
+        other => panic!("expected the held fill behind the trigger, got {other:?}"),
+    }
+    let filled_at = start.elapsed();
+
+    assert!(
+        triggered_at >= held,
+        "OrderTriggered arrived in {triggered_at:?}, before the {held:?} execution hold: \
+         it is not classified as execution traffic"
+    );
+    assert!(
+        filled_at >= held,
+        "the fill behind the trigger arrived in {filled_at:?}, before the {held:?} hold"
+    );
+    assert!(
+        triggered_at < Duration::from_secs(3) && filled_at < Duration::from_secs(3),
+        "trigger {triggered_at:?} / fill {filled_at:?} paid the four-second DATA bucket: \
+         one of them is misfiled as market data"
     );
 }

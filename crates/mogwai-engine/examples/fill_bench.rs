@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use mogwai_engine::{Engine, EngineConfig, ScanResult};
+use mogwai_protocol::Hit;
 use mogwai_protocol::{
     AccountId, ClientMessage, OrderType, Side, SubmitOrder, TimeInForce, default_instruments,
 };
@@ -44,6 +45,9 @@ fn order(id: String) -> SubmitOrder {
         order_type: OrderType::Limit,
         quantity: Decimal::ONE,
         price: Some(Decimal::from(100)),
+        trigger_price: None,
+        reduce_only: false,
+        post_only: false,
         time_in_force: TimeInForce::Gtc,
     }
 }
@@ -64,7 +68,10 @@ fn scans(size: usize, fill: bool) -> (Engine, Vec<ScanResult>) {
             client_order_id: scan.client_order_id.clone(),
             from_ns: scan.from_ns,
             revision: scan.revision,
-            triggered: fill,
+            hit: fill.then_some(Hit {
+                ts_ns: 2,
+                px: scan.px,
+            }),
             scanned_to_ns: 2,
         })
         .collect();
@@ -116,6 +123,7 @@ fn benches(c: &mut Criterion) {
                     1,
                     Some(mogwai_engine::MarketReading {
                         last_px: Decimal::from(99),
+                        ts_ns: 0,
                         band_ticks: 0,
                     }),
                 );

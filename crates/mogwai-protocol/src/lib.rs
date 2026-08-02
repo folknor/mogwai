@@ -31,12 +31,12 @@ pub use havoc::{
 pub use instruments::{InstrumentDef, default_instruments};
 pub use messages::{
     ADMISSION_ENVELOPE_BYTES, ADMISSION_FRAME_MAX_BYTES, AccountId, AccountIdError, AccountState,
-    AdmissionSubject, AggressorSide, Balance, ClientMessage, CommandClass, FillSnapshot,
+    AdmissionSubject, AggressorSide, Balance, ClientMessage, CommandClass, FillSnapshot, Hit,
     JSON_ESCAPE_FACTOR, MAX_ACCOUNT_ID_LEN, MAX_CLIENT_ID_LEN, MAX_CURRENCY_LEN, MAX_REASON_LEN,
     MAX_SYMBOL_LEN, OrderFilled, OrderStatusInfo, OrderStatusSnapshot, OrderType, Position,
-    QueryKind, QuoteTick, ServerMessage, Side, SubmitOrder, TimeInForce, TradeTick,
-    WireOrderStatus, trades_through, truncate_client_id, truncate_reason, validate_client_order_id,
-    validate_modify_order, validate_request_id, validate_submit_order,
+    QueryKind, QuoteTick, ScanKind, ServerMessage, Side, SubmitOrder, TimeInForce, TradeTick,
+    WireOrderStatus, touches_trigger, trades_through, truncate_client_id, truncate_reason,
+    validate_client_order_id, validate_modify_order, validate_request_id, validate_submit_order,
 };
 pub use ready::{ReadyRecord, SeedReport};
 

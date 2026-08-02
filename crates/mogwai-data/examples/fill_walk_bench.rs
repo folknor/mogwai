@@ -18,7 +18,7 @@ use mogwai_data::{
     CheckpointIndex, Fingerprint, GeneratedSource, GeneratorScalars, MergeSource, TickSource,
     TriggerScan, scan_triggers,
 };
-use mogwai_protocol::Side;
+use mogwai_protocol::{ScanKind, Side};
 use rust_decimal::Decimal;
 
 const ORIGIN: u64 = 1_700_438_400_000_000_000;
@@ -50,7 +50,8 @@ fn scans(count: usize) -> Vec<TriggerScan> {
     (0..count)
         .map(|_| TriggerScan {
             side: Side::Buy,
-            trigger_px: Decimal::ONE,
+            px: Decimal::ONE,
+            kind: ScanKind::FillThrough,
             from_ns: ORIGIN,
         })
         .collect()
@@ -91,7 +92,7 @@ fn benches(c: &mut Criterion) {
 
     let mapping_input: Vec<ScanTuple> = scans(50)
         .into_iter()
-        .map(|scan| (scan.side, scan.trigger_px, scan.from_ns))
+        .map(|scan| (scan.side, scan.px, scan.from_ns))
         .collect();
     c.bench_function("scan_mapping_50", |b| {
         b.iter_batched(
@@ -99,9 +100,10 @@ fn benches(c: &mut Criterion) {
             |input| {
                 input
                     .iter()
-                    .map(|&(side, trigger_px, from_ns)| TriggerScan {
+                    .map(|&(side, px, from_ns)| TriggerScan {
                         side,
-                        trigger_px,
+                        px,
+                        kind: ScanKind::FillThrough,
                         from_ns,
                     })
                     .collect::<Vec<_>>()

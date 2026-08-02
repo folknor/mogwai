@@ -1,0 +1,16 @@
+# A stop-market placed a few ticks BELOW the last print cannot be touched by the
+# acceptance-time reading, so the OrderTriggered it eventually gets can only have
+# come from a venue-originated sweep pass walking the canonical tape. That is the
+# whole claim of this mode.
+#
+# The clock is accelerated for the same reason smoke-band-swept.toml accelerates
+# its own: the trigger waits on the NEXT PRINT at or below the anchor, and at
+# speed 1.0 the fitted BTCUSDT arrival process legitimately dwells tens of
+# seconds between prints, so a wall-bounded assertion would be a bet on the
+# tape's cadence rather than a gate on the trigger. At speed 100 every wall
+# second buys 100 simulated seconds of tape.
+sim_epoch_ns = 1900000000000000000
+speed = 100.0
+fill_band_vol_mult = 0.5
+fill_band_max_ticks = 200
+fill_sweep_interval_ms = 50

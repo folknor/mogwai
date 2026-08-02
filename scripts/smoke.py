@@ -57,6 +57,7 @@ MODE_CONFIGS = {
     "command-latency": "smoke-command-latency.toml",
     "band": "smoke-band.toml",
     "band-swept": "smoke-band-swept.toml",
+    "stop": "smoke-stop.toml",
 }
 
 
@@ -574,6 +575,44 @@ def mode_band_swept(venue: Venue) -> str:
     return "the run sweep delivered an unsolicited fill for a banded resting limit"
 
 
+def mode_stop(venue: Venue) -> str:
+    ws = WsClient(venue.addr)
+    try:
+        ws.send(order("STOP-POSITION", venue.symbol))
+        position_fill = ws.until(lambda frame: frame.get("type") == "OrderFilled" and frame.get("client_order_id") == "STOP-POSITION")
+        assert position_fill, "could not establish the position the protective stop reduces"
+        for attempt in range(3):
+            client_order_id = f"STOP-{attempt}"
+            sim_now = int(venue.http("/clock")["server_now_ns"])
+            anchor = venue.http(
+                f"/trades?symbol={venue.symbol}&start={sim_now - 300_000_000_000}&end={sim_now}&limit=10000"
+            )
+            assert anchor, "no anchor print"
+            trigger = float(anchor[-1]["price"]) - 0.01
+            ws.send(order(client_order_id, venue.symbol, order_type="StopMarket", side="Sell", trigger_price=f"{trigger:.2f}", reduce_only=True))
+            accepted = ws.until(lambda frame: frame.get("type") in ("OrderAccepted", "OrderRejected") and frame.get("client_order_id") == client_order_id)
+            assert accepted and accepted["type"] == "OrderAccepted", accepted
+            ws.send({"type": "QueryOrders", "request_id": f"STOP-Q-{attempt}", "open_only": True})
+            snapshot = ws.until(lambda frame: frame.get("type") == "OrderStatusSnapshot")
+            row = next((row for row in snapshot["orders"] if row["client_order_id"] == client_order_id), None)
+            if row is None:
+                continue
+            assert float(row["trigger_price"]) == trigger
+            triggered = ws.until(lambda frame: frame.get("type") == "OrderTriggered" and frame.get("client_order_id") == client_order_id, timeout=90)
+            if triggered:
+                fill = ws.until(lambda frame: frame.get("type") == "OrderFilled" and frame.get("client_order_id") == client_order_id)
+                assert fill, "triggered stop did not fill"
+                # The fill is priced off the print that TRIGGERED it, slipped
+                # adversely - down for a sell. Never the stop price itself,
+                # which is the client's own number and the lie the fill band
+                # exists to remove.
+                assert float(fill["last_px"]) <= trigger, f"a sell stop must fill at or below its trigger, got {fill['last_px']}"
+                return "stop-market rested, triggered on the tape, and filled adversely"
+        raise AssertionError("the run sweep never triggered the stop-market")
+    finally:
+        ws.close()
+
+
 def mode_duration(venue: Venue, duration: str) -> str:
     """The declared-duration path: announced completion, then exit 0."""
     ws = WsClient(venue.addr)
@@ -603,6 +642,7 @@ MODES = {
     "command-latency": mode_command_latency,
     "band": mode_band,
     "band-swept": mode_band_swept,
+    "stop": mode_stop,
 }
 
 

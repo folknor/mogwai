@@ -16,7 +16,7 @@ use std::{
 
 use common::{
     StubState, account_json, bound_stub, connected_exec_client, instrument_id, next_exec_event,
-    position_json, venue_fill_row, venue_order_row,
+    position_json, venue_fill_row, venue_order_row, venue_stop_order_row,
 };
 use mogwai_protocol::WireOrderStatus;
 use nautilus_common::{
@@ -33,7 +33,7 @@ use nautilus_common::{
 };
 use nautilus_core::{UUID4, UnixNanos};
 use nautilus_model::{
-    enums::{OrderStatus, PositionSideSpecified},
+    enums::{OrderStatus, OrderType, PositionSideSpecified, TriggerType},
     identifiers::{ClientId, ClientOrderId, StrategyId, TradeId, TraderId, VenueOrderId},
     types::{Price, Quantity},
 };
@@ -292,4 +292,124 @@ async fn query_order_emits_an_order_status_report() {
         }
         other => panic!("expected an order status report, got {other:?}"),
     }
+}
+
+/// Reconciliation of a CONDITIONAL, over both order-status carriers.
+///
+/// The existing guard above proves venue truth reaches nautilus at all. It
+/// cannot see the hole the conditional surface opened: `OrderStatusReport`'s
+/// constructor leaves price, trigger price, trigger type and `ts_triggered` at
+/// `None`, so a report built without setting them describes a stop the venue is
+/// resting as an order with no limit and nothing to wait for. Startup
+/// reconciliation would then adopt a protective leg it cannot match against the
+/// strategy's own, silently. Both an UNTRIGGERED and a TRIGGERED row are pinned
+/// because they differ in exactly the two fields (`order_status`,
+/// `ts_triggered`) the new status ladder introduced.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn a_stop_report_carries_its_trigger_price_and_status() {
+    let state = Arc::new(StubState::default());
+    state.serve_account.store(true, Ordering::Relaxed);
+    {
+        let mut rows = state.venue_orders.lock().expect("venue orders mutex");
+        rows.push(venue_stop_order_row(
+            "O-STOP",
+            "V-9",
+            mogwai_protocol::OrderType::StopMarket,
+            WireOrderStatus::Accepted,
+            None,
+            Decimal::from(95),
+            None,
+            11,
+        ));
+        rows.push(venue_stop_order_row(
+            "O-STOPLIMIT",
+            "V-7",
+            mogwai_protocol::OrderType::StopLimit,
+            WireOrderStatus::Triggered,
+            Some(Decimal::from(94)),
+            Decimal::from(95),
+            Some(12),
+            12,
+        ));
+    }
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (sink_tx, mut sink_rx) = unbounded_channel();
+    replace_exec_event_sender(sink_tx);
+    let client = connected_exec_client(
+        base_url,
+        Rc::new(RefCell::new(Cache::default())),
+        &mut sink_rx,
+    )
+    .await;
+
+    // Carrier one: the bulk sweep startup reconciliation runs. `open_only` is
+    // true, which is also what proves `WireOrderStatus::Triggered.is_open()` -
+    // a triggered stop-limit that fell out here would vanish from open-order
+    // reconciliation for the whole window between its trigger and its fill.
+    let reports = client
+        .generate_order_status_reports(&order_reports_cmd())
+        .await
+        .expect("order reports");
+    assert_eq!(
+        reports.len(),
+        2,
+        "a triggered conditional must survive the open-order partition"
+    );
+
+    let untriggered = reports
+        .iter()
+        .find(|report| report.client_order_id == Some(ClientOrderId::from("O-STOP")))
+        .expect("the untriggered stop-market is reported");
+    assert_eq!(untriggered.order_status, OrderStatus::Accepted);
+    assert_eq!(untriggered.order_type, OrderType::StopMarket);
+    assert_eq!(untriggered.trigger_price, Some(Price::from("95.00")));
+    assert_eq!(
+        untriggered.trigger_type,
+        Some(TriggerType::LastPrice),
+        "the venue has one trigger reference and the report must say which"
+    );
+    assert_eq!(
+        untriggered.price, None,
+        "a stop-market carries no price the venue ever consults"
+    );
+    assert_eq!(untriggered.ts_triggered, None);
+    assert!(untriggered.reduce_only);
+
+    let triggered = reports
+        .iter()
+        .find(|report| report.client_order_id == Some(ClientOrderId::from("O-STOPLIMIT")))
+        .expect("the triggered stop-limit is reported");
+    assert_eq!(triggered.order_status, OrderStatus::Triggered);
+    assert_eq!(triggered.order_type, OrderType::StopLimit);
+    assert_eq!(
+        triggered.price,
+        Some(Price::from("94.00")),
+        "a stop-limit report without its limit price is unreconcilable"
+    );
+    assert_eq!(triggered.trigger_price, Some(Price::from("95.00")));
+    assert_eq!(triggered.ts_triggered, Some(UnixNanos::from(12)));
+
+    // Carrier two: the singular, targeted query the execution manager's
+    // in-flight probe uses. It builds its report through the same converter, so
+    // a divergence between the two would be a converter that lost a field on
+    // one path only.
+    let targeted = client
+        .generate_order_status_report(&GenerateOrderStatusReport::new(
+            UUID4::new(),
+            UnixNanos::from(20),
+            None,
+            Some(ClientOrderId::from("O-STOPLIMIT")),
+            None,
+            None,
+            None,
+        ))
+        .await
+        .expect("targeted report")
+        .expect("the venue knows the stop-limit");
+    assert_eq!(targeted.order_status, OrderStatus::Triggered);
+    assert_eq!(targeted.trigger_price, Some(Price::from("95.00")));
+    assert_eq!(targeted.price, Some(Price::from("94.00")));
+    assert_eq!(targeted.ts_triggered, Some(UnixNanos::from(12)));
+    assert_eq!(targeted.trigger_type, Some(TriggerType::LastPrice));
 }

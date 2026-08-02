@@ -8,7 +8,7 @@ use mogwai_protocol::{AggressorSide as MogwaiAggressorSide, InstrumentDef, Side,
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{QuoteTick as NautilusQuoteTick, TradeTick as NautilusTradeTick},
-    enums::{AggressorSide, OrderSide, OrderStatus, OrderType, TimeInForce},
+    enums::{AggressorSide, OrderSide, OrderStatus, OrderType, TimeInForce, TriggerType},
     identifiers::{InstrumentId, Symbol as NautilusSymbol, TradeId},
     instruments::{InstrumentAny, currency_pair::CurrencyPair},
     types::{Money, Price, Quantity, currency::Currency},
@@ -70,19 +70,24 @@ pub(crate) fn wire_order_type(order_type: OrderType) -> anyhow::Result<mogwai_pr
     match order_type {
         OrderType::Market => Ok(mogwai_protocol::OrderType::Market),
         OrderType::Limit => Ok(mogwai_protocol::OrderType::Limit),
-        // Market and Limit is the whole set, permanently: mogwai keeps no order
-        // book, so a conditional order (StopMarket, StopLimit, MarketIfTouched)
-        // has nothing to rest against and no trigger to watch, and faking one
-        // would teach a strategy fill semantics no venue would honor. Name the
-        // replacement in the refusal - this reaches the operator as a
-        // `SUBMIT_FAILED` denial, and "unsupported order type StopMarket" alone
-        // leaves them to guess whether the venue, the adapter or their script
-        // is at fault. See reference/architecture.md, "mogwai-protocol".
+        OrderType::StopMarket => Ok(mogwai_protocol::OrderType::StopMarket),
+        OrderType::StopLimit => Ok(mogwai_protocol::OrderType::StopLimit),
         other => anyhow::bail!(
-            "unsupported order type {other:?}: the MOGWAI venue holds no order book, \
-             so it serves Market and Limit only and cannot rest a conditional order. \
-             Express the protective leg as a limit for forward testing, noting that a \
-             bookless venue fills it immediately at its own price"
+            "unsupported order type {other:?}: the MOGWAI venue serves Market, Limit, \
+             StopMarket and StopLimit. It models no trailing state and no order lists, \
+             so a trailing stop or a bracket leg must be expressed as a fixed stop that \
+             the strategy re-places itself"
+        ),
+    }
+}
+
+pub(crate) fn wire_trigger_type(trigger: Option<TriggerType>) -> anyhow::Result<()> {
+    match trigger {
+        None | Some(TriggerType::NoTrigger | TriggerType::Default | TriggerType::LastPrice) => {
+            Ok(())
+        }
+        Some(other) => anyhow::bail!(
+            "unsupported trigger type {other:?}: MOGWAI triggers from last traded price only"
         ),
     }
 }
@@ -110,6 +115,8 @@ pub(crate) fn nautilus_order_type(order_type: mogwai_protocol::OrderType) -> Ord
     match order_type {
         mogwai_protocol::OrderType::Market => OrderType::Market,
         mogwai_protocol::OrderType::Limit => OrderType::Limit,
+        mogwai_protocol::OrderType::StopMarket => OrderType::StopMarket,
+        mogwai_protocol::OrderType::StopLimit => OrderType::StopLimit,
     }
 }
 
@@ -124,9 +131,11 @@ pub(crate) fn nautilus_time_in_force(tif: mogwai_protocol::TimeInForce) -> TimeI
 pub(crate) fn nautilus_order_status(status: WireOrderStatus) -> OrderStatus {
     match status {
         WireOrderStatus::Accepted => OrderStatus::Accepted,
+        WireOrderStatus::Triggered => OrderStatus::Triggered,
         WireOrderStatus::PartiallyFilled => OrderStatus::PartiallyFilled,
         WireOrderStatus::Filled => OrderStatus::Filled,
         WireOrderStatus::Canceled => OrderStatus::Canceled,
+        WireOrderStatus::Rejected => OrderStatus::Rejected,
     }
 }
 

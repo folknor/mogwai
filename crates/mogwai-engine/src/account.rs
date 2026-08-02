@@ -204,6 +204,9 @@ impl Engine {
         let mut clipped_currencies = Vec::new();
 
         for order in &self.open {
+            if order.submit.reduce_only {
+                continue;
+            }
             // Defense-in-depth, unreachable through `process`: an order only
             // rests here after `validate_submit`/`on_modify` confirmed its
             // instrument, and none is ever removed, so the lookup always
@@ -223,7 +226,8 @@ impl Engine {
                     let price = order
                         .submit
                         .price
-                        .expect("resting order price is always Some");
+                        .or(order.submit.trigger_price)
+                        .expect("resting order carries a price or a trigger price");
                     // One order's `leaves_qty * price` is representable
                     // (submit and modify both `checked_mul` the full
                     // notional), but the SUM across all resting buys is

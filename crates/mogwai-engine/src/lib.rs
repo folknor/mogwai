@@ -21,9 +21,9 @@
 use std::collections::{HashMap, VecDeque};
 
 use mogwai_protocol::{
-    AccountId, AccountState, ClientMessage, ClientOrderId, FillSnapshot, InstrumentDef,
-    OrderFilled, OrderStatusInfo, OrderStatusSnapshot, Position, ServerMessage, Side, SubmitOrder,
-    Symbol, VenueOrderId, WireOrderStatus, control::Divergence, default_instruments,
+    AccountId, AccountState, ClientMessage, ClientOrderId, FillSnapshot, Hit, InstrumentDef,
+    OrderFilled, OrderStatusInfo, OrderStatusSnapshot, Position, ScanKind, ServerMessage, Side,
+    SubmitOrder, Symbol, VenueOrderId, WireOrderStatus, control::Divergence, default_instruments,
 };
 use rust_decimal::Decimal;
 
@@ -50,6 +50,22 @@ use account::{Account, Warned};
 /// it hit.
 pub const MAX_ARMED_DIVERGENCES: usize = 1_024;
 
+/// What the venue is waiting for on one resting order. Replaces the filter the
+/// scan planner used to carry: with three kinds of resting order, "Limit and
+/// GTC" would have needed a second special case, and making the state explicit
+/// removes both.
+#[derive(Debug, Clone, Copy)]
+pub enum Resting {
+    /// Live limit. A print strictly through `fill_trigger_px` fills it at its
+    /// own stated price.
+    Limit { fill_trigger_px: Decimal },
+    /// Untriggered conditional. A print TOUCHING `stop_px` triggers it.
+    Conditional { stop_px: Decimal },
+    /// Never scanned: a market remainder left by a partial fill, which has no
+    /// meaningful price for the tape to reach. Ends only on a client cancel.
+    Inert,
+}
+
 /// A resting order tracked by the venue.
 #[derive(Debug, Clone)]
 pub struct OpenOrder {
@@ -61,13 +77,17 @@ pub struct OpenOrder {
     /// Sim unix-ns instant of the last lifecycle activity (accept, fill,
     /// amend). Reported on `QueryOrders` replies as the row's `ts_last`.
     pub ts_last: u64,
+    /// Sim unix-ns the conditional's trigger fired; `None` until it does and
+    /// for every non-conditional order. Reported as the row's `ts_triggered`
+    /// and preserved into the terminal truth store.
+    pub ts_triggered: Option<u64>,
     /// Band half width this order was accepted under, in ticks. Held so a
     /// re-draw (reprice, partial-fill remainder) does not need a fresh tape
     /// reading it has no way to take.
     pub band_ticks: u32,
-    /// The drawn trigger price for the CURRENT tranche and price. A print
-    /// strictly through this fills the order at its own stated price.
-    pub trigger_px: Decimal,
+    /// What this order is waiting for: a print through its drawn band trigger,
+    /// a print touching its stop, or nothing at all.
+    pub resting: Resting,
     /// Number of draws this order has made. Part of the RNG key, so a reprice
     /// or a partial-fill remainder draws a fresh offset rather than reusing the
     /// one the previous tranche got. Deliberately NOT `revision`, which sweep
@@ -105,6 +125,8 @@ pub struct EngineConfig {
 pub struct MarketReading {
     /// Last print at or before that instant. Never a look-ahead.
     pub last_px: Decimal,
+    /// Instant of that canonical last print.
+    pub ts_ns: u64,
     /// Band half width in TICKS, already scaled by trailing realized volatility
     /// and clamped by the server. The engine multiplies it by the instrument's
     /// price increment, because the instrument table lives here.
@@ -132,10 +154,12 @@ pub struct PendingScan {
     pub client_order_id: ClientOrderId,
     pub symbol: Symbol,
     pub side: Side,
-    /// The trigger drawn for this order's current tranche and price. A print
-    /// strictly through it fills the order; the stated price the fill books at
-    /// stays inside the engine.
-    pub trigger_px: Decimal,
+    /// The price the predicate is applied against: a live limit's drawn band
+    /// trigger, or an untriggered conditional's stop price. The stated price a
+    /// fill books at stays inside the engine.
+    pub px: Decimal,
+    /// Which predicate the walk applies to `px`.
+    pub kind: ScanKind,
     /// Exclusive lower bound of the span still to walk.
     pub from_ns: u64,
     /// The order state this scan was planned against. Echoed back on the
@@ -152,9 +176,10 @@ pub struct ScanResult {
     /// applied.
     pub from_ns: u64,
     pub revision: u64,
-    /// Whether a print strictly through the trigger was seen in
-    /// `(from_ns, scanned_to_ns]`. One is enough - there is no accumulation.
-    pub triggered: bool,
+    /// The print that satisfied the scan in `(from_ns, scanned_to_ns]`, or
+    /// `None` if the span held nothing. The FIRST such print - there is no
+    /// accumulation - and a triggered stop-market prices its fill off it.
+    pub hit: Option<Hit>,
     /// The instant the walk ACTUALLY reached, which its drain budget may have
     /// cut short of the pass's target. The frontier advances to exactly this,
     /// never past it.
@@ -327,7 +352,8 @@ impl Engine {
                 client_order_id,
                 price,
                 quantity,
-            } => self.on_modify(client_order_id, price, quantity, ts, reading),
+                trigger_price,
+            } => self.on_modify(client_order_id, price, quantity, trigger_price, ts, reading),
             ClientMessage::QueryOrders {
                 request_id,
                 client_order_id,
@@ -346,33 +372,46 @@ impl Engine {
         }
     }
 
-    /// Every resting GTC LIMIT, each carrying the trigger the tape has to print
-    /// through to fill it. There is no off switch: the band is always on, so a
-    /// venue always sweeps.
+    /// Every resting order the tape can decide, each carrying the price the
+    /// walk applies its predicate to and WHICH predicate that is. There is no
+    /// off switch: the band is always on, so a venue always sweeps.
     ///
-    /// The `order_type` filter is load-bearing, not belt-and-braces: a MARKET
-    /// order never draws a trigger (it is marketable by definition), but an
-    /// armed `PartialFillNext` can leave one RESTING with a stamped price, and
-    /// without this filter that remainder would be handed to the tape walk and
-    /// held until the market traded through the price the venue itself
-    /// synthesized for it. A market remainder has no meaningful trigger to walk
-    /// against; it rests, is never scanned, and ends only on a client cancel.
+    /// The dispatch is a match on `Resting`, and each arm is load-bearing:
+    ///
+    /// - `Limit` yields a `FillThrough` scan against the order's DRAWN band
+    ///   trigger. A print strictly through it fills the order at its own stated
+    ///   price.
+    /// - `Conditional` yields a `TriggerTouch` scan against the client's STATED
+    ///   stop price. A print merely reaching it triggers, because a stop holds
+    ///   no queue position and so needs none of the strictness the limit case
+    ///   does.
+    /// - `Inert` yields NOTHING, which is the naming of what an `order_type`
+    ///   filter used to express here: an armed `PartialFillNext` can leave a
+    ///   MARKET remainder resting with a stamped price, and handing that to the
+    ///   tape walk would hold it until the market traded through a price the
+    ///   venue itself synthesized. A market remainder, and a triggered
+    ///   stop-market's remainder, have no meaningful price for the tape to
+    ///   reach; they rest, are never scanned, and end only on a client cancel.
     #[must_use]
     pub fn pending_scans(&self) -> Vec<PendingScan> {
         let mut scans: Vec<_> = self
             .open
             .iter()
-            .filter(|order| {
-                order.submit.order_type == mogwai_protocol::OrderType::Limit
-                    && order.submit.time_in_force == mogwai_protocol::TimeInForce::Gtc
-            })
-            .map(|order| PendingScan {
-                client_order_id: order.submit.client_order_id.clone(),
-                symbol: order.submit.symbol.clone(),
-                side: order.submit.side,
-                trigger_px: order.trigger_px,
-                from_ns: order.scanned_ns,
-                revision: order.revision,
+            .filter_map(|order| {
+                let (kind, px) = match order.resting {
+                    Resting::Limit { fill_trigger_px } => (ScanKind::FillThrough, fill_trigger_px),
+                    Resting::Conditional { stop_px } => (ScanKind::TriggerTouch, stop_px),
+                    Resting::Inert => return None,
+                };
+                Some(PendingScan {
+                    client_order_id: order.submit.client_order_id.clone(),
+                    symbol: order.submit.symbol.clone(),
+                    side: order.submit.side,
+                    px,
+                    kind,
+                    from_ns: order.scanned_ns,
+                    revision: order.revision,
+                })
             })
             .collect();
         scans.sort_by_key(|scan| scan.from_ns);
@@ -523,12 +562,18 @@ fn open_order_status(order: &OpenOrder) -> OrderStatusInfo {
         time_in_force: order.submit.time_in_force,
         status: if filled_qty > Decimal::ZERO {
             WireOrderStatus::PartiallyFilled
+        } else if order.ts_triggered.is_some() {
+            WireOrderStatus::Triggered
         } else {
             WireOrderStatus::Accepted
         },
         quantity: order.submit.quantity,
         filled_qty,
         price: order.submit.price,
+        trigger_price: order.submit.trigger_price,
+        ts_triggered: order.ts_triggered,
+        reduce_only: order.submit.reduce_only,
+        post_only: order.submit.post_only,
         ts_accepted: order.ts_accepted,
         ts_last: order.ts_last,
     }
@@ -568,8 +613,791 @@ mod tests {
             order_type: OrderType::Market,
             quantity,
             price,
+            trigger_price: None,
+            reduce_only: false,
+            post_only: false,
             time_in_force: TimeInForce::Gtc,
         }
+    }
+
+    fn stop_order(
+        id: &str,
+        side: Side,
+        order_type: OrderType,
+        trigger: i64,
+        price: Option<i64>,
+    ) -> SubmitOrder {
+        SubmitOrder {
+            client_order_id: id.into(),
+            symbol: "BTCUSDT".into(),
+            side,
+            order_type,
+            quantity: Decimal::ONE,
+            price: price.map(Decimal::from),
+            trigger_price: Some(Decimal::from(trigger)),
+            time_in_force: TimeInForce::Gtc,
+            reduce_only: false,
+            post_only: false,
+        }
+    }
+
+    #[test]
+    fn a_stop_market_rests_untriggered_until_a_print_touches_its_stop() {
+        let mut e = banded(7);
+        let out = e.process_with_market(
+            ClientMessage::SubmitOrder(stop_order(
+                "stop",
+                Side::Sell,
+                OrderType::StopMarket,
+                90,
+                None,
+            )),
+            10,
+            Some(reading(0)),
+        );
+        assert!(matches!(
+            out.as_slice(),
+            [
+                ServerMessage::OrderAccepted { .. },
+                ServerMessage::AccountState(_)
+            ]
+        ));
+        let scan = e.pending_scans().remove(0);
+        assert_eq!(scan.kind, ScanKind::TriggerTouch);
+        let (out, emitted) = e.apply_scans(
+            &[ScanResult {
+                client_order_id: scan.client_order_id,
+                from_ns: scan.from_ns,
+                revision: scan.revision,
+                hit: Some(Hit {
+                    ts_ns: 11,
+                    px: Decimal::from(90),
+                }),
+                scanned_to_ns: 11,
+            }],
+            11,
+        );
+        assert_eq!(emitted, 1);
+        assert!(matches!(
+            out.first(),
+            Some(ServerMessage::OrderTriggered { .. })
+        ));
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_)))
+        );
+    }
+
+    #[test]
+    fn a_stop_triggers_on_a_print_exactly_at_its_stop_price() {
+        let mut e = banded(8);
+        let out = e.process_with_market(
+            ClientMessage::SubmitOrder(stop_order(
+                "touch-stop",
+                Side::Buy,
+                OrderType::StopMarket,
+                99,
+                None,
+            )),
+            12,
+            Some(reading(0)),
+        );
+        assert!(matches!(
+            out.get(1),
+            Some(ServerMessage::OrderTriggered { .. })
+        ));
+    }
+
+    #[test]
+    fn a_gapped_stop_limit_triggers_and_rests_without_filling() {
+        let mut e = banded(9);
+        e.process(
+            ClientMessage::SubmitOrder(stop_order(
+                "gap",
+                Side::Sell,
+                OrderType::StopLimit,
+                100,
+                Some(99),
+            )),
+            10,
+        );
+        let scan = e.pending_scans().remove(0);
+        let (out, _) = e.apply_scans(
+            &[ScanResult {
+                client_order_id: scan.client_order_id,
+                from_ns: scan.from_ns,
+                revision: scan.revision,
+                hit: Some(Hit {
+                    ts_ns: 11,
+                    px: Decimal::from(95),
+                }),
+                scanned_to_ns: 11,
+            }],
+            11,
+        );
+        assert!(matches!(
+            out.as_slice(),
+            [ServerMessage::OrderTriggered { .. }]
+        ));
+        assert!(matches!(e.open[0].resting, Resting::Limit { .. }));
+    }
+
+    #[test]
+    fn query_orders_reports_a_triggered_stop_limit_as_open() {
+        let mut e = banded(10);
+        e.process(
+            ClientMessage::SubmitOrder(stop_order(
+                "query-stop",
+                Side::Sell,
+                OrderType::StopLimit,
+                100,
+                Some(99),
+            )),
+            10,
+        );
+        let scan = e.pending_scans().remove(0);
+        e.apply_scans(
+            &[ScanResult {
+                client_order_id: scan.client_order_id,
+                from_ns: scan.from_ns,
+                revision: scan.revision,
+                hit: Some(Hit {
+                    ts_ns: 11,
+                    px: Decimal::from(95),
+                }),
+                scanned_to_ns: 11,
+            }],
+            11,
+        );
+        let snapshot = e.order_status_snapshot("q".into(), None, true, 12);
+        assert_eq!(snapshot.orders[0].status, WireOrderStatus::Triggered);
+        assert_eq!(snapshot.orders[0].ts_triggered, Some(11));
+        assert_eq!(
+            snapshot.orders[0].trigger_price,
+            Some(Decimal::from(100)),
+            "the row echoes the stop the client stated"
+        );
+    }
+
+    /// Sweep one pending scan of `e` with a print at `px`, applied at `ts`.
+    fn sweep(e: &mut Engine, px: i64, ts: u64) -> Vec<ServerMessage> {
+        let scan = e.pending_scans().remove(0);
+        let (out, _) = e.apply_scans(
+            &[ScanResult {
+                client_order_id: scan.client_order_id,
+                from_ns: scan.from_ns,
+                revision: scan.revision,
+                hit: Some(Hit {
+                    ts_ns: ts,
+                    px: Decimal::from(px),
+                }),
+                scanned_to_ns: ts,
+            }],
+            ts,
+        );
+        out
+    }
+
+    fn filled(out: &[ServerMessage]) -> &OrderFilled {
+        out.iter()
+            .find_map(|event| match event {
+                ServerMessage::OrderFilled(fill) => Some(fill),
+                _ => None,
+            })
+            .expect("expected a fill")
+    }
+
+    #[test]
+    fn a_triggered_stop_market_fills_slipped_off_the_triggering_print() {
+        // The fill comes from the print that MADE the order live, slipped
+        // adversely. Never the stop price (that is the client's own number) and
+        // never the acceptance-time last price (that is the look-ahead's mirror
+        // image: a reading the trigger did not happen at).
+        let mut e = banded(11);
+        e.process_with_market(
+            ClientMessage::SubmitOrder(stop_order(
+                "slip",
+                Side::Sell,
+                OrderType::StopMarket,
+                90,
+                None,
+            )),
+            10,
+            Some(reading(50)),
+        );
+        let out = sweep(&mut e, 80, 11);
+        let fill = filled(&out);
+        assert!(
+            fill.last_px <= Decimal::from(80),
+            "a sell slips DOWN from the triggering print, got {}",
+            fill.last_px
+        );
+        assert_ne!(fill.last_px, Decimal::from(90), "never the stop price");
+        assert_ne!(
+            fill.last_px,
+            Decimal::from(99),
+            "never the acceptance-time last price"
+        );
+    }
+
+    #[test]
+    fn a_stop_already_through_the_market_triggers_on_arrival() {
+        // Not rejected, as nautilus' own simulated exchange would: a protective
+        // leg submitted a beat late must end up protected-and-filled.
+        let mut e = banded(12);
+        let out = e.process_with_market(
+            ClientMessage::SubmitOrder(stop_order(
+                "late",
+                Side::Buy,
+                OrderType::StopMarket,
+                99,
+                None,
+            )),
+            12,
+            Some(reading(50)),
+        );
+        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(out[1], ServerMessage::OrderTriggered { .. }));
+        let fill = filled(&out);
+        assert!(
+            fill.last_px >= Decimal::from(99),
+            "the arrival fill is the reading's last print slipped UP for a buy"
+        );
+    }
+
+    #[test]
+    fn a_stop_with_ioc_or_fok_is_rejected() {
+        // A now-or-never order cannot wait for a trigger, so the state is
+        // removed rather than accepted and cancelled in the same breath.
+        for tif in [TimeInForce::Ioc, TimeInForce::Fok] {
+            let mut e = banded(13);
+            let mut order = stop_order("nowait", Side::Sell, OrderType::StopMarket, 90, None);
+            order.time_in_force = tif;
+            let out = e.process(ClientMessage::SubmitOrder(order), 10);
+            assert!(
+                reject_reason(&out).starts_with("conditional orders are good-till-cancel only"),
+                "{tif:?} stop must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn conditional_field_shapes_are_rejected_by_type() {
+        // The whole type table in one place: every field that is required is
+        // required, and every field the venue would never consult is refused
+        // rather than accepted and ignored.
+        type Shape = fn(&mut SubmitOrder);
+        let cases: [(&str, Shape, &str); 6] = [
+            (
+                "stop with no trigger",
+                |o| {
+                    o.order_type = OrderType::StopMarket;
+                    o.price = None;
+                    o.trigger_price = None;
+                },
+                "conditional order must carry trigger_price",
+            ),
+            (
+                "limit with a trigger",
+                |o| {
+                    o.order_type = OrderType::Limit;
+                    o.trigger_price = Some(Decimal::from(90));
+                },
+                "Limit order must not carry trigger_price",
+            ),
+            (
+                "stop-market with a price",
+                |o| {
+                    o.order_type = OrderType::StopMarket;
+                    o.trigger_price = Some(Decimal::from(90));
+                },
+                "StopMarket order must not carry a price",
+            ),
+            (
+                "stop-limit with no price",
+                |o| {
+                    o.order_type = OrderType::StopLimit;
+                    o.price = None;
+                    o.trigger_price = Some(Decimal::from(90));
+                },
+                "limit order must carry a price",
+            ),
+            (
+                "off-grid trigger",
+                |o| {
+                    o.order_type = OrderType::StopMarket;
+                    o.price = None;
+                    o.trigger_price = Some(Decimal::new(900_001, 4));
+                },
+                "trigger price violates price increment",
+            ),
+            (
+                "post-only market",
+                |o| {
+                    o.post_only = true;
+                },
+                "post_only is legal only on Limit and StopLimit",
+            ),
+        ];
+        for (name, shape, reason) in cases {
+            let mut e = banded(14);
+            let mut order = order("shape", 1);
+            shape(&mut order);
+            let out = e.process(ClientMessage::SubmitOrder(order), 10);
+            assert_eq!(reject_reason(&out), reason, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_post_only_order_that_would_take_liquidity_is_rejected() {
+        // On arrival for a limit, and at TRIGGER time for a stop-limit - after
+        // the trigger, which did happen. Rejected rather than canceled: it is
+        // the venue refusing the order's own stated terms.
+        let mut e = banded(15);
+        let mut taker = limit_order("taker", 1);
+        taker.post_only = true;
+        let out = e.process_with_market(ClientMessage::SubmitOrder(taker), 10, Some(reading(0)));
+        assert_eq!(reject_reason(&out), "post-only order would take liquidity");
+
+        let mut e = banded(15);
+        let mut stop = stop_order("post-stop", Side::Buy, OrderType::StopLimit, 99, Some(100));
+        stop.post_only = true;
+        let out = e.process_with_market(ClientMessage::SubmitOrder(stop), 10, Some(reading(0)));
+        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(out[1], ServerMessage::OrderTriggered { .. }));
+        assert!(
+            matches!(&out[2], ServerMessage::OrderRejected { reason, .. } if reason == "post-only order would take liquidity")
+        );
+        assert!(e.open.is_empty(), "the rejected order leaves the book");
+        assert_eq!(
+            e.closed["post-stop"].status,
+            WireOrderStatus::Rejected,
+            "a rejection after acceptance is a closed row a query can report"
+        );
+        assert!(matches!(out[3], ServerMessage::AccountState(_)));
+    }
+
+    #[test]
+    fn a_reduce_only_order_rests_while_flat_on_a_funded_account() {
+        // The admission exemption: a protective sell-stop placed while flat
+        // holds no base, so the funded-sell check must not refuse it and it must
+        // reserve nothing - otherwise the shape this whole surface exists to
+        // serve is unreachable on the only account mode that checks anything.
+        let mut e = funded(1_000);
+        let mut stop = stop_order("protect", Side::Sell, OrderType::StopMarket, 90, None);
+        stop.reduce_only = true;
+        let out = e.process(ClientMessage::SubmitOrder(stop), 10);
+        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        let state = account(&out, out.len() - 1);
+        assert_eq!(balance(state, "USDT").locked, Decimal::ZERO);
+        assert_eq!(balance(state, "USDT").free, Decimal::from(1_000));
+    }
+
+    #[test]
+    fn a_reduce_only_order_is_capped_by_the_position_and_cancels_when_flat() {
+        let mut e = banded(16);
+        let mut stop = stop_order("flat", Side::Sell, OrderType::StopMarket, 90, None);
+        stop.reduce_only = true;
+        e.process(ClientMessage::SubmitOrder(stop), 10);
+        let out = sweep(&mut e, 90, 11);
+        assert!(matches!(out[0], ServerMessage::OrderTriggered { .. }));
+        assert!(
+            matches!(out[1], ServerMessage::OrderCanceled { .. }),
+            "a cap of zero cancels rather than opening a fresh short"
+        );
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+            "nothing may fill against a position that is already gone"
+        );
+        assert_eq!(e.closed["flat"].status, WireOrderStatus::Canceled);
+        assert!(matches!(out[2], ServerMessage::AccountState(_)));
+    }
+
+    #[test]
+    fn a_cap_clamped_reduce_only_fill_cancels_its_remainder() {
+        // The remainder can never again have a non-zero cap, and an `Inert`
+        // remainder reaches no further fill decision, so it would sit open
+        // forever. It is closed in the same batch instead.
+        let mut e = banded(17);
+        e.process(ClientMessage::SubmitOrder(order("open-1", 1)), 10);
+        let mut stop = stop_order("clamped", Side::Sell, OrderType::StopMarket, 90, None);
+        stop.reduce_only = true;
+        stop.quantity = Decimal::from(3);
+        e.process(ClientMessage::SubmitOrder(stop), 11);
+        let out = sweep(&mut e, 90, 12);
+        assert_eq!(
+            filled(&out).last_qty,
+            Decimal::ONE,
+            "clamped to the position"
+        );
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderCanceled { .. }))
+        );
+        assert!(e.open.is_empty(), "no Inert remainder is left behind");
+        assert_eq!(e.closed["clamped"].status, WireOrderStatus::Canceled);
+    }
+
+    #[test]
+    fn an_untriggered_buy_stop_reserves_against_its_trigger_price() {
+        // A stop-market has no price, so the reservation is the only number it
+        // has. Under-reserved by exactly the slippage, which the fill-time
+        // re-check is what covers.
+        let mut e = funded(1_000);
+        let mut stop = stop_order("hold", Side::Buy, OrderType::StopMarket, 100, None);
+        stop.quantity = Decimal::from(2);
+        let out = e.process(ClientMessage::SubmitOrder(stop), 10);
+        let state = account(&out, out.len() - 1);
+        assert_eq!(balance(state, "USDT").locked, Decimal::from(200));
+        assert_eq!(balance(state, "USDT").free, Decimal::from(800));
+    }
+
+    #[test]
+    fn a_fully_funded_buy_stop_does_not_fail_its_own_trigger_on_its_own_reservation() {
+        // The double-count: at trigger time the order IS resting, so its own
+        // hold has already left `free_balance`. Comparing the notional against
+        // that would fail a fully funded order at zero slippage.
+        let mut e = funded(200);
+        let mut stop = stop_order("own-hold", Side::Buy, OrderType::StopMarket, 100, None);
+        stop.quantity = Decimal::from(2);
+        e.process(ClientMessage::SubmitOrder(stop), 10);
+        let out = sweep(&mut e, 100, 11);
+        assert_eq!(filled(&out).last_qty, Decimal::from(2));
+        assert_eq!(e.closed["own-hold"].status, WireOrderStatus::Filled);
+    }
+
+    #[test]
+    fn a_triggered_stop_limit_rests_banded_and_does_not_fill_for_free() {
+        // The trigger pass covered `(from, reached]`, so the live limit resumes
+        // from exactly there - never from the pass instant, which on a
+        // budget-truncated walk would skip a span nothing looked at.
+        let mut e = banded(18);
+        e.process(
+            ClientMessage::SubmitOrder(stop_order(
+                "banded",
+                Side::Sell,
+                OrderType::StopLimit,
+                100,
+                Some(99),
+            )),
+            10,
+        );
+        let scan = e.pending_scans().remove(0);
+        let (out, emitted) = e.apply_scans(
+            &[ScanResult {
+                client_order_id: scan.client_order_id,
+                from_ns: scan.from_ns,
+                revision: scan.revision,
+                hit: Some(Hit {
+                    ts_ns: 11,
+                    px: Decimal::from(95),
+                }),
+                // The walk ran out of budget at 11 even though the pass targeted 40.
+                scanned_to_ns: 11,
+            }],
+            40,
+        );
+        assert_eq!(emitted, 1, "a trigger-only pass still reserves its frame");
+        assert!(matches!(
+            out.as_slice(),
+            [ServerMessage::OrderTriggered { .. }]
+        ));
+        assert_eq!(
+            e.open[0].scanned_ns, 11,
+            "the frontier is where the walk REACHED, not the pass instant"
+        );
+        let next = e.pending_scans().remove(0);
+        assert_eq!(next.kind, ScanKind::FillThrough);
+        assert_eq!(next.from_ns, 11);
+        assert_eq!(next.revision, e.open[0].revision);
+    }
+
+    #[test]
+    fn a_triggered_stop_limit_marketable_against_its_trigger_print_fills_at_once() {
+        // The print that made the order live is offered to it: a limit resting
+        // with its frontier past that print would discard a fill it was owed.
+        let mut e = banded(19);
+        let out = e.process_with_market(
+            ClientMessage::SubmitOrder(stop_order(
+                "atonce",
+                Side::Buy,
+                OrderType::StopLimit,
+                99,
+                Some(100),
+            )),
+            10,
+            Some(reading(0)),
+        );
+        assert!(matches!(out[1], ServerMessage::OrderTriggered { .. }));
+        assert_eq!(
+            filled(&out).last_px,
+            Decimal::from(100),
+            "a triggered stop-limit fills at its own stated price"
+        );
+    }
+
+    #[test]
+    fn partial_fill_next_lands_on_the_fill_the_trigger_produces() {
+        // The arm targets a FILL. A stop-limit that triggers and rests produced
+        // none, so the arm must survive the trigger and fire on the sweep fill
+        // that follows.
+        let mut e = banded(20);
+        let mut stop = stop_order("armed", Side::Sell, OrderType::StopLimit, 100, Some(99));
+        stop.quantity = Decimal::from(2);
+        e.process(ClientMessage::SubmitOrder(stop), 10);
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "armed".into(),
+            fraction: Decimal::new(5, 1),
+        });
+        let out = sweep(&mut e, 95, 11);
+        assert!(
+            matches!(out.as_slice(), [ServerMessage::OrderTriggered { .. }]),
+            "the gap triggered it and nothing filled"
+        );
+        let out = sweep(&mut e, 90, 12);
+        assert_eq!(
+            filled(&out).last_qty,
+            Decimal::ONE,
+            "the arm was still armed and fired on the fill the trigger produced"
+        );
+    }
+
+    #[test]
+    fn a_silent_cancel_racing_a_trigger_leaves_the_order_canceled() {
+        // The composition section 1.11 pins: `CancelOpenOrderSilently` takes the
+        // engine lock while a walk that already found the trigger print is in
+        // flight. The silent cancel bumps no revision - it REMOVES the order -
+        // so the in-flight `ScanResult` fails its `client_order_id` lookup and
+        // is dropped. The order is canceled, no trigger is published, and no
+        // fill is booked. This is the existing revision-guard contract reaching
+        // a conditional, not new machinery.
+        let mut e = banded(31);
+        e.process(
+            ClientMessage::SubmitOrder(stop_order(
+                "raced",
+                Side::Sell,
+                OrderType::StopMarket,
+                90,
+                None,
+            )),
+            10,
+        );
+        // Planned off the book BEFORE the cancel, exactly as the sweeper plans
+        // its walk off the lock and applies the result after re-taking it.
+        let scan = e.pending_scans().remove(0);
+        e.cancel_open_order_silently("raced", 11)
+            .expect("an untriggered conditional is a resting order");
+
+        let (out, emitted) = e.apply_scans(
+            &[ScanResult {
+                client_order_id: scan.client_order_id,
+                from_ns: scan.from_ns,
+                revision: scan.revision,
+                hit: Some(Hit {
+                    ts_ns: 12,
+                    px: Decimal::from(90),
+                }),
+                scanned_to_ns: 12,
+            }],
+            12,
+        );
+        assert!(
+            out.is_empty(),
+            "the venue cancelled silently: the raced trigger publishes nothing, got {out:?}"
+        );
+        assert_eq!(emitted, 0, "a dropped scan reserves no delivery bytes");
+        assert!(
+            e.open_orders().is_empty(),
+            "the order is gone from the book"
+        );
+        assert!(
+            e.fill_snapshot("f-1".into(), Some("raced"), 13)
+                .fills
+                .is_empty(),
+            "a canceled order must book no fill from the trigger that raced it"
+        );
+
+        // Only a `QueryOrders` poll reveals it - the highest-value coverage the
+        // arm buys on a protective leg.
+        let snapshot = e.order_status_snapshot("q-1".into(), Some("raced"), false, 13);
+        let row = snapshot.orders.first().expect("the truth store retains it");
+        assert_eq!(row.status, WireOrderStatus::Canceled);
+        assert_eq!(row.ts_triggered, None, "it never triggered");
+        assert_eq!(row.filled_qty, Decimal::ZERO);
+    }
+
+    #[test]
+    fn a_trigger_amend_restarts_the_trigger_window_and_is_rejected_after_triggering() {
+        let mut e = banded(21);
+        e.process(
+            ClientMessage::SubmitOrder(stop_order(
+                "amend-stop",
+                Side::Sell,
+                OrderType::StopMarket,
+                90,
+                None,
+            )),
+            10,
+        );
+        let out = e.process(
+            ClientMessage::ModifyOrder {
+                client_order_id: "amend-stop".into(),
+                price: None,
+                quantity: None,
+                trigger_price: Some(Decimal::from(80)),
+            },
+            20,
+        );
+        assert!(
+            matches!(&out[0], ServerMessage::OrderUpdated { trigger_price, .. } if *trigger_price == Some(Decimal::from(80))),
+            "the ack has to carry the new trigger or the amend is unverifiable"
+        );
+        assert_eq!(e.open[0].scanned_ns, 20, "the trigger window restarts");
+        let scan = e.pending_scans().remove(0);
+        assert_eq!(scan.px, Decimal::from(80));
+
+        // After the trigger there is nothing left to trigger, and silently
+        // ignoring the field would make the amend a lie. A stop-LIMIT is the
+        // shape that survives its own trigger, so it is what proves the
+        // refusal rather than the terminal-order one.
+        let mut e = banded(21);
+        e.process(
+            ClientMessage::SubmitOrder(stop_order(
+                "fired",
+                Side::Sell,
+                OrderType::StopLimit,
+                100,
+                Some(99),
+            )),
+            10,
+        );
+        sweep(&mut e, 95, 11);
+        let out = e.process(
+            ClientMessage::ModifyOrder {
+                client_order_id: "fired".into(),
+                price: None,
+                quantity: None,
+                trigger_price: Some(Decimal::from(70)),
+            },
+            12,
+        );
+        assert!(
+            matches!(&out[0], ServerMessage::OrderModifyRejected { reason, .. } if reason == "order has already triggered"),
+            "got {out:?}"
+        );
+
+        // And on an order that never had a trigger, the reason says THAT.
+        let mut e = banded(21);
+        e.process(ClientMessage::SubmitOrder(limit_order("plain", 1)), 10);
+        let out = e.process(
+            ClientMessage::ModifyOrder {
+                client_order_id: "plain".into(),
+                price: None,
+                quantity: None,
+                trigger_price: Some(Decimal::from(70)),
+            },
+            11,
+        );
+        assert!(
+            matches!(&out[0], ServerMessage::OrderModifyRejected { reason, .. } if reason == "order carries no trigger to amend"),
+            "got {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_price_amend_on_an_untriggered_stop_limit_keeps_it_conditional() {
+        // It changes the limit the order will TAKE, not the price the tape has
+        // to touch: the trigger window stands and the order stays conditional.
+        // Promoting it here would make the venue fill a stop that never fired.
+        let mut e = banded(22);
+        e.process(
+            ClientMessage::SubmitOrder(stop_order(
+                "repriced",
+                Side::Sell,
+                OrderType::StopLimit,
+                100,
+                Some(99),
+            )),
+            10,
+        );
+        e.process(
+            ClientMessage::ModifyOrder {
+                client_order_id: "repriced".into(),
+                price: Some(Decimal::from(98)),
+                quantity: None,
+                trigger_price: None,
+            },
+            20,
+        );
+        assert!(
+            matches!(e.open[0].resting, Resting::Conditional { stop_px } if stop_px == Decimal::from(100))
+        );
+        assert_eq!(e.open[0].scanned_ns, 10, "the trigger window is untouched");
+        assert_eq!(e.open[0].submit.price, Some(Decimal::from(98)));
+        let scan = e.pending_scans().remove(0);
+        assert_eq!(scan.kind, ScanKind::TriggerTouch);
+    }
+
+    #[test]
+    fn a_price_amend_on_a_stop_market_is_refused() {
+        // It carries no price by construction, so an amend must not be able to
+        // give it one - `locked_balances` and the RNG key both read `price` in
+        // preference to the trigger.
+        let mut e = banded(23);
+        e.process(
+            ClientMessage::SubmitOrder(stop_order(
+                "priceless",
+                Side::Sell,
+                OrderType::StopMarket,
+                90,
+                None,
+            )),
+            10,
+        );
+        let out = e.process(
+            ClientMessage::ModifyOrder {
+                client_order_id: "priceless".into(),
+                price: Some(Decimal::from(80)),
+                quantity: None,
+                trigger_price: None,
+            },
+            20,
+        );
+        assert!(
+            matches!(&out[0], ServerMessage::OrderModifyRejected { reason, .. } if reason == "StopMarket order must not carry a price")
+        );
+        assert_eq!(e.open[0].submit.price, None);
+    }
+
+    #[test]
+    fn query_orders_distinguishes_untriggered_triggered_and_partially_filled() {
+        let mut e = banded(24);
+        let mut stop = stop_order("ladder", Side::Sell, OrderType::StopLimit, 100, Some(99));
+        stop.quantity = Decimal::from(2);
+        e.process(ClientMessage::SubmitOrder(stop), 10);
+        let row = |e: &mut Engine, ts| {
+            e.order_status_snapshot("q".into(), None, true, ts)
+                .orders
+                .remove(0)
+        };
+        assert_eq!(row(&mut e, 11).status, WireOrderStatus::Accepted);
+
+        sweep(&mut e, 95, 12);
+        assert_eq!(row(&mut e, 13).status, WireOrderStatus::Triggered);
+
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "ladder".into(),
+            fraction: Decimal::new(5, 1),
+        });
+        sweep(&mut e, 90, 14);
+        let row = row(&mut e, 15);
+        assert_eq!(
+            row.status,
+            WireOrderStatus::PartiallyFilled,
+            "a partial fill is the more specific truth"
+        );
+        assert_eq!(row.ts_triggered, Some(12), "the trigger instant survives");
     }
 
     fn account(out: &[ServerMessage], index: usize) -> &AccountState {
@@ -670,6 +1498,7 @@ mod tests {
     fn reading(band_ticks: u32) -> MarketReading {
         MarketReading {
             last_px: Decimal::from(99),
+            ts_ns: 0,
             band_ticks,
         }
     }
@@ -679,7 +1508,10 @@ mod tests {
             client_order_id: scan.client_order_id.clone(),
             from_ns: scan.from_ns,
             revision: scan.revision,
-            triggered,
+            hit: triggered.then_some(Hit {
+                ts_ns: scanned_to_ns,
+                px: scan.px,
+            }),
             scanned_to_ns,
         }
     }
@@ -742,7 +1574,7 @@ mod tests {
             "a limit whose trigger the reading has not reached must rest"
         );
         let scan = e.pending_scans().remove(0);
-        assert!(scan.trigger_px < wide.last_px);
+        assert!(scan.px < wide.last_px);
     }
 
     #[test]
@@ -752,12 +1584,15 @@ mod tests {
         // market touching rather than trading through and does not fill.
         let mut e = banded(9);
         e.process(ClientMessage::SubmitOrder(limit_order("degenerate", 1)), 10);
-        assert_eq!(e.open[0].trigger_px, Decimal::from(100));
+        assert!(
+            matches!(e.open[0].resting, Resting::Limit { fill_trigger_px } if fill_trigger_px == Decimal::from(100))
+        );
         let at_touch = e.process_with_market(
             ClientMessage::SubmitOrder(limit_order("touch", 1)),
             11,
             Some(MarketReading {
                 last_px: Decimal::from(100),
+                ts_ns: 0,
                 band_ticks: 0,
             }),
         );
@@ -803,6 +1638,7 @@ mod tests {
                 client_order_id: "amend".into(),
                 price: None,
                 quantity: Some(Decimal::from(3)),
+                trigger_price: None,
             },
             30,
         );
@@ -812,6 +1648,7 @@ mod tests {
                 client_order_id: "amend".into(),
                 price: Some(Decimal::from(101)),
                 quantity: None,
+                trigger_price: None,
             },
             40,
         );
@@ -827,6 +1664,7 @@ mod tests {
             10,
             Some(MarketReading {
                 last_px: Decimal::from(101),
+                ts_ns: 0,
                 band_ticks: 4,
             }),
         );
@@ -835,6 +1673,7 @@ mod tests {
             client_order_id: "regime".into(),
             price: Some(Decimal::from(price)),
             quantity: None,
+            trigger_price: None,
         };
         // A reading supplied with the amend replaces the acceptance band, so an
         // order repriced into a new regime is not judged under the old one.
@@ -843,6 +1682,7 @@ mod tests {
             20,
             Some(MarketReading {
                 last_px: Decimal::from(101),
+                ts_ns: 0,
                 band_ticks: 9,
             }),
         );
@@ -1156,6 +1996,7 @@ mod tests {
                 client_order_id: "R1".into(),
                 price: None,
                 quantity: Some(Decimal::from(8)),
+                trigger_price: None,
             },
             3,
         );
@@ -1167,6 +2008,7 @@ mod tests {
                 client_order_id: "R1".into(),
                 price: None,
                 quantity: Some(Decimal::from(11)),
+                trigger_price: None,
             },
             4,
         );
@@ -2082,6 +2924,7 @@ mod tests {
                 client_order_id: "O1".into(),
                 price: Some(Decimal::from(200)),
                 quantity: None,
+                trigger_price: None,
             },
             2,
         );
@@ -2106,6 +2949,7 @@ mod tests {
                 client_order_id: "O1".into(),
                 price: Some(Decimal::from(200)),
                 quantity: None,
+                trigger_price: None,
             },
             2,
         );
@@ -2128,6 +2972,7 @@ mod tests {
                 client_order_id: "ghost".into(),
                 price: Some(Decimal::from(200)),
                 quantity: None,
+                trigger_price: None,
             },
             1,
         );
@@ -2159,6 +3004,7 @@ mod tests {
                 client_order_id: "O1".into(),
                 price: Some(Decimal::from(200)),
                 quantity: None,
+                trigger_price: None,
             },
             2,
         );
@@ -2191,6 +3037,7 @@ mod tests {
                 client_order_id: "O1".into(),
                 price: None,
                 quantity: Some(Decimal::from(20)),
+                trigger_price: None,
             },
             2,
         );
@@ -2227,6 +3074,7 @@ mod tests {
                     client_order_id: "O1".into(),
                     price: None,
                     quantity: Some(new_total),
+                    trigger_price: None,
                 },
                 2,
             );
@@ -2259,6 +3107,7 @@ mod tests {
                 client_order_id: "O1".into(),
                 price: None,
                 quantity: Some(Decimal::ZERO),
+                trigger_price: None,
             },
             2,
         );
@@ -2290,6 +3139,7 @@ mod tests {
                 client_order_id: "O1".into(),
                 price: Some(Decimal::ZERO),
                 quantity: None,
+                trigger_price: None,
             },
             2,
         );
@@ -2321,6 +3171,7 @@ mod tests {
                 client_order_id: "O1".into(),
                 price: None,
                 quantity: None,
+                trigger_price: None,
             },
             2,
         );
@@ -2353,6 +3204,7 @@ mod tests {
                 client_order_id: "O1".into(),
                 price: Some(Decimal::from(200)),
                 quantity: None,
+                trigger_price: None,
             },
             2,
         );
@@ -2462,6 +3314,7 @@ mod tests {
                 client_order_id: "O1".into(),
                 price: Some(Decimal::from(200)),
                 quantity: Some(Decimal::from(20)),
+                trigger_price: None,
             },
             5,
         );
@@ -2698,6 +3551,7 @@ mod tests {
                         client_order_id: esc_id.clone(),
                         price: Some(Decimal::from(101)),
                         quantity: None,
+                        trigger_price: None,
                     },
                     query_orders.clone(),
                     query_fills.clone(),
@@ -2764,6 +3618,62 @@ mod tests {
     }
 
     #[test]
+    fn worst_case_reservation_covers_an_arrival_triggered_conditional() {
+        // The widest CONDITIONAL arrival, which the matrix above cannot express
+        // because it drives `process` with no market reading and a stop needs
+        // one to fire on arrival: accepted, triggered, the duplicated fill, the
+        // fill, and the cancel that closes the remainder the reduce-only cap
+        // clamped. FIVE order events - one more than the IOC limit shape, and
+        // the reason the submit multiplier is five rather than four.
+        let esc_id = "\u{0001}".repeat(mogwai_protocol::MAX_CLIENT_ID_LEN);
+        let mut e = Engine::build(EngineConfig {
+            account_id: AccountId::parse(&"Z".repeat(mogwai_protocol::MAX_ACCOUNT_ID_LEN))
+                .expect("max length account id"),
+            instruments: default_instruments(),
+            balances: HashMap::new(),
+            fill_seed: 0,
+        });
+        // The position the protective leg reduces, one lot against a ten-lot
+        // stop, so the cap clamps the fill and cancels the remainder.
+        e.process(
+            ClientMessage::SubmitOrder(order_with(
+                "seed",
+                Side::Buy,
+                "BTCUSDT",
+                1,
+                Some(Decimal::from(100)),
+            )),
+            1,
+        );
+        e.arm(Divergence::DuplicateNextFill);
+        let mut stop = order_with(&esc_id, Side::Sell, "BTCUSDT", 10, None);
+        stop.order_type = OrderType::StopMarket;
+        stop.trigger_price = Some(Decimal::from(1_000_000));
+        stop.reduce_only = true;
+
+        let cmd = ClientMessage::SubmitOrder(stop);
+        let shape = e.book_shape();
+        let bound = mogwai_protocol::sizing::worst_case_output_bytes(&cmd, &shape);
+        let output = e.process_with_market(cmd, 2, Some(reading(50)));
+        assert_eq!(
+            output
+                .iter()
+                .filter(|event| !matches!(event, ServerMessage::AccountState(_)))
+                .count(),
+            5,
+            "the shape this bound is derived from: {output:?}"
+        );
+        let actual: usize = output
+            .iter()
+            .map(|event| serde_json::to_vec(event).expect("serializes").len())
+            .sum();
+        assert!(
+            actual <= bound,
+            "produced {actual} bytes against a {bound} byte reservation"
+        );
+    }
+
+    #[test]
     fn swept_fill_reservation_covers_a_multi_pair_sweep_batch() {
         // THREE distinct pairs, none previously held: a single-pair batch cannot
         // distinguish per-batch from per-order account widening and would pass
@@ -2826,6 +3736,84 @@ mod tests {
     }
 
     #[test]
+    fn swept_reservation_covers_a_trigger_that_fills_duplicates_and_cancels() {
+        // The widest SWEPT shape for one order: `OrderTriggered`, the
+        // duplicated fill, the fill, and the cancel that closes the reduce-only
+        // remainder the position cap clamped. Four order events, which is why
+        // the per-order multiplier is four rather than three.
+        let mut e = banded(31);
+        e.process(ClientMessage::SubmitOrder(order("seed", 1)), 1);
+        let mut stop = stop_order("wide", Side::Sell, OrderType::StopMarket, 90, None);
+        stop.quantity = Decimal::from(10);
+        stop.reduce_only = true;
+        e.process(ClientMessage::SubmitOrder(stop), 2);
+        e.arm(Divergence::DuplicateNextFill);
+
+        let scan = e.pending_scans().remove(0);
+        let shape = e.book_shape();
+        let (events, emitted) = e.apply_scans(&[result(&scan, true, 100)], 100);
+        assert_eq!(emitted, 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| !matches!(event, ServerMessage::AccountState(_)))
+                .count(),
+            4,
+            "the shape this bound is derived from: {events:?}"
+        );
+        let bound = mogwai_protocol::sizing::swept_fill_max_bytes(&shape, emitted);
+        let actual: usize = events
+            .iter()
+            .map(|event| serde_json::to_vec(event).expect("event serializes").len())
+            .sum();
+        assert!(
+            actual <= bound,
+            "produced {actual} bytes against a {bound} byte reservation"
+        );
+    }
+
+    #[test]
+    fn a_trigger_only_sweep_pass_reserves_its_own_frame() {
+        // The sharpest hole the reviews found: a pass in which a stop-limit
+        // triggers and RESTS books no fill, so a fill-keyed `emitted` would be
+        // zero and the `OrderTriggered` frame would be written against a
+        // zero-order reservation.
+        let mut e = banded(32);
+        e.process(
+            ClientMessage::SubmitOrder(stop_order(
+                "trigger-only",
+                Side::Sell,
+                OrderType::StopLimit,
+                100,
+                Some(99),
+            )),
+            10,
+        );
+        let scan = e.pending_scans().remove(0);
+        let shape = e.book_shape();
+        let (events, emitted) = e.apply_scans(
+            &[ScanResult {
+                client_order_id: scan.client_order_id,
+                from_ns: scan.from_ns,
+                revision: scan.revision,
+                hit: Some(Hit {
+                    ts_ns: 11,
+                    px: Decimal::from(95),
+                }),
+                scanned_to_ns: 11,
+            }],
+            11,
+        );
+        assert_eq!(emitted, 1, "an order that emitted anything is counted");
+        let bound = mogwai_protocol::sizing::swept_fill_max_bytes(&shape, emitted);
+        let actual: usize = events
+            .iter()
+            .map(|event| serde_json::to_vec(event).expect("event serializes").len())
+            .sum();
+        assert!(actual <= bound);
+    }
+
+    #[test]
     fn a_limit_rests_until_the_tape_reaches_its_drawn_trigger() {
         let mut e = banded(7);
         e.process(
@@ -2850,6 +3838,7 @@ mod tests {
     fn the_trigger_is_a_pure_function_of_seed_and_order_identity() {
         let reading = MarketReading {
             last_px: Decimal::from(100),
+            ts_ns: 0,
             band_ticks: 50,
         };
         let mut a = banded(42);
@@ -2875,9 +3864,11 @@ mod tests {
                 .iter()
                 .find(|order| order.submit.client_order_id == "same")
                 .unwrap()
-                .trigger_px
+                .resting
         };
-        assert_eq!(trigger(&a), trigger(&b));
+        assert!(
+            matches!((trigger(&a), trigger(&b)), (Resting::Limit { fill_trigger_px: a }, Resting::Limit { fill_trigger_px: b }) if a == b)
+        );
     }
 
     #[test]
@@ -2982,6 +3973,7 @@ mod tests {
     fn a_market_buy_slips_up_and_a_market_sell_slips_down() {
         let reading = MarketReading {
             last_px: Decimal::from(100),
+            ts_ns: 0,
             band_ticks: 50,
         };
         let mut e = banded(42);
@@ -3031,6 +4023,7 @@ mod tests {
     fn a_funded_account_is_checked_against_the_slipped_price() {
         let reading = MarketReading {
             last_px: Decimal::from(100),
+            ts_ns: 0,
             band_ticks: 200,
         };
         let candidate = (0..100)

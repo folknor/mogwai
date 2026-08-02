@@ -47,7 +47,7 @@ use nautilus_common::{
 };
 use nautilus_live::ExecutionClientCore;
 use nautilus_model::{
-    enums::{OmsType, OrderSide, TimeInForce},
+    enums::{OmsType, OrderSide, TimeInForce, TrailingOffsetType, TriggerType},
     identifiers::{AccountId, ClientId, ClientOrderId, InstrumentId, StrategyId, Symbol, TraderId},
     types::{Price, Quantity},
 };
@@ -77,6 +77,15 @@ pub struct StubState {
     pub ws_trades: Mutex<Vec<String>>,
     /// Execution frames the WS leg pushes after a client `SubmitOrder`.
     pub ws_exec_frames: Mutex<Vec<String>>,
+    /// Execution frames the WS leg pushes after a client `ModifyOrder`. The
+    /// amend leg is separate from `ws_exec_frames` because the same socket
+    /// carries both and a test that seeds an amend ack must not have it
+    /// delivered on the submit.
+    pub ws_modify_frames: Mutex<Vec<String>>,
+    /// Raw text of every `ClientMessage` frame the stub received, in arrival
+    /// order. A test asserting that a field CROSSED THE WIRE (rather than
+    /// merely being accepted by the client) reads it here.
+    pub ws_client_messages: Mutex<Vec<String>>,
     /// WS upgrade attempts (handshakes the stub started serving). The
     /// idle-reconnect and max-attempts tests count (re)connections with this.
     pub ws_handshakes: AtomicUsize,
@@ -342,8 +351,21 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
                 state.ws_pongs.fetch_add(1, Ordering::Relaxed);
             }
             Message::Text(text) => {
+                state
+                    .ws_client_messages
+                    .lock()
+                    .expect("ws client messages mutex")
+                    .push(text.to_string());
                 match serde_json::from_str::<ClientMessage>(&text) {
                     Ok(ClientMessage::ModifyOrder { .. }) => {
+                        let frames = state
+                            .ws_modify_frames
+                            .lock()
+                            .expect("ws modify frames mutex")
+                            .clone();
+                        for frame in frames {
+                            drop(ws.send(Message::Text(frame.into())).await);
+                        }
                         // A close-after-trades leg serves its one batch only on
                         // the first subscribe; a reconnect after the close gets
                         // an empty, silent socket so the held trade is not
@@ -490,6 +512,10 @@ pub fn venue_order_row(
         quantity: rust_decimal::Decimal::from(2),
         filled_qty,
         price: Some(rust_decimal::Decimal::from(100)),
+        trigger_price: None,
+        ts_triggered: None,
+        reduce_only: false,
+        post_only: false,
         ts_accepted: 10,
         ts_last,
     }
@@ -611,6 +637,173 @@ pub fn cached_order(cache: &Rc<RefCell<Cache>>) -> nautilus_model::orders::Order
         )
         .expect("cache order");
     order
+}
+
+/// Seeds a BTCUSDT sell `StopMarketOrder` `O-STOP` into the cache and returns
+/// it. The protective-leg shape: reduce-only, GTC, last-price trigger.
+pub fn cached_stop_market(cache: &Rc<RefCell<Cache>>) -> nautilus_model::orders::OrderAny {
+    let mut factory = order_factory();
+    let order = factory.stop_market(
+        instrument_id(),
+        OrderSide::Sell,
+        Quantity::from("1"),
+        Price::from("95.00"),
+        Some(TriggerType::LastPrice),
+        Some(TimeInForce::Gtc),
+        None,
+        Some(true),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(ClientOrderId::from("O-STOP")),
+    );
+    cache_order(cache, &order);
+    order
+}
+
+/// Seeds a BTCUSDT sell `StopLimitOrder` `O-STOPLIMIT` into the cache: trigger
+/// 95, limit 94, the shape whose trigger survives into a live limit and is
+/// therefore the one an amend can walk backwards.
+pub fn cached_stop_limit(cache: &Rc<RefCell<Cache>>) -> nautilus_model::orders::OrderAny {
+    let mut factory = order_factory();
+    let order = factory.stop_limit(
+        instrument_id(),
+        OrderSide::Sell,
+        Quantity::from("1"),
+        Price::from("94.00"),
+        Price::from("95.00"),
+        Some(TriggerType::LastPrice),
+        Some(TimeInForce::Gtc),
+        None,
+        None,
+        Some(true),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(ClientOrderId::from("O-STOPLIMIT")),
+    );
+    cache_order(cache, &order);
+    order
+}
+
+/// Seeds a BTCUSDT sell `TrailingStopMarketOrder` `O-TRAIL` into the cache. The
+/// venue models no trailing state, so this is the shape that must still be
+/// refused by name after conditionals landed.
+pub fn cached_trailing_stop(cache: &Rc<RefCell<Cache>>) -> nautilus_model::orders::OrderAny {
+    let mut factory = order_factory();
+    let order = factory.trailing_stop_market(
+        instrument_id(),
+        OrderSide::Sell,
+        Quantity::from("1"),
+        rust_decimal::Decimal::from(1),
+        Some(TrailingOffsetType::PriceTier),
+        None,
+        Some(Price::from("95.00")),
+        Some(TriggerType::LastPrice),
+        Some(TimeInForce::Gtc),
+        None,
+        Some(true),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(ClientOrderId::from("O-TRAIL")),
+    );
+    cache_order(cache, &order);
+    order
+}
+
+fn order_factory() -> OrderFactory {
+    OrderFactory::new(
+        TraderId::from("MOGWAI-001"),
+        StrategyId::from("S-001"),
+        None,
+        None,
+        Rc::new(RefCell::new(TestClock::new())),
+        false,
+        false,
+    )
+}
+
+fn cache_order(cache: &Rc<RefCell<Cache>>, order: &nautilus_model::orders::OrderAny) {
+    cache
+        .borrow_mut()
+        .add_order(
+            order.clone(),
+            None,
+            Some(ClientId::from("MOGWAI-EXEC")),
+            false,
+        )
+        .expect("cache order");
+}
+
+/// The `SubmitOrder` command the exec client's `submit_order` takes, built from
+/// an order's own init event. `init` lets a caller hand in a MUTATED init - the
+/// unsupported-shape table drives every refusal that way, because nautilus'
+/// own factory refuses to build most of them.
+pub fn submit_command(
+    order: &nautilus_model::orders::OrderAny,
+    init: nautilus_model::events::OrderInitialized,
+) -> nautilus_common::messages::execution::SubmitOrder {
+    nautilus_common::messages::execution::SubmitOrder::new(
+        TraderId::from("MOGWAI-001"),
+        Some(ClientId::from("MOGWAI-EXEC")),
+        StrategyId::from("S-001"),
+        instrument_id(),
+        nautilus_model::orders::Order::client_order_id(order),
+        init,
+        None,
+        None,
+        None,
+        nautilus_core::UUID4::new(),
+        nautilus_core::UnixNanos::default(),
+        None,
+    )
+}
+
+/// A BTCUSDT venue-truth row for a CONDITIONAL order, carrying the four fields
+/// the conditional surface added. Reconciliation of a stop is unreadable
+/// without them, which is what the report gate pins.
+#[expect(clippy::too_many_arguments)]
+pub fn venue_stop_order_row(
+    client_order_id: &str,
+    venue_order_id: &str,
+    order_type: mogwai_protocol::OrderType,
+    status: WireOrderStatus,
+    price: Option<rust_decimal::Decimal>,
+    trigger_price: rust_decimal::Decimal,
+    ts_triggered: Option<u64>,
+    ts_last: u64,
+) -> OrderStatusInfo {
+    OrderStatusInfo {
+        client_order_id: client_order_id.to_string(),
+        venue_order_id: venue_order_id.to_string(),
+        symbol: mogwai_protocol::Symbol::from("BTCUSDT"),
+        side: mogwai_protocol::Side::Sell,
+        order_type,
+        time_in_force: mogwai_protocol::TimeInForce::Gtc,
+        status,
+        quantity: rust_decimal::Decimal::from(2),
+        filled_qty: rust_decimal::Decimal::ZERO,
+        price,
+        trigger_price: Some(trigger_price),
+        ts_triggered,
+        reduce_only: true,
+        post_only: false,
+        ts_accepted: 10,
+        ts_last,
+    }
 }
 
 /// Awaits the next execution event or fails after `timeout`.

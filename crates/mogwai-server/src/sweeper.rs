@@ -91,15 +91,15 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 // nothing advances: an unreachable span is not a span
                 // nothing triggered in.
                 if let Some(walk) = walked {
-                    results.extend(scans.into_iter().zip(walk.triggered).map(
-                        |(scan, triggered)| ScanResult {
+                    results.extend(scans.into_iter().zip(walk.hits).map(|(scan, hit)| {
+                        ScanResult {
                             client_order_id: scan.client_order_id,
                             from_ns: scan.from_ns,
                             revision: scan.revision,
-                            triggered,
+                            hit,
                             scanned_to_ns: walk.reached_ns,
-                        },
-                    ));
+                        }
+                    }));
                 }
             }
             let mut engine = sweep.run.engine.lock().await;
@@ -133,6 +133,17 @@ fn deliver(
     let subject = events.iter().find_map(|event| match event {
         ServerMessage::OrderFilled(fill) => Some(AdmissionSubject::Submit {
             client_order_id: fill.client_order_id.clone(),
+        }),
+        ServerMessage::OrderTriggered {
+            client_order_id, ..
+        }
+        | ServerMessage::OrderCanceled {
+            client_order_id, ..
+        }
+        | ServerMessage::OrderRejected {
+            client_order_id, ..
+        } => Some(AdmissionSubject::Submit {
+            client_order_id: client_order_id.clone(),
         }),
         _ => None,
     });

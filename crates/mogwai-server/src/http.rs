@@ -87,9 +87,10 @@ pub(crate) fn boundary_error(cmd: &ClientMessage) -> Option<&'static str> {
             client_order_id,
             price,
             quantity,
+            trigger_price,
         } => validate_client_order_id(client_order_id)
             .err()
-            .or_else(|| validate_modify_order(*price, *quantity).err()),
+            .or_else(|| validate_modify_order(*price, *quantity, *trigger_price).err()),
         // A cancel's only failure modes are venue-side, and a query is
         // answered truthfully whatever it asks (an unknown id is an empty
         // snapshot, not an error) - so for these the id caps are the whole

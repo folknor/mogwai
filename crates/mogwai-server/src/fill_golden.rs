@@ -196,6 +196,9 @@ fn run_scenario(band_vol_mult: f64, profiles: &InstrumentProfiles) -> Vec<Cell> 
                 order_type: OrderType::Limit,
                 quantity: Decimal::ONE,
                 price: Some(price),
+                trigger_price: None,
+                reduce_only: false,
+                post_only: false,
                 time_in_force: TimeInForce::Gtc,
             };
             // Exactly what `http::market_reading` hands the engine on the real
@@ -215,12 +218,12 @@ fn run_scenario(band_vol_mult: f64, profiles: &InstrumentProfiles) -> Vec<Cell> 
             .expect("scenario starts on reachable clean tape");
         let results = scans
             .iter()
-            .zip(walk.triggered)
-            .map(|(scan, triggered)| ScanResult {
+            .zip(walk.hits)
+            .map(|(scan, hit)| ScanResult {
                 client_order_id: scan.client_order_id.clone(),
                 from_ns: scan.from_ns,
                 revision: scan.revision,
-                triggered,
+                hit,
                 scanned_to_ns: walk.reached_ns,
             })
             .collect::<Vec<_>>();

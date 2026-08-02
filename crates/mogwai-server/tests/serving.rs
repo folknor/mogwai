@@ -503,6 +503,98 @@ async fn the_tape_is_identical_with_and_without_order_flow() {
     );
 }
 
+/// The tape-purity property, extended to conditionals: no client conditional
+/// advances any generator state.
+///
+/// A resting conditional is the one order shape that puts a SECOND kind of scan
+/// into the sweeper's per-symbol walk (`ScanKind::TriggerTouch` beside the
+/// limits' `FillThrough`), and the walk drains the tape source. If a trigger
+/// scan drained prints the canonical `/trades` page would otherwise have served,
+/// or advanced the generator past them, the two reads of the same fixed window
+/// would differ. They must not.
+///
+/// It lives at the SERVER layer rather than in `mogwai-engine`, where the spec's
+/// gate list names it: the engine holds no tape and no generator, so the
+/// property it asserts is only expressible where the walk and the source
+/// actually are. Its twin above is the same assertion for plain limits.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn the_tape_is_identical_with_and_without_a_resting_stop() {
+    let venue = spawn(&["--config", &band_config()]);
+    let path = format!(
+        "/trades?symbol={}&start={}&limit=200",
+        venue.record.symbol, venue.record.data_origin_ns
+    );
+    let (status, before) = http_get(&venue.http_base(), &path);
+    assert_eq!(status, 200);
+    let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
+        .await
+        .expect("open order socket");
+    // Sell stops at a trigger of 1: unreachable by any BTCUSDT print, so every
+    // one of them REMAINS resting and untriggered for the whole test, which is
+    // the state that puts a touch scan into every sweep pass. Half stop-market
+    // and half stop-limit, because the two rest identically as
+    // `Resting::Conditional` but reach the walk through different submit paths.
+    // They are `reduce_only`, which is what a protective leg on a flat book
+    // actually is: the funded account holds no BTC, and section 1.8's admission
+    // exemption is precisely what lets such a leg rest rather than be refused at
+    // the door.
+    for index in 0..100 {
+        let submit = if index % 2 == 0 {
+            format!(
+                r#"{{"type":"SubmitOrder","client_order_id":"STOP-{index}","symbol":"{}","side":"Sell","order_type":"StopMarket","quantity":"0.01","trigger_price":"1","reduce_only":true,"time_in_force":"Gtc"}}"#,
+                venue.record.symbol
+            )
+        } else {
+            format!(
+                r#"{{"type":"SubmitOrder","client_order_id":"STOP-{index}","symbol":"{}","side":"Sell","order_type":"StopLimit","quantity":"0.01","price":"1","trigger_price":"1","reduce_only":true,"time_in_force":"Gtc"}}"#,
+                venue.record.symbol
+            )
+        };
+        socket
+            .send(Message::Text(submit.into()))
+            .await
+            .expect("submit");
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let message = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .expect("the venue answered every submit")
+            .expect("the socket stayed open")
+            .expect("a websocket frame");
+        let Message::Text(text) = message else {
+            continue;
+        };
+        match serde_json::from_str::<ServerMessage>(&text) {
+            Ok(ServerMessage::OrderRejected {
+                client_order_id,
+                reason,
+                ..
+            }) => panic!("{client_order_id} was rejected: {reason}"),
+            Ok(ServerMessage::OrderTriggered {
+                client_order_id, ..
+            }) => panic!("{client_order_id} triggered: a trigger of 1 is unreachable"),
+            Ok(ServerMessage::OrderAccepted {
+                client_order_id, ..
+            }) if client_order_id == "STOP-99" => break,
+            _ => {}
+        }
+    }
+    // Let several sweep passes run WITH the hundred touch scans in the book.
+    // Draining to the last acceptance only proves the submit path is pure; the
+    // walk is what this test is actually about, and it runs on its own cadence
+    // (`fill_sweep_interval_ms = 10`).
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let (status, after) = http_get(&venue.http_base(), &path);
+    assert_eq!(status, 200);
+    assert_eq!(
+        before, after,
+        "a resting conditional's touch scan advanced or altered the clean tape"
+    );
+}
+
 /// One blocking `POST /control/divergence`, returning the status code.
 fn post_divergence(base: &str, body: &str) -> u16 {
     use std::io::{Read, Write};
