@@ -10,6 +10,15 @@ Revised 2026-08-02: folds the validated findings of
 `notes/arrival-drought-review-r1.md` and `notes/arrival-drought-review-r2.md`.
 Section 8 records what was rejected and why.
 
+Revised 2026-08-02 (adjudication, after the first L2 attempt): D5's stage-1
+grid exhausted against the FULL-SPAN dispersion floor (best tuple 86.8 vs
+131.7), and the adjudication found the floor itself dishonest rather than the
+mechanism: the era-windowed anchor dispersion is ~36, not 4608.9 - the
+full-span duration targets are dominated by the same infancy/outage deserts
+D3 already disqualified for dwell. D3a below re-derives the dispersion band
+and duration ACF anchor era-windowed; L2 restarts at D5 stage 1 against the
+corrected targets. Section 8 records the ruling.
+
 ## 1. The item
 
 The fitted default tape prints 15-18 h near-silent stretches, because the ACD
@@ -103,8 +112,9 @@ ratio explicitly; a flat slack that silently absorbs it is not allowed.
   `start_ts 0`, no regime. `measure()` derives EVERY duration statistic from
   consecutive differences of realized `trade.ts_event` - it never sees the
   internal `duration_s`. Asserted today: dispersion in the committed band
-  [131.7 .. 4608.9] (seed 42 lands ~190, near the floor, per the
-  `consts.rs` comment); duration ACF lag1/lag5 within
+  (full-span [131.7 .. 4608.9] when this spec was written; era-windowed per
+  D3a after the adjudication - seed 42 landed ~190 under the old constants);
+  duration ACF lag1/lag5 within
   `DURATION_ACF_ABS_TOL = 0.14` of the anchors 0.194 / 0.136; the return,
   zero-change, round-lot, size and on-grid gates. `Measured` has twelve
   fields; none is a function of wall-clock density. Note on the dispersion
@@ -279,6 +289,25 @@ one decision:
   shape; the cross-pair range documents the dying-symbol spread the
   `LiquidityDrought` knob may imitate; `realism()` asserts against the
   anchor values only.
+
+**D3a - the DURATION targets follow the era window (added by the 2026-08-02
+adjudication).** The dispersion band and the duration ACF anchor were fitted
+over the full corpus span; the dwell measurement (0c0a0b9) disqualified that
+span for gap statistics, and dispersion and duration ACF ARE gap statistics.
+Measured consequences, from the committed in-window dwell histograms and the
+regenerated reports: the anchor's full-span dispersion 4608.9 collapses to
+~36 in the modern window - the committed band max was almost entirely
+desert-era variance - and the old floor 131.7 (full-span DOTUSD) sits far
+ABOVE the modern anchor, so the stage-1 retune was failed against exactly
+the behavior this spec evicts. The fix mirrors D3: `characterize.py` computes
+in-window duration variance/dispersion and an in-window duration ACF over the
+same gap population as the dwell block (a gap belongs to the trade that
+closes it); `build_fingerprint.py` points `duration_dispersion_index` (anchor
+and cross-pair range) and `duration_acf_anchor` at the windowed values.
+Return, size and session targets stay full-span: they are per-tick shape
+statistics, not gap statistics, and nothing disqualified their span. The
+gate's Rust side is untouched - it reads the fingerprint. The full-span
+values remain in the char reports as documentation.
 
 **D4 - the dwell gate: quantile and run statistics, cadence-scaled,
 one-sided.** The gated statistics, chosen for cross-sample-size stability
@@ -552,6 +581,19 @@ the grid-selected constants, the dwell assertions, the golden re-bless, and
 the doc rewrites are inseparable (each without the others is either a red
 suite or a lie about the tape).
 
+D3a addendum: the L2 landing ALSO carries the regenerated
+`analysis/fingerprint.json` and `analysis/findings.md` (one
+`python3 analysis/run_corpus.py` then `python3 analysis/build_fingerprint.py`
+run - the analysis code computing the windowed duration targets is already
+landed). The corrected duration targets are red against the desert-era
+constants by construction (seed 42's duration ACF lag1 measures 0.306 against
+the windowed anchor 0.160, outside the 0.14 tolerance - the defect measured a
+fifth way), so the fingerprint regeneration is inseparable from the retune
+for the same reason the dwell asserts are. For grid calibration: the
+corrected dispersion band is [36.3 .. 1627.9] cross-pair, windowed anchor
+36.3, windowed duration ACF anchor lag1 0.1603 / lag5 0.1113; the previously
+failed stage-1 dispersion 86.8 is comfortably inside the corrected band.
+
 Gates, exact commands:
 
     brokkr check
@@ -654,6 +696,22 @@ Rejected:
   the dead-era dwell.
 - r2 finding 1's fallback arm ("or the completion claim must be narrowed").
   The stronger arm was taken instead: the production seed is asserted.
+- The 2026-08-02 adjudication of the first L2 attempt. The implementer ran
+  D5 stage 1 faithfully, found the strongest tuple at dispersion 86.8 against
+  the committed floor 131.7, and reverted per the keep/revert rule - correct
+  procedure. The adjudication ruled the FLOOR wrong, not the mechanism: the
+  era-windowed anchor dispersion is ~36 (the full-span 4608.9 was desert-era
+  variance), so 86.8 is on the dispersed side of the modern anchor and the
+  failure was manufactured by a full-span target the era window had already
+  discredited. Disposition: D3a lands as an L1-style analysis/fingerprint
+  amendment; L2 restarts at D5 stage 1 (shape still frozen at 0.60) against
+  the corrected band and windowed ACF anchor; stage 2 (unfreeze the shape,
+  drag `WEIBULL_MEAN_SHAPE_060` along) remains the fallback exactly as
+  written. Considered and not taken: unfreezing the shape FIRST (treats a
+  symptom of a wrong target as a tuning problem, and the levers fight per
+  D5's own rationale), and abandoning the ACD family (no evidence yet that
+  the family fails against an honest target).
+
 - r1's nit that `AGENTS.md` still calls `docs/` "the transient TODO" while
   its own folder table defines `docs/` as durable usage docs. Real, but a
   root-convention-file fix with no connection to this spec; not folded.

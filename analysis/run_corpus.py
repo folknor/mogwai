@@ -66,12 +66,13 @@ def main():
     for r in reps:
         d, q = r["duration"], r["returns"]
         print(f"{r['pair']:<9}{r['n_trades']:>13,}  "
-              f"{d['dispersion_index']:>7.0f}  "
+              f"{d['dwell']['dispersion_index']:>7.0f}  "
               f"{q['acf'][0]:>6.2f}  {q['abs_acf'][0]:>6.2f}  "
               f"{q['zero_change_frac']:>5.2f}  "
               f"{str(q['modal_tick']):>10}  {str(q['price_decimals_mode']):>4}  "
               f"{r['size']['round_frac']:>5.2f}")
-    print("\ndisp=duration dispersion index (Poisson=1); ret1/|ret|1=lag-1 ACF; "
+    print("\ndisp=era-windowed duration dispersion index (Poisson=1); "
+          "ret1/|ret|1=lag-1 ACF; "
           "zchg=zero-price-change frac; rnd=size <=2 decimals frac")
     return 0
 

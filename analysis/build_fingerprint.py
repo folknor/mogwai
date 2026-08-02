@@ -93,7 +93,14 @@ def main():
     vol = avg_curves([hour_vol(r) for r in reps.values()])
     dow = avg_curves([dow_weights(r) for r in reps.values()])
 
-    disp = [r["duration"]["dispersion_index"] for r in reps.values()]
+    # Duration-side targets (dispersion band, duration ACF anchor) are
+    # era-windowed like the dwell block: the full-span values are dominated
+    # by infancy/outage deserts the default profile does not claim (the
+    # full-span anchor dispersion 4608.9 collapses to ~36 in the modern
+    # window), so a gate fitted full-span polices exactly the behavior the
+    # drought elimination evicts. Return/size/session targets stay full-span:
+    # they are per-tick shape statistics, not gap statistics.
+    disp = [r["duration"]["dwell"]["dispersion_index"] for r in reps.values()]
     ret1 = [r["returns"]["acf"][0] for r in reps.values()]
     abs1 = [r["returns"]["abs_acf"][0] for r in reps.values()]
     abs10 = [r["returns"]["abs_acf"][9] for r in reps.values()]
@@ -110,9 +117,10 @@ def main():
         "golden_targets": {
             "_doc": "the generator's synthetic stream must reproduce these; "
                     "tolerances are the cross-pair spread, anchored on the "
-                    "deepest series",
+                    "deepest series; duration dispersion and duration ACF are "
+                    "era-windowed like dwell, everything else full-span",
             "duration_dispersion_index": {
-                "anchor": anchor["duration"]["dispersion_index"],
+                "anchor": anchor["duration"]["dwell"]["dispersion_index"],
                 "range": rng(disp),
             },
             "return_acf_lag1": {"anchor": anchor["returns"]["acf"][0],
@@ -127,7 +135,7 @@ def main():
             },
             "zero_change_frac": {"anchor": anchor["returns"]["zero_change_frac"],
                                  "range": rng(zchg)},
-            "duration_acf_anchor": anchor["duration"]["acf"][:10],
+            "duration_acf_anchor": anchor["duration"]["dwell"]["acf"][:10],
             "return_acf_anchor": anchor["returns"]["acf"][:10],
             "abs_return_acf_anchor": anchor["returns"]["abs_acf"],
             "dwell": {
@@ -174,14 +182,14 @@ def main():
     md.append(f"Pairs analyzed: {', '.join(pairs)}  ")
     md.append(f"Total trades: {fingerprint['source']['total_trades']:,}  ")
     md.append(f"Anchor (golden targets): {anchor['pair']}\n")
-    md.append("## Stylized facts (cross-pair)\n")
+    md.append("## Stylized facts (cross-pair; disp is era-windowed)\n")
     md.append("| pair | trades | disp | ret1 | |ret|1 | zchg | tick | pdec |")
     md.append("|---|--:|--:|--:|--:|--:|--:|--:|")
     for p in sorted(reps, key=lambda x: -reps[x]["n_trades"]):
         r = reps[p]
         md.append(
             f"| {p} | {r['n_trades']:,} | "
-            f"{r['duration']['dispersion_index']:.0f} | "
+            f"{r['duration']['dwell']['dispersion_index']:.0f} | "
             f"{r['returns']['acf'][0]:.2f} | {r['returns']['abs_acf'][0]:.2f} | "
             f"{r['returns']['zero_change_frac']:.2f} | "
             f"{r['returns']['modal_tick']} | {r['returns']['price_decimals_mode']} |"

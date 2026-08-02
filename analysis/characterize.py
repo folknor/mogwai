@@ -137,12 +137,18 @@ def characterize(path):
     dwell_hist = [0] * DWELL_LOG_BINS
     dwell_n = 0
     dwell_sum = 0.0
+    dwell_sumsq = 0.0
     dwell_max = 0.0
     dwell_seen_hours = set()
 
     ret_acf = AutoCorr(MAX_LAG)
     abs_acf = AutoCorr(MAX_LAG)
     dur_acf = AutoCorr(MAX_LAG)
+    # Era-windowed duration ACF: same in-window gap population as the dwell
+    # statistics, so the duration targets the gate reads are all judged over
+    # the era the default profile actually claims. The full-span dur_acf is
+    # kept for documentation and offline comparison.
+    dwell_acf = AutoCorr(MAX_LAG)
 
     zero_change = 0
     change_n = 0
@@ -207,6 +213,8 @@ def characterize(path):
                     if ts >= DWELL_ERA_START_TS:
                         dwell_n += 1
                         dwell_sum += dt
+                        dwell_sumsq += dt * dt
+                        dwell_acf.push(dt)
                         dwell_max = max(dwell_max, dt)
                         dwell_hist[log_bin(
                             max(dt, DWELL_LOG_LO_S),
@@ -259,6 +267,8 @@ def characterize(path):
 
     dur_mean = dur_sum / dur_n if dur_n else 0.0
     dur_var = (dur_sumsq / dur_n - dur_mean**2) if dur_n else 0.0
+    dwell_mean = dwell_sum / dwell_n if dwell_n else 0.0
+    dwell_var = (dwell_sumsq / dwell_n - dwell_mean**2) if dwell_n else 0.0
     empty_hour_frac, max_empty_hour_run_h = dwell_stats(
         first_ts, last_ts, dwell_seen_hours
     )
@@ -297,7 +307,12 @@ def characterize(path):
             "dwell": {
                 "era_start_ts": DWELL_ERA_START_TS,
                 "n_gaps": dwell_n,
-                "mean_s": dwell_sum / dwell_n if dwell_n else 0.0,
+                "mean_s": dwell_mean,
+                "var_s2": dwell_var,
+                "dispersion_index": (
+                    (dwell_var / dwell_mean) if dwell_mean else None
+                ),
+                "acf": dwell_acf.acf(),
                 "max_gap_s": dwell_max,
                 "gap_p999_s": dwell_p999_s,
                 "dwell_hist": dwell_hist,
@@ -354,6 +369,9 @@ def main():
     print(f"duration: mean={d['mean_s']:.3f}s  dispersion_index="
           f"{d['dispersion_index']:.1f}")
     dwell = d["dwell"]
+    print(f"era duration: mean={dwell['mean_s']:.3f}s  dispersion_index="
+          f"{dwell['dispersion_index']:.1f}  "
+          f"acf1-5: {[round(x, 3) for x in dwell['acf'][:5]]}")
     print(f"dwell: max_gap={dwell['max_gap_s']:.3f}s  p999="
           f"{dwell['gap_p999_s']:.3f}s  empty_hours="
           f"{dwell['empty_hour_frac']:.4f}  max_empty_run="
