@@ -48,7 +48,7 @@ use nautilus_common::{
 use nautilus_live::ExecutionClientCore;
 use nautilus_model::{
     enums::{OmsType, OrderSide, TimeInForce},
-    identifiers::{ClientId, ClientOrderId, InstrumentId, StrategyId, Symbol, TraderId},
+    identifiers::{AccountId, ClientId, ClientOrderId, InstrumentId, StrategyId, Symbol, TraderId},
     types::{Price, Quantity},
 };
 use tokio::{
@@ -536,6 +536,10 @@ pub async fn connected_exec_client(
     sink_rx: &mut UnboundedReceiver<ExecutionEvent>,
 ) -> MogwaiExecutionClient {
     let config = MogwaiExecClientConfig {
+        // Stated, not defaulted: `account_id` defaults to the placeholder the
+        // validator refuses, precisely so nobody can bind a socket to an
+        // account they never chose. The fake venue seeds this account.
+        account_id: AccountId::from("MOGWAI-001"),
         base_url,
         transport_profile,
         ..MogwaiExecClientConfig::default()

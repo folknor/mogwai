@@ -17,6 +17,23 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_BASE_URL: &str = "ws://127.0.0.1:8787";
 
+/// Placeholder both configs default their `account_id` to, and which `validate`
+/// refuses.
+///
+/// `account_id` is the one field of these configs that has no defensible
+/// default: it names WHICH server-side account slot the socket binds to, and
+/// the data and execution legs of one venue session must bind the SAME slot or
+/// the server-owned divergence windows (`StallData`, `GoDark`, the delay
+/// atomics), which live on that slot and are armed only from the execution leg,
+/// silently miss the data feed entirely. A default that looked like a real
+/// account (`MOGWAI-001`) made an omitted `account_id` indistinguishable from a
+/// deliberate one, so a consumer that forgot the field got a working data
+/// socket on the wrong account and no diagnostic anywhere. Defaulting to a value
+/// that is syntactically legal - so `Default`, `#[serde(default)]` and every
+/// partial-config deserialization keep working - but semantically refused turns
+/// that omission into a create-time error naming the field.
+pub const UNSET_ACCOUNT_ID: &str = "MOGWAI-UNSET";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MogwaiDataClientConfig {
@@ -38,7 +55,7 @@ pub struct MogwaiDataClientConfig {
 impl Default for MogwaiDataClientConfig {
     fn default() -> Self {
         Self {
-            account_id: AccountId::from("MOGWAI-001"),
+            account_id: AccountId::from(UNSET_ACCOUNT_ID),
             base_url: DEFAULT_BASE_URL.to_string(),
             transport_profile: TransportProfile::default(),
             havoc: None,
@@ -56,7 +73,7 @@ impl MogwaiDataClientConfig {
     /// out of range.
     pub fn validate(&self) -> anyhow::Result<()> {
         validate_base_url(&self.base_url)?;
-        mogwai_protocol::AccountId::parse(self.account_id.as_ref())?;
+        validate_account_id(&self.account_id)?;
         validate_havoc(&self.havoc, self.transport_profile)
     }
 
@@ -138,7 +155,7 @@ impl Default for MogwaiExecClientConfig {
     fn default() -> Self {
         Self {
             trader_id: TraderId::from("MOGWAI-001"),
-            account_id: AccountId::from("MOGWAI-001"),
+            account_id: AccountId::from(UNSET_ACCOUNT_ID),
             base_url: DEFAULT_BASE_URL.to_string(),
             account_type: AccountType::Cash,
             oms_type: default_oms_type(),
@@ -158,7 +175,7 @@ impl MogwaiExecClientConfig {
     /// out of range.
     pub fn validate(&self) -> anyhow::Result<()> {
         validate_base_url(&self.base_url)?;
-        mogwai_protocol::AccountId::parse(self.account_id.as_ref())?;
+        validate_account_id(&self.account_id)?;
         validate_havoc(&self.havoc, self.transport_profile)
     }
 
@@ -225,6 +242,31 @@ fn validate_base_url(base_url: &str) -> anyhow::Result<()> {
         !host.is_empty(),
         "base_url must include a host, got {base_url:?}"
     );
+    Ok(())
+}
+
+/// Validates the account this client's socket binds to: it must be legal to the
+/// venue's own charset, and it must not still be the `UNSET_ACCOUNT_ID`
+/// placeholder.
+///
+/// The placeholder check is the whole point of the placeholder. The data and
+/// execution legs of one venue session must bind the same server account slot -
+/// the divergence windows live on the slot and only the execution leg arms them,
+/// so a data leg on a different slot streams straight through every armed
+/// `StallData` and `GoDark`. There is nothing in a single config that can detect
+/// that mismatch, and nothing on the wire that reports it: the venue happily
+/// auto-creates whatever account a socket names. Refusing the value a config
+/// carries when nobody set it is the one place the omission is knowable, so it
+/// is refused here, before any socket is opened.
+fn validate_account_id(account_id: &AccountId) -> anyhow::Result<()> {
+    ensure!(
+        account_id.as_ref() != UNSET_ACCOUNT_ID,
+        "account_id is still the {UNSET_ACCOUNT_ID} placeholder - set it to the \
+         account this client binds to on the venue. The data and execution \
+         clients of one venue session must be given the SAME account_id, or \
+         server-armed divergence windows will miss the market-data feed"
+    );
+    mogwai_protocol::AccountId::parse(account_id.as_ref())?;
     Ok(())
 }
 
@@ -337,23 +379,65 @@ fn validate_window_deliverable(
     }
 }
 
+/// Account the crate's own unit tests bind both legs of a session to.
+///
+/// Production code deliberately has no default account (see
+/// `UNSET_ACCOUNT_ID`), so every in-crate test that builds a client has to state
+/// one. Naming it once here keeps that from being reintroduced as a
+/// real-looking `Default` field value, and keeps the tests' account visibly a
+/// choice rather than an accident.
+#[cfg(test)]
+pub(crate) const TEST_ACCOUNT_ID: &str = "MOGWAI-001";
+
+#[cfg(test)]
+impl MogwaiDataClientConfig {
+    /// `Default` with the account stated, i.e. a config that passes `validate`.
+    pub(crate) fn test_default() -> Self {
+        Self {
+            account_id: AccountId::from(TEST_ACCOUNT_ID),
+            ..Self::default()
+        }
+    }
+}
+
+#[cfg(test)]
+impl MogwaiExecClientConfig {
+    /// `Default` with the account stated, i.e. a config that passes `validate`.
+    pub(crate) fn test_default() -> Self {
+        Self {
+            account_id: AccountId::from(TEST_ACCOUNT_ID),
+            ..Self::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn default_base_url_uses_server_port() {
-        let cfg = MogwaiDataClientConfig::default();
+        let cfg = MogwaiDataClientConfig::test_default();
 
         assert_eq!(cfg.ws_url(), "ws://127.0.0.1:8787/ws?account=MOGWAI-001");
         assert_eq!(cfg.http_base_url(), "http://127.0.0.1:8787");
+
+        // The bare `Default` carries the placeholder account, not a usable one.
+        assert_eq!(
+            MogwaiDataClientConfig::default().account_id.as_ref(),
+            UNSET_ACCOUNT_ID
+        );
+        assert_eq!(
+            MogwaiExecClientConfig::default().account_id.as_ref(),
+            UNSET_ACCOUNT_ID
+        );
     }
 
     #[test]
     fn http_base_url_normalizes_secure_ws_scheme() {
         let cfg = MogwaiDataClientConfig {
             base_url: "wss://example.test:9443".into(),
-            ..MogwaiDataClientConfig::default()
+            ..MogwaiDataClientConfig::test_default()
         };
 
         assert_eq!(
@@ -373,11 +457,11 @@ mod tests {
         for illegal in ["WYRD 042-A", "WYRD-042/BTCUSDT"] {
             let data = MogwaiDataClientConfig {
                 account_id: AccountId::from(illegal),
-                ..MogwaiDataClientConfig::default()
+                ..MogwaiDataClientConfig::test_default()
             };
             let exec = MogwaiExecClientConfig {
                 account_id: AccountId::from(illegal),
-                ..MogwaiExecClientConfig::default()
+                ..MogwaiExecClientConfig::test_default()
             };
             let err = data
                 .validate()
@@ -390,7 +474,7 @@ mod tests {
         assert!(
             MogwaiExecClientConfig {
                 account_id: AccountId::from("WYRD-042:BTCUSDT"),
-                ..MogwaiExecClientConfig::default()
+                ..MogwaiExecClientConfig::test_default()
             }
             .validate()
             .is_ok()
@@ -402,7 +486,7 @@ mod tests {
         let cfg = MogwaiExecClientConfig {
             account_id: AccountId::from("WYRD-042:BTCUSDT"),
             base_url: "ws://example.test:8787  ".into(),
-            ..MogwaiExecClientConfig::default()
+            ..MogwaiExecClientConfig::test_default()
         };
         assert_eq!(
             cfg.ws_url(),
@@ -411,16 +495,72 @@ mod tests {
     }
 
     #[test]
+    fn a_config_that_never_names_its_account_is_refused() {
+        // The defect this pins, observed in a live forward run: the consumer
+        // built the data config by overriding base_url, transport_profile and
+        // havoc and never touched `account_id`, while the sibling exec config
+        // was handed the worker's real account. The data socket bound
+        // `MOGWAI-001` and the exec socket bound the worker, so the two legs of
+        // one venue session sat on different server account slots. That is
+        // silent and total: the server-owned divergence windows
+        // (`StallData`, `GoDark`, the delay atomics) live on the account slot
+        // and are armed only from the execution leg, so a `StallData` armed for
+        // the run withheld market-data frames from an account that carried no
+        // market data while the real feed streamed on undisturbed - a blackout
+        // test that passes green against a path that was never dark. The
+        // placeholder also auto-created a stray account on the venue that held
+        // a session forever and counted against `max_accounts`.
+        //
+        // The API made that invisible because `account_id` defaulted to a
+        // plausible-looking REAL account. It now defaults to a placeholder the
+        // validator refuses, so omitting the field is a create-time error that
+        // names the field instead of a wrong-account binding nobody sees.
+        let mut data = MogwaiDataClientConfig {
+            base_url: "ws://127.0.0.1:9797".into(),
+            transport_profile: TransportProfile::HttpOrders,
+            ..MogwaiDataClientConfig::default()
+        };
+        let exec = MogwaiExecClientConfig {
+            account_id: AccountId::from("WYRD-042"),
+            base_url: "ws://127.0.0.1:9797".into(),
+            transport_profile: TransportProfile::HttpOrders,
+            ..MogwaiExecClientConfig::default()
+        };
+
+        let err = data
+            .validate()
+            .expect_err("a data config that never names its account must be refused")
+            .to_string();
+        assert!(err.contains("account_id"), "{err}");
+        assert!(err.contains(UNSET_ACCOUNT_ID), "{err}");
+
+        // The exec leg shares the same placeholder and the same refusal, so a
+        // pair that validates is a pair whose accounts were both stated.
+        let unset_exec = MogwaiExecClientConfig {
+            base_url: "ws://127.0.0.1:9797".into(),
+            ..MogwaiExecClientConfig::default()
+        };
+        assert!(unset_exec.validate().is_err());
+
+        // Once stated, the two legs land on one account slot - the invariant
+        // the defect broke.
+        data.account_id = exec.account_id;
+        assert!(data.validate().is_ok());
+        assert!(exec.validate().is_ok());
+        assert_eq!(data.ws_url(), exec.ws_url());
+    }
+
+    #[test]
     fn validate_rejects_non_ws_scheme() {
         // D.4: a typo'd scheme used to pass validation and then fail silently
         // inside the reconnect loop. Reject it up front.
         let http = MogwaiDataClientConfig {
             base_url: "http://example.test".into(),
-            ..MogwaiDataClientConfig::default()
+            ..MogwaiDataClientConfig::test_default()
         };
         let garbage = MogwaiDataClientConfig {
             base_url: "not a url".into(),
-            ..MogwaiDataClientConfig::default()
+            ..MogwaiDataClientConfig::test_default()
         };
 
         assert!(http.validate().is_err());
@@ -431,7 +571,7 @@ mod tests {
     fn validate_rejects_hostless_ws_url() {
         let cfg = MogwaiExecClientConfig {
             base_url: "ws:///just/a/path".into(),
-            ..MogwaiExecClientConfig::default()
+            ..MogwaiExecClientConfig::test_default()
         };
 
         assert!(cfg.validate().is_err());
@@ -441,11 +581,11 @@ mod tests {
     fn validate_accepts_ws_and_wss() {
         let ws = MogwaiDataClientConfig {
             base_url: "ws://example.test:8787".into(),
-            ..MogwaiDataClientConfig::default()
+            ..MogwaiDataClientConfig::test_default()
         };
         let wss = MogwaiExecClientConfig {
             base_url: "wss://example.test:9443".into(),
-            ..MogwaiExecClientConfig::default()
+            ..MogwaiExecClientConfig::test_default()
         };
 
         assert!(ws.validate().is_ok());
@@ -460,11 +600,11 @@ mod tests {
         // inside the reconnect loop.
         let data = MogwaiDataClientConfig {
             base_url: "  ws://example.test:8787  ".into(),
-            ..MogwaiDataClientConfig::default()
+            ..MogwaiDataClientConfig::test_default()
         };
         let exec = MogwaiExecClientConfig {
             base_url: "\twss://example.test:9443\n".into(),
-            ..MogwaiExecClientConfig::default()
+            ..MogwaiExecClientConfig::test_default()
         };
 
         assert!(data.validate().is_ok());
@@ -492,7 +632,7 @@ mod tests {
                 server: vec![divergence],
                 ..HavocSpec::default()
             }),
-            ..MogwaiExecClientConfig::default()
+            ..MogwaiExecClientConfig::test_default()
         };
 
         // The full deliverability matrix. A window a carrier cannot pass is a
@@ -618,7 +758,7 @@ mod tests {
                 server: vec![Divergence::GoDark { ms: 100 }],
                 ..HavocSpec::default()
             }),
-            ..MogwaiDataClientConfig::default()
+            ..MogwaiDataClientConfig::test_default()
         };
         assert!(data.validate().is_err());
     }

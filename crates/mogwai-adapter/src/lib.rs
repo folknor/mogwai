@@ -21,7 +21,7 @@ mod lifecycle;
 
 pub use client::{MogwaiDataClient, MogwaiExecutionClient};
 pub use clock::{MogwaiClock, mogwai_clock_factory};
-pub use config::{MogwaiDataClientConfig, MogwaiExecClientConfig};
+pub use config::{MogwaiDataClientConfig, MogwaiExecClientConfig, UNSET_ACCOUNT_ID};
 pub use factories::{MogwaiDataClientFactory, MogwaiExecutionClientFactory};
 
 /// The canonical MOGWAI venue identifier, single-sourced so a future rename

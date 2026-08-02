@@ -2557,7 +2557,7 @@ mod tests {
     use super::*;
 
     fn execution_client() -> MogwaiExecutionClient {
-        execution_client_with_config(MogwaiExecClientConfig::default())
+        execution_client_with_config(MogwaiExecClientConfig::test_default())
     }
 
     fn execution_client_with_config(config: MogwaiExecClientConfig) -> MogwaiExecutionClient {
@@ -2681,7 +2681,7 @@ mod tests {
         tokio::sync::mpsc::UnboundedReceiver<ExecutionEvent>,
     ) {
         let (tx, rx) = unbounded_channel();
-        let config = MogwaiExecClientConfig::default();
+        let config = MogwaiExecClientConfig::test_default();
         let mut emitter = ExecutionEventEmitter::new(
             get_atomic_clock_realtime(),
             config.trader_id,
@@ -2993,7 +2993,7 @@ mod tests {
     async fn http_orders_dispatch_does_not_require_ws_channel() {
         let client = execution_client_with_config(MogwaiExecClientConfig {
             transport_profile: TransportProfile::HttpOrders,
-            ..MogwaiExecClientConfig::default()
+            ..MogwaiExecClientConfig::test_default()
         });
 
         client
@@ -4144,7 +4144,7 @@ mod tests {
                 },
                 ..HavocSpec::default()
             }),
-            ..MogwaiExecClientConfig::default()
+            ..MogwaiExecClientConfig::test_default()
         });
         let (tx, mut rx) = unbounded_channel();
         client.emitter.set_sender(tx);

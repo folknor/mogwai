@@ -115,6 +115,9 @@ async fn connect_data_client(
     replace_data_event_sender(sink_tx);
 
     let config = MogwaiDataClientConfig {
+        // Stated, not defaulted: the default is a placeholder the validator
+        // refuses, so no socket binds an account nobody chose.
+        account_id: AccountId::from("MOGWAI-001"),
         base_url,
         havoc,
         ..MogwaiDataClientConfig::default()
@@ -184,6 +187,7 @@ async fn submit_exec_client(
     let cache = Rc::new(RefCell::new(Cache::default()));
     let order = cached_order(&cache);
     let config = MogwaiExecClientConfig {
+        account_id: AccountId::from("MOGWAI-001"),
         base_url,
         ..MogwaiExecClientConfig::default()
     };
@@ -241,6 +245,7 @@ async fn ships_server_havoc() {
 
     let cache = Rc::new(RefCell::new(Cache::default()));
     let exec_config = MogwaiExecClientConfig {
+        account_id: AccountId::from("MOGWAI-001"),
         base_url: base_url.clone(),
         transport_profile: TransportProfile::HttpOrders,
         havoc: Some(havoc.clone()),
@@ -730,6 +735,7 @@ async fn conn_http_request_timeout_rejects_order() {
             request_timeout_secs: 1,
             ..ConnHavoc::default()
         })),
+        account_id: AccountId::from("MOGWAI-001"),
         ..MogwaiExecClientConfig::default()
     };
     let core = ExecutionClientCore::new(

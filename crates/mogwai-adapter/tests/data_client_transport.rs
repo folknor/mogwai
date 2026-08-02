@@ -44,7 +44,7 @@ use nautilus_core::{UUID4, UnixNanos};
 use nautilus_model::{
     data::Data,
     enums::AggressorSide,
-    identifiers::ClientId,
+    identifiers::{AccountId, ClientId},
     types::{Price, Quantity},
 };
 use tokio::sync::mpsc::unbounded_channel;
@@ -80,6 +80,10 @@ async fn subscribe_and_request_drive_data_events() {
     replace_data_event_sender(sink_tx);
 
     let config = MogwaiDataClientConfig {
+        // Stated, not defaulted: `account_id` defaults to a placeholder the
+        // validator refuses, so a data socket can never bind an account nobody
+        // chose (which is how it silently diverged from its exec sibling).
+        account_id: AccountId::from("MOGWAI-001"),
         base_url,
         ..MogwaiDataClientConfig::default()
     };
@@ -175,6 +179,7 @@ async fn http_polling_subscribe_fetches_trades_without_ws() {
     replace_data_event_sender(sink_tx);
 
     let config = MogwaiDataClientConfig {
+        account_id: AccountId::from("MOGWAI-001"),
         base_url,
         transport_profile: TransportProfile::HttpPolling,
         ..MogwaiDataClientConfig::default()
@@ -261,6 +266,10 @@ async fn failed_history_fetch_still_answers_the_request() {
     replace_data_event_sender(sink_tx);
 
     let config = MogwaiDataClientConfig {
+        // Stated, not defaulted: `account_id` defaults to a placeholder the
+        // validator refuses, so a data socket can never bind an account nobody
+        // chose (which is how it silently diverged from its exec sibling).
+        account_id: AccountId::from("MOGWAI-001"),
         base_url,
         ..MogwaiDataClientConfig::default()
     };
@@ -347,6 +356,10 @@ async fn off_tape_window_still_answers_the_request() {
     replace_data_event_sender(sink_tx);
 
     let config = MogwaiDataClientConfig {
+        // Stated, not defaulted: `account_id` defaults to a placeholder the
+        // validator refuses, so a data socket can never bind an account nobody
+        // chose (which is how it silently diverged from its exec sibling).
+        account_id: AccountId::from("MOGWAI-001"),
         base_url,
         ..MogwaiDataClientConfig::default()
     };

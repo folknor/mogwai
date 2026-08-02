@@ -2104,7 +2104,7 @@ mod data_client_tests {
     fn data_client() -> MogwaiDataClient {
         MogwaiDataClient::new(
             ClientId::from("MOGWAI-DATA"),
-            MogwaiDataClientConfig::default(),
+            MogwaiDataClientConfig::test_default(),
         )
         .expect("valid data client")
     }
@@ -2114,7 +2114,7 @@ mod data_client_tests {
             ClientId::from("MOGWAI-DATA"),
             MogwaiDataClientConfig {
                 transport_profile: TransportProfile::HttpPolling,
-                ..MogwaiDataClientConfig::default()
+                ..MogwaiDataClientConfig::test_default()
             },
         )
         .expect("valid polling data client")
@@ -2309,7 +2309,7 @@ mod data_client_tests {
                     data: Some(MarketRegime::LiquidityDrought { thin_factor: 5.0 }),
                     ..HavocSpec::default()
                 }),
-                ..MogwaiDataClientConfig::default()
+                ..MogwaiDataClientConfig::test_default()
             },
         )
         .expect("valid data client");

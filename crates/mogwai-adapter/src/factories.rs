@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn mogwai_data_factory_creates_client_with_client_id() {
         let factory = MogwaiDataClientFactory::new();
-        let config = MogwaiDataClientConfig::default();
+        let config = MogwaiDataClientConfig::test_default();
         let cache = cache();
         let clock = Rc::new(RefCell::new(TestClock::new()));
 
@@ -221,7 +221,7 @@ mod tests {
         let factory = MogwaiExecutionClientFactory::new();
         let config = MogwaiExecClientConfig {
             trader_id: TraderId::from("MOGWAI-001"),
-            ..Default::default()
+            ..MogwaiExecClientConfig::test_default()
         };
         let cache = cache();
 
@@ -242,7 +242,7 @@ mod tests {
         let factory = MogwaiExecutionClientFactory::new();
         let config = MogwaiExecClientConfig {
             oms_type: OmsType::Hedging,
-            ..Default::default()
+            ..MogwaiExecClientConfig::test_default()
         };
         let cache = cache();
 
@@ -288,7 +288,7 @@ mod tests {
         let data_factory = MogwaiDataClientFactory::new();
         let data_config = MogwaiDataClientConfig {
             base_url: "   ".to_string(),
-            ..MogwaiDataClientConfig::default()
+            ..MogwaiDataClientConfig::test_default()
         };
         let cache = cache();
         let clock = Rc::new(RefCell::new(TestClock::new()));
@@ -303,7 +303,7 @@ mod tests {
         let exec_factory = MogwaiExecutionClientFactory::new();
         let exec_config = MogwaiExecClientConfig {
             base_url: String::new(),
-            ..Default::default()
+            ..MogwaiExecClientConfig::test_default()
         };
         let exec_err = match exec_factory.create("MOGWAI-TEST", &exec_config, cache.into()) {
             Ok(_) => panic!("execution factory accepted empty base_url"),
@@ -337,7 +337,7 @@ mod tests {
             base_url: "ws://example.invalid:9999".to_string(),
             transport_profile: TransportProfile::HttpOrders,
             havoc: Some(havoc_spec()),
-            ..Default::default()
+            ..MogwaiExecClientConfig::test_default()
         };
         let exec_json =
             serde_json::to_string(&exec_config).expect("serialize execution client config");
@@ -358,7 +358,7 @@ mod tests {
     fn data_client_config_round_trips_account_id() {
         let config = MogwaiDataClientConfig {
             account_id: AccountId::from("WYRD-042:BTCUSDT"),
-            ..Default::default()
+            ..MogwaiDataClientConfig::test_default()
         };
         let decoded: MogwaiDataClientConfig =
             serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
@@ -387,6 +387,16 @@ mod tests {
         assert_eq!(exec.account_type, defaults.account_type);
         assert_eq!(exec.transport_profile, TransportProfile::WsStreaming);
         assert_eq!(exec.havoc, None);
+
+        // `account_id` is the one field the fill CANNOT supply a usable value
+        // for - it names which venue account slot the socket binds to, and the
+        // data and execution legs of a session must name the same one. The fill
+        // therefore hands back the placeholder, and validation refuses it, so a
+        // config document that omits the account is a startup error rather than
+        // a socket quietly bound to somebody else's account.
+        assert_eq!(data.account_id.as_ref(), crate::UNSET_ACCOUNT_ID);
+        assert_eq!(exec.account_id.as_ref(), crate::UNSET_ACCOUNT_ID);
+        assert!(exec.validate().is_err());
     }
 
     #[test]
@@ -404,7 +414,7 @@ mod tests {
                 data: None,
                 conn: Default::default(),
             }),
-            ..MogwaiDataClientConfig::default()
+            ..MogwaiDataClientConfig::test_default()
         };
 
         let data_err =
@@ -425,7 +435,7 @@ mod tests {
                 data: None,
                 conn: Default::default(),
             }),
-            ..MogwaiExecClientConfig::default()
+            ..MogwaiExecClientConfig::test_default()
         };
         let exec_err = match exec_factory.create("MOGWAI-TEST", &exec_config, cache.into()) {
             Ok(_) => panic!("execution factory accepted invalid havoc probability"),
@@ -446,7 +456,7 @@ mod tests {
                 data: Some(MarketRegime::LiquidityDrought { thin_factor: 0.5 }),
                 ..HavocSpec::default()
             }),
-            ..MogwaiDataClientConfig::default()
+            ..MogwaiDataClientConfig::test_default()
         };
 
         let data_err =
@@ -462,7 +472,7 @@ mod tests {
                 data: Some(MarketRegime::VolStorm { vol_mult: 0.0 }),
                 ..HavocSpec::default()
             }),
-            ..MogwaiExecClientConfig::default()
+            ..MogwaiExecClientConfig::test_default()
         };
         let exec_err = match exec_factory.create("MOGWAI-TEST", &exec_config, cache.into()) {
             Ok(_) => panic!("execution factory accepted invalid data regime"),
@@ -486,7 +496,7 @@ mod tests {
                 },
                 ..HavocSpec::default()
             }),
-            ..MogwaiDataClientConfig::default()
+            ..MogwaiDataClientConfig::test_default()
         };
 
         let data_err =
@@ -505,7 +515,7 @@ mod tests {
                 },
                 ..HavocSpec::default()
             }),
-            ..MogwaiExecClientConfig::default()
+            ..MogwaiExecClientConfig::test_default()
         };
         let exec_err = match exec_factory.create("MOGWAI-TEST", &exec_config, cache.into()) {
             Ok(_) => panic!("execution factory accepted invalid connection havoc"),
