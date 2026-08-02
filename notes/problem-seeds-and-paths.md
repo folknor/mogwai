@@ -72,29 +72,72 @@ Two things fall out of that and are not in tension with it:
 
 ## What must be decided
 
-1. **What sets `data_origin` once it is off the wall clock.** It is part of tape
-   identity and every history request is bounded by it. Candidates are a config
-   value, a function of the seed, or a fixed epoch. `wall_anchor_ns` already
-   exists to pin the anchor so restarts land on the same axis, so some machinery
-   is there.
-2. **Seed granularity.** One seed per run, per instrument, or per subscription.
-   Today it is per symbol via FNV. If a run holds several instruments, they must
-   be decorrelated from one run seed without collisions - deriving per-symbol
-   seeds from (run seed, symbol) is the obvious approach and its independence
-   properties should be stated rather than assumed.
-3. **What counts as an independent path**, and whether independence is checked
-   or asserted. Seed alone, or seed plus origin, or seed plus session phase.
-4. **Where the run reports itself.** A `/run` endpoint, a field on `/clock`, a
-   structured log line at startup - and whether the adapter propagates it into
-   nautilus so a consumer captures it without scraping. The adapter half lives
-   in this repo; the capture half does not.
-5. **What else belongs in that record.** Seed and epoch at minimum. Arguably
-   also the effective instrument profiles, the fingerprint version, the armed
-   havoc and the binary version - at which point it is a run manifest rather
-   than a seed report, and the question is whether to build one. Add to that
-   list the two knobs the lifecycle document settled: the run's declared
-   DURATION and its declared WARMUP, both of which change what tape a strategy
-   saw and neither of which is recoverable from the seed.
+ALL FIVE ARE SETTLED by the user. They are recorded as rulings rather than as
+questions, and a spec descending from this document implements them rather than
+re-deriving them. Where a ruling made a question meaningless rather than
+answering it, that is said plainly.
+
+1. ~~**What sets `data_origin` once it is off the wall clock.**~~ SETTLED: a
+   FIXED EPOCH AT ZERO. The tape begins at `0 - warmup_ns`, reaches 0 at the
+   instant the run proper begins, and proceeds either indefinitely or until the
+   configured duration is met. `sim_epoch_ns` already defaults to 0, so this is
+   the DELETION of the wall-derived origin rather than the addition of a new
+   mechanism, and `wall_anchor_ns` goes with it.
+
+   The drafting concern that a fixed epoch starts every run in the same session
+   shape was raised and dismissed, correctly: forward tests always run
+   accelerated, so a run of any useful length sweeps every hour of the day
+   regardless of where it starts.
+2. ~~**Seed granularity.**~~ SETTLED: ONE SEED PER RUN, and at the end state
+   per-run is synonymous with per-boot and per-instance. Everything derives from
+   it WITHOUT EXCEPTION - the tape generator and the fill band's draw stream
+   alike. It is global, random per launch, and overridable in config.
+
+   Two thirds of the original question died with the lifecycle landing rather
+   than being answered: one instance serves one instrument and subscriptions no
+   longer exist, so there is nothing to decorrelate and the per-symbol FNV
+   derivation now hashes a constant. What survives is the derivation discipline:
+   the fill band's stream must stay separate from the generator's, because
+   drawing the band from the generator's stream would advance it and make the
+   tape a function of how many orders the client placed. Separate STREAMS, one
+   SEED.
+3. ~~**What counts as an independent path**, and whether independence is checked
+   or asserted.~~ SETTLED, and the question was largely meaningless once 1 and 2
+   landed: with the origin constant and one seed feeding every stream, two runs
+   differing only in seed are two draws from the same process. Independence is
+   ASSERTED by construction and nothing verifies it. Nothing could: fire and
+   forget means no state outlives a run, so a duplicate seed across two
+   concurrent instances is undetectable by design, and ensuring distinct seeds
+   across a fleet belongs to whatever launches them.
+4. ~~**Where the run reports itself.**~~ SETTLED: the READINESS RECORD ONLY. No
+   `/run` endpoint, no field on `/clock`, no propagation into nautilus. The
+   launcher started the run and allocated its endpoint, so it is both the thing
+   that needs the seed and the thing attaching provenance to a result; a wire
+   surface would let a client read a value it has no use for, since the strategy
+   is not what makes the claim. The record already exists and already carries a
+   staged seed field.
+5. ~~**What else belongs in that record.**~~ SETTLED, and NOT as a manifest. The
+   record carries the seed; what makes two runs comparable BEYOND the seed is a
+   single TAPE GENERATOR PROTOCOL VERSION constant, exposed through the CLI's
+   `--version` output. The operator records it, and a bump tells them new runs
+   are not equivalent to their old ones.
+
+   Rejected in favour of it: giving the fingerprint an identity (version, corpus,
+   era, fit date) and reporting instrument configuration, binary version and
+   armed havoc in the record. The version constant answers the same question -
+   would this reproduce - at a fraction of the surface.
+
+   The honest limit: nothing can detect that a generator constant changed while
+   the version did not. Bumping it is a discipline, and a discipline needs to be
+   visible where the change is made rather than only where the constant lives.
+
+   So `AGENTS.md` MUST reference this constant by name and state the obligation
+   outright: any code change that affects tape determinism has to bump it. A doc
+   comment at the definition is not sufficient and is not the deliverable - the
+   person changing an ACD constant, a GARCH parameter, the fingerprint, or any
+   part of the generation path is not reading the version constant's own
+   comment. `AGENTS.md` is what they do read, so that is where the rule binds.
+   The comment at the definition stays as well, pointing back at it.
 6. ~~**Whether a restarted venue resumes its path.**~~ CLOSED by the user. There
    is no restart and no resume - mogwai is fire and forget, and an instance that
    dies is gone. Reproducing a path means launching a NEW instance with the same
