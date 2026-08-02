@@ -29,6 +29,111 @@ import statistics
 HERE = os.path.dirname(__file__)
 ANCHOR = "XBTUSD"
 
+LEVEL_DOC = (
+    "AT-TOUCH TRADED VOLUME per level visit, era-windowed, expressed as a "
+    "multiple of the same era's median trade size. NOT book depth and NOT "
+    "queue position: cancelled liquidity is invisible so the number is "
+    "deflated, liquidity that joined the level mid-visit is counted so it is "
+    "also inflated, and the corpus has no aggressor side so buy- and "
+    "sell-initiated flow at one price are summed together."
+)
+# The four proceed conditions a trades-only queue-ahead fill model would have
+# had to clear before it could claim its queue quantity was fitted rather than
+# chosen. Each is a reading of the numbers in this same block, recomputed on
+# every regeneration so the verdict cannot drift away from the measurement.
+LEVEL_CONDITIONS = (
+    ("single_print_frac <= 0.50", "a strict majority of level visits carry "
+     "more than one print, so visit volume is a real quantity and not a "
+     "restatement of the trade-size distribution"),
+    ("vol_dispersion >= 3.0", "the volume distribution has genuine dispersion, "
+     "so a draw from it is not a constant in disguise"),
+    ("vol_dispersion >= 1.5 * size_dispersion", "that dispersion exceeds the "
+     "trade-size dispersion it could have been inherited from"),
+    ("anchor single_print_frac within 1.5x of the cross-pair median",
+     "the anchor is not the outlier a model would have been fitted to"),
+)
+
+
+def level_verdict(level, single_fracs):
+    """Evaluate the four proceed conditions against the anchor's measurement."""
+    median = statistics.median(single_fracs)
+    held = (
+        level["single_print_frac"] <= 0.50,
+        level["vol_dispersion"] >= 3.0,
+        level["vol_dispersion"] >= 1.5 * level["size_dispersion"],
+        median / 1.5 <= level["single_print_frac"] <= median * 1.5,
+    )
+    failed = [test for (test, _why), ok in zip(LEVEL_CONDITIONS, held) if not ok]
+    return {
+        "proceed": all(held),
+        "conditions": [
+            {"test": test, "why": why, "held": ok}
+            for (test, why), ok in zip(LEVEL_CONDITIONS, held)
+        ],
+        "failed": failed,
+        "single_print_frac_cross_pair_median": median,
+    }
+
+
+def level_queue(anchor, reports):
+    """Promote the at-touch level-visit measurement into a golden target.
+
+    Refuses rather than degrades. A report without a `level` block was written
+    by a characterization pass older than the measurement, and quietly dropping
+    it - or dropping the whole target - would put a cross-pair band on the
+    record that some pairs never contributed to, or leave the measurement out
+    of the fingerprint entirely with nothing said about it. Both hide a stale
+    `char_<PAIR>.json`, which is the one failure this measurement cannot
+    survive: the proceed/close verdict is read off the anchor's numbers.
+    """
+    stale = sorted(pair for pair, report in reports.items() if "level" not in report)
+    if stale:
+        raise ValueError(
+            "char_<PAIR>.json predates the level measurement, re-run "
+            f"run_corpus.py for: {', '.join(stale)}")
+    levels = [report["level"] for report in reports.values()]
+    binning = {key: anchor["level"][key] for key in ("bin_lo", "bin_hi", "bins_per_decade")}
+    if any({key: level[key] for key in binning} != binning for level in levels):
+        raise ValueError("level histogram binning differs across pairs")
+    level = anchor["level"]
+    total = sum(level["vol_hist"])
+    if not total or not level["size_median"]:
+        raise ValueError("anchor has no usable level visits")
+    support = [
+        binning["bin_lo"] * 10 ** ((index + 0.5) / binning["bins_per_decade"])
+        / level["size_median"]
+        for index in range(len(level["vol_hist"]))
+    ]
+    verdict = level_verdict(level, [x["single_print_frac"] for x in levels])
+    if verdict["proceed"]:
+        reading = (
+            " All four proceed conditions hold, so the queue-ahead fill model "
+            "may sample support_norm/pmf as an inverse CDF; single_print_frac "
+            "is the credibility reading its landing was judged against.")
+    else:
+        reading = (
+            " VERDICT: DECLINED. RFC 4631 phase B is refused in full - "
+            f"{', '.join(verdict['failed'])} does not hold on the anchor "
+            f"(single_print_frac {level['single_print_frac']:.6f}, "
+            f"vol_dispersion {level['vol_dispersion']:.6f}, "
+            f"size_dispersion {level['size_dispersion']:.6f}), so a "
+            "trades-only queue-ahead quantity would be a free parameter "
+            "dressed in a histogram. Nothing samples support_norm/pmf; they "
+            "are kept as the durable corpus fact the refusal was read off.")
+    return {
+        "era_start_ts": level["era_start_ts"],
+        "_doc": LEVEL_DOC + reading,
+        "single_print_frac": {"anchor": level["single_print_frac"], "range": rng([x["single_print_frac"] for x in levels])},
+        "vol_p50_norm": {"anchor": level["vol_p50_norm"], "range": rng([x["vol_p50_norm"] for x in levels])},
+        "vol_p90_norm": {"anchor": level["vol_p90_norm"], "range": rng([x["vol_p90_norm"] for x in levels])},
+        "vol_dispersion": {"anchor": level["vol_dispersion"], "range": rng([x["vol_dispersion"] for x in levels])},
+        "size_dispersion": {"anchor": level["size_dispersion"], "range": rng([x["size_dispersion"] for x in levels])},
+        "verdict": verdict,
+        "binning": binning,
+        "support_norm": support,
+        "pmf": [count / total for count in level["vol_hist"]],
+    }
+
 
 def load_reports():
     reps = {}
@@ -107,6 +212,7 @@ def main():
     abs50 = [r["returns"]["abs_acf"][49] for r in reps.values()]
     zchg = [r["returns"]["zero_change_frac"] for r in reps.values()]
     dwell = [r["duration"]["dwell"] for r in reps.values()]
+    queue = level_queue(anchor, reps)
 
     fingerprint = {
         "source": {
@@ -171,6 +277,7 @@ def main():
                 [r["size"]["round_frac"] for r in reps.values()]),
         },
     }
+    fingerprint["golden_targets"]["level_queue"] = queue
 
     out = os.path.join(HERE, "fingerprint.json")
     with open(out, "w") as f:

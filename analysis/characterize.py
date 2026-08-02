@@ -35,6 +35,115 @@ DWELL_LOG_BINS = 160
 DWELL_LOG_LO_S = 1.0
 DWELL_LOG_HI_S = 604_800.0
 TICK_DICT_CAP = 500_000  # bound the distinct-increment counter
+LVL_LOG_LO = 1e-6
+LVL_LOG_HI = 1e6
+LVL_PER_DEC = 10
+LVL_BINS = 120
+
+
+def lvl_bin(value):
+    """Regular log bin for era-windowed level-visit volumes and sizes."""
+    if value < LVL_LOG_LO:
+        return 0
+    bucket = int(math.floor(math.log10(value / LVL_LOG_LO) * LVL_PER_DEC))
+    return min(LVL_BINS - 1, max(0, bucket))
+
+
+def histogram_quantile(hist, q):
+    """Geometric bin-centre quantile for the level histogram."""
+    total = sum(hist)
+    if total == 0:
+        return None
+    threshold = math.ceil(q * total)
+    cumulative = 0
+    for index, count in enumerate(hist):
+        cumulative += count
+        if cumulative >= threshold:
+            return LVL_LOG_LO * 10 ** ((index + 0.5) / LVL_PER_DEC)
+    raise AssertionError("histogram quantile did not find a bin")
+
+
+class LevelVisits:
+    """Streaming O(1) accumulator of at-touch traded volume per level visit.
+
+    A level VISIT is a maximal run of consecutive prints at one price, and its
+    summed size is how much the market traded at that price before the price
+    moved off it. That estimand is AT-TOUCH TRADED VOLUME, not book depth and
+    not a queue position: liquidity that was cancelled rather than traded is
+    invisible so the number is deflated, liquidity that joined the level
+    mid-visit is traded and counted so it is also inflated, and a trades-only
+    corpus has no aggressor side so buy- and sell-initiated flow at one price
+    are summed together.
+
+    Both accumulators are windowed on the same modern era as the dwell
+    statistics, so the visit volumes and the trade sizes that normalize them
+    share one window and one binning. A visit is binned only if it OPENED in
+    era, so a visit straddling the boundary is dropped entirely rather than
+    contributing a truncated volume. The file is time-ordered, so a visit can
+    cross the boundary at most once.
+    """
+
+    def __init__(self, era_start_ts=DWELL_ERA_START_TS):
+        self.era_start_ts = era_start_ts
+        self.px = None
+        self.vol = 0.0
+        self.n = 0
+        self.open_ok = False
+        self.vol_hist = [0] * LVL_BINS
+        self.n_hist = [0] * 12  # 1,2,...,10, 11-20, 21+ prints per visit
+        self.count = 0
+        self.single = 0
+        self.size_hist = [0] * LVL_BINS  # era-windowed sizes, the normalizer
+
+    @staticmethod
+    def n_bin(prints):
+        if prints <= 10:
+            return prints - 1
+        return 10 if prints <= 20 else 11
+
+    def push(self, ts, px, sz):
+        if ts >= self.era_start_ts and sz > 0:
+            self.size_hist[lvl_bin(sz)] += 1
+        if px == self.px:
+            self.vol += sz
+            self.n += 1
+        else:
+            self.close()
+            self.px = px
+            self.vol = sz
+            self.n = 1
+            self.open_ok = ts >= self.era_start_ts
+
+    def close(self):
+        """Bin the open visit. Called on every price change and once at EOF."""
+        if self.px is None or not self.open_ok:
+            return
+        self.vol_hist[lvl_bin(self.vol)] += 1
+        self.n_hist[self.n_bin(self.n)] += 1
+        self.count += 1
+        self.single += int(self.n == 1)
+        self.open_ok = False  # binned once, even if close() is called again
+
+    def report(self):
+        size_p50 = histogram_quantile(self.size_hist, 0.5)
+        size_p90 = histogram_quantile(self.size_hist, 0.9)
+        vol_p50 = histogram_quantile(self.vol_hist, 0.5)
+        vol_p90 = histogram_quantile(self.vol_hist, 0.9)
+        return {
+            "era_start_ts": self.era_start_ts,
+            "n_visits": self.count,
+            "single_print_frac": self.single / self.count if self.count else None,
+            "bin_lo": LVL_LOG_LO,
+            "bin_hi": LVL_LOG_HI,
+            "bins_per_decade": LVL_PER_DEC,
+            "vol_hist": self.vol_hist,
+            "n_hist": self.n_hist,
+            "size_median": size_p50,
+            "vol_p50_norm": vol_p50 / size_p50 if vol_p50 and size_p50 else None,
+            "vol_p90_norm": vol_p90 / size_p50 if vol_p90 and size_p50 else None,
+            "vol_dispersion": vol_p90 / vol_p50 if vol_p90 and vol_p50 else None,
+            "size_dispersion": size_p90 / size_p50 if size_p90 and size_p50 else None,
+        }
 
 
 class AutoCorr:
@@ -159,6 +268,7 @@ def characterize(path):
     size_log_hist = [0] * 30
     size_dec_hist = [0] * 9  # size significant decimals 0..8+
     size_n = 0
+    visits = LevelVisits()
 
     sess_count = [[0] * 7 for _ in range(24)]
     sess_sumsq_ret = [[0.0] * 7 for _ in range(24)]
@@ -187,6 +297,8 @@ def characterize(path):
 
             if ts >= DWELL_ERA_START_TS:
                 dwell_seen_hours.add(int(ts) // 3600)
+
+            visits.push(ts, px, sz)
 
             tsec = int(ts)
             hour = (tsec // 3600) % 24
@@ -244,6 +356,8 @@ def characterize(path):
 
             prev_ts = ts
             prev_px = px
+
+    visits.close()
 
     # modal tick + low percentiles of the nonzero increment
     modal_tick = tick_p10 = tick_p50 = None
@@ -337,6 +451,7 @@ def characterize(path):
                 sum(size_dec_hist[:3]) / size_n if size_n else None
             ),  # <=2 decimals
         },
+        "level": visits.report(),
         "session": {
             "count_hour_dow": sess_count,
             "sumsq_ret_hour_dow": sess_sumsq_ret,

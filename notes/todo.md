@@ -104,44 +104,18 @@ Or both. There are no exceptions.
   not taken here: the venue says clearly what happened, what the consumer does
   with that is the consumer's call.
 
-- DECIDE, then write up and delete this entry: how much of RFC 4631's phase B
-  (shared queue position) mogwai can honestly build. The RFC asks for a FIFO
-  per price level accounting for all resting liquidity, public book included.
-  That full shape is REFUSED here and the refusal is the point: there is no L2
-  anywhere in this project's lineage - the offline corpus is trades only, the
-  committed fingerprint is fitted to trades, and the engine holds no book at
-  all - so a synthesized depth ladder would be INVENTED microstructure shipped
-  under a banner of fitted realism, which is the exact failure the fingerprint
-  discipline exists to prevent. What may be salvageable, and is what this item
-  must decide: a trades-only queue-AHEAD model, where a resting order records
-  the cumulative traded volume at or through its price since it rested and only
-  fills once that volume exceeds a modeled quantity queued ahead of it. That
-  needs no book, only the trade tape mogwai already synthesizes - and the
-  counting primitive is now built: `mogwai-server/src/fills.rs`'s
-  `count_penetrations` walks one symbol's clean tape per pass against a set of
-  resting-order predicates, so a queue-ahead model would add a volume
-  accumulator to an existing walk rather than a new one. It
-  captures the property phase B actually cares about (your order is not first
-  in line) while making no claim about depth it cannot support. Open question
-  is whether the queue-ahead quantity can be grounded in the fingerprint or
-  would itself be a free parameter, which is the same credibility test the
-  refusal above applies - if it is a free parameter, decline it too and say so.
-
-- After the queue-ahead decision above lands (the penetration gate has landed):
-  Criterion
-  benches on the fill path, and golden-file fill distributions if and only if
-  fills have become stochastic.
-  RFC 4631's phase D. The benches are cheap and can land any time, guarding the
-  fill hot path against a silent throughput regression as the gates above make
-  it fatter. The golden fill CDFs are NOT meaningful yet and must not be built
-  first: while a fill is a deterministic fraction of the order's own quantity
-  there is no distribution to snapshot, so the artifact would pin a constant and
-  read as coverage. They become worth building once penetration gating (and a
-  queue-ahead model, if it survives its decision) makes the fill outcome depend
-  on the tape - which, as of the penetration gate, they now do whenever
-  `penetration_ticks > 0`: a fill's timing is a function of the tape, so a
-  golden fill distribution has become a meaningful artifact for a gated
-  configuration.
+- RFC 4631 phase D: Criterion benches on the fill path, and golden-file fill
+  distributions. The benches are cheap and can land any time, guarding the fill
+  hot path against a silent throughput regression as the gates above make it
+  fatter. The golden fill CDFs needed a fill outcome that depends on the tape,
+  and the penetration gate supplies one: whenever `penetration_ticks > 0` a
+  fill's TIMING is a function of the tape, so a golden fill distribution is a
+  meaningful artifact for a gated configuration rather than a constant pinned
+  as coverage. That unblocking is now final - the queue-ahead model that would
+  also have made fills tape-dependent was measured and refused
+  (`reference/architecture.md`, "Fills are synthetic"), so the gated
+  penetration config is the only shape these CDFs will ever have to cover, and
+  they can be built against it without waiting on anything.
 
 - DECIDE: does `analysis/` deserve a test harness? Surfaced 2026-08-02 landing
   the drought elimination. The dwell statistics are computed TWICE against the
@@ -151,12 +125,18 @@ Or both. There are no exceptions.
   bucket conventions ever drift (inclusive end boundary, the era-start ceiling,
   which trade closes a gap) the gate silently compares two different quantities
   and still passes. The Rust side has a fixture pinning the convention; the
-  Python side has none, because the repo has no Python test runner at all - the
-  Rust fixture names `dwell_stats` as the counterpart it must match, which is
-  the cheapest honest mitigation and not a real pin. Adding a runner for four
-  analysis scripts is a project-shape decision, not a local fix: it buys this
-  guard and the offline lineage's other unpinned assumptions, at the cost of a
-  second test toolchain in a workspace whose gate is `brokkr check`.
+  dwell convention on the Python side still has none - the Rust fixture names
+  `dwell_stats` as the counterpart it must match, which is the cheapest honest
+  mitigation and not a real pin. The "no Python test runner at all" half of
+  this is now stale: the queue-ahead measurement landed
+  `analysis/test_characterize.py` plus an `analysis/__init__.py`, runnable as
+  `python3 -m unittest discover -s analysis -t .` with no dependency beyond the
+  stdlib, because a verdict was being read off an untested estimator. That is a
+  bridgehead, not the decision. What is still open: whether that runner becomes
+  the standing one (versus pytest), whether it joins `brokkr check` or stays a
+  manual step, and whether the existing analysis code - `dwell_stats` first -
+  gets retrofitted onto it. Adding a second test toolchain to a workspace whose
+  gate is `brokkr check` is a project-shape call, not a local fix.
 
 ## Notes / gotchas
 

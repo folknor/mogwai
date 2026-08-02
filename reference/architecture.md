@@ -124,6 +124,32 @@ sockets, timers and the clock; the engine owns order and account state.
   order price, not the penetrating trade price. An account-owned sweeper books
   those fills even without a websocket; delivery to connected sessions is best
   effort and reconciliation remains the venue truth.
+  **RFC 4631 phase B is refused in full, and the refusal is measured, not
+  intuited.** Its shared per-level FIFO needs an L2 book, and there is no L2
+  anywhere in this project's lineage - the corpus is trades only, the
+  fingerprint is fitted to trades, `/quotes` is always empty and the engine
+  holds no book - so a synthesized depth ladder would be invented
+  microstructure shipped under a banner of fitted realism. The one salvage
+  worth measuring was a trades-only queue-AHEAD substitute: a resting limit
+  fills once enough volume has printed AT its price, with the queued quantity
+  drawn from the corpus rather than chosen. Its estimand is AT-TOUCH TRADED
+  VOLUME PER LEVEL VISIT - the summed size of a maximal run of consecutive
+  prints at one price - which is NOT book depth and NOT a queue position:
+  cancelled liquidity is invisible so it is deflated, liquidity joining the
+  level mid-visit is counted so it is also inflated, and a trades-only corpus
+  has no aggressor side so buy- and sell-initiated flow at one price are summed
+  together. `analysis/characterize.py` measures it in its existing streaming
+  pass and `build_fingerprint.py` promotes it to
+  `golden_targets.level_queue`, whose `verdict` block records the reading. The
+  modern-era XBTUSD tape gives a `single_print_frac` of 0.690855, i.e. 69
+  percent of level visits are a lone print, against a ceiling of 0.50 - so the
+  measured quantity is a restatement of the trade-size distribution and the
+  queued quantity would have been a free parameter dressed in a histogram. The
+  measurement stays as a durable corpus fact; no queue-ahead execution
+  semantics are shipped, and a fill's only tape-dependent gate is the
+  penetration count above. Draws-per-order independence, per-side queues,
+  aggressor-filtered consumption and cancellation modeling are refused with it,
+  not deferred.
 - **Submit validation.** Before a submit is accepted it is range-checked the same
   way an amend is: empty or duplicate `client_order_id`, an unknown instrument, a
   non-positive quantity or price, a missing price, and a quantity or price off
