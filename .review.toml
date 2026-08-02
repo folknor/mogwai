@@ -50,6 +50,11 @@ model = "gpt-5.6-terra"
 effort = "medium"
 sandbox = "workspace-write"
 
+[plantasjen.codex.quick]
+model = "gpt-5.6-sol"
+effort = "low"
+sandbox = "workspace-write"
+
 [bygg.codex.deep]
 model = "gpt-5.6-sol"
 effort = "xhigh"
@@ -58,6 +63,11 @@ sandbox = "read-only"
 [bygg.codex.build]
 model = "gpt-5.6-terra"
 effort = "medium"
+sandbox = "workspace-write"
+
+[bygg.codex.quick]
+model = "gpt-5.6-sol"
+effort = "low"
 sandbox = "workspace-write"
 
 [_audit]
