@@ -110,7 +110,18 @@ Or both. There are no exceptions.
   naming a successor, and that debt is real and belongs to whichever spec
   descends from it.
 
-  - `notes/problem-server-lifecycle.md` - mogwai is one long-lived service and
+  - `notes/problem-server-lifecycle.md` - **RESOLVED, awaiting a spec.** All
+    seven decisions are settled; four DISSOLVED rather than being answered, once
+    the reasoning started from the end state rather than from the current code.
+    The venue is a separate process started by the run launcher, not embedded
+    and not adapter-spawned; nothing identifies an instance because nothing
+    looks one up; the launcher knows the endpoint it allocated, so only a
+    readiness record survives; death is the launcher or the declared duration;
+    `serve` and `gen` survive, `stop` and `man` go. The one an implementer is
+    most likely to get wrong: the multi-TENANT machinery goes, while the LAG
+    machinery STAYS, because a real venue's clock does not wait for its
+    consumer and disconnecting one that falls behind is fidelity rather than
+    arbitration. The problem it resolved: mogwai is one long-lived service and
     the workload is hundreds of disposable instances. Nothing allocates a port,
     discovers one, or cleans one up, so concurrent forward tests collide today
     and were hand-serialized during the 2026-08-02 session. Also the root of the

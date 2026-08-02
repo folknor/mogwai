@@ -164,58 +164,98 @@ Resource cost is out of scope per the user. These are not cost:
 - **`MAX_HISTORY_SEEK_TICKS` (190,000) against a 24 h `backfill_horizon_ns`.**
   At any cadence worth targeting the seek budget stops reaching the start of the
   window a client is permitted to request, so the venue silently serves less
-  history than it advertises.
+  history than it advertises. Closed by the declared-warmup ruling above: the
+  cap is a latency bound on LAZY history, and eager generation at boot leaves it
+  nothing to protect.
 - **`mogwai.log`, `mogwai.pid` and `mogwai.toml` are cwd-relative.** Concurrent
-  runs in one tree collide on all three.
+  runs in one tree collide on all three. The PID file and the config read stop
+  existing under the resolution below - the launcher holds the handle and
+  supplies the config - so the log is the only artifact that still needs a
+  per-run home, and choosing it is the operator's problem.
 - **Attributability**, if the venue is ever embedded in the consumer's process:
   a venue-side stall and a strategy-side stall sharing one worker pool become
   indistinguishable, and the fixture stops measuring what it exists to measure.
-  This is a fidelity property, not a performance one.
+  This is a fidelity property, not a performance one, and it is the argument
+  that settled decision 1.
 
-## What must be decided
+## RESOLVED
 
-1. **Subprocess or embedded.** A subprocess spawned by the adapter keeps the
-   process boundary that makes venue stalls attributable, needs no library
-   extraction, and dies with its parent through a held pipe. Embedding removes
-   the spawn entirely but requires `mogwai-server` to gain a lib target. An
-   earlier draft sized that job at "~758 non-test lines in `main.rs`", which is
-   an accurate count and a misleading scope: `main.rs` does carry 759 lines
-   before its test module, but the crate is roughly 14,900 lines across 13
-   modules (`ws.rs`, `http.rs`, `source.rs`, `gen.rs`, `admission.rs`, `tape.rs`,
-   `config.rs` and the rest). The extraction scope is the crate's module graph,
-   not one file. Embedding also raises the attributability question above. An
-   assessment of embedding exists in the 2026-08-02 session record; its
-   conclusion was feasible and mechanical, with two genuinely open sub-questions
-   - who owns the venue when two clients share it, and the runtime coupling.
-2. **What identifies an instance.** Evidence that this is load-bearing rather
-   than tidy-minded: the data client silently defaulted to `MOGWAI-001` and
-   bound a different account slot than its own exec socket, which mogwai fixed
-   by refusing an unset account. That fix makes disagreement LOUD; it does not
-   make it impossible, because the two clients still have no structural link and
-   agreement is still a convention each side keeps. Given nautilus builds a DATA
-   client and an
-   EXECUTION client from two independent factories that share no state. One
-   venue per PAIR is required; the pairing has no representation today, and the
-   `account_id` both clients now must state (as of the 2026-08-02 fix) is the
-   obvious candidate key.
-3. **How the venue and its client find each other** without a fixed port.
-   `127.0.0.1:8787` is currently hardcoded independently in three places: the
-   server's `--addr` default, the adapter's `DEFAULT_BASE_URL`, and the smoke
-   harness.
-4. **What guarantees death.** A parent killed with SIGKILL leaves a child
-   reparented and running on Linux. The venue's lifetime must be tied to the
-   parent PROCESS rather than to connection state - the adapter reconnects by
-   design, so exiting when the last socket closes would make a transport blip
-   fatal.
-5. **Which parts of the CLI survive.** `serve` and `stop` are the serving half.
-   `gen` dumps the offline generator to CSV and is what `analysis/plot_tape.py`
-   drives for charting; `man` renders bundled reference docs. Neither serves a
-   client.
-6. **What happens to the multi-consumer machinery** - accounts, reaping, caps,
-   tape arbitration. Some is vestigial under one instance per run; some is still
-   load-bearing because one client has two sockets and many subscriptions.
-7. **How the test surface adapts.** Every smoke scenario starts a server out of
-   band on a fixed port and says so in its module doc.
+All of it. This document is settled and ready for a spec. The list below was
+seven open decisions; four of them DISSOLVED rather than being answered, which
+is the characteristic result of reasoning from the end state instead of from the
+shape of the current code. Read the dissolutions carefully - a spec author who
+re-derives these questions from today's implementation will re-invent machinery
+that has no reason to exist.
+
+1. **A separate process, started by the run launcher.** Not embedded, and not
+   spawned by the adapter either. Separate because the process boundary is what
+   makes a venue-side stall distinguishable from a strategy-side one, and under
+   mandatory acceleration a busy venue and a busy strategy sharing a tokio
+   executor would contend for threads continuously - so embedding does not merely
+   risk the attributability property, it forfeits it. Whoever launches the run
+   launches the venue: it is not the adapter's job, and a library holding a child
+   process inside someone else's node is a worse owner than the thing that owns
+   the run.
+
+2. ~~**What identifies an instance.**~~ DISSOLVED. Nothing does, because nothing
+   is looking one up. An instance is a process with an endpoint; the launcher
+   created it, so the launcher holds the handle and knows the endpoint. There is
+   no namespace, no registry and no key to agree on. The account follows: one
+   instance means one ledger, so the account name identifies nothing and every
+   instance may use the same literal. It stops being a key and becomes a label.
+
+   Recorded so it is not re-derived: this question existed because two nautilus
+   factories build the DATA and EXECUTION clients independently, share no state,
+   and both must reach the same venue - which is what produced the `MOGWAI-001`
+   misbinding. That pairing is a coordination problem ONLY if the adapter spawns
+   the venue. When the launcher creates it first and writes the endpoint into
+   both configs, both clients are told rather than discovering, and the two
+   nautilus clients remain two objects without being two decisions.
+
+3. ~~**How the venue and its client find each other.**~~ DISSOLVED with 2. A
+   launcher that allocates the port knows the port. What survives is not a
+   rendezvous protocol but a readiness record: with an ephemeral port the venue
+   must report its endpoint back to whoever started it, over an inherited
+   channel, which is also the signal that it is ready to serve. The three
+   independently hardcoded copies of `127.0.0.1:8787` all go.
+
+4. **Death has exactly two causes.** The launcher kills it, or it reaches its
+   declared run duration and stops itself. Nothing else ends a venue - not the
+   last socket closing, since the adapter reconnects by design and a transport
+   blip must not be fatal. Where the process artifacts live is the operator's
+   problem, in the same class as choosing an extreme warmup.
+
+5. **`serve` and `gen` survive; `stop` and `man` go.** `serve` runs in the
+   foreground and does not daemonize, because a launcher wants a child it owns.
+   `stop` has nothing to stop once the launcher holds the handle. `gen` survives
+   on its own merits as the offline tape dump, and matters more than it used to,
+   since the repository owner IS the realism gate and generated tapes are what
+   they inspect. `man` renders bundled docs for an audience that reads files
+   directly.
+
+6. **The multi-TENANT machinery goes; the LAG machinery stays.** This split is
+   the one an implementer is most likely to get wrong, because both halves look
+   like the same "one process serving many" apparatus and they are not.
+
+   Gone, because there are no strangers: accounts as a namespace, implicit
+   creation on first unknown header, `max_accounts`, the idle reaper, account
+   deletion over HTTP, and arbitration between consumers who do not know each
+   other.
+
+   STAYS, because it is FIDELITY rather than tenancy: the bounded fanout ring,
+   the lag policy, and killing a connection that falls behind. A real venue's
+   clock does not wait for anyone - the market runs whether or not you are
+   watching the DOM, and real exchanges disconnect slow consumers. A venue that
+   paced itself to its consumer would be an in-process backtest sandbox with
+   extra steps, which is precisely what this project exists not to be. So the sim
+   clock advances on wall clock times speed, unconditionally; the venue never
+   pulls, never waits and never acknowledges; and a consumer that cannot keep up
+   gets disconnected. That a strategy cannot keep up with the tape is a real
+   finding a forward test SHOULD surface.
+
+7. ~~**How the test surface adapts.**~~ NOT A DECISION AT THIS LAYER. It
+   resolves per implementation commit, the same layer error the acceptance
+   paragraph in `notes/todo.md` made.
 
 ## What this document does not decide
 
