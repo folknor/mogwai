@@ -22,8 +22,14 @@ document resolves first; this one is written assuming its answer.
 
 Looking at the generated tape the user said there are still way too few trades
 in some places, and asked what an active crypto pair actually does per second
-on a weekday - the answer being roughly 1-5 trades/sec on a mid-tier venue and
-tens per second on Binance, against the 0.14/sec mogwai produces. They want the
+on a weekday - the answer given at the time being roughly 1-5 trades/sec on a
+mid-tier venue and tens per second on Binance, against the 0.14/sec mogwai
+produces. The Binance half of that was subsequently measured and is the table
+below. The MID-TIER half is RECOLLECTION and stays unmeasured: no mid-tier
+corpus exists in this project, Kraken being the only non-Binance data held and
+its whole-second timestamps unable to express sub-second arrival structure at
+all. Nothing in this document is sized off the 1-5 figure, so it is kept as the
+framing that started the question rather than as evidence. They want the
 default tape to look like a real active instrument rather than a thin one, they
 consider the Kraken lineage incidental (it was an easy place to get a lot of
 data, not a claim about which venue mogwai is), and they expect this to want
@@ -78,9 +84,15 @@ of it is committed and a fresh clone has none of it. Roughly 1.5 GB:
   TradingView export window, which is how the cross-validation above was done.
 - `{BTCUSDT,ETHUSDT,SOLUSDT}-aggTrades-2026-06.zip` - trade-level, June only.
   BTC 498 MB, ETH 466 MB, SOL 91 MB.
-- `BINANCE_BTCUSDT, 15S_*.csv` and `CME_MINI_MNQ1!, 15S_*.csv` - hand-exported
-  from TradingView, 15-second OHLCV. The CME file is the only non-crypto data
-  currently held and the only source for a futures session envelope.
+- `BINANCE_BTCUSDT, 15S_*.csv`, `CME_MINI_MNQ1!, 15S_*.csv` and
+  `CME_MINI_MES1!, 15S_*.csv` - hand-exported from TradingView, 15-second OHLCV.
+  The two CME files are the only non-crypto data held and the only source for a
+  futures session envelope. Both span 2026-07-27 to 2026-07-31, roughly 22,000
+  bars each: FIVE DAYS, one partial week. That span limit binds harder than the
+  format limit for the questions the instrument model asks - a week contains no
+  holiday, no early close, no DST transition and no contract roll, which are
+  exactly the four things its session-fidelity and continuous-versus-dated
+  decisions need evidence for.
 
 **How to get more.** `research/binance-public-data/` is a vendored checkout of
 Binance's own downloader. Its scripts need `pandas`, which is not installed
@@ -160,11 +172,19 @@ fact about venues. An earlier draft asserted that no venue publishes raw fills
 individually; Binance's spot `@trade` stream does exactly that, and nautilus
 makes raw-versus-aggregated ticks configurable in its Binance integration.
 
-The collapse from aggTrades to match events is not a modelling choice - it is
-recovering what the exchange actually did. Binance stamps every fill of one
-match event with a single `transact_time`, so 55.5% of consecutive BTC
-aggTrades share a timestamp. At 13 trades/sec, microsecond collisions cannot
-happen by chance; they are the signature of a taker sweeping several makers.
+The collapse from aggTrades to match events is close to recovering what the
+exchange actually did, and an earlier draft of this paragraph called it exactly
+that - "not a modelling choice". That overstates it, and `notes/problem-order-book.md`
+states the caveat correctly where this document dropped it: Binance documents an
+aggTrade as the aggregation of fills for one taker order, but does not guarantee
+that a shared timestamp identifies one order across price levels, and there is
+no taker-order id in the data. So the grouping is strong INFERENCE, not
+identification. Binance stamps every fill of one match event with a single
+`transact_time`, and 55.5% of consecutive BTC aggTrades share a timestamp. At 13.2 aggTrades/sec against microsecond
+resolution, two independent arrivals collide with probability about 1.3e-5 per
+adjacent pair - four orders of magnitude below the 55.5% observed - so the
+collisions are the signature of a taker sweeping several makers rather than
+chance.
 
 A `TradeTick` on this venue is one print at one price with one size. Which layer
 the emitted tape corresponds to is the feed-contract half of the question, and
@@ -215,8 +235,19 @@ instrument's price gives a new instrument a defensible size from two numbers
 already known, with no fit.
 
 Consequence: mogwai's current tape is wrong in BOTH factors and they partly
-cancel. Trades are ~20x too large and ~350x too rare, so volume is only ~17x
-low. Anyone checking volume alone would under-read the defect.
+cancel. Trades are far too large and ~350x too rare, so volume is low by much
+less than either factor alone, and anyone checking volume alone would under-read
+the defect.
+
+CORRECTED, and the correction is one this document raises three paragraphs
+below and then failed to apply here. An earlier draft said ~20x too large and
+~17x low volume, computed against `typical_size = 0.1`. But the generator takes
+`typical_size` as the lognormal MEDIAN and `SIZE_LOG_SIGMA = 1.15`, so the
+generated MEAN size is `0.1 * exp(1.15^2 / 2)`, about 0.194 BTC - roughly 39x
+Binance's measured mean of 0.00492 BTC, not 20x. Volume is correspondingly about
+9x low rather than 17x: 0.14/sec times 0.194 is 0.027 BTC/sec against Binance's
+0.244. The defect in cadence is unchanged; the size defect is twice as large as
+stated and the volume gap half as large.
 
 Three things the "notional over price" proposal leaves open, all of which a
 spec would have to pin. WHICH price - the generated mid drifts, and the anchor
@@ -244,8 +275,16 @@ have nothing to do with the arrival shape. Measured, same data, both forms:
 | `var / mean` (committed units) | 36.28 | 0.79 | 1.85 |
 | `var / mean^2` (dimensionless) | 12.64 | 4.62 | 3.57 |
 
-The 41x difference between Kraken and Binance in the committed units is
-ENTIRELY cadence.
+CORRECTED. An earlier draft said the difference between Kraken and Binance in
+the committed units was 41x and "ENTIRELY cadence". Its own table refutes both
+halves: 36.28 / 0.79 is 45.9, not 41, and it decomposes into two factors rather
+than one. About 16.8x of it is mean-gap scale (2.871 / 0.171), which is the
+units problem this section is about. The remaining ~2.74x (12.64 / 4.62) is a
+genuinely different dimensionless SHAPE - Kraken's arrivals cluster harder than
+Binance's even after the units are removed, though the whole-second quantisation
+finding below is a live alternative explanation for that residue. The point the
+section exists to make survives intact: the band is scale-dependent and will
+fail mechanically on any rescale. It is just not the whole story.
 
 ## The fitted corpus cannot see the cadence being targeted
 
@@ -272,6 +311,19 @@ COMMITTED fitted target, the one the drought retune was tuned against on
 2026-08-02 - collapses to 0.0012 when same-second trades are treated as one
 arrival. That target is measuring how trades clump inside a one-second bucket,
 not how arrivals cluster in time.
+
+**And the blast radius is wider than the two anchors named above.** An earlier
+draft scoped this to `duration_acf` lag1 and the dispersion band. But the
+committed `duration_acf_anchor` is a TEN-LAG VECTOR, not one number, and
+`return_acf_lag1` (-0.197), the three `abs_return_acf` lags and
+`zero_change_frac` (0.474) are all computed PER PRINT over a corpus where 61.1%
+of consecutive prints share a whole-second stamp. `return_acf_lag1` in
+particular is read as a bid-ask-bounce signature, which is a claim about
+intra-second print ORDERING - and the corpus cannot order within a second. If
+same-second bucketing is an artefact it is an artefact for all of these, so the
+inventory of gates that survive a cadence change is smaller than this document
+previously implied. Establishing which of them are measuring the bucket rather
+than the market is spec-level work and has not been done.
 
 At today's cadence this is survivable: a 7.19 s mean gap sits well above the
 quantum, so the fitted process operates in a range the data can describe. At
@@ -349,8 +401,34 @@ The consequences are already visible in the code's own vocabulary: a websocket
 subscribe can report `SeekBudgetExhausted`, and an HTTP history request can turn
 an exhausted seek into an EMPTY SUCCESSFUL response - a venue silently serving
 less history than it advertises, which is a lie about the data rather than a
-slowdown. Whether `MAX_HISTORY_SEEK_TICKS` at 190,000 against a 24 h horizon is
-adequate at the target density is a measurement nobody has taken.
+slowdown.
+
+RESOLVED by the lifecycle document, and recorded here because this document
+raised it. The seek budget is a LATENCY bound on the request path, not a memory
+bound: history is never retained, and a request for past data re-synthesizes it
+from the nearest checkpoint, so 190,000 ticks is sized in `source.rs` against
+measured synthesis throughput of ~1.9M ticks/sec to fit a ~100 ms request
+budget. Under a DECLARED warmup duration the venue knows at boot how much tape
+it owes and generates it eagerly, so no client request needs a long seek and the
+cap has nothing left to protect. The user's ruling is that warmup length is
+their decision, not the venue's. What survives into the spec is the SHAPE of the
+startup cost rather than a single number, because the number depends on decision
+1 above and swings 8.5x across its candidate answers. A two-year warmup at the
+match-event rate is roughly 368 million ticks, about 3 minutes at the measured
+~1.9M ticks/sec; at the aggTrade rate roughly 830 million and ~7 minutes; at the
+raw-fill rate roughly 3.2 billion and ~28 minutes. An earlier draft quoted only
+the last of those as if the layer were settled. Separately, the checkpoint index
+retains one generator clone per `CHECKPOINT_K` ticks, so checkpoint spacing
+rather than the seek cap is the knob that trades memory against seek latency.
+Neither is a reason to cap the request; both belong in the spec so an extreme
+warmup fails loudly rather than mysteriously.
+
+**Acceleration is a premise, and it is a correctness bound rather than a cost.**
+Forward tests always run accelerated. A denser tape multiplies the work per unit
+of WALL time at any given speed, and the adapter's `MIN_WALL_REQUEST_TIMEOUT_SECS`
+of 1 is flagged in its own comment as the tightest cap on usable sim speed. A
+request that times out is a failed run, not a slow one, so this sits outside the
+resource-cost exclusion below and the spec has to price it.
 
 An earlier draft also claimed a truncated `SWEEP_DRAIN_BUDGET` pass returns
 `complete: false` and stalls the scan frontier. There is no such field. A

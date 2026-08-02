@@ -27,8 +27,15 @@ venue to stop being the reason a real strategy shape is untestable.
 
 `mogwai-adapter` refuses every conditional order type at conversion, with
 `SUBMIT_FAILED: unsupported order type <T>`, and the bridge fails closed rather
-than trading unprotected. The refusal itself is correct given a bookless venue:
-a stop has nothing to rest against and no trigger to watch.
+than trading unprotected. Failing closed is correct. An earlier draft went
+further and called the REFUSAL itself correct "given a bookless venue", on the
+grounds that a stop has nothing to rest against and no trigger to watch. That is
+too strong, and this document refutes it below: a stop can trigger from TRADED
+prices, which is what the penetration gate already does, and the account-owned
+sweeper is already the loop a trigger needs. What a bookless venue genuinely
+lacks is a defensible FILL after the trigger, not the trigger. So the refusal is
+a defensible response to an unsolved fill problem rather than a necessary
+consequence of having no book.
 
 `reference/architecture.md` already records the consequence in full, and states
 it as a documented coverage hole rather than pending work:
@@ -105,10 +112,17 @@ market order to the venue when the trigger fires. Several of its own adapters
 set it. That would make protective stops testable with no protocol growth and no
 book at all.
 
-It is probably the wrong answer here - the venue then never sees the protective
-leg, so no havoc can delay, drop or reject it, and exercising the live path is
-the entire reason this venue exists. But it is a real option and it should be
-rejected in writing rather than left unmentioned.
+It is probably the wrong answer here, but the reason needs stating precisely
+because an earlier draft overstated it. The claim was that under emulation "no
+havoc can delay, drop or reject it". That is false: the emulator releases a
+MARKET order when the trigger fires, and havoc reaches that order, its ack and
+its fill exactly as it reaches any other. What emulation puts beyond havoc's
+reach is the venue-side RESTING and TRIGGERING behaviour specifically - the
+protective leg never exists at the venue, so nothing can delay its acceptance,
+reject it on arrival, drop it while it rests, or fire it late. Since exercising
+the live path is the entire reason this venue exists, that is still a real loss,
+and it is the loss to argue from. The option should be rejected in writing on
+those grounds rather than left unmentioned.
 
 ## What a stop needs that does not exist
 
@@ -124,11 +138,18 @@ rejected in writing rather than left unmentioned.
   needs.
 - **A defensible fill after the trigger.** A triggered stop-market becomes a
   market order, and a bookless venue fills market orders at their own submitted
-  price - which for a stop is meaningless. Real stops slip, and the sweep tail
-  measured in the sibling document (up to 2,213 prints in one match event on
-  BTC) is exactly the event that produces the slippage. Without a book there is
-  no principled price to fill at; with only top-of-book there is a price but no
-  depth to walk.
+  price - which for a stop is meaningless. Real stops slip. The sweep tail
+  measured in the sibling document (up to 2,213 aggTrade ROWS in one match event
+  on BTC) is the plausible mechanism, but note what that number is and is not: it
+  counts rows, not distinct prices, so it does not yet establish how far a
+  marketable order actually walks. The quantity that would - price SPAN per
+  inferred match event - has not been measured, and the same missing number is
+  what `notes/problem-order-book.md` needs to choose between its A3 and A4. One
+  probe extension over archives already on disk answers both. Resolve it at the
+  spec level, whichever of the two specs is written first; until then, treat the
+  slippage magnitude here as an unquantified mechanism rather than a measured
+  one. Without a book there is no principled price to fill at; with only
+  top-of-book there is a price but no depth to walk.
 
 ## What must be decided
 

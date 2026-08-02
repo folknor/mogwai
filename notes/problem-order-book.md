@@ -30,9 +30,11 @@ we need a book. The immediate motivations are that the instruments they trade
 this venue cannot accept at all; that the sweep structure visible in the data
 is unrepresentable without levels; and that several refusals already on record
 - queue position, quote-based fills - were refusals for want of depth rather
-than for want of desire. What is NOT settled is how much book: whether client
-orders should merely be TRIGGERED by book state, or should REST in it and be
-consumed by arriving flow.
+than for want of desire. What is NOT settled is how much book - specifically,
+what exists for a client order to match AGAINST, which is axis A below. Whether
+client orders rest or merely trigger IS settled (they rest: axis B, option 3);
+an earlier version of this paragraph listed that as open, contradicting the
+axis B section further down.
 
 ## The observation
 
@@ -83,6 +85,16 @@ rows, not distinct prices, and has never verified the latter. "One taker swept
 2,213 levels" is unsupported by this measurement; establishing it needs distinct
 price count, price span and side consistency per inferred event.
 
+That measurement is a SHARED dependency, not a local gap. Price span per
+inferred match event is simultaneously the depth-shape quantity this document
+needs to choose between A3 and A4, and the slippage quantity
+`notes/problem-refused-order-types.md` needs for its decision 3 (what a
+triggered market order fills at). Both documents currently assert conclusions
+that only this number can support. It is an extension to a probe that already
+groups events, over archives already on disk, so it is the cheapest open
+measurement in the set by a wide margin. Resolving it belongs at the spec
+level, whichever of the two specs is written first.
+
 **The last row is a different quantity and it inverts the story for SOL.** SOL
 is 98.6% single-ROW while still averaging 6.4 raw fills per event, which means
 many makers at ONE price - depth at a level rather than breadth across levels.
@@ -91,9 +103,13 @@ would get SOL badly wrong, and depth-per-level is exactly the quantity
 queue-ahead was refused for want of.
 
 **And the grouping is inferred, not identified.** The probe groups aggTrades
-that share a microsecond timestamp. That is strong evidence of one match event -
-at these rates a chance collision is essentially impossible - but there is no
-taker-order id in the data, so a group is a hypothesis rather than a fact.
+that share a microsecond timestamp. That is strong evidence of one match event,
+and the arithmetic is worth stating rather than asserting: at 13.2 aggTrades per
+second against microsecond resolution, two independent arrivals share a
+microsecond with probability about 1.3e-5 per adjacent pair, against 55.5%
+observed on BTC. Four orders of magnitude separate the coincidence hypothesis
+from the observation. But there is no taker-order id in the data, so a group
+remains a hypothesis rather than a fact.
 
 ## Two independent axes, not one spectrum
 
@@ -113,6 +129,24 @@ choices, and conflating them hid that "fitted depth" is not an alternative to
    data, though NOT through the downloader vendored at
    `research/binance-public-data/` - its python directory carries aggTrade,
    trade and kline only, so acquiring it is unscoped work.
+5. Fitted top of book: a GROUNDED variant of 2, listed last so the A1-A4
+   labels used elsewhere keep their meaning. Take best bid and ask from a
+   bookTicker corpus rather than deriving a synthetic quote from the trade
+   tape. Top-of-book data is structurally simpler than full depth diffs - best
+   bid and ask updates, not a ladder with replenishment and cancellation
+   dynamics - so it is the cheapest way to stop the SPREAD being a declared
+   quantity.
+
+   TWO CORRECTIONS to an earlier draft of this entry, both of which overstated
+   it. First, this is NOT "one archive fetch": Binance's public-data
+   documentation lists spot trades, aggTrades and klines, and does NOT list a
+   historical spot bookTicker or depth archive, so sourcing it is unscoped work
+   and may mean live collection, a licensed corpus, or accepting a futures
+   corpus with the venue and asset-class mismatch that implies. Second, it does
+   NOT reduce the declared surface to "one parameter". Top of book still leaves
+   queue priority, hidden liquidity, replenishment, cancellation, order-size
+   dependence and adverse selection unobserved. It shrinks what must be
+   declared; it does not shrink it to one thing.
 
 **Axis B, execution semantics: what happens to a client order.**
 
@@ -145,9 +179,59 @@ rewrite.
 
 What that inherits is a grounding obligation. A fill probability chosen from
 nowhere is invented microstructure with better manners, which is the objection
-that closed queue-ahead. The difference is that fill outcomes are in principle
-measurable from trade data in a way resting depth is not, so grounding may be
-reachable here where it was not there. Whether it actually is, is open.
+that closed queue-ahead.
+
+An earlier draft answered that obligation by claiming fill outcomes are in
+principle measurable from trade data in a way resting depth is not, so grounding
+may be reachable here where it was not there. That claim does not survive
+scrutiny in its strong form, and a spec author should not inherit it. **What
+trade data constrains is an upper bound on fill, not a fill.** From trades alone
+you recover how far price traded through a level and how much volume arrived
+there. What you cannot recover is how much of that volume was AHEAD of your
+order in the queue, and that fraction is exactly what decides whether your
+resting order filled. There is no taker-order id, no maker id, and no depth, so
+nothing in the corpus distinguishes a level that traded 100 units with you first
+in line from the same level with you last.
+
+So the probabilistic model does not escape the queue-ahead objection. It
+RANDOMIZES it: an invented deterministic queue position is replaced by an
+invented distribution over queue positions. That may well be the right trade,
+and it is defensible under this project's own standard - a declared model is
+acceptable if it says so - but it is a different claim from "grounding may be
+reachable", and the difference is the whole honesty question. The residual free
+parameter is the queue-ahead fraction, and it is DECLARED rather than fitted
+unless something else grounds it.
+
+Option A5 above is what could ground part of it. bookTicker gives real best bid
+and ask, so the spread and the top-of-book dynamics stop being assumed, and the
+declared surface shrinks from a whole fill model to one parameter.
+
+**Effort asymmetry, since the natural objection is that this research is harder
+than just building the book.** It is not, and the reason is that A4's research
+is a SUPERSET of A2's rather than an alternative to it. A4 needs everything A2
+needs, plus a depth corpus (full L2 diff streams are tens of GB per month per
+symbol, against roughly 500 MB for a month of aggTrades), plus a fitted
+limit-order-book model - ladder shape, replenishment, cancellation - which is
+strictly harder statistics than a fill probability rather than easier, plus
+price-time-priority matching in the engine, plus the determinism break this
+document's cost section already names as the sharpest technical risk.
+
+The decisive difference is termination. A2 can END at "here is the model, here
+is what grounds each parameter, here is which one is declared", which is a
+finite research session. A4 has no comparable stopping point, because the reason
+to acquire depth data is to stop declaring things, so every unfitted assumption
+reads as unfinished work. Stated as an absolute - "A4 cannot terminate because
+nothing may be declared" - that is a methodological assertion rather than a
+fact, and it is false in the strong form: every fitted book model retains
+assumptions and declared boundaries too. The defensible version is about
+EXPECTATION, not possibility. The honest counterweight remains that A2 has no
+ground truth, so its model can be stated but never verified, while A4 is
+expensive and checkable.
+
+**This is not resolved here and should not be.** It is genuinely probability and
+statistics work and it warrants its own research session, ahead of any spec.
+What this document fixes is the terms: the bound above, the declared residual,
+and A5 as the option that shrinks it.
 
 One correction an earlier draft got wrong: stops do NOT simply fall out of
 matching. A conditional order normally sits outside the visible book until its
@@ -156,25 +240,39 @@ sophisticated the matching is.
 
 ## What must be decided
 
-1. **Which point on axis A.** A2 with a probabilistic allocation model, A3 with
-   a generated ladder, or A4 with fitted depth. A2 is the cheapest and the user
-   has argued it is sufficient; A3 is the one that reintroduces invented
-   microstructure; A4 needs a book corpus that does not exist here and cannot be
-   fetched with the vendored downloader.
-2. **How the allocation model is grounded.** Under A2 this is the whole
+1. **Which point on axis A.** A2 with a probabilistic allocation model, A5 with
+   the same model over a bookTicker-fitted top of book, A3 with a generated
+   ladder, or A4 with fitted depth. A2 is the cheapest and the user has argued
+   it is sufficient; A5 grounds the spread and shrinks - but does not eliminate
+   - what A2 must declare, at the cost of sourcing a top-of-book corpus that is
+   NOT in Binance's public archive; A3 is the one that reintroduces invented
+   microstructure; A4 needs
+   a book corpus that does not exist here and cannot be fetched with the
+   vendored downloader.
+2. **How the allocation model is grounded.** Under A2 or A5 this is the whole
    question: what determines fill probability and partial quantity from
    penetration depth and arriving volume, and whether those parameters are
-   measured from trade data, fitted, or declared. A declared model is
-   acceptable if it says so; an unlabelled one is the queue-ahead failure again.
+   measured, fitted, or declared. Per the bound established above the queue-ahead
+   fraction cannot be measured from trades at all, so the realistic question is
+   how small the declared surface can be made rather than whether one exists. A
+   declared model is acceptable if it says so; an unlabelled one is the
+   queue-ahead failure again. THIS IS A RESEARCH SESSION IN ITS OWN RIGHT and
+   precedes the spec.
 3. **What reaches the wire.** Whether the book is internal only or exposed -
    whether `/quotes` finally fills in, whether the protocol grows snapshots or
    deltas, and what a consumer may subscribe to. A matching venue and a public
    depth feed are separate deliverables and only the first is implied by B3.
-4. **Whether client fills join the public tape.** If a client's fill prints, two
-   instances at the same seed diverge the moment either trades, which changes
-   what a path is (`notes/problem-seeds-and-paths.md`) and what determinism
-   means. If it does not print, the client is trading against a market that
-   cannot see it.
+4. ~~**Whether client fills join the public tape.**~~ CLOSED by the user. They
+   do NOT print. The reasoning is not a weighing of the two sides but an
+   exclusion: the tape must be a deterministic function of (config, seed), and a
+   client fill on the public tape makes it a function of client behaviour
+   instead. The consequence the open version of this decision raised stands and
+   is simply accepted - the client trades against a market that cannot see it,
+   which is what a PRICE-TAKER simulator means. The same ruling excludes market
+   impact generally: a client order of any size moves nothing, not as a
+   simplification to be bounded by a participation limit, but because impact is
+   incompatible with the determinism contract. State it in the spec so a
+   consumer knows the venue makes no claim about size-dependent execution.
 5. **Whether determinism-given-identical-client-input replaces byte-identical
    determinism** as the contract. Today the generator is a pure function of its
    state and the checkpointed seek depends on it. A book that client orders

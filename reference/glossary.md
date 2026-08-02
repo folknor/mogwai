@@ -14,8 +14,9 @@ recorded as a term that three documents use three ways. The open discrepancies
 are collected at the end, and each is cited from the term it belongs to.
 
 `reference/` is durable and citable from source, so this file is binding as a
-description. It is not binding as a design: nothing here decides the open scope
-question in `notes/problem-per-consumer-scope.md`.
+description. It is not binding as a design: nothing here decides any open scope
+question, and where a transient planning document disagrees with this file about
+what the code does, this file wins and that document is describing an intent.
 
 ## The identity chain, as the code actually builds it
 
@@ -187,10 +188,9 @@ At least five unrelated referents, three of them in the venue itself:
   `HttpPolling`, the adapter's transport archetype.
 - **`reference/config.md`'s "instrument profile"**: the `[[instrument]]` TOML
   table, and "the built-in BTCUSDT profile" for the default.
-- **A named, pre-registered preset** with per-knob overrides, which is what
-  `notes/problem-instrument-profiles.md` asks for and what
-  `notes/problem-per-consumer-scope.md` reasons about. No such thing exists in
-  the code.
+- **A named, pre-registered preset** with per-knob overrides. No such thing
+  exists in the code; the sense is in circulation because it is what planning
+  work has asked for.
 
 Outside the venue the word is also a `.review.toml` model tier and a brokkr gate
 profile. See D7.
@@ -293,8 +293,8 @@ Has NO referent in the code. `mogwai-server`, `mogwai-engine`,
 `mogwai-protocol` and `mogwai-data` contain no user concept, no user id, and no
 authentication of any kind. The `reference/` documents say **operator** for the
 human who writes `mogwai.toml` and runs the binary, and the surviving
-occurrences of "user" are "user-facing" and "user config". In
-`notes/problem-per-consumer-scope.md` "user" means that human. See D18.
+occurrences of "user" are "user-facing" and "user config". Transient planning
+documents use "user" for that same human. See D18.
 
 ### venue
 
@@ -323,9 +323,8 @@ should be discarded. See D13, D14.
 Observed facts, deliberately unresolved. Each is a candidate work item; none is
 a recommendation.
 
-**D1. "strategy" has no object here.** `notes/problem-instrument-profiles.md`
-and `notes/problem-per-consumer-scope.md` both ask for a knob "set per
-strategy". mogwai has no strategy identity on the wire or in any crate outside
+**D1. "strategy" has no object here.** Planning work has repeatedly asked for a
+knob "set per strategy". mogwai has no strategy identity on the wire or in any crate outside
 `mogwai-adapter`'s nautilus-facing internals. Broadarrow maps N strategies onto
 one account by a convention written down nowhere in this repo, so mogwai cannot
 distinguish them even in principle today.
@@ -365,12 +364,20 @@ otherwise.** `research/broadarrow/reference/mogwai.md` states that `mogwai_data`
 builds a config "with NO account identity (keyless)" and that
 `register_mogwai_forward` registers both clients "using the worker's
 already-resolved `trader_id` and `account_id`". In the code
-`MogwaiDataClientConfig` carries an `account_id` defaulting to `MOGWAI-001`,
-`ws_url` appends it as `?account=`, and broadarrow's `applied_data_config` never
-sets it. So a forward run's data socket binds a DIFFERENT account slot than its
-exec socket: it auto-creates `MOGWAI-001`, counts a session against it, and
-charges it against `max_accounts`. More generally, mogwai requires an account on
-`/ws` even for a market-data-only socket that touches no ledger.
+`MogwaiDataClientConfig` carries an `account_id` and `ws_url` appends it as
+`?account=`, while broadarrow's `applied_data_config` never sets it.
+
+The mogwai-side half of this is FIXED and the entry is kept for the broadarrow
+half. Both configs now default `account_id` to the `UNSET_ACCOUNT_ID`
+placeholder (`MOGWAI-UNSET`) and `validate_account_id` REFUSES a config that
+still carries it, so an omitted account is a loud failure rather than a silent
+default. Previously it defaulted to `MOGWAI-001`, which made an omitted
+`account_id` indistinguishable from a deliberate one: a forward run's data
+socket bound a DIFFERENT account slot than its exec socket, auto-creating
+`MOGWAI-001`, counting a session against it and charging it against
+`max_accounts`. What remains true regardless: mogwai requires an account on
+`/ws` even for a market-data-only socket that touches no ledger, and
+broadarrow's own reference still describes the data client as keyless.
 
 **D7. "profile" has five referents**, three of them live in the venue
 (`InstrumentProfile`, `SessionProfile`, `TransportProfile`), one is the config
@@ -383,8 +390,7 @@ realization of the synthesized walk. The sweeper's "clean tape" walk and a
 subscription's private backfill are the second sense and never touch the first.
 
 **D9. "tape identity" has no code identifier.** It is
-`reference/architecture.md`'s and `notes/problem-review-r2.md`'s name for
-`TapeKey`. Recorded as an alias, not a distinct concept.
+`reference/architecture.md`'s name for `TapeKey`. Recorded as an alias, not a distinct concept.
 
 **D10. "subscriber" and "subscription" are not distinguished.** They name the
 same object from two ends. Nothing in the code assigns a subscriber an identity
@@ -394,9 +400,9 @@ enter `TapeKey`.
 
 **D11. "account" carries four jobs at once**: the ledger key, the tenant key a
 socket is bound to, the blast radius of armed divergences, and the nautilus
-`AccountId` the exec client presents. `notes/problem-per-consumer-scope.md`
-observes that an account is a LEDGER and that two strategies sharing a ledger is
-a different thing from two sharing a data profile.
+`AccountId` the exec client presents. Worth separating, because an account is
+first a LEDGER, and two strategies sharing a ledger is a different thing from
+two sharing a data profile.
 
 **D12. Account scope is not uniform.** Divergences are per-account; `[balances]`
 is explicitly not, and `reference/config.md` states "funding is not

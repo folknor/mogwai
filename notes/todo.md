@@ -15,9 +15,38 @@ Or both. There are no exceptions.
 - PROBLEM STATEMENTS. **This is the solvable set of problems we believe will
   get mogwai to the end state the user needs.** That is a claim rather than an
   inventory: each entry is believed NECESSARY, and the set is believed
-  SUFFICIENT FOR MOGWAI TO STOP BEING THE BLOCKER. If all eight resolve and the
+  SUFFICIENT FOR MOGWAI TO STOP BEING THE BLOCKER. If all seven resolve and the
   end state is still out of reach, the claim was wrong - which is a finding
   worth having, and the reason it is stated as a claim rather than as a list.
+
+  SEVEN, DOWN FROM EIGHT, as of the 2026-08-02 review pass. `problem-fees.md`
+  dissolved into the instrument model (an exchange charges fees, so the schedule
+  is one more config knob) and was deleted. The MECHANISM half of
+  `problem-instrument-profiles.md` went the same way, but that document SURVIVES
+  and still counts: its empirical question - whether the arrival and volatility
+  process constants are per-instrument - is untouched by any ruling. An earlier
+  version of this paragraph said six and was wrong; count the files in `notes/`.
+
+  PREMISES THE USER HAS SETTLED, which every document below inherits and none
+  previously stated. Forward tests always run ACCELERATED, never at speed 1.0 -
+  which is a correctness bound rather than a cost one, since the adapter's
+  one-second minimum wall request timeout caps usable sim speed and a timed-out
+  request is a failed run. A run has an OPTIONAL DURATION in sim time,
+  defaulting to indefinite. There is NO RESTART and NO RESUME; mogwai is fire
+  and forget, and reproducing a path means a fresh instance with the same seed
+  and config. WARMUP is declared config, so the venue generates it eagerly at
+  boot and `MAX_HISTORY_SEEK_TICKS` dies with the lazy history it existed to
+  bound. Strategies are SINGLE-INSTRUMENT, which is why independent per-symbol
+  tapes carrying no cross-instrument correlation is correct rather than a defect.
+  There is ONE `MOGWAI` venue, not one per asset class.
+
+  THE SUFFICIENCY CLAIM HAS NO EVIDENCE AND IS NOT MEANT TO. Two review passes
+  have now flagged that, correctly as a matter of fact and beside the point as a
+  matter of genre: the first paragraph says outright that this is a claim rather
+  than an inventory, and that being wrong about it is the finding it exists to
+  produce. It cannot be evidenced in advance without already having built the
+  thing. Do not raise it a third time; raise a MISSING ENTRY instead, which is
+  the falsifiable form of the same objection.
 
   Three things are deliberately outside that claim. THROUGHPUT - whether N
   instances fit on the machine - is excluded by the user's standing instruction
@@ -46,12 +75,15 @@ Or both. There are no exceptions.
                                      ▲                     ▲
       instrument-model ──────────────┴─────────────────────┘
 
-      fees ── independent, resolvable at any point
-
   The one non-obvious edge: order-type REQUIREMENTS precede the book, because a
   market-state model cannot be chosen before it is known what triggers, fills
   and reduce-only behaviour it must support - even though implementing those
   types lands after the book resolves.
+
+  The instrument model has grown two inbound absorptions (fees, and the profile
+  mechanism) without gaining an inbound dependency, so its position in the graph
+  is unchanged. `profiles` is now a thin node: only the per-instrument
+  clustering question.
 
   The end state they serve: on the order of 200 agents running concurrently,
   each developing a strategy through broadarrow - backtest, optimize, Monte
@@ -66,13 +98,17 @@ Or both. There are no exceptions.
   with what nautilus strategies emit, the note is a preference and loses.
   Consulting them is courtesy, not process.
 
-  ACCEPTANCE: none of these documents proposes how you would know its problem is
-  fixed, and that is the largest thing they share as a defect. A resolved
-  problem statement should name the measurable form of "done" before its spec is
-  written - for the cadence document that is a target statistic and its
-  tolerance, for the lifecycle document it is concurrent instances actually
-  running, and so on. Deriving those is part of resolving each document, not of
-  writing the spec that follows it.
+  ACCEPTANCE was previously listed here as the largest defect these documents
+  share - that none names a measurable form of "done". That paragraph was wrong
+  at the layer it applied: gates are a
+  `reference/technical-implementation-spec.md` concern, stated there as exact
+  copy-pasteable commands, and a problem statement that carried them would be
+  doing the spec's job. The documents are correct to omit them. Two things
+  survive the removal. The SET needs no acceptance criterion at all - the
+  repository owner is the gate and will know. But the cadence document does
+  invalidate a currently-green gate, the 0.1603 duration ACF anchor, without
+  naming a successor, and that debt is real and belongs to whichever spec
+  descends from it.
 
   - `notes/problem-server-lifecycle.md` - mogwai is one long-lived service and
     the workload is hundreds of disposable instances. Nothing allocates a port,
@@ -84,7 +120,8 @@ Or both. There are no exceptions.
     because tape identity includes a `data_origin` derived from wall time, but
     the variation is accidental, unsampled and unrecorded. Decided by the user:
     one axis, a random seed per launch, deterministic given that seed, wall
-    anchor removed, seed reported. What sets the origin instead is open.
+    anchor removed, seed reported. What sets the origin instead is open. Its
+    restart question is CLOSED - there is no restart.
   - `notes/problem-order-book.md` - the founding no-book assumption. Two
     independent axes: what exists to match against, and what happens to a client
     order. The user has answered the second - orders rest and are consumed by
@@ -92,7 +129,13 @@ Or both. There are no exceptions.
     probabilistic fill model can supply allocation without modelled depth, which
     keeps the cheapest market-state option alive. Resolves before cadence,
     because under matching the generator emits parent arrivals and wire prints
-    fall out of it.
+    fall out of it. Now carries a bound the earlier draft asserted its way past:
+    trade data constrains an UPPER BOUND on fill, not a fill, because
+    queue-ahead volume is unrecoverable from trades - so the probabilistic model
+    randomizes the queue-ahead objection rather than escaping it, and the
+    residual parameter is declared. A fifth market-state option (A5,
+    bookTicker-fitted top of book) was added as the cheapest way to shrink that
+    declared surface. NEEDS ITS OWN RESEARCH SESSION before any spec.
   - `notes/problem-trade-cadence.md` - the tape runs orders of magnitude slower
     than a real active pair, and "trades per second" has three values differing
     by 8.5x because raw fills, aggregated prints and match events are LAYERS of
@@ -104,22 +147,58 @@ Or both. There are no exceptions.
     only, so MNQ and MES cannot be futures: no multiplier, no tick value, no
     expiry, no margin, and a session envelope that can thin an hour but not
     close it, with no calendar and no exchange-local time. Precedes profiles,
-    because a profile cannot be fitted for an instrument that cannot exist.
-  - `notes/problem-instrument-profiles.md` - per-symbol SCALE and session are
-    configurable in TOML today; the arrival and volatility PROCESS is global
-    constants no config reaches. Missing at the mechanism level: named presets,
-    an overlay for per-knob override, provenance, selection. Missing at the
-    model level: whether the process constants become per-instrument at all,
-    which measured clustering differing 2.8x across three crypto majors leaves
-    genuinely open.
+    because a profile cannot be fitted for an instrument that cannot exist. NOW
+    THE LARGEST DOCUMENT IN THE SET: the user ruled first-class, and that the
+    model is a complete PARAMETERIZATION rather than an enum of supported
+    instruments - presets are named bundles of otherwise-tunable knobs, and a
+    user who picks none must be able to invent MCL, MBT or AAPL. Fees and the
+    profile mechanism both land here as a result, as do margin and the general
+    config-versus-havoc line (config is the instrument's identity; havoc is a
+    deviation from it, so a scheduled CME close is config and `ReopenGap` stays
+    havoc for unscheduled halts only). Its decision list was renumbered - it
+    previously ran 1 to 6 then repeated 4 and 5, so older citations by number
+    are ambiguous.
+  - `notes/problem-instrument-profiles.md` - REDUCED to one question. Its
+    mechanism half (named presets, overlay, provenance, selection) moved to the
+    instrument model under the parameterization ruling. What remains is
+    empirical and untouched by any decision: whether the arrival and volatility
+    PROCESS constants become per-instrument at all, which measured clustering
+    differing 2.8x across three crypto majors leaves genuinely open. Confirming
+    that spread across months is an ACQUISITION, not a probe run: aggTrades are
+    held for June only, and the April and May archives are 1-second klines that
+    cannot describe sub-second structure at all.
   - `notes/problem-refused-order-types.md` - every conditional type is refused,
     so a strategy with a protective stop cannot be forward-tested at all. The
     owed surface is what nautilus expresses, not what today's consumer happens
     to emit. Its REQUIREMENTS precede the book; its implementation follows it.
-  - `notes/problem-fees.md` - the engine books zero commission on every fill,
-    unconditionally, so every claim the fleet produces is biased optimistically
-    and systematically. Cheap to close relative to the fidelity work and
-    arguably a larger correction to a claim. Independent of the rest.
+  DELETED, not archived: `notes/problem-fees.md`. The engine books zero
+  commission on every fill, which biases every claim optimistically and
+  systematically - but an exchange charges fees, so under the parameterization
+  ruling the schedule is one more config knob and the problem belongs to the
+  instrument model, which now carries it. Its "declare fee-free and push cost
+  onto the consumer" exit was independently closed and the reason is recorded
+  there: nautilus computes commission client-side only in its SIMULATED matching
+  engine, so on the live path a venue reporting no commission is
+  indistinguishable from one that charges none, and nothing downstream can
+  correct for it.
+
+  RAISED IN REVIEW AND RULED ON, recorded so they are not raised a third time.
+  (a) Three documents each partly re-scope the realism gate - cadence
+  invalidates its anchors, profiles moves the ACD constants out from under it,
+  and the parameterization ruling lets config move the tape anywhere - and it
+  was argued that nobody owns the result. The owner is the repository owner, the
+  same answer as ACCEPTANCE above. (b) Three documents each want to rewrite part
+  of `mogwai-engine` (per-run state, matching, a margin ledger) and nothing
+  sequences the REWRITES as opposed to the decisions. That is spec-level, the
+  same layer error the acceptance paragraph made. (c) The dead-feed watchdog and
+  the terminal-venue-fault item stay OUTSIDE the set. A venue fault is
+  mogwai failing to do its job and is obviously terminal, and mogwai surfaces it
+  as such where it can tell - but in most cases it cannot, because a real
+  failure shows up as a crashed or stalled PID rather than as a protocol event.
+  Under fire-and-forget instances tied to a parent process that is exactly what
+  the owner observes, so the silent-but-socket-alive failure the watchdog was
+  designed for was a property of the long-lived shared daemon being deleted. The
+  watchdog is not worthless; it is not structural.
 
   Also relevant and not a problem statement: `reference/glossary.md` defines the
   identity chain the code builds - process, account, session, subscription, tape
@@ -206,8 +285,11 @@ Or both. There are no exceptions.
   opt-in ordering mode to tell a strategy bug from a transport race while
   debugging.
 
-- DECIDE (client side, spans two repos): should a venue fault be terminal for the
-  consumer? mogwai now distinguishes failing from misbehaving on the wire -
+- DECIDE (client side only now, and it is broadarrow's half): should a venue
+  fault be terminal for the consumer? The MOGWAI-SIDE half is settled - a venue
+  fault is mogwai failing to perform its duties, it is terminal, and the venue
+  says so as clearly as it can. What remains is what the consumer does with
+  that, which is theirs. mogwai now distinguishes failing from misbehaving on the wire -
   `SubscriptionIssue::is_venue_fault()` alongside `is_refusal()`, a WS 1011 close
   naming the fault, and an adapter error arm ahead of the refusal catch-all (see
   `reference/havoc.md`, "Misbehaving is not failing"). But the adapter's ordinary
@@ -401,7 +483,11 @@ Inline literals (no named const):
 
 - `DEFAULT_BASE_URL = "ws://127.0.0.1:8787"` (see coupling above).
 - `MOGWAI_VENUE_STR = "MOGWAI"` (correctly single-sourced).
-- Default identity `TraderId`/`AccountId` `MOGWAI-001` in the exec config.
+- Default `TraderId` `MOGWAI-001` in the exec config. `AccountId` no longer
+  defaults to it on either config: both carry the `UNSET_ACCOUNT_ID` placeholder
+  (`MOGWAI-UNSET`) and `validate_account_id` refuses a config that still states
+  it, so an omitted account fails loudly instead of silently binding a slot.
+  `TEST_ACCOUNT_ID` keeps `MOGWAI-001` for in-crate fixtures.
 - Timeout consts: HTTP `POLL_INTERVAL 250ms`, `ACCOUNT_REGISTRATION_TIMEOUT 5s`,
   `ACCOUNT_REGISTRATION_POLL 10ms`, `MIN_WALL_REQUEST_TIMEOUT_SECS 1` (flagged in
   its own comment as the tightest cap on usable sim speed). `wait_connected`

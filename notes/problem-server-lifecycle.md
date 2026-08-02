@@ -31,6 +31,51 @@ Explicitly out of scope by the user's instruction: whether 200 instances fit on
 the machine. If the answer turns out to be 20, that is a hardware problem to be
 solved later and must not shape any decision here.
 
+## What the user has since settled
+
+Four rulings that this document previously left open or did not ask. They are
+premises for every spec descending from here.
+
+- **Forward tests always run ACCELERATED.** Never speed 1.0. This is a premise
+  no document previously stated, and it is a correctness constraint rather than
+  a cost one: the adapter's `MIN_WALL_REQUEST_TIMEOUT_SECS` of 1 is already
+  flagged in its own comment as the tightest cap on usable sim speed, and a
+  request that times out at speed N is a failed run rather than a slow one. It
+  therefore sits outside the resource-cost exclusion above.
+- **A run has an optional duration, defaulting to indefinite.** The adapter can
+  be told to run for N seconds, minutes, hours or days; told nothing, the
+  instance runs until its owner dies. The duration is in SIM time, not wall
+  time - under mandatory acceleration those differ by the speed factor, and the
+  adapter is where the ambiguity would land, so the spec states it.
+- **There is no restart and no resume.** mogwai is fire and forget. An instance
+  that dies is gone; nothing resumes its path. This CLOSES decision 6 of
+  `notes/problem-seeds-and-paths.md` rather than deferring it. Reproducing a
+  path means launching a new instance with the same seed and the same config,
+  which reproduces from the origin because the tape is a pure function of
+  (seed, config) once the wall-clock anchor is removed.
+- **Everything is on the sim clock, and REAL latency is not modelled.** Recorded
+  as a ruling because it keeps being re-raised: under mandatory acceleration a
+  sim-axis latency figure and physical wall latency appear to move in opposite
+  directions (a 30 ms modelled latency is 0.3 ms of wall at 100x, while a real
+  microsecond of wall reads as 100 microseconds of sim), and this looks like a
+  conflict. It is not one mogwai can or should resolve. The venue models latency
+  on the sim axis only, it does not measure or compensate for physical latency,
+  and it runs over loopback on the same machine as its client, where physical
+  latency is negligible by construction. Do not reopen this without a measured
+  case where it actually distorts a result.
+- **Warmup duration is declared config.** How much history a run needs before
+  the strategy trades is the user's decision, not the venue's. Two consequences.
+  The venue knows its horizon at boot, so it generates warmup EAGERLY rather
+  than serving it lazily per request - which removes the silent failure where an
+  exhausted seek returns an empty SUCCESSFUL HTTP response, and lets a request
+  reaching beyond the declared horizon be refused precisely. And
+  `MAX_HISTORY_SEEK_TICKS` dies with that: it is a latency bound on the request
+  path (190,000 ticks sized against ~1.9M ticks/sec synthesis to fit a ~100 ms
+  request budget), not a memory bound, and once no request needs a long seek it
+  protects nothing. The user's position is that requesting a two-year warmup and
+  the consequences of doing so are theirs to own. See the correctness section of
+  `notes/problem-trade-cadence.md` for the surviving numbers.
+
 ## Who the operator is
 
 Not a human. The entity that starts venues, runs smokes, reads failures and
@@ -41,6 +86,15 @@ file" is not a diagnostic.
 
 This is not hypothetical. Every venue started during the 2026-08-02 session was
 started by an agent, and the friction below was hit by one.
+
+On the standing of that evidence, since two review passes have raised it: the
+frictions below are SESSION OBSERVATIONS, not regression cases. No logs were
+retained and no test reproduces them. They are recorded because they happened,
+and the two that are structural rather than anecdotal - a fixed port permitting
+one concurrent run, and cwd-relative artifacts colliding - are verifiable from
+the code without reference to the session at all. The orphaned-venue item is
+the weakest of them and is inferred rather than observed. None of this changes
+the document's argument, which rests on the fixed port.
 
 ## The observation
 
@@ -123,13 +177,23 @@ Resource cost is out of scope per the user. These are not cost:
 1. **Subprocess or embedded.** A subprocess spawned by the adapter keeps the
    process boundary that makes venue stalls attributable, needs no library
    extraction, and dies with its parent through a held pipe. Embedding removes
-   the spawn entirely but requires `mogwai-server` to gain a lib target (it is
-   bin-only today, ~758 non-test lines in `main.rs`, the rest being daemon
-   plumbing and tests), and raises the attributability question above. An
+   the spawn entirely but requires `mogwai-server` to gain a lib target. An
+   earlier draft sized that job at "~758 non-test lines in `main.rs`", which is
+   an accurate count and a misleading scope: `main.rs` does carry 759 lines
+   before its test module, but the crate is roughly 14,900 lines across 13
+   modules (`ws.rs`, `http.rs`, `source.rs`, `gen.rs`, `admission.rs`, `tape.rs`,
+   `config.rs` and the rest). The extraction scope is the crate's module graph,
+   not one file. Embedding also raises the attributability question above. An
    assessment of embedding exists in the 2026-08-02 session record; its
    conclusion was feasible and mechanical, with two genuinely open sub-questions
    - who owns the venue when two clients share it, and the runtime coupling.
-2. **What identifies an instance**, given nautilus builds a DATA client and an
+2. **What identifies an instance.** Evidence that this is load-bearing rather
+   than tidy-minded: the data client silently defaulted to `MOGWAI-001` and
+   bound a different account slot than its own exec socket, which mogwai fixed
+   by refusing an unset account. That fix makes disagreement LOUD; it does not
+   make it impossible, because the two clients still have no structural link and
+   agreement is still a convention each side keeps. Given nautilus builds a DATA
+   client and an
    EXECUTION client from two independent factories that share no state. One
    venue per PAIR is required; the pairing has no representation today, and the
    `account_id` both clients now must state (as of the 2026-08-02 fix) is the

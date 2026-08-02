@@ -91,11 +91,74 @@ Two things fall out of that and are not in tension with it:
 5. **What else belongs in that record.** Seed and epoch at minimum. Arguably
    also the effective instrument profiles, the fingerprint version, the armed
    havoc and the binary version - at which point it is a run manifest rather
-   than a seed report, and the question is whether to build one.
-6. **Whether a restarted venue resumes its path.** If an instance dies mid-run
-   and something restarts it, reusing the seed reproduces the tape from the
-   origin but not the cursor. Whether that counts as the same run is a question
-   the lifecycle document's restart policy also needs.
+   than a seed report, and the question is whether to build one. Add to that
+   list the two knobs the lifecycle document settled: the run's declared
+   DURATION and its declared WARMUP, both of which change what tape a strategy
+   saw and neither of which is recoverable from the seed.
+6. ~~**Whether a restarted venue resumes its path.**~~ CLOSED by the user. There
+   is no restart and no resume - mogwai is fire and forget, and an instance that
+   dies is gone. Reproducing a path means launching a NEW instance with the same
+   seed and config, which reproduces from the origin because the tape is a pure
+   function of (seed, config) once the wall anchor is removed. Recorded here
+   rather than deleted because the question was reasonable and the answer
+   constrains the run record in decision 5: nothing has to record a CURSOR,
+   because there is no partial run to resume into.
+
+   Note the narrower claim. An earlier version of this entry said "a seed plus
+   config identifies a path completely", which overstates it and contradicts
+   decision 5's own list. The tape is a pure function of (seed, config) FOR A
+   GIVEN BUILD AND FINGERPRINT: change the generator's constants, the committed
+   fingerprint, or the process itself, and the same seed draws a different path.
+   So the reproducible unit is (seed, config, fingerprint version, binary
+   version), which is precisely why decision 5 asks whether the record is a seed
+   report or a run manifest.
+
+## What a path is evidence OF, and a second variation axis
+
+Raised in review and worth carrying into the spec, because it changes what the
+record has to say rather than what the venue has to do.
+
+A new seed draws a new path from ONE FITTED MODEL. Marginalizing over seeds
+therefore reduces variance conditional on that model; it does not reduce model
+error and it is not out-of-sample market evidence. Forty distinct paths are
+forty draws from one fingerprint fitted to one corpus, so if the model is wrong
+in some respect all forty are wrong in it identically. That is a real limit on
+what a consumer may conclude, and mogwai is the only party positioned to state
+it, since the consumer cannot see how the tape was made.
+
+The user's response is a SECOND AXIS: support multiple fitted models, derived
+from different corpora, so a claim can marginalize over models as well as paths.
+Mechanically this is cheap - the fingerprint is already a JSON artifact the
+generator reads, so another one is a file plus a selector. Two honest limits on
+what it buys. It samples PARAMETER uncertainty, not STRUCTURAL model error:
+refitting the same process family (ACD arrivals, GARCH volatility, Student-t
+innovations) to new data gives different constants, not a different model, so a
+flaw in the family survives every refit identically. And models fitted from the
+same venue and era are correlated draws rather than independent ones, which
+makes different ERAS the cheapest genuinely-independent axis.
+
+Two consequences for the spec. The realism gate has to assert per model rather
+than once, which is the gate-scoping question the profiles document also raises.
+And a fingerprint gains an identity - version, corpus, era, fit date - which
+`notes/problem-instrument-model.md` decision 10 needs anyway for the
+fitted-versus-declared distinction, so it is the same work.
+
+The user is the realism gate and accepts a fingerprint by inspecting generated
+tapes against real ones. That is a coherent stopping rule and the record should
+say so plainly rather than implying more: a run's provenance should name which
+seed, which model, and that the model was accepted by the owner on comparison
+against a named corpus. One thing visual comparison cannot gate, and the record
+should not imply it does: a tape can match every marginal moment - rate, size,
+burstiness, session shape - and still be systematically easier or harder to
+trade, because what pays a strategy is conditional structure rather than
+marginal shape.
+
+Related, and currently unenumerated in `notes/problem-trade-cadence.md`: making
+a whole-second corpus "statistically sub-second" is a MODELLING choice, not a
+preprocessing step. Kraken records 61% of consecutive prints in the same second,
+so any sub-second structure is manufactured by whatever rule spreads them, and
+the duration ACF that comes back out is a property of that rule. Defensible if
+declared, per the discipline already in these documents.
 
 ## What this document does not decide
 
