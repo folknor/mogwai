@@ -156,12 +156,18 @@ those grounds rather than left unmentioned.
 
 ## What must be decided
 
-1. **Which types and which SHAPES the venue accepts.** Stop-market and
-   stop-limit at minimum, given the user's trading; trailing stops and
-   two-leg brackets with reduce-only or OCO linkage are what the consumer
-   actually emits, and a decision to omit them is a decision that real strategy
-   shapes stay untestable. Market-if-touched was explicitly killed and stays
-   killed unless re-argued.
+1. ~~**Which types and which SHAPES the venue accepts.**~~ SETTLED by the user:
+   STOP-MARKET and STOP-LIMIT, and nothing else. NO TRAILING STOPS and NO
+   TWO-LEG BRACKETS - not deferred, not phase two, simply not built. The
+   consequence this document previously stated as an argument against omitting
+   them stands as an accepted cost rather than an objection: a strategy whose
+   protective structure is a bracket, or whose stop trails, is not forward
+   testable on this venue, and that is the user's call to make about their own
+   venue. Trailing stops were the expensive half anyway, needing venue-side
+   per-tick high-water state; brackets needed linkage the wire does not carry
+   and reduce-only semantics the ledger does not have.
+
+   Market-if-touched was explicitly killed and stays killed unless re-argued.
 2. ~~**What the trigger reads.**~~ SETTLED: the traded price. There is no quote
    and there is not going to be one, and the fill model reads traded prices too,
    so the venue answers the predicate question the same way everywhere - which
@@ -174,13 +180,28 @@ those grounds rather than left unmentioned.
    declared slippage model - all presumed structure the venue is not building.
    Filling at the submitted trigger price would still be a lie of the class the
    queue-ahead refusal rejected; the band is what prevents it.
-4. **Whether the standing no-growth decision is reopened**, and if so, whether
-   broadarrow is consulted first - it is their note, and their consumer.
-5. **Which havoc arms extend to a conditional order.** The argument against
-   client-side emulation is precisely that the venue must SEE the protective leg
-   so havoc can reach it - and then no document says which arms apply to a
-   trigger. Delayed trigger, rejected trigger, dropped trigger conversion, and
-   how submit-time and trigger-time divergences compose are all unasked.
+4. ~~**Whether the standing no-growth decision is reopened**, and if so, whether
+   broadarrow is consulted first.~~ SETTLED by the user: it is reopened, and
+   broadarrow is NOT consulted. What they do is not an input to this decision.
+   The note recorded a consumer's preference; mogwai is a nautilus adapter and
+   the owed surface follows what nautilus expresses, so the note loses. Nothing
+   here waits on them and no coordination is owed before building.
+5. ~~**Which havoc arms extend to a conditional order.**~~ SETTLED by the user:
+   ALL of them have a chance of reaching a conditional. The argument against
+   client-side emulation was precisely that the venue must SEE the protective
+   leg so havoc can reach it, and the answer follows that argument to its end
+   rather than carving out exemptions - a conditional order is an order, and
+   every arm that can reach an order can reach it.
+
+   What remains is spec-level and is not a re-opening of this ruling: a
+   conditional has MORE surface than a plain order, because it has a submit, a
+   trigger, and the order the trigger produces. So the spec states, for each
+   arm, WHERE it lands on that longer lifecycle - a delayed ack against the
+   submit versus a delayed trigger, a reject on arrival versus a reject at
+   trigger time, a drop while resting versus a dropped trigger conversion - and
+   how a submit-time divergence composes with a trigger-time one when both are
+   armed. Enumerating that is spec work; whether the arms apply at all is
+   answered, and the answer is yes.
 6. **Lifecycle of a resting conditional.** Whether a trigger price can be
    amended, what cancel means before versus after triggering, what
    `QueryOrders` must report for one, and what happens to a resting stop when
