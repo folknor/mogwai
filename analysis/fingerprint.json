@@ -140,7 +140,51 @@
       0.12464749806619022,
       0.12313544391270614,
       0.12252418571992679
-    ]
+    ],
+    "dwell": {
+      "era_start_ts": 1546300800,
+      "mean_s": {
+        "anchor": 2.870902107294822,
+        "range": {
+          "min": 2.870902107294822,
+          "median": 7.0637373224622095,
+          "max": 12.096040763227697
+        }
+      },
+      "max_gap_s": {
+        "anchor": 24756.0,
+        "range": {
+          "min": 24756.0,
+          "median": 24794.5,
+          "max": 176478.0
+        }
+      },
+      "gap_p999_s": {
+        "anchor": 89.39103723830209,
+        "range": {
+          "min": 89.39103723830209,
+          "median": 349.0170025625145,
+          "max": 845.1639513667328
+        }
+      },
+      "empty_hour_frac": {
+        "anchor": 0.000456479266711706,
+        "range": {
+          "min": 0.000456479266711706,
+          "median": 0.0012872715321270108,
+          "max": 0.0575377969762419
+        }
+      },
+      "max_empty_hour_run_h": {
+        "anchor": 5,
+        "range": {
+          "min": 5,
+          "median": 6.0,
+          "max": 49
+        }
+      },
+      "_doc": "era-windowed; gate reads the anchor p999, empty-hour fraction, and run, with p999 cadence-scaled against mean_s; max_gap_s is documentation and the range records the dying-symbol spread LiquidityDrought imitates"
+    }
   },
   "session_profile": {
     "_doc": "UTC, instrument-agnostic. intensity[h] and vol[h] index hour-of-day 0..23; dow[d] indexes Sun=0..Sat=6",

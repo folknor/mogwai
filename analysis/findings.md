@@ -44,5 +44,10 @@ Anchor (golden targets): XBTUSD
     22:00   4.15%  ##############################
     23:00   3.84%  ############################
 
+## Modern-era dwell (anchor)
+
+Window starts at 1546300800; mean gap 2.871s, p999 89.391s, max gap 24756.000s, empty-hour fraction 0.000456, longest empty run 5h.
+
+
 intensity peaks at the London-NY overlap, troughs in the Asian small hours; weekends lighter (see dow_weight).
 
