@@ -32,6 +32,13 @@ futures-util = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+# Bench harness, dev-only. default-features off drops plotters and rayon, which
+# only serve the HTML report this workspace does not produce; cargo_bench_support
+# is what lets criterion_main run outside `cargo bench`, which the benches need
+# because they ship as example targets driven through brokkr.
+criterion = { version = "0.8", default-features = false, features = [
+    "cargo_bench_support",
+] }
 
 [profile.release]
 opt-level = 3

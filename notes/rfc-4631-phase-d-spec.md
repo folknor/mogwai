@@ -379,7 +379,7 @@ state it.
 
 ### 4. The benches
 
-`criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }`
+`criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }`
 as a dev-dependency of `mogwai-engine` and `mogwai-data`, declared once in
 `[workspace.dependencies]` and referenced with `.workspace = true`, matching the
 file's existing convention.
