@@ -190,13 +190,34 @@ not repeated. The list is renumbered: it previously ran 1 to 6 and then repeated
 4 and 5, so any citation of "decision 4" in an earlier document is ambiguous and
 should be re-resolved against this list.
 
-1. **How much futures accounting.** Margin and settlement are a different
-   ledger, not an extension of this one. A middle position exists - correct
-   multiplier and tick value, integer quantities, no margin - which is dishonest
-   in a stated and bounded way rather than silently. Note this is now partly
-   constrained rather than free: margin is config per the ruling above, so
-   declining to model it means shipping a knob the ledger ignores, which is
-   worse than not having the knob.
+1. ~~**How much futures accounting.**~~ SETTLED: the full version, because it is
+   arithmetic rather than a different ledger. An earlier draft offered a middle
+   position - correct multiplier and tick value, integer quantities, no margin -
+   as "dishonest in a stated and bounded way rather than silently". The user
+   rejected the framing: this is not expensive.
+
+   The engine already keeps per-symbol positions with a volume-weighted average
+   price and per-currency balances, so unrealized P&L is
+   `(mark - avg_px) * qty * multiplier` against the current tape price, which is
+   arithmetic over data already present. Margin is a configured per-contract
+   number times position size, and a comparison. A breach refuses new orders or
+   force-closes - and a forced close is a market order, so it fills through the
+   band model in `notes/problem-order-book.md` with no new machinery.
+
+   So: multiplier, tick value, integer quantities, CONTINUOUS mark-to-market,
+   margin held per contract, and a breach that refuses or liquidates. The
+   question this answers is whether a forward test can report "profitable, but
+   the account would have been liquidated on day three". It can.
+
+   DAILY SETTLEMENT is the one genuinely separate piece and it must not be
+   assumed away silently. Futures are marked to market daily and the difference
+   moves in actual CASH - that is what variation margin is, and it is why a
+   losing futures position generates margin calls rather than merely a worse
+   balance. It fires at a defined SETTLEMENT TIME, which is not the session
+   close: for CME equity index futures the settlement price is struck at 16:00
+   ET while the session runs to 17:00 ET, with the maintenance halt at 16:15 to
+   16:30. Three distinct daily timestamps, only one of which is a session
+   boundary. Spot crypto has no settlement at all, so this is futures-only.
 2. **What the wire carries.** `InstrumentDef` grows fields. A bare symbol can
    already distinguish `MNQU6` from `MNQZ6` - what the wire lacks is instrument
    CLASS, underlying, activation and expiry, the relationship between contracts
@@ -207,24 +228,57 @@ should be re-resolved against this list.
 3. **The completeness bound.** "Invent any instrument you wish" has one real
    limit and it should be stated rather than discovered: nautilus does not
    accept arbitrary instruments. The adapter must construct a CONCRETE type -
-   `CurrencyPair`, `FuturesContract`, `Equity`, `CryptoPerpetual` and so on - so
-   the config surface must carry enough to both SELECT the nautilus type and
-   FILL it. Note this is a match statement over what each `InstrumentDef`
-   declares rather than an architectural fork: one adapter publishes a
-   heterogeneous instrument set, as nautilus's own Binance integration does with
-   spot and futures. The binding constraints are which classes exist upstream
-   and whether the ledger can account for each. AAPL as a target pushes the set
-   past futures into equities, a third class with its own session and settlement
-   shape.
+   `CurrencyPair`, `FuturesContract` and so on - so the config surface must
+   carry enough to both SELECT the nautilus type and FILL it. This is a match
+   statement over what each `InstrumentDef` declares rather than an
+   architectural fork.
+
+   Scope it to what is actually traded: spot pairs and cash-settled futures.
+   A review pass proposed naming a finite set of semantic classes with explicit
+   refusals for everything else, on the grounds that AAPL implies equities with
+   short-sale, corporate actions and settlement, and MCL implies physical
+   delivery. The user's answer is that this is irrelevant - those were
+   illustrations of a COMPLETE CONFIG SURFACE, not a request for equities, and
+   pre-emptively enumerating refusals for instruments nobody will trade is
+   speculative work. Build the classes that are needed; adding one later is code
+   rather than config, and that is the honest boundary.
 4. **Continuous or dated.** The user's data is `MNQ1!` and `MES1!`, which are
    continuous front-month series, so a roll policy is forced: either the venue
    models a dated contract with an expiry and something rolls it, or it models a
    synthetic continuous instrument and says so.
-5. **Session fidelity.** Whether the near-zero approximation above is adequate,
-   or whether index futures need exact sub-hour sessions, exchange-local time
-   with DST, holidays and early closes. The `ReopenGap` half of this is settled
-   by the config/havoc line above - a scheduled close is config - so what
-   remains is how much calendar the config surface grows.
+5. ~~**Session fidelity.**~~ SETTLED, and much smaller than the question
+   implied. The venue does not need a CALENDAR, it needs a SIMULATED one. There
+   is nothing to reconcile against: the tape is synthetic and a run spans a few
+   simulated days, so nobody is checking the venue's clock against a real
+   exchange's.
+
+   What the instrument config carries is a set of recurring daily timestamps at
+   SUB-HOUR resolution - open, halt window, settlement, close - expressed in the
+   instrument's own terms, plus genuine WEEKEND closure. A nine-day MNQ run
+   should contain a weekend, and that weekend should be shut rather than thin.
+   NOT modelled: holidays, early closes, DST. A run either spans a holiday or
+   does not, and if it does the strategy sees a quiet day, which costs nothing
+   to declare as unmodelled.
+
+   Whether a stated timestamp matches CME's actual clock to the minute matters
+   only insofar as the tape should feel like MNQ, which is a PRESET's business
+   rather than the venue's.
+
+   One implementation trap worth naming, because it looks like a bug to fix:
+   `SessionProfile::validate()` requires every `dow_weight` to be STRICTLY
+   POSITIVE, so a genuinely closed Saturday cannot be expressed today - only a
+   very thin one. That refusal is not an oversight; it is a normalization guard
+   against a config that silently compresses arrival rates. Real closure means
+   either relaxing it deliberately for the weekend case or expressing closure as
+   its own concept, not loosening the check.
+
+   The `ReopenGap` half is settled by the config/havoc line above: a scheduled
+   close is config, and that arm stays havoc for UNSCHEDULED halts only.
+
+   A configured weekend also happens to resolve an ambiguity that recurs
+   elsewhere - it is legitimate silence the consumer can know about IN ADVANCE,
+   which is exactly the "venue asleep versus subscription dead" case, and it is
+   neither ambiguous nor havoc.
 6. **Netting, hedging and position identity.** nautilus carries `position_id` on
    submission and the adapter currently DROPS it when building the wire order -
    verified: the identifier appears nowhere in `mogwai-adapter/src`. That is a
@@ -245,11 +299,11 @@ should be re-resolved against this list.
    cannot be implemented honestly yet, because the venue has no way to say which
    a fill was. The wire carries no liquidity side and the adapter hardcodes
    `LiquiditySide::Taker` at both fill-construction sites in
-   `client/exec.rs`. Under B3 a resting order consumed by arriving flow is a
-   MAKER fill, so the classification only becomes expressible once matching
-   exists - which makes the fee work depend on `notes/problem-order-book.md`
-   rather than being independent of it, as the deleted fees document claimed. A
-   flat schedule has no such dependency and can land at any time.
+   `client/exec.rs`. Under the fill model in `notes/problem-order-book.md` the
+   classification falls out by construction - a limit order filled by the tape
+   reaching its band is a MAKER fill, a market order is a TAKER fill - so the
+   dependency is on that model rather than on any matching engine, and it is
+   satisfied the moment the model lands.
 
    Also worth stating rather than assuming: treating fees and margin as
    INSTRUMENT IDENTITY is a design decision, not a description of how markets

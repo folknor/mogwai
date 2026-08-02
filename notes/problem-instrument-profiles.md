@@ -99,10 +99,22 @@ but priced honestly it is an acquisition rather than an afternoon.
 
 So the open question is sharper than "does the pattern hold when CME arrives".
 It is already not holding within crypto. If clustering is genuinely
-per-instrument it has to become configurable - and it is currently four GLOBAL
-module constants (`ACD_PERSISTENCE`, `ACD_FEEDBACK_SHARE`, `ACD_WEIBULL_SHAPE`,
+per-instrument it has to become configurable - and it is currently FIVE global
+module constants in `generated/consts.rs` (`ACD_PERSISTENCE`,
+`ACD_FEEDBACK_SHARE`, `ACD_WEIBULL_SHAPE`, `ACD_WALL_RELAX_TAU_S`,
 `ACD_RELAX_MEAN_CAL`) that the realism gate is anchored on with a single
-profile. Moving them per-instrument re-scopes that gate.
+profile. Earlier drafts named four and omitted `ACD_WALL_RELAX_TAU_S`, which is
+the wall-time relaxation the drought fix turned on - so it is arguably the one
+most likely to differ per instrument, since it governs how a quiet stretch
+decays. Moving them per-instrument re-scopes that gate.
+
+Two cautions on the inference itself, both of which the conclusion should carry.
+A dispersion spread does not identify WHICH constants differ, or even establish
+that ACD constants are the right place to absorb the difference: session
+nonstationarity, the inferred-event grouping, and month effects are all
+alternative explanations for the same summary statistic. And this document is
+titled for arrival AND volatility while supplying no cross-instrument volatility
+measurement at all - the GARCH side of the question is untested.
 
 ## The provenance problem
 
@@ -143,7 +155,7 @@ the evidence exists to fit each instrument is this one's.
    May archives held are klines and cannot describe sub-second structure.
 2. **What the realism gate asserts** when several instruments exist and it
    currently runs one. Every instrument, the default only, or a named subset.
-   This is forced by decision 1: the gate is anchored on the four global ACD
+   This is forced by decision 1: the gate is anchored on the five global ACD
    constants, so making them configurable moves the tape out from under it.
 3. **What a configured instrument may NOT change.** A config that can set the
    ACD constants can move the tape outside the band the realism gate asserts, at

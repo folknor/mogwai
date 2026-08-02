@@ -71,19 +71,24 @@ Or both. There are no exceptions.
       lifecycle ─┬─> everything (it decides what a run IS)
       seeds ─────┘
 
-      order-types ──requirements──> book ──> cadence ──> profiles
-                                     ▲                     ▲
-      instrument-model ──────────────┴─────────────────────┘
+      fill-model ──> order-types
 
-  The one non-obvious edge: order-type REQUIREMENTS precede the book, because a
-  market-state model cannot be chosen before it is known what triggers, fills
-  and reduce-only behaviour it must support - even though implementing those
-  types lands after the book resolves.
+      cadence ──> profiles
+                    ▲
+      instrument-model ───┘
+
+  REDRAWN. The graph previously ran order-types into the book into cadence into
+  profiles, with a note that order-type REQUIREMENTS preceded the book because a
+  market-state model could not be chosen before knowing what it had to support.
+  That whole chain rested on the venue growing a book. It is not growing one -
+  see the fill-model resolution below - so the edges go with it. The fill model
+  now precedes order types only because a triggered stop needs a defensible
+  fill, and cadence no longer waits on anything, because with no matching the
+  tape is generated independently of every client action.
 
   The instrument model has grown two inbound absorptions (fees, and the profile
-  mechanism) without gaining an inbound dependency, so its position in the graph
-  is unchanged. `profiles` is now a thin node: only the per-instrument
-  clustering question.
+  mechanism) without gaining an inbound dependency. `profiles` is now a thin
+  node: only the per-instrument clustering question.
 
   The end state they serve: on the order of 200 agents running concurrently,
   each developing a strategy through broadarrow - backtest, optimize, Monte
@@ -137,16 +142,25 @@ Or both. There are no exceptions.
     independent axes: what exists to match against, and what happens to a client
     order. The user has answered the second - orders rest and are consumed by
     arriving flow, accounts never match each other - and argued that a
-    probabilistic fill model can supply allocation without modelled depth, which
-    keeps the cheapest market-state option alive. Resolves before cadence,
-    because under matching the generator emits parent arrivals and wire prints
-    fall out of it. Now carries a bound the earlier draft asserted its way past:
-    trade data constrains an UPPER BOUND on fill, not a fill, because
-    queue-ahead volume is unrecoverable from trades - so the probabilistic model
-    randomizes the queue-ahead objection rather than escaping it, and the
-    residual parameter is declared. A fifth market-state option (A5,
-    bookTicker-fitted top of book) was added as the cheapest way to shrink that
-    declared surface. NEEDS ITS OWN RESEARCH SESSION before any spec.
+    RESOLVED, and retitled: there is no book and never was going to be. The
+    document had attributed a choice of "B3 - Matching" to the user, who had
+    described a BEHAVIOUR that a drafting session mapped onto a label carrying a
+    book with it. What the user actually specified: a limit order gets a fill
+    price RANGE predetermined at submit time, scaled to the instrument's typical
+    movement, quantised to tick size, derived from the run seed - and when the
+    tape enters that band the order fills IN FULL at its stated price.
+
+    That dissolves most of this document. No depth, no queue, no allocation, no
+    counterparty, and no client-mutable market state, so the determinism risk it
+    called sharpest never arises. Maker and taker fall out by construction, so
+    the fee split needs no wire field. Stops reuse the band as slippage.
+    Partials move to `PartialFillNext`, where havoc already lives. The research
+    session it was going to need is not needed. What is left is spec-level: what
+    estimates the band's width (trailing realized volatility recommended, since
+    ATR needs bars this venue does not ship), its scale and shape, and that the
+    draw must come from a stream derived from the seed rather than the
+    generator's own RNG. It no longer resolves before cadence - with no
+    matching, the two are independent.
   - `notes/problem-trade-cadence.md` - the tape runs orders of magnitude slower
     than a real active pair, and "trades per second" has three values differing
     by 8.5x because raw fills, aggregated prints and match events are LAYERS of
@@ -551,7 +565,9 @@ golden-test seed.
   rust_decimal 1 with serde-with-str, rand 0.10, rand_distr 0.6, rand_chacha 0.10,
   and the rest) centralised as workspace deps; `[profile.release]` opt-level 3 /
   lto fat / codegen-units 1; `rust-version 1.96`, `resolver 3`. The nautilus
-  crates.io dep (pinned) lives in `mogwai-adapter/Cargo.toml`, not root. `brokkr.toml` only sets
+  deps live in `mogwai-adapter/Cargo.toml`, not root, and are five SIBLING PATH
+  dependencies rather than pinned crates.io versions - this line previously said
+  pinned, contradicting the open path-dependency item above. `brokkr.toml` only sets
   `project = "mogwai"`. Root `mogwai.toml` carries the run knobs (`sim_epoch_ns 0`,
   `wall_anchor_ns 0`, `speed 1.0`, `gap_cap_ms 1000`, `server_heartbeat_ms 0`,
   `max_concurrent_tapes 256`, `max_subscriptions_per_connection 256`,

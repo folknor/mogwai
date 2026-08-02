@@ -135,7 +135,10 @@ refitting the same process family (ACD arrivals, GARCH volatility, Student-t
 innovations) to new data gives different constants, not a different model, so a
 flaw in the family survives every refit identically. And models fitted from the
 same venue and era are correlated draws rather than independent ones, which
-makes different ERAS the cheapest genuinely-independent axis.
+makes different ERAS the cheapest axis worth sampling - though not a
+"genuinely independent" one, as an earlier draft called it: different eras of
+one venue still share its market structure, overlapping regimes and the same
+model family. They reduce shared sampling dependence, nothing more.
 
 Two consequences for the spec. The realism gate has to assert per model rather
 than once, which is the gate-scoping question the profiles document also raises.

@@ -359,25 +359,18 @@ broadarrow worker is one account but two adapter clients and therefore two
 `/ws` sockets, so "per client" is ambiguous between one consumer and two
 connections.
 
-**D6. broadarrow believes its mogwai data client is accountless; the code says
-otherwise.** `research/broadarrow/reference/mogwai.md` states that `mogwai_data`
-builds a config "with NO account identity (keyless)" and that
-`register_mogwai_forward` registers both clients "using the worker's
-already-resolved `trader_id` and `account_id`". In the code
-`MogwaiDataClientConfig` carries an `account_id` and `ws_url` appends it as
-`?account=`, while broadarrow's `applied_data_config` never sets it.
+**D6. a market-data socket must still name an account.** mogwai requires an
+account on `/ws` even for a socket that carries no orders and touches no ledger.
+`MogwaiDataClientConfig` therefore carries an `account_id` and `ws_url` appends
+it as `?account=`.
 
-The mogwai-side half of this is FIXED and the entry is kept for the broadarrow
-half. Both configs now default `account_id` to the `UNSET_ACCOUNT_ID`
-placeholder (`MOGWAI-UNSET`) and `validate_account_id` REFUSES a config that
-still carries it, so an omitted account is a loud failure rather than a silent
-default. Previously it defaulted to `MOGWAI-001`, which made an omitted
-`account_id` indistinguishable from a deliberate one: a forward run's data
-socket bound a DIFFERENT account slot than its exec socket, auto-creating
-`MOGWAI-001`, counting a session against it and charging it against
-`max_accounts`. What remains true regardless: mogwai requires an account on
-`/ws` even for a market-data-only socket that touches no ledger, and
-broadarrow's own reference still describes the data client as keyless.
+Both configs default that field to the `UNSET_ACCOUNT_ID` placeholder
+(`MOGWAI-UNSET`) and `validate_account_id` REFUSES a config that still carries
+it, so an omitted account fails loudly. It previously defaulted to `MOGWAI-001`,
+which made an omitted `account_id` indistinguishable from a deliberate one: a
+data socket would bind a DIFFERENT account slot than its own exec socket,
+auto-creating `MOGWAI-001`, counting a session against it and charging it
+against `max_accounts`. That defect is closed on both sides of the wire.
 
 **D7. "profile" has five referents**, three of them live in the venue
 (`InstrumentProfile`, `SessionProfile`, `TransportProfile`), one is the config

@@ -36,12 +36,32 @@ solved later and must not shape any decision here.
 Four rulings that this document previously left open or did not ask. They are
 premises for every spec descending from here.
 
-- **Forward tests always run ACCELERATED.** Never speed 1.0. This is a premise
-  no document previously stated, and it is a correctness constraint rather than
-  a cost one: the adapter's `MIN_WALL_REQUEST_TIMEOUT_SECS` of 1 is already
-  flagged in its own comment as the tightest cap on usable sim speed, and a
-  request that times out at speed N is a failed run rather than a slow one. It
-  therefore sits outside the resource-cost exclusion above.
+- **Forward tests always run ACCELERATED, in PRACTICE.** This is a statement
+  about how the venue is used, not an invariant the venue enforces - the
+  committed default of `speed 1.0` is not a contradiction to be fixed, because
+  speed is a knob the launcher sets. Two consequences are real for the runs that
+  matter, without being constraints: the adapter's
+  `MIN_WALL_REQUEST_TIMEOUT_SECS` of 1 is flagged in its own comment as the
+  tightest cap on usable sim speed, and a request that times out at speed N is a
+  failed run rather than a slow one; and the HTTP polling path cannot keep up
+  under acceleration, on which see below.
+- **One instance serves exactly ONE INSTRUMENT.** The config names it at boot
+  and the venue serves that and nothing else. This is structural rather than a
+  refusal policy: there is no catalogue and nothing else to ask for. It is what
+  makes independent per-symbol tapes correct - with one instrument per venue,
+  two instruments never coexist, so the absence of any cross-instrument
+  correlation model is not a gap. See the subscription consequence in decision 6.
+- **The HTTP transport profile must be accelerable or it is REMOVED.** The
+  adapter polls on a 250 ms WALL interval while the server caps each page at
+  1,000 trades, so a dense tape under acceleration outruns it and the poller
+  silently misses data - roughly 1,250 trades per poll at 100x, against a 1,000
+  cap. `reference/clock.md` already records accelerated polling as a downstream
+  item. Probably fixable by scaling the cap and interval with speed, but it is a
+  polling loop imitating a stream and it degrades as speed rises. Nothing
+  currently uses it: `TransportProfile::default()` is `WsStreaming` and no
+  scenario overrides it. If it goes, one open item in `notes/todo.md` goes with
+  it - the write-up explaining why unordered HTTP order dispatch is fidelity
+  rather than a defect, which only matters while the path exists.
 - **A run has an optional duration, defaulting to indefinite.** The adapter can
   be told to run for N seconds, minutes, hours or days; told nothing, the
   instance runs until its owner dies. The duration is in SIM time, not wall
@@ -50,9 +70,11 @@ premises for every spec descending from here.
 - **There is no restart and no resume.** mogwai is fire and forget. An instance
   that dies is gone; nothing resumes its path. This CLOSES decision 6 of
   `notes/problem-seeds-and-paths.md` rather than deferring it. Reproducing a
-  path means launching a new instance with the same seed and the same config,
-  which reproduces from the origin because the tape is a pure function of
-  (seed, config) once the wall-clock anchor is removed.
+  path means launching a new instance with the same seed, config, fingerprint
+  and binary, which reproduces from the origin once the wall-clock anchor is
+  removed. Seed and config ALONE are not sufficient - the tape is a pure
+  function of its inputs only for a given build and fingerprint, and
+  `notes/problem-seeds-and-paths.md` states the full reproducible unit.
 - **Everything is on the sim clock, and REAL latency is not modelled.** Recorded
   as a ruling because it keeps being re-raised: under mandatory acceleration a
   sim-axis latency figure and physical wall latency appear to move in opposite
@@ -119,7 +141,14 @@ Concretely, the friction that shape produced in one session:
   orphaned venue holding 8787 poisons the next run and nothing prevents it.
 
 At fleet scale each of those stops being friction and becomes a wall. A
-hardcoded port permits exactly one concurrent forward test per machine.
+hardcoded DEFAULT port permits exactly one concurrent forward test per machine
+without deliberate coordination. Stated precisely, because an earlier wording
+said a hardcoded port permits exactly one, full stop, and that overstates it:
+the server already accepts `--addr` and scenarios already accept a base URL, so
+multiple ports are possible today. The defect is that nothing ALLOCATES one,
+nothing tells the client which was allocated, and the default is shared - so
+concurrency requires an operator to hand-assign ports and keep them straight,
+which at fleet scale is the same as not having it.
 
 ## What one shared service forces that hundreds of instances would not
 
@@ -219,10 +248,23 @@ that has no reason to exist.
    channel, which is also the signal that it is ready to serve. The three
    independently hardcoded copies of `127.0.0.1:8787` all go.
 
-4. **Death has exactly two causes.** The launcher kills it, or it reaches its
-   declared run duration and stops itself. Nothing else ends a venue - not the
-   last socket closing, since the adapter reconnects by design and a transport
-   blip must not be fatal. Where the process artifacts live is the operator's
+4. **Death has exactly two INTENDED causes**, and the distinction matters
+   because an earlier wording said "exactly two" flatly, which is a policy
+   stated as a process invariant. Crashes, signals, panics, OOM and machine
+   failure remain possible and cannot be legislated away. What can be made exact
+   is how each exit is CLASSIFIED. The two intended causes are: the launcher
+   kills it, or it reaches its declared run duration and stops itself. Nothing
+   else ends a venue deliberately - not the last socket closing, since the
+   adapter reconnects by design and a transport blip must not be fatal.
+
+   Planned completion needs to be distinguishable from a crash, because the
+   adapter's reconnect behaviour makes them look identical: a venue that
+   finished cleanly and exited looks like one that died, so the client
+   reconnects, backs off, exhausts, and reports failure for a run that
+   succeeded. The venue stops accepting connections once it is done and the
+   adapter treats a closed-and-refusing venue as an ending rather than a fault.
+   Implementation detail at spec time, recorded here because the duration ruling
+   created a terminal state that did not previously exist. Where the process artifacts live is the operator's
    problem, in the same class as choosing an extreme warmup.
 
 5. **`serve` and `gen` survive; `stop` and `man` go.** `serve` runs in the
@@ -241,6 +283,31 @@ that has no reason to exist.
    creation on first unknown header, `max_accounts`, the idle reaper, account
    deletion over HTTP, and arbitration between consumers who do not know each
    other.
+
+   Gone as well, because ONE INSTANCE SERVES ONE INSTRUMENT: the k-way
+   `MergeSource`, `max_concurrent_tapes`, refcounted tape sharing keyed on
+   symbol, and `[[instrument]]` as a list rather than a single table.
+
+   And SUBSCRIPTION ITSELF largely goes, which is the least obvious consequence
+   in this document. If the venue boots knowing its one instrument, subscription
+   stops being a SELECTION mechanism: a client connects and receives the tape,
+   because there is nothing to name and therefore nothing to refuse. That
+   retires `Subscribe` and `Unsubscribe` as wire messages, the
+   `SubscriptionIssue` refusal path, `max_subscriptions_per_connection`, and
+   fanout keyed by subscription. The adapter still receives nautilus's
+   `subscribe_trades` call - that is nautilus's client model and it does not go
+   away - but it satisfies it locally by forwarding what is already arriving,
+   rather than asking the venue for permission. What survives as a REQUEST
+   rather than a stream is history: nautilus strategies ask for historical data
+   on start, and with warmup declared and generated eagerly that is the venue
+   serving a window it already knows it owes.
+
+   One knob moves as a result, and it is the last of its kind. `MarketRegime` is
+   currently per-SUBSCRIPTION, described elsewhere in this document as the one
+   knob a consumer picks for itself. With no subscriptions it becomes boot
+   config, chosen by whoever launches the run - consistent with the launcher
+   supplying config and with havoc being armed through the control plane, but
+   worth stating rather than discovering.
 
    STAYS, because it is FIDELITY rather than tenancy: the bounded fanout ring,
    the lag policy, and killing a connection that falls behind. A real venue's

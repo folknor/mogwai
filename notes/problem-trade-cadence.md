@@ -11,12 +11,15 @@ problem statement yields one or more specs.
 Expanded from what would otherwise be a `notes/todo.md` entry; it outgrew a
 bullet.
 
-SEQUENCING CORRECTION: an earlier draft claimed this document resolves first.
-It does not. `notes/problem-order-book.md` decides whether client orders rest in
-a book and are consumed by arriving flow, and under that answer the generator
-emits parent taker arrivals while the wire prints fall out of matching - which
-redefines what a trade IS before this document can pick a rate for it. The book
-document resolves first; this one is written assuming its answer.
+SEQUENCING, twice corrected and now settled as INDEPENDENT. A first draft
+claimed this document resolves first. A second reversed that, on the grounds
+that `notes/problem-order-book.md` would decide whether client orders rest in a
+book consumed by arriving flow - under which the generator emits parent taker
+arrivals and the wire prints fall out of matching, redefining what a trade IS
+before a rate could be picked for it. That reversal is void: the venue is not
+growing a book. The fill model that document resolved to never touches tape
+generation, so nothing pre-empts the choice below and this document depends on
+none of the others.
 
 ## What the user wants
 
@@ -201,9 +204,14 @@ the parent rate is the other half:
   makes raw-versus-aggregated configurable, so choosing it is a decision about
   what mogwai's feed claims to be, not an indefensible option.
 
-Nothing downstream can be sized until this is picked - and note the sequencing:
-under the book document's B3, wire prints fall out of matching, so this choice
-is partly pre-empted rather than free.
+Nothing downstream can be sized until this is picked, and the choice is now
+FREE. An earlier draft said it was partly pre-empted, because under a matching
+venue the generator would emit parent arrivals and the wire prints would fall
+out of matching. There is no matching: `notes/problem-order-book.md` resolved to
+a fill model in which client orders never interact with the tape's generation at
+all. So the tape's publication contract is this document's to choose, and the
+sequencing correction at the top of this file - that the book resolves first -
+no longer applies.
 
 ## Three scope cautions on the numbers above
 
@@ -328,7 +336,8 @@ than the market is spec-level work and has not been done.
 At today's cadence this is survivable: a 7.19 s mean gap sits well above the
 quantum, so the fitted process operates in a range the data can describe. At
 the cadence this document proposes targeting - anywhere from 1 to 50 trades per
-second - every gap falls below the corpus's resolution, and the fitted
+second - the great majority of gaps fall below the corpus's resolution, and the
+fitted
 constants would be extrapolating into a region their source data cannot
 constrain at all.
 
@@ -338,6 +347,17 @@ resolution, is the only source here that can constrain sub-second arrival
 structure, which makes the cadence work a refit against a new corpus rather
 than a rescale of the existing one - a materially larger change than "move one
 scalar", and one that touches the constants the realism gate asserts.
+
+Two limits on how far that argument reaches, since an earlier draft stated it
+more categorically than the evidence supports. Whole-second stamps prove that
+exact sub-second durations CANNOT BE RECOVERED. They do not prove that 0.1603 is
+purely an artefact, and they do not prove that same-second rows carry no
+meaningful order - collapsing every same-second print is itself a MODEL of what
+happened, not recovered truth, in exactly the way the Binance timestamp collapse
+is an inference rather than an identification. What is established is that the
+corpus cannot ADJUDICATE between those readings, which is enough to disqualify
+it as the source for a sub-second target and not enough to call the committed
+anchor false.
 
 ## What must be decided
 

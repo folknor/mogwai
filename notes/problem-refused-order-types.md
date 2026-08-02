@@ -9,10 +9,12 @@ as under-specified, that is the genre rather than an omission. One resolved
 problem statement yields one or more specs.
 
 Expanded from what would otherwise be a `notes/todo.md` entry. Related to
-`notes/problem-order-book.md` but not the same question: that document asks how
-much book to build, this one asks what execution surface the venue owes its
-consumer. A book is one way to pay for it, not the only one, and the debt
-exists whether or not a book lands.
+`notes/problem-order-book.md` but not the same question: that document settles
+HOW an order fills, this one asks WHICH orders the venue accepts. It resolved to
+a seeded, volatility-scaled fill band and no book at all, which removes this
+document's hardest obstacle - a triggered stop now has a defensible fill price,
+so the remaining work here is the order-type surface itself rather than the
+execution model under it.
 
 ## What the user wants
 
@@ -136,20 +138,21 @@ those grounds rather than left unmentioned.
   landed 2026-08-02 (`b8031d8`) walks the tape per account and re-evaluates
   resting orders against it, which is structurally the same loop a stop trigger
   needs.
-- **A defensible fill after the trigger.** A triggered stop-market becomes a
-  market order, and a bookless venue fills market orders at their own submitted
-  price - which for a stop is meaningless. Real stops slip. The sweep tail
-  measured in the sibling document (up to 2,213 aggTrade ROWS in one match event
-  on BTC) is the plausible mechanism, but note what that number is and is not: it
-  counts rows, not distinct prices, so it does not yet establish how far a
-  marketable order actually walks. The quantity that would - price SPAN per
-  inferred match event - has not been measured, and the same missing number is
-  what `notes/problem-order-book.md` needs to choose between its A3 and A4. One
-  probe extension over archives already on disk answers both. Resolve it at the
-  spec level, whichever of the two specs is written first; until then, treat the
-  slippage magnitude here as an unquantified mechanism rather than a measured
-  one. Without a book there is no principled price to fill at; with only
-  top-of-book there is a price but no depth to walk.
+- ~~**A defensible fill after the trigger.**~~ SUPPLIED by the fill model. A
+  triggered stop-market becomes a market order, and the objection was that a
+  bookless venue fills market orders at their own submitted price, which for a
+  stop is meaningless. Under `notes/problem-order-book.md` a market order takes
+  its own seeded, volatility-scaled band, so the slippage is defensible without
+  any depth to walk. Real stops slip, and the band is what makes this one slip.
+
+  What the band's WIDTH should be for a triggered stop is a spec-level scale
+  question, and the measurement that would inform it is still owed: price SPAN
+  per inferred match event has never been computed. The sweep tail quoted
+  elsewhere (up to 2,213 aggTrade ROWS in one inferred event on BTC) counts rows
+  rather than distinct prices, so it does not establish how far a marketable
+  order actually walks. One probe extension over archives already on disk would
+  settle it. Until then the slippage magnitude is an unquantified mechanism
+  rather than a measured one.
 
 ## What must be decided
 
@@ -159,13 +162,18 @@ those grounds rather than left unmentioned.
    actually emits, and a decision to omit them is a decision that real strategy
    shapes stay untestable. Market-if-touched was explicitly killed and stays
    killed unless re-argued.
-2. **What the trigger reads** - traded price, or a quote that does not yet
-   exist. This is the same predicate question the penetration gate answered
-   under duress, and answering both the same way is worth something.
-3. **What a triggered market order fills at.** The honest options are a
-   top-of-book price, a swept average over generated depth, or an explicitly
-   declared slippage model. Filling at the submitted trigger price would be a
-   lie of the same class the queue-ahead refusal rejected.
+2. ~~**What the trigger reads.**~~ SETTLED: the traded price. There is no quote
+   and there is not going to be one, and the fill model reads traded prices too,
+   so the venue answers the predicate question the same way everywhere - which
+   also retires the deviation the penetration gate had to declare against RFC
+   4631's quote predicate.
+3. ~~**What a triggered market order fills at.**~~ SETTLED by
+   `notes/problem-order-book.md`: its own seeded, volatility-scaled band, the
+   same mechanism a limit order uses. The options an earlier draft listed - a
+   top-of-book price, a swept average over generated depth, or a separately
+   declared slippage model - all presumed structure the venue is not building.
+   Filling at the submitted trigger price would still be a lie of the class the
+   queue-ahead refusal rejected; the band is what prevents it.
 4. **Whether the standing no-growth decision is reopened**, and if so, whether
    broadarrow is consulted first - it is their note, and their consumer.
 5. **Which havoc arms extend to a conditional order.** The argument against
