@@ -11,7 +11,10 @@ use std::{
     },
 };
 
-use mogwai_engine::Engine;
+use crate::admission::ExecLanes;
+use crate::source::InstrumentProfiles;
+use mogwai_engine::{Engine, EngineConfig};
+use mogwai_protocol::SimClock;
 use mogwai_protocol::{AccountId, CommandClass, InstrumentDef};
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -38,17 +41,32 @@ pub(crate) struct AccountSlot {
     pub(crate) dark_until_ns: AtomicU64,
     pub(crate) stall_until_ns: AtomicU64,
     pub(crate) sessions: AtomicUsize,
+    pub(crate) next_session_id: AtomicU64,
+    /// The `ExecLanes` of every session currently bound to this account, so an
+    /// account-owned producer (the fill sweeper) can deliver to all of them.
+    /// Sessions register in `SessionLease::acquire` and deregister on the same
+    /// drop that releases the lease, so a dead socket's lanes cannot
+    /// accumulate. A `std::sync::Mutex` (never held across an await) rather
+    /// than an async one: every `ExecLanes` method is non-blocking by
+    /// construction.
+    pub(crate) session_lanes: Mutex<Vec<(u64, ExecLanes)>>,
     pub(crate) last_seen_ns: AtomicU64,
 }
 
 pub(crate) struct SessionLease {
     slot: Arc<AccountSlot>,
+    session_id: u64,
 }
 impl SessionLease {
-    pub(crate) fn acquire(slot: Arc<AccountSlot>, now_ns: u64) -> Self {
+    pub(crate) fn acquire(slot: Arc<AccountSlot>, now_ns: u64, lanes: ExecLanes) -> Self {
         slot.sessions.fetch_add(1, Ordering::Relaxed);
         slot.last_seen_ns.store(now_ns, Ordering::Relaxed);
-        Self { slot }
+        let session_id = slot.next_session_id.fetch_add(1, Ordering::Relaxed);
+        slot.session_lanes
+            .lock()
+            .expect("session lanes poisoned")
+            .push((session_id, lanes));
+        Self { slot, session_id }
     }
     pub(crate) fn slot(&self) -> &Arc<AccountSlot> {
         &self.slot
@@ -57,6 +75,11 @@ impl SessionLease {
 impl Drop for SessionLease {
     fn drop(&mut self) {
         self.slot.sessions.fetch_sub(1, Ordering::Relaxed);
+        self.slot
+            .session_lanes
+            .lock()
+            .expect("session lanes poisoned")
+            .retain(|(id, _)| *id != self.session_id);
     }
 }
 
@@ -84,6 +107,11 @@ impl AccountSlot {
 pub(crate) struct AccountTemplate {
     pub(crate) instruments: Arc<[InstrumentDef]>,
     pub(crate) balances: HashMap<String, Decimal>,
+    pub(crate) penetration_ticks: u32,
+    pub(crate) fill_sweep_interval_ms: u64,
+    pub(crate) sim: SimClock,
+    pub(crate) profiles: Arc<InstrumentProfiles>,
+    pub(crate) data_origin_ns: u64,
 }
 #[derive(Debug)]
 pub(crate) enum RegistryError {
@@ -135,11 +163,12 @@ impl AccountRegistry {
             generation: self.next_generation.fetch_add(1, Ordering::Relaxed),
             tombstoned: AtomicBool::new(false),
             closed: Notify::new(),
-            engine: AsyncMutex::new(Engine::with_instruments_and_balances(
-                id.clone(),
-                self.template.instruments.to_vec(),
-                self.template.balances.clone(),
-            )),
+            engine: AsyncMutex::new(Engine::build(EngineConfig {
+                account_id: id.clone(),
+                instruments: self.template.instruments.to_vec(),
+                balances: self.template.balances.clone(),
+                penetration_ticks: self.template.penetration_ticks,
+            })),
             delay_ms: AtomicU64::new(0),
             submit_act_ms: AtomicU64::new(0),
             modify_act_ms: AtomicU64::new(0),
@@ -150,9 +179,28 @@ impl AccountRegistry {
             dark_until_ns: AtomicU64::new(0),
             stall_until_ns: AtomicU64::new(0),
             sessions: AtomicUsize::new(0),
+            next_session_id: AtomicU64::new(1),
+            session_lanes: Mutex::new(Vec::new()),
             last_seen_ns: AtomicU64::new(now_ns),
         });
         slots.insert(id.clone(), Arc::clone(&slot));
+        // The account's fill sweeper, spawned only when the gate is armed so a
+        // default venue costs no task at all. The handle is deliberately NOT
+        // retained for an abort: the task selects on `wait_for_teardown`, which
+        // `destroy`/`reap_idle` fire before they drop their `Arc`, so it stops
+        // and releases the slot on tombstone without a second lifetime hook to
+        // keep in sync with the first.
+        if self.template.penetration_ticks > 0 {
+            drop(crate::sweeper::spawn_account_sweeper(
+                crate::sweeper::FillSweep {
+                    slot: Arc::clone(&slot),
+                    sim: self.template.sim,
+                    profiles: Arc::clone(&self.template.profiles),
+                    data_origin_ns: self.template.data_origin_ns,
+                    interval_ms: self.template.fill_sweep_interval_ms,
+                },
+            ));
+        }
         Ok(slot)
     }
     #[allow(dead_code)]
@@ -257,11 +305,12 @@ impl AccountSlot {
             generation: 1,
             tombstoned: AtomicBool::new(false),
             closed: Notify::new(),
-            engine: AsyncMutex::new(Engine::with_instruments_and_balances(
-                id,
-                Vec::new(),
-                HashMap::new(),
-            )),
+            engine: AsyncMutex::new(Engine::build(EngineConfig {
+                account_id: id,
+                instruments: Vec::new(),
+                balances: HashMap::new(),
+                penetration_ticks: 0,
+            })),
             delay_ms: AtomicU64::new(0),
             submit_act_ms: AtomicU64::new(0),
             modify_act_ms: AtomicU64::new(0),
@@ -272,6 +321,8 @@ impl AccountSlot {
             dark_until_ns: AtomicU64::new(0),
             stall_until_ns: AtomicU64::new(0),
             sessions: AtomicUsize::new(0),
+            next_session_id: AtomicU64::new(1),
+            session_lanes: Mutex::new(Vec::new()),
             last_seen_ns: AtomicU64::new(0),
         })
     }
@@ -287,6 +338,11 @@ mod tests {
             AccountTemplate {
                 instruments: Arc::from(mogwai_protocol::default_instruments()),
                 balances: HashMap::new(),
+                penetration_ticks: 0,
+                fill_sweep_interval_ms: 100,
+                sim: SimClock::identity(),
+                profiles: Arc::new(InstrumentProfiles::defaults()),
+                data_origin_ns: 0,
             },
             max_accounts,
         )
@@ -345,7 +401,10 @@ mod tests {
         let registry = registry(0);
         let account = id("LIVE");
         let slot = registry.acquire(&account, 1).unwrap();
-        let _lease = SessionLease::acquire(slot, 1);
+        let (lanes, _receivers) = crate::admission::ExecLanes::detached_with(
+            crate::admission::AdmissionLimits::default(),
+        );
+        let _lease = SessionLease::acquire(slot, 1, lanes);
         assert!(registry.reap_idle(101, 100).is_empty());
         assert_eq!(registry.len(), 1);
     }
@@ -359,7 +418,10 @@ mod tests {
         let registry = registry(0);
         let slot = registry.acquire(&id("LEASE"), 1).unwrap();
         {
-            let _lease = SessionLease::acquire(Arc::clone(&slot), 1);
+            let (lanes, _receivers) = crate::admission::ExecLanes::detached_with(
+                crate::admission::AdmissionLimits::default(),
+            );
+            let _lease = SessionLease::acquire(Arc::clone(&slot), 1, lanes);
             assert_eq!(slot.sessions.load(Ordering::Relaxed), 1);
         }
         assert_eq!(slot.sessions.load(Ordering::Relaxed), 0);

@@ -286,6 +286,50 @@ pub(crate) fn current_price(
     Some(trade.price)
 }
 
+/// The last clean-tape trade printed AT OR BEFORE `ts`.
+///
+/// Deliberately not `current_price`, which seeks to the first tick at or AFTER
+/// sim-now (its own gate asserts `ts_event >= sim_now`). That is right for
+/// stamping a MARKET order against what a live subscriber sees, and wrong for
+/// deciding whether a limit was already marketable when the venue accepted it:
+/// seeding a penetration from a trade that has not printed yet is a look-ahead
+/// leak. `positioned_generator` restores the checkpoint at or before `ts`, so
+/// the residual drain is at most `CHECKPOINT_K` ticks; `MAX_HISTORY_SEEK_TICKS`
+/// bounds it anyway. `None` when no print exists at or before `ts` within that
+/// budget, in which case no penetration is seeded and the order simply rests.
+pub(crate) fn last_trade_at_or_before(
+    symbol: &str,
+    ts: u64,
+    profiles: &InstrumentProfiles,
+    data_origin: u64,
+) -> Option<Decimal> {
+    let profile = profiles.get(symbol)?;
+    let mut source = positioned_generator(
+        profile,
+        seed_for(symbol),
+        data_origin,
+        fingerprint(),
+        None,
+        Some(ts),
+    );
+    let mut last = None;
+    for _ in 0..MAX_HISTORY_SEEK_TICKS {
+        // A source that ends returns what was already found rather than
+        // discarding it - `?` here would turn a real reading into `None`.
+        let Some(event) = source.next_tick() else {
+            break;
+        };
+        let TickEvent::Trade(trade) = event else {
+            continue;
+        };
+        if trade.ts_event > ts {
+            break;
+        }
+        last = Some(trade.price);
+    }
+    last
+}
+
 fn fresh_generator(
     profile: &InstrumentProfile,
     seed: u64,

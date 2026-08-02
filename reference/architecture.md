@@ -112,11 +112,18 @@ Venue-agnostic, intentionally synchronous and side-effect free: `process` takes
 a `ClientMessage` and returns the `ServerMessage`s to send. The server owns
 sockets, timers and the clock; the engine owns order and account state.
 
-- **Fills are synthetic - there is no matching and no order book.** A submit
+- **Fills are synthetic - there is no matching and no order book.** At the default penetration setting (`N = 0`), a submit
   fills immediately and in full at the order's own price; the price is carried
   onto the fill, never used as a matching constraint. mogwai never replays a real
   market against orders, so the immediate full fill is the neutral baseline and
   every interesting behaviour is a deliberate divergence from it.
+  With `penetration_ticks > 0`, a GTC or IOC limit instead needs that many
+  strictly-through **traded-price** prints after acceptance. This is deliberately
+  a trade predicate, not RFC 4631's quote predicate: mogwai has a trades-only
+  corpus and `/quotes` is empty. The eventual synthetic fill still uses the
+  order price, not the penetrating trade price. An account-owned sweeper books
+  those fills even without a websocket; delivery to connected sessions is best
+  effort and reconciliation remains the venue truth.
 - **Submit validation.** Before a submit is accepted it is range-checked the same
   way an amend is: empty or duplicate `client_order_id`, an unknown instrument, a
   non-positive quantity or price, a missing price, and a quantity or price off
@@ -135,6 +142,8 @@ sockets, timers and the clock; the engine owns order and account state.
   is all-or-nothing: if the order cannot fully fill - only possible under an armed
   `PartialFillNext` - it is rejected before acceptance and books nothing. A plain
   order fills in full, so TIF only diverges from `Gtc` once a partial is in play.
+  Under penetration gating, IOC evaluates only its acceptance-time reading and
+  cancels if it is still short; FOK and market orders are never gated.
 - **Divergence injection seam.** Armed divergences sit in a queue consumed as
   their trigger fires. `PartialFillNext`, `RejectNextSubmit`, `DuplicateNextFill`
   and `DropNextAccountUpdate` are the four engine-side divergences. The two
@@ -333,6 +342,22 @@ Owns the sockets, the clock, and replay pacing.
     adopted by it.
   - **Not a credential.** The header is an identity, not a credential, and any
     id may act as any account on this trusted-network test venue.
+- **The fill sweeper is ACCOUNT-owned** (`sweeper.rs`), spawned by
+  `AccountRegistry::acquire` only when `penetration_ticks > 0` - a default venue
+  pays for no task, no timer and no lock acquisition. Each pass takes the engine
+  lock for the pending scans, walks the CLEAN tape OFF the lock on
+  `spawn_blocking` (one walk per SYMBOL, not per order, with its own
+  `SWEEP_DRAIN_BUDGET`), then re-locks and applies the results; the engine drops
+  any result whose order revision or scan frontier has moved, which is what makes
+  the off-lock gap safe. Account ownership, not session ownership, is what lets
+  an order submitted over `POST /orders` with no websocket fill at all, and what
+  keeps a disconnected account's book moving. EXECUTION is account-scoped;
+  DELIVERY stays per session, through a lane registry on the slot that sessions
+  join and leave with their `SessionLease`. A session whose byte budget refuses
+  the batch gets the ordinary `AdmissionRejected` and reconciles over
+  `QueryOrders`/`QueryFills`: the fill is booked into venue truth whether or not
+  any session could take the frame, because a client's budget does not get to
+  decide whether the market traded through a price.
 - **Shared tapes, fanned out per subscription.** Synthesis is per TAPE, not per
   subscription: the number of OS threads producing market data is the number of
   distinct tapes in flight, and a subscription is a cheap tokio task attached to

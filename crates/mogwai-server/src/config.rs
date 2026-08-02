@@ -31,6 +31,20 @@ use crate::source;
 // `[[instrument]]` table is guarded the same way, by `ConfiguredInstrument`.
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Config {
+    /// Trades that must print THROUGH a resting limit's price before the venue
+    /// fills it. `0` - the default - is the bookless venue's historical
+    /// behaviour: a limit fills on submit at its own price, untouched by the
+    /// tape. Any positive value turns resting limits into orders the market has
+    /// to come to, gated on TRADED prices rather than quotes, because this
+    /// venue's corpus, generator and `/quotes` surface are all trades-only.
+    pub(crate) penetration_ticks: u32,
+    /// How often, in sim milliseconds, an ACCOUNT re-checks its resting limits
+    /// against the tape. Read only when `penetration_ticks > 0`. `0` disables
+    /// the sweep, and with the sweep off a gated resting order can NEVER fill:
+    /// a submit seeds only its own order, so nothing else ever advances a
+    /// penetration count. Boot refuses that combination rather than shipping a
+    /// venue that accepts limits it will never execute.
+    pub(crate) fill_sweep_interval_ms: u64,
     /// Simulated start instant. `0` keeps the identity wall-time clock.
     pub(crate) sim_epoch_ns: u64,
     /// Wall instant the accelerated clock anchors to. `0` (the default)
@@ -167,6 +181,8 @@ pub(crate) struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            penetration_ticks: 0,
+            fill_sweep_interval_ms: 100,
             sim_epoch_ns: 0,
             wall_anchor_ns: 0,
             // Honest-by-default: wall-clock pace the generator's inter-arrival
@@ -339,6 +355,34 @@ pub(crate) fn validate_account_lifecycle(cfg: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Above this no realistic tape ever fills a resting order and the venue would
+/// silently be a black hole; refusing at boot says so out loud.
+pub(crate) const MAX_PENETRATION_TICKS: u32 = 1_000;
+/// An interval this slow is functionally the "sweep disabled" case and deserves
+/// to be named as such rather than passing silently under the one-hour ceiling.
+pub(crate) const SLOW_SWEEP_WARN_MS: u64 = 60_000;
+
+/// Boot gate for the penetration knobs, alongside `validate_admission_limits`
+/// and `validate_account_lifecycle`.
+pub(crate) fn validate_penetration(cfg: &Config) -> anyhow::Result<()> {
+    if cfg.penetration_ticks > MAX_PENETRATION_TICKS {
+        anyhow::bail!("penetration_ticks must be at most {MAX_PENETRATION_TICKS}");
+    }
+    if cfg.fill_sweep_interval_ms > mogwai_protocol::control::MAX_DIVERGENCE_MS {
+        anyhow::bail!("fill_sweep_interval_ms must be at most MAX_DIVERGENCE_MS");
+    }
+    if cfg.penetration_ticks > 0 && cfg.fill_sweep_interval_ms == 0 {
+        anyhow::bail!("fill_sweep_interval_ms must be > 0 when penetration_ticks is enabled");
+    }
+    if cfg.penetration_ticks > 0 && cfg.fill_sweep_interval_ms > SLOW_SWEEP_WARN_MS {
+        tracing::warn!(
+            interval_ms = cfg.fill_sweep_interval_ms,
+            "penetration fill sweep interval is very slow"
+        );
+    }
+    Ok(())
+}
+
 /// The per-connection budget sizes every websocket session is built with.
 pub(crate) fn build_admission_limits(cfg: &Config) -> AdmissionLimits {
     AdmissionLimits {
@@ -371,6 +415,7 @@ impl Config {
         validate_balances(&cfg)?;
         validate_admission_limits(&cfg)?;
         validate_account_lifecycle(&cfg)?;
+        validate_penetration(&cfg)?;
         // Unlike every neighbouring count knob, 0 is not "unbounded" here:
         // `broadcast::channel(0)` panics, so the key is named in a load error
         // rather than crashing the first subscribe.

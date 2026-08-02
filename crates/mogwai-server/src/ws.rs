@@ -257,7 +257,6 @@ pub(crate) async fn run_writer<S>(
 /// `DelayAcks` window paces only execution traffic - see `spawn_exec_pump`
 /// for why that hop exists and for the per-event delay contract.
 async fn handle_socket(socket: WebSocket, state: AppState, slot: Arc<AccountSlot>) {
-    let lease = SessionLease::acquire(Arc::clone(&slot), crate::config::now_ns());
     let (sink, mut stream) = socket.split();
     let (tx, rx) = mpsc::channel::<Outbound>(1024);
     let (prio_tx, prio_rx) = mpsc::unbounded_channel::<Outbound>();
@@ -269,6 +268,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, slot: Arc<AccountSlot
     // lane takes megabytes of engine output and a TCP window's worth of timing
     // luck, so the invariants would have no end-to-end gate at all.
     let lanes = ExecLanes::new(held_tx, prio_tx, build_admission_limits(&state.cfg));
+    let lease = SessionLease::acquire(Arc::clone(&slot), crate::config::now_ns(), lanes.clone());
     // One replay stream PER SYMBOL, not per sorted symbol-set. Keying per set let
     // overlapping subscriptions (`[A,B]` then `[B,C]`) spawn two independent
     // streams both emitting `B` from independent generators/clocks, so the client

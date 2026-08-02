@@ -27,7 +27,9 @@ use std::time::Instant;
 
 use mogwai_protocol::{
     ClientMessage, CommandClass, ServerMessage,
-    sizing::{BOUNDARY_REFUSAL_BYTES, BookShape, worst_case_output_bytes},
+    sizing::{
+        BOUNDARY_REFUSAL_BYTES, BookShape, penetrated_fill_max_bytes, worst_case_output_bytes,
+    },
     truncate_reason,
 };
 use tokio::sync::{Semaphore, mpsc};
@@ -420,6 +422,14 @@ impl ExecLanes {
     pub(crate) fn reserve(&self, cmd: &ClientMessage, shape: &BookShape) -> Option<Reservation> {
         self.held_budget
             .try_reserve(worst_case_output_bytes(cmd, shape))
+    }
+    pub(crate) fn reserve_penetrated(
+        &self,
+        shape: &BookShape,
+        orders: usize,
+    ) -> Option<Reservation> {
+        self.held_budget
+            .try_reserve(penetrated_fill_max_bytes(shape, orders))
     }
 
     /// Reserve capacity for a protocol-boundary refusal, whose worst case is a

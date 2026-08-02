@@ -698,6 +698,14 @@ regime is an input to the generated walk, not a post-generation filter, so a
 different armed regime receives a distinct tape and cannot perturb clean or
 other-regime subscribers.
 
+Execution reads the CLEAN tape regardless of any armed regime. Market-order
+price stamping already did; the penetration fill sweep
+(`penetration_ticks > 0`) does the same. A regime is per SUBSCRIPTION while an
+order belongs to an ACCOUNT, so there is no single regime an order could be
+gated under - a scenario that arms a `LiquidityDrought` silences its own data
+feed while its resting limits keep being judged against the venue's canonical
+tape.
+
 ## Validation boundaries
 
 Four free validators in `mogwai-protocol` gate the havoc surfaces, one per

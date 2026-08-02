@@ -8,15 +8,20 @@
 use std::collections::HashMap;
 
 use mogwai_protocol::{
-    ClientOrderId, OrderFilled, ServerMessage, Side, SubmitOrder, TimeInForce, VenueOrderId,
-    WireOrderStatus, control::Divergence,
+    ClientOrderId, OrderFilled, OrderType, ServerMessage, Side, SubmitOrder, TimeInForce,
+    VenueOrderId, WireOrderStatus, control::Divergence,
 };
 use rust_decimal::Decimal;
 
-use crate::{Engine, OpenOrder};
+use crate::{Engine, OpenOrder, ScanResult};
 
 impl Engine {
-    pub(crate) fn on_submit(&mut self, order: SubmitOrder, ts: u64) -> Vec<ServerMessage> {
+    pub(crate) fn on_submit(
+        &mut self,
+        order: SubmitOrder,
+        ts: u64,
+        market_px: Option<Decimal>,
+    ) -> Vec<ServerMessage> {
         if let Err(reason) = self.validate_submit(&order) {
             return vec![ServerMessage::OrderRejected {
                 client_order_id: order.client_order_id,
@@ -37,23 +42,73 @@ impl Engine {
             }];
         }
 
-        // Order here is load-bearing. `fill_fraction` consumes the targeted
+        // The penetration gate. MARKET is marketable by definition and FOK is
+        // decided now or never, so neither is ever gated and neither pays for
+        // the server's market reading. A LIMIT that is already through the last
+        // print is seeded with one penetration, so an aggressive limit is not
+        // taxed a whole sweep interval for arriving marketable.
+        let gated = self.penetration_ticks > 0
+            && order.order_type == OrderType::Limit
+            && matches!(order.time_in_force, TimeInForce::Gtc | TimeInForce::Ioc);
+        let seeded = if gated {
+            let limit = order.price.expect("a validated limit carries a price");
+            u32::from(market_px.is_some_and(|px| through(order.side, limit, px)))
+        } else {
+            0
+        };
+        if gated && seeded < self.penetration_ticks {
+            let venue_order_id = self.next_id("V");
+            self.seen_client_order_ids
+                .insert(order.client_order_id.clone(), venue_order_id.clone());
+            let mut out = vec![ServerMessage::OrderAccepted {
+                client_order_id: order.client_order_id.clone(),
+                venue_order_id: venue_order_id.clone(),
+                ts_event: ts,
+            }];
+            let leaves_qty = order.quantity;
+            let record = OpenOrder {
+                venue_order_id,
+                submit: order,
+                leaves_qty,
+                ts_accepted: ts,
+                ts_last: ts,
+                penetration_count: seeded,
+                penetration_scanned_ns: ts,
+                revision: 0,
+            };
+            match record.submit.time_in_force {
+                // GTC rests and is swept; an IOC is evaluated exactly once,
+                // against the acceptance-time seed, and cancels short rather
+                // than filling at a price the market never reached.
+                TimeInForce::Gtc => self.open.push(record),
+                TimeInForce::Ioc => {
+                    out.push(ServerMessage::OrderCanceled {
+                        client_order_id: record.submit.client_order_id.clone(),
+                        venue_order_id: record.venue_order_id.clone(),
+                        ts_event: ts,
+                    });
+                    self.record_closed(&record, WireOrderStatus::Canceled, ts);
+                }
+                TimeInForce::Fok => unreachable!("FOK is never gated"),
+            }
+            // Deliberately does NOT consume `DropNextAccountUpdate`, and does
+            // not call `plan_fill`, so neither that divergence nor a targeted
+            // `PartialFillNext` is spent here: both are armed against the FILL,
+            // and under the gate the fill has not happened yet.
+            out.push(ServerMessage::AccountState(self.snapshot(ts)));
+            return out;
+        }
+
+        // Order here is load-bearing. `plan_fill` consumes the targeted
         // `PartialFillNext` for this id, and it must run BEFORE the FOK decision
         // because all-or-nothing is judged against the (possibly diverged) fill
         // size, not the requested quantity. A FOK the partial pushes below full
         // is rejected right here, and the partial it consumed goes with it: the
         // divergence fired on its target (it is what killed the order), so it is
         // correctly spent rather than left armed to ambush a later resubmit of
-        // the same id.
-        let fill_fraction = self.fill_fraction(&order);
-        // `validate_submit` already confirmed the instrument exists; a missing
-        // entry here would mean `Decimal::ZERO`, which `floor_to_increment`
-        // treats as "not a grid" and passes the raw fraction through.
-        let size_increment = self
-            .instruments
-            .get(&order.symbol)
-            .map_or(Decimal::ZERO, |instrument| instrument.size_increment);
-        let last_qty = fill_quantity(&order, fill_fraction, size_increment);
+        // the same id. `plan_fill` needs no venue id precisely so this ordering
+        // survives: a rejected FOK must not burn its client order id.
+        let last_qty = self.plan_fill(&order, order.quantity);
         let leaves_qty = order.quantity - last_qty;
 
         if order.time_in_force == TimeInForce::Fok && leaves_qty > Decimal::ZERO {
@@ -91,37 +146,8 @@ impl Engine {
         // so this never perturbs a normal submit. An armed `DuplicateNextFill`
         // is left in place: it applies to a fill, and no fill was produced.
         if last_qty > Decimal::ZERO {
-            let last_px = order.price.expect("validated submit price is present");
-
-            let fill = OrderFilled {
-                client_order_id: order.client_order_id.clone(),
-                venue_order_id: venue_order_id.clone(),
-                trade_id: self.next_id("T"),
-                symbol: order.symbol.clone(),
-                side: order.side,
-                last_qty,
-                last_px,
-                leaves_qty,
-                commission: Decimal::ZERO,
-                ts_event: ts,
-            };
-
-            self.apply_fill(&fill);
-            // Booked exactly once into the QueryFills truth store, BEFORE the
-            // duplicate divergence below doubles the wire event: the
-            // duplication is the lie this venue injects, the store keeps the
-            // truth a reconciler checks against.
-            self.record_fill(&fill);
-            // Untargeted: applies to the fill just produced. Scanned (not peeked
-            // at `front()`) so a non-matching targeted `PartialFillNext` parked
-            // ahead of it in the queue cannot block it - see `take_armed`.
-            let duplicate = self
-                .take_armed(|d| matches!(d, Divergence::DuplicateNextFill))
-                .is_some();
-            if duplicate {
-                out.push(ServerMessage::OrderFilled(fill.clone()));
-            }
-            out.push(ServerMessage::OrderFilled(fill));
+            let fill = self.commit_fill(&order, &venue_order_id, last_qty, leaves_qty, ts);
+            out.extend(fill);
         }
 
         // Freeze the accepted order's state once, then route it: rest it
@@ -134,6 +160,9 @@ impl Engine {
             leaves_qty,
             ts_accepted: ts,
             ts_last: ts,
+            penetration_count: 0,
+            penetration_scanned_ns: ts,
+            revision: 0,
         };
         if leaves_qty > Decimal::ZERO {
             match record.submit.time_in_force {
@@ -162,6 +191,151 @@ impl Engine {
         if !drop_update {
             out.push(ServerMessage::AccountState(self.snapshot(ts)));
         }
+        out
+    }
+
+    /// Apply a batch of off-lock walk results and execute whatever the gate now
+    /// admits.
+    ///
+    /// Each result is matched back to a still-resting order whose `revision`
+    /// AND `penetration_scanned_ns` both still equal what the walk was planned
+    /// against; anything cancelled, filled, repriced, amended or already
+    /// advanced by an overlapping pass is dropped. That check, not liveness, is
+    /// what makes walking the tape off the engine lock safe: two overlapping
+    /// walks naming one order would otherwise both credit the span they share.
+    ///
+    /// Returns the batch's events and the number of orders it actually EMITTED
+    /// a fill for, which is what the caller reserves delivery bytes against - a
+    /// scan below its threshold produces no bytes, so reserving for it would
+    /// grow the request with the open-order count against a fixed budget.
+    pub fn apply_scans(&mut self, results: &[ScanResult], ts: u64) -> (Vec<ServerMessage>, usize) {
+        let mut out = Vec::new();
+        let mut emitted = 0;
+        for result in results {
+            let Some(pos) = self.open.iter().position(|order| {
+                order.submit.client_order_id == result.client_order_id
+                    && order.revision == result.revision
+                    && order.penetration_scanned_ns == result.from_ns
+            }) else {
+                continue;
+            };
+            let (submit, venue_order_id, leaves) = {
+                let order = &mut self.open[pos];
+                order.penetration_count = order.penetration_count.saturating_add(result.counted);
+                // The frontier advances to exactly where the walk REACHED, which
+                // a spent drain budget may leave short of the pass's target, so
+                // a truncated pass loses no span rather than skipping over it.
+                order.penetration_scanned_ns = result.scanned_to_ns;
+                order.revision = order.revision.saturating_add(1);
+                (
+                    order.submit.clone(),
+                    order.venue_order_id.clone(),
+                    order.leaves_qty,
+                )
+            };
+            if self.open[pos].penetration_count < self.penetration_ticks {
+                continue;
+            }
+            // Sized off the LEAVES, never `submit.quantity`: a swept order may
+            // already be partly filled or have been amended, and multiplying a
+            // partial-fill fraction by the original quantity would over-fill.
+            let last_qty = self.plan_fill(&submit, leaves);
+            let new_leaves = leaves - last_qty;
+            if last_qty > Decimal::ZERO {
+                out.extend(self.commit_fill(&submit, &venue_order_id, last_qty, new_leaves, ts));
+                emitted += 1;
+            }
+            if new_leaves > Decimal::ZERO {
+                let order = &mut self.open[pos];
+                order.leaves_qty = new_leaves;
+                order.ts_last = ts;
+                // An execution RESTARTS the window. Without this the remainder
+                // rests at exactly its threshold and the next pass fills it
+                // with zero further penetrations - the gate would leak open on
+                // precisely the orders it is most meant to hold. Each tranche
+                // has to be traded through on its own.
+                order.penetration_count = 0;
+                order.penetration_scanned_ns = ts;
+                order.revision = order.revision.saturating_add(1);
+            } else {
+                let order = self.open.remove(pos);
+                self.record_closed(&order, WireOrderStatus::Filled, ts);
+            }
+        }
+        // ONE snapshot for the whole batch, taken after every fill it booked -
+        // which is what `sizing::penetrated_fill_max_bytes` bounds.
+        if emitted > 0 {
+            let drop_update = self
+                .take_armed(|d| matches!(d, Divergence::DropNextAccountUpdate))
+                .is_some();
+            if !drop_update {
+                out.push(ServerMessage::AccountState(self.snapshot(ts)));
+            }
+        }
+        (out, emitted)
+    }
+
+    /// The size this fill WOULD be, and nothing else: consumes the targeted
+    /// `PartialFillNext`, clamps it and floors it onto the size grid against
+    /// `remaining` (the order's leaves, not its original quantity). Mutates no
+    /// ledger and needs no venue id, so `on_submit` can judge FOK against its
+    /// answer while a rejected FOK still leaves its client order id unreserved.
+    fn plan_fill(&mut self, order: &SubmitOrder, remaining: Decimal) -> Decimal {
+        let fraction = self.fill_fraction(order);
+        // `validate_submit` already confirmed the instrument exists; a missing
+        // entry here would mean `Decimal::ZERO`, which `floor_to_increment`
+        // treats as "not a grid" and passes the raw fraction through.
+        let increment = self
+            .instruments
+            .get(&order.symbol)
+            .map_or(Decimal::ZERO, |instrument| instrument.size_increment);
+        let mut remaining_order = order.clone();
+        remaining_order.quantity = remaining;
+        fill_quantity(&remaining_order, fraction, increment)
+    }
+
+    /// Emit and book a planned fill at the ORDER'S price: `apply_fill`,
+    /// `record_fill`, and the `DuplicateNextFill` consumption. Shared by
+    /// `on_submit` (ungated, or marketable on arrival) and `apply_scans` (the
+    /// tape has now traded through), so the two paths cannot diverge in WHAT
+    /// they produce, only in when.
+    fn commit_fill(
+        &mut self,
+        order: &SubmitOrder,
+        venue_order_id: &VenueOrderId,
+        last_qty: Decimal,
+        leaves_qty: Decimal,
+        ts: u64,
+    ) -> Vec<ServerMessage> {
+        let fill = OrderFilled {
+            client_order_id: order.client_order_id.clone(),
+            venue_order_id: venue_order_id.clone(),
+            trade_id: self.next_id("T"),
+            symbol: order.symbol.clone(),
+            side: order.side,
+            last_qty,
+            last_px: order.price.expect("validated submit price is present"),
+            leaves_qty,
+            commission: Decimal::ZERO,
+            ts_event: ts,
+        };
+        self.apply_fill(&fill);
+        // Booked exactly once into the QueryFills truth store, BEFORE the
+        // duplicate divergence doubles the wire event: the duplication is the
+        // lie this venue injects, the store keeps the truth a reconciler checks
+        // against.
+        self.record_fill(&fill);
+        // Untargeted: applies to the fill just produced. Scanned (not peeked at
+        // `front()`) so a non-matching targeted `PartialFillNext` parked ahead
+        // of it in the queue cannot block it - see `take_armed`.
+        let duplicate = self
+            .take_armed(|d| matches!(d, Divergence::DuplicateNextFill))
+            .is_some();
+        let mut out = Vec::new();
+        if duplicate {
+            out.push(ServerMessage::OrderFilled(fill.clone()));
+        }
+        out.push(ServerMessage::OrderFilled(fill));
         out
     }
 
@@ -453,8 +627,17 @@ impl Engine {
 
         let (quantity, price, leaves_qty) = {
             let order = &mut self.open[pos];
+            // Either kind of amend bumps the revision, so a penetration walk
+            // already in flight against the pre-amend state is discarded.
+            order.revision = order.revision.saturating_add(1);
             if price.is_some() {
                 order.submit.price = price;
+                // A reprice restarts the penetration window: prints through the
+                // OLD price are not evidence about the new one. A quantity-only
+                // amend keeps the count, because the price the market has to
+                // trade through has not moved.
+                order.penetration_count = 0;
+                order.penetration_scanned_ns = ts;
             }
             order.submit.quantity = new_total;
             order.leaves_qty = new_total - filled;
@@ -529,6 +712,15 @@ fn fill_quantity(order: &SubmitOrder, fill_fraction: Decimal, size_increment: De
             "PartialFillNext produced non-positive last_qty; treating as a normal full fill"
         );
         order.quantity
+    }
+}
+
+/// True only when a traded price is strictly through the resting limit. The
+/// venue has a trades-only tape, so this deliberately is not a quote predicate.
+fn through(side: Side, limit: Decimal, traded: Decimal) -> bool {
+    match side {
+        Side::Buy => traded < limit,
+        Side::Sell => traded > limit,
     }
 }
 

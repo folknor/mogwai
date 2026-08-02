@@ -263,7 +263,13 @@ pub(crate) async fn process_order_cmd(
             .await;
         }
     }
-    let order_cmd = stamp_market_price(order_cmd, state).await;
+    // Re-sampled BEFORE the reading, not after the act sleep only in name: the
+    // gated-limit reading is "the last print at or before the venue ACTED", so
+    // handing it the entry-time `ts` would judge a delayed submit against the
+    // tape as it was when the command arrived - the exact staleness the act
+    // delay is placed above the reading to avoid.
+    let ts = sim_now_ns(state.sim);
+    let (order_cmd, market_px) = market_reading(order_cmd, state, ts).await;
     // Re-sample after the market-price synthesis, which for a price-less MARKET
     // order may block ~100 ms on the checkpoint mutex and seek (S16). The
     // synthesis-failure reject and the engine events below all occur now.
@@ -324,7 +330,7 @@ pub(crate) async fn process_order_cmd(
             ts_event: ts,
         });
     };
-    let events = engine.process(order_cmd, ts);
+    let events = engine.process_with_market(order_cmd, ts, market_px);
     drop(engine);
     OrderOutcome::Produced {
         events,
@@ -683,10 +689,28 @@ pub(crate) async fn clock(State(state): State<AppState>) -> Json<ServerClock> {
 /// `/trades` request (or vice versa) any longer than the symbol's shared
 /// index itself requires - other symbols' requests do not queue here at all
 /// (S13).
-async fn stamp_market_price(msg: ClientMessage, state: &AppState) -> ClientMessage {
+/// Under the penetration gate this also takes a reading for a LIMIT submit, but
+/// a DIFFERENT one and for a different purpose: `fills::last_trade_at_or_before`
+/// rather than `source::current_price`, because the latter returns the first
+/// tick at or AFTER sim-now and seeding a penetration from a print that has not
+/// happened yet is a look-ahead leak. That reading is RETURNED, never stamped -
+/// the limit keeps its own price, and the reading only tells the engine whether
+/// the order was already marketable when the venue accepted it. MARKET and FOK
+/// orders are never gated, so neither pays for a seek whose result is discarded.
+async fn market_reading(
+    msg: ClientMessage,
+    state: &AppState,
+    ts: u64,
+) -> (ClientMessage, Option<rust_decimal::Decimal>) {
     let ClientMessage::SubmitOrder(mut order) = msg else {
-        return msg;
+        return (msg, None);
     };
+    let gated_limit = state.cfg.penetration_ticks > 0
+        && order.order_type == OrderType::Limit
+        && matches!(
+            order.time_in_force,
+            mogwai_protocol::TimeInForce::Gtc | mogwai_protocol::TimeInForce::Ioc
+        );
     if order.order_type == OrderType::Market && order.price.is_none() {
         let symbol = order.symbol.clone();
         let profiles = Arc::clone(&state.profiles);
@@ -703,8 +727,25 @@ async fn stamp_market_price(msg: ClientMessage, state: &AppState) -> ClientMessa
                 None
             }
         };
+        return (ClientMessage::SubmitOrder(order), None);
     }
-    ClientMessage::SubmitOrder(order)
+    if gated_limit {
+        let symbol = order.symbol.clone();
+        let profiles = Arc::clone(&state.profiles);
+        let data_origin = state.data_origin_ns;
+        let reading = tokio::task::spawn_blocking(move || {
+            crate::fills::last_trade_at_or_before(&symbol, ts, &profiles, data_origin)
+        })
+        .await
+        .unwrap_or_else(|e| {
+            // A failed reading is simply no reading: the order rests and the
+            // sweeper decides it. Never a seeded penetration.
+            tracing::error!(%e, "limit market reading task failed");
+            None
+        });
+        return (ClientMessage::SubmitOrder(order), reading);
+    }
+    (ClientMessage::SubmitOrder(order), None)
 }
 
 /// HTTP order-entry surface for profiles that do not use `/ws` for orders.

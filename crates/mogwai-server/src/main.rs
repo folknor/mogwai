@@ -13,6 +13,8 @@
 compile_error!("mogwai-server requires a Unix target");
 
 mod config;
+mod fills;
+mod sweeper;
 // `gen` is a reserved keyword in the 2024 edition (generator blocks), so the
 // module is declared via the raw identifier; `crate::r#gen` is otherwise the
 // plain `crate::gen` module the spec names throughout.
@@ -318,6 +320,11 @@ async fn serve_async(
         AccountTemplate {
             instruments: Arc::from(profiles.instrument_defs()),
             balances: cfg.balances.clone(),
+            penetration_ticks: cfg.penetration_ticks,
+            fill_sweep_interval_ms: cfg.fill_sweep_interval_ms,
+            sim,
+            profiles: Arc::clone(&profiles),
+            data_origin_ns,
         },
         cfg.max_accounts,
     ));
@@ -807,6 +814,11 @@ mod tests {
             AccountTemplate {
                 instruments: Arc::from(profiles.instrument_defs()),
                 balances: std::collections::HashMap::new(),
+                penetration_ticks: 0,
+                fill_sweep_interval_ms: 100,
+                sim: SimClock::identity(),
+                profiles: Arc::clone(&profiles),
+                data_origin_ns: 0,
             },
             4096,
         ));
@@ -876,6 +888,11 @@ mod tests {
                 AccountTemplate {
                     instruments: Arc::from(profiles.instrument_defs()),
                     balances: Default::default(),
+                    penetration_ticks: cfg.penetration_ticks,
+                    fill_sweep_interval_ms: cfg.fill_sweep_interval_ms,
+                    sim: SimClock::identity(),
+                    profiles: Arc::clone(&profiles),
+                    data_origin_ns: now_ns().saturating_sub(cfg.backfill_horizon_ns),
                 },
                 4096,
             )),
@@ -6236,5 +6253,262 @@ mod tests {
             "cancelled pacing sleep took {:?} to return",
             cancelled_at.elapsed()
         );
+    }
+
+    /// A gated venue whose account sweeper is running.
+    ///
+    /// The clock is ACCELERATED on purpose. The gate is a statement about the
+    /// tape, and at `speed = 1.0` the fitted BTCUSDT arrival process legitimately
+    /// dwells tens of seconds between prints, so a wall-bounded assertion about a
+    /// resting fill would be a bet on the tape's cadence rather than a gate on
+    /// this code. At `speed = 100` the sweep's wall floor (5 ms) buys half a
+    /// simulated second of tape per pass, which the dwell bound in
+    /// `mogwai-data`'s `default_symbol_tape_dwell_is_bounded` makes a print-rich
+    /// interval.
+    fn gated_state(ticks: u32, interval_ms: u64) -> AppState {
+        let wall = now_ns();
+        let sim = SimClock {
+            sim_epoch_ns: wall,
+            wall_anchor_ns: wall,
+            speed: 100.0,
+        };
+        let cfg = Config {
+            penetration_ticks: ticks,
+            fill_sweep_interval_ms: interval_ms,
+            sim_epoch_ns: wall,
+            wall_anchor_ns: wall,
+            speed: 100.0,
+            server_heartbeat_ms: 0,
+            ..Config::default()
+        };
+        let profiles = default_profiles();
+        let data_origin_ns = wall.saturating_sub(cfg.backfill_horizon_ns);
+        let pending_act_slots = cfg.global_pending_command_acts;
+        let (tapes, _reaper) = crate::tape::TapeRegistry::new(&cfg, build_tape_permits(&cfg));
+        AppState {
+            accounts: Arc::new(AccountRegistry::new(
+                AccountTemplate {
+                    instruments: Arc::from(profiles.instrument_defs()),
+                    balances: Default::default(),
+                    penetration_ticks: ticks,
+                    fill_sweep_interval_ms: interval_ms,
+                    sim,
+                    profiles: Arc::clone(&profiles),
+                    data_origin_ns,
+                },
+                4096,
+            )),
+            profiles,
+            sim,
+            data_origin_ns,
+            cfg,
+            tapes,
+            pending_acts: Arc::new(tokio::sync::Semaphore::new(pending_act_slots)),
+        }
+    }
+
+    /// A BUY the whole tape is below, so every print is strictly through it -
+    /// the generated BTC tape lives around 60,000, and the price-100 fixtures
+    /// the rest of this suite uses would rest forever under the gate.
+    fn gated_buy(id: &str) -> ClientMessage {
+        ClientMessage::SubmitOrder(SubmitOrder {
+            client_order_id: id.into(),
+            symbol: "BTCUSDT".into(),
+            side: mogwai_protocol::Side::Buy,
+            order_type: mogwai_protocol::OrderType::Limit,
+            quantity: Decimal::new(1, 2),
+            price: Some(Decimal::from(1_000_000)),
+            time_in_force: TimeInForce::Gtc,
+        })
+    }
+
+    async fn http_order_status(
+        app: &AppState,
+        account: &str,
+        id: &str,
+    ) -> mogwai_protocol::WireOrderStatus {
+        let Json(events) = submit_order_http(
+            State(app.clone()),
+            account_headers_for(account),
+            Json(ClientMessage::QueryOrders {
+                request_id: "pen-truth".into(),
+                client_order_id: Some(id.into()),
+                open_only: false,
+            }),
+        )
+        .await
+        .expect("query accepted");
+        let ServerMessage::OrderStatusSnapshot(snapshot) = &events[0] else {
+            panic!("expected an order snapshot, got {:?}", events[0])
+        };
+        snapshot.orders[0].status
+    }
+
+    /// The gate on account ownership (spec 3.4): an order submitted over
+    /// `POST /orders` by an account with NO websocket must still fill, because
+    /// the sweeper belongs to the account, not to a session. A session-owned
+    /// sweeper fails exactly here, and the venue-truth stores would then
+    /// honestly report an order that can never execute.
+    ///
+    /// `penetration_ticks = 2` makes the crossing deterministic rather than
+    /// hoped for: the acceptance reading seeds ONE penetration (the tape is
+    /// below 1,000,000), so the order rests exactly one short, and the next
+    /// print - whatever direction the walk takes, since `MAX_ABS_RETURN` cannot
+    /// move the tape sixteenfold - completes it on the first sweep after it.
+    #[tokio::test]
+    async fn an_http_only_account_still_fills_under_the_gate() {
+        let app = gated_state(2, 10);
+        let Json(events) = submit_order_http(
+            State(app.clone()),
+            account_headers_for("PEN-HTTP"),
+            Json(gated_buy("HTTP-1")),
+        )
+        .await
+        .expect("order accepted");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+            "a seed of one against a threshold of two must rest: {events:?}"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if http_order_status(&app, "PEN-HTTP", "HTTP-1").await
+                == mogwai_protocol::WireOrderStatus::Filled
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the account sweeper never filled a resting limit the tape trades through"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    /// The negative, and the point of the whole feature: a limit the market
+    /// never reaches does not fill. Bounded by wall time rather than by a print,
+    /// because no print can satisfy it.
+    #[tokio::test]
+    async fn a_gated_order_the_tape_never_reaches_never_fills() {
+        let app = gated_state(1, 10);
+        let mut order = gated_buy("HELD-1");
+        if let ClientMessage::SubmitOrder(submit) = &mut order {
+            // A buy at one cent: the tape is five orders of magnitude above it,
+            // so no print is ever strictly through.
+            submit.price = Some(Decimal::new(1, 2));
+        }
+        let Json(events) = submit_order_http(
+            State(app.clone()),
+            account_headers_for("PEN-HELD"),
+            Json(order),
+        )
+        .await
+        .expect("order accepted");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+            "an unmarketable limit must not fill on submit: {events:?}"
+        );
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            http_order_status(&app, "PEN-HELD", "HELD-1").await,
+            mogwai_protocol::WireOrderStatus::Accepted,
+            "the venue filled an order the market never traded through"
+        );
+    }
+
+    /// Execution is ACCOUNT-scoped, delivery is per SESSION: a fill produced by
+    /// the account's sweeper - which no command asked for - reaches a socket
+    /// bound to that account through the slot's session-lane registry. The order
+    /// is submitted over HTTP on purpose, so the frame the socket receives
+    /// cannot be a response to anything it sent.
+    #[tokio::test]
+    async fn a_swept_fill_reaches_a_session_that_asked_for_nothing() {
+        let app = gated_state(2, 10);
+        let router = Router::new()
+            .route("/ws", get(ws_upgrade))
+            .with_state(app.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            drop(axum::serve(listener, router).await);
+        });
+        let mut socket = tape_socket(addr, "PEN-WS").await;
+
+        // Round-trip a query so the session's lanes are registered on the slot
+        // before the order the sweeper will fill is submitted.
+        socket
+            .send(tungstenite::Message::Text(
+                serde_json::to_string(&ClientMessage::QueryOrders {
+                    request_id: "hello".into(),
+                    client_order_id: None,
+                    open_only: false,
+                })
+                .expect("encode query")
+                .into(),
+            ))
+            .await
+            .expect("send query");
+
+        let Json(events) = submit_order_http(
+            State(app.clone()),
+            account_headers_for("PEN-WS"),
+            Json(gated_buy("WS-1")),
+        )
+        .await
+        .expect("order accepted");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+            "a seed of one against a threshold of two must rest: {events:?}"
+        );
+
+        let fill = tokio::time::timeout(Duration::from_secs(15), async {
+            while let Some(frame) = socket.next().await {
+                let tungstenite::Message::Text(text) = frame.expect("read frame") else {
+                    continue;
+                };
+                if let ServerMessage::OrderFilled(fill) =
+                    serde_json::from_str(&text).expect("decode server frame")
+                {
+                    return fill;
+                }
+            }
+            panic!("socket ended before the swept fill")
+        })
+        .await
+        .expect("the sweeper's fill reaches the bound session");
+        assert_eq!(fill.client_order_id, "WS-1");
+        // The gate decides WHEN, never at what price: the print is the ORDER'S
+        // own price, not the penetrating trade's.
+        assert_eq!(fill.last_px, Decimal::from(1_000_000));
+    }
+
+    /// A default venue pays nothing for the gate: no order is ever scannable,
+    /// so the sweeper has nothing to do even if one were spawned - and
+    /// `AccountRegistry::acquire` spawns it from exactly one place under exactly
+    /// one condition, `penetration_ticks > 0`.
+    #[tokio::test]
+    async fn a_default_venue_has_no_pending_scans() {
+        let app = state();
+        let _events = submit_order_http(
+            State(app.clone()),
+            account_headers_for("PEN-OFF"),
+            Json(gated_buy("OFF-1")),
+        )
+        .await
+        .expect("order accepted");
+        let slot = app
+            .accounts
+            .get(&mogwai_protocol::AccountId::parse("PEN-OFF").expect("account id"))
+            .expect("the account exists");
+        assert!(slot.engine.lock().await.pending_scans().is_empty());
     }
 }

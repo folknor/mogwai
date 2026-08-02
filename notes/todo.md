@@ -104,33 +104,6 @@ Or both. There are no exceptions.
   not taken here: the venue says clearly what happened, what the consumer does
   with that is the consumer's call.
 
-- BUILD, unblocked now that the default tape carries a gated dwell bound:
-  penetration-gated fills. RFC 4631's phase A, and the highest-value fill-fidelity item available
-  to us -
-  at-touch filling is the specific lie that flatters maker strategies. Today
-  `mogwai-engine/src/orders.rs` fills synthetically at the ORDER'S OWN price on
-  submit ("No order-type special case: this venue prices Market orders like any
-  other submit"), with the quantity coming from `fill_fraction`, so a resting
-  limit never has to be traded through to fill. The gate wanted is: fill only
-  once the tape has printed N ticks THROUGH the limit, with N=0 reproducing
-  today's behavior exactly so the default is unchanged. One deviation from the
-  RFC is forced and must be stated wherever this lands: the RFC gates on the
-  best QUOTE moving through, and mogwai has no quotes to gate on - the Kraken
-  corpus is trades-only, the generator synthesizes trades, and `/quotes` is
-  always empty (see the note below). So mogwai gates on traded prices, which is
-  what bar and L1 backtesting does anyway and is defensible on its own terms,
-  but it is NOT the same predicate nautilus would implement upstream. If both
-  ship, the two disagree about fills for a reason that is invisible at the call
-  site, so the divergence belongs in `reference/architecture.md` and in the RFC
-  thread, not only here. Sequencing, now satisfied: this could not land while
-  the default tape deserted, because a penetration gate makes resting fills
-  strictly rarer and a desert starves them silently - the realism gate's dwell
-  asserts are what removed that hazard. Phase C (outbound per-command latency) has
-  LANDED as `Divergence::CommandLatency`, and the two compose: a submit held by
-  an armed act delay meets a tape that has moved further, so a penetration gate
-  and an act latency stack into "the order was late AND had to be traded
-  through" rather than either alone.
-
 - DECIDE, then write up and delete this entry: how much of RFC 4631's phase B
   (shared queue position) mogwai can honestly build. The RFC asks for a FIFO
   per price level accounting for all resting liquidity, public book included.
@@ -143,14 +116,19 @@ Or both. There are no exceptions.
   must decide: a trades-only queue-AHEAD model, where a resting order records
   the cumulative traded volume at or through its price since it rested and only
   fills once that volume exceeds a modeled quantity queued ahead of it. That
-  needs no book, only the trade tape mogwai already synthesizes, and it
+  needs no book, only the trade tape mogwai already synthesizes - and the
+  counting primitive is now built: `mogwai-server/src/fills.rs`'s
+  `count_penetrations` walks one symbol's clean tape per pass against a set of
+  resting-order predicates, so a queue-ahead model would add a volume
+  accumulator to an existing walk rather than a new one. It
   captures the property phase B actually cares about (your order is not first
   in line) while making no claim about depth it cannot support. Open question
   is whether the queue-ahead quantity can be grounded in the fingerprint or
   would itself be a free parameter, which is the same credibility test the
   refusal above applies - if it is a free parameter, decline it too and say so.
 
-- After the penetration gate and the queue-ahead decision above land: Criterion
+- After the queue-ahead decision above lands (the penetration gate has landed):
+  Criterion
   benches on the fill path, and golden-file fill distributions if and only if
   fills have become stochastic.
   RFC 4631's phase D. The benches are cheap and can land any time, guarding the
@@ -160,7 +138,10 @@ Or both. There are no exceptions.
   there is no distribution to snapshot, so the artifact would pin a constant and
   read as coverage. They become worth building once penetration gating (and a
   queue-ahead model, if it survives its decision) makes the fill outcome depend
-  on the tape.
+  on the tape - which, as of the penetration gate, they now do whenever
+  `penetration_ticks > 0`: a fill's timing is a function of the tape, so a
+  golden fill distribution has become a meaningful artifact for a gated
+  configuration.
 
 - DECIDE: does `analysis/` deserve a test harness? Surfaced 2026-08-02 landing
   the drought elimination. The dwell statistics are computed TWICE against the

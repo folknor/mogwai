@@ -48,6 +48,9 @@ Outbound command latency runs against `scripts/smoke-command-latency.toml`:
 
     brokkr run mogwai -- serve -f --config scripts/smoke-command-latency.toml
     python3 scripts/smoke.py --command-latency
+
+Penetration-gated fills use `smoke-penetration.toml` (`--penetration`) and
+`smoke-penetration-two.toml` (`--penetration-swept`).
 """
 import json
 import socket
@@ -1027,6 +1030,102 @@ def main_command_latency() -> None:
     print("PASS: command latency detaches delayed submits from the socket read loop")
 
 
+def penetration_order(client_order_id: str, price: float) -> dict:
+    """Use tape-scale prices: the generated BTC tape is around 60,000, not 100."""
+    return {
+        "type": "SubmitOrder", "client_order_id": client_order_id,
+        "symbol": "BTCUSDT", "side": "Buy", "order_type": "Limit",
+        "quantity": "0.01", "price": f"{price:.2f}", "time_in_force": "Gtc",
+    }
+
+
+def order_truth(client_order_id: str, account_id: str = SMOKE_ACCOUNT) -> dict:
+    ws = WsClient(timeout=2.0, account_id=account_id)
+    ws.send({"type": "QueryOrders", "request_id": f"truth-{client_order_id}",
+             "client_order_id": client_order_id, "open_only": False})
+    reply = read_non_heartbeat(ws, 2.0)
+    ws.close()
+    assert reply["type"] == "OrderStatusSnapshot", reply
+    assert len(reply["orders"]) == 1, reply
+    return reply["orders"][0]
+
+
+def penetration_anchor() -> float:
+    # The request itself deliberately remains a one-sim-minute live window;
+    # retrying handles a legitimate just-after-boot dwell without falling back
+    # to the /trades origin (which would anchor the order at stale price).
+    deadline = time.monotonic() + 120.0
+    while time.monotonic() < deadline:
+        now = fetch_clock()["server_now_ns"]
+        ticks = fetch_trades("BTCUSDT", now - 60_000_000_000, 200)
+        if ticks:
+            return float(ticks[-1]["price"])
+        time.sleep(0.05)
+    raise AssertionError("no live tape tick in a one-sim-minute window after 120s")
+
+
+def main_penetration(swept: bool) -> None:
+    # A per-run nonce keeps every client order id (and the HTTP-leg account)
+    # fresh: the venue reserves an accepted id forever, so a fixed id makes the
+    # scenario fail on any venue that already ran it once.
+    run = str(int(time.time() * 1000))
+    hold_id, cross_id, http_id = f"P-HOLD-{run}", f"P-CROSS-{run}", f"P-HTTP-{run}"
+    px = penetration_anchor()
+    ws = WsClient(timeout=0.25)
+    # A price far below the tape must hold; this is the negative assertion the
+    # old bookless venue could not make.
+    ws.send(penetration_order(hold_id, px * 0.5))
+    held = [ws.read(), ws.read()]
+    assert [frame["type"] for frame in held] == ["OrderAccepted", "AccountState"], held
+    try:
+        assert ws.read()["type"] != "OrderFilled"
+    except socket.timeout:
+        pass
+    assert order_truth(hold_id)["status"] == "Accepted"
+
+    marketable = penetration_order(cross_id, px * 1.5)
+    ws.send(marketable)
+    accepted = ws.read()
+    assert accepted["type"] == "OrderAccepted", accepted
+    if not swept:
+        filled = ws.read()
+        assert filled["type"] == "OrderFilled", filled
+        assert float(filled["last_px"]) == float(marketable["price"]), filled
+        ws.close()
+        assert order_truth(hold_id)["status"] == "Accepted"
+        print("PASS: penetration gate holds unreachable limits and fills marketable limits at their order price")
+        return
+
+    # N=2 gets one admission-time seed but must receive its fill later, from
+    # the account-owned sweeper rather than this command's response batch.
+    second = ws.read()
+    assert second["type"] == "AccountState", second
+    # The fill waits on the next PRINT, not on the 50 ms sweep timer, and the
+    # fitted BTCUSDT arrival process legitimately dwells tens of sim-seconds -
+    # sometimes sim-minutes - between prints. That is why the fixture runs at
+    # speed = 100: 60 wall-seconds buys 6000 simulated seconds of tape, deep
+    # past the dwell bound, so the bound gates the sweeper rather than betting
+    # on the tape's cadence.
+    fill = read_non_heartbeat(ws, 60.0)
+    assert fill["type"] == "OrderFilled", fill
+    assert float(fill["last_px"]) == float(marketable["price"]), fill
+    ws.close()
+
+    # A no-socket account is the ownership proof. Its truth store must move.
+    http_account = f"SMOKE-PEN-HTTP-{run}"
+    response = post_order(penetration_order(http_id, px * 1.5), http_account)
+    assert [frame["type"] for frame in response] == ["OrderAccepted", "AccountState"], response
+    # Bounded by the accelerated tape's dwell allowance, exactly as above.
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline:
+        if order_truth(http_id, http_account)["status"] == "Filled":
+            break
+        time.sleep(0.05)
+    assert order_truth(http_id, http_account)["status"] == "Filled"
+    assert order_truth(hold_id)["status"] == "Accepted"
+    print("PASS: swept and HTTP-only penetration fills are booked without a socket")
+
+
 def main() -> None:
     args = sys.argv[1:]
     if args == ["--heartbeat"]:
@@ -1037,10 +1136,14 @@ def main() -> None:
         main_admission()
     elif args == ["--command-latency"]:
         main_command_latency()
+    elif args == ["--penetration"]:
+        main_penetration(False)
+    elif args == ["--penetration-swept"]:
+        main_penetration(True)
     elif not args:
         main_default()
     else:
-        raise SystemExit("usage: smoke.py [--heartbeat|--accelerated|--admission|--command-latency]")
+        raise SystemExit("usage: smoke.py [--heartbeat|--accelerated|--admission|--command-latency|--penetration|--penetration-swept]")
 
 
 if __name__ == "__main__":

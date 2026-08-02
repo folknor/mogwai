@@ -32,6 +32,11 @@ gap_cap_ms = 1000
 # frames that survive StallData.
 server_heartbeat_ms = 0
 
+# Resting limit fills are historically immediate at 0. A positive value requires
+# this many strictly-through traded prints; the account sweeps on this sim-ms cadence.
+penetration_ticks = 0
+fill_sweep_interval_ms = 100
+
 # Global ceiling on concurrently-live per-symbol replay streams, summed across
 # every websocket connection. A tape is one symbol, one data origin and one
 # bit-identical market regime; every subscription matching an existing tape

@@ -90,6 +90,29 @@ pub fn account_state_max_bytes(shape: &BookShape) -> usize {
         + shape.positions * POSITION_ROW_MAX_BYTES
 }
 
+/// Upper bound on one penetration sweep's output: per executed order, the fill
+/// plus its possible `DuplicateNextFill` twin, and ONE `AccountState` for the
+/// whole batch (the sweep snapshots once, after every fill it booked).
+///
+/// The account is sized against a shape widened PER ORDER, not per batch: a
+/// sweep can execute `orders` fills across `orders` distinct pairs, and each
+/// first fill in a new pair introduces up to two currencies and one position the
+/// pre-sweep snapshot never had. Widening by a flat `+2/+1` (the single-command
+/// `SubmitOrder` case) under-reserves any multi-symbol batch, which is exactly
+/// the domination failure the held-byte budget exists to prevent.
+///
+/// `orders` is the count of orders the sweep actually EMITS for, never the count
+/// of pending scans: a scan below its threshold produces no bytes.
+#[must_use]
+pub fn penetrated_fill_max_bytes(shape: &BookShape, orders: usize) -> usize {
+    orders * 2 * ORDER_EVENT_MAX_BYTES
+        + account_state_max_bytes(&BookShape {
+            balances: shape.balances + 2 * orders,
+            positions: shape.positions + orders,
+            ..*shape
+        })
+}
+
 /// Upper bound on the total serialized bytes `Engine::process` can produce for
 /// `cmd` against a book of `shape`. The worst cases are enumerated from the
 /// engine's own branches and pinned by

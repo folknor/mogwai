@@ -22,7 +22,7 @@ use std::collections::{HashMap, VecDeque};
 
 use mogwai_protocol::{
     AccountId, AccountState, ClientMessage, ClientOrderId, FillSnapshot, InstrumentDef,
-    OrderFilled, OrderStatusInfo, OrderStatusSnapshot, Position, ServerMessage, SubmitOrder,
+    OrderFilled, OrderStatusInfo, OrderStatusSnapshot, Position, ServerMessage, Side, SubmitOrder,
     Symbol, VenueOrderId, WireOrderStatus, control::Divergence, default_instruments,
 };
 use rust_decimal::Decimal;
@@ -61,6 +61,84 @@ pub struct OpenOrder {
     /// Sim unix-ns instant of the last lifecycle activity (accept, fill,
     /// amend). Reported on `QueryOrders` replies as the row's `ts_last`.
     pub ts_last: u64,
+    /// Trades that have printed THROUGH `submit.price` since this order was
+    /// accepted, since its last REPRICE, or since its last FILL - a price
+    /// amend and an execution both restart the window, a quantity amend does
+    /// not. Compared against the engine's `penetration_ticks`; at the default
+    /// 0 it is written once and never read.
+    pub penetration_count: u32,
+    /// Sim unix-ns instant the penetration walk has already covered, the
+    /// exclusive lower bound for the next pass. Advanced by the ENGINE when it
+    /// accepts a count, never by the counter: a walk whose result is discarded
+    /// must re-cover the same span rather than lose it.
+    pub penetration_scanned_ns: u64,
+    /// Bumped on every mutation of this order's identity for gating purposes -
+    /// reprice, quantity amend, fill, frontier advance. A `ScanResult` carries
+    /// the revision its walk was planned against, so a result computed against
+    /// state that has since moved is DROPPED rather than applied. Liveness
+    /// alone is not enough: two overlapping walks can both name a still-resting
+    /// order, and applying both double-counts the span they share.
+    pub revision: u64,
+}
+
+/// The one construction path for an engine. The core receives observations,
+/// never a tape or clock; `penetration_ticks` is therefore a pure model knob.
+pub struct EngineConfig {
+    pub account_id: AccountId,
+    pub instruments: Vec<InstrumentDef>,
+    pub balances: HashMap<String, Decimal>,
+    pub penetration_ticks: u32,
+}
+
+impl EngineConfig {
+    #[must_use]
+    pub fn unbound(instruments: Vec<InstrumentDef>) -> Self {
+        Self {
+            account_id: AccountId::parse(Engine::UNBOUND_ACCOUNT_ID).expect("static account id"),
+            instruments,
+            balances: HashMap::new(),
+            penetration_ticks: 0,
+        }
+    }
+}
+
+/// One resting order the caller must count penetrations for, and how many are
+/// still owed. The engine hands these out; the server walks the tape and hands
+/// back `ScanResult`s. This is the whole seam - the engine never sees a tick.
+#[derive(Debug, Clone)]
+pub struct PendingScan {
+    pub client_order_id: ClientOrderId,
+    pub symbol: Symbol,
+    pub side: Side,
+    /// The resting limit's price. Always present: only a validated LIMIT can
+    /// rest under the gate, so the scan surface hands the counter a `Decimal`
+    /// rather than re-litigating `submit.price`'s `Option`.
+    pub price: Decimal,
+    /// Exclusive lower bound of the span still to walk.
+    pub from_ns: u64,
+    /// Penetrations still required. Never zero: an order already at its
+    /// threshold is executed, not returned.
+    pub remaining: u32,
+    /// The order state this scan was planned against. Echoed back on the
+    /// `ScanResult` and checked under the engine lock.
+    pub revision: u64,
+}
+
+/// Result of one walk, handed back for the engine to apply under the lock.
+#[derive(Debug, Clone)]
+pub struct ScanResult {
+    pub client_order_id: ClientOrderId,
+    /// Echoed from the `PendingScan`: the span's exclusive lower bound and the
+    /// order revision the walk assumed. Both are checked before the result is
+    /// applied.
+    pub from_ns: u64,
+    pub revision: u64,
+    /// Penetrations observed in `(from_ns, scanned_to_ns]`.
+    pub counted: u32,
+    /// The instant the walk ACTUALLY reached, which its drain budget may have
+    /// cut short of the pass's target. The frontier advances to exactly this,
+    /// never past it.
+    pub scanned_to_ns: u64,
 }
 
 #[derive(Debug)]
@@ -109,6 +187,7 @@ pub struct Engine {
     armed: VecDeque<Divergence>,
     seq: u64,
     warned: Warned,
+    penetration_ticks: u32,
 }
 
 impl Engine {
@@ -132,23 +211,15 @@ impl Engine {
         reason = "new() seeds the instrument table; a Default impl would diverge or be dead surface"
     )]
     pub fn new() -> Self {
-        Self::with_instruments(default_instruments())
+        Self::build(EngineConfig::unbound(default_instruments()))
     }
 
-    /// Placeholder identity for the two id-less constructors. Production always
-    /// goes through `with_instruments_and_balances`, which REQUIRES the real id:
+    /// Placeholder identity for `EngineConfig::unbound` and `new()`. Production
+    /// always builds an `EngineConfig` by hand, which REQUIRES the real id:
     /// an engine that guessed its own identity would stamp a wrong
     /// `AccountState.account_id` on the wire, and a snapshot is only
     /// self-describing if that field is the account the ledger belongs to.
     pub const UNBOUND_ACCOUNT_ID: &'static str = "UNBOUND";
-
-    pub fn with_instruments(instruments: Vec<InstrumentDef>) -> Self {
-        Self::with_instruments_and_balances(
-            AccountId::parse(Self::UNBOUND_ACCOUNT_ID).expect("static account id"),
-            instruments,
-            HashMap::new(),
-        )
-    }
 
     /// Constructs the engine with the account pre-funded per currency, the
     /// venue's equivalent of a deposit made before the run. The ledger itself
@@ -167,22 +238,20 @@ impl Engine {
     /// `account_id` is stored, not threaded through `account_snapshot`, so the
     /// engine is the single source of truth for the identity it stamps on every
     /// `AccountState` it produces.
-    pub fn with_instruments_and_balances(
-        account_id: AccountId,
-        instruments: Vec<InstrumentDef>,
-        balances: HashMap<String, Decimal>,
-    ) -> Self {
-        let instruments = instruments
+    pub fn build(config: EngineConfig) -> Self {
+        let enforce_funds = !config.balances.is_empty();
+        let instruments = config
+            .instruments
             .into_iter()
             .map(|instrument| (instrument.symbol.clone(), instrument))
             .collect();
 
         Self {
-            account_id,
+            account_id: config.account_id,
             open: Vec::new(),
-            enforce_funds: !balances.is_empty(),
+            enforce_funds,
             account: Account {
-                balances,
+                balances: config.balances,
                 positions: HashMap::new(),
             },
             instruments,
@@ -192,6 +261,7 @@ impl Engine {
             armed: VecDeque::new(),
             seq: 0,
             warned: Warned::default(),
+            penetration_ticks: config.penetration_ticks,
         }
     }
 
@@ -212,8 +282,17 @@ impl Engine {
     /// `ts` is supplied by the caller (the server's clock) so the engine stays
     /// free of wall-clock access and remains deterministic in tests.
     pub fn process(&mut self, msg: ClientMessage, ts: u64) -> Vec<ServerMessage> {
+        self.process_with_market(msg, ts, None)
+    }
+
+    pub fn process_with_market(
+        &mut self,
+        msg: ClientMessage,
+        ts: u64,
+        market_px: Option<Decimal>,
+    ) -> Vec<ServerMessage> {
         match msg {
-            ClientMessage::SubmitOrder(order) => self.on_submit(order, ts),
+            ClientMessage::SubmitOrder(order) => self.on_submit(order, ts, market_px),
             ClientMessage::CancelOrder { client_order_id } => self.on_cancel(client_order_id, ts),
             ClientMessage::ModifyOrder {
                 client_order_id,
@@ -238,6 +317,46 @@ impl Engine {
             // Subscriptions are intercepted by the server for replay control.
             ClientMessage::Subscribe { .. } | ClientMessage::Unsubscribe { .. } => Vec::new(),
         }
+    }
+
+    /// Every resting GTC LIMIT whose gate is not yet satisfied. Empty when
+    /// `penetration_ticks == 0`, which is what lets a default venue never even
+    /// spawn a sweeper.
+    ///
+    /// The `order_type` filter is load-bearing, not belt-and-braces: a MARKET
+    /// order is never gated (it is marketable by definition), but an armed
+    /// `PartialFillNext` can leave one RESTING with a stamped price, and
+    /// without this filter that remainder would be handed to the tape walk and
+    /// held until the market traded through the price the venue itself
+    /// synthesized for it.
+    #[must_use]
+    pub fn pending_scans(&self) -> Vec<PendingScan> {
+        if self.penetration_ticks == 0 {
+            return Vec::new();
+        }
+        let mut scans: Vec<_> = self
+            .open
+            .iter()
+            .filter_map(|order| {
+                let price = order.submit.price?;
+                (order.submit.order_type == mogwai_protocol::OrderType::Limit
+                    && order.submit.time_in_force == mogwai_protocol::TimeInForce::Gtc)
+                    .then(|| PendingScan {
+                        client_order_id: order.submit.client_order_id.clone(),
+                        symbol: order.submit.symbol.clone(),
+                        side: order.submit.side,
+                        price,
+                        from_ns: order.penetration_scanned_ns,
+                        remaining: self
+                            .penetration_ticks
+                            .saturating_sub(order.penetration_count),
+                        revision: order.revision,
+                    })
+            })
+            .filter(|scan| scan.remaining > 0)
+            .collect();
+        scans.sort_by_key(|scan| scan.from_ns);
+        scans
     }
 
     /// Answer a `QueryOrders` truthfully from the book: the currently-open
@@ -459,11 +578,12 @@ mod tests {
         // seed shows up in the first snapshot untouched, and a fill's delta
         // applies ON TOP of it - a buy's spend debits the funded quote leg
         // instead of driving it negative from zero.
-        let mut e = Engine::with_instruments_and_balances(
-            test_account_id(),
-            default_instruments(),
-            HashMap::from([("USDT".to_string(), Decimal::from(1_000))]),
-        );
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            balances: HashMap::from([("USDT".to_string(), Decimal::from(1_000))]),
+            penetration_ticks: 0,
+        });
 
         let state = e.account_snapshot(1);
         assert_eq!(state.balances.len(), 1);
@@ -485,11 +605,12 @@ mod tests {
         // The snapshot is the wire's only statement of whose ledger it is, and
         // the consumer rejects a mismatch, so a wrong stamp here is a run that
         // errors on its first fill rather than a silent relabel.
-        let mut e = Engine::with_instruments_and_balances(
-            AccountId::parse("WYRD-042:BTCUSDT").expect("deployment-shaped id"),
-            default_instruments(),
-            HashMap::new(),
-        );
+        let mut e = Engine::build(EngineConfig {
+            account_id: AccountId::parse("WYRD-042:BTCUSDT").expect("deployment-shaped id"),
+            instruments: default_instruments(),
+            balances: HashMap::new(),
+            penetration_ticks: 0,
+        });
         assert_eq!(
             e.account_snapshot(1).account_id.as_str(),
             "WYRD-042:BTCUSDT"
@@ -501,11 +622,367 @@ mod tests {
     }
 
     fn funded(usdt: i64) -> Engine {
-        Engine::with_instruments_and_balances(
-            test_account_id(),
-            default_instruments(),
-            HashMap::from([("USDT".to_string(), Decimal::from(usdt))]),
-        )
+        Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            balances: HashMap::from([("USDT".to_string(), Decimal::from(usdt))]),
+            penetration_ticks: 0,
+        })
+    }
+
+    fn gated(ticks: u32) -> Engine {
+        Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            balances: HashMap::new(),
+            penetration_ticks: ticks,
+        })
+    }
+
+    fn result(scan: &PendingScan, counted: u32, scanned_to_ns: u64) -> ScanResult {
+        ScanResult {
+            client_order_id: scan.client_order_id.clone(),
+            from_ns: scan.from_ns,
+            revision: scan.revision,
+            counted,
+            scanned_to_ns,
+        }
+    }
+
+    #[test]
+    fn zero_penetration_ticks_fills_on_submit_exactly_as_before() {
+        let mut e = Engine::new();
+        let out = e.process(ClientMessage::SubmitOrder(order("legacy", 1)), 7);
+        assert!(
+            matches!(out.as_slice(), [ServerMessage::OrderAccepted { .. }, ServerMessage::OrderFilled(fill), ServerMessage::AccountState(_)] if fill.last_px == Decimal::from(100))
+        );
+        assert!(e.pending_scans().is_empty());
+    }
+
+    #[test]
+    fn a_gated_limit_rests_without_a_fill_event() {
+        let mut e = gated(1);
+        let out = e.process(ClientMessage::SubmitOrder(order("rest", 2)), 7);
+        assert!(matches!(
+            out.as_slice(),
+            [
+                ServerMessage::OrderAccepted { .. },
+                ServerMessage::AccountState(_)
+            ]
+        ));
+        assert_eq!(e.open.len(), 1);
+        assert_eq!(e.open[0].leaves_qty, Decimal::from(2));
+    }
+
+    #[test]
+    fn a_marketable_limit_fills_on_arrival_under_a_gate_of_one() {
+        let mut e = gated(1);
+        let out = e.process_with_market(
+            ClientMessage::SubmitOrder(order("cross", 1)),
+            7,
+            Some(Decimal::from(99)),
+        );
+        assert!(matches!(
+            out.as_slice(),
+            [
+                ServerMessage::OrderAccepted { .. },
+                ServerMessage::OrderFilled(_),
+                ServerMessage::AccountState(_)
+            ]
+        ));
+        assert!(e.pending_scans().is_empty());
+    }
+
+    #[test]
+    fn a_marketable_limit_still_rests_under_a_gate_of_two() {
+        let mut e = gated(2);
+        let out = e.process_with_market(
+            ClientMessage::SubmitOrder(order("two", 1)),
+            7,
+            Some(Decimal::from(99)),
+        );
+        assert!(matches!(
+            out.as_slice(),
+            [
+                ServerMessage::OrderAccepted { .. },
+                ServerMessage::AccountState(_)
+            ]
+        ));
+        assert_eq!(e.open[0].penetration_count, 1);
+    }
+
+    #[test]
+    fn apply_scans_accumulates_below_the_threshold() {
+        let mut e = gated(2);
+        e.process(ClientMessage::SubmitOrder(order("count", 1)), 10);
+        let first = e.pending_scans().remove(0);
+        let (out, emitted) = e.apply_scans(&[result(&first, 1, 20)], 20);
+        assert!(out.is_empty());
+        assert_eq!(emitted, 0);
+        let second = e.pending_scans().remove(0);
+        let (out, emitted) = e.apply_scans(&[result(&second, 1, 30)], 30);
+        assert_eq!(emitted, 1);
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_)))
+        );
+    }
+
+    #[test]
+    fn a_truncated_scan_advances_only_what_it_covered() {
+        let mut e = gated(3);
+        e.process(ClientMessage::SubmitOrder(order("short", 1)), 10);
+        let scan = e.pending_scans().remove(0);
+        e.apply_scans(&[result(&scan, 1, 12)], 99);
+        assert_eq!(e.open[0].penetration_count, 1);
+        assert_eq!(e.open[0].penetration_scanned_ns, 12);
+    }
+
+    #[test]
+    fn a_scan_against_a_stale_revision_is_dropped() {
+        let mut e = gated(2);
+        e.process(ClientMessage::SubmitOrder(order("stale", 1)), 10);
+        let scan = e.pending_scans().remove(0);
+        e.apply_scans(&[result(&scan, 1, 20)], 20);
+        let (_, emitted) = e.apply_scans(&[result(&scan, 1, 20)], 20);
+        assert_eq!(emitted, 0);
+        assert_eq!(e.open[0].penetration_count, 1);
+    }
+
+    #[test]
+    fn a_price_amend_restarts_the_penetration_window_and_quantity_amend_preserves_it() {
+        let mut e = gated(3);
+        e.process(ClientMessage::SubmitOrder(order("amend", 2)), 10);
+        let scan = e.pending_scans().remove(0);
+        e.apply_scans(&[result(&scan, 1, 20)], 20);
+        e.process(
+            ClientMessage::ModifyOrder {
+                client_order_id: "amend".into(),
+                price: None,
+                quantity: Some(Decimal::from(3)),
+            },
+            30,
+        );
+        assert_eq!(e.open[0].penetration_count, 1);
+        e.process(
+            ClientMessage::ModifyOrder {
+                client_order_id: "amend".into(),
+                price: Some(Decimal::from(101)),
+                quantity: None,
+            },
+            40,
+        );
+        assert_eq!(e.open[0].penetration_count, 0);
+        assert_eq!(e.open[0].penetration_scanned_ns, 40);
+    }
+
+    #[test]
+    fn apply_scans_fills_an_order_the_tape_traded_through() {
+        let mut e = gated(1);
+        e.process(ClientMessage::SubmitOrder(order("swept", 1)), 10);
+        let scan = e.pending_scans().remove(0);
+        let (out, emitted) = e.apply_scans(&[result(&scan, 1, 20)], 20);
+        assert_eq!(emitted, 1);
+        // Accept-free: the fill is unsolicited, and it prints at the ORDER'S
+        // price, never the penetrating trade's - the gate decides WHEN.
+        assert!(matches!(
+            out.as_slice(),
+            [ServerMessage::OrderFilled(fill), ServerMessage::AccountState(_)]
+                if fill.last_px == Decimal::from(100) && fill.leaves_qty == Decimal::ZERO
+        ));
+        assert!(e.open.is_empty());
+        let snapshot = e.order_status_snapshot("r".into(), Some("swept"), false, 21);
+        assert_eq!(snapshot.orders[0].status, WireOrderStatus::Filled);
+    }
+
+    #[test]
+    fn an_executed_order_restarts_its_penetration_window() {
+        // A partly filled remainder resting AT its threshold would be filled by
+        // the next pass with zero further penetrations - the gate leaking open
+        // on exactly the orders it is most meant to hold.
+        let mut e = gated(1);
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "part".into(),
+            fraction: Decimal::new(5, 1),
+        });
+        e.process(ClientMessage::SubmitOrder(order("part", 2)), 10);
+        let scan = e.pending_scans().remove(0);
+        let (out, emitted) = e.apply_scans(&[result(&scan, 1, 20)], 20);
+        assert_eq!(emitted, 1);
+        assert!(matches!(
+            out.first(),
+            Some(ServerMessage::OrderFilled(fill))
+                if fill.last_qty == Decimal::ONE && fill.leaves_qty == Decimal::ONE
+        ));
+        assert_eq!(e.open[0].penetration_count, 0);
+        assert_eq!(e.open[0].penetration_scanned_ns, 20);
+        assert_eq!(e.open[0].leaves_qty, Decimal::ONE);
+    }
+
+    #[test]
+    fn a_swept_fill_sizes_off_the_remaining_quantity() {
+        // The second sweep multiplies its fraction by the LEAVES, not by the
+        // original quantity, so it cannot over-fill a partly filled order.
+        let mut e = gated(1);
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "leaves".into(),
+            fraction: Decimal::new(5, 1),
+        });
+        e.process(ClientMessage::SubmitOrder(order("leaves", 4)), 10);
+        let scan = e.pending_scans().remove(0);
+        e.apply_scans(&[result(&scan, 1, 20)], 20);
+        assert_eq!(e.open[0].leaves_qty, Decimal::from(2));
+        let scan = e.pending_scans().remove(0);
+        let (out, _) = e.apply_scans(&[result(&scan, 1, 30)], 30);
+        assert!(matches!(
+            out.first(),
+            Some(ServerMessage::OrderFilled(fill))
+                if fill.last_qty == Decimal::from(2) && fill.leaves_qty == Decimal::ZERO
+        ));
+    }
+
+    #[test]
+    fn a_partial_fill_divergence_survives_until_the_gated_order_executes() {
+        // The gated rest calls no `plan_fill`, so the targeted divergence is
+        // still armed for the execution it names.
+        let mut e = gated(1);
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "armed".into(),
+            fraction: Decimal::new(5, 1),
+        });
+        e.process(ClientMessage::SubmitOrder(order("armed", 2)), 10);
+        assert_eq!(e.armed.len(), 1);
+        let scan = e.pending_scans().remove(0);
+        let (out, _) = e.apply_scans(&[result(&scan, 1, 20)], 20);
+        assert!(matches!(
+            out.first(),
+            Some(ServerMessage::OrderFilled(fill)) if fill.last_qty == Decimal::ONE
+        ));
+        assert!(e.armed.is_empty());
+    }
+
+    #[test]
+    fn a_duplicate_fill_divergence_applies_to_a_swept_fill() {
+        let mut e = gated(1);
+        e.process(ClientMessage::SubmitOrder(order("dup", 1)), 10);
+        e.arm(Divergence::DuplicateNextFill);
+        let scan = e.pending_scans().remove(0);
+        let (out, emitted) = e.apply_scans(&[result(&scan, 1, 20)], 20);
+        // Two wire fills, ONE booked into the truth store, one account state.
+        assert_eq!(emitted, 1);
+        assert_eq!(
+            out.iter()
+                .filter(|event| matches!(event, ServerMessage::OrderFilled(_)))
+                .count(),
+            2
+        );
+        assert_eq!(e.fill_snapshot("r".into(), Some("dup"), 21).fills.len(), 1);
+    }
+
+    #[test]
+    fn fok_and_market_orders_are_never_gated() {
+        let mut e = gated(5);
+        let mut fok = order("fok-ungated", 1);
+        fok.time_in_force = TimeInForce::Fok;
+        let out = e.process(ClientMessage::SubmitOrder(fok), 1);
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_)))
+        );
+
+        // A MARKET order arrives price-stamped by the server; it is marketable
+        // by definition and is neither seeded nor swept.
+        let market = order_with("mkt", Side::Buy, "BTCUSDT", 1, None);
+        let market = SubmitOrder {
+            price: Some(Decimal::from(100)),
+            ..market
+        };
+        let out = e.process(ClientMessage::SubmitOrder(market), 2);
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_)))
+        );
+        assert!(e.pending_scans().is_empty());
+    }
+
+    #[test]
+    fn a_partly_filled_market_remainder_is_never_swept() {
+        // A MARKET order is never gated, but an armed partial can leave one
+        // RESTING with a server-stamped price. Handing that remainder to the
+        // tape walk would hold it until the market traded through a price the
+        // venue itself synthesized.
+        let mut e = gated(1);
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "mkt-part".into(),
+            fraction: Decimal::new(5, 1),
+        });
+        let market = SubmitOrder {
+            order_type: OrderType::Market,
+            ..order("mkt-part", 2)
+        };
+        e.process(ClientMessage::SubmitOrder(market), 1);
+        assert_eq!(e.open[0].leaves_qty, Decimal::ONE);
+        assert!(e.pending_scans().is_empty());
+    }
+
+    #[test]
+    fn a_dropped_account_update_survives_a_gated_accept_and_applies_to_the_swept_fill() {
+        let mut e = gated(1);
+        e.arm(Divergence::DropNextAccountUpdate);
+        let accepted = e.process(ClientMessage::SubmitOrder(order("drop", 1)), 10);
+        assert!(matches!(
+            accepted.last(),
+            Some(ServerMessage::AccountState(_))
+        ));
+        let scan = e.pending_scans().remove(0);
+        let (out, _) = e.apply_scans(&[result(&scan, 1, 20)], 20);
+        assert!(matches!(out.as_slice(), [ServerMessage::OrderFilled(_)]));
+    }
+
+    #[test]
+    fn a_rejected_fok_still_does_not_reserve_its_client_order_id() {
+        let mut e = gated(1);
+        let mut fok = order("fok-reuse", 2);
+        fok.time_in_force = TimeInForce::Fok;
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "fok-reuse".into(),
+            fraction: Decimal::new(5, 1),
+        });
+        let rejected = e.process(ClientMessage::SubmitOrder(fok.clone()), 1);
+        assert!(matches!(
+            rejected.as_slice(),
+            [ServerMessage::OrderRejected { .. }]
+        ));
+        let accepted = e.process(ClientMessage::SubmitOrder(fok), 2);
+        assert!(matches!(
+            accepted.first(),
+            Some(ServerMessage::OrderAccepted { .. })
+        ));
+    }
+
+    #[test]
+    fn a_gated_ioc_cancels_when_the_seed_misses_and_fills_when_it_meets() {
+        let mut e = gated(1);
+        let mut miss = order("ioc-miss", 1);
+        miss.time_in_force = TimeInForce::Ioc;
+        let out = e.process(ClientMessage::SubmitOrder(miss), 1);
+        assert!(matches!(
+            out.as_slice(),
+            [
+                ServerMessage::OrderAccepted { .. },
+                ServerMessage::OrderCanceled { .. },
+                ServerMessage::AccountState(_)
+            ]
+        ));
+        let mut hit = order("ioc-hit", 1);
+        hit.time_in_force = TimeInForce::Ioc;
+        let out =
+            e.process_with_market(ClientMessage::SubmitOrder(hit), 2, Some(Decimal::from(99)));
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_)))
+        );
+        assert!(e.pending_scans().is_empty());
     }
 
     #[test]
@@ -2034,19 +2511,21 @@ mod tests {
         // pre-command shape never had.
         let max_account_id = AccountId::parse(&"Z".repeat(mogwai_protocol::MAX_ACCOUNT_ID_LEN))
             .expect("max length account id");
-        let mut fresh = Engine::with_instruments_and_balances(
-            max_account_id.clone(),
-            default_instruments(),
-            HashMap::new(),
-        );
+        let mut fresh = Engine::build(EngineConfig {
+            account_id: max_account_id.clone(),
+            instruments: default_instruments(),
+            balances: HashMap::new(),
+            penetration_ticks: 0,
+        });
 
         // Book 2: deep - hundreds of open and closed orders and a long fill
         // history, so the per-row snapshot terms actually carry the bound.
-        let mut deep = Engine::with_instruments_and_balances(
-            max_account_id,
-            default_instruments(),
-            HashMap::new(),
-        );
+        let mut deep = Engine::build(EngineConfig {
+            account_id: max_account_id,
+            instruments: default_instruments(),
+            balances: HashMap::new(),
+            penetration_ticks: 0,
+        });
         for i in 0..200 {
             // A far-from-market limit rests; a marketable one fills and closes.
             deep.process(
@@ -2189,5 +2668,68 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn penetrated_fill_reservation_covers_a_multi_pair_sweep_batch() {
+        // THREE distinct pairs, none previously held: a single-pair batch cannot
+        // distinguish per-batch from per-order account widening and would pass
+        // against an under-reserving bound. Every fill duplicated and every id
+        // at max length in `\u{0001}`, which serde escapes to six bytes each.
+        let esc =
+            |n: usize| "\u{0001}".repeat(mogwai_protocol::MAX_CLIENT_ID_LEN - 1) + &n.to_string();
+        let pairs = [
+            ("AAABBB", "AAA", "BBB"),
+            ("CCCDDD", "CCC", "DDD"),
+            ("EEEFFF", "EEE", "FFF"),
+        ];
+        let instruments: Vec<_> = pairs
+            .iter()
+            .map(|(symbol, base, quote)| InstrumentDef {
+                symbol: (*symbol).into(),
+                base: (*base).into(),
+                quote: (*quote).into(),
+                price_precision: 2,
+                size_precision: 8,
+                price_increment: Decimal::new(1, 2),
+                size_increment: Decimal::new(1, 8),
+            })
+            .collect();
+        let mut e = Engine::build(EngineConfig {
+            account_id: AccountId::parse(&"Z".repeat(mogwai_protocol::MAX_ACCOUNT_ID_LEN))
+                .expect("max length account id"),
+            instruments,
+            balances: HashMap::new(),
+            penetration_ticks: 1,
+        });
+        for (index, (symbol, _, _)) in pairs.iter().enumerate() {
+            e.process(
+                ClientMessage::SubmitOrder(order_with(
+                    &esc(index),
+                    Side::Buy,
+                    symbol,
+                    10,
+                    Some(Decimal::from(1_000_000)),
+                )),
+                index as u64,
+            );
+            e.arm(Divergence::DuplicateNextFill);
+        }
+        let scans = e.pending_scans();
+        assert_eq!(scans.len(), 3);
+        let results: Vec<_> = scans.iter().map(|scan| result(scan, 1, 100)).collect();
+        // Read exactly where the sweeper reads it: before `apply_scans`.
+        let shape = e.book_shape();
+        let (events, emitted) = e.apply_scans(&results, 100);
+        assert_eq!(emitted, 3);
+        let bound = mogwai_protocol::sizing::penetrated_fill_max_bytes(&shape, emitted);
+        let actual: usize = events
+            .iter()
+            .map(|event| serde_json::to_vec(event).expect("event serializes").len())
+            .sum();
+        assert!(
+            actual <= bound,
+            "a three-pair sweep produced {actual} bytes against a {bound} byte reservation"
+        );
     }
 }
