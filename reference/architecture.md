@@ -120,10 +120,16 @@ sockets, timers and the clock; the engine owns order and account state.
   With `penetration_ticks > 0`, a GTC or IOC limit instead needs that many
   strictly-through **traded-price** prints after acceptance. This is deliberately
   a trade predicate, not RFC 4631's quote predicate: mogwai has a trades-only
-  corpus and `/quotes` is empty. The eventual synthetic fill still uses the
+  corpus and `/quotes` is empty. `mogwai_protocol::trades_through` is the one
+  shared definition used by both the engine's acceptance-time seed and the
+  tape walk. The eventual synthetic fill still uses the
   order price, not the penetrating trade price. An account-owned sweeper books
   those fills even without a websocket; delivery to connected sessions is best
-  effort and reconciliation remains the venue truth.
+  effort and reconciliation remains the venue truth. The deterministic gated
+  fill distribution is pinned byte-exactly in
+  `crates/mogwai-server/tests/golden/fill_distribution.json`; regenerate it by
+  deleting the file, running `fill_distribution_matches_the_golden`, inspecting
+  the resulting diff, then running the test again.
   **RFC 4631 phase B is refused in full, and the refusal is measured, not
   intuited.** Its shared per-level FIFO needs an L2 book, and there is no L2
   anywhere in this project's lineage - the corpus is trades only, the

@@ -104,19 +104,6 @@ Or both. There are no exceptions.
   not taken here: the venue says clearly what happened, what the consumer does
   with that is the consumer's call.
 
-- RFC 4631 phase D: Criterion benches on the fill path, and golden-file fill
-  distributions. The benches are cheap and can land any time, guarding the fill
-  hot path against a silent throughput regression as the gates above make it
-  fatter. The golden fill CDFs needed a fill outcome that depends on the tape,
-  and the penetration gate supplies one: whenever `penetration_ticks > 0` a
-  fill's TIMING is a function of the tape, so a golden fill distribution is a
-  meaningful artifact for a gated configuration rather than a constant pinned
-  as coverage. That unblocking is now final - the queue-ahead model that would
-  also have made fills tape-dependent was measured and refused
-  (`reference/architecture.md`, "Fills are synthetic"), so the gated
-  penetration config is the only shape these CDFs will ever have to cover, and
-  they can be built against it without waiting on anything.
-
 - DECIDE: does `analysis/` deserve a test harness? Surfaced 2026-08-02 landing
   the drought elimination. The dwell statistics are computed TWICE against the
   same definition - `dwell_stats` in `analysis/characterize.py` measures the

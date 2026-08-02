@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use mogwai_protocol::{
     ClientOrderId, OrderFilled, OrderType, ServerMessage, Side, SubmitOrder, TimeInForce,
-    VenueOrderId, WireOrderStatus, control::Divergence,
+    VenueOrderId, WireOrderStatus, control::Divergence, trades_through,
 };
 use rust_decimal::Decimal;
 
@@ -52,7 +52,7 @@ impl Engine {
             && matches!(order.time_in_force, TimeInForce::Gtc | TimeInForce::Ioc);
         let seeded = if gated {
             let limit = order.price.expect("a validated limit carries a price");
-            u32::from(market_px.is_some_and(|px| through(order.side, limit, px)))
+            u32::from(market_px.is_some_and(|px| trades_through(order.side, limit, px)))
         } else {
             0
         };
@@ -712,15 +712,6 @@ fn fill_quantity(order: &SubmitOrder, fill_fraction: Decimal, size_increment: De
             "PartialFillNext produced non-positive last_qty; treating as a normal full fill"
         );
         order.quantity
-    }
-}
-
-/// True only when a traded price is strictly through the resting limit. The
-/// venue has a trades-only tape, so this deliberately is not a quote predicate.
-fn through(side: Side, limit: Decimal, traded: Decimal) -> bool {
-    match side {
-        Side::Buy => traded < limit,
-        Side::Sell => traded > limit,
     }
 }
 

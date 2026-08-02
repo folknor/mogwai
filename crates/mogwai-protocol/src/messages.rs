@@ -17,6 +17,25 @@ pub const MAX_CLIENT_ID_LEN: usize = 64;
 /// Maximum byte length of the account identity carried by the transport.
 pub const MAX_ACCOUNT_ID_LEN: usize = 64;
 
+/// True only when a traded price is strictly through a resting limit.
+///
+/// The single definition of the penetration predicate. `mogwai-engine` applies
+/// it to the acceptance-time market reading, seeding an aggressive limit with
+/// one penetration, and `mogwai-data`'s tape walk applies it to every print in
+/// the swept span; a print AT the limit is the market touching, not trading
+/// through, and at-touch filling is the fidelity failure the gate removes. The
+/// two sides of that seam must agree exactly - an order that filled on arrival
+/// under one copy and was judged not-penetrated by the other would never
+/// resolve - so there is one copy and both call it. Deliberately a TRADE
+/// predicate, not a quote predicate: this venue has a trades-only tape.
+#[must_use]
+pub fn trades_through(side: Side, limit: Decimal, traded: Decimal) -> bool {
+    match side {
+        Side::Buy => traded < limit,
+        Side::Sell => traded > limit,
+    }
+}
+
 /// A venue account identity. Kept deliberately small and log-safe because it
 /// is accepted at every stateful transport boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]

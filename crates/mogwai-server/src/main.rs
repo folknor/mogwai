@@ -27,6 +27,9 @@ mod source;
 mod tape;
 mod ws;
 
+#[cfg(test)]
+mod fill_golden;
+
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},

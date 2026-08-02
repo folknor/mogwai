@@ -36,9 +36,9 @@ pub use messages::{
     MAX_SUBSCRIPTION_ISSUES_LISTED, MAX_SYMBOL_LEN, OrderFilled, OrderStatusInfo,
     OrderStatusSnapshot, OrderType, Position, QueryKind, QuoteTick, ServerMessage, Side,
     SubmitOrder, SubscriptionIssue, SubscriptionOutcome, SubscriptionRequest, TimeInForce,
-    TradeTick, WireOrderStatus, truncate_client_id, truncate_reason, validate_client_order_id,
-    validate_modify_order, validate_request_id, validate_submit_order, validate_subscriptions,
-    validate_symbols,
+    TradeTick, WireOrderStatus, trades_through, truncate_client_id, truncate_reason,
+    validate_client_order_id, validate_modify_order, validate_request_id, validate_submit_order,
+    validate_subscriptions, validate_symbols,
 };
 /// HTTP header carrying an acting account on stateful venue requests.
 pub const ACCOUNT_HEADER: &str = "x-mogwai-account";
@@ -72,5 +72,14 @@ mod tests {
     #[test]
     fn default_request_timeout_secs_is_thirty() {
         assert_eq!(DEFAULT_REQUEST_TIMEOUT_SECS, 30);
+    }
+
+    #[test]
+    fn trades_through_is_strict_on_both_sides() {
+        let limit = Decimal::from(100);
+        assert!(trades_through(Side::Buy, limit, Decimal::from(99)));
+        assert!(!trades_through(Side::Buy, limit, limit));
+        assert!(trades_through(Side::Sell, limit, Decimal::from(101)));
+        assert!(!trades_through(Side::Sell, limit, limit));
     }
 }

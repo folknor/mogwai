@@ -24,9 +24,14 @@
 //!
 //! [`MergeSource`] k-way merges several single-symbol sources into one
 //! time-ordered stream, and [`MemorySource`] backs tests and the wiring skeleton.
+//!
+//! [`count_penetrations`] is the one bounded tape walk behind the venue's
+//! penetration gate: it lives here, next to the sources it drains, so the server
+//! and the benchmarks call the same shipped code rather than two copies of it.
 
 mod bars;
 mod generated;
+mod penetration;
 
 use std::{
     fs::File,
@@ -45,6 +50,7 @@ pub use generated::{
     SessionProfileError,
 };
 pub use mogwai_protocol::MarketRegime;
+pub use penetration::{PenetrationScan, Walk, count_penetrations};
 
 /// One replayable market-data event.
 #[derive(Debug, Clone)]

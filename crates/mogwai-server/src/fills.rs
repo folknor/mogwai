@@ -3,9 +3,9 @@
 
 //! Trades-only penetration counting for account-owned resting limit fills.
 
-use mogwai_data::TickEvent;
+use mogwai_data::PenetrationScan;
+pub(crate) use mogwai_data::Walk;
 use mogwai_engine::PendingScan;
-use mogwai_protocol::Side;
 use rust_decimal::Decimal;
 
 use crate::source::{self, InstrumentProfiles};
@@ -18,35 +18,6 @@ use crate::source::{self, InstrumentProfiles};
 /// BTCUSDT cadence, and still terminates a multi-hour gap in bounded work
 /// across several passes.
 pub(crate) const SWEEP_DRAIN_BUDGET: usize = 20_000;
-
-/// What one symbol's walk found.
-pub(crate) struct Walk {
-    /// Per scan, in the input's order: penetrations counted in
-    /// `(scan.from_ns, reached_ns]`.
-    pub(crate) counted: Vec<u32>,
-    /// The instant the drain ACTUALLY reached - `to_ns` when the span was
-    /// covered, otherwise the `ts_event` of the last tick examined before the
-    /// budget was spent. The caller advances each frontier to exactly this and
-    /// never past it, so a truncated pass loses nothing and the next pass
-    /// resumes where this one stopped.
-    pub(crate) reached_ns: u64,
-    /// Exposed to the focused cost gates: one symbol walk must not multiply
-    /// this by the number of probes, nor re-cover an old frontier.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) drained: usize,
-}
-
-/// Strict on purpose: a print AT the limit is the market touching, not trading
-/// through, and at-touch filling is the fidelity failure the gate removes. The
-/// engine's own `through` is the same predicate on the seed path - both sides
-/// of the seam have to agree or an order would fill on arrival and then be
-/// judged not-penetrated by the sweep.
-fn through(side: Side, limit: Decimal, traded: Decimal) -> bool {
-    match side {
-        Side::Buy => traded < limit,
-        Side::Sell => traded > limit,
-    }
-}
 
 /// Count penetrations for every scan on one symbol in one walk of the CLEAN
 /// tape.
@@ -76,10 +47,13 @@ fn through(side: Side, limit: Decimal, traded: Decimal) -> bool {
 /// `stamp_market_price` and the `/trades` handler already do for the same
 /// synthesis.
 ///
-/// Takes `PendingScan` directly rather than a server-local `Probe` mirror of
-/// it: the engine's scan surface already carries exactly the five fields the
-/// predicate needs, and a second struct would be a field-for-field copy kept in
-/// sync by hand.
+/// The walk itself is `mogwai_data::count_penetrations`; this function is the
+/// composition - it builds the source, converts the engine's `PendingScan` to
+/// the tape-shaped `PenetrationScan` the walk takes, and applies the server's
+/// drain budget. The conversion is one allocation per symbol per pass and is
+/// deliberate: `mogwai-data` does not depend on `mogwai-engine` (the dependency
+/// runs the other way, through this crate) and the engine's scan additionally
+/// carries the order identity and revision the tape has no business seeing.
 pub(crate) fn count_penetrations(
     symbol: &str,
     scans: &[PendingScan],
@@ -95,61 +69,21 @@ pub(crate) fn count_penetrations(
         profiles,
         data_origin,
     )?;
-    let mut counted = vec![0_u32; scans.len()];
-    let mut reached_ns = earliest;
-    // Counted OUTSIDE the loop, so every exit reports what the pass really
-    // pulled. A loop-local counter left the two early exits reporting the whole
-    // budget, which is the number the cost gates read.
-    let mut drained = 0;
-    for _ in 0..SWEEP_DRAIN_BUDGET {
-        let Some(event) = source.next_tick() else {
-            break;
-        };
-        drained += 1;
-        if event.ts_event() > to_ns {
-            // The span is fully covered: the frontier moves to the pass's own
-            // target, not to a tick that lies beyond it.
-            reached_ns = to_ns;
-            break;
-        }
-        reached_ns = event.ts_event();
-        if let TickEvent::Trade(trade) = event {
-            for (index, scan) in scans.iter().enumerate() {
-                if counted[index] < scan.remaining
-                    && trade.ts_event > scan.from_ns
-                    && through(scan.side, scan.price, trade.price)
-                {
-                    counted[index] = counted[index].saturating_add(1);
-                }
-            }
-            if scans
-                .iter()
-                .enumerate()
-                .all(|(index, scan)| counted[index] >= scan.remaining)
-            {
-                return Some(Walk {
-                    counted,
-                    reached_ns,
-                    drained,
-                });
-            }
-        }
-        // An exact boundary has fully covered the requested inclusive span;
-        // do not ask the generator for another tick merely to discover that it
-        // lies beyond it.
-        if reached_ns == to_ns {
-            return Some(Walk {
-                counted,
-                reached_ns,
-                drained,
-            });
-        }
-    }
-    Some(Walk {
-        counted,
-        reached_ns,
-        drained,
-    })
+    let mapped: Vec<_> = scans
+        .iter()
+        .map(|scan| PenetrationScan {
+            side: scan.side,
+            price: scan.price,
+            from_ns: scan.from_ns,
+            remaining: scan.remaining,
+        })
+        .collect();
+    Some(mogwai_data::count_penetrations(
+        source.as_mut(),
+        &mapped,
+        to_ns,
+        SWEEP_DRAIN_BUDGET,
+    ))
 }
 
 /// The last trade printed at or before `ts` on the clean tape: the venue's
@@ -170,6 +104,7 @@ pub(crate) fn last_trade_at_or_before(
 mod tests {
     use mogwai_data::{TickEvent, TickSource};
     use mogwai_engine::PendingScan;
+    use mogwai_protocol::Side;
 
     use super::*;
 
