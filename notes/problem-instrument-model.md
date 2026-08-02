@@ -218,13 +218,24 @@ should be re-resolved against this list.
    ET while the session runs to 17:00 ET, with the maintenance halt at 16:15 to
    16:30. Three distinct daily timestamps, only one of which is a session
    boundary. Spot crypto has no settlement at all, so this is futures-only.
-2. **What the wire carries.** `InstrumentDef` grows fields. A bare symbol can
-   already distinguish `MNQU6` from `MNQZ6` - what the wire lacks is instrument
-   CLASS, underlying, activation and expiry, the relationship between contracts
-   of one underlying, multiplier and tick value, lot rules, margin and the fee
-   schedule. The consumer needs the fee schedule BEFORE trading rather than
-   only observing it per fill, which argues for the wire rather than
-   server-local config.
+2. ~~**What the wire carries.**~~ SETTLED, and by a sharper test than the one
+   originally proposed. The draft argued the wire should carry the fee schedule
+   because a consumer needs to know its costs before trading. The user rejected
+   the premise: the consumer CONFIGURED the instrument, so publishing its own
+   knobs back at it informs nobody. Fees and margin are config knobs like every
+   other, and mogwai needs no intelligence here.
+
+   The test that survives is what the ADAPTER needs in order to construct a
+   CORRECT NAUTILUS INSTRUMENT. Nautilus values positions and computes P&L from
+   its instrument object, so anything it needs for that must cross the wire or
+   the adapter builds an instrument that prices positions wrong. That is:
+   instrument CLASS, MULTIPLIER, TICK VALUE as distinct from tick size, and LOT
+   RULES including integer-only quantities.
+
+   By the same test, fees and margin do NOT need the wire. Commission already
+   reaches nautilus per fill on `OrderFilled.commission`, and margin is enforced
+   venue-side by the ledger; neither is something nautilus needs in advance to
+   value a position. Activation and expiry drop out entirely under decision 4.
 3. **The completeness bound.** "Invent any instrument you wish" has one real
    limit and it should be stated rather than discovered: nautilus does not
    accept arbitrary instruments. The adapter must construct a CONCRETE type -
@@ -242,10 +253,18 @@ should be re-resolved against this list.
    pre-emptively enumerating refusals for instruments nobody will trade is
    speculative work. Build the classes that are needed; adding one later is code
    rather than config, and that is the honest boundary.
-4. **Continuous or dated.** The user's data is `MNQ1!` and `MES1!`, which are
-   continuous front-month series, so a roll policy is forced: either the venue
-   models a dated contract with an expiry and something rolls it, or it models a
-   synthetic continuous instrument and says so.
+4. ~~**Continuous or dated.**~~ SETTLED: a SYNTHETIC CONTINUOUS INSTRUMENT,
+   declared as such. The venue lists `MNQ`, it never expires, and the tape is one
+   unbroken series. No expiry, no activation, no roll, no front-month switch.
+
+   Why, and the cost. Strategies are single-instrument and forward tests are
+   short against a contract's life, so a modelled roll would almost never fire;
+   and modelling one honestly means modelling its price discontinuity, its
+   open-interest migration and the front-month switch, none of which the
+   15-second OHLCV data held can support. Inventing that would be manufactured
+   microstructure sold as fitted realism, which this project already refused once
+   over queue-ahead. The accepted cost, stated so nobody rediscovers it as a
+   defect: no forward test on MOGWAI can exercise a contract roll.
 5. ~~**Session fidelity.**~~ SETTLED, and much smaller than the question
    implied. The venue does not need a CALENDAR, it needs a SIMULATED one. There
    is nothing to reconcile against: the tape is synthetic and a run spans a few

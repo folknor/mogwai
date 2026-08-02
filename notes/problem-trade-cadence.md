@@ -361,36 +361,101 @@ anchor false.
 
 ## What must be decided
 
-1. **Which definition of a trade the tape emits.** Match event, aggTrade, or
-   raw fill. Everything else is sized off this.
-2. **The target rate, and in what form.** Not a single scalar: mean, median,
-   quantiles and the zero-second fraction each constrain a different part of the
-   distribution and a real process satisfies all of them at once. The 12-15x
-   mean-over-median spread is an order of magnitude rather than a fitted target,
-   since the medians are integer per-second counts with a one-trade
-   quantisation floor.
-3. **Whether the dispersion band is restated dimensionlessly** or rescaled with
-   the cadence. Restating is the honest fix; rescaling preserves the committed
-   numbers at the cost of keeping a scale-dependent gate. Either way the band
-   needs a SOURCE, and no obvious one exists: the committed band is a cross-pair
-   spread over eight Kraken pairs, and this document establishes that the Kraken
-   corpus cannot describe sub-second structure at all, so neither its 12.64 raw
-   nor its 600.80 collapsed figure can found a new band. The Binance
-   measurements span 3.57 to 10.01 over three instruments of one venue in one
-   month, which is a candidate and a thin one. The same question applies to the
-   duration ACF anchor of 0.1603, which this document demolishes as an artefact
-   of one-second bucketing without proposing what replaces it - and that anchor
-   is a committed target the drought retune was tuned against, so it is a
-   currently-green gate being invalidated with no successor named.
-4. **Whether size belongs in this document at all.** The notional-derived
-   proposal above fails for a contract instrument, and
-   `notes/problem-instrument-model.md` owns whether contracts exist. Either
-   sizing resolves here for spot only and reopens under the instrument model, or
-   it moves there wholesale. It cannot resolve here for both.
-5. **Whether a `TradeTick` needs an exchange trade id or sequence number.** The
-   adapter derives `TradeId` from the tick's own fields, so several children of
-   one parent event sharing a timestamp and price can collide. Denser tape, more
-   collisions.
+FOUR OF THE FIVE ARE SETTLED by the user; the fifth was withdrawn as not being
+a decision at this layer. They are recorded as rulings, and a spec descending
+from this document implements them rather than re-deriving them.
+
+1. ~~**Which definition of a trade the tape emits.**~~ SETTLED: RAW FILLS. The
+   tape publishes individual fills, which is what Binance's spot `@trade` stream
+   carries and what nautilus makes configurable in its Binance integration, so it
+   is a real publication contract rather than a naive reading of a headline
+   number. It is also the layer that matches the figure anyone would compare
+   against, and the densest, which matters for the venue's own machinery - see
+   the consequences below.
+
+   THE MODEL STILL NEEDS BOTH HALVES. This ruling is about the PUBLICATION
+   CONTRACT only. Raw fills are the CHILDREN of a parent arrival, and emitting
+   them as independent draws would produce the right count with the wrong
+   clustering - no real book generates independent fills. So the generator grows
+   a parent arrival rate AND a child multiplicity rule regardless, and publishes
+   the children. Rate discussion below is at the parent layer; 49.6 raw fills per
+   second on BTC is roughly 5.84 parent events with a mean of 8.5 children.
+
+   Consequences the user weighed, with resource cost excluded by standing
+   instruction. Anything counting TICKS rather than volume moves by the full 8.5x
+   - tick bars, trade-count indicators, and the adapter's client-side fabricated
+   OHLCV. The venue's own execution machinery samples the same path more finely,
+   because the fill band and stop triggers read traded prices, so resting limits
+   fill more readily and stops trigger sooner at the same underlying path. And
+   the cold-reading defect recorded in `notes/todo.md` - the fill band inert on
+   about 30% of instants because a 300 sim-second window carries too few prints -
+   is deleted outright by 8.5x the sample density.
+2. ~~**The target rate, and in what form.**~~ SETTLED, and the question was
+   wrongly posed: mean, median, quantiles and the zero-second fraction are not
+   alternatives to choose between. They are simultaneous consequences of one
+   arrival shape, and a real process reproduces all of them at once. The model
+   targets the DISTRIBUTION, and the realism gate asserts ALL FOUR - mean,
+   median, the upper quantiles and the zero-second fraction - each as a band
+   rather than a point. A tape can match the mean while being uniformly paced
+   instead of bursty, and only the quantiles and the zero fraction catch that.
+
+   The measured shape to reproduce, Binance BTCUSDT June 2026 at the raw-fill
+   layer: mean 49.6/sec, median 4, p95 257, 13.4% of seconds empty. Note the
+   medians are integer per-second counts with a one-trade quantisation floor, so
+   they carry less information than they appear to and are the weakest of the
+   four as a target.
+3. ~~**Whether the dispersion band is restated dimensionlessly**, and what
+   replaces the 0.1603 duration ACF anchor.~~ SETTLED. The dispersion band is
+   RESTATED DIMENSIONLESSLY, as `var / mean^2`, because the committed `var/mean`
+   form carries units of seconds and fails mechanically on any rescale for
+   reasons that have nothing to do with arrival shape.
+
+   The 0.1603 duration ACF anchor is RETIRED WITH NO SUCCESSOR BUILT. It is an
+   artefact of whole-second timestamps - 61% of consecutive Kraken prints share a
+   stamp, and collapsing them takes the figure to 0.0012 - so it certifies a
+   property it never measured. The user's ruling is that a replacement is not
+   worth constructing here because this ground is rewritten by the later work
+   that models parent arrivals and multiple prints per event; that spec defines
+   what, if anything, anchors clustering. Do not invent an interim anchor to fill
+   the gap.
+
+   The wider blast radius stands as recorded: `return_acf_lag1`, the three
+   `abs_return_acf` lags and `zero_change_frac` are all computed per print over
+   the same whole-second corpus. Establishing which of them measure the bucket
+   rather than the market is spec-level work.
+4. ~~**Whether size belongs in this document at all.**~~ SETTLED: SIZING IS
+   FIXED HERE, FOR SPOT, on a notional basis. Mean trade size differs by three
+   orders of magnitude across BTC, ETH and SOL in native units and by less than
+   2x in notional, so a notional target divided by price gives any new spot
+   instrument a defensible size from two numbers already known, with no fit.
+   Contract instruments reopen it under `notes/problem-instrument-model.md`,
+   which owns whether contracts exist and where "notional over price" yields a
+   fractional contract.
+
+   Fixing cadence while leaving size wrong would produce a tape correct in rate
+   and wrong in flow: the current tape is about 39x too large per trade and 354x
+   too rare, which partly cancels, so volume alone under-reads the defect by a
+   wide margin.
+
+   Two things a spec must pin. The generator takes `typical_size` as the
+   lognormal MEDIAN while the archives report a MEAN, so handing it a mean
+   overshoots by roughly `exp(sigma^2 / 2)`, about 1.9x at `SIZE_LOG_SIGMA =
+   1.15`. And WHICH price divides the notional, since the generated mid drifts
+   and the anchor is `START_PRICE_USD 60_000` while the archive window's real
+   price was not that.
+5. ~~**Whether a `TradeTick` needs an exchange trade id or sequence number.**~~
+   WITHDRAWN as not a decision at this layer. It is spec-level and contingent on
+   a fact nobody has checked: the adapter derives `TradeId` from the tick's own
+   fields, and at the raw-fill layer many children of one parent share a
+   timestamp and price, so the venue will emit duplicate ids. Whether that
+   matters depends entirely on what nautilus does with `TradeId`.
+
+   Why it is worth the spec establishing that rather than ignoring: if anything
+   downstream collapses byte-identical ticks, then the density decision 1 selects
+   for exists only on the wire, and what reaches the strategy is coarser than
+   what the venue sent. That would silently undo decision 1. If nothing collapses
+   them, duplicate ids are cosmetic and no wire field is owed. One reading of the
+   vendored `research/nautilus_trader` settles it.
 
 ## What this document does not decide
 

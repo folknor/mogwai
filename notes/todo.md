@@ -147,15 +147,29 @@ Or both. There are no exceptions.
     havoc for unscheduled halts only). Its decision list was renumbered - it
     previously ran 1 to 6 then repeated 4 and 5, so older citations by number
     are ambiguous.
-  - `notes/problem-instrument-profiles.md` - REDUCED to one question. Its
-    mechanism half (named presets, overlay, provenance, selection) moved to the
-    instrument model under the parameterization ruling. What remains is
-    empirical and untouched by any decision: whether the arrival and volatility
-    PROCESS constants become per-instrument at all, which measured clustering
-    differing 2.8x across three crypto majors leaves genuinely open. Confirming
-    that spread across months is an ACQUISITION, not a probe run: aggTrades are
-    held for June only, and the April and May archives are 1-second klines that
-    cannot describe sub-second structure at all.
+  DELETED, not archived: `notes/problem-instrument-profiles.md`. Its mechanism
+  half had already moved to the instrument model under the parameterization
+  ruling. Its one surviving question - whether the arrival and volatility
+  PROCESS constants become per-instrument at all - is answered by that same
+  ruling and needed no separate document: the model is a COMPLETE
+  parameterization and a preset is a named bundle of otherwise-tunable knobs, so
+  those constants are per-instrument because EVERYTHING is per-instrument. The
+  ACD constants, the GARCH parameters and `SIZE_LOG_SIGMA` get slots like any
+  other knob.
+
+  What survives is not a design question but a FITTING one, and it belongs to
+  whoever builds each preset: whether BTC and ETH genuinely differ enough to
+  warrant different values, which the measured 2.8x dispersion spread across
+  three crypto majors suggests but one month of one venue cannot settle. That is
+  answered when the data arrives - trade-level or 1-second archives spanning
+  years are expected - and it gates nothing in the meantime, because the venue
+  can already EXPRESS a difference whether or not one is fitted. The evidence
+  asymmetry the document recorded stays true and stays relevant to preset
+  authors: BTC, ETH and SOL have trade-level archives, MNQ and MES have
+  15-second bars and nothing else, so a CME preset's cadence is derived
+  arithmetic and its clustering comes from nowhere at all. Each preset says
+  where its numbers came from.
+
   DELETED, not archived: `notes/problem-fees.md`. The engine books zero
   commission on every fill, which biases every claim optimistically and
   systematically - but an exchange charges fees, so under the parameterization
