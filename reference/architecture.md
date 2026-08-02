@@ -178,13 +178,21 @@ sockets, timers and the clock; the engine owns order and account state.
   cancels if it is still short; FOK and market orders are never gated.
 - **Divergence injection seam.** Armed divergences sit in a queue consumed as
   their trigger fires. `PartialFillNext`, `RejectNextSubmit`, `DuplicateNextFill`
-  and `DropNextAccountUpdate` are the four engine-side divergences. The two
-  temporal, connection-scoped divergences (`DelayAcks`, `GoDark`) are filtered
-  out of the engine queue and applied in the server's outbound writer instead.
-  `CancelOpenOrderSilently` is immediate-action, not armed: the server routes it
-  straight to `cancel_open_order_silently`, which removes a resting order and
-  frees its reservation with NO lifecycle event - the out-of-band cancel whose
-  lost event the consumer's reconciliation poll exists to catch.
+  and `DropNextAccountUpdate` are the four engine-side divergences: each waits
+  in the queue for a trigger the engine itself fires. Everything else is
+  server-owned and is dropped by `arm` rather than queued, because no engine
+  trigger would ever consume it and a dead queue entry is worse than no entry.
+  Three of those are temporal windows applied in the server's outbound path -
+  `DelayAcks` and `StallData` hold or withhold frames, `GoDark` blacks the
+  connection out - while `CommandLatency` is applied earlier and is scoped to
+  the ACCOUNT rather than the connection: it delays the venue ACTING on a
+  command, before the market-price stamp and the engine, as distinct from
+  delaying the acknowledgement the client reads. `ClearDivergences` lifts the
+  server-owned windows. `CancelOpenOrderSilently` is immediate-action, not
+  armed: the server routes it straight to `cancel_open_order_silently`, which
+  removes a resting order and frees its reservation with NO lifecycle event -
+  the out-of-band cancel whose lost event the consumer's reconciliation poll
+  exists to catch.
 - **The truth stores behind the queries.** Open orders carry
   `ts_accepted`/`ts_last`; every order that reaches `Filled` or `Canceled`
   (client cancel, IOC remainder, or the silent cancel) freezes into a terminal
