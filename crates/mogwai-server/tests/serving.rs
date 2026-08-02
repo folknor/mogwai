@@ -8,7 +8,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::{fast_config, gated_config, http_get, paced_config, spawn, tiny_fanout_config};
+use common::{band_config, fast_config, http_get, paced_config, spawn, tiny_fanout_config};
 use futures_util::{SinkExt, StreamExt};
 use mogwai_protocol::{ServerMessage, TradeTick};
 use tokio_tungstenite::tungstenite::Message;
@@ -289,24 +289,34 @@ async fn an_armed_divergence_reaches_every_connection() {
 }
 
 /// The run owns the fill sweep now that no account does. Without a sweep task
-/// on the run, a penetration-gated limit rests forever: a submit seeds only its
-/// own order, so nothing else ever advances a penetration count, and the venue
-/// would be accepting orders it can never execute - which is exactly what
-/// `validate_penetration` refuses to ship.
+/// on the run, a banded limit rests forever: a submit decides only its own
+/// order, against the reading it arrived with, so nothing else ever walks the
+/// span its trigger waits on, and the venue would be accepting orders it can
+/// never execute.
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
-async fn a_gated_limit_fills_from_the_run_sweep() {
-    let venue = spawn(&["--config", &gated_config()]);
+async fn a_banded_limit_fills_from_the_run_sweep() {
+    let venue = spawn(&["--config", &band_config()]);
     let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
         .await
         .expect("open the order socket");
 
-    // A buy the whole tape prints through, so every print counts against the
-    // gate. The acceptance reading seeds one penetration of the two required,
-    // so it must REST on submit and be filled by a later sweep pass.
+    let (_, clock_body) = http_get(&venue.http_base(), "/clock");
+    let clock: serde_json::Value = serde_json::from_str(&clock_body).expect("clock");
+    let sim_now = clock["server_now_ns"].as_u64().expect("sim now");
+    let (_, trades_body) = http_get(
+        &venue.http_base(),
+        &format!(
+            "/trades?symbol={}&start={}&end={sim_now}&limit=10000",
+            venue.record.symbol,
+            sim_now.saturating_sub(300_000_000_000)
+        ),
+    );
+    let trades: Vec<TradeTick> = serde_json::from_str(&trades_body).expect("anchor trades");
+    let price = trades.last().expect("anchor print").price;
     let submit = format!(
-        r#"{{"type":"SubmitOrder","client_order_id":"GATED-1","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"0.01","price":"1000000","time_in_force":"Gtc"}}"#,
-        venue.record.symbol
+        r#"{{"type":"SubmitOrder","client_order_id":"BAND-1","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"0.01","price":"{price}","time_in_force":"Gtc"}}"#,
+        venue.record.symbol,
     );
     socket
         .send(Message::Text(submit.into()))
@@ -314,7 +324,7 @@ async fn a_gated_limit_fills_from_the_run_sweep() {
         .expect("submit the gated limit");
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-    let mut accepted = false;
+    let mut accepted_ts = None;
     loop {
         let message = tokio::time::timeout_at(deadline, socket.next())
             .await
@@ -325,21 +335,172 @@ async fn a_gated_limit_fills_from_the_run_sweep() {
             continue;
         };
         match serde_json::from_str::<ServerMessage>(&text) {
-            Ok(ServerMessage::OrderAccepted { .. }) => accepted = true,
+            Ok(ServerMessage::OrderAccepted { ts_event, .. }) => accepted_ts = Some(ts_event),
             Ok(ServerMessage::OrderFilled(fill)) => {
                 assert!(
-                    accepted,
-                    "a gated limit must be accepted and rest before it fills"
+                    accepted_ts.is_some_and(|accepted| fill.ts_event > accepted),
+                    "a banded limit must rest before the sweep fills it"
                 );
-                assert_eq!(fill.client_order_id, "GATED-1");
+                assert_eq!(fill.client_order_id, "BAND-1");
                 return;
             }
             Ok(ServerMessage::OrderRejected { reason, .. }) => {
-                panic!("the gated limit was rejected: {reason}")
+                panic!("the banded limit was rejected: {reason}")
             }
             _ => {}
         }
     }
+}
+
+/// Market slippage is only real if the submit path actually takes a reading, and
+/// it has to take one on BOTH market paths - the priced one and the price-less
+/// one that used to return early with a stamped price and no reading at all. An
+/// engine that slips perfectly would otherwise never receive a reading in
+/// production while every engine-side unit test passed.
+///
+/// Proven by the fill PRICE: a market order priced absurdly far from the market
+/// fills near the tape rather than at its own number, which is only possible if
+/// the venue read the tape. Adverse-or-equal is asserted on the tape-priced
+/// fill in the same breath.
+///
+/// Retried, because `read_market` legitimately REFUSES at any instant whose
+/// trailing window carries fewer than `MIN_VOL_SAMPLES` returns, and the fitted
+/// BTCUSDT tape does that at a substantial fraction of instants. A refused
+/// reading is the documented fallback - stated price, no slippage, WARN - so a
+/// single attempt would be a coin flip. What is pinned is that a reading IS
+/// taken on both paths: every attempt filling at its own number would mean the
+/// path never reads at all, which is the defect this test exists for.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths() {
+    const ATTEMPTS: usize = 8;
+    let venue = spawn(&["--config", &band_config()]);
+    let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
+        .await
+        .expect("open the order socket");
+
+    for path in ["priced", "priceless"] {
+        let price = if path == "priced" {
+            r#","price":"9000000""#
+        } else {
+            ""
+        };
+        let mut read_the_tape = false;
+        for attempt in 0..ATTEMPTS {
+            let id = format!("MKT-{path}-{attempt}");
+            let submit = format!(
+                r#"{{"type":"SubmitOrder","client_order_id":"{id}","symbol":"{}","side":"Buy","order_type":"Market","quantity":"0.01"{price},"time_in_force":"Gtc"}}"#,
+                venue.record.symbol
+            );
+            socket
+                .send(Message::Text(submit.into()))
+                .await
+                .expect("submit the market order");
+
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+            let fill = loop {
+                let message = tokio::time::timeout_at(deadline, socket.next())
+                    .await
+                    .expect("the venue answered the market submit")
+                    .expect("the socket stayed open")
+                    .expect("a websocket frame");
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                match serde_json::from_str::<ServerMessage>(&text) {
+                    Ok(ServerMessage::OrderFilled(fill)) if fill.client_order_id == id => {
+                        break fill;
+                    }
+                    Ok(ServerMessage::OrderRejected { reason, .. }) => {
+                        panic!("{id} was rejected: {reason}")
+                    }
+                    _ => {}
+                }
+            };
+
+            let (_, body) = http_get(
+                &venue.http_base(),
+                &format!(
+                    "/trades?symbol={}&start={}&end={}&limit=10000",
+                    venue.record.symbol,
+                    fill.ts_event.saturating_sub(300_000_000_000),
+                    fill.ts_event
+                ),
+            );
+            let trades: Vec<TradeTick> =
+                serde_json::from_str(&body).expect("tape at the fill instant");
+            let last = trades.last().expect("a print at or before the fill").price;
+            if fill.last_px < last * rust_decimal::Decimal::TWO {
+                read_the_tape = true;
+                assert!(
+                    fill.last_px >= last,
+                    "a market buy filled better than the market: {} < {last}",
+                    fill.last_px
+                );
+                break;
+            }
+            // The refusal fallback fired. Let the clock move so the next
+            // attempt reads a genuinely different window - at speed 100 this is
+            // fifty sim seconds of fresh tape.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        assert!(
+            read_the_tape,
+            "the {path} market path never took a tape reading in {ATTEMPTS} attempts"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn the_tape_is_identical_with_and_without_order_flow() {
+    let venue = spawn(&["--config", &band_config()]);
+    let path = format!(
+        "/trades?symbol={}&start={}&limit=200",
+        venue.record.symbol, venue.record.data_origin_ns
+    );
+    let (status, before) = http_get(&venue.http_base(), &path);
+    assert_eq!(status, 200);
+    let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
+        .await
+        .expect("open order socket");
+    for index in 0..100 {
+        let submit = format!(
+            r#"{{"type":"SubmitOrder","client_order_id":"TAPE-{index}","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"0.01","price":"1","time_in_force":"Gtc"}}"#,
+            venue.record.symbol
+        );
+        socket
+            .send(Message::Text(submit.into()))
+            .await
+            .expect("submit");
+    }
+    // Drain to the LAST acceptance before re-reading. Comparing the pages while
+    // the submits were still in flight would let a clean run and a broken one
+    // look alike.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let message = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .expect("the venue answered every submit")
+            .expect("the socket stayed open")
+            .expect("a websocket frame");
+        let Message::Text(text) = message else {
+            continue;
+        };
+        if let Ok(ServerMessage::OrderAccepted {
+            client_order_id, ..
+        }) = serde_json::from_str::<ServerMessage>(&text)
+            && client_order_id == "TAPE-99"
+        {
+            break;
+        }
+    }
+    let (status, after) = http_get(&venue.http_base(), &path);
+    assert_eq!(status, 200);
+    assert_eq!(
+        before, after,
+        "client order flow advanced or altered the clean tape"
+    );
 }
 
 /// One blocking `POST /control/divergence`, returning the status code.

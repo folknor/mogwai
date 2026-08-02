@@ -181,7 +181,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let (prio_tx, prio_rx) = mpsc::unbounded_channel();
     let lanes = ExecLanes::new(held_tx, prio_tx, build_admission_limits(&state.cfg));
     let writer = tokio::spawn(run_writer(sink, prio_rx, out_rx, state.clone()));
-    // Venue-ORIGINATED execution output (a penetration fill nobody commanded)
+    // Venue-ORIGINATED execution output (a trigger fill nobody commanded)
     // is delivered through these lanes, so the run has to know about them for
     // as long as this connection lives.
     let lane_id = state.run.bind_lanes(lanes.clone());

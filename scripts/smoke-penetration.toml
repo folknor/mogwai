@@ -1,4 +1,0 @@
-# Penetration-gated fill smoke: the first strictly-through print is enough.
-speed = 1.0
-penetration_ticks = 1
-fill_sweep_interval_ms = 50

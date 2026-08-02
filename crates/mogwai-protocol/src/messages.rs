@@ -19,14 +19,11 @@ pub const MAX_ACCOUNT_ID_LEN: usize = 64;
 
 /// True only when a traded price is strictly through a resting limit.
 ///
-/// The single definition of the penetration predicate. `mogwai-engine` applies
-/// it to the acceptance-time market reading, seeding an aggressive limit with
-/// one penetration, and `mogwai-data`'s tape walk applies it to every print in
-/// the swept span; a print AT the limit is the market touching, not trading
-/// through, and at-touch filling is the fidelity failure the gate removes. The
-/// two sides of that seam must agree exactly - an order that filled on arrival
-/// under one copy and was judged not-penetrated by the other would never
-/// resolve - so there is one copy and both call it. Deliberately a TRADE
+/// The single definition of the trigger predicate. The engine applies it to
+/// the acceptance-time reading and the data walk applies it to every later
+/// print. A print AT the trigger is touching, not trading through. Both sides
+/// of the seam use this copy so arrival and sweep decisions cannot disagree.
+/// Deliberately a TRADE
 /// predicate, not a quote predicate: this venue has a trades-only tape.
 #[must_use]
 pub fn trades_through(side: Side, limit: Decimal, traded: Decimal) -> bool {

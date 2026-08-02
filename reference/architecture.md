@@ -13,10 +13,16 @@ attached to the run tape on upgrade: clients do not subscribe or supply an
 account identity. The bounded fanout ring remains; a lagging client receives
 `FeedLagged` on the priority lane and is closed with WS 1011.
 
-Execution output that no command asked for reaches every open socket. With
-`penetration_ticks > 0` a resting limit fills only when the run's fill sweep
-walks a print through its price, and that fill is delivered to each connection's
-lanes from the run, not from a command response.
+Execution output that no command asked for reaches every open socket. Every
+resting limit carries a trigger price drawn once at submit from a seeded,
+volatility-scaled band around its stated price (`fill_band_vol_mult = 0.0`
+degenerates to a strict through-at-the-stated-price fill), and it fills only
+when the run's fill sweep walks a print strictly through that trigger; the
+fill is delivered to each connection's lanes from the run, not from a command
+response. A market order slips the same way, adverse to its side, off the same
+seeded band. No order book exists: orders never interact, so self-trade within
+one account is impossible rather than prevented, and every fill is judged only
+against the tape.
 
 Warmup is generated before readiness. `data_origin_ns = run_start_ns -
 warmup_ns`, and history outside `[data_origin_ns, sim_now]` is refused. A

@@ -3,9 +3,10 @@
 
 //! Deterministic sources for the one eagerly warmed run tape.
 
+use mogwai_data::TickEvent;
 use mogwai_data::{
     CheckpointIndex, Fingerprint, GeneratedSource, GeneratorScalars, MergeSource, SessionProfile,
-    TickEvent, TickSource,
+    TickSource,
 };
 use mogwai_protocol::{InstrumentDef, MarketRegime, Symbol, default_instruments};
 use rust_decimal::Decimal;
@@ -230,19 +231,6 @@ pub(crate) fn materialize_warmup(
         "warmup generation produced no tick at the run start"
     );
     Ok(guard.checkpoint_count())
-}
-
-pub(crate) fn current_price(
-    symbol: &str,
-    profiles: &InstrumentProfiles,
-    data_origin: u64,
-    sim_now: u64,
-) -> Option<Decimal> {
-    let mut source = build_history_source(symbol, Some(sim_now), profiles, data_origin)?;
-    let TickEvent::Trade(trade) = source.next_tick()? else {
-        return None;
-    };
-    Some(trade.price)
 }
 
 /// The last trade printed at or before `ts`. Positioned from the chain at a

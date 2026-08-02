@@ -1,4 +1,6 @@
-# The second threshold makes the seeded marketable order prove an unsolicited sweep.
+# An order priced AT the last print cannot be through its trigger on arrival, so
+# the fill it eventually gets can only have come from a venue-originated sweep
+# pass. That is the whole claim of this mode.
 #
 # The clock is accelerated for the same reason the in-process sweeper gates run
 # at speed 100: the swept fill waits on the NEXT PRINT, and at speed 1.0 the
@@ -10,5 +12,6 @@
 # keeps the pass cost bounded.
 sim_epoch_ns = 1900000000000000000
 speed = 100.0
-penetration_ticks = 2
+fill_band_vol_mult = 0.5
+fill_band_max_ticks = 200
 fill_sweep_interval_ms = 50

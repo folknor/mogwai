@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Criterion benchmarks for the engine's fill path: the ungated submit, both
-//! gated submit branches, and the batch scan application. Run as
+//! Criterion benchmarks for the engine's fill path: the immediate submit, both
+//! banded submit branches, and the batch scan application. Run as
 //! `brokkr run fill_bench -- --bench`; `criterion_main` parses the `--bench`
 //! flag itself, which is what lets these live in an example target instead of a
 //! `cargo bench` harness.
@@ -24,15 +24,15 @@ use rust_decimal::Decimal;
 /// Every benchmark builds its engine in the setup closure. The engine is
 /// stateful in ways that grow without bound across iterations - accepted client
 /// order ids are retained for duplicate detection, closed orders and fills are
-/// retained as history, and under the gate every submit leaves another resting
-/// order in `open` - so reusing one engine would price a monotonically growing
+/// retained as history, and every resting submit leaves another order in
+/// `open` - so reusing one engine would price a monotonically growing
 /// structure and report the average of a ramp as a latency.
-fn engine(penetration_ticks: u32) -> Engine {
+fn engine(fill_seed: u64) -> Engine {
     Engine::build(EngineConfig {
         account_id: AccountId::parse("BENCH").expect("static account"),
         instruments: default_instruments(),
         balances: HashMap::new(),
-        penetration_ticks,
+        fill_seed,
     })
 }
 
@@ -48,10 +48,10 @@ fn order(id: String) -> SubmitOrder {
     }
 }
 
-/// One gated engine holding `size` resting limits, plus the scan results a
-/// sweep pass would hand back for them. `fill` decides whether every result
-/// crosses its threshold (the worst case: `size` fills plus a snapshot) or none
-/// does (the common pass).
+/// One engine holding `size` resting limits, plus the scan results a sweep pass
+/// would hand back for them. `fill` decides whether the tape triggered every one
+/// (the worst case: `size` fills plus a snapshot) or none of them (the common
+/// pass).
 fn scans(size: usize, fill: bool) -> (Engine, Vec<ScanResult>) {
     let mut engine = engine(1);
     for index in 0..size {
@@ -64,7 +64,7 @@ fn scans(size: usize, fill: bool) -> (Engine, Vec<ScanResult>) {
             client_order_id: scan.client_order_id.clone(),
             from_ns: scan.from_ns,
             revision: scan.revision,
-            counted: u32::from(fill),
+            triggered: fill,
             scanned_to_ns: 2,
         })
         .collect();
@@ -82,7 +82,7 @@ fn benches(c: &mut Criterion) {
     // and tearing down an engine carrying an instrument table, an id set and a
     // fill history costs more than the submit being measured, with allocator
     // noise on top.
-    c.bench_function("submit_full_fill", |b| {
+    c.bench_function("submit_immediate", |b| {
         b.iter_batched(
             || (engine(0), order("full".into())),
             |(mut engine, order)| {
@@ -92,7 +92,7 @@ fn benches(c: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
-    c.bench_function("submit_gated_rest", |b| {
+    c.bench_function("submit_banded_rest", |b| {
         b.iter_batched(
             || (engine(1), order("rest".into())),
             |(mut engine, order)| {
@@ -102,19 +102,22 @@ fn benches(c: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
-    // `Engine::process` passes no market price, so a bench built only on it
-    // never reaches the seed branch every gated submit takes on the real path,
-    // where `http.rs` and the socket handler both supply a reading. 99 is
-    // strictly through the buy limit at 100, so `seeded == 1` and the submit
-    // fills synchronously.
-    c.bench_function("submit_gated_seeded", |b| {
+    // `Engine::process` passes no reading, so a bench built only on it never
+    // reaches the marketable-on-arrival branch a submit takes on the real path,
+    // where `http.rs` and the socket handler both supply one. 99 is
+    // strictly through the buy limit at 100 at a zero band, so the order is
+    // marketable on arrival and fills synchronously.
+    c.bench_function("submit_banded_marketable", |b| {
         b.iter_batched(
             || (engine(1), order("seed".into())),
             |(mut engine, order)| {
                 let out = engine.process_with_market(
                     ClientMessage::SubmitOrder(order),
                     1,
-                    Some(Decimal::from(99)),
+                    Some(mogwai_engine::MarketReading {
+                        last_px: Decimal::from(99),
+                        band_ticks: 0,
+                    }),
                 );
                 (engine, out)
             },

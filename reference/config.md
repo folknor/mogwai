@@ -16,11 +16,19 @@ The clock keys are `sim_epoch_ns` (zero keeps the identity wall clock),
 `wall_anchor_ns` (zero anchors at boot) and `speed`. `server_heartbeat_ms`
 sets the server-originated liveness cadence; zero disables it.
 
-The fill gate is `penetration_ticks` (zero, the default, fills a limit on
-submit at its own price) and `fill_sweep_interval_ms`, which is how often the
-run re-checks its resting limits against the tape. With the gate on, that sweep
-is the only thing that ever fills a resting limit, so boot refuses a zero
-interval.
+The fill band is `fill_band_vol_mult` and `fill_band_max_ticks`. Every resting
+limit draws a trigger price uniformly from `0 ..= band_ticks` ticks away from
+its stated price, where `band_ticks` is `fill_band_vol_mult` times the tape's
+trailing realized volatility scaled to a 60-second horizon, clamped to
+`fill_band_max_ticks`. `fill_band_vol_mult = 0.0` degenerates to a strict
+through-at-the-stated-price fill. The default `0.5` is the smallest multiplier
+in the calibration sweep (`mogwai-server`'s `fills::vol_probe`) whose median
+implied band lands in the usable 3-to-100-tick window on the default BTCUSDT
+profile: a 9-tick median, 18 ticks at p90. `fill_band_max_ticks` defaults to
+`200`, just above that 100-tick ceiling of usefulness. `fill_sweep_interval_ms`
+is how often the run re-checks its resting limits against the tape; the sweep
+is the only thing that ever fills a resting limit or delivers a market order's
+slipped fill unsolicited, so boot refuses a zero interval.
 
 One optional `[instrument]` table defines the run instrument. Omitting it uses
 the built-in BTCUSDT profile. `[[instrument]]` is not accepted. `[regime]`

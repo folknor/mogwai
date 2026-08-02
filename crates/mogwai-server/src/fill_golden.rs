@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! A deterministic, end-to-end fill-timing distribution for the penetration
-//! gate, pinned byte-exactly by a committed artifact.
+//! A deterministic, end-to-end fill-timing distribution for the fill band,
+//! pinned byte-exactly by a committed artifact.
 //!
 //! It lives in the bin crate because this is the only place that can see
-//! `fills::count_penetrations`, `Engine::apply_scans` and `InstrumentProfiles`
+//! `fills::scan_triggers`, `Engine::apply_scans` and `InstrumentProfiles`
 //! at once - precisely the seam being certified. The harness reproduces
 //! `sweeper.rs`'s three-phase pass synchronously (pending scans, one walk per
 //! symbol, apply) rather than sharing code with it: the async loop, the teardown
@@ -31,11 +31,25 @@
 //! sample rather than folded in at the horizon value, which would make the
 //! artifact move whenever the horizon moved.
 //!
-//! Out of scope, deliberately: the window-restart path. The engine restarts a
-//! penetration window only when a fill leaves a remainder, which needs an armed
-//! `PartialFillNext`; this harness arms no divergence, so every admitted order
-//! fills completely and leaves the book. `penetration_ticks = 3` covers
-//! multi-pass penetration ACCUMULATION across sweep boundaries, not a restart.
+//! Out of scope, deliberately: the tranche-redraw path. A remainder needs an
+//! armed `PartialFillNext`; this harness arms no divergence, so every admitted
+//! order fills completely and leaves the book.
+//!
+//! Where the band comes from: nothing hands this harness a `MarketReading`,
+//! because it never goes through the HTTP submit path, so it takes one itself
+//! with `fills::read_market` at each order's OWN acceptance instant, under the
+//! scenario's multiplier and the default 200-tick clamp. That is per-order
+//! rather than one reading per scenario - a deliberate departure from the
+//! spec's anchor-instant reuse, and it costs one extra tape walk per acceptance
+//! (measured at roughly 0.2 ms each). It buys exactly what the shipped submit
+//! path does: each order is banded by the regime it actually arrived in, so the
+//! artifact moves when the estimator moves. Its cost is bounded by the same
+//! `SWEEP_DRAIN_BUDGET` the sweep pays.
+//!
+//! The two scenarios are the degenerate `0.0` band and the shipped multiplier.
+//! Retired rather than migrated: the old `penetration_ticks = 3` cell covered
+//! ACCUMULATION of penetrations across sweep boundaries, and this model has no
+//! counter to accumulate - one print through the trigger fills.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -69,6 +83,9 @@ const ACCEPT_STRIDE_NS: u64 = 3_000_000_000;
 /// sample. 1 to 100 spans saturation to near-total censoring, so every cell
 /// carries a distribution that moves when fill timing moves.
 const OFFSETS: [u32; 5] = [1, 3, 10, 30, 100];
+/// The shipped `fill_band_max_ticks` default, so the artifact is produced under
+/// the clamp a real venue runs.
+const MAX_TICKS: u32 = 200;
 
 #[derive(Serialize)]
 struct Golden {
@@ -84,7 +101,7 @@ struct Golden {
 
 #[derive(Serialize)]
 struct Cell {
-    penetration_ticks: u32,
+    band_vol_mult: f64,
     offset_ticks: u32,
     samples: usize,
     filled: usize,
@@ -105,7 +122,7 @@ fn golden_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/fill_distribution.json")
 }
 
-fn run_scenario(penetration_ticks: u32, profiles: &InstrumentProfiles) -> Vec<Cell> {
+fn run_scenario(band_vol_mult: f64, profiles: &InstrumentProfiles) -> Vec<Cell> {
     let total = OFFSETS.len() * ORDERS_PER_OFFSET;
     // The last acceptance must leave every order at least half the horizon in
     // which to fill, so a later edit to the population, the stride or the
@@ -119,7 +136,7 @@ fn run_scenario(penetration_ticks: u32, profiles: &InstrumentProfiles) -> Vec<Ce
         account_id: AccountId::parse("GOLDEN").expect("static account"),
         instruments: default_instruments(),
         balances: HashMap::new(),
-        penetration_ticks,
+        fill_seed: crate::source::seed_for(SYMBOL),
     });
     let increment = default_instruments()
         .into_iter()
@@ -137,15 +154,14 @@ fn run_scenario(penetration_ticks: u32, profiles: &InstrumentProfiles) -> Vec<Ce
             } else {
                 Side::Sell
             };
-            // The same acceptance-time reading `http.rs` gives the real path,
-            // so the seed is the shipped one. It is `None` only at the very
-            // origin, where no print exists at or before `ts` yet; the first
-            // order of each scenario therefore anchors on the tape's first
+            // The anchor the harness prices its own limit off. `None` only at
+            // the very origin, where no print exists at or before `ts` yet, so
+            // the first order of each scenario anchors on the tape's first
             // print instead. That is a look-ahead the venue itself would refuse,
-            // but here it only anchors the harness's own limit price: the limit
-            // is placed `offset_ticks` away from the very reading it is judged
-            // against, so no order is ever seeded on arrival either way.
-            let market = fills::last_trade_at_or_before(SYMBOL, ts, profiles, ORIGIN)
+            // but it only positions the harness's price: the limit is placed
+            // `offset_ticks` away from the very reading it is judged against, so
+            // no order is ever marketable on arrival either way.
+            let market = fills::read_last(SYMBOL, ts, profiles, ORIGIN)
                 .or_else(|| {
                     let mut tape = crate::source::build_history_source(
                         SYMBOL,
@@ -164,7 +180,7 @@ fn run_scenario(penetration_ticks: u32, profiles: &InstrumentProfiles) -> Vec<Ce
                 Side::Buy => market - offset,
                 Side::Sell => market + offset,
             };
-            let id = format!("g{penetration_ticks}-{i}");
+            let id = format!("g{band_vol_mult}-{i}");
             meta.insert(
                 id.clone(),
                 OrderMeta {
@@ -182,24 +198,29 @@ fn run_scenario(penetration_ticks: u32, profiles: &InstrumentProfiles) -> Vec<Ce
                 price: Some(price),
                 time_in_force: TimeInForce::Gtc,
             };
+            // Exactly what `http::market_reading` hands the engine on the real
+            // path, refusals included: a refused reading is passed on as `None`
+            // rather than papered over with a synthetic zero band.
+            let reading =
+                fills::read_market(SYMBOL, ts, profiles, ORIGIN, band_vol_mult, MAX_TICKS);
             let submitted =
-                engine.process_with_market(ClientMessage::SubmitOrder(order), ts, Some(market));
+                engine.process_with_market(ClientMessage::SubmitOrder(order), ts, reading);
             record_fills(&submitted, &meta, &mut samples);
         }
         let scans = engine.pending_scans();
         if scans.is_empty() {
             continue;
         }
-        let walk = fills::count_penetrations(SYMBOL, &scans, ts, profiles, ORIGIN)
+        let walk = fills::scan_triggers(SYMBOL, &scans, ts, profiles, ORIGIN)
             .expect("scenario starts on reachable clean tape");
         let results = scans
             .iter()
-            .zip(walk.counted)
-            .map(|(scan, counted)| ScanResult {
+            .zip(walk.triggered)
+            .map(|(scan, triggered)| ScanResult {
                 client_order_id: scan.client_order_id.clone(),
                 from_ns: scan.from_ns,
                 revision: scan.revision,
-                counted,
+                triggered,
                 scanned_to_ns: walk.reached_ns,
             })
             .collect::<Vec<_>>();
@@ -213,7 +234,7 @@ fn run_scenario(penetration_ticks: u32, profiles: &InstrumentProfiles) -> Vec<Ce
             values.sort_by_key(|(latency, _, _)| *latency);
             let filled = values.len();
             Cell {
-                penetration_ticks,
+                band_vol_mult,
                 offset_ticks,
                 samples: ORDERS_PER_OFFSET,
                 filled,
@@ -263,14 +284,14 @@ fn record_fills(
 fn render() -> String {
     let profiles = InstrumentProfiles::defaults();
     let golden = Golden {
-        schema: 1,
+        schema: 2,
         symbol: SYMBOL,
         data_origin_ns: ORIGIN,
         sweep_interval_ns: SWEEP_INTERVAL_NS,
         horizon_ns: HORIZON_NS,
         orders_per_offset: ORDERS_PER_OFFSET,
         accept_stride_ns: ACCEPT_STRIDE_NS,
-        cells: [1, 3]
+        cells: [0.0, 0.5]
             .into_iter()
             .flat_map(|ticks| run_scenario(ticks, &profiles))
             .collect(),
@@ -290,8 +311,8 @@ fn assert_shape(rendered: &str) {
     let cells = golden["cells"].as_array().expect("cells array");
     assert_eq!(cells.len(), 2 * OFFSETS.len());
     for (index, cell) in cells.iter().enumerate() {
-        let expected_ticks = if index < OFFSETS.len() { 1 } else { 3 };
-        assert_eq!(cell["penetration_ticks"], expected_ticks);
+        let expected_mult = if index < OFFSETS.len() { 0.0 } else { 0.5 };
+        assert_eq!(cell["band_vol_mult"], expected_mult);
         assert_eq!(cell["offset_ticks"], OFFSETS[index % OFFSETS.len()]);
         let samples = cell["samples"].as_u64().expect("samples");
         let filled = cell["filled"].as_u64().expect("filled");
@@ -328,6 +349,30 @@ fn assert_shape(rendered: &str) {
             "cell {index}: the nearest offset filled a minority of its sample"
         );
     }
+    // The one inspection property this artifact can actually assert. It is
+    // implied PATHWISE rather than statistically - `u >= 0` moves a trigger
+    // away from the market, so a banded order fills only on a subset of the
+    // tapes that fill an unbanded one at the same price - so it holds per order
+    // and needs no tolerance.
+    //
+    // Censoring rising with `offset_ticks` is NOT asserted, deliberately. It
+    // would only be a valid test of a correct model on PAIRED cohorts - every
+    // offset submitted at the same acceptance instants under the same identity
+    // stem - and this harness rotates offsets through the acceptance schedule
+    // instead, so different offsets are accepted at different tape instants
+    // under different order identities and finite-sample noise can invert two
+    // adjacent offsets even when the model is exactly right. A revert condition
+    // that fires on noise is worse than no revert condition.
+    for index in 0..OFFSETS.len() {
+        let unbanded = cells[index]["filled"].as_u64().expect("filled");
+        let banded = cells[index + OFFSETS.len()]["filled"]
+            .as_u64()
+            .expect("filled");
+        assert!(
+            unbanded >= banded,
+            "a banded trigger cannot be easier than an unbanded trigger"
+        );
+    }
 }
 
 /// Name the first cell that moved and, inside it, the first field or sample
@@ -355,8 +400,8 @@ fn describe_mismatch(rendered: &str, expected: &str) -> String {
             continue;
         }
         let label = format!(
-            "cell {index} (penetration_ticks={}, offset_ticks={})",
-            new_cell["penetration_ticks"], new_cell["offset_ticks"]
+            "cell {index} (band_vol_mult={}, offset_ticks={})",
+            new_cell["band_vol_mult"], new_cell["offset_ticks"]
         );
         for field in ["samples", "filled", "censored", "buy_filled", "sell_filled"] {
             if new_cell[field] != old_cell[field] {

@@ -29,19 +29,27 @@ pub(crate) struct Config {
     /// Simulated duration of one venue run. Zero means the launcher owns
     /// shutdown; a non-zero duration is announced as a clean completion.
     pub(crate) run_duration_ns: u64,
-    /// Trades that must print THROUGH a resting limit's price before the venue
-    /// fills it. `0` - the default - is the bookless venue's historical
-    /// behaviour: a limit fills on submit at its own price, untouched by the
-    /// tape. Any positive value turns resting limits into orders the market has
-    /// to come to, gated on TRADED prices rather than quotes, because this
-    /// venue's corpus, generator and `/quotes` surface are all trades-only.
-    pub(crate) penetration_ticks: u32,
+    /// How many trailing-volatility horizons wide the fill band is. An order's
+    /// trigger is drawn uniformly from `0 ..= band_ticks` ticks AWAY from its
+    /// stated price, and `band_ticks` is this multiplier times the tape's
+    /// realized volatility scaled to `FILL_HORIZON_NS`. The default `0.5` is the
+    /// smallest multiplier in the calibration sweep whose median implied band
+    /// lands in the usable 3-to-100-tick window on the default BTCUSDT profile
+    /// (9 ticks median, 18 at p90 - see `fills::vol_probe`).
+    ///
+    /// `0.0` is legal and gives the strict-through-at-the-stated-price venue.
+    /// That is the DEGENERATE CASE of this model, not a compatibility mode:
+    /// there is no switch that restores the counter it replaced.
+    pub(crate) fill_band_vol_mult: f64,
+    /// Ceiling on the drawn band, in ticks. Truncates a reading rather than the
+    /// multiplier, so a genuine volatility spike can widen the band past its
+    /// median while a mispriced estimate cannot make a fill a coin flip. The
+    /// default `200` sits just above the 100-tick ceiling of usefulness, so it
+    /// only ever truncates readings the calibration would already have rejected.
+    pub(crate) fill_band_max_ticks: u32,
     /// How often, in sim milliseconds, the RUN re-checks its resting limits
-    /// against the tape. Read only when `penetration_ticks > 0`. `0` disables
-    /// the sweep, and with the sweep off a gated resting order can NEVER fill:
-    /// a submit seeds only its own order, so nothing else ever advances a
-    /// penetration count. Boot refuses that combination rather than shipping a
-    /// venue that accepts limits it will never execute.
+    /// against the tape. Zero is refused because the fill band is always on and
+    /// every resting trigger needs the sweep to advance.
     pub(crate) fill_sweep_interval_ms: u64,
     /// Simulated start instant. `0` keeps the identity wall-time clock.
     pub(crate) sim_epoch_ns: u64,
@@ -152,7 +160,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             run_duration_ns: 0,
-            penetration_ticks: 0,
+            fill_band_vol_mult: 0.5,
+            fill_band_max_ticks: 200,
             fill_sweep_interval_ms: 100,
             sim_epoch_ns: 0,
             wall_anchor_ns: 0,
@@ -302,29 +311,34 @@ pub(crate) fn validate_admission_limits(cfg: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Above this no realistic tape ever fills a resting order and the venue would
-/// silently be a black hole; refusing at boot says so out loud.
-pub(crate) const MAX_PENETRATION_TICKS: u32 = 1_000;
 /// An interval this slow is functionally the "sweep disabled" case and deserves
 /// to be named as such rather than passing silently under the one-hour ceiling.
 pub(crate) const SLOW_SWEEP_WARN_MS: u64 = 60_000;
 
-/// Boot gate for the penetration knobs, alongside `validate_admission_limits`
-/// and the admission limits.
-pub(crate) fn validate_penetration(cfg: &Config) -> anyhow::Result<()> {
-    if cfg.penetration_ticks > MAX_PENETRATION_TICKS {
-        anyhow::bail!("penetration_ticks must be at most {MAX_PENETRATION_TICKS}");
+/// Boot gate for the fill-band knobs, alongside `validate_admission_limits`.
+///
+/// The upper validation bounds are generous on purpose - an operator
+/// deliberately exploring a pathological band is a legitimate experiment - while
+/// the DEFAULTS are what have to be defensible. A zero sweep interval is refused
+/// outright rather than warned about: the band is always on, and a venue that
+/// accepts resting limits nothing will ever advance is a black hole.
+pub(crate) fn validate_fill_band(cfg: &Config) -> anyhow::Result<()> {
+    if !cfg.fill_band_vol_mult.is_finite() || !(0.0..=1_000.0).contains(&cfg.fill_band_vol_mult) {
+        anyhow::bail!("fill_band_vol_mult must be finite and between 0 and 1000");
+    }
+    if !(1..=10_000).contains(&cfg.fill_band_max_ticks) {
+        anyhow::bail!("fill_band_max_ticks must be between 1 and 10000");
     }
     if cfg.fill_sweep_interval_ms > mogwai_protocol::control::MAX_DIVERGENCE_MS {
         anyhow::bail!("fill_sweep_interval_ms must be at most MAX_DIVERGENCE_MS");
     }
-    if cfg.penetration_ticks > 0 && cfg.fill_sweep_interval_ms == 0 {
-        anyhow::bail!("fill_sweep_interval_ms must be > 0 when penetration_ticks is enabled");
+    if cfg.fill_sweep_interval_ms == 0 {
+        anyhow::bail!("fill_sweep_interval_ms must be > 0");
     }
-    if cfg.penetration_ticks > 0 && cfg.fill_sweep_interval_ms > SLOW_SWEEP_WARN_MS {
+    if cfg.fill_sweep_interval_ms > SLOW_SWEEP_WARN_MS {
         tracing::warn!(
             interval_ms = cfg.fill_sweep_interval_ms,
-            "penetration fill sweep interval is very slow"
+            "fill sweep interval is very slow"
         );
     }
     Ok(())
@@ -359,7 +373,7 @@ impl Config {
         // their builders: they need boot-time inputs this loader lacks.)
         validate_balances(&cfg)?;
         validate_admission_limits(&cfg)?;
-        validate_penetration(&cfg)?;
+        validate_fill_band(&cfg)?;
         // Unlike every neighbouring count knob, 0 is not "unbounded" here:
         // `broadcast::channel(0)` panics, so the key is named in a load error
         // rather than crashing the first subscribe.

@@ -3,17 +3,19 @@
 
 //! The venue re-checking the run's resting limits against the tape.
 //!
-//! Spawned once at boot, and ONLY when `penetration_ticks > 0`, so a default
-//! venue pays nothing at all - not a task, not a timer, not a lock acquisition.
+//! Spawned once at boot, unconditionally, because every resting limit now
+//! carries a trigger only a tape walk can advance. A pass with nothing resting
+//! is still just one lock acquisition and a `continue`.
+//!
 //! Owned by the RUN rather than by an account or a session: one process is one
 //! ledger now, and a session-owned sweep would freeze a disconnected client's
 //! book mid-window, make the `QueryOrders` truth store honestly report a venue
 //! that cannot execute, and double the tape walk when two sockets are open on
 //! the one run.
 //!
-//! Without this task a venue configured with `penetration_ticks > 0` accepts
-//! resting limits nothing will ever fill: a submit seeds only its own order, so
-//! only a sweep pass ever advances a penetration count.
+//! Without this task the venue accepts resting limits nothing will ever fill: a
+//! submit decides only its own order, against the reading it arrived with, so
+//! only a sweep pass ever walks the span a trigger is waiting on.
 
 use std::{
     collections::HashMap,
@@ -79,25 +81,25 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 let origin = sweep.run.data_origin_ns();
                 let scans_for_walk = scans.clone();
                 let walked = tokio::task::spawn_blocking(move || {
-                    fills::count_penetrations(&symbol, &scans_for_walk, to_ns, &profiles, origin)
+                    fills::scan_triggers(&symbol, &scans_for_walk, to_ns, &profiles, origin)
                 })
                 .await
                 .ok()
                 .flatten();
                 // A `None` walk (the positioning seek could not reach the
                 // earliest frontier) yields no result at all for the symbol, so
-                // nothing advances: an unreachable span is not zero
-                // penetrations.
+                // nothing advances: an unreachable span is not a span
+                // nothing triggered in.
                 if let Some(walk) = walked {
-                    results.extend(scans.into_iter().zip(walk.counted).map(|(scan, counted)| {
-                        ScanResult {
+                    results.extend(scans.into_iter().zip(walk.triggered).map(
+                        |(scan, triggered)| ScanResult {
                             client_order_id: scan.client_order_id,
                             from_ns: scan.from_ns,
                             revision: scan.revision,
-                            counted,
+                            triggered,
                             scanned_to_ns: walk.reached_ns,
-                        }
-                    }));
+                        },
+                    ));
                 }
             }
             let mut engine = sweep.run.engine.lock().await;
@@ -136,7 +138,7 @@ fn deliver(
     });
     let mut closed = Vec::new();
     for (id, lane) in run.bound_lanes() {
-        let Some(reservation) = lane.reserve_penetrated(shape, emitted) else {
+        let Some(reservation) = lane.reserve_swept(shape, emitted) else {
             if refuse(&lane, subject.clone(), ts).is_err() {
                 closed.push(id);
             }

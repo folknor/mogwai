@@ -40,17 +40,17 @@ Fill BEHAVIOUR is gated automatically, by
 
 `fill_bench` (`crates/mogwai-engine/examples/fill_bench.rs`):
 
-- `submit_full_fill` - one accepted limit through the ungated default path
-  (`penetration_ticks = 0`): validation, `plan_fill`, `commit_fill`, ledger
-  apply, `record_fill`, account snapshot.
-- `submit_gated_rest` - the same submit at `penetration_ticks = 1` with no
-  market reading, so `seeded == 0` and the order rests. The per-submit cost a
-  gated venue pays.
-- `submit_gated_seeded` - the same at `penetration_ticks = 1` with a marketable
-  reading, so `trades_through` holds, the gate is satisfied on arrival and the
-  submit fills synchronously. `Engine::process` supplies no market price, so
-  only this benchmark reaches the branch the real path takes on every gated
-  submit.
+- `submit_immediate` - one accepted limit at `fill_band_vol_mult = 0.0`, so the
+  drawn band is zero-width and the order fills at submit exactly as the old
+  ungated default did: validation, `plan_fill`, `commit_fill`, ledger apply,
+  `record_fill`, account snapshot.
+- `submit_banded_rest` - the same submit with a nonzero band and no market
+  reading, so the order draws its trigger and rests. The per-submit cost the
+  banded venue pays.
+- `submit_banded_marketable` - the same with a marketable reading, so
+  `trades_through` holds against the drawn trigger and the submit fills
+  synchronously. `Engine::process` supplies no market price, so only this
+  benchmark reaches the branch the real path takes on every banded submit.
 - `apply_scans_50` / `apply_scans_200` - one `apply_scans` batch over 50 and 200
   resting orders with no result at threshold: the common pass.
 - `apply_scans_50_all_fill` / `apply_scans_200_all_fill` - the same batches with
@@ -59,10 +59,10 @@ Fill BEHAVIOUR is gated automatically, by
 `fill_walk_bench` (`crates/mogwai-data/examples/fill_walk_bench.rs`):
 
 - `walk_one_pass_1_scan` / `_50_scans` / `_500_scans` - one
-  `mogwai_data::count_penetrations` over a one-second span of the fitted
-  BTCUSDT tape, at three scan counts. The scans are far from market, so no walk
-  exits early on a satisfied scan.
-- `scan_mapping_50` - the `PendingScan` to `PenetrationScan` mapping the server
+  `mogwai_data::scan_triggers` over a one-second span of the fitted BTCUSDT
+  tape, at three scan counts. The scans are far from market, so no walk exits
+  early on a satisfied scan.
+- `scan_mapping_50` - the `PendingScan` to `TriggerScan` mapping the server
   wrapper builds once per symbol per pass, allocation included.
 - `source_positioning` - the sweeper's fixed per-pass cost: a checkpoint restore
   out of a long-lived index taken under a lock, then the residual drain through

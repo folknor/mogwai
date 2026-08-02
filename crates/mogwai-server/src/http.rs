@@ -229,7 +229,7 @@ pub(crate) async fn process_order_cmd(
     // the step-2 `ts` re-sample below then dates the engine's events at act time
     // with no second re-sample needed.
     // Re-sampled BEFORE the reading, not after the act sleep only in name: the
-    // gated-limit reading is "the last print at or before the venue ACTED", so
+    // reading is "the last print at or before the venue ACTED", so
     // handing it the entry-time `ts` would judge a delayed submit against the
     // tape as it was when the command arrived - the exact staleness the act
     // delay is placed above the reading to avoid.
@@ -516,13 +516,25 @@ pub(crate) async fn clock(State(state): State<AppState>) -> Json<ServerClock> {
     })
 }
 
-/// A wire MARKET order carries no price (mirroring Nautilus, which never
-/// stamps one), but the engine has no book of its own and fills "at the
-/// order's own price" - so before either order-entry surface hands a
-/// `SubmitOrder` to the engine, stamp a MARKET order missing a price with the
-/// venue's own current synthesized price. A LIMIT order's price is left
-/// untouched: the engine's "submit price required" rejection is correct for a
-/// limit, it only over-reached for the price-less market case.
+/// The venue's tape reading for one command, taken on the way in.
+///
+/// EVERY submit takes one, and so does every PRICE amend: a limit needs it to
+/// size the band its trigger is drawn from and to judge marketability, a market
+/// order needs it to price its slippage, and an amend needs it so the re-draw
+/// adopts the current regime instead of the acceptance one. A quantity-only
+/// amend and every non-order message take none.
+///
+/// A wire MARKET order carries no price (mirroring Nautilus, which never stamps
+/// one), but the engine has no book of its own, so a price-less market order is
+/// additionally STAMPED here with the last print at or before `ts`. That is the
+/// same number the reading carries; the separate `source::current_price` path
+/// this replaced returned the first tick at or AFTER sim-now, which is a
+/// look-ahead, and keeping two sources of "what is the market" is how they drift
+/// apart. `fills::read_last` is consulted only when `read_market` refuses
+/// outright, since the protocol still requires a price on the wire.
+///
+/// The reading is otherwise RETURNED, never stamped - an order keeps its own
+/// stated price, and what the venue read is the engine's business.
 ///
 /// Synthesis (`build_history_source` -> `source_at_or_before`) locks the run's
 /// checkpoint mutex and walks the residual past the nearest checkpoint.
@@ -532,63 +544,53 @@ pub(crate) async fn clock(State(state): State<AppState>) -> Json<ServerClock> {
 /// `/trades` request (or vice versa) any longer than the symbol's shared
 /// index itself requires - other symbols' requests do not queue here at all
 /// (S13).
-/// Under the penetration gate this also takes a reading for a LIMIT submit, but
-/// a DIFFERENT one and for a different purpose: `fills::last_trade_at_or_before`
-/// rather than `source::current_price`, because the latter returns the first
-/// tick at or AFTER sim-now and seeding a penetration from a print that has not
-/// happened yet is a look-ahead leak. That reading is RETURNED, never stamped -
-/// the limit keeps its own price, and the reading only tells the engine whether
-/// the order was already marketable when the venue accepted it. MARKET and FOK
-/// orders are never gated, so neither pays for a seek whose result is discarded.
 async fn market_reading(
     msg: ClientMessage,
     state: &AppState,
     ts: u64,
-) -> (ClientMessage, Option<rust_decimal::Decimal>) {
-    let ClientMessage::SubmitOrder(mut order) = msg else {
-        return (msg, None);
+) -> (ClientMessage, Option<mogwai_engine::MarketReading>) {
+    let symbol = match &msg {
+        ClientMessage::SubmitOrder(order) => Some(order.symbol.clone()),
+        // A run is one instrument (`Run::instrument`), so an amend's symbol is
+        // the run's own. Looking it up through the engine would mean taking the
+        // execution lock on the command path to learn something already known.
+        ClientMessage::ModifyOrder { price: Some(_), .. } => {
+            Some(state.run.instrument.symbol.clone())
+        }
+        _ => None,
     };
-    let gated_limit = state.cfg.penetration_ticks > 0
-        && order.order_type == OrderType::Limit
-        && matches!(
-            order.time_in_force,
-            mogwai_protocol::TimeInForce::Gtc | mogwai_protocol::TimeInForce::Ioc
-        );
-    if order.order_type == OrderType::Market && order.price.is_none() {
-        let symbol = order.symbol.clone();
+    if let Some(symbol) = symbol {
         let profiles = Arc::clone(&state.profiles);
         let data_origin = state.data_origin_ns();
-        let sim_now = sim_now_ns(state.sim());
-        order.price = match tokio::task::spawn_blocking(move || {
-            source::current_price(&symbol, &profiles, data_origin, sim_now)
-        })
-        .await
-        {
-            Ok(price) => price,
-            Err(e) => {
-                tracing::error!(%e, "market price synthesis task failed");
-                None
-            }
-        };
-        return (ClientMessage::SubmitOrder(order), None);
-    }
-    if gated_limit {
-        let symbol = order.symbol.clone();
-        let profiles = Arc::clone(&state.profiles);
-        let data_origin = state.data_origin_ns();
-        let reading = tokio::task::spawn_blocking(move || {
-            crate::fills::last_trade_at_or_before(&symbol, ts, &profiles, data_origin)
+        let mult = state.cfg.fill_band_vol_mult;
+        let max_ticks = state.cfg.fill_band_max_ticks;
+        let (reading, last_px) = tokio::task::spawn_blocking(move || {
+            let reading =
+                crate::fills::read_market(&symbol, ts, &profiles, data_origin, mult, max_ticks);
+            let last_px = reading
+                .map(|value| value.last_px)
+                .or_else(|| crate::fills::read_last(&symbol, ts, &profiles, data_origin));
+            (reading, last_px)
         })
         .await
         .unwrap_or_else(|e| {
             // A failed reading is simply no reading: the order rests and the
-            // sweeper decides it. Never a seeded penetration.
-            tracing::error!(%e, "limit market reading task failed");
-            None
+            // sweeper decides it. Never a fill the venue could not price.
+            tracing::error!(%e, "market reading task failed");
+            (None, None)
         });
-        return (ClientMessage::SubmitOrder(order), reading);
+        let msg = match msg {
+            ClientMessage::SubmitOrder(mut order)
+                if order.order_type == OrderType::Market && order.price.is_none() =>
+            {
+                order.price = last_px;
+                ClientMessage::SubmitOrder(order)
+            }
+            other => other,
+        };
+        return (msg, reading);
     }
-    (ClientMessage::SubmitOrder(order), None)
+    (msg, None)
 }
 
 #[derive(Debug, Deserialize)]

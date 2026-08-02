@@ -19,7 +19,7 @@ mod ws;
 
 /// The fill-timing distribution certification. Test-only, and here rather than
 /// in `tests/` because this is the only place that can see
-/// `fills::count_penetrations`, `Engine::apply_scans` and `InstrumentProfiles`
+/// `fills::scan_triggers`, `Engine::apply_scans` and `InstrumentProfiles`
 /// at once - precisely the seam it certifies.
 #[cfg(test)]
 mod fill_golden;
@@ -170,7 +170,6 @@ async fn serve_async(
         instrument.clone(),
         Arc::clone(&profiles),
         cfg.balances.clone(),
-        cfg.penetration_ticks,
         sim,
         run_start_ns,
         cfg.warmup_ns,
@@ -180,17 +179,17 @@ async fn serve_async(
         cfg.fanout_depth,
         cfg.zero_speed_stall_ms,
     );
-    // The penetration gate needs something to advance it: a submit seeds only
-    // its own order, so a resting limit fills only when a sweep pass walks the
-    // tape it is waiting on. Spawned only when the gate is on, so a default
-    // venue pays nothing for it.
-    if cfg.penetration_ticks > 0 {
-        sweeper::spawn_fill_sweeper(sweeper::FillSweep {
-            run: Arc::clone(&run),
-            profiles: Arc::clone(&profiles),
-            interval_ms: cfg.fill_sweep_interval_ms,
-        });
-    }
+    tracing::info!(fill_seed = run.fill_seed, "fill band stream initialized");
+    // The band needs something to advance it: a submit decides only its own
+    // order, against the reading it arrived with, so a resting limit fills only
+    // when a sweep pass walks the tape it is waiting on. Spawned
+    // unconditionally, because there is no configuration in which limits do not
+    // rest.
+    sweeper::spawn_fill_sweeper(sweeper::FillSweep {
+        run: Arc::clone(&run),
+        profiles: Arc::clone(&profiles),
+        interval_ms: cfg.fill_sweep_interval_ms,
+    });
     let state = AppState {
         run,
         cfg: cfg.clone(),

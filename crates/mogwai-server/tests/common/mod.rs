@@ -164,10 +164,9 @@ pub fn tiny_fanout_config() -> String {
     )
 }
 
-/// A venue whose resting limits are penetration-gated, so only the run's fill
-/// sweep can ever fill one.
-pub fn gated_config() -> String {
-    format!("{}/tests/configs/gated.toml", env!("CARGO_MANIFEST_DIR"))
+/// A venue whose resting limits use the volatility-scaled fill band.
+pub fn band_config() -> String {
+    format!("{}/tests/configs/band.toml", env!("CARGO_MANIFEST_DIR"))
 }
 
 /// A venue with a large warmup and an accelerated clock, for the slow-start gate.

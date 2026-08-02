@@ -1623,6 +1623,8 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "mogwai-protocol",
+ "rand 0.10.2",
+ "rand_chacha 0.10.0",
  "rust_decimal",
  "serde_json",
  "tracing",

@@ -26,6 +26,7 @@ pub(crate) struct Run {
     /// is exactly one of it.
     pub(crate) instrument: InstrumentDef,
     pub(crate) engine: AsyncMutex<Engine>,
+    pub(crate) fill_seed: u64,
     pub(crate) tape: Arc<Tape>,
     /// The run clock. Owned HERE rather than beside the router state: a run has
     /// one clock, and a second copy in the HTTP state is a second thing that
@@ -51,7 +52,7 @@ pub(crate) struct Run {
     pub(crate) stall_until_ns: AtomicU64,
     complete_tx: watch::Sender<Option<(u64, u64)>>,
     /// Every live connection's outbound lanes, so venue-ORIGINATED output - a
-    /// penetration fill nobody commanded - reaches all of them. This is what
+    /// trigger fill nobody commanded - reaches all of them. This is what
     /// `AccountSlot::session_lanes` was, moved to the one thing that now owns
     /// execution: with a single ledger there is exactly one broadcast target,
     /// and a fill booked into it is a fact about the run, not about whichever
@@ -69,7 +70,6 @@ impl Run {
         instrument: InstrumentDef,
         profiles: Arc<source::InstrumentProfiles>,
         balances: std::collections::HashMap<String, Decimal>,
-        penetration_ticks: u32,
         sim: SimClock,
         started_ns: u64,
         warmup_ns: u64,
@@ -80,6 +80,7 @@ impl Run {
         zero_speed_stall_ms: u64,
     ) -> Arc<Self> {
         let symbol = instrument.symbol.clone();
+        let fill_seed = source::seed_for(&symbol);
         let data_origin_ns = started_ns.saturating_sub(warmup_ns);
         let tape = Tape::start(
             symbol,
@@ -99,9 +100,10 @@ impl Run {
                 account_id: mogwai_protocol::AccountId::parse("MOGWAI").expect("fixed account id"),
                 instruments: vec![instrument.clone()],
                 balances,
-                penetration_ticks,
+                fill_seed,
             })),
             instrument,
+            fill_seed,
             tape,
             sim,
             started_ns,
@@ -203,7 +205,6 @@ mod tests {
             instrument,
             profiles,
             std::collections::HashMap::new(),
-            0,
             SimClock::identity(),
             started_ns,
             warmup_ns,

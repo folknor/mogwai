@@ -19,13 +19,17 @@ Or both. There are no exceptions.
   end state is still out of reach, the claim was wrong - which is a finding
   worth having, and the reason it is stated as a claim rather than as a list.
 
-  SEVEN, DOWN FROM EIGHT, as of the 2026-08-02 review pass. `problem-fees.md`
-  dissolved into the instrument model (an exchange charges fees, so the schedule
-  is one more config knob) and was deleted. The MECHANISM half of
-  `problem-instrument-profiles.md` went the same way, but that document SURVIVES
-  and still counts: its empirical question - whether the arrival and volatility
-  process constants are per-instrument - is untouched by any ruling. An earlier
-  version of this paragraph said six and was wrong; count the files in `notes/`.
+  FIVE, DOWN FROM SIX, as of the 2026-08-02 fill-model landing.
+  `problem-order-book.md` is deleted: the user's fill model needed no book, and
+  what remained open after that ruling - the volatility estimator, the band's
+  scale and shape, the derived RNG stream, self-trade impossibility - is now
+  landed code (`a214996` and follow-on commits), pinned by the tests and docs
+  the landing itself cites. `problem-fees.md` dissolved into the instrument
+  model (an exchange charges fees, so the schedule is one more config knob) and
+  was deleted earlier. The MECHANISM half of `problem-instrument-profiles.md`
+  went the same way, but that document SURVIVES and still counts: its empirical
+  question - whether the arrival and volatility process constants are
+  per-instrument - is untouched by any ruling. Count the files in `notes/`.
 
   PREMISES THE USER HAS SETTLED, which every document below inherits and none
   previously stated. Forward tests always run ACCELERATED, never at speed 1.0 -
@@ -71,8 +75,6 @@ Or both. There are no exceptions.
       lifecycle ─┬─> everything (it decides what a run IS)
       seeds ─────┘
 
-      fill-model ──> order-types
-
       cadence ──> profiles
                     ▲
       instrument-model ───┘
@@ -80,11 +82,14 @@ Or both. There are no exceptions.
   REDRAWN. The graph previously ran order-types into the book into cadence into
   profiles, with a note that order-type REQUIREMENTS preceded the book because a
   market-state model could not be chosen before knowing what it had to support.
-  That whole chain rested on the venue growing a book. It is not growing one -
-  see the fill-model resolution below - so the edges go with it. The fill model
-  now precedes order types only because a triggered stop needs a defensible
-  fill, and cadence no longer waits on anything, because with no matching the
-  tape is generated independently of every client action.
+  That whole chain rested on the venue growing a book. It is not growing one,
+  and the fill model that replaced the book has since landed (the seeded
+  volatility-scaled band, `a214996` and follow-on commits) and discharged its
+  one obligation to order types - a triggered stop now has a defensible fill,
+  namely the same band applied to the market order the trigger produces - so
+  `order-types` carries no inbound edge at all. Cadence no longer waits on
+  anything either, because with no matching the tape is generated independently
+  of every client action.
 
   The instrument model has grown two inbound absorptions (fees, and the profile
   mechanism) without gaining an inbound dependency. `profiles` is now a thin
@@ -121,29 +126,6 @@ Or both. There are no exceptions.
     one axis, a random seed per launch, deterministic given that seed, wall
     anchor removed, seed reported. What sets the origin instead is open. Its
     restart question is CLOSED - there is no restart.
-  - `notes/problem-order-book.md` - the founding no-book assumption. Two
-    independent axes: what exists to match against, and what happens to a client
-    order. The user has answered the second - orders rest and are consumed by
-    arriving flow, accounts never match each other - and argued that a
-    RESOLVED, and retitled: there is no book and never was going to be. The
-    document had attributed a choice of "B3 - Matching" to the user, who had
-    described a BEHAVIOUR that a drafting session mapped onto a label carrying a
-    book with it. What the user actually specified: a limit order gets a fill
-    price RANGE predetermined at submit time, scaled to the instrument's typical
-    movement, quantised to tick size, derived from the run seed - and when the
-    tape enters that band the order fills IN FULL at its stated price.
-
-    That dissolves most of this document. No depth, no queue, no allocation, no
-    counterparty, and no client-mutable market state, so the determinism risk it
-    called sharpest never arises. Maker and taker fall out by construction, so
-    the fee split needs no wire field. Stops reuse the band as slippage.
-    Partials move to `PartialFillNext`, where havoc already lives. The research
-    session it was going to need is not needed. What is left is spec-level: what
-    estimates the band's width (trailing realized volatility recommended, since
-    ATR needs bars this venue does not ship), its scale and shape, and that the
-    draw must come from a stream derived from the seed rather than the
-    generator's own RNG. It no longer resolves before cadence - with no
-    matching, the two are independent.
   - `notes/problem-trade-cadence.md` - the tape runs orders of magnitude slower
     than a real active pair, and "trades per second" has three values differing
     by 8.5x because raw fills, aggregated prints and match events are LAYERS of
@@ -211,6 +193,32 @@ Or both. There are no exceptions.
   Also relevant and not a problem statement: `reference/glossary.md` defines the
   identity chain the code builds - now just run, tape and ledger, since the
   lifecycle landing collapsed account, session and subscription out of it.
+
+- The fill band is INERT about 30% of the time on the default profile, which
+  silently restores the defect it was built to remove. Found 2026-08-02 while
+  landing the band itself, by the calibration probe in `mogwai-server`'s
+  `fills.rs`: 425 refused readings out of 1440 sampled instants on the default
+  BTCUSDT profile, a full sim day past warmup. The cause is NOT budget
+  exhaustion - zero readings hit the walk budget - but windows carrying fewer
+  than `MIN_VOL_SAMPLES` returns inside `VOL_WINDOW_NS`, whose median is 32
+  prints with a long quiet tail. `read_market` then refuses, and a refusal means
+  a market order fills unslipped at the client's own stated price while a limit
+  gets `band_ticks = 0`: the most permissive regime the venue has, and exactly
+  the behaviour the band replaced. The spec that landed the band asserted this
+  state was reachable only within a few hundred sim seconds of `data_origin`, so
+  that no live order would see it; that premise is false against the fitted tape
+  and the measurement above is what refutes it.
+
+  ORDERED AFTER `notes/problem-trade-cadence.md`, because it is most likely a
+  SYMPTOM of that item rather than a defect in the estimator. The default tape
+  runs at 0.14 trades/sec, so a 300 sim-second window expects roughly 43 prints
+  and its quiet tail falls below the sample floor often enough to produce the
+  30%. At any cadence that document contemplates targeting, the refusal rate
+  collapses on its own. Tuning `VOL_WINDOW_NS` or `MIN_VOL_SAMPLES` now would
+  bake a workaround for a tape defect into the fill model and would have to be
+  unpicked once the tape is fixed - and either knob moves the estimator's
+  identity, forcing a golden re-bless. Re-measure after cadence lands; only if
+  the rate is still material does the estimator itself need changing.
 
 - Move the adapter off the `../nautilus_trader` path dependency onto a pinned
   crates.io release. `crates/mogwai-adapter/Cargo.toml` path-depends five

@@ -8,6 +8,8 @@ license.workspace = true
 mogwai-protocol.workspace = true
 rust_decimal.workspace = true
 tracing.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

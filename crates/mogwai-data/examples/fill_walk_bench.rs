@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Criterion benchmarks for the shared penetration walk and the fixed per-pass
+//! Criterion benchmarks for the shared trigger walk and the fixed per-pass
 //! cost the sweeper pays around it. Run as `brokkr run fill_walk_bench --
 //! --bench`; `criterion_main` parses the `--bench` flag itself, which is what
 //! lets these live in an example target instead of a `cargo bench` harness.
@@ -15,8 +15,8 @@ use std::sync::Mutex;
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use mogwai_data::{
-    CheckpointIndex, Fingerprint, GeneratedSource, GeneratorScalars, MergeSource, PenetrationScan,
-    TickSource, count_penetrations,
+    CheckpointIndex, Fingerprint, GeneratedSource, GeneratorScalars, MergeSource, TickSource,
+    TriggerScan, scan_triggers,
 };
 use mogwai_protocol::Side;
 use rust_decimal::Decimal;
@@ -46,13 +46,12 @@ fn source() -> GeneratedSource {
 
 /// Far-from-market buy limits: no print is ever strictly through them, so every
 /// walk drains its whole span instead of returning early on a satisfied scan.
-fn scans(count: usize) -> Vec<PenetrationScan> {
+fn scans(count: usize) -> Vec<TriggerScan> {
     (0..count)
-        .map(|_| PenetrationScan {
+        .map(|_| TriggerScan {
             side: Side::Buy,
-            price: Decimal::ONE,
+            trigger_px: Decimal::ONE,
             from_ns: ORIGIN,
-            remaining: 1,
         })
         .collect()
 }
@@ -61,7 +60,7 @@ fn scans(count: usize) -> Vec<PenetrationScan> {
 /// crate cannot name and must not start depending on. The mapping benchmark
 /// prices the allocation and the per-field copy the server wrapper pays each
 /// pass, and nothing else.
-type ScanTuple = (Side, Decimal, u64, u32);
+type ScanTuple = (Side, Decimal, u64);
 
 fn benches(c: &mut Criterion) {
     for (name, count) in [
@@ -82,7 +81,7 @@ fn benches(c: &mut Criterion) {
             b.iter_batched(
                 source,
                 |mut source| {
-                    let walk = count_penetrations(&mut source, &scans, ORIGIN + SPAN_NS, BUDGET);
+                    let walk = scan_triggers(&mut source, &scans, ORIGIN + SPAN_NS, BUDGET);
                     (source, walk)
                 },
                 BatchSize::SmallInput,
@@ -92,7 +91,7 @@ fn benches(c: &mut Criterion) {
 
     let mapping_input: Vec<ScanTuple> = scans(50)
         .into_iter()
-        .map(|scan| (scan.side, scan.price, scan.from_ns, scan.remaining))
+        .map(|scan| (scan.side, scan.trigger_px, scan.from_ns))
         .collect();
     c.bench_function("scan_mapping_50", |b| {
         b.iter_batched(
@@ -100,11 +99,10 @@ fn benches(c: &mut Criterion) {
             |input| {
                 input
                     .iter()
-                    .map(|&(side, price, from_ns, remaining)| PenetrationScan {
+                    .map(|&(side, trigger_px, from_ns)| TriggerScan {
                         side,
-                        price,
+                        trigger_px,
                         from_ns,
-                        remaining,
                     })
                     .collect::<Vec<_>>()
             },
@@ -115,7 +113,7 @@ fn benches(c: &mut Criterion) {
     // The sweeper's fixed per-pass cost is positioning, not walking, and the two
     // scale with different things - the seek distance versus print density and
     // scan count - so they are timed apart. Shaped like
-    // `fills::count_penetrations`: a checkpoint restore out of a long-lived
+    // `fills::scan_triggers`: a checkpoint restore out of a long-lived
     // process-wide index, taken under a lock, then the residual drain through
     // `MergeSource::starting_at` behind a `Box<dyn TickSource>`.
     let index = Mutex::new(CheckpointIndex::new(

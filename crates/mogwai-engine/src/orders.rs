@@ -11,16 +11,18 @@ use mogwai_protocol::{
     ClientOrderId, OrderFilled, OrderType, ServerMessage, Side, SubmitOrder, TimeInForce,
     VenueOrderId, WireOrderStatus, control::Divergence, trades_through,
 };
+use rand::{RngExt, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 use rust_decimal::Decimal;
 
-use crate::{Engine, OpenOrder, ScanResult};
+use crate::{Engine, MarketReading, OpenOrder, ScanResult};
 
 impl Engine {
     pub(crate) fn on_submit(
         &mut self,
         order: SubmitOrder,
         ts: u64,
-        market_px: Option<Decimal>,
+        reading: Option<MarketReading>,
     ) -> Vec<ServerMessage> {
         if let Err(reason) = self.validate_submit(&order) {
             return vec![ServerMessage::OrderRejected {
@@ -42,21 +44,63 @@ impl Engine {
             }];
         }
 
-        // The penetration gate. MARKET is marketable by definition and FOK is
-        // decided now or never, so neither is ever gated and neither pays for
-        // the server's market reading. A LIMIT that is already through the last
-        // print is seeded with one penetration, so an aggressive limit is not
-        // taxed a whole sweep interval for arriving marketable.
-        let gated = self.penetration_ticks > 0
-            && order.order_type == OrderType::Limit
-            && matches!(order.time_in_force, TimeInForce::Gtc | TimeInForce::Ioc);
-        let seeded = if gated {
-            let limit = order.price.expect("a validated limit carries a price");
-            u32::from(market_px.is_some_and(|px| trades_through(order.side, limit, px)))
+        // The fill band. Every order draws a trigger from a stream keyed on its
+        // own identity, never on the generator's: a limit fills at its stated
+        // price the moment a print is strictly through that trigger, and a
+        // market order fills at the last print slipped adversely by the same
+        // draw. The band applies to IOC and FOK as well, on narrower grounds
+        // than the resting case - the venue does not know what price an
+        // aggressor would really get, and filling it at its own stated price is
+        // the same lie for an IOC as for a market order.
+        let stated_px = order.price.expect("validated submit carries a price");
+        let increment = self.instruments[&order.symbol].price_increment;
+        let band_ticks = reading.map_or(0, |value| value.band_ticks);
+        let trigger_px = draw_trigger(self.fill_seed, &order, stated_px, increment, band_ticks, 0);
+        let fill_px = if order.order_type == OrderType::Market {
+            reading.map_or_else(
+                || {
+                    tracing::warn!(client_order_id = %order.client_order_id, "market order has no market reading; using its stated price");
+                    stated_px
+                },
+                |value| {
+                    draw_market_price(
+                        self.fill_seed,
+                        &order,
+                        stated_px,
+                        value.last_px,
+                        increment,
+                        band_ticks,
+                    )
+                },
+            )
         } else {
-            0
+            stated_px
         };
-        if gated && seeded < self.penetration_ticks {
+        if let Err(reason) = self.validate_fill_funds(&order, fill_px) {
+            return vec![ServerMessage::OrderRejected {
+                client_order_id: order.client_order_id,
+                reason,
+                ts_event: ts,
+            }];
+        }
+        let marketable = order.order_type == OrderType::Market
+            || reading.is_some_and(|value| trades_through(order.side, trigger_px, value.last_px));
+
+        if order.order_type == OrderType::Limit && !marketable {
+            if order.time_in_force == TimeInForce::Fok {
+                // `plan_fill` is called for its CONSUMING effect and its plan
+                // thrown away. A targeted `PartialFillNext` which is the very
+                // reason a FOK cannot fill must go with the FOK that hit it,
+                // rather than stay armed to ambush a resubmit of the same id.
+                // Short of its trigger is still now-or-never, so the rejection
+                // follows immediately.
+                let _ = self.plan_fill(&order, order.quantity);
+                return vec![ServerMessage::OrderRejected {
+                    client_order_id: order.client_order_id,
+                    reason: "fill-or-kill could not fill at its trigger".into(),
+                    ts_event: ts,
+                }];
+            }
             let venue_order_id = self.next_id("V");
             self.seen_client_order_ids
                 .insert(order.client_order_id.clone(), venue_order_id.clone());
@@ -72,14 +116,17 @@ impl Engine {
                 leaves_qty,
                 ts_accepted: ts,
                 ts_last: ts,
-                penetration_count: seeded,
-                penetration_scanned_ns: ts,
+                band_ticks,
+                trigger_px,
+                band_draw: 0,
+                scanned_ns: ts,
                 revision: 0,
             };
             match record.submit.time_in_force {
                 // GTC rests and is swept; an IOC is evaluated exactly once,
-                // against the acceptance-time seed, and cancels short rather
-                // than filling at a price the market never reached.
+                // against the acceptance-time reading, and cancels short of its
+                // trigger rather than filling at a price the market never
+                // reached.
                 TimeInForce::Gtc => self.open.push(record),
                 TimeInForce::Ioc => {
                     out.push(ServerMessage::OrderCanceled {
@@ -89,12 +136,12 @@ impl Engine {
                     });
                     self.record_closed(&record, WireOrderStatus::Canceled, ts);
                 }
-                TimeInForce::Fok => unreachable!("FOK is never gated"),
+                TimeInForce::Fok => unreachable!("FOK rejected above"),
             }
             // Deliberately does NOT consume `DropNextAccountUpdate`, and does
             // not call `plan_fill`, so neither that divergence nor a targeted
             // `PartialFillNext` is spent here: both are armed against the FILL,
-            // and under the gate the fill has not happened yet.
+            // and a resting order has not had one yet.
             out.push(ServerMessage::AccountState(self.snapshot(ts)));
             return out;
         }
@@ -146,7 +193,7 @@ impl Engine {
         // so this never perturbs a normal submit. An armed `DuplicateNextFill`
         // is left in place: it applies to a fill, and no fill was produced.
         if last_qty > Decimal::ZERO {
-            let fill = self.commit_fill(&order, &venue_order_id, last_qty, leaves_qty, ts);
+            let fill = self.commit_fill(&order, &venue_order_id, last_qty, leaves_qty, fill_px, ts);
             out.extend(fill);
         }
 
@@ -154,17 +201,35 @@ impl Engine {
         // (GTC remainder), or close it into the terminal truth store (full
         // fill, or an IOC's canceled remainder) so a `QueryOrders` reply can
         // attest to it after it leaves the book.
-        let record = OpenOrder {
+        let mut record = OpenOrder {
             venue_order_id,
             submit: order,
             leaves_qty,
             ts_accepted: ts,
             ts_last: ts,
-            penetration_count: 0,
-            penetration_scanned_ns: ts,
+            band_ticks,
+            trigger_px,
+            band_draw: 0,
+            scanned_ns: ts,
             revision: 0,
         };
         if leaves_qty > Decimal::ZERO {
+            // Every partial increments `band_draw`, and the sweep is not the
+            // only place a partial happens: a marketable-on-arrival limit cut
+            // short by an armed `PartialFillNext` leaves a remainder that is a
+            // NEW tranche, so it draws a fresh queue position around the
+            // unchanged price with the band it was accepted under.
+            if last_qty > Decimal::ZERO && record.submit.order_type == OrderType::Limit {
+                record.band_draw = 1;
+                record.trigger_px = draw_trigger(
+                    self.fill_seed,
+                    &record.submit,
+                    stated_px,
+                    increment,
+                    band_ticks,
+                    1,
+                );
+            }
             match record.submit.time_in_force {
                 TimeInForce::Gtc => {
                     self.open.push(record);
@@ -194,19 +259,19 @@ impl Engine {
         out
     }
 
-    /// Apply a batch of off-lock walk results and execute whatever the gate now
-    /// admits.
+    /// Apply a batch of off-lock walk results and execute every order the tape
+    /// printed through the trigger of.
     ///
     /// Each result is matched back to a still-resting order whose `revision`
-    /// AND `penetration_scanned_ns` both still equal what the walk was planned
-    /// against; anything cancelled, filled, repriced, amended or already
+    /// AND `scanned_ns` both still equal what the walk was planned against;
+    /// anything cancelled, filled, repriced, amended or already
     /// advanced by an overlapping pass is dropped. That check, not liveness, is
     /// what makes walking the tape off the engine lock safe: two overlapping
     /// walks naming one order would otherwise both credit the span they share.
     ///
     /// Returns the batch's events and the number of orders it actually EMITTED
     /// a fill for, which is what the caller reserves delivery bytes against - a
-    /// scan below its threshold produces no bytes, so reserving for it would
+    /// scan the tape did not trigger produces no bytes, so reserving for it would
     /// grow the request with the open-order count against a fixed budget.
     pub fn apply_scans(&mut self, results: &[ScanResult], ts: u64) -> (Vec<ServerMessage>, usize) {
         let mut out = Vec::new();
@@ -215,17 +280,16 @@ impl Engine {
             let Some(pos) = self.open.iter().position(|order| {
                 order.submit.client_order_id == result.client_order_id
                     && order.revision == result.revision
-                    && order.penetration_scanned_ns == result.from_ns
+                    && order.scanned_ns == result.from_ns
             }) else {
                 continue;
             };
             let (submit, venue_order_id, leaves) = {
                 let order = &mut self.open[pos];
-                order.penetration_count = order.penetration_count.saturating_add(result.counted);
                 // The frontier advances to exactly where the walk REACHED, which
                 // a spent drain budget may leave short of the pass's target, so
                 // a truncated pass loses no span rather than skipping over it.
-                order.penetration_scanned_ns = result.scanned_to_ns;
+                order.scanned_ns = result.scanned_to_ns;
                 order.revision = order.revision.saturating_add(1);
                 (
                     order.submit.clone(),
@@ -233,7 +297,7 @@ impl Engine {
                     order.leaves_qty,
                 )
             };
-            if self.open[pos].penetration_count < self.penetration_ticks {
+            if !result.triggered {
                 continue;
             }
             // Sized off the LEAVES, never `submit.quantity`: a swept order may
@@ -242,20 +306,40 @@ impl Engine {
             let last_qty = self.plan_fill(&submit, leaves);
             let new_leaves = leaves - last_qty;
             if last_qty > Decimal::ZERO {
-                out.extend(self.commit_fill(&submit, &venue_order_id, last_qty, new_leaves, ts));
+                let fill_px = submit
+                    .price
+                    .expect("validated resting limit carries a price");
+                out.extend(self.commit_fill(
+                    &submit,
+                    &venue_order_id,
+                    last_qty,
+                    new_leaves,
+                    fill_px,
+                    ts,
+                ));
                 emitted += 1;
             }
             if new_leaves > Decimal::ZERO {
                 let order = &mut self.open[pos];
                 order.leaves_qty = new_leaves;
                 order.ts_last = ts;
-                // An execution RESTARTS the window. Without this the remainder
-                // rests at exactly its threshold and the next pass fills it
-                // with zero further penetrations - the gate would leak open on
-                // precisely the orders it is most meant to hold. Each tranche
-                // has to be traded through on its own.
-                order.penetration_count = 0;
-                order.penetration_scanned_ns = ts;
+                // An execution starts a NEW tranche, so the remainder draws a
+                // fresh trigger around the unchanged price and re-covers the
+                // span from here. Without this the remainder would rest already
+                // triggered and the next pass would fill it for free - the band
+                // would leak open on precisely the orders it most has to hold.
+                // Each tranche has to be traded through on its own, and gets a
+                // fresh queue position while it waits.
+                order.band_draw = order.band_draw.saturating_add(1);
+                order.trigger_px = draw_trigger(
+                    self.fill_seed,
+                    &order.submit,
+                    order.submit.price.expect("validated limit carries a price"),
+                    self.instruments[&order.submit.symbol].price_increment,
+                    order.band_ticks,
+                    order.band_draw,
+                );
+                order.scanned_ns = ts;
                 order.revision = order.revision.saturating_add(1);
             } else {
                 let order = self.open.remove(pos);
@@ -263,7 +347,7 @@ impl Engine {
             }
         }
         // ONE snapshot for the whole batch, taken after every fill it booked -
-        // which is what `sizing::penetrated_fill_max_bytes` bounds.
+        // which is what `sizing::swept_fill_max_bytes` bounds.
         if emitted > 0 {
             let drop_update = self
                 .take_armed(|d| matches!(d, Divergence::DropNextAccountUpdate))
@@ -294,17 +378,20 @@ impl Engine {
         fill_quantity(&remaining_order, fraction, increment)
     }
 
-    /// Emit and book a planned fill at the ORDER'S price: `apply_fill`,
+    /// Emit and book a planned fill at the price the caller decided: `apply_fill`,
     /// `record_fill`, and the `DuplicateNextFill` consumption. Shared by
-    /// `on_submit` (ungated, or marketable on arrival) and `apply_scans` (the
-    /// tape has now traded through), so the two paths cannot diverge in WHAT
-    /// they produce, only in when.
+    /// `on_submit` (marketable on arrival, or a slipped market order) and
+    /// `apply_scans` (the tape has now traded through a trigger), so the two
+    /// paths cannot diverge in WHAT they produce, only in when. A limit always
+    /// books at its own stated price; only a market order is slipped, and the
+    /// slippage is applied by the caller, not here.
     fn commit_fill(
         &mut self,
         order: &SubmitOrder,
         venue_order_id: &VenueOrderId,
         last_qty: Decimal,
         leaves_qty: Decimal,
+        fill_px: Decimal,
         ts: u64,
     ) -> Vec<ServerMessage> {
         let fill = OrderFilled {
@@ -314,7 +401,7 @@ impl Engine {
             symbol: order.symbol.clone(),
             side: order.side,
             last_qty,
-            last_px: order.price.expect("validated submit price is present"),
+            last_px: fill_px,
             leaves_qty,
             commission: Decimal::ZERO,
             ts_event: ts,
@@ -412,6 +499,27 @@ impl Engine {
         Ok(())
     }
 
+    /// The funds check re-run against the price the order will ACTUALLY fill
+    /// at, which for a market order is the slipped price rather than the stated
+    /// one. `validate_submit` cleared the stated notional; without this a
+    /// slipped buy could overdraw an account that validator had passed. A limit
+    /// fills at its own price, so for one this is the same question twice and
+    /// answers it the same way.
+    fn validate_fill_funds(&self, order: &SubmitOrder, fill_px: Decimal) -> Result<(), String> {
+        if !self.enforce_funds || order.side == Side::Sell {
+            return Ok(());
+        }
+        let instrument = &self.instruments[&order.symbol];
+        let required = order
+            .quantity
+            .checked_mul(fill_px)
+            .ok_or_else(|| "order notional exceeds maximum representable value".to_string())?;
+        if self.free_balance(&instrument.quote) < required {
+            return Err(format!("insufficient {} balance", instrument.quote));
+        }
+        Ok(())
+    }
+
     fn fill_fraction(&mut self, order: &SubmitOrder) -> Decimal {
         // Divergence: partial-fill the next order. `PartialFillNext` is
         // targeted: it applies only to the order whose id it names, so a
@@ -477,6 +585,7 @@ impl Engine {
         price: Option<Decimal>,
         quantity: Option<Decimal>,
         ts: u64,
+        reading: Option<MarketReading>,
     ) -> Vec<ServerMessage> {
         let Some(pos) = self
             .open
@@ -627,17 +736,36 @@ impl Engine {
 
         let (quantity, price, leaves_qty) = {
             let order = &mut self.open[pos];
-            // Either kind of amend bumps the revision, so a penetration walk
+            // Either kind of amend bumps the revision, so a trigger walk
             // already in flight against the pre-amend state is discarded.
             order.revision = order.revision.saturating_add(1);
-            if price.is_some() {
-                order.submit.price = price;
-                // A reprice restarts the penetration window: prints through the
-                // OLD price are not evidence about the new one. A quantity-only
-                // amend keeps the count, because the price the market has to
-                // trade through has not moved.
-                order.penetration_count = 0;
-                order.penetration_scanned_ns = ts;
+            if let Some(new_price) = price {
+                order.submit.price = Some(new_price);
+                // A reprice is a new draw: prints through the OLD trigger are
+                // not evidence about the new one, and the order rejoins the
+                // queue at the back. A quantity-only amend touches none of it,
+                // because the price the market has to trade through has not
+                // moved.
+                //
+                // The re-draw takes a FRESH band when the server supplies one.
+                // An amend arrives over the same path that reads the tape on
+                // every limit submit, so a reading is available and cheap next
+                // to the amend itself; an order repriced hours after acceptance
+                // would otherwise keep a band fitted to a regime that is gone.
+                // The stored value is the fallback, and is updated to whatever
+                // the re-draw used so a later tranche inherits the current
+                // regime rather than the acceptance one.
+                order.band_draw = order.band_draw.saturating_add(1);
+                order.band_ticks = reading.map_or(order.band_ticks, |value| value.band_ticks);
+                order.trigger_px = draw_trigger(
+                    self.fill_seed,
+                    &order.submit,
+                    new_price,
+                    instrument.price_increment,
+                    order.band_ticks,
+                    order.band_draw,
+                );
+                order.scanned_ns = ts;
             }
             order.submit.quantity = new_total;
             order.leaves_qty = new_total - filled;
@@ -657,6 +785,121 @@ impl Engine {
             ServerMessage::AccountState(self.snapshot(ts)),
         ]
     }
+}
+
+/// FNV-1a over the run's fill seed and the order's identity. Deliberately a
+/// pure function of client-supplied fields plus `fill_seed`, which means a
+/// client that dislikes its trigger can cancel and resubmit under a fresh
+/// `client_order_id` to re-roll it. For a test venue whose clients are
+/// strategies rather than adversaries that is accepted; it is written down here
+/// so nobody later reports it as a leak.
+fn draw_key(fill_seed: u64, order: &SubmitOrder, price: Decimal, band_draw: u32) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    let mut feed = |bytes: &[u8]| {
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    };
+    feed(&fill_seed.to_le_bytes());
+    feed(order.symbol.as_bytes());
+    feed(&[0]);
+    feed(order.client_order_id.as_bytes());
+    feed(&[0]);
+    feed(&[match order.side {
+        Side::Buy => 0,
+        Side::Sell => 1,
+    }]);
+    feed(&price.serialize());
+    feed(&band_draw.to_le_bytes());
+    hash
+}
+
+/// The band draw: an integer number of ticks uniform on `0 ..= band_ticks`.
+///
+/// Uniform is a declaration, not a fit: the SCALE comes from trailing
+/// volatility, and the maximum-entropy shape on a bounded support is the one
+/// that claims nothing further. A fresh `ChaCha8Rng` per draw rather than a
+/// long-lived stream, so the offset is a pure function of its key and no
+/// ordering of submits can perturb another order's trigger.
+pub(super) fn draw_offset(
+    fill_seed: u64,
+    order: &SubmitOrder,
+    price: Decimal,
+    band_ticks: u32,
+    band_draw: u32,
+) -> u32 {
+    ChaCha8Rng::seed_from_u64(draw_key(fill_seed, order, price, band_draw))
+        .random_range(0..=band_ticks)
+}
+
+/// Total-function guard for every price the band computes. `Decimal` arithmetic
+/// is checked throughout, and a `None` or a non-positive result degenerates to
+/// the order's stated price: unreachable at any sane band, but a sell trigger
+/// and a buy market fill can overflow at a wide one, and a sell market fill can
+/// slip to zero.
+fn safe_price(stated: Decimal, candidate: Option<Decimal>) -> Decimal {
+    candidate
+        .filter(|price| *price > Decimal::ZERO)
+        .unwrap_or(stated)
+}
+
+/// The trigger for a limit: its stated price moved AWAY from the market by the
+/// draw.
+///
+/// One-sided on purpose. A symmetric band would fill a buy limit while the
+/// market traded above it - a fill better than any price the market offered,
+/// which is free money the venue manufactured and a strictly worse forward test
+/// than the instant fill this replaced. `u = 0` is the front-of-queue draw and
+/// reduces to one print strictly through the stated price.
+fn draw_trigger(
+    fill_seed: u64,
+    order: &SubmitOrder,
+    price: Decimal,
+    increment: Decimal,
+    band_ticks: u32,
+    band_draw: u32,
+) -> Decimal {
+    let offset = increment.checked_mul(Decimal::from(draw_offset(
+        fill_seed, order, price, band_ticks, band_draw,
+    )));
+    safe_price(
+        price,
+        offset.and_then(|offset| match order.side {
+            Side::Buy => price.checked_sub(offset),
+            Side::Sell => price.checked_add(offset),
+        }),
+    )
+}
+
+/// The fill price for a MARKET order: the last print slipped adversely by a
+/// draw from the same band and the same key, with `band_draw = 0`.
+///
+/// The client's stated price is ignored for PRICING - answering "what price did
+/// this trade at" with the client's own number is the same defect the limit
+/// band removes - but it is still validated and still keys the draw, because
+/// the wire contract requires it. The magnitude here is borrowed rather than
+/// fitted: it is the limit band's multiplier, so it introduces no unmeasured
+/// number, and a separately fitted market multiplier is a successor change to
+/// one config field.
+fn draw_market_price(
+    fill_seed: u64,
+    order: &SubmitOrder,
+    stated_px: Decimal,
+    last_px: Decimal,
+    increment: Decimal,
+    band_ticks: u32,
+) -> Decimal {
+    let offset = increment.checked_mul(Decimal::from(draw_offset(
+        fill_seed, order, stated_px, band_ticks, 0,
+    )));
+    safe_price(
+        stated_px,
+        offset.and_then(|offset| match order.side {
+            Side::Buy => last_px.checked_add(offset),
+            Side::Sell => last_px.checked_sub(offset),
+        }),
+    )
 }
 
 fn fill_quantity(order: &SubmitOrder, fill_fraction: Decimal, size_increment: Decimal) -> Decimal {

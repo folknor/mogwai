@@ -90,7 +90,7 @@ pub fn account_state_max_bytes(shape: &BookShape) -> usize {
         + shape.positions * POSITION_ROW_MAX_BYTES
 }
 
-/// Upper bound on one penetration sweep's output: per executed order, the fill
+/// Upper bound on one trigger sweep's output: per executed order, the fill
 /// plus its possible `DuplicateNextFill` twin, and ONE `AccountState` for the
 /// whole batch (the sweep snapshots once, after every fill it booked).
 ///
@@ -104,7 +104,7 @@ pub fn account_state_max_bytes(shape: &BookShape) -> usize {
 /// `orders` is the count of orders the sweep actually EMITS for, never the count
 /// of pending scans: a scan below its threshold produces no bytes.
 #[must_use]
-pub fn penetrated_fill_max_bytes(shape: &BookShape, orders: usize) -> usize {
+pub fn swept_fill_max_bytes(shape: &BookShape, orders: usize) -> usize {
     orders * 2 * ORDER_EVENT_MAX_BYTES
         + account_state_max_bytes(&BookShape {
             balances: shape.balances + 2 * orders,

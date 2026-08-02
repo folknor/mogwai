@@ -55,8 +55,8 @@ MODE_CONFIGS = {
     "accelerated": "smoke-accelerated.toml",
     "admission": "smoke-admission.toml",
     "command-latency": "smoke-command-latency.toml",
-    "penetration": "smoke-penetration.toml",
-    "penetration-swept": "smoke-penetration-two.toml",
+    "band": "smoke-band.toml",
+    "band-swept": "smoke-band-swept.toml",
 }
 
 
@@ -66,16 +66,21 @@ MODE_CONFIGS = {
 
 
 def venue_binary() -> str:
-    """Build the venue, then return the binary's OWN path."""
+    """Build the venue, then return the binary's OWN path.
+
+    The build is not optional and is not skipped when a binary already exists: a
+    smoke run against a stale binary asserts things about code that is not in
+    the tree, which is worse than no smoke run at all.
+    """
+    candidates = [
+        os.path.join(REPO, "target", profile, "mogwai") for profile in ("release", "debug")
+    ]
     subprocess.run(
         ["brokkr", "run", "mogwai", "--", "--version"],
         cwd=REPO,
         check=True,
         stdout=subprocess.DEVNULL,
     )
-    candidates = [
-        os.path.join(REPO, "target", profile, "mogwai") for profile in ("release", "debug")
-    ]
     for path in candidates:
         if os.path.exists(path):
             return path
@@ -334,6 +339,31 @@ def mode_default(venue: Venue) -> str:
         assert accepted, "the order socket answered nothing"
         assert accepted["type"] != "OrderRejected", accepted
 
+        # Market slippage, observed end to end: the fill price against the tape
+        # the venue itself serves at the fill instant. Adverse or equal, never
+        # better - equality is admitted because u = 0 is a legitimate draw, and
+        # this is the only gate in the suite that watches a fill PRICE.
+        def slippage_is_adverse(client_order_id: str, side: str) -> None:
+            ws.send(order(client_order_id, venue.symbol, side=side))
+            fill = ws.until(
+                lambda frame: frame.get("type") in ("OrderFilled", "OrderRejected")
+                and frame.get("client_order_id") == client_order_id
+            )
+            assert fill and fill["type"] == "OrderFilled", fill
+            ts = int(fill["ts_event"])
+            tape = venue.http(
+                f"/trades?symbol={venue.symbol}&start={ts - 300_000_000_000}&end={ts}&limit=10000"
+            )
+            assert tape, f"no tape reading at the {side} fill"
+            last, got = float(tape[-1]["price"]), float(fill["last_px"])
+            if side == "Buy":
+                assert got >= last, f"a market buy slipped DOWN: {got} < {last}"
+            else:
+                assert got <= last, f"a market sell slipped UP: {got} > {last}"
+
+        slippage_is_adverse("SMOKE-SLIP-BUY", "Buy")
+        slippage_is_adverse("SMOKE-SLIP-SELL", "Sell")
+
         # The one ledger answers for the order the same socket just worked.
         ws.send({"type": "QueryOrders", "request_id": "SMOKE-Q", "open_only": False})
         snapshot = ws.until(lambda frame: frame.get("type") == "OrderStatusSnapshot")
@@ -446,10 +476,13 @@ def mode_command_latency(venue: Venue) -> str:
     return f"armed act delay realized as {elapsed * 1000:.0f} ms"
 
 
-def mode_penetration(venue: Venue) -> str:
+def mode_band(venue: Venue) -> str:
     # A resting limit the market has to come to: it fills only once a trade
     # prints strictly through its price.
-    anchor = venue.http(f"/trades?symbol={venue.symbol}&limit=1")
+    sim_now = int(venue.http("/clock")["server_now_ns"])
+    anchor = venue.http(
+        f"/trades?symbol={venue.symbol}&start={sim_now - 300_000_000_000}&end={sim_now}&limit=10000"
+    )
     assert anchor, "no anchor print"
     price = float(anchor[-1]["price"])
 
@@ -457,7 +490,7 @@ def mode_penetration(venue: Venue) -> str:
     try:
         ws.send(
             order(
-                "PEN-1",
+                "BAND-1",
                 venue.symbol,
                 order_type="Limit",
                 side="Buy",
@@ -467,56 +500,78 @@ def mode_penetration(venue: Venue) -> str:
         accepted = ws.until(
             lambda frame: frame.get("type") in ("OrderAccepted", "OrderRejected")
         )
-        assert accepted, "the gated limit was never answered"
+        assert accepted, "the banded limit was never answered"
         assert accepted["type"] == "OrderAccepted", accepted
-        # It must REST rather than fill on submit: that is the whole point of
-        # the penetration gate.
-        ws.send({"type": "QueryOrders", "request_id": "PEN-Q", "open_only": True})
+        # It must REST rather than fill on submit. Priced AT the last print, no
+        # draw can put its trigger above the market, and u = 0 still needs a
+        # print strictly THROUGH the price, which the submit instant by
+        # definition does not have.
+        ws.send({"type": "QueryOrders", "request_id": "BAND-Q", "open_only": True})
         snapshot = ws.until(lambda frame: frame.get("type") == "OrderStatusSnapshot")
         assert snapshot, "the venue-truth query went unanswered"
-        resting = [row for row in snapshot["orders"] if row["client_order_id"] == "PEN-1"]
-        assert resting, "a penetration-gated limit must REST, not fill on submit"
+        resting = [row for row in snapshot["orders"] if row["client_order_id"] == "BAND-1"]
+        assert resting, "a banded limit must REST, not fill on submit"
     finally:
         ws.close()
-    return "penetration-gated limit rested rather than filling on submit"
+    return "banded limit rested rather than filling on submit"
 
 
-def mode_penetration_swept(venue: Venue) -> str:
+def mode_band_swept(venue: Venue) -> str:
     """The fill nobody asked for: the run's sweep, not a command response.
 
-    `penetration_ticks = 2` means the acceptance reading seeds exactly one
-    penetration, so a marketable buy rests one short and can only be completed
-    by a later sweep pass. That fill arrives UNSOLICITED on an open socket,
-    which is the whole ownership claim: the sweep belongs to the run, not to the
-    command that placed the order.
-    """
-    anchor = venue.http(f"/trades?symbol={venue.symbol}&limit=1")
-    assert anchor, "no anchor print"
-    price = float(anchor[-1]["price"])
+    The order is placed at the latest print, so it is not strictly through its
+    trigger on arrival. A later clean print can cross it and the resulting fill
+    arrives unsolicited on the open socket.
 
+    A downward-drifting tape is what makes this fill, so the wall bound is
+    generous and the submit is retried at a fresh anchor price rather than
+    asserting that one draw of the generator must cooperate.
+    """
     ws = WsClient(venue.addr)
     try:
-        ws.send(
-            order(
-                "PEN-SWEPT-1",
-                venue.symbol,
-                order_type="Limit",
-                side="Buy",
-                price=f"{price * 1.5:.2f}",
+        for attempt in range(3):
+            client_order_id = f"BAND-SWEPT-{attempt}"
+            sim_now = int(venue.http("/clock")["server_now_ns"])
+            anchor = venue.http(
+                f"/trades?symbol={venue.symbol}&start={sim_now - 300_000_000_000}&end={sim_now}&limit=10000"
             )
-        )
-        accepted = ws.until(
-            lambda frame: frame.get("type") in ("OrderAccepted", "OrderRejected")
-        )
-        assert accepted and accepted["type"] == "OrderAccepted", accepted
-        # Bounded by the accelerated tape's dwell allowance, not by the sweep
-        # timer: the fill waits on the next PRINT.
-        fill = ws.until(lambda frame: frame.get("type") == "OrderFilled", timeout=90)
+            assert anchor, "no anchor print"
+            price = float(anchor[-1]["price"])
+            ws.send(
+                order(
+                    client_order_id,
+                    venue.symbol,
+                    order_type="Limit",
+                    side="Buy",
+                    price=f"{price:.2f}",
+                )
+            )
+            accepted = ws.until(
+                lambda frame: frame.get("type") in ("OrderAccepted", "OrderRejected")
+                and frame.get("client_order_id") == client_order_id
+            )
+            assert accepted and accepted["type"] == "OrderAccepted", accepted
+            # The half the old 1.5x-through construction could not make: it did
+            # NOT fill on the submit path, so whatever fills it later is the
+            # venue's own sweep and nothing else.
+            ws.send({"type": "QueryOrders", "request_id": "BAND-SWEPT-Q", "open_only": True})
+            snapshot = ws.until(lambda frame: frame.get("type") == "OrderStatusSnapshot")
+            assert snapshot and any(
+                row["client_order_id"] == client_order_id for row in snapshot["orders"]
+            ), "the band-swept order filled on submit instead of resting"
+            # Bounded by the accelerated tape's dwell allowance, not by the
+            # sweep timer: the fill waits on the next PRINT.
+            fill = ws.until(
+                lambda frame: frame.get("type") == "OrderFilled"
+                and frame.get("client_order_id") == client_order_id,
+                timeout=90,
+            )
+            if fill:
+                break
         assert fill, "the run's sweep never filled a limit the tape traded through"
-        assert fill["client_order_id"] == "PEN-SWEPT-1", fill
     finally:
         ws.close()
-    return "the run sweep delivered an unsolicited fill for a gated resting limit"
+    return "the run sweep delivered an unsolicited fill for a banded resting limit"
 
 
 def mode_duration(venue: Venue, duration: str) -> str:
@@ -546,8 +601,8 @@ MODES = {
     "accelerated": mode_accelerated,
     "admission": mode_admission,
     "command-latency": mode_command_latency,
-    "penetration": mode_penetration,
-    "penetration-swept": mode_penetration_swept,
+    "band": mode_band,
+    "band-swept": mode_band_swept,
 }
 
 
