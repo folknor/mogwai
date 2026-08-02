@@ -1,5 +1,13 @@
 # PROBLEM: the venue refuses the order types the user actually trades with
 
+**This is a PROBLEM STATEMENT, not an implementation spec.** It is what the
+author of a `reference/technical-implementation-spec.md` document reads BEFORE
+writing one: the observed defect and its evidence, the decisions still open and
+who settles them, and what is deliberately out of scope. It contains no
+implementation plan, names no target artifacts, and pins no gates - if it reads
+as under-specified, that is the genre rather than an omission. One resolved
+problem statement yields one or more specs.
+
 Expanded from what would otherwise be a `notes/todo.md` entry. Related to
 `notes/problem-order-book.md` but not the same question: that document asks how
 much book to build, this one asks what execution surface the venue owes its
@@ -45,11 +53,62 @@ on TradingView and nautilus being unable to rest an MIT faithfully. That
 decision is captured in `notes/todo.md` and cited in the architecture
 reference.
 
-It was made on the premise that the gap was a nuisance for one order shape. The
-user's own trading makes it structural: every instrument they named is
-routinely traded with a protective stop. Reopening a recorded decision needs to
-be deliberate and the reasons written down, which is the main reason this is a
-problem statement rather than a spec.
+Two things about it have changed. It was made on the premise that the gap was a
+nuisance for one order shape, and the user's own trading makes it structural:
+every instrument they named is routinely traded with a protective stop.
+
+More importantly, broadarrow is INCIDENTAL. mogwai implements nautilus's
+`DataClient`/`ExecutionClient` traits and registers factories for the `MOGWAI`
+venue; it is a nautilus adapter, and broadarrow is one consumer that happens to
+be the only one today. So that note records a consumer's preference, not a
+constraint on the venue, and what actually determines the owed surface is what
+nautilus strategies emit. Reopening it does not require their consent, though
+telling them is courteous.
+
+## What the consumer surface actually contains
+
+Scoping this to stop-market and stop-limit, as an earlier draft did, understates
+it. broadarrow's own execution reference maps `Market`, `Limit`, `StopMarket`,
+`StopLimit` and `TrailingStopMarket`, and describes two-leg protective brackets
+where both legs must remain present, implemented as separate reduce-only orders
+rather than a venue-side OCO list.
+
+That matters in three ways the earlier draft missed:
+
+- **Trailing stops need venue-side state** - a per-tick high-water mark - and
+  are materially more work than a fixed trigger.
+- **Protective pairs need SOMETHING that stops both legs filling.** What that
+  something is, is open. Note what broadarrow does today, as evidence rather
+  than as a constraint: it emits two orders that are NOT venue-linked, both
+  reduce-only, and expects the engine to clamp or cancel the sibling once the
+  position is exhausted. So the minimum the venue owes to accept that shape is
+  reduce-only semantics, not a venue OCO abstraction - but since mogwai is a
+  nautilus adapter rather than a broadarrow accessory, what it OUGHT to support
+  is whatever nautilus expresses, which includes order lists and contingency
+  types the current consumer happens not to use.
+- **Reservations double-count.** Two protective legs against one position both
+  reserve the held asset unless the ledger understands that they are exclusive.
+- **`position_id` is dropped.** nautilus carries it on submission and the
+  adapter discards it when building the wire order. Independent of any consumer,
+  that decides whether opposing orders net or hedge.
+
+The wire has none of the fields any of this needs: one optional price, no
+trigger price, no trigger type, no reduce-only flag, no trailing geometry, no
+linkage metadata. Adding two enum variants would not make a real strategy shape
+testable.
+
+## A fifth option nobody enumerated
+
+nautilus can emulate conditional orders client-side: `emulation_trigger` and
+`OrderEmulator` hold the order in the strategy's own process and release a
+market order to the venue when the trigger fires. Several of its own adapters
+set it. That would make protective stops testable with no protocol growth and no
+book at all.
+
+It is probably the wrong answer here - the venue then never sees the protective
+leg, so no havoc can delay, drop or reject it, and exercising the live path is
+the entire reason this venue exists. But it is a real option and it should be
+rejected in writing rather than left unmentioned.
 
 ## What a stop needs that does not exist
 
@@ -73,8 +132,11 @@ problem statement rather than a spec.
 
 ## What must be decided
 
-1. **Which types the venue accepts.** Stop-market and stop-limit at minimum,
-   given the user's trading. Market-if-touched was explicitly killed and stays
+1. **Which types and which SHAPES the venue accepts.** Stop-market and
+   stop-limit at minimum, given the user's trading; trailing stops and
+   two-leg brackets with reduce-only or OCO linkage are what the consumer
+   actually emits, and a decision to omit them is a decision that real strategy
+   shapes stay untestable. Market-if-touched was explicitly killed and stays
    killed unless re-argued.
 2. **What the trigger reads** - traded price, or a quote that does not yet
    exist. This is the same predicate question the penetration gate answered
@@ -85,9 +147,19 @@ problem statement rather than a spec.
    lie of the same class the queue-ahead refusal rejected.
 4. **Whether the standing no-growth decision is reopened**, and if so, whether
    broadarrow is consulted first - it is their note, and their consumer.
-5. **Whether this can land before the book question resolves.** A
-   trade-triggered stop filling at top-of-book is buildable on option 1 of the
-   book document; a faithful one probably is not.
+5. **Which havoc arms extend to a conditional order.** The argument against
+   client-side emulation is precisely that the venue must SEE the protective leg
+   so havoc can reach it - and then no document says which arms apply to a
+   trigger. Delayed trigger, rejected trigger, dropped trigger conversion, and
+   how submit-time and trigger-time divergences compose are all unasked.
+6. **Lifecycle of a resting conditional.** Whether a trigger price can be
+   amended, what cancel means before versus after triggering, what
+   `QueryOrders` must report for one, and what happens to a resting stop when
+   its instance dies or its account is reaped.
+7. **The adjacent flags.** Reduce-only as a standalone property rather than only
+   as bracket linkage, time-in-force including GTD, and post-only. The engine's
+   `pending_scans` already filters on order type AND time-in-force, so the
+   surface is wider than the trigger itself.
 
 ## What this document does not decide
 

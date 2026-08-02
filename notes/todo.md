@@ -12,35 +12,119 @@ Or both. There are no exceptions.
 
 ## Open issues
 
-- PROBLEM STATEMENTS, resolved in order, each producing one or more
-  implementation specs. These are ordinary todo items that outgrew a bullet, so
-  they live in their own files; they carry the evidence, the decisions to be
-  made, and what is explicitly out of scope, but no implementation plan. A spec
-  is written against `reference/technical-implementation-spec.md` only once the
-  problem statement it descends from has been resolved.
+- PROBLEM STATEMENTS. **This is the solvable set of problems we believe will
+  get mogwai to the end state the user needs.** That is a claim rather than an
+  inventory: each entry is believed NECESSARY, and the set is believed
+  SUFFICIENT FOR MOGWAI TO STOP BEING THE BLOCKER. If all eight resolve and the
+  end state is still out of reach, the claim was wrong - which is a finding
+  worth having, and the reason it is stated as a claim rather than as a list.
 
-  1. `notes/problem-trade-cadence.md` - the default tape runs 350x slower than
-     a real active pair, and "trades per second" has three values differing by
-     8.5x depending on whether a trade is a raw fill, an aggregated print or a
-     match event. Settles what a trade IS before anything is sized off it.
-     Also carries the market-data provenance: where the archives live, how to
-     fetch more, and which committed probe reproduces each number in all four
-     documents.
-  2. `notes/problem-instrument-profiles.md` - one fitted instrument, five
-     traded ones, no way for a scenario to name which. Named pre-registered
-     profiles with per-knob override, and the provenance problem that a
-     crypto profile can be fitted from trade-level data while a CME one cannot.
-     Depends on 1.
-  3. `notes/problem-order-book.md` - the founding no-book assumption, and the
-     refusals it now produces. Spectrum from synthetic top-of-book to a real
-     matching engine. The one document that revisits a founding decision, and
-     its answer changes what 1 and 2 are worth building.
-  4. `notes/problem-refused-order-types.md` - the venue refuses every
-     conditional type, so a strategy with a protective stop cannot be
-     forward-tested at all, on the only keyless venue available for it.
-     Conflicts with a standing broadarrow decision that the protocol owes no
-     order-type growth, which is why it is a problem statement and not a spec.
-     Constrained by 3.
+  Three things are deliberately outside that claim. THROUGHPUT - whether N
+  instances fit on the machine - is excluded by the user's standing instruction
+  that resource cost shapes no decision here. The CLAIM PIPELINE - how a seed
+  becomes provenance attached to a result, how many paths make a claim, how they
+  are allocated - belongs to whatever consumes the venue; mogwai's obligation
+  ends at generating a path and reporting which. And the open items elsewhere in
+  this file, notably the dead-feed watchdog and the terminal-venue-fault
+  decision, both bear on whether a forward result is VALID and are not part of
+  this set.
+
+  They are ordinary todo items that outgrew a bullet, so they live in their own
+  files; they carry the evidence, the decisions to be made, and what is
+  explicitly out of scope, but no implementation plan. A spec is written against
+  `reference/technical-implementation-spec.md` only once the problem statement
+  it descends from has been resolved.
+
+  ORDERING IS A GRAPH, NOT A LINE. An earlier draft asserted a total order and
+  two independent reviews found it circular. The dependencies below are
+  technical, and where none exists the order is free:
+
+      lifecycle ─┬─> everything (it decides what a run IS)
+      seeds ─────┘
+
+      order-types ──requirements──> book ──> cadence ──> profiles
+                                     ▲                     ▲
+      instrument-model ──────────────┴─────────────────────┘
+
+      fees ── independent, resolvable at any point
+
+  The one non-obvious edge: order-type REQUIREMENTS precede the book, because a
+  market-state model cannot be chosen before it is known what triggers, fills
+  and reduce-only behaviour it must support - even though implementing those
+  types lands after the book resolves.
+
+  The end state they serve: on the order of 200 agents running concurrently,
+  each developing a strategy through broadarrow - backtest, optimize, Monte
+  Carlo - and then FORWARD TESTING it against mogwai. Whether that many
+  instances fit on the machine is explicitly not a design input; resource cost
+  does not shape any decision in these documents.
+
+  WHO DECIDES: the repository owner, on every product and architecture question
+  in every one of these documents. There is one user, and the operator of the
+  venue is an agent acting for them. broadarrow is a consumer, not an authority -
+  mogwai is a nautilus adapter, so where a standing broadarrow note conflicts
+  with what nautilus strategies emit, the note is a preference and loses.
+  Consulting them is courtesy, not process.
+
+  ACCEPTANCE: none of these documents proposes how you would know its problem is
+  fixed, and that is the largest thing they share as a defect. A resolved
+  problem statement should name the measurable form of "done" before its spec is
+  written - for the cadence document that is a target statistic and its
+  tolerance, for the lifecycle document it is concurrent instances actually
+  running, and so on. Deriving those is part of resolving each document, not of
+  writing the spec that follows it.
+
+  - `notes/problem-server-lifecycle.md` - mogwai is one long-lived service and
+    the workload is hundreds of disposable instances. Nothing allocates a port,
+    discovers one, or cleans one up, so concurrent forward tests collide today
+    and were hand-serialized during the 2026-08-02 session. Also the root of the
+    account namespace that produced that session's adapter defect. Decides what
+    a RUN is, so everything else inherits from it.
+  - `notes/problem-seeds-and-paths.md` - the tape already varies per launch,
+    because tape identity includes a `data_origin` derived from wall time, but
+    the variation is accidental, unsampled and unrecorded. Decided by the user:
+    one axis, a random seed per launch, deterministic given that seed, wall
+    anchor removed, seed reported. What sets the origin instead is open.
+  - `notes/problem-order-book.md` - the founding no-book assumption. Two
+    independent axes: what exists to match against, and what happens to a client
+    order. The user has answered the second - orders rest and are consumed by
+    arriving flow, accounts never match each other - and argued that a
+    probabilistic fill model can supply allocation without modelled depth, which
+    keeps the cheapest market-state option alive. Resolves before cadence,
+    because under matching the generator emits parent arrivals and wire prints
+    fall out of it.
+  - `notes/problem-trade-cadence.md` - the tape runs orders of magnitude slower
+    than a real active pair, and "trades per second" has three values differing
+    by 8.5x because raw fills, aggregated prints and match events are LAYERS of
+    one process rather than alternatives. Also carries the market-data
+    provenance for the whole set: where the archives live, how to fetch more,
+    which committed probe reproduces each figure, and why none of it is
+    reproducible from a fresh clone yet.
+  - `notes/problem-instrument-model.md` - the venue models spot currency pairs
+    only, so MNQ and MES cannot be futures: no multiplier, no tick value, no
+    expiry, no margin, and a session envelope that can thin an hour but not
+    close it, with no calendar and no exchange-local time. Precedes profiles,
+    because a profile cannot be fitted for an instrument that cannot exist.
+  - `notes/problem-instrument-profiles.md` - per-symbol SCALE and session are
+    configurable in TOML today; the arrival and volatility PROCESS is global
+    constants no config reaches. Missing at the mechanism level: named presets,
+    an overlay for per-knob override, provenance, selection. Missing at the
+    model level: whether the process constants become per-instrument at all,
+    which measured clustering differing 2.8x across three crypto majors leaves
+    genuinely open.
+  - `notes/problem-refused-order-types.md` - every conditional type is refused,
+    so a strategy with a protective stop cannot be forward-tested at all. The
+    owed surface is what nautilus expresses, not what today's consumer happens
+    to emit. Its REQUIREMENTS precede the book; its implementation follows it.
+  - `notes/problem-fees.md` - the engine books zero commission on every fill,
+    unconditionally, so every claim the fleet produces is biased optimistically
+    and systematically. Cheap to close relative to the fidelity work and
+    arguably a larger correction to a claim. Independent of the rest.
+
+  Also relevant and not a problem statement: `reference/glossary.md` defines the
+  identity chain the code builds - process, account, session, subscription, tape
+  - and carries a numbered register of discrepancies found while writing it,
+  several of which are work items in their own right.
 
 - Move the adapter off the `../nautilus_trader` path dependency onto a pinned
   crates.io release. `crates/mogwai-adapter/Cargo.toml` path-depends five
@@ -164,8 +248,12 @@ Or both. There are no exceptions.
   GoDark scenarios past it (also recorded in reference/havoc.md's operator
   note); (b) the once-floated MarketIfTouched order-type extension is dead
   (the triggering Pine shape is invalid on TradingView and nautilus cannot
-  rest an MIT faithfully) - the protocol owes no order-type growth beyond
-  Market and Limit. Standing consequence for them, surfaced by QA 2026-08-01
+  rest an MIT faithfully) - and their position was that the protocol owes no
+  order-type growth beyond Market and Limit. SUPERSEDED as of 2026-08-02 by
+  `notes/problem-refused-order-types.md`: that was a consumer's preference, and
+  mogwai is a nautilus adapter whose owed surface follows what nautilus
+  expresses. MarketIfTouched specifically stays dead unless re-argued. Standing
+  consequence for them, surfaced by QA 2026-08-01
   and now written up in `reference/architecture.md`: a strategy whose
   protective leg is a stop-MARKET cannot be forward-tested on MOGWAI at all,
   because the adapter refuses the type and MOGWAI is the only keyless venue
@@ -208,9 +296,12 @@ Or both. There are no exceptions.
   `mogwai-data` for the offline lineage and its unit tests.
 - `MOGWAI_DATA_DIR` (default `/home/folk/Kraken`) is an
   offline-analysis input only (`analysis/`), never a server runtime knob.
-- `research/` (the nautilus and broadarrow clones) is gitignored; read those APIs
-  from there. mogwai builds against the pinned crates.io nautilus, not a `../`
-  checkout.
+- `research/` is gitignored and holds the read-only nautilus and broadarrow
+  clones plus `market-data/` (the Binance archives and TradingView exports) and
+  `binance-public-data/` (the vendored downloader). Read those APIs from there.
+  mogwai BUILDS against the sibling `../nautilus_trader` checkout, per the open
+  path-dependency item above and `AGENTS.md` - not against crates.io, and never
+  against `research/`.
 
 ## Hardcoded-value and env-var inventory (read-only sweep, 2026-07-01)
 

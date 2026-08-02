@@ -1,5 +1,13 @@
 # PROBLEM: one fitted instrument, five traded ones, and no way to say which
 
+**This is a PROBLEM STATEMENT, not an implementation spec.** It is what the
+author of a `reference/technical-implementation-spec.md` document reads BEFORE
+writing one: the observed defect and its evidence, the decisions still open and
+who settles them, and what is deliberately out of scope. It contains no
+implementation plan, names no target artifacts, and pins no gates - if it reads
+as under-specified, that is the genre rather than an omission. One resolved
+problem statement yields one or more specs.
+
 Expanded from what would otherwise be a `notes/todo.md` entry. Depends on
 `notes/problem-trade-cadence.md`, which settles what a trade is and how fast
 they arrive; this document settles how that varies per instrument and who gets
@@ -26,12 +34,31 @@ scenario cannot say "behave like SOL" or "behave like MNQ", and an operator who
 wants a thinner or busier tape has one lever, `LiquidityDrought`, which only
 thins and is a havoc arm rather than a profile.
 
-The seam for this already exists and is half-built: `InstrumentProfile`
-(`mogwai-server/src/source.rs`) bundles an `InstrumentDef`, a
-`GeneratorScalars` and a `SessionProfile` per symbol, and `InstrumentProfiles`
-holds them by symbol. What is missing is that the values are not per-instrument
-in any meaningful sense - every profile is built from the same fingerprint
-medians - and there is no way to name one from config.
+The seam for this exists and is more complete than an earlier draft of this
+document claimed. `InstrumentProfile` (`mogwai-server/src/source.rs`) bundles an
+`InstrumentDef`, a `GeneratorScalars` and a `SessionProfile` per symbol, and
+`reference/config.md` documents that each `[[instrument]]` table in the server
+TOML carries all three - the wire definition fields, a full `generator` table,
+and a `session` table of 24 hourly arrival shares, 24 hourly volatility
+multipliers and 7 day-of-week weights, all value-validated at load. It says
+outright that per-symbol exchange hours, maintenance breaks and weekend shape
+belong there.
+
+So per-symbol configuration exists and is validated. It is NOT complete, and an
+earlier draft of this document over-corrected by calling it "fully configurable
+in TOML" - `GeneratorScalars` exposes eight values, while the ACD shape
+constants, `SIZE_LOG_SIGMA`, the GARCH parameters and the bounce dynamics remain
+GLOBAL module constants that no config can reach. So the configurable surface is
+the instrument's scale and session envelope; the arrival and volatility PROCESS
+is one global shape for every symbol.
+
+What is missing is therefore two things at different levels. At the mechanism
+level: named built-in PRESETS, an OVERLAY so a consumer names one and overrides
+two fields rather than supplying forty, PROVENANCE on the resulting effective
+values, and a SELECTION mechanism. At the model level: whether the process
+constants become per-instrument at all, which is the clustering question below.
+The built-in default is built from cross-pair fingerprint medians, which is a
+third and separate complaint about the default's provenance.
 
 ## Measured differences that a profile must be able to express
 
@@ -43,20 +70,36 @@ table and provenance):
 | raw trades/sec | 49.6 | 46.9 | 12.5 |
 | seconds with zero trades | 13.4% | 26.2% | 38.9% |
 | notional per trade | $311 | $151 | $191 |
-| dimensionless dispersion, match events | 4.62 | pending | 3.57 |
+| match events/sec | 5.84 | 6.78 | 1.94 |
+| single-print share of events | 76.5% | 77.4% | 98.6% |
+| dimensionless dispersion, match events | 4.62 | 10.01 | 3.57 |
 
-Two readings of that table matter for the design. The SHAPE is close: mean over
-median is 12-15x on all three, taker-buy share is 0.483-0.496 on all three, and
-the dimensionless dispersion of BTC and SOL sit within 30%. The SCALE is not:
-rate varies 4x and quiet-second fraction 3x across three instruments that are
-all crypto majors on one venue.
+Some of that is shared and some is not, and the split does not fall where a
+first look suggested. Mean-over-median burstiness is 12-15x on all three - an
+order of magnitude, not a fitted figure, since the medians are integer
+per-second counts (4, 3, 1) with a quantisation floor of one whole trade;
+taker-buy share is 0.483-0.496 on all three; and the two busy books sweep
+almost identically, 76.5% against 77.4% single-print events, while the thin one
+barely sweeps at all. Those look like one shape.
 
-If that pattern holds when CME data arrives, a profile is a small set of scale
-knobs over one shared fitted shape. If MNQ and MES break it, clustering has to
-move into the profile too - and clustering is currently four GLOBAL module
-constants (`ACD_PERSISTENCE`, `ACD_FEEDBACK_SHARE`, `ACD_WEIBULL_SHAPE`,
-`ACD_RELAX_MEAN_CAL`) that the realism gate is anchored on with a single
-profile. Moving them per-instrument re-scopes that gate.
+Clustering does not. The dimensionless dispersion spans 3.57 to 10.01 across
+three crypto majors on one venue, a 2.8x spread that survives the
+timestamp-collapse correction. An earlier reading of BTC and SOL alone put them
+within 30% and suggested one shared fitted shape; ETH breaks that, and the
+design should not assume the cheap answer.
+
+That conclusion rests on one month of one venue, and the April and May archives
+for all three instruments are already on disk unexamined. Establishing whether
+the 2.8x spread is stable across months, or is a June artefact, is cheap and
+would either firm up the per-instrument-clustering conclusion or dissolve it. It
+should happen before a spec is written against either answer.
+
+So the open question is sharper than "does the pattern hold when CME arrives".
+It is already not holding within crypto. If clustering is genuinely
+per-instrument, it has to move into the profile - and it is currently four
+GLOBAL module constants (`ACD_PERSISTENCE`, `ACD_FEEDBACK_SHARE`,
+`ACD_WEIBULL_SHAPE`, `ACD_RELAX_MEAN_CAL`) that the realism gate is anchored on
+with a single profile. Moving them per-instrument re-scopes that gate.
 
 ## The provenance problem
 
@@ -64,12 +107,19 @@ The five instruments will not be fitted from equivalent evidence:
 
 - **BTC, ETH, SOL** have Binance trade-level archives: real inter-trade
   durations, sizes, aggressor, sweep structure.
-- **MNQ, MES** have 15-second TradingView bars: OHLCV only. No trade counts, no
-  durations, no aggressor. A CME cadence cannot be fitted the way a crypto one
-  can - it would be derived from volume-and-size arithmetic, and its clustering
-  would come from nowhere at all.
+- **MNQ, MES** have 15-second TradingView bars and nothing else: OHLCV only. No
+  trade counts, no durations, no aggressor. A CME cadence cannot be fitted the
+  way a crypto one can - it would be derived from volume-and-size arithmetic,
+  and its clustering would come from nowhere at all. Note also that before a CME
+  profile can be fitted at all, the venue has to be able to REPRESENT a futures
+  contract, which it currently cannot - see
+  `notes/problem-instrument-model.md`, which precedes this document.
 - **Kraken** remains the only corpus with multi-year span, and it is the one
-  the committed fingerprint and every realism anchor is built from.
+  the committed fingerprint and every realism anchor is built from - but its
+  timestamps are whole seconds, all 81.8 million of them, so it cannot describe
+  arrival structure below one second at all. See the resolution section of
+  `notes/problem-trade-cadence.md`. A profile whose cadence is sub-second
+  cannot inherit its clustering from this corpus, whatever else it inherits.
 
 So a profile field can be fitted, derived, or declared, and those deserve
 different trust. A declared 0.076 s cadence and a fitted one look identical in
