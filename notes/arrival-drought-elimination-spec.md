@@ -19,6 +19,20 @@ D3 already disqualified for dwell. D3a below re-derives the dispersion band
 and duration ACF anchor era-windowed; L2 restarts at D5 stage 1 against the
 corrected targets. Section 8 records the ruling.
 
+Revised 2026-08-02 (second adjudication, after the second L2 attempt): the
+D5 grid exhausted against D4's mean-gap gate - the Jensen drift D2's caveat
+predicted, realized at ~17-20 percent, and no tuple can retune it away
+because every relaxation strong enough to bound dwell removes the tail mass
+that carried the mean. The ruling takes the mean-preserving calibration the
+review offered and the first draft declined, with a correction to its form
+found by simulation (`analysis/relax_mean_calibration.py`): shifting only
+the relaxation attractor saturates (w is ~0.999 in the ~7 s bulk, so no
+finite shift recovers tail mass), so the calibration scales the intercept
+and attractor TOGETHER - the recursion runs at an internal mean
+`c = ACD_RELAX_MEAN_CAL * mean_s`. D2a below specifies it; D5 gains the
+per-tuple calibration step; L2 restarts at D5 stage 1. Section 8 records
+the ruling.
+
 ## 1. The item
 
 The fitted default tape prints 15-18 h near-silent stretches, because the ACD
@@ -243,10 +257,12 @@ Properties, each load-bearing:
   fixed point is exactly `mean_s` for any `w`, but `w` is correlated with the
   state it damps (a long `prev_duration_s` produces a small `w`), so
   `E[psi]` sits below `mean_s` by a Jensen-style term that grows as the gap
-  distribution fattens. The retune absorbs it - which means the landed
-  `ACD_*` values are COMPENSATING constants, no longer the raw fit; the
-  `consts.rs` comment must say so, and the realized mean-gap assert (4.6) is
-  what keeps the compensation honest.
+  distribution fattens. The second L2 attempt measured it at ~17-20 percent
+  - too large for the retune to absorb (the grid exhausted against the
+  mean-gap gate) - so D2a cancels it in the mechanism; the landed `ACD_*`
+  values are still COMPENSATING constants, no longer the raw fit; the
+  `consts.rs` comment must say so, and the realized mean-gap assert (4.6)
+  is what keeps the compensation honest.
 - `w` is computed from the UN-MODULATED `prev_duration_s`, preserving the
   invariant that the recursion never sees the session envelope or an armed
   regime. This is sufficient - desert gaps are hour-scale before modulation
@@ -264,7 +280,40 @@ but couples the dwell horizon to the persistence constant, and the two must
 be tunable independently - dispersion wants phi high, dwell wants the memory
 horizon short).
 
-**D3 - the dwell target is the ERA-WINDOWED anchor.** Two choices folded into
+**D2a - mean-preserving calibration of the intercept (added by the second
+2026-08-02 adjudication).** The relaxation removes exactly the tail mass
+that carried the unconditional mean, so `E[psi]` under D2 sits ~17-20
+percent below `mean_s` and no grid tuple can pass D4's mean-gap gate. The
+fix cancels the Jensen term inside the mechanism: the recursion runs at an
+internal mean `c = ACD_RELAX_MEAN_CAL * scalars.mean_duration_s`, i.e.
+
+    c     = ACD_RELAX_MEAN_CAL * mean_s
+    omega = c * (1 - ACD_PERSISTENCE)
+    w     = exp(-prev_duration_s / ACD_WALL_RELAX_TAU_S)
+    psi   = c + w * (omega + alpha * prev_duration_s + beta * psi - c)
+
+with `ACD_RELAX_MEAN_CAL` a new fitted constant in `consts.rs` (> 1.0; the
+sim landed ~1.26 at tau 7200 up to ~1.38 at tau 900). Properties:
+
+- Form matters, verified by simulation (`analysis/relax_mean_calibration.py`,
+  committed as the adjudication's evidence): shifting the ATTRACTOR alone
+  (omega left at `mean_s * (1 - phi)`) saturates - `w` is ~0.999 in the ~7 s
+  bulk, so the shift contributes almost nothing there, and even an attractor
+  of 1.8x the mean recovered under half the deficit. Scaling intercept and
+  attractor together lifts the whole psi process ~linearly, and the realized
+  mean returns to `mean_s` with dispersion still inside the windowed band
+  and the duration ACF inside tolerance, across seeds 42 / 7 / 1337.
+- Degenerates correctly: as tau grows, w -> 1 and the recursion's fixed
+  point returns to `c`; the calibration is only honest jointly with a tau,
+  which is why D5 calibrates k PER TUPLE, and why `ACD_RELAX_MEAN_CAL = 1.0`
+  is the exact no-op spelling of today's D2 form.
+- Deterministic, no RNG consumed, no new state: `AcdClock`'s `mean_s` field
+  simply stores `c` instead of the raw mean (the raw mean stays on
+  `scalars`); `Clone`/checkpoint semantics unchanged. The un-modulated-
+  feedback invariant is untouched - `w` still reads `prev_duration_s`.
+- The D4 mean-gap gate STAYS as written, tolerance 10 percent, un-widened:
+  it is the guard that caught this defect, and the calibration is what
+  satisfies it rather than what excuses it. Two choices folded into
 one decision:
 
 - Era window: dwell statistics are computed only over trades at or after
@@ -373,6 +422,13 @@ with a stated order and a first-hit-wins rule:
   weakest relaxation - the dynamics closest to today's fit - that passes);
   `ACD_PERSISTENCE` in [0.9935, 0.9945, 0.9950];
   `ACD_FEEDBACK_SHARE` in [0.08, 0.10, 0.12].
+  Per tuple, `ACD_RELAX_MEAN_CAL` is not a grid axis but a DERIVED value
+  (D2a): a bisection on k in [1.0, 1.8], 10 iterations, target
+  `measured.mean_gap_s = scalars.mean_duration_s` at seed 42 over the
+  standard 2M `measure()` draw, k committed rounded to 4 decimals. The
+  procedure is pinned so two implementers land the same constant; the D4
+  mean-gap band (10 percent) is far wider than the bisection's resolution,
+  so the rounding cannot flip a verdict.
   The winner is the FIRST tuple where the full `realism()` gate (all existing
   bands plus D4's dwell and mean-gap asserts) passes at seed 42 AND the
   dwell/mean-gap asserts pass at the production BTCUSDT seed (4.6). During
@@ -482,12 +538,16 @@ anchor+range fields, same shape as `duration_dispersion_index`). Lands in L2
 ### 4.5 `crates/mogwai-data/src/generated/consts.rs` and `dynamics.rs` and `source.rs`
 
 - `consts.rs`: new `ACD_WALL_RELAX_TAU_S: f64` with a doc comment giving
-  D2's story; the ACD block comment rewritten per D5 (including the
-  compensating-constants admission); the ACD constants updated to the
-  grid-selected values.
-- `dynamics.rs`: `AcdClock` gains `mean_s: f64`.
-- `source.rs`: `try_with_clamp_override` seeds `mean_s: mean_duration_s`;
-  `next_duration_ns` replaces the recursion line with D2's two lines. The
+  D2's story, and new `ACD_RELAX_MEAN_CAL: f64` with D2a's story (the
+  Jensen cancellation, the attractor-only saturation finding, and the
+  bisection that derived it); the ACD block comment rewritten per D5
+  (including the compensating-constants admission); the ACD constants
+  updated to the grid-selected values.
+- `dynamics.rs`: `AcdClock` gains `mean_s: f64` - holding the CALIBRATED
+  internal mean `c` per D2a, named accordingly in its doc comment.
+- `source.rs`: `try_with_clamp_override` seeds the clock's internal mean
+  as `ACD_RELAX_MEAN_CAL * mean_duration_s` and derives `omega` from it;
+  `next_duration_ns` replaces the recursion line with D2a's lines. The
   "order is load-bearing" comment block is extended one sentence: the
   relaxation weight reads `prev_duration_s` (last tick's un-modulated draw),
   never the realized gap.
@@ -711,6 +771,32 @@ Rejected:
   symptom of a wrong target as a tuning problem, and the levers fight per
   D5's own rationale), and abandoning the ACD family (no evidence yet that
   the family fails against an honest target).
+- The second 2026-08-02 adjudication, of the second L2 attempt. The
+  implementer ran the corrected-target grid faithfully and exhausted it
+  against D4's mean-gap gate (weakest stage-1 tuple 5.95 s, stage-2 first
+  shape-0.55 tuple 5.73 s, against 7.19 s at 10 percent) - correct
+  procedure, and the gate was CORRECT to refuse: the drift is the Jensen
+  term D2's caveat predicted, an artifact of the relaxation, not a fact
+  about the market. The ruling adopts the review's mean-preserving
+  calibration (previously declined in favor of the gate alone), as D2a,
+  keeping the gate as the guard - with the form corrected by simulation:
+  the calibration must scale intercept and attractor together, because an
+  attractor-only shift saturates in the bulk where w is ~0.999.
+  `analysis/relax_mean_calibration.py` is the committed evidence: it
+  reproduces the failure (raw-ACD mean 5.81 s at tau 7200 vs the
+  implementer's 5.95 s under the full generator) and shows the calibrated
+  form landing mean/dispersion/ACF jointly inside every windowed target at
+  seeds 42, 7 and 1337 for every tau in the grid. Disposition: L2 restarts
+  at D5 stage 1 (shape back to frozen 0.60 - the stage-2 escalation was
+  answering the wrong question) with the per-tuple k bisection. Considered
+  and not taken: re-deriving the 7.19 s cadence target era-windowed (the
+  full-span-shaped number is a real smell, but the mean-gap gate is a
+  SELF-consistency check against the tape's own declared cadence, not an
+  anchor target - the failure was manufactured by the mechanism, proven by
+  the sim reproducing it from the recursion alone, and moving the cadence
+  would re-price every tick-count budget to fix a defect that is not
+  theirs); and widening D4's tolerance (loosening a guard because it is
+  refusing us is how a gate stops meaning anything - the gate did its job).
 
 - r1's nit that `AGENTS.md` still calls `docs/` "the transient TODO" while
   its own folder table defines `docs/` as durable usage docs. Real, but a
