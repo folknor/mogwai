@@ -12,6 +12,36 @@ Or both. There are no exceptions.
 
 ## Open issues
 
+- PROBLEM STATEMENTS, resolved in order, each producing one or more
+  implementation specs. These are ordinary todo items that outgrew a bullet, so
+  they live in their own files; they carry the evidence, the decisions to be
+  made, and what is explicitly out of scope, but no implementation plan. A spec
+  is written against `reference/technical-implementation-spec.md` only once the
+  problem statement it descends from has been resolved.
+
+  1. `notes/problem-trade-cadence.md` - the default tape runs 350x slower than
+     a real active pair, and "trades per second" has three values differing by
+     8.5x depending on whether a trade is a raw fill, an aggregated print or a
+     match event. Settles what a trade IS before anything is sized off it.
+     Also carries the market-data provenance: where the archives live, how to
+     fetch more, and which committed probe reproduces each number in all four
+     documents.
+  2. `notes/problem-instrument-profiles.md` - one fitted instrument, five
+     traded ones, no way for a scenario to name which. Named pre-registered
+     profiles with per-knob override, and the provenance problem that a
+     crypto profile can be fitted from trade-level data while a CME one cannot.
+     Depends on 1.
+  3. `notes/problem-order-book.md` - the founding no-book assumption, and the
+     refusals it now produces. Spectrum from synthetic top-of-book to a real
+     matching engine. The one document that revisits a founding decision, and
+     its answer changes what 1 and 2 are worth building.
+  4. `notes/problem-refused-order-types.md` - the venue refuses every
+     conditional type, so a strategy with a protective stop cannot be
+     forward-tested at all, on the only keyless venue available for it.
+     Conflicts with a standing broadarrow decision that the protocol owes no
+     order-type growth, which is why it is a problem statement and not a spec.
+     Constrained by 3.
+
 - Move the adapter off the `../nautilus_trader` path dependency onto a pinned
   crates.io release. `crates/mogwai-adapter/Cargo.toml` path-depends five
   nautilus crates from the sibling checkout, which is deliberate: the published
