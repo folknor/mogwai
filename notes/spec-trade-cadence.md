@@ -568,17 +568,56 @@ So L0 answers it before L1 is written, at a cost of minutes:
    the measured `q` and `m`, for a few million events, and prints the same four
    per-second statistics.
 
-Verdict, read here and not at L1:
+### 4.4b-RESULT: the check has been RUN, it FAILED, and the owner has ruled
 
-- All four inside the section 6.4 bands: proceed as written.
-- Mean inside but the median, p95 or zero fraction outside: the ARRIVAL CLOCK
-  cannot produce the density distribution at this cadence. That is a finding
-  about the ACD block at sub-second cadence, it is the same escalation section
-  5.4 defines for `RELAX_MEAN_CAL`, and it comes back to the user. It does NOT
-  get absorbed by widening the 6.4 bands until they pass.
+This is no longer a pre-check to perform. It was performed, and the numbers are
+recorded here so nobody re-derives them:
 
-This check exists because the alternative is discovering it after the golden
-re-bless, when the whole landing is already unpickable.
+| | measured BTCUSDT | ACD clock as committed |
+|---|---|---|
+| mean fills/sec | 49.64 | 41.87 |
+| median | 4 | 12 |
+| p95 | 257 | 177 |
+| empty seconds | 13.35% | 30.73% |
+
+The parent/child layer PASSED - 8.49 children per event, 55.87% single-child, so
+section 2.3's mixture is sound and section 5.2 stands. What failed is the ACD
+ARRIVAL CLOCK, and the shape of the miss is the useful part: the simulated tape
+carries THREE TIMES the median and MORE THAN TWICE the empty seconds. It is not
+uniformly too slow. It alternates between dead seconds and steady moderate
+activity where the real tape alternates between dead seconds and violent bursts.
+That is a process-shape failure, which is exactly why one mean-calibration
+constant cannot reach it.
+
+THE OWNER HAS RULED THAT THIS DOES NOT STOP THE WORK. The end state gets
+implemented; residuals are fixed afterwards. The gate advises, it does not
+decide, and it must NOT be treated as a CLOSE verdict or as a reason to halt
+before L1.
+
+The permitted response, in order:
+
+1. **REFIT the ACD clock against Binance.** Section 5.4's refusal to re-run the
+   persistence and feedback grid is LIFTED. `ACD_PERSISTENCE`,
+   `ACD_FEEDBACK_SHARE`, `ACD_WEIBULL_SHAPE` and `ACD_RELAX_MEAN_CAL` are all
+   refittable against the raw-trades corpus. This is the first move because the
+   committed values were fitted to a corpus of whole-second Kraken stamps that
+   cannot describe sub-second arrival structure at all, so they were never
+   evidence for behaviour at this cadence; refitting them against data that CAN
+   describe it is what should have happened regardless.
+2. **REPLACE the arrival process** if a refitted ACD still cannot reach the
+   shape. A refit that leaves the median and empty-second fraction outside their
+   bands is evidence that the family is inadequate rather than the constants,
+   and a self-exciting process is the standard answer for arrivals that cluster
+   this hard. Take this step only on that evidence, and state in the landing
+   which constants were tried and what they produced.
+
+Re-run `analysis/check_cadence_feasible.py` after a refit; it is the cheap
+oracle for whether the family can reach the shape, and it stays useful precisely
+because it costs minutes. Its verdict is now INFORMATIVE, not blocking.
+
+The 6.4 bands still do NOT get widened until they pass. Refitting or replacing
+the process to meet the measured distribution is the work; moving the target to
+meet the process is not.
 
 ### 4.5 L0 gates
 
@@ -1220,10 +1259,12 @@ cases in `analysis/test_characterize.py`.
     python3 -m unittest discover -s analysis -t .
     brokkr check
 
-Read BOTH verdicts here: the section 4.4 parent/child threshold and the section
-4.4b density feasibility check. A CLOSE verdict stops the spec at this landing
-and the artifacts stay - they are the evidence the item closed. A failed
-feasibility check escalates to the user before any of L1 is written.
+BOTH verdicts have already been read and L0's artifacts already exist; see
+section 4.4b-RESULT. The parent/child threshold PASSED. The density feasibility
+check FAILED, and the owner has ruled that it does not stop the work: L1
+proceeds, with the ACD refit permitted as its first move and replacement of the
+arrival process permitted if a refit proves the family inadequate. Do not halt
+at this landing and do not treat the failed check as a CLOSE verdict.
 
 **L1 - the rewrite** (sections 2, 3, 5, 6, 7, and the golden re-bless of 8.1).
 One landing. In dependency order inside it: the streaming `measure` rewrite
