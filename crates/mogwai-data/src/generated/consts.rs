@@ -8,19 +8,50 @@
 //! tree (config validation, the core walk, the stochastic building blocks),
 //! never part of the crate's public API.
 
-// ACD persistence (phi = alpha + beta) and the Weibull innovation shape jointly
-// set duration_dispersion_index into the fingerprint band [131.7 .. 4608.9].
-// Both push the dispersion up: phi toward 1 lengthens the clustered runs and a
-// shape below 1 fattens the per-event innovation tail. The pair is deliberately
-// NOT pushed to the anchor extreme (4608.9): var(d)/mean(d) is dominated by the
-// single largest gap when the innovation is that heavy-tailed, so chasing the
-// anchor makes the statistic explode well past the band on unlucky seeds. This
-// pair lands the seeded (seed 42) realism draw near the band's lower interior
-// (~190) with margin to the 131.7 floor, which is the cross-pair-band gate the
-// spec commits to - not anchor point-tracking.
+// The ACD block is tuned JOINTLY, and these are compensating values rather
+// than a raw per-constant fit - do not move one without re-running the whole
+// procedure below.
+//
+// - PERSISTENCE and FEEDBACK_SHARE land the era-windowed duration dispersion
+//   band and the duration ACF anchors (both gap statistics, so both measured
+//   over the modern-era window of the anchor series, not its full span).
+// - WEIBULL_SHAPE stays 0.60: lowering it fattens the innovation tail and
+//   directly re-inflates the realized gap quantiles the relaxation suppresses
+//   (the levers fight), and it drags the shape-specific unit-mean normalizer
+//   WEIBULL_MEAN_SHAPE_060 in numeric.rs along with it.
+// - WALL_RELAX_TAU_S is the wall-time relaxation horizon. Duration memory used
+//   to decay per TICK, so an hour-scale excursion persisted ~1/(1 - phi) ticks
+//   regardless of how much wall time each tick consumed, and the tape deserted
+//   for days. Each gap now collapses psi toward its attractor by
+//   exp(-gap / tau), so an excursion's WALL dwell is bounded by a few tau while
+//   the sub-minute clustering the ACF band measures is perturbed by well under
+//   a percent (w is ~0.999 at the ~7 s bulk cadence). tau bounds the
+//   PERSISTENCE of an excursion, not any single draw: psi * eps keeps an
+//   unbounded Weibull tail, which is why the gate asserts quantiles and
+//   empty-hour runs rather than a sample maximum.
+// - RELAX_MEAN_CAL cancels the Jensen term the relaxation introduces. w is
+//   negatively correlated with the state it damps, so E[psi] lands ~17-20
+//   percent below the declared cadence and the realized mean-gap gate refuses
+//   the tape. Shifting the attractor alone saturates (w is ~0.999 in the bulk,
+//   where the shift barely acts), so the calibration scales the intercept and
+//   the attractor TOGETHER: the recursion runs at an internal mean
+//   RELAX_MEAN_CAL * scalars.mean_duration_s. It is therefore only meaningful
+//   jointly with tau - 1.0 is the exact no-op spelling.
+//
+// Selection procedure, stated so a second implementer lands the same numbers:
+// a first-hit-wins grid, iterated tau in [7200, 3600, 1800, 900] (descending -
+// prefer the weakest relaxation that passes) outermost, then PERSISTENCE in
+// [0.9935, 0.9945, 0.9950], then FEEDBACK_SHARE in [0.08, 0.10, 0.12]. Per
+// tuple RELAX_MEAN_CAL is not an axis but a derived value: a 10-step bisection
+// on [1.0, 1.8] driving the seed-42 realized mean gap of the 2M-tick realism
+// draw onto scalars.mean_duration_s, committed as the final bracket midpoint
+// rounded to four decimals. The tuple below is the grid's first hit; it also
+// clears the dwell and mean-gap asserts at the production BTCUSDT seed.
 pub(super) const ACD_PERSISTENCE: f64 = 0.9935;
 pub(super) const ACD_FEEDBACK_SHARE: f64 = 0.08;
 pub(super) const ACD_WEIBULL_SHAPE: f64 = 0.60;
+pub(super) const ACD_WALL_RELAX_TAU_S: f64 = 7200.0;
+pub(super) const ACD_RELAX_MEAN_CAL: f64 = 1.2293;
 // GARCH persistence gives clustered latent volatility without letting the
 // continuous mid-price drown out tick-grid flat runs.
 pub(super) const GARCH_ARCH: f64 = 0.06;

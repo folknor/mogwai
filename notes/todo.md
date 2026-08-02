@@ -12,64 +12,6 @@ Or both. There are no exceptions.
 
 ## Open issues
 
-- BUILD: eliminate arrival droughts from the default tape; keep the drought as
-  an armable havoc scenario. DECIDED 2026-08-01, closing the oldest open
-  question here (formerly a DECIDE entry that had absorbed sweep item D16).
-  What settled it: charting the default tape at 1m and 15m over 4 days shows a
-  desert no symbol we care about ever prints - but symbols that DO trade like
-  this exist and are easy to find (a front-month future dying after rollover,
-  an abandoned crypto pair, a near-dead exchange), so the shape is worth
-  keeping. The deserts are realism attached to the wrong symbol: the default
-  profile claims BTCUSDT, which never behaves this way, so droughts leave the
-  ambient tape and become an opt-in divergence - "validate against a dying
-  symbol" turns into a deliberate scenario instead of an ambush. Mechanism and
-  measurements are written up in `reference/architecture.md` ("Tape arrival
-  droughts"); the short version is that psi decays per TICK so a high-psi
-  state self-prolongs in WALL time, and neither committed duration band
-  constrains wall-clock dwell (the `Measured` struct has no dwell statistic at
-  all), so the per-tick fit is structurally blind to an 18 h desert.
-
-  Generator work, in order:
-  1. Measure the Kraken corpus's own wall-clock dwell in `analysis/` (trades
-     per hour, zero-window fraction, max inter-trade gap on the anchor
-     series) - an increment to `characterize.py`, and it sets the target the
-     retune aims at. The dwell measurement is ERA-WINDOWED behind a declared
-     boundary constant: the full-span anchor series does NOT satisfy realistic
-     dwell (its infancy/outage years desert - decoded from the committed
-     histograms, no corpus disk needed), so the joint target is claimed only
-     of the modern-era window, L1 verifies that claim, and what is open is
-     only whether the three-constant ACD family reaches it.
-  2. Make the duration mechanism wall-clock-aware (leading candidate: psi
-     decay in wall time rather than per tick), retune ACD_PERSISTENCE /
-     ACD_FEEDBACK_SHARE / ACD_WEIBULL_SHAPE against the SAME committed bands
-     plus the new dwell band, regenerate the golden stream, and re-anchor the
-     coupled realism tests. Serving-side caps stay REJECTED: `realism()`
-     measures realized gaps, so any cap outside the fitted mechanism lowers
-     the very statistics it validates - the fix goes through the mechanism
-     and the refit, not around it.
-  3. Add the dwell statistic to `measure()` as an ASSERTING gate - the
-     regression pin for this decision (the default tape may never desert
-     again). Not before the fix lands: on today's constants it is a red gate.
-
-  Havoc side: `MarketRegime::LiquidityDrought { thin_factor }` (validated
-  [1, 1000], carried per subscription on `Subscribe` and per request on
-  `GET /trades`, whole-tape, never on `/control/divergence` - so no
-  divergence-window ceiling applies) is the home for the dying-symbol
-  scenario. `arrival_thin` multiplies only the REALIZED gap while the ACD
-  feedback sees the un-modulated duration, so a thinned tape keeps the fitted
-  clustering stretched intact - which IS the dying-symbol shape. thin_factor
-  1000 on a ~7 s cadence is a ~2 h mean gap with much longer clustered
-  excursions; pin that shape with a test once the default tape is dense.
-
-  Spec: `notes/arrival-drought-elimination-spec.md`.
-
-  Unblocked by this decision: the AD12 dead-feed watchdog below (on a dense
-  default tape honest silence has a hard upper bound, and an armed drought is
-  visible via the control plane), the penetration fill gate below (its
-  sequencing blocker was the desert's silent no-fill starvation), and the
-  declined clock-timer close of a live in-progress bar window, which can be
-  relitigated on the same grounds.
-
 - Move the adapter off the `../nautilus_trader` path dependency onto a pinned
   crates.io release. `crates/mogwai-adapter/Cargo.toml` path-depends five
   nautilus crates from the sibling checkout, which is deliberate: the published
@@ -110,10 +52,11 @@ Or both. There are no exceptions.
   WS idle timeout does not cover it: `idle_timeout_ms` defaults to 0, and even
   armed the idle clock resets on ANY application frame, so a
   data-silent-but-frame-active socket never trips it, deliberately, because that
-  is what reproduces the 4255 case. The drought DECISION above unblocks this;
-  the drought ELIMINATION still gates it in practice: the threshold separating
-  "the venue is asleep" from "the subscription is dead" comes from the dense
-  default tape's dwell bound, and an armed LiquidityDrought legitimately
+  is what reproduces the 4255 case. The landed default-tape dwell bound is what
+  supplies the threshold separating "the venue is asleep" from "the subscription
+  is dead": honest silence on the dense default tape now has a gated upper
+  bound (the realism gate's era-windowed p999 gap, empty-hour fraction and
+  longest empty-hour run), and an armed LiquidityDrought legitimately
   silences the feed but is visible via the control plane, so the watchdog can
   account for it.
 
@@ -161,8 +104,8 @@ Or both. There are no exceptions.
   not taken here: the venue says clearly what happened, what the consumer does
   with that is the consumer's call.
 
-- BUILD, SEQUENCED after the drought elimination above lands: penetration-gated
-  fills. RFC 4631's phase A, and the highest-value fill-fidelity item available
+- BUILD, unblocked now that the default tape carries a gated dwell bound:
+  penetration-gated fills. RFC 4631's phase A, and the highest-value fill-fidelity item available
   to us -
   at-touch filling is the specific lie that flatters maker strategies. Today
   `mogwai-engine/src/orders.rs` fills synthetically at the ORDER'S OWN price on
@@ -179,9 +122,10 @@ Or both. There are no exceptions.
   but it is NOT the same predicate nautilus would implement upstream. If both
   ship, the two disagree about fills for a reason that is invisible at the call
   site, so the divergence belongs in `reference/architecture.md` and in the RFC
-  thread, not only here. Sequencing: this must NOT land before the default tape
-  is desert-free, because a penetration gate makes resting fills strictly rarer
-  and a desert starves them silently. Phase C (outbound per-command latency) has
+  thread, not only here. Sequencing, now satisfied: this could not land while
+  the default tape deserted, because a penetration gate makes resting fills
+  strictly rarer and a desert starves them silently - the realism gate's dwell
+  asserts are what removed that hazard. Phase C (outbound per-command latency) has
   LANDED as `Divergence::CommandLatency`, and the two compose: a submit held by
   an armed act delay meets a tape that has moved further, so a penetration gate
   and an act latency stack into "the order was late AND had to be traded
@@ -217,6 +161,21 @@ Or both. There are no exceptions.
   read as coverage. They become worth building once penetration gating (and a
   queue-ahead model, if it survives its decision) makes the fill outcome depend
   on the tape.
+
+- DECIDE: does `analysis/` deserve a test harness? Surfaced 2026-08-02 landing
+  the drought elimination. The dwell statistics are computed TWICE against the
+  same definition - `dwell_stats` in `analysis/characterize.py` measures the
+  corpus, `empty_hour_stats` in `mogwai-data`'s generator tests measures the
+  synthetic tape, and the gate compares one against the other. If the two hour-
+  bucket conventions ever drift (inclusive end boundary, the era-start ceiling,
+  which trade closes a gap) the gate silently compares two different quantities
+  and still passes. The Rust side has a fixture pinning the convention; the
+  Python side has none, because the repo has no Python test runner at all - the
+  Rust fixture names `dwell_stats` as the counterpart it must match, which is
+  the cheapest honest mitigation and not a real pin. Adding a runner for four
+  analysis scripts is a project-shape decision, not a local fix: it buys this
+  guard and the offline lineage's other unpinned assumptions, at the cost of a
+  second test toolchain in a workspace whose gate is `brokkr check`.
 
 ## Notes / gotchas
 

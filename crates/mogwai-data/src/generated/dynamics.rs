@@ -18,6 +18,9 @@ use super::consts::{
 
 #[derive(Clone)]
 pub(super) struct AcdClock {
+    /// Calibrated internal ACD mean. The relaxation recursion uses this for
+    /// both its intercept and attractor; it is not the raw scalar cadence.
+    pub(super) mean_s: f64,
     pub(super) omega: f64,
     pub(super) alpha: f64,
     pub(super) beta: f64,

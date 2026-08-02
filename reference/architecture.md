@@ -206,7 +206,11 @@ sources into one time-ordered stream.
 
   Four composed layers reproduce the stylized facts the real tape exhibits:
   - an **ACD-style arrival clock** - bursty, far-from-Poisson inter-arrival
-    durations with clustering;
+    durations with clustering. Its duration memory relaxes toward the mean in
+    WALL time (weight `exp(-prev_duration_s / tau)`), not per tick, so a long
+    gap collapses the memory instead of self-prolonging into a desert; because
+    that relaxation would otherwise pull the realized mean below the declared
+    cadence, the recursion runs at a calibrated internal mean;
   - a **GARCH(1,1) stochastic-volatility latent mid** - fat tails plus volatility
     clustering;
   - a **tick-grid bid-ask-bounce overlay** - the negative lag-1 return
@@ -252,49 +256,27 @@ sources into one time-ordered stream.
 
 ### Tape arrival droughts
 
-A consequence of the ACD layer that any consumer of the tape has to plan for.
-The fitted duration process is persistent (0.9935) and heavy-tailed (Weibull
-shape 0.60), so the realized arrival rate does not hover around its ~7 s mean
-cadence - it wanders, and the slow excursions are LONG. Measured on the served
-tape via `scripts/probe_warmup_window.py` (default BTCUSDT profile, epoch
-2023-11-20T00:00:00Z, trades counted per simulated hour off `/trades`):
+The default tape has a corpus-anchored dwell bound. Its ACD recursion relaxes
+duration memory in wall time, then the realism gate checks the modern-era
+XBTUSD anchor's p999 gap, empty-hour fraction and longest empty-hour run, plus
+the declared mean cadence. This keeps the liquid default profile from silently
+turning into a dying symbol while preserving ordinary tick-domain clustering.
 
-- with the default 24 h `backfill_horizon_ns`, the tape opens dense (~660
-  trades/hour for the first eight hours) and then collapses to 3-16
-  trades/hour for the remaining eighteen, with the final hour empty outright;
-- over a 7-day horizon the rate recovers and collapses repeatedly - dense
-  stretches above 500/hour interleaved with droughts of 15+ simulated hours
-  running at under 20/hour.
-
-Two operational consequences:
-
-1. **A short historical window can legitimately return zero trades**, and
-   therefore zero bars. Inside a drought a 5-minute window is empty more often
-   than not, and `/trades` answers `200 []` for it - correct, and NOT
-   distinguishable from a defect without knowing the local rate. A nautilus
-   warmup asking for a handful of 1-minute bars against a fresh venue is
-   exactly this case, and it surfaces downstream as an empty bar response and
-   then a fatal warmup timeout. The adapter's `request_bars` warns and names
-   this cause when an on-tape window yields no bars.
-2. **Where sim-now sits on the tape is fixed by the boot config, not by luck.**
-   `data_origin = sim_now_at_boot - backfill_horizon_ns` and the generator is
-   seeded deterministically, so a pinned `sim_epoch_ns` puts every boot on the
-   same stretch of tape: if that stretch is a drought, every run of that config
-   starts in it and stays there until the clock walks out. This is why "the
-   venue had just restarted" correlates with empty warmups while a venue that
-   has been up a while succeeds - uptime is a proxy for distance travelled out
-   of the opening drought, not a cause.
-
-Widening the window, using a coarser bar interval, moving `sim_epoch_ns`, or
-letting the venue run further past its epoch all avoid it. Bounding the lulls in
-the generator would change the on-grid walk and break the committed
-fingerprint's byte-identical golden stream, so it is a fingerprint-refit
-decision rather than a local fix.
+Hour-scale silence is instead an explicit `LiquidityDrought` regime. Under an
+armed drought, a short historical window can legitimately return no trades or
+bars, and a deterministic boot epoch can repeatedly begin in the same sparse
+stretch. The adapter's sparse-window warning remains the correct diagnosis in
+that scenario; the control-plane regime makes its cause observable.
 
 The realism gate is a self-contained Rust test that draws a long stream and
 asserts each measured stylized fact lands inside the fingerprint's cross-pair
-tolerance band - never against live CSV data. An ignored 5M-tick test asserts the
-session curves are reproduced.
+tolerance band - never against live CSV data. The dwell statistics are the
+exception in shape, not in source: they are one-sided upper bounds against the
+era-windowed ANCHOR (the default tape claims to be that symbol), with the p999
+bound scaled by the cadence ratio, and they are asserted twice - once on the
+gate's own seed and once on the FNV-derived seed the served BTCUSDT tape
+actually runs. An ignored 5M-tick test asserts the session curves are
+reproduced.
 
 ## mogwai-server - the axum binary
 
@@ -450,7 +432,7 @@ Owns the sockets, the clock, and replay pacing.
   success frame would be a wire frame no rule consumes, and it would cost a
   priority-lane frame per subscribe on the healthy path - the lane the coalescing
   exists to protect. What would reopen the question: a client needing positive
-  confirmation that a generation became current DURING a tape arrival drought,
+  confirmation that a generation became current during an armed liquidity drought,
   where the first tick (today's implicit success signal) can be hours of sim time
   away. `Unsubscribe` cancellation (an `AtomicBool` paired with a `Notify` so a
   fanout task parked in `recv` or `reserve` wakes promptly rather than at the
@@ -601,8 +583,8 @@ release.
 
   `request_bars` additionally warns whenever it produces FEWER bars than were
   requested, not merely zero. Bars exist only for intervals containing a trade,
-  so inside one of the tape's arrival droughts a request for N bars typically
-  returns a handful - non-empty, so nothing downstream objects, and the strategy
+  so under an armed liquidity drought a request for N bars can return a
+  handful - non-empty, so nothing downstream objects, and the strategy
   silently warms off a fraction of its configured history. That short case is
   the more dangerous one precisely because it does not stop anything.
 - **convert.** A pure module mapping mogwai `Decimal` ticks to nautilus
@@ -735,7 +717,14 @@ it. It streams the Kraken dump (O(1) memory) and fits the model:
 - `recon.py` enumerates the dump (file sizes, schema, date spans).
 - `characterize.py` measures one pair's stylized facts in a streaming pass
   (duration dispersion and ACF, return and absolute-return ACF, zero-change
-  fraction, tick grid, size distribution, the 24x7 UTC session grid).
+  fraction, tick grid, size distribution, the 24x7 UTC session grid, and the
+  wall-clock dwell block - mean and p999 gap, empty-hour fraction and longest
+  empty-hour run). The gap statistics - dwell, duration dispersion, duration
+  ACF - are measured only from `DWELL_ERA_START_TS` (2019-01-01 UTC) onward: the
+  anchor's infancy and outage years desert for days at a time, and the default
+  profile claims a present-day liquid major. That boundary is a declared
+  judgement, not something the corpus chose; everything inside it is measured.
+  Per-tick shape statistics stay full-span.
 - `run_corpus.py` fans that across a representative pair set in parallel.
 - `build_fingerprint.py` synthesizes `fingerprint.json` - the golden stylized-fact
   targets with cross-pair tolerance bands, the pooled UTC session profile, and the
@@ -743,5 +732,5 @@ it. It streams the Kraken dump (O(1) memory) and fits the model:
 
 `fingerprint.json` is the Python-to-Rust contract: the analysis produces it, and
 `GeneratedSource` embeds and reproduces it. The Kraken dump (`MOGWAI_DATA_DIR`,
-default `/media/folk/Banan/Kraken_Trading_History`) is an offline analysis input
+default `/home/folk/Kraken`) is an offline analysis input
 only, never a runtime or build input.

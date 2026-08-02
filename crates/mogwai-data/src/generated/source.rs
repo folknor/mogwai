@@ -6,7 +6,8 @@
 //! the optional regime overlay into the [`crate::TickSource`] the running
 //! server drives. Same seed plus tape anchor yields the same stream byte for
 //! byte - see `clean_regime_is_byte_identical` in the test module for the
-//! pinned golden sequence this file must never perturb.
+//! pinned golden sequence that must be re-blessed with any intentional walk
+//! mechanism change.
 
 use mogwai_protocol::{AggressorSide, MarketRegime, TradeTick, decimal_to_f64};
 use rand::{RngExt, SeedableRng};
@@ -17,9 +18,9 @@ use rust_decimal::Decimal;
 use crate::{TickEvent, TickSource};
 
 use super::consts::{
-    ACD_FEEDBACK_SHARE, ACD_PERSISTENCE, ACD_WEIBULL_SHAPE, GARCH_SIGMA_CAP, HALF_SPREAD_TICKS,
-    MAX_ABS_RETURN, MAX_SESSION_GAP_NS, MID_CEILING, NS_PER_HOUR, SESSION_CLOSED_ARR_MULT,
-    SIZE_DECIMALS, SIZE_LOG_SIGMA, STUDENT_T_DF,
+    ACD_FEEDBACK_SHARE, ACD_PERSISTENCE, ACD_RELAX_MEAN_CAL, ACD_WALL_RELAX_TAU_S,
+    ACD_WEIBULL_SHAPE, GARCH_SIGMA_CAP, HALF_SPREAD_TICKS, MAX_ABS_RETURN, MAX_SESSION_GAP_NS,
+    MID_CEILING, NS_PER_HOUR, SESSION_CLOSED_ARR_MULT, SIZE_DECIMALS, SIZE_LOG_SIGMA, STUDENT_T_DF,
 };
 use super::dynamics::{AcdClock, BounceState, GarchVol};
 use super::fingerprint::{Fingerprint, GeneratedSourceError, GeneratorScalars, SessionProfile};
@@ -150,9 +151,10 @@ impl GeneratedSource {
         scalars.validate(fp).map_err(GeneratedSourceError::Scalar)?;
         session.validate().map_err(GeneratedSourceError::Session)?;
         let mean_duration_s = scalars.mean_duration_s;
+        let calibrated_mean_s = ACD_RELAX_MEAN_CAL * mean_duration_s;
         let alpha = ACD_PERSISTENCE * ACD_FEEDBACK_SHARE;
         let beta = ACD_PERSISTENCE - alpha;
-        let omega = mean_duration_s * (1.0 - ACD_PERSISTENCE);
+        let omega = calibrated_mean_s * (1.0 - ACD_PERSISTENCE);
         let vol = GarchVol::new(decimal_to_f64(scalars.start_price), scalars.vol_scalar);
         let size_median = decimal_to_f64(scalars.typical_size).max(f64::MIN_POSITIVE);
         let size_dist = LogNormal::new(size_median.ln(), SIZE_LOG_SIGMA).expect("valid lognormal");
@@ -166,11 +168,12 @@ impl GeneratedSource {
             rng: ChaCha12Rng::seed_from_u64(seed),
             clock_ns: start_ts,
             acd: AcdClock {
+                mean_s: calibrated_mean_s,
                 omega,
                 alpha,
                 beta,
-                psi: mean_duration_s,
-                prev_duration_s: mean_duration_s,
+                psi: calibrated_mean_s,
+                prev_duration_s: calibrated_mean_s,
                 eps_mean: WEIBULL_MEAN_SHAPE_060,
             },
             vol,
@@ -232,13 +235,16 @@ impl GeneratedSource {
     fn next_duration_ns(&mut self) -> u64 {
         let raw_eps = self.duration_dist.sample(&mut self.rng);
         let eps = (raw_eps / self.acd.eps_mean).max(f64::MIN_POSITIVE);
-        self.acd.psi = self.acd.omega
+        let unrelaxed = self.acd.omega
             + self.acd.alpha * self.acd.prev_duration_s
             + self.acd.beta * self.acd.psi;
+        let relax_weight = (-self.acd.prev_duration_s / ACD_WALL_RELAX_TAU_S).exp();
+        self.acd.psi = self.acd.mean_s + relax_weight * (unrelaxed - self.acd.mean_s);
         let duration_s = (self.acd.psi * eps).max(0.000_000_001);
         // ACD feedback sees the un-modulated duration so clustering dynamics are
         // unchanged; the session envelope only stretches or compresses the
-        // realized gap.
+        // realized gap. The relaxation weight above likewise reads this last
+        // un-modulated draw, never a realized or regime-thinned gap.
         self.acd.prev_duration_s = duration_s;
         let arr_mult = self.session.arrival_mult(self.clock_ns);
         if arr_mult >= SESSION_CLOSED_ARR_MULT {

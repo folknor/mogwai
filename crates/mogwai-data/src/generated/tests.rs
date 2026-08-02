@@ -11,6 +11,7 @@ use super::numeric::WEIBULL_MEAN_SHAPE_060;
 use super::session::{utc_hour, utc_hour_dow};
 use super::*;
 use rust_decimal::Decimal;
+use std::collections::HashSet;
 
 const DRAW: usize = 2_000_000;
 const SESSION_DRAW: usize = 5_000_000;
@@ -24,6 +25,27 @@ const SESSION_DRAW: usize = 5_000_000;
 // envelope is designed to prevent) - which collapses these lags toward zero,
 // an order of magnitude past 0.14 from the anchor - is still caught.
 const DURATION_ACF_ABS_TOL: f64 = 0.14;
+// Dwell slack. All three bounds are one-sided: the failure mode this gate
+// exists to catch is silence, and the lower side is already policed by the
+// duration ACF band and (weakly) the dispersion floor. The slack covers seed
+// wobble on a 2M-tick draw plus the residual population mismatch - the draw
+// runs a few months of simulated time under the session envelope, while the
+// era-windowed anchor spans years. The p999 bound is additionally scaled by
+// the cadence ratio (the tape's declared mean gap over the windowed anchor
+// mean) because the default profile is seeded from the cross-pair median
+// cadence and so runs ~2.5x slower than the anchor by construction - the
+// handicap is made explicit rather than absorbed into the slack. The two
+// empty-hour statistics take additive slack instead: they are fractions and
+// counts of whole hours whose anchor values are near zero, so a multiplicative
+// bound would be meaningless.
+// MEAN_GAP_REL_TOL is the only two-sided band here. It guards the tape's
+// declared cadence, which every tick-count budget outside this crate prices
+// (history seek caps, checkpoint spacing, the server's backfill horizon), and
+// it is what keeps ACD_RELAX_MEAN_CAL honest.
+const DWELL_P999_SLACK: f64 = 2.0;
+const EMPTY_HOUR_FRAC_SLACK: f64 = 0.01;
+const EMPTY_HOUR_RUN_SLACK_H: f64 = 2.0;
+const MEAN_GAP_REL_TOL: f64 = 0.10;
 const INTENSITY_SHARE_ABS_TOL: f64 = 0.006;
 const DOW_SHARE_ABS_TOL: f64 = 0.01;
 const SESSION_START_TS: u64 = 1_700_438_400_000_000_000;
@@ -34,6 +56,7 @@ fn fingerprint_parses() {
     assert_eq!(fp.session_profile.intensity_hour.len(), 24);
     assert_eq!(fp.session_profile.dow_weight.len(), 7);
     assert_eq!(fp.golden_targets.abs_return_acf_anchor.len(), 50);
+    assert_eq!(fp.golden_targets.dwell.era_start_ts, 1_546_300_800);
     assert_eq!(fp.scalar_ranges.price_decimals.min, 1.0);
     assert_eq!(fp.scalar_ranges.price_decimals.max, 7.0);
 }
@@ -530,38 +553,38 @@ fn clean_regime_is_byte_identical() {
     let scalars = GeneratorScalars::xbtusd_anchor(&fp);
     let mut src = GeneratedSource::new(scalars, 42, 1_000, &fp, None);
     let expected = [
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.12498350, aggressor: Buyer, ts_event: 1932367546 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.10200766, aggressor: Buyer, ts_event: 14404949050 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.1, aggressor: Buyer, ts_event: 63395677414 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.08673040, aggressor: Buyer, ts_event: 70348510297 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.01819669, aggressor: Buyer, ts_event: 70444232828 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.09715509, aggressor: Buyer, ts_event: 70448615756 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.08202765, aggressor: Buyer, ts_event: 70701257715 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.08319530, aggressor: Buyer, ts_event: 80028550942 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.09242684, aggressor: Buyer, ts_event: 98575731579 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.09712421, aggressor: Buyer, ts_event: 98783459004 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.02064065, aggressor: Buyer, ts_event: 105144479491 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.29393977, aggressor: Buyer, ts_event: 105970801177 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.57435314, aggressor: Buyer, ts_event: 118332552074 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.18559909, aggressor: Buyer, ts_event: 126200221174 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.01540320, aggressor: Buyer, ts_event: 141379233446 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.07153911, aggressor: Buyer, ts_event: 155104805884 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.9, aggressor: Buyer, ts_event: 178963716674 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.1, aggressor: Buyer, ts_event: 215566810133 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.07602495, aggressor: Buyer, ts_event: 236005084772 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.22289688, aggressor: Buyer, ts_event: 240701378904 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.31333162, aggressor: Buyer, ts_event: 246071332070 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.47843512, aggressor: Buyer, ts_event: 263375527056 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.3, aggressor: Buyer, ts_event: 267600259492 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.17390790, aggressor: Buyer, ts_event: 298777679331 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.17095568, aggressor: Buyer, ts_event: 299630805098 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.1, aggressor: Buyer, ts_event: 315966784358 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.19798447, aggressor: Buyer, ts_event: 319016030880 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.76061526, aggressor: Buyer, ts_event: 348635836996 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.05957004, aggressor: Buyer, ts_event: 397060998713 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.06491765, aggressor: Buyer, ts_event: 406213679341 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.12519947, aggressor: Buyer, ts_event: 408886805844 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.32332866, aggressor: Buyer, ts_event: 408913781393 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.12498350, aggressor: Buyer, ts_event: 2375459195 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.10200766, aggressor: Buyer, ts_event: 17708346295 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.1, aggressor: Buyer, ts_event: 77929073872 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.08673040, aggressor: Buyer, ts_event: 86444530598 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.01819669, aggressor: Buyer, ts_event: 86561710566 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.09715509, aggressor: Buyer, ts_event: 86567076056 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.08202765, aggressor: Buyer, ts_event: 86876361485 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.08319530, aggressor: Buyer, ts_event: 98295035162 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.09242684, aggressor: Buyer, ts_event: 120993574375 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.09712421, aggressor: Buyer, ts_event: 121247548592 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.02064065, aggressor: Buyer, ts_event: 129024888135 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.29393977, aggressor: Buyer, ts_event: 130034976086 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.57435314, aggressor: Buyer, ts_event: 145146021841 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.18559909, aggressor: Buyer, ts_event: 154759534192 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.01540320, aggressor: Buyer, ts_event: 173302106626 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.07153911, aggressor: Buyer, ts_event: 190057400305 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.9, aggressor: Buyer, ts_event: 219161426338 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.1, aggressor: Buyer, ts_event: 263734424400 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.07602495, aggressor: Buyer, ts_event: 288536671002 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.22289688, aggressor: Buyer, ts_event: 294224262441 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.31333162, aggressor: Buyer, ts_event: 300725147459 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.47843512, aggressor: Buyer, ts_event: 321664742379 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.3, aggressor: Buyer, ts_event: 326769050219 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.17390790, aggressor: Buyer, ts_event: 364425972535 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.17095568, aggressor: Buyer, ts_event: 365453225597 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.1, aggressor: Buyer, ts_event: 385123311756 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.19798447, aggressor: Buyer, ts_event: 388789456068 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.76061526, aggressor: Buyer, ts_event: 424394953397 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.05957004, aggressor: Buyer, ts_event: 482437887016 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.06491765, aggressor: Buyer, ts_event: 493347162617 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.12519947, aggressor: Buyer, ts_event: 496530290227 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.32332866, aggressor: Buyer, ts_event: 496562406191 }))"#,
     ];
 
     for expected_tick in expected {
@@ -619,6 +642,44 @@ fn liquidity_drought_stretches_durations() {
     assert!(
         drought_mean >= clean_mean * 4.0,
         "clean_mean={clean_mean} drought_mean={drought_mean}"
+    );
+}
+
+// The dying-symbol scenario the default tape's dwell bound evicts from ambient
+// behavior: thin_factor multiplies only the REALIZED gap, while the ACD
+// feedback and the wall-time relaxation both read the un-modulated draw, so a
+// thinned tape carries the fitted clustering stretched intact rather than
+// relaxing itself back to density. A constant multiplier leaves the realized
+// gap ACF invariant, which is what makes that invariant testable here.
+#[test]
+fn liquidity_drought_imitates_dying_symbol() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let mut src = GeneratedSource::new(
+        scalars,
+        42,
+        0,
+        &fp,
+        Some(MarketRegime::LiquidityDrought {
+            thin_factor: 1000.0,
+        }),
+    );
+    let gaps = durations(&mut src, 50_000);
+    let mean_gap = mean(&gaps);
+    let max_gap = gaps.iter().copied().fold(0.0_f64, f64::max);
+    assert!(
+        (3600.0..=14_400.0).contains(&mean_gap),
+        "mean_gap={mean_gap}"
+    );
+    assert_near(
+        "drought_duration_acf_lag1",
+        acf(&gaps, 1),
+        fp.golden_targets.duration_acf_anchor[0],
+        DURATION_ACF_ABS_TOL,
+    );
+    assert!(
+        max_gap >= 5.0 * mean_gap,
+        "max_gap={max_gap} mean_gap={mean_gap}"
     );
 }
 
@@ -955,6 +1016,66 @@ fn realism() {
     assert!(measured.size_cv > 0.5, "size_cv={}", measured.size_cv);
     assert_eq!(measured.off_grid_prices, 0);
     assert_eq!(measured.neutral_aggressors, 0);
+    assert_dwell_is_bounded(&measured, &scalars, &fp);
+}
+
+// The dwell bound asserted against the tape broadarrow actually consumes. The
+// realism gate runs at seed 42, but the server keys each symbol's walk on an
+// FNV-1a-64 hash of the symbol, so the served BTCUSDT walk is a different
+// realization from every other committed test - and until this test existed,
+// nothing asserted anything about it at all.
+#[test]
+fn default_symbol_tape_dwell_is_bounded() {
+    let fp = Fingerprint::from_repo_json();
+    // Reconstructs mogwai-server's `default_profile`: fingerprint medians
+    // overlaid with the default instrument's tick size and precision. The
+    // instrument def comes from mogwai-protocol so it cannot drift; the seed
+    // fold is duplicated from `seed_for` in mogwai-server's source.rs, which
+    // stays the source of truth (mogwai-data cannot depend on the server).
+    let def = mogwai_protocol::default_instruments()
+        .into_iter()
+        .find(|def| def.symbol == "BTCUSDT")
+        .expect("the default instrument set carries BTCUSDT");
+    let mut scalars = GeneratorScalars::from_fingerprint_medians(&def.symbol, &fp);
+    scalars.modal_tick = def.price_increment;
+    scalars.price_decimals = u32::from(def.price_precision);
+    let mut seed = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in def.symbol.bytes() {
+        seed = (seed ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let mut src = GeneratedSource::new(scalars.clone(), seed, 0, &fp, None);
+    let measured = measure(&mut src, &scalars, DRAW);
+    assert_dwell_is_bounded(&measured, &scalars, &fp);
+}
+
+fn assert_dwell_is_bounded(measured: &Measured, scalars: &GeneratorScalars, fp: &Fingerprint) {
+    let dwell = &fp.golden_targets.dwell;
+    let cadence = scalars.mean_duration_s / dwell.mean_s.anchor;
+    assert!(
+        measured.gap_p999_s <= DWELL_P999_SLACK * cadence * dwell.gap_p999_s.anchor,
+        "gap_p999_s={} bound={}",
+        measured.gap_p999_s,
+        DWELL_P999_SLACK * cadence * dwell.gap_p999_s.anchor
+    );
+    assert!(
+        measured.empty_hour_frac <= dwell.empty_hour_frac.anchor + EMPTY_HOUR_FRAC_SLACK,
+        "empty_hour_frac={} bound={}",
+        measured.empty_hour_frac,
+        dwell.empty_hour_frac.anchor + EMPTY_HOUR_FRAC_SLACK
+    );
+    assert!(
+        measured.max_empty_hour_run_h <= dwell.max_empty_hour_run_h.anchor + EMPTY_HOUR_RUN_SLACK_H,
+        "max_empty_hour_run_h={} bound={}",
+        measured.max_empty_hour_run_h,
+        dwell.max_empty_hour_run_h.anchor + EMPTY_HOUR_RUN_SLACK_H
+    );
+    assert!(
+        (measured.mean_gap_s - scalars.mean_duration_s).abs()
+            <= MEAN_GAP_REL_TOL * scalars.mean_duration_s,
+        "mean_gap_s={} declared_mean_s={}",
+        measured.mean_gap_s,
+        scalars.mean_duration_s
+    );
 }
 
 // NOTE: this test asserts the RAW fingerprint shares (intensity_hour,
@@ -1039,6 +1160,15 @@ fn session_modulation_reproduces_curves() {
 
 #[derive(Default)]
 struct Measured {
+    mean_gap_s: f64,
+    #[expect(
+        dead_code,
+        reason = "Sample maxima are recorded for diagnostic context but intentionally never gated."
+    )]
+    max_gap_s: f64,
+    gap_p999_s: f64,
+    empty_hour_frac: f64,
+    max_empty_hour_run_h: f64,
     duration_dispersion_index: f64,
     duration_acf_lag1: f64,
     duration_acf_lag5: f64,
@@ -1069,7 +1199,7 @@ fn measure(src: &mut GeneratedSource, scalars: &GeneratorScalars, draw: usize) -
         if trade.aggressor == AggressorSide::NoAggressor {
             neutral_aggressors += 1;
         }
-        timestamps.push(trade.ts_event as f64 / 1_000_000_000.0);
+        timestamps.push(trade.ts_event);
         prices.push(decimal_to_f64(trade.price));
         sizes.push(trade.size);
     }
@@ -1078,7 +1208,7 @@ fn measure(src: &mut GeneratedSource, scalars: &GeneratorScalars, draw: usize) -
     let mut returns = Vec::with_capacity(draw - 1);
     let mut zero_changes = 0;
     for i in 1..draw {
-        durations.push(timestamps[i] - timestamps[i - 1]);
+        durations.push((timestamps[i] - timestamps[i - 1]) as f64 / 1_000_000_000.0);
         returns.push((prices[i] / prices[i - 1]).ln());
         if prices[i] == prices[i - 1] {
             zero_changes += 1;
@@ -1088,7 +1218,16 @@ fn measure(src: &mut GeneratedSource, scalars: &GeneratorScalars, draw: usize) -
     let sizes_f64: Vec<f64> = sizes.iter().copied().map(decimal_to_f64).collect();
     let round_lots = sizes.iter().filter(|size| is_round_lot(**size)).count();
 
+    let mut sorted_durations = durations.clone();
+    sorted_durations.sort_by(f64::total_cmp);
+    let p999_index = (999 * sorted_durations.len()).div_ceil(1000) - 1;
+    let (empty_hour_frac, max_empty_hour_run_h) = empty_hour_stats(&timestamps);
     Measured {
+        mean_gap_s: mean(&durations),
+        max_gap_s: durations.iter().copied().fold(0.0_f64, f64::max),
+        gap_p999_s: sorted_durations[p999_index],
+        empty_hour_frac,
+        max_empty_hour_run_h,
         duration_dispersion_index: variance(&durations) / mean(&durations),
         duration_acf_lag1: acf(&durations, 1),
         duration_acf_lag5: acf(&durations, 5),
@@ -1102,6 +1241,53 @@ fn measure(src: &mut GeneratedSource, scalars: &GeneratorScalars, draw: usize) -
         off_grid_prices,
         neutral_aggressors,
     }
+}
+
+fn empty_hour_stats(timestamps_ns: &[u64]) -> (f64, f64) {
+    let Some(&first) = timestamps_ns.first() else {
+        return (0.0, 0.0);
+    };
+    let Some(&last) = timestamps_ns.last() else {
+        return (0.0, 0.0);
+    };
+    // Population: every whole UTC hour bucket lying fully inside [first, last],
+    // matching `dwell_stats` in analysis/characterize.py bucket for bucket so
+    // the gate compares like with like. A span holding no complete bucket
+    // defines both statistics as 0, which keeps the helper total.
+    let first_complete = first.div_ceil(NS_PER_HOUR);
+    let after_last_complete = last / NS_PER_HOUR;
+    if first_complete >= after_last_complete {
+        return (0.0, 0.0);
+    }
+    let seen: HashSet<u64> = timestamps_ns.iter().map(|ts| ts / NS_PER_HOUR).collect();
+    let total = after_last_complete - first_complete;
+    let mut empty = 0_u64;
+    let mut run = 0_u64;
+    let mut max_run = 0_u64;
+    for hour in first_complete..after_last_complete {
+        if seen.contains(&hour) {
+            run = 0;
+        } else {
+            empty += 1;
+            run += 1;
+            max_run = max_run.max(run);
+        }
+    }
+    (empty as f64 / total as f64, max_run as f64)
+}
+
+#[test]
+fn empty_hour_stats_use_complete_utc_buckets() {
+    let h = NS_PER_HOUR;
+    // Hand-built fixture for the rule `dwell_stats` implements on the Python
+    // side; keep the two in step or the gate compares different populations.
+    // Buckets 1 and 2 are complete, bucket 2 is empty.
+    assert_eq!(empty_hour_stats(&[h / 2, h + 1, 4 * h - 1]), (0.5, 1.0));
+    // No complete bucket inside the span at all.
+    assert_eq!(empty_hour_stats(&[h / 2, h + 1, 2 * h - 1]), (0.0, 0.0));
+    // Buckets 0 through 4 are complete (the last one ends exactly on the final
+    // trade, so it counts) and only bucket 0 is occupied: a four-hour desert.
+    assert_eq!(empty_hour_stats(&[0, 5 * h]), (0.8, 4.0));
 }
 
 fn durations(src: &mut GeneratedSource, draw: usize) -> Vec<f64> {

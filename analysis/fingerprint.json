@@ -14,13 +14,13 @@
     "anchor": "XBTUSD"
   },
   "golden_targets": {
-    "_doc": "the generator's synthetic stream must reproduce these; tolerances are the cross-pair spread, anchored on the deepest series",
+    "_doc": "the generator's synthetic stream must reproduce these; tolerances are the cross-pair spread, anchored on the deepest series; duration dispersion and duration ACF are era-windowed like dwell, everything else full-span",
     "duration_dispersion_index": {
-      "anchor": 4608.916472092034,
+      "anchor": 36.278444299915236,
       "range": {
-        "min": 131.7123399062904,
-        "median": 476.73407334590877,
-        "max": 4608.916472092034
+        "min": 36.278444299915236,
+        "median": 164.5019199508684,
+        "max": 1627.8607991153633
       }
     },
     "return_acf_lag1": {
@@ -66,16 +66,16 @@
       }
     },
     "duration_acf_anchor": [
-      0.1939124065581372,
-      0.14717263911789677,
-      0.1514743255016541,
-      0.11929106487278375,
-      0.13573417768854404,
-      0.11548990988412838,
-      0.12425447477528298,
-      0.1167334860298169,
-      0.09527435276820266,
-      0.10042949705618488
+      0.16032326206843064,
+      0.13954658272146567,
+      0.1244541132410137,
+      0.11694460382030801,
+      0.11134268260464784,
+      0.1078807915129391,
+      0.10446066929242681,
+      0.10183059133971133,
+      0.09997342374830519,
+      0.09780824326808452
     ],
     "return_acf_anchor": [
       -0.1969661298377815,

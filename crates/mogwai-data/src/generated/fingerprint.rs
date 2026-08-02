@@ -42,12 +42,23 @@ impl Fingerprint {
 #[derive(Debug, Clone, Deserialize)]
 pub struct GoldenTargets {
     pub duration_dispersion_index: AnchorRange,
+    pub dwell: DwellTargets,
     pub return_acf_lag1: AnchorRange,
     pub abs_return_acf: AbsReturnAcf,
     pub zero_change_frac: AnchorRange,
     pub duration_acf_anchor: Vec<f64>,
     pub return_acf_anchor: Vec<f64>,
     pub abs_return_acf_anchor: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DwellTargets {
+    pub era_start_ts: u64,
+    pub mean_s: AnchorRange,
+    pub max_gap_s: AnchorRange,
+    pub gap_p999_s: AnchorRange,
+    pub empty_hour_frac: AnchorRange,
+    pub max_empty_hour_run_h: AnchorRange,
 }
 
 #[derive(Debug, Clone, Deserialize)]

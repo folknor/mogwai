@@ -4,17 +4,17 @@ Pairs analyzed: ADAUSD, DOTUSD, ETHUSD, SOLUSD, USDTUSD, XBTUSD, XDGUSD, XRPUSD
 Total trades: 298,003,956  
 Anchor (golden targets): XBTUSD
 
-## Stylized facts (cross-pair)
+## Stylized facts (cross-pair; disp is era-windowed)
 
 | pair | trades | disp | ret1 | |ret|1 | zchg | tick | pdec |
 |---|--:|--:|--:|--:|--:|--:|--:|
-| XBTUSD | 81,810,187 | 4609 | -0.20 | 0.31 | 0.47 | 0.1 | 1 |
-| USDTUSD | 67,308,081 | 493 | -0.06 | 0.15 | 0.75 | 0.0001 | 4 |
-| ETHUSD | 53,416,611 | 2199 | -0.18 | 0.25 | 0.42 | 0.01 | 2 |
-| XRPUSD | 24,848,999 | 413 | -0.17 | 0.27 | 0.38 | 1e-05 | 5 |
+| XBTUSD | 81,810,187 | 36 | -0.20 | 0.31 | 0.47 | 0.1 | 1 |
+| USDTUSD | 67,308,081 | 145 | -0.06 | 0.15 | 0.75 | 0.0001 | 4 |
+| ETHUSD | 53,416,611 | 67 | -0.18 | 0.25 | 0.42 | 0.01 | 2 |
+| XRPUSD | 24,848,999 | 332 | -0.17 | 0.27 | 0.38 | 1e-05 | 5 |
 | SOLUSD | 21,973,204 | 184 | -0.09 | 0.25 | 0.54 | 0.01 | 2 |
 | XDGUSD | 19,185,656 | 1628 | -0.12 | 0.21 | 0.36 | 1e-07 | 7 |
-| ADAUSD | 16,352,376 | 461 | -0.16 | 0.30 | 0.34 | 1e-06 | 6 |
+| ADAUSD | 16,352,376 | 407 | -0.16 | 0.30 | 0.34 | 1e-06 | 6 |
 | DOTUSD | 13,108,842 | 132 | -0.07 | 0.20 | 0.34 | 0.0001 | 4 |
 
 ## UTC session intensity (pooled, normalized share)

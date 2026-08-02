@@ -660,7 +660,9 @@ scalars. The four regimes:
   multiply without the clamp lift would be silently clamped; the data crate pins
   this with a clamp-override test.
 - **`LiquidityDrought { thin_factor }`** - divides the arrival intensity by
-  `thin_factor` (stretches inter-arrival durations), producing a thin tape.
+  `thin_factor` (stretches inter-arrival durations), producing the dying-symbol
+  thin tape scenario. Its clustering survives thinning; the data crate pins
+  that invariant with `liquidity_drought_imitates_dying_symbol`.
 - **`SessionEdgeSpike { start_hour, end_hour, extra_vol_mult }`** - inside the
   UTC half-open hour window `[start_hour, end_hour)`, amplifies the session vol
   curve. The extra is *additive* within the regime envelope (neutral 1.0, out of
