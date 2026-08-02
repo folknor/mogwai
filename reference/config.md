@@ -30,11 +30,16 @@ limit draws a trigger price uniformly from `0 ..= band_ticks` ticks away from
 its stated price, where `band_ticks` is `fill_band_vol_mult` times the tape's
 trailing realized volatility scaled to a 60-second horizon, clamped to
 `fill_band_max_ticks`. `fill_band_vol_mult = 0.0` degenerates to a strict
-through-at-the-stated-price fill. The default `0.5` is the smallest multiplier
-in the calibration sweep (`mogwai-server`'s `fills::vol_probe`) whose median
-implied band lands in the usable 3-to-100-tick window on the default BTCUSDT
-profile: a 9-tick median, 18 ticks at p90. `fill_band_max_ticks` defaults to
-`200`, just above that 100-tick ceiling of usefulness. `fill_sweep_interval_ms`
+through-at-the-stated-price fill. The default is `0.005`, selected by
+`fills::vol_probe`: it samples 128 readings at a 10-minute stride, requires no
+more than one percent cold-window refusals (currently zero), and picks the
+smallest multiplier whose median implied band lands in the usable 3-to-100-tick
+window. On the committed BTCUSDT fingerprint `0.005` reads a median band of 4
+ticks and a p90 of 7. It replaced `0.5`, which was fitted to the print-layer
+tape and implies a median 439 ticks at the raw-fill cadence - past the clamp, so
+the band stopped tracking volatility at all. `fill_band_max_ticks` defaults to
+`200`.
+`fill_sweep_interval_ms`
 is how often the run re-checks its resting limits against the tape; the sweep
 is the only thing that ever fills a resting limit or delivers a market order's
 slipped fill unsolicited, so boot refuses a zero interval.
@@ -47,3 +52,11 @@ The replay and admission settings remain run-wide: `fanout_depth`,
 `zero_speed_stall_ms`, `exec_held_budget_bytes`, `admission_lane_frames`,
 `pending_command_acts`, and `global_pending_command_acts`. There are no
 account, tape-cap, subscription, or transport-profile configuration keys.
+
+The built-in generator profile expresses cadence with
+`mean_event_duration_s`, `children_mean`, `children_single_frac`, and
+`levels_mean`. Raw-fill size is expressed as `typical_notional`; its base-size
+median is derived from the configured start price and the fitted lognormal
+shape. The default `fanout_depth` is 65,536. A custom value should exceed one
+wall second of projected frames:
+`children_mean / mean_event_duration_s * speed`.

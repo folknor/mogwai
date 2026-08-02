@@ -11,13 +11,14 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 
 use super::consts::{
-    GARCH_SIGMA_CAP, SESSION_SHARE_SUM, SESSION_SUM_TOL, START_PRICE_USD, TYPICAL_SIZE_MANTISSA,
-    TYPICAL_SIZE_SCALE, VOL_HOUR_SUM, VOL_SCALAR,
+    GARCH_SIGMA_CAP, SESSION_SHARE_SUM, SESSION_SUM_TOL, SIZE_DECIMALS, SIZE_LOG_SIGMA,
+    START_PRICE_USD, VOL_HOUR_SUM, VOL_SCALAR,
 };
 use super::numeric::{decimal_from_f64, validate_f64};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Fingerprint {
+    pub cadence: Cadence,
     pub golden_targets: GoldenTargets,
     pub session_profile: SessionProfile,
     pub scalar_ranges: ScalarRanges,
@@ -41,14 +42,39 @@ impl Fingerprint {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct GoldenTargets {
-    pub duration_dispersion_index: AnchorRange,
+    pub duration_dispersion_cv2: AnchorRange,
     pub dwell: DwellTargets,
     pub return_acf_lag1: AnchorRange,
     pub abs_return_acf: AbsReturnAcf,
     pub zero_change_frac: AnchorRange,
-    pub duration_acf_anchor: Vec<f64>,
     pub return_acf_anchor: Vec<f64>,
     pub abs_return_acf_anchor: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Cadence {
+    pub targets: CadenceTargets,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CadenceTargets {
+    pub mean_event_duration_s: AnchorRange,
+    pub children_mean: AnchorRange,
+    pub children_single_frac: AnchorRange,
+    pub levels_mean: AnchorRange,
+    pub typical_notional: AnchorRange,
+    pub duration_dispersion_cv2: AnchorRange,
+    pub duration_acf_lag1: AnchorRange,
+    pub duration_acf_lag5: AnchorRange,
+    pub per_second_counts: PerSecondCounts,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PerSecondCounts {
+    pub mean: f64,
+    pub median: u32,
+    pub p95: u32,
+    pub zero_frac: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -131,7 +157,7 @@ impl SessionProfile {
         // 1.0) and `vol_hour` is a per-mean ratio summing to ~24. A plausible
         // "no modulation" config of all-ones intensity passes every per-element
         // check yet yields a 24x (168x with dow) arrival multiplier, silently
-        // compressing the validated `mean_duration_s` from seconds to
+        // compressing the validated `mean_event_duration_s` from seconds to
         // milliseconds; an un-normalized vol curve silently rescales overall
         // volatility even though `vol_scalar` validated. The on-grid and
         // positivity invariants still hold, so the golden stream would never
@@ -191,7 +217,11 @@ fn strictly_positive_finite(value: f64) -> bool {
 pub struct ScalarRanges {
     pub modal_tick: MinMedianMax,
     pub price_decimals: MinMedianMax,
-    pub mean_duration_s: MinMedianMax,
+    pub mean_event_duration_s: MinMedianMax,
+    pub children_mean: MinMedianMax,
+    pub children_single_frac: MinMedianMax,
+    pub levels_mean: MinMedianMax,
+    pub typical_notional: MinMedianMax,
     pub size_round_frac: MinMedianMax,
 }
 
@@ -201,10 +231,13 @@ pub struct GeneratorScalars {
     pub symbol: String,
     pub modal_tick: Decimal,
     pub price_decimals: u32,
-    pub mean_duration_s: f64,
+    pub mean_event_duration_s: f64,
+    pub children_mean: f64,
+    pub children_single_frac: f64,
+    pub levels_mean: f64,
     pub size_round_frac: f64,
     pub start_price: Decimal,
-    pub typical_size: Decimal,
+    pub typical_notional: Decimal,
     pub vol_scalar: f64,
 }
 
@@ -215,10 +248,13 @@ impl GeneratorScalars {
             symbol: symbol.to_string(),
             modal_tick: decimal_from_f64(fp.scalar_ranges.modal_tick.median),
             price_decimals: fp.scalar_ranges.price_decimals.median.round() as u32,
-            mean_duration_s: fp.scalar_ranges.mean_duration_s.median,
+            mean_event_duration_s: fp.cadence.targets.mean_event_duration_s.anchor,
+            children_mean: fp.cadence.targets.children_mean.anchor,
+            children_single_frac: fp.cadence.targets.children_single_frac.anchor,
+            levels_mean: fp.cadence.targets.levels_mean.anchor,
             size_round_frac: fp.scalar_ranges.size_round_frac.median,
             start_price: Decimal::from(START_PRICE_USD),
-            typical_size: Decimal::new(TYPICAL_SIZE_MANTISSA, TYPICAL_SIZE_SCALE),
+            typical_notional: decimal_from_f64(fp.cadence.targets.typical_notional.anchor),
             vol_scalar: VOL_SCALAR,
         }
     }
@@ -229,10 +265,13 @@ impl GeneratorScalars {
             symbol: "XBTUSD".to_string(),
             modal_tick: Decimal::new(1, 1),
             price_decimals: 1,
-            mean_duration_s: fp.scalar_ranges.mean_duration_s.median,
+            mean_event_duration_s: fp.cadence.targets.mean_event_duration_s.anchor,
+            children_mean: fp.cadence.targets.children_mean.anchor,
+            children_single_frac: fp.cadence.targets.children_single_frac.anchor,
+            levels_mean: fp.cadence.targets.levels_mean.anchor,
             size_round_frac: fp.scalar_ranges.size_round_frac.median,
             start_price: Decimal::from(START_PRICE_USD),
-            typical_size: Decimal::new(TYPICAL_SIZE_MANTISSA, TYPICAL_SIZE_SCALE),
+            typical_notional: decimal_from_f64(fp.cadence.targets.typical_notional.anchor),
             vol_scalar: VOL_SCALAR,
         }
     }
@@ -270,10 +309,40 @@ impl GeneratorScalars {
             });
         }
         validate_f64(
-            "mean_duration_s",
-            self.mean_duration_s,
-            &fp.scalar_ranges.mean_duration_s,
+            "mean_event_duration_s",
+            self.mean_event_duration_s,
+            &fp.scalar_ranges.mean_event_duration_s,
         )?;
+        validate_f64(
+            "children_mean",
+            self.children_mean,
+            &fp.scalar_ranges.children_mean,
+        )?;
+        validate_f64(
+            "children_single_frac",
+            self.children_single_frac,
+            &fp.scalar_ranges.children_single_frac,
+        )?;
+        validate_f64(
+            "levels_mean",
+            self.levels_mean,
+            &fp.scalar_ranges.levels_mean,
+        )?;
+        if self.children_mean <= 1.0 {
+            return Err(ScalarError {
+                field: "children_mean",
+            });
+        }
+        if !(0.0..1.0).contains(&self.children_single_frac) {
+            return Err(ScalarError {
+                field: "children_single_frac",
+            });
+        }
+        if !(1.0..=self.children_mean).contains(&self.levels_mean) {
+            return Err(ScalarError {
+                field: "levels_mean",
+            });
+        }
         validate_f64(
             "size_round_frac",
             self.size_round_frac,
@@ -291,9 +360,22 @@ impl GeneratorScalars {
                 field: "start_price",
             });
         }
-        if self.typical_size <= Decimal::ZERO {
+        validate_f64(
+            "typical_notional",
+            decimal_to_f64(self.typical_notional),
+            &fp.scalar_ranges.typical_notional,
+        )?;
+        if self.typical_notional <= Decimal::ZERO {
             return Err(ScalarError {
-                field: "typical_size",
+                field: "typical_notional",
+            });
+        }
+        let median_size = decimal_to_f64(self.typical_notional)
+            / decimal_to_f64(self.start_price)
+            / (SIZE_LOG_SIGMA.powi(2) / 2.0).exp();
+        if decimal_from_f64(median_size).round_dp(SIZE_DECIMALS) <= Decimal::ZERO {
+            return Err(ScalarError {
+                field: "typical_notional",
             });
         }
         if !strictly_positive_finite(self.vol_scalar) {

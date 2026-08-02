@@ -13,10 +13,10 @@ use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use mogwai_data::TickEvent;
 use mogwai_engine::MAX_ARMED_DIVERGENCES;
 use mogwai_protocol::{
-    AccountState, AdmissionSubject, ClientMessage, InstrumentDef, MAX_HISTORY_LIMIT, OrderType,
-    QuoteTick, ServerClock, ServerMessage, SimClock, TradeTick, control::Divergence,
-    truncate_client_id, truncate_reason, validate_client_order_id, validate_divergence,
-    validate_modify_order, validate_request_id, validate_submit_order,
+    AccountState, AdmissionSubject, ClientMessage, DEFAULT_HISTORY_LIMIT, InstrumentDef,
+    MAX_HISTORY_LIMIT, OrderType, QuoteTick, ServerClock, ServerMessage, SimClock, TradeTick,
+    control::Divergence, truncate_client_id, truncate_reason, validate_client_order_id,
+    validate_divergence, validate_modify_order, validate_request_id, validate_submit_order,
 };
 use serde::Deserialize;
 
@@ -306,6 +306,7 @@ pub(crate) struct AppState {
     /// Process-wide ceiling on websocket commands sleeping out an armed ACT
     /// delay. The per-connection lane bounds one client; this bounds the run.
     pub(crate) pending_acts: Arc<tokio::sync::Semaphore>,
+    pub(crate) market_readings: Arc<crate::fills::MarketReadingCache>,
 }
 
 impl AppState {
@@ -394,6 +395,18 @@ pub(crate) async fn arm_divergence(
                 Ordering::Relaxed,
             );
         }
+        Divergence::FlowSurge {
+            rate_mult,
+            children_mult,
+            duration_ms,
+        } => {
+            run.tape.arm_flow_surge(
+                sim_now_ns(state.sim()),
+                duration_ms,
+                rate_mult,
+                children_mult,
+            );
+        }
         // Immediate book action, not an armed trigger: cancel the resting
         // order right now, silently (no lifecycle event - that lost event IS
         // the injected fault; the truth surfaces only via QueryOrders). A
@@ -421,6 +434,7 @@ pub(crate) async fn arm_divergence(
             run.delay_ms.store(0, Ordering::Relaxed);
             run.dark_until_ns.store(0, Ordering::Relaxed);
             run.stall_until_ns.store(0, Ordering::Relaxed);
+            run.tape.clear_flow_surge();
             // All six `CommandLatency` fields go with them. This clears what the
             // venue will do to commands it has NOT started acting on yet, and it
             // lifts an ack window off frames already queued (the pump reads that
@@ -450,6 +464,7 @@ pub(crate) async fn arm_divergence(
                         | Divergence::CommandLatency { .. }
                         | Divergence::GoDark { .. }
                         | Divergence::StallData { .. }
+                        | Divergence::FlowSurge { .. }
                         | Divergence::ClearDivergences
                         | Divergence::CancelOpenOrderSilently { .. }
                 ),
@@ -561,8 +576,10 @@ async fn market_reading(
         let profiles = Arc::clone(&state.profiles);
         let mult = state.cfg.fill_band_vol_mult;
         let max_ticks = state.cfg.fill_band_max_ticks;
+        let interval_ms = state.cfg.fill_sweep_interval_ms;
+        let cache = Arc::clone(&state.market_readings);
         let (reading, last_px) = tokio::task::spawn_blocking(move || {
-            let reading = crate::fills::read_market(&symbol, ts, &profiles, mult, max_ticks);
+            let reading = cache.read(&symbol, ts, &profiles, mult, max_ticks, interval_ms);
             let last_px = reading
                 .map(|value| value.last_px)
                 .or_else(|| crate::fills::read_last(&symbol, ts, &profiles));
@@ -705,7 +722,9 @@ pub(crate) async fn quotes(
 /// return in `bounded_trades`, which the synthesis loop relies on (the
 /// `out.len() >= limit` break would otherwise yield one tick for `limit == 0`).
 pub(crate) fn normalize_limit(limit: Option<usize>) -> usize {
-    limit.unwrap_or(MAX_HISTORY_LIMIT).min(MAX_HISTORY_LIMIT)
+    limit
+        .unwrap_or(DEFAULT_HISTORY_LIMIT)
+        .min(MAX_HISTORY_LIMIT)
 }
 
 pub(crate) fn bounded_trades(

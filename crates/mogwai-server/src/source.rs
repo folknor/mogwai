@@ -108,7 +108,10 @@ fn generator(profile: &InstrumentProfile) -> GeneratedSource {
 /// seek BUDGET that used to cap it: there is no `MAX_HISTORY_SEEK_TICKS` any
 /// more and no request is served short because it ran out of walk. A request
 /// below the floor is refused by name instead, which is the whole point.
-pub(crate) const CHECKPOINT_K: usize = 8192;
+/// 262,144 ticks is about 88 simulated minutes at the default raw-fill rate,
+/// bounds residual seek replay to that many ticks, and delays checkpoint
+/// coarsening to roughly 250 simulated days.
+pub(crate) const CHECKPOINT_K: usize = 262_144;
 
 /// Runaway backstop on a SINGLE `extend_to` walk. Deliberately NOT a request
 /// budget: every legitimate target (the warmup floor, sim-now, a live cursor)

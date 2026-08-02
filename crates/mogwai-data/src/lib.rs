@@ -61,7 +61,7 @@ pub use trigger::{
 /// Identity of the tape generation process, not of any one path. Two runs are
 /// comparable only if their venues report the same value. `AGENTS.md` carries
 /// the obligation to bump this for every tape-determinism change.
-pub const TAPE_PROTOCOL_VERSION: u32 = 1;
+pub const TAPE_PROTOCOL_VERSION: u32 = 2;
 
 /// One replayable market-data event.
 #[derive(Debug, Clone)]
@@ -84,6 +84,19 @@ impl TickEvent {
 pub trait TickSource {
     /// Next tick in replay order, or `None` at end of stream.
     fn next_tick(&mut self) -> Option<TickEvent>;
+
+    /// Arm a simulated-time flow surge. Non-generated sources ignore it.
+    fn arm_flow_surge(
+        &mut self,
+        _start_ns: u64,
+        _duration_ms: u64,
+        _rate_mult: f64,
+        _children_mult: f64,
+    ) {
+    }
+
+    /// Clear an armed flow surge. Non-generated sources ignore it.
+    fn clear_flow_surge(&mut self) {}
 
     /// Advance past ticks before `start_ts`, returning the first tick in the
     /// window. The default drains one tick at a time and keeps O(1) memory.
@@ -412,6 +425,24 @@ impl TickSource for MergeSource {
         let out = self.heads[pick].take();
         self.heads[pick] = self.sources[pick].next_tick();
         out
+    }
+
+    fn arm_flow_surge(
+        &mut self,
+        start_ns: u64,
+        duration_ms: u64,
+        rate_mult: f64,
+        children_mult: f64,
+    ) {
+        for source in &mut self.sources {
+            source.arm_flow_surge(start_ns, duration_ms, rate_mult, children_mult);
+        }
+    }
+
+    fn clear_flow_surge(&mut self) {
+        for source in &mut self.sources {
+            source.clear_flow_surge();
+        }
     }
 }
 

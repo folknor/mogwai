@@ -29,10 +29,16 @@ impl Engine {
             // server routes it to `cancel_open_order_silently` at post time.
             // Reaching `arm` with it would leak a dead queue entry, so it is
             // dropped alongside the server-owned temporal variants.
+            // `FlowSurge` is named here for the same reason and one more: it is
+            // the first arm that reaches into GENERATOR state (a sim-time window
+            // on the tape source), so it has no engine-side trigger at all.
+            // Listing it explicitly is what stops a future enum variant from
+            // falling through into engine behaviour by accident.
             Divergence::DelayAcks { .. }
             | Divergence::CommandLatency { .. }
             | Divergence::GoDark { .. }
             | Divergence::StallData { .. }
+            | Divergence::FlowSurge { .. }
             | Divergence::ClearDivergences
             | Divergence::CancelOpenOrderSilently { .. } => None,
             other => {

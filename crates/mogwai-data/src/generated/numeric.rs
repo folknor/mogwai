@@ -3,9 +3,7 @@
 
 //! Small numeric helpers shared across the generator: fingerprint-range
 //! membership checks, the saturating f64-to-Decimal conversion the walk uses
-//! for prices/sizes, round-lot snapping, and the one derived constant
-//! (`WEIBULL_MEAN_SHAPE_060`) the ACD clock needs but `rand_distr` does not
-//! expose.
+//! for prices/sizes and round-lot snapping.
 
 use rust_decimal::{Decimal, prelude::FromPrimitive};
 
@@ -50,23 +48,20 @@ pub(super) fn decimal_from_f64(value: f64) -> Decimal {
     }
 }
 
-pub(super) fn round_lot_size(base: f64) -> Decimal {
-    if base >= 1.0 {
-        decimal_from_f64(base.round().max(1.0))
-    } else {
-        decimal_from_f64((base * 10.0).round().max(1.0) / 10.0).round_dp(1)
-    }
+/// Snap a size draw to the venue's round-lot grid, where the grid is DECADE
+/// RELATIVE to the derived median rather than absolute.
+///
+/// The old rule snapped to whole units above 1.0 and to 0.1 below it. At the
+/// raw-fill size scale (a 0.0027 BTC median) that turned every round-lot draw
+/// into exactly 0.1 - 37x the median - on the ~24% of trades `size_round_frac`
+/// selects. `lot = 10^floor(log10(median))` reproduces the old sub-unit
+/// behaviour at a 0.1 median and tracks the median anywhere else. `is_round_lot`
+/// in the test module is the same predicate, deliberately, so the generator and
+/// the gate cannot disagree about what a round lot is.
+///
+/// The floor at one lot keeps a snapped size strictly positive: `round` can
+/// legitimately return zero for a draw well below half a lot.
+pub(super) fn round_lot_size(base: f64, median: f64) -> Decimal {
+    let lot = 10.0_f64.powf(median.log10().floor());
+    decimal_from_f64((lot * (base / lot).round()).max(lot))
 }
-
-// Mean of a Weibull(scale = 1, shape = 0.60): gamma(1 + 1/0.60) = gamma(2.6666...).
-// The ACD clock divides each duration innovation by this so the latent process
-// targets a unit mean; the sole consumer is the construction-time `eps_mean` below.
-// This was computed by a Lanczos approximation (g = 7, n = 9) of the gamma function,
-// but gamma was only ever called with this one argument, so the series has been
-// replaced by its result as a literal. The literal is the shortest decimal that
-// round-trips to the exact f64 the series produced (bits 0x3ff812bdbf467568,
-// identical in debug and release - no FP-contraction divergence), so it reproduces
-// the byte-identical golden stream (`clean_regime_is_byte_identical`); the tolerance
-// test below guards the magnitude against a typo. `rand_distr 0.4`'s Weibull exposes
-// no `mean()` accessor, which is why the mean lives here as a constant.
-pub(super) const WEIBULL_MEAN_SHAPE_060: f64 = 1.504_575_488_251_555_6;

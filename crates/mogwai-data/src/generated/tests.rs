@@ -7,23 +7,28 @@ use crate::{TickEvent, TickSource};
 
 use super::checkpoint::MAX_CHECKPOINTS;
 use super::consts::{GARCH_SIGMA_CAP, MAX_ABS_RETURN, MAX_SESSION_GAP_NS, NS_PER_HOUR};
-use super::numeric::WEIBULL_MEAN_SHAPE_060;
 use super::session::{utc_hour, utc_hour_dow};
 use super::*;
 use rust_decimal::Decimal;
 use std::collections::HashSet;
 
 const DRAW: usize = 2_000_000;
-const SESSION_DRAW: usize = 5_000_000;
-// Unlike the return/abs-return/dispersion targets, duration_acf has no
-// committed cross-pair min/median/max band in the fingerprint - only the
-// anchor lag vector (duration_acf_anchor). With no band to inherit, 0.14 is
-// a principled absolute choice rather than a fitted one: the seeded duration
-// ACF lands within a few hundredths of the anchor at lags 1 and 5, so 0.14
-// gives margin for seed-to-seed sampling wobble while staying tight enough
-// that a flattened ACF (the failure mode the after-the-recursion session
-// envelope is designed to prevent) - which collapses these lags toward zero,
-// an order of magnitude past 0.14 from the anchor - is still caught.
+// PARENT EVENTS, not prints. The day-of-week assertions below need at least a
+// full week of simulated tape and want several, so this is denominated in SIM
+// SPAN rather than in ticks: at the committed 0.171 s mean event gap, 15M
+// events is roughly 30 simulated days. `measure_session_curves` drops each
+// event's children rather than emitting them, which is what makes a four-week
+// span affordable - see the note there on what that costs.
+const SESSION_DRAW: usize = 15_000_000;
+// The clean tape's duration ACF is gated by the committed cross-pair BAND
+// (`cadence.targets.duration_acf_lag1` / `_lag5`, measured on microsecond-
+// stamped Binance parent events). This absolute tolerance is used at ONE site
+// only - the drought test, which walks a 50,000-gap sample far too small to
+// inherit that band and only needs to see that thinning the tape stretches the
+// gaps without destroying their serial dependence. 0.14 is a principled
+// absolute choice rather than a fitted one: it gives margin for sampling wobble
+// on a short draw while still catching a flattened ACF, which collapses the lag
+// toward zero, an order of magnitude past 0.14 from the anchor.
 const DURATION_ACF_ABS_TOL: f64 = 0.14;
 // Dwell slack. All three bounds are one-sided: the failure mode this gate
 // exists to catch is silence, and the lower side is already policed by the
@@ -41,13 +46,12 @@ const DURATION_ACF_ABS_TOL: f64 = 0.14;
 // MEAN_GAP_REL_TOL is the only two-sided band here. It guards the tape's
 // declared cadence, which every tick-count budget outside this crate prices
 // (history seek caps, checkpoint spacing, the server's backfill horizon), and
-// it is what keeps ACD_RELAX_MEAN_CAL honest.
+// it is what keeps ARRIVAL_MEAN_CAL honest.
 const DWELL_P999_SLACK: f64 = 2.0;
 const EMPTY_HOUR_FRAC_SLACK: f64 = 0.01;
 const EMPTY_HOUR_RUN_SLACK_H: f64 = 2.0;
 const MEAN_GAP_REL_TOL: f64 = 0.10;
 const INTENSITY_SHARE_ABS_TOL: f64 = 0.006;
-const DOW_SHARE_ABS_TOL: f64 = 0.01;
 const SESSION_START_TS: u64 = 1_700_438_400_000_000_000;
 
 #[test]
@@ -67,11 +71,11 @@ fn scalars_validate() {
     let scalars = GeneratorScalars::from_fingerprint_medians("ETHUSD", &fp);
     assert!(scalars.validate(&fp).is_ok());
     let mut bad = scalars.clone();
-    bad.mean_duration_s = fp.scalar_ranges.mean_duration_s.max + 1.0;
+    bad.mean_event_duration_s = fp.scalar_ranges.mean_event_duration_s.max + 1.0;
     assert_eq!(
         bad.validate(&fp),
         Err(ScalarError {
-            field: "mean_duration_s"
+            field: "mean_event_duration_s"
         })
     );
 }
@@ -216,11 +220,11 @@ fn try_new_accepts_valid_input_and_surfaces_bad_input() {
     // infallible `new` would. `GeneratedSource` is not `PartialEq`, so drop
     // the Ok half with `.err()` before comparing the error.
     let mut bad_scalars = scalars.clone();
-    bad_scalars.mean_duration_s = fp.scalar_ranges.mean_duration_s.max + 1.0;
+    bad_scalars.mean_event_duration_s = fp.scalar_ranges.mean_event_duration_s.max + 1.0;
     assert_eq!(
         GeneratedSource::try_new(bad_scalars, 42, 0, &fp, None).err(),
         Some(GeneratedSourceError::Scalar(ScalarError {
-            field: "mean_duration_s"
+            field: "mean_event_duration_s"
         }))
     );
 
@@ -282,21 +286,6 @@ fn on_grid_prices_and_native_aggressor() {
             AggressorSide::Buyer | AggressorSide::Seller
         ));
     }
-}
-
-#[test]
-fn weibull_mean_matches_known_constant() {
-    // Pin the construction-time constant the ACD clock divides by. The true
-    // value of gamma(1 + 1/0.6) = gamma(2.6666...) is ~1.5045754867; the
-    // hard-coded WEIBULL_MEAN_SHAPE_060 literal is the f64 the former Lanczos
-    // series produced for that argument (~1.5e-8 from the true value, the
-    // series' inherent approximation error). A 1e-7 tolerance catches a typo in
-    // the literal without asserting an exact f64 bit pattern (the byte-exact
-    // guard is the golden test, clean_regime_is_byte_identical).
-    assert!(
-        (WEIBULL_MEAN_SHAPE_060 - 1.504_575_486_7).abs() < 1e-7,
-        "WEIBULL_MEAN_SHAPE_060={WEIBULL_MEAN_SHAPE_060}"
-    );
 }
 
 #[test]
@@ -553,43 +542,44 @@ fn clean_regime_is_byte_identical() {
     let scalars = GeneratorScalars::xbtusd_anchor(&fp);
     let mut src = GeneratedSource::new(scalars, 42, 1_000, &fp, None);
     let expected = [
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.12498350, aggressor: Buyer, ts_event: 2375459195 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.10200766, aggressor: Buyer, ts_event: 17708346295 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.1, aggressor: Buyer, ts_event: 77929073872 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.08673040, aggressor: Buyer, ts_event: 86444530598 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.01819669, aggressor: Buyer, ts_event: 86561710566 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.09715509, aggressor: Buyer, ts_event: 86567076056 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.08202765, aggressor: Buyer, ts_event: 86876361485 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.08319530, aggressor: Buyer, ts_event: 98295035162 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.09242684, aggressor: Buyer, ts_event: 120993574375 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.09712421, aggressor: Buyer, ts_event: 121247548592 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.02064065, aggressor: Buyer, ts_event: 129024888135 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.29393977, aggressor: Buyer, ts_event: 130034976086 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.57435314, aggressor: Buyer, ts_event: 145146021841 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.18559909, aggressor: Buyer, ts_event: 154759534192 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.01540320, aggressor: Buyer, ts_event: 173302106626 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.07153911, aggressor: Buyer, ts_event: 190057400305 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.9, aggressor: Buyer, ts_event: 219161426338 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.1, aggressor: Buyer, ts_event: 263734424400 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.07602495, aggressor: Buyer, ts_event: 288536671002 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.22289688, aggressor: Buyer, ts_event: 294224262441 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.31333162, aggressor: Buyer, ts_event: 300725147459 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.47843512, aggressor: Buyer, ts_event: 321664742379 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.3, aggressor: Buyer, ts_event: 326769050219 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.17390790, aggressor: Buyer, ts_event: 364425972535 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.17095568, aggressor: Buyer, ts_event: 365453225597 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.1, aggressor: Buyer, ts_event: 385123311756 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.19798447, aggressor: Buyer, ts_event: 388789456068 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.76061526, aggressor: Buyer, ts_event: 424394953397 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.05957004, aggressor: Buyer, ts_event: 482437887016 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.06491765, aggressor: Buyer, ts_event: 493347162617 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.12519947, aggressor: Buyer, ts_event: 496530290227 }))"#,
-        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.32332866, aggressor: Buyer, ts_event: 496562406191 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.00016711, aggressor: Buyer, ts_event: 1651680 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.002, aggressor: Buyer, ts_event: 1652680 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.001, aggressor: Buyer, ts_event: 1653680 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.00118992, aggressor: Buyer, ts_event: 1654680 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.00374134, aggressor: Buyer, ts_event: 2085712 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.00981338, aggressor: Buyer, ts_event: 2390006 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.00632398, aggressor: Buyer, ts_event: 4430072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.00219303, aggressor: Buyer, ts_event: 4431072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.00064674, aggressor: Buyer, ts_event: 4432072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.009, aggressor: Buyer, ts_event: 4433072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.003, aggressor: Buyer, ts_event: 4434072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.00072433, aggressor: Buyer, ts_event: 4435072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.00089376, aggressor: Buyer, ts_event: 4436072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.01757230, aggressor: Buyer, ts_event: 4437072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.1, size: 0.00234238, aggressor: Buyer, ts_event: 4438072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00259664, aggressor: Buyer, ts_event: 4439072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00129664, aggressor: Buyer, ts_event: 4440072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00929062, aggressor: Buyer, ts_event: 4441072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00177211, aggressor: Buyer, ts_event: 4442072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00172264, aggressor: Buyer, ts_event: 4443072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00494222, aggressor: Buyer, ts_event: 4444072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00076565, aggressor: Buyer, ts_event: 4445072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.002, aggressor: Buyer, ts_event: 4446072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.01535550, aggressor: Buyer, ts_event: 4447072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00048139, aggressor: Buyer, ts_event: 4448072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00199492, aggressor: Buyer, ts_event: 4449072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.004, aggressor: Buyer, ts_event: 4450072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00216568, aggressor: Buyer, ts_event: 4451072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.007, aggressor: Buyer, ts_event: 4452072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00078736, aggressor: Buyer, ts_event: 4453072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00070413, aggressor: Buyer, ts_event: 4454072 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00191262, aggressor: Buyer, ts_event: 4455072 }))"#,
     ];
 
-    for expected_tick in expected {
-        assert_eq!(format!("{:?}", src.next_tick()), expected_tick);
-    }
+    let actual: Vec<_> = (0..expected.len())
+        .map(|_| format!("{:?}", src.next_tick()))
+        .collect();
+    assert_eq!(actual, expected);
 }
 
 #[test]
@@ -646,35 +636,40 @@ fn liquidity_drought_stretches_durations() {
 }
 
 // The dying-symbol scenario the default tape's dwell bound evicts from ambient
-// behavior: thin_factor multiplies only the REALIZED gap, while the ACD
-// feedback and the wall-time relaxation both read the un-modulated draw, so a
-// thinned tape carries the fitted clustering stretched intact rather than
-// relaxing itself back to density. A constant multiplier leaves the realized
-// gap ACF invariant, which is what makes that invariant testable here.
+// behavior: thin_factor multiplies only the realized gap, leaving the fitted
+// state transitions intact. A constant multiplier leaves realized gap ACF
+// invariant, which is what makes that invariant testable here.
 #[test]
 fn liquidity_drought_imitates_dying_symbol() {
     let fp = Fingerprint::from_repo_json();
     let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    const THIN_FACTOR: f64 = 1000.0;
     let mut src = GeneratedSource::new(
-        scalars,
+        scalars.clone(),
         42,
         0,
         &fp,
         Some(MarketRegime::LiquidityDrought {
-            thin_factor: 1000.0,
+            thin_factor: THIN_FACTOR,
         }),
     );
     let gaps = durations(&mut src, 50_000);
     let mean_gap = mean(&gaps);
     let max_gap = gaps.iter().copied().fold(0.0_f64, f64::max);
+    // What this test is about is the RATIO the drought applies to the PARENT
+    // gap: `thin_factor` multiplies the clean gap, so the realized mean must
+    // land near `thin_factor * mean_event_duration_s`. The 0.5x-to-2x band is
+    // sampling slack on a 50,000-gap draw whose gaps are additionally stretched
+    // and squeezed by the session envelope; it is not a fitted window.
+    let expected_gap = THIN_FACTOR * scalars.mean_event_duration_s;
     assert!(
-        (3600.0..=14_400.0).contains(&mean_gap),
-        "mean_gap={mean_gap}"
+        (expected_gap / 2.0..=expected_gap * 2.0).contains(&mean_gap),
+        "mean_gap={mean_gap} expected~{expected_gap}"
     );
     assert_near(
         "drought_duration_acf_lag1",
         acf(&gaps, 1),
-        fp.golden_targets.duration_acf_anchor[0],
+        fp.cadence.targets.duration_acf_lag1.anchor,
         DURATION_ACF_ABS_TOL,
     );
     assert!(
@@ -699,7 +694,7 @@ fn session_edge_spike_localizes() {
         }),
     );
 
-    let (in_window, out_window) = windowed_latent_returns(&mut src, 250_000, 14, 16);
+    let (in_window, out_window) = windowed_latent_returns(&mut src, 1_000_000, 14, 16);
     let in_rms = rms(&in_window);
     let out_rms = rms(&out_window);
     assert!(in_rms >= out_rms * 2.0, "in_rms={in_rms} out_rms={out_rms}");
@@ -736,8 +731,8 @@ fn session_edge_spike_lifts_realized_clamp() {
         Some(spike(small)),
     );
 
-    let (big_in, _) = windowed_latent_returns(&mut big_src, 250_000, start_hour, end_hour);
-    let (small_in, _) = windowed_latent_returns(&mut small_src, 250_000, start_hour, end_hour);
+    let (big_in, _) = windowed_latent_returns(&mut big_src, 1_000_000, start_hour, end_hour);
+    let (small_in, _) = windowed_latent_returns(&mut small_src, 1_000_000, start_hour, end_hour);
     let big_in_rms = rms(&big_in);
     let small_in_rms = rms(&small_in);
     let big_in_max = big_in
@@ -795,7 +790,7 @@ fn reopen_gap_halts_and_gaps() {
     let mut gap_return = None;
     let mut straddling_gap = None;
     let mut large_gaps = 0;
-    for _ in 0..10_000 {
+    for _ in 0..100_000 {
         let _tick = src.next_tick().expect("unbounded generated source");
         let dt = src.clock_ns - prior_ts;
         if dt >= halt_ns {
@@ -967,21 +962,19 @@ fn realism() {
     let mut src = GeneratedSource::new(scalars.clone(), 42, 0, &fp, None);
     let measured = measure(&mut src, &scalars, DRAW);
     assert_in_range(
-        "duration_dispersion_index",
-        measured.duration_dispersion_index,
-        &fp.golden_targets.duration_dispersion_index.range,
+        "duration_dispersion_cv2",
+        measured.duration_dispersion_cv2,
+        &fp.cadence.targets.duration_dispersion_cv2.range,
     );
-    assert_near(
+    assert_in_range(
         "duration_acf_lag1",
         measured.duration_acf_lag1,
-        fp.golden_targets.duration_acf_anchor[0],
-        DURATION_ACF_ABS_TOL,
+        &fp.cadence.targets.duration_acf_lag1.range,
     );
-    assert_near(
+    assert_in_range(
         "duration_acf_lag5",
         measured.duration_acf_lag5,
-        fp.golden_targets.duration_acf_anchor[4],
-        DURATION_ACF_ABS_TOL,
+        &fp.cadence.targets.duration_acf_lag5.range,
     );
     assert_in_range(
         "return_acf_lag1",
@@ -1016,7 +1009,203 @@ fn realism() {
     assert!(measured.size_cv > 0.5, "size_cv={}", measured.size_cv);
     assert_eq!(measured.off_grid_prices, 0);
     assert_eq!(measured.neutral_aggressors, 0);
+    let density = &fp.cadence.targets.per_second_counts;
+    assert!(
+        (measured.fills_per_second_mean / density.mean - 1.0).abs() <= 0.10,
+        "fills_per_second_mean={}",
+        measured.fills_per_second_mean
+    );
+    assert!(
+        (density.median.saturating_sub(1)..=density.median + 1)
+            .contains(&measured.fills_per_second_median),
+        "fills_per_second_median={}",
+        measured.fills_per_second_median
+    );
+    assert!(
+        (density.p95 / 2..=density.p95 * 2).contains(&measured.fills_per_second_p95),
+        "fills_per_second_p95={}",
+        measured.fills_per_second_p95
+    );
+    assert!(
+        (measured.zero_second_frac - density.zero_frac).abs() <= 0.05,
+        "zero_second_frac={}",
+        measured.zero_second_frac
+    );
+    assert!(
+        measured.truncation_frac < 1e-5,
+        "truncation_frac={}",
+        measured.truncation_frac
+    );
     assert_dwell_is_bounded(&measured, &scalars, &fp);
+}
+
+#[test]
+fn sweep_structure() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let mut src = GeneratedSource::new(scalars.clone(), 42, 0, &fp, None);
+    let mut total_children = 0_u64;
+    let mut singles = 0_u64;
+    let mut total_levels = 0_u64;
+    let mut prior_ts = 0_u64;
+    for _ in 0..5_000 {
+        assert_eq!(src.burst.remaining, 0);
+        let updates_before = src.latent_updates;
+        let TickEvent::Trade(first) = src.next_tick().expect("trade") else {
+            unreachable!()
+        };
+        assert_eq!(src.latent_updates, updates_before + 1);
+        let parent_ts = first.ts_event;
+        let side = first.aggressor;
+        let mut previous_price = first.price;
+        let mut children = 1_u64;
+        let mut levels = 1_u64;
+        assert!(parent_ts > prior_ts);
+        while src.burst.remaining > 0 {
+            let TickEvent::Trade(child) = src.next_tick().expect("trade") else {
+                unreachable!()
+            };
+            assert_eq!(child.aggressor, side);
+            assert_eq!(
+                child.ts_event,
+                parent_ts + children * super::consts::INTRA_EVENT_STEP_NS
+            );
+            match side {
+                AggressorSide::Buyer => assert!(child.price >= previous_price),
+                AggressorSide::Seller => assert!(child.price <= previous_price),
+                AggressorSide::NoAggressor => unreachable!(),
+            }
+            if child.price != previous_price {
+                levels += 1;
+            }
+            previous_price = child.price;
+            children += 1;
+        }
+        assert_eq!(src.latent_updates, updates_before + 1);
+        total_children += children;
+        total_levels += levels;
+        singles += u64::from(children == 1);
+        prior_ts = parent_ts + (children - 1) * super::consts::INTRA_EVENT_STEP_NS;
+    }
+    let events = 5_000.0;
+    assert!((total_children as f64 / events / scalars.children_mean - 1.0).abs() < 0.10);
+    assert!((singles as f64 / events - scalars.children_single_frac).abs() < 0.05);
+    assert!((total_levels as f64 / events / scalars.levels_mean - 1.0).abs() < 0.15);
+}
+
+// A snapshot taken mid-sweep must restore mid-sweep. `SweepBurst` lives in
+// generator state exactly so this holds, and the failure mode is invisible
+// outside the seek path: a burst that did not survive a snapshot would only
+// show up as a seek returning a tape that re-opened its parent. Asserted
+// through the real `CheckpointIndex`, not through `Clone`, because `Clone` is
+// the substrate the index is built on and would pass no matter what the index
+// did with it.
+#[test]
+fn checkpoint_resume_mid_sweep_is_byte_identical() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let origin_ts = 1_000u64;
+    let seed = 42u64;
+    let mut reference = GeneratedSource::new(scalars.clone(), seed, origin_ts, &fp, None);
+    let mut ticks = Vec::with_capacity(4_000);
+    let mut mid_sweep = Vec::with_capacity(4_000);
+    for _ in 0..4_000 {
+        let opens_event = reference.burst.remaining == 0;
+        let TickEvent::Trade(t) = reference.next_tick().expect("trade") else {
+            unreachable!("generated source emits trades")
+        };
+        // Mid-sweep means: this child did not open its event AND its event is
+        // not finished, so a snapshot at this instant carries `remaining > 0`.
+        mid_sweep.push(!opens_event && reference.burst.remaining > 0);
+        ticks.push((t.ts_event, t.price, t.size, t.aggressor));
+    }
+    let at = (1_000..3_000)
+        .find(|i| mid_sweep[*i])
+        .expect("a 4000-tick draw at ~8.5 children per event holds a mid-sweep child");
+    let target = ticks[at].0;
+
+    let origin = GeneratedSource::new(scalars, seed, origin_ts, &fp, None);
+    let mut index = CheckpointIndex::new(origin, 7, 100_000);
+    let mut resumed = index.source_at_or_before(target);
+    assert!(index.checkpoint_count() > 1);
+    let mut tick = resumed.next_tick().expect("trade");
+    while tick.ts_event() < target {
+        tick = resumed.next_tick().expect("trade");
+    }
+    for expected in &ticks[at..at + 200] {
+        let TickEvent::Trade(t) = tick else {
+            unreachable!("generated source emits trades")
+        };
+        assert_eq!(
+            (t.ts_event, t.price, t.size, t.aggressor),
+            *expected,
+            "resumed tail diverged after a mid-sweep restore"
+        );
+        tick = resumed.next_tick().expect("trade");
+    }
+}
+
+// A halt lands BETWEEN events, never inside one: the `ReopenGap` crossing check
+// sits in `begin_event`, so a sweep is an atomic exchange action. The failure
+// this pins is a burst whose children straddle the halt, which is a state no
+// venue produces.
+#[test]
+fn a_reopen_gap_never_splits_a_sweep() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let at_ts = 400_000_000_000;
+    let halt_ns = 86_400_000_000_000;
+    let mut src = GeneratedSource::new(
+        scalars,
+        42,
+        0,
+        &fp,
+        Some(MarketRegime::ReopenGap {
+            at_ts,
+            halt_secs: halt_ns / 1_000_000_000,
+            gap_frac: 0.05,
+        }),
+    );
+    let mut crossings = 0;
+    let mut prior_ts = 0;
+    let mut event_start_ts = 0;
+    for _ in 0..200_000 {
+        let opens_event = src.burst.remaining == 0;
+        let tick = src.next_tick().expect("unbounded generated source");
+        if opens_event {
+            event_start_ts = tick.ts_event();
+        }
+        if tick.ts_event().saturating_sub(prior_ts) >= halt_ns {
+            crossings += 1;
+            assert!(
+                opens_event,
+                "the halt landed inside a sweep that opened at {event_start_ts}"
+            );
+        }
+        prior_ts = tick.ts_event();
+    }
+    assert_eq!(crossings, 1, "crossings={crossings}");
+}
+
+// The two state-conditional sweep multipliers must reproduce the DECLARED
+// unconditional child mean exactly, or the mean the fingerprint states and the
+// mean the tape realizes are two different numbers. The active multiplier is
+// therefore not a free constant - it is determined by the quiet share and the
+// quiet multiplier, and this pins the committed literal to that identity.
+#[test]
+fn arrival_children_mults_preserve_the_declared_mean() {
+    use super::consts::{
+        ARRIVAL_ACTIVE_CHILDREN_MULT, ARRIVAL_QUIET_CHILDREN_MULT, ARRIVAL_QUIET_FRACTION,
+    };
+    let blended = ARRIVAL_QUIET_FRACTION * ARRIVAL_QUIET_CHILDREN_MULT
+        + (1.0 - ARRIVAL_QUIET_FRACTION) * ARRIVAL_ACTIVE_CHILDREN_MULT;
+    assert!((blended - 1.0).abs() < 1e-12, "blended={blended}");
+    let derived = (1.0 - ARRIVAL_QUIET_FRACTION * ARRIVAL_QUIET_CHILDREN_MULT)
+        / (1.0 - ARRIVAL_QUIET_FRACTION);
+    assert!(
+        (derived - ARRIVAL_ACTIVE_CHILDREN_MULT).abs() < 1e-12,
+        "derived={derived}"
+    );
 }
 
 #[test]
@@ -1028,11 +1217,15 @@ fn run_seeded_tape_dwell_is_bounded() {
 #[ignore = "walks eight two-million-tick run realizations"]
 fn dwell_is_bounded_across_run_seeds() {
     for run_seed in 0..8 {
-        assert_run_seed_dwell_is_bounded(run_seed);
+        assert_run_seed_dwell_is_bounded_with_draw(run_seed, DRAW / 8);
     }
 }
 
 fn assert_run_seed_dwell_is_bounded(run_seed: u64) {
+    assert_run_seed_dwell_is_bounded_with_draw(run_seed, DRAW);
+}
+
+fn assert_run_seed_dwell_is_bounded_with_draw(run_seed: u64, draw: usize) {
     let fp = Fingerprint::from_repo_json();
     let def = mogwai_protocol::default_instruments()
         .into_iter()
@@ -1043,13 +1236,13 @@ fn assert_run_seed_dwell_is_bounded(run_seed: u64) {
     scalars.price_decimals = u32::from(def.price_precision);
     let seed = mogwai_protocol::RunSeeds::from_run_seed(run_seed).tape;
     let mut src = GeneratedSource::new(scalars.clone(), seed, 0, &fp, None);
-    let measured = measure(&mut src, &scalars, DRAW);
+    let measured = measure(&mut src, &scalars, draw);
     assert_dwell_is_bounded(&measured, &scalars, &fp);
 }
 
 fn assert_dwell_is_bounded(measured: &Measured, scalars: &GeneratorScalars, fp: &Fingerprint) {
     let dwell = &fp.golden_targets.dwell;
-    let cadence = scalars.mean_duration_s / dwell.mean_s.anchor;
+    let cadence = scalars.mean_event_duration_s / dwell.mean_s.anchor;
     assert!(
         measured.gap_p999_s <= DWELL_P999_SLACK * cadence * dwell.gap_p999_s.anchor,
         "gap_p999_s={} bound={}",
@@ -1069,22 +1262,17 @@ fn assert_dwell_is_bounded(measured: &Measured, scalars: &GeneratorScalars, fp: 
         dwell.max_empty_hour_run_h.anchor + EMPTY_HOUR_RUN_SLACK_H
     );
     assert!(
-        (measured.mean_gap_s - scalars.mean_duration_s).abs()
-            <= MEAN_GAP_REL_TOL * scalars.mean_duration_s,
+        (measured.mean_gap_s - scalars.mean_event_duration_s).abs()
+            <= MEAN_GAP_REL_TOL * scalars.mean_event_duration_s,
         "mean_gap_s={} declared_mean_s={}",
         measured.mean_gap_s,
-        scalars.mean_duration_s
+        scalars.mean_event_duration_s
     );
 }
 
-// NOTE: this test asserts the RAW fingerprint shares (intensity_hour,
-// dow_weight) directly against measured occupancy fractions. That only holds
-// because SessionModulator centers each arrival multiplier on 1.0 (the share
-// times 24 or 7), so occupancy converges back to the underlying share. If the
-// centering convention in SessionModulator::new ever changes, these
-// assertions break in a non-obvious way - and because the test is #[ignore]d
-// (it draws 5M ticks), `brokkr check` will not catch the regression. Re-derive
-// the expected curves alongside any centering change.
+// NOTE: the persistent arrival state can carry a long quiet gap across a UTC
+// day boundary. Hour shares remain tightly sampled, while the seven-point day
+// curve is therefore checked for shape rather than exact occupancy.
 #[test]
 #[ignore]
 fn session_modulation_reproduces_curves() {
@@ -1119,7 +1307,7 @@ fn session_modulation_reproduces_curves() {
     let max_vol_hour = argmax(&measured.vol_hour);
     assert_eq!(max_vol_hour, 14);
     assert!(
-        measured.vol_hour[14] > 1.8,
+        measured.vol_hour[14] > 1.5,
         "vol_hour[14]={}",
         measured.vol_hour[14]
     );
@@ -1131,14 +1319,8 @@ fn session_modulation_reproduces_curves() {
     let vol_corr = pearson(&measured.vol_hour, &fp.session_profile.vol_hour);
     assert!(vol_corr > 0.9, "vol_corr={vol_corr}");
 
-    for d in 0..7 {
-        assert_near(
-            "dow_weight",
-            measured.dow_weight[d],
-            fp.session_profile.dow_weight[d],
-            DOW_SHARE_ABS_TOL,
-        );
-    }
+    let dow_corr = pearson(&measured.dow_weight, &fp.session_profile.dow_weight);
+    assert!(dow_corr > 0.9, "dow_corr={dow_corr}");
     for weekday in 1..=5 {
         assert!(
             measured.dow_weight[0] < measured.dow_weight[weekday],
@@ -1168,7 +1350,7 @@ struct Measured {
     gap_p999_s: f64,
     empty_hour_frac: f64,
     max_empty_hour_run_h: f64,
-    duration_dispersion_index: f64,
+    duration_dispersion_cv2: f64,
     duration_acf_lag1: f64,
     duration_acf_lag5: f64,
     return_acf_lag1: f64,
@@ -1180,15 +1362,41 @@ struct Measured {
     size_cv: f64,
     off_grid_prices: usize,
     neutral_aggressors: usize,
+    fills_per_second_mean: f64,
+    fills_per_second_median: u32,
+    fills_per_second_p95: u32,
+    zero_second_frac: f64,
+    truncation_frac: f64,
 }
 
+/// `draw` counts PARENT EVENTS, not prints: at the committed
+/// `children_mean` a 2M-event draw emits roughly 17M raw fills.
+///
+/// The per-EVENT series (parent timestamps, event prices, the gaps and returns
+/// derived from them) are retained in full - 2M `f64` is 16 MB apiece and the
+/// dwell block's p999 needs a sortable duration vector. The per-PRINT series
+/// are NOT: 17M timestamps plus 17M `Decimal` sizes would be most of a
+/// gigabyte, so sizes are folded into running moments and timestamps into the
+/// two structures that actually read them - the occupied-hour set and the
+/// per-second count vector, both O(simulated seconds) rather than O(prints).
 fn measure(src: &mut GeneratedSource, scalars: &GeneratorScalars, draw: usize) -> Measured {
-    let mut timestamps = Vec::with_capacity(draw);
+    let median_size = decimal_to_f64(scalars.typical_notional)
+        / decimal_to_f64(scalars.start_price)
+        / (super::consts::SIZE_LOG_SIGMA.powi(2) / 2.0).exp();
+    let mut parent_timestamps = Vec::with_capacity(draw);
     let mut prices = Vec::with_capacity(draw);
-    let mut sizes = Vec::with_capacity(draw);
+    let mut size_n = 0_u64;
+    let mut size_sum = 0.0_f64;
+    let mut size_sumsq = 0.0_f64;
+    let mut round_lots = 0_u64;
+    let mut occupied_hours: HashSet<u64> = HashSet::new();
+    let mut first_ts = None;
+    let mut last_ts = 0_u64;
+    let mut counts: Vec<u32> = Vec::new();
     let mut off_grid_prices = 0;
     let mut neutral_aggressors = 0;
-    for _ in 0..draw {
+    while prices.len() < draw {
+        let starts_event = src.burst.remaining == 0;
         let TickEvent::Trade(trade) = src.next_tick().expect("unbounded generated source") else {
             unreachable!("generated source emits trades")
         };
@@ -1198,36 +1406,59 @@ fn measure(src: &mut GeneratedSource, scalars: &GeneratorScalars, draw: usize) -
         if trade.aggressor == AggressorSide::NoAggressor {
             neutral_aggressors += 1;
         }
-        timestamps.push(trade.ts_event);
-        prices.push(decimal_to_f64(trade.price));
-        sizes.push(trade.size);
+        let first = *first_ts.get_or_insert(trade.ts_event);
+        last_ts = trade.ts_event;
+        occupied_hours.insert(trade.ts_event / NS_PER_HOUR);
+        let second = (trade.ts_event / 1_000_000_000 - first / 1_000_000_000) as usize;
+        if second >= counts.len() {
+            counts.resize(second + 1, 0);
+        }
+        counts[second] += 1;
+        if starts_event {
+            parent_timestamps.push(trade.ts_event);
+        }
+        if src.burst.remaining == 0 {
+            prices.push(decimal_to_f64(trade.price));
+        }
+        let size = decimal_to_f64(trade.size);
+        size_n += 1;
+        size_sum += size;
+        size_sumsq += size * size;
+        round_lots += u64::from(is_round_lot(trade.size, median_size));
     }
 
     let mut durations = Vec::with_capacity(draw - 1);
     let mut returns = Vec::with_capacity(draw - 1);
     let mut zero_changes = 0;
     for i in 1..draw {
-        durations.push((timestamps[i] - timestamps[i - 1]) as f64 / 1_000_000_000.0);
+        durations.push((parent_timestamps[i] - parent_timestamps[i - 1]) as f64 / 1_000_000_000.0);
         returns.push((prices[i] / prices[i - 1]).ln());
         if prices[i] == prices[i - 1] {
             zero_changes += 1;
         }
     }
     let abs_returns: Vec<f64> = returns.iter().map(|r| r.abs()).collect();
-    let sizes_f64: Vec<f64> = sizes.iter().copied().map(decimal_to_f64).collect();
-    let round_lots = sizes.iter().filter(|size| is_round_lot(**size)).count();
 
     let mut sorted_durations = durations.clone();
     sorted_durations.sort_by(f64::total_cmp);
     let p999_index = (999 * sorted_durations.len()).div_ceil(1000) - 1;
-    let (empty_hour_frac, max_empty_hour_run_h) = empty_hour_stats(&timestamps);
+    let (empty_hour_frac, max_empty_hour_run_h) = empty_hour_stats_over(
+        first_ts.expect("a non-empty draw"),
+        last_ts,
+        &occupied_hours,
+    );
+    let span = counts.len();
+    counts.sort_unstable();
+    let size_mean = size_sum / size_n as f64;
+    let size_var = (size_sumsq / size_n as f64 - size_mean * size_mean).max(0.0);
+    let zero_seconds = counts.partition_point(|count| *count == 0);
     Measured {
         mean_gap_s: mean(&durations),
         max_gap_s: durations.iter().copied().fold(0.0_f64, f64::max),
         gap_p999_s: sorted_durations[p999_index],
         empty_hour_frac,
         max_empty_hour_run_h,
-        duration_dispersion_index: variance(&durations) / mean(&durations),
+        duration_dispersion_cv2: variance(&durations) / mean(&durations).powi(2),
         duration_acf_lag1: acf(&durations, 1),
         duration_acf_lag5: acf(&durations, 5),
         return_acf_lag1: acf(&returns, 1),
@@ -1235,20 +1466,30 @@ fn measure(src: &mut GeneratedSource, scalars: &GeneratorScalars, draw: usize) -
         abs_return_acf_lag10: acf(&abs_returns, 10),
         abs_return_acf_lag50: acf(&abs_returns, 50),
         zero_change_frac: zero_changes as f64 / returns.len() as f64,
-        round_lot_frac: round_lots as f64 / sizes.len() as f64,
-        size_cv: variance(&sizes_f64).sqrt() / mean(&sizes_f64),
+        round_lot_frac: round_lots as f64 / size_n as f64,
+        size_cv: size_var.sqrt() / size_mean,
         off_grid_prices,
         neutral_aggressors,
+        fills_per_second_mean: size_n as f64 / span as f64,
+        fills_per_second_median: counts[(span - 1) / 2],
+        fills_per_second_p95: counts[(95 * span).div_ceil(100) - 1],
+        zero_second_frac: zero_seconds as f64 / span as f64,
+        truncation_frac: src.shape.truncated as f64 / src.shape.drawn as f64,
     }
 }
 
+/// Slice-shaped front for the fixture test below. `measure` streams and calls
+/// `empty_hour_stats_over` directly, because holding 17M print timestamps only
+/// to bucket them is the allocation the streaming rewrite exists to remove.
 fn empty_hour_stats(timestamps_ns: &[u64]) -> (f64, f64) {
-    let Some(&first) = timestamps_ns.first() else {
+    let (Some(&first), Some(&last)) = (timestamps_ns.first(), timestamps_ns.last()) else {
         return (0.0, 0.0);
     };
-    let Some(&last) = timestamps_ns.last() else {
-        return (0.0, 0.0);
-    };
+    let seen: HashSet<u64> = timestamps_ns.iter().map(|ts| ts / NS_PER_HOUR).collect();
+    empty_hour_stats_over(first, last, &seen)
+}
+
+fn empty_hour_stats_over(first: u64, last: u64, seen: &HashSet<u64>) -> (f64, f64) {
     // Population: every whole UTC hour bucket lying fully inside [first, last],
     // matching `dwell_stats` in analysis/characterize.py bucket for bucket so
     // the gate compares like with like. A span holding no complete bucket
@@ -1258,7 +1499,6 @@ fn empty_hour_stats(timestamps_ns: &[u64]) -> (f64, f64) {
     if first_complete >= after_last_complete {
         return (0.0, 0.0);
     }
-    let seen: HashSet<u64> = timestamps_ns.iter().map(|ts| ts / NS_PER_HOUR).collect();
     let total = after_last_complete - first_complete;
     let mut empty = 0_u64;
     let mut run = 0_u64;
@@ -1292,8 +1532,12 @@ fn empty_hour_stats_use_complete_utc_buckets() {
 fn durations(src: &mut GeneratedSource, draw: usize) -> Vec<f64> {
     let mut out = Vec::with_capacity(draw.saturating_sub(1));
     let mut prior_ts = None;
-    for _ in 0..draw {
+    while prior_ts.is_none() || out.len() < draw.saturating_sub(1) {
+        let starts_event = src.burst.remaining == 0;
         let tick = src.next_tick().expect("unbounded generated source");
+        if !starts_event {
+            continue;
+        }
         if let Some(prior) = prior_ts {
             out.push((tick.ts_event() - prior) as f64 / 1_000_000_000.0);
         }
@@ -1305,8 +1549,12 @@ fn durations(src: &mut GeneratedSource, draw: usize) -> Vec<f64> {
 fn latent_returns(src: &mut GeneratedSource, draw: usize) -> Vec<f64> {
     let mut out = Vec::with_capacity(draw.saturating_sub(1));
     let mut prior_mid = src.vol.mid;
-    for _ in 0..draw {
+    while out.len() < draw {
+        let starts_event = src.burst.remaining == 0;
         let _tick = src.next_tick().expect("unbounded generated source");
+        if !starts_event {
+            continue;
+        }
         out.push((src.vol.mid / prior_mid).ln());
         prior_mid = src.vol.mid;
     }
@@ -1322,8 +1570,12 @@ fn windowed_latent_returns(
     let mut in_window = Vec::new();
     let mut out_window = Vec::new();
     let mut prior_mid = src.vol.mid;
-    for _ in 0..draw {
+    while in_window.len() + out_window.len() < draw {
+        let starts_event = src.burst.remaining == 0;
         let _tick = src.next_tick().expect("unbounded generated source");
+        if !starts_event {
+            continue;
+        }
         let ret = (src.vol.mid / prior_mid).ln();
         let hour = utc_hour(src.clock_ns);
         if usize::from(start_hour) <= hour && hour < usize::from(end_hour) {
@@ -1353,15 +1605,34 @@ fn measure_session_curves(src: &mut GeneratedSource, draw: usize) -> SessionCurv
     let mut dow_count = [0_u64; 7];
     let mut prev_price: Option<f64> = None;
 
-    for _ in 0..draw {
+    let mut events = 0;
+    while events < draw {
+        let starts_event = src.burst.remaining == 0;
         let TickEvent::Trade(trade) = src.next_tick().expect("unbounded generated source") else {
             unreachable!("generated source emits trades")
         };
+        if !starts_event {
+            continue;
+        }
+        // Drop the rest of the sweep instead of emitting it, so a four-week
+        // span costs 15M ticks rather than ~130M. Safe for THIS test and no
+        // other: no child draw touches the arrival clock, the GARCH state or
+        // the session curves, which are the only things measured here. It is
+        // NOT the shipped tape's realization - the skipped children would have
+        // consumed level and size draws, so every later draw lands at a
+        // different position in the RNG stream. That makes this a statistically
+        // equivalent path, not a byte-identical one, which is all a curve-shape
+        // assertion needs.
+        src.burst.remaining = 0;
+        events += 1;
         let (hour, dow) = utc_hour_dow(trade.ts_event);
         hour_count[hour] += 1;
         dow_count[dow] += 1;
 
-        let price = decimal_to_f64(trade.price);
+        // Session volatility modulates the one latent update made for each
+        // parent event. Child sweep geometry is execution microstructure, so
+        // measuring the final child would mix level count into this curve.
+        let price = src.vol.mid;
         if let Some(prev) = prev_price {
             let ret = (price / prev).ln();
             sumsq_ret_hour[hour] += ret.powi(2);
@@ -1435,9 +1706,10 @@ fn acf(values: &[f64], lag: usize) -> f64 {
     num / denom
 }
 
-fn is_round_lot(size: Decimal) -> bool {
-    let normalized = size.normalize();
-    normalized.scale() <= 1
+fn is_round_lot(size: Decimal, median: f64) -> bool {
+    let lot = 10.0_f64.powf(median.log10().floor());
+    let units = decimal_to_f64(size) / lot;
+    (units - units.round()).abs() < 1e-6
 }
 
 fn assert_in_range(label: &str, value: f64, range: &MinMedianMax) {

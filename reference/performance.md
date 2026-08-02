@@ -132,3 +132,24 @@ It is built from `mogwai-data` and so omits one ingredient of the server's
 read outside any loop. It also omits the server-private `BoundedSeek` wrapper,
 whose cost is one counter comparison per drained tick. So this number is close
 to, but strictly below, the sweeper's true per-pass fixed cost.
+
+## 2026-08-02 raw-fill cadence L2
+
+| id | mean | std dev |
+|---|---:|---:|
+| `walk_one_pass_1_scan` | 8.314 us | 0.35 % |
+| `walk_one_pass_50_scans` | 8.667 us | 0.42 % |
+| `walk_one_pass_500_scans` | 11.788 us | 0.48 % |
+| `scan_mapping_50` | 30.06 ns | 1.93 % |
+| `source_positioning` | 8.162 us | 0.16 % |
+
+The walk ratios against the prior readings are 28.5x, 29.2x, and 29.2x,
+inside the cadence landing's 42x ceiling after adding a constant-time price
+envelope rejection before the per-scan loop. At speed 100, the paced-tape gate
+delivered 43,121 frames in 10 wall seconds with p99 lateness 19.34 ms and a
+43.77 ms maximum, below the 50 ms threshold, so burst-batched pacing was not
+needed. The fill-band probe read 32 day-spanning windows with zero refusals.
+The uncached 300-second market reading measured 13.86 ms median on the dense
+tape, above the 5 ms submit budget. Caching one reading per symbol per sweep
+interval reduced the repeated-path median and p99 to 30 ns; the first command
+in an interval still pays the synthesis on the blocking worker.

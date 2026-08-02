@@ -24,11 +24,11 @@ use rust_decimal::Decimal;
 const ORIGIN: u64 = 1_700_438_400_000_000_000;
 const SPAN_NS: u64 = 1_000_000_000;
 /// The sweeper's own per-pass drain budget (`fills::SWEEP_DRAIN_BUDGET`).
-const BUDGET: usize = 20_000;
+const BUDGET: usize = 5_000_000;
 /// Mirrors the server's checkpoint spacing (`source::CHECKPOINT_K`), so the
 /// positioning benchmark restores from the same grid and pays the same residual
 /// drain the sweeper does.
-const CHECKPOINT_K: usize = 8_192;
+const CHECKPOINT_K: usize = 262_144;
 /// This BENCH's own walk length. It has no server counterpart: the server's
 /// per-request seek budget (`MAX_HISTORY_SEEK_TICKS`) died with the lazy
 /// history path, because a declared warmup is materialized eagerly and a

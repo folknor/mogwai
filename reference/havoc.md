@@ -11,6 +11,13 @@ suppresses a connection's output wholesale; `StallData` suppresses market data
 only, so a server heartbeat still arrives and a stalled feed stays
 distinguishable from a dead venue.
 
+`FlowSurge { rate_mult, children_mult, duration_ms }` acts on the live tape at
+parent boundaries. It divides parent gaps and increases sweep size for an
+absolute simulated-time window. Historical checkpoint reads remain clean, so
+seeking back across a live surge intentionally does not replay the havoc.
+`LiquidityDrought` remains the inverse rate control: it stretches parent gaps
+while leaving sweep shape unchanged.
+
 A planned run completion is not havoc: it emits `RunComplete` and closes
 normally. That announcement is exempt from both suppression windows - a venue
 that reached its declared duration says so even mid-blackout, because dropping

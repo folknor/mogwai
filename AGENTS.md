@@ -59,9 +59,9 @@ folders section below for what each folder may and may not contain.
 
 Any change to the tape generation path MUST bump
 `mogwai_data::TAPE_PROTOCOL_VERSION`. This includes a generator constant, an
-ACD or GARCH parameter, the committed fingerprint, seed derivation, the fill
-band's draw, or the tape origin. Nothing can detect that a determinism-affecting
-change should have bumped the version and did not.
+arrival-clock or GARCH parameter, the committed fingerprint, seed derivation,
+the fill band's draw, or the tape origin. Nothing can detect that a
+determinism-affecting change should have bumped the version and did not.
 
 ### Reading vs depending on nautilus_trader and broadarrow
 

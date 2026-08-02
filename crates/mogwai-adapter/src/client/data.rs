@@ -1327,6 +1327,21 @@ struct TradeFetch<'a> {
     end: Option<UnixNanos>,
     limit: Option<std::num::NonZeroUsize>,
 }
+/// Request-wide ceiling, in TRADES rather than in pages, on what one paged
+/// history request may accumulate. A page count would multiply badly: 256 pages
+/// at 50,000 each is 12.8M `TradeTick`s and ~1.8 GB of JSON for a single
+/// `request_bars`. 1,000,000 is 20 pages at the current page size, roughly seven
+/// simulated hours, ~140 MB transferred and a resident vector in the low
+/// hundreds of MB.
+///
+/// It is sized against the fact that `request_bars` aggregates from a COMPLETE
+/// trade vector. Making bar aggregation incremental is the change that would let
+/// this be raised; until then the vector is what the bound is about.
+const MAX_TRADES_PER_REQUEST: usize = 1_000_000;
+/// Loop-safety backstop only. The real bound is `MAX_TRADES_PER_REQUEST`; this
+/// exists so a server that kept answering full pages without advancing the
+/// cursor cannot spin forever.
+const MAX_TRADE_PAGES: usize = 64;
 async fn fetch_trades(
     http: &HttpClient,
     quota: &HttpQuota,
@@ -1358,9 +1373,48 @@ async fn fetch_trades_windowed(
     fetch: TradeFetch<'_>,
     mut stop: impl FnMut(&[TradeTick]) -> bool,
 ) -> anyhow::Result<(Vec<TradeTick>, bool)> {
-    let trades = fetch_trades(http, quota, base, fetch).await?;
-    let truncated = stop(&trades);
-    Ok((trades, truncated))
+    let mut out = Vec::new();
+    let mut start = fetch.start;
+    // A caller-stated limit is a request-wide ceiling too, not a per-page one:
+    // it must bound the accumulation or paging would silently overrun it.
+    // Today's two callers pass `None` (their real stop condition is the `stop`
+    // closure), but honoring it keeps the field from becoming a lie.
+    let ceiling = fetch.limit.map_or(MAX_TRADES_PER_REQUEST, |limit| {
+        limit.get().min(MAX_TRADES_PER_REQUEST)
+    });
+    for _ in 0..MAX_TRADE_PAGES {
+        let remaining = ceiling.saturating_sub(out.len());
+        if remaining == 0 {
+            return Ok((out, true));
+        }
+        let page_limit = remaining.min(mogwai_protocol::MAX_HISTORY_LIMIT);
+        let page = fetch_trades(
+            http,
+            quota,
+            base,
+            TradeFetch {
+                symbol: fetch.symbol,
+                start,
+                end: fetch.end,
+                limit: std::num::NonZeroUsize::new(page_limit),
+            },
+        )
+        .await?;
+        let full = page.len() == page_limit;
+        let next = page.last().map(|trade| trade.ts_event.saturating_add(1));
+        out.extend(page);
+        if stop(&out) {
+            return Ok((out, true));
+        }
+        if !full {
+            return Ok((out, false));
+        }
+        let Some(next) = next else {
+            return Ok((out, false));
+        };
+        start = Some(UnixNanos::from(next));
+    }
+    Ok((out, true))
 }
 fn bar_span_reached(trades: &[TradeTick], interval: u64, limit: Option<usize>) -> bool {
     match (trades.first(), trades.last(), limit) {

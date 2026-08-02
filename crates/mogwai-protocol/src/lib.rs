@@ -55,11 +55,24 @@ pub type VenueOrderId = String;
 /// the honest-transport default lives in exactly one spot.
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 
-/// Maximum number of trades a single `/trades` history page returns. The server
-/// enforces this cap (it clamps every request to it), and the adapter requests
-/// within it - sourcing both from here keeps the two in lockstep, so the adapter
-/// never advertises a ceiling larger than the server will honor.
-pub const MAX_HISTORY_LIMIT: usize = 1_000;
+/// What a `/trades` request that states NO `limit` gets. This is the
+/// no-opinion answer, deliberately split from the ceiling below: at the
+/// raw-fill cadence one page at `MAX_HISTORY_LIMIT` is roughly 7 MB of JSON,
+/// and serving that to a caller who expressed no opinion would be a 50x
+/// regression nobody asked for. 1000 raw fills is ~20 simulated seconds.
+pub const DEFAULT_HISTORY_LIMIT: usize = 1_000;
+
+/// Maximum number of trades a single `/trades` history page returns - the
+/// ceiling an EXPLICIT caller may ask for. The server enforces it (it clamps
+/// every request to it) and the adapter, which always states a limit, asks for
+/// exactly this; sourcing both from here keeps the two in lockstep, so the
+/// adapter never advertises a ceiling larger than the server will honor.
+///
+/// Sized against a loopback venue: ~1000 simulated seconds per page, ~7 MB of
+/// JSON, synthesized well inside `DEFAULT_REQUEST_TIMEOUT_SECS`. It is NOT
+/// sized for a real network, and the adapter additionally bounds a whole PAGED
+/// request with its own `MAX_TRADES_PER_REQUEST`.
+pub const MAX_HISTORY_LIMIT: usize = 50_000;
 
 #[cfg(test)]
 mod tests {

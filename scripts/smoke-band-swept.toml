@@ -11,6 +11,6 @@
 # mogwai-data makes a print-rich interval, while the sweep's 5 ms wall floor
 # keeps the pass cost bounded.
 speed = 100.0
-fill_band_vol_mult = 0.5
+fill_band_vol_mult = 0.005
 fill_band_max_ticks = 200
 fill_sweep_interval_ms = 50

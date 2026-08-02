@@ -32,10 +32,31 @@ pub(crate) struct Config {
     /// How many trailing-volatility horizons wide the fill band is. An order's
     /// trigger is drawn uniformly from `0 ..= band_ticks` ticks AWAY from its
     /// stated price, and `band_ticks` is this multiplier times the tape's
-    /// realized volatility scaled to `FILL_HORIZON_NS`. The default `0.5` is the
-    /// smallest multiplier in the calibration sweep whose median implied band
-    /// lands in the usable 3-to-100-tick window on the default BTCUSDT profile
-    /// (9 ticks median, 18 at p90 - see `fills::vol_probe`).
+    /// realized volatility scaled to `FILL_HORIZON_NS`.
+    ///
+    /// `0.005` is the RAW-FILL-CADENCE calibration, selected by
+    /// `fills::vol_probe`'s PROCEED rule - the smallest multiplier whose median
+    /// implied band lands in the 3-to-100-tick usable window. On the committed
+    /// BTCUSDT profile it reads a median implied band of 4 ticks and a p90 of 7.
+    ///
+    /// It replaces `0.5`, which was calibrated against the PRINT-layer tape where
+    /// a 300 s window carried ~32 returns. The same window now carries ~15,700,
+    /// so the estimator's horizon return rose by two orders of magnitude and
+    /// `0.5` implied a median band of 439 ticks with a p90 of 703 - above the
+    /// `fill_band_max_ticks` clamp of 200 at nearly every instant. A clamp-
+    /// saturated band draws uniformly across the full clamp range regardless of
+    /// what the tape is doing, which is the mirror image of the inert `u = 0`
+    /// band: in neither case does the tape decide the fill.
+    ///
+    /// The probe is the provenance. Re-run it (`brokkr test -p mogwai-server
+    /// vol_probe`) and read the selection off its table rather than trusting this
+    /// comment if the fingerprint or the cadence moves again; the golden
+    /// `tests/golden/fill_distribution.json` is blessed against whatever this
+    /// default is and has to be re-blessed with it.
+    ///
+    /// The probe's OTHER reading is good news and closes an open item: cold-
+    /// window refusals are 0 of 128 sampled instants, against a 29.5% refusal
+    /// rate at the print-layer cadence.
     ///
     /// `0.0` is legal and gives the strict-through-at-the-stated-price venue.
     /// That is the DEGENERATE CASE of this model, not a compatibility mode:
@@ -80,11 +101,9 @@ pub(crate) struct Config {
     /// the tape instead is not an option either - every other subscriber on the
     /// symbol shares it.
     ///
-    /// The default 4096 is roughly eight simulated hours at the tape's mean
-    /// cadence, so on a loopback deployment this is unreachable short of a
-    /// client stalling for hours: it is a backstop against a wedged consumer,
-    /// NOT a tuning knob for a modeled pathology. Ordinary slow-consumer
-    /// behavior belongs to the armed havoc surfaces instead.
+    /// The default 65,536 holds about 22 simulated minutes at the raw-fill
+    /// cadence and more than one wall second at speed 100. It is a backstop
+    /// against a wedged consumer, not a modeled pathology.
     /// UNLIKE every neighbouring count knob, `0` is NOT "unbounded" here:
     /// `broadcast::channel(0)` panics, so `validate()` rejects it at load.
     pub(crate) fanout_depth: usize,
@@ -149,7 +168,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             run_duration_ns: 0,
-            fill_band_vol_mult: 0.5,
+            fill_band_vol_mult: 0.005,
             fill_band_max_ticks: 200,
             fill_sweep_interval_ms: 100,
             seed: None,
@@ -169,7 +188,7 @@ impl Default for Config {
             // speed 100. A subscriber that cannot keep up with 4096 queued
             // pre-serialized frames is not a subscriber whose feed is
             // meaningful.
-            fanout_depth: 4096,
+            fanout_depth: 65_536,
             zero_speed_stall_ms: 5000,
             exec_held_budget_bytes: crate::admission::EXEC_HELD_BUDGET_BYTES,
             admission_lane_frames: crate::admission::ADMISSION_LANE_FRAMES,

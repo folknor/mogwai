@@ -11,7 +11,7 @@
 //! - `session` - wall-clock derivation and the precomputed session
 //!   multipliers.
 //! - `regime` - the optional per-subscription market-regime overlay.
-//! - `dynamics` - the ACD duration clock, GARCH latent vol and bounce/drift
+//! - `dynamics` - the stateful arrival clock, GARCH latent vol and bounce/drift
 //!   price process the walk composes each tick.
 //! - `numeric` - small numeric helpers (range checks, saturating decimal
 //!   conversion, round-lot snapping).

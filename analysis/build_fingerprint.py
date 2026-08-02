@@ -144,6 +144,15 @@ def load_reports():
     return reps
 
 
+def load_cadence():
+    path = os.path.join(HERE, "cadence.json")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "analysis/cadence.json is required; run build_cadence.py first")
+    with open(path) as stream:
+        return json.load(stream)
+
+
 def hour_shares(rep):
     c = rep["session"]["count_hour_dow"]
     hour = [sum(c[h]) for h in range(24)]
@@ -188,6 +197,7 @@ def rng(values):
 
 def main():
     reps = load_reports()
+    cadence = load_cadence()
     if not reps:
         print("no char_*.json found; run run_corpus.py first")
         return 1
@@ -225,9 +235,10 @@ def main():
                     "tolerances are the cross-pair spread, anchored on the "
                     "deepest series; duration dispersion and duration ACF are "
                     "era-windowed like dwell, everything else full-span",
-            "duration_dispersion_index": {
-                "anchor": anchor["duration"]["dwell"]["dispersion_index"],
-                "range": rng(disp),
+            "duration_dispersion_cv2": {
+                "anchor": anchor["duration"]["dwell"]["dispersion_index"] /
+                          anchor["duration"]["dwell"]["mean_s"],
+                "range": rng([d["dispersion_index"] / d["mean_s"] for d in dwell]),
             },
             "return_acf_lag1": {"anchor": anchor["returns"]["acf"][0],
                                 "range": rng(ret1)},
@@ -241,7 +252,6 @@ def main():
             },
             "zero_change_frac": {"anchor": anchor["returns"]["zero_change_frac"],
                                  "range": rng(zchg)},
-            "duration_acf_anchor": anchor["duration"]["dwell"]["acf"][:10],
             "return_acf_anchor": anchor["returns"]["acf"][:10],
             "abs_return_acf_anchor": anchor["returns"]["abs_acf"],
             "dwell": {
@@ -271,11 +281,15 @@ def main():
             "modal_tick": rng([r["returns"]["modal_tick"] for r in reps.values()]),
             "price_decimals": rng(
                 [r["returns"]["price_decimals_mode"] for r in reps.values()]),
-            "mean_duration_s": rng(
-                [r["duration"]["mean_s"] for r in reps.values()]),
+            "mean_event_duration_s": cadence["targets"]["mean_event_duration_s"]["range"],
+            "children_mean": cadence["targets"]["children_mean"]["range"],
+            "children_single_frac": cadence["targets"]["children_single_frac"]["range"],
+            "levels_mean": cadence["targets"]["levels_mean"]["range"],
+            "typical_notional": cadence["targets"]["typical_notional"]["range"],
             "size_round_frac": rng(
                 [r["size"]["round_frac"] for r in reps.values()]),
         },
+        "cadence": cadence,
     }
     fingerprint["golden_targets"]["level_queue"] = queue
 
@@ -322,7 +336,7 @@ def main():
 
     print(f"fingerprint: {out}")
     print(f"pairs: {pairs}")
-    print(f"golden disp anchor={fingerprint['golden_targets']['duration_dispersion_index']['anchor']:.0f} "
+    print(f"golden cv2 anchor={fingerprint['golden_targets']['duration_dispersion_cv2']['anchor']:.3f} "
           f"ret1 anchor={fingerprint['golden_targets']['return_acf_lag1']['anchor']:.3f}")
     print("dwell anchor: "
           f"p999={anchor_dwell['gap_p999_s']:.3f}s "

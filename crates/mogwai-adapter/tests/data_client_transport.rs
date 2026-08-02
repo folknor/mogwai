@@ -172,6 +172,71 @@ async fn subscribe_and_request_drive_data_events() {
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn trade_history_pages_without_duplicates_at_the_seam() {
+    use nautilus_common::messages::data::RequestTrades;
+
+    let state = Arc::new(StubState::default());
+    let mut first = Vec::with_capacity(mogwai_protocol::MAX_HISTORY_LIMIT);
+    for ts in 1..=mogwai_protocol::MAX_HISTORY_LIMIT as u64 {
+        first.push(mogwai_protocol::TradeTick {
+            symbol: "BTCUSDT".to_string(),
+            price: rust_decimal::Decimal::new(10_000, 2),
+            size: rust_decimal::Decimal::ONE,
+            aggressor: mogwai_protocol::AggressorSide::Buyer,
+            ts_event: ts,
+        });
+    }
+    let second = vec![mogwai_protocol::TradeTick {
+        symbol: "BTCUSDT".to_string(),
+        price: rust_decimal::Decimal::new(10_100, 2),
+        size: rust_decimal::Decimal::ONE,
+        aggressor: mogwai_protocol::AggressorSide::Seller,
+        ts_event: mogwai_protocol::MAX_HISTORY_LIMIT as u64 + 1,
+    }];
+    {
+        let mut pages = state.trades_pages.lock().expect("trades pages mutex");
+        pages.push_back(serde_json::to_string(&first).expect("first page json"));
+        pages.push_back(serde_json::to_string(&second).expect("second page json"));
+    }
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
+    replace_data_event_sender(sink_tx);
+    let mut client = data_client(base_url);
+    client.start().expect("start grabs the sink");
+    client.connect().await.expect("connect opens the socket");
+    client
+        .request_trades(RequestTrades::new(
+            instrument_id(),
+            None,
+            None,
+            None,
+            Some(ClientId::from("MOGWAI-DATA")),
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+        ))
+        .expect("request trades");
+
+    let timeout = Duration::from_secs(10);
+    loop {
+        if let DataEvent::Response(DataResponse::Trades(resp)) =
+            next_data_event(&mut sink_rx, timeout).await
+        {
+            assert_eq!(resp.data.len(), mogwai_protocol::MAX_HISTORY_LIMIT + 1);
+            for pair in resp.data.windows(2) {
+                assert!(pair[0].ts_event < pair[1].ts_event);
+            }
+            assert_eq!(
+                state.trades_hits.load(std::sync::atomic::Ordering::Relaxed),
+                2
+            );
+            break;
+        }
+    }
+}
+
 /// One run is one instrument, so a subscribe for any other symbol can never be
 /// served. It is refused LOCALLY and loudly rather than recorded as a
 /// subscription that silently never delivers - silence here would be the

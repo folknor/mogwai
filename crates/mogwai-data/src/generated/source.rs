@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The core path-dependent walk: [`GeneratedSource`] composes the ACD
+//! The core path-dependent walk: [`GeneratedSource`] composes the arrival
 //! duration clock, the GARCH latent mid, the bounce/drift price process and
 //! the optional regime overlay into the [`crate::TickSource`] the running
 //! server drives. Same seed plus tape anchor yields the same stream byte for
@@ -18,13 +18,16 @@ use rust_decimal::Decimal;
 use crate::{TickEvent, TickSource};
 
 use super::consts::{
-    ACD_FEEDBACK_SHARE, ACD_PERSISTENCE, ACD_RELAX_MEAN_CAL, ACD_WALL_RELAX_TAU_S,
-    ACD_WEIBULL_SHAPE, GARCH_SIGMA_CAP, HALF_SPREAD_TICKS, MAX_ABS_RETURN, MAX_SESSION_GAP_NS,
-    MID_CEILING, NS_PER_HOUR, SESSION_CLOSED_ARR_MULT, SIZE_DECIMALS, SIZE_LOG_SIGMA, STUDENT_T_DF,
+    ARRIVAL_ACTIVE_CHILDREN_MULT, ARRIVAL_MEAN_CAL, ARRIVAL_QUIET_ACTIVE_RATIO,
+    ARRIVAL_QUIET_CHILDREN_MULT, ARRIVAL_QUIET_FRACTION, ARRIVAL_STATE_PERSISTENCE,
+    ARRIVAL_WEIBULL_MEAN, ARRIVAL_WEIBULL_SHAPE, DRIFT_RECENTER_FRAC, EVENT_PRICE_REPEAT_PROB,
+    GARCH_SIGMA_CAP, HALF_SPREAD_TICKS, HIGH_REGIME_LEVEL_STEP_MULT, INTRA_EVENT_STEP_NS,
+    LOW_REGIME_LEVEL_STEP_MULT, MAX_ABS_RETURN, MAX_SESSION_GAP_NS, MID_CEILING, NS_PER_HOUR,
+    SESSION_CLOSED_ARR_MULT, SIZE_DECIMALS, SIZE_LOG_SIGMA, STUDENT_T_DF,
 };
-use super::dynamics::{AcdClock, BounceState, GarchVol};
+use super::dynamics::{ArrivalClock, BounceState, GarchVol, SweepBurst, SweepShape};
 use super::fingerprint::{Fingerprint, GeneratedSourceError, GeneratorScalars, SessionProfile};
-use super::numeric::{WEIBULL_MEAN_SHAPE_060, decimal_from_f64, round_lot_size};
+use super::numeric::{decimal_from_f64, round_lot_size};
 use super::regime::RegimeState;
 use super::session::SessionModulator;
 
@@ -39,7 +42,7 @@ pub struct GeneratedSource {
     scalars: GeneratorScalars,
     rng: ChaCha12Rng,
     pub(super) clock_ns: u64,
-    acd: AcdClock,
+    arrival: ArrivalClock,
     pub(super) vol: GarchVol,
     session: SessionModulator,
     bounce: BounceState,
@@ -47,8 +50,23 @@ pub struct GeneratedSource {
     normal: Normal<f64>,
     chi_squared: ChiSquared<f64>,
     size_dist: LogNormal<f64>,
+    size_median: f64,
     tick_f64: f64,
     regime: RegimeState,
+    pub(super) shape: SweepShape,
+    pub(super) burst: SweepBurst,
+    last_event_price_ticks: Option<f64>,
+    surge: Option<SurgeWindow>,
+    #[cfg(test)]
+    pub(super) latent_updates: u64,
+}
+
+#[derive(Clone)]
+struct SurgeWindow {
+    start_ns: u64,
+    end_ns: u64,
+    rate_mult: f64,
+    children_mult: f64,
 }
 
 impl GeneratedSource {
@@ -150,14 +168,22 @@ impl GeneratedSource {
     ) -> Result<Self, GeneratedSourceError> {
         scalars.validate(fp).map_err(GeneratedSourceError::Scalar)?;
         session.validate().map_err(GeneratedSourceError::Session)?;
-        let mean_duration_s = scalars.mean_duration_s;
-        let calibrated_mean_s = ACD_RELAX_MEAN_CAL * mean_duration_s;
-        let alpha = ACD_PERSISTENCE * ACD_FEEDBACK_SHARE;
-        let beta = ACD_PERSISTENCE - alpha;
-        let omega = calibrated_mean_s * (1.0 - ACD_PERSISTENCE);
+        let mean_event_duration_s = scalars.mean_event_duration_s;
+        let calibrated_mean_s = ARRIVAL_MEAN_CAL * mean_event_duration_s;
+        let active_mean_s = calibrated_mean_s
+            / ((1.0 - ARRIVAL_QUIET_FRACTION)
+                + ARRIVAL_QUIET_FRACTION * ARRIVAL_QUIET_ACTIVE_RATIO);
         let vol = GarchVol::new(decimal_to_f64(scalars.start_price), scalars.vol_scalar);
-        let size_median = decimal_to_f64(scalars.typical_size).max(f64::MIN_POSITIVE);
+        let size_median = (decimal_to_f64(scalars.typical_notional)
+            / decimal_to_f64(scalars.start_price)
+            / (SIZE_LOG_SIGMA.powi(2) / 2.0).exp())
+        .max(f64::MIN_POSITIVE);
         let size_dist = LogNormal::new(size_median.ln(), SIZE_LOG_SIGMA).expect("valid lognormal");
+        let shape = SweepShape::new(
+            scalars.children_mean,
+            scalars.children_single_frac,
+            scalars.levels_mean,
+        );
         // Built before the struct literal because it borrows `scalars.symbol`,
         // which the literal moves; `start_ts` is the tape anchor RegimeState
         // needs to fail-close an already-elapsed ReopenGap.
@@ -167,14 +193,13 @@ impl GeneratedSource {
             scalars,
             rng: ChaCha12Rng::seed_from_u64(seed),
             clock_ns: start_ts,
-            acd: AcdClock {
-                mean_s: calibrated_mean_s,
-                omega,
-                alpha,
-                beta,
-                psi: calibrated_mean_s,
-                prev_duration_s: calibrated_mean_s,
-                eps_mean: WEIBULL_MEAN_SHAPE_060,
+            arrival: ArrivalClock {
+                active_mean_s,
+                quiet_mean_s: active_mean_s * ARRIVAL_QUIET_ACTIVE_RATIO,
+                quiet_to_active: (1.0 - ARRIVAL_STATE_PERSISTENCE) * (1.0 - ARRIVAL_QUIET_FRACTION),
+                active_to_quiet: (1.0 - ARRIVAL_STATE_PERSISTENCE) * ARRIVAL_QUIET_FRACTION,
+                quiet: false,
+                last_quiet: false,
             },
             vol,
             session: SessionModulator::new(session),
@@ -195,11 +220,18 @@ impl GeneratedSource {
                 drift_hot: false,
                 half_spread_ticks: HALF_SPREAD_TICKS,
             },
-            duration_dist: Weibull::new(1.0, ACD_WEIBULL_SHAPE).expect("valid weibull"),
+            duration_dist: Weibull::new(1.0, ARRIVAL_WEIBULL_SHAPE).expect("valid weibull"),
             normal: Normal::new(0.0, 1.0).expect("valid normal"),
             chi_squared: ChiSquared::new(STUDENT_T_DF).expect("valid chi-squared"),
             size_dist,
+            size_median,
             regime,
+            shape,
+            burst: SweepBurst::empty(),
+            last_event_price_ticks: None,
+            surge: None,
+            #[cfg(test)]
+            latent_updates: 0,
         })
     }
 
@@ -234,18 +266,18 @@ impl GeneratedSource {
 
     fn next_duration_ns(&mut self) -> u64 {
         let raw_eps = self.duration_dist.sample(&mut self.rng);
-        let eps = (raw_eps / self.acd.eps_mean).max(f64::MIN_POSITIVE);
-        let unrelaxed = self.acd.omega
-            + self.acd.alpha * self.acd.prev_duration_s
-            + self.acd.beta * self.acd.psi;
-        let relax_weight = (-self.acd.prev_duration_s / ACD_WALL_RELAX_TAU_S).exp();
-        self.acd.psi = self.acd.mean_s + relax_weight * (unrelaxed - self.acd.mean_s);
-        let duration_s = (self.acd.psi * eps).max(0.000_000_001);
-        // ACD feedback sees the un-modulated duration so clustering dynamics are
-        // unchanged; the session envelope only stretches or compresses the
-        // realized gap. The relaxation weight above likewise reads this last
-        // un-modulated draw, never a realized or regime-thinned gap.
-        self.acd.prev_duration_s = duration_s;
+        self.arrival.last_quiet = self.arrival.quiet;
+        let state_mean = if self.arrival.quiet {
+            self.arrival.quiet_mean_s
+        } else {
+            self.arrival.active_mean_s
+        };
+        let duration_s = (state_mean * raw_eps / ARRIVAL_WEIBULL_MEAN).max(0.000_000_001);
+        self.arrival.quiet = if self.arrival.quiet {
+            !self.rng.random_bool(self.arrival.quiet_to_active)
+        } else {
+            self.rng.random_bool(self.arrival.active_to_quiet)
+        };
         let arr_mult = self.session.arrival_mult(self.clock_ns);
         if arr_mult >= SESSION_CLOSED_ARR_MULT {
             // Open-market path: the multiplier sampled at the instant the gap
@@ -341,6 +373,10 @@ impl GeneratedSource {
     }
 
     fn next_latent_mid(&mut self) -> f64 {
+        #[cfg(test)]
+        {
+            self.latent_updates += 1;
+        }
         let normal = self.normal.sample(&mut self.rng);
         // Guard against a chi-squared draw that underflows to exactly 0.0: an
         // unguarded 0.0 denominator makes `student_t` `0.0/0.0 = NaN` when
@@ -429,7 +465,7 @@ impl GeneratedSource {
     fn next_size(&mut self) -> Decimal {
         let base = self.size_dist.sample(&mut self.rng).max(f64::MIN_POSITIVE);
         let size = if self.rng.random_bool(self.scalars.size_round_frac) {
-            round_lot_size(base)
+            round_lot_size(base, self.size_median)
         } else {
             decimal_from_f64(base).round_dp(SIZE_DECIMALS)
         };
@@ -439,7 +475,42 @@ impl GeneratedSource {
 
 impl TickSource for GeneratedSource {
     fn next_tick(&mut self) -> Option<TickEvent> {
-        let dt_ns = self.next_duration_ns();
+        if self.burst.remaining == 0 {
+            self.begin_event();
+        }
+        Some(TickEvent::Trade(self.next_child()))
+    }
+
+    fn arm_flow_surge(
+        &mut self,
+        start_ns: u64,
+        duration_ms: u64,
+        rate_mult: f64,
+        children_mult: f64,
+    ) {
+        self.surge = Some(SurgeWindow {
+            start_ns,
+            end_ns: start_ns.saturating_add(duration_ms.saturating_mul(1_000_000)),
+            rate_mult,
+            children_mult,
+        });
+    }
+
+    fn clear_flow_surge(&mut self) {
+        self.surge = None;
+    }
+}
+
+impl GeneratedSource {
+    fn begin_event(&mut self) {
+        let (rate_mult, children_mult) = self
+            .surge
+            .as_ref()
+            .filter(|window| (window.start_ns..window.end_ns).contains(&self.clock_ns))
+            .map_or((1.0, 1.0), |window| {
+                (window.rate_mult, window.children_mult)
+            });
+        let dt_ns = ((self.next_duration_ns() as f64 / rate_mult).round() as u64).max(1);
         // Order is load-bearing: next_duration_ns reads the arrival multiplier at
         // the START of the gap (the clock has not advanced yet), then the clock
         // steps, then next_latent_mid reads the volatility multiplier at the
@@ -457,13 +528,112 @@ impl TickSource for GeneratedSource {
         }
         let mid = self.next_latent_mid();
         let (price, aggressor) = self.next_price(mid);
-        let size = self.next_size();
-        Some(TickEvent::Trade(TradeTick {
+        // Sweep size is conditional on the arrival state, and the two branches
+        // are constructed to reproduce the DECLARED unconditional shape:
+        //
+        // - the mean, exactly, by the identity ARRIVAL_*_CHILDREN_MULT carry;
+        // - the single-child fraction, by giving the active state whatever
+        //   residual mass is left once the quiet state has contributed its own.
+        //   The quiet mean is far enough below the declared mean that its
+        //   mixture solve falls into the pure-geometric fallback of section
+        //   2.3, so the quiet state's realized single fraction is 1 / (C_bar *
+        //   QUIET_MULT); that is the term subtracted here. The `.max(0.0)`
+        //   is the honest floor for a config where no residual is left - the
+        //   quiet state alone then already over-supplies single-child events.
+        //
+        // The shape is re-solved per event rather than cached because a
+        // `FlowSurge` may also be scaling `children_mean` right now. It is
+        // arithmetic on five floats, no allocation; `self.shape` stays the
+        // owner of `level_step_prob` and of the truncation counters the realism
+        // gate reads, which is why they are folded back in below.
+        let state_children_mult = if self.arrival.last_quiet {
+            ARRIVAL_QUIET_CHILDREN_MULT
+        } else {
+            ARRIVAL_ACTIVE_CHILDREN_MULT
+        };
+        let state_single_frac = if self.arrival.last_quiet {
+            self.scalars.children_single_frac
+        } else {
+            ((self.scalars.children_single_frac
+                - ARRIVAL_QUIET_FRACTION
+                    / (self.scalars.children_mean * ARRIVAL_QUIET_CHILDREN_MULT))
+                / (1.0 - ARRIVAL_QUIET_FRACTION))
+                .max(0.0)
+        };
+        let count = {
+            let mut event_shape = SweepShape::new(
+                self.scalars.children_mean * children_mult * state_children_mult,
+                state_single_frac,
+                // Levels are not drawn here: `next_child` walks the grid off
+                // `self.shape.level_step_prob`, which is solved once from the
+                // declared `levels_mean` and never state-conditioned. Any
+                // value in [1, mean] would do; 1.0 says "unused" plainly.
+                1.0,
+            );
+            let count = event_shape.next_count(&mut self.rng);
+            self.shape.drawn += 1;
+            self.shape.truncated += event_shape.truncated;
+            count
+        };
+        let price_ticks = if count == 1
+            && !self.bounce.high_regime
+            && self.rng.random_bool(EVENT_PRICE_REPEAT_PROB)
+        {
+            self.last_event_price_ticks
+                .unwrap_or_else(|| decimal_to_f64(price) / self.tick_f64)
+        } else {
+            decimal_to_f64(price) / self.tick_f64
+        };
+        self.burst = SweepBurst {
+            remaining: count,
+            emitted: 0,
+            parent_ts_ns: self.clock_ns,
+            side: aggressor,
+            price_ticks,
+        };
+    }
+
+    fn next_child(&mut self) -> TradeTick {
+        let level_step_prob = if self.bounce.high_regime {
+            (self.shape.level_step_prob * HIGH_REGIME_LEVEL_STEP_MULT).min(1.0)
+        } else {
+            self.shape.level_step_prob * LOW_REGIME_LEVEL_STEP_MULT
+        };
+        if self.burst.emitted > 0 && self.rng.random_bool(level_step_prob) {
+            match self.burst.side {
+                AggressorSide::Buyer => self.burst.price_ticks += 1.0,
+                AggressorSide::Seller => self.burst.price_ticks -= 1.0,
+                AggressorSide::NoAggressor => unreachable!("parent side is native"),
+            }
+        }
+        self.burst.price_ticks = self.burst.price_ticks.max(1.0);
+        self.clock_ns = self
+            .burst
+            .parent_ts_ns
+            .saturating_add(u64::from(self.burst.emitted).saturating_mul(INTRA_EVENT_STEP_NS));
+        let price = decimal_from_f64(self.burst.price_ticks * self.tick_f64)
+            .round_dp(self.scalars.price_decimals);
+        let tick = TradeTick {
             symbol: self.scalars.symbol.clone(),
             price,
-            size,
-            aggressor,
+            size: self.next_size(),
+            aggressor: self.burst.side,
             ts_event: self.clock_ns,
-        }))
+        };
+        self.burst.remaining -= 1;
+        self.burst.emitted += 1;
+        if self.burst.remaining == 0 {
+            // End of the sweep: remember where it finished (the repeat branch
+            // in `begin_event` quotes from here) and RE-CENTRE the bounce
+            // drift on the residual between the last printed level and the
+            // latent mid. `BounceState::next_drift` still takes its per-event
+            // step, but it no longer accumulates across events - see the field
+            // comment on `drift_ticks`.
+            self.last_event_price_ticks = Some(self.burst.price_ticks);
+            self.bounce.drift_ticks = (DRIFT_RECENTER_FRAC
+                * (self.burst.price_ticks - self.vol.mid / self.tick_f64))
+                .round() as i64;
+        }
+        tick
     }
 }

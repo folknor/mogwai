@@ -11,9 +11,10 @@ resolution there is no timestamp-collision artifact, unlike aggTrades, so the
 per-second count distribution is a clean read on burstiness.
 
 Counts here are RAW fills, which is the largest of the three trade definitions
-(raw fills > aggTrades > match events; see notes/problem-trade-cadence.md).
-Do not compare this number against an aggTrades rate without saying which is
-which.
+- raw fills are individual executions, aggTrades merge fills sharing a taker
+order's price and timestamp, and match events collapse further to one taker
+order however many makers it hit. Do not compare this number against an
+aggTrades rate without saying which is which.
 
 Streaming and O(1) in memory except for the per-second count vector, which is
 one int per second of the archive (2.6M for a month).
@@ -25,6 +26,7 @@ Usage:
 
 import csv
 import io
+import os
 import statistics
 import sys
 import zipfile
@@ -61,7 +63,22 @@ def probe(path):
     ordered = sorted(counts)
     zero = sum(1 for c in counts if c == 0)
 
-    print(path.split("/")[-1])
+    result = {
+        "seconds": seconds,
+        "raw_trades": total,
+        "per_second_counts": {
+            "mean": statistics.mean(counts),
+            "median": statistics.median(counts),
+            "p95": ordered[int(0.95 * seconds)],
+            "max": ordered[-1],
+            "zero_frac": zero / seconds,
+        },
+        "mean_trade_size": volume / total,
+        "mean_notional": quote / total,
+        "notional_per_second": quote / seconds,
+        "taker_buy_share": taker / volume,
+    }
+    print(os.path.basename(path))
     print(f"  seconds         {seconds:,}")
     print(f"  raw trades      {total:,}")
     print(f"  trades/sec      mean {statistics.mean(counts):.2f}"
@@ -75,6 +92,7 @@ def probe(path):
     print(f"  notional/trade  ${quote / total:,.0f}")
     print(f"  notional/sec    ${quote / seconds:,.0f}")
     print(f"  taker-buy share {taker / volume:.4f}   (of base volume)")
+    return result
 
 
 if __name__ == "__main__":

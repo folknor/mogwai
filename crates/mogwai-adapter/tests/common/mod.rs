@@ -25,6 +25,7 @@
 
 use std::{
     cell::RefCell,
+    collections::VecDeque,
     rc::Rc,
     sync::{
         Arc, Mutex,
@@ -98,6 +99,8 @@ pub struct StubState {
     pub ws_server_pings: AtomicUsize,
     /// JSON body of each HTTP `GET /trades` response. Defaults to `[]`.
     pub trades_body: Mutex<Option<String>>,
+    /// Optional successive `/trades` bodies for pagination tests.
+    pub trades_pages: Mutex<VecDeque<String>>,
     /// When true, `GET /trades` answers `500`, modelling a venue that refuses
     /// the history fetch. The request generators must still emit a (empty)
     /// response rather than leaving the nautilus request unresolved.
@@ -212,10 +215,11 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
             respond_json(stream, "500 Internal Server Error", "").await;
         } else {
             let body = state
-                .trades_body
+                .trades_pages
                 .lock()
-                .expect("trades body mutex")
-                .clone()
+                .expect("trades pages mutex")
+                .pop_front()
+                .or_else(|| state.trades_body.lock().expect("trades body mutex").clone())
                 .unwrap_or_else(|| "[]".to_string());
             respond_json(stream, "200 OK", &body).await;
         }

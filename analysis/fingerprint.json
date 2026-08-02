@@ -15,12 +15,12 @@
   },
   "golden_targets": {
     "_doc": "the generator's synthetic stream must reproduce these; tolerances are the cross-pair spread, anchored on the deepest series; duration dispersion and duration ACF are era-windowed like dwell, everything else full-span",
-    "duration_dispersion_index": {
-      "anchor": 36.278444299915236,
+    "duration_dispersion_cv2": {
+      "anchor": 12.636600951224871,
       "range": {
-        "min": 36.278444299915236,
-        "median": 164.5019199508684,
-        "max": 1627.8607991153633
+        "min": 11.850739982907303,
+        "median": 33.78236302154724,
+        "max": 187.36780710161992
       }
     },
     "return_acf_lag1": {
@@ -65,18 +65,6 @@
         "max": 0.7510754726624204
       }
     },
-    "duration_acf_anchor": [
-      0.16032326206843064,
-      0.13954658272146567,
-      0.1244541132410137,
-      0.11694460382030801,
-      0.11134268260464784,
-      0.1078807915129391,
-      0.10446066929242681,
-      0.10183059133971133,
-      0.09997342374830519,
-      0.09780824326808452
-    ],
     "return_acf_anchor": [
       -0.1969661298377815,
       -0.06387561554926988,
@@ -585,15 +573,306 @@
       "median": 4.0,
       "max": 7
     },
-    "mean_duration_s": {
-      "min": 3.7537612720493585,
-      "median": 7.194349711185499,
-      "max": 12.55624317568549
+    "mean_event_duration_s": {
+      "max": 0.7743752935385264,
+      "median": 0.17104059420590498,
+      "min": 0.09833512865934796
+    },
+    "children_mean": {
+      "max": 12.735798829863239,
+      "median": 6.911916756119584,
+      "min": 4.302627072266479
+    },
+    "children_single_frac": {
+      "max": 0.8380251819005528,
+      "median": 0.493046043756676,
+      "min": 0.25867103362691796
+    },
+    "levels_mean": {
+      "max": 3.3706665508799256,
+      "median": 1.7442105614782686,
+      "min": 1.0
+    },
+    "typical_notional": {
+      "max": 466.12754727409384,
+      "median": 191.39625649855998,
+      "min": 100.7834655729268
     },
     "size_round_frac": {
       "min": 0.12178520017317648,
       "median": 0.20856767610054022,
       "max": 0.27079954941337425
+    }
+  },
+  "cadence": {
+    "anchor": "BTCUSDT",
+    "pairs": {
+      "BTCUSDT": {
+        "bytes": 9767151124,
+        "mean_notional": 310.7516981827292,
+        "per_second_counts": {
+          "mean": 49.64045216049383,
+          "median": 4,
+          "p95": 257,
+          "zero_frac": 0.13345717592592593
+        },
+        "raw_fills_per_second": 49.64045216049383,
+        "rows": 128668052,
+        "span_days": 30.0,
+        "timestamp_and_side": {
+          "children": {
+            "max": 3690,
+            "mean": 8.49053255324216,
+            "p95": 39,
+            "single_frac": 0.5586834546003685
+          },
+          "events": 15154297,
+          "levels": {
+            "mean": 2.2471110339199503,
+            "single_frac": 0.7649023903913194
+          },
+          "parent_gap": {
+            "acf_lag1": 0.32204142581620676,
+            "acf_lag5": 0.22388204486699373,
+            "cv2": 4.618827832310333,
+            "mean_s": 0.17104059420590498,
+            "var_over_mean": 0.7900070569731314
+          },
+          "subsecond_distinct_gap_mean_us": 114561.30660640613
+        },
+        "timestamp_only": {
+          "children": {
+            "max": 4924,
+            "mean": 8.493044997120096,
+            "p95": 39,
+            "single_frac": 0.5586475187088106
+          },
+          "events": 15149814,
+          "levels": {
+            "mean": 2.2475604650987795,
+            "single_frac": 0.7648321622958539
+          },
+          "parent_gap": {
+            "acf_lag1": 0.32201057510412073,
+            "acf_lag5": 0.22385591277505712,
+            "cv2": 4.6171656498392855,
+            "mean_s": 0.17109120704078454,
+            "var_over_mean": 0.7899564441382516
+          },
+          "subsecond_distinct_gap_mean_us": 114561.30660640613
+        }
+      },
+      "ETHUSDT": {
+        "bytes": 9081421414,
+        "mean_notional": 151.1751983593902,
+        "per_second_counts": {
+          "mean": 46.859592978395064,
+          "median": 3,
+          "p95": 233,
+          "zero_frac": 0.2622206790123457
+        },
+        "raw_fills_per_second": 46.859592978395064,
+        "rows": 121460065,
+        "span_days": 30.0,
+        "timestamp_and_side": {
+          "children": {
+            "max": 3163,
+            "mean": 6.911916756119584,
+            "p95": 29,
+            "single_frac": 0.38800655044037696
+          },
+          "events": 17572559,
+          "levels": {
+            "mean": 1.7442105614782686,
+            "single_frac": 0.7737608961790938
+          },
+          "parent_gap": {
+            "acf_lag1": 0.3364804790391064,
+            "acf_lag5": 0.1784387949554087,
+            "cv2": 10.010108456606508,
+            "mean_s": 0.14750269298902194,
+            "var_over_mean": 1.476517954461642
+          },
+          "subsecond_distinct_gap_mean_us": 70957.68983927203
+        },
+        "timestamp_only": {
+          "children": {
+            "max": 3163,
+            "mean": 6.912921875259675,
+            "p95": 29,
+            "single_frac": 0.38796678703089654
+          },
+          "events": 17570004,
+          "levels": {
+            "mean": 1.7443458180203033,
+            "single_frac": 0.7737337453081968
+          },
+          "parent_gap": {
+            "acf_lag1": 0.33648917739936063,
+            "acf_lag5": 0.1784454343444415,
+            "cv2": 10.008507618122627,
+            "mean_s": 0.14752414258015673,
+            "var_over_mean": 1.4764965048705072
+          },
+          "subsecond_distinct_gap_mean_us": 70957.68983927203
+        }
+      },
+      "SOLUSDT": {
+        "bytes": 2368894564,
+        "mean_notional": 191.39625649855998,
+        "per_second_counts": {
+          "mean": 12.501573498405667,
+          "median": 1,
+          "p95": 57,
+          "zero_frac": 0.3892901027972662
+        },
+        "raw_fills_per_second": 12.501573498405667,
+        "rows": 32404016,
+        "span_days": 29.99994212962963,
+        "timestamp_and_side": {
+          "children": {
+            "max": 4459,
+            "mean": 6.453940608399718,
+            "p95": 21,
+            "single_frac": 0.493046043756676
+          },
+          "events": 5020811,
+          "levels": {
+            "mean": 1.0154084668791556,
+            "single_frac": 0.987715132077268
+          },
+          "parent_gap": {
+            "acf_lag1": 0.2788056495794741,
+            "acf_lag5": 0.1975888926421296,
+            "cv2": 3.5761938310444163,
+            "mean_s": 0.516250195692351,
+            "var_over_mean": 1.8462107651104585
+          },
+          "subsecond_distinct_gap_mean_us": 180284.46304306106
+        },
+        "timestamp_only": {
+          "children": {
+            "max": 4479,
+            "mean": 6.456201199708391,
+            "p95": 21,
+            "single_frac": 0.4929822418691335
+          },
+          "events": 5019053,
+          "levels": {
+            "mean": 1.0155342053570664,
+            "single_frac": 0.9876100132833824
+          },
+          "parent_gap": {
+            "acf_lag1": 0.2788013420806035,
+            "acf_lag5": 0.19758496799336892,
+            "cv2": 3.5745915101529726,
+            "mean_s": 0.5164310202472723,
+            "var_over_mean": 1.8460299405555376
+          },
+          "subsecond_distinct_gap_mean_us": 180284.46304306106
+        }
+      }
+    },
+    "provenance": {
+      "archives": [
+        {
+          "bytes": 914498374,
+          "name": "BTCUSDT-trades-2026-06.zip",
+          "rows": 128668052,
+          "span_days": 30.0
+        },
+        {
+          "bytes": 905842175,
+          "name": "ETHUSDT-trades-2026-06.zip",
+          "rows": 121460065,
+          "span_days": 30.0
+        },
+        {
+          "bytes": 270989829,
+          "name": "SOLUSDT-trades-2026-06.zip",
+          "rows": 32404016,
+          "span_days": 29.99994212962963
+        }
+      ],
+      "generated_utc": "2026-08-02T20:24:29.665781+00:00"
+    },
+    "shape": {
+      "fallback_pure_geometric": false,
+      "level_step_prob": 0.16649163795171784,
+      "m": 16.973151429115703,
+      "q": 0.5310548086592048
+    },
+    "targets": {
+      "children_mean": {
+        "anchor": 8.49053255324216,
+        "range": {
+          "max": 12.735798829863239,
+          "median": 6.911916756119584,
+          "min": 4.302627072266479
+        }
+      },
+      "children_single_frac": {
+        "anchor": 0.5586834546003685,
+        "range": {
+          "max": 0.8380251819005528,
+          "median": 0.493046043756676,
+          "min": 0.25867103362691796
+        }
+      },
+      "duration_acf_lag1": {
+        "anchor": 0.32204142581620676,
+        "range": {
+          "max": 0.5047207185586595,
+          "median": 0.32204142581620676,
+          "min": 0.18587043305298276
+        }
+      },
+      "duration_acf_lag5": {
+        "anchor": 0.22388204486699373,
+        "range": {
+          "max": 0.3358230673004906,
+          "median": 0.1975888926421296,
+          "min": 0.11895919663693914
+        }
+      },
+      "duration_dispersion_cv2": {
+        "anchor": 4.618827832310333,
+        "range": {
+          "max": 15.015162684909761,
+          "median": 4.618827832310333,
+          "min": 2.3841292206962774
+        }
+      },
+      "levels_mean": {
+        "anchor": 2.2471110339199503,
+        "range": {
+          "max": 3.3706665508799256,
+          "median": 1.7442105614782686,
+          "min": 1.0
+        }
+      },
+      "mean_event_duration_s": {
+        "anchor": 0.17104059420590498,
+        "range": {
+          "max": 0.7743752935385264,
+          "median": 0.17104059420590498,
+          "min": 0.09833512865934796
+        }
+      },
+      "per_second_counts": {
+        "mean": 49.64045216049383,
+        "median": 4,
+        "p95": 257,
+        "zero_frac": 0.13345717592592593
+      },
+      "typical_notional": {
+        "anchor": 310.7516981827292,
+        "range": {
+          "max": 466.12754727409384,
+          "median": 191.39625649855998,
+          "min": 100.7834655729268
+        }
+      }
     }
   }
 }

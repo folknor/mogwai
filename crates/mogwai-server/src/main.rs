@@ -48,6 +48,17 @@ use crate::{
 
 const LONG_VERSION: &str = env!("MOGWAI_LONG_VERSION");
 
+/// Raw fills the generator synthesizes per wall second, used only to project
+/// warmup cost at boot. It is a MEASURED number, not a target - re-read it off
+/// the `fill_bench` row in `reference/performance.md` whenever the walk changes,
+/// or the projection quietly drifts away from what boot actually costs.
+const SYNTHESIS_TICKS_PER_SEC: f64 = 5_000_000.0;
+/// Projected warmup synthesis above this escalates the boot line from INFO to
+/// WARN. No refusal: warmup length is the operator's call, and the obligation
+/// this discharges is only that an extreme warmup fails loudly rather than
+/// looking like a hung boot.
+const WARMUP_WARN_SECS: f64 = 60.0;
+
 fn long_version() -> String {
     format!("{LONG_VERSION} tape {}", mogwai_data::TAPE_PROTOCOL_VERSION)
 }
@@ -150,6 +161,40 @@ async fn serve_async(
         seeds,
         regime: cfg.regime,
     };
+    // Boot projections. Both are advisory - warmup length and ring depth are
+    // the operator's call - but an extreme warmup must fail LOUDLY rather than
+    // look like a hung boot, and a ring sized for the old cadence is a
+    // correctness problem (`FeedLagged` closes the socket with WS 1011), not a
+    // tuning one. A missing profile is not fatal here: the run has already been
+    // validated against the instrument set, so this only skips the advice.
+    if let Some(profile) = profiles.get(&instrument.symbol) {
+        let projected_ticks =
+            cfg.warmup_ns as f64 / 1_000_000_000.0 / profile.scalars.mean_event_duration_s
+                * profile.scalars.children_mean;
+        let projected_synthesis_s = projected_ticks / SYNTHESIS_TICKS_PER_SEC;
+        if projected_synthesis_s > WARMUP_WARN_SECS {
+            tracing::warn!(
+                projected_ticks,
+                projected_synthesis_s,
+                "warmup synthesis is projected to exceed 60 seconds"
+            );
+        } else {
+            tracing::info!(
+                projected_ticks,
+                projected_synthesis_s,
+                "projected warmup synthesis cost"
+            );
+        }
+        let projected_wall_frames =
+            profile.scalars.children_mean / profile.scalars.mean_event_duration_s * cfg.speed;
+        if (cfg.fanout_depth as f64) < projected_wall_frames {
+            tracing::warn!(
+                fanout_depth = cfg.fanout_depth,
+                projected_wall_frames,
+                "fanout ring holds less than one projected wall second"
+            );
+        }
+    }
     let checkpoints = tokio::task::spawn_blocking(move || {
         source::materialize_warmup(&warm_symbol, &warm_profiles, warm_boot, run_start_ns)
     })
@@ -194,6 +239,7 @@ async fn serve_async(
         cfg: cfg.clone(),
         profiles: Arc::clone(&profiles),
         pending_acts: Arc::new(tokio::sync::Semaphore::new(cfg.global_pending_command_acts)),
+        market_readings: Arc::new(fills::MarketReadingCache::default()),
     };
     let completing_run = Arc::clone(&state.run);
     let app = Router::new()

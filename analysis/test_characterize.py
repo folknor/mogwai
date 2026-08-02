@@ -11,8 +11,13 @@ closure, the era window, the binning, and the histogram quantiles.
 """
 
 import unittest
+import tempfile
+import zipfile
+from pathlib import Path
+from contextlib import redirect_stdout
+from io import StringIO
 
-from analysis.build_fingerprint import level_queue, level_verdict
+from analysis.build_fingerprint import level_queue, level_verdict, load_cadence
 from analysis.characterize import (
     LVL_BINS,
     LVL_LOG_HI,
@@ -22,6 +27,12 @@ from analysis.characterize import (
     histogram_quantile,
     lvl_bin,
 )
+from analysis.build_cadence import solve_shape
+from analysis.check_cadence_feasible import next_count
+from analysis.probe_binance_aggtrades import AutoCorr
+from analysis.probe_binance_aggtrades import probe as probe_aggtrades
+from analysis.probe_binance_klines import probe as probe_klines
+from analysis.probe_binance_trades import EventStats, probe as probe_trades
 
 ERA = 1_000_000
 
@@ -238,6 +249,79 @@ class LevelQueueTests(unittest.TestCase):
             "anchor single_print_frac within 1.5x of the cross-pair median",
             verdict["failed"])
         self.assertAlmostEqual(verdict["single_print_frac_cross_pair_median"], 0.4)
+
+
+class CadenceTests(unittest.TestCase):
+    def test_event_grouping_rules_are_distinct(self):
+        side = EventStats(True)
+        stamp = EventStats(False)
+        for ts, taker_side, price in ((10, False, "1"), (10, True, "2"), (11, True, "2")):
+            side.push(ts, taker_side, price)
+            stamp.push(ts, taker_side, price)
+        self.assertEqual(side.report()["events"], 3)
+        self.assertEqual(stamp.report()["events"], 2)
+
+    def test_mixture_solution_and_fallback(self):
+        mixed = solve_shape(5.0, 0.5, 2.0)
+        self.assertFalse(mixed["fallback_pure_geometric"])
+        self.assertAlmostEqual(mixed["m"], 8.0)
+        fallback = solve_shape(5.0, 0.1, 2.0)
+        self.assertTrue(fallback["fallback_pure_geometric"])
+        self.assertEqual(fallback["q"], 0.0)
+        self.assertEqual(fallback["m"], 5.0)
+
+    def test_geometric_sampler_uses_the_pinned_inverse_cdf(self):
+        values = iter((0.9, 0.0, 0.9, 0.5))
+        uniform = lambda: next(values)
+        self.assertEqual(next_count(uniform, 0.5, 4.0)[0], 1)
+        self.assertEqual(next_count(uniform, 0.5, 4.0)[0], 3)
+
+    def test_raw_probe_returns_structured_result(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory:
+            path = Path(directory) / "fixture.zip"
+            rows = (
+                "1,100,1,100,1000000,false,true\n"
+                "2,100,2,200,1000000,false,true\n"
+                "3,101,1,101,2000000,true,true\n"
+            )
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("fixture.csv", rows)
+            with redirect_stdout(StringIO()):
+                result = probe_trades(path)
+        self.assertEqual(result["rows"], 3)
+        self.assertEqual(result["timestamp_and_side"]["events"], 2)
+        self.assertIn("per_second_counts", result)
+
+    def test_kline_probe_returns_structured_result(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory:
+            path = Path(directory) / "fixture.zip"
+            rows = (
+                "1000,1,1,1,1,2,1999,20,2,1,10,0\n"
+                "2000,1,1,1,1,3,2999,30,0,2,20,0\n"
+            )
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("fixture.csv", rows)
+            with redirect_stdout(StringIO()):
+                result = probe_klines(path)
+        self.assertEqual(result["raw_trades"], 2)
+        self.assertEqual(result["per_second_counts"]["median"], 1.0)
+
+    def test_aggtrades_probe_returns_structured_result(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory:
+            path = Path(directory) / "fixture.zip"
+            rows = "".join(
+                f"{i},100,1,{i},{i},{1_000_000 + i * 1_000_000},false,true\n"
+                for i in range(8)
+            )
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("fixture.csv", rows)
+            with redirect_stdout(StringIO()):
+                result = probe_aggtrades(path)
+        self.assertEqual(result["trades"], 8)
+        self.assertIn("event_duration", result)
+
+    def test_committed_cadence_is_loadable(self):
+        self.assertEqual(load_cadence()["anchor"], "BTCUSDT")
 
 
 if __name__ == "__main__":

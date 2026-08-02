@@ -72,6 +72,12 @@ pub enum Divergence {
     /// data is withheld, especially when paired with the server
     /// `Heartbeat`.
     StallData { ms: u64 },
+    /// Temporarily accelerate parent arrivals and enlarge their sweeps.
+    FlowSurge {
+        rate_mult: f64,
+        children_mult: f64,
+        duration_ms: u64,
+    },
     /// Clear the server-owned temporal windows: cancel any armed
     /// `DelayAcks`, any armed `GoDark`, any armed `StallData`, and every
     /// `CommandLatency` field.

@@ -8,54 +8,97 @@
 //! tree (config validation, the core walk, the stochastic building blocks),
 //! never part of the crate's public API.
 
-// The ACD block is tuned JOINTLY, and these are compensating values rather
-// than a raw per-constant fit - do not move one without re-running the whole
-// procedure below.
+// Raw-trade cadence refit. The permitted ACD refit was run first over 500
+// explicit (persistence, feedback, weibull_shape, relax_mean_cal) tuples and
+// its best candidate still produced median 13 fills/sec against a measured 4,
+// and 17% empty seconds against a measured 13.4% - a process-SHAPE miss, not a
+// calibration one. Section 4.4b of `notes/spec-trade-cadence.md` permits
+// replacing the family on exactly that evidence, so the ACD clock is gone and
+// arrivals are drawn from a two-state (quiet/active) Markov-modulated Weibull
+// clock instead. Every constant below is fitted, not derived, and the whole
+// block is module-level process SHAPE - deliberately NOT per-instrument, per
+// section 10's stopping rule.
 //
-// - PERSISTENCE and FEEDBACK_SHARE land the era-windowed duration dispersion
-//   band and the duration ACF anchors (both gap statistics, so both measured
-//   over the modern-era window of the anchor series, not its full span).
-// - WEIBULL_SHAPE stays 0.60: lowering it fattens the innovation tail and
-//   directly re-inflates the realized gap quantiles the relaxation suppresses
-//   (the levers fight), and it drags the shape-specific unit-mean normalizer
-//   WEIBULL_MEAN_SHAPE_060 in numeric.rs along with it.
-// - WALL_RELAX_TAU_S is the wall-time relaxation horizon. Duration memory used
-//   to decay per TICK, so an hour-scale excursion persisted ~1/(1 - phi) ticks
-//   regardless of how much wall time each tick consumed, and the tape deserted
-//   for days. Each gap now collapses psi toward its attractor by
-//   exp(-gap / tau), so an excursion's WALL dwell is bounded by a few tau while
-//   the sub-minute clustering the ACF band measures is perturbed by well under
-//   a percent (w is ~0.999 at the ~7 s bulk cadence). tau bounds the
-//   PERSISTENCE of an excursion, not any single draw: psi * eps keeps an
-//   unbounded Weibull tail, which is why the gate asserts quantiles and
-//   empty-hour runs rather than a sample maximum.
-// - RELAX_MEAN_CAL cancels the Jensen term the relaxation introduces. w is
-//   negatively correlated with the state it damps, so E[psi] lands ~17-20
-//   percent below the declared cadence and the realized mean-gap gate refuses
-//   the tape. Shifting the attractor alone saturates (w is ~0.999 in the bulk,
-//   where the shift barely acts), so the calibration scales the intercept and
-//   the attractor TOGETHER: the recursion runs at an internal mean
-//   RELAX_MEAN_CAL * scalars.mean_duration_s. It is therefore only meaningful
-//   jointly with tau - 1.0 is the exact no-op spelling.
+// The chain is parameterized by its STATIONARY quiet share and a persistence,
+// so the two transition probabilities in `ArrivalClock` fall out as
+// `(1 - persistence) * (1 - quiet_fraction)` and `(1 - persistence) *
+// quiet_fraction`, whose stationary quiet occupancy is exactly
+// ARRIVAL_QUIET_FRACTION. The active and quiet state means are solved from the
+// declared `mean_event_duration_s` so the UNCONDITIONAL mean gap is preserved
+// whatever the ratio is set to.
+/// Stationary share of parent events drawn from the quiet state.
+pub(super) const ARRIVAL_QUIET_FRACTION: f64 = 0.35;
+/// Probability the clock keeps its current state at the next parent event, in
+/// the sense that the switch rate is `1 - this`. Higher values make the dead
+/// stretches and the bursts both longer; this is the knob that buys the
+/// measured empty-second mass without inflating the median.
+pub(super) const ARRIVAL_STATE_PERSISTENCE: f64 = 0.90;
+/// Quiet mean gap divided by active mean gap. The measured tape alternates
+/// between dead seconds and violent bursts rather than being uniformly slow,
+/// which is what this ratio buys and what no single-state clock could.
+pub(super) const ARRIVAL_QUIET_ACTIVE_RATIO: f64 = 150.0;
+/// Shape of the per-event Weibull innovation. 1.0 is exponential: the burst
+/// clustering lives in the state chain, not in the marginal, so a sub-unit
+/// shape would double-count it.
+pub(super) const ARRIVAL_WEIBULL_SHAPE: f64 = 1.0;
+/// Mean-gap calibration, the successor to `ACD_RELAX_MEAN_CAL`. Re-derived by
+/// the same 10-step bisection the spec documents, driving the seed-42 realized
+/// mean PARENT gap of the two-million-event realism draw onto
+/// `scalars.mean_event_duration_s`; `MEAN_GAP_REL_TOL` in the test module is
+/// what keeps it honest.
+pub(super) const ARRIVAL_MEAN_CAL: f64 = 0.944;
+/// Mean of `Weibull(scale = 1, shape = ARRIVAL_WEIBULL_SHAPE)`, which the draw
+/// is divided by so the innovation carries unit mean. `gamma(1 + 1/1.0) = 1`
+/// exactly at the committed shape; it stays a named constant so a future shape
+/// change finds the coupling instead of silently losing the normalization.
+pub(super) const ARRIVAL_WEIBULL_MEAN: f64 = 1.0;
+// Sweep intensity conditional on the arrival state. The two multipliers scale
+// `children_mean` per state and are chosen to preserve the DECLARED
+// unconditional mean exactly:
 //
-// Selection procedure, stated so a second implementer lands the same numbers:
-// a first-hit-wins grid, iterated tau in [7200, 3600, 1800, 900] (descending -
-// prefer the weakest relaxation that passes) outermost, then PERSISTENCE in
-// [0.9935, 0.9945, 0.9950], then FEEDBACK_SHARE in [0.08, 0.10, 0.12]. Per
-// tuple RELAX_MEAN_CAL is not an axis but a derived value: a 10-step bisection
-// on [1.0, 1.8] driving the seed-42 realized mean gap of the 2M-tick realism
-// draw onto scalars.mean_duration_s, committed as the final bracket midpoint
-// rounded to four decimals. The tuple below is the grid's first hit; it also
-// clears the dwell and mean-gap asserts at the production BTCUSDT seed.
-pub(super) const ACD_PERSISTENCE: f64 = 0.9935;
-pub(super) const ACD_FEEDBACK_SHARE: f64 = 0.08;
-pub(super) const ACD_WEIBULL_SHAPE: f64 = 0.60;
-pub(super) const ACD_WALL_RELAX_TAU_S: f64 = 7200.0;
-pub(super) const ACD_RELAX_MEAN_CAL: f64 = 1.2293;
+//     quiet_frac * QUIET + (1 - quiet_frac) * ACTIVE == 1
+//
+// so `ARRIVAL_ACTIVE_CHILDREN_MULT` is fully determined by the other two, and
+// `arrival_children_mults_preserve_the_declared_mean` in the test module pins
+// the literal against that identity. Conditioning sweep size on the state (thin
+// sweeps while quiet, fat sweeps while active) is what supplies the measured
+// mean/median spread: the child mixture alone is exponential-tailed and cannot.
+pub(super) const ARRIVAL_QUIET_CHILDREN_MULT: f64 = 0.20;
+pub(super) const ARRIVAL_ACTIVE_CHILDREN_MULT: f64 = 1.430_769_230_769_230_8;
+/// Probability that a SINGLE-child event in the low bounce regime re-prints the
+/// previous event's last price instead of the freshly quoted one. Fitted to the
+/// `zero_change_frac` band: at the raw-fill layer most prints are children that
+/// repeat their parent's level by construction, but the EVENT series the gate
+/// measures (section 6.3) would otherwise almost never repeat, because every
+/// parent re-quotes off a fresh latent mid. A venue whose top of book does not
+/// move between two small takes prints the same price twice, which is what this
+/// reproduces. It costs one Bernoulli draw per event and never applies in the
+/// high regime, where the price is meant to be moving.
+pub(super) const EVENT_PRICE_REPEAT_PROB: f64 = 0.8;
+// Level-walk intensity conditional on the bounce regime. `level_step_prob` is
+// solved from the measured `levels_mean` (section 2.4) as an unconditional
+// probability; these two multipliers redistribute it so a sweep in the high
+// regime walks the grid hard and a sweep in the quiet regime barely walks at
+// all, which is where the abs-return ACF at the event layer comes from.
+// NOTE the deliberate imprecision: at the bounce chain's stationary high share
+// (BOUNCE_LOW_TO_HIGH / (BOUNCE_LOW_TO_HIGH + BOUNCE_HIGH_TO_LOW) = 0.3125) the
+// blended multiplier is 0.956, so realized `levels_mean` sits ~4% BELOW the
+// declared scalar. `sweep_structure` asserts that agreement at a 15% tolerance
+// with this shortfall in mind; tightening it means re-solving these two against
+// the stationary share, which re-blesses the golden.
+pub(super) const HIGH_REGIME_LEVEL_STEP_MULT: f64 = 2.4;
+pub(super) const LOW_REGIME_LEVEL_STEP_MULT: f64 = 0.3;
+/// Fraction of the gap between an event's LAST child price and the latent mid
+/// that is carried into the next event as `BounceState::drift_ticks`. This
+/// re-centres the drift at every event boundary, which is what keeps the
+/// event-layer return ACF negative once a sweep can walk several ticks away
+/// from the mid inside one event: without it a burst's walk would be a
+/// permanent, uncorrected excursion.
+pub(super) const DRIFT_RECENTER_FRAC: f64 = 0.16;
 // GARCH persistence gives clustered latent volatility without letting the
 // continuous mid-price drown out tick-grid flat runs.
-pub(super) const GARCH_ARCH: f64 = 0.06;
-pub(super) const GARCH_GARCH: f64 = 0.935;
+pub(super) const GARCH_ARCH: f64 = 0.12;
+pub(super) const GARCH_GARCH: f64 = 0.875;
 pub(super) const STUDENT_T_DF: f64 = 4.0;
 // The high/low bounce regime jointly controls negative lag-1 return ACF
 // (target -0.197 .. -0.057), zero_change_frac (0.336 .. 0.751) and the
@@ -65,9 +108,9 @@ pub(super) const STUDENT_T_DF: f64 = 4.0;
 // decay above the lag10 ceiling, too short starves the lag50 floor, so these
 // two transition probabilities are pinned together with the flip contrast.
 pub(super) const BOUNCE_LOW_FLIP_PROB: f64 = 0.02;
-pub(super) const BOUNCE_HIGH_FLIP_PROB: f64 = 0.58;
-pub(super) const BOUNCE_LOW_TO_HIGH_PROB: f64 = 0.004;
-pub(super) const BOUNCE_HIGH_TO_LOW_PROB: f64 = 0.030;
+pub(super) const BOUNCE_HIGH_FLIP_PROB: f64 = 0.25;
+pub(super) const BOUNCE_LOW_TO_HIGH_PROB: f64 = 0.01;
+pub(super) const BOUNCE_HIGH_TO_LOW_PROB: f64 = 0.022;
 pub(super) const HALF_SPREAD_TICKS: f64 = 0.5;
 // High-regime drift adds same-direction on-grid movement so volatility clusters
 // are not only alternating bid-ask moves.
@@ -77,8 +120,10 @@ pub(super) const DRIFT_DIR_FLIP_PROB: f64 = 0.015;
 // Size calibration controls heavy-tailed sizes and the round-lot mass gate.
 pub(super) const SIZE_LOG_SIGMA: f64 = 1.15;
 pub(super) const SIZE_DECIMALS: u32 = 8;
+pub(super) const INTRA_EVENT_STEP_NS: u64 = 1_000;
+pub(super) const CHILD_CAP: u32 = 4_096;
 pub(super) const MAX_ABS_RETURN: f64 = 0.000_02;
-pub(super) const GARCH_SIGMA_CAP: f64 = 0.000_001;
+pub(super) const GARCH_SIGMA_CAP: f64 = 0.000_01;
 // Hard ceiling `next_latent_mid` clamps the latent mid to (the modal tick is
 // the matching floor). Hoisted so the two clamp sites and `start_price`
 // validation cannot drift: a `start_price` above this is silently collapsed on
@@ -100,9 +145,7 @@ pub(super) const SESSION_SUM_TOL: f64 = 0.02;
 // the constructors.
 pub(super) const START_PRICE_USD: i64 = 60_000;
 // 0.1 expressed as Decimal::new(mantissa, scale).
-pub(super) const TYPICAL_SIZE_MANTISSA: i64 = 1;
-pub(super) const TYPICAL_SIZE_SCALE: u32 = 1;
-pub(super) const VOL_SCALAR: f64 = 0.000_000_05;
+pub(super) const VOL_SCALAR: f64 = 0.000_001;
 // Session-gap rails. Trading hours, maintenance breaks and closed weekends are
 // expressed as NEAR-ZERO hour/day shares in a custom SessionProfile - not a
 // separate code path - but the arrival multiplier is sampled once, at the

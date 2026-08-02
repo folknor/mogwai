@@ -125,13 +125,6 @@ Or both. There are no exceptions.
   naming a successor, and that debt is real and belongs to whichever spec
   descends from it.
 
-  - `notes/problem-trade-cadence.md` - the tape runs orders of magnitude slower
-    than a real active pair, and "trades per second" has three values differing
-    by 8.5x because raw fills, aggregated prints and match events are LAYERS of
-    one process rather than alternatives. Also carries the market-data
-    provenance for the whole set: where the archives live, how to fetch more,
-    which committed probe reproduces each figure, and why none of it is
-    reproducible from a fresh clone yet.
   - `notes/problem-instrument-model.md` - the venue models spot currency pairs
     only, so MNQ and MES cannot be futures: no multiplier, no tick value, no
     expiry, no margin, and a session envelope that can thin an hour but not
@@ -154,7 +147,7 @@ Or both. There are no exceptions.
   ruling and needed no separate document: the model is a COMPLETE
   parameterization and a preset is a named bundle of otherwise-tunable knobs, so
   those constants are per-instrument because EVERYTHING is per-instrument. The
-  ACD constants, the GARCH parameters and `SIZE_LOG_SIGMA` get slots like any
+  arrival constants, the GARCH parameters and `SIZE_LOG_SIGMA` get slots like any
   other knob.
 
   What survives is not a design question but a FITTING one, and it belongs to
@@ -192,7 +185,7 @@ Or both. There are no exceptions.
 
   RAISED IN REVIEW AND RULED ON, recorded so they are not raised a third time.
   (a) Three documents each partly re-scope the realism gate - cadence
-  invalidates its anchors, profiles moves the ACD constants out from under it,
+  invalidates its anchors, profiles moves the arrival constants out from under it,
   and the parameterization ruling lets config move the tape anywhere - and it
   was argued that nobody owns the result. The owner is the repository owner, the
   same answer as ACCEPTANCE above. (b) Three documents each want to rewrite part
@@ -236,31 +229,43 @@ Or both. There are no exceptions.
   on disk would settle it; until then the slippage magnitude stays an
   unquantified mechanism shared by every order type that slips.
 
-- The fill band is INERT about 30% of the time on the default profile, which
-  silently restores the defect it was built to remove. Found 2026-08-02 while
-  landing the band itself, by the calibration probe in `mogwai-server`'s
-  `fills.rs`: 425 refused readings out of 1440 sampled instants on the default
-  BTCUSDT profile, a full sim day past warmup. The cause is NOT budget
-  exhaustion - zero readings hit the walk budget - but windows carrying fewer
-  than `MIN_VOL_SAMPLES` returns inside `VOL_WINDOW_NS`, whose median is 32
-  prints with a long quiet tail. `read_market` then refuses, and a refusal means
-  a market order fills unslipped at the client's own stated price while a limit
-  gets `band_ticks = 0`: the most permissive regime the venue has, and exactly
-  the behaviour the band replaced. The spec that landed the band asserted this
-  state was reachable only within a few hundred sim seconds of `data_origin`, so
-  that no live order would see it; that premise is false against the fitted tape
-  and the measurement above is what refutes it.
+- RESTORE DISCRIMINATION to the fill golden's banded half. Found 2026-08-03 while
+  re-calibrating `fill_band_vol_mult` from `0.5` to `0.005`: the re-blessed
+  `crates/mogwai-server/tests/golden/fill_distribution.json` now has its five
+  banded cells BYTE-IDENTICAL to its five unbanded ones - same fill counts, same
+  latency vectors, same pass counts. The banded half therefore certifies that the
+  band pipeline RUNS, not that the band BITES, and a regression that silently
+  zeroed the band would still pass this golden.
+  The cause is resolution rather than calibration. Latency is quantized to the
+  harness's one-second `SWEEP_INTERVAL_NS`, and one second of raw-fill tape
+  carries roughly fifty prints travelling much further than the 0-to-4 ticks -
+  about 0.1 basis points on a 37,000 tape - that a `0.005` band displaces a
+  trigger by, so the tape crosses the displacement inside the same sweep pass.
+  The old `0.5` discriminated only because it was clamp-saturated at 200 ticks,
+  which is the defect the re-calibration removed; this is the bill for fixing it,
+  not a new regression.
+  Two knobs restore it, both costing runtime in a harness whose coverage was
+  deliberately cut for runtime: a finer `SWEEP_INTERVAL_NS`, so sub-second
+  latency differences are representable, and a tighter offset ladder, so the band
+  is a large fraction of the distance to the limit rather than a rounding error
+  against it. Neither was taken. A third option is to stop asking this artifact
+  the question and add a direct assertion that a banded trigger differs from its
+  stated price, which is cheap but proves much less.
 
-  ORDERED AFTER `notes/problem-trade-cadence.md`, because it is most likely a
-  SYMPTOM of that item rather than a defect in the estimator. The default tape
-  runs at 0.14 trades/sec, so a 300 sim-second window expects roughly 43 prints
-  and its quiet tail falls below the sample floor often enough to produce the
-  30%. At any cadence that document contemplates targeting, the refusal rate
-  collapses on its own. Tuning `VOL_WINDOW_NS` or `MIN_VOL_SAMPLES` now would
-  bake a workaround for a tape defect into the fill model and would have to be
-  unpicked once the tape is fixed - and either knob moves the estimator's
-  identity, forcing a golden re-bless. Re-measure after cadence lands; only if
-  the rate is still material does the estimator itself need changing.
+- RE-SCOPE the acceptance-time market reading, or accept 12.6 ms inside a
+  submit. Measured 2026-08-03 by `read_market_latency_stays_within_submit_budget`
+  after that instrument was corrected to time the cache MISS rather than a
+  warmed hit. The cadence landing applied lever two of that gate's own
+  KEEP/REVERT rule (memoize per symbol per sweep interval, `MarketReadingCache`)
+  and not lever one (a shorter `VOL_WINDOW_NS` or an otherwise re-scoped
+  reading), so the 5 ms budget is met on the hit path (~0.13 ms) and missed by
+  2.5x on the miss path. Lever one moves the estimator's identity and re-blesses
+  the fill golden, which is why the cadence spec put it out of scope; it is
+  still owed. Two prices are being paid for that: the 12.6 ms itself, and the
+  loss of an exactly-stated slippage contract (the reading instant is not on the
+  wire, so both end-to-end gates now assert a bracket - see the doc comment on
+  `MarketReadingCache`). Putting the reading instant on `OrderFilled` would buy
+  the contract back cheaply and independently of the re-scoping.
 
 - Move the adapter off the `../nautilus_trader` path dependency onto a pinned
   crates.io release. `crates/mogwai-adapter/Cargo.toml` path-depends five
@@ -526,12 +531,13 @@ Inline literals (no named const):
 ### mogwai-data (generator)
 
 Fingerprint/distribution constants are named module consts, fitted-and-committed
-by design (changing them re-shapes the synthetic market): ACD 0.9935 / 0.08 /
-Weibull shape 0.60, GARCH 0.06 / 0.935, Student-t df 4.0, bounce and drift
-transition probabilities, `SIZE_LOG_SIGMA 1.15`, `MAX_ABS_RETURN 2e-5`,
-`GARCH_SIGMA_CAP 1e-6`, anchor `START_PRICE_USD 60_000`, `VOL_SCALAR 5e-8`, and the
-precomputed `WEIBULL_MEAN_SHAPE_060` gamma normaliser. The real fingerprint numbers
-live in `analysis/fingerprint.json` (embedded via `include_str!`), not in Rust.
+by design (changing them re-shapes the synthetic market): quiet share 0.35,
+state persistence 0.90, quiet/active mean ratio 150, Weibull shape 1.0,
+GARCH 0.12 / 0.875, Student-t df 4.0, bounce and drift transition
+probabilities, `SIZE_LOG_SIGMA 1.15`, `MAX_ABS_RETURN 2e-5`,
+`GARCH_SIGMA_CAP 1e-5`, anchor `START_PRICE_USD 60_000`, and
+`VOL_SCALAR 1e-6`. The real fingerprint numbers live in
+`analysis/fingerprint.json` (embedded via `include_str!`), not in Rust.
 
 Inline (not named): `xbtusd_anchor` fields `XBTUSD` / `modal_tick 0.1` /
 `price_decimals 1` (deliberately per-pair, kept in the constructor); the `1e9`

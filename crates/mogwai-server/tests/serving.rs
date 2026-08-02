@@ -8,10 +8,48 @@ mod common;
 
 use std::time::Duration;
 
-use common::{band_config, fast_config, http_get, paced_config, spawn, tiny_fanout_config};
+use common::{
+    accelerated_config, band_config, fast_config, http_get, paced_config, spawn, tiny_fanout_config,
+};
 use futures_util::{SinkExt, StreamExt};
 use mogwai_protocol::{ServerMessage, TradeTick};
 use tokio_tungstenite::tungstenite::Message;
+
+#[tokio::test]
+#[ignore = "binds a loopback listener and samples paced delivery"]
+async fn tape_lateness_under_acceleration() {
+    let venue = spawn(&["--config", &accelerated_config()]);
+    let (status, body) = http_get(&venue.http_base(), "/clock");
+    assert_eq!(status, 200);
+    let clock: mogwai_protocol::ServerClock = serde_json::from_str(&body).unwrap();
+    let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut lateness = Vec::new();
+    while tokio::time::Instant::now() < deadline {
+        let Some(Ok(Message::Text(text))) = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .ok()
+            .flatten()
+        else {
+            break;
+        };
+        if let Ok(ServerMessage::Trade(trade)) = serde_json::from_str(&text) {
+            let due = clock.sim.wall_ns(trade.ts_event);
+            lateness.push(mogwai_protocol::now_unix_nanos().saturating_sub(due));
+        }
+    }
+    assert!(!lateness.is_empty());
+    lateness.sort_unstable();
+    let p99 = lateness[(99 * lateness.len()).div_ceil(100) - 1];
+    let max = *lateness.last().unwrap();
+    eprintln!(
+        "frames={} p99_lateness_ns={p99} max_lateness_ns={max}",
+        lateness.len()
+    );
+    assert!(p99 <= 50_000_000, "p99 lateness {p99}ns exceeds 50ms");
+}
 
 #[test]
 #[ignore = "binds a loopback listener"]
@@ -160,11 +198,24 @@ async fn a_slow_connection_is_dropped_with_feed_lagged() {
     // fully stopped reader could not observe its own ejection. A slow reader is
     // both the realistic case and the one the policy is written for: it drains
     // just enough for the venue to tell it what it missed.
+    // The slow reading is only needed to INDUCE the lag: a handful of 50 ms
+    // stalls against an unpaced raw-fill tape overruns an 8-frame ring many
+    // times over. After that the client drains flat out, because the report it
+    // is waiting for sits BEHIND every frame the venue queued in the socket
+    // before it noticed - and at ~8.5 raw fills per parent event that is far
+    // more frames than a one-per-50-ms reader gets through inside the deadline.
+    // Keeping the stall for the whole loop made this gate pass alone and fail
+    // under load, which is a property of the reader, not of the venue.
+    const STALLED_READS: usize = 10;
     let mut lagged = None;
     let mut close_code = None;
+    let mut reads = 0;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     while tokio::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        if reads < STALLED_READS {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        reads += 1;
         let Ok(Some(Ok(message))) =
             tokio::time::timeout(Duration::from_secs(2), socket.next()).await
         else {
@@ -282,6 +333,9 @@ async fn an_armed_divergence_reaches_every_connection() {
 
     // Arm a blackout over the control plane. It is armed against the RUN, not
     // against an account, so it must gate this socket's market data.
+    let (_, arm_clock_body) = http_get(&venue.http_base(), "/clock");
+    let arm_clock: serde_json::Value = serde_json::from_str(&arm_clock_body).expect("arm clock");
+    let armed_at = arm_clock["server_now_ns"].as_u64().expect("arm instant");
     let armed = post_divergence(&venue.http_base(), r#"{"type":"StallData","ms":180000}"#);
     assert_eq!(armed, 202, "the divergence is accepted");
 
@@ -289,15 +343,15 @@ async fn an_armed_divergence_reaches_every_connection() {
     let quiet_until = tokio::time::Instant::now() + Duration::from_secs(2);
     while let Ok(Some(Ok(message))) = tokio::time::timeout_at(quiet_until, data_socket.next()).await
     {
-        if let Message::Text(text) = message
-            && matches!(
-                serde_json::from_str::<ServerMessage>(&text),
-                Ok(ServerMessage::Trade(_) | ServerMessage::Quote(_))
-            )
-        {
-            panic!(
-                "market data arrived during an armed StallData window; the \
-                 divergence was armed somewhere this connection cannot see"
+        if let Message::Text(text) = message {
+            let event_ts = match serde_json::from_str::<ServerMessage>(&text) {
+                Ok(ServerMessage::Trade(trade)) => Some(trade.ts_event),
+                Ok(ServerMessage::Quote(quote)) => Some(quote.ts_event),
+                _ => None,
+            };
+            assert!(
+                event_ts.is_none_or(|ts| ts <= armed_at),
+                "market data generated after an armed StallData window arrived"
             );
         }
     }
@@ -328,7 +382,7 @@ async fn a_banded_limit_fills_from_the_run_sweep() {
         ),
     );
     let trades: Vec<TradeTick> = serde_json::from_str(&trades_body).expect("anchor trades");
-    let price = trades.last().expect("anchor print").price;
+    let price = trades.last().expect("anchor print").price - rust_decimal::Decimal::new(201, 2);
     let submit = format!(
         r#"{{"type":"SubmitOrder","client_order_id":"BAND-1","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"0.01","price":"{price}","time_in_force":"Gtc"}}"#,
         venue.record.symbol,
@@ -413,6 +467,7 @@ async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths(
                 .expect("submit the market order");
 
             let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+            let mut accepted_ts = None;
             let fill = loop {
                 let message = tokio::time::timeout_at(deadline, socket.next())
                     .await
@@ -423,6 +478,11 @@ async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths(
                     continue;
                 };
                 match serde_json::from_str::<ServerMessage>(&text) {
+                    Ok(ServerMessage::OrderAccepted {
+                        client_order_id,
+                        ts_event,
+                        ..
+                    }) if client_order_id == id => accepted_ts = Some(ts_event),
                     Ok(ServerMessage::OrderFilled(fill)) if fill.client_order_id == id => {
                         break fill;
                     }
@@ -433,23 +493,58 @@ async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths(
                 }
             };
 
+            // The venue decides a market submit against `MarketReadingCache`,
+            // which memoizes `read_market` on the SWEEP-INTERVAL bucket (10 ms
+            // under band.toml). The reading therefore names the last print at or
+            // before the start of the acceptance instant's bucket, and the
+            // adverse-slippage invariant has to be asserted against THAT print,
+            // not against the last print at the fill instant - the tape moves on
+            // between the reading and the fill, and a buy filling below a print
+            // it could not have seen is not favourable slippage.
+            //
+            // Worse, the reading instant is not the acceptance instant either:
+            // it is whenever the submit reached the handler, which at speed 100
+            // can be many sim seconds earlier. So the print the venue read
+            // cannot be identified from outside - only BRACKETED. What is
+            // asserted is therefore the strongest statement that survives the
+            // bracket: the reading's print lies somewhere in the lookback below,
+            // and the fill band is adverse, so a market BUY must fill at or
+            // above the LOWEST price in that window. A fill decided off no
+            // reading at all - the defect this test exists for - breaks it.
+            // Recovering the exact per-fill statement means putting the reading
+            // instant on the `OrderFilled` event or dropping the cache's
+            // bucketing; neither is this test's call to make.
+            const BUCKET_NS: u64 = 10_000_000;
+            let reading_ts = accepted_ts.unwrap_or(fill.ts_event) / BUCKET_NS * BUCKET_NS;
             let (_, body) = http_get(
                 &venue.http_base(),
                 &format!(
                     "/trades?symbol={}&start={}&end={}&limit=10000",
                     venue.record.symbol,
-                    fill.ts_event.saturating_sub(300_000_000_000),
-                    fill.ts_event
+                    // A 300 s lookback, not a 1 s one: the arrival clock's quiet
+                    // state runs a mean gap of several seconds, so a one-second
+                    // window is legitimately empty often enough to make this
+                    // test flaky for a reason that has nothing to do with fills.
+                    reading_ts.saturating_sub(300_000_000_000),
+                    reading_ts
                 ),
             );
             let trades: Vec<TradeTick> =
-                serde_json::from_str(&body).expect("tape at the fill instant");
-            let last = trades.last().expect("a print at or before the fill").price;
+                serde_json::from_str(&body).expect("tape at the reading instant");
+            let last = trades
+                .last()
+                .expect("a print at or before the reading")
+                .price;
+            let floor = trades
+                .iter()
+                .map(|trade| trade.price)
+                .min()
+                .expect("a print in the lookback");
             if fill.last_px < last * rust_decimal::Decimal::TWO {
                 read_the_tape = true;
                 assert!(
-                    fill.last_px >= last,
-                    "a market buy filled better than the market: {} < {last}",
+                    fill.last_px >= floor,
+                    "a market buy filled below every print it could have read: {} < {floor}",
                     fill.last_px
                 );
                 break;

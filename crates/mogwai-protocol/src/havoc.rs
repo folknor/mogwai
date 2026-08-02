@@ -302,6 +302,22 @@ pub fn validate_divergence(div: &control::Divergence) -> Result<(), &'static str
             }
             Ok(())
         }
+        control::Divergence::FlowSurge {
+            rate_mult,
+            children_mult,
+            duration_ms,
+        } => {
+            if !rate_mult.is_finite() || !(1.0..=1000.0).contains(rate_mult) || *rate_mult == 1.0 {
+                return Err("FlowSurge rate_mult must be in (1, 1000]");
+            }
+            if !children_mult.is_finite() || !(1.0..=100.0).contains(children_mult) {
+                return Err("FlowSurge children_mult must be in [1, 100]");
+            }
+            if *duration_ms > control::MAX_DIVERGENCE_MS {
+                return Err("FlowSurge duration_ms must be <= 3600000");
+            }
+            Ok(())
+        }
         control::Divergence::CancelOpenOrderSilently { client_order_id } => {
             if client_order_id.trim().is_empty() {
                 return Err("CancelOpenOrderSilently client_order_id must be non-empty");

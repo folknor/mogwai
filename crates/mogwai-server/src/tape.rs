@@ -9,6 +9,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
     thread,
     time::{Duration, Instant},
@@ -22,6 +23,14 @@ pub(crate) struct TapeFrame {
 pub(crate) struct Tape {
     tx: broadcast::Sender<TapeFrame>,
     cancel: Arc<AtomicBool>,
+    control: mpsc::Sender<FlowSurgeArm>,
+}
+struct FlowSurgeArm {
+    start_ns: u64,
+    duration_ms: u64,
+    rate_mult: f64,
+    children_mult: f64,
+    clear: bool,
 }
 pub(crate) struct TapeSpawn {
     pub(crate) profiles: Arc<source::InstrumentProfiles>,
@@ -33,9 +42,11 @@ pub(crate) struct TapeSpawn {
 impl Tape {
     pub(crate) fn start(symbol: String, spawn: TapeSpawn) -> Arc<Self> {
         let (tx, _) = broadcast::channel(spawn.fanout_depth);
+        let (control, controls) = mpsc::channel();
         let tape = Arc::new(Self {
             tx,
             cancel: Arc::new(AtomicBool::new(false)),
+            control,
         });
         let worker = Arc::clone(&tape);
         thread::spawn(move || {
@@ -46,6 +57,18 @@ impl Tape {
                 return;
             };
             while !worker.cancel.load(Ordering::Relaxed) {
+                while let Ok(arm) = controls.try_recv() {
+                    if arm.clear {
+                        source.clear_flow_surge();
+                    } else {
+                        source.arm_flow_surge(
+                            arm.start_ns,
+                            arm.duration_ms,
+                            arm.rate_mult,
+                            arm.children_mult,
+                        );
+                    }
+                }
                 let Some(tick) = source.next_tick() else {
                     break;
                 };
@@ -79,6 +102,30 @@ impl Tape {
     }
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<TapeFrame> {
         self.tx.subscribe()
+    }
+    pub(crate) fn arm_flow_surge(
+        &self,
+        start_ns: u64,
+        duration_ms: u64,
+        rate_mult: f64,
+        children_mult: f64,
+    ) {
+        drop(self.control.send(FlowSurgeArm {
+            start_ns,
+            duration_ms,
+            rate_mult,
+            children_mult,
+            clear: false,
+        }));
+    }
+    pub(crate) fn clear_flow_surge(&self) {
+        drop(self.control.send(FlowSurgeArm {
+            start_ns: 0,
+            duration_ms: 0,
+            rate_mult: 1.0,
+            children_mult: 1.0,
+            clear: true,
+        }));
     }
     #[cfg(test)]
     pub(crate) fn stop_for_test(&self) {

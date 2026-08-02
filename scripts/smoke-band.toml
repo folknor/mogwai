@@ -1,5 +1,5 @@
 # Fill-band smoke: a print must be strictly through the drawn trigger.
 speed = 1.0
-fill_band_vol_mult = 0.5
+fill_band_vol_mult = 0.005
 fill_band_max_ticks = 200
 fill_sweep_interval_ms = 50

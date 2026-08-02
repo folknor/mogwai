@@ -50,6 +50,71 @@
 //! Retired rather than migrated: the old `penetration_ticks = 3` cell covered
 //! ACCUMULATION of penetrations across sweep boundaries, and this model has no
 //! counter to accumulate - one print through the trigger fills.
+//!
+//! # Why the committed artifact was last re-blessed
+//!
+//! The banded scenario runs at `Config::default().fill_band_vol_mult`, and that
+//! default moved from `0.5` to `0.005` when the fill band was re-calibrated for
+//! the raw-fill cadence. The raw-fill tape carries ~15,700 returns in the
+//! estimator's 300 s window where the print-layer tape carried ~32, so at `0.5`
+//! the implied band ran a median 439 ticks against the 200-tick
+//! `fill_band_max_ticks` clamp: every banded trigger was drawn uniformly across
+//! the whole clamp range, and the tape had stopped deciding fills. `0.005` is
+//! what `fills::vol_probe`'s PROCEED rule selects on the current fingerprint
+//! (median 4 ticks, p90 7). The artifact therefore moved because the SCENARIO
+//! moved, not because fill timing regressed - the banded cells are now measured
+//! under a band that tracks volatility instead of one pinned to its ceiling.
+//!
+//! READ THE RE-BLESSED ARTIFACT BEFORE TRUSTING ITS BANDED HALF. At `0.005` the
+//! five banded cells came out BYTE-IDENTICAL to the five unbanded ones - same
+//! fill counts, same latency vectors, same pass counts. That is not a bug in the
+//! harness and it does not violate the `unbanded >= banded` property asserted
+//! below (equality satisfies it), but it does mean the banded half currently
+//! certifies only that the band PIPELINE runs, not that the band BITES.
+//!
+//! The cause is resolution, not calibration. Latency here is quantized to
+//! `SWEEP_INTERVAL_NS`, one second, and one second of raw-fill tape carries
+//! roughly fifty prints travelling far more than the 0-to-4 ticks (about 0.1
+//! basis points on a 37,000 tape) that a `0.005` band displaces a trigger by. The
+//! band moves the trigger; the tape crosses the difference inside the same sweep
+//! pass, so the recorded latency does not move. A wider band showed up here only
+//! because it was clamp-saturated at 200 ticks, which is precisely the state the
+//! re-calibration removed.
+//!
+//! So the two knobs that would restore discrimination are a finer
+//! `SWEEP_INTERVAL_NS` and a tighter offset ladder, both of which cost runtime
+//! and neither of which is taken here. `notes/todo.md` carries it as owed work.
+//!
+//! # Why the coverage is smaller than the print-layer harness's
+//!
+//! Four dimensions shrank when the tape moved to the raw-fill cadence: warmup
+//! 24 h to 1 h, horizon 20 min to 1 min, 40 orders per offset to 5, and the
+//! acceptance stride 3 s to 1 s. Only the first three reduce work; the stride
+//! shrank so the smaller population still spans a meaningful share of the
+//! shorter horizon.
+//!
+//! It is a RUNTIME trade, and it is safe because the thing being reduced is
+//! SIMULATED TIME, while what the artifact needs is PRINTS. The raw-fill tape
+//! carries roughly 8.5x the prints per unit of sim time that the print layer
+//! did, so one sim minute of horizon now contains more tape than the old
+//! twenty-minute horizon did, and one sim hour of warmup fills the estimator's
+//! 300 s window many times over - the reason 24 h was needed was that the
+//! print-layer window was print-starved, which the probe's 0-of-128 cold-window
+//! refusal census says is no longer the case. The cost that did NOT shrink with
+//! sim time is the per-order `read_market` walk and the checkpoint restore each
+//! one pays, which is why the ORDER COUNT came down as well.
+//!
+//! What the coverage still establishes is unchanged in kind: five offset rungs
+//! from 1 to 100 ticks spanning saturation to near-total censoring, both sides
+//! participating at the nearest rung, and the pathwise `unbanded >= banded`
+//! ordering at every rung - all asserted in `assert_shape` before any comparison
+//! or write. What it establishes LESS of is tail resolution: 5 samples per cell
+//! resolves a fill fraction to 20 percentage points, so a cell's censoring count
+//! is a coarse reading and the artifact's value is byte-exact REGRESSION
+//! detection - any change to the fingerprint, generator, predicate, seeding or
+//! frontier arithmetic still moves it - rather than an estimate of the fill
+//! distribution's shape. `fills::vol_probe` is where distributional questions
+//! get answered.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -67,12 +132,12 @@ use crate::{fills, source::InstrumentProfiles};
 
 const SYMBOL: &str = "BTCUSDT";
 const GOLDEN_RUN_SEED: u64 = 42;
-const GOLDEN_WARMUP_NS: u64 = 86_400_000_000_000;
+const GOLDEN_WARMUP_NS: u64 = 3_600_000_000_000;
 const ORIGIN: u64 = crate::source::TAPE_ORIGIN_NS + GOLDEN_WARMUP_NS;
 const SWEEP_INTERVAL_NS: u64 = 1_000_000_000;
-const HORIZON_NS: u64 = 1_200_000_000_000;
-const ORDERS_PER_OFFSET: usize = 40;
-const ACCEPT_STRIDE_NS: u64 = 3_000_000_000;
+const HORIZON_NS: u64 = 60_000_000_000;
+const ORDERS_PER_OFFSET: usize = 5;
+const ACCEPT_STRIDE_NS: u64 = 1_000_000_000;
 /// Limit placement in price increments away from the market at acceptance,
 /// always >= 1 so nothing is marketable on arrival and every fill's timing is a
 /// function of the tape rather than of the acceptance seed.
@@ -88,6 +153,14 @@ const OFFSETS: [u32; 5] = [1, 3, 10, 30, 100];
 /// The shipped `fill_band_max_ticks` default, so the artifact is produced under
 /// the clamp a real venue runs.
 const MAX_TICKS: u32 = 200;
+
+/// The banded scenario's multiplier, READ from the shipped default rather than
+/// written out here. Two copies of a calibration constant is how a golden ends
+/// up certifying a band nothing runs: this way moving the default moves the
+/// artifact, the test fails, and the re-bless is forced rather than forgotten.
+fn shipped_mult() -> f64 {
+    crate::config::Config::default().fill_band_vol_mult
+}
 
 #[derive(Serialize)]
 struct Golden {
@@ -291,7 +364,7 @@ fn render() -> String {
         horizon_ns: HORIZON_NS,
         orders_per_offset: ORDERS_PER_OFFSET,
         accept_stride_ns: ACCEPT_STRIDE_NS,
-        cells: [0.0, 0.5]
+        cells: [0.0, shipped_mult()]
             .into_iter()
             .flat_map(|ticks| run_scenario(ticks, &profiles))
             .collect(),
@@ -311,7 +384,11 @@ fn assert_shape(rendered: &str) {
     let cells = golden["cells"].as_array().expect("cells array");
     assert_eq!(cells.len(), 2 * OFFSETS.len());
     for (index, cell) in cells.iter().enumerate() {
-        let expected_mult = if index < OFFSETS.len() { 0.0 } else { 0.5 };
+        let expected_mult = if index < OFFSETS.len() {
+            0.0
+        } else {
+            shipped_mult()
+        };
         assert_eq!(cell["band_vol_mult"], expected_mult);
         assert_eq!(cell["offset_ticks"], OFFSETS[index % OFFSETS.len()]);
         let samples = cell["samples"].as_u64().expect("samples");

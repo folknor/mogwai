@@ -12,9 +12,9 @@ run_duration_ns = 0
 # precise error rather than silently served short. Formerly backfill_horizon_ns;
 # an operator with an old file renames the key and keeps the value.
 warmup_ns = 86400000000000
-fanout_depth = 4096
+fanout_depth = 65536
 zero_speed_stall_ms = 5000
-fill_band_vol_mult = 0.5
+fill_band_vol_mult = 0.005
 fill_band_max_ticks = 200
 fill_sweep_interval_ms = 100
 exec_held_budget_bytes = 8388608

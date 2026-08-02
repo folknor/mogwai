@@ -81,6 +81,8 @@ class AutoCorr:
         out = []
         for d in range(1, self.k + 1):
             m = self.n - d
+            if m <= 0:
+                break
             cov = self.cross[d] / m - mean * mean
             out.append(cov / var)
         return out
@@ -195,6 +197,22 @@ def probe(path):
     print(f"sweep width     mean {sweep_sum / sweep_n:.2f}  max {sweep_max}")
     sw = sorted(sweep_hist.items())
     print(f"sweep hist      {[(k, round(100 * v / sweep_n, 1)) for k, v in sw]}   (aggTrades per event, pct; 9 is 9+)")
+    return {
+        "trades": n,
+        "span_days": span_s / 86400.0,
+        "trades_per_second": n / span_s,
+        "duration": {"mean_s": mean, "cv2": var / (mean * mean), "acf": acf},
+        "events": ev_n + 1,
+        "event_duration": {
+            "mean_s": ev_mean,
+            "cv2": ev_var / (ev_mean * ev_mean),
+            "acf": ev_a,
+        },
+        "children_mean": sweep_sum / sweep_n,
+        "children_max": sweep_max,
+        "mean_trade_size": size_sum / n,
+        "taker_buy_share": 1 - maker_qty / size_sum,
+    }
 
 
 if __name__ == "__main__":

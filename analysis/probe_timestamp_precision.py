@@ -12,9 +12,11 @@ second" is a measurement rather than an assumption.
 It exists because the Kraken anchor turned out to carry WHOLE-SECOND timestamps
 on all 81,810,187 rows, which means its finest expressible inter-trade gap is
 one second and 61% of consecutive trades record a gap of exactly zero. The
-committed duration ACF anchor (0.1603) is measured on that series; collapsing
-same-timestamp trades into one arrival drops it to 0.0012. See
-`notes/problem-trade-cadence.md`.
+duration ACF this corpus measured on the raw series (0.1603) collapses to
+0.0012 once same-timestamp trades are treated as one arrival - a whole-second
+corpus cannot adjudicate sub-second arrival structure, which is why the
+raw-fill cadence work (git history, `ca72e89` onward) fitted the arrival clock
+against microsecond-stamped Binance archives instead.
 
 The consequence generalises to any corpus considered for fitting: check the
 resolution before trusting a duration statistic drawn from it, and never fit a

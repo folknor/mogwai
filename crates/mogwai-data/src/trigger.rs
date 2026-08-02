@@ -91,6 +91,33 @@ pub fn scan_triggers(
         };
     };
     let mut hits = vec![None; scans.len()];
+    // Per-print pre-filter, added when the tape went to ~50 raw fills a second:
+    // a pass that used to see a handful of prints now sees thousands, and the
+    // inner loop is O(scans) per print. Each of the four bounds is the EXTREME
+    // of one (kind, side) group in the direction that group's predicate opens,
+    // so "no scan in this group can hit" is exact rather than heuristic -
+    // FillThrough Buy hits on `price < px`, so nothing hits once the price is
+    // at or above the largest such `px`, and symmetrically for the other three.
+    // A skipped print therefore cannot hide a hit, and the `all(is_some)` early
+    // return is safe to skip with it because no hit was recorded.
+    let mut fill_buy_max: Option<Decimal> = None;
+    let mut fill_sell_min: Option<Decimal> = None;
+    let mut touch_buy_min: Option<Decimal> = None;
+    let mut touch_sell_max: Option<Decimal> = None;
+    for scan in scans {
+        let slot = match (scan.kind, scan.side) {
+            (ScanKind::FillThrough, Side::Buy) => &mut fill_buy_max,
+            (ScanKind::FillThrough, Side::Sell) => &mut fill_sell_min,
+            (ScanKind::TriggerTouch, Side::Buy) => &mut touch_buy_min,
+            (ScanKind::TriggerTouch, Side::Sell) => &mut touch_sell_max,
+        };
+        *slot = Some(match (*slot, scan.kind, scan.side) {
+            (Some(bound), ScanKind::FillThrough, Side::Buy)
+            | (Some(bound), ScanKind::TriggerTouch, Side::Sell) => bound.max(scan.px),
+            (Some(bound), _, _) => bound.min(scan.px),
+            (None, _, _) => scan.px,
+        });
+    }
     let mut reached_ns = earliest;
     let mut drained = 0;
     for _ in 0..budget {
@@ -104,6 +131,16 @@ pub fn scan_triggers(
         }
         reached_ns = event.ts_event();
         if let TickEvent::Trade(trade) = event {
+            let any_price_can_hit = fill_buy_max.is_some_and(|px| trade.price < px)
+                || fill_sell_min.is_some_and(|px| trade.price > px)
+                || touch_buy_min.is_some_and(|px| trade.price >= px)
+                || touch_sell_max.is_some_and(|px| trade.price <= px);
+            if !any_price_can_hit {
+                if reached_ns == to_ns {
+                    break;
+                }
+                continue;
+            }
             for (hit, scan) in hits.iter_mut().zip(scans) {
                 if hit.is_none()
                     && trade.ts_event > scan.from_ns
