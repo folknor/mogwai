@@ -68,10 +68,9 @@ pub struct MogwaiDataClient {
     http: HttpClient,
     http_quota: HttpQuota,
     sim: SimClock,
-    /// Earliest `ts_event` the venue can serve, learned from `/clock` at connect.
-    /// `0` means unknown (clock fetch failed); the warmup guard skips its
-    /// pre-flight refusal in that case and defers to the server's own 422.
-    data_origin_ns: u64,
+    /// Earliest `ts_event` the venue can serve. `None` means the clock fetch
+    /// failed; `Some(0)` is the real fixed tape floor.
+    data_origin_ns: Option<u64>,
     ws_cmd: Option<UnboundedSender<WsCommand>>,
     instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     subs: Arc<Mutex<HashMap<Symbol, SubState>>>,
@@ -111,7 +110,7 @@ impl MogwaiDataClient {
             sink: None,
             http,
             sim: SimClock::identity(),
-            data_origin_ns: 0,
+            data_origin_ns: None,
             ws_cmd: None,
             instruments: Arc::new(Mutex::new(HashMap::new())),
             subs: Arc::new(Mutex::new(HashMap::new())),
@@ -320,10 +319,10 @@ impl DataClient for MogwaiDataClient {
     async fn connect(&mut self) -> anyhow::Result<()> {
         let sink = self.sink()?;
         let http_base_url = self.config.http_base_url();
-        let server = fetch_clock_or_identity(&self.http, &http_base_url).await;
+        let (server, floor_known) = fetch_clock_or_identity(&self.http, &http_base_url).await;
         let sim = server.sim;
         self.sim = sim;
-        self.data_origin_ns = server.data_origin_ns;
+        self.data_origin_ns = floor_known.then_some(server.data_origin_ns);
         let conn = conn_havoc(&self.config.havoc);
         self.http_quota = HttpQuota::from_conn(&conn, sim);
         seed_instruments(

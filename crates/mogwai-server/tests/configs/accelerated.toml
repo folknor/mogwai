@@ -7,7 +7,6 @@
 # during warmup generation and the run would be over before the launcher could
 # connect. It must instead serve its whole declared duration after readiness.
 
-sim_epoch_ns = 1600000000000000000
 speed = 100.0
 
 # Six simulated hours of warmup, generated before the readiness line.

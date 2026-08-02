@@ -13,27 +13,42 @@ use futures_util::{SinkExt, StreamExt};
 use mogwai_protocol::{ServerMessage, TradeTick};
 use tokio_tungstenite::tungstenite::Message;
 
-/// The silent failure the eager-warmup ruling exists to remove: an off-tape
-/// window used to drain the seek budget and come back an empty `200` the caller
-/// could not tell from "no trades happened". It is now a named refusal.
 #[test]
 #[ignore = "binds a loopback listener"]
-fn trades_before_the_history_floor_are_refused_with_400() {
-    let venue = spawn(&["--config", &fast_config()]);
-    let floor = venue.record.data_origin_ns;
+fn the_tape_origin_is_fixed_and_independent_of_launch_time() {
+    let first = spawn(&["--config", &fast_config()]);
+    let second = spawn(&["--config", &fast_config()]);
+    for venue in [&first, &second] {
+        assert_eq!(venue.record.data_origin_ns, 0);
+        assert_eq!(venue.record.run_start_ns, venue.record.warmup_ns);
+        let (status, body) = http_get(&venue.http_base(), "/clock");
+        assert_eq!(status, 200);
+        let clock: mogwai_protocol::ServerClock = serde_json::from_str(&body).unwrap();
+        assert_eq!(clock.data_origin_ns, 0);
+    }
+    assert_eq!(first.record.run_start_ns, second.record.run_start_ns);
+    assert_eq!(first.record.warmup_ns, second.record.warmup_ns);
+}
 
-    let (status, body) = http_get(
-        &venue.http_base(),
-        &format!("/trades?symbol={}&start={}", venue.record.symbol, floor - 1),
-    );
-    assert_eq!(
-        status, 400,
-        "an off-tape start is refused, not served short"
-    );
-    assert!(
-        body.contains(&floor.to_string()),
-        "the refusal names the earliest servable instant: {body}"
-    );
+#[test]
+#[ignore = "binds three loopback listeners"]
+fn two_runs_with_the_same_configured_seed_serve_the_same_first_trades() {
+    let first = spawn(&["--config", &fast_config()]);
+    let second = spawn(&["--config", &fast_config()]);
+    let alternate = format!("{}/tests/configs/fast-alt.toml", env!("CARGO_MANIFEST_DIR"));
+    let third = spawn(&["--config", &alternate]);
+    let page = |venue: &common::Venue| {
+        let path = format!(
+            "/trades?symbol={}&start=0&end={}&limit=50",
+            venue.record.symbol, venue.record.run_start_ns
+        );
+        let (status, body) = http_get(&venue.http_base(), &path);
+        assert_eq!(status, 200, "{body}");
+        body
+    };
+    let first_page = page(&first);
+    assert_eq!(first_page, page(&second));
+    assert_ne!(first_page, page(&third));
 }
 
 /// The symmetric ceiling. Serving past the clock would be a look-ahead leak no
@@ -267,7 +282,7 @@ async fn an_armed_divergence_reaches_every_connection() {
 
     // Arm a blackout over the control plane. It is armed against the RUN, not
     // against an account, so it must gate this socket's market data.
-    let armed = post_divergence(&venue.http_base(), r#"{"type":"StallData","ms":60000}"#);
+    let armed = post_divergence(&venue.http_base(), r#"{"type":"StallData","ms":180000}"#);
     assert_eq!(armed, 202, "the divergence is accepted");
 
     // Within the window no market data may arrive on this socket.

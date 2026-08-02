@@ -4,10 +4,11 @@
 //! `mogwai gen` - runs the synthetic generator OFFLINE (no server, no sockets,
 //! no adapter) and writes its output as CSV, either raw trades or aggregated
 //! OHLCV bars, so the generated tape can be charted and inspected. Reuses the
-//! server's own generation plumbing (`InstrumentProfiles`, `seed_for`,
-//! `fingerprint()`, `GeneratedSource`) and the shared bar-aggregation core
-//! (`mogwai_data::{BarAcc, fold_trade}`) so this CLI never diverges from the
-//! walk the running server would produce at the same anchor.
+//! server's own generation plumbing (`InstrumentProfiles`, `fingerprint()`,
+//! `GeneratedSource`) and the shared bar-aggregation core
+//! (`mogwai_data::{BarAcc, fold_trade}`), so the PROCESS is the shipped one.
+//! The realization is not: a run draws or configures its own seed, so this CLI
+//! reproduces a served walk only when handed that run's tape seed via `--seed`.
 //!
 //! The load-bearing piece is the empty-window-fill rule in `write_bars`, which
 //! renders multi-hour trade deserts as flat zero-volume runs on a chart -
@@ -26,7 +27,10 @@ use mogwai_protocol::{
 };
 use rust_decimal::Decimal;
 
-use crate::source::{InstrumentProfiles, fingerprint, seed_for};
+use crate::source::{InstrumentProfiles, fingerprint};
+
+/// Default offline realization, shared with the realism certification seed.
+const DEFAULT_GEN_SEED: u64 = 42;
 
 #[derive(Copy, Clone, ValueEnum)]
 pub(crate) enum GenType {
@@ -51,7 +55,9 @@ pub(crate) struct GenArgs {
     /// Instrument to generate. Selects a built-in fingerprint profile.
     #[arg(long, default_value = "BTCUSDT")]
     symbol: String,
-    /// Walk seed. Defaults to the FNV of `--symbol`, matching the running server.
+    /// Walk seed. Defaults to `DEFAULT_GEN_SEED`, the realism gate's seed. The
+    /// running server draws or configures its own run seed instead, so this
+    /// offline walk matches a served one only when given that run's tape seed.
     #[arg(long)]
     seed: Option<u64>,
     /// Sim-time unix-ns anchor the walk starts at. Default 0 is the canonical
@@ -240,7 +246,7 @@ fn build_source(args: &GenArgs) -> anyhow::Result<mogwai_data::GeneratedSource> 
             args.symbol
         )
     })?;
-    let seed = args.seed.unwrap_or_else(|| seed_for(&args.symbol));
+    let seed = args.seed.unwrap_or(DEFAULT_GEN_SEED);
     let mut scalars = profile.scalars.clone();
     if let Some(p) = args.start_price {
         scalars.start_price = p;
@@ -651,7 +657,7 @@ mod tests {
         let profile = profiles.get("BTCUSDT").expect("BTCUSDT profile");
         let mut direct_source = mogwai_data::GeneratedSource::new_with_session_profile(
             profile.scalars.clone(),
-            seed_for("BTCUSDT"),
+            DEFAULT_GEN_SEED,
             0,
             fp,
             &profile.session,

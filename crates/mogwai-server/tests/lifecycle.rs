@@ -19,6 +19,33 @@ use std::{
 
 use common::{fast_config, http_get, spawn, spawn_raw, venue_binary};
 
+#[test]
+#[ignore = "binds two loopback listeners"]
+fn the_ready_record_reports_a_seed_that_differs_between_launches() {
+    let config = format!(
+        "{}/tests/configs/fast-random.toml",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let first = spawn(&["--config", &config]);
+    let second = spawn(&["--config", &config]);
+    // A collision is a 2^-63 event, not a venue defect.
+    assert_ne!(first.record.run_seed, second.record.run_seed);
+}
+
+#[test]
+#[ignore = "binds a loopback listener"]
+fn the_ready_record_names_the_tape_protocol_version() {
+    let venue = spawn(&["--config", &fast_config()]);
+    assert!(
+        venue
+            .record
+            .version_string
+            .contains(&format!("tape {}", mogwai_data::TAPE_PROTOCOL_VERSION)),
+        "{}",
+        venue.record.version_string
+    );
+}
+
 /// The whole point of the ephemeral port: the venue picks one and REPORTS it,
 /// so a launcher never has to pick a port and never collides with another run.
 #[test]

@@ -10,7 +10,6 @@
 # second buys 100 simulated seconds of tape, which the dwell bound in
 # mogwai-data makes a print-rich interval, while the sweep's 5 ms wall floor
 # keeps the pass cost bounded.
-sim_epoch_ns = 1900000000000000000
 speed = 100.0
 fill_band_vol_mult = 0.5
 fill_band_max_ticks = 200

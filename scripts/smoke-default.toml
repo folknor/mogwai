@@ -1,0 +1,12 @@
+# mogwai-server config for scripts/smoke.py (the default mode).
+#
+# The mode asserts the launcher contract - a tape pushed unbidden, an order
+# worked, one ledger answered - not a cadence. It used to run on the venue's
+# built-in defaults, which capped the wall wait between two prints at
+# gap_cap_ms. With that cap deleted, speed = 1.0 waits out the fitted
+# inter-arrival process in full, whose dwells run to tens of seconds on the
+# default BTCUSDT profile, and the first Trade frame no longer arrives inside
+# the client's timeout. Speed is the knob that answers that now, so this
+# compresses the same fitted process rather than capping it.
+speed = 60.0
+server_heartbeat_ms = 0

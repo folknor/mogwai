@@ -312,9 +312,6 @@ impl AppState {
     pub(crate) fn sim(&self) -> SimClock {
         self.run.sim
     }
-    pub(crate) fn data_origin_ns(&self) -> u64 {
-        self.run.data_origin_ns()
-    }
 }
 
 /// Marker proving the websocket dispatcher has served any ACT delay off its
@@ -507,12 +504,12 @@ pub(crate) async fn clock(State(state): State<AppState>) -> Json<ServerClock> {
     // its own warmup against `data_origin_ns` rather than issuing a doomed
     // off-tape fetch. `server_now_ns` is sampled here so the client gets sim-now
     // and the floor from one round trip, without reading its own (skewable) wall
-    // clock. `data_origin_ns` is the boot-derived floor; the horizon is echoed so
+    // clock. `data_origin_ns` is the fixed floor; the horizon is echoed so
     // the client can report the floor in its own terms.
     Json(ServerClock {
         sim: state.sim(),
         server_now_ns: sim_now_ns(state.sim()),
-        data_origin_ns: state.data_origin_ns(),
+        data_origin_ns: state.run.data_origin_ns(),
         warmup_ns: state.run.warmup_ns,
     })
 }
@@ -562,15 +559,13 @@ async fn market_reading(
     };
     if let Some(symbol) = symbol {
         let profiles = Arc::clone(&state.profiles);
-        let data_origin = state.data_origin_ns();
         let mult = state.cfg.fill_band_vol_mult;
         let max_ticks = state.cfg.fill_band_max_ticks;
         let (reading, last_px) = tokio::task::spawn_blocking(move || {
-            let reading =
-                crate::fills::read_market(&symbol, ts, &profiles, data_origin, mult, max_ticks);
+            let reading = crate::fills::read_market(&symbol, ts, &profiles, mult, max_ticks);
             let last_px = reading
                 .map(|value| value.last_px)
-                .or_else(|| crate::fills::read_last(&symbol, ts, &profiles, data_origin));
+                .or_else(|| crate::fills::read_last(&symbol, ts, &profiles));
             (reading, last_px)
         })
         .await
@@ -611,7 +606,7 @@ pub(crate) async fn trades(
     // construction rather than by a client remembering to ask for the same one.
     let limit = normalize_limit(query.limit);
     let profiles = Arc::clone(&state.profiles);
-    let data_origin = state.data_origin_ns();
+    let data_origin = source::TAPE_ORIGIN_NS;
     let sim_now = sim_now_ns(state.sim());
     let HistoryQuery {
         symbol, start, end, ..
@@ -623,6 +618,12 @@ pub(crate) async fn trades(
     // `200` the warmup cannot distinguish from "no trades happened". `None` means
     // "from origin" and is served; degenerate windows (start > end, limit 0) flow
     // through to `bounded_trades` unchanged.
+    //
+    // With `TAPE_ORIGIN_NS` fixed at zero this branch is currently unreachable -
+    // no `u64` start is below it - and it is kept rather than deleted because
+    // the floor is a constant this handler reads, not a literal it hardcodes:
+    // move the origin off zero and the refusal is live again, with its message
+    // and its status already agreed with the adapter's `ensure_on_tape` guard.
     if let Some(start) = start
         && start < data_origin
     {
@@ -674,7 +675,7 @@ pub(crate) async fn trades(
     // tokio worker, so a burst of `/trades` requests cannot stall the async
     // runtime's worker pool.
     let ticks = match tokio::task::spawn_blocking(move || {
-        bounded_trades(&symbol, start, end, limit, &profiles, data_origin)
+        bounded_trades(&symbol, start, end, limit, &profiles)
     })
     .await
     {
@@ -713,14 +714,12 @@ pub(crate) fn bounded_trades(
     end: Option<u64>,
     limit: usize,
     profiles: &source::InstrumentProfiles,
-    data_origin: u64,
 ) -> Vec<TradeTick> {
     if limit == 0 {
         return Vec::new();
     }
 
-    let Some(mut merged) = source::build_history_source(symbol, start, profiles, data_origin)
-    else {
+    let Some(mut merged) = source::build_history_source(symbol, start, profiles) else {
         return Vec::new();
     };
     let mut out = Vec::new();

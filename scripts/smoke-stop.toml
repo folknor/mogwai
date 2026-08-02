@@ -9,7 +9,6 @@
 # seconds between prints, so a wall-bounded assertion would be a bet on the
 # tape's cadence rather than a gate on the trigger. At speed 100 every wall
 # second buys 100 simulated seconds of tape.
-sim_epoch_ns = 1900000000000000000
 speed = 100.0
 fill_band_vol_mult = 0.5
 fill_band_max_ticks = 200

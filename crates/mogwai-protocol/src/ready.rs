@@ -7,14 +7,6 @@ use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
 
-/// Provenance for the generated tape.  A run seed is intentionally not
-/// invented here: today the generator derives one seed per symbol.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "value")]
-pub enum SeedReport {
-    PerSymbolFnv(Vec<(String, u64)>),
-}
-
 /// The venue's report to the process that launched it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadyRecord {
@@ -24,7 +16,9 @@ pub struct ReadyRecord {
     pub addr: SocketAddr,
     pub pid: u32,
     pub symbol: String,
-    pub seed: SeedReport,
+    /// The value that, with the config, fingerprint and `version_string`,
+    /// reproduces this path.
+    pub run_seed: u64,
     pub data_origin_ns: u64,
     pub run_start_ns: u64,
     pub run_duration_ns: Option<u64>,
@@ -37,7 +31,7 @@ impl ReadyRecord {
     /// by any landing that adds or changes a field. Stated once, here, so the
     /// venue that writes the record and the test that pins its bytes cannot
     /// disagree about which schema they mean.
-    pub const VERSION: u32 = 4;
+    pub const VERSION: u32 = 5;
 }
 
 #[cfg(test)]
@@ -51,7 +45,7 @@ mod tests {
             addr: "127.0.0.1:41235".parse().unwrap(),
             pid: 42,
             symbol: "BTCUSDT".into(),
-            seed: SeedReport::PerSymbolFnv(vec![("BTCUSDT".into(), 7)]),
+            run_seed: 7,
             data_origin_ns: 1,
             run_start_ns: 2,
             run_duration_ns: None,
@@ -61,7 +55,7 @@ mod tests {
         let json = serde_json::to_string(&value).unwrap();
         assert_eq!(
             json,
-            r#"{"version":4,"addr":"127.0.0.1:41235","pid":42,"symbol":"BTCUSDT","seed":{"kind":"PerSymbolFnv","value":[["BTCUSDT",7]]},"data_origin_ns":1,"run_start_ns":2,"run_duration_ns":null,"warmup_ns":1,"version_string":"test"}"#
+            r#"{"version":5,"addr":"127.0.0.1:41235","pid":42,"symbol":"BTCUSDT","run_seed":7,"data_origin_ns":1,"run_start_ns":2,"run_duration_ns":null,"warmup_ns":1,"version_string":"test"}"#
         );
         assert_eq!(serde_json::from_str::<ReadyRecord>(&json).unwrap(), value);
     }

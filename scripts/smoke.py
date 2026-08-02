@@ -39,18 +39,20 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.request
+from decimal import ROUND_DOWN, Decimal
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Readiness-record schema this launcher understands. Step 3 refuses anything
 # else rather than reading fields that may have moved.
-READY_VERSION = 4
+READY_VERSION = 5
 
 # Each mode's default venue config, relative to scripts/. `None` means the
 # venue's own built-in defaults.
 MODE_CONFIGS = {
-    "default": None,
+    "default": "smoke-default.toml",
     "heartbeat": "smoke-heartbeat.toml",
     "accelerated": "smoke-accelerated.toml",
     "admission": "smoke-admission.toml",
@@ -284,14 +286,21 @@ def order(client_order_id: str, symbol: str, **overrides: object) -> dict:
 def check_common(venue: Venue) -> None:
     """One run, one instrument, one reachable endpoint, one servable warmup."""
     with urllib.request.urlopen(f"http://{venue.addr}/health", timeout=10) as resp:
-        assert resp.read() == b"ok"
+        body = resp.read()
+        assert body == b"ok", f"/health answered {body!r} instead of ok"
 
     instruments = venue.http("/instruments")
     assert len(instruments) == 1, f"one run serves one instrument, got {instruments}"
-    assert instruments[0]["symbol"] == venue.symbol
+    assert instruments[0]["symbol"] == venue.symbol, (
+        f"the served instrument is {instruments[0]['symbol']}, the readiness "
+        f"record names {venue.symbol}"
+    )
 
     clock = venue.http("/clock")
-    assert clock["data_origin_ns"] == venue.record["data_origin_ns"]
+    assert clock["data_origin_ns"] == venue.record["data_origin_ns"], (
+        f"/clock reports data_origin_ns {clock['data_origin_ns']}, the readiness "
+        f"record reports {venue.record['data_origin_ns']}"
+    )
     assert clock["warmup_ns"] == venue.record["warmup_ns"], (
         "the clock's warmup horizon and the readiness record's must agree"
     )
@@ -330,7 +339,9 @@ def mode_default(venue: Venue) -> str:
         # the run's one tape on upgrade.
         trade = ws.until(lambda frame: frame.get("type") == "Trade")
         assert trade, "the venue did not push its tape unbidden"
-        assert trade["symbol"] == venue.symbol
+        assert trade["symbol"] == venue.symbol, (
+            f"the pushed tape carries {trade['symbol']}, the run serves {venue.symbol}"
+        )
 
         ws.send(order("SMOKE-1", venue.symbol))
         accepted = ws.until(
@@ -369,7 +380,9 @@ def mode_default(venue: Venue) -> str:
         ws.send({"type": "QueryOrders", "request_id": "SMOKE-Q", "open_only": False})
         snapshot = ws.until(lambda frame: frame.get("type") == "OrderStatusSnapshot")
         assert snapshot, "the venue-truth query went unanswered"
-        assert any(row["client_order_id"] == "SMOKE-1" for row in snapshot["orders"])
+        assert any(row["client_order_id"] == "SMOKE-1" for row in snapshot["orders"]), (
+            f"SMOKE-1 is absent from the venue-truth snapshot: {snapshot['orders']}"
+        )
 
         account = venue.http("/account")
         assert account["balances"], "the run's one ledger reports its funding"
@@ -438,7 +451,7 @@ def mode_admission(venue: Venue) -> str:
         )
         assert refusal, "the venue never refused for capacity under a shrunk budget"
         assert refusal["subject"], "a refusal names what it refused"
-        assert "reason" in refusal
+        assert "reason" in refusal, f"a refusal states a reason: {refusal}"
     finally:
         ws.close()
     return f"venue refused for capacity: {refusal['reason']}"
@@ -588,16 +601,29 @@ def mode_stop(venue: Venue) -> str:
                 f"/trades?symbol={venue.symbol}&start={sim_now - 300_000_000_000}&end={sim_now}&limit=10000"
             )
             assert anchor, "no anchor print"
-            trigger = float(anchor[-1]["price"]) - 0.01
-            ws.send(order(client_order_id, venue.symbol, order_type="StopMarket", side="Sell", trigger_price=f"{trigger:.2f}", reduce_only=True))
+            # Decimal, not float, and the SENT string is what is asserted
+            # against. The venue echoes back exactly the number it was given, so
+            # comparing the echo to an unrounded binary float that was rounded
+            # on its way out fails for every anchor whose cent arithmetic is not
+            # exact in base two - about a third of them, which is what made this
+            # mode fail intermittently rather than never.
+            trigger = (Decimal(anchor[-1]["price"]) - Decimal("0.01")).quantize(
+                Decimal("0.01"), rounding=ROUND_DOWN
+            )
+            wire_trigger = f"{trigger}"
+            ws.send(order(client_order_id, venue.symbol, order_type="StopMarket", side="Sell", trigger_price=wire_trigger, reduce_only=True))
             accepted = ws.until(lambda frame: frame.get("type") in ("OrderAccepted", "OrderRejected") and frame.get("client_order_id") == client_order_id)
             assert accepted and accepted["type"] == "OrderAccepted", accepted
             ws.send({"type": "QueryOrders", "request_id": f"STOP-Q-{attempt}", "open_only": True})
             snapshot = ws.until(lambda frame: frame.get("type") == "OrderStatusSnapshot")
+            assert snapshot, "the venue-truth query went unanswered"
             row = next((row for row in snapshot["orders"] if row["client_order_id"] == client_order_id), None)
             if row is None:
                 continue
-            assert float(row["trigger_price"]) == trigger
+            assert Decimal(row["trigger_price"]) == trigger, (
+                f"the venue echoed trigger_price {row['trigger_price']} for an "
+                f"order submitted at {wire_trigger}"
+            )
             triggered = ws.until(lambda frame: frame.get("type") == "OrderTriggered" and frame.get("client_order_id") == client_order_id, timeout=90)
             if triggered:
                 fill = ws.until(lambda frame: frame.get("type") == "OrderFilled" and frame.get("client_order_id") == client_order_id)
@@ -606,7 +632,7 @@ def mode_stop(venue: Venue) -> str:
                 # adversely - down for a sell. Never the stop price itself,
                 # which is the client's own number and the lie the fill band
                 # exists to remove.
-                assert float(fill["last_px"]) <= trigger, f"a sell stop must fill at or below its trigger, got {fill['last_px']}"
+                assert Decimal(fill["last_px"]) <= trigger, f"a sell stop must fill at or below its trigger {wire_trigger}, got {fill['last_px']}"
                 return "stop-market rested, triggered on the tape, and filled adversely"
         raise AssertionError("the run sweep never triggered the stop-market")
     finally:
@@ -621,7 +647,9 @@ def mode_duration(venue: Venue, duration: str) -> str:
             lambda frame: frame.get("type") == "RunComplete", timeout=180
         )
         assert completion, "the run ended without announcing its completion"
-        assert completion["elapsed_ns"] > 0
+        assert completion["elapsed_ns"] > 0, (
+            f"a completed run reports positive elapsed time, got {completion['elapsed_ns']}"
+        )
         # The socket is closed with WS 1000 right behind the announcement.
         ws.recv(timeout=10)
         assert ws.closed_code in (None, 1000), (
@@ -680,9 +708,36 @@ def main() -> None:
     print(f"PASS [{parsed.mode}] {venue.addr}: {detail}")
 
 
+def failure_reason(err: BaseException) -> str:
+    """A reason for EVERY failure, including a bare `assert x` with no message.
+
+    A gate whose operator is an agent cannot afford `FAIL:` with nothing after
+    it. `str(err)` is empty for an unannotated assertion and for several stdlib
+    exceptions, so the location and the failing source line are appended
+    unconditionally: those are the two facts that are always available and they
+    are enough to name what broke.
+    """
+    frames = traceback.extract_tb(err.__traceback__)
+    where = ""
+    if frames:
+        last = frames[-1]
+        where = f"{os.path.basename(last.filename)}:{last.lineno}"
+        if last.line:
+            where = f"{where} {last.line}"
+    message = str(err).strip()
+    kind = type(err).__name__
+    if message and where:
+        return f"{kind}: {message} [at {where}]"
+    if message:
+        return f"{kind}: {message}"
+    if where:
+        return f"{kind} with no message, at {where}"
+    return f"{kind} with no message and no traceback"
+
+
 if __name__ == "__main__":
     try:
         main()
-    except AssertionError as err:
-        print(f"FAIL: {err}", file=sys.stderr)
+    except Exception as err:  # noqa: BLE001 - the gate reports, it does not raise
+        print(f"FAIL: {failure_reason(err)}", file=sys.stderr)
         raise SystemExit(1) from err

@@ -10,8 +10,8 @@
 #
 # One simulated hour of warmup supplies the estimator's 300-second window.
 
-sim_epoch_ns = 1600000000000000000
 speed = 100.0
+seed = 42
 warmup_ns = 3600000000000
 fill_band_vol_mult = 0.5
 fill_band_max_ticks = 200

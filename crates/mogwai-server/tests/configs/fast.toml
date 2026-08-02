@@ -5,6 +5,11 @@
 # tape so a connection sees frames immediately rather than waiting out real
 # inter-trade gaps.
 
+# Pinned so two venues launched from this file serve the SAME realization,
+# which is what the reproduction gate asserts. fast-alt.toml is the same file
+# at a different seed; fast-random.toml is the same file with none.
+seed = 42
+
 # Five simulated minutes of history, materialized at boot.
 warmup_ns = 300000000000
 

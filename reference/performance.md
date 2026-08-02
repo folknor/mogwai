@@ -127,9 +127,8 @@ reunite the two crates.
 
 ### What `source_positioning` does NOT include
 
-It is built from `mogwai-data` and so omits two ingredients of the server's
-`build_history_source`: the `InstrumentProfiles` lookup and the `seed_for`
-FNV-1a-64 symbol folding. Both are constant-time table reads outside any loop.
-It also omits the server-private `BoundedSeek` wrapper, whose cost is one
-counter comparison per drained tick. So this number is close to, but strictly
-below, the sweeper's true per-pass fixed cost.
+It is built from `mogwai-data` and so omits one ingredient of the server's
+`build_history_source`: the `InstrumentProfiles` lookup, a constant-time table
+read outside any loop. It also omits the server-private `BoundedSeek` wrapper,
+whose cost is one counter comparison per drained tick. So this number is close
+to, but strictly below, the sweeper's true per-pass fixed cost.

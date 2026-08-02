@@ -13,7 +13,17 @@ brokkr run mogwai -- serve --config run.toml --ready-fd 3
 
 `--config PATH` is optional and otherwise uses built-in defaults. It never
 consults the working directory. `--duration DURATION` overrides
-`run_duration_ns` for this invocation.
+`run_duration_ns` for this invocation. There is no `--seed` flag: a
+reproduced path is a written-down act, so the seed is overridden through the
+config file's `seed` key alone; when absent, one is drawn at launch and
+reported back in the readiness record's `run_seed`, the value that with the
+config, the fingerprint and `version_string` reproduces the served path.
+
+`mogwai --version` prints semver, build hash, build time and the tape
+generation process's version (`mogwai_data::TAPE_PROTOCOL_VERSION`) on one
+line; the same string is what the readiness record reports as
+`version_string`, so an operator can tell whether two runs' tapes are even
+comparable before comparing seeds.
 
 The launcher creates a pipe, starts `mogwai serve --ready-fd 3` as its direct
 child, reads exactly one JSON `ReadyRecord` line, checks `version`, and uses

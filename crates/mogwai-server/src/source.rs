@@ -8,7 +8,7 @@ use mogwai_data::{
     CheckpointIndex, Fingerprint, GeneratedSource, GeneratorScalars, MergeSource, SessionProfile,
     TickSource,
 };
-use mogwai_protocol::{InstrumentDef, MarketRegime, Symbol, default_instruments};
+use mogwai_protocol::{InstrumentDef, MarketRegime, RunSeeds, Symbol, default_instruments};
 use rust_decimal::Decimal;
 use std::{
     collections::HashMap,
@@ -19,13 +19,10 @@ pub(crate) fn fingerprint() -> &'static Fingerprint {
     static FP: OnceLock<Fingerprint> = OnceLock::new();
     FP.get_or_init(Fingerprint::from_repo_json)
 }
-pub(crate) fn seed_for(symbol: &str) -> u64 {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    symbol.bytes().fold(OFFSET, |hash, byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(PRIME)
-    })
-}
+
+/// Fixed epoch of every generated tape. The run proper begins one configured
+/// warmup span after this instant.
+pub(crate) const TAPE_ORIGIN_NS: u64 = 0;
 
 #[derive(Debug, Clone)]
 pub(crate) struct InstrumentProfile {
@@ -87,18 +84,17 @@ fn default_profile(def: InstrumentDef, fp: &Fingerprint) -> InstrumentProfile {
     scalars.price_decimals = u32::from(def.price_precision);
     InstrumentProfile::new(def, scalars, fp.session_profile.clone())
 }
-fn generator(
-    profile: &InstrumentProfile,
-    data_origin: u64,
-    regime: Option<MarketRegime>,
-) -> GeneratedSource {
+fn generator(profile: &InstrumentProfile) -> GeneratedSource {
+    let boot = *BOOT
+        .get()
+        .expect("warmup fixes the run tape before it is read");
     GeneratedSource::new_with_session_profile(
         profile.scalars.clone(),
-        seed_for(&profile.def.symbol),
-        data_origin,
+        boot.seeds.tape,
+        TAPE_ORIGIN_NS,
         fingerprint(),
         &profile.session,
-        regime,
+        boot.regime,
     )
 }
 
@@ -125,42 +121,41 @@ const MAX_EXTEND_TICKS: usize = 1 << 30;
 /// life of the process, so there is nothing left to key it by.
 static INDEX: OnceLock<Mutex<CheckpointIndex>> = OnceLock::new();
 
-/// The regime this run was launched with. Boot config now rather than a
-/// per-subscription choice, so the whole process shares one realization.
-static BOOT_REGIME: OnceLock<Option<MarketRegime>> = OnceLock::new();
-
-pub(crate) fn set_boot_regime(regime: Option<MarketRegime>) {
-    // A second set is a no-op by construction, which is the honest behaviour:
-    // one process is one run and the regime is fixed at boot.
-    if BOOT_REGIME.set(regime).is_err() {
-        tracing::debug!("boot regime was already fixed; one process is one run");
-    }
+/// Everything that fixes WHICH tape this process serves: the run's derived
+/// seeds and the regime it was launched with. Boot config now rather than a
+/// per-subscription choice, so the whole process shares one realization. One
+/// struct rather than two globals, because both are set at the same instant by
+/// the same caller and read by the same function.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct BootTape {
+    pub(crate) seeds: RunSeeds,
+    pub(crate) regime: Option<MarketRegime>,
 }
 
-fn boot_regime() -> Option<MarketRegime> {
-    BOOT_REGIME.get().copied().flatten()
+static BOOT: OnceLock<BootTape> = OnceLock::new();
+
+/// Installs the boot tape for an in-crate test, or ASSERTS that the one already
+/// installed is identical. The checkpoint chain is process-global, so whichever
+/// test touches it first would otherwise fix the tape seed for every later test
+/// in the binary and turn this into a silent no-op. Every in-crate test that
+/// reaches the chain goes through here with the same `BootTape`, so a future
+/// test wanting a different one fails immediately and by name.
+#[cfg(test)]
+pub(crate) fn set_boot_for_test(boot: BootTape) {
+    let installed = *BOOT.get_or_init(|| boot);
+    assert_eq!(
+        installed, boot,
+        "boot tape collision: installed {installed:?}, requested {boot:?}"
+    );
 }
 
-/// The run's chain, built on first use and reused thereafter.
-///
-/// `data_origin` is read ONLY on that first call - it is checkpoint zero, and a
-/// chain cannot be re-based without discarding every snapshot on it. That is
-/// safe because the first caller is always `materialize_warmup` at boot, whose
-/// origin is at or below every origin a later caller passes: the boot estimate
-/// is taken before warmup generation while `Run::data_origin_ns` is derived
-/// from the post-warmup `run_start_ns`, so the chain reaches at least as far
-/// back as anything asked of it and every later `data_origin` argument is
-/// already inside it.
-fn index(
-    symbol: &str,
-    profiles: &InstrumentProfiles,
-    data_origin: u64,
-) -> Option<&'static Mutex<CheckpointIndex>> {
+/// The run's chain, rooted at the fixed tape origin and reused thereafter.
+fn index(symbol: &str, profiles: &InstrumentProfiles) -> Option<&'static Mutex<CheckpointIndex>> {
     if let Some(existing) = INDEX.get() {
         return Some(existing);
     }
     let profile = profiles.get(symbol)?;
-    let origin = generator(profile, data_origin, boot_regime());
+    let origin = generator(profile);
     Some(
         INDEX.get_or_init(|| {
             Mutex::new(CheckpointIndex::new(origin, CHECKPOINT_K, MAX_EXTEND_TICKS))
@@ -180,10 +175,9 @@ fn locked(
 pub(crate) fn build_live_source(
     symbol: &str,
     profiles: &InstrumentProfiles,
-    data_origin: u64,
     sim_now: u64,
 ) -> Option<Box<dyn TickSource>> {
-    build_history_source(symbol, Some(sim_now), profiles, data_origin)
+    build_history_source(symbol, Some(sim_now), profiles)
 }
 
 /// A source positioned at `start`, RESUMED from the run's checkpoint chain
@@ -193,10 +187,9 @@ pub(crate) fn build_history_source(
     symbol: &str,
     start: Option<u64>,
     profiles: &InstrumentProfiles,
-    data_origin: u64,
 ) -> Option<Box<dyn TickSource>> {
-    let index = index(symbol, profiles, data_origin)?;
-    let positioned = locked(index).source_at_or_before(start.unwrap_or(data_origin));
+    let index = index(symbol, profiles)?;
+    let positioned = locked(index).source_at_or_before(start.unwrap_or(TAPE_ORIGIN_NS));
     Some(Box::new(MergeSource::starting_at(
         vec![Box::new(positioned)],
         start,
@@ -207,19 +200,23 @@ pub(crate) fn build_history_source(
 /// readiness record is written.
 ///
 /// Holding it is what the checkpoint chain does: once this returns, every
-/// instant in `[data_origin, run_start_ns]` is reachable by a resume plus a
+/// instant in `[TAPE_ORIGIN_NS, run_start_ns]` is reachable by a resume plus a
 /// bounded residual replay, so a history request for the earliest servable
 /// instant is ANSWERED rather than refused or silently served short. Returns
 /// the number of snapshots retained, for the boot log.
 pub(crate) fn materialize_warmup(
     symbol: &str,
     profiles: &InstrumentProfiles,
-    regime: Option<MarketRegime>,
-    data_origin: u64,
+    boot: BootTape,
     run_start_ns: u64,
 ) -> anyhow::Result<usize> {
-    set_boot_regime(regime);
-    let Some(index) = index(symbol, profiles, data_origin) else {
+    // `OnceLock::set` hands BACK the rejected value on failure, not the stored
+    // one, so the installed tape is read separately or the message would name
+    // the wrong seed.
+    if BOOT.set(boot).is_err() {
+        anyhow::bail!("boot tape was already fixed as {:?}", BOOT.get());
+    }
+    let Some(index) = index(symbol, profiles) else {
         anyhow::bail!("configured warmup symbol {symbol} has no source");
     };
     let mut guard = locked(index);
@@ -240,9 +237,8 @@ pub(crate) fn last_trade_at_or_before(
     symbol: &str,
     ts: u64,
     profiles: &InstrumentProfiles,
-    data_origin: u64,
 ) -> Option<Decimal> {
-    let index = index(symbol, profiles, data_origin)?;
+    let index = index(symbol, profiles)?;
     let mut source = locked(index).source_at_or_before(ts);
     let mut last = None;
     while let Some(TickEvent::Trade(trade)) = source.next_tick() {

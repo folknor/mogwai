@@ -60,15 +60,10 @@ pub(crate) fn scan_triggers(
     scans: &[PendingScan],
     to_ns: u64,
     profiles: &InstrumentProfiles,
-    data_origin: u64,
 ) -> Option<Walk> {
     let earliest = scans.iter().map(|scan| scan.from_ns).min()?;
-    let mut source = source::build_history_source(
-        symbol,
-        Some(earliest.saturating_add(1)),
-        profiles,
-        data_origin,
-    )?;
+    let mut source =
+        source::build_history_source(symbol, Some(earliest.saturating_add(1)), profiles)?;
     let mapped: Vec<_> = scans
         .iter()
         .map(|scan| TriggerScan {
@@ -111,17 +106,12 @@ pub(crate) fn read_market(
     symbol: &str,
     ts: u64,
     profiles: &InstrumentProfiles,
-    data_origin: u64,
     mult: f64,
     max_ticks: u32,
 ) -> Option<MarketReading> {
-    let from_ns = ts.saturating_sub(VOL_WINDOW_NS).max(data_origin);
-    let mut source = source::build_history_source(
-        symbol,
-        Some(from_ns.saturating_add(1)),
-        profiles,
-        data_origin,
-    )?;
+    let from_ns = ts.saturating_sub(VOL_WINDOW_NS);
+    let mut source =
+        source::build_history_source(symbol, Some(from_ns.saturating_add(1)), profiles)?;
     let reading = mogwai_data::vol_reading(source.as_mut(), from_ns, ts, SWEEP_DRAIN_BUDGET)?;
     let increment = profiles.get(symbol)?.def.price_increment.to_f64()?;
     let last_px = reading.last_px.to_f64()?;
@@ -146,13 +136,8 @@ pub(crate) fn read_market(
 /// instants where a last print does exist. It is NOT a second answer to "what
 /// is the market" that fill decisions may consult - every one of those goes
 /// through `read_market`.
-pub(crate) fn read_last(
-    symbol: &str,
-    ts: u64,
-    profiles: &InstrumentProfiles,
-    data_origin: u64,
-) -> Option<Decimal> {
-    source::last_trade_at_or_before(symbol, ts, profiles, data_origin)
+pub(crate) fn read_last(symbol: &str, ts: u64, profiles: &InstrumentProfiles) -> Option<Decimal> {
+    source::last_trade_at_or_before(symbol, ts, profiles)
 }
 
 #[cfg(test)]
@@ -163,14 +148,18 @@ mod tests {
 
     use super::*;
 
-    const TEST_ORIGIN: u64 = 1_700_438_400_000_000_000;
+    const TEST_ORIGIN: u64 = source::TAPE_ORIGIN_NS + 86_400_000_000_000;
 
     fn profiles() -> InstrumentProfiles {
+        source::set_boot_for_test(source::BootTape {
+            seeds: mogwai_protocol::RunSeeds::from_run_seed(42),
+            regime: None,
+        });
         InstrumentProfiles::defaults()
     }
 
     fn tape(start: u64) -> Box<dyn TickSource> {
-        source::build_history_source("BTCUSDT", Some(start), &profiles(), TEST_ORIGIN)
+        source::build_history_source("BTCUSDT", Some(start), &profiles())
             .expect("configured deterministic BTC tape")
     }
 
@@ -200,11 +189,15 @@ mod tests {
 
     #[test]
     fn triggers_only_on_prints_strictly_through_the_trigger() {
-        let ticks = trades(TEST_ORIGIN, 2);
+        let ticks = trades(TEST_ORIGIN, 1);
         let (tick_ts, tick_price) = ticks[0];
         let increment = Decimal::new(1, 2);
+        // The window is exactly the first print: every probe is placed relative
+        // to that one price, so admitting a second print would make the
+        // expectation a statement about whichever way the walk happened to move
+        // next rather than about the strictly-through rule under test.
         let from = tick_ts.saturating_sub(1);
-        let to = ticks[1].0;
+        let to = tick_ts;
         let probes = vec![
             scan("touch-buy", Side::Buy, tick_price, from),
             scan("touch-sell", Side::Sell, tick_price, from),
@@ -213,7 +206,7 @@ mod tests {
             scan("below-buy", Side::Buy, tick_price - increment, from),
             scan("below-sell", Side::Sell, tick_price - increment, from),
         ];
-        let walk = scan_triggers("BTCUSDT", &probes, to, &profiles(), TEST_ORIGIN).expect("walk");
+        let walk = scan_triggers("BTCUSDT", &probes, to, &profiles()).expect("walk");
         assert_eq!(
             walk.hits.iter().map(Option::is_some).collect::<Vec<_>>(),
             vec![false, false, true, false, false, true]
@@ -227,8 +220,7 @@ mod tests {
         let mut touch = scan("touch", Side::Buy, px, ts.saturating_sub(1));
         touch.kind = mogwai_protocol::ScanKind::TriggerTouch;
         let through = scan("through", Side::Buy, px, ts.saturating_sub(1));
-        let walk = scan_triggers("BTCUSDT", &[touch, through], ts, &profiles(), TEST_ORIGIN)
-            .expect("walk");
+        let walk = scan_triggers("BTCUSDT", &[touch, through], ts, &profiles()).expect("walk");
         assert!(walk.hits[0].is_some());
         assert!(walk.hits[1].is_none());
         assert_eq!(walk.drained, 1);
@@ -242,7 +234,6 @@ mod tests {
             &probes,
             TEST_ORIGIN + 3_600_000_000_000,
             &profiles(),
-            TEST_ORIGIN,
         )
         .expect("walk");
         assert!(walk.hits[0].is_none());
@@ -252,8 +243,7 @@ mod tests {
     fn a_walk_stops_once_every_scan_has_triggered() {
         let ticks = trades(TEST_ORIGIN, 4);
         let probe = scan("one", Side::Buy, ticks[0].1 + Decimal::ONE, TEST_ORIGIN);
-        let walk =
-            scan_triggers("BTCUSDT", &[probe], ticks[3].0, &profiles(), TEST_ORIGIN).expect("walk");
+        let walk = scan_triggers("BTCUSDT", &[probe], ticks[3].0, &profiles()).expect("walk");
         assert!(walk.hits[0].is_some());
         assert_eq!(walk.reached_ns, ticks[0].0);
     }
@@ -266,7 +256,7 @@ mod tests {
         // 20k prints in that window, so a day does not actually exercise the
         // drain cap.
         let to = TEST_ORIGIN + 3_650 * 24 * 3_600_000_000_000;
-        let walk = scan_triggers("BTCUSDT", &probes, to, &profiles(), TEST_ORIGIN).expect("walk");
+        let walk = scan_triggers("BTCUSDT", &probes, to, &profiles()).expect("walk");
         assert!(walk.reached_ns < to);
         assert!(walk.reached_ns > first.0);
         assert!(walk.hits[0].is_none());
@@ -281,20 +271,13 @@ mod tests {
             scan("c", Side::Buy, Decimal::ONE, ticks[3].0),
         ];
         let to = ticks[5].0;
-        let batched =
-            scan_triggers("BTCUSDT", &probes, to, &profiles(), TEST_ORIGIN).expect("batched");
+        let batched = scan_triggers("BTCUSDT", &probes, to, &profiles()).expect("batched");
         let singles: Vec<_> = probes
             .iter()
             .map(|probe| {
-                scan_triggers(
-                    "BTCUSDT",
-                    std::slice::from_ref(probe),
-                    to,
-                    &profiles(),
-                    TEST_ORIGIN,
-                )
-                .expect("single")
-                .hits[0]
+                scan_triggers("BTCUSDT", std::slice::from_ref(probe), to, &profiles())
+                    .expect("single")
+                    .hits[0]
                     .is_some()
             })
             .collect();
@@ -308,8 +291,7 @@ mod tests {
     fn the_deciding_prints_are_the_prints_trades_serves() {
         let ticks = trades(TEST_ORIGIN, 8);
         let probe = scan("served", Side::Buy, ticks[0].1 + Decimal::ONE, TEST_ORIGIN);
-        let walk =
-            scan_triggers("BTCUSDT", &[probe], ticks[7].0, &profiles(), TEST_ORIGIN).expect("walk");
+        let walk = scan_triggers("BTCUSDT", &[probe], ticks[7].0, &profiles()).expect("walk");
         let expected = ticks
             .iter()
             .filter(|(ts, price)| *ts > TEST_ORIGIN && *price < ticks[0].1 + Decimal::ONE)
@@ -322,7 +304,7 @@ mod tests {
         let ticks = trades(TEST_ORIGIN, 2);
         let before_second = ticks[1].0.saturating_sub(1);
         assert_eq!(
-            read_last("BTCUSDT", before_second, &profiles(), TEST_ORIGIN),
+            read_last("BTCUSDT", before_second, &profiles()),
             Some(ticks[0].1)
         );
     }
@@ -337,7 +319,6 @@ mod tests {
             &[scan("old", Side::Buy, Decimal::ONE, ticks[0].0)],
             ticks[1].0,
             &profiles(),
-            TEST_ORIGIN,
         )
         .expect("first pass");
         let second = scan_triggers(
@@ -345,7 +326,6 @@ mod tests {
             &[scan("old", Side::Buy, Decimal::ONE, first.reached_ns)],
             ticks[2].0,
             &profiles(),
-            TEST_ORIGIN,
         )
         .expect("second pass");
         assert!(
@@ -363,14 +343,12 @@ mod tests {
             &[scan("one", Side::Buy, Decimal::ONE, TEST_ORIGIN)],
             to,
             &profiles(),
-            TEST_ORIGIN,
         )
         .expect("one probe");
         let many: Vec<_> = (0..50)
             .map(|i| scan(&format!("many-{i}"), Side::Buy, Decimal::ONE, TEST_ORIGIN))
             .collect();
-        let fifty =
-            scan_triggers("BTCUSDT", &many, to, &profiles(), TEST_ORIGIN).expect("fifty probes");
+        let fifty = scan_triggers("BTCUSDT", &many, to, &profiles()).expect("fifty probes");
         assert_eq!(fifty.drained, one.drained);
     }
 
@@ -378,7 +356,7 @@ mod tests {
     /// only that the instrument itself ran.
     ///
     /// One sim day of readings, one per sim minute, on the committed BTCUSDT
-    /// profile and its `data_origin`, starting one sim hour in so the window is
+    /// profile and the fixed tape origin, starting one sim hour in so the window is
     /// clear of both `VOL_WINDOW_NS` and the generator's own warmup. Quantiles
     /// are NEAREST-RANK on the sorted vector of non-`None` readings - element
     /// `ceil(q * m) - 1`, zero-indexed, no interpolation - stated because
@@ -421,21 +399,16 @@ mod tests {
             let from_ns = ts
                 .saturating_sub(mogwai_data::VOL_WINDOW_NS)
                 .max(TEST_ORIGIN);
-            let mut source =
-                source::build_history_source("BTCUSDT", Some(from_ns + 1), &profiles, TEST_ORIGIN)
-                    .expect("probe tape");
+            let mut source = source::build_history_source("BTCUSDT", Some(from_ns + 1), &profiles)
+                .expect("probe tape");
             match mogwai_data::vol_reading(source.as_mut(), from_ns, ts, SWEEP_DRAIN_BUDGET) {
                 Some(reading) => readings.push(reading),
                 None => {
                     // Re-walk with an unbounded-in-practice budget: if that
                     // succeeds, the budget was what refused the reading.
-                    let mut retry = source::build_history_source(
-                        "BTCUSDT",
-                        Some(from_ns + 1),
-                        &profiles,
-                        TEST_ORIGIN,
-                    )
-                    .expect("probe tape");
+                    let mut retry =
+                        source::build_history_source("BTCUSDT", Some(from_ns + 1), &profiles)
+                            .expect("probe tape");
                     if mogwai_data::vol_reading(retry.as_mut(), from_ns, ts, usize::MAX).is_some() {
                         refused_drained += 1;
                     } else {
@@ -483,7 +456,7 @@ mod tests {
         for mult in MULTIPLIERS {
             let ticks: Vec<f64> = instants
                 .iter()
-                .filter_map(|&ts| read_market("BTCUSDT", ts, &profiles, TEST_ORIGIN, mult, 10_000))
+                .filter_map(|&ts| read_market("BTCUSDT", ts, &profiles, mult, 10_000))
                 .map(|reading| f64::from(reading.band_ticks))
                 .collect();
             let bps = |ticks: f64| {
@@ -514,11 +487,11 @@ mod tests {
     fn read_market_latency_stays_within_submit_budget() {
         let profiles = profiles();
         let ts = TEST_ORIGIN + 3_600_000_000_000;
-        let _ = read_market("BTCUSDT", ts, &profiles, TEST_ORIGIN, 0.5, 200);
+        let _ = read_market("BTCUSDT", ts, &profiles, 0.5, 200);
         let mut samples = Vec::with_capacity(100);
         for _ in 0..100 {
             let started = std::time::Instant::now();
-            let _ = read_market("BTCUSDT", ts, &profiles, TEST_ORIGIN, 0.5, 200);
+            let _ = read_market("BTCUSDT", ts, &profiles, 0.5, 200);
             samples.push(started.elapsed());
         }
         samples.sort_unstable();

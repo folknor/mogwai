@@ -17,6 +17,7 @@ mod havoc;
 mod instruments;
 mod messages;
 mod ready;
+mod seeds;
 pub mod sizing;
 
 pub mod control;
@@ -38,7 +39,8 @@ pub use messages::{
     WireOrderStatus, touches_trigger, trades_through, truncate_client_id, truncate_reason,
     validate_client_order_id, validate_modify_order, validate_request_id, validate_submit_order,
 };
-pub use ready::{ReadyRecord, SeedReport};
+pub use ready::ReadyRecord;
+pub use seeds::RunSeeds;
 
 pub type Symbol = String;
 /// Client-assigned order id (nautilus `ClientOrderId`).

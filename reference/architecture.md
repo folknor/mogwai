@@ -40,9 +40,18 @@ name; the venue models neither trailing state nor order linkage. No order book
 exists: orders never interact, so self-trade within one account is impossible
 rather than prevented, and every fill is judged only against the tape.
 
-Warmup is generated before readiness. `data_origin_ns = run_start_ns -
-warmup_ns`, and history outside `[data_origin_ns, sim_now]` is refused. A
-declared duration starts at `run_start_ns`, not boot. At its deadline the server
+A run draws one 64-bit seed at launch, or takes it from config, and every
+random stream in the run - the tape generator's and the fill band's - derives
+from it by domain-separated derivation; nothing else in a run is random. The
+tape's origin is the fixed constant `TAPE_ORIGIN_NS = 0`; warmup is generated
+before readiness and the run proper begins at `run_start_ns = TAPE_ORIGIN_NS +
+warmup_ns` on the same axis, so `data_origin_ns` is always `TAPE_ORIGIN_NS` and
+history outside `[data_origin_ns, sim_now]` is refused. A run is therefore a
+pure function of `(seed, config)` for a given build and fingerprint - with the
+limit that a new seed only draws a new path from the one fitted model behind
+the fingerprint, so marginalizing over seeds reduces variance conditional on
+that model rather than adding out-of-sample market evidence. A declared
+duration starts at `run_start_ns`, not boot. At its deadline the server
 announces `RunComplete`, closes WebSockets normally, drains, and exits zero.
 
 The protocol crate owns every JSON type shared by server and adapter. The

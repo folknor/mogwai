@@ -41,15 +41,19 @@ use axum::{
 use clap::{Args, Parser, Subcommand};
 
 use crate::{
-    config::{Config, build_instrument_profiles, build_sim_clock, now_ns, refuse_unfunded_quotes},
+    config::{Config, build_instrument_profiles, build_run_clock, now_ns, refuse_unfunded_quotes},
     http::{AppState, account, arm_divergence, clock, instruments, quotes, trades},
     ws::ws_upgrade,
 };
 
 const LONG_VERSION: &str = env!("MOGWAI_LONG_VERSION");
 
+fn long_version() -> String {
+    format!("{LONG_VERSION} tape {}", mogwai_data::TAPE_PROTOCOL_VERSION)
+}
+
 #[derive(Parser)]
-#[command(name = "mogwai", version = LONG_VERSION, about = "Fake broker/exchange that drives broadarrow's live trading path", arg_required_else_help = true)]
+#[command(name = "mogwai", version = long_version(), about = "Fake broker/exchange that drives broadarrow's live trading path", arg_required_else_help = true)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -130,33 +134,28 @@ async fn serve_async(
         .next()
         .ok_or_else(|| anyhow::anyhow!("no instrument configured"))?;
 
-    // Decision 8: sim time must not advance across warmup generation, so the
-    // clock is anchored AFTER the warmup is materialized rather than before.
-    // The pre-warm clock exists only to name the window to generate; the run's
-    // own clock, and therefore `run_start_ns`, is built once that work is paid
-    // for. A scaled clock re-anchors onto the same sim epoch, so the two
-    // windows coincide exactly; the identity clock cannot be re-anchored and
-    // slides by the wall cost of warmup, which is why `data_origin_ns` is
-    // re-derived from the FINAL `run_start_ns` below and not from the estimate.
-    let prewarm = build_sim_clock(&cfg, now_ns())?;
-    let prewarm_start_ns = prewarm.sim_ns(now_ns());
-    let prewarm_origin_ns = prewarm_start_ns.saturating_sub(cfg.warmup_ns);
+    let seeds = mogwai_protocol::RunSeeds::from_run_seed(
+        cfg.seed.unwrap_or_else(|| rand::random::<u64>() >> 1),
+    );
+    let run_start_ns = source::TAPE_ORIGIN_NS.saturating_add(cfg.warmup_ns);
+    tracing::info!(
+        run_seed = seeds.run,
+        tape_seed = seeds.tape,
+        fill_seed = seeds.fill,
+        "run seeds fixed"
+    );
     let warm_symbol = instrument.symbol.clone();
     let warm_profiles = Arc::clone(&profiles);
-    let warm_regime = cfg.regime;
+    let warm_boot = source::BootTape {
+        seeds,
+        regime: cfg.regime,
+    };
     let checkpoints = tokio::task::spawn_blocking(move || {
-        source::materialize_warmup(
-            &warm_symbol,
-            &warm_profiles,
-            warm_regime,
-            prewarm_origin_ns,
-            prewarm_start_ns,
-        )
+        source::materialize_warmup(&warm_symbol, &warm_profiles, warm_boot, run_start_ns)
     })
     .await??;
-    let sim = build_sim_clock(&cfg, now_ns())?;
-    let run_start_ns = sim.sim_ns(now_ns());
-    let data_origin_ns = run_start_ns.saturating_sub(cfg.warmup_ns);
+    let sim = build_run_clock(&cfg, now_ns())?;
+    let data_origin_ns = source::TAPE_ORIGIN_NS;
     tracing::info!(
         checkpoints,
         warmup_ns = cfg.warmup_ns,
@@ -174,12 +173,12 @@ async fn serve_async(
         run_start_ns,
         cfg.warmup_ns,
         run_duration_ns,
+        seeds,
         cfg.speed,
-        cfg.gap_cap_ms,
         cfg.fanout_depth,
         cfg.zero_speed_stall_ms,
     );
-    tracing::info!(fill_seed = run.fill_seed, "fill band stream initialized");
+    tracing::info!(fill_seed = run.seeds.fill, "fill band stream initialized");
     // The band needs something to advance it: a submit decides only its own
     // order, against the reading it arrived with, so a resting limit fills only
     // when a sweep pass walks the tape it is waiting on. Spawned
@@ -216,15 +215,12 @@ async fn serve_async(
             addr: bound_addr,
             pid: std::process::id(),
             symbol: symbol.clone(),
-            seed: mogwai_protocol::SeedReport::PerSymbolFnv(vec![(
-                symbol.clone(),
-                source::seed_for(&symbol),
-            )]),
+            run_seed: seeds.run,
             data_origin_ns,
             run_start_ns,
             run_duration_ns,
             warmup_ns: cfg.warmup_ns,
-            version_string: LONG_VERSION.into(),
+            version_string: long_version(),
         };
         let mut ready = unsafe { File::from_raw_fd(fd) };
         ready.write_all(format!("{}\n", serde_json::to_string(&record)?).as_bytes())?;

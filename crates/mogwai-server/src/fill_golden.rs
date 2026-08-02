@@ -57,7 +57,7 @@ use std::path::PathBuf;
 use mogwai_data::TickEvent;
 use mogwai_engine::{Engine, EngineConfig, ScanResult};
 use mogwai_protocol::{
-    AccountId, ClientMessage, OrderType, ServerMessage, Side, SubmitOrder, TimeInForce,
+    AccountId, ClientMessage, OrderType, RunSeeds, ServerMessage, Side, SubmitOrder, TimeInForce,
     default_instruments,
 };
 use rust_decimal::Decimal;
@@ -66,7 +66,9 @@ use serde::Serialize;
 use crate::{fills, source::InstrumentProfiles};
 
 const SYMBOL: &str = "BTCUSDT";
-const ORIGIN: u64 = 1_700_438_400_000_000_000;
+const GOLDEN_RUN_SEED: u64 = 42;
+const GOLDEN_WARMUP_NS: u64 = 86_400_000_000_000;
+const ORIGIN: u64 = crate::source::TAPE_ORIGIN_NS + GOLDEN_WARMUP_NS;
 const SWEEP_INTERVAL_NS: u64 = 1_000_000_000;
 const HORIZON_NS: u64 = 1_200_000_000_000;
 const ORDERS_PER_OFFSET: usize = 40;
@@ -136,7 +138,7 @@ fn run_scenario(band_vol_mult: f64, profiles: &InstrumentProfiles) -> Vec<Cell> 
         account_id: AccountId::parse("GOLDEN").expect("static account"),
         instruments: default_instruments(),
         balances: HashMap::new(),
-        fill_seed: crate::source::seed_for(SYMBOL),
+        fill_seed: RunSeeds::from_run_seed(GOLDEN_RUN_SEED).fill,
     });
     let increment = default_instruments()
         .into_iter()
@@ -161,14 +163,10 @@ fn run_scenario(band_vol_mult: f64, profiles: &InstrumentProfiles) -> Vec<Cell> 
             // but it only positions the harness's price: the limit is placed
             // `offset_ticks` away from the very reading it is judged against, so
             // no order is ever marketable on arrival either way.
-            let market = fills::read_last(SYMBOL, ts, profiles, ORIGIN)
+            let market = fills::read_last(SYMBOL, ts, profiles)
                 .or_else(|| {
-                    let mut tape = crate::source::build_history_source(
-                        SYMBOL,
-                        Some(ORIGIN),
-                        profiles,
-                        ORIGIN,
-                    )?;
+                    let mut tape =
+                        crate::source::build_history_source(SYMBOL, Some(ORIGIN), profiles)?;
                     match tape.next_tick()? {
                         TickEvent::Trade(trade) => Some(trade.price),
                         TickEvent::Quote(_) => None,
@@ -204,8 +202,7 @@ fn run_scenario(band_vol_mult: f64, profiles: &InstrumentProfiles) -> Vec<Cell> 
             // Exactly what `http::market_reading` hands the engine on the real
             // path, refusals included: a refused reading is passed on as `None`
             // rather than papered over with a synthetic zero band.
-            let reading =
-                fills::read_market(SYMBOL, ts, profiles, ORIGIN, band_vol_mult, MAX_TICKS);
+            let reading = fills::read_market(SYMBOL, ts, profiles, band_vol_mult, MAX_TICKS);
             let submitted =
                 engine.process_with_market(ClientMessage::SubmitOrder(order), ts, reading);
             record_fills(&submitted, &meta, &mut samples);
@@ -214,7 +211,7 @@ fn run_scenario(band_vol_mult: f64, profiles: &InstrumentProfiles) -> Vec<Cell> 
         if scans.is_empty() {
             continue;
         }
-        let walk = fills::scan_triggers(SYMBOL, &scans, ts, profiles, ORIGIN)
+        let walk = fills::scan_triggers(SYMBOL, &scans, ts, profiles)
             .expect("scenario starts on reachable clean tape");
         let results = scans
             .iter()
@@ -433,6 +430,10 @@ fn describe_mismatch(rendered: &str, expected: &str) -> String {
 
 #[test]
 fn fill_distribution_matches_the_golden() {
+    crate::source::set_boot_for_test(crate::source::BootTape {
+        seeds: RunSeeds::from_run_seed(GOLDEN_RUN_SEED),
+        regime: None,
+    });
     let rendered = render();
     assert_shape(&rendered);
     let path = golden_path();

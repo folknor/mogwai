@@ -402,7 +402,10 @@ pub(crate) fn request_timeout_secs(spec: &Option<HavocSpec>, sim: SimClock) -> u
 const CLOCK_FETCH_RETRY_DELAY: Duration = Duration::from_millis(200);
 const CLOCK_FETCH_MAX_ATTEMPTS: u32 = 3;
 
-pub(crate) async fn fetch_clock_or_identity(http: &HttpClient, http_base: &str) -> ServerClock {
+pub(crate) async fn fetch_clock_or_identity(
+    http: &HttpClient,
+    http_base: &str,
+) -> (ServerClock, bool) {
     // Retry before committing to identity (AD16): the identity fallback silently
     // puts EVERY ts_init, havoc sleep, quota interval, backoff and timeout on the
     // wrong axis for the life of the connection if the server actually runs at
@@ -416,7 +419,7 @@ pub(crate) async fn fetch_clock_or_identity(http: &HttpClient, http_base: &str) 
                 if attempt > 0 {
                     tracing::info!(attempt, "clock fetch recovered after retry");
                 }
-                return clock;
+                return (clock, true);
             }
             Err(err) => {
                 tracing::warn!(
@@ -439,16 +442,17 @@ pub(crate) async fn fetch_clock_or_identity(http: &HttpClient, http_base: &str) 
          quota interval, backoff and timeout will be scaled on the wrong axis for \
          the life of this connection"
     );
-    // No reachable server: identity map and an UNKNOWN tape floor. A
-    // `data_origin_ns` of 0 is the "floor unknown" sentinel the warmup
-    // guard checks - it skips the pre-flight refusal and lets the server's
-    // own 422 stand if a later request is off-tape.
-    ServerClock {
-        sim: SimClock::identity(),
-        server_now_ns: 0,
-        data_origin_ns: 0,
-        warmup_ns: 0,
-    }
+    // The boolean preserves whether the floor is known. Zero is a valid floor
+    // and must never double as the fallback sentinel.
+    (
+        ServerClock {
+            sim: SimClock::identity(),
+            server_now_ns: 0,
+            data_origin_ns: 0,
+            warmup_ns: 0,
+        },
+        false,
+    )
 }
 pub(crate) fn duration_to_nanos(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
@@ -504,9 +508,11 @@ pub(crate) fn date_to_unix_nanos(date: Option<chrono::DateTime<chrono::Utc>>) ->
 /// and the client fell back to identity): the check is skipped so the server's
 /// own refusal stays authoritative. A `None` start means "from origin" and is
 /// always on-tape.
-pub(crate) fn ensure_on_tape(start: Option<UnixNanos>, data_origin: u64) -> anyhow::Result<()> {
-    if let Some(start) = start
-        && data_origin != 0
+pub(crate) fn ensure_on_tape(
+    start: Option<UnixNanos>,
+    data_origin: Option<u64>,
+) -> anyhow::Result<()> {
+    if let (Some(start), Some(data_origin)) = (start, data_origin)
         && start.as_u64() < data_origin
     {
         anyhow::bail!(
@@ -542,6 +548,15 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
+
+    #[test]
+    fn an_unknown_floor_skips_the_guard_but_a_zero_floor_enforces_it() {
+        ensure_on_tape(Some(UnixNanos::from(5)), None).expect("unknown floor skips guard");
+        ensure_on_tape(Some(UnixNanos::from(5)), Some(0)).expect("zero floor accepts five");
+        let err = ensure_on_tape(Some(UnixNanos::from(5)), Some(10))
+            .expect_err("known floor rejects an earlier start");
+        assert!(err.to_string().contains("data_origin_ns 10"), "{err}");
+    }
 
     #[test]
     fn date_to_unix_nanos_maps_in_range_datetimes_exactly() {

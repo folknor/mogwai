@@ -27,12 +27,11 @@ pub(crate) struct TapeSpawn {
     pub(crate) profiles: Arc<source::InstrumentProfiles>,
     pub(crate) sim: SimClock,
     pub(crate) speed: f64,
-    pub(crate) gap_cap_ms: u64,
     pub(crate) fanout_depth: usize,
     pub(crate) zero_speed_stall_ms: u64,
 }
 impl Tape {
-    pub(crate) fn start(symbol: String, data_origin_ns: u64, spawn: TapeSpawn) -> Arc<Self> {
+    pub(crate) fn start(symbol: String, spawn: TapeSpawn) -> Arc<Self> {
         let (tx, _) = broadcast::channel(spawn.fanout_depth);
         let tape = Arc::new(Self {
             tx,
@@ -43,13 +42,9 @@ impl Tape {
             let wall_anchor = now_ns();
             let instant_anchor = Instant::now();
             let now = spawn.sim.sim_ns(wall_anchor);
-            let Some(mut source) =
-                source::build_live_source(&symbol, &spawn.profiles, data_origin_ns, now)
-            else {
+            let Some(mut source) = source::build_live_source(&symbol, &spawn.profiles, now) else {
                 return;
             };
-            let mut previous = None;
-            let mut deadline = None;
             while !worker.cancel.load(Ordering::Relaxed) {
                 let Some(tick) = source.next_tick() else {
                     break;
@@ -58,8 +53,6 @@ impl Tape {
                     &worker,
                     &spawn,
                     tick.ts_event(),
-                    &mut previous,
-                    &mut deadline,
                     wall_anchor,
                     instant_anchor,
                 );
@@ -101,45 +94,13 @@ const TAPE_SLEEP_POLL: Duration = Duration::from_millis(20);
 /// Poll slice of the `speed == 0.0` headroom park.
 const TAPE_HEADROOM_POLL: Duration = Duration::from_millis(5);
 
-/// Pace one tick: deadline pacing against the simulated clock in accelerated
-/// mode, chained gap pacing capped at `gap_cap_ms` in identity mode, and no
-/// pacing at all at `speed == 0.0`, whose throttle is [`await_headroom`].
-///
-/// Chained deadlines rather than a fresh relative sleep per tick: a per-tick
-/// relative sleep never accounts for the wall time spent generating and
-/// broadcasting the previous tick, so realized spacing would progressively lag
-/// over a long run.
-fn pace(
-    tape: &Tape,
-    spawn: &TapeSpawn,
-    ts: u64,
-    previous: &mut Option<u64>,
-    deadline: &mut Option<u64>,
-    wall_anchor: u64,
-    instant_anchor: Instant,
-) {
-    let target = if !spawn.sim.is_identity() {
-        Some(spawn.sim.wall_ns(ts))
-    } else if spawn.speed > 0.0 {
-        // Nanosecond resolution: dividing down to whole milliseconds would
-        // collapse the micros-apart bursts the generator emits into zero-delay
-        // sends, so the realized timeline would not track original / speed.
-        let wait = previous.map(|p| {
-            let mut wait_ns = (ts.saturating_sub(p) as f64 / spawn.speed) as u64;
-            if spawn.gap_cap_ms > 0 {
-                wait_ns = wait_ns.min(spawn.gap_cap_ms.saturating_mul(1_000_000));
-            }
-            wait_ns
-        });
-        *previous = Some(ts);
-        wait.map(|wait_ns| {
-            let due = deadline.unwrap_or(wall_anchor).saturating_add(wait_ns);
-            *deadline = Some(due);
-            due
-        })
-    } else {
+/// Pace one tick against the run clock, or skip delivery pacing for a firehose.
+fn pace(tape: &Tape, spawn: &TapeSpawn, ts: u64, wall_anchor: u64, instant_anchor: Instant) {
+    let target = if spawn.speed == 0.0 {
         await_headroom(tape, spawn);
         None
+    } else {
+        Some(spawn.sim.wall_ns(ts))
     };
     if let Some(target) = target {
         sleep_until_wall_cancellable(tape, target, wall_anchor, instant_anchor);

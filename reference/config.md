@@ -12,9 +12,18 @@ into it. `/clock` names the resulting `data_origin_ns` and `warmup_ns`;
 `/trades` refuses a start below the floor or beyond current simulated time, and
 clamps an end past current simulated time to it.
 
-The clock keys are `sim_epoch_ns` (zero keeps the identity wall clock),
-`wall_anchor_ns` (zero anchors at boot) and `speed`. `server_heartbeat_ms`
-sets the server-originated liveness cadence; zero disables it.
+`seed` (absent means a fresh `u64` is drawn at launch, capped at `i64::MAX` so
+it round-trips through TOML) is the run's single source of randomness; the
+tape generator's stream and the fill band's stream both derive from it by
+domain-separated derivation, and nothing else in a run is random. The tape's
+origin is the fixed constant `TAPE_ORIGIN_NS = 0`; the run proper begins one
+`warmup_ns` later on the same axis, so a run is a pure function of `(seed,
+config)` for a given build and fingerprint. There is no wall-clock input to a
+run's identity left: the only clock key is `speed`, which paces delivery
+against wall time but never decides which tick is served. `speed = 0.0` is
+unpaced delivery, not a stopped clock - the underlying sim time still advances
+at wall rate. `server_heartbeat_ms` sets the server-originated liveness
+cadence; zero disables it.
 
 The fill band is `fill_band_vol_mult` and `fill_band_max_ticks`. Every resting
 limit draws a trigger price uniformly from `0 ..= band_ticks` ticks away from
@@ -34,8 +43,7 @@ One optional `[instrument]` table defines the run instrument. Omitting it uses
 the built-in BTCUSDT profile. `[[instrument]]` is not accepted. `[regime]`
 selects the single run-wide market regime. `[balances]` funds the one ledger.
 
-The replay and admission settings remain run-wide: `gap_cap_ms`,
-`fanout_depth`, `zero_speed_stall_ms`, `exec_held_budget_bytes`,
-`admission_lane_frames`, `pending_command_acts`, and
-`global_pending_command_acts`. There are no account, tape-cap, subscription,
-or transport-profile configuration keys.
+The replay and admission settings remain run-wide: `fanout_depth`,
+`zero_speed_stall_ms`, `exec_held_budget_bytes`, `admission_lane_frames`,
+`pending_command_acts`, and `global_pending_command_acts`. There are no
+account, tape-cap, subscription, or transport-profile configuration keys.

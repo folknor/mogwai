@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 folknor
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# fast.toml with NO pinned seed, so each launch draws its own and reports it.
+# The gate that two launches report different run seeds needs a venue that
+# actually draws; every other test config pins a seed for reproducibility.
+
+warmup_ns = 300000000000
+speed = 0.0
+zero_speed_stall_ms = 10

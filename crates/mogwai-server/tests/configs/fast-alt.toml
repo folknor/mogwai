@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 folknor
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# fast.toml at a DIFFERENT pinned seed. Its only job is to be the third venue
+# in the reproduction gate: same config in every other respect, so a served
+# tape that differs from fast.toml's can only be the seed.
+
+seed = 43
+warmup_ns = 300000000000
+speed = 0.0
+zero_speed_stall_ms = 10

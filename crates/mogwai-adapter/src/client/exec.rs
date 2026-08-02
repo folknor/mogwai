@@ -724,6 +724,7 @@ impl ExecutionClient for MogwaiExecutionClient {
         // the envelope is the data client's concern.
         let sim = fetch_clock_or_identity(&self.http, &http_base_url)
             .await
+            .0
             .sim;
         self.sim = sim;
         let conn = conn_havoc(&self.config.havoc);

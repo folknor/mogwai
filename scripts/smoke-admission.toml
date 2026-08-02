@@ -9,8 +9,6 @@
 # ACTUAL held bytes that must reach the ceiling), which is a load generator, not
 # a smoke step. Shrinking the budget changes how soon the venue refuses, not
 # what it does when it refuses, so the branch under test is the shipped one.
-sim_epoch_ns = 0
 speed = 1.0
-gap_cap_ms = 1000
 server_heartbeat_ms = 0
 exec_held_budget_bytes = 32768

@@ -10,7 +10,7 @@ use std::sync::{
 };
 
 use mogwai_engine::{Engine, EngineConfig};
-use mogwai_protocol::{CommandClass, InstrumentDef, SimClock};
+use mogwai_protocol::{CommandClass, InstrumentDef, RunSeeds, SimClock};
 use rust_decimal::Decimal;
 use tokio::sync::{Mutex as AsyncMutex, watch};
 
@@ -26,7 +26,7 @@ pub(crate) struct Run {
     /// is exactly one of it.
     pub(crate) instrument: InstrumentDef,
     pub(crate) engine: AsyncMutex<Engine>,
-    pub(crate) fill_seed: u64,
+    pub(crate) seeds: RunSeeds,
     pub(crate) tape: Arc<Tape>,
     /// The run clock. Owned HERE rather than beside the router state: a run has
     /// one clock, and a second copy in the HTTP state is a second thing that
@@ -74,22 +74,18 @@ impl Run {
         started_ns: u64,
         warmup_ns: u64,
         run_duration_ns: Option<u64>,
+        seeds: RunSeeds,
         speed: f64,
-        gap_cap_ms: u64,
         fanout_depth: usize,
         zero_speed_stall_ms: u64,
     ) -> Arc<Self> {
         let symbol = instrument.symbol.clone();
-        let fill_seed = source::seed_for(&symbol);
-        let data_origin_ns = started_ns.saturating_sub(warmup_ns);
         let tape = Tape::start(
             symbol,
-            data_origin_ns,
             TapeSpawn {
                 profiles,
                 sim,
                 speed,
-                gap_cap_ms,
                 fanout_depth,
                 zero_speed_stall_ms,
             },
@@ -100,10 +96,10 @@ impl Run {
                 account_id: mogwai_protocol::AccountId::parse("MOGWAI").expect("fixed account id"),
                 instruments: vec![instrument.clone()],
                 balances,
-                fill_seed,
+                fill_seed: seeds.fill,
             })),
             instrument,
-            fill_seed,
+            seeds,
             tape,
             sim,
             started_ns,
@@ -151,11 +147,9 @@ impl Run {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Earliest sim instant the tape can serve. Derived, never stored twice:
-    /// the floor and the warmup span are the same fact seen from two ends, and
-    /// keeping a second copy is how they drift apart.
+    /// Earliest sim instant the tape can serve.
     pub(crate) fn data_origin_ns(&self) -> u64 {
-        self.started_ns.saturating_sub(self.warmup_ns)
+        source::TAPE_ORIGIN_NS
     }
 
     /// Announces the one planned terminal transition.  Receivers get the
@@ -209,19 +203,17 @@ mod tests {
             started_ns,
             warmup_ns,
             run_duration_ns,
+            RunSeeds::from_run_seed(42),
             0.0,
-            0,
             8,
             1,
         )
     }
 
     #[test]
-    fn the_history_floor_is_derived_from_the_warmup_span() {
-        // Decision 7: `data_origin_ns = run_start_ns - warmup_ns`. Deriving it
-        // rather than storing it is what makes the two impossible to disagree.
+    fn the_history_floor_is_the_fixed_tape_origin() {
         let run = run(1_000, 400, None);
-        assert_eq!(run.data_origin_ns(), 600);
+        assert_eq!(run.data_origin_ns(), source::TAPE_ORIGIN_NS);
         assert_eq!(run.started_ns, 1_000);
         assert_eq!(run.warmup_ns, 400);
         run.tape.stop_for_test();

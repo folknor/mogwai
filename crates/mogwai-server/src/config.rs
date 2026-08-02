@@ -19,7 +19,7 @@ use crate::source;
 /// (see `load`); never from ambient environment variables.
 #[derive(Debug, Clone, serde::Deserialize)]
 // `deny_unknown_fields` makes config.md's "a malformed file is a hard error"
-// promise literally true for top-level knobs: a typo'd key (`gap_cap_m = 0`)
+// promise literally true for top-level knobs: a typo'd key (`warmup_n = 0`)
 // used to fall through to the field default silently, so the operator ran with a
 // value they never set (S20). `default` (missing keys keep built-in defaults) and
 // `deny` (unknown keys are rejected) are orthogonal and compose. Each
@@ -51,24 +51,13 @@ pub(crate) struct Config {
     /// against the tape. Zero is refused because the fill band is always on and
     /// every resting trigger needs the sweep to advance.
     pub(crate) fill_sweep_interval_ms: u64,
-    /// Simulated start instant. `0` keeps the identity wall-time clock.
-    pub(crate) sim_epoch_ns: u64,
-    /// Wall instant the accelerated clock anchors to. `0` (the default)
-    /// anchors at this run's boot, so every run is a fresh deterministic
-    /// scenario starting at `sim_epoch_ns`. A nonzero value pins the anchor, so
-    /// separate runs launched at different wall instants land on the SAME
-    /// affine axis - which is how two runs are made comparable, not how one
-    /// venue resumes: a process serves one run and there is no restart.
-    /// Requires `sim_epoch_ns` to be set, and must not be in the future at
-    /// boot.
-    pub(crate) wall_anchor_ns: u64,
+    /// Run seed to reproduce. Absent, one pasteable 63-bit seed is drawn once
+    /// at launch.
+    pub(crate) seed: Option<u64>,
     /// Replay speed multiplier. `0.0` means unthrottled (stream as fast as the client
     /// drains). `1.0` is the default and paces to real wall-clock gaps; otherwise
     /// inter-tick wall delay = (tick gap) / speed.
     pub(crate) speed: f64,
-    /// Maximum wall-clock sleep between two ticks under paced replay, in
-    /// milliseconds. `0` disables the cap.
-    pub(crate) gap_cap_ms: u64,
     /// Optional server-originated heartbeat cadence in milliseconds. `0`
     /// disables it. When enabled, each websocket session receives liveness
     /// frames that survive `StallData` but not `GoDark`.
@@ -163,8 +152,7 @@ impl Default for Config {
             fill_band_vol_mult: 0.5,
             fill_band_max_ticks: 200,
             fill_sweep_interval_ms: 100,
-            sim_epoch_ns: 0,
-            wall_anchor_ns: 0,
+            seed: None,
             // Honest-by-default: wall-clock pace the generator's inter-arrival
             // gaps so a no-config server serves a realistic live feed, matching
             // the committed mogwai.toml. 0.0 remains available as an explicit
@@ -172,7 +160,6 @@ impl Default for Config {
             // clock lands this is the 1x baseline; afterwards it is the 1x point
             // of the acceleration axis.
             speed: 1.0,
-            gap_cap_ms: 1000,
             server_heartbeat_ms: 0,
             // 24h: one day of warmup tape behind sim-now. A wrong horizon is made
             // loud (off-tape requests are refused, not silently under-served), so
@@ -594,56 +581,40 @@ pub(crate) fn window_until_ns(now: u64, ms: u64) -> u64 {
     now.saturating_add(ms.saturating_mul(1_000_000))
 }
 
-/// Derives the run's `SimClock` from config. `boot_wall_ns` is the wall
-/// instant of this boot; it anchors the clock unless the config pins
-/// `wall_anchor_ns` explicitly. With the default boot anchor every run starts
-/// at `sim_epoch_ns`; a pinned anchor instead puts every run launched against
-/// it on the same affine axis, which is what makes two runs' timestamps
-/// comparable. A pinned anchor in the future is refused rather than served:
-/// `sim_ns` clamps pre-anchor reads to the epoch, so the venue would sit
-/// frozen at `sim_epoch_ns` until the wall catches up - a misconfiguration
-/// (most likely a seconds-vs-nanos slip), not a schedulable start.
-pub(crate) fn build_sim_clock(cfg: &Config, boot_wall_ns: u64) -> anyhow::Result<SimClock> {
-    if !cfg.speed.is_finite() {
-        anyhow::bail!("speed must be finite");
+/// The run's clock. The epoch is fixed by config alone, while the wall anchor
+/// decides only when a tick is delivered. `speed == 0.0` is unpaced delivery,
+/// but the axis advances at wall rate for deadlines, sweeps and volatility.
+pub(crate) fn build_run_clock(cfg: &Config, boot_wall_ns: u64) -> anyhow::Result<SimClock> {
+    if !cfg.speed.is_finite() || cfg.speed < 0.0 {
+        anyhow::bail!("speed must be finite and non-negative");
     }
-    if cfg.sim_epoch_ns == 0 {
-        if cfg.wall_anchor_ns != 0 {
-            anyhow::bail!(
-                "wall_anchor_ns requires sim_epoch_ns (the identity clock has no anchor)"
-            );
-        }
-        if cfg.speed != 1.0 && cfg.speed != 0.0 {
-            anyhow::bail!("sim_epoch_ns must be set when speed is neither 0.0 nor 1.0");
-        }
-        return Ok(SimClock::identity());
-    }
-    if cfg.speed <= 0.0 {
-        anyhow::bail!("speed must be > 0.0 when sim_epoch_ns is set");
-    }
-    let wall_anchor_ns = if cfg.wall_anchor_ns == 0 {
-        boot_wall_ns
-    } else {
-        if cfg.wall_anchor_ns > boot_wall_ns {
-            anyhow::bail!(
-                "wall_anchor_ns {} is in the future (wall now {}); \
-                 a pinned anchor must be a past instant",
-                cfg.wall_anchor_ns,
-                boot_wall_ns
-            );
-        }
-        cfg.wall_anchor_ns
-    };
     Ok(SimClock {
-        sim_epoch_ns: cfg.sim_epoch_ns,
-        wall_anchor_ns,
-        speed: cfg.speed,
+        sim_epoch_ns: source::TAPE_ORIGIN_NS.saturating_add(cfg.warmup_ns),
+        wall_anchor_ns: boot_wall_ns,
+        speed: if cfg.speed == 0.0 { 1.0 } else { cfg.speed },
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_configured_seed_at_the_signed_maximum_round_trips() {
+        let text = format!("seed = {}", i64::MAX);
+        let cfg: Config = toml::from_str(&text).expect("maximum signed seed parses");
+        assert_eq!(cfg.seed, Some(i64::MAX as u64));
+        for _ in 0..128 {
+            assert!(rand::random::<u64>() >> 1 <= i64::MAX as u64);
+        }
+    }
+
+    #[test]
+    fn a_config_naming_a_removed_clock_key_is_refused() {
+        let err = toml::from_str::<Config>("sim_epoch_ns = 1")
+            .expect_err("removed clock key must be refused");
+        assert!(err.to_string().contains("sim_epoch_ns"), "{err}");
+    }
 
     /// A run serves ONE instrument, so `[instrument]` is a table. A file
     /// carrying the old `[[instrument]]` list must fail loudly at parse rather

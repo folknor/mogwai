@@ -78,10 +78,9 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
             let mut results = Vec::new();
             for (symbol, scans) in groups {
                 let profiles = Arc::clone(&sweep.profiles);
-                let origin = sweep.run.data_origin_ns();
                 let scans_for_walk = scans.clone();
                 let walked = tokio::task::spawn_blocking(move || {
-                    fills::scan_triggers(&symbol, &scans_for_walk, to_ns, &profiles, origin)
+                    fills::scan_triggers(&symbol, &scans_for_walk, to_ns, &profiles)
                 })
                 .await
                 .ok()

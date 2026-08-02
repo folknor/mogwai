@@ -1,5 +1,3 @@
 # mogwai-server config for scripts/smoke.py --accelerated.
-sim_epoch_ns = 1900000000000000000
 speed = 100.0
-gap_cap_ms = 1000
 server_heartbeat_ms = 0

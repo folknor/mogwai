@@ -1652,6 +1652,7 @@ dependencies = [
  "mogwai-engine",
  "mogwai-protocol",
  "nix",
+ "rand 0.10.2",
  "rust_decimal",
  "serde",
  "serde_json",

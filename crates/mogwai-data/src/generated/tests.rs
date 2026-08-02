@@ -1019,19 +1019,21 @@ fn realism() {
     assert_dwell_is_bounded(&measured, &scalars, &fp);
 }
 
-// The dwell bound asserted against the tape broadarrow actually consumes. The
-// realism gate runs at seed 42, but the server keys each symbol's walk on an
-// FNV-1a-64 hash of the symbol, so the served BTCUSDT walk is a different
-// realization from every other committed test - and until this test existed,
-// nothing asserted anything about it at all.
 #[test]
-fn default_symbol_tape_dwell_is_bounded() {
+fn run_seeded_tape_dwell_is_bounded() {
+    assert_run_seed_dwell_is_bounded(42);
+}
+
+#[test]
+#[ignore = "walks eight two-million-tick run realizations"]
+fn dwell_is_bounded_across_run_seeds() {
+    for run_seed in 0..8 {
+        assert_run_seed_dwell_is_bounded(run_seed);
+    }
+}
+
+fn assert_run_seed_dwell_is_bounded(run_seed: u64) {
     let fp = Fingerprint::from_repo_json();
-    // Reconstructs mogwai-server's `default_profile`: fingerprint medians
-    // overlaid with the default instrument's tick size and precision. The
-    // instrument def comes from mogwai-protocol so it cannot drift; the seed
-    // fold is duplicated from `seed_for` in mogwai-server's source.rs, which
-    // stays the source of truth (mogwai-data cannot depend on the server).
     let def = mogwai_protocol::default_instruments()
         .into_iter()
         .find(|def| def.symbol == "BTCUSDT")
@@ -1039,10 +1041,7 @@ fn default_symbol_tape_dwell_is_bounded() {
     let mut scalars = GeneratorScalars::from_fingerprint_medians(&def.symbol, &fp);
     scalars.modal_tick = def.price_increment;
     scalars.price_decimals = u32::from(def.price_precision);
-    let mut seed = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in def.symbol.bytes() {
-        seed = (seed ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
-    }
+    let seed = mogwai_protocol::RunSeeds::from_run_seed(run_seed).tape;
     let mut src = GeneratedSource::new(scalars.clone(), seed, 0, &fp, None);
     let measured = measure(&mut src, &scalars, DRAW);
     assert_dwell_is_bounded(&measured, &scalars, &fp);

@@ -100,12 +100,6 @@ impl SimClock {
     pub fn wall_duration(&self, sim_dur_ns: u64) -> std::time::Duration {
         std::time::Duration::from_nanos(self.wall_span(sim_dur_ns).max(1))
     }
-
-    /// True when this clock is the default wall-time map.
-    #[must_use]
-    pub fn is_identity(&self) -> bool {
-        *self == Self::identity()
-    }
 }
 
 /// The `/clock` payload: the affine `SimClock` plus the tape boundary the
@@ -146,7 +140,7 @@ pub struct ServerClock {
 /// existing - but it cannot round-trip over the wire: serde_json serializes a
 /// non-finite `f64` as JSON `null`, and `null` fails to decode back into the
 /// bare `f64` field, wedging whichever end tries to parse it.
-/// `mogwai-server`'s own config-time check (`build_sim_clock`) already guards
+/// `mogwai-server`'s own config-time check (`build_run_clock`) already guards
 /// the configured speed before a `SimClock` is ever constructed there; this
 /// validator exists so any other sender of a `SimClock` - present or future -
 /// has the same one-line gate to call before serializing one, instead of
@@ -179,7 +173,7 @@ mod tests {
         assert_eq!(clock.sim_ns(123), 123);
         assert_eq!(clock.wall_ns(456), 456);
         assert_eq!(clock.wall_span(789), 789);
-        assert!(clock.is_identity());
+        assert_eq!(clock, SimClock::identity());
     }
 
     #[test]

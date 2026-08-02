@@ -125,12 +125,6 @@ Or both. There are no exceptions.
   naming a successor, and that debt is real and belongs to whichever spec
   descends from it.
 
-  - `notes/problem-seeds-and-paths.md` - the tape already varies per launch,
-    because tape identity includes a `data_origin` derived from wall time, but
-    the variation is accidental, unsampled and unrecorded. Decided by the user:
-    one axis, a random seed per launch, deterministic given that seed, wall
-    anchor removed, seed reported. What sets the origin instead is open. Its
-    restart question is CLOSED - there is no restart.
   - `notes/problem-trade-cadence.md` - the tape runs orders of magnitude slower
     than a real active pair, and "trades per second" has three values differing
     by 8.5x because raw fills, aggregated prints and match events are LAYERS of
