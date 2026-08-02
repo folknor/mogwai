@@ -314,8 +314,6 @@ impl Engine {
                 client_order_id.as_deref(),
                 ts,
             ))],
-            // Subscriptions are intercepted by the server for replay control.
-            ClientMessage::Subscribe { .. } | ClientMessage::Unsubscribe { .. } => Vec::new(),
         }
     }
 

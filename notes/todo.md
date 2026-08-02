@@ -115,23 +115,6 @@ Or both. There are no exceptions.
   naming a successor, and that debt is real and belongs to whichever spec
   descends from it.
 
-  - `notes/problem-server-lifecycle.md` - **RESOLVED, awaiting a spec.** All
-    seven decisions are settled; four DISSOLVED rather than being answered, once
-    the reasoning started from the end state rather than from the current code.
-    The venue is a separate process started by the run launcher, not embedded
-    and not adapter-spawned; nothing identifies an instance because nothing
-    looks one up; the launcher knows the endpoint it allocated, so only a
-    readiness record survives; death is the launcher or the declared duration;
-    `serve` and `gen` survive, `stop` and `man` go. The one an implementer is
-    most likely to get wrong: the multi-TENANT machinery goes, while the LAG
-    machinery STAYS, because a real venue's clock does not wait for its
-    consumer and disconnecting one that falls behind is fidelity rather than
-    arbitration. The problem it resolved: mogwai is one long-lived service and
-    the workload is hundreds of disposable instances. Nothing allocates a port,
-    discovers one, or cleans one up, so concurrent forward tests collide today
-    and were hand-serialized during the 2026-08-02 session. Also the root of the
-    account namespace that produced that session's adapter defect. Decides what
-    a RUN is, so everything else inherits from it.
   - `notes/problem-seeds-and-paths.md` - the tape already varies per launch,
     because tape identity includes a `data_origin` derived from wall time, but
     the variation is accidental, unsampled and unrecorded. Decided by the user:
@@ -226,9 +209,8 @@ Or both. There are no exceptions.
   watchdog is not worthless; it is not structural.
 
   Also relevant and not a problem statement: `reference/glossary.md` defines the
-  identity chain the code builds - process, account, session, subscription, tape
-  - and carries a numbered register of discrepancies found while writing it,
-  several of which are work items in their own right.
+  identity chain the code builds - now just run, tape and ledger, since the
+  lifecycle landing collapsed account, session and subscription out of it.
 
 - Move the adapter off the `../nautilus_trader` path dependency onto a pinned
   crates.io release. `crates/mogwai-adapter/Cargo.toml` path-depends five
@@ -293,32 +275,14 @@ Or both. There are no exceptions.
   violator under `reorder_prob`, and is pinned by
   `an_out_of_order_trade_folds_into_the_open_window_without_wedging`.)
 
-- WRITE UP, then delete this entry: why unordered HttpOrders dispatch is fidelity
-  rather than a defect (formerly sweep item X6). `dispatch_order` hands each
-  Submit/Modify/Cancel to `get_runtime().spawn` with no sequencing, so a submit
-  followed immediately by a cancel can arrive at `/orders` reversed. That is
-  exactly what nautilus's own production adapters do - the Binance futures client
-  sends every order command through `spawn_task`, a bare `runtime.spawn` onto an
-  abort list, with no cross-command sequencing anywhere - so real REST order
-  entry has no ordering guarantee and sequencing mogwai would make its HTTP
-  profile MORE orderly than the venues it stands in for. Blast radius is narrow:
-  `TransportProfile::default()` is `WsStreaming` and broadarrow does not override
-  it, so an HTTP profile is opt-in per scenario. `reference/architecture.md`
-  already discloses the race; what it lacks is this REASON. The per-client
-  ordered queue previously floated is explicitly REJECTED so it is not
-  re-proposed. A genuinely separate feature, only if wanted in practice: an
-  opt-in ordering mode to tell a strategy bug from a transport race while
-  debugging.
-
 - DECIDE (client side only now, and it is broadarrow's half): should a venue
   fault be terminal for the consumer? The MOGWAI-SIDE half is settled - a venue
   fault is mogwai failing to perform its duties, it is terminal, and the venue
   says so as clearly as it can. What remains is what the consumer does with
   that, which is theirs. mogwai now distinguishes failing from misbehaving on the wire -
-  `SubscriptionIssue::is_venue_fault()` alongside `is_refusal()`, a WS 1011 close
-  naming the fault, and an adapter error arm ahead of the refusal catch-all (see
-  `reference/havoc.md`, "Misbehaving is not failing"). But the adapter's ordinary
-  reconnect logic still fires on that close, so the client reconnects,
+  `ServerMessage::FeedLagged` closes the socket with WS 1011 naming the fault
+  (see `reference/architecture.md`). But the adapter's ordinary reconnect logic
+  still fires on that close, so the client reconnects,
   resubscribes, and carries on with a hole in its history. Making the fault
   terminal end to end means the adapter treating 1011 differently from a routine
   disconnect AND broadarrow failing the run rather than resuming. Deliberately
@@ -352,8 +316,8 @@ Or both. There are no exceptions.
   order-status query surface): (a) the ack-delay havoc band above their ~25 s
   INFLIGHT_TIMEOUT is deliberately unserved - they permanently declined a
   per-venue ceiling on that safety timeout, so do not invest in DelayAcks/
-  GoDark scenarios past it (also recorded in reference/havoc.md's operator
-  note); (b) the once-floated MarketIfTouched order-type extension is dead
+  GoDark scenarios past it; (b) the once-floated MarketIfTouched order-type
+  extension is dead
   (the triggering Pine shape is invalid on TradingView and nautilus cannot
   rest an MIT faithfully) - and their position was that the protocol owes no
   order-type growth beyond Market and Limit. SUPERSEDED as of 2026-08-02 by
@@ -385,17 +349,14 @@ Or both. There are no exceptions.
   the issue-4255 hypothesis ("the connection looks healthy...") as fact even
   when the venue process is dead; (b) `reference/mogwai.md` / `ba man mogwai`
   still describe the venue as unfundable - stale once the `[balances]` seed
-  lands; (c) any stored scenario TOMLs arming `GoDark`/`DelayAcks` under an
-  HTTP transport profile now fail scenario load by design (create-time
-  deliverability refusal) and need a sweep. (The data-path WARN template that
-  named three wrong causes turned out to live in mogwai-adapter, not ba - fixed
+  lands; (c) any stored scenario TOMLs setting a `transport_profile` on either
+  adapter config now fail to parse, since the field is gone with
+  `TransportProfile` itself (the lifecycle landing removed the HTTP transport
+  entirely, not just its deliverability refusal), and need a sweep. (The
+  data-path WARN template that named three wrong causes turned out to live in
+  mogwai-adapter, not ba - fixed
   here: it now defers to the venue's `reason`, and the WS lifecycle logs
   disconnect/backoff/reconnect/exhaustion per socket.)
-- Arming havoc via raw `POST /control/divergence` bypasses the adapter's
-  create-time deliverability check by construction: the windows are
-  venue-global and the server cannot know which transport each connected
-  client rides. External armers (the QA probes do this) remain responsible for
-  matching windows to carriers; `reference/havoc.md` says so explicitly.
 - The offline Kraken corpus is trades only - no quotes, no L2, no aggressor side.
   This shapes the offline analysis only; the running server synthesizes trades
   with a native `Buyer`/`Seller` aggressor and serves no quotes (`/quotes` is
@@ -440,11 +401,6 @@ in `mogwai.toml`. The only reads:
 
 ### Cross-crate couplings worth reconciling
 
-- Default server address `127.0.0.1:8787` is hardcoded independently in three
-  places with no shared constant: the server's `--addr` default, the adapter's
-  `DEFAULT_BASE_URL = "ws://127.0.0.1:8787"`, and the smoke test's `HOST, PORT`.
-  Consistent today, but a port change needs three coordinated edits and nothing
-  flags a drift.
 - Correctly single-sourced from `mogwai-protocol` (the pattern to follow):
   `DEFAULT_REQUEST_TIMEOUT_SECS` (30) and `MAX_HISTORY_LIMIT` (1000) - the adapter
   references these rather than re-hardcoding them.
@@ -485,39 +441,36 @@ Inline literals (no named const):
 
 ### mogwai-server
 
-- Bind: `--addr` default `127.0.0.1:8787` (see coupling above); tests bind
-  `127.0.0.1:0`.
-- Filenames: `mogwai.log`; `mogwai.pid` (default duplicated on both `serve` and
-  `stop` args); `mogwai.toml` (fallback duplicated in `Config::load` and
-  `resolve_paths`).
+- Bind: `--addr` default `127.0.0.1:0` (ephemeral, reported on the ready fd);
+  tests bind `127.0.0.1:0` too.
 - HTTP route strings (`/health`, `/account`, `/instruments`, `/trades`,
   `/quotes`, `/clock`, `/orders`, `/ws`, `/control/divergence`) as inline
   literals, no shared registry with the adapter's route segments.
 - `Config::default()`: `speed 1.0`, `gap_cap_ms 1000`, `server_heartbeat_ms 0`,
-  `backfill_horizon_ns 86_400_000_000_000` (24h), `sim_epoch_ns 0`.
-- Lifecycle timeout consts: `READY_TIMEOUT 10s`, `SHUTDOWN_GRACE 2s`, `STOP_TIMEOUT
-  5s`, `STOP_KILL_GRACE 2s` (same value as SHUTDOWN_GRACE but a distinct phase),
-  `PID_POLL_INTERVAL 25ms`, `TAPE_SLEEP_POLL 20ms`, `TAPE_HEADROOM_POLL 5ms`.
+  `warmup_ns 86_400_000_000_000` (24h), `sim_epoch_ns 0`.
+- Lifecycle timeout consts: `SHUTDOWN_GRACE 5s`, `TAPE_SLEEP_POLL 20ms`,
+  `TAPE_HEADROOM_POLL 5ms`.
 - Channel capacity `1024` duplicated inline for the writer channel and the
   exec-delay pump channel (different traffic classes, no shared const).
-- Synthesis limits: `MAX_HISTORY_SEEK_TICKS 190_000`, `CHECKPOINT_K 8192`. The
-  test-side `HORIZON_S 86_400.0` stands in for the production `backfill_horizon_ns`
-  default as a plain literal and can silently drift from it.
+- Synthesis limits: `CHECKPOINT_K 8192`. The test-side `HORIZON_S 86_400.0`
+  stands in for the production `warmup_ns` default as a plain literal and can
+  silently drift from it.
 
 ### mogwai-adapter
 
-- `DEFAULT_BASE_URL = "ws://127.0.0.1:8787"` (see coupling above).
+- `base_url` is now required on both configs (no default endpoint); a launcher
+  learns it from the readiness record.
 - `MOGWAI_VENUE_STR = "MOGWAI"` (correctly single-sourced).
 - Default `TraderId` `MOGWAI-001` in the exec config. `AccountId` no longer
   defaults to it on either config: both carry the `UNSET_ACCOUNT_ID` placeholder
   (`MOGWAI-UNSET`) and `validate_account_id` refuses a config that still states
   it, so an omitted account fails loudly instead of silently binding a slot.
   `TEST_ACCOUNT_ID` keeps `MOGWAI-001` for in-crate fixtures.
-- Timeout consts: HTTP `POLL_INTERVAL 250ms`, `ACCOUNT_REGISTRATION_TIMEOUT 5s`,
-  `ACCOUNT_REGISTRATION_POLL 10ms`, `MIN_WALL_REQUEST_TIMEOUT_SECS 1` (flagged in
-  its own comment as the tightest cap on usable sim speed). `wait_connected`
-  re-hardcodes an independent 5s/10ms pair matching the registration consts by
-  value but not sharing them.
+- Timeout consts: `ACCOUNT_REGISTRATION_TIMEOUT 5s`, `ACCOUNT_REGISTRATION_POLL
+  10ms`, `MIN_WALL_REQUEST_TIMEOUT_SECS 1` (flagged in its own comment as the
+  tightest cap on usable sim speed). `wait_connected` re-hardcodes an
+  independent 5s/10ms pair matching the registration consts by value but not
+  sharing them.
 - `1_000_000_000` (nanos-per-second) repeated inline 5+ times across `client.rs`
   and `lifecycle.rs` - a `NANOS_PER_SEC` const would remove the repetition.
 - Triplicated test `def()` instrument fixture (`price_precision 2`/`size_precision
@@ -542,12 +495,13 @@ golden-test seed.
 
 ### Non-crate (scripts, analysis, root config)
 
-- `scripts/smoke.py`: `HOST/PORT 127.0.0.1:8787` (no `--host`/`--port` override),
-  `WINDOW_LOOKBACK_NS 1h`, `ACCEL_DELAY_MS 1000`, `ACCEL_CLOCK_SLACK_WALL_NS
-  50ms`, `ACCEL_ANCHOR_TIMEOUT_S 120`, fixed order shape
-  (`BTCUSDT`/`Limit`/qty 10/px 100), plus many inline per-assertion socket
-  timeouts and latency tolerances (not centralised; first place to look if
-  the smoke ever gets flaky).
+- `scripts/smoke.py`: spawns its own venue and learns the bound address from
+  the readiness record read off the child's `--ready-fd` pipe (no hardcoded
+  host/port). `WINDOW_LOOKBACK_NS 1h`, `ACCEL_DELAY_MS 1000`,
+  `ACCEL_CLOCK_SLACK_WALL_NS 50ms`, `ACCEL_ANCHOR_TIMEOUT_S 120`, fixed order
+  shape (`BTCUSDT`/`Limit`/qty 10/px 100), plus many inline per-assertion
+  socket timeouts and latency tolerances (not centralised; first place to look
+  if the smoke ever gets flaky).
 - Orchestration: the `review` tool, configured from `.review.toml` - the codex
   wrapper scripts were removed in favour of it. Critique runs `review bare
   --profile deep` (gpt-5.6-sol, xhigh, read-only); implement runs `review goal
@@ -570,6 +524,5 @@ golden-test seed.
   pinned, contradicting the open path-dependency item above. `brokkr.toml` only sets
   `project = "mogwai"`. Root `mogwai.toml` carries the run knobs (`sim_epoch_ns 0`,
   `wall_anchor_ns 0`, `speed 1.0`, `gap_cap_ms 1000`, `server_heartbeat_ms 0`,
-  `max_concurrent_tapes 256`, `max_subscriptions_per_connection 256`,
-  `fanout_depth 4096`, `zero_speed_stall_ms 5000`, and the funded `balances`
-  table).
+  `run_duration_ns 0`, `warmup_ns`, `fanout_depth 4096`,
+  `zero_speed_stall_ms 5000`, and the funded `balances` table).

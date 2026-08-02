@@ -116,9 +116,9 @@ impl SimClock {
 /// `server_now_ns` is `sim.sim_ns(wall)` sampled when the request is served, so
 /// a client gets sim-now and the tape floor from one round trip without having
 /// to read its own (possibly skewed) wall clock. `data_origin_ns` is the
-/// earliest `ts_event` any source can serve (`server_now_at_boot -
-/// backfill_horizon_ns`); a request for a `start` below it is refused. The
-/// horizon is echoed so the client can report the floor in its own terms.
+/// earliest `ts_event` any source can serve (`run_start_ns - warmup_ns`); a
+/// request for a `start` below it is refused. The span is echoed so the client
+/// can report the floor in its own terms.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ServerClock {
     /// The affine wall-to-sim map the adapter feeds to the nautilus node.
@@ -127,8 +127,10 @@ pub struct ServerClock {
     pub server_now_ns: u64,
     /// Earliest `ts_event` the tape can serve; a `start` below it is off-tape.
     pub data_origin_ns: u64,
-    /// How far behind boot sim-now the tape begins, in nanoseconds.
-    pub backfill_horizon_ns: u64,
+    /// Simulated history the venue GENERATED before it reported readiness, in
+    /// nanoseconds. The whole span is servable, not merely permitted: it is
+    /// materialized at boot and held for the life of the process.
+    pub warmup_ns: u64,
 }
 
 /// API-boundary guard for `SimClock`, mirroring `validate_conn_havoc` /
@@ -276,8 +278,13 @@ mod tests {
         assert_eq!(decoded, clock);
     }
 
+    /// The snapshot `/clock` serves and the adapter reads. Its BYTE form is
+    /// pinned, not just its round trip: `backfill_horizon_ns` became
+    /// `warmup_ns` when warmup stopped being a permission and became something
+    /// the venue materializes, and the adapter's transport test pins this exact
+    /// text - so the two move together or the rename is caught here first.
     #[test]
-    fn server_clock_serde_round_trip() {
+    fn clock_snapshot_round_trips() {
         let clock = ServerClock {
             sim: SimClock {
                 sim_epoch_ns: 1_900_000_000_000_000_000,
@@ -286,12 +293,16 @@ mod tests {
             },
             server_now_ns: 1_900_000_799_000_000_000,
             data_origin_ns: 1_899_913_600_000_000_000,
-            backfill_horizon_ns: 86_400_000_000_000,
+            warmup_ns: 86_400_000_000_000,
         };
 
         let json = serde_json::to_string(&clock).unwrap();
+        assert_eq!(
+            json,
+            r#"{"sim":{"sim_epoch_ns":1900000000000000000,"wall_anchor_ns":1782000000000000000,"speed":120.0},"server_now_ns":1900000799000000000,"data_origin_ns":1899913600000000000,"warmup_ns":86400000000000}"#,
+            "the /clock snapshot's byte form is a wire contract"
+        );
         let decoded: ServerClock = serde_json::from_str(&json).unwrap();
-
         assert_eq!(decoded, clock);
     }
 

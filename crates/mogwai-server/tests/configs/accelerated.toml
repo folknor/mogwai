@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: 2026 folknor
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The slow-start gate's venue, per decision 8. A LARGE warmup, a fast clock and
+# a SHORT declared duration: if the run deadline were measured from boot rather
+# than from the post-warmup `started_ns`, the accelerated duration would elapse
+# during warmup generation and the run would be over before the launcher could
+# connect. It must instead serve its whole declared duration after readiness.
+
+sim_epoch_ns = 1600000000000000000
+speed = 100.0
+
+# Six simulated hours of warmup, generated before the readiness line.
+warmup_ns = 21600000000000

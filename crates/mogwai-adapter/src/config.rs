@@ -4,18 +4,13 @@
 use std::any::Any;
 
 use anyhow::ensure;
-use mogwai_protocol::{
-    HavocSpec, TransportProfile, control::Divergence, validate_client_havoc, validate_conn_havoc,
-    validate_divergence, validate_market_regime,
-};
+use mogwai_protocol::{HavocSpec, validate_client_havoc, validate_conn_havoc, validate_divergence};
 use nautilus_common::factories::ClientConfig;
 use nautilus_model::{
     enums::{AccountType, OmsType},
     identifiers::{AccountId, TraderId},
 };
 use serde::{Deserialize, Serialize};
-
-const DEFAULT_BASE_URL: &str = "ws://127.0.0.1:8787";
 
 /// Placeholder both configs default their `account_id` to, and which `validate`
 /// refuses.
@@ -44,9 +39,6 @@ pub struct MogwaiDataClientConfig {
     /// Later data handlers derive the `/ws` market-data path from this value.
     /// The skeleton stores and validates the URL without opening a transport.
     pub base_url: String,
-    /// Selects the transport archetype this data client presents.
-    #[serde(default)]
-    pub transport_profile: TransportProfile,
     /// Havoc to arm on connect. `None` is a clean adapter.
     #[serde(default)]
     pub havoc: Option<HavocSpec>,
@@ -56,8 +48,7 @@ impl Default for MogwaiDataClientConfig {
     fn default() -> Self {
         Self {
             account_id: AccountId::from(UNSET_ACCOUNT_ID),
-            base_url: DEFAULT_BASE_URL.to_string(),
-            transport_profile: TransportProfile::default(),
+            base_url: String::new(),
             havoc: None,
         }
     }
@@ -74,7 +65,7 @@ impl MogwaiDataClientConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         validate_base_url(&self.base_url)?;
         validate_account_id(&self.account_id)?;
-        validate_havoc(&self.havoc, self.transport_profile)
+        validate_havoc(&self.havoc)
     }
 
     /// Returns the ws/wss URL to hand to the transport, trimmed of
@@ -93,12 +84,7 @@ impl MogwaiDataClientConfig {
         // literal `X/ws` and whose path is `/` - a URL the venue rejects, and
         // which fails as a connect timeout inside the reconnect loop rather
         // than as anything that names the cause.
-        format!(
-            "{}/ws?{}={}",
-            self.base_url.trim().trim_end_matches('/'),
-            mogwai_protocol::ACCOUNT_QUERY_PARAM,
-            self.account_id
-        )
+        format!("{}/ws", self.base_url.trim().trim_end_matches('/'))
     }
 
     /// Derives the HTTP base URL from the configured ws/wss `base_url`.
@@ -135,9 +121,6 @@ pub struct MogwaiExecClientConfig {
     /// OMS, `Hedging` allows multiple positions per instrument (D.7).
     #[serde(default = "default_oms_type")]
     pub oms_type: OmsType,
-    /// Selects the transport archetype this execution client presents.
-    #[serde(default)]
-    pub transport_profile: TransportProfile,
     /// Havoc to arm on connect. `None` is a clean adapter.
     #[serde(default)]
     pub havoc: Option<HavocSpec>,
@@ -156,10 +139,9 @@ impl Default for MogwaiExecClientConfig {
         Self {
             trader_id: TraderId::from("MOGWAI-001"),
             account_id: AccountId::from(UNSET_ACCOUNT_ID),
-            base_url: DEFAULT_BASE_URL.to_string(),
+            base_url: String::new(),
             account_type: AccountType::Cash,
             oms_type: default_oms_type(),
-            transport_profile: TransportProfile::default(),
             havoc: None,
         }
     }
@@ -176,7 +158,7 @@ impl MogwaiExecClientConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         validate_base_url(&self.base_url)?;
         validate_account_id(&self.account_id)?;
-        validate_havoc(&self.havoc, self.transport_profile)
+        validate_havoc(&self.havoc)
     }
 
     /// Returns the ws/wss URL to hand to the transport, trimmed of
@@ -191,12 +173,7 @@ impl MogwaiExecClientConfig {
         // literal `X/ws` and whose path is `/` - a URL the venue rejects, and
         // which fails as a connect timeout inside the reconnect loop rather
         // than as anything that names the cause.
-        format!(
-            "{}/ws?{}={}",
-            self.base_url.trim().trim_end_matches('/'),
-            mogwai_protocol::ACCOUNT_QUERY_PARAM,
-            self.account_id
-        )
+        format!("{}/ws", self.base_url.trim().trim_end_matches('/'))
     }
 
     /// Derives the HTTP base URL from the configured ws/wss `base_url`.
@@ -305,481 +282,13 @@ fn http_base_url(base_url: &str) -> String {
 /// two configs from drifting and means an out-of-range knob (an unbounded
 /// `PartialFillNext.fraction`, a degenerate regime, a zeroed rate limit) is
 /// rejected at config time rather than detonating later on the live path.
-fn validate_havoc(
-    havoc: &Option<HavocSpec>,
-    transport_profile: TransportProfile,
-) -> anyhow::Result<()> {
+fn validate_havoc(havoc: &Option<HavocSpec>) -> anyhow::Result<()> {
     if let Some(havoc) = havoc {
         validate_client_havoc(&havoc.client).map_err(anyhow::Error::msg)?;
         validate_conn_havoc(&havoc.conn).map_err(anyhow::Error::msg)?;
-        if let Some(regime) = &havoc.data {
-            validate_market_regime(regime).map_err(anyhow::Error::msg)?;
-        }
         for divergence in &havoc.server {
             validate_divergence(divergence).map_err(anyhow::Error::msg)?;
-            validate_window_deliverable(divergence, transport_profile)?;
         }
     }
     Ok(())
-}
-
-/// Refuses a server temporal window the chosen transport carrier provably
-/// cannot deliver. The windows live only in the server's `/ws` outbound
-/// writer, so a leg carried over HTTP request/response never passes through
-/// them: arming such a window constructs a client that runs a clean path
-/// while the operator believes havoc is live - a blackout test that passes
-/// green against a path that was never dark. Every other impossible spec is
-/// already refused at create, and both contradicting fields sit in this one
-/// config, so the contradiction is refused at the same boundary:
-///
-/// - `DelayAcks` paces execution frames on the WS socket; under
-///   `HttpOrders`/`HttpPolling` order events return synchronously in the
-///   `POST /orders` response and there is no WS exec leg to delay.
-/// - `GoDark` is documented as a TOTAL venue blackout; under either HTTP
-///   orders profile the order path rides HTTP and stays live through the
-///   window, so the blackout can never be total (under `HttpOrders` a
-///   data-only stall is deliverable - arm `StallData` instead).
-/// - `StallData` gates WS market-data frames; under `HttpPolling` data is
-///   fetched over `GET /trades` and never passes the writer. It stays legal
-///   under `HttpOrders`, whose market data still streams over WS.
-///
-/// `CommandLatency` is carrier-agnostic: its act half runs in the shared order
-/// path and its ack half delays either the WS writer or the HTTP response. Its
-/// additive composition with `DelayAcks` is WS-only, because `DelayAcks` is
-/// refused for HTTP orders. `ClearDivergences` and the engine-side single-shots
-/// also pass unconditionally.
-fn validate_window_deliverable(
-    divergence: &Divergence,
-    transport_profile: TransportProfile,
-) -> anyhow::Result<()> {
-    match divergence {
-        Divergence::DelayAcks { .. } if transport_profile.orders_over_http() => {
-            anyhow::bail!(
-                "DelayAcks delays execution frames on the /ws socket, but \
-                 transport_profile {transport_profile:?} carries order entry over HTTP \
-                 request/response - the delay can never fire; use WsStreaming"
-            )
-        }
-        Divergence::GoDark { .. } if transport_profile.orders_over_http() => {
-            anyhow::bail!(
-                "GoDark is a total venue blackout on the /ws writer, but \
-                 transport_profile {transport_profile:?} carries order entry over HTTP and \
-                 stays live through the window; use WsStreaming (or StallData under \
-                 HttpOrders for a data-only stall)"
-            )
-        }
-        Divergence::StallData { .. } if transport_profile.data_by_polling() => {
-            anyhow::bail!(
-                "StallData gates market-data frames on the /ws socket, but \
-                 transport_profile {transport_profile:?} polls market data over GET /trades - \
-                 the stall can never fire; use WsStreaming or HttpOrders"
-            )
-        }
-        _ => Ok(()),
-    }
-}
-
-/// Account the crate's own unit tests bind both legs of a session to.
-///
-/// Production code deliberately has no default account (see
-/// `UNSET_ACCOUNT_ID`), so every in-crate test that builds a client has to state
-/// one. Naming it once here keeps that from being reintroduced as a
-/// real-looking `Default` field value, and keeps the tests' account visibly a
-/// choice rather than an accident.
-#[cfg(test)]
-pub(crate) const TEST_ACCOUNT_ID: &str = "MOGWAI-001";
-
-#[cfg(test)]
-impl MogwaiDataClientConfig {
-    /// `Default` with the account stated, i.e. a config that passes `validate`.
-    pub(crate) fn test_default() -> Self {
-        Self {
-            account_id: AccountId::from(TEST_ACCOUNT_ID),
-            ..Self::default()
-        }
-    }
-}
-
-#[cfg(test)]
-impl MogwaiExecClientConfig {
-    /// `Default` with the account stated, i.e. a config that passes `validate`.
-    pub(crate) fn test_default() -> Self {
-        Self {
-            account_id: AccountId::from(TEST_ACCOUNT_ID),
-            ..Self::default()
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_base_url_uses_server_port() {
-        let cfg = MogwaiDataClientConfig::test_default();
-
-        assert_eq!(cfg.ws_url(), "ws://127.0.0.1:8787/ws?account=MOGWAI-001");
-        assert_eq!(cfg.http_base_url(), "http://127.0.0.1:8787");
-
-        // The bare `Default` carries the placeholder account, not a usable one.
-        assert_eq!(
-            MogwaiDataClientConfig::default().account_id.as_ref(),
-            UNSET_ACCOUNT_ID
-        );
-        assert_eq!(
-            MogwaiExecClientConfig::default().account_id.as_ref(),
-            UNSET_ACCOUNT_ID
-        );
-    }
-
-    #[test]
-    fn http_base_url_normalizes_secure_ws_scheme() {
-        let cfg = MogwaiDataClientConfig {
-            base_url: "wss://example.test:9443".into(),
-            ..MogwaiDataClientConfig::test_default()
-        };
-
-        assert_eq!(
-            cfg.ws_url(),
-            "wss://example.test:9443/ws?account=MOGWAI-001"
-        );
-        assert_eq!(cfg.http_base_url(), "https://example.test:9443");
-    }
-
-    #[test]
-    fn a_config_id_illegal_to_the_venue_fails_client_construction() {
-        // The two charsets do not agree: nautilus `AccountId::new_checked` wants
-        // only a non-empty ASCII string with a `-` and non-empty parts either
-        // side, so it accepts spaces and slashes the venue refuses. Left
-        // unchecked, a perfectly legal nautilus config yields a client that
-        // 400s on every request, first observed under live trading.
-        for illegal in ["WYRD 042-A", "WYRD-042/BTCUSDT"] {
-            let data = MogwaiDataClientConfig {
-                account_id: AccountId::from(illegal),
-                ..MogwaiDataClientConfig::test_default()
-            };
-            let exec = MogwaiExecClientConfig {
-                account_id: AccountId::from(illegal),
-                ..MogwaiExecClientConfig::test_default()
-            };
-            let err = data
-                .validate()
-                .expect_err("a venue-illegal id must fail the data client build")
-                .to_string();
-            assert!(err.contains("illegal character"), "{err}");
-            assert!(exec.validate().is_err(), "{illegal}");
-        }
-        // The deployment shape stays legal to both ends.
-        assert!(
-            MogwaiExecClientConfig {
-                account_id: AccountId::from("WYRD-042:BTCUSDT"),
-                ..MogwaiExecClientConfig::test_default()
-            }
-            .validate()
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn websocket_upgrade_carries_the_account_query_param() {
-        let cfg = MogwaiExecClientConfig {
-            account_id: AccountId::from("WYRD-042:BTCUSDT"),
-            base_url: "ws://example.test:8787  ".into(),
-            ..MogwaiExecClientConfig::test_default()
-        };
-        assert_eq!(
-            cfg.ws_url(),
-            "ws://example.test:8787/ws?account=WYRD-042:BTCUSDT"
-        );
-    }
-
-    #[test]
-    fn a_config_that_never_names_its_account_is_refused() {
-        // The defect this pins, observed in a live forward run: the consumer
-        // built the data config by overriding base_url, transport_profile and
-        // havoc and never touched `account_id`, while the sibling exec config
-        // was handed the worker's real account. The data socket bound
-        // `MOGWAI-001` and the exec socket bound the worker, so the two legs of
-        // one venue session sat on different server account slots. That is
-        // silent and total: the server-owned divergence windows
-        // (`StallData`, `GoDark`, the delay atomics) live on the account slot
-        // and are armed only from the execution leg, so a `StallData` armed for
-        // the run withheld market-data frames from an account that carried no
-        // market data while the real feed streamed on undisturbed - a blackout
-        // test that passes green against a path that was never dark. The
-        // placeholder also auto-created a stray account on the venue that held
-        // a session forever and counted against `max_accounts`.
-        //
-        // The API made that invisible because `account_id` defaulted to a
-        // plausible-looking REAL account. It now defaults to a placeholder the
-        // validator refuses, so omitting the field is a create-time error that
-        // names the field instead of a wrong-account binding nobody sees.
-        let mut data = MogwaiDataClientConfig {
-            base_url: "ws://127.0.0.1:9797".into(),
-            transport_profile: TransportProfile::HttpOrders,
-            ..MogwaiDataClientConfig::default()
-        };
-        let exec = MogwaiExecClientConfig {
-            account_id: AccountId::from("WYRD-042"),
-            base_url: "ws://127.0.0.1:9797".into(),
-            transport_profile: TransportProfile::HttpOrders,
-            ..MogwaiExecClientConfig::default()
-        };
-
-        let err = data
-            .validate()
-            .expect_err("a data config that never names its account must be refused")
-            .to_string();
-        assert!(err.contains("account_id"), "{err}");
-        assert!(err.contains(UNSET_ACCOUNT_ID), "{err}");
-
-        // The exec leg shares the same placeholder and the same refusal, so a
-        // pair that validates is a pair whose accounts were both stated.
-        let unset_exec = MogwaiExecClientConfig {
-            base_url: "ws://127.0.0.1:9797".into(),
-            ..MogwaiExecClientConfig::default()
-        };
-        assert!(unset_exec.validate().is_err());
-
-        // Once stated, the two legs land on one account slot - the invariant
-        // the defect broke.
-        data.account_id = exec.account_id;
-        assert!(data.validate().is_ok());
-        assert!(exec.validate().is_ok());
-        assert_eq!(data.ws_url(), exec.ws_url());
-    }
-
-    #[test]
-    fn validate_rejects_non_ws_scheme() {
-        // D.4: a typo'd scheme used to pass validation and then fail silently
-        // inside the reconnect loop. Reject it up front.
-        let http = MogwaiDataClientConfig {
-            base_url: "http://example.test".into(),
-            ..MogwaiDataClientConfig::test_default()
-        };
-        let garbage = MogwaiDataClientConfig {
-            base_url: "not a url".into(),
-            ..MogwaiDataClientConfig::test_default()
-        };
-
-        assert!(http.validate().is_err());
-        assert!(garbage.validate().is_err());
-    }
-
-    #[test]
-    fn validate_rejects_hostless_ws_url() {
-        let cfg = MogwaiExecClientConfig {
-            base_url: "ws:///just/a/path".into(),
-            ..MogwaiExecClientConfig::test_default()
-        };
-
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn validate_accepts_ws_and_wss() {
-        let ws = MogwaiDataClientConfig {
-            base_url: "ws://example.test:8787".into(),
-            ..MogwaiDataClientConfig::test_default()
-        };
-        let wss = MogwaiExecClientConfig {
-            base_url: "wss://example.test:9443".into(),
-            ..MogwaiExecClientConfig::test_default()
-        };
-
-        assert!(ws.validate().is_ok());
-        assert!(wss.validate().is_ok());
-    }
-
-    #[test]
-    fn ws_url_trims_whitespace_padding() {
-        // A whitespace-padded base_url passes validation (which trims) and
-        // derives a clean HTTP base (which trims), so ws_url must trim too or
-        // the padded value reaches connect_async and fails silently forever
-        // inside the reconnect loop.
-        let data = MogwaiDataClientConfig {
-            base_url: "  ws://example.test:8787  ".into(),
-            ..MogwaiDataClientConfig::test_default()
-        };
-        let exec = MogwaiExecClientConfig {
-            base_url: "\twss://example.test:9443\n".into(),
-            ..MogwaiExecClientConfig::test_default()
-        };
-
-        assert!(data.validate().is_ok());
-        assert_eq!(
-            data.ws_url(),
-            "ws://example.test:8787/ws?account=MOGWAI-001"
-        );
-        assert_eq!(data.http_base_url(), "http://example.test:8787");
-
-        assert!(exec.validate().is_ok());
-        assert_eq!(
-            exec.ws_url(),
-            "wss://example.test:9443/ws?account=MOGWAI-001"
-        );
-        assert_eq!(exec.http_base_url(), "https://example.test:9443");
-    }
-
-    #[test]
-    fn validate_refuses_undeliverable_temporal_windows() {
-        use mogwai_protocol::control::Divergence;
-
-        let config = |divergence: Divergence, profile: TransportProfile| MogwaiExecClientConfig {
-            transport_profile: profile,
-            havoc: Some(HavocSpec {
-                server: vec![divergence],
-                ..HavocSpec::default()
-            }),
-            ..MogwaiExecClientConfig::test_default()
-        };
-
-        // The full deliverability matrix. A window a carrier cannot pass is a
-        // create-time refusal, exactly like every other impossible spec.
-        let cases = [
-            (
-                Divergence::DelayAcks { ms: 100 },
-                TransportProfile::WsStreaming,
-                true,
-            ),
-            (
-                Divergence::DelayAcks { ms: 100 },
-                TransportProfile::HttpOrders,
-                false,
-            ),
-            (
-                Divergence::DelayAcks { ms: 100 },
-                TransportProfile::HttpPolling,
-                false,
-            ),
-            (
-                Divergence::GoDark { ms: 100 },
-                TransportProfile::WsStreaming,
-                true,
-            ),
-            (
-                Divergence::GoDark { ms: 100 },
-                TransportProfile::HttpOrders,
-                false,
-            ),
-            (
-                Divergence::GoDark { ms: 100 },
-                TransportProfile::HttpPolling,
-                false,
-            ),
-            (
-                Divergence::StallData { ms: 100 },
-                TransportProfile::WsStreaming,
-                true,
-            ),
-            // HttpOrders still streams market data over WS, so a data-only
-            // stall is deliverable there.
-            (
-                Divergence::StallData { ms: 100 },
-                TransportProfile::HttpOrders,
-                true,
-            ),
-            (
-                Divergence::StallData { ms: 100 },
-                TransportProfile::HttpPolling,
-                false,
-            ),
-            // Carrier-agnostic controls pass under every profile.
-            (
-                Divergence::ClearDivergences,
-                TransportProfile::HttpPolling,
-                true,
-            ),
-            // `CommandLatency` is the one server-owned WINDOW that is not
-            // WS-only: the act half runs in the shared order path and the ack
-            // half delays either the WS writer or the HTTP response, so it is
-            // refused under NO profile. Its additive composition with
-            // `DelayAcks` is WS-only, but that is a property of `DelayAcks`,
-            // which the arm above already refuses for HTTP orders.
-            (
-                Divergence::CommandLatency {
-                    submit_act_ms: 100,
-                    modify_act_ms: 100,
-                    cancel_act_ms: 100,
-                    submit_ack_ms: 100,
-                    modify_ack_ms: 100,
-                    cancel_ack_ms: 100,
-                },
-                TransportProfile::WsStreaming,
-                true,
-            ),
-            (
-                Divergence::CommandLatency {
-                    submit_act_ms: 100,
-                    modify_act_ms: 0,
-                    cancel_act_ms: 0,
-                    submit_ack_ms: 100,
-                    modify_ack_ms: 0,
-                    cancel_ack_ms: 0,
-                },
-                TransportProfile::HttpOrders,
-                true,
-            ),
-            (
-                Divergence::CommandLatency {
-                    submit_act_ms: 100,
-                    modify_act_ms: 0,
-                    cancel_act_ms: 0,
-                    submit_ack_ms: 100,
-                    modify_ack_ms: 0,
-                    cancel_ack_ms: 0,
-                },
-                TransportProfile::HttpPolling,
-                true,
-            ),
-            (
-                Divergence::RejectNextSubmit {
-                    reason: "nope".into(),
-                },
-                TransportProfile::HttpPolling,
-                true,
-            ),
-        ];
-        for (divergence, profile, ok) in cases {
-            let result = config(divergence.clone(), profile).validate();
-            assert_eq!(
-                result.is_ok(),
-                ok,
-                "{divergence:?} under {profile:?}: {result:?}"
-            );
-        }
-
-        // The data config shares the same validator, so the same contradiction
-        // is refused there too.
-        let data = MogwaiDataClientConfig {
-            transport_profile: TransportProfile::HttpPolling,
-            havoc: Some(HavocSpec {
-                server: vec![Divergence::GoDark { ms: 100 }],
-                ..HavocSpec::default()
-            }),
-            ..MogwaiDataClientConfig::test_default()
-        };
-        assert!(data.validate().is_err());
-    }
-
-    #[test]
-    fn http_base_url_never_emits_a_non_http_base() {
-        // D.13: an unrecognized scheme used to pass through unchanged, yielding
-        // an "HTTP base" that is not HTTP. It now always carries an http(s)
-        // scheme. (Such values are rejected by `validate`; this guards a direct
-        // caller.)
-        assert_eq!(
-            super::http_base_url("relative/path"),
-            "http://relative/path"
-        );
-        assert_eq!(
-            super::http_base_url("http://already.http"),
-            "http://already.http"
-        );
-        assert_eq!(
-            super::http_base_url("https://already.https"),
-            "https://already.https"
-        );
-    }
 }

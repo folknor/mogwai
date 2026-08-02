@@ -1,98 +1,37 @@
 # mogwai command line
 
-The workspace ships one binary, **`mogwai`** (the axum gateway, built from the
-`mogwai-server` crate - the binary is named `mogwai`, the package
-`mogwai-server`). The other crates are libraries: `mogwai-protocol`,
-`mogwai-engine` and `mogwai-data` are broker internals, and `mogwai-adapter` is
-the nautilus venue adapter broadarrow loads in-process - none has a `main`. This
-document is the command-line surface of the server binary; `reference/config.md`
-covers the TOML file it loads, and `reference/architecture.md` covers the
-HTTP/WS routes it serves.
+`mogwai` runs one foreground venue for one run. It owns no PID, log, or
+configuration files. Logs go to stderr; `RUST_LOG` selects the tracing filter.
 
-## Running
-
-`mogwai` has three verbs, `serve`, `stop`, and `man`; there is no default verb,
-so a bare `mogwai` prints help. Start a daemon with `serve`:
+`serve` binds the HTTP and WebSocket endpoint. Its default address is
+`127.0.0.1:0`. An ephemeral address requires `--ready-fd`; an explicit nonzero
+port does not.
 
 ```sh
-brokkr run mogwai -- serve
+brokkr run mogwai -- serve --config run.toml --ready-fd 3
 ```
 
-`mogwai` is the bin TARGET name, not the package: `brokkr run` discovers every
-bin and example across the workspace from cargo metadata and selects by target
-name, and a bare `brokkr run` lists what is runnable. The command returns after
-the socket is bound and the daemon keeps running. Stop it with
-`brokkr run mogwai -- stop`, or use `serve -f` when a foreground process is
-wanted. An installed build (`cargo install --path crates/mogwai-server`) is
-invoked directly, e.g. `mogwai serve` and `mogwai stop`.
+`--config PATH` is optional and otherwise uses built-in defaults. It never
+consults the working directory. `--duration DURATION` overrides
+`run_duration_ns` for this invocation.
 
-Arguments after the `--` separator are forwarded raw to the binary, not to
-cargo; brokkr's own flags (`--debug` / `--release`) go BEFORE the target name:
+The launcher creates a pipe, starts `mogwai serve --ready-fd 3` as its direct
+child, reads exactly one JSON `ReadyRecord` line, checks `version`, and uses
+`addr` for both clients. That read blocks for as long as warmup generation
+takes, which is proportional to `warmup_ns` and the tape's cadence; a launcher
+wanting a bound sets its own timeout and treats expiry as a boot failure. A
+pipe that closes without a line is a boot failure, and the child's stderr and
+exit status say why. It keeps the child as a direct child: Linux parent-death
+handling terminates the venue if that launcher dies. On a `RunComplete` frame,
+the process exits successfully; otherwise the launcher terminates and reaps it.
 
-```sh
-brokkr run mogwai -- serve -f --config scripts/smoke-heartbeat.toml
-```
+A launcher that CAPTURES the child's stderr must also DRAIN it, continuously,
+from the moment of spawn. Logs go to stderr by design, a pipe holds roughly
+64 KiB, and a full pipe blocks the writer - so an undrained capture wedges the
+venue mid-run, which is indistinguishable from a hung venue at the socket. A
+launcher that does not want the log should redirect it to a file or to the null
+device rather than to a pipe it never reads. `scripts/smoke.py` drains it on a
+thread, which is the reference form.
 
-## Global flags
-
-The argument grammar is clap-parsed: `--help`/`-h` and `--version`/`-V` work,
-unknown flags and bad values are rejected with a usage error (not silently
-ignored), each verb carries its own `--help`, and a bare `mogwai` prints help
-rather than doing anything.
-
-| Flag | Effect |
-| --- | --- |
-| `--version`, `-V` | Print `mogwai <semver> (<git-hash> <build-time> UTC)` and exit. The hash carries a `-dirty` suffix when the tree had uncommitted changes at build time, and is `unknown` when built outside a checkout. Stamped at compile time by the crate's `build.rs`. |
-| `--help`, `-h` | Print usage and exit. `mogwai <verb> --help` prints that verb's help. |
-
-## Subcommands
-
-### `serve [OPTIONS]`
-
-Run the gateway: bind the sockets, replay synthesized market data, and serve the
-HTTP/WS routes. A bare `serve` daemonizes by default, writes a PID file, and
-returns once the listener is ready. Pass `-f` / `--foreground` for containers,
-systemd Type=simple units, and local harnesses that need a foreground process.
-Its run knobs live in `mogwai.toml`, not in flags; the flags here select paths,
-the bind address, and foreground mode.
-
-| Flag | Argument | Default | Effect |
-| --- | --- | --- | --- |
-| `--config` | path | `mogwai.toml` in the working directory | Load the run config from this TOML file. A missing file falls back to built-in defaults; a malformed file is a hard error. See `reference/config.md`. |
-| `--addr` | `host:port` | `127.0.0.1:8787` | Address to bind the gateway to. The adapter's default server URL targets `8787`, so a non-default port also needs the adapter pointed at it. |
-| `--log-file` | path | `mogwai.log` in the working directory | Append structured tracing logs to this file. The readiness banner still prints to stdout in foreground mode and from the launcher parent in daemon mode. |
-| `--pid-file` | path | `mogwai.pid` in the working directory | PID-file path used by daemon mode for the single-instance lock and by `stop` to find the daemon. Ignored under `-f`. |
-| `--foreground`, `-f` | none | off | Stay in the foreground instead of daemonizing. |
-
-### `stop [OPTIONS]`
-
-Stop a daemon started by `mogwai serve`. `stop` uses the PID-file lock to decide
-whether a daemon is live before it signals anything, so a stale PID file is
-removed without targeting a recycled PID.
-
-| Flag | Argument | Default | Effect |
-| --- | --- | --- | --- |
-| `--pid-file` | path | `mogwai.pid` in the working directory | PID-file path for the daemon to stop. Use the same value that was passed to `serve --pid-file`. |
-
-### `man [TOPIC]`
-
-Render the bundled reference docs to the terminal. The `reference/*.md` contracts
-are compiled into the binary with `include_str!`, so an installed `mogwai`
-carries its own reference with nothing to ship alongside.
-
-- `mogwai man` lists the available topics.
-- `mogwai man <topic>` renders one as styled markdown. Topics: `cli`, `config`,
-  `architecture`, `havoc`, `clock` (the user-facing reference docs; the
-  `orchestrate` and `technical-implementation-spec` process docs are
-  deliberately not bundled).
-- The topic is a clap value, so an unknown one is rejected with the valid set,
-  and `mogwai man --help` lists the topics with a one-line description each.
-
-Colour is auto-disabled when stdout is not a TTY or `NO_COLOR` is set, and a
-closed downstream pipe (`mogwai man havoc | less`, quit early) is a clean exit.
-
-## Environment
-
-| Variable | Default | Effect |
-| --- | --- | --- |
-| `RUST_LOG` | `mogwai=info` | Standard `tracing` env-filter directive. The one deliberate exception to the no-ambient-environment rule for run knobs: log level is the universally-expected env var, not a run knob. An unset or unparseable value falls back to `mogwai=info`. |
+`gen` remains the offline generator command. There are no `stop` or `man`
+subcommands, and documentation is not compiled into the binary.

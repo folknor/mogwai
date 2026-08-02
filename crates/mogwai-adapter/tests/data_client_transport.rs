@@ -4,24 +4,28 @@
 //! End-to-end transport test for the mogwai `DataClient`.
 //!
 //! Exercises the public adapter surface against the shared self-contained stub
-//! (`tests/common`) that speaks the mogwai HTTP (`/instruments`, `/trades`) and
-//! WebSocket (`/ws`) protocol on a single bound port. It installs its own egress
-//! sink via the nautilus runner thread-local, then asserts that:
+//! (`tests/common`) that speaks the mogwai HTTP (`/instruments`, `/clock`,
+//! `/trades`) and WebSocket (`/ws`) protocol on a single bound port. It
+//! installs its own egress sink via the nautilus runner thread-local, then
+//! asserts that:
 //!
-//! - a live `subscribe_trades` drives the stub-pushed `ServerMessage::Trade`
-//!   into the sink as a `DataEvent::Data(Data::Trade)` with the right
-//!   price/size/aggressor/ts,
+//! - the venue's unbidden tape reaches the sink as a `DataEvent::Data(
+//!   Data::Trade)` with every field round-tripped, once the local subscription
+//!   is recorded,
 //! - a `request_trades` fetch returns a matching `DataResponse::Trades` with the
-//!   two distinct trades in order, and
-//! - under the `HttpPolling` profile, a `subscribe_trades` drives a polled
-//!   `GET /trades` row into the sink, the poll actually repeats, and NO `/ws`
-//!   socket is ever opened.
+//!   two distinct trades in order,
+//! - a failed or off-tape history fetch still RESOLVES the nautilus request
+//!   rather than hanging it, and
+//! - a subscribe for an instrument this run does not serve is refused locally
+//!   and loudly.
 //!
-//! This is the transport-profile integration gate (the polling case is the
-//! behavior neither the engine tests nor the smoke path reach). It is marked
-//! `#[ignore]` because it binds a real TCP listener, which the CI sandbox may
-//! refuse; run it explicitly in a socket-capable environment with
-//! `brokkr test -p mogwai-adapter subscribe_and_request_drive_data_events --debug`.
+//! The `fixture(transport_profile)` parameterization is gone with
+//! `TransportProfile` itself: there is one carrier, so there is nothing to
+//! parameterize over, and the polling case that only existed under
+//! `HttpPolling` was deleted with the profile rather than ported.
+//!
+//! Marked `#[ignore]` because it binds a real TCP listener, which the sandbox
+//! may refuse; `brokkr check --gate` and the focused runner both include it.
 
 mod common;
 
@@ -31,7 +35,6 @@ use common::{
     StubState, bound_stub, instrument_id, next_data_event, next_non_instrument_data_event,
 };
 use mogwai_adapter::{MogwaiDataClient, MogwaiDataClientConfig};
-use mogwai_protocol::TransportProfile;
 use nautilus_common::{
     clients::DataClient,
     live::runner::replace_data_event_sender,
@@ -63,6 +66,20 @@ fn bar_type() -> nautilus_model::data::BarType {
     )
 }
 
+fn data_client(base_url: String) -> MogwaiDataClient {
+    let config = MogwaiDataClientConfig {
+        // Stated, not defaulted: `account_id` defaults to a placeholder the
+        // validator refuses, so a data socket can never bind an account nobody
+        // chose. It is a nautilus-side label with no venue meaning now - the
+        // venue has one ledger and ignores it - but the loud refusal still
+        // earns its place.
+        account_id: AccountId::from("MOGWAI-001"),
+        base_url,
+        ..MogwaiDataClientConfig::default()
+    };
+    MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds")
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn subscribe_and_request_drive_data_events() {
@@ -79,20 +96,14 @@ async fn subscribe_and_request_drive_data_events() {
     let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
     replace_data_event_sender(sink_tx);
 
-    let config = MogwaiDataClientConfig {
-        // Stated, not defaulted: `account_id` defaults to a placeholder the
-        // validator refuses, so a data socket can never bind an account nobody
-        // chose (which is how it silently diverged from its exec sibling).
-        account_id: AccountId::from("MOGWAI-001"),
-        base_url,
-        ..MogwaiDataClientConfig::default()
-    };
-    let mut client =
-        MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
-
+    let mut client = data_client(base_url);
     client.start().expect("start grabs the sink");
-    client.connect().await.expect("connect opens transports");
+    client.connect().await.expect("connect opens the socket");
 
+    // The subscribe is satisfied LOCALLY: no frame reaches the venue, which
+    // pushes its one run's tape whether or not anybody asked. What the call
+    // still does is gate forwarding, so the tape below only reaches the sink
+    // because of it.
     client
         .subscribe_trades(SubscribeTrades::new(
             instrument_id(),
@@ -105,11 +116,11 @@ async fn subscribe_and_request_drive_data_events() {
         ))
         .expect("subscribe trades");
 
-    // The stub pushes a trade after the Subscribe; it must reach the sink with
-    // every field round-tripped (a wrong scaling, flipped aggressor or dropped
-    // ts would still be a Trade variant but is caught here). The connect-time
-    // instrument prologue is skipped (see next_non_instrument_data_event).
-    let timeout = Duration::from_secs(2);
+    // The stub pushes a trade unbidden; it must reach the sink with every field
+    // round-tripped (a wrong scaling, flipped aggressor or dropped ts would
+    // still be a Trade variant but is caught here). The connect-time instrument
+    // prologue is skipped (see next_non_instrument_data_event).
+    let timeout = Duration::from_secs(5);
     match next_non_instrument_data_event(&mut sink_rx, timeout).await {
         DataEvent::Data(Data::Trade(trade)) => {
             assert_eq!(trade.instrument_id, instrument_id());
@@ -161,41 +172,46 @@ async fn subscribe_and_request_drive_data_events() {
     }
 }
 
+/// One run is one instrument, so a subscribe for any other symbol can never be
+/// served. It is refused LOCALLY and loudly rather than recorded as a
+/// subscription that silently never delivers - silence here would be the
+/// misbinding defect this lifecycle exists to remove, in a new place.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
-async fn http_polling_subscribe_fetches_trades_without_ws() {
-    use std::sync::atomic::Ordering;
-
+async fn a_subscribe_for_another_instrument_is_refused_locally() {
     let state = Arc::new(StubState::default());
-    // A single trade in the polled body; the polling profile fetches it over
-    // `GET /trades` rather than the WS leg.
-    *state.trades_body.lock().expect("trades body mutex") = Some(
-        r#"[{"symbol":"BTCUSDT","price":"100.00","size":"1","aggressor":"Buyer","ts_event":10}]"#
-            .to_string(),
-    );
     let base_url = bound_stub(Arc::clone(&state)).await;
-
-    let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
+    let (sink_tx, _sink_rx) = unbounded_channel::<DataEvent>();
     replace_data_event_sender(sink_tx);
 
-    let config = MogwaiDataClientConfig {
-        account_id: AccountId::from("MOGWAI-001"),
-        base_url,
-        transport_profile: TransportProfile::HttpPolling,
-        ..MogwaiDataClientConfig::default()
-    };
-    let mut client =
-        MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
-
+    let mut client = data_client(base_url);
     client.start().expect("start grabs the sink");
-    client.connect().await.expect("connect starts polling");
-    // Anchor the poll cursor BELOW the stub's fixed trade: a subscribe without
-    // a start anchors at sim-now (wall now, against this stub's identity
-    // clock), and the cursor's rewind guard would then skip the ts_event=10
-    // body forever - the stub serves it verbatim regardless of the requested
-    // window, unlike the real server.
-    let params: nautilus_core::Params =
-        serde_json::from_value(serde_json::json!({ "start_ts": 5 })).expect("params decode");
+    client
+        .connect()
+        .await
+        .expect("connect seeds the instrument");
+
+    let other = nautilus_model::identifiers::InstrumentId::new(
+        nautilus_model::identifiers::Symbol::from("ETHUSDT"),
+        *mogwai_adapter::MOGWAI_VENUE,
+    );
+    let err = client
+        .subscribe_trades(SubscribeTrades::new(
+            other,
+            Some(ClientId::from("MOGWAI-DATA")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        ))
+        .expect_err("a symbol this run does not serve must be refused");
+    let message = err.to_string();
+    assert!(message.contains("ETHUSDT"), "{message}");
+    assert!(message.contains("BTCUSDT"), "{message}");
+
+    // The run's own instrument is still accepted, so the refusal is a check and
+    // not a blanket failure.
     client
         .subscribe_trades(SubscribeTrades::new(
             instrument_id(),
@@ -204,42 +220,9 @@ async fn http_polling_subscribe_fetches_trades_without_ws() {
             UUID4::new(),
             UnixNanos::default(),
             None,
-            Some(params),
+            None,
         ))
-        .expect("subscribe trades");
-
-    // Skip the connect-time instrument prologue and assert the polled trade.
-    let timeout = Duration::from_secs(2);
-    match next_non_instrument_data_event(&mut sink_rx, timeout).await {
-        DataEvent::Data(Data::Trade(trade)) => {
-            assert_eq!(trade.instrument_id, instrument_id());
-            assert_eq!(trade.price, Price::from("100.00"));
-            assert_eq!(trade.ts_event, UnixNanos::from(10));
-        }
-        other => panic!("expected a polled trade data event, got {other:?}"),
-    }
-
-    // Repeated polling is the polling profile's defining behavior - a one-shot
-    // poll that fired once and stopped would still deliver the first row above.
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    loop {
-        if state.trades_hits.load(Ordering::Relaxed) >= 2 {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "polling did not repeat a second /trades GET"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-
-    assert_eq!(
-        state.ws_hits.load(Ordering::Relaxed),
-        0,
-        "polling must not open /ws"
-    );
-
-    client.disconnect().await.expect("disconnect stops polling");
+        .expect("the run's own instrument subscribes");
 }
 
 /// A failed history fetch must still RESOLVE the nautilus request.
@@ -265,20 +248,11 @@ async fn failed_history_fetch_still_answers_the_request() {
     let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
     replace_data_event_sender(sink_tx);
 
-    let config = MogwaiDataClientConfig {
-        // Stated, not defaulted: `account_id` defaults to a placeholder the
-        // validator refuses, so a data socket can never bind an account nobody
-        // chose (which is how it silently diverged from its exec sibling).
-        account_id: AccountId::from("MOGWAI-001"),
-        base_url,
-        ..MogwaiDataClientConfig::default()
-    };
-    let mut client =
-        MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
+    let mut client = data_client(base_url);
     client.start().expect("start grabs the sink");
-    client.connect().await.expect("connect opens transports");
+    client.connect().await.expect("connect opens the socket");
 
-    let timeout = Duration::from_secs(2);
+    let timeout = Duration::from_secs(5);
 
     client
         .request_trades(RequestTrades::new(
@@ -336,6 +310,11 @@ async fn failed_history_fetch_still_answers_the_request() {
 /// at the request boundary. Returning that refusal to nautilus does not reach
 /// the requester: `DataEngine::execute` logs a synchronous client error and
 /// emits no correlated response, so the loud refusal read downstream as a hang.
+///
+/// The clock envelope below is the literal `/clock` text, and it carries
+/// `warmup_ns` rather than the former `backfill_horizon_ns`: the rename is a
+/// WIRE change, so this text and `clock_snapshot_round_trips` in
+/// `mogwai-protocol` move together or one of them fails.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn off_tape_window_still_answers_the_request() {
@@ -347,7 +326,7 @@ async fn off_tape_window_still_answers_the_request() {
     // Publish a real clock envelope: without one the client cannot decode a
     // floor, falls back to "unknown" (0), and the off-tape guard never fires.
     *state.clock_body.lock().expect("clock body mutex") = Some(format!(
-        r#"{{"sim":{{"sim_epoch_ns":0,"wall_anchor_ns":0,"speed":1.0}},"server_now_ns":{},"data_origin_ns":{ORIGIN},"backfill_horizon_ns":86400000000000}}"#,
+        r#"{{"sim":{{"sim_epoch_ns":0,"wall_anchor_ns":0,"speed":1.0}},"server_now_ns":{},"data_origin_ns":{ORIGIN},"warmup_ns":86400000000000}}"#,
         ORIGIN + 86_400_000_000_000
     ));
     let base_url = bound_stub(Arc::clone(&state)).await;
@@ -355,22 +334,13 @@ async fn off_tape_window_still_answers_the_request() {
     let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
     replace_data_event_sender(sink_tx);
 
-    let config = MogwaiDataClientConfig {
-        // Stated, not defaulted: `account_id` defaults to a placeholder the
-        // validator refuses, so a data socket can never bind an account nobody
-        // chose (which is how it silently diverged from its exec sibling).
-        account_id: AccountId::from("MOGWAI-001"),
-        base_url,
-        ..MogwaiDataClientConfig::default()
-    };
-    let mut client =
-        MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
+    let mut client = data_client(base_url);
     client.start().expect("start grabs the sink");
-    client.connect().await.expect("connect opens transports");
+    client.connect().await.expect("connect opens the socket");
 
     // One nanosecond below the floor: as off-tape as it gets.
     let off_tape = chrono::DateTime::from_timestamp_nanos((ORIGIN - 1) as i64);
-    let timeout = Duration::from_secs(2);
+    let timeout = Duration::from_secs(5);
 
     client
         .request_trades(RequestTrades::new(

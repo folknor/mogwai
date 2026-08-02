@@ -8,10 +8,10 @@ implementation plan, names no target artifacts, and pins no gates - if it reads
 as under-specified, that is the genre rather than an omission. One resolved
 problem statement yields one or more specs.
 
-Expanded from what would otherwise be a `notes/todo.md` entry. Sibling of
-`notes/problem-server-lifecycle.md`: that one is about how an instance starts
-and dies, this one is about which market it generates and what a consumer can
-honestly claim from having traded against it.
+Expanded from what would otherwise be a `notes/todo.md` entry. Sibling of the
+now-landed server-lifecycle work (see git history): that one was about how an
+instance starts and dies, this one is about which market it generates and what
+a consumer can honestly claim from having traded against it.
 
 ## What the user wants
 
@@ -165,7 +165,8 @@ declared, per the discipline already in these documents.
 
 ## What this document does not decide
 
-How instances start (`notes/problem-server-lifecycle.md`). What the tape's
+How instances start (settled by the now-landed server-lifecycle work; see git
+history). What the tape's
 cadence or shape is - a different seed draws a different path from the same
 fitted process, and changing the process is the cadence, profile and book
 documents. It also does not decide what a consumer does with the paths: how many

@@ -7,15 +7,10 @@
 //! server (the HTTP routes, the websocket replay) only ever reads back
 //! through `AppState`/`SimClock`, never mutates.
 
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{collections::HashMap, path::PathBuf};
 
-use mogwai_protocol::{InstrumentDef, SimClock};
+use mogwai_protocol::{InstrumentDef, MarketRegime, SimClock};
 use rust_decimal::Decimal;
-use tokio::sync::Semaphore;
 
 use crate::admission::AdmissionLimits;
 use crate::source;
@@ -31,6 +26,9 @@ use crate::source;
 // `[[instrument]]` table is guarded the same way, by `ConfiguredInstrument`.
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Config {
+    /// Simulated duration of one venue run. Zero means the launcher owns
+    /// shutdown; a non-zero duration is announced as a clean completion.
+    pub(crate) run_duration_ns: u64,
     /// Trades that must print THROUGH a resting limit's price before the venue
     /// fills it. `0` - the default - is the bookless venue's historical
     /// behaviour: a limit fills on submit at its own price, untouched by the
@@ -38,7 +36,7 @@ pub(crate) struct Config {
     /// to come to, gated on TRADED prices rather than quotes, because this
     /// venue's corpus, generator and `/quotes` surface are all trades-only.
     pub(crate) penetration_ticks: u32,
-    /// How often, in sim milliseconds, an ACCOUNT re-checks its resting limits
+    /// How often, in sim milliseconds, the RUN re-checks its resting limits
     /// against the tape. Read only when `penetration_ticks > 0`. `0` disables
     /// the sweep, and with the sweep off a gated resting order can NEVER fill:
     /// a submit seeds only its own order, so nothing else ever advances a
@@ -48,14 +46,13 @@ pub(crate) struct Config {
     /// Simulated start instant. `0` keeps the identity wall-time clock.
     pub(crate) sim_epoch_ns: u64,
     /// Wall instant the accelerated clock anchors to. `0` (the default)
-    /// anchors at server boot, which REWINDS sim time to `sim_epoch_ns` on
-    /// every restart: each boot is a fresh deterministic scenario, and a
-    /// client that survives the restart lands on a rewound axis. A nonzero
-    /// value pins the anchor so every boot lands on the SAME axis - a
-    /// restarted venue resumes at the sim instant a monotonic exchange would
-    /// have reached, which is what lets a surviving worker ride through a
-    /// venue bounce (see reference/clock.md, "Restarts"). Requires
-    /// `sim_epoch_ns` to be set, and must not be in the future at boot.
+    /// anchors at this run's boot, so every run is a fresh deterministic
+    /// scenario starting at `sim_epoch_ns`. A nonzero value pins the anchor, so
+    /// separate runs launched at different wall instants land on the SAME
+    /// affine axis - which is how two runs are made comparable, not how one
+    /// venue resumes: a process serves one run and there is no restart.
+    /// Requires `sim_epoch_ns` to be set, and must not be in the future at
+    /// boot.
     pub(crate) wall_anchor_ns: u64,
     /// Replay speed multiplier. `0.0` means unthrottled (stream as fast as the client
     /// drains). `1.0` is the default and paces to real wall-clock gaps; otherwise
@@ -68,39 +65,16 @@ pub(crate) struct Config {
     /// disables it. When enabled, each websocket session receives liveness
     /// frames that survive `StallData` but not `GoDark`.
     pub(crate) server_heartbeat_ms: u64,
-    /// How far before sim-now the synthetic tape begins, in nanoseconds. The boot
-    /// `data_origin = sim_now_at_boot - backfill_horizon_ns` is the earliest
-    /// instant any source can serve, shared by every symbol's generator so the
-    /// data timeline tracks the advertised clock (no frozen origin to drift past).
-    /// A request straddling the floor is refused loudly rather than served short,
-    /// so this default need not be exact - 24h covers a day's warmup. Documented
-    /// next to `sim_epoch_ns`: both anchor the run's timelines.
-    pub(crate) backfill_horizon_ns: u64,
-    /// Global ceiling on concurrently-live TAPES across every websocket
-    /// connection. The unit is a distinct tape, not a subscription: a tape is
-    /// identified by `(symbol, data_origin, regime)` - the regime included
-    /// because it is an input to the generated walk, not a filter over it - and
-    /// every subscription whose triple matches an existing tape shares it for
-    /// free. Each distinct tape runs on its own OS thread, so without a ceiling
-    /// the thread count is client-driven (S22a): a fleet arming distinct
-    /// regimes across the whole catalog can exhaust the process thread limit.
-    /// A subscribe that would need a new tape past the cap is refused for those
-    /// symbols with a per-entry `ReplayCapacity` outcome; the connection stays
-    /// up and its already-running streams are untouched. `0` disables the cap
-    /// (unbounded), matching the `0`-disables convention of `gap_cap_ms` and
-    /// `server_heartbeat_ms`.
-    pub(crate) max_concurrent_tapes: usize,
-    /// Maximum live symbol subscriptions on ONE websocket, counted over the
-    /// entries currently streaming on that connection. The tape cap no longer
-    /// bounds this incidentally - subscriptions are tasks, and many share a
-    /// tape - so this is what stops one connection from opening unbounded
-    /// fanout tasks. Enforced after any predecessor for the symbol has been
-    /// quiesced, so a resubscribe at the cap replaces rather than being refused
-    /// by itself. The overflow is refused with `ReplayCapacity`. `0` is
-    /// unbounded. The default equals `MAX_SUBSCRIBE_SYMBOLS`, so one maximal
-    /// subscribe frame lands exactly at the limit and neither number silently
-    /// shadows the other.
-    pub(crate) max_subscriptions_per_connection: usize,
+    /// Simulated history generated eagerly at boot, in nanoseconds.
+    /// `data_origin = run_start_ns - warmup_ns` is the earliest instant the
+    /// tape can serve, and the whole span is MATERIALIZED before the readiness
+    /// record is written (see `source::materialize_warmup`) rather than merely
+    /// permitted. A request below the floor is refused loudly rather than
+    /// served short, so this default need not be exact - 24h covers a day's
+    /// warmup. Formerly `backfill_horizon_ns`, which bounded what a client was
+    /// allowed to ASK for; with warmup declared and generated those are the
+    /// same number.
+    pub(crate) warmup_ns: u64,
     /// Depth of each tape's bounded broadcast ring, in pre-serialized frames.
     /// A subscriber that falls further behind than this has its CONNECTION
     /// KILLED as a venue fault (`admission::CLOSE_VENUE_FAULT`), because the
@@ -124,12 +98,6 @@ pub(crate) struct Config {
     /// never the reason a firehose stalls, short enough that a dead client
     /// costs one stall and is then refused.
     pub(crate) zero_speed_stall_ms: u64,
-    /// Hard ceiling on simultaneously live ledgers. Zero disables the cap.
-    pub(crate) max_accounts: usize,
-    /// Wall-clock idle lifetime for accounts without a live session. Zero disables reaping.
-    pub(crate) account_idle_timeout_ms: u64,
-    /// Wall-clock interval at which the account reaper runs.
-    pub(crate) account_reap_interval_ms: u64,
     /// Per-connection byte ceiling on execution output that has been produced
     /// but not yet written to the socket, i.e. the HELD lane's budget. See
     /// `admission::EXEC_HELD_BUDGET_BYTES`, which is this field's default and
@@ -149,24 +117,26 @@ pub(crate) struct Config {
     /// `exec_held_budget_bytes`: the overload close is only reachable in a test
     /// when this can be made small.
     pub(crate) admission_lane_frames: usize,
-    /// Per-connection pool of outstanding PROMISES of a future priority frame,
-    /// one per live replay, accounted separately from queue depth. See
-    /// `admission::ADMISSION_PROMISE_TICKETS`.
-    pub(crate) admission_promise_tickets: usize,
     /// Per-connection ceiling on order commands detached by an armed
     /// `CommandLatency` act delay and not yet acted on. One COMMAND, not one
     /// payload. See `admission::PENDING_ACT_SLOTS`; lowering it is how the smoke
     /// test reaches the refusal.
     pub(crate) pending_command_acts: usize,
-    /// Process-wide ceiling on the same, across every connection AND the
-    /// `POST /orders` surface, which has no per-connection lane to draw on. See
+    /// Process-wide ceiling on the same across every websocket connection. See
     /// `admission::GLOBAL_PENDING_ACT_SLOTS`.
     pub(crate) global_pending_command_acts: usize,
-    /// Optional explicit venue instrument set. When empty, the server seeds the
-    /// protocol default set. When present, this is authoritative for
-    /// `/instruments`, order validation, and data generation.
+    /// The one instrument this run serves. Absent, the server seeds the
+    /// built-in default profile. Present, it is authoritative for
+    /// `/instruments`, order validation, and data generation. A table, not a
+    /// list: a run serves exactly one instrument, so `[[instrument]]` fails to
+    /// parse rather than silently serving whichever entry sorted first.
     #[serde(rename = "instrument")]
-    pub(crate) instruments: Vec<ConfiguredInstrument>,
+    pub(crate) instrument: Option<ConfiguredInstrument>,
+    /// Market regime for this run's tape. Formerly the one knob a consumer
+    /// picked for itself per subscription; with no subscriptions left it is
+    /// boot config, chosen by whoever launches the run. Absent means the
+    /// generator's unmodified baseline.
+    pub(crate) regime: Option<MarketRegime>,
     /// Initial per-currency account funding, currency -> amount (a decimal
     /// string, like the instrument increments). The venue's equivalent of a
     /// deposit made before the run: the ledger only ever books fill deltas, so
@@ -181,6 +151,7 @@ pub(crate) struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            run_duration_ns: 0,
             penetration_ticks: 0,
             fill_sweep_interval_ms: 100,
             sim_epoch_ns: 0,
@@ -197,31 +168,19 @@ impl Default for Config {
             // 24h: one day of warmup tape behind sim-now. A wrong horizon is made
             // loud (off-tape requests are refused, not silently under-served), so
             // the default's exactness is low-stakes.
-            backfill_horizon_ns: 86_400_000_000_000,
-            // 256 distinct tapes: the intended single-broadarrow-node
-            // deployment subscribes a handful of symbols clean plus whatever
-            // distinct regimes QA arms, so this is two orders of magnitude
-            // above the clean-tape need while still an OS-thread count a
-            // process trivially carries. `0` lifts it entirely.
-            max_concurrent_tapes: 256,
-            // Equal to MAX_SUBSCRIBE_SYMBOLS, so one maximal subscribe frame
-            // lands exactly at the limit.
-            max_subscriptions_per_connection: 256,
+            warmup_ns: 86_400_000_000_000,
             // ~8 simulated hours of the default cadence, ~5 wall minutes at
             // speed 100. A subscriber that cannot keep up with 4096 queued
             // pre-serialized frames is not a subscriber whose feed is
             // meaningful.
             fanout_depth: 4096,
             zero_speed_stall_ms: 5000,
-            max_accounts: 4096,
-            account_idle_timeout_ms: 3_600_000,
-            account_reap_interval_ms: 60_000,
             exec_held_budget_bytes: crate::admission::EXEC_HELD_BUDGET_BYTES,
             admission_lane_frames: crate::admission::ADMISSION_LANE_FRAMES,
-            admission_promise_tickets: crate::admission::ADMISSION_PROMISE_TICKETS,
             pending_command_acts: crate::admission::PENDING_ACT_SLOTS,
             global_pending_command_acts: crate::admission::GLOBAL_PENDING_ACT_SLOTS,
-            instruments: Vec::new(),
+            instrument: None,
+            regime: None,
             balances: default_balances(),
         }
     }
@@ -236,8 +195,8 @@ fn default_balances() -> HashMap<String, Decimal> {
     HashMap::from([("USDT".to_string(), Decimal::from(1_000_000))])
 }
 
-/// Warns at boot about funding gaps the funded-account enforcement will turn
-/// into rejections. A funded venue refuses any order its free balance cannot
+/// Refuses boot on funding gaps the funded-account enforcement would turn into
+/// rejections. A funded venue refuses any order its free balance cannot
 /// cover, so an instrument whose QUOTE currency carries no funding can never
 /// buy - every order on it rejects with "insufficient balance", and without
 /// this warning the first sign is a rejected order minutes into a run. (Base
@@ -246,25 +205,31 @@ fn default_balances() -> HashMap<String, Decimal> {
 /// deliberately unfunded account gets one warning stating the consequence
 /// instead: funds are unenforced, and the first buy books a negative quote
 /// leg a nautilus cash consumer will refuse to apply.
-pub(crate) fn warn_unfunded_quotes(cfg: &Config, defs: &[InstrumentDef]) {
+pub(crate) fn refuse_unfunded_quotes(cfg: &Config, defs: &[InstrumentDef]) -> anyhow::Result<()> {
     if cfg.balances.is_empty() {
         tracing::warn!(
             "account is UNFUNDED (empty balances table): funds checks are off, and the \
              first buy drives the quote leg negative - a nautilus cash account will \
              refuse every snapshot after it"
         );
-        return;
+        return Ok(());
     }
+    // A hard boot error rather than a warning: with ONE instrument per run, an
+    // unfunded quote currency means every buy in the whole run rejects for
+    // insufficient balance. That is a misconfigured run, not a caution, and it
+    // is cheaper to refuse at boot than to discover it minutes in.
     for def in defs {
         if !cfg.balances.contains_key(&def.quote) {
-            tracing::warn!(
-                symbol = %def.symbol,
-                quote = %def.quote,
-                "instrument quote currency is unfunded; every buy on it will be \
-                 rejected with insufficient balance - add it to [balances]"
+            anyhow::bail!(
+                "instrument {} quote currency {} is unfunded; every buy in this run \
+                 would be rejected for insufficient balance - add {} to [balances]",
+                def.symbol,
+                def.quote,
+                def.quote
             );
         }
     }
+    Ok(())
 }
 
 /// Validates the `[balances]` funding table: currencies must be non-blank,
@@ -296,7 +261,7 @@ pub(crate) fn validate_balances(cfg: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Validates the three admission budgets an operator can set.
+/// Validates the admission budgets an operator can set.
 ///
 /// A budget of zero refuses every command the venue will ever be sent, which is
 /// not a small venue but a dead one; a held budget below
@@ -324,9 +289,6 @@ pub(crate) fn validate_admission_limits(cfg: &Config) -> anyhow::Result<()> {
     if cfg.admission_lane_frames == 0 {
         anyhow::bail!("admission_lane_frames must be at least 1");
     }
-    if cfg.admission_promise_tickets == 0 {
-        anyhow::bail!("admission_promise_tickets must be at least 1");
-    }
     // A zero budget would refuse every delayed command, so the control could be
     // armed but never served.
     if cfg.pending_command_acts == 0 {
@@ -340,21 +302,6 @@ pub(crate) fn validate_admission_limits(cfg: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The account-lifecycle knobs. `account_reap_interval_ms == 0` is REFUSED
-/// rather than given a meaning: read as "never" it silently disables the only
-/// teardown mechanism that fires without a driver calling
-/// `DELETE /accounts/<id>`, and read as "every tick" it is a busy loop.
-/// Disabling the reaper has exactly one spelling, `account_idle_timeout_ms = 0`.
-pub(crate) fn validate_account_lifecycle(cfg: &Config) -> anyhow::Result<()> {
-    if cfg.account_reap_interval_ms == 0 {
-        anyhow::bail!(
-            "account_reap_interval_ms must be > 0; set account_idle_timeout_ms = 0 to \
-             disable the idle reaper"
-        );
-    }
-    Ok(())
-}
-
 /// Above this no realistic tape ever fills a resting order and the venue would
 /// silently be a black hole; refusing at boot says so out loud.
 pub(crate) const MAX_PENETRATION_TICKS: u32 = 1_000;
@@ -363,7 +310,7 @@ pub(crate) const MAX_PENETRATION_TICKS: u32 = 1_000;
 pub(crate) const SLOW_SWEEP_WARN_MS: u64 = 60_000;
 
 /// Boot gate for the penetration knobs, alongside `validate_admission_limits`
-/// and `validate_account_lifecycle`.
+/// and the admission limits.
 pub(crate) fn validate_penetration(cfg: &Config) -> anyhow::Result<()> {
     if cfg.penetration_ticks > MAX_PENETRATION_TICKS {
         anyhow::bail!("penetration_ticks must be at most {MAX_PENETRATION_TICKS}");
@@ -388,25 +335,23 @@ pub(crate) fn build_admission_limits(cfg: &Config) -> AdmissionLimits {
     AdmissionLimits {
         held_budget_bytes: cfg.exec_held_budget_bytes,
         lane_frames: cfg.admission_lane_frames,
-        promise_tickets: cfg.admission_promise_tickets,
+        promise_tickets: crate::admission::ADMISSION_PROMISE_TICKETS,
         pending_act_slots: cfg.pending_command_acts,
     }
 }
 
 impl Config {
     /// Load run config from a TOML file. `path` is the parsed `--config <path>`
-    /// argument when passed, otherwise `mogwai.toml` in the working directory.
-    /// A missing file yields built-in defaults so the server still starts with
-    /// no config present; a malformed file is a hard error rather than a silent
-    /// fallback. Replaces the former MOGWAI_REPLAY_SPEED and MOGWAI_GAP_CAP_MS
+    /// argument when passed; omission uses built-in defaults. A requested file
+    /// must exist and parse - consulting a cwd-relative `mogwai.toml` would
+    /// make one run depend on its launcher's ambient working directory.
+    /// Replaces the former MOGWAI_REPLAY_SPEED and MOGWAI_GAP_CAP_MS
     /// environment variables - run knobs belong in explicit input, not ambient
     /// environment.
     pub(crate) fn load(path: Option<PathBuf>) -> anyhow::Result<Self> {
-        let path = path.unwrap_or_else(|| PathBuf::from("mogwai.toml"));
-        let cfg: Self = match std::fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text)?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
-            Err(e) => return Err(e.into()),
+        let cfg: Self = match path {
+            Some(path) => toml::from_str(&std::fs::read_to_string(path)?)?,
+            None => Self::default(),
         };
         // Validate here, not at the call site, so a validated `Config` is the
         // only kind `load` ever hands out - a future second consumer cannot
@@ -414,7 +359,6 @@ impl Config {
         // their builders: they need boot-time inputs this loader lacks.)
         validate_balances(&cfg)?;
         validate_admission_limits(&cfg)?;
-        validate_account_lifecycle(&cfg)?;
         validate_penetration(&cfg)?;
         // Unlike every neighbouring count knob, 0 is not "unbounded" here:
         // `broadcast::channel(0)` panics, so the key is named in a load error
@@ -428,21 +372,7 @@ impl Config {
     }
 }
 
-/// Build the global tape permit pool from the configured cap. A cap of `0`
-/// maps to `Semaphore::MAX_PERMITS`, i.e. effectively unbounded, so the
-/// acquire path stays uniform (a permit is always taken; unlimited just never
-/// runs dry) rather than branching on an `Option` at every subscribe. See
-/// `Config::max_concurrent_tapes` for the rationale.
-pub(crate) fn build_tape_permits(cfg: &Config) -> Arc<Semaphore> {
-    let permits = if cfg.max_concurrent_tapes == 0 {
-        Semaphore::MAX_PERMITS
-    } else {
-        cfg.max_concurrent_tapes
-    };
-    Arc::new(Semaphore::new(permits))
-}
-
-/// One `[[instrument]]` table: an `InstrumentDef` spelled out inline, plus its
+/// The `[instrument]` table: an `InstrumentDef` spelled out inline, plus its
 /// generator and session profiles.
 ///
 /// The def's seven fields are RESTATED here rather than pulled in with
@@ -496,21 +426,15 @@ impl ConfiguredInstrument {
 pub(crate) fn build_instrument_profiles(
     cfg: &Config,
 ) -> anyhow::Result<source::InstrumentProfiles> {
-    if cfg.instruments.is_empty() {
+    let Some(configured) = &cfg.instrument else {
         return Ok(source::InstrumentProfiles::defaults());
-    }
-
+    };
     let fp = mogwai_data::Fingerprint::from_repo_json();
-    let mut seen = HashSet::new();
-    let mut profiles = Vec::with_capacity(cfg.instruments.len());
+    let mut profiles = Vec::with_capacity(1);
 
-    for configured in &cfg.instruments {
+    {
         let def = configured.def();
         validate_instrument_def(&def)?;
-
-        if !seen.insert(def.symbol.clone()) {
-            anyhow::bail!("duplicate instrument symbol {}", def.symbol);
-        }
 
         let mut scalars = configured.generator.clone();
         scalars.symbol = def.symbol.clone();
@@ -658,11 +582,10 @@ pub(crate) fn window_until_ns(now: u64, ms: u64) -> u64 {
 
 /// Derives the run's `SimClock` from config. `boot_wall_ns` is the wall
 /// instant of this boot; it anchors the clock unless the config pins
-/// `wall_anchor_ns` explicitly. The pinned form is what makes sim time
-/// monotonic ACROSS restarts: with the default boot anchor, every boot
-/// re-anchors and so rewinds sim-now back to `sim_epoch_ns`, while a pinned
-/// anchor puts every boot on the same affine axis (reference/clock.md,
-/// "Restarts"). A pinned anchor in the future is refused rather than served:
+/// `wall_anchor_ns` explicitly. With the default boot anchor every run starts
+/// at `sim_epoch_ns`; a pinned anchor instead puts every run launched against
+/// it on the same affine axis, which is what makes two runs' timestamps
+/// comparable. A pinned anchor in the future is refused rather than served:
 /// `sim_ns` clamps pre-anchor reads to the epoch, so the venue would sit
 /// frozen at `sim_epoch_ns` until the wall catches up - a misconfiguration
 /// (most likely a seconds-vs-nanos slip), not a schedulable start.
@@ -702,4 +625,52 @@ pub(crate) fn build_sim_clock(cfg: &Config, boot_wall_ns: u64) -> anyhow::Result
         wall_anchor_ns,
         speed: cfg.speed,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A run serves ONE instrument, so `[instrument]` is a table. A file
+    /// carrying the old `[[instrument]]` list must fail loudly at parse rather
+    /// than silently serving whichever entry happened to sort first.
+    #[test]
+    fn a_config_naming_two_instruments_fails_to_parse() {
+        let two = "\n[[instrument]]\nsymbol = \"BTCUSDT\"\n[[instrument]]\nsymbol = \"ETHUSDT\"\n";
+        let err = toml::from_str::<Config>(two).expect_err("a list of instruments is refused");
+        assert!(
+            err.to_string().contains("instrument"),
+            "the parse error names the offending key: {err}"
+        );
+    }
+
+    /// With one instrument per run, an unfunded quote currency means every buy
+    /// in the whole run rejects for insufficient balance. That is a
+    /// misconfigured run, so it fails BOOT rather than warning.
+    #[test]
+    fn an_unfunded_quote_currency_refuses_boot() {
+        let cfg = Config {
+            balances: HashMap::from([("EUR".to_string(), Decimal::from(1))]),
+            ..Config::default()
+        };
+        let defs = mogwai_protocol::default_instruments();
+        let err = refuse_unfunded_quotes(&cfg, &defs).expect_err("an unfunded quote refuses boot");
+        assert!(err.to_string().contains("unfunded"), "{err}");
+
+        refuse_unfunded_quotes(&Config::default(), &defs)
+            .expect("the shipped defaults fund their own quote currency");
+    }
+
+    /// An empty `[balances]` table is the deliberate unfunded run, not a
+    /// misconfiguration: funds checks are off entirely, so there is nothing to
+    /// refuse.
+    #[test]
+    fn an_explicitly_unfunded_account_still_boots() {
+        let cfg = Config {
+            balances: HashMap::new(),
+            ..Config::default()
+        };
+        refuse_unfunded_quotes(&cfg, &mogwai_protocol::default_instruments())
+            .expect("an explicitly unfunded run is allowed");
+    }
 }

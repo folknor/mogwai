@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: 2026 folknor
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# A run whose quote currency carries no funding. With one instrument per run
+# that means every buy would reject for insufficient balance, so it is refused
+# at boot rather than discovered minutes in - which is what makes it a compact
+# way to exercise the launcher contract's boot-failure path.
+
+warmup_ns = 300000000000
+
+[balances]
+EUR = "1000"

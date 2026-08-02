@@ -16,8 +16,8 @@ mod decimal;
 mod havoc;
 mod instruments;
 mod messages;
+mod ready;
 pub mod sizing;
-mod transport;
 
 pub mod control;
 
@@ -30,21 +30,15 @@ pub use havoc::{
 };
 pub use instruments::{InstrumentDef, default_instruments};
 pub use messages::{
-    ADMISSION_FRAME_MAX_BYTES, AccountId, AccountIdError, AccountState, AdmissionSubject,
-    AggressorSide, Balance, ClientMessage, CommandClass, FillSnapshot, JSON_ESCAPE_FACTOR,
-    MAX_ACCOUNT_ID_LEN, MAX_CLIENT_ID_LEN, MAX_CURRENCY_LEN, MAX_REASON_LEN, MAX_SUBSCRIBE_SYMBOLS,
-    MAX_SUBSCRIPTION_ISSUES_LISTED, MAX_SYMBOL_LEN, OrderFilled, OrderStatusInfo,
-    OrderStatusSnapshot, OrderType, Position, QueryKind, QuoteTick, ServerMessage, Side,
-    SubmitOrder, SubscriptionIssue, SubscriptionOutcome, SubscriptionRequest, TimeInForce,
-    TradeTick, WireOrderStatus, trades_through, truncate_client_id, truncate_reason,
-    validate_client_order_id, validate_modify_order, validate_request_id, validate_submit_order,
-    validate_subscriptions, validate_symbols,
+    ADMISSION_ENVELOPE_BYTES, ADMISSION_FRAME_MAX_BYTES, AccountId, AccountIdError, AccountState,
+    AdmissionSubject, AggressorSide, Balance, ClientMessage, CommandClass, FillSnapshot,
+    JSON_ESCAPE_FACTOR, MAX_ACCOUNT_ID_LEN, MAX_CLIENT_ID_LEN, MAX_CURRENCY_LEN, MAX_REASON_LEN,
+    MAX_SYMBOL_LEN, OrderFilled, OrderStatusInfo, OrderStatusSnapshot, OrderType, Position,
+    QueryKind, QuoteTick, ServerMessage, Side, SubmitOrder, TimeInForce, TradeTick,
+    WireOrderStatus, trades_through, truncate_client_id, truncate_reason, validate_client_order_id,
+    validate_modify_order, validate_request_id, validate_submit_order,
 };
-/// HTTP header carrying an acting account on stateful venue requests.
-pub const ACCOUNT_HEADER: &str = "x-mogwai-account";
-/// Websocket query parameter carrying the account bound to a session.
-pub const ACCOUNT_QUERY_PARAM: &str = "account";
-pub use transport::TransportProfile;
+pub use ready::{ReadyRecord, SeedReport};
 
 pub type Symbol = String;
 /// Client-assigned order id (nautilus `ClientOrderId`).
@@ -81,5 +75,20 @@ mod tests {
         assert!(!trades_through(Side::Buy, limit, limit));
         assert!(trades_through(Side::Sell, limit, Decimal::from(101)));
         assert!(!trades_through(Side::Sell, limit, limit));
+    }
+
+    #[test]
+    fn run_complete_round_trips() {
+        let message = ServerMessage::RunComplete {
+            sim_now_ns: 123,
+            elapsed_ns: 45,
+        };
+        let json = serde_json::to_string(&message).expect("serialize RunComplete");
+        assert_eq!(
+            json,
+            r#"{"type":"RunComplete","sim_now_ns":123,"elapsed_ns":45}"#
+        );
+        let decoded: ServerMessage = serde_json::from_str(&json).expect("decode RunComplete");
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), json);
     }
 }

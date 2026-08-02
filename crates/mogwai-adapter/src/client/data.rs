@@ -9,22 +9,18 @@
 //! `super::shared`.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     num::NonZeroU64,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
 };
 
 use anyhow::{Context, ensure};
 use async_trait::async_trait;
 use mogwai_data::{BarAcc, fold_trade};
-use mogwai_protocol::{
-    ClientMessage, InstrumentDef, MAX_SUBSCRIBE_SYMBOLS, MarketRegime, ServerMessage, SimClock,
-    SubscriptionIssue, SubscriptionRequest, Symbol, TradeTick,
-};
+use mogwai_protocol::{ClientMessage, InstrumentDef, ServerMessage, SimClock, Symbol, TradeTick};
 use nautilus_common::{
     clients::DataClient,
     live::{get_data_event_sender, get_runtime},
@@ -46,8 +42,6 @@ use nautilus_model::{
     identifiers::{ClientId, Venue},
 };
 use nautilus_network::http::HttpClient;
-#[cfg(test)]
-use rust_decimal::Decimal;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 
@@ -55,30 +49,15 @@ use crate::{
     MOGWAI_VENUE, MogwaiDataClientConfig,
     client::shared::{
         HavocDelivery, HavocFilter, abort_tasks, cache_instruments, capped_limit, client_havoc,
-        conn_havoc, data_regime, date_to_unix_nanos, drain_havoc_anchored, emit_seeded_instruments,
-        enqueue_havoc, ensure_instrument, ensure_on_tape, fetch_clock_or_identity,
-        fetch_instruments, flush_havoc, flush_havoc_into_pump, instrument_any_or_warn,
-        instrument_def, join_url, lock_recover, now_unix_nanos, seed_instruments,
-        spawn_latency_pump, symbol_from_instrument, track_task, wait_connected,
+        conn_havoc, date_to_unix_nanos, emit_seeded_instruments, enqueue_havoc, ensure_instrument,
+        ensure_on_tape, fetch_clock_or_identity, fetch_instruments, flush_havoc_into_pump,
+        instrument_any_or_warn, instrument_def, join_url, lock_recover, now_unix_nanos,
+        seed_instruments, spawn_latency_pump, symbol_from_instrument, track_task, wait_connected,
         warn_missing_instrument_once,
     },
     convert,
     lifecycle::{HttpQuota, WsConnectionConfig, run_ws_connection},
 };
-
-/// Cadence of the `HttpPolling` data path's `/trades` pull. This stays a WALL
-/// duration and is deliberately NOT scaled by the sim clock: the endpoint it
-/// polls is the `ORIGIN_TS`-anchored history seek path, which the coherent-clock
-/// work leaves OFF the accelerated axis (see `reference/clock.md` and the
-/// coherent-clock spec). Scaling it would only spin the poll loop faster under
-/// acceleration without producing on-axis data. The accelerated vehicle is the
-/// WS push path, which deadline-paces server-side.
-const POLL_INTERVAL: Duration = Duration::from_millis(250);
-const GENERATION_HISTORY: usize = 4 * MAX_SUBSCRIBE_SYMBOLS;
-/// Consecutive poll-failure count at which the wedged-feed warning re-fires and
-/// the AD6 self-heal (clock re-fetch + cursor reset) runs - onset (count 1),
-/// then every this-many failures (~10s at the 250ms POLL_INTERVAL).
-const POLL_FAILURE_ALERT_EVERY: u64 = 40;
 
 #[derive(Debug)]
 pub struct MogwaiDataClient {
@@ -96,12 +75,9 @@ pub struct MogwaiDataClient {
     ws_cmd: Option<UnboundedSender<WsCommand>>,
     instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     subs: Arc<Mutex<HashMap<Symbol, SubState>>>,
-    generation_seq: Arc<AtomicU64>,
-    issued: Arc<Mutex<BTreeMap<u64, Symbol>>>,
     bars: Arc<Mutex<HashMap<BarType, BarSubState>>>,
-    poll_cursor: Arc<Mutex<HashMap<Symbol, PollCursor>>>,
-    /// Handles for every task this client spawns (the WS reader, the poll loop,
-    /// and each short-lived `request_*`/`subscribe_instrument*` fetch). Shared
+    /// Handles for every task this client spawns (the WS reader and each
+    /// short-lived `request_*`/`subscribe_instrument*` fetch). Shared
     /// behind an `Arc<Mutex<..>>` so the `&self` request handlers can record
     /// their handle too, not just the `&mut self` connect path; `stop()` aborts
     /// the lot so a fetch spawned just before disconnect cannot keep issuing
@@ -119,10 +95,7 @@ impl MogwaiDataClient {
     pub fn new(client_id: ClientId, config: MogwaiDataClientConfig) -> anyhow::Result<Self> {
         config.validate()?;
         let http = HttpClient::new(
-            HashMap::from([(
-                mogwai_protocol::ACCOUNT_HEADER.to_string(),
-                config.account_id.to_string(),
-            )]),
+            HashMap::new(),
             Vec::new(),
             Vec::new(),
             None,
@@ -142,10 +115,7 @@ impl MogwaiDataClient {
             ws_cmd: None,
             instruments: Arc::new(Mutex::new(HashMap::new())),
             subs: Arc::new(Mutex::new(HashMap::new())),
-            generation_seq: Arc::new(AtomicU64::new(0)),
-            issued: Arc::new(Mutex::new(BTreeMap::new())),
             bars: Arc::new(Mutex::new(HashMap::new())),
-            poll_cursor: Arc::new(Mutex::new(HashMap::new())),
             task_handles: Arc::new(Mutex::new(Vec::new())),
         })
     }
@@ -156,19 +126,46 @@ impl MogwaiDataClient {
         kind: SubKind,
         start_ts: Option<u64>,
     ) -> anyhow::Result<()> {
-        // A live subscribe sends `start_ts = None` and lets the server seek the
-        // shared tape to sim-now. The old default anchored a fresh subscribe at
-        // `sim_epoch_ns` (the tape origin), which under acceleration made the
-        // server replay the whole backfill at once - the catch-up dump. "Live
-        // means from now" is now the server's job; the adapter only forwards an
-        // explicit caller-supplied start (a resume cursor) unchanged.
-        let (emit, active_start_ts, generation) = {
+        // The subscription is satisfied LOCALLY. Nautilus still calls
+        // subscribe/unsubscribe and this client must still implement them, but
+        // the venue serves one run's one tape and pushes it unbidden, so there
+        // is no frame to send: this table only gates which arriving ticks are
+        // forwarded to the message bus.
+        // The venue serves exactly one instrument and pushes its tape unbidden,
+        // so a subscribe for any OTHER symbol can never be satisfied. Refuse it
+        // here, loudly and locally, rather than recording a subscription that
+        // will silently never deliver: silence is precisely the misbinding
+        // defect this lifecycle exists to remove. An empty instrument cache
+        // means the client has not connected yet and has nothing to check
+        // against, so it defers rather than guessing.
+        {
+            let instruments = self
+                .instruments
+                .lock()
+                .map_err(|_| anyhow::anyhow!("instrument mutex poisoned"))?;
+            if !instruments.is_empty() && !instruments.contains_key(&symbol) {
+                let served: Vec<&str> = instruments.keys().map(String::as_str).collect();
+                tracing::error!(
+                    %symbol,
+                    served = ?served,
+                    "refusing a subscription for an instrument this run does not serve"
+                );
+                anyhow::bail!(
+                    "this venue run serves {served:?}, not {symbol}; \
+                     one run is one instrument and cannot be asked for another"
+                );
+            }
+        }
+        {
             let mut subs = self
                 .subs
                 .lock()
                 .map_err(|_| anyhow::anyhow!("subscription mutex poisoned"))?;
-            let state = subs.entry(symbol.clone()).or_default();
-            let emit = state.total() == 0;
+            let state = subs.entry(symbol).or_default();
+            // The 0->1 transition. It no longer emits anything - there is no
+            // wire subscribe - but it is still what seeds the shared resume
+            // cursor, and only the FIRST subscriber may.
+            let first = state.total() == 0;
             state.increment(kind);
             // `start_ts` is this symbol's single shared resume cursor, advanced
             // forward-only by `advance_sub_start_ts` on every delivered tick so a
@@ -184,86 +181,36 @@ impl MogwaiDataClient {
             // replay), and not forward either (that would skip data the first
             // subscriber still wants). The shared feed already serves every
             // subscriber from the cursor forward.
-            if emit {
+            if first {
                 state.start_ts = start_ts;
-                state.generation = next_generation(&self.generation_seq);
             }
-            (emit, state.start_ts, state.generation)
-        };
-
-        // Gate the direct Subscribe send on a live connection. A subscribe that
-        // lands during a reconnect backoff (`connected == false`) must NOT queue a
-        // Subscribe: the queued command survives the reconnect in the unbounded
-        // command channel and would be sent AGAIN after `on_connect`
-        // (`subscribe_commands`) already rebuilt the full subscription state from
-        // the table, double-subscribing the symbol and restarting the server-side
-        // replay - the resubscribe duplicate-window bug (AD5). While disconnected,
-        // `on_connect` is the sole post-reconnect subscribe source, and it
-        // reconstructs this subscription from the table the increment above just
-        // updated, so nothing is lost by skipping the send here.
-        if emit
-            && !self.config.transport_profile.data_by_polling()
-            && self.connected.load(Ordering::Relaxed)
-        {
-            self.send_ws(WsCommand::Subscribe {
-                subscriptions: vec![SubscriptionRequest {
-                    generation,
-                    symbol: symbol.clone(),
-                    start_ts: active_start_ts,
-                    regime: data_regime(&self.config.havoc),
-                }],
-            })?;
-            record_issued(&self.issued, generation, symbol);
         }
+
+        // Nothing is sent to the venue. The subscription is satisfied entirely
+        // by this local table: the WS reader forwards an arriving tick when the
+        // matching kind's count is non-zero, and the venue pushes the run's one
+        // tape whether or not anybody asked. The seeded `start_ts` survives as
+        // the resume cursor the historical request paths read.
         Ok(())
     }
 
+    #[allow(clippy::needless_pass_by_value)]
+    /// The mirror of `subscribe_symbol`, and equally local: dropping the last
+    /// subscriber of every kind retires the symbol's row, which stops the WS
+    /// reader forwarding its ticks. Nothing is sent to the venue, which keeps
+    /// pushing the run's one tape either way.
     fn unsubscribe_symbol(&mut self, symbol: Symbol, kind: SubKind) -> anyhow::Result<()> {
-        let mut emit = false;
-        {
-            let mut subs = self
-                .subs
-                .lock()
-                .map_err(|_| anyhow::anyhow!("subscription mutex poisoned"))?;
-            if let Some(state) = subs.get_mut(&symbol) {
-                state.decrement(kind);
-                emit = state.total() == 0;
-            }
-            if emit {
+        let mut subs = self
+            .subs
+            .lock()
+            .map_err(|_| anyhow::anyhow!("subscription mutex poisoned"))?;
+        if let Some(state) = subs.get_mut(&symbol) {
+            state.decrement(kind);
+            if state.total() == 0 {
                 subs.remove(&symbol);
             }
         }
-
-        if emit {
-            self.poll_cursor
-                .lock()
-                .map_err(|_| anyhow::anyhow!("poll cursor mutex poisoned"))?
-                .remove(&symbol);
-        }
-
-        // Gate the Unsubscribe send on a live connection, mirroring the subscribe
-        // path (AD5). While disconnected the symbol was already removed from the
-        // table above, so `on_connect` will simply not re-subscribe it on the next
-        // reconnect - there is nothing to unsubscribe on a dead socket, and queuing
-        // a command that outlives the reconnect only risks racing a fresh
-        // subscribe's rebuilt state.
-        if emit
-            && !self.config.transport_profile.data_by_polling()
-            && self.connected.load(Ordering::Relaxed)
-        {
-            self.send_ws(WsCommand::Unsubscribe {
-                symbols: vec![symbol],
-            })?;
-        }
         Ok(())
-    }
-
-    fn send_ws(&self, cmd: WsCommand) -> anyhow::Result<()> {
-        let tx = self
-            .ws_cmd
-            .as_ref()
-            .context("mogwai data client is not connected")?;
-        tx.send(cmd).context("send websocket command")
     }
 
     fn sink(&self) -> anyhow::Result<UnboundedSender<DataEvent>> {
@@ -355,10 +302,6 @@ impl DataClient for MogwaiDataClient {
             .lock()
             .map_err(|_| anyhow::anyhow!("bar mutex poisoned"))?
             .clear();
-        self.poll_cursor
-            .lock()
-            .map_err(|_| anyhow::anyhow!("poll cursor mutex poisoned"))?
-            .clear();
         Ok(())
     }
 
@@ -398,40 +341,6 @@ impl DataClient for MogwaiDataClient {
         // Server-side divergences are execution-owned. The data client accepts
         // the same config object but only applies its client-side transport half.
         let client_havoc = client_havoc(&self.config.havoc);
-        let regime = data_regime(&self.config.havoc);
-
-        if self.config.transport_profile.data_by_polling() {
-            let connected = Arc::clone(&self.connected);
-            connected.store(true, Ordering::Relaxed);
-            let http = self.http.clone();
-            let http_quota = self.http_quota.clone();
-            let instruments = Arc::clone(&self.instruments);
-            let subs = Arc::clone(&self.subs);
-            let issued = Arc::clone(&self.issued);
-            let bars = Arc::clone(&self.bars);
-            let cursor = Arc::clone(&self.poll_cursor);
-            let havoc_filter = HavocFilter::from_client(&client_havoc);
-            let poll_handle = tokio::spawn(async move {
-                poll_market_data(DataPollContext {
-                    http,
-                    http_quota,
-                    base: http_base_url,
-                    sink,
-                    instruments,
-                    subs,
-                    issued,
-                    bars,
-                    cursor,
-                    connected,
-                    havoc_filter,
-                    regime,
-                    sim,
-                })
-                .await;
-            });
-            track_task(&self.task_handles, poll_handle);
-            return Ok(());
-        }
 
         // `ws_url` already carries the `/ws` path and the account query; do not
         // join a path onto it (see its comment).
@@ -442,7 +351,6 @@ impl DataClient for MogwaiDataClient {
         let connected = Arc::clone(&self.connected);
         let instruments = Arc::clone(&self.instruments);
         let subs = Arc::clone(&self.subs);
-        let issued = Arc::clone(&self.issued);
         let bars = Arc::clone(&self.bars);
         let havoc_filter = Arc::new(tokio::sync::Mutex::new(HavocFilter::from_client(
             &client_havoc,
@@ -458,10 +366,9 @@ impl DataClient for MogwaiDataClient {
             let sink = sink.clone();
             let instruments = Arc::clone(&instruments);
             let subs = Arc::clone(&subs);
-            let issued = Arc::clone(&issued);
             let bars = Arc::clone(&bars);
             async move {
-                handle_market_message(msg, &sink, &instruments, &subs, &issued, &bars, sim).await;
+                handle_market_message(msg, &sink, &instruments, &subs, &bars, sim).await;
             }
         });
         track_task(&self.task_handles, pump_handle);
@@ -470,9 +377,6 @@ impl DataClient for MogwaiDataClient {
         let handler_deliver = deliver_tx.clone();
         let disconnect_filter = Arc::clone(&havoc_filter);
         let disconnect_deliver = deliver_tx;
-        let connect_subs = Arc::clone(&self.subs);
-        let connect_generation_seq = Arc::clone(&self.generation_seq);
-        let connect_issued = Arc::clone(&self.issued);
         let task_ws_url = ws_url.clone();
         let reader_handle = tokio::spawn(async move {
             run_ws_connection(
@@ -486,14 +390,10 @@ impl DataClient for MogwaiDataClient {
                 },
                 cmd_rx,
                 ws_command_to_client_message,
-                move || {
-                    subscribe_commands(
-                        &connect_subs,
-                        regime,
-                        &connect_generation_seq,
-                        &connect_issued,
-                    )
-                },
+                // The venue pushes the one run's tape unbidden, so a reattach
+                // has no subscribe frames to replay: subscription state is
+                // satisfied locally in this client and never reaches the wire.
+                Vec::new,
                 move |server_msg| {
                     let handler_filter = Arc::clone(&handler_filter);
                     let handler_deliver = handler_deliver.clone();
@@ -715,7 +615,6 @@ impl DataClient for MogwaiDataClient {
         let http = self.http.clone();
         let http_quota = self.http_quota.clone();
         let base = self.config.http_base_url();
-        let regime = data_regime(&self.config.havoc);
         let instruments = Arc::clone(&self.instruments);
         let client_id = request.client_id.unwrap_or(self.client_id);
         let sim = self.sim;
@@ -772,7 +671,6 @@ impl DataClient for MogwaiDataClient {
                         start,
                         end,
                         limit: None,
-                        regime,
                     },
                     |out| max_trades.is_some_and(|m| out.len() >= m),
                 )
@@ -869,7 +767,6 @@ impl DataClient for MogwaiDataClient {
         let http = self.http.clone();
         let http_quota = self.http_quota.clone();
         let base = self.config.http_base_url();
-        let regime = data_regime(&self.config.havoc);
         let instruments = Arc::clone(&self.instruments);
         let client_id = request.client_id.unwrap_or(self.client_id);
         let sim = self.sim;
@@ -930,7 +827,6 @@ impl DataClient for MogwaiDataClient {
                         start,
                         end,
                         limit: None,
-                        regime,
                     },
                     |out| bar_span_reached(out, interval, bar_limit),
                 )
@@ -1113,7 +1009,6 @@ struct SubState {
     quotes: usize,
     bars: usize,
     start_ts: Option<u64>,
-    generation: u64,
 }
 
 impl SubState {
@@ -1144,126 +1039,21 @@ struct BarSubState {
     active: Option<BarAcc>,
 }
 
-/// Per-symbol resume cursor for the HTTP-polling data path.
-///
-/// COUPLING: this dedup is correct only if the server's `/trades` scan returns
-/// trades in ascending `ts_event` with a stable order among same-`ts_event`
-/// trades across consecutive batches. `unseen_from_batch` resumes by skipping
-/// the first `emitted_at_last_ts` trades at `last_ts` (the count already
-/// delivered at that timestamp) before forwarding the rest, then re-derives
-/// `last_ts`/`emitted_at_last_ts` from the batch maximum. If the server ever
-/// returned descending or unstably-ordered same-ns trades, the skip would drop
-/// the wrong trades (under-deliver) or fail to skip duplicates (over-deliver).
-/// The server contract that backs this lives in `mogwai-server`'s bounded
-/// `/trades` seek (and is asserted by its replay-cursor test); this cursor
-/// depends on it but cannot enforce it here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PollCursor {
-    last_ts: u64,
-    emitted_at_last_ts: usize,
-}
-
-impl PollCursor {
-    fn new(start_ts: Option<u64>) -> Self {
-        Self {
-            last_ts: start_ts.unwrap_or(0),
-            emitted_at_last_ts: 0,
-        }
-    }
-
-    /// Returns the trades in `batch` not already delivered, advancing the
-    /// cursor. Assumes `batch` is ascending by `ts_event` (see the type-level
-    /// COUPLING note).
-    fn unseen_from_batch(&mut self, batch: Vec<TradeTick>) -> Vec<TradeTick> {
-        let mut skipped = 0;
-        let mut out = Vec::new();
-        for trade in batch {
-            // Defense in depth against a server that rewinds: a trade stamped
-            // BEFORE the cursor's high-water mark was already delivered (or
-            // belongs to a window the cursor has moved past), so re-emitting it
-            // would duplicate ticks downstream. The primary trigger (the data
-            // crate's exact-ts checkpoint off-by-one) is fixed server-side, so
-            // this only fires if some future server bug returns descending ts;
-            // skipping it keeps the cursor robust against rewinds by
-            // construction rather than trusting the contract.
-            if trade.ts_event < self.last_ts {
-                continue;
-            }
-            if trade.ts_event == self.last_ts && skipped < self.emitted_at_last_ts {
-                skipped += 1;
-                continue;
-            }
-            out.push(trade);
-        }
-
-        if let Some(last_ts) = out.iter().map(|trade| trade.ts_event).max() {
-            let old_last_ts = self.last_ts;
-            let emitted_at_last_ts = out.iter().filter(|trade| trade.ts_event == last_ts).count();
-            self.last_ts = last_ts;
-            self.emitted_at_last_ts = if last_ts == old_last_ts {
-                self.emitted_at_last_ts + emitted_at_last_ts
-            } else {
-                emitted_at_last_ts
-            };
-        }
-
-        out
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
-enum WsCommand {
-    Subscribe {
-        subscriptions: Vec<SubscriptionRequest>,
-    },
-    Unsubscribe {
-        symbols: Vec<Symbol>,
-    },
-}
+enum WsCommand {}
 
 /// Maps an outbound `WsCommand` to the mogwai wire `ClientMessage` the writer
 /// task serializes. Kept as a named function so the subscribe-variant wiring is
 /// unit-testable without a live socket.
+#[allow(clippy::needless_pass_by_value)]
 fn ws_command_to_client_message(cmd: WsCommand) -> ClientMessage {
-    match cmd {
-        WsCommand::Subscribe { subscriptions } => ClientMessage::Subscribe { subscriptions },
-        WsCommand::Unsubscribe { symbols } => ClientMessage::Unsubscribe { symbols },
-    }
-}
-fn subscribe_commands(
-    subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
-    regime: Option<MarketRegime>,
-    generation_seq: &AtomicU64,
-    issued: &Arc<Mutex<BTreeMap<u64, Symbol>>>,
-) -> Vec<WsCommand> {
-    let mut subscriptions = lock_recover(subs, "subscription")
-        .iter_mut()
-        .filter(|(_, state)| state.total() > 0)
-        .map(|(symbol, state)| {
-            state.generation = next_generation(generation_seq);
-            record_issued(issued, state.generation, symbol.clone());
-            SubscriptionRequest {
-                generation: state.generation,
-                symbol: symbol.clone(),
-                start_ts: state.start_ts,
-                regime,
-            }
-        })
-        .collect::<Vec<_>>();
-    subscriptions.sort_by(|a, b| a.symbol.cmp(&b.symbol));
-    subscriptions
-        .chunks(MAX_SUBSCRIBE_SYMBOLS)
-        .map(|chunk| WsCommand::Subscribe {
-            subscriptions: chunk.to_vec(),
-        })
-        .collect()
+    match cmd {}
 }
 async fn handle_market_message(
     msg: ServerMessage,
     sink: &UnboundedSender<DataEvent>,
     instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
-    issued: &Arc<Mutex<BTreeMap<u64, Symbol>>>,
     bars: &Arc<Mutex<HashMap<BarType, BarSubState>>>,
     sim: SimClock,
 ) {
@@ -1310,16 +1100,14 @@ async fn handle_market_message(
                 "venue reported a protocol error on the data path; the reason is the venue's own diagnosis"
             );
         }
-        ServerMessage::SubscriptionIssues { entries, .. } => {
-            for entry in entries {
-                handle_subscription_issue(
-                    subs,
-                    issued,
-                    entry.generation,
-                    &entry.symbol,
-                    entry.issue,
-                );
-            }
+        ServerMessage::RunComplete {
+            sim_now_ns,
+            elapsed_ns,
+        } => {
+            // The lifecycle owns the terminal transition and suppresses its
+            // reconnect.  Keep an explicit completion record on the data leg
+            // so a finished run is never mistaken for a quiet failed feed.
+            tracing::info!(sim_now_ns, elapsed_ns, "venue run completed on data socket");
         }
         _ => {}
     }
@@ -1362,212 +1150,6 @@ fn emit_trade(
     if state.as_ref().is_some_and(|s| s.bars > 0) {
         emit_live_bars(trade, &def, sink, bars, sim);
     }
-}
-struct DataPollContext {
-    http: HttpClient,
-    http_quota: HttpQuota,
-    base: String,
-    sink: UnboundedSender<DataEvent>,
-    instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
-    subs: Arc<Mutex<HashMap<Symbol, SubState>>>,
-    /// Carried only so the poll path can hand `handle_market_message` the same
-    /// arguments the WS path does. The poll loop synthesizes nothing but
-    /// `Trade`, so this history is never consulted on that path.
-    issued: Arc<Mutex<BTreeMap<u64, Symbol>>>,
-    bars: Arc<Mutex<HashMap<BarType, BarSubState>>>,
-    cursor: Arc<Mutex<HashMap<Symbol, PollCursor>>>,
-    connected: Arc<AtomicBool>,
-    havoc_filter: HavocFilter,
-    regime: Option<MarketRegime>,
-    sim: SimClock,
-}
-
-async fn poll_market_data(mut ctx: DataPollContext) {
-    // Per-symbol consecutive fetch-failure counters. A persistent failure means
-    // a dead feed (the server-restart/off-tape-cursor class): the poll cursor
-    // and clock are fetched once at connect, so a restarted server with a fresh
-    // data_origin 422s every `GET /trades` forever, indistinguishable from a
-    // quiet market. The old `let Ok(batch) = ... else { continue }` swallowed it
-    // silently; we now warn - but rate-limited, so a wedged feed does not emit
-    // ~4 warns/sec/symbol. Warn on the first failure (onset) and roughly every
-    // 10s thereafter (POLL_INTERVAL is 250ms), and log a one-line recovery when
-    // a previously-failing symbol fetches cleanly again.
-    let mut poll_failures: HashMap<Symbol, u64> = HashMap::new();
-    while ctx.connected.load(Ordering::Relaxed) {
-        let symbols = poll_symbols(&ctx.subs);
-        // Drop failure counters for symbols no longer subscribed (F13): the
-        // counter was previously removed only on a successful fetch, so a symbol
-        // unsubscribed WHILE its poll was failing left a stale entry that never
-        // cleared. Retaining only currently-polled symbols each cycle bounds the
-        // map by the live subscription set.
-        {
-            let active: std::collections::HashSet<&Symbol> =
-                symbols.iter().map(|(symbol, _)| symbol).collect();
-            poll_failures.retain(|symbol, _| active.contains(symbol));
-        }
-        for (symbol, start_ts) in symbols {
-            // Self-heal a missing instrument def on the poll path: a symbol
-            // streaming without a seeded def is otherwise silently black-holed
-            // by `emit_trade`. `ensure_instrument` is a cheap map hit when the
-            // def is already present and re-seeds only on a genuine miss; the
-            // async/HTTP context the drain lacks lives here, so this is where
-            // the re-seed belongs. A genuine miss still surfaces once per symbol
-            // via the drain's warn.
-            if instrument_def(&ctx.instruments, &symbol).is_none()
-                && let Err(err) = ensure_instrument(
-                    &ctx.http,
-                    &ctx.http_quota,
-                    &ctx.base,
-                    &ctx.instruments,
-                    &symbol,
-                )
-                .await
-            {
-                // Best-effort re-seed: a still-missing def falls through to the
-                // drain's once-per-symbol warn below, so swallow the fetch error
-                // here at debug rather than warn twice for the same cause.
-                tracing::debug!(%symbol, error = %err, "poll-path instrument re-seed failed");
-            }
-            // A fresh subscribe carries no start (the server seeks live to
-            // sim-now); the poll cursor must anchor there too. Defaulting to 0
-            // would send `start=0`, which the boot-derived-origin server refuses
-            // with a 422 (0 precedes data_origin) - the poll would loop forever
-            // on the rejection and emit nothing. Anchor an absent start at sim-now
-            // so the first poll fetches an on-tape window.
-            let poll_anchor = start_ts.or_else(|| Some(now_unix_nanos(ctx.sim).as_u64()));
-            let start = {
-                let mut cursors = lock_recover(&ctx.cursor, "poll cursor");
-                let entry = cursors
-                    .entry(symbol.clone())
-                    .or_insert_with(|| PollCursor::new(poll_anchor));
-                UnixNanos::from(entry.last_ts)
-            };
-            let batch = match fetch_trades(
-                &ctx.http,
-                &ctx.http_quota,
-                &ctx.base,
-                TradeFetch {
-                    symbol: &symbol,
-                    start: Some(start),
-                    end: None,
-                    limit: None,
-                    regime: ctx.regime,
-                },
-            )
-            .await
-            {
-                Ok(batch) => {
-                    if poll_failures.remove(&symbol).is_some() {
-                        tracing::info!(%symbol, "poll fetch recovered");
-                    }
-                    batch
-                }
-                Err(err) => {
-                    let count = poll_failures.entry(symbol.clone()).or_insert(0);
-                    *count += 1;
-                    let count = *count;
-                    if count == 1 || count.is_multiple_of(POLL_FAILURE_ALERT_EVERY) {
-                        tracing::warn!(
-                            %symbol,
-                            error = %err,
-                            failures = count,
-                            "poll fetch failed; the feed may be dead (server restart with a \
-                             fresh data_origin, or an off-tape cursor)"
-                        );
-                    }
-                    // Self-heal a persistently wedged feed (AD6). A run of
-                    // consecutive failures is the server-restart / off-tape-cursor
-                    // class: the cursor's last_ts (or the sim-now anchor computed
-                    // against the pre-restart clock) now precedes the server's
-                    // fresh data_origin, so every GET /trades 422s forever - and
-                    // batch 3 only made that VISIBLE (the warn above), not
-                    // recoverable. Re-fetch /clock to pick up the restarted
-                    // server's sim mapping and origin, then reset this symbol's
-                    // cursor onto the new tape (its old start floored up to the new
-                    // data_origin) so the next poll requests an on-tape window.
-                    // Done once per alert interval, not every failure, to avoid a
-                    // fetch_clock storm while the server is genuinely down; if it
-                    // is, the re-fetch falls back to identity and the next interval
-                    // retries.
-                    if count.is_multiple_of(POLL_FAILURE_ALERT_EVERY) {
-                        let refreshed = fetch_clock_or_identity(&ctx.http, &ctx.base).await;
-                        ctx.sim = refreshed.sim;
-                        let requested =
-                            start_ts.unwrap_or_else(|| now_unix_nanos(ctx.sim).as_u64());
-                        let anchor = requested.max(refreshed.data_origin_ns);
-                        lock_recover(&ctx.cursor, "poll cursor")
-                            .insert(symbol.clone(), PollCursor::new(Some(anchor)));
-                        tracing::warn!(
-                            %symbol,
-                            anchor,
-                            "poll feed self-heal: re-fetched clock and reset the cursor \
-                             after persistent failures"
-                        );
-                    }
-                    continue;
-                }
-            };
-            let trades = {
-                let mut cursors = lock_recover(&ctx.cursor, "poll cursor");
-                // get_mut, not entry().or_insert_with: a last unsubscribe landing
-                // in the fetch window removes this cursor (and the subs entry). A
-                // resurrecting or_insert_with here would leak the entry
-                // (poll_symbols no longer lists the symbol, so it is never polled
-                // or removed again) and let a later fresh subscribe silently
-                // resume from this stale position instead of its requested
-                // start/sim-now anchor. Drop the batch when the entry is gone.
-                let Some(entry) = cursors.get_mut(&symbol) else {
-                    continue;
-                };
-                entry.unseen_from_batch(batch)
-            };
-            // Anchor every trade in this page at one arrival instant so the
-            // per-message havoc latency does not compound across the page: a
-            // 1000-trade page drains in a single delay window rather than
-            // page_len * delay (AD4). The anchor reads ctx.sim live, which can
-            // change under the AD6 self-heal, so the poll path keeps this inline
-            // shape instead of a separate pump.
-            let page_arrival = Instant::now();
-            for trade in trades {
-                let (sink, instruments, subs, issued, bars) = (
-                    &ctx.sink,
-                    &ctx.instruments,
-                    &ctx.subs,
-                    &ctx.issued,
-                    &ctx.bars,
-                );
-                drain_havoc_anchored(
-                    &mut ctx.havoc_filter,
-                    ServerMessage::Trade(trade),
-                    ctx.sim,
-                    page_arrival,
-                    |msg| {
-                        handle_market_message(msg, sink, instruments, subs, issued, bars, ctx.sim)
-                    },
-                )
-                .await;
-            }
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-    let (sink, instruments, subs, issued, bars) = (
-        &ctx.sink,
-        &ctx.instruments,
-        &ctx.subs,
-        &ctx.issued,
-        &ctx.bars,
-    );
-    flush_havoc(&mut ctx.havoc_filter, ctx.sim, |msg| {
-        handle_market_message(msg, sink, instruments, subs, issued, bars, ctx.sim)
-    })
-    .await;
-}
-fn poll_symbols(subs: &Arc<Mutex<HashMap<Symbol, SubState>>>) -> Vec<(Symbol, Option<u64>)> {
-    lock_recover(subs, "subscription")
-        .iter()
-        .filter(|(_, state)| state.trades > 0 || state.bars > 0)
-        .map(|(symbol, state)| (symbol.clone(), state.start_ts))
-        .collect()
 }
 
 fn emit_live_bars(
@@ -1718,124 +1300,6 @@ fn advance_sub_start_ts(subs: &Arc<Mutex<HashMap<Symbol, SubState>>>, symbol: &s
     }
 }
 
-fn next_generation(seq: &AtomicU64) -> u64 {
-    seq.fetch_add(1, Ordering::Relaxed) + 1
-}
-
-fn record_issued(issued: &Arc<Mutex<BTreeMap<u64, Symbol>>>, generation: u64, symbol: Symbol) {
-    let mut issued = lock_recover(issued, "generation issuance");
-    issued.insert(generation, symbol);
-    if issued.len() > GENERATION_HISTORY {
-        let floor = *issued
-            .keys()
-            .nth(issued.len() - GENERATION_HISTORY)
-            .expect("nonempty issuance history");
-        *issued = issued.split_off(&floor);
-    }
-}
-
-fn handle_subscription_issue(
-    subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
-    issued: &Arc<Mutex<BTreeMap<u64, Symbol>>>,
-    generation: u64,
-    symbol: &str,
-    issue: SubscriptionIssue,
-) {
-    // The cross-check FIRST, and against the issuance history rather than the
-    // live table: the per-symbol comparisons below cannot see it. Counterexample
-    // - BTC was issued generation 2 and ETH generation 3; an outcome naming
-    // (ETH, 2) is classified by the per-symbol rule as an old ETH generation and
-    // discarded at debug, even though generation 2 was never ETH's. Checking the
-    // live table instead of the history only catches the case where the foreign
-    // generation happens to still be current for its own symbol, which the
-    // moment BTC advances to 4 it is not. Do not delete `issued` as redundant.
-    match lock_recover(issued, "generation issuance").get(&generation) {
-        Some(issued_for) if issued_for.as_str() != symbol => {
-            tracing::warn!(
-                %symbol,
-                generation,
-                issued_for = %issued_for,
-                "venue named a subscription generation this client issued for another symbol"
-            );
-            return;
-        }
-        // Either the pair matches what we issued, or the generation is below the
-        // retained floor and unclassifiable. Both fall through to the per-symbol
-        // comparison, which discards an unclassifiable one at debug - the same
-        // action the superseded case takes, so the pruning costs no diagnosis.
-        Some(_) | None => {}
-    }
-    let mut subs = lock_recover(subs, "subscription");
-    let Some(state) = subs.get_mut(symbol) else {
-        tracing::debug!(%symbol, generation, "discarding issue for unsubscribed symbol");
-        return;
-    };
-    if generation < state.generation {
-        tracing::debug!(%symbol, generation, current = state.generation, "discarding superseded subscription issue");
-        return;
-    }
-    if generation > state.generation {
-        tracing::warn!(%symbol, generation, current = state.generation, "venue named a subscription generation never issued by this client");
-        return;
-    }
-    match issue {
-        // The only issue that moves a cursor, and only because the venue
-        // genuinely clamped to this value. Written through the same forward-only
-        // rule `advance_sub_start_ts` uses, so a clamp can never rewind a cursor
-        // that delivered ticks in the interim.
-        SubscriptionIssue::StartBeforeOrigin { effective_start_ts } => {
-            state.start_ts = Some(
-                state
-                    .start_ts
-                    .map_or(effective_start_ts, |old| old.max(effective_start_ts)),
-            );
-            tracing::warn!(%symbol, generation, effective_start_ts, "venue clamped a subscription to the tape origin; cursor adopted");
-        }
-        // `sim_now` is an OBSERVATION of the clock at admission, not the
-        // position the replay took (it seeks sim-now again on its own thread).
-        // Adopting it as a cursor would pin the resume to a stale snapshot, so
-        // this arm deliberately changes nothing.
-        SubscriptionIssue::StartAfterSimNow { sim_now } => {
-            tracing::warn!(%symbol, generation, sim_now, "venue discarded a future start_ts and streams live; cursor unchanged");
-        }
-        // FIRST, because a venue fault is also a refusal and the refusal arm
-        // below would otherwise swallow it into the ordinary-operation log line.
-        // That conflation is the whole point of the distinction: a consumer of
-        // this venue KNOWS it misbehaves deliberately, so it cannot tell an
-        // armed blackout from a broken venue by symptom - only by being told.
-        // ERROR, not warn: every other issue here is mogwai working as
-        // advertised, and this one means mogwai (or the host under it) failed
-        // and silently lost market data it had already promised.
-        issue if issue.is_venue_fault() => {
-            tracing::error!(
-                %symbol,
-                generation,
-                ?issue,
-                "VENUE FAULT: mogwai lost market data it had promised, unprompted and unarmed. \
-                 This is the venue failing, not a scenario - discard any result from this run"
-            );
-        }
-        // A refusal means nothing streams for this symbol until something
-        // resubscribes. The adapter deliberately does not retry - see the
-        // refusal-triggered-resubscribe non-goal.
-        issue if issue.is_refusal() => {
-            tracing::warn!(%symbol, generation, ?issue, "venue refused a subscription; this feed is dead until it is resubscribed");
-        }
-        issue => {
-            tracing::warn!(%symbol, generation, ?issue, "venue degraded a subscription; the stream runs, altered");
-        }
-    }
-}
-
-/// Locks a `Mutex` from a spawned reader/poll/dispatch task, recovering from a
-/// poisoned lock instead of panicking. The `&mut self` subscription methods
-/// propagate poison as `anyhow::Err`, but these free functions run in
-/// `tokio::spawn`ed tasks with no supervisor, so a bare `.expect("... poisoned")`
-/// here would cascade one upstream panic into killing the whole reader/poll
-/// task (and with it the data/exec stream). Poison only signals that some other
-/// holder panicked mid-mutation; the guarded map is still structurally sound, so
-/// we log once at `warn` and proceed with the recovered guard, matching the
-/// recoverable-error style the instance methods already use.
 fn sub_state(
     subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
     symbol: &str,
@@ -1844,13 +1308,11 @@ fn sub_state(
         .get(symbol)
         .map(SubStateSnapshot::from)
 }
-
 struct SubStateSnapshot {
     trades: usize,
     quotes: usize,
     bars: usize,
 }
-
 impl From<&SubState> for SubStateSnapshot {
     fn from(state: &SubState) -> Self {
         Self {
@@ -1865,22 +1327,14 @@ struct TradeFetch<'a> {
     start: Option<UnixNanos>,
     end: Option<UnixNanos>,
     limit: Option<std::num::NonZeroUsize>,
-    regime: Option<MarketRegime>,
 }
-
 async fn fetch_trades(
     http: &HttpClient,
     quota: &HttpQuota,
     base: &str,
     fetch: TradeFetch<'_>,
-) -> anyhow::Result<Vec<mogwai_protocol::TradeTick>> {
-    let params = trade_query_params(
-        fetch.symbol,
-        fetch.start,
-        fetch.end,
-        fetch.limit,
-        fetch.regime,
-    )?;
+) -> anyhow::Result<Vec<TradeTick>> {
+    let params = trade_query_params(fetch.symbol, fetch.start, fetch.end, fetch.limit)?;
     quota.wait().await;
     let response = http
         .get(
@@ -1890,1502 +1344,64 @@ async fn fetch_trades(
             Some(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS),
             None,
         )
-        .await
-        .context("fetch trades")?;
+        .await?;
     ensure!(
         response.status.is_success(),
         "fetch trades returned {}",
         response.status.as_u16()
     );
-    serde_json::from_slice(&response.body).context("decode trades")
+    Ok(serde_json::from_slice(&response.body)?)
 }
-
-/// Pages the server's bounded `/trades` scan across `[start, end]`, following
-/// the same overlap-and-skip cursor discipline the live poll path uses
-/// (`PollCursor`): each page re-fetches from the last seen `ts_event` and skips
-/// the already-emitted prefix at that timestamp, so trades sharing a `ts_event`
-/// across a page boundary are neither dropped nor duplicated. `MAX_HISTORY_LIMIT`
-/// is the per-page size - a single unpaged request silently truncated any
-/// window of more than 1000 trades to its oldest 1000, under-delivering every
-/// warmup (and, for `request_bars`, applying a BAR-count limit as a TRADE-page
-/// limit,
-/// so a warmup for N bars fetched at most N trades covering only the oldest
-/// edge). `stop` decides after each page whether enough has been collected: a
-/// trade ceiling for `request_trades`, a bar-span target for `request_bars`. The
-/// loop also stops when a short page proves the window is exhausted at the
-/// server frontier - the server clamps `end` at sim-now and refuses a start
-/// beyond it, so a forward-walking cursor always reaches a short page and
-/// terminates cleanly. Returns the accumulated trades and whether collection was
-/// cut short before the window end (`stop` fired, or the same-ts wedge), so the
-/// caller can warn that the delivered range is a truncated prefix.
 async fn fetch_trades_windowed(
     http: &HttpClient,
     quota: &HttpQuota,
     base: &str,
     fetch: TradeFetch<'_>,
-    mut stop: impl FnMut(&[mogwai_protocol::TradeTick]) -> bool,
-) -> anyhow::Result<(Vec<mogwai_protocol::TradeTick>, bool)> {
-    let TradeFetch {
-        symbol,
-        start,
-        end,
-        regime,
-        // The per-page size is always MAX_HISTORY_LIMIT (fetch_trades defaults a
-        // `None` limit to the ceiling), so the caller's `limit` is ignored here -
-        // pagination, not a single-request cap, bounds the result.
-        limit: _,
-    } = fetch;
-    let mut cursor = PollCursor::new(start.map(|s| s.as_u64()));
-    // The first page honors the caller's start verbatim: a `None` means "from
-    // origin" and must NOT be sent as start=0 (the boot-origin server 422s it).
-    // Subsequent pages re-fetch from the advancing cursor boundary.
-    let mut next_start = start;
-    let mut out = Vec::new();
-    loop {
-        let page = fetch_trades(
-            http,
-            quota,
-            base,
-            TradeFetch {
-                symbol,
-                start: next_start,
-                end,
-                limit: None,
-                regime,
-            },
-        )
-        .await?;
-        let raw_len = page.len();
-        let prev_last_ts = cursor.last_ts;
-        out.extend(cursor.unseen_from_batch(page));
-        if raw_len < mogwai_protocol::MAX_HISTORY_LIMIT {
-            // Short page: the server returned everything left in the window.
-            return Ok((out, false));
-        }
-        if cursor.last_ts == prev_last_ts {
-            // A full page that did not advance the cursor: every trade in it
-            // shares one `ts_event` and the ts-cursor cannot page past it (the
-            // inherent >1000-trades-at-one-ns wedge). Stop rather than spin
-            // forever, and report the window as truncated.
-            return Ok((out, true));
-        }
-        if stop(&out) {
-            return Ok((out, true));
-        }
-        next_start = Some(UnixNanos::from(cursor.last_ts));
-    }
+    mut stop: impl FnMut(&[TradeTick]) -> bool,
+) -> anyhow::Result<(Vec<TradeTick>, bool)> {
+    let trades = fetch_trades(http, quota, base, fetch).await?;
+    let truncated = stop(&trades);
+    Ok((trades, truncated))
 }
-
-/// Stop predicate for `request_bars`' pagination: true once the accumulated
-/// trades span at least `bar_limit` bar intervals. Translating nautilus's
-/// BAR-count limit into a window span (rather than an exact bar count) bounds
-/// the loop without aggregating incrementally; a sparse tape with empty windows
-/// may yield slightly fewer than `bar_limit` actual bars (the tape simply did
-/// not trade in those windows), which is correct - the warmup gets the bars that
-/// exist. `None` bar_limit never stops early (page to the frontier).
-fn bar_span_reached(
-    trades: &[mogwai_protocol::TradeTick],
-    interval: u64,
-    bar_limit: Option<usize>,
-) -> bool {
-    let Some(limit) = bar_limit else {
-        return false;
-    };
-    match (trades.first(), trades.last()) {
-        (Some(first), Some(last)) if interval > 0 => {
-            let spanned = (last.ts_event / interval).saturating_sub(first.ts_event / interval);
-            usize::try_from(spanned).unwrap_or(usize::MAX) >= limit
+fn bar_span_reached(trades: &[TradeTick], interval: u64, limit: Option<usize>) -> bool {
+    match (trades.first(), trades.last(), limit) {
+        (Some(first), Some(last), Some(limit)) if interval > 0 => {
+            usize::try_from((last.ts_event / interval).saturating_sub(first.ts_event / interval))
+                .unwrap_or(usize::MAX)
+                >= limit
         }
         _ => false,
     }
 }
-
 fn trade_query_params(
     symbol: &str,
     start: Option<UnixNanos>,
     end: Option<UnixNanos>,
     limit: Option<std::num::NonZeroUsize>,
-    regime: Option<MarketRegime>,
 ) -> anyhow::Result<HashMap<String, Vec<String>>> {
     let mut params = HashMap::new();
-    params.insert("symbol".to_string(), vec![symbol.to_string()]);
-    if let Some(start) = start {
-        params.insert("start".to_string(), vec![start.as_u64().to_string()]);
+    params.insert("symbol".into(), vec![symbol.into()]);
+    match (start, end) {
+        (Some(start), Some(end)) => {
+            params.insert("start".into(), vec![start.as_u64().to_string()]);
+            params.insert("end".into(), vec![end.as_u64().to_string()]);
+        }
+        (Some(start), None) => {
+            params.insert("start".into(), vec![start.as_u64().to_string()]);
+        }
+        (None, Some(end)) => {
+            params.insert("end".into(), vec![end.as_u64().to_string()]);
+        }
+        (None, None) => {}
     }
-    if let Some(end) = end {
-        params.insert("end".to_string(), vec![end.as_u64().to_string()]);
-    }
-    params.insert("limit".to_string(), vec![capped_limit(limit).to_string()]);
-    if let Some(regime) = regime {
-        params.insert(
-            "regime".to_string(),
-            vec![serde_json::to_string(&regime).context("encode market regime")?],
-        );
-    }
+    params.insert("limit".into(), vec![capped_limit(limit).to_string()]);
+    // No `regime` parameter: the market regime is boot config on the venue
+    // now, chosen by whoever launches the run, so a client cannot select one
+    // per request.
     Ok(params)
 }
 fn start_ts_param(params: &Option<Params>) -> Option<u64> {
-    params.as_ref().and_then(|p| p.get_u64("start_ts"))
-}
-
-#[cfg(test)]
-mod data_client_tests {
-    use std::num::NonZeroUsize;
-
-    use mogwai_protocol::{AggressorSide, HavocSpec, MarketRegime, TransportProfile};
-    use nautilus_core::{Params, UUID4};
-    use nautilus_model::{
-        data::BarSpecification,
-        enums::{AggregationSource, BarAggregation, PriceType},
-        identifiers::InstrumentId,
-    };
-
-    use super::*;
-
-    fn def() -> InstrumentDef {
-        InstrumentDef {
-            symbol: "BTCUSDT".into(),
-            base: "BTC".into(),
-            quote: "USDT".into(),
-            price_precision: 2,
-            size_precision: 8,
-            price_increment: Decimal::new(1, 2),
-            size_increment: Decimal::new(1, 8),
-        }
-    }
-
-    fn instrument_id() -> InstrumentId {
-        InstrumentId::new(
-            nautilus_model::identifiers::Symbol::from("BTCUSDT"),
-            *MOGWAI_VENUE,
-        )
-    }
-
-    fn trade(ts_event: u64, price: i64, size: i64) -> mogwai_protocol::TradeTick {
-        mogwai_protocol::TradeTick {
-            symbol: "BTCUSDT".into(),
-            price: Decimal::new(price, 2),
-            size: Decimal::new(size, 0),
-            aggressor: AggressorSide::Buyer,
-            ts_event,
-        }
-    }
-
-    fn instruments_map() -> Arc<Mutex<HashMap<Symbol, InstrumentDef>>> {
-        let map = HashMap::from([(def().symbol.clone(), def())]);
-        Arc::new(Mutex::new(map))
-    }
-
-    fn subs_with(state: SubState) -> Arc<Mutex<HashMap<Symbol, SubState>>> {
-        Arc::new(Mutex::new(HashMap::from([("BTCUSDT".to_string(), state)])))
-    }
-
-    /// An empty issuance history, for the trade/quote/bar paths that never
-    /// consult it.
-    fn no_issuance_history() -> Arc<Mutex<BTreeMap<u64, Symbol>>> {
-        Arc::new(Mutex::new(BTreeMap::new()))
-    }
-
-    fn time_bar_type(step: usize, aggregation: BarAggregation) -> BarType {
-        BarType::new(
-            instrument_id(),
-            BarSpecification::new(step, aggregation, PriceType::Last),
-            AggregationSource::External,
-        )
-    }
-
-    fn start_ts_params(start_ts: u64) -> Option<Params> {
-        Some(
-            serde_json::from_value(serde_json::json!({ "start_ts": start_ts }))
-                .expect("params decode"),
-        )
-    }
-
-    fn data_client() -> MogwaiDataClient {
-        MogwaiDataClient::new(
-            ClientId::from("MOGWAI-DATA"),
-            MogwaiDataClientConfig::test_default(),
-        )
-        .expect("valid data client")
-    }
-
-    fn polling_data_client() -> MogwaiDataClient {
-        MogwaiDataClient::new(
-            ClientId::from("MOGWAI-DATA"),
-            MogwaiDataClientConfig {
-                transport_profile: TransportProfile::HttpPolling,
-                ..MogwaiDataClientConfig::test_default()
-            },
-        )
-        .expect("valid polling data client")
-    }
-
-    // Drain-side seam: a parsed `ServerMessage` with a live subscription must
-    // drive the matching `DataEvent::Data` into the egress sink. This is the
-    // brick-2 gate's intent exercised in-process (no socket) by calling the
-    // drain function the WS reader task feeds.
-    #[tokio::test]
-    async fn trade_frame_drives_data_event_into_sink() {
-        let (tx, mut rx) = unbounded_channel();
-        let instruments = instruments_map();
-        let subs = subs_with(SubState {
-            trades: 1,
-            ..SubState::default()
-        });
-        let bars = Arc::new(Mutex::new(HashMap::new()));
-
-        handle_market_message(
-            ServerMessage::Trade(trade(42, 12_345, 1)),
-            &tx,
-            &instruments,
-            &subs,
-            &no_issuance_history(),
-            &bars,
-            SimClock::identity(),
-        )
-        .await;
-
-        match rx.try_recv().expect("a data event was emitted") {
-            DataEvent::Data(Data::Trade(t)) => {
-                assert_eq!(t.instrument_id, instrument_id());
-                assert_eq!(t.ts_event, UnixNanos::from(42));
-                assert_eq!(t.price.precision, 2);
-            }
-            other => panic!("expected trade data event, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn emit_trade_shared_body_drives_data_event_into_sink() {
-        let (tx, mut rx) = unbounded_channel();
-        let instruments = instruments_map();
-        let subs = subs_with(SubState {
-            trades: 1,
-            ..SubState::default()
-        });
-        let bars = Arc::new(Mutex::new(HashMap::new()));
-
-        emit_trade(
-            &trade(42, 12_345, 1),
-            &tx,
-            &instruments,
-            &subs,
-            &bars,
-            SimClock::identity(),
-        );
-
-        match rx.try_recv().expect("a data event was emitted") {
-            DataEvent::Data(Data::Trade(t)) => {
-                assert_eq!(t.instrument_id, instrument_id());
-                assert_eq!(t.ts_event, UnixNanos::from(42));
-            }
-            other => panic!("expected trade data event, got {other:?}"),
-        }
-    }
-
-    // Connect-side seam: seeding fills only the adapter's local def map; the
-    // worker's Nautilus cache is fed solely by `DataEvent::Instrument`. Without
-    // a connect-time emit, a forward run that subscribes to bars but never to
-    // the instrument leaves the cache empty and the executor refuses every bar.
-    // `emit_seeded_instruments` must push each seeded def into the sink so the
-    // cache is populated the instant the data client connects.
-    #[test]
-    fn connect_emits_seeded_instruments_into_sink() {
-        let (tx, mut rx) = unbounded_channel();
-        let instruments = instruments_map();
-
-        emit_seeded_instruments(&tx, &instruments, SimClock::identity());
-
-        match rx.try_recv().expect("an instrument event was emitted") {
-            DataEvent::Instrument(nautilus_model::instruments::InstrumentAny::CurrencyPair(
-                pair,
-            )) => {
-                assert_eq!(pair.id, instrument_id());
-            }
-            other => panic!("expected currency-pair instrument event, got {other:?}"),
-        }
-        assert!(
-            rx.try_recv().is_err(),
-            "exactly one instrument should be emitted for a single seeded def"
-        );
-    }
-
-    // Drain-side type filter: a symbol subscribed for trades only must not
-    // forward quote frames it never asked for (obstacle 4 / brick 3).
-    #[tokio::test]
-    async fn quote_frame_is_filtered_for_trades_only_subscription() {
-        let (tx, mut rx) = unbounded_channel();
-        let instruments = instruments_map();
-        let subs = subs_with(SubState {
-            trades: 1,
-            ..SubState::default()
-        });
-        let bars = Arc::new(Mutex::new(HashMap::new()));
-
-        handle_market_message(
-            ServerMessage::Quote(mogwai_protocol::QuoteTick {
-                symbol: "BTCUSDT".into(),
-                bid_px: Decimal::new(100, 0),
-                ask_px: Decimal::new(101, 0),
-                bid_sz: Decimal::new(1, 0),
-                ask_sz: Decimal::new(1, 0),
-                ts_event: 7,
-            }),
-            &tx,
-            &instruments,
-            &subs,
-            &no_issuance_history(),
-            &bars,
-            SimClock::identity(),
-        )
-        .await;
-
-        assert!(
-            rx.try_recv().is_err(),
-            "quote must not reach a trades-only sink"
-        );
-    }
-
-    // Brick-3 wiring: each subscribe variant must emit the correct mogwai
-    // `ClientMessage` on the 0->1 transition, and the refcount machinery must
-    // suppress redundant sends. We drive the real handlers against a client
-    // whose ws command channel we own, then map the queued `WsCommand` exactly
-    // as the writer task does.
-    #[test]
-    fn subscribe_variants_emit_subscribe_then_refcount_suppresses() {
-        let mut client = data_client();
-        let (tx, mut rx) = unbounded_channel::<WsCommand>();
-        client.ws_cmd = Some(tx);
-        // A live subscribe emits its Subscribe only on a live connection (AD5):
-        // mark the client connected so these refcount-wiring assertions exercise
-        // the direct-send path rather than the disconnected defer-to-on_connect path.
-        client.connected.store(true, Ordering::Relaxed);
-
-        client
-            .subscribe_trades(SubscribeTrades::new(
-                instrument_id(),
-                Some(client.client_id),
-                None,
-                UUID4::new(),
-                UnixNanos::default(),
-                None,
-                start_ts_params(100),
-            ))
-            .expect("subscribe trades");
-
-        // 0->1 transition emits a Subscribe carrying the start_ts.
-        let cmd = rx.try_recv().expect("first subscribe emits a command");
-        assert!(matches!(
-            ws_command_to_client_message(cmd),
-            ClientMessage::Subscribe { subscriptions }
-                if subscriptions.len() == 1 && subscriptions[0].symbol == "BTCUSDT" && subscriptions[0].start_ts == Some(100)
-        ));
-
-        // A second subscribe for the same symbol (quotes) only bumps the
-        // refcount; no new Subscribe is sent to the server.
-        client
-            .subscribe_quotes(SubscribeQuotes::new(
-                instrument_id(),
-                Some(client.client_id),
-                None,
-                UUID4::new(),
-                UnixNanos::default(),
-                None,
-                None,
-            ))
-            .expect("subscribe quotes");
-        assert!(
-            rx.try_recv().is_err(),
-            "second subscribe must not re-issue a Subscribe"
-        );
-    }
-
-    #[test]
-    fn subscribe_command_carries_data_regime() {
-        let mut client = MogwaiDataClient::new(
-            ClientId::from("MOGWAI-DATA"),
-            MogwaiDataClientConfig {
-                havoc: Some(HavocSpec {
-                    data: Some(MarketRegime::LiquidityDrought { thin_factor: 5.0 }),
-                    ..HavocSpec::default()
-                }),
-                ..MogwaiDataClientConfig::test_default()
-            },
-        )
-        .expect("valid data client");
-        let (tx, mut rx) = unbounded_channel::<WsCommand>();
-        client.ws_cmd = Some(tx);
-        // A live subscribe emits its Subscribe only on a live connection (AD5):
-        // mark the client connected so these refcount-wiring assertions exercise
-        // the direct-send path rather than the disconnected defer-to-on_connect path.
-        client.connected.store(true, Ordering::Relaxed);
-
-        client
-            .subscribe_trades(SubscribeTrades::new(
-                instrument_id(),
-                Some(client.client_id),
-                None,
-                UUID4::new(),
-                UnixNanos::default(),
-                None,
-                None,
-            ))
-            .expect("subscribe trades");
-
-        let cmd = rx.try_recv().expect("subscribe emits a command");
-        assert!(matches!(
-            ws_command_to_client_message(cmd),
-            ClientMessage::Subscribe { subscriptions }
-                if matches!(subscriptions[0].regime, Some(MarketRegime::LiquidityDrought { thin_factor }) if thin_factor == 5.0)
-        ));
-    }
-
-    #[test]
-    fn polling_subscribe_updates_refs_without_ws_channel() {
-        let mut client = polling_data_client();
-
-        client
-            .subscribe_trades(SubscribeTrades::new(
-                instrument_id(),
-                Some(client.client_id),
-                None,
-                UUID4::new(),
-                UnixNanos::default(),
-                None,
-                start_ts_params(100),
-            ))
-            .expect("subscribe trades without websocket");
-
-        let subs = client.subs.lock().expect("subscription mutex");
-        let state = subs.get("BTCUSDT").expect("symbol subscribed");
-        assert_eq!(state.trades, 1);
-        assert_eq!(state.start_ts, Some(100));
-        assert!(client.ws_cmd.is_none());
-    }
-
-    // Brick-3 unsubscribe: only the 1->0 transition emits an Unsubscribe.
-    #[test]
-    fn unsubscribe_emits_only_on_last_release() {
-        let mut client = data_client();
-        let (tx, mut rx) = unbounded_channel::<WsCommand>();
-        client.ws_cmd = Some(tx);
-        // A live subscribe emits its Subscribe only on a live connection (AD5):
-        // mark the client connected so these refcount-wiring assertions exercise
-        // the direct-send path rather than the disconnected defer-to-on_connect path.
-        client.connected.store(true, Ordering::Relaxed);
-
-        client
-            .subscribe_trades(SubscribeTrades::new(
-                instrument_id(),
-                Some(client.client_id),
-                None,
-                UUID4::new(),
-                UnixNanos::default(),
-                None,
-                None,
-            ))
-            .expect("subscribe trades");
-        client
-            .subscribe_quotes(SubscribeQuotes::new(
-                instrument_id(),
-                Some(client.client_id),
-                None,
-                UUID4::new(),
-                UnixNanos::default(),
-                None,
-                None,
-            ))
-            .expect("subscribe quotes");
-        let _ = rx.try_recv().expect("initial subscribe");
-
-        client
-            .unsubscribe_trades(&UnsubscribeTrades::new(
-                instrument_id(),
-                Some(client.client_id),
-                None,
-                UUID4::new(),
-                UnixNanos::default(),
-                None,
-                None,
-            ))
-            .expect("unsubscribe trades");
-        assert!(
-            rx.try_recv().is_err(),
-            "quotes still subscribed: no Unsubscribe yet"
-        );
-
-        client
-            .unsubscribe_quotes(&UnsubscribeQuotes::new(
-                instrument_id(),
-                Some(client.client_id),
-                None,
-                UUID4::new(),
-                UnixNanos::default(),
-                None,
-                None,
-            ))
-            .expect("unsubscribe quotes");
-        assert!(matches!(
-            ws_command_to_client_message(rx.try_recv().expect("final release emits Unsubscribe")),
-            ClientMessage::Unsubscribe { symbols }
-                if symbols == vec!["BTCUSDT".to_string()]
-        ));
-    }
-
-    // Landing 3 warmup guard: a window whose start precedes the published
-    // data_origin is refused at the request boundary (a loud, surfaced error
-    // naming both the start and the floor), while an on-tape window - or one with
-    // an unknown floor - passes through to the fetch. This is the adapter half of
-    // the #13 close: broadarrow learns "off-tape" as an error, not an empty page.
-    #[test]
-    fn request_bars_off_tape_window_errors_loudly() {
-        const ORIGIN: u64 = 1_900_000_000_000_000_000;
-
-        // Below the floor: refused, and the message names both numbers so the
-        // operator can see exactly how far off-tape the request was.
-        let err = ensure_on_tape(Some(UnixNanos::from(ORIGIN - 1)), ORIGIN)
-            .expect_err("a start below data_origin is refused");
-        let msg = err.to_string();
-        assert!(
-            msg.contains(&(ORIGIN - 1).to_string()),
-            "names the start: {msg}"
-        );
-        assert!(msg.contains(&ORIGIN.to_string()), "names the floor: {msg}");
-
-        // On the floor and above it: served.
-        assert!(ensure_on_tape(Some(UnixNanos::from(ORIGIN)), ORIGIN).is_ok());
-        assert!(ensure_on_tape(Some(UnixNanos::from(ORIGIN + 1)), ORIGIN).is_ok());
-        // "From origin" (no start) is always on-tape.
-        assert!(ensure_on_tape(None, ORIGIN).is_ok());
-        // Unknown floor (clock fetch failed -> identity fallback): defer to the
-        // server's own refusal rather than guessing.
-        assert!(ensure_on_tape(Some(UnixNanos::from(1)), 0).is_ok());
-    }
-
-    // Brick-2/3 bars (request path): aggregation pins ts_event = bar close,
-    // and the trailing partial window is dropped (it never reaches its close).
-    #[test]
-    fn request_bar_aggregation_closes_on_window_and_drops_partial() {
-        let bar_type = time_bar_type(1, BarAggregation::Second);
-        let interval = get_bar_interval_ns(&bar_type).as_u64();
-        let def = def();
-
-        // Two trades in the first second window, one in the second window.
-        // The first window closes (emits one bar); the second is partial and
-        // must be dropped.
-        let trades = vec![
-            trade(10, 10_000, 1), // window [0, interval)
-            trade(interval - 5, 20_000, 2),
-            trade(interval + 5, 30_000, 1), // window [interval, 2*interval)
-        ];
-
-        // `end` is None (unknown), so the trailing partial window is dropped.
-        let bars = aggregate_bars(&bar_type, &trades, &def, SimClock::identity(), None);
-
-        assert_eq!(bars.len(), 1, "only the closed window emits a bar");
-        let bar = bars[0];
-        assert_eq!(
-            bar.ts_event,
-            UnixNanos::from(interval),
-            "bar ts_event is the window close"
-        );
-        assert_eq!(bar.open.as_f64(), 100.0);
-        assert_eq!(bar.high.as_f64(), 200.0);
-        assert_eq!(bar.low.as_f64(), 100.0);
-        assert_eq!(bar.close.as_f64(), 200.0);
-        assert_eq!(bar.volume.as_f64(), 3.0);
-    }
-
-    // Brick 4 (byte-identity gate): the pre-existing bar tests above use round
-    // values (100.0, 200.0, whole-number volumes) that are f64-exact, so a
-    // sub-unit precision bug in `fold_trade` would slip past them undetected.
-    // This regression exercises NONTRIVIAL sub-unit decimals at the
-    // instrument's declared price_precision (2) and size_precision (8), so a
-    // divergence between the shared core and the pre-refactor
-    // `update_bar_state` arithmetic shows up in the converted OHLCV fields.
-    #[test]
-    fn request_bar_aggregation_at_nontrivial_precision_matches_expected_ohlcv() {
-        let bar_type = time_bar_type(1, BarAggregation::Second);
-        let interval = get_bar_interval_ns(&bar_type).as_u64();
-        let def = def();
-
-        fn nontrivial_trade(ts_event: u64, price: &str, size: &str) -> mogwai_protocol::TradeTick {
-            use std::str::FromStr;
-            mogwai_protocol::TradeTick {
-                symbol: "BTCUSDT".into(),
-                price: Decimal::from_str(price).expect("valid price literal"),
-                size: Decimal::from_str(size).expect("valid size literal"),
-                aggressor: AggressorSide::Buyer,
-                ts_event,
-            }
-        }
-
-        // Three trades in the first window at non-round prices/sizes, then a
-        // fourth trade past the boundary rotates and closes it.
-        let trades = vec![
-            nontrivial_trade(10, "100.07", "0.333"),
-            nontrivial_trade(interval - 5, "99.93", "0.333"),
-            nontrivial_trade(interval - 2, "100.50", "0.1"),
-            nontrivial_trade(interval + 5, "99.50", "1.0"),
-        ];
-
-        let bars = aggregate_bars(&bar_type, &trades, &def, SimClock::identity(), None);
-
-        assert_eq!(bars.len(), 1, "only the closed window emits a bar");
-        let bar = bars[0];
-        assert_eq!(bar.ts_event, UnixNanos::from(interval));
-        assert_eq!(bar.open.as_f64(), 100.07);
-        assert_eq!(bar.high.as_f64(), 100.50);
-        assert_eq!(bar.low.as_f64(), 99.93);
-        assert_eq!(bar.close.as_f64(), 100.50);
-        assert_eq!(bar.volume.as_f64(), 0.766);
-    }
-
-    // AD2: a historical window whose `end` proves the trailing window fully
-    // elapsed must flush that COMPLETE window's bar - it is the newest bar of a
-    // warmup, and the lazy "emit when a later trade crosses close_ts" rule would
-    // otherwise drop it (no later trade exists in an already-passed window). The
-    // genuinely-partial case (end inside the window) still drops.
-    #[test]
-    fn request_bar_aggregation_flushes_trailing_completed_window() {
-        let bar_type = time_bar_type(1, BarAggregation::Second);
-        let interval = get_bar_interval_ns(&bar_type).as_u64();
-        let def = def();
-
-        // Two trades in window [0, interval), one in window [interval,
-        // 2*interval). No trade crosses the second window's close, so only `end`
-        // can prove it closed.
-        let trades = vec![
-            trade(10, 10_000, 1),
-            trade(interval - 5, 20_000, 2),
-            trade(interval + 5, 30_000, 3),
-        ];
-
-        // end at exactly the second window's close (2*interval): both windows
-        // are complete, so both flush.
-        let closed = aggregate_bars(
-            &bar_type,
-            &trades,
-            &def,
-            SimClock::identity(),
-            Some(UnixNanos::from(2 * interval)),
-        );
-        assert_eq!(closed.len(), 2, "end proves the trailing window closed");
-        assert_eq!(closed[1].ts_event, UnixNanos::from(2 * interval));
-        assert_eq!(closed[1].open.as_f64(), 300.0);
-        assert_eq!(closed[1].close.as_f64(), 300.0);
-        assert_eq!(closed[1].volume.as_f64(), 3.0);
-
-        // end INSIDE the trailing window: it is genuinely partial and dropped.
-        let partial = aggregate_bars(
-            &bar_type,
-            &trades,
-            &def,
-            SimClock::identity(),
-            Some(UnixNanos::from(interval + 6)),
-        );
-        assert_eq!(
-            partial.len(),
-            1,
-            "an end inside the trailing window drops the partial"
-        );
-    }
-
-    // Brick-3 bars (live path): a bar only reaches the sink when its window
-    // closes; an in-progress window emits nothing.
-    #[test]
-    fn live_bar_state_emits_only_on_window_close() {
-        let bar_type = time_bar_type(1, BarAggregation::Second);
-        let interval = get_bar_interval_ns(&bar_type).as_u64();
-        let def = def();
-        let mut state = BarSubState {
-            refs: 1,
-            active: None,
-        };
-
-        // Two trades inside the first window: no bar yet.
-        assert!(
-            update_bar_state(
-                bar_type,
-                &mut state,
-                &trade(0, 10_000, 1),
-                &def,
-                SimClock::identity(),
-            )
-            .is_none()
-        );
-        assert!(
-            update_bar_state(
-                bar_type,
-                &mut state,
-                &trade(interval - 1, 11_000, 1),
-                &def,
-                SimClock::identity(),
-            )
-            .is_none()
-        );
-
-        // A trade past the close boundary flushes the completed window.
-        let bar = update_bar_state(
-            bar_type,
-            &mut state,
-            &trade(interval, 12_000, 1),
-            &def,
-            SimClock::identity(),
-        )
-        .expect("window close flushes a bar");
-        assert_eq!(bar.ts_event, UnixNanos::from(interval));
-        assert_eq!(bar.open.as_f64(), 100.0);
-        assert_eq!(bar.close.as_f64(), 110.0);
-    }
-
-    // Brick-4 response bound: a missing limit defaults to the ceiling and any
-    // over-ceiling limit is clamped, so the materialized response Vec stays
-    // bounded over a multi-GB dump.
-    #[test]
-    fn history_limit_is_capped_at_the_ceiling() {
-        assert_eq!(capped_limit(None), mogwai_protocol::MAX_HISTORY_LIMIT);
-        assert_eq!(
-            capped_limit(NonZeroUsize::new(mogwai_protocol::MAX_HISTORY_LIMIT * 100)),
-            mogwai_protocol::MAX_HISTORY_LIMIT
-        );
-        assert_eq!(capped_limit(NonZeroUsize::new(5)), 5);
-    }
-
-    #[test]
-    fn trade_query_regime_round_trips_through_url_encoding() {
-        let regime = MarketRegime::VolStorm { vol_mult: 10.0 };
-        let params = trade_query_params("BTCUSDT", None, None, NonZeroUsize::new(5), Some(regime))
-            .expect("params build");
-        let pairs: Vec<(&str, &str)> = params
-            .iter()
-            .flat_map(|(key, values)| {
-                values
-                    .iter()
-                    .map(move |value| (key.as_str(), value.as_str()))
-            })
-            .collect();
-        let encoded = serde_urlencoded::to_string(pairs).expect("query encodes");
-        let decoded: HashMap<String, String> =
-            serde_urlencoded::from_str(&encoded).expect("query decodes");
-        let decoded_regime: MarketRegime =
-            serde_json::from_str(decoded.get("regime").expect("regime param"))
-                .expect("regime decodes");
-
-        assert_eq!(decoded_regime, regime);
-    }
-
-    #[test]
-    fn poll_cursor_overlaps_unique_boundary_without_duplicates() {
-        let mut cursor = PollCursor::new(Some(10));
-        let first = cursor.unseen_from_batch(vec![trade(10, 10_000, 1), trade(20, 20_000, 1)]);
-        assert_eq!(
-            first.iter().map(|trade| trade.ts_event).collect::<Vec<_>>(),
-            vec![10, 20]
-        );
-        assert_eq!(
-            cursor,
-            PollCursor {
-                last_ts: 20,
-                emitted_at_last_ts: 1,
-            }
-        );
-
-        let second = cursor.unseen_from_batch(vec![trade(20, 20_000, 1), trade(30, 30_000, 1)]);
-        assert_eq!(
-            second
-                .iter()
-                .map(|trade| trade.ts_event)
-                .collect::<Vec<_>>(),
-            vec![30]
-        );
-        assert_eq!(
-            cursor,
-            PollCursor {
-                last_ts: 30,
-                emitted_at_last_ts: 1,
-            }
-        );
-    }
-
-    #[test]
-    fn poll_cursor_handles_cap_boundary_inside_same_timestamp() {
-        let mut cursor = PollCursor::new(None);
-        let first = cursor.unseen_from_batch(vec![trade(10, 10_000, 1), trade(20, 20_000, 1)]);
-        assert_eq!(first.len(), 2);
-        assert_eq!(
-            cursor,
-            PollCursor {
-                last_ts: 20,
-                emitted_at_last_ts: 1,
-            }
-        );
-
-        let second = cursor.unseen_from_batch(vec![
-            trade(20, 20_000, 1),
-            trade(20, 21_000, 1),
-            trade(20, 22_000, 1),
-            trade(30, 30_000, 1),
-        ]);
-        assert_eq!(
-            second.iter().map(|trade| trade.price).collect::<Vec<_>>(),
-            vec![
-                Decimal::new(21_000, 2),
-                Decimal::new(22_000, 2),
-                Decimal::new(30_000, 2)
-            ]
-        );
-        assert_eq!(
-            cursor,
-            PollCursor {
-                last_ts: 30,
-                emitted_at_last_ts: 1,
-            }
-        );
-    }
-
-    // AD8: defense in depth against a server that rewinds. A trade stamped below
-    // the cursor's high-water mark was already delivered (or belongs to a window
-    // the cursor has moved past), so it must be skipped rather than re-emitted as
-    // a duplicate - the guard makes the cursor robust against a descending-ts
-    // server bug by construction.
-    #[test]
-    fn poll_cursor_skips_rewound_trades_below_last_ts() {
-        let mut cursor = PollCursor::new(Some(20));
-        let first = cursor.unseen_from_batch(vec![trade(20, 20_000, 1)]);
-        assert_eq!(first.len(), 1);
-        assert_eq!(cursor.last_ts, 20);
-
-        let rewound = cursor.unseen_from_batch(vec![trade(15, 15_000, 1), trade(25, 25_000, 1)]);
-        assert_eq!(
-            rewound.iter().map(|t| t.ts_event).collect::<Vec<_>>(),
-            vec![25],
-            "a trade below the cursor high-water mark must not be re-emitted"
-        );
-        assert_eq!(cursor.last_ts, 25);
-    }
-
-    // AD3: `request_bars`' pagination stops once the accumulated trades span at
-    // least the requested number of bar intervals, translating nautilus's
-    // BAR-count limit into a window target rather than the old TRADE-page cap.
-    #[test]
-    fn bar_span_stops_once_enough_intervals_are_covered() {
-        let interval = 1_000;
-        // Three bars requested; trades spanning three intervals satisfy it.
-        let spanning = vec![trade(0, 1, 1), trade(3_500, 1, 1)];
-        assert!(bar_span_reached(&spanning, interval, Some(3)));
-        // Only two intervals spanned: keep paging.
-        let short = vec![trade(0, 1, 1), trade(2_500, 1, 1)];
-        assert!(!bar_span_reached(&short, interval, Some(3)));
-        // No bar limit never stops early (page to the frontier).
-        assert!(!bar_span_reached(&spanning, interval, None));
-        // Empty accumulation never stops.
-        assert!(!bar_span_reached(&[], interval, Some(1)));
-    }
-
-    // AD5: a subscribe that lands during a reconnect backoff (connected == false)
-    // must NOT queue a Subscribe. The queued command would survive the reconnect
-    // in the command channel and be sent AGAIN after on_connect
-    // (subscribe_commands) already rebuilt the subscription from the table -
-    // double-subscribing and restarting the server-side replay. While
-    // disconnected, on_connect is the sole subscribe source and reconstructs the
-    // subscription from the table, so nothing is lost.
-    #[test]
-    fn reconnect_sends_one_subscribe_carrying_every_cursor() {
-        let mut client = data_client();
-        let (tx, mut rx) = unbounded_channel::<WsCommand>();
-        client.ws_cmd = Some(tx);
-        // connected stays false: this is a reconnect backoff window.
-
-        client
-            .subscribe_trades(SubscribeTrades::new(
-                instrument_id(),
-                Some(client.client_id),
-                None,
-                UUID4::new(),
-                UnixNanos::default(),
-                None,
-                start_ts_params(100),
-            ))
-            .expect("subscribe trades while disconnected");
-
-        assert!(
-            rx.try_recv().is_err(),
-            "a subscribe while disconnected must not queue a Subscribe (AD5)"
-        );
-        // The subscription is recorded, so on_connect reconstructs it exactly once.
-        // Two more symbols with their OWN advanced cursors: the whole point of
-        // the per-entry wire is that one frame carries all three without
-        // clobbering any of them.
-        {
-            let mut subs = lock_recover(&client.subs, "subscription");
-            for (symbol, cursor) in [("ETHUSDT", 200u64), ("SOLUSDT", 300)] {
-                subs.insert(
-                    symbol.to_string(),
-                    SubState {
-                        trades: 1,
-                        start_ts: Some(cursor),
-                        ..SubState::default()
-                    },
-                );
-            }
-        }
-
-        let reconstructed =
-            subscribe_commands(&client.subs, None, &client.generation_seq, &client.issued);
-        let [WsCommand::Subscribe { subscriptions }] = reconstructed.as_slice() else {
-            panic!("a reconnect sends exactly ONE Subscribe, got {reconstructed:?}")
-        };
-        assert_eq!(
-            subscriptions
-                .iter()
-                .map(|entry| (entry.symbol.as_str(), entry.start_ts))
-                .collect::<Vec<_>>(),
-            vec![
-                ("BTCUSDT", Some(100)),
-                ("ETHUSDT", Some(200)),
-                ("SOLUSDT", Some(300)),
-            ],
-            "sorted by symbol, each carrying its own cursor"
-        );
-        let generations: std::collections::HashSet<u64> =
-            subscriptions.iter().map(|entry| entry.generation).collect();
-        assert_eq!(generations.len(), 3, "three distinct fresh generations");
-        // The table and the frame agree, because both are written under one lock.
-        let subs = lock_recover(&client.subs, "subscription");
-        for entry in subscriptions {
-            assert_eq!(subs[&entry.symbol].generation, entry.generation);
-            assert!(
-                entry.generation > 1,
-                "a rebuild generation must exceed the one the 0-to-1 subscribe stamped"
-            );
-        }
-    }
-
-    /// The one case where more than one frame is correct: a subscription set
-    /// larger than the server's own documented per-frame cap. Exercised against
-    /// the pure function, deliberately NOT end to end - 257 live subscriptions
-    /// exhaust the 256 promise tickets and close the connection by design, so an
-    /// end-to-end version would prove the close rather than the chunking.
-    #[test]
-    fn reconnect_chunks_at_the_subscribe_cap() {
-        let subs = Arc::new(Mutex::new(HashMap::new()));
-        {
-            let mut table = lock_recover(&subs, "subscription");
-            for i in 0..=MAX_SUBSCRIBE_SYMBOLS {
-                table.insert(
-                    format!("SYM{i:04}"),
-                    SubState {
-                        trades: 1,
-                        ..SubState::default()
-                    },
-                );
-            }
-        }
-        let seq = AtomicU64::new(0);
-        let issued = Arc::new(Mutex::new(BTreeMap::new()));
-
-        let commands = subscribe_commands(&subs, None, &seq, &issued);
-
-        let lengths: Vec<usize> = commands
-            .iter()
-            .map(|command| match command {
-                WsCommand::Subscribe { subscriptions } => subscriptions.len(),
-                other => panic!("expected only Subscribe commands, got {other:?}"),
-            })
-            .collect();
-        assert_eq!(lengths, vec![MAX_SUBSCRIBE_SYMBOLS, 1]);
-    }
-
-    #[test]
-    fn reconnect_with_nothing_subscribed_sends_no_frame() {
-        let subs = Arc::new(Mutex::new(HashMap::new()));
-        let seq = AtomicU64::new(0);
-        let issued = Arc::new(Mutex::new(BTreeMap::new()));
-
-        assert!(
-            subscribe_commands(&subs, None, &seq, &issued).is_empty(),
-            "an empty table must not send an empty Subscribe"
-        );
-    }
-
-    /// BTC at generation 2, ETH at generation 3, and the venue names (ETH, 2).
-    /// The per-symbol comparison classifies that as an OLD ETH generation and
-    /// discards it silently, even though generation 2 was never ETH's. Only the
-    /// `issued` history catches it, which is why this test cannot pass without
-    /// that map - and why `issued` must not be deleted as redundant.
-    #[test]
-    fn subscription_issue_for_a_foreign_generation_is_a_protocol_inconsistency() {
-        let subs = two_symbol_subs();
-        let issued = issuance_history(&[(2, "BTCUSDT"), (3, "ETHUSDT")]);
-
-        handle_subscription_issue(
-            &subs,
-            &issued,
-            2,
-            "ETHUSDT",
-            SubscriptionIssue::StartBeforeOrigin {
-                effective_start_ts: 999,
-            },
-        );
-
-        let subs = lock_recover(&subs, "subscription");
-        assert_eq!(
-            subs["ETHUSDT"].start_ts,
-            Some(200),
-            "a pair this client never issued must change no state at all"
-        );
-    }
-
-    #[test]
-    fn subscription_issue_for_a_superseded_generation_is_discarded() {
-        let subs = two_symbol_subs();
-        let issued = issuance_history(&[(1, "BTCUSDT"), (2, "BTCUSDT"), (3, "ETHUSDT")]);
-
-        handle_subscription_issue(
-            &subs,
-            &issued,
-            1,
-            "BTCUSDT",
-            SubscriptionIssue::StartBeforeOrigin {
-                effective_start_ts: 999,
-            },
-        );
-
-        let subs = lock_recover(&subs, "subscription");
-        assert_eq!(
-            subs["BTCUSDT"].start_ts,
-            Some(100),
-            "generation 1 is superseded by the table's generation 2"
-        );
-    }
-
-    #[test]
-    fn subscription_issue_for_the_current_generation_moves_the_cursor() {
-        let subs = two_symbol_subs();
-        let issued = issuance_history(&[(2, "BTCUSDT")]);
-
-        handle_subscription_issue(
-            &subs,
-            &issued,
-            2,
-            "BTCUSDT",
-            SubscriptionIssue::StartBeforeOrigin {
-                effective_start_ts: 150,
-            },
-        );
-        // Forward-only, the same rule `advance_sub_start_ts` uses: a later,
-        // smaller clamp must not rewind a cursor that has since moved on.
-        handle_subscription_issue(
-            &subs,
-            &issued,
-            2,
-            "BTCUSDT",
-            SubscriptionIssue::StartBeforeOrigin {
-                effective_start_ts: 120,
-            },
-        );
-
-        let subs = lock_recover(&subs, "subscription");
-        assert_eq!(subs["BTCUSDT"].start_ts, Some(150));
-    }
-
-    /// The negative half of the two-clamp split: `sim_now` is an observation of
-    /// the clock at admission, not the position the replay took, so adopting it
-    /// as a cursor would pin the resume to a stale snapshot.
-    #[test]
-    fn subscription_issue_start_after_sim_now_leaves_the_cursor_alone() {
-        let subs = two_symbol_subs();
-        let issued = issuance_history(&[(2, "BTCUSDT")]);
-
-        handle_subscription_issue(
-            &subs,
-            &issued,
-            2,
-            "BTCUSDT",
-            SubscriptionIssue::StartAfterSimNow { sim_now: 999 },
-        );
-
-        let subs = lock_recover(&subs, "subscription");
-        assert_eq!(subs["BTCUSDT"].start_ts, Some(100));
-    }
-
-    /// `FeedLagged` must classify as BOTH, and the pairing is load-bearing in
-    /// two directions. It is a refusal, so a consumer waiting on data stops
-    /// waiting; and it is a venue FAULT, so it takes the error arm instead of
-    /// being logged as mogwai operating normally. If `is_venue_fault` ever
-    /// stopped covering it, the refusal arm below would silently swallow a
-    /// broken venue into the same warn line as an unknown symbol - which is the
-    /// exact conflation a client of a deliberately-misbehaving venue cannot
-    /// detect for itself. It must also leave the cursor alone: nothing streamed.
-    #[test]
-    fn subscription_issue_feed_lagged_is_a_venue_fault_and_moves_no_cursor() {
-        assert!(SubscriptionIssue::FeedLagged { skipped: 12 }.is_refusal());
-        assert!(SubscriptionIssue::FeedLagged { skipped: 12 }.is_venue_fault());
-        // And nothing else is a fault: every other issue is normal operation.
-        for issue in [
-            SubscriptionIssue::UnknownSymbol,
-            SubscriptionIssue::ReplayCapacity,
-            SubscriptionIssue::StaleGeneration { current: 3 },
-            SubscriptionIssue::SeekBudgetExhausted,
-            SubscriptionIssue::StartBeforeOrigin {
-                effective_start_ts: 5,
-            },
-            SubscriptionIssue::StartAfterSimNow { sim_now: 5 },
-            SubscriptionIssue::InvalidRegime,
-            SubscriptionIssue::ReopenGapUnfireable { at_ts: 5 },
-        ] {
-            assert!(
-                !issue.is_venue_fault(),
-                "{issue:?} is normal operation, not a venue fault"
-            );
-        }
-        let subs = two_symbol_subs();
-        let issued = issuance_history(&[(2, "BTCUSDT")]);
-
-        handle_subscription_issue(
-            &subs,
-            &issued,
-            2,
-            "BTCUSDT",
-            SubscriptionIssue::FeedLagged { skipped: 12 },
-        );
-
-        let subs = lock_recover(&subs, "subscription");
-        assert_eq!(subs["BTCUSDT"].start_ts, Some(100));
-    }
-
-    fn two_symbol_subs() -> Arc<Mutex<HashMap<Symbol, SubState>>> {
-        Arc::new(Mutex::new(HashMap::from([
-            (
-                "BTCUSDT".to_string(),
-                SubState {
-                    trades: 1,
-                    start_ts: Some(100),
-                    generation: 2,
-                    ..SubState::default()
-                },
-            ),
-            (
-                "ETHUSDT".to_string(),
-                SubState {
-                    trades: 1,
-                    start_ts: Some(200),
-                    generation: 3,
-                    ..SubState::default()
-                },
-            ),
-        ])))
-    }
-
-    fn issuance_history(pairs: &[(u64, &str)]) -> Arc<Mutex<BTreeMap<u64, Symbol>>> {
-        Arc::new(Mutex::new(
-            pairs
-                .iter()
-                .map(|(generation, symbol)| (*generation, (*symbol).to_string()))
-                .collect(),
-        ))
-    }
-
-    // AD7: a later subscriber must not pull the symbol's shared resume cursor
-    // (start_ts) backward. The old min(existing, new) rewound it to an earlier
-    // requested start, which the next reconnect's on_connect then replayed as an
-    // already-delivered window. Only the first subscriber seeds the cursor.
-    #[test]
-    fn later_subscriber_does_not_pull_start_ts_backward() {
-        let mut client = data_client();
-        let (tx, _rx) = unbounded_channel::<WsCommand>();
-        client.ws_cmd = Some(tx);
-        client.connected.store(true, Ordering::Relaxed);
-
-        client
-            .subscribe_trades(SubscribeTrades::new(
-                instrument_id(),
-                Some(client.client_id),
-                None,
-                UUID4::new(),
-                UnixNanos::default(),
-                None,
-                start_ts_params(100),
-            ))
-            .expect("first subscribe seeds the cursor at 100");
-
-        // A second subscriber asking for an EARLIER start (50) must not rewind it.
-        client
-            .subscribe_quotes(SubscribeQuotes::new(
-                instrument_id(),
-                Some(client.client_id),
-                None,
-                UUID4::new(),
-                UnixNanos::default(),
-                None,
-                start_ts_params(50),
-            ))
-            .expect("second subscribe with an earlier start");
-
-        let subs = client.subs.lock().expect("subscription mutex");
-        assert_eq!(
-            subs.get("BTCUSDT").expect("symbol subscribed").start_ts,
-            Some(100),
-            "a later earlier-start subscriber must not rewind the shared cursor (AD7)"
-        );
-    }
-
-    // AD10: an unsubscribe_bars for a bar type that was never subscribed must be a
-    // no-op on the symbol's shared bars count, so it cannot darken a surviving
-    // subscription for a DIFFERENT bar type on the same symbol.
-    #[test]
-    fn unmatched_unsubscribe_bars_does_not_darken_surviving_feed() {
-        let mut client = data_client();
-        let (tx, mut rx) = unbounded_channel::<WsCommand>();
-        client.ws_cmd = Some(tx);
-        client.connected.store(true, Ordering::Relaxed);
-
-        let subscribed = time_bar_type(1, BarAggregation::Second);
-        client
-            .subscribe_bars(SubscribeBars::new(
-                subscribed,
-                Some(client.client_id),
-                None,
-                UUID4::new(),
-                UnixNanos::default(),
-                None,
-                None,
-            ))
-            .expect("subscribe bars");
-        assert!(
-            matches!(
-                ws_command_to_client_message(rx.try_recv().expect("0->1 subscribe")),
-                ClientMessage::Subscribe { .. }
-            ),
-            "the live bar subscription emits its Subscribe"
-        );
-
-        // Unsubscribe a DIFFERENT bar type that was never subscribed.
-        let never = time_bar_type(5, BarAggregation::Minute);
-        client
-            .unsubscribe_bars(&UnsubscribeBars::new(
-                never,
-                Some(client.client_id),
-                None,
-                UUID4::new(),
-                UnixNanos::default(),
-                None,
-                None,
-            ))
-            .expect("unmatched unsubscribe is a no-op");
-
-        assert!(
-            rx.try_recv().is_err(),
-            "an unmatched unsubscribe_bars must not fire a wire Unsubscribe (AD10)"
-        );
-        let subs = client.subs.lock().expect("subscription mutex");
-        assert_eq!(
-            subs.get("BTCUSDT").expect("symbol still subscribed").bars,
-            1,
-            "the surviving bar subscription's shared count must be untouched"
-        );
-    }
-
-    // AD11: Week/Month/Year bars are refused (their calendar anchoring cannot be
-    // produced by the adapter's epoch-anchored aggregation); Day and finer pass.
-    #[test]
-    fn calendar_anchored_bar_aggregations_are_refused() {
-        assert!(is_calendar_anchored(BarAggregation::Week));
-        assert!(is_calendar_anchored(BarAggregation::Month));
-        assert!(is_calendar_anchored(BarAggregation::Year));
-        assert!(!is_calendar_anchored(BarAggregation::Day));
-        assert!(!is_calendar_anchored(BarAggregation::Hour));
-        assert!(!is_calendar_anchored(BarAggregation::Minute));
-        assert!(!is_calendar_anchored(BarAggregation::Second));
-
-        // Wired into subscribe_bars: a Week bar is refused at the boundary.
-        let mut client = data_client();
-        client.connected.store(true, Ordering::Relaxed);
-        let err = client
-            .subscribe_bars(SubscribeBars::new(
-                time_bar_type(1, BarAggregation::Week),
-                Some(client.client_id),
-                None,
-                UUID4::new(),
-                UnixNanos::default(),
-                None,
-                None,
-            ))
-            .expect_err("Week bars are refused");
-        assert!(err.to_string().contains("Week/Month/Year"), "{err}");
-
-        // A Day bar passes the gate.
-        let (tx, _rx) = unbounded_channel::<WsCommand>();
-        client.ws_cmd = Some(tx);
-        client
-            .subscribe_bars(SubscribeBars::new(
-                time_bar_type(1, BarAggregation::Day),
-                Some(client.client_id),
-                None,
-                UUID4::new(),
-                UnixNanos::default(),
-                None,
-                None,
-            ))
-            .expect("Day bars are accepted");
-    }
-
-    // AD19 (partial): on the last unsubscribe of a bar type, a window that has
-    // already closed (close_ts <= sim-now) but was withheld for lack of a later
-    // trade to cross its boundary is flushed rather than silently discarded; a
-    // genuinely in-progress window (close_ts still in the future) is dropped, not
-    // shipped as a future-stamped partial bar.
-    #[test]
-    fn unsubscribe_bars_flushes_completed_window_but_not_in_progress() {
-        fn active_bar(close_ts: u64) -> BarAcc {
-            BarAcc {
-                open: Decimal::new(10_000, 2),
-                high: Decimal::new(10_000, 2),
-                low: Decimal::new(10_000, 2),
-                close: Decimal::new(10_000, 2),
-                volume: Decimal::new(1, 0),
-                count: 1,
-                close_ts,
-            }
-        }
-
-        let mut client = data_client();
-        let cid = client.client_id;
-        let (tx, mut rx) = unbounded_channel();
-        client.sink = Some(tx);
-        client.instruments = instruments_map();
-
-        let completed = time_bar_type(1, BarAggregation::Second);
-        let in_progress = time_bar_type(5, BarAggregation::Minute);
-        {
-            let mut bars = client.bars.lock().expect("bars");
-            bars.insert(
-                completed,
-                BarSubState {
-                    refs: 1,
-                    // close_ts 1 is far in the past under the identity clock
-                    // (sim-now reads wall-clock nanos).
-                    active: Some(active_bar(1)),
-                },
-            );
-            bars.insert(
-                in_progress,
-                BarSubState {
-                    refs: 1,
-                    active: Some(active_bar(u64::MAX)),
-                },
-            );
-        }
-        {
-            let mut subs = client.subs.lock().expect("subs");
-            subs.insert(
-                "BTCUSDT".to_string(),
-                SubState {
-                    bars: 2,
-                    ..SubState::default()
-                },
-            );
-        }
-
-        client
-            .unsubscribe_bars(&UnsubscribeBars::new(
-                completed,
-                Some(cid),
-                None,
-                UUID4::new(),
-                UnixNanos::default(),
-                None,
-                None,
-            ))
-            .expect("unsubscribe the completed bar type");
-        match rx
-            .try_recv()
-            .expect("the completed withheld window is flushed")
-        {
-            DataEvent::Data(Data::Bar(bar)) => assert_eq!(bar.ts_event, UnixNanos::from(1)),
-            other => panic!("expected a bar, got {other:?}"),
-        }
-
-        client
-            .unsubscribe_bars(&UnsubscribeBars::new(
-                in_progress,
-                Some(cid),
-                None,
-                UUID4::new(),
-                UnixNanos::default(),
-                None,
-                None,
-            ))
-            .expect("unsubscribe the in-progress bar type");
-        assert!(
-            rx.try_recv().is_err(),
-            "an in-progress window must not ship a future-stamped partial bar"
-        );
-    }
-
-    // AD19 (teardown): stop() flushes every completed-but-withheld window across
-    // the whole bar table - not just a single unsubscribed type - so a shutdown
-    // or a reconnect-driven reset does not silently drop the newest complete bar
-    // of a live feed. In-progress windows are left unshipped, and a flushed
-    // window is cleared so a second teardown cannot double-emit.
-    #[test]
-    fn stop_flushes_completed_bar_windows_but_not_in_progress() {
-        fn active_bar(close_ts: u64) -> BarAcc {
-            BarAcc {
-                open: Decimal::new(10_000, 2),
-                high: Decimal::new(10_000, 2),
-                low: Decimal::new(10_000, 2),
-                close: Decimal::new(10_000, 2),
-                volume: Decimal::new(1, 0),
-                count: 1,
-                close_ts,
-            }
-        }
-
-        let mut client = data_client();
-        let (tx, mut rx) = unbounded_channel();
-        client.sink = Some(tx);
-        client.instruments = instruments_map();
-
-        let completed = time_bar_type(1, BarAggregation::Second);
-        let in_progress = time_bar_type(5, BarAggregation::Minute);
-        {
-            let mut bars = client.bars.lock().expect("bars");
-            bars.insert(
-                completed,
-                BarSubState {
-                    refs: 1,
-                    active: Some(active_bar(1)),
-                },
-            );
-            bars.insert(
-                in_progress,
-                BarSubState {
-                    refs: 1,
-                    active: Some(active_bar(u64::MAX)),
-                },
-            );
-        }
-
-        client.stop().expect("stop");
-
-        match rx
-            .try_recv()
-            .expect("the completed withheld window is flushed at stop")
-        {
-            DataEvent::Data(Data::Bar(bar)) => assert_eq!(bar.ts_event, UnixNanos::from(1)),
-            other => panic!("expected a bar, got {other:?}"),
-        }
-        assert!(
-            rx.try_recv().is_err(),
-            "the in-progress window is not shipped and nothing is double-emitted"
-        );
-
-        client.stop().expect("stop again");
-        assert!(
-            rx.try_recv().is_err(),
-            "a second teardown must not re-emit the already-flushed window"
-        );
-    }
+    params
+        .as_ref()
+        .and_then(|params| params.get_u64("start_ts"))
 }

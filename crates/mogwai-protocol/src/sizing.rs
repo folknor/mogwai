@@ -148,10 +148,6 @@ pub fn worst_case_output_bytes(cmd: &ClientMessage, shape: &BookShape) -> usize 
         ClientMessage::QueryFills { .. } => {
             SNAPSHOT_ENVELOPE_MAX_BYTES + shape.recorded_fills * FILL_ROW_MAX_BYTES
         }
-        // No engine output at all (the engine returns an empty vec); a
-        // subscribe's diagnostics are priority-lane frames, reserved from a
-        // different pool entirely.
-        ClientMessage::Subscribe { .. } | ClientMessage::Unsubscribe { .. } => 0,
     }
 }
 

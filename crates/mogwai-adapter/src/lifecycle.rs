@@ -137,9 +137,9 @@ async fn backoff_or_exhausted(
 /// (AE13). Keep call sites consistent with this list, since the meter itself
 /// cannot see who bypasses it:
 ///
-/// METERED (steady-state data-plane and order-plane). Every
-/// `fetch_instruments` / `fetch_account` / `fetch_trades` / `post_order` in
-/// `client.rs` awaits `wait()` before issuing its request, so the configured
+/// METERED (steady-state data plane). Every `fetch_instruments` /
+/// `fetch_account` / `fetch_trades` request awaits `wait()` before issuing its
+/// request, so the configured
 /// ceiling governs the ongoing request stream a running strategy generates.
 ///
 /// EXEMPT (connect-time bootstrap, deliberately un-metered):
@@ -259,6 +259,10 @@ pub(crate) async fn run_ws_connection<
     // seed reaches here; absent a seed we fall back to entropy.
     let mut rng = seed.map_or_else(|| StdRng::from_rng(&mut rand::rng()), StdRng::seed_from_u64);
     let mut attempt = 0u32;
+    // `RunComplete` is a planned terminal state, not a transport failure.  A
+    // clean 1000 close is its socket-level fallback for a reader that loses
+    // the final text frame while the server drains.
+    let mut run_complete = false;
 
     loop {
         if policy.exhausted(attempt) {
@@ -370,6 +374,11 @@ pub(crate) async fn run_ws_connection<
 
             match action {
                 WsAction::Inbound(inbound) => {
+                    if matches!(&inbound, Some(Ok(Message::Close(Some(frame))) ) if frame.code == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal)
+                    {
+                        run_complete = true;
+                        break;
+                    }
                     if let Some(cause) = disconnect_cause(&inbound) {
                         tracing::warn!(
                             socket = label,
@@ -391,7 +400,14 @@ pub(crate) async fn run_ws_connection<
                             // connection looks healthy while data silently drops
                             // (D.5).
                             match serde_json::from_str::<ServerMessage>(&text) {
-                                Ok(server_msg) => handler(server_msg).await,
+                                Ok(server_msg) => {
+                                    run_complete |=
+                                        matches!(server_msg, ServerMessage::RunComplete { .. });
+                                    handler(server_msg).await;
+                                    if run_complete {
+                                        break;
+                                    }
+                                }
                                 Err(error) => tracing::warn!(
                                     %error,
                                     "dropping unparseable text server frame"
@@ -403,7 +419,14 @@ pub(crate) async fn run_ws_connection<
                             attempt = 0;
                             reset_idle(&mut idle_sleep, conn.idle_timeout_ms, sim);
                             match serde_json::from_slice::<ServerMessage>(&bytes) {
-                                Ok(server_msg) => handler(server_msg).await,
+                                Ok(server_msg) => {
+                                    run_complete |=
+                                        matches!(server_msg, ServerMessage::RunComplete { .. });
+                                    handler(server_msg).await;
+                                    if run_complete {
+                                        break;
+                                    }
+                                }
                                 Err(error) => tracing::warn!(
                                     %error,
                                     "dropping unparseable binary server frame"
@@ -467,6 +490,10 @@ pub(crate) async fn run_ws_connection<
         drop(reader_handle.await);
         on_disconnect().await;
         connected.store(false, Ordering::Relaxed);
+        if run_complete {
+            tracing::info!(socket = label, "venue run completed; reconnect disabled");
+            return;
+        }
         // An established connection dropping (peer Close, read error, idle
         // timeout) re-enters the dial through the same backoff as a failed
         // dial. The sleep used to live only on the `connect_async` Err arm, so
@@ -830,6 +857,35 @@ mod tests {
              (elapsed {elapsed:?})"
         );
         server.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+    async fn run_complete_stops_the_reconnect_loop() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub listener");
+        let port = listener.local_addr().expect("stub addr").port();
+        let server = tokio::spawn(async move {
+            let mut ws = accept_ws(&listener).await;
+            let frame = serde_json::to_string(&ServerMessage::RunComplete {
+                sim_now_ns: 30,
+                elapsed_ns: 30,
+            })
+            .expect("encode completion");
+            ws.send(Message::Text(frame.into()))
+                .await
+                .expect("send completion");
+            ws.close(None).await.expect("close completion socket");
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            run_lifecycle(port, ConnHavoc::default()),
+        )
+        .await
+        .expect("completion stops lifecycle without reconnecting");
+        server.await.expect("completion stub exits");
     }
 
     #[tokio::test(flavor = "current_thread")]

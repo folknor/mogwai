@@ -25,11 +25,16 @@ const ORIGIN: u64 = 1_700_438_400_000_000_000;
 const SPAN_NS: u64 = 1_000_000_000;
 /// The sweeper's own per-pass drain budget (`fills::SWEEP_DRAIN_BUDGET`).
 const BUDGET: usize = 20_000;
-/// Mirrors the server's `CHECKPOINT_K` and `MAX_HISTORY_SEEK_TICKS`, so the
-/// positioning benchmark restores from the same checkpoint spacing and pays the
-/// same residual drain the sweeper does.
+/// Mirrors the server's checkpoint spacing (`source::CHECKPOINT_K`), so the
+/// positioning benchmark restores from the same grid and pays the same residual
+/// drain the sweeper does.
 const CHECKPOINT_K: usize = 8_192;
-const MAX_SEEK_TICKS: usize = 190_000;
+/// This BENCH's own walk length. It has no server counterpart: the server's
+/// per-request seek budget (`MAX_HISTORY_SEEK_TICKS`) died with the lazy
+/// history path, because a declared warmup is materialized eagerly and a
+/// request below the floor is refused by name rather than served short. What
+/// remains here is simply how far this benchmark walks.
+const BENCH_SEEK_TICKS: usize = 190_000;
 
 fn source() -> GeneratedSource {
     let fp = Fingerprint::from_repo_json();
@@ -113,7 +118,11 @@ fn benches(c: &mut Criterion) {
     // `fills::count_penetrations`: a checkpoint restore out of a long-lived
     // process-wide index, taken under a lock, then the residual drain through
     // `MergeSource::starting_at` behind a `Box<dyn TickSource>`.
-    let index = Mutex::new(CheckpointIndex::new(source(), CHECKPOINT_K, MAX_SEEK_TICKS));
+    let index = Mutex::new(CheckpointIndex::new(
+        source(),
+        CHECKPOINT_K,
+        BENCH_SEEK_TICKS,
+    ));
     let target = ORIGIN + SPAN_NS;
     // Prime the index so the timed region measures a steady-state restore rather
     // than the one-off from-origin extension, which is what the server pays after

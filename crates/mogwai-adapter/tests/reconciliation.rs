@@ -18,7 +18,7 @@ use common::{
     StubState, account_json, bound_stub, connected_exec_client, instrument_id, next_exec_event,
     position_json, venue_fill_row, venue_order_row,
 };
-use mogwai_protocol::{TransportProfile, WireOrderStatus};
+use mogwai_protocol::WireOrderStatus;
 use nautilus_common::{
     cache::Cache,
     clients::ExecutionClient,
@@ -46,7 +46,7 @@ struct Fixture {
     sink_rx: UnboundedReceiver<ExecutionEvent>,
 }
 
-async fn fixture(transport_profile: TransportProfile) -> Fixture {
+async fn fixture() -> Fixture {
     let state = Arc::new(StubState::default());
     state.serve_account.store(true, Ordering::Relaxed);
     *state.account_body.lock().expect("account body mutex") = Some(account_json(
@@ -75,7 +75,6 @@ async fn fixture(transport_profile: TransportProfile) -> Fixture {
     replace_exec_event_sender(sink_tx);
     let client = connected_exec_client(
         base_url,
-        transport_profile,
         Rc::new(RefCell::new(Cache::default())),
         &mut sink_rx,
     )
@@ -151,7 +150,7 @@ fn assert_mass_status(mass: &nautilus_model::reports::ExecutionMassStatus) {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn mass_status_reports_all_three_sets_over_ws() {
-    let fixture = fixture(TransportProfile::WsStreaming).await;
+    let fixture = fixture().await;
     let mass = fixture
         .client
         .generate_mass_status(None)
@@ -165,8 +164,8 @@ async fn mass_status_reports_all_three_sets_over_ws() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
-async fn mass_status_reports_all_three_sets_over_http() {
-    let fixture = fixture(TransportProfile::HttpOrders).await;
+async fn mass_status_reports_all_three_sets_over_the_single_ws_transport() {
+    let fixture = fixture().await;
     let mass = fixture
         .client
         .generate_mass_status(None)
@@ -176,13 +175,13 @@ async fn mass_status_reports_all_three_sets_over_http() {
     assert_mass_status(&mass);
     assert!(fixture.state.order_queries.load(Ordering::Relaxed) >= 1);
     assert!(fixture.state.fill_queries.load(Ordering::Relaxed) >= 1);
-    assert_eq!(fixture.state.ws_hits.load(Ordering::Relaxed), 0);
+    assert!(fixture.state.ws_hits.load(Ordering::Relaxed) >= 1);
 }
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn order_status_reports_are_non_empty_end_to_end() {
-    let fixture = fixture(TransportProfile::WsStreaming).await;
+    let fixture = fixture().await;
     let reports = fixture
         .client
         .generate_order_status_reports(&order_reports_cmd())
@@ -199,7 +198,7 @@ async fn order_status_reports_are_non_empty_end_to_end() {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn fill_reports_are_non_empty_end_to_end() {
-    let fixture = fixture(TransportProfile::WsStreaming).await;
+    let fixture = fixture().await;
     let reports = fixture
         .client
         .generate_fill_reports(fill_reports_cmd())
@@ -217,7 +216,7 @@ async fn fill_reports_are_non_empty_end_to_end() {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn position_status_reports_are_non_empty_end_to_end() {
-    let fixture = fixture(TransportProfile::WsStreaming).await;
+    let fixture = fixture().await;
     let reports = fixture
         .client
         .generate_position_status_reports(&position_reports_cmd())
@@ -235,7 +234,7 @@ async fn position_status_reports_are_non_empty_end_to_end() {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn singular_order_status_report_resolves_a_targeted_order() {
-    let fixture = fixture(TransportProfile::WsStreaming).await;
+    let fixture = fixture().await;
     let command = |id| {
         GenerateOrderStatusReport::new(
             UUID4::new(),
@@ -270,7 +269,7 @@ async fn singular_order_status_report_resolves_a_targeted_order() {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn query_order_emits_an_order_status_report() {
-    let mut fixture = fixture(TransportProfile::WsStreaming).await;
+    let mut fixture = fixture().await;
     fixture
         .client
         .query_order(QueryOrder::new(

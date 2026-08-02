@@ -1,115 +1,40 @@
-# mogwai-server run configuration.
-#
-# Replaces the former MOGWAI_REPLAY_SPEED and MOGWAI_GAP_CAP_MS environment
-# variables: run knobs are explicit input, not ambient environment. The server
-# reads this file from the working directory at startup; pass --config <path> to
-# point it elsewhere, or delete the file to fall back to built-in defaults.
-
-# Simulated epoch for accelerated coherent-clock runs. 0 keeps the identity
-# clock, where simulated time equals wall time.
+# Example configuration for one foreground run.
 sim_epoch_ns = 0
-
-# Wall instant the accelerated clock anchors to. 0 anchors at server boot,
-# which rewinds sim time to sim_epoch_ns on every restart (each boot is a
-# fresh scenario). Pin a past wall instant to put every boot on the same
-# simulated axis, so a restarted venue resumes where a monotonic exchange
-# would be and a surviving worker rides through the bounce. Requires
-# sim_epoch_ns; see reference/clock.md, "Restarts".
 wall_anchor_ns = 0
-
-# Replay speed multiplier. With sim_epoch_ns = 0, 1.0 paces inter-tick wall
-# delay to the real gaps between ticks, and 0.0 streams unthrottled. Any other
-# speed requires sim_epoch_ns to be set so all timestamps and timers share one
-# simulated axis.
 speed = 1.0
-
-# Maximum wall-clock sleep between two ticks under paced replay, milliseconds.
-# 0 disables the cap.
 gap_cap_ms = 1000
-
-# Optional server-originated websocket heartbeat cadence, milliseconds. 0 keeps
-# the honest default off. Enable in a separate config when testing liveness
-# frames that survive StallData.
 server_heartbeat_ms = 0
+# Sim-time duration of this run. 0 runs indefinitely, until the launcher kills
+# the process. Non-zero: the venue serves exactly this much sim time, announces
+# RunComplete, and exits 0. `--duration` overrides it.
+run_duration_ns = 0
 
-# Resting limit fills are historically immediate at 0. A positive value requires
-# this many strictly-through traded prints; the account sweeps on this sim-ms cadence.
+# Sim-time history generated eagerly at boot, before the readiness record is
+# written. A history request reaching further back than this is refused with a
+# precise error rather than silently served short. Formerly backfill_horizon_ns;
+# an operator with an old file renames the key and keeps the value.
+warmup_ns = 86400000000000
+fanout_depth = 4096
+zero_speed_stall_ms = 5000
 penetration_ticks = 0
 fill_sweep_interval_ms = 100
-
-# Global ceiling on concurrently-live per-symbol replay streams, summed across
-# every websocket connection. A tape is one symbol, one data origin and one
-# bit-identical market regime; every subscription matching an existing tape
-# shares it for free, and only a DISTINCT tape costs an OS thread. Over-cap
-# subscribes are refused per entry while running streams keep going. 0 disables
-# the cap.
-max_concurrent_tapes = 256
-
-# Live subscriptions allowed on ONE websocket. 0 disables the cap.
-max_subscriptions_per_connection = 256
-
-# Pre-serialized frames each tape keeps for its subscribers. A subscriber that
-# falls further behind loses its feed with FeedLagged rather than being handed a
-# silent gap. 0 is INVALID here, not unbounded.
-fanout_depth = 4096
-
-# How long a speed = 0 tape waits for its slowest subscriber before letting that
-# subscriber lag. Only consulted when speed = 0.
-zero_speed_stall_ms = 5000
-
-# Per-account ledger registry. Idle timeout uses wall time; 0 disables its
-# respective account cap or timeout. The reap interval must remain nonzero.
-max_accounts = 4096
-account_idle_timeout_ms = 3600000
-account_reap_interval_ms = 60000
-
-# Admission control, per websocket connection. The HELD lane carries engine
-# output through the DelayAcks shift and is bounded in BYTES, because an
-# AccountState or a venue-truth snapshot has no per-frame size ceiling a count
-# could stand in for. The PRIORITY lane carries admission truth (refusals,
-# diagnostics), is exempt from DelayAcks, and is bounded in FRAMES - legitimate
-# there and nowhere else, because every frame on it is under
-# ADMISSION_FRAME_MAX_BYTES. A connection whose held budget cannot cover a
-# command's worst-case output is refused with an AdmissionRejected before the
-# engine sees the command; a connection whose priority lane is full is closed
-# with WS 1013 and a stated reason. These are per connection, so the process
-# ceiling is the value times the live connection count. Raising the held budget
-# lets one stalled connection hold more memory; lowering it refuses sooner.
 exec_held_budget_bytes = 8388608
-
-# Queued priority frames per connection. 64 x 8 KiB = 512 KiB.
 admission_lane_frames = 64
-
-# Outstanding promises of a future priority frame, one per live replay on this
-# connection, pooled separately from queue depth: a promise lives as long as its
-# replay, so drawn from the queue budget a handful of healthy streams would
-# leave no room for an actual refusal. Sized at MAX_SUBSCRIBE_SYMBOLS.
-admission_promise_tickets = 256
-
-# Order commands sleeping out an armed CommandLatency ACT delay - the venue has
-# received them but has not touched the book yet. A COMMAND is the bounded unit
-# here, not a payload: a pending act holds no frame, it holds future work, and
-# an armed hour-long delay would otherwise let one connection park unbounded
-# tasks. The first is per connection; the second bounds the whole box and is the
-# only ceiling covering POST /orders, which has no per-connection lane. Lowering
-# pending_command_acts is how scripts/smoke.py reaches the refusal. The global
-# value must be at least the per-connection one, or the local budget is a lie.
 pending_command_acts = 256
 global_pending_command_acts = 4096
 
-# Initial per-currency account funding - the deposit made before the run. The
-# ledger books only fill deltas on top of this seed. A funded account is an
-# honest cash venue: orders the free balance cannot cover are rejected with
-# insufficient balance. An explicitly empty [balances] table runs the account
-# unfunded and unenforced instead - the permissive ledger where the first buy
-# goes negative, which a nautilus cash account (the adapter's default) refuses
-# to apply; use that only to exercise the refusal itself. Amounts are decimal
-# strings. Omitting the table keeps this same funded default. Fund the quote
-# currency of every instrument the run trades (the server warns at boot if one
-# is missing), and the base currency too if a strategy sells first.
+# The single instrument this run serves. Omitted, the built-in BTCUSDT profile
+# applies. A run serves exactly one, so this is a table and not a list.
+# [instrument]
+# symbol = "BTCUSDT"
+
+# Market regime for this run. Formerly per-subscription, the one knob a
+# consumer picked for itself; with no subscriptions it is boot config chosen by
+# whoever launches the run. Omitted, the generator's baseline applies.
+# [regime]
+
+# Initial funding. The quote currency of the configured instrument MUST appear
+# here, or boot is refused: with one instrument per run, an unfunded quote means
+# every buy in the run rejects for insufficient balance.
 [balances]
 USDT = "1000000"
-
-# Omit [[instrument]] tables to use the built-in BTCUSDT profile. Add explicit
-# profiles when a run needs a custom instrument set, generator scale, or session
-# shape; see reference/config.md.

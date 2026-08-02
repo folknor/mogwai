@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 folknor
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# A venue whose resting limits are penetration-gated, so the run's fill sweep is
+# the only thing that can ever fill one.
+#
+# The clock is ACCELERATED on purpose. The gate is a statement about the tape,
+# and at speed 1.0 the fitted BTCUSDT arrival process legitimately dwells tens
+# of seconds between prints, so a wall-bounded assertion about a resting fill
+# would be a bet on the tape's cadence rather than a gate on this code.
+#
+# penetration_ticks = 2 makes the crossing deterministic rather than hoped for:
+# the acceptance reading seeds ONE penetration for a buy the whole tape prints
+# through, so the order rests exactly one short and the next print completes it.
+
+sim_epoch_ns = 1600000000000000000
+speed = 100.0
+warmup_ns = 60000000000
+penetration_ticks = 2
+fill_sweep_interval_ms = 10

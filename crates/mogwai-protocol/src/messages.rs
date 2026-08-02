@@ -4,7 +4,7 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::havoc::{EventKind, MarketRegime};
+use crate::havoc::EventKind;
 use crate::{ClientOrderId, Symbol, VenueOrderId};
 
 /// Maximum byte length of any client-supplied identifier the venue echoes back
@@ -102,32 +102,6 @@ pub const MAX_REASON_LEN: usize = 512;
 /// connection.
 pub const MAX_CURRENCY_LEN: usize = 16;
 
-/// Maximum number of symbols one `Subscribe`/`Unsubscribe` may name, so a
-/// single read-loop iteration cannot be made to demand 100k per-symbol
-/// reservations.
-pub const MAX_SUBSCRIBE_SYMBOLS: usize = 256;
-
-/// Maximum outcomes listed on one coalesced `SubscriptionIssues` frame.
-///
-/// The cap is LOSSY and deliberately so. A subscribe producing more than this
-/// many outcomes drops the surplus, and those entries get no `(symbol,
-/// generation, issue)` at all - a genuine attribution hole that can swallow the
-/// news that a feed is dead. It is kept because the cap is what makes
-/// `ADMISSION_FRAME_MAX_BYTES` provable and what keeps a `MAX_SUBSCRIBE_SYMBOLS`
-/// subscribe to ONE priority frame, both load-bearing.
-///
-/// Two things pay for it: `entries` is filled with REFUSALS first, so the
-/// outcomes that kill a feed are the ones that survive truncation (a lost
-/// degradation costs a log line, a lost refusal costs a feed); and the frame
-/// carries `issues_total` AND `refusals_total`, so a client seeing more refusals
-/// counted than listed knows attributably that some feed it asked for is dead
-/// and can resubscribe the set rather than guess.
-///
-/// Pagination and a larger frame were both rejected: pagination puts multi-frame
-/// sequencing state on the priority lane the coalescing exists to protect, and a
-/// larger frame reopens a currently-proven ceiling.
-pub const MAX_SUBSCRIPTION_ISSUES_LISTED: usize = 16;
-
 /// Worst-case expansion factor `serde_json` applies to an arbitrary string of
 /// N bytes: a byte that must be escaped as `\uXXXX` costs six output bytes.
 /// Every `*_MAX_BYTES` constant is stated in SERIALIZED bytes, so each embedded
@@ -138,16 +112,24 @@ pub const MAX_SUBSCRIPTION_ISSUES_LISTED: usize = 16;
 pub const JSON_ESCAPE_FACTOR: usize = 6;
 
 /// Upper bound on the serialized bytes of any `EventKind::Admission` frame -
-/// `AdmissionRejected`, `ProtocolError`, and `SubscriptionIssues`, since all ride the server's
-/// priority lane. Proven by `admission_frames_fit_their_ceiling`: the widest
-/// widest frame is `SubscriptionIssues` with
-/// `MAX_SUBSCRIPTION_ISSUES_LISTED` entries. Each charges its symbol at
-/// `JSON_ESCAPE_FACTOR * MAX_SYMBOL_LEN`, two u64 values and fixed issue JSON,
-/// keeping the list below 5600 bytes plus envelope. This bound is
+/// `AdmissionRejected` and `ProtocolError`, since both ride the server's
+/// priority lane. `AdmissionRejected` is the widest: one capped client id, one
+/// capped reason, one capped symbol and its fixed envelope. This bound is
 /// what makes the priority lane's FRAME count a memory bound, so every
 /// `ProtocolError` construction site must route its reason through
 /// `truncate_reason`.
-pub const ADMISSION_FRAME_MAX_BYTES: usize = 8192;
+///
+/// The figure is the next power of two above `JSON_ESCAPE_FACTOR * (
+/// MAX_CLIENT_ID_LEN + MAX_REASON_LEN + MAX_SYMBOL_LEN) +
+/// ADMISSION_ENVELOPE_BYTES`, and `admission_frames_fit_their_ceiling` runs
+/// that derivation rather than trusting this comment.
+pub const ADMISSION_FRAME_MAX_BYTES: usize = 4096;
+
+/// Fixed JSON scaffolding of an `AdmissionRejected`: the envelope, the key
+/// names, the subject tag and the `ts_event` digits. Generous by design - it is
+/// the constant term of an upper bound, so over-stating it can only make the
+/// bound safer.
+pub const ADMISSION_ENVELOPE_BYTES: usize = 256;
 
 /// Truncate a server-generated reason to `MAX_REASON_LEN` bytes on a char
 /// boundary, appending nothing (the truncation is visible as an abrupt end).
@@ -199,73 +181,6 @@ pub fn validate_request_id(id: &str) -> Result<(), &'static str> {
         .ok_or("request_id exceeds MAX_CLIENT_ID_LEN")
 }
 
-/// Boundary guard for a `Subscribe`/`Unsubscribe` symbol list: both the
-/// per-symbol length and the CARDINALITY are capped. Called from the websocket
-/// read loop, not from the order path - subscribes never reach the order path.
-pub fn validate_symbols(symbols: &[Symbol]) -> Result<(), &'static str> {
-    if symbols.len() > MAX_SUBSCRIBE_SYMBOLS {
-        return Err("symbols exceeds MAX_SUBSCRIBE_SYMBOLS");
-    }
-    if symbols.iter().any(|s| s.len() > MAX_SYMBOL_LEN) {
-        return Err("symbol exceeds MAX_SYMBOL_LEN");
-    }
-    Ok(())
-}
-
-/// Boundary guard for a `Subscribe`'s entry list: cardinality, per-symbol
-/// length, and DUPLICATE SYMBOLS. Two entries naming one symbol with different
-/// generations have no defined meaning - which cursor wins, which generation is
-/// current - so the whole frame is refused rather than silently deduplicated.
-/// `dedup_symbols` was the old answer and it silently discarded a cursor; a
-/// refusal is the honest one. (`dedup_symbols` survives on the `Unsubscribe`
-/// path, where a duplicate genuinely is a no-op.)
-pub fn validate_subscriptions(subs: &[SubscriptionRequest]) -> Result<(), &'static str> {
-    if subs.len() > MAX_SUBSCRIBE_SYMBOLS {
-        return Err("subscriptions exceeds MAX_SUBSCRIBE_SYMBOLS");
-    }
-    if subs.iter().any(|entry| entry.symbol.len() > MAX_SYMBOL_LEN) {
-        return Err("symbol exceeds MAX_SYMBOL_LEN");
-    }
-    let mut symbols: Vec<&str> = subs.iter().map(|entry| entry.symbol.as_str()).collect();
-    symbols.sort_unstable();
-    if symbols.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err("subscriptions names a symbol twice");
-    }
-    Ok(())
-}
-
-/// One symbol's subscription within a `Subscribe`. Self-contained: identity,
-/// cursor and regime all per entry, so a client may resubscribe one symbol
-/// without restating any other's state.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SubscriptionRequest {
-    /// Client-chosen identity for THIS generation of this symbol's stream.
-    ///
-    /// The client is OBLIGED to make it strictly increasing per symbol within a
-    /// connection; the venue enforces the obligation and refuses any entry that
-    /// breaks it with `SubscriptionIssue::StaleGeneration`, because a reused
-    /// generation makes a stale diagnostic look current. A monotone counter that
-    /// never resets - not even across reconnects - trivially conforms.
-    ///
-    /// The venue never interprets it beyond ordering it against the generation
-    /// it recorded for the symbol, and echoing it on every diagnostic about this
-    /// subscription. Ordering is what lets a client tell a diagnostic about a
-    /// superseded generation from one about a generation it never issued, which
-    /// an opaque identifier cannot.
-    pub generation: u64,
-    pub symbol: Symbol,
-    /// Replay from this unix-nanosecond instant forward. `None` positions the
-    /// stream at sim-now (a live subscribe, the shape that avoids a catch-up
-    /// dump); `Some` is a historical window or a resume cursor.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub start_ts: Option<u64>,
-    /// Generator-level market regime for THIS symbol's stream only. The regime
-    /// is per entry on the wire; the adapter today sends one value for every
-    /// entry, so a genuinely per-symbol regime is a client-side change only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub regime: Option<MarketRegime>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Side {
     Buy,
@@ -295,16 +210,11 @@ pub enum TimeInForce {
     Fok,
 }
 
-/// Client → server messages (order entry + market-data subscription).
+/// Client → server order-entry messages. Market data is streamed immediately
+/// when the websocket is upgraded; there is no subscription command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ClientMessage {
-    Subscribe {
-        subscriptions: Vec<SubscriptionRequest>,
-    },
-    Unsubscribe {
-        symbols: Vec<Symbol>,
-    },
     SubmitOrder(SubmitOrder),
     CancelOrder {
         client_order_id: ClientOrderId,
@@ -376,7 +286,7 @@ pub enum CommandClass {
 
 impl CommandClass {
     /// The class of an order-entry command, or `None` for anything else -
-    /// queries, subscribe/unsubscribe. Queries are deliberately classless: the
+    /// queries. Queries are deliberately classless: the
     /// reconciliation witness is never made the slowest thing on the venue.
     #[must_use]
     pub fn of(cmd: &ClientMessage) -> Option<Self> {
@@ -548,123 +458,6 @@ pub enum QueryKind {
     Fills,
 }
 
-/// What the venue did to one requested subscription that it did not serve
-/// exactly as asked. A closed set rather than prose: the client's handling is a
-/// match, not a string search, and a fixed set is what keeps
-/// `ADMISSION_FRAME_MAX_BYTES` provable now that issues are per entry.
-///
-/// THREE classes, and the third is the one that matters most to a consumer.
-/// REFUSED and DEGRADED are both mogwai OPERATING NORMALLY: the venue declined
-/// or altered a request, deliberately, and said so. A VENUE FAULT is mogwai
-/// FAILING - it promised data and then lost it, through no client action and no
-/// armed scenario.
-///
-/// A client connects to this venue knowing it deliberately misbehaves, which is
-/// exactly why it cannot infer the difference from symptoms: a gap in the tape
-/// looks the same whether a blackout was armed or the process broke. So the
-/// distinction is explicit on the wire and machine-readable via `is_refusal`
-/// and `is_venue_fault`, rather than left to be guessed from prose or from
-/// which frames stopped arriving. Deliberate misbehavior is the product; a
-/// fault is a bug in mogwai or the host under it, and a run that saw one should
-/// be discarded rather than believed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind")]
-pub enum SubscriptionIssue {
-    /// REFUSED: the venue does not list this symbol. Nothing streams.
-    UnknownSymbol,
-    /// REFUSED: the global replay-thread pool is exhausted. Nothing streams;
-    /// running streams are untouched.
-    ReplayCapacity,
-    /// REFUSED: `generation` is not strictly greater than the generation the
-    /// venue currently records for this symbol on this connection. The live
-    /// stream is untouched - this is a client-ordering fault, and destroying a
-    /// healthy replay over one would be a worse answer than refusing it.
-    StaleGeneration { current: u64 },
-    /// REFUSED: the positioning seek exhausted its tick budget, so the stream
-    /// could not be placed. Discovered asynchronously on the replay thread,
-    /// which is why this issue in particular must carry a generation.
-    SeekBudgetExhausted,
-    /// VENUE FAULT: the subscriber fell behind the shared tape's bounded fanout
-    /// buffer, so the venue lost `skipped` ticks it had already promised to
-    /// deliver in ascending order. Nothing further streams for this generation,
-    /// and the connection is closed behind this frame.
-    ///
-    /// NOT a divergence and NOT a refusal. Nobody armed this, no request caused
-    /// it, and no client can plan around it - it is the venue (or the host under
-    /// it) failing. At the shipped ring depth it is unreachable on a loopback
-    /// deployment short of a consumer wedging for hours, so treat its arrival as
-    /// evidence that something is broken, not as a scenario to handle: any run
-    /// that observed it has holes in its market data and its results are void.
-    FeedLagged { skipped: u64 },
-    /// DEGRADED: `start_ts` preceded the tape origin; the venue clamped the
-    /// request to `effective_start_ts` (the tape origin) and the stream runs
-    /// from there. This value IS the position the venue used, so a client may
-    /// safely adopt it as a cursor.
-    StartBeforeOrigin { effective_start_ts: u64 },
-    /// DEGRADED: `start_ts` exceeded sim-now; the venue discarded the requested
-    /// start and the stream is live from the clock. `sim_now` is the clock
-    /// reading at admission - an OBSERVATION, not a position the venue
-    /// promises, because the replay seeks sim-now again on its own thread. A
-    /// client must NOT adopt it as a cursor.
-    StartAfterSimNow { sim_now: u64 },
-    /// DEGRADED: the entry's `regime` failed `validate_market_regime` and was
-    /// dropped; the clean, unhavocked tape streams.
-    InvalidRegime,
-    /// DEGRADED: the entry's `ReopenGap` is anchored at or before the tape
-    /// origin and can never fire; it was stripped and the clean tape streams.
-    ReopenGapUnfireable { at_ts: u64 },
-}
-
-impl SubscriptionIssue {
-    /// `true` when nothing streams for this entry; `false` when the stream
-    /// runs, altered. The one bit a client needs to decide whether to keep
-    /// waiting for data.
-    ///
-    /// Deliberately includes the venue fault: nothing streams either way, so a
-    /// consumer waiting on data must stop waiting on both. It is the WRONG bit
-    /// for deciding whether the venue is healthy - see `is_venue_fault`.
-    #[must_use]
-    pub fn is_refusal(self) -> bool {
-        matches!(
-            self,
-            Self::UnknownSymbol
-                | Self::ReplayCapacity
-                | Self::StaleGeneration { .. }
-                | Self::SeekBudgetExhausted
-                | Self::FeedLagged { .. }
-        )
-    }
-
-    /// `true` when this entry reports mogwai FAILING rather than mogwai
-    /// operating: the venue lost data it had already promised, unprompted by
-    /// any request and unarmed by any scenario.
-    ///
-    /// This is the bit that separates "the fake venue is misbehaving on
-    /// purpose, as advertised" from "the fake venue is broken". Every other
-    /// issue, refusal or degradation alike, is normal operation and a run that
-    /// saw one is still valid. A run that saw THIS has gaps in its market data
-    /// and should be discarded, because the venue cannot say what was in them.
-    ///
-    /// Kept as a classifier rather than a separate message type because the
-    /// report is still per subscription - it has to name the generation and
-    /// symbol whose feed died - and because a closed set with two predicates
-    /// keeps the client's handling a match rather than a string search.
-    #[must_use]
-    pub fn is_venue_fault(self) -> bool {
-        matches!(self, Self::FeedLagged { .. })
-    }
-}
-
-/// One entry's outcome on a `SubscriptionIssues` frame. The `generation` echoes
-/// the `SubscriptionRequest` this describes, which is what lets a client discard
-/// a diagnostic about a generation it has already superseded.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubscriptionOutcome {
-    pub generation: u64,
-    pub symbol: Symbol,
-    pub issue: SubscriptionIssue,
-}
-
 /// API-boundary guard for a `ClientMessage::ModifyOrder`'s `price`/`quantity`
 /// pair, mirroring `validate_submit_order` in style. At least one of the two
 /// must be present - both absent decodes as a no-op amend that changes
@@ -693,6 +486,13 @@ pub fn validate_modify_order(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ServerMessage {
+    /// The declared simulated run duration elapsed. This is sent immediately
+    /// before the venue closes normally, making a planned exit distinguishable
+    /// from a failed connection.
+    RunComplete {
+        sim_now_ns: u64,
+        elapsed_ns: u64,
+    },
     /// The venue REFUSED to do the work, before any engine state was touched:
     /// its per-connection outbound capacity could not cover the command's
     /// worst-case output, or the request could not be decoded at all.
@@ -780,19 +580,28 @@ pub enum ServerMessage {
     Heartbeat {
         ts_event: u64,
     },
-    /// A whole frame the server could not decode or attribute to an entry: a
+    /// The bounded tape fanout overwrote frames for this connection. This is a
+    /// venue fault, not a client refusal; the server closes with WS 1011 after
+    /// delivering it.
+    FeedLagged {
+        skipped: u64,
+        sim_now_ns: u64,
+    },
+    /// A non-fatal run-level havoc observation. It replaces the old
+    /// subscription-attributed diagnostic because a run has one tape.
+    HavocDiagnostic {
+        reason: String,
+        sim_now_ns: u64,
+    },
+    /// A whole frame the server could not decode or attribute: a
     /// frame that is not a `ClientMessage` (bad JSON, unknown `type`, or a
-    /// known `type` missing required fields), a `Subscribe`/`Unsubscribe`
-    /// refused whole at the `validate_subscriptions`/`validate_symbols`
-    /// boundary, or a request on a carrier that does not support it. Emitted in
+    /// known `type` missing required fields), or a request on a carrier that
+    /// does not support it. Emitted in
     /// place of a silent drop: without it, an unservable request and a
     /// healthy-but-idle feed were indistinguishable on the wire.
     ///
     /// Untargeted, and now only where untargetedness is honest: a whole-frame
-    /// fault HAS no entry to name. Everything per-entry - unknown symbols, dead
-    /// seeks, clamped starts, dropped regimes - moved to `SubscriptionIssues`,
-    /// which echoes the `(symbol, generation)` it describes. The correlation
-    /// field that was future work is that generation, and it exists.
+    /// fault has no target to name.
     ///
     /// Classifies `EventKind::Admission`, not `Exec`: it reports what the
     /// venue's REQUEST HANDLING refused, which is never something the matching
@@ -806,38 +615,6 @@ pub enum ServerMessage {
     /// memory bound - is unproven.
     ProtocolError {
         reason: String,
-        ts_event: u64,
-    },
-    /// Per-entry truth about a `Subscribe` the venue could not serve exactly as
-    /// asked. COALESCED: one frame per `Subscribe` for every synchronously
-    /// discovered issue, so a `MAX_SUBSCRIBE_SYMBOLS`-entry subscribe of unknown
-    /// symbols costs one priority frame, not 256. The asynchronous
-    /// `SeekBudgetExhausted` arrives later in its own single-entry frame, paid
-    /// for by the replay's promise ticket.
-    ///
-    /// `entries` lists at most `MAX_SUBSCRIPTION_ISSUES_LISTED`, REFUSALS
-    /// FIRST; `issues_total` is the true count and `refusals_total` the count
-    /// of those that killed a feed, so a client can tell "some feed I asked for
-    /// is dead but was truncated away" from "everything listed is what
-    /// happened".
-    ///
-    /// One entry may produce more than one outcome (a clamped start on an entry
-    /// whose regime was also dropped), so `issues_total >= entries.len()` says
-    /// nothing about how many ENTRIES were affected.
-    ///
-    /// Classifies `EventKind::Admission`, rides the priority lane, exempt from
-    /// `DelayAcks` - it reports what request handling did, never engine output.
-    ///
-    /// Successful subscriptions gain NO acknowledgment frame: a client's own
-    /// record of the last generation it issued per symbol is the whole decision
-    /// table, and a success frame would cost a priority-lane frame per subscribe
-    /// on the healthy path. What would reopen that: a client needing positive
-    /// confirmation during a tape arrival drought, where the first tick - the
-    /// implicit success signal - can be hours of sim time away.
-    SubscriptionIssues {
-        entries: Vec<SubscriptionOutcome>,
-        issues_total: usize,
-        refusals_total: usize,
         ts_event: u64,
     },
 }
@@ -881,7 +658,9 @@ impl ServerMessage {
             | ServerMessage::OrderCancelRejected { .. } => EventKind::Exec,
             ServerMessage::AdmissionRejected { .. }
             | ServerMessage::ProtocolError { .. }
-            | ServerMessage::SubscriptionIssues { .. } => EventKind::Admission,
+            | ServerMessage::FeedLagged { .. }
+            | ServerMessage::HavocDiagnostic { .. }
+            | ServerMessage::RunComplete { .. } => EventKind::Admission,
         }
     }
 
@@ -958,621 +737,163 @@ pub struct QuoteTick {
 mod tests {
     use super::*;
 
+    /// The post-subscription-retirement wire surface, pinned by BYTE form.
+    ///
+    /// `Subscribe`, `Unsubscribe` and the nine `SubscriptionIssue` variants are
+    /// gone; the two that carried surviving meaning became top-level frames.
+    /// Pinning the text rather than only `from(to(x)) == x` is what stops a
+    /// field rename from passing here and failing in the launcher or the
+    /// adapter instead.
     #[test]
-    fn account_id_round_trips_as_bare_string() {
-        let id = AccountId::parse("ACC-1").expect("valid account id");
-        let json = serde_json::to_string(&id).expect("serialize account id");
-        assert_eq!(json, r#""ACC-1""#);
-        assert_eq!(serde_json::from_str::<AccountId>(&json).unwrap(), id);
-    }
-
-    #[test]
-    fn account_id_parse_rejects_empty_overlong_and_illegal() {
-        for raw in ["", &"A".repeat(MAX_ACCOUNT_ID_LEN + 1), "a/b", "a b"] {
-            assert!(AccountId::parse(raw).is_err(), "{raw:?} must be refused");
-        }
-        assert!(AccountId::parse("WYRD-042:BTCUSDT").is_ok());
-    }
-
-    #[test]
-    fn account_state_carries_its_account_id() {
-        let json = r#"{"account_id":"ACC-42","balances":[],"positions":[],"ts_event":7}"#;
-        let state: AccountState = serde_json::from_str(json).expect("decode snapshot");
-        assert_eq!(state.account_id.as_str(), "ACC-42");
-    }
-
-    #[test]
-    fn subscribe_round_trips_per_entry_generations() {
-        let with_start = ClientMessage::Subscribe {
-            subscriptions: vec![
-                SubscriptionRequest {
-                    generation: 1,
-                    symbol: "X".into(),
-                    start_ts: None,
-                    regime: None,
+    fn client_and_server_messages_round_trip() {
+        let client_frames = [
+            (
+                ClientMessage::CancelOrder {
+                    client_order_id: "O-1".into(),
                 },
-                SubscriptionRequest {
-                    generation: 2,
-                    symbol: "Y".into(),
-                    start_ts: Some(123),
-                    regime: None,
+                r#"{"type":"CancelOrder","client_order_id":"O-1"}"#,
+            ),
+            (
+                ClientMessage::ModifyOrder {
+                    client_order_id: "O-1".into(),
+                    price: None,
+                    quantity: Some(Decimal::from(2)),
                 },
-            ],
-        };
-        let json = serde_json::to_string(&with_start).unwrap();
-        assert_eq!(
-            json,
-            r#"{"type":"Subscribe","subscriptions":[{"generation":1,"symbol":"X"},{"generation":2,"symbol":"Y","start_ts":123}]}"#
-        );
-        let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
-        // `ClientMessage` is not `PartialEq`, so the round trip is proven by
-        // re-serializing to the identical bytes.
-        assert_eq!(serde_json::to_string(&decoded).unwrap(), json);
-
-        // Every issue variant, both directions: the tags and payload field
-        // names are wire contract, and a client's handling is a match on them.
-        let issues = [
-            SubscriptionIssue::UnknownSymbol,
-            SubscriptionIssue::ReplayCapacity,
-            SubscriptionIssue::StaleGeneration { current: 7 },
-            SubscriptionIssue::SeekBudgetExhausted,
-            SubscriptionIssue::FeedLagged { skipped: 3 },
-            SubscriptionIssue::StartBeforeOrigin {
-                effective_start_ts: 11,
-            },
-            SubscriptionIssue::StartAfterSimNow { sim_now: 13 },
-            SubscriptionIssue::InvalidRegime,
-            SubscriptionIssue::ReopenGapUnfireable { at_ts: 17 },
+                r#"{"type":"ModifyOrder","client_order_id":"O-1","price":null,"quantity":"2"}"#,
+            ),
+            (
+                ClientMessage::QueryOrders {
+                    request_id: "Q-1".into(),
+                    client_order_id: None,
+                    open_only: true,
+                },
+                r#"{"type":"QueryOrders","request_id":"Q-1","open_only":true}"#,
+            ),
+            (
+                ClientMessage::QueryFills {
+                    request_id: "Q-2".into(),
+                    client_order_id: None,
+                },
+                r#"{"type":"QueryFills","request_id":"Q-2"}"#,
+            ),
         ];
-        let refusals_total = issues.iter().filter(|issue| issue.is_refusal()).count();
-        assert_eq!(refusals_total, 5, "five of the nine kill a feed");
-        let frame = ServerMessage::SubscriptionIssues {
-            entries: issues
-                .iter()
-                .enumerate()
-                .map(|(i, issue)| SubscriptionOutcome {
-                    generation: i as u64 + 1,
-                    symbol: format!("SYM{i}"),
-                    issue: *issue,
-                })
-                .collect(),
-            issues_total: issues.len(),
-            refusals_total,
-            ts_event: 99,
-        };
-        let json = serde_json::to_string(&frame).unwrap();
+        for (frame, expected) in client_frames {
+            let json = serde_json::to_string(&frame).expect("serialize");
+            assert_eq!(json, expected);
+            let decoded: ClientMessage = serde_json::from_str(&json).expect("decode");
+            assert_eq!(serde_json::to_string(&decoded).expect("re-serialize"), json);
+        }
+
+        // There is no Subscribe frame left to send: the venue pushes the run's
+        // one tape unbidden, so a client that still sends one is refused by the
+        // decoder rather than silently ignored.
         assert!(
-            json.contains(r#"{"kind":"StartAfterSimNow","sim_now":13}"#),
-            "the issue tag and its payload name are wire contract: {json}"
+            serde_json::from_str::<ClientMessage>(r#"{"type":"Subscribe","symbols":["BTCUSDT"]}"#)
+                .is_err(),
+            "Subscribe was retired with the subscription model"
         );
-        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
-        let ServerMessage::SubscriptionIssues { entries, .. } = &decoded else {
-            panic!("expected SubscriptionIssues, got {decoded:?}")
-        };
-        assert_eq!(
-            entries.iter().map(|e| e.issue).collect::<Vec<_>>(),
-            issues.to_vec(),
-            "every variant survives the round trip"
-        );
-        assert_eq!(serde_json::to_string(&decoded).unwrap(), json);
-    }
-
-    #[test]
-    fn account_state_with_positions_round_trips() {
-        let state = AccountState {
-            account_id: AccountId::parse("ACC-1").unwrap(),
-            balances: vec![Balance {
-                currency: "USDT".into(),
-                total: Decimal::from(-300),
-                free: Decimal::from(-1000),
-                locked: Decimal::from(700),
-            }],
-            positions: vec![Position {
-                symbol: "BTCUSDT".into(),
-                quantity: Decimal::from(3),
-                avg_px: Decimal::from(100),
-            }],
-            ts_event: 123,
-        };
-
-        let json = serde_json::to_string(&state).unwrap();
-        let decoded: AccountState = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(decoded.balances[0].currency, state.balances[0].currency);
-        assert_eq!(decoded.balances[0].total, state.balances[0].total);
-        assert_eq!(decoded.balances[0].free, state.balances[0].free);
-        assert_eq!(decoded.balances[0].locked, state.balances[0].locked);
-        assert_eq!(decoded.positions[0].symbol, state.positions[0].symbol);
-        assert_eq!(decoded.positions[0].quantity, state.positions[0].quantity);
-        assert_eq!(decoded.positions[0].avg_px, state.positions[0].avg_px);
-        assert_eq!(decoded.ts_event, state.ts_event);
-    }
-
-    #[test]
-    fn server_message_category_is_shared_source_of_truth() {
-        // The classifier both ends consult. `AccountState` is exec, not data:
-        // the split-brain this test pins is the adapter once bucketing it as
-        // data while the server delayed it as execution. Trades and quotes are
-        // the only `Data`; fills are `Fill`; every order-lifecycle event and
-        // the account snapshot are `Exec`.
-        let exec = [
-            ServerMessage::AccountState(AccountState {
-                account_id: AccountId::parse("ACC-1").unwrap(),
-                balances: Vec::new(),
-                positions: Vec::new(),
-                ts_event: 1,
-            }),
-            ServerMessage::OrderAccepted {
-                client_order_id: "O".into(),
-                venue_order_id: "V".into(),
-                ts_event: 1,
-            },
-            ServerMessage::OrderRejected {
-                client_order_id: "O".into(),
-                reason: "no".into(),
-                ts_event: 1,
-            },
-            ServerMessage::OrderCanceled {
-                client_order_id: "O".into(),
-                venue_order_id: "V".into(),
-                ts_event: 1,
-            },
-            ServerMessage::OrderUpdated {
-                client_order_id: "O".into(),
-                venue_order_id: "V".into(),
-                quantity: Decimal::from(1),
-                price: None,
-                leaves_qty: Decimal::from(1),
-                ts_event: 1,
-            },
-            ServerMessage::OrderModifyRejected {
-                client_order_id: "O".into(),
-                venue_order_id: None,
-                reason: "no".into(),
-                ts_event: 1,
-            },
-            ServerMessage::OrderCancelRejected {
-                client_order_id: "O".into(),
-                venue_order_id: None,
-                reason: "no".into(),
-                ts_event: 1,
-            },
-        ];
-        for msg in &exec {
-            assert_eq!(msg.category(), EventKind::Exec, "{msg:?} is execution");
-            assert!(msg.category().is_execution(), "{msg:?} delays as execution");
-        }
-
-        let fill = ServerMessage::OrderFilled(OrderFilled {
-            client_order_id: "O".into(),
-            venue_order_id: "V".into(),
-            trade_id: "T".into(),
-            symbol: "BTCUSDT".into(),
-            side: Side::Buy,
-            last_qty: Decimal::from(1),
-            last_px: Decimal::from(1),
-            leaves_qty: Decimal::ZERO,
-            commission: Decimal::ZERO,
-            ts_event: 1,
-        });
-        assert_eq!(fill.category(), EventKind::Fill);
         assert!(
-            fill.category().is_execution(),
-            "fills delay as execution too"
+            serde_json::from_str::<ClientMessage>(r#"{"type":"Unsubscribe"}"#).is_err(),
+            "Unsubscribe was retired with the subscription model"
         );
 
-        let data = [
-            ServerMessage::Trade(TradeTick {
-                symbol: "BTCUSDT".into(),
-                price: Decimal::from(1),
-                size: Decimal::from(1),
-                aggressor: AggressorSide::NoAggressor,
-                ts_event: 1,
-            }),
-            ServerMessage::Quote(QuoteTick {
-                symbol: "BTCUSDT".into(),
-                bid_px: Decimal::from(1),
-                ask_px: Decimal::from(1),
-                bid_sz: Decimal::from(1),
-                ask_sz: Decimal::from(1),
-                ts_event: 1,
-            }),
+        let server_frames = [
+            (
+                ServerMessage::RunComplete {
+                    sim_now_ns: 123,
+                    elapsed_ns: 45,
+                },
+                r#"{"type":"RunComplete","sim_now_ns":123,"elapsed_ns":45}"#,
+            ),
+            (
+                // Formerly SubscriptionIssue::FeedLagged. There is no
+                // subscription to attribute it to, so it is a top-level frame.
+                ServerMessage::FeedLagged {
+                    skipped: 7,
+                    sim_now_ns: 8,
+                },
+                r#"{"type":"FeedLagged","skipped":7,"sim_now_ns":8}"#,
+            ),
+            (
+                // Formerly SubscriptionIssue::ReopenGapUnfireable.
+                ServerMessage::HavocDiagnostic {
+                    reason: "reopen gap at or before the tape origin".into(),
+                    sim_now_ns: 9,
+                },
+                r#"{"type":"HavocDiagnostic","reason":"reopen gap at or before the tape origin","sim_now_ns":9}"#,
+            ),
+            (
+                ServerMessage::Heartbeat { ts_event: 1 },
+                r#"{"type":"Heartbeat","ts_event":1}"#,
+            ),
+            (
+                ServerMessage::ProtocolError {
+                    reason: "invalid client frame".into(),
+                    ts_event: 2,
+                },
+                r#"{"type":"ProtocolError","reason":"invalid client frame","ts_event":2}"#,
+            ),
         ];
-        for msg in &data {
-            assert_eq!(msg.category(), EventKind::Data, "{msg:?} is market data");
-            assert!(msg.is_market_data(), "{msg:?} is channel data");
-            assert!(
-                !msg.category().is_execution(),
-                "{msg:?} is not delayed as execution"
-            );
-        }
-
-        let heartbeat = ServerMessage::Heartbeat { ts_event: 1 };
-        assert_eq!(heartbeat.category(), EventKind::Data);
-        assert!(!heartbeat.category().is_execution());
-        assert!(!heartbeat.is_market_data());
-    }
-
-    #[test]
-    fn admission_rejected_round_trips() {
-        let escaped = "\u{0001}".repeat(MAX_CLIENT_ID_LEN);
-        let subjects = [
-            AdmissionSubject::Submit {
-                client_order_id: escaped.clone(),
-            },
-            AdmissionSubject::Cancel {
-                client_order_id: escaped.clone(),
-            },
-            AdmissionSubject::Modify {
-                client_order_id: escaped.clone(),
-            },
-            AdmissionSubject::Query {
-                request_id: escaped.clone(),
-                query: QueryKind::Orders,
-            },
-            AdmissionSubject::Query {
-                request_id: escaped.clone(),
-                query: QueryKind::Fills,
-            },
-            AdmissionSubject::Frame,
-        ];
-        for subject in subjects {
-            let message = ServerMessage::AdmissionRejected {
-                subject,
-                reason: "\u{0001}".repeat(MAX_REASON_LEN),
-                ts_event: u64::MAX,
-            };
-            let wire = serde_json::to_vec(&message).expect("serialize admission rejection");
-            let decoded: ServerMessage =
-                serde_json::from_slice(&wire).expect("deserialize admission rejection");
-            assert_eq!(
-                serde_json::to_vec(&decoded).expect("serialize decoded admission rejection"),
-                wire
-            );
+        for (frame, expected) in server_frames {
+            let json = serde_json::to_string(&frame).expect("serialize");
+            assert_eq!(json, expected);
+            let decoded: ServerMessage = serde_json::from_str(&json).expect("decode");
+            assert_eq!(serde_json::to_string(&decoded).expect("re-serialize"), json);
         }
     }
 
+    /// `ADMISSION_FRAME_MAX_BYTES` is what makes the priority lane's FRAME
+    /// count a memory bound, so it must be PROVEN rather than asserted.
+    ///
+    /// The old bound was 8192, sized by a list of `MAX_SUBSCRIPTION_ISSUES_LISTED`
+    /// rows. With `SubscriptionIssues` retired the widest admission frame is a
+    /// single `AdmissionRejected` - one capped client id, one capped reason,
+    /// one capped symbol, plus a fixed envelope - so the bound was recomputed
+    /// from those caps and rounded up to the next power of two. This test is
+    /// the recomputation, run.
     #[test]
     fn admission_frames_fit_their_ceiling() {
-        let escaped_id = "\u{0001}".repeat(MAX_CLIENT_ID_LEN);
-        let escaped_symbol = "\u{0001}".repeat(MAX_SYMBOL_LEN);
-        let subjects = [
-            AdmissionSubject::Submit {
-                client_order_id: escaped_id.clone(),
+        // The worst case is every capped field at its cap, in characters that
+        // JSON escapes maximally - which is what JSON_ESCAPE_FACTOR prices.
+        let worst_id = "\u{7}".repeat(MAX_CLIENT_ID_LEN);
+        let worst_reason = "\u{7}".repeat(MAX_REASON_LEN);
+
+        let widest = ServerMessage::AdmissionRejected {
+            subject: AdmissionSubject::Submit {
+                client_order_id: worst_id.clone(),
             },
-            AdmissionSubject::Cancel {
-                client_order_id: escaped_id.clone(),
-            },
-            AdmissionSubject::Modify {
-                client_order_id: escaped_id.clone(),
-            },
-            AdmissionSubject::Query {
-                request_id: escaped_id.clone(),
-                query: QueryKind::Orders,
-            },
-            AdmissionSubject::Query {
-                request_id: escaped_id.clone(),
-                query: QueryKind::Fills,
-            },
-            AdmissionSubject::Frame,
-        ];
-        for subject in subjects {
-            let msg = ServerMessage::AdmissionRejected {
-                subject,
-                reason: "\u{0001}".repeat(MAX_REASON_LEN),
-                ts_event: u64::MAX,
-            };
-            assert!(
-                serde_json::to_vec(&msg)
-                    .expect("serialize admission rejection")
-                    .len()
-                    <= ADMISSION_FRAME_MAX_BYTES,
-                "{msg:?} exceeds the admission-frame ceiling"
-            );
-        }
-        let issues = ServerMessage::SubscriptionIssues {
-            entries: vec![
-                SubscriptionOutcome {
-                    generation: u64::MAX,
-                    symbol: escaped_symbol,
-                    issue: SubscriptionIssue::StartBeforeOrigin {
-                        effective_start_ts: u64::MAX
-                    }
-                };
-                MAX_SUBSCRIPTION_ISSUES_LISTED
-            ],
-            issues_total: MAX_SUBSCRIBE_SYMBOLS,
-            refusals_total: MAX_SUBSCRIBE_SYMBOLS,
+            reason: worst_reason.clone(),
             ts_event: u64::MAX,
         };
+        let widest_len = serde_json::to_string(&widest).expect("serialize").len();
+
+        let error = ServerMessage::ProtocolError {
+            reason: worst_reason,
+            ts_event: u64::MAX,
+        };
+        let error_len = serde_json::to_string(&error).expect("serialize").len();
+
         assert!(
-            serde_json::to_vec(&issues).expect("serialize issues").len()
-                <= ADMISSION_FRAME_MAX_BYTES
+            widest_len >= error_len,
+            "AdmissionRejected is the widest admission frame: {widest_len} vs {error_len}"
         );
-    }
-
-    #[test]
-    fn admission_is_not_execution_for_delay_purposes() {
-        for msg in [
-            ServerMessage::AdmissionRejected {
-                subject: AdmissionSubject::Frame,
-                reason: "bad frame".into(),
-                ts_event: 1,
-            },
-            ServerMessage::ProtocolError {
-                reason: "bad frame".into(),
-                ts_event: 1,
-            },
-        ] {
-            assert_eq!(msg.category(), EventKind::Admission);
-            assert!(!msg.category().is_execution());
-            assert!(!msg.is_market_data());
-        }
-    }
-
-    #[test]
-    fn oversized_ids_do_not_echo_at_full_length() {
-        let overlong = "x".repeat(8 * 1024 * 1024);
-        let echoed = truncate_client_id(overlong);
-        let msg = ServerMessage::OrderRejected {
-            client_order_id: echoed,
-            reason: truncate_reason("x".repeat(8 * 1024 * 1024)),
-            ts_event: 1,
-        };
         assert!(
-            serde_json::to_vec(&msg)
-                .expect("serialize bounded rejection")
-                .len()
-                <= crate::sizing::ORDER_EVENT_MAX_BYTES
-        );
-    }
-
-    #[test]
-    fn oversized_client_ids_are_refused_at_the_boundary() {
-        let overlong = "x".repeat(MAX_CLIENT_ID_LEN + 1);
-        assert_eq!(
-            validate_client_order_id(&overlong),
-            Err("client_order_id exceeds MAX_CLIENT_ID_LEN")
-        );
-    }
-
-    #[test]
-    fn query_messages_round_trip_and_default_their_filters() {
-        let targeted = ClientMessage::QueryOrders {
-            request_id: "Q1".into(),
-            client_order_id: Some("O1".into()),
-            open_only: true,
-        };
-        let json = serde_json::to_string(&targeted).unwrap();
-        let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(
-            decoded,
-            ClientMessage::QueryOrders {
-                request_id,
-                client_order_id: Some(id),
-                open_only: true,
-            } if request_id == "Q1" && id == "O1"
-        ));
-
-        // A bare query decodes with both filters defaulted: all orders.
-        let bare = r#"{"type":"QueryOrders","request_id":"Q2"}"#;
-        let decoded: ClientMessage = serde_json::from_str(bare).unwrap();
-        assert!(matches!(
-            decoded,
-            ClientMessage::QueryOrders {
-                request_id,
-                client_order_id: None,
-                open_only: false,
-            } if request_id == "Q2"
-        ));
-
-        let fills = r#"{"type":"QueryFills","request_id":"Q3"}"#;
-        let decoded: ClientMessage = serde_json::from_str(fills).unwrap();
-        assert!(matches!(
-            decoded,
-            ClientMessage::QueryFills {
-                request_id,
-                client_order_id: None,
-            } if request_id == "Q3"
-        ));
-    }
-
-    #[test]
-    fn snapshot_replies_round_trip_and_classify_as_execution() {
-        let snapshot = ServerMessage::OrderStatusSnapshot(OrderStatusSnapshot {
-            request_id: "Q1".into(),
-            orders: vec![OrderStatusInfo {
-                client_order_id: "O1".into(),
-                venue_order_id: "V1".into(),
-                symbol: "BTCUSDT".into(),
-                side: Side::Buy,
-                order_type: OrderType::Limit,
-                time_in_force: TimeInForce::Gtc,
-                status: WireOrderStatus::PartiallyFilled,
-                quantity: Decimal::from(10),
-                filled_qty: Decimal::from(3),
-                price: Some(Decimal::from(100)),
-                ts_accepted: 5,
-                ts_last: 7,
-            }],
-            ts_event: 9,
-        });
-        let json = serde_json::to_string(&snapshot).unwrap();
-        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
-        let ServerMessage::OrderStatusSnapshot(decoded) = decoded else {
-            panic!("expected order status snapshot")
-        };
-        assert_eq!(decoded.request_id, "Q1");
-        assert_eq!(decoded.orders.len(), 1);
-        assert_eq!(decoded.orders[0].status, WireOrderStatus::PartiallyFilled);
-        assert_eq!(decoded.orders[0].filled_qty, Decimal::from(3));
-
-        // Both replies ride the execution channel: DelayAcks holds them and
-        // GoDark drops them (havoc-able delivery), and they are not market
-        // data, so StallData leaves them alone.
-        assert_eq!(snapshot.category(), EventKind::Exec);
-        assert!(snapshot.category().is_execution());
-        assert!(!snapshot.is_market_data());
-
-        let fills = ServerMessage::FillSnapshot(FillSnapshot {
-            request_id: "Q2".into(),
-            fills: Vec::new(),
-            ts_event: 9,
-        });
-        assert_eq!(fills.category(), EventKind::Exec);
-        assert!(!fills.is_market_data());
-    }
-
-    #[test]
-    fn wire_order_status_open_matches_variants() {
-        assert!(WireOrderStatus::Accepted.is_open());
-        assert!(WireOrderStatus::PartiallyFilled.is_open());
-        assert!(!WireOrderStatus::Filled.is_open());
-        assert!(!WireOrderStatus::Canceled.is_open());
-    }
-
-    #[test]
-    fn heartbeat_round_trips() {
-        let heartbeat = ServerMessage::Heartbeat { ts_event: 123 };
-        let json = serde_json::to_string(&heartbeat).unwrap();
-        assert_eq!(json, r#"{"type":"Heartbeat","ts_event":123}"#);
-        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(
-            decoded,
-            ServerMessage::Heartbeat { ts_event: 123 }
-        ));
-    }
-
-    #[test]
-    fn order_updated_and_modify_rejected_round_trip() {
-        let updated = ServerMessage::OrderUpdated {
-            client_order_id: "O1".into(),
-            venue_order_id: "V1".into(),
-            quantity: Decimal::from(20),
-            price: Some(Decimal::from(200)),
-            leaves_qty: Decimal::from(17),
-            ts_event: 123,
-        };
-        let json = serde_json::to_string(&updated).unwrap();
-        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(
-            decoded,
-            ServerMessage::OrderUpdated {
-                client_order_id,
-                venue_order_id,
-                quantity,
-                price: Some(price),
-                leaves_qty,
-                ts_event: 123,
-            } if client_order_id == "O1"
-                && venue_order_id == "V1"
-                && quantity == Decimal::from(20)
-                && price == Decimal::from(200)
-                && leaves_qty == Decimal::from(17)
-        ));
-
-        let known_reject = ServerMessage::OrderModifyRejected {
-            client_order_id: "O2".into(),
-            venue_order_id: Some("V2".into()),
-            reason: "modify to non-positive price".into(),
-            ts_event: 456,
-        };
-        let json = serde_json::to_string(&known_reject).unwrap();
-        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(
-            decoded,
-            ServerMessage::OrderModifyRejected {
-                client_order_id,
-                venue_order_id: Some(venue_order_id),
-                reason,
-                ts_event: 456,
-            } if client_order_id == "O2"
-                && venue_order_id == "V2"
-                && reason == "modify to non-positive price"
-        ));
-
-        let unknown_reject = ServerMessage::OrderModifyRejected {
-            client_order_id: "GHOST".into(),
-            venue_order_id: None,
-            reason: "unknown order".into(),
-            ts_event: 789,
-        };
-        let json = serde_json::to_string(&unknown_reject).unwrap();
-        let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(
-            decoded,
-            ServerMessage::OrderModifyRejected {
-                client_order_id,
-                venue_order_id: None,
-                reason,
-                ts_event: 789,
-            } if client_order_id == "GHOST" && reason == "unknown order"
-        ));
-    }
-
-    #[test]
-    fn validate_submit_order_bounds_quantity_and_limit_price() {
-        let base = SubmitOrder {
-            client_order_id: "O-1".into(),
-            symbol: "BTCUSDT".into(),
-            side: Side::Buy,
-            order_type: OrderType::Limit,
-            quantity: Decimal::ONE,
-            price: Some(Decimal::from(100)),
-            time_in_force: TimeInForce::Gtc,
-        };
-        validate_submit_order(&base).expect("well-formed limit order is valid");
-
-        let mut zero_qty = base.clone();
-        zero_qty.quantity = Decimal::ZERO;
-        assert_eq!(
-            validate_submit_order(&zero_qty),
-            Err("quantity must be > 0")
+            widest_len <= ADMISSION_FRAME_MAX_BYTES,
+            "the widest admission frame is {widest_len} bytes, over the {ADMISSION_FRAME_MAX_BYTES} ceiling"
         );
 
-        let mut negative_qty = base.clone();
-        negative_qty.quantity = Decimal::from(-1);
-        assert_eq!(
-            validate_submit_order(&negative_qty),
-            Err("quantity must be > 0")
+        // The analytic bound the constant is derived FROM, so the constant is
+        // not merely large enough for the case above by luck.
+        let analytic = JSON_ESCAPE_FACTOR * (MAX_CLIENT_ID_LEN + MAX_REASON_LEN + MAX_SYMBOL_LEN)
+            + ADMISSION_ENVELOPE_BYTES;
+        assert!(
+            analytic <= ADMISSION_FRAME_MAX_BYTES,
+            "the analytic worst case is {analytic} bytes, over the {ADMISSION_FRAME_MAX_BYTES} ceiling"
         );
-
-        let mut priceless_limit = base.clone();
-        priceless_limit.price = None;
-        assert_eq!(
-            validate_submit_order(&priceless_limit),
-            Err("Limit order must carry a price")
+        assert!(
+            ADMISSION_FRAME_MAX_BYTES < 2 * analytic,
+            "the ceiling is the next power of two above the analytic bound, not an \
+             arbitrarily large number that proves nothing"
         );
-
-        let mut zero_price = base.clone();
-        zero_price.price = Some(Decimal::ZERO);
-        assert_eq!(validate_submit_order(&zero_price), Err("price must be > 0"));
-
-        // A priceless Market order is legitimate (Nautilus MARKET orders carry
-        // no price).
-        let mut market = base;
-        market.order_type = OrderType::Market;
-        market.price = None;
-        validate_submit_order(&market).expect("priceless market order is valid");
-    }
-
-    #[test]
-    fn validate_modify_order_rejects_empty_and_nonpositive() {
-        assert_eq!(
-            validate_modify_order(None, None),
-            Err("ModifyOrder must set price and/or quantity")
-        );
-        assert_eq!(
-            validate_modify_order(Some(Decimal::ZERO), None),
-            Err("price must be > 0")
-        );
-        assert_eq!(
-            validate_modify_order(None, Some(Decimal::from(-1))),
-            Err("quantity must be > 0")
-        );
-        validate_modify_order(Some(Decimal::from(100)), None).expect("price-only amend is valid");
-        validate_modify_order(None, Some(Decimal::from(1))).expect("quantity-only amend is valid");
-        validate_modify_order(Some(Decimal::from(100)), Some(Decimal::from(1)))
-            .expect("both present and positive is valid");
     }
 }

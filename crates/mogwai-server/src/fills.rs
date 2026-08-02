@@ -65,7 +65,6 @@ pub(crate) fn count_penetrations(
     let mut source = source::build_history_source(
         symbol,
         Some(earliest.saturating_add(1)),
-        None,
         profiles,
         data_origin,
     )?;
@@ -115,7 +114,7 @@ mod tests {
     }
 
     fn tape(start: u64) -> Box<dyn TickSource> {
-        source::build_history_source("BTCUSDT", Some(start), None, &profiles(), TEST_ORIGIN)
+        source::build_history_source("BTCUSDT", Some(start), &profiles(), TEST_ORIGIN)
             .expect("configured deterministic BTC tape")
     }
 

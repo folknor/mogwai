@@ -2,33 +2,27 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! HTTP surface: shared app state plus every plain request/response route
-//! (`/instruments`, `/account`, `/clock`, `/trades`, `/quotes`, `/orders`,
+//! (`/instruments`, `/account`, `/clock`, `/trades`, `/quotes`,
 //! `/control/divergence`). The stateful, streaming websocket surface
 //! (`/ws`) lives in `ws.rs`; both share `AppState` and the order-entry
 //! validation gate (`process_order_cmd`) defined here.
 
 use std::sync::{Arc, atomic::Ordering};
 
-use axum::{
-    Json,
-    extract::State,
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
-};
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use mogwai_data::TickEvent;
 use mogwai_engine::MAX_ARMED_DIVERGENCES;
 use mogwai_protocol::{
-    ACCOUNT_HEADER, AccountId, AccountState, AdmissionSubject, ClientMessage, CommandClass,
-    InstrumentDef, MAX_HISTORY_LIMIT, MarketRegime, OrderType, QuoteTick, ServerClock,
-    ServerMessage, SimClock, TradeTick, control::Divergence, truncate_client_id, truncate_reason,
-    validate_client_order_id, validate_divergence, validate_market_regime, validate_modify_order,
-    validate_request_id, validate_submit_order,
+    AccountState, AdmissionSubject, ClientMessage, InstrumentDef, MAX_HISTORY_LIMIT, OrderType,
+    QuoteTick, ServerClock, ServerMessage, SimClock, TradeTick, control::Divergence,
+    truncate_client_id, truncate_reason, validate_client_order_id, validate_divergence,
+    validate_modify_order, validate_request_id, validate_submit_order,
 };
 use serde::Deserialize;
 
-use crate::accounts::{AccountRegistry, AccountSlot, AccountSummary, RegistryError};
 use crate::admission::{ExecLanes, Reservation};
 use crate::config::{Config, sim_now_ns, window_until_ns};
+use crate::run::Run;
 use crate::source;
 
 /// What one order-entry command came to. Every variant that carries frames also
@@ -55,12 +49,6 @@ pub(crate) enum OrderOutcome {
     /// an `AdmissionRejected`: conflating malformed with over-capacity would
     /// make an admission refusal unreadable as a load signal.
     Diagnostic(ServerMessage),
-    /// The account was destroyed between identity resolution and winning the
-    /// engine lock. Nothing was processed. Distinct from `Diagnostic` because
-    /// the HTTP surface owes this one a `410 Gone` status rather than a `200`
-    /// carrying a diagnostic body: a caller told "OK" would believe its order
-    /// was booked into a ledger nobody will ever read again.
-    Gone(ServerMessage),
 }
 
 /// Name what a refusal refused, so the consumer can translate it per command -
@@ -86,7 +74,6 @@ pub(crate) fn admission_subject(cmd: &ClientMessage) -> AdmissionSubject {
             request_id: request_id.clone(),
             query: mogwai_protocol::QueryKind::Fills,
         },
-        _ => AdmissionSubject::Frame,
     }
 }
 
@@ -124,9 +111,6 @@ pub(crate) fn boundary_error(cmd: &ClientMessage) -> Option<&'static str> {
                 .as_ref()
                 .and_then(|id| validate_client_order_id(id).err())
         }),
-        ClientMessage::Subscribe { .. } | ClientMessage::Unsubscribe { .. } => {
-            unreachable!("callers route Subscribe/Unsubscribe away before process_order_cmd")
-        }
     }
 }
 
@@ -198,14 +182,8 @@ fn boundary_refusal(cmd: &ClientMessage, reason: &str, ts: u64) -> ServerMessage
 ///    never asked, so nothing mutated: no venue order id burned, no order
 ///    resting.
 ///
-/// Shared by both order-entry surfaces (`POST /orders` and `/ws`) so the gate
-/// lives in exactly one place; the HTTP surface passes per-request lanes.
-/// The protocol-boundary gate, split out of `process_order_cmd` because it
-/// needs NO account: `submit_order_http` runs it before resolving identity, so
-/// a request refused here mints no slot. Section 3.2 of the multi-account spec
-/// requires that a rejected request create nothing, and a well-formed id on a
-/// malformed body would otherwise fill the registry to `max_accounts` with
-/// ghosts. `None` means the command cleared the boundary.
+/// The websocket order carrier uses this one gate for every command. `None`
+/// means the command cleared the protocol boundary.
 fn boundary_outcome(order_cmd: &ClientMessage, lanes: &ExecLanes, ts: u64) -> Option<OrderOutcome> {
     let reason = boundary_error(order_cmd)?;
     let Some(reservation) = lanes.try_reserve_boundary() else {
@@ -233,13 +211,13 @@ fn boundary_outcome(order_cmd: &ClientMessage, lanes: &ExecLanes, ts: u64) -> Op
 pub(crate) async fn process_order_cmd(
     order_cmd: ClientMessage,
     state: &AppState,
-    slot: &Arc<AccountSlot>,
+    run: &Arc<Run>,
     lanes: &ExecLanes,
-    act_delay: ActDelay,
+    _act_delay: ActDelay,
 ) -> OrderOutcome {
     // Sampled at entry for the boundary rejections below: they return before
     // any price synthesis, so entry-time is when they logically occur.
-    let ts = sim_now_ns(state.sim);
+    let ts = sim_now_ns(state.sim());
     if let Some(outcome) = boundary_outcome(&order_cmd, lanes, ts) {
         return outcome;
     }
@@ -250,33 +228,20 @@ pub(crate) async fn process_order_cmd(
     // when the venue ACTS, not as it was when the command arrived - and because
     // the step-2 `ts` re-sample below then dates the engine's events at act time
     // with no second re-sample needed.
-    if matches!(act_delay, ActDelay::PayHere)
-        && let Some(class) = CommandClass::of(&order_cmd)
-    {
-        let ms = slot.act_ms(class);
-        if ms > 0 {
-            tokio::time::sleep(
-                state
-                    .sim
-                    .wall_duration(crate::config::sim_duration_from_millis(ms)),
-            )
-            .await;
-        }
-    }
     // Re-sampled BEFORE the reading, not after the act sleep only in name: the
     // gated-limit reading is "the last print at or before the venue ACTED", so
     // handing it the entry-time `ts` would judge a delayed submit against the
     // tape as it was when the command arrived - the exact staleness the act
     // delay is placed above the reading to avoid.
-    let ts = sim_now_ns(state.sim);
+    let ts = sim_now_ns(state.sim());
     let (order_cmd, market_px) = market_reading(order_cmd, state, ts).await;
     // Re-sample after the market-price synthesis, which for a price-less MARKET
     // order may block ~100 ms on the checkpoint mutex and seek (S16). The
     // synthesis-failure reject and the engine events below all occur now.
-    let ts = sim_now_ns(state.sim);
+    let ts = sim_now_ns(state.sim());
     // A MARKET order still price-less after the stamp, for a symbol this venue
-    // DOES list, means `current_price` failed: the positioning seek could not
-    // reach sim-now within its budget (or the synthesis task itself died).
+    // DOES list, means `current_price` failed (most likely the synthesis task
+    // itself died).
     // Reject it here with the honest story - the client correctly sent no price
     // (nautilus never stamps a market order), so letting the engine's "submit
     // price required" fire would blame the client for the venue's own synthesis
@@ -309,17 +274,7 @@ pub(crate) async fn process_order_cmd(
             reservation,
         };
     }
-    let mut engine = slot.engine.lock().await;
-    // Rechecked HERE, holding the engine lock: `acquire` handing back a live
-    // slot is no guarantee it is still live by the time this lock is won, and a
-    // DELETE racing an in-flight order would otherwise fill into a removed
-    // engine while the caller is told it succeeded.
-    if slot.tombstoned.load(Ordering::Relaxed) {
-        return OrderOutcome::Gone(ServerMessage::ProtocolError {
-            reason: "account has been destroyed".into(),
-            ts_event: ts,
-        });
-    }
+    let mut engine = run.engine.lock().await;
     let shape = engine.book_shape();
     let Some(reservation) = lanes.reserve(&order_cmd, &shape) else {
         // The engine has NOT been asked to process anything, so nothing
@@ -338,144 +293,56 @@ pub(crate) async fn process_order_cmd(
     }
 }
 
+/// The router's share of the run. Deliberately thin: the clock, the history
+/// floor and the instrument all live on `Run`, which owns them, and are read
+/// through it rather than copied here - a second copy of the clock is a second
+/// thing that can be re-anchored out from under the tape it dates.
 #[derive(Clone)]
 pub(crate) struct AppState {
-    pub(crate) accounts: Arc<AccountRegistry>,
+    pub(crate) run: Arc<Run>,
     pub(crate) cfg: Config,
     pub(crate) profiles: Arc<source::InstrumentProfiles>,
-    /// Run clock shared with adapters over `/clock`.
-    pub(crate) sim: SimClock,
-    /// Earliest sim-time unix-ns instant the synthetic tape can serve, derived
-    /// once at boot as `sim.sim_ns(now) - backfill_horizon_ns`. The binding floor
-    /// for `/trades` and the anchor both source builders generate from, so the
-    /// data origin and the advertised clock cannot diverge.
-    pub(crate) data_origin_ns: u64,
-    /// Process-wide registry of shared synthesized tapes.
-    pub(crate) tapes: Arc<crate::tape::TapeRegistry>,
-    /// Process-wide ceiling on order commands sleeping out an armed ACT delay,
-    /// across every connection and BOTH order-entry surfaces. The per-connection
-    /// `pending_command_acts` bounds one client; this bounds the box, and it is
-    /// what stops an armed hour-long act delay plus a `POST /orders` flood from
-    /// parking unbounded axum tasks - `mogwai-server` installs no `tower`
-    /// concurrency or timeout layer that would catch that.
+    /// Process-wide ceiling on websocket commands sleeping out an armed ACT
+    /// delay. The per-connection lane bounds one client; this bounds the run.
     pub(crate) pending_acts: Arc<tokio::sync::Semaphore>,
 }
 
-/// A non-200 answer from `POST /orders`, boxed so the ordinary `Ok` path is not
-/// charged for the size of a whole `Response`.
-///
-/// It is a `Response` rather than a bare `StatusCode` because one refusal - the
-/// pending-act capacity refusal - owes the caller the same `AdmissionRejected`
-/// body the WS surface sends; every other refusal is still status-only.
-#[derive(Debug)]
-pub(crate) struct OrderHttpError(Box<axum::response::Response>);
-
-impl OrderHttpError {
-    /// The status this refusal will render. Only the tests ask: axum renders
-    /// the whole response on the serving path.
-    #[cfg(test)]
-    pub(crate) fn status(&self) -> StatusCode {
-        self.0.status()
+impl AppState {
+    pub(crate) fn sim(&self) -> SimClock {
+        self.run.sim
+    }
+    pub(crate) fn data_origin_ns(&self) -> u64 {
+        self.run.data_origin_ns()
     }
 }
 
-impl From<StatusCode> for OrderHttpError {
-    fn from(status: StatusCode) -> Self {
-        Self(Box::new(status.into_response()))
-    }
-}
-
-impl IntoResponse for OrderHttpError {
-    fn into_response(self) -> axum::response::Response {
-        *self.0
-    }
-}
-
-/// Whether the venue's ACT delay for this command has already been served.
-///
-/// Not a bare bool: the two call sites mean opposite things and a silent mix-up
-/// reintroduces the head-of-line stall the whole feature exists to avoid. `Paid`
-/// is what the detached act task passes AND what the WS inline (zero-delay) arm
-/// passes - the read loop must NEVER sleep here, even if a re-arm lands between
-/// the loop's `act_ms` load and this one.
+/// Marker proving the websocket dispatcher has served any ACT delay off its
+/// read loop before it invokes the common command gate.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ActDelay {
-    /// The caller already slept it off the read loop, or there was none.
+    /// The caller already slept it off the websocket read loop, or there was none.
     Paid,
-    /// Sleep it here, inline: `POST /orders` has no read loop to free.
-    PayHere,
 }
 
-/// Identity resolution, step one: parse only. No slot is created, so a caller
-/// that may still refuse the request for an unrelated reason can check the id
-/// first and acquire later.
-pub(crate) fn account_id_from_headers(
-    headers: &HeaderMap,
-) -> Result<AccountId, (StatusCode, String)> {
-    let raw = headers
-        .get(ACCOUNT_HEADER)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, format!("missing {ACCOUNT_HEADER}")))?
-        .to_str()
-        .map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("invalid {ACCOUNT_HEADER}: not printable ASCII"),
-            )
-        })?;
-    AccountId::parse(raw).map_err(|err| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("invalid {ACCOUNT_HEADER}: {err}"),
-        )
-    })
-}
-
-/// Identity resolution, step two: get-or-create. Called only on the path that
-/// will actually serve the request, so no 4xx leaves a slot behind.
-pub(crate) fn acquire_account(
-    state: &AppState,
-    id: &AccountId,
-) -> Result<Arc<AccountSlot>, (StatusCode, String)> {
-    state
-        .accounts
-        .acquire(id, crate::config::now_ns())
-        .map_err(|RegistryError::AtCapacity| {
-            (
-                StatusCode::TOO_MANY_REQUESTS,
-                "account capacity exhausted".into(),
-            )
-        })
-}
-
-pub(crate) fn account_from_headers(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Result<Arc<AccountSlot>, (StatusCode, String)> {
-    acquire_account(state, &account_id_from_headers(headers)?)
-}
-
-/// Control plane: arm a divergence to fire on its next trigger.
+/// Control plane: arm a divergence to fire on its next trigger. It is armed
+/// against the RUN, so it reaches every open connection: there is no account to
+/// divert it onto.
 pub(crate) async fn arm_divergence(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(div): Json<Divergence>,
 ) -> impl IntoResponse {
-    // Reject an invalid control payload before admission can create a slot.
-    // A typo must be a no-op, including for an otherwise valid account id.
+    // Reject an invalid control payload before anything is stored. A typo must
+    // be a no-op.
     if let Err(err) = validate_divergence(&div) {
         tracing::warn!(?div, err, "rejecting out-of-range divergence");
         return (StatusCode::BAD_REQUEST, err.to_string());
     }
-    let slot = match account_from_headers(&state, &headers) {
-        Ok(slot) => slot,
-        Err(err) => return err,
-    };
+    let run = &state.run;
     tracing::info!(?div, "arming divergence");
     // Validate at the arming boundary so an out-of-range knob (e.g. a
     // `PartialFillNext.fraction` outside `(0, 1]`) is rejected before it is
     // stored into server state or armed on the engine, rather than surfacing
-    // as a degenerate fill downstream. Mirrors the `validate_market_regime`
-    // gate on the subscription/history paths.
+    // as a degenerate fill downstream.
     // The operator-supplied reject reason is truncated HERE, at the arming
     // boundary, before the divergence is stored: the engine echoes it verbatim
     // into `OrderRejected.reason`, so an uncapped one would make a produced
@@ -491,7 +358,7 @@ pub(crate) async fn arm_divergence(
     };
     match div {
         Divergence::DelayAcks { ms } => {
-            slot.delay_ms.store(ms, Ordering::Relaxed);
+            run.delay_ms.store(ms, Ordering::Relaxed);
         }
         // STORE-not-merge, like every other server-owned window: one arm
         // REPLACES all six values, so an omitted field is armed as zero rather
@@ -504,12 +371,12 @@ pub(crate) async fn arm_divergence(
             modify_ack_ms,
             cancel_ack_ms,
         } => {
-            slot.submit_act_ms.store(submit_act_ms, Ordering::Relaxed);
-            slot.modify_act_ms.store(modify_act_ms, Ordering::Relaxed);
-            slot.cancel_act_ms.store(cancel_act_ms, Ordering::Relaxed);
-            slot.submit_ack_ms.store(submit_ack_ms, Ordering::Relaxed);
-            slot.modify_ack_ms.store(modify_ack_ms, Ordering::Relaxed);
-            slot.cancel_ack_ms.store(cancel_ack_ms, Ordering::Relaxed);
+            run.submit_act_ms.store(submit_act_ms, Ordering::Relaxed);
+            run.modify_act_ms.store(modify_act_ms, Ordering::Relaxed);
+            run.cancel_act_ms.store(cancel_act_ms, Ordering::Relaxed);
+            run.submit_ack_ms.store(submit_ack_ms, Ordering::Relaxed);
+            run.modify_ack_ms.store(modify_ack_ms, Ordering::Relaxed);
+            run.cancel_ack_ms.store(cancel_ack_ms, Ordering::Relaxed);
         }
         // GoDark/StallData windows are STORE-not-extend (S18): each arm overwrites
         // the absolute deadline with `now + ms`, so re-arming with a SMALLER `ms`
@@ -518,14 +385,14 @@ pub(crate) async fn arm_divergence(
         // a test cut a window short by re-posting a small one; an operator wanting a
         // longer window re-arms with the longer `ms`.
         Divergence::GoDark { ms } => {
-            slot.dark_until_ns.store(
-                window_until_ns(sim_now_ns(state.sim), ms),
+            run.dark_until_ns.store(
+                window_until_ns(sim_now_ns(state.sim()), ms),
                 Ordering::Relaxed,
             );
         }
         Divergence::StallData { ms } => {
-            slot.stall_until_ns.store(
-                window_until_ns(sim_now_ns(state.sim), ms),
+            run.stall_until_ns.store(
+                window_until_ns(sim_now_ns(state.sim()), ms),
                 Ordering::Relaxed,
             );
         }
@@ -535,8 +402,8 @@ pub(crate) async fn arm_divergence(
         // miss - unknown id, or already terminal - is refused with a 404 so
         // a scenario cannot believe it armed a fault that never happened.
         Divergence::CancelOpenOrderSilently { client_order_id } => {
-            let ts = sim_now_ns(state.sim);
-            if let Err(reason) = slot
+            let ts = sim_now_ns(state.sim());
+            if let Err(reason) = run
                 .engine
                 .lock()
                 .await
@@ -548,26 +415,26 @@ pub(crate) async fn arm_divergence(
             tracing::info!(%client_order_id, "silently canceled resting order server-side");
         }
         Divergence::ClearDivergences => {
-            // Lift both server-owned temporal windows FOR THIS ACCOUNT. `0` is the
+            // Lift both server-owned temporal windows. `0` is the
             // cleared sentinel: `delay_ms == 0` skips the exec pump's delay sleep,
             // and `now_ns() < 0` is never true so the dark and data-stall
             // guards are off. There is no backlog to replay because gated
             // frames are dropped.
-            slot.delay_ms.store(0, Ordering::Relaxed);
-            slot.dark_until_ns.store(0, Ordering::Relaxed);
-            slot.stall_until_ns.store(0, Ordering::Relaxed);
+            run.delay_ms.store(0, Ordering::Relaxed);
+            run.dark_until_ns.store(0, Ordering::Relaxed);
+            run.stall_until_ns.store(0, Ordering::Relaxed);
             // All six `CommandLatency` fields go with them. This clears what the
             // venue will do to commands it has NOT started acting on yet, and it
             // lifts an ack window off frames already queued (the pump reads that
             // one per event at dequeue). It does NOT reach into an act delay
             // already being served: that command's sleep was read once, at
             // detach, and a venue that has begun acting does not un-begin.
-            slot.submit_act_ms.store(0, Ordering::Relaxed);
-            slot.modify_act_ms.store(0, Ordering::Relaxed);
-            slot.cancel_act_ms.store(0, Ordering::Relaxed);
-            slot.submit_ack_ms.store(0, Ordering::Relaxed);
-            slot.modify_ack_ms.store(0, Ordering::Relaxed);
-            slot.cancel_ack_ms.store(0, Ordering::Relaxed);
+            run.submit_act_ms.store(0, Ordering::Relaxed);
+            run.modify_act_ms.store(0, Ordering::Relaxed);
+            run.cancel_act_ms.store(0, Ordering::Relaxed);
+            run.submit_ack_ms.store(0, Ordering::Relaxed);
+            run.modify_ack_ms.store(0, Ordering::Relaxed);
+            run.cancel_ack_ms.store(0, Ordering::Relaxed);
         }
         // Server-ownership contract (pins B.4 / E.11): `DelayAcks`, `GoDark`,
         // `StallData`, and `ClearDivergences` are server-owned controls with no
@@ -600,7 +467,7 @@ pub(crate) async fn arm_divergence(
             // does not fire") was wrong - the arm had been evicted. The status
             // stays `202` because the requested arm WAS accepted; the body is
             // where the collateral damage is named.
-            if let Some(shed) = slot.engine.lock().await.arm(engine_div) {
+            if let Some(shed) = run.engine.lock().await.arm(engine_div) {
                 let body = format!(
                     "armed; the engine queue was at its {MAX_ARMED_DIVERGENCES}-entry cap, \
                      so the oldest armed divergence was discarded to make room: {shed:?}"
@@ -613,48 +480,25 @@ pub(crate) async fn arm_divergence(
     (StatusCode::ACCEPTED, String::new())
 }
 
+/// The instrument table, which under one-venue-per-run is a one-element list.
+/// Served from `Run::instrument` rather than from the profile map so the route
+/// reports what the run actually serves: the map is a boot-time lookup that can
+/// still hold the built-in defaults, and answering from it is how a consumer
+/// would come to believe a second symbol is subscribable.
 pub(crate) async fn instruments(State(state): State<AppState>) -> Json<Vec<InstrumentDef>> {
-    Json(state.profiles.instrument_defs())
+    Json(vec![state.run.instrument.clone()])
 }
 
 /// Pull route for the venue's current account snapshot.
 ///
-/// AccountState is execution-owned and is otherwise only pushed with an order
-/// event. An adapter connecting over either transport pulls this once so the
-/// bridge's account row exists before the first order is worked, rather than
-/// learning the account only when the first fill's AccountState arrives. The
-/// route is transport-agnostic, so it also serves the HttpOrders execution
-/// profile that opens no /ws socket and never sends Subscribe.
-pub(crate) async fn account(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<AccountState>, (StatusCode, String)> {
-    let slot = account_from_headers(&state, &headers)?;
-    let ts = sim_now_ns(state.sim);
-    let mut engine = slot.engine.lock().await;
-    // Checked under the engine lock, like the order path: a DELETE that lands
-    // between `acquire` and this lock has already tombstoned the slot, and
-    // answering from a removed ledger would tell the caller its run is alive.
-    if slot.tombstoned.load(Ordering::Relaxed) {
-        return Err((StatusCode::GONE, "account has been destroyed".into()));
-    }
-    Ok(Json(engine.account_snapshot(ts)))
-}
-
-pub(crate) async fn list_accounts(State(state): State<AppState>) -> Json<Vec<AccountSummary>> {
-    Json(state.accounts.summaries().await)
-}
-
-pub(crate) async fn delete_account(
-    State(state): State<AppState>,
-    axum::extract::Path(raw): axum::extract::Path<String>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    let id = AccountId::parse(&raw).map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
-    state
-        .accounts
-        .destroy(&id)
-        .then_some(StatusCode::OK)
-        .ok_or((StatusCode::NOT_FOUND, "account not found".into()))
+/// `AccountState` is execution-owned and is otherwise only pushed with an order
+/// event. An adapter pulls this once on connect so the bridge's account row
+/// exists before the first order is worked, rather than learning the account
+/// only when the first fill's `AccountState` arrives.
+pub(crate) async fn account(State(state): State<AppState>) -> Json<AccountState> {
+    let ts = sim_now_ns(state.sim());
+    let mut engine = state.run.engine.lock().await;
+    Json(engine.account_snapshot(ts))
 }
 
 pub(crate) async fn clock(State(state): State<AppState>) -> Json<ServerClock> {
@@ -665,10 +509,10 @@ pub(crate) async fn clock(State(state): State<AppState>) -> Json<ServerClock> {
     // clock. `data_origin_ns` is the boot-derived floor; the horizon is echoed so
     // the client can report the floor in its own terms.
     Json(ServerClock {
-        sim: state.sim,
-        server_now_ns: sim_now_ns(state.sim),
-        data_origin_ns: state.data_origin_ns,
-        backfill_horizon_ns: state.cfg.backfill_horizon_ns,
+        sim: state.sim(),
+        server_now_ns: sim_now_ns(state.sim()),
+        data_origin_ns: state.data_origin_ns(),
+        warmup_ns: state.run.warmup_ns,
     })
 }
 
@@ -680,11 +524,10 @@ pub(crate) async fn clock(State(state): State<AppState>) -> Json<ServerClock> {
 /// untouched: the engine's "submit price required" rejection is correct for a
 /// limit, it only over-reached for the price-less market case.
 ///
-/// Synthesis (`positioned_generator` -> `source_at_or_before`) locks the
-/// symbol's own checkpoint mutex and, on a cold/deep index, walks up to
-/// `MAX_HISTORY_SEEK_TICKS`. `/trades` already pushes the identical synthesis
-/// onto `spawn_blocking` rather than running it inline on the tokio worker
-/// (see `trades` above); this does the same, so a burst of price-less market
+/// Synthesis (`build_history_source` -> `source_at_or_before`) locks the run's
+/// checkpoint mutex and walks the residual past the nearest checkpoint.
+/// `/trades` pushes the identical synthesis onto `spawn_blocking` rather than
+/// running it inline on the tokio worker; this does the same, so a burst of price-less market
 /// orders cannot stall the runtime's worker pool or serialize behind a seeked
 /// `/trades` request (or vice versa) any longer than the symbol's shared
 /// index itself requires - other symbols' requests do not queue here at all
@@ -714,8 +557,8 @@ async fn market_reading(
     if order.order_type == OrderType::Market && order.price.is_none() {
         let symbol = order.symbol.clone();
         let profiles = Arc::clone(&state.profiles);
-        let data_origin = state.data_origin_ns;
-        let sim_now = sim_now_ns(state.sim);
+        let data_origin = state.data_origin_ns();
+        let sim_now = sim_now_ns(state.sim());
         order.price = match tokio::task::spawn_blocking(move || {
             source::current_price(&symbol, &profiles, data_origin, sim_now)
         })
@@ -732,7 +575,7 @@ async fn market_reading(
     if gated_limit {
         let symbol = order.symbol.clone();
         let profiles = Arc::clone(&state.profiles);
-        let data_origin = state.data_origin_ns;
+        let data_origin = state.data_origin_ns();
         let reading = tokio::task::spawn_blocking(move || {
             crate::fills::last_trade_at_or_before(&symbol, ts, &profiles, data_origin)
         })
@@ -748,134 +591,25 @@ async fn market_reading(
     (ClientMessage::SubmitOrder(order), None)
 }
 
-/// HTTP order-entry surface for profiles that do not use `/ws` for orders.
-///
-/// The events come back in the response body as they always have. This path has
-/// no pump, no socket and no backlog, so there is nothing for admission control
-/// to protect: it gets lanes constructed FRESH PER REQUEST and dropped with it,
-/// holding their own receivers so the forgotten permits are never stranded.
-/// A refusal is therefore unreachable by construction - a per-request budget
-/// starts empty of charges - and is mapped to a 500 with its reason rather than
-/// silently unwrapped.
-///
-/// Both halves of an armed `CommandLatency` are applied INLINE here: there is no
-/// read loop to free and the response IS the ack, so the act delay makes the
-/// mutation late and the ack delay makes the response late. It does take the
-/// process-wide pending-act permit while it sleeps, because the socket this
-/// request holds is exactly the resource the WS ticket protects, and a refused
-/// permit answers `503` with the same `AdmissionRejected` body the WS surface
-/// sends. Per the control's contract it does NOT add `DelayAcks`: that window
-/// belongs to the WS pump alone, and the adapter refuses to arm it under an
-/// HTTP-orders profile for that very reason.
-pub(crate) async fn submit_order_http(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(msg): Json<ClientMessage>,
-) -> Result<Json<Vec<ServerMessage>>, OrderHttpError> {
-    match msg {
-        ClientMessage::Subscribe { .. } | ClientMessage::Unsubscribe { .. } => {
-            Err(StatusCode::BAD_REQUEST.into())
-        }
-        order_cmd => {
-            // Identity is PARSED before anything else and the slot is acquired
-            // only on the path that will actually serve the request: the
-            // boundary gate runs first, so a malformed command carrying a
-            // well-formed id leaves no account behind (spec 3.2).
-            let id = account_id_from_headers(&headers)
-                .map_err(|(status, _)| OrderHttpError::from(status))?;
-            let (lanes, _receivers) = ExecLanes::detached();
-            // A boundary refusal is answered before an account is resolved at
-            // all, so no slot exists and no armed window applies: these responses
-            // are prompt and undelayed, matching the WS surface, where the
-            // boundary check also runs before the detach decision.
-            if let Some(outcome) = boundary_outcome(&order_cmd, &lanes, sim_now_ns(state.sim)) {
-                return http_order_response(outcome);
-            }
-            let slot =
-                acquire_account(&state, &id).map_err(|(status, _)| OrderHttpError::from(status))?;
-            let class = CommandClass::of(&order_cmd);
-            let act_ms = class.map_or(0, |class| slot.act_ms(class));
-            // The permit and the sleep are decided from ONE load: passing
-            // `PayHere` only when this load saw a nonzero delay means a re-arm
-            // racing this request can never make it sleep without a permit.
-            let permit = if act_ms > 0 {
-                let Ok(permit) = Arc::clone(&state.pending_acts).try_acquire_owned() else {
-                    return Err(OrderHttpError(Box::new(
-                        (
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            Json(vec![ServerMessage::AdmissionRejected {
-                                subject: admission_subject(&order_cmd),
-                                reason: "venue pending-act capacity exhausted".into(),
-                                ts_event: sim_now_ns(state.sim),
-                            }]),
-                        )
-                            .into_response(),
-                    )));
-                };
-                Some(permit)
-            } else {
-                None
-            };
-            let act_delay = if permit.is_some() {
-                ActDelay::PayHere
-            } else {
-                ActDelay::Paid
-            };
-            let outcome = process_order_cmd(order_cmd, &state, &slot, &lanes, act_delay).await;
-            let ack_ms = class.map_or(0, |class| slot.ack_ms(class));
-            if ack_ms > 0 {
-                tokio::time::sleep(
-                    state
-                        .sim
-                        .wall_duration(crate::config::sim_duration_from_millis(ack_ms)),
-                )
-                .await;
-            }
-            // Held across the ack sleep too: the request is still parked on a
-            // socket until the response is rendered.
-            drop(permit);
-            http_order_response(outcome)
-        }
-    }
-}
-
-fn http_order_response(outcome: OrderOutcome) -> Result<Json<Vec<ServerMessage>>, OrderHttpError> {
-    match outcome {
-        OrderOutcome::Produced { events, .. } | OrderOutcome::Refused { events, .. } => {
-            Ok(Json(events))
-        }
-        OrderOutcome::Diagnostic(frame) => Ok(Json(vec![frame])),
-        OrderOutcome::Gone(_) => Err(StatusCode::GONE.into()),
-        OrderOutcome::NotAdmitted(frame) => {
-            tracing::error!(
-                ?frame,
-                "per-request lanes refused admission; this should be unreachable"
-            );
-            Err(StatusCode::INTERNAL_SERVER_ERROR.into())
-        }
-    }
-}
-
 #[derive(Debug, Deserialize)]
 pub(crate) struct HistoryQuery {
     pub(crate) symbol: String,
     pub(crate) start: Option<u64>,
     pub(crate) end: Option<u64>,
     pub(crate) limit: Option<usize>,
-    #[serde(default)]
-    pub(crate) regime: Option<String>,
 }
 
 pub(crate) async fn trades(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
 ) -> Result<Json<Vec<TradeTick>>, (StatusCode, String)> {
+    // No `regime` parameter: the market regime is boot config for the whole run
+    // now, so history and the live tape are the same realization by
+    // construction rather than by a client remembering to ask for the same one.
     let limit = normalize_limit(query.limit);
-    let mut regime = parse_history_regime(query.regime.as_deref());
-    strip_unfireable_reopen_gap(&mut regime, state.data_origin_ns);
     let profiles = Arc::clone(&state.profiles);
-    let data_origin = state.data_origin_ns;
-    let sim_now = sim_now_ns(state.sim);
+    let data_origin = state.data_origin_ns();
+    let sim_now = sim_now_ns(state.sim());
     let HistoryQuery {
         symbol, start, end, ..
     } = query;
@@ -893,7 +627,7 @@ pub(crate) async fn trades(
             "requested start {start} precedes data_origin_ns {data_origin}; the tape cannot serve before its origin"
         );
         tracing::warn!(start, data_origin, "refusing off-tape trades window");
-        return Err((StatusCode::UNPROCESSABLE_ENTITY, body));
+        return Err((StatusCode::BAD_REQUEST, body));
     }
 
     // The symmetric ceiling: tape past sim-now does not exist yet. Every
@@ -901,7 +635,7 @@ pub(crate) async fn trades(
     // the generator is deterministic, so serving a future `start` would extend
     // the shared index past the clock and hand the client tomorrow's tape - a
     // look-ahead leak no real venue can produce. Refused with the same loud
-    // `422` as the origin floor, so "you asked for data that cannot exist yet"
+    // `400` as the origin floor, so "you asked for data that cannot exist yet"
     // stays distinguishable from "no trades happened".
     if let Some(start) = start
         && start > sim_now
@@ -910,9 +644,19 @@ pub(crate) async fn trades(
             "requested start {start} exceeds sim-now {sim_now}; the tape cannot serve past the clock"
         );
         tracing::warn!(start, sim_now, "refusing future trades window");
-        return Err((StatusCode::UNPROCESSABLE_ENTITY, body));
+        return Err((StatusCode::BAD_REQUEST, body));
     }
 
+    // An explicit `end` past the clock is CLAMPED rather than refused, and that
+    // asymmetry with the `start` refusal above is deliberate. A start past
+    // sim-now asks for a window that lies entirely in the future and can only
+    // be a caller error; an end past sim-now is the ordinary "give me
+    // everything up to now" request, which a consumer writes by stamping its
+    // OWN clock - a hair ahead of the venue's under any skew or acceleration.
+    // Refusing that would fail every honest warmup fetch to prevent nothing:
+    // the clamp serves exactly the data that exists and no more, so nothing is
+    // silently short about it.
+    //
     // Clamp the served tail at sim-now for the same reason: an `end` past the
     // clock - or a no-`end` request, which otherwise grinds out the full
     // `limit` however far into the future that lands - must not stream ticks
@@ -927,7 +671,7 @@ pub(crate) async fn trades(
     // tokio worker, so a burst of `/trades` requests cannot stall the async
     // runtime's worker pool.
     let ticks = match tokio::task::spawn_blocking(move || {
-        bounded_trades(&symbol, start, end, limit, regime, &profiles, data_origin)
+        bounded_trades(&symbol, start, end, limit, &profiles, data_origin)
     })
     .await
     {
@@ -965,7 +709,6 @@ pub(crate) fn bounded_trades(
     start: Option<u64>,
     end: Option<u64>,
     limit: usize,
-    regime: Option<MarketRegime>,
     profiles: &source::InstrumentProfiles,
     data_origin: u64,
 ) -> Vec<TradeTick> {
@@ -973,8 +716,7 @@ pub(crate) fn bounded_trades(
         return Vec::new();
     }
 
-    let Some(mut merged) =
-        source::build_history_source(symbol, start, regime, profiles, data_origin)
+    let Some(mut merged) = source::build_history_source(symbol, start, profiles, data_origin)
     else {
         return Vec::new();
     };
@@ -997,56 +739,4 @@ pub(crate) fn bounded_trades(
     }
 
     out
-}
-
-pub(crate) fn parse_history_regime(raw: Option<&str>) -> Option<MarketRegime> {
-    let raw = raw?;
-    let Ok(regime) = serde_json::from_str::<MarketRegime>(raw) else {
-        tracing::warn!(raw, "dropping malformed market regime");
-        return None;
-    };
-    validate_regime_or_clean(Some(regime)).0
-}
-
-/// D3's API-boundary half: a `ReopenGap` whose `at_ts` sits at or before the
-/// tape origin can never fire - the generator consumes it at construction
-/// with a warning and the realized tape is byte-identical to clean - so
-/// decide the degradation loudly here at the boundary instead of deep in the
-/// generator. Stripping also keeps the request on the checkpoint-index fast
-/// path: any `Some(regime)` bypasses the shared index (a regime'd realization
-/// is a different tape), so a doomed gap would otherwise buy the slow
-/// from-origin drain for a tape identical to clean. Returns the stripped
-/// `at_ts` so the WS carrier can announce the strip on the wire; the HTTP
-/// history path has no diagnostic side channel and ignores it.
-pub(crate) fn strip_unfireable_reopen_gap(
-    regime: &mut Option<MarketRegime>,
-    data_origin_ns: u64,
-) -> Option<u64> {
-    if let Some(MarketRegime::ReopenGap { at_ts, .. }) = *regime
-        && at_ts <= data_origin_ns
-    {
-        tracing::warn!(
-            at_ts,
-            data_origin_ns,
-            "ReopenGap at or before the tape origin can never fire; serving the clean tape"
-        );
-        *regime = None;
-        return Some(at_ts);
-    }
-    None
-}
-
-pub(crate) fn validate_regime_or_clean(
-    regime: Option<MarketRegime>,
-) -> (Option<MarketRegime>, bool) {
-    let Some(regime) = regime else {
-        return (None, false);
-    };
-    match validate_market_regime(&regime) {
-        Ok(()) => (Some(regime), false),
-        Err(err) => {
-            tracing::warn!(?regime, err, "dropping out-of-range market regime");
-            (None, true)
-        }
-    }
 }

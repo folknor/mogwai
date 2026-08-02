@@ -9,7 +9,8 @@
 //! at once - precisely the seam being certified. The harness reproduces
 //! `sweeper.rs`'s three-phase pass synchronously (pending scans, one walk per
 //! symbol, apply) rather than sharing code with it: the async loop, the teardown
-//! race and the per-session delivery are not what a fill distribution measures.
+//! race and the per-connection delivery are not what a fill distribution
+//! measures.
 //! It does NOT reimplement the walk or the gate - both are the shipped
 //! functions, which is the whole point. A golden computed by a hand-rolled tape
 //! loop would certify nothing but itself.
@@ -149,7 +150,6 @@ fn run_scenario(penetration_ticks: u32, profiles: &InstrumentProfiles) -> Vec<Ce
                     let mut tape = crate::source::build_history_source(
                         SYMBOL,
                         Some(ORIGIN),
-                        None,
                         profiles,
                         ORIGIN,
                     )?;

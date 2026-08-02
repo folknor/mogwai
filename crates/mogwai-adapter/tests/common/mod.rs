@@ -36,7 +36,7 @@ use std::{
 use mogwai_adapter::{MOGWAI_VENUE, MogwaiExecClientConfig, MogwaiExecutionClient};
 use mogwai_protocol::{
     ClientMessage, FillSnapshot, OrderFilled, OrderStatusInfo, OrderStatusSnapshot, ServerMessage,
-    TransportProfile, WireOrderStatus,
+    WireOrderStatus,
 };
 use nautilus_common::{
     cache::Cache,
@@ -210,30 +210,6 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
                 .unwrap_or_else(|| "[]".to_string());
             respond_json(stream, "200 OK", &body).await;
         }
-    } else if path.starts_with("/orders") {
-        state
-            .http_request_times
-            .lock()
-            .expect("http request times mutex")
-            .push(Instant::now());
-        if state.hang_orders.load(Ordering::Relaxed) {
-            // Accept the POST but never respond: the client's per-request
-            // timeout must elapse and surface the order as a reject. Hold the
-            // socket so the request does not fail with a connection reset.
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            return;
-        }
-        let reply = serde_json::from_slice::<ClientMessage>(&body)
-            .ok()
-            .as_ref()
-            .and_then(|message| venue_query_reply(message, &state));
-        match reply {
-            Some(reply) => {
-                let body = serde_json::to_string(&vec![reply]).expect("encode venue query reply");
-                respond_json(stream, "200 OK", &body).await;
-            }
-            None => respond_json(stream, "200 OK", "[]").await,
-        }
     } else if path.starts_with("/control/divergence") {
         state.control_hits.fetch_add(1, Ordering::Relaxed);
         state
@@ -338,6 +314,25 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
     .await;
 
     use futures_util::{SinkExt, StreamExt};
+    // The venue streams the one run-wide tape without a subscribe frame. Give
+    // the client a scheduling turn after the handshake to record its local
+    // Nautilus subscription before the first tape frame arrives.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let dark = state.dark_ms.load(Ordering::Relaxed);
+    if dark > 0 {
+        tokio::time::sleep(Duration::from_millis(dark as u64)).await;
+    }
+    let frames = state.ws_trades.lock().expect("ws trades mutex").clone();
+    for trade in frames {
+        drop(ws.send(Message::Text(trade.into())).await);
+    }
+    if state.ws_server_pings.load(Ordering::Relaxed) > 0 {
+        drop(ws.send(Message::Ping(Vec::new().into())).await);
+    }
+    if state.close_after_trades.load(Ordering::Relaxed) {
+        drop(ws.close(None).await);
+        return;
+    }
     while let Some(Ok(msg)) = ws.next().await {
         match msg {
             Message::Ping(_) => {
@@ -348,7 +343,7 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
             }
             Message::Text(text) => {
                 match serde_json::from_str::<ClientMessage>(&text) {
-                    Ok(ClientMessage::Subscribe { .. }) => {
+                    Ok(ClientMessage::ModifyOrder { .. }) => {
                         // A close-after-trades leg serves its one batch only on
                         // the first subscribe; a reconnect after the close gets
                         // an empty, silent socket so the held trade is not
@@ -361,15 +356,11 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
                         // Optionally open the blackout window first so the
                         // suppressed-during-dark frames are dropped by the stub.
                         let dark = state.dark_ms.load(Ordering::Relaxed);
-                        let frames = state.ws_trades.lock().expect("ws trades mutex").clone();
                         if dark > 0 {
                             // During the dark window the stub holds (drops) every
                             // application frame, then resumes. We model the
                             // suppression by emitting nothing for `dark` ms.
                             tokio::time::sleep(Duration::from_millis(dark as u64)).await;
-                        }
-                        for trade in frames {
-                            drop(ws.send(Message::Text(trade.into())).await);
                         }
                         // After the data frames, optionally probe the client's
                         // inbound Ping -> Pong reply path.
@@ -531,7 +522,6 @@ pub fn venue_fill_row(
 /// installs the event sink before invoking this helper.
 pub async fn connected_exec_client(
     base_url: String,
-    transport_profile: TransportProfile,
     cache: Rc<RefCell<Cache>>,
     sink_rx: &mut UnboundedReceiver<ExecutionEvent>,
 ) -> MogwaiExecutionClient {
@@ -541,7 +531,6 @@ pub async fn connected_exec_client(
         // account they never chose. The fake venue seeds this account.
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
-        transport_profile,
         ..MogwaiExecClientConfig::default()
     };
     let core = ExecutionClientCore::new(

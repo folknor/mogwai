@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: 2026 folknor
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The lifecycle gates' venue: a small warmup so boot is cheap, and an unpaced
+# tape so a connection sees frames immediately rather than waiting out real
+# inter-trade gaps.
+
+# Five simulated minutes of history, materialized at boot.
+warmup_ns = 300000000000
+
+# Unthrottled: the gates assert on WHAT arrives, not on its cadence.
+speed = 0.0

@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 folknor
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The divergence gate's venue. Paced rather than unthrottled: an unpaced tape
+# leaves megabytes of frames in the kernel's socket buffers, so a blackout armed
+# at wall instant T is still draining pre-T frames well after it, and "no market
+# data arrived" becomes untestable. Pacing keeps at most one frame in flight, so
+# a suppression window is observable as silence.
+
+warmup_ns = 300000000000
+
+speed = 1.0
+# Cap the wait between two ticks so the gate sees a steady trickle whatever the
+# generator's inter-arrival draw happens to be.
+gap_cap_ms = 200

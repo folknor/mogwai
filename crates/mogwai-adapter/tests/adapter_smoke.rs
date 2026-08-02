@@ -21,7 +21,6 @@ use common::{
     StubState, bound_stub, cached_order, connected_exec_client, instrument_id, next_exec_event,
 };
 use mogwai_adapter::MOGWAI_VENUE;
-use mogwai_protocol::TransportProfile;
 use nautilus_common::{
     cache::Cache,
     clients::ExecutionClient,
@@ -40,23 +39,16 @@ use tokio::sync::mpsc::unbounded_channel;
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn connect_seeds_initial_account_state() {
-    for transport_profile in [TransportProfile::WsStreaming, TransportProfile::HttpOrders] {
-        let state = Arc::new(StubState::default());
-        state.serve_account.store(true, Ordering::Relaxed);
-        let base_url = bound_stub(Arc::clone(&state)).await;
+    let state = Arc::new(StubState::default());
+    state.serve_account.store(true, Ordering::Relaxed);
+    let base_url = bound_stub(Arc::clone(&state)).await;
 
-        let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
-        replace_exec_event_sender(sink_tx);
+    let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
+    replace_exec_event_sender(sink_tx);
 
-        let cache = Rc::new(RefCell::new(Cache::default()));
-        let client =
-            connected_exec_client(base_url, transport_profile, Rc::clone(&cache), &mut sink_rx)
-                .await;
-        assert!(
-            client.get_account().is_some(),
-            "account registered for {transport_profile:?}"
-        );
-    }
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    let client = connected_exec_client(base_url, Rc::clone(&cache), &mut sink_rx).await;
+    assert!(client.get_account().is_some(), "account registered");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -89,8 +81,7 @@ async fn adapter_submit_drives_live_exec_events() {
 
     let cache = Rc::new(RefCell::new(Cache::default()));
     let order = cached_order(&cache);
-    let client =
-        connected_exec_client(base_url, TransportProfile::WsStreaming, cache, &mut sink_rx).await;
+    let client = connected_exec_client(base_url, cache, &mut sink_rx).await;
     client
         .submit_order(SubmitOrder::new(
             TraderId::from("MOGWAI-001"),

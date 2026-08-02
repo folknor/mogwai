@@ -27,9 +27,7 @@ use std::time::Instant;
 
 use mogwai_protocol::{
     ClientMessage, CommandClass, ServerMessage,
-    sizing::{
-        BOUNDARY_REFUSAL_BYTES, BookShape, penetrated_fill_max_bytes, worst_case_output_bytes,
-    },
+    sizing::{BOUNDARY_REFUSAL_BYTES, BookShape, worst_case_output_bytes},
     truncate_reason,
 };
 use tokio::sync::{Semaphore, mpsc};
@@ -47,20 +45,21 @@ pub(crate) const ADMISSION_LANE_FRAMES: usize = 64;
 /// Outstanding PROMISES of a future priority frame - one per live replay, held
 /// for the replay's whole life. Accounted separately from queue depth: drawn
 /// from the same 64-slot pool, 64 healthy replays would leave zero capacity for
-/// any actual refusal and the 65th subscribe would close a connection whose
-/// priority lane is completely empty. Sized at `MAX_SUBSCRIBE_SYMBOLS` because
-/// that is exactly how many replays one connection can have.
-pub(crate) const ADMISSION_PROMISE_TICKETS: usize = mogwai_protocol::MAX_SUBSCRIBE_SYMBOLS;
+/// any actual refusal would leave a connection whose priority lane is
+/// completely empty unable to state why it is closing.
+///
+/// One connection owns one unconditional replay - it is attached to the run's
+/// single tape on upgrade, with no subscribe frame - hence exactly one future
+/// refusal promise. Deliberately no longer tied to a wire subscribe cap: there
+/// is no wire subscribe.
+pub(crate) const ADMISSION_PROMISE_TICKETS: usize = 1;
 /// Per-connection ceiling on order commands detached by an armed act latency
 /// and not yet acted on. An armed hour-long act delay would otherwise let one
 /// connection spawn unbounded pending tasks. A pending act is one COMMAND, not
 /// a payload, so a frame count is the right unit here.
 pub(crate) const PENDING_ACT_SLOTS: usize = 256;
-/// Process-wide ceiling on commands sleeping out an armed act delay, across
-/// every connection and both order-entry surfaces. `PENDING_ACT_SLOTS` bounds
-/// one client; this bounds the box, and it is what stops an armed hour-long act
-/// delay plus a `POST /orders` flood from parking unbounded axum tasks - there
-/// is no `tower` concurrency or timeout layer on this server.
+/// Process-wide ceiling on websocket commands sleeping out an armed act delay.
+/// `PENDING_ACT_SLOTS` bounds one client; this bounds the run.
 pub(crate) const GLOBAL_PENDING_ACT_SLOTS: usize = 4096;
 
 /// WS 1013 "Try Again Later": the venue is refusing further work on this
@@ -288,6 +287,21 @@ pub(crate) struct Ticket {
     _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
+/// What an armed suppression window is allowed to do to one frame.
+///
+/// `GoDark` gates the writer wholesale and `StallData` gates market data only,
+/// which is what makes a stalled feed and a dead venue distinguishable to a
+/// client. `Terminal` is exempt from both: the run announcing that it reached
+/// its declared duration is not venue output a scenario armed away, and
+/// dropping it would make a planned completion indistinguishable from the death
+/// a blackout is imitating - the exact confusion `RunComplete` exists to end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FrameClass {
+    MarketData,
+    Execution,
+    Terminal,
+}
+
 /// A frame already rendered to its wire bytes, plus the facts the writer needs.
 /// Serializing at the PRODUCER (the tape thread, the admission path, the
 /// order path) is what makes the byte budget exact rather than estimated: the
@@ -295,7 +309,7 @@ pub(crate) struct Ticket {
 /// cost off the single writer task.
 pub(crate) struct OutboundFrame {
     pub(crate) payload: Arc<str>,
-    pub(crate) is_market_data: bool,
+    pub(crate) class: FrameClass,
     /// Held-lane byte charge, released when this frame is dropped. `None` for
     /// frames that were never charged: market data and heartbeats. Never read -
     /// it travels with the frame so the budget is released exactly once, at
@@ -372,6 +386,7 @@ pub(crate) struct ExecLanes {
 /// Sending into a lane whose receiver was never created returns `Err` and would
 /// strand forgotten permits, so the receivers are handed back rather than
 /// dropped on the floor.
+#[cfg(test)]
 pub(crate) struct LaneReceivers {
     #[allow(dead_code, reason = "kept alive so sends succeed; read only by tests")]
     pub(crate) held_rx: mpsc::UnboundedReceiver<HeldFrame>,
@@ -395,19 +410,20 @@ impl ExecLanes {
         }
     }
 
-    /// Lanes with no socket behind them, for the HTTP order path (constructed
-    /// FRESH PER REQUEST and dropped with it) and for tests. Budgets are the
+    /// Lanes with no socket behind them, for tests. Budgets are the
     /// ordinary sizes, not a saturating sentinel: a sentinel would have to
     /// survive the `u32` conversion in `try_reserve` and would make this the
     /// one path where the reservation arithmetic is untested, while a
     /// per-request budget can never refuse a single command anyway because it
     /// starts empty of charges.
+    #[cfg(test)]
     pub(crate) fn detached() -> (Self, LaneReceivers) {
         Self::detached_with(AdmissionLimits::default())
     }
 
     /// `detached`, at budgets of the caller's choosing. Tests only in practice:
     /// it is how a unit test reaches a refusal without producing 8 MiB.
+    #[cfg(test)]
     pub(crate) fn detached_with(limits: AdmissionLimits) -> (Self, LaneReceivers) {
         let (held_tx, held_rx) = mpsc::unbounded_channel();
         let (prio_tx, prio_rx) = mpsc::unbounded_channel();
@@ -423,13 +439,19 @@ impl ExecLanes {
         self.held_budget
             .try_reserve(worst_case_output_bytes(cmd, shape))
     }
+    /// Reserve worst-case output for one penetration sweep batch: `orders`
+    /// fills plus the single `AccountState` that follows them. The sweep is
+    /// venue-originated, so there is no command to size against - the shape and
+    /// the batch width are the whole input.
     pub(crate) fn reserve_penetrated(
         &self,
         shape: &BookShape,
         orders: usize,
     ) -> Option<Reservation> {
         self.held_budget
-            .try_reserve(penetrated_fill_max_bytes(shape, orders))
+            .try_reserve(mogwai_protocol::sizing::penetrated_fill_max_bytes(
+                shape, orders,
+            ))
     }
 
     /// Reserve capacity for a protocol-boundary refusal, whose worst case is a
@@ -484,13 +506,12 @@ impl ExecLanes {
                 reason: truncate_reason(reason),
                 ts_event,
             },
-            // No free-text `reason` field, BY DESIGN: every outcome is a typed
-            // `SubscriptionIssue` and the entry list is capped at
-            // `MAX_SUBSCRIPTION_ISSUES_LISTED`, which is what keeps the frame
-            // under `ADMISSION_FRAME_MAX_BYTES` without a truncation step.
-            // Named explicitly rather than left to the catch-all so the next
-            // reason-carrying variant is not silently emitted untruncated.
-            issues @ ServerMessage::SubscriptionIssues { .. } => issues,
+            ServerMessage::HavocDiagnostic { reason, sim_now_ns } => {
+                ServerMessage::HavocDiagnostic {
+                    reason: truncate_reason(reason),
+                    sim_now_ns,
+                }
+            }
             other => other,
         };
         // Unreachable by construction (every field is a String, a number or a
@@ -507,19 +528,10 @@ impl ExecLanes {
         self.prio_tx
             .send(Outbound::Frame(OutboundFrame {
                 payload: Arc::from(payload),
-                is_market_data: false,
+                class: FrameClass::Execution,
                 charge: None,
                 slot: Some(slot),
             }))
-            .map_err(|_| LaneClosed)
-    }
-
-    /// Queue the reasoned close. It needs no lane slot: it is sent after the
-    /// read loop has already stopped taking new work, and the writer stops on
-    /// it.
-    pub(crate) fn send_close(&self, close: CloseSpec) -> Result<(), LaneClosed> {
-        self.prio_tx
-            .send(Outbound::Close(close))
             .map_err(|_| LaneClosed)
     }
 
@@ -556,7 +568,7 @@ impl ExecLanes {
                     class,
                     frame: OutboundFrame {
                         payload: Arc::from(payload),
-                        is_market_data: false,
+                        class: FrameClass::Execution,
                         charge: Some(charge),
                         slot: None,
                     },
@@ -565,6 +577,17 @@ impl ExecLanes {
         }
         // Whatever the batch did not use goes back when `reservation` drops.
         Ok(())
+    }
+
+    /// Close the connection with a stated reason, jumping the held lane.
+    ///
+    /// Deliberately needs no ticket: a close is the venue's last word, and
+    /// making it queue behind the market data the peer is not reading is how a
+    /// reasoned close turns into a bare socket teardown.
+    pub(crate) fn send_close(&self, close: CloseSpec) -> Result<(), LaneClosed> {
+        self.prio_tx
+            .send(Outbound::Close(close))
+            .map_err(|_| LaneClosed)
     }
 }
 
@@ -700,10 +723,10 @@ mod tests {
     #[test]
     fn many_live_replays_do_not_exhaust_the_priority_queue() {
         let (lanes, _rx) = ExecLanes::detached();
-        let promises: Vec<_> = (0..=ADMISSION_LANE_FRAMES)
+        let promises: Vec<_> = (0..ADMISSION_PROMISE_TICKETS)
             .map(|_| lanes.reserve_promise().expect("live replay promise"))
             .collect();
-        assert_eq!(promises.len(), ADMISSION_LANE_FRAMES + 1);
+        assert_eq!(promises.len(), ADMISSION_PROMISE_TICKETS);
         assert!(
             lanes.reserve_admission().is_some(),
             "promises do not consume queue slots"
@@ -711,9 +734,9 @@ mod tests {
     }
 
     #[test]
-    fn the_promise_pool_covers_a_full_subscribe() {
+    fn the_promise_pool_covers_the_one_run_replay() {
         let (lanes, _rx) = ExecLanes::detached();
-        let promises: Vec<_> = (0..mogwai_protocol::MAX_SUBSCRIBE_SYMBOLS)
+        let promises: Vec<_> = (0..ADMISSION_PROMISE_TICKETS)
             .map(|_| {
                 lanes
                     .reserve_promise()
