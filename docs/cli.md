@@ -110,8 +110,15 @@ clients to the run it started rather than to the address it landed on. The
 nautilus adapter does this through `MogwaiDataClientConfig::for_run` /
 `MogwaiExecClientConfig::for_run`, which check `/health` on every connect and
 refuse - terminally, logging `venue identity mismatch` - when the address is
-serving a different run. A venue that cannot be probed at all is used rather
-than judged: an unanswered probe is a transport failure, not a wrong venue.
+serving a different run.
+
+Two outcomes are deliberately NOT a mismatch, and they are reported as different
+things because they are different things. A probe that gets no usable answer -
+the request failed, or returned an error status, or returned something that is
+not JSON - is a transport failure, indistinguishable from the socket failing the
+same way, so the connection proceeds. A probe that IS answered by a venue
+reporting no `run_seed` is version skew: nothing failed, the venue simply
+predates run identity, and the log says so rather than blaming the network.
 
 A launcher that CAPTURES the child's stderr must also DRAIN it, continuously,
 from the moment of spawn. Logs go to stderr by design, a pipe holds roughly

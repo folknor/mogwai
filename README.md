@@ -149,10 +149,11 @@ let venue = launch(LaunchSpec {
 })?;
 
 // 2. Both clients speak for ONE account against ONE ledger, so they take one
-//    account id. Nothing on the wire notices if they disagree.
-// `for_run` binds them to THIS run, not merely to the address it landed on:
-// the port is ephemeral and is freed before the venue exits, so a client that
-// only knows where to dial cannot tell its own run from whatever answers next.
+//    account id - nothing on the wire notices if they disagree - and `for_run`
+//    binds them to THIS run rather than to the address it happened to land on.
+//    The port is ephemeral and is freed before the venue exits, so a client
+//    that only knows where to dial cannot tell its own run from whatever
+//    answers there next.
 let account_id = AccountId::from("MOGWAI-001");
 let data = MogwaiDataClientConfig::for_run(venue.record(), account_id.clone());
 let exec = MogwaiExecClientConfig::for_run(venue.record(), account_id);

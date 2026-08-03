@@ -228,12 +228,52 @@ pub(crate) struct WsConnectionConfig {
     pub(crate) identity: Option<RunIdentityCheck>,
 }
 
-/// Runs the identity check, turning "could not ask" into a distinct outcome
-/// from "asked, and it is someone else".
+/// What an identity probe established. Three outcomes, not two: only one of
+/// them refuses the connection, and the other two are refused-to-refuse for
+/// DIFFERENT reasons that must not be reported as each other.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum IdentityOutcome {
+    /// The venue named this client's run.
+    Confirmed,
+    /// No usable answer - a transport error, an error status, or a body that is
+    /// not JSON. Indistinguishable from the socket failing the same way.
+    Unreachable(String),
+    /// Answered, well-formed, and carrying no run identity at all. This is
+    /// VERSION SKEW, not a transport failure: the venue predates run identity.
+    /// It was filed under `Unreachable` once, which made a real skew
+    /// undiscoverable by anyone grepping for the category it was filed under.
+    Unidentified(String),
+    /// Answered, by a different run.
+    Mismatch(String),
+}
+
+/// Sorts a probe result into its outcome.
 ///
-/// An unreachable venue is NOT a mismatch: a health probe can fail for the same
-/// transport reasons the socket can, and refusing terminally on that would turn
-/// a blip into a dead client. Only a venue that answers with a different run
+/// Split out so the classification is testable without a socket - the bug this
+/// exists to prevent was a correctly-worded detail filed under a contradicting
+/// headline, which no black-box assertion on behaviour would have caught,
+/// because all three non-mismatch paths behave identically.
+pub(crate) fn classify_identity(result: Result<(), String>) -> IdentityOutcome {
+    match result {
+        Ok(()) => IdentityOutcome::Confirmed,
+        Err(reason) if reason.starts_with(IDENTITY_UNREACHABLE) => {
+            IdentityOutcome::Unreachable(reason)
+        }
+        Err(reason) if reason.starts_with(IDENTITY_NOT_REPORTED) => {
+            IdentityOutcome::Unidentified(reason)
+        }
+        Err(reason) => IdentityOutcome::Mismatch(reason),
+    }
+}
+
+/// Runs the identity check, turning "could not ask" and "asked, got no answer
+/// to this question" into distinct outcomes from "asked, and it is someone
+/// else".
+///
+/// Neither non-answer is a mismatch. A probe can fail for the same transport
+/// reasons the socket can, and refusing terminally on that would turn a blip
+/// into a dead client; a venue too old to report a run cannot be judged by a
+/// check it does not implement. Only a venue that answers, as a different run,
 /// earns the refusal.
 async fn verify_run_identity(
     check: &(
@@ -243,24 +283,40 @@ async fn verify_run_identity(
      ),
     label: &'static str,
 ) -> Result<(), String> {
-    match check().await {
-        Ok(()) => Ok(()),
-        Err(reason) if reason.starts_with(IDENTITY_UNREACHABLE) => {
+    match classify_identity(check().await) {
+        IdentityOutcome::Confirmed => Ok(()),
+        IdentityOutcome::Unreachable(reason) => {
             tracing::warn!(
                 socket = label,
                 %reason,
-                "could not confirm which run this venue is serving; proceeding, because an \
-                 unanswered probe is a transport failure rather than a wrong venue"
+                "could not reach this venue to confirm which run it is serving; proceeding, \
+                 because an unanswered probe is a transport failure rather than a wrong venue"
             );
             Ok(())
         }
-        Err(reason) => Err(reason),
+        IdentityOutcome::Unidentified(reason) => {
+            tracing::warn!(
+                socket = label,
+                %reason,
+                "this venue does not report a run at all, so this client cannot verify it is \
+                 the one it was launched against; proceeding, but the venue and this build are \
+                 out of step - rebuild the older one to get the check back"
+            );
+            Ok(())
+        }
+        IdentityOutcome::Mismatch(reason) => Err(reason),
     }
 }
 
-/// Prefix marking an identity probe that could not be answered at all, as
-/// opposed to one answered by the wrong run.
+/// Prefix marking an identity probe that got no usable answer - the request
+/// failed, or returned an error status, or returned something that is not JSON.
 pub(crate) const IDENTITY_UNREACHABLE: &str = "unreachable: ";
+
+/// Prefix marking an identity probe that WAS answered, correctly, by a venue
+/// that reports no run at all. Distinct from [`IDENTITY_UNREACHABLE`] because
+/// nothing failed: this is version skew, and calling it a transport failure
+/// sends whoever reads the log looking for a network problem that is not there.
+pub(crate) const IDENTITY_NOT_REPORTED: &str = "unidentified: ";
 
 /// Asks the venue at this address which run it is serving.
 ///
@@ -671,6 +727,48 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use super::*;
+
+    /// A venue that ANSWERS, correctly, and reports no run is version skew - not
+    /// a transport failure, and not a mismatch.
+    ///
+    /// All three non-mismatch paths behave identically (the connection
+    /// proceeds), so no assertion on behaviour can tell them apart; only the
+    /// category distinguishes them, and only this test pins it. The skew case
+    /// was filed under `Unreachable` once, which put a correct detail under a
+    /// headline contradicting it and hid a real version mismatch from anyone
+    /// grepping the category it was filed as.
+    #[test]
+    fn a_venue_that_reports_no_run_is_skew_not_a_transport_failure() {
+        let skew = classify_identity(Err(format!(
+            "{IDENTITY_NOT_REPORTED}http://x/health answered without a run_seed"
+        )));
+        assert!(
+            matches!(skew, IdentityOutcome::Unidentified(_)),
+            "an answered probe with no run is skew, got {skew:?}"
+        );
+
+        for unreachable in [
+            format!("{IDENTITY_UNREACHABLE}http://x/health: connection refused"),
+            format!("{IDENTITY_UNREACHABLE}http://x/health answered 500"),
+            format!("{IDENTITY_UNREACHABLE}http://x/health is not JSON: eof"),
+        ] {
+            let outcome = classify_identity(Err(unreachable.clone()));
+            assert!(
+                matches!(outcome, IdentityOutcome::Unreachable(_)),
+                "{unreachable} is no usable answer, got {outcome:?}"
+            );
+        }
+
+        // Anything not carrying a category prefix is the venue answering as
+        // someone else, which is the only outcome that refuses.
+        assert!(matches!(
+            classify_identity(Err(
+                "expected run 7, but this address is serving run 42".to_owned()
+            )),
+            IdentityOutcome::Mismatch(_)
+        ));
+        assert_eq!(classify_identity(Ok(())), IdentityOutcome::Confirmed);
+    }
 
     #[test]
     fn reconnect_policy_backoff_grows_and_clamps() {

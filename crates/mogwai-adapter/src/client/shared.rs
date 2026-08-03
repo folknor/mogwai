@@ -33,7 +33,7 @@ use tokio::task::JoinHandle;
 use crate::{
     clock::fetch_clock,
     convert,
-    lifecycle::{HttpQuota, IDENTITY_UNREACHABLE, RunIdentityCheck},
+    lifecycle::{HttpQuota, IDENTITY_NOT_REPORTED, IDENTITY_UNREACHABLE, RunIdentityCheck},
 };
 
 /// One message queued for timed delivery through the latency pump: the wall
@@ -507,8 +507,8 @@ pub(crate) fn run_identity_check(
                 let Some(reported) = health.get("run_seed").and_then(serde_json::Value::as_u64)
                 else {
                     return Err(format!(
-                        "{IDENTITY_UNREACHABLE}{url} reports no run_seed; the venue predates run \
-                     identity"
+                        "{IDENTITY_NOT_REPORTED}{url} answered without a run_seed; the venue \
+                         predates run identity"
                     ));
                 };
                 if reported == expected {
