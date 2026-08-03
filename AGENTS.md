@@ -29,7 +29,9 @@ A Cargo workspace, five crates under `crates/`:
   offline-analysis lineage.
 - `mogwai-server` - the axum binary that owns the sockets, the clock and replay
   pacing, synthesizing market data per subscription; exposes `/health`, `/ws`,
-  `/control/divergence`, `/orders`, `/instruments` and `/trades`. `serve` runs
+  `/control/divergence`, `/instruments`, `/trades`, `/quotes`, `/account` and
+  `/clock`. Order entry is websocket-only - the `POST /orders` carrier went with
+  the HTTP transport profiles. `serve` runs
   ONE venue in the foreground for one run and owns no PID, log or config files:
   it reports its bound address as a single JSON readiness line on stdout,
   and `PR_SET_PDEATHSIG` makes the kernel kill it when its launcher dies. There

@@ -201,6 +201,20 @@ pub(crate) fn build_live_source(
 /// A source positioned at `start`, RESUMED from the run's checkpoint chain
 /// rather than re-walked from the origin. `None` means the tape origin, which
 /// is checkpoint zero and therefore free.
+///
+/// The `MergeSource` around a ONE-element vector is not a leftover from the
+/// multi-symbol era and must not be "simplified" away. `TickSource::seek_to`
+/// CONSUMES the tick it returns, so something has to hold that first in-window
+/// tick until the stream is read; `MergeSource`'s per-source head buffer is what
+/// does it. Unwrapping this to the bare source silently drops the tick at
+/// exactly `start` - a one-tick-late history window that no type would catch.
+/// Replacing it means writing an equivalent one-tick pushback, which is the same
+/// object with a narrower name.
+///
+/// That `start` is INCLUSIVE is relied on rather than incidental: the fill
+/// sweeper passes `from_ns + 1` precisely to get a window that excludes the
+/// instant it already processed, which only works if the tick at the requested
+/// instant is emitted.
 pub(crate) fn build_history_source(
     symbol: &str,
     start: Option<u64>,

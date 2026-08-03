@@ -381,14 +381,18 @@ Or both. There are no exceptions.
   mogwai BUILDS against the pinned crates.io nautilus release (0.61), never
   against `research/` and no longer against a sibling checkout; see `AGENTS.md`.
 
-## Hardcoded-value and env-var inventory (read-only sweep, 2026-07-01)
+## Hardcoded-value and env-var inventory (swept 2026-07-01, re-verified 2026-08-03)
 
-STALE BY CONSTRUCTION, and not covered by the removal rule at the top of this
-file: it is a point-in-time catalogue rather than a set of work items, so
-nothing here gets removed on completion and nothing re-sweeps it. Entries have
-already been found describing code that no longer exists. Treat every line as a
-LEAD to verify against the source, never as a statement of fact, and re-sweep
-the section wholesale before relying on it.
+STALE BY CONSTRUCTION between sweeps, and not covered by the removal rule at the
+top of this file: it is a point-in-time catalogue rather than a set of work
+items, so nothing here gets removed on completion and nothing re-sweeps it
+automatically. The 2026-08-03 pass corrected six entries that had drifted -
+`MAX_HISTORY_LIMIT` (1000 to 50_000), `CHECKPOINT_K` (8192 to 262_144), a
+`/orders` route that no longer exists, `gap_cap_ms` which no longer exists
+anywhere, `sim_epoch_ns` which became derived-and-refused rather than a knob,
+and a `NO_COLOR` entry that briefly went stale with `man` and came back with it.
+That hit rate is the reason for the standing instruction: treat every line as a
+LEAD to verify against the source, never as a statement of fact.
 
 Catalogue only, for later evaluation of what deserves to become a knob - nothing
 here was changed. Pervasive test-fixture literals (repeated `BTCUSDT`/`BTC`/
@@ -420,8 +424,8 @@ reads:
 ### Cross-crate couplings worth reconciling
 
 - Correctly single-sourced from `mogwai-protocol` (the pattern to follow):
-  `DEFAULT_REQUEST_TIMEOUT_SECS` (30) and `MAX_HISTORY_LIMIT` (1000) - the adapter
-  references these rather than re-hardcoding them.
+  `DEFAULT_REQUEST_TIMEOUT_SECS` (30) and `MAX_HISTORY_LIMIT` (50_000) - the
+  adapter references these rather than re-hardcoding them.
 - `default_instruments()` BTCUSDT seed lives in `mogwai-protocol` but its seven
   literals are duplicated verbatim in two of that crate's own tests, and the smoke
   test's fixed order shape implicitly depends on it.
@@ -460,15 +464,18 @@ Inline literals (no named const):
   `--addr` flag is gone, so ephemeral loopback is the only endpoint and it is
   reported on stdout as the readiness line, and on stderr as `mogwai listening`.
 - HTTP route strings (`/health`, `/account`, `/instruments`, `/trades`,
-  `/quotes`, `/clock`, `/orders`, `/ws`, `/control/divergence`) as inline
+  `/quotes`, `/clock`, `/ws`, `/control/divergence`) as inline
   literals, no shared registry with the adapter's route segments.
-- `Config::default()`: `speed 1.0`, `gap_cap_ms 1000`, `server_heartbeat_ms 0`,
-  `warmup_ns 86_400_000_000_000` (24h), `sim_epoch_ns 0`.
+- `Config::default()`: `speed 1.0`, `server_heartbeat_ms 0`,
+  `warmup_ns 86_400_000_000_000` (24h). `gap_cap_ms` no longer exists anywhere in
+  the workspace, and `sim_epoch_ns` is no longer a config key at all - it is
+  DERIVED as `TAPE_ORIGIN_NS + warmup_ns`, and a config file stating it is
+  refused by the parser.
 - Lifecycle timeout consts: `SHUTDOWN_GRACE 5s`, `TAPE_SLEEP_POLL 20ms`,
   `TAPE_HEADROOM_POLL 5ms`.
 - Channel capacity `1024` duplicated inline for the writer channel and the
   exec-delay pump channel (different traffic classes, no shared const).
-- Synthesis limits: `CHECKPOINT_K 8192`. The test-side `HORIZON_S 86_400.0`
+- Synthesis limits: `CHECKPOINT_K 262_144`. The test-side `HORIZON_S 86_400.0`
   stands in for the production `warmup_ns` default as a plain literal and can
   silently drift from it.
 
@@ -537,7 +544,10 @@ golden-test seed.
   lto fat / codegen-units 1; `rust-version 1.96`, `resolver 3`. The nautilus
   deps live in `mogwai-adapter/Cargo.toml`, not root, and are five crates.io
   dependencies pinned at 0.61 with default-features off. `brokkr.toml` only sets
-  `project = "mogwai"`. Root `mogwai.toml` carries the run knobs (`sim_epoch_ns 0`,
-  `wall_anchor_ns 0`, `speed 1.0`, `gap_cap_ms 1000`, `server_heartbeat_ms 0`,
-  `run_duration_ns 0`, `warmup_ns`, `fanout_depth 4096`,
-  `zero_speed_stall_ms 5000`, and the funded `balances` table).
+  `project = "mogwai"`. Root `mogwai.toml` is an EXAMPLE run config, not one the
+  server reads (nothing consults the working directory): `speed 1.0`,
+  `server_heartbeat_ms 0`, `run_duration_ns 0`, `warmup_ns` 24h,
+  `fanout_depth 65536`, `zero_speed_stall_ms 5000`, the fill-band and admission
+  knobs, and the funded `balances` table. It states neither `sim_epoch_ns` nor
+  `wall_anchor_ns` - both are derived at boot, and the former is refused as a
+  key.
