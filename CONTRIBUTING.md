@@ -30,7 +30,9 @@ cargo test                       # the test suite
 cargo test -p <crate> <NAME>     # focused tests by name filter
 ```
 
-See [`AGENTS.md`](AGENTS.md) for the full codebase conventions and build rules.
+See [`AGENTS.md`](AGENTS.md) for the full codebase conventions and build rules,
+and [`LLM.md`](LLM.md) for how LLM-based tools are used here and what separation
+is maintained around differently-licensed sources.
 
 ## New source files
 
