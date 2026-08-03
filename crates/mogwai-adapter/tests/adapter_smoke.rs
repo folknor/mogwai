@@ -207,6 +207,84 @@ async fn adapter_submit_drives_live_exec_events() {
     }
 }
 
+/// A venue that labels its ledger differently from this client is SERVED, not
+/// refused and not silently ignored.
+///
+/// Both halves of that used to fail. The connect path asserted equality and
+/// killed the client; the pushed path dropped every mismatched snapshot, so a
+/// client would take its fills while its balances quietly stopped moving. Both
+/// were per-account-slot invariants that outlived the slots: one venue is one
+/// run is one ledger, so the account this connection carries is the only one
+/// there is and a label cannot mean it belongs elsewhere.
+///
+/// The label here is deliberately nothing like the configured `MOGWAI-001`.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn an_account_labelled_differently_is_still_served() {
+    let state = Arc::new(StubState::default());
+    state.serve_account.store(true, Ordering::Relaxed);
+    {
+        let mut frames = state.ws_exec_frames.lock().expect("ws exec frames mutex");
+        frames.push(
+            r#"{"type":"OrderAccepted","client_order_id":"O-1","venue_order_id":"V-1","ts_event":10}"#
+                .to_string(),
+        );
+        frames.push(
+            r#"{"type":"OrderFilled","client_order_id":"O-1","venue_order_id":"V-1","trade_id":"T-1","symbol":"BTCUSDT","side":"Buy","last_qty":"1","last_px":"100.00","leaves_qty":"0","commission":"0","commission_currency":"USDT","liquidity_side":"taker","ts_event":11}"#
+                .to_string(),
+        );
+        frames.push(
+            r#"{"type":"AccountState","account_id":"SANDBOX-042","balances":[{"currency":"USDT","total":"9900","free":"9900","locked":"0"}],"positions":[{"symbol":"BTCUSDT","quantity":"1","avg_px":"100.00"}],"ts_event":12}"#
+                .to_string(),
+        );
+    }
+    let base_url = bound_stub(Arc::clone(&state)).await;
+
+    let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
+    replace_exec_event_sender(sink_tx);
+
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    let order = cached_order(&cache);
+    // Connecting at all is the first half: this pulls GET /account, which used
+    // to be a fatal equality check.
+    let client = connected_exec_client(base_url, cache, &mut sink_rx).await;
+    client
+        .submit_order(SubmitOrder::new(
+            TraderId::from("MOGWAI-001"),
+            Some(ClientId::from("MOGWAI-EXEC")),
+            StrategyId::from("S-001"),
+            instrument_id(),
+            order.client_order_id(),
+            order.init_event().clone(),
+            None,
+            None,
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+        ))
+        .expect("submit order");
+
+    let timeout = Duration::from_secs(2);
+    let mut saw_account = false;
+    for _ in 0..4 {
+        if let ExecutionEvent::Account(account) = next_exec_event(&mut sink_rx, timeout).await {
+            let usdt = account
+                .balances
+                .iter()
+                .find(|b| b.currency.code.as_str() == "USDT")
+                .expect("account carries a USDT balance");
+            assert_eq!(usdt.total.as_decimal(), rust_decimal::Decimal::from(9900));
+            saw_account = true;
+            break;
+        }
+    }
+    assert!(
+        saw_account,
+        "a differently-labelled account snapshot must reach the sink, not be dropped"
+    );
+}
+
 /// The one test that proves the conditional refusal is actually gone end to
 /// end: a real nautilus `StopMarketOrder` through the real `ExecutionClient`,
 /// over a real socket, producing `Submitted -> Accepted -> Triggered -> Filled`

@@ -135,17 +135,35 @@ async fn fetch_account(
         .map_err(FetchAccountError::Other)
 }
 
-fn validate_account_snapshot(
-    state: &mogwai_protocol::AccountState,
-    expected: AccountId,
-) -> anyhow::Result<()> {
-    ensure!(
-        state.account_id.as_str() == expected.as_ref(),
-        "account snapshot belongs to {}, expected {}",
-        state.account_id.as_str(),
-        expected,
-    );
-    Ok(())
+/// Notes the venue's account label when it differs from the configured one.
+///
+/// This was a FATAL equality check, and killing it is the point. Under the
+/// retired per-account model a client named a slot and the venue honoured it, so
+/// a snapshot bearing another id meant the venue had routed someone else's
+/// account here and adopting it would have corrupted this one. One venue is now
+/// one run is one LEDGER: the connection carries the only account there is,
+/// there is nothing to be misrouted from, and the venue's id is a label rather
+/// than a key. An equality check is a per-slot invariant that outlived the
+/// slots.
+///
+/// It also could not be satisfied. The venue reported a bare `MOGWAI` for one
+/// release - legal as a `mogwai_protocol::AccountId`, and unconstructable as a
+/// nautilus one, which parses `ISSUER-NUMBER` - so no configured value could
+/// equal it and every run died on connect. That specific id is fixed venue-side,
+/// but a check that can deadlock a run over a label is worth removing on its own
+/// terms rather than repairing.
+///
+/// Differing is still worth SAYING once, at connect: it means the venue config
+/// and the client config name the account differently, which is confusing when
+/// reading two logs side by side even though nothing downstream depends on it.
+fn note_account_label(state: &mogwai_protocol::AccountState, configured: AccountId) {
+    if state.account_id.as_str() != configured.as_ref() {
+        tracing::info!(
+            venue_account = %state.account_id.as_str(),
+            configured_account = %configured,
+            "the venue labels its ledger differently from this client; using the configured id"
+        );
+    }
 }
 async fn ship_server_havoc(
     http: &HttpClient,
@@ -784,7 +802,7 @@ impl ExecutionClient for MogwaiExecutionClient {
         // recreate the exact first-fill cache-miss this fix exists to eliminate.
         match fetch_account(&self.http, &self.http_quota, &http_base_url).await {
             Ok(state) => {
-                validate_account_snapshot(&state, self.config.account_id)?;
+                note_account_label(&state, self.config.account_id);
                 handle_exec_message(ServerMessage::AccountState(state), &self.exec_context());
                 self.await_account_registered().await?;
             }
@@ -1200,7 +1218,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                     return Err(anyhow::Error::new(err).context("position status venue truth"));
                 }
             };
-        validate_account_snapshot(&state, self.config.account_id)?;
+        note_account_label(&state, self.config.account_id);
         // The venue's snapshot instant is the honest `ts_last` for every row:
         // the wire `Position` carries no per-symbol activity timestamp, and
         // dating a report off the client's own last-seen event would put a
@@ -2369,19 +2387,19 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
 }
 
 fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext) {
-    // The pushed path is the one that would contaminate SILENTLY: below, the
-    // CONFIGURED id is stamped onto the nautilus event regardless of what the
-    // wire said, so a misrouted snapshot would be adopted and relabelled as
-    // one's own. Compared borrowed, not through `to_string`: this runs on every
-    // account frame of every fill.
-    if state.account_id.as_str() != ctx.account_id.as_ref() {
-        tracing::error!(
-            wire_account = %state.account_id.as_str(),
-            expected_account = %ctx.account_id,
-            "dropping account snapshot routed to a different account"
-        );
-        return;
-    }
+    // The wire's account id is deliberately NOT compared against the configured
+    // one here, and the difference matters more on this path than on the connect
+    // path: this used to DROP a snapshot whose label differed, so a venue and a
+    // client that named the account differently produced a client whose balances
+    // silently stopped updating while every fill still arrived.
+    //
+    // The drop guarded against adopting a MISROUTED snapshot back when a venue
+    // served many accounts and could route one to the wrong session. This venue
+    // serves one run with one ledger, so the only account there is, is the one
+    // this connection carries - there is nothing to be misrouted from, and a
+    // dropped snapshot can only lose state that was correct. The configured id
+    // is stamped on below, as it always was; `note_account_label` says once at
+    // connect if the two names differ.
     let ts_event = UnixNanos::from(state.ts_event);
     let balances = state
         .balances
