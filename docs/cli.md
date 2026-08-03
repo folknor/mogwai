@@ -24,7 +24,7 @@ it, while the launcher waited forever on a pipe that got neither a line nor an
 EOF. Stdout cannot be misaddressed.
 
 ```sh
-brokkr run mogwai -- serve --config run.toml
+mogwai serve --config run.toml
 ```
 
 `--config PATH` is optional and otherwise uses built-in defaults. It never

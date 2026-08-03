@@ -96,6 +96,6 @@ Presets are a convenience, not a requirement. Skip `preset` entirely and
 write the full `[instrument]` table - `[instrument.class]`, and for a future
 `[instrument.margin]`, plus optionally `[instrument.fees]` and
 `[instrument.calendar]` - to model an instrument no preset covers (MCL, AAPL,
-or any other bundle of the same knobs). See `reference/config.md` for the
+or any other bundle of the same knobs). See `docs/config.md` for the
 complete field-by-field surface; this guide covers only the preset mechanism
 that sits on top of it.

@@ -465,7 +465,7 @@ pub enum EventKind {
     /// Transport/admission truth: what the venue's request handling refused,
     /// clamped, or could not decode. Never engine output, so the knob that
     /// holds engine output (`DelayAcks`) legitimately does not reach it - see
-    /// `reference/havoc.md`. `is_execution()` is FALSE for this kind, which is
+    /// `docs/havoc.md`. `is_execution()` is FALSE for this kind, which is
     /// what implements that exemption in one place.
     Admission,
 }

@@ -651,7 +651,7 @@ pub enum ServerMessage {
     /// Admission truth, not engine output: it classifies `EventKind::Admission`,
     /// rides the server's priority lane, and is deliberately NOT held by a
     /// `DelayAcks` window - the knob that holds engine output does not reach
-    /// something the engine never produced. See `reference/havoc.md`.
+    /// something the engine never produced. See `docs/havoc.md`.
     /// `reason` is server-generated and truncated to `MAX_REASON_LEN`, which
     /// with the identifier caps is what bounds this frame by
     /// `ADMISSION_FRAME_MAX_BYTES`.

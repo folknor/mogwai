@@ -48,7 +48,7 @@ Or both. There are no exceptions.
   commission, `position_id` end to end under both netting and hedging, and a
   preset layer with mandatory provenance - landed code, pinned by the test
   suites and gates each landing added. `reference/architecture.md`,
-  `reference/config.md`, `reference/glossary.md`, `reference/cli.md`,
+  `docs/config.md`, `reference/glossary.md`, `docs/cli.md`,
   `reference/performance.md` and `docs/presets.md` /
   `docs/oms-types.md` carry what must endure; the landing history is git's, not
   this file's, to keep. `notes/` now holds no problem statement or spec files

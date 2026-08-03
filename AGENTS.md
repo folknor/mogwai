@@ -40,7 +40,7 @@ A Cargo workspace, five crates under `crates/`:
   it reports its bound address as a single JSON readiness line on stdout,
   and `PR_SET_PDEATHSIG` makes the kernel kill it when its launcher dies. There
   is no daemon mode and no `stop` subcommand - lifecycle is the launcher's job.
-  See `reference/cli.md`.
+  See `docs/cli.md`.
 - `mogwai-adapter` - the nautilus venue adapter: the `MogwaiDataClientFactory` /
   `MogwaiExecutionClientFactory`, their configs, and the client pair a host
   registers for the `MOGWAI` venue. The only crate that depends on nautilus -
@@ -51,9 +51,11 @@ A Cargo workspace, five crates under `crates/`:
 orchestration loop uses (codex is now driven by the `review` tool, configured
 from `.review.toml`, not by wrapper scripts);
 `analysis/` is the offline Python that fits the fingerprint; `notes/` holds the
-transient work items and plans; `reference/` is durable docs - `architecture.md`
-describes how the system works, the others are process docs. See the Document
-folders section below for what each folder may and may not contain.
+transient work items and plans. The durable documentation is split by subject:
+`docs/` is how the venue is USED (`cli`, `config`, `havoc`, `presets`,
+`oms-types`) and `reference/` is how it is BUILT and why (`architecture`,
+`clock`, `glossary`, `performance`, `technical-implementation-spec`). See the
+Document folders section below for what each folder may and may not contain.
 
 ## Rules
 

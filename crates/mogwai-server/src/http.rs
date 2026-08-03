@@ -400,7 +400,7 @@ pub(crate) async fn arm_divergence(
     // frame exceed the reservation sized against `ORDER_EVENT_MAX_BYTES` and
     // void the whole size model. Truncating at the boundary means the engine can
     // only ever echo an already-bounded string, and no engine change is needed.
-    // Documented alongside the control in reference/havoc.md.
+    // Documented alongside the control in docs/havoc.md.
     let div = match div {
         Divergence::RejectNextSubmit { reason } => Divergence::RejectNextSubmit {
             reason: truncate_reason(reason),

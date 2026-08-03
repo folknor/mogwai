@@ -23,21 +23,22 @@ use std::io::{IsTerminal, Write};
 
 use clap::ValueEnum;
 
-/// The bundled reference topics. The user-facing docs only - the process docs
-/// (`orchestrate`, `technical-implementation-spec`) are deliberately not
-/// bundled, and neither are `glossary.md` or `performance.md`, which are
-/// working references for someone editing this repo rather than someone running
-/// the venue. Each variant must have an arm in `content`.
+/// The bundled topics: everything in `docs/`, which is by definition how the
+/// venue is USED, plus the two `reference/` documents an operator rather than a
+/// contributor needs. Deliberately not bundled: `technical-implementation-spec`
+/// and `performance`, which serve someone changing this repo, and `glossary`,
+/// which is a working aid for the same audience. Each variant must have an arm
+/// in `content`.
 #[derive(Clone, Copy, ValueEnum)]
 #[clap(rename_all = "kebab-case")]
 pub(crate) enum ManTopic {
-    /// The mogwai command line (reference/cli.md).
+    /// The mogwai command line (docs/cli.md).
     Cli,
-    /// The mogwai.toml run knobs (reference/config.md).
+    /// The mogwai.toml run knobs (docs/config.md).
     Config,
     /// How the system works, subsystem by subsystem (reference/architecture.md).
     Architecture,
-    /// The havoc model: divergences and the four surfaces (reference/havoc.md).
+    /// The havoc model: divergences and the four surfaces (docs/havoc.md).
     Havoc,
     /// The simulated clock for accelerated forward testing (reference/clock.md).
     Clock,
@@ -77,10 +78,10 @@ fn summary(topic: ManTopic) -> &'static str {
 /// to one `reference/*.md`.
 fn content(topic: ManTopic) -> &'static str {
     match topic {
-        ManTopic::Cli => include_str!("../../../reference/cli.md"),
-        ManTopic::Config => include_str!("../../../reference/config.md"),
+        ManTopic::Cli => include_str!("../../../docs/cli.md"),
+        ManTopic::Config => include_str!("../../../docs/config.md"),
         ManTopic::Architecture => include_str!("../../../reference/architecture.md"),
-        ManTopic::Havoc => include_str!("../../../reference/havoc.md"),
+        ManTopic::Havoc => include_str!("../../../docs/havoc.md"),
         ManTopic::Clock => include_str!("../../../reference/clock.md"),
         ManTopic::Presets => include_str!("../../../docs/presets.md"),
         ManTopic::OmsTypes => include_str!("../../../docs/oms-types.md"),
@@ -121,7 +122,7 @@ fn list_topics() -> String {
         .map(|topic| name(*topic).len())
         .max()
         .unwrap_or(0);
-    let mut out = String::from("Bundled reference docs. Run `mogwai man <topic>` to read one.\n\n");
+    let mut out = String::from("Bundled documentation. Run `mogwai man <topic>` to read one.\n\n");
     for topic in topics {
         out.push_str(&format!(
             "  {name:width$}  {summary}\n",

@@ -75,7 +75,7 @@ pub(crate) const CLOSE_ADMISSION_OVERLOAD: u16 = 1013;
 ///
 /// This is NOT a divergence. Every modeled pathology in this venue is armed
 /// deliberately and the honest floor is that nothing perturbs the stream unless
-/// it was asked for (see `reference/havoc.md`). A lagged ring is an unarmed
+/// it was asked for (see `docs/havoc.md`). A lagged ring is an unarmed
 /// hole, which makes it a venue fault rather than a scenario: the exchange
 /// crashed. It ends the connection instead of continuing with a gap, because a
 /// forward-validation run that keeps streaming past silently-missing data

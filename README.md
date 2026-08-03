@@ -36,12 +36,13 @@ of those commands running at once cannot collide and cannot be pointed at each
 other. The bound address comes back as one line of JSON on stdout - a launcher
 captures it, a human reads it off the terminal.
 
-To put a `mogwai` binary on your `PATH` instead, install it from the crate path
-- it is never published to crates.io, so the `--path` form is the only one that
-resolves (the package is `mogwai-server`; the binary it installs is `mogwai`):
+To put a `mogwai` binary on your `PATH` instead, install it. Nothing here is
+published to crates.io, so install from git or from a checkout - the package is
+`mogwai-server`, and the binary it installs is `mogwai`:
 
 ```sh
-cargo install --path crates/mogwai-server
+cargo install --git https://github.com/folknor/mogwai mogwai-server
+cargo install --path crates/mogwai-server            # from a checkout
 ```
 
 This build graph excludes `mogwai-adapter`, so it pulls no nautilus crates at
@@ -51,7 +52,7 @@ venue in the FOREGROUND for one run and owns no PID, log or config files: it
 never consults the working directory, so pass `serve --config <path>` to use
 anything but the built-in defaults. There is no daemon mode and no `stop`
 subcommand - the launcher owns the lifecycle, reading the bound address from the
-readiness line on stdout; see [`reference/cli.md`](reference/cli.md).
+readiness line on stdout; see [`docs/cli.md`](docs/cli.md).
 
 Linux only, for now. The venue arms `PR_SET_PDEATHSIG` so the kernel terminates
 it when its launcher dies, which is the whole of its cleanup story - there is no
@@ -78,7 +79,23 @@ ledger.
 
 The venue is a process, and the adapter is a pair of nautilus clients that
 connect to it. A host starts one venue per run, learns where it landed, and
-registers both clients for the `MOGWAI` venue:
+registers both clients for the `MOGWAI` venue.
+
+```toml
+[dependencies]
+mogwai-adapter = { git = "https://github.com/folknor/mogwai" }
+# Or, to launch a venue without importing nautilus at all - the launcher lives
+# here and `mogwai-adapter` only re-exports it:
+mogwai-protocol = { git = "https://github.com/folknor/mogwai" }
+```
+
+**Your nautilus version has to match the adapter's.** `mogwai-adapter` depends on
+the published `nautilus-*` crates, pinned in its `Cargo.toml`. If your build
+resolves a different version - or path-depends a checkout - cargo compiles two
+distinct sets of nautilus types, and registering the factories fails with
+errors of the form `expected ExecutionClient, found ExecutionClient`. Pin the
+same version on both sides; a `[patch.crates-io]` cannot bridge a minor-version
+gap, because `0.61` means `>=0.61.0, <0.62.0`.
 
 ```rust
 use std::time::Duration;
@@ -123,7 +140,7 @@ and the host restates none of them. Trading a futures preset wants
 `CashAccount` has nowhere to keep the margin rows the venue reports and drops
 them client-side. And divergences are armed either per-client with
 `.with_havoc(..)` or at runtime over `POST /control/divergence`; see
-[`reference/havoc.md`](reference/havoc.md).
+[`docs/havoc.md`](docs/havoc.md).
 
 ### The launcher contract, for a launcher that is not Rust
 
@@ -152,21 +169,40 @@ copy from.
 
 ## Documentation
 
-- [`reference/architecture.md`](reference/architecture.md) - how the system
-  works, subsystem by subsystem, including the HTTP/WS routes.
-- [`reference/havoc.md`](reference/havoc.md) - the havoc model: every divergence
-  variant, the four havoc surfaces, and the validation boundaries.
-- [`reference/config.md`](reference/config.md) - the `mogwai.toml` run knobs.
-- [`reference/cli.md`](reference/cli.md) - the `mogwai` command line.
+Split by subject rather than audience. `docs/` is how the venue is USED, and
+`reference/` is how it is BUILT and why - what you need in order to change it
+safely. Both are binding: what they say has to be true.
+
+Using it:
+
+- [`docs/cli.md`](docs/cli.md) - the `mogwai` command line and the launcher
+  contract.
+- [`docs/config.md`](docs/config.md) - the run configuration file, knob by knob.
+- [`docs/havoc.md`](docs/havoc.md) - every divergence variant, the four havoc
+  surfaces, and the validation boundaries.
 - [`docs/presets.md`](docs/presets.md) - choosing one of the five instrument
   presets shipped inside the binary, and reading its provenance.
 - [`docs/oms-types.md`](docs/oms-types.md) - the run-level `oms_type` choice,
   and how netting and hedging differ on the wire.
 
-All seven are compiled into the binary: `mogwai man <topic>` renders one in the
-terminal and `mogwai man` lists them, so an installed `mogwai` carries its own
-documentation with no source tree present. Colour is dropped when stdout is not
-a terminal or `NO_COLOR` is set.
+Changing it:
+
+- [`reference/architecture.md`](reference/architecture.md) - how the system
+  works, subsystem by subsystem, including the HTTP/WS routes.
+- [`reference/clock.md`](reference/clock.md) - the simulated clock, and what
+  accelerating a run does and does not change.
+- [`reference/glossary.md`](reference/glossary.md) - the identity chain the code
+  builds: run, tape, ledger and the instrument vocabulary.
+- [`reference/performance.md`](reference/performance.md) - the durable record of
+  measured numbers, with the method behind each.
+- [`reference/technical-implementation-spec.md`](reference/technical-implementation-spec.md)
+  - what an implementation spec for this repo must contain.
+
+Everything in `docs/`, plus `architecture` and `clock`, is compiled into the
+binary: `mogwai man <topic>` renders one in the terminal and `mogwai man` lists
+them, so an installed `mogwai` carries its own documentation with no source tree
+present. Colour is dropped when stdout is not a terminal or `NO_COLOR` is set.
+The rest of `reference/` serves someone editing this repo, who has the files.
 
 Codebase conventions and build rules live in `AGENTS.md`. Transient work items,
 plans and analysis live in `notes/`; the offline fingerprint-fitting pipeline is

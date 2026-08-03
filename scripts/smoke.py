@@ -4,7 +4,7 @@
 
 """Reference implementation of the mogwai launcher contract, plus a smoke run.
 
-This script IS the contract from reference/cli.md, executed:
+This script IS the contract from docs/cli.md, executed:
 
   1. Spawn `mogwai serve --config <path>` as a DIRECT child, capturing both
      stdout and stderr. There is no endpoint flag and no fd to nominate: the
