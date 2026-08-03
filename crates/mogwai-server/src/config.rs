@@ -29,6 +29,21 @@ pub(crate) struct Config {
     /// Simulated duration of one venue run. Zero means the launcher owns
     /// shutdown; a non-zero duration is announced as a clean completion.
     pub(crate) run_duration_ns: u64,
+    /// The account this run's single ledger is reported under.
+    ///
+    /// One venue is one run is one ledger, so this NAMES the account rather than
+    /// selecting one - there is nothing to look up and nothing to refuse. It is
+    /// configurable anyway because the consumer asserts it: a host holds an
+    /// account of its own naming and compares it against what the venue reports,
+    /// so a venue that insists on its own label is a venue that host cannot use.
+    ///
+    /// The default is `MOGWAI-001` and `validate_account_id` requires the
+    /// `ISSUER-NUMBER` shape. That is a nautilus rule rather than a wire rule -
+    /// `mogwai_protocol::AccountId` accepts a bare word quite happily - but
+    /// mogwai is a nautilus venue, and an id nautilus cannot construct makes
+    /// every run using it dead on arrival at the consumer. Refusing at boot
+    /// costs a line; the alternative was discovered a minute into a run.
+    pub(crate) account_id: String,
     pub(crate) oms_type: mogwai_protocol::OmsType,
     /// How many trailing-volatility horizons wide the fill band is. An order's
     /// trigger is drawn uniformly from `0 ..= band_ticks` ticks AWAY from its
@@ -169,6 +184,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             run_duration_ns: 0,
+            account_id: DEFAULT_ACCOUNT_ID.to_owned(),
             oms_type: mogwai_protocol::OmsType::Netting,
             fill_band_vol_mult: 0.005,
             fill_band_max_ticks: 200,
@@ -249,6 +265,43 @@ pub(crate) fn refuse_unfunded_settlement(
                 currency
             );
         }
+    }
+    Ok(())
+}
+
+/// The account a run reports when its config does not name one.
+///
+/// `MOGWAI-001` rather than `MOGWAI` because nautilus parses an `AccountId` as
+/// `ISSUER-NUMBER` and rejects a bare word. The venue's own wire type is happy
+/// either way, which is exactly why this needs stating: nothing inside mogwai
+/// notices the difference, and the consumer notices it as a run that cannot
+/// start.
+pub(crate) const DEFAULT_ACCOUNT_ID: &str = "MOGWAI-001";
+
+/// Validates the run's account id.
+///
+/// Two rules. It must be a legal `mogwai_protocol::AccountId`, which is the wire
+/// constraint. And it must carry an `ISSUER-NUMBER` split, which is NOT a wire
+/// constraint but a nautilus one: `AccountId::new` panics on a value with no
+/// `-`, so a venue reporting one produces a host that cannot construct the
+/// account it is being told about. mogwai does not import nautilus here and so
+/// checks the shape by hand; the alternative is a run that boots cleanly, serves
+/// happily, and is refused by its consumer a minute later with an error naming
+/// neither this file nor this key.
+pub(crate) fn validate_account_id(cfg: &Config) -> anyhow::Result<()> {
+    let id = cfg.account_id.trim();
+    mogwai_protocol::AccountId::parse(id)
+        .map_err(|err| anyhow::anyhow!("account_id {id:?} is not a legal account id: {err}"))?;
+    let (issuer, number) = id.split_once('-').ok_or_else(|| {
+        anyhow::anyhow!(
+            "account_id {id:?} has no '-'. A nautilus AccountId is ISSUER-NUMBER, so a \
+             consumer cannot construct this one - try {DEFAULT_ACCOUNT_ID}"
+        )
+    })?;
+    if issuer.is_empty() || number.is_empty() {
+        anyhow::bail!(
+            "account_id {id:?} must have a non-empty issuer and number either side of the '-'"
+        );
     }
     Ok(())
 }
@@ -394,6 +447,7 @@ impl Config {
         // forget the check. (The clock and instrument validations stay with
         // their builders: they need boot-time inputs this loader lacks.)
         validate_balances(&cfg)?;
+        validate_account_id(&cfg)?;
         validate_admission_limits(&cfg)?;
         validate_fill_band(&cfg)?;
         // Unlike every neighbouring count knob, 0 is not "unbounded" here:
@@ -985,6 +1039,48 @@ pub(crate) fn build_run_clock(cfg: &Config, boot_wall_ns: u64) -> anyhow::Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn with_account(id: &str) -> Config {
+        Config {
+            account_id: id.to_owned(),
+            ..Config::default()
+        }
+    }
+
+    /// The venue reported a bare `MOGWAI` for one release, which is a legal
+    /// `mogwai_protocol::AccountId` and an ILLEGAL nautilus one - so every run
+    /// booted cleanly and was refused by its consumer, which could not name an
+    /// account that satisfied both sides. The wire type will not catch this
+    /// because by its own rules there is nothing wrong; only this check will.
+    #[test]
+    fn an_account_id_nautilus_cannot_parse_is_refused_at_load() {
+        let err = validate_account_id(&with_account("MOGWAI"))
+            .expect_err("a bare word is not a nautilus AccountId");
+        let message = err.to_string();
+        assert!(message.contains("ISSUER-NUMBER"), "{message}");
+        assert!(message.contains(DEFAULT_ACCOUNT_ID), "{message}");
+
+        for empty_side in ["-001", "MOGWAI-"] {
+            assert!(
+                validate_account_id(&with_account(empty_side)).is_err(),
+                "{empty_side} has an empty side"
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_supplied_account_id_is_accepted() {
+        // The point of the key: a consumer holds an account of its own naming
+        // and asserts the venue reports the same one.
+        for id in [DEFAULT_ACCOUNT_ID, "MOGWAI-QA2", "SANDBOX-001"] {
+            validate_account_id(&with_account(id)).unwrap_or_else(|err| panic!("{id}: {err}"));
+        }
+    }
+
+    #[test]
+    fn the_default_account_id_satisfies_its_own_rule() {
+        validate_account_id(&Config::default()).expect("the shipped default must be usable");
+    }
 
     fn future_configured() -> ConfiguredInstrument {
         let profile = source::InstrumentProfiles::defaults()

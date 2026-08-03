@@ -1,5 +1,10 @@
 # Example configuration for one foreground run.
 speed = 1.0
+# The account this run's ledger is reported under. Names it rather than selects
+# it - there is one ledger - but the consumer asserts it, so it has to be the
+# account the host expects. Must be ISSUER-NUMBER: a nautilus AccountId cannot
+# be built from a bare word.
+account_id = "MOGWAI-001"
 # seed = 42 # Absent means a fresh seed is drawn and reported at launch.
 server_heartbeat_ms = 0
 # Sim-time duration of this run. 0 runs indefinitely, until the launcher kills

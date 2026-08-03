@@ -50,6 +50,21 @@ selects the single run-wide market regime. `[balances]` funds the one ledger.
 `oms_type` is `netting` (the default) or `hedging`; the venue serves both and
 refuses a client over neither, and `/health` reports the run's choice.
 
+`account_id` names the account the run's single ledger is reported under,
+defaulting to `MOGWAI-001`. It NAMES rather than selects: one venue is one run
+is one ledger, so there is nothing to look up and no `?account=` to honour - a
+query naming another account is ignored, not served. Set it because the
+CONSUMER asserts it. A nautilus host holds an account of its own naming and
+compares it against what the venue reports, so a venue insisting on its own
+label is a venue that host cannot use.
+
+The value must have the `ISSUER-NUMBER` shape, and boot is refused otherwise.
+That is a nautilus rule rather than a wire rule - mogwai's own account type
+accepts a bare word - but a nautilus `AccountId` cannot be constructed from one,
+so a venue reporting `MOGWAI` boots cleanly, serves happily, and is rejected by
+its consumer with an error naming neither this file nor this key. Refusing at
+load costs a line.
+
 ## The instrument class
 
 `[instrument]` carries five shape fields - `symbol`, `price_precision`,

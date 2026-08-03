@@ -81,6 +81,7 @@ impl Run {
         zero_speed_stall_ms: u64,
         oms_type: mogwai_protocol::OmsType,
         fill_band_max_ticks: u32,
+        account_id: mogwai_protocol::AccountId,
     ) -> Arc<Self> {
         let symbol = instrument.symbol.clone();
         let margin = profiles
@@ -101,7 +102,7 @@ impl Run {
         );
         let (complete_tx, _) = watch::channel(None);
         let mut engine = Engine::build(EngineConfig {
-            account_id: mogwai_protocol::AccountId::parse("MOGWAI").expect("fixed account id"),
+            account_id,
             instruments: vec![instrument.clone()],
             balances,
             fill_seed: seeds.fill,
@@ -254,6 +255,8 @@ mod tests {
             1,
             mogwai_protocol::OmsType::Netting,
             200,
+            mogwai_protocol::AccountId::parse(crate::config::DEFAULT_ACCOUNT_ID)
+                .expect("the default account id is legal"),
         )
     }
 

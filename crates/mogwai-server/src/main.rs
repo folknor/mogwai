@@ -285,6 +285,13 @@ async fn serve_async(
         cfg.zero_speed_stall_ms,
         cfg.oms_type,
         cfg.fill_band_max_ticks,
+        // Validated at load, so this cannot fail here.
+        mogwai_protocol::AccountId::parse(cfg.account_id.trim())
+            .map_err(|err| anyhow::anyhow!("account_id: {err}"))?,
+    );
+    tracing::info!(
+        account_id = cfg.account_id.trim(),
+        "run ledger account fixed"
     );
     tracing::info!(fill_seed = run.seeds.fill, "fill band stream initialized");
     // The band needs something to advance it: a submit decides only its own
