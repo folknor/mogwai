@@ -243,6 +243,12 @@ Codebase conventions and build rules live in `AGENTS.md`. Transient work items,
 plans and analysis live in `notes/`; the offline fingerprint-fitting pipeline is
 `analysis/`.
 
+## Acknowledgements and disclaimers
+
+I want to thank [Nautech Systems](https://nautilustrader.io/) for their incredible software, upon which mogwai rests.
+
+This is an independent community project. It is not affiliated with, endorsed by, or supported by Nautech Systems Pty Ltd or the official NautilusTrader project.
+
 ## License
 
 mogwai is dual-licensed:

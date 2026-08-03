@@ -324,7 +324,38 @@ Or both. There are no exceptions.
   gets retrofitted onto it. Adding a second test toolchain to a workspace whose
   gate is `brokkr check` is a project-shape call, not a local fix.
 
+- UNPROVEN, and it decides whether the venue-identity check needs to stop being
+  opt-in: can a full session be established against a stranger holding a reused
+  port, and this client's account id stamped onto its state, inside the window
+  before anyone notices? An external QA pass forced the port reuse and showed
+  the adapter DOES dial a dead venue's address and a stranger DOES accept the
+  connections, but their stranger was a bare TCP listener that accepted and
+  closed, so the stamping half was never demonstrated. Their bound on the window
+  (about 160 ms) came entirely from the consumer's own child-exit poll, which
+  covers nothing for a consumer that does not own the venue as a child, and
+  nothing at all when the venue is wedged rather than exited.
+  `expected_run_seed` closes it for anyone who sets one; what is undecided is
+  whether a config WITHOUT one should keep dialling blind. Answering it needs a
+  stub venue that speaks enough of the wire to complete a handshake.
+
+- The venue frees its port BEFORE it exits: a declared completion stops the
+  accept loop, then drains live connections for up to `SHUTDOWN_GRACE`. So the
+  address is reusable while the process is still alive, which is why a consumer
+  watching for child exit sees nothing during that window. Not a defect - the
+  drain is deliberate - but it is the mechanism behind the item above, and worth
+  keeping in view before anyone shortens or lengthens the grace.
+
 ## Notes / gotchas
+
+- The CLA check is NOT yet a required status check. cla-assistant.io is wired up
+  and its webhook delivers (verified `200 OK` on a real PR), but nothing blocks
+  an unsigned merge until a repository ruleset requires the check by name. The
+  trap: an owner-authored PR produces no status at all - the CLA assigns
+  copyright TO the owner, so the bot correctly has nothing to ask - which means
+  the check cannot be picked from the suggestion list and cannot be validated
+  against a real run. Type the context name in by hand and leave the rule in
+  EVALUATE mode until an outside PR confirms it, because a required check that
+  never reports blocks every merge with no visible cause.
 
 - broadarrow standing notes (2026-07-31, their request that landed the
   order-status query surface): (a) the ack-delay havoc band above their ~25 s
@@ -375,7 +406,7 @@ Or both. There are no exceptions.
   `mogwai-data` for the offline lineage and its unit tests.
 - `MOGWAI_DATA_DIR` (default `/home/folk/Kraken`) is an
   offline-analysis input only (`analysis/`), never a server runtime knob.
-- `research/` is gitignored and holds the read-only nautilus and broadarrow
+- `research/` is gitignored and holds read-only nautilus, broadarrow and piners
   clones plus `market-data/` (the Binance archives and TradingView exports) and
   `binance-public-data/` (the vendored downloader). Read those APIs from there.
   mogwai BUILDS against the pinned crates.io nautilus release (0.61), never
@@ -433,9 +464,17 @@ reads:
 ### mogwai-protocol (canonical wire defaults)
 
 Named consts, canonical: `DEFAULT_REQUEST_TIMEOUT_SECS = 30`, `MAX_HISTORY_LIMIT
-= 1000`, `BASELINE_LATENCY.base_nanos = 30_000_000` (30ms honest-feed latency
+= 50_000`, `BASELINE_LATENCY.base_nanos = 30_000_000` (30ms honest-feed latency
 floor), `MAX_LATENCY_NANOS = 60_000_000_000` (60s per-field ceiling),
-`control::MAX_DIVERGENCE_MS = 3_600_000` (1h DelayAcks/GoDark/StallData ceiling).
+`control::MAX_DIVERGENCE_MS = 3_600_000` (1h DelayAcks/GoDark/StallData ceiling),
+`ReadyRecord::VERSION = 5`.
+
+The `launch` module (the shipped launcher) adds `DEFAULT_BINARY = "mogwai"`,
+`DEFAULT_READY_TIMEOUT = 300s`, `STDERR_RING = 64` retained lines, and
+`OWNER_POLL = 200ms` (how often the owning thread notices the venue ended on its
+own). It also puts `serde_json` and `tracing` on this crate at RUNTIME rather
+than dev-only: the launcher parses the readiness line and announces the run it
+started.
 
 Inline literals (no named const):
 - `default_instruments()`: symbol `BTCUSDT`, base `BTC`, quote `USDT`,
@@ -467,10 +506,20 @@ Inline literals (no named const):
   `/quotes`, `/clock`, `/ws`, `/control/divergence`) as inline
   literals, no shared registry with the adapter's route segments.
 - `Config::default()`: `speed 1.0`, `server_heartbeat_ms 0`,
-  `warmup_ns 86_400_000_000_000` (24h). `gap_cap_ms` no longer exists anywhere in
+  `warmup_ns 86_400_000_000_000` (24h), `account_id` from
+  `DEFAULT_ACCOUNT_ID = "MOGWAI-001"`. `gap_cap_ms` no longer exists anywhere in
   the workspace, and `sim_epoch_ns` is no longer a config key at all - it is
   DERIVED as `TAPE_ORIGIN_NS + warmup_ns`, and a config file stating it is
   refused by the parser.
+- `account_id` is validated for the `ISSUER-NUMBER` shape at load, which is a
+  NAUTILUS rule enforced by a crate that does not import nautilus. The venue's
+  own wire type accepts a bare word; nautilus cannot construct an `AccountId`
+  from one, so a venue reporting `MOGWAI` booted fine and was refused by every
+  consumer.
+- `SYNTHESIS_TICKS_PER_SEC = 2_900_000`, the boot projection's rate. MEASURED,
+  not chosen - see the warmup section of `reference/performance.md` for the runs
+  and the method. It read 5_000_000 for a while, making the projection 1.7x
+  optimistic and the 60-second WARN threshold fire at about 104 seconds.
 - Lifecycle timeout consts: `SHUTDOWN_GRACE 5s`, `TAPE_SLEEP_POLL 20ms`,
   `TAPE_HEADROOM_POLL 5ms`.
 - Channel capacity `1024` duplicated inline for the writer channel and the
@@ -482,7 +531,15 @@ Inline literals (no named const):
 ### mogwai-adapter
 
 - `base_url` is now required on both configs (no default endpoint); a launcher
-  learns it from the readiness record.
+  learns it from the readiness record. `for_addr` builds a config from the
+  reported address; `for_run` also captures `expected_run_seed` from the record,
+  which is what binds a client to a RUN rather than to an address that may be
+  reused. Builders cover havoc, oms type, account type and trader id.
+- `expected_run_seed` unset dials blind, the historical behaviour. Set, every
+  dial checks `/health` and a different run is refused TERMINALLY, logged as
+  `venue identity mismatch`. Two non-answers are deliberately not mismatches and
+  are reported as distinct categories: no usable answer is a transport failure,
+  a well-formed answer carrying no `run_seed` is version skew.
 - `MOGWAI_VENUE_STR = "MOGWAI"` (correctly single-sourced).
 - Default `TraderId` `MOGWAI-001` in the exec config. `AccountId` no longer
   defaults to it on either config: both carry the `UNSET_ACCOUNT_ID` placeholder
