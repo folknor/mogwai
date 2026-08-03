@@ -49,7 +49,7 @@ use std::{
     io::{BufRead, BufReader},
     net::SocketAddr,
     path::PathBuf,
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     sync::{
         Arc, Mutex,
         mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel},
@@ -374,21 +374,32 @@ pub fn launch(spec: LaunchSpec) -> Result<LaunchedVenue, LaunchError> {
         let stderr = Arc::clone(&stderr);
         std::thread::Builder::new()
             .name("mogwai-venue".to_owned())
-            .spawn(move || own_venue(&binary, &argv, sink, &boot_tx, &shutdown_rx, &exit, &stderr))
+            .spawn(move || {
+                own_venue(
+                    &binary,
+                    &argv,
+                    sink,
+                    timeout,
+                    &boot_tx,
+                    &shutdown_rx,
+                    &exit,
+                    &stderr,
+                );
+            })
             .map_err(|source| LaunchError::Spawn {
                 binary: OsString::from("<owning thread>"),
                 source,
             })?
     };
 
-    let booted = match boot_rx.recv_timeout(timeout) {
-        Ok(result) => result,
-        Err(RecvTimeoutError::Timeout) => Err(LaunchError::Timeout {
-            waited: timeout,
-            stderr: snapshot(&stderr),
-        }),
-        Err(RecvTimeoutError::Disconnected) => Err(LaunchError::OwnerDied),
-    };
+    // Waits WITHOUT a deadline of its own, deliberately. The readiness bound is
+    // enforced inside the owner, because the owner holds the `Child` and can
+    // therefore end the wait; a deadline here could only stop waiting, and then
+    // had to join a thread still blocked in `read_line` on a child that may
+    // never write. That inverted the whole point of the bound - a wedged venue
+    // made `launch` hang forever, AFTER reporting a timeout. The owner always
+    // sends exactly one result, so a disconnect here means it panicked.
+    let booted = boot_rx.recv().unwrap_or(Err(LaunchError::OwnerDied));
 
     match booted {
         Ok(record) => {
@@ -465,7 +476,17 @@ fn format_duration(duration: Duration) -> String {
     if nanos.is_multiple_of(1_000_000) {
         return format!("{}ms", nanos / 1_000_000);
     }
-    format!("{nanos}ns")
+    // A sub-millisecond remainder renders as nanoseconds, which is exact for
+    // every duration a run could want - but `Duration` reaches far past what a
+    // nanosecond count fits in `u64`, and the venue's parser refuses the
+    // oversized integer before startup. Falling back to whole seconds keeps the
+    // promise this type exists to make: every value renders into something the
+    // venue accepts. The precision lost is nanoseconds off a span of at least
+    // half a millennium.
+    match u64::try_from(nanos) {
+        Ok(nanos) => format!("{nanos}ns"),
+        Err(_) => format!("{}s", duration.as_secs()),
+    }
 }
 
 fn snapshot(ring: &Arc<Mutex<VecDeque<String>>>) -> Vec<String> {
@@ -476,10 +497,17 @@ fn snapshot(ring: &Arc<Mutex<VecDeque<String>>>) -> Vec<String> {
 
 /// Body of the dedicated owning thread: spawn, drain, read one line, report,
 /// then park until shutdown or until the venue ends itself, and reap.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is a distinct channel or piece of shared state this thread owns; \
+              bundling them into a struct would name the bundle after this function and hide \
+              which of them cross thread boundaries"
+)]
 fn own_venue(
     binary: &OsStr,
     argv: &[OsString],
     sink: StderrSink,
+    ready_timeout: Duration,
     boot_tx: &SyncSender<Result<ReadyRecord, LaunchError>>,
     shutdown_rx: &Receiver<()>,
     exit: &Arc<Mutex<Option<VenueExit>>>,
@@ -533,7 +561,64 @@ fn own_venue(
             })
     });
 
-    let booted = read_ready(&mut child, stderr_ring);
+    // The readiness read happens on ITS OWN thread so this one keeps a deadline.
+    // `read_line` on a child that holds stdout open and never writes cannot be
+    // interrupted from outside, so the bound has to belong to whoever can end
+    // the wait - and that is this thread, which owns the `Child`. On expiry it
+    // kills the venue, which closes stdout and releases the reader.
+    let stdout = child.stdout.take();
+    let (line_tx, line_rx) = sync_channel::<Result<ReadyRecord, LaunchError>>(1);
+    let reader = std::thread::Builder::new()
+        .name("mogwai-venue-ready".to_owned())
+        .spawn(move || {
+            let booted = match stdout {
+                Some(stdout) => read_ready(stdout),
+                None => Err(LaunchError::Read(std::io::Error::other(
+                    "the venue was spawned without a stdout pipe",
+                ))),
+            };
+            drop(line_tx.send(booted));
+        });
+
+    let booted = match reader {
+        Err(source) => Err(LaunchError::Spawn {
+            binary: OsString::from("<readiness reader thread>"),
+            source,
+        }),
+        Ok(reader) => {
+            let outcome = match line_rx.recv_timeout(ready_timeout) {
+                Ok(booted) => booted,
+                Err(RecvTimeoutError::Timeout) => {
+                    // Kill first, so the reader is released and this thread can
+                    // be joined by a caller that is now returning an error.
+                    drop(child.kill());
+                    Err(LaunchError::Timeout {
+                        waited: ready_timeout,
+                        stderr: snapshot(stderr_ring),
+                    })
+                }
+                Err(RecvTimeoutError::Disconnected) => Err(LaunchError::Read(
+                    std::io::Error::other("the readiness reader died without reporting"),
+                )),
+            };
+            drop(reader.join());
+            outcome
+        }
+    };
+
+    // A boot failure's explanation arrives on stderr, which is drained by
+    // another thread; give it the moment it needs before the ring is copied
+    // into the error, and re-snapshot rather than trusting an earlier copy.
+    let booted = match booted {
+        Err(LaunchError::NoRecord { .. }) => {
+            std::thread::sleep(Duration::from_millis(50));
+            Err(LaunchError::NoRecord {
+                stderr: snapshot(stderr_ring),
+            })
+        }
+        other => other,
+    };
+
     let serving = booted.is_ok();
     drop(boot_tx.send(booted));
 
@@ -559,32 +644,33 @@ fn own_venue(
 
     drop(child.kill());
     drop(child.wait());
-    if let Some(Ok(drain)) = drain {
-        drop(drain.join());
-    }
+    // The drain thread is NOT joined. It runs a caller-supplied callback once
+    // per log line, and joining it here would put arbitrary user code in the
+    // path of `LaunchedVenue::drop` - a callback that blocks on a mutex the
+    // dropping thread holds, or on a current-thread runtime that is shutting
+    // down, would deadlock a destructor with no cancellation path, including
+    // during a panic unwind. The child is dead by this point, so its stderr is
+    // closed and the thread ends on its own; a callback that never returns is
+    // then one leaked thread rather than a hung process.
+    drop(drain);
 }
 
 /// Read and validate the single readiness line off the child's stdout.
-fn read_ready(
-    child: &mut Child,
-    stderr_ring: &Arc<Mutex<VecDeque<String>>>,
-) -> Result<ReadyRecord, LaunchError> {
-    let Some(stdout) = child.stdout.take() else {
-        return Err(LaunchError::Read(std::io::Error::other(
-            "the venue was spawned without a stdout pipe",
-        )));
-    };
+///
+/// Takes the handle rather than the `Child`, because this runs on a thread that
+/// must not own the process it is reading from - the thread that DOES own it is
+/// the one enforcing the readiness deadline, and it can only do that by killing
+/// the child out from under this read.
+///
+/// The stderr for a `NoRecord` is attached by the caller, which is the only
+/// party that knows how long the drain has had to deliver it.
+fn read_ready(stdout: std::process::ChildStdout) -> Result<ReadyRecord, LaunchError> {
     let mut line = String::new();
     let read = BufReader::new(stdout)
         .read_line(&mut line)
         .map_err(LaunchError::Read)?;
     if read == 0 {
-        // Give the drain a moment to deliver the lines that explain why, so the
-        // error carries the reason rather than pointing at a log elsewhere.
-        std::thread::sleep(Duration::from_millis(50));
-        return Err(LaunchError::NoRecord {
-            stderr: snapshot(stderr_ring),
-        });
+        return Err(LaunchError::NoRecord { stderr: Vec::new() });
     }
 
     parse_ready(&line)
@@ -596,15 +682,39 @@ fn read_ready(
 /// version refusal in particular is the branch a consumer most needs to work and
 /// least often exercises.
 fn parse_ready(line: &str) -> Result<ReadyRecord, LaunchError> {
+    // Version FIRST means reading it off the RAW json, before the record is
+    // deserialized. Deserializing first and checking after only works while the
+    // rest of the schema still happens to fit this build's struct - the moment a
+    // newer venue retypes or removes any other field, the mismatch surfaces as
+    // `Malformed` and the operator is told the venue speaks gibberish rather
+    // than that it is a version ahead. The version field is the one thing whose
+    // shape may never change, so it is the one thing safe to read alone.
+    let probe: serde_json::Value =
+        serde_json::from_str(line.trim()).map_err(|source| LaunchError::Malformed {
+            line: line.to_owned(),
+            source: source.to_string(),
+        })?;
+    match probe.get("version").and_then(serde_json::Value::as_u64) {
+        Some(version) if version == u64::from(ReadyRecord::VERSION) => {}
+        Some(version) => {
+            return Err(LaunchError::Version {
+                reported: u32::try_from(version).unwrap_or(u32::MAX),
+                understood: ReadyRecord::VERSION,
+            });
+        }
+        None => {
+            return Err(LaunchError::Malformed {
+                line: line.to_owned(),
+                source: "no readable `version` field".to_owned(),
+            });
+        }
+    }
+
     let record: ReadyRecord =
         serde_json::from_str(line.trim()).map_err(|source| LaunchError::Malformed {
             line: line.to_owned(),
             source: source.to_string(),
         })?;
-    // Version FIRST, before trusting any other field: the record is a wire
-    // schema shared with a separately built binary, and a venue that has moved
-    // ahead of this build is exactly the case worth refusing loudly rather than
-    // reading a field whose meaning has changed.
     if record.version != ReadyRecord::VERSION {
         return Err(LaunchError::Version {
             reported: record.version,
@@ -766,6 +876,53 @@ mod tests {
                 other => panic!("expected a version refusal for {version}, got {other:?}"),
             }
         }
+    }
+
+    /// A venue that never speaks: holds its inherited stdout open, writes
+    /// nothing, and ignores whatever argv it is handed.
+    ///
+    /// Written here rather than committed because no stock binary has this
+    /// shape - `sleep` and `cat` both reject the `serve` argv the launcher
+    /// prepends and exit, which is a boot failure rather than the silence under
+    /// test - and because a committed fixture would carry an executable bit that
+    /// has to survive a checkout.
+    fn silent_venue() -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join("mogwai-silent-venue.sh");
+        std::fs::create_dir_all(path.parent().expect("target dir")).expect("create target dir");
+        std::fs::write(&path, "#!/bin/sh\nexec sleep 60\n").expect("write the silent venue");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("make the silent venue executable");
+        path
+    }
+
+    /// The bound is a WALL-CLOCK bound, not merely an eventual error.
+    ///
+    /// This is the case that used to hang FOREVER after reporting its timeout:
+    /// the thread owning the child sat in `read_line` on a line that was never
+    /// coming, and `launch` joined it. The assertion that matters is the elapsed
+    /// time, not the error variant - the old code produced the right variant and
+    /// then never returned.
+    #[test]
+    fn the_ready_bound_returns_on_time_against_a_silent_venue() {
+        let started = std::time::Instant::now();
+        let error = launch(LaunchSpec {
+            binary: Some(silent_venue().into_os_string()),
+            ready_timeout: Some(Duration::from_millis(400)),
+            stderr: StderrSink::Discard,
+            ..LaunchSpec::default()
+        })
+        .expect_err("a venue that never speaks must time out");
+        let elapsed = started.elapsed();
+
+        assert!(matches!(error, LaunchError::Timeout { .. }), "{error:?}");
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "launch must return on its own bound, took {elapsed:?}"
+        );
     }
 
     /// The timeout path needs a process that holds stdout open and stays silent,

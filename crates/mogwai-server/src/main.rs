@@ -202,6 +202,26 @@ fn arm_parent_death_signal(expected: Option<i32>) -> anyhow::Result<()> {
             return Err(std::io::Error::last_os_error().into());
         }
     }
+    // A blocked SIGTERM is INHERITED ACROSS EXEC, and a blocked parent-death
+    // signal is simply never delivered - the venue outlives its launcher with
+    // the signal pending forever. That makes the whole cleanup story depend on
+    // a property of whichever process happened to spawn us, which no launcher
+    // documents and none can be asked to guarantee. Unblocking it here is the
+    // only place that covers every launcher. Reproduced before this line
+    // existed: a launcher that blocked SIGTERM, spawned the venue and exited
+    // left it serving `/health` indefinitely.
+    //
+    // SIGTERM rather than SIGKILL stays deliberate - it feeds the graceful
+    // drain in `shutdown_signal` - but that choice is only safe once delivery
+    // is guaranteed.
+    let mut just_sigterm = nix::sys::signal::SigSet::empty();
+    just_sigterm.add(nix::sys::signal::Signal::SIGTERM);
+    nix::sys::signal::sigprocmask(
+        nix::sys::signal::SigmaskHow::SIG_UNBLOCK,
+        Some(&just_sigterm),
+        None,
+    )
+    .map_err(|err| anyhow::anyhow!("could not unblock SIGTERM: {err}"))?;
     let after = nix::unistd::getppid();
     if before != after {
         anyhow::bail!(
