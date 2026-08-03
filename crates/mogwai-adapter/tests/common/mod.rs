@@ -29,7 +29,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -118,6 +118,9 @@ pub struct StubState {
     pub serve_account: AtomicBool,
     /// Body served for `GET /account` when `serve_account` is set.
     pub account_body: Mutex<Option<String>>,
+    /// The run this stub reports on `GET /health`. A client configured with a
+    /// different `expected_run_seed` must refuse to use the connection.
+    pub run_seed: AtomicU64,
     /// Venue-truth order rows returned to reconciliation queries.
     pub venue_orders: Mutex<Vec<OrderStatusInfo>>,
     /// Venue-truth fill rows returned to reconciliation queries.
@@ -198,6 +201,16 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
         } else {
             respond_json(stream, "404 Not Found", "").await;
         }
+    } else if path.starts_with("/health") {
+        // The run this stub claims to be. A client bound to a different run must
+        // refuse it - that is the whole of the venue-identity check.
+        let run_seed = state.run_seed.load(Ordering::Relaxed);
+        respond_json(
+            stream,
+            "200 OK",
+            &format!(r#"{{"status":"ok","oms_type":"netting","run_seed":{run_seed}}}"#),
+        )
+        .await;
     } else if path.starts_with("/clock") {
         let body = state.clock_body.lock().expect("clock body mutex").clone();
         match body {

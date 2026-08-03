@@ -30,7 +30,11 @@ use rand::{RngExt, SeedableRng, rngs::StdRng};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
-use crate::{clock::fetch_clock, convert, lifecycle::HttpQuota};
+use crate::{
+    clock::fetch_clock,
+    convert,
+    lifecycle::{HttpQuota, IDENTITY_UNREACHABLE, RunIdentityCheck},
+};
 
 /// One message queued for timed delivery through the latency pump: the wall
 /// deadline it must not be released before, and the message to hand to the sink.
@@ -454,6 +458,71 @@ pub(crate) async fn fetch_clock_or_identity(
         false,
     )
 }
+/// Builds the per-dial run-identity check both clients hand to their connection
+/// loop, or `None` when the config named no run to be bound to.
+///
+/// The probe is `GET /health`, which reports the run's seed - a value already
+/// unique per run and already carried in the readiness record, so a launcher
+/// that has one can bind its clients to it without any new plumbing.
+///
+/// Reachability and identity are separated deliberately. A health probe fails
+/// for the same transport reasons a socket does, so an unanswered probe is
+/// reported with the [`IDENTITY_UNREACHABLE`] prefix and does NOT refuse the
+/// connection; only a venue that answers, with a different run, does.
+pub(crate) fn run_identity_check(
+    http: HttpClient,
+    quota: HttpQuota,
+    http_base: String,
+    expected: Option<u64>,
+) -> Option<RunIdentityCheck> {
+    let expected = expected?;
+    Some(Arc::new(move || {
+        let http = http.clone();
+        let quota = quota.clone();
+        let url = join_url(&http_base, "health");
+        let probe: std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send>> =
+            Box::pin(async move {
+                quota.wait().await;
+                let response = http
+                    .get(
+                        url.clone(),
+                        None,
+                        None,
+                        Some(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS),
+                        None,
+                    )
+                    .await
+                    .map_err(|err| format!("{IDENTITY_UNREACHABLE}{url}: {err}"))?;
+                if !response.status.is_success() {
+                    return Err(format!(
+                        "{IDENTITY_UNREACHABLE}{url} answered {}",
+                        response.status.as_u16()
+                    ));
+                }
+                let health: serde_json::Value = serde_json::from_slice(&response.body)
+                    .map_err(|err| format!("{IDENTITY_UNREACHABLE}{url} is not JSON: {err}"))?;
+                // A venue too old to report its run is unidentifiable rather than
+                // wrong, and refusing it would make this field's arrival a breaking
+                // change for a client that opted in.
+                let Some(reported) = health.get("run_seed").and_then(serde_json::Value::as_u64)
+                else {
+                    return Err(format!(
+                        "{IDENTITY_UNREACHABLE}{url} reports no run_seed; the venue predates run \
+                     identity"
+                    ));
+                };
+                if reported == expected {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "expected run {expected}, but this address is serving run {reported}"
+                    ))
+                }
+            });
+        probe
+    }))
+}
+
 pub(crate) fn duration_to_nanos(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }

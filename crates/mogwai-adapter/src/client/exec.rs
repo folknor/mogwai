@@ -61,8 +61,8 @@ use crate::{
     client::shared::{
         HavocDelivery, HavocFilter, abort_tasks, client_havoc, conn_havoc, enqueue_havoc,
         fetch_clock_or_identity, flush_havoc_into_pump, instrument_def, join_url, lock_recover,
-        now_unix_nanos, request_timeout_secs, seed_instruments, spawn_latency_pump,
-        symbol_from_instrument, track_task, wait_connected,
+        now_unix_nanos, request_timeout_secs, run_identity_check, seed_instruments,
+        spawn_latency_pump, symbol_from_instrument, track_task, wait_connected,
     },
     convert,
     lifecycle::{HttpQuota, WsConnectionConfig, run_ws_connection},
@@ -847,6 +847,12 @@ impl ExecutionClient for MogwaiExecutionClient {
         let disconnect_filter = Arc::clone(&havoc_filter);
         let disconnect_deliver = deliver_tx;
         let task_ws_url = ws_url.clone();
+        let identity = run_identity_check(
+            self.http.clone(),
+            self.http_quota.clone(),
+            http_base_url.clone(),
+            self.config.expected_run_seed,
+        );
         let reader_handle = tokio::spawn(async move {
             run_ws_connection(
                 WsConnectionConfig {
@@ -856,6 +862,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                     connected,
                     sim,
                     label: "exec",
+                    identity,
                 },
                 cmd_rx,
                 exec_command_to_client_message,

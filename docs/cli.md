@@ -94,6 +94,25 @@ guard, and will leave a venue serving under init for its whole declared duration
 A launcher sees either refusal the same way as any other boot failure - stdout
 closes with no line - so no special handling is needed for them.
 
+## Which run is at an address
+
+`GET /health` reports `run_seed`, identifying the RUN rather than the process.
+
+A port identifies nothing over time. It is ephemeral, and this venue frees it
+BEFORE it exits: a declared completion stops the accept loop first, then drains
+live connections for up to the shutdown grace, so the address is available while
+the process is still alive. A consumer watching for child exit sees nothing
+during that window, and a client that only knows where to dial cannot tell its
+own run from whatever answers there next.
+
+The readiness record already carries `run_seed`, so a launcher can bind its
+clients to the run it started rather than to the address it landed on. The
+nautilus adapter does this through `MogwaiDataClientConfig::for_run` /
+`MogwaiExecClientConfig::for_run`, which check `/health` on every connect and
+refuse - terminally, logging `venue identity mismatch` - when the address is
+serving a different run. A venue that cannot be probed at all is used rather
+than judged: an unanswered probe is a transport failure, not a wrong venue.
+
 A launcher that CAPTURES the child's stderr must also DRAIN it, continuously,
 from the moment of spawn. Logs go to stderr by design, a pipe holds roughly
 64 KiB, and a full pipe blocks the writer - so an undrained capture wedges the

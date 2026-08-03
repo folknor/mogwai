@@ -42,6 +42,15 @@ pub struct MogwaiDataClientConfig {
     /// Havoc to arm on connect. `None` is a clean adapter.
     #[serde(default)]
     pub havoc: Option<HavocSpec>,
+    /// The run this client belongs to, checked on every connect.
+    ///
+    /// `None` keeps the historical behaviour: dial the address and trust
+    /// whatever answers. Set - which [`MogwaiDataClientConfig::for_run`] does
+    /// from the readiness record - the client verifies the venue's reported
+    /// `run_seed` before using the connection, and refuses terminally if it
+    /// differs. See `verify_run_identity`.
+    #[serde(default)]
+    pub expected_run_seed: Option<u64>,
 }
 
 impl Default for MogwaiDataClientConfig {
@@ -50,6 +59,7 @@ impl Default for MogwaiDataClientConfig {
             account_id: AccountId::from(UNSET_ACCOUNT_ID),
             base_url: String::new(),
             havoc: None,
+            expected_run_seed: None,
         }
     }
 }
@@ -72,6 +82,23 @@ impl MogwaiDataClientConfig {
             account_id,
             base_url: format!("ws://{addr}"),
             havoc: None,
+            expected_run_seed: None,
+        }
+    }
+
+    /// Build a config bound to the RUN a readiness record describes, not merely
+    /// to the address it landed on.
+    ///
+    /// Prefer this to [`Self::for_addr`] whenever the record is in hand, which
+    /// it always is when the venue was launched rather than found. An address
+    /// identifies nothing over time: the port is ephemeral, and this venue frees
+    /// it before it exits, so a client that only knows where to dial cannot tell
+    /// its own run from whatever answers there next.
+    #[must_use]
+    pub fn for_run(record: &mogwai_protocol::ReadyRecord, account_id: AccountId) -> Self {
+        Self {
+            expected_run_seed: Some(record.run_seed),
+            ..Self::for_addr(record.addr, account_id)
         }
     }
 
@@ -152,6 +179,11 @@ pub struct MogwaiExecClientConfig {
     /// Havoc to arm on connect. `None` is a clean adapter.
     #[serde(default)]
     pub havoc: Option<HavocSpec>,
+    /// The run this client belongs to. See
+    /// [`MogwaiDataClientConfig::expected_run_seed`]; both legs should carry the
+    /// same one, for the same reason they carry the same account.
+    #[serde(default)]
+    pub expected_run_seed: Option<u64>,
 }
 
 /// Default OMS type for an exec client config field that is absent from the
@@ -171,6 +203,7 @@ impl Default for MogwaiExecClientConfig {
             account_type: AccountType::Cash,
             oms_type: default_oms_type(),
             havoc: None,
+            expected_run_seed: None,
         }
     }
 }
@@ -180,7 +213,8 @@ impl MogwaiExecClientConfig {
     ///
     /// See [`MogwaiDataClientConfig::for_addr`]; pass the same `account_id` to
     /// both, because the pair speaks for one account and the venue has one
-    /// ledger regardless of what either client believes.
+    /// ledger regardless of what either client believes. Prefer
+    /// [`Self::for_run`] when the readiness record is in hand.
     ///
     /// Leaves `account_type` at `Cash`. A futures run wants
     /// `AccountType::Margin` - the venue posts and reports margin either way,
@@ -192,6 +226,16 @@ impl MogwaiExecClientConfig {
             account_id,
             base_url: format!("ws://{addr}"),
             ..Self::default()
+        }
+    }
+
+    /// Build a config bound to the RUN a readiness record describes. See
+    /// [`MogwaiDataClientConfig::for_run`].
+    #[must_use]
+    pub fn for_run(record: &mogwai_protocol::ReadyRecord, account_id: AccountId) -> Self {
+        Self {
+            expected_run_seed: Some(record.run_seed),
+            ..Self::for_addr(record.addr, account_id)
         }
     }
 

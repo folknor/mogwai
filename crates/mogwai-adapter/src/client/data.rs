@@ -52,8 +52,8 @@ use crate::{
         conn_havoc, date_to_unix_nanos, emit_seeded_instruments, enqueue_havoc, ensure_instrument,
         ensure_on_tape, fetch_clock_or_identity, fetch_instruments, flush_havoc_into_pump,
         instrument_any_or_warn, instrument_def, join_url, lock_recover, now_unix_nanos,
-        seed_instruments, spawn_latency_pump, symbol_from_instrument, track_task, wait_connected,
-        warn_missing_instrument_once,
+        run_identity_check, seed_instruments, spawn_latency_pump, symbol_from_instrument,
+        track_task, wait_connected, warn_missing_instrument_once,
     },
     convert,
     lifecycle::{HttpQuota, WsConnectionConfig, run_ws_connection},
@@ -377,6 +377,12 @@ impl DataClient for MogwaiDataClient {
         let disconnect_filter = Arc::clone(&havoc_filter);
         let disconnect_deliver = deliver_tx;
         let task_ws_url = ws_url.clone();
+        let identity = run_identity_check(
+            self.http.clone(),
+            self.http_quota.clone(),
+            http_base_url.clone(),
+            self.config.expected_run_seed,
+        );
         let reader_handle = tokio::spawn(async move {
             run_ws_connection(
                 WsConnectionConfig {
@@ -386,6 +392,7 @@ impl DataClient for MogwaiDataClient {
                     connected,
                     sim,
                     label: "data",
+                    identity,
                 },
                 cmd_rx,
                 ws_command_to_client_message,

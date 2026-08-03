@@ -218,7 +218,58 @@ pub(crate) struct WsConnectionConfig {
     /// tag the interleaved disconnect/backoff/reconnect lines cannot be told
     /// apart.
     pub(crate) label: &'static str,
+    /// Proves, on every dial, that the thing answering is still this client's
+    /// run. `None` dials blind, which is the historical behaviour.
+    ///
+    /// It lives here rather than in either client's connect path because the
+    /// RECONNECT is the exposure: a re-dial never re-runs that path, so a check
+    /// placed there would cover only the first connection - the one least likely
+    /// to reach a stranger.
+    pub(crate) identity: Option<RunIdentityCheck>,
 }
+
+/// Runs the identity check, turning "could not ask" into a distinct outcome
+/// from "asked, and it is someone else".
+///
+/// An unreachable venue is NOT a mismatch: a health probe can fail for the same
+/// transport reasons the socket can, and refusing terminally on that would turn
+/// a blip into a dead client. Only a venue that answers with a different run
+/// earns the refusal.
+async fn verify_run_identity(
+    check: &(
+         dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
+             + Send
+             + Sync
+     ),
+    label: &'static str,
+) -> Result<(), String> {
+    match check().await {
+        Ok(()) => Ok(()),
+        Err(reason) if reason.starts_with(IDENTITY_UNREACHABLE) => {
+            tracing::warn!(
+                socket = label,
+                %reason,
+                "could not confirm which run this venue is serving; proceeding, because an \
+                 unanswered probe is a transport failure rather than a wrong venue"
+            );
+            Ok(())
+        }
+        Err(reason) => Err(reason),
+    }
+}
+
+/// Prefix marking an identity probe that could not be answered at all, as
+/// opposed to one answered by the wrong run.
+pub(crate) const IDENTITY_UNREACHABLE: &str = "unreachable: ";
+
+/// Asks the venue at this address which run it is serving.
+///
+/// Boxed rather than generic because the connection loop is already carrying
+/// seven type parameters, and this one is called once per dial on a path whose
+/// cost is a network round trip.
+pub(crate) type RunIdentityCheck = std::sync::Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync,
+>;
 
 pub(crate) async fn run_ws_connection<
     Cmd,
@@ -251,6 +302,7 @@ pub(crate) async fn run_ws_connection<
         connected,
         sim,
         label,
+        identity,
     } = config;
     let policy = ReconnectPolicy::from_conn(&conn, sim);
     // The reconnect-jitter RNG is seeded from the configured havoc seed when one
@@ -296,6 +348,29 @@ pub(crate) async fn run_ws_connection<
                 continue;
             }
         };
+        // Prove the thing that answered is this client's run, BEFORE it is used
+        // for anything. An address identifies nothing over time: the port is
+        // ephemeral, the venue frees it before it exits, and a client that only
+        // knows where to dial cannot tell its own run from whatever answers
+        // there next.
+        //
+        // A mismatch is TERMINAL and never retried. Reconnecting is for a venue
+        // that went away and came back; a different run at the same address did
+        // not come back, and dialling it again would only find it again.
+        if let Some(check) = identity.as_ref()
+            && let Err(reason) = verify_run_identity(check.as_ref(), label).await
+        {
+            tracing::error!(
+                socket = label,
+                url = %ws_url,
+                %reason,
+                "venue identity mismatch; this address is serving a different run, so this \
+                 client is giving up rather than trading against it"
+            );
+            connected.store(false, Ordering::Relaxed);
+            return;
+        }
+
         // `attempt` counts dials since the last PROVEN connection, so a nonzero
         // value here marks this line as a re-attach after an outage rather than
         // the boot-time connect.
@@ -806,6 +881,7 @@ mod tests {
                 connected: Arc::new(AtomicBool::new(false)),
                 sim: SimClock::identity(),
                 label: "test",
+                identity: None,
             },
             cmd_rx,
             |cmd: ClientMessage| cmd,

@@ -63,6 +63,7 @@ async fn subscribed_data_client(
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
         havoc,
+        expected_run_seed: None,
     };
     let mut client =
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
@@ -117,6 +118,7 @@ async fn connect_data_client(
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
         havoc,
+        expected_run_seed: None,
     };
     let mut client =
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
@@ -330,6 +332,7 @@ async fn ships_server_havoc() {
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
         havoc: Some(havoc),
+        expected_run_seed: None,
     };
     let mut data_client =
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), data_config).expect("client builds");
@@ -504,6 +507,87 @@ async fn havoc_reorder_swaps_adjacent() {
     );
 }
 
+/// A client bound to a run refuses an address serving a DIFFERENT run, and says
+/// so in one named line rather than dying as a generic connect failure.
+///
+/// The exposure this closes: the venue's port is ephemeral and is freed BEFORE
+/// the process exits - it stops accepting, then drains for up to the shutdown
+/// grace - so an address can be reused while a consumer watching for child exit
+/// still sees a live child. A client that only knows where to dial cannot tell
+/// its own run from whatever answers there next.
+///
+/// Terminal on purpose: reconnecting is for a venue that went away and came
+/// back. A different run at the same address did not come back, and re-dialling
+/// would only find it again.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn a_venue_serving_another_run_is_refused_terminally() {
+    let state = Arc::new(StubState::default());
+    state.run_seed.store(4242, Ordering::Relaxed);
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (sink_tx, _sink_rx) = unbounded_channel::<DataEvent>();
+    replace_data_event_sender(sink_tx);
+
+    let config = MogwaiDataClientConfig {
+        account_id: AccountId::from("MOGWAI-001"),
+        base_url,
+        havoc: None,
+        // Bound to a run this stub is not serving.
+        expected_run_seed: Some(7),
+    };
+    let mut client =
+        MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
+    client.start().expect("start grabs the data-event sink");
+    // Refused, so the client never reports connected and `connect` gives up
+    // waiting. The DISTINCT signal is the named `venue identity mismatch` error
+    // line the loop logs before returning; at this API the outcome is simply
+    // that the client never comes up, which is the correct end state either way.
+    drop(client.connect().await);
+
+    assert!(
+        client.is_disconnected(),
+        "a client bound to run 7 must not stay connected to run 4242"
+    );
+    // The refusal is terminal, so the loop stops dialing rather than walking the
+    // reconnect ladder against an address it has already judged.
+    let handshakes = state.ws_handshakes.load(Ordering::Relaxed);
+    assert!(
+        handshakes <= 2,
+        "a refused identity must not be retried, saw {handshakes} handshakes"
+    );
+}
+
+/// An identity check the venue cannot answer is NOT a mismatch. A probe fails
+/// for the same transport reasons a socket does, and refusing on that would turn
+/// a blip into a dead client - so a venue with no `/health` is used, not judged.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn an_unanswerable_identity_probe_does_not_refuse() {
+    let state = Arc::new(StubState::default());
+    // Serving the run this client expects, so the only question is reachability.
+    state.run_seed.store(7, Ordering::Relaxed);
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (sink_tx, _sink_rx) = unbounded_channel::<DataEvent>();
+    replace_data_event_sender(sink_tx);
+
+    let config = MogwaiDataClientConfig {
+        account_id: AccountId::from("MOGWAI-001"),
+        base_url,
+        havoc: None,
+        expected_run_seed: Some(7),
+    };
+    let mut client =
+        MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
+    client.start().expect("start grabs the data-event sink");
+    client.connect().await.expect("connect is spawned");
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(
+        !client.is_disconnected(),
+        "a matching run must be used, not refused"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn conn_reconnect_respects_max_attempts() {
@@ -528,6 +612,7 @@ async fn conn_reconnect_respects_max_attempts() {
             reconnect_delay_max_ms: 30,
             ..ConnHavoc::default()
         })),
+        expected_run_seed: None,
     };
     let mut client =
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");

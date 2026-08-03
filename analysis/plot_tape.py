@@ -16,7 +16,7 @@ Two ways in:
   # chart a CSV you already dumped
   python3 analysis/plot_tape.py --csv bars.csv --open
 
-  # dump and chart in one step (shells out to `brokkr run mogwai -- gen`)
+  # dump and chart in one step (shells out to `mogwai gen`)
   python3 analysis/plot_tape.py --gen --type bars --interval 1m --length 1d --open
 
 Everything after `--gen` that this script does not consume itself is forwarded
@@ -92,7 +92,8 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     src.add_argument(
         "--gen",
         action="store_true",
-        help="Run `brokkr run mogwai -- gen` first, then chart its output.",
+        help="Run `mogwai gen` first, then chart its output. Uses MOGWAI_BIN, "
+        "or a binary under target/, building one if neither is there.",
     )
     out = p.add_argument_group("output")
     out.add_argument(
@@ -115,8 +116,42 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     return p.parse_known_args(argv)
 
 
+def venue_binary() -> str:
+    """The `mogwai` binary to dump with, built if it is not there yet.
+
+    Deliberately NOT `brokkr run mogwai -- gen`. That spelling depends on
+    `brokkr run` consuming the target name, and when it does not - falling
+    through to cargo's default bin instead - the name is forwarded to the
+    program as an argument and the run dies on `unrecognized subcommand
+    'mogwai'`, which reads like a mogwai bug rather than an invocation one.
+    Naming the binary removes the ambiguity entirely.
+
+    `MOGWAI_BIN` wins if set, so a developer can chart a build from elsewhere.
+    """
+    override = os.environ.get("MOGWAI_BIN")
+    if override:
+        return override
+    for profile in ("release", "debug"):
+        candidate = os.path.join(REPO_ROOT, "target", profile, "mogwai")
+        if os.path.exists(candidate):
+            return candidate
+    if shutil.which("cargo") is None:
+        sys.exit(
+            "plot_tape: no mogwai binary under target/ and cargo is not on PATH; "
+            "build it, set MOGWAI_BIN, or dump the CSV yourself and use --csv"
+        )
+    print("plot_tape: building mogwai (no binary under target/)", file=sys.stderr)
+    build = subprocess.run(
+        ["cargo", "build", "--release", "-p", "mogwai-server", "--bin", "mogwai"],
+        cwd=REPO_ROOT,
+    )
+    if build.returncode != 0:
+        sys.exit(f"plot_tape: building mogwai failed with status {build.returncode}")
+    return os.path.join(REPO_ROOT, "target", "release", "mogwai")
+
+
 def run_gen(csv_path: str, forwarded: list[str]) -> None:
-    """Dump a tape to `csv_path` via brokkr, forwarding `forwarded` to gen.
+    """Dump a tape to `csv_path`, forwarding `forwarded` to gen.
 
     `--out` is appended last and is this script's to own: the CSV path comes
     from `--csv`, so a caller passing their own `--out` through would be
@@ -125,10 +160,8 @@ def run_gen(csv_path: str, forwarded: list[str]) -> None:
     """
     if "--out" in forwarded:
         sys.exit("plot_tape: pass --csv, not --out, to choose the dump path")
-    if shutil.which("brokkr") is None:
-        sys.exit("plot_tape: brokkr not on PATH; dump the CSV yourself and use --csv")
     os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
-    cmd = ["brokkr", "run", "mogwai", "--", "gen"] + forwarded + ["--out", csv_path]
+    cmd = [venue_binary(), "gen"] + forwarded + ["--out", csv_path]
     print("plot_tape: " + " ".join(cmd), file=sys.stderr)
     done = subprocess.run(cmd, cwd=REPO_ROOT)
     if done.returncode != 0:

@@ -352,12 +352,27 @@ pub(crate) struct AppState {
 pub(crate) struct Health {
     status: &'static str,
     oms_type: mogwai_protocol::OmsType,
+    /// Identifies this RUN, not this process.
+    ///
+    /// The endpoint is an ephemeral port, and a port outlives nothing: once a
+    /// venue exits, the number is free and anything may take it. A client
+    /// holding that address has no way to tell the run it was launched against
+    /// from whatever now answers there, and the window is not hypothetical -
+    /// this venue stops accepting BEFORE it exits, draining live connections for
+    /// up to the shutdown grace, so the port is free while the process is still
+    /// alive and any consumer watching for child exit sees nothing.
+    ///
+    /// The seed is already unique per run and already reported in the readiness
+    /// record, so a launcher can hand it to its clients and they can check they
+    /// are still talking to the venue they were given.
+    run_seed: u64,
 }
 
 pub(crate) async fn health(State(state): State<AppState>) -> Json<Health> {
     Json(Health {
         status: "ok",
         oms_type: state.run.oms_type,
+        run_seed: state.run.seeds.run,
     })
 }
 
