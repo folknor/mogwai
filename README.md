@@ -74,19 +74,72 @@ Sockets may still be many (the adapter alone opens two, data and execution), but
 they all speak for the same account, so anything they submit lands in one shared
 ledger.
 
-Normally a launcher starts the venue, and normally that launcher is an agent
-rather than a person. A Rust consumer gets the launcher from the library -
-`mogwai_protocol::launch::launch(spec)`, also re-exported as
-`mogwai_adapter::launch` - and needs none of what follows. The contract is
-written out because a launcher in another language still has to implement it,
-and because every step below is load-bearing:
+### Driving it from a nautilus live node
+
+The venue is a process, and the adapter is a pair of nautilus clients that
+connect to it. A host starts one venue per run, learns where it landed, and
+registers both clients for the `MOGWAI` venue:
+
+```rust
+use std::time::Duration;
+
+use mogwai_adapter::{
+    MogwaiDataClientConfig, MogwaiDataClientFactory,
+    MogwaiExecClientConfig, MogwaiExecutionClientFactory,
+    launch::{LaunchSpec, StderrSink, launch},
+};
+use nautilus_model::identifiers::AccountId;
+
+// 1. Start this run's venue. There is no address to configure - the venue binds
+//    an ephemeral loopback port and reports it. Holding the returned guard is
+//    what keeps the venue alive; dropping it kills and reaps the process.
+let venue = launch(LaunchSpec {
+    config: Some("run.toml".into()),
+    duration: Some(Duration::from_secs(600)), // SIM time, not wall time
+    stderr: StderrSink::Lines(Box::new(|line| tracing::info!("mogwai: {line}"))),
+    ..LaunchSpec::default()
+})?;
+
+// 2. Both clients speak for ONE account against ONE ledger, so they take one
+//    account id. Nothing on the wire notices if they disagree.
+let account_id = AccountId::from("MOGWAI-001");
+let data = MogwaiDataClientConfig::for_addr(venue.addr(), account_id.clone());
+let exec = MogwaiExecClientConfig::for_addr(venue.addr(), account_id);
+
+// 3. Register the pair.
+let builder = builder
+    .add_data_client(None, Box::new(MogwaiDataClientFactory::new()), Box::new(data))?
+    .add_exec_client(None, Box::new(MogwaiExecutionClientFactory::new()), Box::new(exec))?;
+```
+
+`launch` can be called from anywhere, including an async task: the guard owns a
+dedicated OS thread internally, so the caller's runtime cannot shorten the
+venue's life.
+
+Three things worth knowing at the call site. The venue's own knobs - `speed`,
+`warmup_ns`, `[balances]`, the instrument - live in the file passed as `config`,
+and the host restates none of them. Trading a futures preset wants
+`.with_account_type(AccountType::Margin)` on the exec config, because a nautilus
+`CashAccount` has nowhere to keep the margin rows the venue reports and drops
+them client-side. And divergences are armed either per-client with
+`.with_havoc(..)` or at runtime over `POST /control/divergence`; see
+[`reference/havoc.md`](reference/havoc.md).
+
+### The launcher contract, for a launcher that is not Rust
+
+A Rust host needs none of this - `launch` above is it. Written out because a
+launcher in another language has to implement it, and because every step is
+load-bearing rather than conventional:
 
 1. Spawn `mogwai serve` as a **direct** child, capturing stdout.
-2. Read one line of stdout: a JSON `ReadyRecord`. Check its `version`, then use
-   its `addr`. Stdout closing without a line means the venue failed to boot, and
-   its stderr says why. The read blocks for as long as warmup generation takes.
+2. Read one line of stdout: a JSON `ReadyRecord`. Check its `version` first, then
+   use its `addr`. Stdout closing without a line means the venue failed to boot,
+   and its stderr says why. The read blocks for as long as warmup generation
+   takes, so bound it yourself and treat expiry as a boot failure.
 3. Drain stderr continuously, or send it to a file or the null device. Logs go
-   to stderr by design, and a pipe nobody reads fills up and wedges the venue.
+   to stderr by design, a pipe holds about 64 KiB, and a full pipe blocks the
+   writer - so a capture nobody reads wedges the venue mid-run, which at the
+   socket is indistinguishable from a hang.
 4. On `RunComplete` the venue exits 0 by itself; otherwise terminate it.
 
 "Direct child" is load-bearing rather than stylistic: the venue arms
@@ -94,7 +147,8 @@ and because every step below is load-bearing:
 double fork in between wires the death watch to the wrapper and leaves a real
 orphan behind. The signal also tracks the parent THREAD, so spawn from a thread
 that outlives the run or the venue dies mid-run under a healthy launcher.
-`scripts/smoke.py` is this contract executed, and is the reference to copy from.
+`scripts/smoke.py` is this contract executed in Python, and is the reference to
+copy from.
 
 ## Documentation
 

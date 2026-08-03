@@ -202,6 +202,15 @@ impl MogwaiExecClientConfig {
         self
     }
 
+    /// Set the trader id. [`Self::for_addr`] leaves it at this crate's default,
+    /// which is a mogwai-flavoured placeholder rather than the host's identity,
+    /// so a host with its own trader id sets it here.
+    #[must_use]
+    pub fn with_trader_id(mut self, trader_id: TraderId) -> Self {
+        self.trader_id = trader_id;
+        self
+    }
+
     /// Set the OMS type this client presents to nautilus.
     #[must_use]
     pub fn with_oms_type(mut self, oms_type: OmsType) -> Self {
