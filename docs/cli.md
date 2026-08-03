@@ -29,7 +29,10 @@ mogwai serve --config run.toml
 
 `--config PATH` is optional and otherwise uses built-in defaults. It never
 consults the working directory. `--duration DURATION` overrides
-`run_duration_ns` for this invocation. There is no `--seed` flag: a
+`run_duration_ns` for this invocation, and `--duration 0s` means what
+`run_duration_ns = 0` means - NO declared completion, run until the launcher
+ends it. It briefly meant the opposite here, producing a venue that announced
+readiness and exited before anyone could connect. There is no `--seed` flag: a
 reproduced path is a written-down act, so the seed is overridden through the
 config file's `seed` key alone; when absent, one is drawn at launch and
 reported back in the readiness record's `run_seed`, the value that with the
@@ -72,12 +75,24 @@ thread, or a pool thread deliberately parked for the run's duration. At fleet
 scale, spawning from a short-lived pool task is the natural thing to write and
 the wrong thing to write.
 
-The venue refuses to start if its launcher died during its own startup. It reads
-its parent before arming the signal and again after; a change means it was
-reparented in the window where no signal could be delivered, so it exits nonzero
-with `launcher died during startup` rather than serving a run nobody owns. A
-launcher sees this the same way as any other boot failure - stdout closes with no
-line - so no special handling is needed for it.
+The venue refuses to start if its launcher is already gone. `--launcher-pid PID`
+is how it knows: told the launcher's own pid, it checks it still HAS that parent
+before serving, and exits nonzero otherwise. The shipped launcher always passes
+it; a launcher in another language should too. Without it the venue can only
+notice a launcher that dies DURING its startup - comparing its parent before and
+after arming the signal - which is blind to one already gone before the first
+instruction ran, and that is the case a launcher that spawns and exits produces
+every time.
+
+Capturing stdout is the second guard and the reason the contract says to capture
+rather than merely suggesting it. The readiness line is written to a pipe whose
+read end died with the launcher, so the write fails and the venue exits - later
+than the pid check, since it comes after warmup, but before it has served
+anything. A launcher that neither passes its pid nor captures stdout has neither
+guard, and will leave a venue serving under init for its whole declared duration.
+
+A launcher sees either refusal the same way as any other boot failure - stdout
+closes with no line - so no special handling is needed for them.
 
 A launcher that CAPTURES the child's stderr must also DRAIN it, continuously,
 from the moment of spawn. Logs go to stderr by design, a pipe holds roughly

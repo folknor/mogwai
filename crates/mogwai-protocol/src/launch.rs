@@ -167,6 +167,8 @@ pub enum LaunchError {
     Version { reported: u32, understood: u32 },
     /// The owning thread died before reporting, which means it panicked.
     OwnerDied,
+    /// The readiness bound was zero, which no venue can meet.
+    ZeroReadyTimeout,
 }
 
 impl std::fmt::Display for LaunchError {
@@ -174,7 +176,9 @@ impl std::fmt::Display for LaunchError {
         match self {
             Self::Spawn { binary, source } => write!(
                 f,
-                "could not spawn the venue binary {}: {source}. Set LaunchSpec::binary if it is not on PATH",
+                "could not spawn the venue binary {}: {source}. If the binary is elsewhere, point \
+                 the launcher at it - whatever your launcher calls that setting, it ends up as \
+                 LaunchSpec::binary",
                 binary.to_string_lossy()
             ),
             Self::Read(source) => write!(f, "reading the venue's readiness line: {source}"),
@@ -189,7 +193,8 @@ impl std::fmt::Display for LaunchError {
                 f,
                 "the venue did not report ready within {waited:?}. That read blocks for as long as \
                  warmup generation takes, so a large warmup_ns or a slow tape cadence can \
-                 legitimately need longer - raise LaunchSpec::ready_timeout{}",
+                 legitimately need longer - raise the readiness bound, whatever your launcher \
+                 calls it (it ends up as LaunchSpec::ready_timeout){}",
                 format_stderr(stderr)
             ),
             Self::Malformed { line, source } => {
@@ -210,6 +215,11 @@ impl std::fmt::Display for LaunchError {
             Self::OwnerDied => {
                 f.write_str("the thread owning the venue died before reporting readiness")
             }
+            Self::ZeroReadyTimeout => f.write_str(
+                "the readiness bound is zero, which no venue can meet: readiness comes after \
+                 warmup generation, which is never instantaneous. Leave it unset for the \
+                 default, or give it a real bound",
+            ),
         }
     }
 }
@@ -341,6 +351,14 @@ pub fn launch(spec: LaunchSpec) -> Result<LaunchedVenue, LaunchError> {
     let binary = spec.binary();
     let argv = serve_argv(&spec);
     let timeout = spec.ready_timeout();
+    // A zero bound cannot be met by any venue: readiness comes after warmup
+    // generation, which is never instantaneous. Accepting it produced a launch
+    // that failed as a timeout every time, blaming a venue that was booting
+    // correctly. A launcher whose own config defaults this to zero should hear
+    // about it here rather than at the far end of a boot.
+    if timeout.is_zero() {
+        return Err(LaunchError::ZeroReadyTimeout);
+    }
     let LaunchSpec { stderr: sink, .. } = spec;
 
     let exit = Arc::new(Mutex::new(None));
@@ -373,13 +391,31 @@ pub fn launch(spec: LaunchSpec) -> Result<LaunchedVenue, LaunchError> {
     };
 
     match booted {
-        Ok(record) => Ok(LaunchedVenue {
-            record,
-            exit,
-            stderr,
-            shutdown: Some(shutdown_tx),
-            owner: Some(owner),
-        }),
+        Ok(record) => {
+            // Announce the run HERE rather than leaving it to the caller. A path
+            // is reproducible only from `run_seed` with the config and the
+            // binary's `version_string`, the seed is drawn at launch and exists
+            // nowhere until this record carries it, and a consumer that forgets
+            // to log it has silently made every run of an entire session
+            // irreproducible. One line from the library removes that from the
+            // list of things a consumer has to remember.
+            tracing::info!(
+                addr = %record.addr,
+                pid = record.pid,
+                symbol = %record.symbol,
+                run_seed = record.run_seed,
+                warmup_ns = record.warmup_ns,
+                version_string = %record.version_string,
+                "mogwai venue up"
+            );
+            Ok(LaunchedVenue {
+                record,
+                exit,
+                stderr,
+                shutdown: Some(shutdown_tx),
+                owner: Some(owner),
+            })
+        }
         Err(error) => {
             // Let the owning thread tear down whatever it spawned before this
             // error propagates, so a failed launch leaves no child behind.
@@ -391,8 +427,20 @@ pub fn launch(spec: LaunchSpec) -> Result<LaunchedVenue, LaunchError> {
 }
 
 /// The argv for `serve`, split out so it is testable without spawning anything.
+///
+/// `--launcher-pid` is always passed. It lets the venue prove it still has the
+/// parent it was started by, rather than inferring a death from a change in
+/// `getppid()` - an inference blind to a launcher that was already gone before
+/// the venue ran its first instruction, which is exactly what a launcher that
+/// spawns and exits produces. This process is that parent: `launch` spawns the
+/// child from a thread it owns, so the pid recorded here is the one the venue
+/// will see.
 fn serve_argv(spec: &LaunchSpec) -> Vec<OsString> {
-    let mut argv = vec![OsString::from("serve")];
+    let mut argv = vec![
+        OsString::from("serve"),
+        OsString::from("--launcher-pid"),
+        OsString::from(std::process::id().to_string()),
+    ];
     if let Some(config) = &spec.config {
         argv.push(OsString::from("--config"));
         argv.push(config.clone().into_os_string());
@@ -570,11 +618,17 @@ fn parse_ready(line: &str) -> Result<ReadyRecord, LaunchError> {
 mod tests {
     use super::*;
 
+    /// Not "no flags": the launcher's own pid always goes, because it is what
+    /// lets the venue refuse to serve after its owner is already gone.
     #[test]
-    fn a_bare_spec_passes_no_flags() {
+    fn a_bare_spec_still_identifies_its_launcher() {
         assert_eq!(
             serve_argv(&LaunchSpec::default()),
-            vec![OsString::from("serve")]
+            vec![
+                OsString::from("serve"),
+                OsString::from("--launcher-pid"),
+                OsString::from(std::process::id().to_string()),
+            ]
         );
     }
 
@@ -589,11 +643,29 @@ mod tests {
             argv,
             vec![
                 OsString::from("serve"),
+                OsString::from("--launcher-pid"),
+                OsString::from(std::process::id().to_string()),
                 OsString::from("--config"),
                 OsString::from("/venue/run.toml"),
                 OsString::from("--duration"),
                 OsString::from("30s"),
             ]
+        );
+    }
+
+    /// A bound no venue can meet is refused before anything is spawned, rather
+    /// than failing as a timeout that blames a venue booting correctly.
+    #[test]
+    fn a_zero_ready_timeout_is_refused_without_spawning() {
+        let error = launch(LaunchSpec {
+            binary: Some(OsString::from("mogwai-should-never-be-spawned")),
+            ready_timeout: Some(Duration::ZERO),
+            ..LaunchSpec::default()
+        })
+        .expect_err("a zero bound cannot be met");
+        assert!(
+            matches!(error, LaunchError::ZeroReadyTimeout),
+            "the refusal must precede the spawn, got {error:?}"
         );
     }
 

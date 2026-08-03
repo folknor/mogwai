@@ -101,6 +101,15 @@ struct ServeArgs {
     config: Option<PathBuf>,
     #[arg(long, value_name = "DURATION")]
     duration: Option<humantime::Duration>,
+    /// The launcher's own pid, so the venue can prove it still has the owner it
+    /// was started by.
+    ///
+    /// Optional, and the shipped launcher always passes it. Without it the venue
+    /// can only notice a launcher that dies DURING its startup, never one
+    /// already gone before the first instruction ran - see
+    /// `arm_parent_death_signal`.
+    #[arg(long, value_name = "PID")]
+    launcher_pid: Option<i32>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -156,14 +165,36 @@ const BIND_ADDR: &str = "127.0.0.1:0";
 /// value rather than against pid 1 keeps this correct under a subreaper, where
 /// an orphan is reparented to the subreaper and never to init.
 ///
-/// One residual window is NOT closed and cannot be from inside this process: a
-/// launcher that dies before this program reaches `main` was already gone at the
-/// first read, so both reads agree and nothing looks wrong. That leaves the
-/// venue running with a reparented owner. It is bounded by process startup
-/// rather than by warmup, which is the difference between microseconds and
-/// minutes.
-fn arm_parent_death_signal() -> anyhow::Result<()> {
+/// Comparing samples cannot see a launcher that was ALREADY gone before the
+/// first instruction ran: both reads return the reaper's pid, nothing changed,
+/// and the venue serves a run nobody owns. That is not theoretical - a launcher
+/// that spawns and exits immediately reproduces it every time. `expected` closes
+/// it exactly: told the launcher's own pid, the venue can check it still has
+/// that parent rather than infer from a change. The shipped launcher always
+/// passes it.
+///
+/// A launcher that cannot pass it is not defenceless, and this is why the
+/// contract says to CAPTURE stdout rather than merely suggesting it. The venue
+/// writes its readiness line to a pipe whose read end died with the launcher, so
+/// the write fails and the venue exits - later than this check, since it happens
+/// after warmup, but before it has served anything. A launcher that both
+/// declines the pid and lets the venue inherit its stdout gets neither guard and
+/// will leave an orphan.
+///
+/// Comparing against the observed value rather than against pid 1 keeps all of
+/// this correct under a subreaper, and refusing to special-case pid 1 keeps a
+/// container's pid-1 launcher working, which a bare `getppid() == 1` test would
+/// reject outright.
+fn arm_parent_death_signal(expected: Option<i32>) -> anyhow::Result<()> {
     let before = nix::unistd::getppid();
+    if let Some(expected) = expected
+        && before != nix::unistd::Pid::from_raw(expected)
+    {
+        anyhow::bail!(
+            "launcher {expected} is already gone (parent is {before}); refusing to serve a run \
+             nobody owns"
+        );
+    }
     // SAFETY: prctl with PR_SET_PDEATHSIG takes a signal number by value and
     // touches no memory this process owns.
     unsafe {
@@ -182,11 +213,18 @@ fn arm_parent_death_signal() -> anyhow::Result<()> {
 }
 
 fn serve(args: ServeArgs) -> anyhow::Result<()> {
-    arm_parent_death_signal()?;
+    arm_parent_death_signal(args.launcher_pid)?;
     init_stderr_logging()?;
+    // Zero means the same thing here as it does in the config file: NO declared
+    // completion. It used to mean the opposite on this path only - a venue that
+    // announced readiness and completed before anyone could connect - so
+    // `run_duration_ns = 0` ran forever while `--duration 0s` was dead on
+    // arrival, and a launcher passing a zero it had defaulted saw a connection
+    // refused against a port that had been alive a moment earlier.
     let duration_ns = args
         .duration
-        .map(|duration| u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX));
+        .map(|duration| u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX))
+        .filter(|ns| *ns != 0);
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?

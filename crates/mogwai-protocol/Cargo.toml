@@ -10,6 +10,10 @@ rust_decimal.workspace = true
 # The launcher parses the venue's readiness line, so this is a runtime dep
 # rather than a test-only one.
 serde_json.workspace = true
+# The launcher announces the run it started. `log` bridges the event onto the
+# `log` facade for hosts that install one and no tracing subscriber, which is
+# the common shape for a nautilus host.
+tracing = { workspace = true, features = ["log"] }
 
 [dev-dependencies]
 
