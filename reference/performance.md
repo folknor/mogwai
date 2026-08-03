@@ -185,3 +185,29 @@ measured 13.86 ms tape walk per symbol, and the cache is single-entry, so a
 multi-symbol pass can evict itself. The landing shares the HTTP cache with the
 sweeper to remove duplicate same-bucket walks when the keys coincide, but it
 does not close the separate market-reading performance item.
+
+## 2026-08-03 warmup materialization throughput
+
+Not a criterion benchmark: measured from a real `mogwai serve` boot, as the
+interval between the `projected warmup synthesis cost` and `eager warmup
+materialized` log lines, on the committed default config (24 h `warmup_ns`,
+BTCUSDT, 4,288,935 projected ticks, 19 checkpoints retained). Release binary.
+
+| run | elapsed | implied rate |
+|---|---:|---:|
+| 1 | 1.4883 s | 2.88 M ticks/s |
+| 2 | 1.4920 s | 2.87 M ticks/s |
+| 3 | 1.4790 s | 2.90 M ticks/s |
+
+**2.9 M ticks/s**, spread 0.9 percent across the three. This is the number
+`SYNTHESIS_TICKS_PER_SEC` in `mogwai-server/src/main.rs` exists to hold, and it
+had been carrying 5 M - so the boot projection ran 1.7x optimistic, and the
+60-second WARN threshold it gates was really firing at about 104 seconds of
+actual cost. Corrected to 2.9 M.
+
+Measuring the whole boot interval rather than tick synthesis alone is
+deliberate: the constant predicts what an operator waits through, which includes
+checkpoint retention and the frontier draw, not just the walk. Re-measure the
+same way after any change to the generator, the checkpoint stride, or the tape
+protocol - the previous value's stated provenance was a `fill_bench` row, and no
+such row has ever existed in this document.

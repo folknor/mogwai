@@ -44,10 +44,19 @@ use crate::{
 const LONG_VERSION: &str = env!("MOGWAI_LONG_VERSION");
 
 /// Raw fills the generator synthesizes per wall second, used only to project
-/// warmup cost at boot. It is a MEASURED number, not a target - re-read it off
-/// the `fill_bench` row in `reference/performance.md` whenever the walk changes,
+/// warmup cost at boot. It is a MEASURED number, not a target: see the
+/// "warmup materialization throughput" section of `reference/performance.md`,
+/// which records the boots it comes from and the method. Re-measure the same way
+/// whenever the generator, the checkpoint stride or the tape protocol changes,
 /// or the projection quietly drifts away from what boot actually costs.
-const SYNTHESIS_TICKS_PER_SEC: f64 = 5_000_000.0;
+///
+/// It drifted exactly that way once. This read 5_000_000 while three measured
+/// boots agreed on 2.9 M, so the projection ran 1.7x optimistic and the
+/// `WARMUP_WARN_SECS` threshold below fired at roughly 104 seconds of real cost
+/// rather than the 60 it names. The number covers the WHOLE boot interval -
+/// walk, checkpoint retention and the frontier draw - because that is what an
+/// operator actually waits through.
+const SYNTHESIS_TICKS_PER_SEC: f64 = 2_900_000.0;
 /// Projected warmup synthesis above this escalates the boot line from INFO to
 /// WARN. No refusal: warmup length is the operator's call, and the obligation
 /// this discharges is only that an extreme warmup fails loudly rather than
