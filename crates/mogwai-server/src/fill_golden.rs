@@ -263,6 +263,7 @@ fn run_scenario(band_vol_mult: f64, profiles: &InstrumentProfiles) -> Vec<Cell> 
             let order = SubmitOrder {
                 client_order_id: id,
                 symbol: SYMBOL.into(),
+                position_id: None,
                 side,
                 order_type: OrderType::Limit,
                 quantity: Decimal::ONE,

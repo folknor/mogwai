@@ -403,6 +403,8 @@ pub struct OrderStatusInfo {
     pub client_order_id: ClientOrderId,
     pub venue_order_id: VenueOrderId,
     pub symbol: Symbol,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_id: Option<String>,
     pub side: Side,
     pub order_type: OrderType,
     pub time_in_force: TimeInForce,
@@ -458,6 +460,8 @@ pub struct FillSnapshot {
 pub struct SubmitOrder {
     pub client_order_id: ClientOrderId,
     pub symbol: Symbol,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_id: Option<String>,
     pub side: Side,
     pub order_type: OrderType,
     pub quantity: Decimal,
@@ -506,6 +510,13 @@ pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
     validate_client_order_id(&order.client_order_id)?;
     if order.symbol.len() > MAX_SYMBOL_LEN {
         return Err("symbol exceeds MAX_SYMBOL_LEN");
+    }
+    if order
+        .position_id
+        .as_ref()
+        .is_some_and(|id| id.len() > MAX_CLIENT_ID_LEN)
+    {
+        return Err("position_id exceeds MAX_CLIENT_ID_LEN");
     }
     if order.quantity <= Decimal::ZERO {
         return Err("quantity must be > 0");
@@ -833,13 +844,25 @@ pub struct OrderFilled {
     pub venue_order_id: VenueOrderId,
     pub trade_id: String,
     pub symbol: Symbol,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_id: Option<String>,
     pub side: Side,
     pub last_qty: Decimal,
     pub last_px: Decimal,
     /// Remaining quantity. `> 0` ⇒ this is a partial fill.
     pub leaves_qty: Decimal,
     pub commission: Decimal,
+    pub commission_currency: String,
+    pub liquidity_side: LiquiditySide,
     pub ts_event: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiquiditySide {
+    Maker,
+    #[default]
+    Taker,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -847,7 +870,17 @@ pub struct AccountState {
     pub account_id: AccountId,
     pub balances: Vec<Balance>,
     pub positions: Vec<Position>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub margins: Vec<PostedMargin>,
     pub ts_event: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostedMargin {
+    pub symbol: Symbol,
+    pub currency: String,
+    pub initial: Decimal,
+    pub maintenance: Decimal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -861,10 +894,16 @@ pub struct Balance {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Position {
     pub symbol: Symbol,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_id: Option<String>,
     /// Signed net quantity: positive is long, negative is short, zero is flat.
     pub quantity: Decimal,
     /// Volume-weighted average entry price of the open quantity. Zero when flat.
     pub avg_px: Decimal,
+    #[serde(default, skip_serializing_if = "Decimal::is_zero")]
+    pub mark_px: Decimal,
+    #[serde(default, skip_serializing_if = "Decimal::is_zero")]
+    pub unrealized_pnl: Decimal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,0 +1,19 @@
+[instrument]
+symbol = "BTCUSDT"
+price_precision = 2
+size_precision = 8
+price_increment = "0.01"
+size_increment = "0.00000001"
+[instrument.class]
+kind = "spot"
+base = "BTC"
+quote = "USDT"
+[provenance]
+"symbol" = { kind = "fitted", corpus = "Binance trades", window = "30 days" }
+"price_precision" = { kind = "declared", rationale = "venue quote grid" }
+"size_precision" = { kind = "declared", rationale = "venue size grid" }
+"price_increment" = { kind = "declared", rationale = "venue quote grid" }
+"size_increment" = { kind = "declared", rationale = "venue size grid" }
+"class.kind" = { kind = "declared", rationale = "spot instrument" }
+"class.base" = { kind = "declared", rationale = "base asset" }
+"class.quote" = { kind = "declared", rationale = "quote asset" }

@@ -49,16 +49,31 @@ daemon; see [`reference/cli.md`](reference/cli.md).
 
 ## Smoke test
 
-With a server running (`cargo run -p mogwai-server -- serve -f`, which paces
-correctly at the default `speed = 1.0`):
+`scripts/smoke.py` spawns its own venue as a direct child - it is the executable
+reference for the launcher contract in [`reference/cli.md`](reference/cli.md) -
+so nothing needs to be running first:
 
 ```sh
-python3 scripts/smoke.py
+python3 scripts/smoke.py            # the `default` mode
+python3 scripts/smoke.py stop       # one named mode, each with its own config
 ```
 
 It arms divergences over the control plane and submits orders over the native
 WS gateway, asserting the resulting execution events. Stdlib only - nothing to
 install.
+
+Every run draws a fresh venue seed, so one green run of a mode proves less than
+it looks like it does. `scripts/smoke-sweep.py` repeats modes and reports every
+failure with its reason:
+
+```sh
+python3 scripts/smoke-sweep.py stop 6   # six runs of one mode
+python3 scripts/smoke-sweep.py 3        # three runs of every mode
+python3 scripts/smoke-sweep.py band stop --repeat 4
+```
+
+The repeat count is a bare trailing integer, or `--repeat N`; with no mode named
+it sweeps every mode `smoke.py` knows.
 
 ## Documentation
 

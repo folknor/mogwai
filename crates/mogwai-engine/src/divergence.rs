@@ -39,6 +39,7 @@ impl Engine {
             | Divergence::GoDark { .. }
             | Divergence::StallData { .. }
             | Divergence::FlowSurge { .. }
+            | Divergence::FeeSurcharge { .. }
             | Divergence::ClearDivergences
             | Divergence::CancelOpenOrderSilently { .. } => None,
             other => {

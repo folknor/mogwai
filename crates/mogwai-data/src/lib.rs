@@ -48,9 +48,9 @@ use rust_decimal::Decimal;
 
 pub use bars::{BarAcc, fold_trade, window_close_ns};
 pub use generated::{
-    AbsReturnAcf, AnchorRange, CheckpointIndex, Fingerprint, GeneratedSource, GeneratedSourceError,
-    GeneratorScalars, GoldenTargets, MinMedianMax, ScalarError, ScalarRanges, SessionProfile,
-    SessionProfileError,
+    AbsReturnAcf, AnchorRange, CalendarError, CheckpointIndex, Fingerprint, GeneratedSource,
+    GeneratedSourceError, GeneratorScalars, GoldenTargets, MinMedianMax, ScalarError, ScalarRanges,
+    SessionCalendar, SessionProfile, SessionProfileError, SizeGrid, WeeklyWindow,
 };
 pub use mogwai_protocol::MarketRegime;
 pub use trigger::{
@@ -61,7 +61,7 @@ pub use trigger::{
 /// Identity of the tape generation process, not of any one path. Two runs are
 /// comparable only if their venues report the same value. `AGENTS.md` carries
 /// the obligation to bump this for every tape-determinism change.
-pub const TAPE_PROTOCOL_VERSION: u32 = 2;
+pub const TAPE_PROTOCOL_VERSION: u32 = 4;
 
 /// One replayable market-data event.
 #[derive(Debug, Clone)]

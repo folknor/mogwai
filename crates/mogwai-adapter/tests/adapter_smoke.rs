@@ -36,8 +36,8 @@ use nautilus_model::{
     enums::{ContingencyType, OrderStatus, TriggerType},
     events::OrderEventAny,
     identifiers::{
-        ClientId, ClientOrderId, InstrumentId, OrderListId, StrategyId, Symbol, TraderId,
-        VenueOrderId,
+        ClientId, ClientOrderId, InstrumentId, OrderListId, PositionId, StrategyId, Symbol,
+        TraderId, VenueOrderId,
     },
     orders::Order,
     types::{Price, Quantity},
@@ -61,6 +61,64 @@ async fn connect_seeds_initial_account_state() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn a_cash_configured_client_still_connects_to_a_futures_run() {
+    let state = Arc::new(StubState::default());
+    state.serve_account.store(true, Ordering::Relaxed);
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
+    replace_exec_event_sender(sink_tx);
+    let client = connected_exec_client(
+        base_url,
+        Rc::new(RefCell::new(Cache::default())),
+        &mut sink_rx,
+    )
+    .await;
+    assert!(client.is_connected());
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn a_submitted_position_id_reaches_the_wire() {
+    let state = Arc::new(StubState::default());
+    state.serve_account.store(true, Ordering::Relaxed);
+    state.ws_exec_frames.lock().unwrap().push(
+        r#"{"type":"OrderAccepted","client_order_id":"O-1","venue_order_id":"V-1","ts_event":10}"#
+            .into(),
+    );
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
+    replace_exec_event_sender(sink_tx);
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    let order = cached_order(&cache);
+    let client = connected_exec_client(base_url, cache, &mut sink_rx).await;
+    client
+        .submit_order(SubmitOrder::new(
+            TraderId::from("MOGWAI-001"),
+            Some(ClientId::from("MOGWAI-EXEC")),
+            StrategyId::from("S-001"),
+            instrument_id(),
+            order.client_order_id(),
+            order.init_event().clone(),
+            None,
+            Some(PositionId::from("BTCUSDT-7")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+        ))
+        .unwrap();
+    let _ = next_exec_event(&mut sink_rx, Duration::from_secs(2)).await;
+    let _ = next_exec_event(&mut sink_rx, Duration::from_secs(2)).await;
+    let sent = state.ws_client_messages.lock().unwrap();
+    let submit = sent
+        .iter()
+        .find(|message| message.contains("SubmitOrder"))
+        .unwrap_or_else(|| panic!("no SubmitOrder in {sent:?}"));
+    assert!(submit.contains(r#""position_id":"BTCUSDT-7""#), "{submit}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn adapter_submit_drives_live_exec_events() {
     // The exec WS leg replies to the client's `SubmitOrder` with accept, fill
     // and account frames. The fill names order `O-1`, venue id `V-1`, qty `1`,
@@ -74,7 +132,7 @@ async fn adapter_submit_drives_live_exec_events() {
                 .to_string(),
         );
         frames.push(
-            r#"{"type":"OrderFilled","client_order_id":"O-1","venue_order_id":"V-1","trade_id":"T-1","symbol":"BTCUSDT","side":"Buy","last_qty":"1","last_px":"100.00","leaves_qty":"0","commission":"0","ts_event":11}"#
+            r#"{"type":"OrderFilled","client_order_id":"O-1","venue_order_id":"V-1","trade_id":"T-1","symbol":"BTCUSDT","side":"Buy","last_qty":"1","last_px":"100.00","leaves_qty":"0","commission":"0","commission_currency":"USDT","liquidity_side":"taker","ts_event":11}"#
                 .to_string(),
         );
         frames.push(
@@ -172,7 +230,7 @@ async fn adapter_submits_a_stop_market_and_sees_triggered_then_filled() {
         // Adverse for a sell: the triggering print was 95.00 and the fill lands
         // below it, which is what the band does to a triggered stop-market.
         frames.push(
-            r#"{"type":"OrderFilled","client_order_id":"O-STOP","venue_order_id":"V-9","trade_id":"T-9","symbol":"BTCUSDT","side":"Sell","last_qty":"1","last_px":"94.97","leaves_qty":"0","commission":"0","ts_event":12}"#
+            r#"{"type":"OrderFilled","client_order_id":"O-STOP","venue_order_id":"V-9","trade_id":"T-9","symbol":"BTCUSDT","side":"Sell","last_qty":"1","last_px":"94.97","leaves_qty":"0","commission":"0","commission_currency":"USDT","liquidity_side":"taker","ts_event":12}"#
                 .to_string(),
         );
     }

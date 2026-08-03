@@ -1,0 +1,53 @@
+[instrument]
+symbol = "MNQ"
+price_precision = 2
+size_precision = 0
+price_increment = "0.25"
+size_increment = "1"
+[instrument.class]
+kind = "future"
+underlying = "NQ"
+settlement_currency = "USD"
+multiplier = "2"
+asset_class = "index"
+[instrument.margin]
+initial_per_contract = "2000"
+maintenance_per_contract = "1800"
+breach_action = "liquidate"
+# Exchange-local CME hours: Sunday 18:00 through Friday 17:00 Chicago time,
+# with the daily 16:15-16:30 maintenance halt and the 17:00-18:00 break, and a
+# genuinely shut Saturday. Minutes count from local Sunday 00:00. Local minute
+# 960 is 16:00, when the daily settlement price is struck; without this table
+# the instrument would carry margin it never settles.
+[instrument.calendar]
+utc_offset_minutes = -300
+settlement_minute_of_day = 960
+open_windows = [
+  { start_minute = 1080, end_minute = 2415 },
+  { start_minute = 2430, end_minute = 2460 },
+  { start_minute = 2520, end_minute = 3855 },
+  { start_minute = 3870, end_minute = 3900 },
+  { start_minute = 3960, end_minute = 5295 },
+  { start_minute = 5310, end_minute = 5340 },
+  { start_minute = 5400, end_minute = 6735 },
+  { start_minute = 6750, end_minute = 6780 },
+  { start_minute = 6840, end_minute = 8175 },
+  { start_minute = 8190, end_minute = 8220 },
+]
+[provenance]
+"symbol" = { kind = "declared", rationale = "continuous synthetic contract" }
+"price_precision" = { kind = "declared", rationale = "CME quote convention" }
+"size_precision" = { kind = "declared", rationale = "whole contracts" }
+"price_increment" = { kind = "declared", rationale = "CME contract specification" }
+"size_increment" = { kind = "declared", rationale = "whole contracts" }
+"class.kind" = { kind = "declared", rationale = "cash-settled future" }
+"class.underlying" = { kind = "declared", rationale = "Nasdaq 100" }
+"class.settlement_currency" = { kind = "declared", rationale = "CME settlement currency" }
+"class.multiplier" = { kind = "declared", rationale = "two dollars per point" }
+"class.asset_class" = { kind = "declared", rationale = "index future" }
+"margin.initial_per_contract" = { kind = "declared", rationale = "test collateral, not a CME performance bond" }
+"margin.maintenance_per_contract" = { kind = "declared", rationale = "test collateral, not a CME performance bond" }
+"margin.breach_action" = { kind = "declared", rationale = "exercise liquidation" }
+"calendar.utc_offset_minutes" = { kind = "declared", rationale = "CME central time; DST is declared unmodelled" }
+"calendar.settlement_minute_of_day" = { kind = "declared", rationale = "16:00 local daily settlement" }
+"calendar.open_windows" = { kind = "declared", rationale = "published CME equity index hours" }

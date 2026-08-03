@@ -9,7 +9,7 @@
 
 use std::{collections::HashMap, path::PathBuf};
 
-use mogwai_protocol::{InstrumentDef, MarketRegime, SimClock};
+use mogwai_protocol::{InstrumentClass, InstrumentDef, MarketRegime, SimClock, WireAssetClass};
 use rust_decimal::Decimal;
 
 use crate::admission::AdmissionLimits;
@@ -29,6 +29,7 @@ pub(crate) struct Config {
     /// Simulated duration of one venue run. Zero means the launcher owns
     /// shutdown; a non-zero duration is announced as a clean completion.
     pub(crate) run_duration_ns: u64,
+    pub(crate) oms_type: mogwai_protocol::OmsType,
     /// How many trailing-volatility horizons wide the fill band is. An order's
     /// trigger is drawn uniformly from `0 ..= band_ticks` ticks AWAY from its
     /// stated price, and `band_ticks` is this multiplier times the tape's
@@ -168,6 +169,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             run_duration_ns: 0,
+            oms_type: mogwai_protocol::OmsType::Netting,
             fill_band_vol_mult: 0.005,
             fill_band_max_ticks: 200,
             fill_sweep_interval_ms: 100,
@@ -220,7 +222,10 @@ fn default_balances() -> HashMap<String, Decimal> {
 /// deliberately unfunded account gets one warning stating the consequence
 /// instead: funds are unenforced, and the first buy books a negative quote
 /// leg a nautilus cash consumer will refuse to apply.
-pub(crate) fn refuse_unfunded_quotes(cfg: &Config, defs: &[InstrumentDef]) -> anyhow::Result<()> {
+pub(crate) fn refuse_unfunded_settlement(
+    cfg: &Config,
+    defs: &[InstrumentDef],
+) -> anyhow::Result<()> {
     if cfg.balances.is_empty() {
         tracing::warn!(
             "account is UNFUNDED (empty balances table): funds checks are off, and the \
@@ -234,13 +239,14 @@ pub(crate) fn refuse_unfunded_quotes(cfg: &Config, defs: &[InstrumentDef]) -> an
     // insufficient balance. That is a misconfigured run, not a caution, and it
     // is cheaper to refuse at boot than to discover it minutes in.
     for def in defs {
-        if !cfg.balances.contains_key(&def.quote) {
+        let currency = def.class.settlement_currency();
+        if !cfg.balances.contains_key(currency) {
             anyhow::bail!(
                 "instrument {} quote currency {} is unfunded; every buy in this run \
                  would be rejected for insufficient balance - add {} to [balances]",
                 def.symbol,
-                def.quote,
-                def.quote
+                currency,
+                currency
             );
         }
     }
@@ -370,7 +376,17 @@ impl Config {
     /// environment.
     pub(crate) fn load(path: Option<PathBuf>) -> anyhow::Result<Self> {
         let cfg: Self = match path {
-            Some(path) => toml::from_str(&std::fs::read_to_string(path)?)?,
+            Some(path) => {
+                let text = std::fs::read_to_string(path)?;
+                let mut raw: toml::Table = toml::from_str(&text)?;
+                if let Some(instrument) = raw
+                    .get_mut("instrument")
+                    .and_then(toml::Value::as_table_mut)
+                {
+                    *instrument = resolve_instrument_table(instrument.clone())?;
+                }
+                toml::Value::Table(raw).try_into()?
+            }
             None => Self::default(),
         };
         // Validate here, not at the call site, so a validated `Config` is the
@@ -390,6 +406,187 @@ impl Config {
         }
         Ok(cfg)
     }
+}
+
+fn preset_text(name: &str) -> Option<&'static str> {
+    match name.to_ascii_uppercase().as_str() {
+        "MNQ" => Some(include_str!("../presets/mnq.toml")),
+        "MES" => Some(include_str!("../presets/mes.toml")),
+        "BTCUSDT" => Some(include_str!("../presets/btcusdt.toml")),
+        "ETHUSDT" => Some(include_str!("../presets/ethusdt.toml")),
+        "SOLUSDT" => Some(include_str!("../presets/solusdt.toml")),
+        _ => None,
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum Provenance {
+    Fitted { corpus: String, window: String },
+    Derived { from: Vec<String> },
+    Declared { rationale: String },
+}
+
+fn flatten_knobs(
+    prefix: &str,
+    table: &toml::Table,
+    paths: &mut std::collections::BTreeSet<String>,
+) {
+    for (key, value) in table {
+        if key == "preset" || key == "override" {
+            continue;
+        }
+        let path = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        if let Some(child) = value.as_table() {
+            flatten_knobs(&path, child, paths);
+        } else {
+            paths.insert(path);
+        }
+    }
+}
+
+fn effective_preset(name: &str) -> anyhow::Result<(toml::Table, toml::Table)> {
+    let text =
+        preset_text(name).ok_or_else(|| anyhow::anyhow!("unknown instrument preset {name}"))?;
+    let raw: toml::Table = toml::from_str(text)?;
+    let mut instrument = raw
+        .get("instrument")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| anyhow::anyhow!("preset {name} has no instrument table"))?
+        .clone();
+    let own_provenance = raw
+        .get("provenance")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| anyhow::anyhow!("preset {name} has no provenance table"))?;
+    let (mut merged, mut provenance) = if let Some(parent) = instrument.remove("preset") {
+        let parent = parent
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("preset {name} instrument.preset must be a string"))?;
+        effective_preset(parent)?
+    } else {
+        (toml::Table::new(), toml::Table::new())
+    };
+    let overrides = instrument
+        .remove("override")
+        .and_then(|value| value.as_table().cloned())
+        .unwrap_or_default();
+    for (key, value) in instrument {
+        if merged.insert(key.clone(), value).is_some() {
+            anyhow::bail!("preset {name} restates inherited key {key}; use instrument.override");
+        }
+    }
+    for (path, value) in overrides {
+        replace_dotted(&mut merged, &path, value)?;
+    }
+    for (path, value) in own_provenance {
+        provenance.insert(path.clone(), value.clone());
+    }
+    validate_provenance(name, &merged, &provenance)?;
+    Ok((merged, provenance))
+}
+
+fn validate_provenance(
+    name: &str,
+    instrument: &toml::Table,
+    provenance: &toml::Table,
+) -> anyhow::Result<()> {
+    let mut knobs = std::collections::BTreeSet::new();
+    flatten_knobs("", instrument, &mut knobs);
+    let declared = provenance
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    if knobs != declared {
+        let missing = knobs.difference(&declared).cloned().collect::<Vec<_>>();
+        let extra = declared.difference(&knobs).cloned().collect::<Vec<_>>();
+        anyhow::bail!(
+            "preset {name} provenance is incomplete: missing {missing:?}, extra {extra:?}"
+        );
+    }
+    for (path, value) in provenance {
+        let entry: Provenance = value.clone().try_into().map_err(|error| {
+            anyhow::anyhow!("preset {name} provenance for {path} is invalid: {error}")
+        })?;
+        match entry {
+            Provenance::Fitted { corpus, window }
+                if corpus.trim().is_empty() || window.trim().is_empty() =>
+            {
+                anyhow::bail!("preset {name} provenance for {path} requires corpus and window")
+            }
+            Provenance::Derived { from }
+                if from.is_empty() || from.iter().any(|source| !knobs.contains(source)) =>
+            {
+                anyhow::bail!("preset {name} provenance for {path} has invalid derived sources")
+            }
+            Provenance::Declared { rationale } if rationale.trim().is_empty() => {
+                anyhow::bail!("preset {name} provenance for {path} requires a rationale")
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn preset_document(name: &str) -> Option<&'static str> {
+    preset_text(name)
+}
+
+fn resolve_instrument_table(mut operator: toml::Table) -> anyhow::Result<toml::Table> {
+    // The pre-class shape was seven flat fields. `deny_unknown_fields` would
+    // refuse it anyway, but with a bare "unknown field `base`" that names
+    // neither the replacement nor the shape it takes. Refuse it here instead,
+    // where the message can say what to write.
+    for removed in ["base", "quote"] {
+        if operator.contains_key(removed) {
+            anyhow::bail!(
+                "instrument.{removed} was replaced by the [instrument.class] table; write \
+                 kind = \"spot\" with base and quote under [instrument.class]"
+            );
+        }
+    }
+    let Some(name) = operator.remove("preset") else {
+        return Ok(operator);
+    };
+    let name = name
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("instrument.preset must be a string"))?;
+    let (mut merged, _) = effective_preset(name)?;
+    let overrides = operator
+        .remove("override")
+        .and_then(|value| value.as_table().cloned())
+        .unwrap_or_default();
+    if !operator.is_empty() {
+        let key = operator.keys().next().unwrap();
+        anyhow::bail!("preset key {key} must be stated under instrument.override");
+    }
+    for (path, value) in overrides {
+        replace_dotted(&mut merged, &path, value)?;
+    }
+    Ok(merged)
+}
+
+fn replace_dotted(table: &mut toml::Table, path: &str, value: toml::Value) -> anyhow::Result<()> {
+    let mut parts = path.split('.').peekable();
+    let mut current = table;
+    while let Some(part) = parts.next() {
+        if parts.peek().is_none() {
+            let old = current
+                .get_mut(part)
+                .ok_or_else(|| anyhow::anyhow!("preset does not set override path {path}"))?;
+            tracing::info!(path, preset_value = %old, override_value = %value, "instrument preset override");
+            *old = value;
+            return Ok(());
+        }
+        current = current
+            .get_mut(part)
+            .and_then(toml::Value::as_table_mut)
+            .ok_or_else(|| anyhow::anyhow!("preset does not set override path {path}"))?;
+    }
+    anyhow::bail!("empty preset override path")
 }
 
 /// The `[instrument]` table: an `InstrumentDef` spelled out inline, plus its
@@ -418,14 +615,67 @@ impl Config {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ConfiguredInstrument {
     pub(crate) symbol: mogwai_protocol::Symbol,
-    pub(crate) base: String,
-    pub(crate) quote: String,
+    pub(crate) class: ConfiguredClass,
     pub(crate) price_precision: u8,
     pub(crate) size_precision: u8,
     pub(crate) price_increment: Decimal,
     pub(crate) size_increment: Decimal,
-    pub(crate) generator: mogwai_data::GeneratorScalars,
+    pub(crate) margin: Option<ConfiguredMargin>,
+    pub(crate) fees: Option<ConfiguredFees>,
+    pub(crate) generator: Option<mogwai_data::GeneratorScalars>,
+    #[serde(default = "default_session_profile")]
     pub(crate) session: mogwai_data::SessionProfile,
+    pub(crate) calendar: Option<mogwai_data::SessionCalendar>,
+}
+
+fn default_session_profile() -> mogwai_data::SessionProfile {
+    mogwai_data::Fingerprint::from_repo_json().session_profile
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum ConfiguredClass {
+    Spot {
+        base: String,
+        quote: String,
+    },
+    Future {
+        underlying: String,
+        settlement_currency: String,
+        multiplier: Decimal,
+        asset_class: WireAssetClass,
+    },
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ConfiguredMargin {
+    pub(crate) initial_per_contract: Decimal,
+    pub(crate) maintenance_per_contract: Decimal,
+    #[serde(default)]
+    pub(crate) breach_action: BreachAction,
+}
+
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BreachAction {
+    #[default]
+    Refuse,
+    Liquidate,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ConfiguredFees {
+    pub(crate) maker: FeeRate,
+    pub(crate) taker: FeeRate,
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(tag = "basis", rename_all = "snake_case")]
+pub(crate) enum FeeRate {
+    BasisPoints { rate: Decimal },
+    PerContract { amount: Decimal },
 }
 
 impl ConfiguredInstrument {
@@ -433,8 +683,23 @@ impl ConfiguredInstrument {
     pub(crate) fn def(&self) -> InstrumentDef {
         InstrumentDef {
             symbol: self.symbol.clone(),
-            base: self.base.clone(),
-            quote: self.quote.clone(),
+            class: match &self.class {
+                ConfiguredClass::Spot { base, quote } => InstrumentClass::Spot {
+                    base: base.clone(),
+                    quote: quote.clone(),
+                },
+                ConfiguredClass::Future {
+                    underlying,
+                    settlement_currency,
+                    multiplier,
+                    asset_class,
+                } => InstrumentClass::Future {
+                    underlying: underlying.clone(),
+                    settlement_currency: settlement_currency.clone(),
+                    multiplier: *multiplier,
+                    asset_class: *asset_class,
+                },
+            },
             price_precision: self.price_precision,
             size_precision: self.size_precision,
             price_increment: self.price_increment,
@@ -455,9 +720,16 @@ pub(crate) fn build_instrument_profiles(
     {
         let def = configured.def();
         validate_instrument_def(&def)?;
+        validate_instrument_options(configured, &def)?;
 
-        let mut scalars = configured.generator.clone();
+        let mut scalars = configured.generator.clone().unwrap_or_else(|| {
+            mogwai_data::GeneratorScalars::from_fingerprint_medians(&def.symbol, &fp)
+        });
         scalars.symbol = def.symbol.clone();
+        if configured.generator.is_none() {
+            scalars.modal_tick = def.price_increment;
+            scalars.price_decimals = u32::from(def.price_precision);
+        }
         if scalars.modal_tick != def.price_increment {
             anyhow::bail!(
                 "instrument {} generator.modal_tick must equal price_increment",
@@ -481,26 +753,131 @@ pub(crate) fn build_instrument_profiles(
             .session
             .validate()
             .map_err(|err| anyhow::anyhow!(session_error_message(&def.symbol, err)))?;
+        if let Some(calendar) = &configured.calendar {
+            calendar.validate().map_err(|err| {
+                anyhow::anyhow!(
+                    "instrument {} calendar failed validation: {}",
+                    def.symbol,
+                    err.0
+                )
+            })?;
+        }
 
         profiles.push(source::InstrumentProfile::new(
             def,
             scalars,
             configured.session.clone(),
+            configured.margin.clone(),
+            configured.fees.clone(),
+            configured.calendar.clone(),
         ));
     }
 
     Ok(source::InstrumentProfiles::from_profiles(profiles))
 }
 
+fn validate_instrument_options(
+    configured: &ConfiguredInstrument,
+    def: &InstrumentDef,
+) -> anyhow::Result<()> {
+    match (&def.class, &configured.margin) {
+        (InstrumentClass::Spot { .. }, Some(_)) => anyhow::bail!(
+            "instrument {} margin is valid only for a future",
+            def.symbol
+        ),
+        (InstrumentClass::Future { .. }, None) => {
+            anyhow::bail!("instrument {} future requires a margin table", def.symbol)
+        }
+        // A future with a margin table: an initial below maintenance is a
+        // config that opens every position already in breach.
+        (_, Some(margin))
+            if margin.maintenance_per_contract <= Decimal::ZERO
+                || margin.initial_per_contract < margin.maintenance_per_contract =>
+        {
+            anyhow::bail!(
+                "instrument {} margin initial_per_contract must be at least positive maintenance_per_contract",
+                def.symbol
+            )
+        }
+        _ => {}
+    }
+    if let Some(fees) = &configured.fees {
+        for rate in [fees.maker, fees.taker] {
+            match rate {
+                FeeRate::BasisPoints { rate }
+                    if rate < Decimal::ZERO || rate > Decimal::from(1000) =>
+                {
+                    anyhow::bail!(
+                        "instrument {} fee basis points must be between 0 and 1000",
+                        def.symbol
+                    )
+                }
+                FeeRate::PerContract { amount } if amount < Decimal::ZERO => anyhow::bail!(
+                    "instrument {} per-contract fee must not be negative",
+                    def.symbol
+                ),
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_instrument_def(def: &InstrumentDef) -> anyhow::Result<()> {
     if def.symbol.trim().is_empty() {
         anyhow::bail!("instrument symbol must not be empty");
     }
-    if def.base.trim().is_empty() {
-        anyhow::bail!("instrument {} base must not be empty", def.symbol);
-    }
-    if def.quote.trim().is_empty() {
-        anyhow::bail!("instrument {} quote must not be empty", def.symbol);
+    match &def.class {
+        InstrumentClass::Spot { base, quote } => {
+            if base.trim().is_empty() {
+                anyhow::bail!("instrument {} base must not be empty", def.symbol);
+            }
+            if quote.trim().is_empty() {
+                anyhow::bail!("instrument {} quote must not be empty", def.symbol);
+            }
+            if base.len() > mogwai_protocol::MAX_CURRENCY_LEN
+                || quote.len() > mogwai_protocol::MAX_CURRENCY_LEN
+            {
+                anyhow::bail!(
+                    "instrument {} base/quote exceeds MAX_CURRENCY_LEN ({})",
+                    def.symbol,
+                    mogwai_protocol::MAX_CURRENCY_LEN
+                );
+            }
+        }
+        InstrumentClass::Future {
+            underlying,
+            settlement_currency,
+            multiplier,
+            ..
+        } => {
+            if underlying.trim().is_empty()
+                || !underlying.is_ascii()
+                || underlying.len() > mogwai_protocol::MAX_SYMBOL_LEN
+            {
+                anyhow::bail!(
+                    "instrument {} future underlying must be non-blank ASCII within MAX_SYMBOL_LEN",
+                    def.symbol
+                );
+            }
+            if settlement_currency.trim().is_empty()
+                || settlement_currency.len() > mogwai_protocol::MAX_CURRENCY_LEN
+            {
+                anyhow::bail!("instrument {} settlement_currency is invalid", def.symbol);
+            }
+            if *multiplier <= Decimal::ZERO || multiplier.scale() > 9 {
+                anyhow::bail!(
+                    "instrument {} multiplier must be positive with scale <= 9",
+                    def.symbol
+                );
+            }
+            if def.size_increment != Decimal::ONE || def.size_precision != 0 {
+                anyhow::bail!(
+                    "instrument {} futures size_increment must be 1 and size_precision must be 0",
+                    def.symbol
+                );
+            }
+        }
     }
     // Symbol, base and quote all reach the wire - the symbol on every tick,
     // order event and position row, the currencies on every balance row - so
@@ -512,15 +889,6 @@ pub(crate) fn validate_instrument_def(def: &InstrumentDef) -> anyhow::Result<()>
             "instrument {} symbol exceeds MAX_SYMBOL_LEN ({})",
             def.symbol,
             mogwai_protocol::MAX_SYMBOL_LEN
-        );
-    }
-    if def.base.len() > mogwai_protocol::MAX_CURRENCY_LEN
-        || def.quote.len() > mogwai_protocol::MAX_CURRENCY_LEN
-    {
-        anyhow::bail!(
-            "instrument {} base/quote exceeds MAX_CURRENCY_LEN ({})",
-            def.symbol,
-            mogwai_protocol::MAX_CURRENCY_LEN
         );
     }
     if def.price_increment <= Decimal::ZERO {
@@ -618,6 +986,35 @@ pub(crate) fn build_run_clock(cfg: &Config, boot_wall_ns: u64) -> anyhow::Result
 mod tests {
     use super::*;
 
+    fn future_configured() -> ConfiguredInstrument {
+        let profile = source::InstrumentProfiles::defaults()
+            .get("BTCUSDT")
+            .expect("default profile")
+            .clone();
+        ConfiguredInstrument {
+            symbol: "MNQ".into(),
+            class: ConfiguredClass::Future {
+                underlying: "NQ".into(),
+                settlement_currency: "USD".into(),
+                multiplier: Decimal::from(2),
+                asset_class: WireAssetClass::Index,
+            },
+            price_precision: 2,
+            size_precision: 0,
+            price_increment: Decimal::new(25, 2),
+            size_increment: Decimal::ONE,
+            margin: Some(ConfiguredMargin {
+                initial_per_contract: Decimal::from(2000),
+                maintenance_per_contract: Decimal::from(1800),
+                breach_action: BreachAction::Refuse,
+            }),
+            fees: None,
+            generator: Some(profile.scalars),
+            session: profile.session,
+            calendar: None,
+        }
+    }
+
     #[test]
     fn a_configured_seed_at_the_signed_maximum_round_trips() {
         let text = format!("seed = {}", i64::MAX);
@@ -658,10 +1055,11 @@ mod tests {
             ..Config::default()
         };
         let defs = mogwai_protocol::default_instruments();
-        let err = refuse_unfunded_quotes(&cfg, &defs).expect_err("an unfunded quote refuses boot");
+        let err =
+            refuse_unfunded_settlement(&cfg, &defs).expect_err("an unfunded quote refuses boot");
         assert!(err.to_string().contains("unfunded"), "{err}");
 
-        refuse_unfunded_quotes(&Config::default(), &defs)
+        refuse_unfunded_settlement(&Config::default(), &defs)
             .expect("the shipped defaults fund their own quote currency");
     }
 
@@ -674,7 +1072,148 @@ mod tests {
             balances: HashMap::new(),
             ..Config::default()
         };
-        refuse_unfunded_quotes(&cfg, &mogwai_protocol::default_instruments())
+        refuse_unfunded_settlement(&cfg, &mogwai_protocol::default_instruments())
             .expect("an explicitly unfunded run is allowed");
+    }
+
+    #[test]
+    fn a_future_with_a_non_unit_size_increment_refuses_boot() {
+        let mut configured = future_configured();
+        configured.size_increment = Decimal::from(2);
+        let err = validate_instrument_def(&configured.def()).expect_err("non-unit increment");
+        assert!(err.to_string().contains("size_increment"), "{err}");
+    }
+
+    #[test]
+    fn a_future_with_an_unfunded_settlement_currency_refuses_boot() {
+        let configured = future_configured();
+        let cfg = Config {
+            balances: HashMap::from([("EUR".into(), Decimal::ONE)]),
+            ..Config::default()
+        };
+        let err = refuse_unfunded_settlement(&cfg, &[configured.def()])
+            .expect_err("unfunded settlement must refuse");
+        assert!(err.to_string().contains("USD"), "{err}");
+    }
+
+    #[test]
+    fn a_margin_table_with_initial_below_maintenance_refuses_boot() {
+        let mut configured = future_configured();
+        configured.margin.as_mut().unwrap().initial_per_contract = Decimal::from(1700);
+        let err = validate_instrument_options(&configured, &configured.def())
+            .expect_err("initial below maintenance");
+        assert!(err.to_string().contains("initial_per_contract"), "{err}");
+    }
+
+    #[test]
+    fn a_negative_fee_rate_refuses_boot() {
+        let mut configured = future_configured();
+        configured.fees = Some(ConfiguredFees {
+            maker: FeeRate::PerContract {
+                amount: -Decimal::ONE,
+            },
+            taker: FeeRate::PerContract {
+                amount: Decimal::ZERO,
+            },
+        });
+        let err = validate_instrument_options(&configured, &configured.def())
+            .expect_err("negative fee must refuse");
+        assert!(err.to_string().contains("negative"), "{err}");
+    }
+
+    #[test]
+    fn a_config_with_top_level_base_and_quote_refuses_boot_naming_the_class_table() {
+        // Through the loader's own path, because that is where the legible
+        // message lives; a raw `toml::from_str::<Config>` answers "unknown
+        // field `base`", which names neither the replacement table nor its
+        // shape, and asserting on THAT would pass no matter what we told the
+        // operator.
+        let table: toml::Table =
+            toml::from_str("symbol = \"BTCUSDT\"\nbase = \"BTC\"\nquote = \"USDT\"\n").unwrap();
+        let message = resolve_instrument_table(table)
+            .expect_err("the removed flat class shape must refuse")
+            .to_string();
+        assert!(message.contains("instrument.class"), "{message}");
+        assert!(message.contains("kind = \"spot\""), "{message}");
+    }
+
+    #[test]
+    fn every_shipped_preset_parses_and_validates() {
+        for name in ["MNQ", "MES", "BTCUSDT", "ETHUSDT", "SOLUSDT"] {
+            let table =
+                toml::Table::from_iter([("preset".into(), toml::Value::String(name.into()))]);
+            let resolved = resolve_instrument_table(table).unwrap();
+            let configured: ConfiguredInstrument = toml::Value::Table(resolved).try_into().unwrap();
+            validate_instrument_def(&configured.def()).unwrap();
+            validate_instrument_options(&configured, &configured.def()).unwrap();
+        }
+    }
+
+    #[test]
+    fn every_shipped_preset_declares_provenance_for_every_knob_it_sets() {
+        for name in ["MNQ", "MES", "BTCUSDT", "ETHUSDT", "SOLUSDT"] {
+            let (instrument, provenance) = effective_preset(name).unwrap();
+            validate_provenance(name, &instrument, &provenance).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_preset_with_incomplete_provenance_refuses_boot() {
+        let instrument: toml::Table =
+            toml::from_str("symbol = \"MNQ\"\nprice_precision = 2").unwrap();
+        let provenance: toml::Table =
+            toml::from_str("symbol = { kind = \"declared\", rationale = \"test symbol\" }")
+                .unwrap();
+        let error = validate_provenance("BROKEN", &instrument, &provenance).unwrap_err();
+        assert!(error.to_string().contains("price_precision"), "{error}");
+    }
+
+    #[test]
+    fn a_preset_key_restated_at_the_top_level_refuses_boot() {
+        let table = toml::Table::from_iter([
+            ("preset".into(), toml::Value::String("MNQ".into())),
+            ("symbol".into(), toml::Value::String("MNQ".into())),
+        ]);
+        assert!(
+            resolve_instrument_table(table)
+                .unwrap_err()
+                .to_string()
+                .contains("override")
+        );
+    }
+
+    #[test]
+    fn an_override_of_a_path_the_preset_does_not_set_refuses_boot() {
+        let table: toml::Table =
+            toml::from_str("preset = \"MNQ\"\n[override]\n\"class.typo\" = \"x\"\n").unwrap();
+        assert!(
+            resolve_instrument_table(table)
+                .unwrap_err()
+                .to_string()
+                .contains("class.typo")
+        );
+    }
+
+    #[test]
+    fn an_override_table_entry_wins_and_is_logged_with_both_values() {
+        let table: toml::Table =
+            toml::from_str("preset = \"MNQ\"\n[override]\n\"class.multiplier\" = \"3\"\n").unwrap();
+        let configured: ConfiguredInstrument =
+            toml::Value::Table(resolve_instrument_table(table).unwrap())
+                .try_into()
+                .unwrap();
+        assert_eq!(configured.def().class.multiplier(), Decimal::from(3));
+    }
+
+    #[test]
+    fn the_mnq_preset_reads_two_dollars_per_point_and_fifty_cents_per_tick() {
+        let table = toml::Table::from_iter([("preset".into(), toml::Value::String("MNQ".into()))]);
+        let configured: ConfiguredInstrument =
+            toml::Value::Table(resolve_instrument_table(table).unwrap())
+                .try_into()
+                .unwrap();
+        let def = configured.def();
+        assert_eq!(def.class.multiplier(), Decimal::from(2));
+        assert_eq!(def.tick_value(), Decimal::new(50, 2));
     }
 }

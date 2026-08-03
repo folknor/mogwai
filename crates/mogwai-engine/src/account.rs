@@ -15,13 +15,14 @@ use crate::Engine;
 #[derive(Debug, Default)]
 pub(crate) struct Account {
     pub(crate) balances: HashMap<String, Decimal>,
-    pub(crate) positions: HashMap<Symbol, PositionState>,
+    pub(crate) positions: HashMap<(Symbol, Option<String>), PositionState>,
 }
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct PositionState {
     pub(crate) qty: Decimal,
     pub(crate) avg_px: Decimal,
+    pub(crate) mark_px: Decimal,
 }
 
 #[derive(Debug, Default)]
@@ -37,6 +38,15 @@ pub(crate) struct Warned {
 
 impl Engine {
     pub(crate) fn apply_fill(&mut self, fill: &OrderFilled) {
+        let previous_position = self
+            .account
+            .positions
+            .get(&(
+                fill.symbol.clone(),
+                self.position_key_id(fill.position_id.as_ref()),
+            ))
+            .cloned()
+            .unwrap_or_default();
         self.apply_position(fill);
 
         // Defense-in-depth, unreachable through `process` today: a fill's
@@ -61,8 +71,37 @@ impl Engine {
             return;
         };
 
-        let base = instrument.base.clone();
-        let quote = instrument.quote.clone();
+        if instrument.class.is_future() {
+            let settlement = instrument.class.settlement_currency().to_owned();
+            let multiplier = instrument.class.multiplier();
+            let before = previous_position;
+            let reducing = (before.qty > Decimal::ZERO && fill.side == Side::Sell)
+                || (before.qty < Decimal::ZERO && fill.side == Side::Buy);
+            if reducing {
+                let closed = before.qty.abs().min(fill.last_qty);
+                let direction = if before.qty > Decimal::ZERO {
+                    Decimal::ONE
+                } else {
+                    -Decimal::ONE
+                };
+                let pnl = fill
+                    .last_px
+                    .saturating_sub(before.avg_px)
+                    .saturating_mul(closed)
+                    .saturating_mul(multiplier)
+                    .saturating_mul(direction);
+                let total = self.account.balances.entry(settlement).or_default();
+                *total = total.saturating_add(pnl).saturating_sub(fill.commission);
+            } else if !fill.commission.is_zero() {
+                let total = self.account.balances.entry(settlement).or_default();
+                *total = total.saturating_sub(fill.commission);
+            }
+            return;
+        }
+        let Some(base) = instrument.class.base_currency().map(str::to_owned) else {
+            return;
+        };
+        let quote = instrument.class.settlement_currency().to_owned();
         // `fill.commission` is always `Decimal::ZERO` on this venue: mogwai
         // models execution DIVERGENCES (partials, rejects, delays, drops), not
         // fees, so no commission source exists and none is wired. The
@@ -110,7 +149,10 @@ impl Engine {
         let current = self
             .account
             .positions
-            .get(&fill.symbol)
+            .get(&(
+                fill.symbol.clone(),
+                self.position_key_id(fill.position_id.as_ref()),
+            ))
             .cloned()
             .unwrap_or_default();
 
@@ -120,9 +162,18 @@ impl Engine {
             self.warn_saturated(&fill.symbol);
         }
         if next.qty == Decimal::ZERO {
-            self.account.positions.remove(&fill.symbol);
+            self.account.positions.remove(&(
+                fill.symbol.clone(),
+                self.position_key_id(fill.position_id.as_ref()),
+            ));
         } else {
-            self.account.positions.insert(fill.symbol.clone(), next);
+            self.account.positions.insert(
+                (
+                    fill.symbol.clone(),
+                    self.position_key_id(fill.position_id.as_ref()),
+                ),
+                next,
+            );
         }
     }
 
@@ -174,6 +225,7 @@ impl Engine {
             account_id: self.account_id.clone(),
             balances,
             positions: self.positions(),
+            margins: self.margin_requirement(),
             ts_event: ts,
         }
     }
@@ -200,8 +252,23 @@ impl Engine {
     /// caller (`snapshot`, which holds `&mut self`) can warn once per key -
     /// this stays `&self` because it runs inside iteration over `self.open`.
     fn locked_balances(&self) -> (HashMap<String, Decimal>, Vec<String>) {
-        let mut locked = HashMap::new();
+        let mut locked: HashMap<String, Decimal> = HashMap::new();
         let mut clipped_currencies = Vec::new();
+
+        for ((symbol, _), position) in &self.account.positions {
+            let Some(policy) = self.margin.get(symbol) else {
+                continue;
+            };
+            let Some(instrument) = self.instruments.get(symbol) else {
+                continue;
+            };
+            let currency = instrument.class.settlement_currency().to_owned();
+            let reserve = policy
+                .maintenance_per_contract
+                .saturating_mul(position.qty.abs());
+            let total = locked.entry(currency).or_default();
+            *total = total.saturating_add(reserve);
+        }
 
         for order in &self.open {
             if order.submit.reduce_only {
@@ -216,6 +283,16 @@ impl Engine {
             let Some(instrument) = self.instruments.get(&order.submit.symbol) else {
                 continue;
             };
+
+            if instrument.class.is_future() {
+                if let Some(policy) = self.margin.get(&order.submit.symbol) {
+                    let reserve = policy.initial_per_contract.saturating_mul(order.leaves_qty);
+                    let currency = instrument.class.settlement_currency().to_owned();
+                    let total = locked.entry(currency.clone()).or_default();
+                    *total = total.saturating_add(reserve);
+                }
+                continue;
+            }
 
             match order.submit.side {
                 Side::Buy => {
@@ -234,18 +311,22 @@ impl Engine {
                     // unbounded - saturate instead of letting `+=` panic.
                     let mut clipped = false;
                     let reserve = mul_clamped(order.leaves_qty, price, &mut clipped);
-                    let total = locked.entry(instrument.quote.clone()).or_default();
+                    let currency = instrument.class.settlement_currency().to_owned();
+                    let total = locked.entry(currency.clone()).or_default();
                     *total = add_clamped(*total, reserve, &mut clipped);
                     if clipped {
-                        clipped_currencies.push(instrument.quote.clone());
+                        clipped_currencies.push(currency);
                     }
                 }
                 Side::Sell => {
                     let mut clipped = false;
-                    let total = locked.entry(instrument.base.clone()).or_default();
+                    let Some(currency) = instrument.class.base_currency().map(str::to_owned) else {
+                        continue;
+                    };
+                    let total = locked.entry(currency.clone()).or_default();
                     *total = add_clamped(*total, order.leaves_qty, &mut clipped);
                     if clipped {
-                        clipped_currencies.push(instrument.base.clone());
+                        clipped_currencies.push(currency);
                     }
                 }
             }
@@ -291,6 +372,7 @@ fn next_position(
         return PositionState {
             qty: delta,
             avg_px: px,
+            mark_px: Decimal::ZERO,
         };
     }
 
@@ -320,6 +402,7 @@ fn next_position(
         return PositionState {
             qty: add_clamped(current.qty, delta, clipped),
             avg_px,
+            mark_px: current.mark_px,
         };
     }
 
@@ -332,14 +415,20 @@ fn next_position(
         PositionState {
             qty,
             avg_px: current.avg_px,
+            mark_px: current.mark_px,
         }
     } else if delta_abs == current_abs {
         PositionState {
             qty: Decimal::ZERO,
             avg_px: Decimal::ZERO,
+            mark_px: Decimal::ZERO,
         }
     } else {
-        PositionState { qty, avg_px: px }
+        PositionState {
+            qty,
+            avg_px: px,
+            mark_px: Decimal::ZERO,
+        }
     }
 }
 

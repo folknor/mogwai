@@ -4,13 +4,18 @@
 use std::str::FromStr;
 
 use anyhow::Context;
-use mogwai_protocol::{AggressorSide as MogwaiAggressorSide, InstrumentDef, Side, WireOrderStatus};
+use mogwai_protocol::{
+    AggressorSide as MogwaiAggressorSide, InstrumentClass, InstrumentDef, Side, WireAssetClass,
+    WireOrderStatus,
+};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{QuoteTick as NautilusQuoteTick, TradeTick as NautilusTradeTick},
-    enums::{AggressorSide, OrderSide, OrderStatus, OrderType, TimeInForce, TriggerType},
+    enums::{
+        AggressorSide, AssetClass, OrderSide, OrderStatus, OrderType, TimeInForce, TriggerType,
+    },
     identifiers::{InstrumentId, Symbol as NautilusSymbol, TradeId},
-    instruments::{InstrumentAny, currency_pair::CurrencyPair},
+    instruments::{InstrumentAny, currency_pair::CurrencyPair, futures_contract::FuturesContract},
     types::{Money, Price, Quantity, currency::Currency},
 };
 use rust_decimal::Decimal;
@@ -235,37 +240,84 @@ pub(crate) fn instrument_any(
     ts_init: UnixNanos,
 ) -> anyhow::Result<InstrumentAny> {
     let id = instrument_id(def);
-    let base =
-        Currency::from_str(&def.base).with_context(|| format!("unknown base {}", def.base))?;
-    let quote =
-        Currency::from_str(&def.quote).with_context(|| format!("unknown quote {}", def.quote))?;
-    let pair = CurrencyPair::new(
-        id,
-        NautilusSymbol::from(def.symbol.as_str()),
-        base,
-        quote,
-        def.price_precision,
-        def.size_precision,
-        price(def.price_increment, def.price_precision)?,
-        quantity(def.size_increment, def.size_precision)?,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        UnixNanos::from(0),
-        ts_init,
-    );
-    Ok(InstrumentAny::CurrencyPair(pair))
+    match &def.class {
+        InstrumentClass::Spot { base, quote } => {
+            let base = Currency::from_str(base).with_context(|| format!("unknown base {base}"))?;
+            let quote =
+                Currency::from_str(quote).with_context(|| format!("unknown quote {quote}"))?;
+            let pair = CurrencyPair::new(
+                id,
+                NautilusSymbol::from(def.symbol.as_str()),
+                base,
+                quote,
+                def.price_precision,
+                def.size_precision,
+                price(def.price_increment, def.price_precision)?,
+                quantity(def.size_increment, def.size_precision)?,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                UnixNanos::from(0),
+                ts_init,
+            );
+            Ok(InstrumentAny::CurrencyPair(pair))
+        }
+        InstrumentClass::Future {
+            underlying,
+            settlement_currency,
+            multiplier,
+            asset_class,
+        } => {
+            let currency = Currency::from_str(settlement_currency)
+                .with_context(|| format!("unknown settlement currency {settlement_currency}"))?;
+            let asset_class = match asset_class {
+                WireAssetClass::Fx => AssetClass::FX,
+                WireAssetClass::Equity => AssetClass::Equity,
+                WireAssetClass::Commodity => AssetClass::Commodity,
+                WireAssetClass::Index => AssetClass::Index,
+                WireAssetClass::Cryptocurrency => AssetClass::Cryptocurrency,
+            };
+            let contract = FuturesContract::new_checked(
+                id,
+                NautilusSymbol::from(def.symbol.as_str()),
+                asset_class,
+                Some(ustr::Ustr::from("MOGWAI")),
+                ustr::Ustr::from(underlying),
+                UnixNanos::from(0),
+                UnixNanos::from(i64::MAX as u64),
+                currency,
+                def.price_precision,
+                price(def.price_increment, def.price_precision)?,
+                quantity(*multiplier, multiplier.scale() as u8)?,
+                quantity(Decimal::ONE, 0)?,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                UnixNanos::from(0),
+                ts_init,
+            )
+            .context("construct futures contract")?;
+            Ok(InstrumentAny::FuturesContract(contract))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -275,13 +327,41 @@ mod tests {
     fn def() -> InstrumentDef {
         InstrumentDef {
             symbol: "BTCUSDT".into(),
-            base: "BTC".into(),
-            quote: "USDT".into(),
+            class: mogwai_protocol::InstrumentClass::Spot {
+                base: "BTC".into(),
+                quote: "USDT".into(),
+            },
             price_precision: 2,
             size_precision: 8,
             price_increment: Decimal::new(1, 2),
             size_increment: Decimal::new(1, 8),
         }
+    }
+
+    #[test]
+    fn a_future_def_builds_a_futures_contract() {
+        let def = InstrumentDef {
+            symbol: "MNQ".into(),
+            class: InstrumentClass::Future {
+                underlying: "NQ".into(),
+                settlement_currency: "USD".into(),
+                multiplier: Decimal::new(25, 1),
+                asset_class: WireAssetClass::Index,
+            },
+            price_precision: 2,
+            size_precision: 0,
+            price_increment: Decimal::new(25, 2),
+            size_increment: Decimal::ONE,
+        };
+        let InstrumentAny::FuturesContract(contract) =
+            instrument_any(&def, UnixNanos::from(7)).expect("future converts")
+        else {
+            panic!("future definition must produce a futures contract");
+        };
+        assert_eq!(contract.multiplier.to_string(), "2.5");
+        assert_eq!(contract.lot_size.to_string(), "1");
+        assert_eq!(contract.size_increment.to_string(), "1");
+        assert!(!contract.expiration_ns.to_rfc3339().is_empty());
     }
 
     #[test]

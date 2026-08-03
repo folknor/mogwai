@@ -47,6 +47,81 @@ slipped fill unsolicited, so boot refuses a zero interval.
 One optional `[instrument]` table defines the run instrument. Omitting it uses
 the built-in BTCUSDT profile. `[[instrument]]` is not accepted. `[regime]`
 selects the single run-wide market regime. `[balances]` funds the one ledger.
+`oms_type` is `netting` (the default) or `hedging`; the venue serves both and
+refuses a client over neither, and `/health` reports the run's choice.
+
+## The instrument class
+
+`[instrument]` carries five shape fields - `symbol`, `price_precision`,
+`size_precision`, `price_increment`, `size_increment` - plus a REQUIRED
+`[instrument.class]` sub-table naming the class. Top-level `base` and `quote`
+were replaced by that table and now refuse boot with a message naming it.
+
+```toml
+[instrument]
+symbol = "BTCUSDT"
+price_precision = 2
+size_precision = 8
+price_increment = "0.01"
+size_increment = "0.00000001"
+
+[instrument.class]
+kind = "spot"
+base = "BTC"
+quote = "USDT"
+```
+
+`kind = "future"` takes `underlying`, `settlement_currency`, `multiplier` and
+`asset_class` (`fx`, `equity`, `commodity`, `index`, `cryptocurrency`) instead.
+A future is cash-settled and continuous: it has no base leg, no expiry and no
+roll. Boot refuses a future whose `size_increment` is not exactly `1` or whose
+`size_precision` is not `0` - a fractional contract has no meaning, and
+nautilus hardcodes both on a `FuturesContract`. Tick value is not configurable:
+it is `price_increment * multiplier`, so a config cannot contradict itself.
+`[balances]` must fund the class's settlement currency, which is the quote for
+spot and `settlement_currency` for a future.
+
+## Margin, fees and the calendar
+
+`[instrument.margin]` is mandatory on a future and refused on a spot pair. It
+takes `initial_per_contract`, `maintenance_per_contract` (positive, and no
+greater than the initial - the reverse opens every position already in breach)
+and `breach_action`, either `refuse` (the default: no new risk while equity is
+below the maintenance requirement) or `liquidate` (the venue closes the
+position through its own fill band). A future posts collateral rather than
+reserving notional at every funds site: submit, fill and amend alike.
+
+`[instrument.fees.maker]` and `[instrument.fees.taker]` each take
+`basis = "basis_points"` with a `rate` in `0 ..= 1000`, or
+`basis = "per_contract"` with a non-negative `amount`. A negative rate refuses
+boot; rebates are not modelled. Omitting the table is the fee-free venue.
+Commission books in the settlement currency and reaches the consumer on the
+fill.
+
+`[instrument.calendar]` expresses genuine closure, which the hour and day
+weights of `[instrument.session]` cannot: those shape intensity WITHIN an open
+session and must stay strictly positive. It takes `utc_offset_minutes`
+(`-720 ..= 840`, fixed - DST is unmodelled), `open_windows` as sorted
+non-overlapping half-open intervals in minutes from local Sunday 00:00 with at
+most one wrapping past it, and an optional `settlement_minute_of_day` naming
+the local minute the daily settlement price is struck. That minute must fall
+inside an open window; a settlement cannot be struck on a shut market. While a
+calendar reports closed, market orders and marketable limits are rejected with
+`market closed`, resting orders persist and simply do not fill, and the mark
+freezes at the last print before the close. No calendar table means always
+open, which is the crypto case and the default.
+
+## Presets
+
+`preset = "MNQ"` inside `[instrument]` merges a committed, embedded preset -
+`MNQ`, `MES`, `BTCUSDT`, `ETHUSDT`, `SOLUSDT`. Every other key must then be
+stated under `[instrument.override]` as a dotted path
+(`"class.multiplier" = "3"`); restating one at the top level refuses boot, and
+so does overriding a path the preset does not set. Each override is logged at
+boot with both values. Every preset carries a `[provenance]` map with one
+entry per knob it sets - `fitted`, `derived` or `declared` with a rationale -
+and boot refuses a preset that leaves any knob undeclared. `mogwai presets`
+lists them; `mogwai presets MNQ` prints one with its provenance.
 
 The replay and admission settings remain run-wide: `fanout_depth`,
 `zero_speed_stall_ms`, `exec_held_budget_bytes`, `admission_lane_frames`,

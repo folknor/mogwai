@@ -6,7 +6,7 @@
 use mogwai_data::TickEvent;
 use mogwai_data::{
     CheckpointIndex, Fingerprint, GeneratedSource, GeneratorScalars, MergeSource, SessionProfile,
-    TickSource,
+    SizeGrid, TickSource,
 };
 use mogwai_protocol::{InstrumentDef, MarketRegime, RunSeeds, Symbol, default_instruments};
 use rust_decimal::Decimal;
@@ -29,18 +29,31 @@ pub(crate) struct InstrumentProfile {
     pub(crate) def: InstrumentDef,
     pub(crate) scalars: GeneratorScalars,
     pub(crate) session: SessionProfile,
+    /// Collateral policy, copied into the engine at `Run::new`. Absent for
+    /// spot, mandatory for a future.
+    pub(crate) margin: Option<crate::config::ConfiguredMargin>,
+    /// Maker/taker schedule, copied into the engine at `Run::new`. Absent
+    /// means the fee-free venue.
+    pub(crate) fees: Option<crate::config::ConfiguredFees>,
+    pub(crate) calendar: Option<mogwai_data::SessionCalendar>,
 }
 impl InstrumentProfile {
     pub(crate) fn new(
         def: InstrumentDef,
         mut scalars: GeneratorScalars,
         session: SessionProfile,
+        margin: Option<crate::config::ConfiguredMargin>,
+        fees: Option<crate::config::ConfiguredFees>,
+        calendar: Option<mogwai_data::SessionCalendar>,
     ) -> Self {
         scalars.symbol = def.symbol.clone();
         Self {
             def,
             scalars,
             session,
+            margin,
+            fees,
+            calendar,
         }
     }
 }
@@ -82,7 +95,7 @@ fn default_profile(def: InstrumentDef, fp: &Fingerprint) -> InstrumentProfile {
     let mut scalars = GeneratorScalars::from_fingerprint_medians(&def.symbol, fp);
     scalars.modal_tick = def.price_increment;
     scalars.price_decimals = u32::from(def.price_precision);
-    InstrumentProfile::new(def, scalars, fp.session_profile.clone())
+    InstrumentProfile::new(def, scalars, fp.session_profile.clone(), None, None, None)
 }
 fn generator(profile: &InstrumentProfile) -> GeneratedSource {
     let boot = *BOOT
@@ -95,7 +108,9 @@ fn generator(profile: &InstrumentProfile) -> GeneratedSource {
         fingerprint(),
         &profile.session,
         boot.regime,
+        SizeGrid::from_def(&profile.def),
     )
+    .with_calendar(profile.calendar.clone())
 }
 
 /// Snapshot spacing of the run's checkpoint chain, in ticks. The generator is

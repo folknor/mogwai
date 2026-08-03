@@ -18,12 +18,13 @@
 //! and [`divergence`] owns the armed-divergence queue. This module keeps the
 //! `Engine` type itself, its constructors, and the top-level `process` dispatch.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use mogwai_protocol::{
     AccountId, AccountState, ClientMessage, ClientOrderId, FillSnapshot, Hit, InstrumentDef,
-    OrderFilled, OrderStatusInfo, OrderStatusSnapshot, Position, ScanKind, ServerMessage, Side,
-    SubmitOrder, Symbol, VenueOrderId, WireOrderStatus, control::Divergence, default_instruments,
+    OrderFilled, OrderStatusInfo, OrderStatusSnapshot, OrderType, Position, ScanKind,
+    ServerMessage, Side, SubmitOrder, Symbol, TimeInForce, VenueOrderId, WireOrderStatus,
+    control::Divergence, default_instruments,
 };
 use rust_decimal::Decimal;
 
@@ -118,6 +119,52 @@ pub struct EngineConfig {
     /// that advanced the tape's state would make the tape a function of client
     /// behaviour, which is exactly the market impact this venue excludes.
     pub fill_seed: u64,
+}
+
+/// The band a liquidation close is judged against when nobody has told the
+/// engine the run's own cap. Matches the server's `fill_band_max_ticks`
+/// default, so an engine built standalone behaves like a default venue.
+pub const DEFAULT_LIQUIDATION_BAND_TICKS: u32 = 200;
+
+/// Per-instrument collateral policy. The settlement SCHEDULE is not here: it
+/// is the session calendar's `settlement_minute_of_day`, read in exchange-local
+/// time, and the sweeper strikes each instant it names.
+#[derive(Debug, Clone, Copy)]
+pub struct MarginPolicy {
+    pub initial_per_contract: Decimal,
+    pub maintenance_per_contract: Decimal,
+    pub breach_action: BreachAction,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BreachAction {
+    #[default]
+    Refuse,
+    Liquidate,
+}
+
+pub struct MarkOutcome {
+    pub events: Vec<ServerMessage>,
+    pub originated_orders: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum FeeRate {
+    BasisPoints { rate: Decimal },
+    PerContract { amount: Decimal },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FeeSchedule {
+    pub maker: FeeRate,
+    pub taker: FeeRate,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FeeSurchargeWindow {
+    mult: Decimal,
+    start_ns: u64,
+    end_ns: u64,
 }
 
 /// What the venue read off its own clean tape at the instant a command arrived.
@@ -233,15 +280,378 @@ pub struct Engine {
     seq: u64,
     warned: Warned,
     fill_seed: u64,
+    margin: HashMap<Symbol, MarginPolicy>,
+    fees: HashMap<Symbol, FeeSchedule>,
+    margin_breached: HashSet<Symbol>,
+    liquidation_band_ticks: u32,
+    fee_surcharge: Option<FeeSurchargeWindow>,
+    oms_type: mogwai_protocol::OmsType,
 }
 
 impl Engine {
+    pub fn set_margin_policy(&mut self, symbol: Symbol, policy: MarginPolicy) {
+        self.margin.insert(symbol, policy);
+    }
+
+    pub fn set_fee_schedule(&mut self, symbol: Symbol, schedule: FeeSchedule) {
+        self.fees.insert(symbol, schedule);
+    }
+
+    /// The band a venue-originated liquidation close is judged against, in
+    /// ticks. The server sets it from `fill_band_max_ticks`; an engine built
+    /// without one keeps [`DEFAULT_LIQUIDATION_BAND_TICKS`].
+    pub fn set_liquidation_band_ticks(&mut self, band_ticks: u32) {
+        self.liquidation_band_ticks = band_ticks;
+    }
+
+    pub fn set_oms_type(&mut self, oms_type: mogwai_protocol::OmsType) {
+        self.oms_type = oms_type;
+    }
+
+    fn position_key_id(&self, position_id: Option<&String>) -> Option<String> {
+        match self.oms_type {
+            mogwai_protocol::OmsType::Netting => None,
+            mogwai_protocol::OmsType::Hedging => position_id.cloned(),
+        }
+    }
+
+    pub fn arm_fee_surcharge(&mut self, mult: Decimal, window_ms: u64, now_ns: u64) {
+        self.fee_surcharge = Some(FeeSurchargeWindow {
+            mult,
+            start_ns: now_ns,
+            end_ns: now_ns.saturating_add(window_ms.saturating_mul(1_000_000)),
+        });
+    }
+
+    pub fn clear_fee_surcharge(&mut self) {
+        self.fee_surcharge = None;
+    }
+
+    pub(crate) fn fee_surcharge_multiplier(&mut self, ts: u64) -> Decimal {
+        let Some(window) = self.fee_surcharge else {
+            return Decimal::ONE;
+        };
+        if ts >= window.end_ns {
+            self.fee_surcharge = None;
+            return Decimal::ONE;
+        }
+        if ts >= window.start_ns {
+            window.mult
+        } else {
+            Decimal::ONE
+        }
+    }
+
+    #[must_use]
+    pub fn futures_mark_symbols(&self) -> Vec<Symbol> {
+        let mut symbols: Vec<_> = self
+            .account
+            .positions
+            .keys()
+            .map(|(symbol, _)| symbol)
+            .chain(self.open.iter().map(|order| &order.submit.symbol))
+            .filter(|symbol| self.margin.contains_key(*symbol))
+            .cloned()
+            .collect();
+        symbols.sort();
+        symbols.dedup();
+        symbols
+    }
+
+    #[must_use]
+    pub fn unrealized_pnl(&self, symbol: &str) -> Decimal {
+        let Some(def) = self
+            .instruments
+            .get(symbol)
+            .filter(|def| def.class.is_future())
+        else {
+            return Decimal::ZERO;
+        };
+        self.account
+            .positions
+            .iter()
+            .filter(|((position_symbol, _), _)| position_symbol == symbol)
+            .fold(Decimal::ZERO, |sum, (_, position)| {
+                let value = position
+                    .mark_px
+                    .checked_sub(position.avg_px)
+                    .and_then(|points| points.checked_mul(position.qty))
+                    .and_then(|value| value.checked_mul(def.class.multiplier()))
+                    .unwrap_or(if position.qty.is_sign_negative() {
+                        Decimal::MIN
+                    } else {
+                        Decimal::MAX
+                    });
+                sum.saturating_add(value)
+            })
+    }
+
+    pub fn mark(&mut self, marks: &[(Symbol, Decimal)], ts: u64) -> MarkOutcome {
+        let mut moved = false;
+        for (symbol, mark) in marks {
+            for position in
+                self.account
+                    .positions
+                    .iter_mut()
+                    .filter_map(|((position_symbol, _), position)| {
+                        (position_symbol == symbol).then_some(position)
+                    })
+            {
+                if self
+                    .instruments
+                    .get(symbol)
+                    .is_some_and(|def| def.class.is_future())
+                    && position.mark_px != *mark
+                {
+                    position.mark_px = *mark;
+                    moved = true;
+                }
+            }
+        }
+        let mut events = Vec::new();
+        let originated_orders = self.apply_margin_breaches(marks, ts, &mut events);
+        if moved || originated_orders > 0 {
+            events.retain(|event| !matches!(event, ServerMessage::AccountState(_)));
+            events.push(ServerMessage::AccountState(self.snapshot(ts)));
+        }
+        MarkOutcome {
+            events,
+            originated_orders,
+        }
+    }
+
+    /// Posted collateral, ONE row per symbol - never one per position. Two
+    /// hedged positions in the same symbol post against one instrument, and
+    /// `book_shape().margins` counts symbols, so a per-position row would both
+    /// misreport the requirement and under-reserve the admission budget.
+    ///
+    /// `maintenance` is what the open positions require; `initial` is what the
+    /// resting non-reduce-only orders require. Their sum is exactly what
+    /// `locked_balances` reserves, so the reported margin reconciles with the
+    /// reported `locked` by construction. Reduce-only orders reserve nothing
+    /// and appear here as nothing.
+    #[must_use]
+    pub(crate) fn margin_requirement(&self) -> Vec<mogwai_protocol::PostedMargin> {
+        let mut rows: HashMap<&Symbol, (Decimal, Decimal)> = HashMap::new();
+        for ((symbol, _), position) in &self.account.positions {
+            let Some(policy) = self.margin.get(symbol) else {
+                continue;
+            };
+            let row = rows.entry(symbol).or_default();
+            row.1 = row.1.saturating_add(
+                policy
+                    .maintenance_per_contract
+                    .saturating_mul(position.qty.abs()),
+            );
+        }
+        for order in &self.open {
+            if order.submit.reduce_only {
+                continue;
+            }
+            let Some(policy) = self.margin.get(&order.submit.symbol) else {
+                continue;
+            };
+            let row = rows.entry(&order.submit.symbol).or_default();
+            row.0 = row
+                .0
+                .saturating_add(policy.initial_per_contract.saturating_mul(order.leaves_qty));
+        }
+        let mut margins: Vec<_> = rows
+            .into_iter()
+            .filter_map(|(symbol, (initial, maintenance))| {
+                let def = self.instruments.get(symbol)?;
+                Some(mogwai_protocol::PostedMargin {
+                    symbol: symbol.clone(),
+                    currency: def.class.settlement_currency().to_owned(),
+                    initial,
+                    maintenance,
+                })
+            })
+            .collect();
+        margins.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        margins
+    }
+
+    fn apply_margin_breaches(
+        &mut self,
+        marks: &[(Symbol, Decimal)],
+        ts: u64,
+        events: &mut Vec<ServerMessage>,
+    ) -> usize {
+        let mut liquidate = Vec::new();
+        let symbols: Vec<_> = self.margin.keys().cloned().collect();
+        for symbol in symbols {
+            let Some(policy) = self.margin.get(&symbol).copied() else {
+                continue;
+            };
+            let Some(def) = self.instruments.get(&symbol) else {
+                continue;
+            };
+            let currency = def.class.settlement_currency();
+            let total = *self
+                .account
+                .balances
+                .get(currency)
+                .unwrap_or(&Decimal::ZERO);
+            // Deduplicated by SYMBOL: `unrealized_pnl` already sums every
+            // position keyed under a symbol, so folding it once per position
+            // key would count a hedged book's two legs twice over and declare
+            // a breach (or clear one) on twice the real P&L.
+            let settled_symbols: HashSet<&Symbol> = self
+                .account
+                .positions
+                .keys()
+                .map(|(other, _)| other)
+                .filter(|other| {
+                    self.instruments
+                        .get(*other)
+                        .is_some_and(|other_def| other_def.class.settlement_currency() == currency)
+                })
+                .collect();
+            let unrealized = settled_symbols.iter().fold(Decimal::ZERO, |sum, other| {
+                sum.saturating_add(self.unrealized_pnl(other))
+            });
+            let maintenance = self
+                .account
+                .positions
+                .iter()
+                .filter_map(|((other, _), position)| {
+                    let other_policy = self.margin.get(other)?;
+                    let other_def = self.instruments.get(other)?;
+                    (other_def.class.settlement_currency() == currency).then(|| {
+                        other_policy
+                            .maintenance_per_contract
+                            .saturating_mul(position.qty.abs())
+                    })
+                })
+                .fold(Decimal::ZERO, Decimal::saturating_add);
+            let breached = total.saturating_add(unrealized) < maintenance;
+            match (breached, policy.breach_action) {
+                (true, BreachAction::Refuse) => {
+                    self.margin_breached.insert(symbol);
+                }
+                (true, BreachAction::Liquidate) => {
+                    self.margin_breached.insert(symbol.clone());
+                    // One order per open POSITION, not one per symbol: under
+                    // hedging a symbol carries several, and closing only the
+                    // first leaves the account still breached after the
+                    // cascade it was supposed to end.
+                    if let Some((_, mark)) = marks.iter().find(|(marked, _)| marked == &symbol) {
+                        for (key, position) in &self.account.positions {
+                            if key.0 == symbol {
+                                liquidate.push((
+                                    symbol.clone(),
+                                    key.1.clone(),
+                                    position.qty,
+                                    *mark,
+                                ));
+                            }
+                        }
+                    }
+                }
+                (false, _) => {
+                    self.margin_breached.remove(&symbol);
+                }
+            }
+        }
+        let mut originated = 0;
+        for (symbol, position_id, qty, mark) in liquidate {
+            self.seq = self.seq.saturating_add(1);
+            let order = SubmitOrder {
+                client_order_id: format!("LQ-{}-{}", symbol, self.seq),
+                symbol,
+                position_id,
+                side: if qty > Decimal::ZERO {
+                    Side::Sell
+                } else {
+                    Side::Buy
+                },
+                order_type: OrderType::Market,
+                quantity: qty.abs(),
+                price: Some(mark),
+                trigger_price: None,
+                time_in_force: TimeInForce::Ioc,
+                reduce_only: true,
+                post_only: false,
+            };
+            events.extend(self.on_submit(
+                order,
+                ts,
+                Some(MarketReading {
+                    last_px: mark,
+                    ts_ns: ts,
+                    // A venue-originated close has no client reading to inherit,
+                    // so it is judged against the run's CONFIGURED band cap
+                    // rather than an invented constant. That is deliberately
+                    // pessimistic: a forced close is the one moment a venue is
+                    // least likely to do better than its worst advertised
+                    // slippage.
+                    band_ticks: self.liquidation_band_ticks,
+                }),
+            ));
+            originated += 1;
+        }
+        originated
+    }
+
+    pub fn settle(&mut self, marks: &[(Symbol, Decimal)], ts: u64) -> MarkOutcome {
+        let mut settled = false;
+        for (symbol, settle_px) in marks {
+            let Some(def) = self.instruments.get(symbol) else {
+                continue;
+            };
+            if !def.class.is_future() {
+                continue;
+            }
+            for position in
+                self.account
+                    .positions
+                    .iter_mut()
+                    .filter_map(|((position_symbol, _), position)| {
+                        (position_symbol == symbol).then_some(position)
+                    })
+            {
+                let pnl = settle_px
+                    .saturating_sub(position.avg_px)
+                    .saturating_mul(position.qty)
+                    .saturating_mul(def.class.multiplier());
+                let total = self
+                    .account
+                    .balances
+                    .entry(def.class.settlement_currency().to_owned())
+                    .or_default();
+                *total = total.saturating_add(pnl);
+                position.avg_px = *settle_px;
+                position.mark_px = *settle_px;
+                settled = true;
+            }
+        }
+        let mut events = Vec::new();
+        let originated_orders = self.apply_margin_breaches(marks, ts, &mut events);
+        if settled || originated_orders > 0 {
+            events.retain(|event| !matches!(event, ServerMessage::AccountState(_)));
+            events.push(ServerMessage::AccountState(self.snapshot(ts)));
+        }
+        MarkOutcome {
+            events,
+            originated_orders,
+        }
+    }
     /// Cheap facts used to reserve a bounded wire response before mutation.
     #[must_use]
     pub fn book_shape(&self) -> mogwai_protocol::sizing::BookShape {
         mogwai_protocol::sizing::BookShape {
             balances: self.account.balances.len(),
             positions: self.account.positions.len(),
+            margins: self
+                .account
+                .positions
+                .keys()
+                .map(|(symbol, _)| symbol)
+                .chain(self.open.iter().map(|order| &order.submit.symbol))
+                .filter(|symbol| self.margin.contains_key(*symbol))
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
             open_orders: self.open.len(),
             closed_orders: self.closed.len(),
             recorded_fills: self.fills.len(),
@@ -307,6 +717,12 @@ impl Engine {
             seq: 0,
             warned: Warned::default(),
             fill_seed: config.fill_seed,
+            margin: HashMap::new(),
+            fees: HashMap::new(),
+            margin_breached: HashSet::new(),
+            liquidation_band_ticks: DEFAULT_LIQUIDATION_BAND_TICKS,
+            fee_surcharge: None,
+            oms_type: mogwai_protocol::OmsType::Netting,
         }
     }
 
@@ -533,10 +949,32 @@ impl Engine {
             .account
             .positions
             .iter()
-            .map(|(symbol, state)| Position {
+            .map(|((symbol, position_id), state)| Position {
                 symbol: symbol.clone(),
+                position_id: position_id.clone(),
                 quantity: state.qty,
                 avg_px: state.avg_px,
+                mark_px: state.mark_px,
+                // Saturating on overflow, NOT zero: the breach check reads a
+                // saturated number from `unrealized_pnl`, and a snapshot that
+                // reported zero for the same position would contradict the
+                // decision the venue just made on it.
+                unrealized_pnl: self
+                    .instruments
+                    .get(symbol)
+                    .filter(|def| def.class.is_future())
+                    .map_or(Decimal::ZERO, |def| {
+                        state
+                            .mark_px
+                            .checked_sub(state.avg_px)
+                            .and_then(|points| points.checked_mul(state.qty))
+                            .and_then(|value| value.checked_mul(def.class.multiplier()))
+                            .unwrap_or(if state.qty.is_sign_negative() {
+                                Decimal::MIN
+                            } else {
+                                Decimal::MAX
+                            })
+                    }),
             })
             .collect();
         positions.sort_by(|a, b| a.symbol.cmp(&b.symbol));
@@ -557,6 +995,7 @@ fn open_order_status(order: &OpenOrder) -> OrderStatusInfo {
         client_order_id: order.submit.client_order_id.clone(),
         venue_order_id: order.venue_order_id.clone(),
         symbol: order.submit.symbol.clone(),
+        position_id: order.submit.position_id.clone(),
         side: order.submit.side,
         order_type: order.submit.order_type,
         time_in_force: order.submit.time_in_force,
@@ -582,7 +1021,9 @@ fn open_order_status(order: &OpenOrder) -> OrderStatusInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mogwai_protocol::{Balance, OrderFilled, OrderType, Side, TimeInForce};
+    use mogwai_protocol::{
+        Balance, InstrumentClass, OrderFilled, OrderType, Side, TimeInForce, WireAssetClass,
+    };
     use rust_decimal::prelude::FromPrimitive;
 
     fn order(id: &str, qty: i64) -> SubmitOrder {
@@ -609,6 +1050,7 @@ mod tests {
         SubmitOrder {
             client_order_id: id.into(),
             symbol: symbol.into(),
+            position_id: None,
             side,
             order_type: OrderType::Market,
             quantity,
@@ -630,6 +1072,7 @@ mod tests {
         SubmitOrder {
             client_order_id: id.into(),
             symbol: "BTCUSDT".into(),
+            position_id: None,
             side,
             order_type,
             quantity: Decimal::ONE,
@@ -1472,6 +1915,443 @@ mod tests {
             balances: HashMap::from([("USDT".to_string(), Decimal::from(usdt))]),
             fill_seed: 0,
         })
+    }
+
+    fn futures_engine(cash: i64, action: BreachAction) -> Engine {
+        let def = InstrumentDef {
+            symbol: "MNQ".into(),
+            class: InstrumentClass::Future {
+                underlying: "NQ".into(),
+                settlement_currency: "USD".into(),
+                multiplier: Decimal::from(2),
+                asset_class: WireAssetClass::Index,
+            },
+            price_precision: 2,
+            size_precision: 0,
+            price_increment: Decimal::new(25, 2),
+            size_increment: Decimal::ONE,
+        };
+        let mut engine = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: vec![def],
+            balances: HashMap::from([("USD".into(), Decimal::from(cash))]),
+            fill_seed: 11,
+        });
+        engine.set_margin_policy(
+            "MNQ".into(),
+            MarginPolicy {
+                initial_per_contract: Decimal::from(2000),
+                maintenance_per_contract: Decimal::from(1800),
+                breach_action: action,
+            },
+        );
+        engine
+    }
+
+    fn mnq_order(id: &str, side: Side, quantity: i64, price: i64) -> SubmitOrder {
+        order_with(id, side, "MNQ", quantity, Some(Decimal::from(price)))
+    }
+
+    fn fill_future(engine: &mut Engine, id: &str, side: Side, quantity: i64, price: i64) {
+        let events = engine.process_with_market(
+            ClientMessage::SubmitOrder(mnq_order(id, side, quantity, price)),
+            1,
+            Some(MarketReading {
+                last_px: Decimal::from(price),
+                ts_ns: 1,
+                band_ticks: 0,
+            }),
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+            "{events:?}"
+        );
+    }
+
+    fn future_fill(
+        engine: &mut Engine,
+        id: &str,
+        quantity: i64,
+        price: i64,
+        ts: u64,
+    ) -> OrderFilled {
+        engine
+            .process_with_market(
+                ClientMessage::SubmitOrder(mnq_order(id, Side::Buy, quantity, price)),
+                ts,
+                Some(MarketReading {
+                    last_px: Decimal::from(price),
+                    ts_ns: ts,
+                    band_ticks: 0,
+                }),
+            )
+            .into_iter()
+            .find_map(|event| match event {
+                ServerMessage::OrderFilled(fill) => Some(fill),
+                _ => None,
+            })
+            .expect("future fills")
+    }
+
+    #[test]
+    fn a_futures_fill_books_no_base_currency_leg() {
+        let mut engine = futures_engine(10_000, BreachAction::Refuse);
+        fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
+        let state = engine.account_snapshot(2);
+        assert_eq!(state.balances.len(), 1);
+        assert_eq!(state.balances[0].currency, "USD");
+    }
+
+    #[test]
+    fn a_futures_position_values_at_multiplier_times_points() {
+        let mut engine = futures_engine(10_000, BreachAction::Refuse);
+        fill_future(&mut engine, "F-1", Side::Buy, 2, 21_000);
+        engine.mark(&[("MNQ".into(), Decimal::from(21_001))], 2);
+        assert_eq!(engine.unrealized_pnl("MNQ"), Decimal::from(4));
+    }
+
+    #[test]
+    fn a_resting_futures_order_reserves_margin_not_notional() {
+        for side in [Side::Buy, Side::Sell] {
+            let mut engine = futures_engine(50_000, BreachAction::Refuse);
+            let mut order = mnq_order("REST", side, 1, 21_000);
+            order.order_type = OrderType::Limit;
+            engine.process(ClientMessage::SubmitOrder(order), 1);
+            let usd = engine
+                .account_snapshot(2)
+                .balances
+                .into_iter()
+                .find(|balance| balance.currency == "USD")
+                .unwrap();
+            assert_eq!(usd.locked, Decimal::from(2000));
+        }
+    }
+
+    #[test]
+    fn margin_requirement_keeps_two_usd_settled_futures_as_two_rows() {
+        let make_def = |symbol: &str, underlying: &str| InstrumentDef {
+            symbol: symbol.into(),
+            class: InstrumentClass::Future {
+                underlying: underlying.into(),
+                settlement_currency: "USD".into(),
+                multiplier: Decimal::from(2),
+                asset_class: WireAssetClass::Index,
+            },
+            price_precision: 2,
+            size_precision: 0,
+            price_increment: Decimal::new(25, 2),
+            size_increment: Decimal::ONE,
+        };
+        let mut engine = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: vec![make_def("MNQ", "NQ"), make_def("MES", "ES")],
+            balances: HashMap::from([("USD".into(), Decimal::from(20_000))]),
+            fill_seed: 1,
+        });
+        for symbol in ["MNQ", "MES"] {
+            engine.set_margin_policy(
+                symbol.into(),
+                MarginPolicy {
+                    initial_per_contract: Decimal::from(2_000),
+                    maintenance_per_contract: Decimal::from(1_800),
+                    breach_action: BreachAction::Refuse,
+                },
+            );
+            let order = order_with(symbol, Side::Buy, symbol, 1, Some(Decimal::from(21_000)));
+            let events = engine.process_with_market(
+                ClientMessage::SubmitOrder(order),
+                1,
+                Some(MarketReading {
+                    last_px: Decimal::from(21_000),
+                    ts_ns: 1,
+                    band_ticks: 0,
+                }),
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+                "{events:?}"
+            );
+        }
+        let state = engine.account_snapshot(2);
+        assert_eq!(state.margins.len(), 2);
+        assert_eq!(
+            state
+                .margins
+                .iter()
+                .map(|row| row.currency.as_str())
+                .collect::<Vec<_>>(),
+            vec!["USD", "USD"]
+        );
+        assert_ne!(state.margins[0].symbol, state.margins[1].symbol);
+    }
+
+    #[test]
+    fn a_futures_fill_is_funds_checked_against_margin_not_notional() {
+        let mut engine = futures_engine(2500, BreachAction::Refuse);
+        fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
+    }
+
+    #[test]
+    fn two_reduce_only_legs_reserve_nothing_against_one_position() {
+        let mut engine = futures_engine(10_000, BreachAction::Refuse);
+        fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
+        for (id, price) in [("STOP", 20_000), ("TARGET", 22_000)] {
+            let mut order = mnq_order(id, Side::Sell, 1, price);
+            order.order_type = OrderType::Limit;
+            order.reduce_only = true;
+            engine.process(ClientMessage::SubmitOrder(order), 2);
+        }
+        let usd = engine
+            .account_snapshot(3)
+            .balances
+            .into_iter()
+            .find(|balance| balance.currency == "USD")
+            .unwrap();
+        assert_eq!(usd.locked, Decimal::from(1800));
+    }
+
+    #[test]
+    fn daily_settlement_moves_unrealized_into_cash_and_resets_avg_px() {
+        let mut engine = futures_engine(10_000, BreachAction::Refuse);
+        fill_future(&mut engine, "F-1", Side::Buy, 2, 21_000);
+        engine.mark(&[("MNQ".into(), Decimal::from(21_001))], 2);
+        engine.settle(&[("MNQ".into(), Decimal::from(21_001))], 3);
+        let state = engine.account_snapshot(3);
+        assert_eq!(state.balances[0].total, Decimal::from(10_004));
+        assert_eq!(state.positions[0].avg_px, Decimal::from(21_001));
+        assert_eq!(state.positions[0].unrealized_pnl, Decimal::ZERO);
+    }
+
+    #[test]
+    fn an_equity_above_maintenance_with_maintenance_locked_is_not_a_breach() {
+        let mut engine = futures_engine(3000, BreachAction::Refuse);
+        fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
+        engine.mark(&[("MNQ".into(), Decimal::from(21_000))], 2);
+        let events = engine.process(
+            ClientMessage::SubmitOrder(mnq_order("F-2", Side::Sell, 1, 21_000)),
+            3,
+        );
+        assert!(
+            !matches!(events.first(), Some(ServerMessage::OrderRejected { reason, .. }) if reason.contains("margin breach")),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_maintenance_breach_under_refuse_rejects_new_risk_but_not_reduce_only() {
+        let mut engine = futures_engine(3000, BreachAction::Refuse);
+        fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
+        engine.mark(&[("MNQ".into(), Decimal::from(20_000))], 2);
+        let rejected = engine.process(
+            ClientMessage::SubmitOrder(mnq_order("F-2", Side::Buy, 1, 20_000)),
+            3,
+        );
+        assert!(
+            matches!(rejected.first(), Some(ServerMessage::OrderRejected { reason, .. }) if reason.contains("margin breach"))
+        );
+        let mut reduce = mnq_order("F-3", Side::Sell, 1, 20_000);
+        reduce.reduce_only = true;
+        let reduced = engine.process_with_market(
+            ClientMessage::SubmitOrder(reduce),
+            4,
+            Some(MarketReading {
+                last_px: Decimal::from(20_000),
+                ts_ns: 4,
+                band_ticks: 0,
+            }),
+        );
+        assert!(
+            reduced
+                .iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+            "{reduced:?}"
+        );
+    }
+
+    #[test]
+    fn a_maintenance_breach_under_liquidate_closes_through_the_fill_band() {
+        let mut engine = futures_engine(3000, BreachAction::Liquidate);
+        fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
+        let outcome = engine.mark(&[("MNQ".into(), Decimal::from(20_000))], 2);
+        let liquidation = outcome
+            .events
+            .iter()
+            .find_map(|event| match event {
+                ServerMessage::OrderFilled(fill) if fill.client_order_id.starts_with("LQ-") => {
+                    Some(fill)
+                }
+                _ => None,
+            })
+            .expect("liquidation produces an ordinary fill");
+        assert_ne!(liquidation.last_px, Decimal::from(20_000));
+        assert!(
+            !engine
+                .account
+                .positions
+                .keys()
+                .any(|(symbol, _)| symbol == "MNQ")
+        );
+        assert_eq!(outcome.originated_orders, 1);
+    }
+
+    #[test]
+    fn per_contract_fees_ignore_price_and_scale_with_contracts() {
+        let mut engine = futures_engine(20_000, BreachAction::Refuse);
+        engine.set_fee_schedule(
+            "MNQ".into(),
+            FeeSchedule {
+                maker: FeeRate::PerContract {
+                    amount: Decimal::new(25, 2),
+                },
+                taker: FeeRate::PerContract {
+                    amount: Decimal::new(25, 2),
+                },
+            },
+        );
+        let fill = future_fill(&mut engine, "FEE-1", 4, 21_000, 1);
+        assert_eq!(fill.commission, Decimal::ONE);
+    }
+
+    #[test]
+    fn basis_point_fees_on_a_future_charge_multiplier_aware_notional() {
+        let mut engine = futures_engine(20_000, BreachAction::Refuse);
+        engine.set_fee_schedule(
+            "MNQ".into(),
+            FeeSchedule {
+                maker: FeeRate::BasisPoints { rate: Decimal::ONE },
+                taker: FeeRate::BasisPoints { rate: Decimal::ONE },
+            },
+        );
+        let fill = future_fill(&mut engine, "FEE-1", 1, 21_000, 1);
+        assert_eq!(fill.commission, Decimal::new(420, 2));
+    }
+
+    #[test]
+    fn a_fee_surcharge_bills_above_the_advertised_schedule_and_expires_on_sim_time() {
+        let mut engine = futures_engine(20_000, BreachAction::Refuse);
+        engine.set_fee_schedule(
+            "MNQ".into(),
+            FeeSchedule {
+                maker: FeeRate::PerContract {
+                    amount: Decimal::ONE,
+                },
+                taker: FeeRate::PerContract {
+                    amount: Decimal::ONE,
+                },
+            },
+        );
+        engine.arm_fee_surcharge(Decimal::from(3), 10, 1);
+        assert_eq!(
+            future_fill(&mut engine, "FEE-1", 1, 21_000, 2).commission,
+            Decimal::from(3)
+        );
+        assert_eq!(
+            future_fill(&mut engine, "FEE-2", 1, 21_000, 10_000_001).commission,
+            Decimal::ONE
+        );
+    }
+
+    #[test]
+    fn a_re_armed_fee_surcharge_replaces_the_earlier_window() {
+        let mut engine = futures_engine(20_000, BreachAction::Refuse);
+        engine.set_fee_schedule(
+            "MNQ".into(),
+            FeeSchedule {
+                maker: FeeRate::PerContract {
+                    amount: Decimal::ONE,
+                },
+                taker: FeeRate::PerContract {
+                    amount: Decimal::ONE,
+                },
+            },
+        );
+        engine.arm_fee_surcharge(Decimal::from(2), 100, 1);
+        engine.arm_fee_surcharge(Decimal::from(4), 100, 2);
+        assert_eq!(
+            future_fill(&mut engine, "FEE-1", 1, 21_000, 3).commission,
+            Decimal::from(4)
+        );
+    }
+
+    #[test]
+    fn netting_collapses_two_opposing_fills_into_one_position() {
+        let mut engine = futures_engine(20_000, BreachAction::Refuse);
+        let mut buy = mnq_order("NET-1", Side::Buy, 2, 21_000);
+        buy.position_id = Some("CLIENT-LONG".into());
+        let mut sell = mnq_order("NET-2", Side::Sell, 1, 21_000);
+        sell.position_id = Some("CLIENT-SHORT".into());
+        for order in [buy, sell] {
+            engine.process_with_market(
+                ClientMessage::SubmitOrder(order),
+                1,
+                Some(MarketReading {
+                    last_px: Decimal::from(21_000),
+                    ts_ns: 1,
+                    band_ticks: 0,
+                }),
+            );
+        }
+        let positions = engine.positions();
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions[0].quantity, Decimal::ONE);
+        assert!(positions[0].position_id.is_none());
+    }
+
+    #[test]
+    fn hedging_keeps_two_opposing_fills_as_two_positions() {
+        let mut engine = futures_engine(20_000, BreachAction::Refuse);
+        engine.set_oms_type(mogwai_protocol::OmsType::Hedging);
+        let mut buy = mnq_order("HEDGE-1", Side::Buy, 1, 21_000);
+        buy.position_id = Some("LONG".into());
+        let mut sell = mnq_order("HEDGE-2", Side::Sell, 1, 21_000);
+        sell.position_id = Some("SHORT".into());
+        for order in [buy, sell] {
+            engine.process_with_market(
+                ClientMessage::SubmitOrder(order),
+                1,
+                Some(MarketReading {
+                    last_px: Decimal::from(21_000),
+                    ts_ns: 1,
+                    band_ticks: 0,
+                }),
+            );
+        }
+        assert_eq!(engine.positions().len(), 2);
+    }
+
+    #[test]
+    fn a_hedging_order_without_a_position_id_opens_a_venue_assigned_one() {
+        let mut engine = futures_engine(20_000, BreachAction::Refuse);
+        engine.set_oms_type(mogwai_protocol::OmsType::Hedging);
+        let fill = future_fill(&mut engine, "HEDGE-1", 1, 21_000, 1);
+        assert!(
+            fill.position_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("MNQ-"))
+        );
+        assert_eq!(engine.positions()[0].position_id, fill.position_id);
+    }
+
+    #[test]
+    fn a_hedging_fill_reports_the_position_id_the_venue_booked_it_against() {
+        let mut engine = futures_engine(20_000, BreachAction::Refuse);
+        engine.set_oms_type(mogwai_protocol::OmsType::Hedging);
+        let mut order = mnq_order("HEDGE-1", Side::Buy, 1, 21_000);
+        order.position_id = Some("BOOK-7".into());
+        let events = engine.process_with_market(
+            ClientMessage::SubmitOrder(order),
+            1,
+            Some(MarketReading {
+                last_px: Decimal::from(21_000),
+                ts_ns: 1,
+                band_ticks: 0,
+            }),
+        );
+        assert!(events.iter().any(|event| matches!(event, ServerMessage::OrderFilled(fill) if fill.position_id.as_deref() == Some("BOOK-7"))));
     }
 
     /// An unfunded engine rooted at one fill seed. The seed picks the trigger
@@ -3593,7 +4473,43 @@ mod tests {
             ),
         ];
 
-        for (label, engine, commands) in cases {
+        // A futures book carries margin rows the spot cases cannot produce, and
+        // `book_shape().margins` is what reserves them. Two hedged positions in
+        // one symbol are the case a per-position margin row under-reserves.
+        let mut hedged = futures_engine(200_000, BreachAction::Refuse);
+        hedged.set_oms_type(mogwai_protocol::OmsType::Hedging);
+        for (index, side) in [(1, Side::Buy), (2, Side::Sell)] {
+            let mut leg = mnq_order(&format!("HEDGE-{index}"), side, 1, 21_000);
+            leg.position_id = Some(format!("LEG-{index}"));
+            hedged.process_with_market(
+                ClientMessage::SubmitOrder(leg),
+                1,
+                Some(MarketReading {
+                    last_px: Decimal::from(21_000),
+                    ts_ns: 1,
+                    band_ticks: 0,
+                }),
+            );
+        }
+        assert_eq!(
+            hedged.account.positions.len(),
+            2,
+            "the hedged fixture must actually carry two positions in one symbol"
+        );
+
+        let futures_cases: Vec<(&str, &mut Engine, Vec<ClientMessage>)> = vec![(
+            "hedged futures book with margin rows",
+            &mut hedged,
+            vec![
+                ClientMessage::SubmitOrder(mnq_order(&esc_id, Side::Buy, 1, 21_000)),
+                query_orders.clone(),
+                ClientMessage::CancelOrder {
+                    client_order_id: esc_id.clone(),
+                },
+            ],
+        )];
+
+        for (label, engine, commands) in cases.into_iter().chain(futures_cases) {
             for (ts, cmd) in commands.into_iter().enumerate() {
                 // The shape is read exactly where the real caller reads it -
                 // immediately before processing, under the same lock - so it
@@ -3615,6 +4531,47 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The sweep-side half of the reservation claim, which `process`-shaped
+    /// cases cannot reach: a liquidation cascade emits order frames NO client
+    /// order paid for, so `emitted` alone under-reserves it and `originated`
+    /// is what covers the gap.
+    #[test]
+    fn worst_case_reservation_covers_a_liquidation_cascade() {
+        let mut engine = futures_engine(3_000, BreachAction::Liquidate);
+        engine.set_oms_type(mogwai_protocol::OmsType::Hedging);
+        for index in 1..=2 {
+            let mut leg = mnq_order(&format!("LONG-{index}"), Side::Buy, 1, 21_000);
+            leg.position_id = Some(format!("LEG-{index}"));
+            engine.process_with_market(
+                ClientMessage::SubmitOrder(leg),
+                1,
+                Some(MarketReading {
+                    last_px: Decimal::from(21_000),
+                    ts_ns: 1,
+                    band_ticks: 0,
+                }),
+            );
+        }
+        let shape = engine.book_shape();
+        let outcome = engine.mark(&[("MNQ".into(), Decimal::from(19_000))], 2);
+        assert!(
+            outcome.originated_orders > 0,
+            "the fixture must actually liquidate: {outcome:?}",
+            outcome = outcome.events
+        );
+        let bound =
+            mogwai_protocol::sizing::swept_fill_max_bytes(&shape, outcome.originated_orders);
+        let actual: usize = outcome
+            .events
+            .iter()
+            .map(|event| serde_json::to_vec(event).expect("event serializes").len())
+            .sum();
+        assert!(
+            actual <= bound,
+            "a cascade produced {actual} bytes against a {bound} byte reservation"
+        );
     }
 
     #[test]
@@ -3690,8 +4647,10 @@ mod tests {
             .iter()
             .map(|(symbol, base, quote)| InstrumentDef {
                 symbol: (*symbol).into(),
-                base: (*base).into(),
-                quote: (*quote).into(),
+                class: mogwai_protocol::InstrumentClass::Spot {
+                    base: (*base).into(),
+                    quote: (*quote).into(),
+                },
                 price_precision: 2,
                 size_precision: 8,
                 price_increment: Decimal::new(1, 2),

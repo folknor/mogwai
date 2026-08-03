@@ -27,6 +27,7 @@ use crate::{
 pub struct BookShape {
     pub balances: usize,
     pub positions: usize,
+    pub margins: usize,
     pub open_orders: usize,
     pub closed_orders: usize,
     pub recorded_fills: usize,
@@ -46,7 +47,7 @@ const ESC: usize = JSON_ESCAPE_FACTOR;
 /// client id, and the venue id which is server-generated and shorter), one
 /// symbol and one reason.
 pub const ORDER_EVENT_MAX_BYTES: usize =
-    512 + ESC * (2 * MAX_CLIENT_ID_LEN + MAX_SYMBOL_LEN + MAX_REASON_LEN);
+    576 + ESC * (3 * MAX_CLIENT_ID_LEN + MAX_SYMBOL_LEN + MAX_REASON_LEN + MAX_CURRENCY_LEN);
 
 /// One `Balance` row inside `AccountState`: `currency`, `total`, `free`,
 /// `locked` - three decimals at ~32 bytes plus ~60 bytes of key names,
@@ -56,7 +57,9 @@ pub const BALANCE_ROW_MAX_BYTES: usize = 192 + ESC * MAX_CURRENCY_LEN;
 /// One `Position` row inside `AccountState`: `symbol`, `quantity`,
 /// `avg_px` - two decimals at ~32 bytes plus key names and punctuation,
 /// rounded to 128.
-pub const POSITION_ROW_MAX_BYTES: usize = 128 + ESC * MAX_SYMBOL_LEN;
+pub const POSITION_ROW_MAX_BYTES: usize = 256 + ESC * (MAX_SYMBOL_LEN + MAX_CLIENT_ID_LEN);
+
+pub const MARGIN_ROW_MAX_BYTES: usize = 192 + ESC * (MAX_SYMBOL_LEN + MAX_CURRENCY_LEN);
 
 /// One `OrderStatusInfo` row inside an `OrderStatusSnapshot`:
 /// `client_order_id`, `venue_order_id`, `symbol`, `side`, `order_type`,
@@ -65,12 +68,13 @@ pub const POSITION_ROW_MAX_BYTES: usize = 128 + ESC * MAX_SYMBOL_LEN;
 /// `ts_last` - ~180 bytes of key names and punctuation, four decimals (132),
 /// three u64s (60), four short enum spellings (~40) and two bools (10): about
 /// 430, rounded to 512 on top of the charged strings.
-pub const ORDER_STATUS_ROW_MAX_BYTES: usize = 512 + ESC * (2 * MAX_CLIENT_ID_LEN + MAX_SYMBOL_LEN);
+pub const ORDER_STATUS_ROW_MAX_BYTES: usize = 512 + ESC * (3 * MAX_CLIENT_ID_LEN + MAX_SYMBOL_LEN);
 
 /// One fill row inside a `FillSnapshot`: an `OrderFilled` plus its trade id, so
 /// three client-id-shaped strings (client, venue, trade), one symbol, four
 /// decimals, a u64 and two enum spellings, rounded to 320.
-pub const FILL_ROW_MAX_BYTES: usize = 320 + ESC * (3 * MAX_CLIENT_ID_LEN + MAX_SYMBOL_LEN);
+pub const FILL_ROW_MAX_BYTES: usize =
+    384 + ESC * (4 * MAX_CLIENT_ID_LEN + MAX_SYMBOL_LEN + MAX_CURRENCY_LEN);
 
 /// The envelope either snapshot wraps its rows in: `type`, `request_id`, the
 /// row-array brackets and `ts_event`, rounded to 128 plus the echoed
@@ -89,6 +93,7 @@ pub fn account_state_max_bytes(shape: &BookShape) -> usize {
     144 + ESC * MAX_ACCOUNT_ID_LEN
         + shape.balances * BALANCE_ROW_MAX_BYTES
         + shape.positions * POSITION_ROW_MAX_BYTES
+        + shape.margins * MARGIN_ROW_MAX_BYTES
 }
 
 /// Upper bound on one trigger sweep's output: per executed order, up to FOUR
@@ -112,6 +117,7 @@ pub fn swept_fill_max_bytes(shape: &BookShape, orders: usize) -> usize {
         + account_state_max_bytes(&BookShape {
             balances: shape.balances + 2 * orders,
             positions: shape.positions + orders,
+            margins: shape.margins + orders,
             ..*shape
         })
 }
@@ -141,6 +147,7 @@ pub fn worst_case_output_bytes(cmd: &ClientMessage, shape: &BookShape) -> usize 
                 + account_state_max_bytes(&BookShape {
                     balances: shape.balances + 2,
                     positions: shape.positions + 1,
+                    margins: shape.margins + 1,
                     ..*shape
                 })
         }
@@ -169,6 +176,7 @@ mod tests {
         let shape = BookShape {
             balances: 0,
             positions: 0,
+            margins: 0,
             open_orders: 0,
             closed_orders: 0,
             recorded_fills: 0,
@@ -177,6 +185,7 @@ mod tests {
             account_id: AccountId::parse(&"Z".repeat(MAX_ACCOUNT_ID_LEN)).unwrap(),
             balances: Vec::new(),
             positions: Vec::new(),
+            margins: Vec::new(),
             ts_event: u64::MAX,
         };
         assert!(

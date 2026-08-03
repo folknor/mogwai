@@ -12,29 +12,47 @@ Or both. There are no exceptions.
 
 ## Open issues
 
-- PROBLEM STATEMENTS. **This is the solvable set of problems we believe will
-  get mogwai to the end state the user needs.** That is a claim rather than an
-  inventory: each entry is believed NECESSARY, and the set is believed
-  SUFFICIENT FOR MOGWAI TO STOP BEING THE BLOCKER. If all seven resolve and the
-  end state is still out of reach, the claim was wrong - which is a finding
-  worth having, and the reason it is stated as a claim rather than as a list.
+- PROBLEM STATEMENTS. **This was the solvable set of problems believed to get
+  mogwai to the end state the user needs.** That was a claim rather than an
+  inventory: each entry was believed NECESSARY, and the set was believed
+  SUFFICIENT FOR MOGWAI TO STOP BEING THE BLOCKER. All seven have now resolved
+  into landed code, which is the point at which the claim becomes checkable
+  rather than assumed - and whether the end state is in fact reached is an
+  observation to make going forward, not a re-litigation to hold here. If it
+  turns out not to be, that is a finding worth having, and the reason the claim
+  was stated as a claim rather than as a list.
 
-  FOUR, DOWN FROM FIVE, as of the conditional-order-type landing.
-  `problem-order-book.md` is deleted: the user's fill model needed no book, and
-  what remained open after that ruling - the volatility estimator, the band's
-  scale and shape, the derived RNG stream, self-trade impossibility - is now
-  landed code (`a214996` and follow-on commits), pinned by the tests and docs
-  the landing itself cites. `problem-fees.md` dissolved into the instrument
-  model (an exchange charges fees, so the schedule is one more config knob) and
-  was deleted earlier. `problem-refused-order-types.md` is deleted the same
-  way: the venue now accepts `StopMarket` and `StopLimit`, with reduce-only and
-  post-only as first-class flags and the touch-versus-through trigger
-  distinction, and the adapter stopped refusing them at conversion - landed
-  code, pinned by the engine, server and adapter test suites the landing
-  itself added. The MECHANISM half of `problem-instrument-profiles.md`
-  went the same way, but that document SURVIVES and still counts: its empirical
-  question - whether the arrival and volatility process constants are
-  per-instrument - is untouched by any ruling. Count the files in `notes/`.
+  ZERO, DOWN FROM SEVEN. `problem-order-book.md` is deleted: the user's fill
+  model needed no book, and what remained open after that ruling - the
+  volatility estimator, the band's scale and shape, the derived RNG stream,
+  self-trade impossibility - is landed code (`a214996` and follow-on commits),
+  pinned by the tests and docs the landing itself cites. `problem-fees.md`
+  dissolved into the instrument model (an exchange charges fees, so the
+  schedule is one more config knob) and was deleted earlier.
+  `problem-refused-order-types.md` is deleted the same way: the venue now
+  accepts `StopMarket` and `StopLimit`, with reduce-only and post-only as
+  first-class flags and the touch-versus-through trigger distinction, and the
+  adapter stopped refusing them at conversion - landed code, pinned by the
+  engine, server and adapter test suites the landing itself added. The
+  MECHANISM half of `problem-instrument-profiles.md` went the same way, and the
+  document's one surviving question - whether the arrival and volatility
+  process constants are genuinely per-instrument - was answered by the same
+  parameterization ruling that closed `problem-instrument-model.md` below: the
+  model is a complete parameterization, so those constants are per-instrument
+  because everything is. Last of the seven, `problem-instrument-model.md` and
+  its spec, `spec-instrument-model.md`, are deleted with it: the venue now
+  models an instrument as a bundle of knobs rather than one hardcoded spot
+  shape - instrument identity and class, a multiplier-aware contract size grid,
+  a futures margin ledger with mark-to-market and settlement, a session
+  calendar with genuine closure, a fee schedule reaching the consumer as booked
+  commission, `position_id` end to end under both netting and hedging, and a
+  preset layer with mandatory provenance - landed code, pinned by the test
+  suites and gates each landing added. `reference/architecture.md`,
+  `reference/config.md`, `reference/glossary.md`, `reference/cli.md`,
+  `reference/performance.md` and `docs/presets.md` /
+  `docs/oms-types.md` carry what must endure; the landing history is git's, not
+  this file's, to keep. `notes/` now holds no problem statement or spec files
+  at all - only this one.
 
   PREMISES THE USER HAS SETTLED, which every document below inherits and none
   previously stated. Forward tests always run ACCELERATED, never at speed 1.0 -
@@ -73,34 +91,17 @@ Or both. There are no exceptions.
   `reference/technical-implementation-spec.md` only once the problem statement
   it descends from has been resolved.
 
-  ORDERING IS A GRAPH, NOT A LINE. An earlier draft asserted a total order and
-  two independent reviews found it circular. The dependencies below are
-  technical, and where none exists the order is free:
+  ORDERING WAS A GRAPH, NOT A LINE, while the set was open - recorded here as
+  a historical note rather than left to imply an active dependency structure,
+  since there is nothing left in the set to sequence. Two independent reviews
+  found an earlier total-order draft circular; the graph that replaced it ran
+  `lifecycle` and `seeds` into everything else, and `cadence` and
+  `instrument-model` both into `profiles`, with `order-types` gaining no
+  inbound edge once the fill band replaced the order book it would otherwise
+  have waited on. All of it resolved in landing order without the graph ever
+  needing to be redrawn again.
 
-      lifecycle ─┬─> everything (it decides what a run IS)
-      seeds ─────┘
-
-      cadence ──> profiles
-                    ▲
-      instrument-model ───┘
-
-  REDRAWN. The graph previously ran order-types into the book into cadence into
-  profiles, with a note that order-type REQUIREMENTS preceded the book because a
-  market-state model could not be chosen before knowing what it had to support.
-  That whole chain rested on the venue growing a book. It is not growing one,
-  and the fill model that replaced the book has since landed (the seeded
-  volatility-scaled band, `a214996` and follow-on commits) and discharged its
-  one obligation to order types - a triggered stop now has a defensible fill,
-  namely the same band applied to the market order the trigger produces - so
-  `order-types` carries no inbound edge at all. Cadence no longer waits on
-  anything either, because with no matching the tape is generated independently
-  of every client action.
-
-  The instrument model has grown two inbound absorptions (fees, and the profile
-  mechanism) without gaining an inbound dependency. `profiles` is now a thin
-  node: only the per-instrument clustering question.
-
-  The end state they serve: on the order of 200 agents running concurrently,
+  The end state they served: on the order of 200 agents running concurrently,
   each developing a strategy through broadarrow - backtest, optimize, Monte
   Carlo - and then FORWARD TESTING it against mogwai. Whether that many
   instances fit on the machine is explicitly not a design input; resource cost
@@ -125,21 +126,6 @@ Or both. There are no exceptions.
   naming a successor, and that debt is real and belongs to whichever spec
   descends from it.
 
-  - `notes/problem-instrument-model.md` - the venue models spot currency pairs
-    only, so MNQ and MES cannot be futures: no multiplier, no tick value, no
-    expiry, no margin, and a session envelope that can thin an hour but not
-    close it, with no calendar and no exchange-local time. Precedes profiles,
-    because a profile cannot be fitted for an instrument that cannot exist. NOW
-    THE LARGEST DOCUMENT IN THE SET: the user ruled first-class, and that the
-    model is a complete PARAMETERIZATION rather than an enum of supported
-    instruments - presets are named bundles of otherwise-tunable knobs, and a
-    user who picks none must be able to invent MCL, MBT or AAPL. Fees and the
-    profile mechanism both land here as a result, as do margin and the general
-    config-versus-havoc line (config is the instrument's identity; havoc is a
-    deviation from it, so a scheduled CME close is config and `ReopenGap` stays
-    havoc for unscheduled halts only). Its decision list was renumbered - it
-    previously ran 1 to 6 then repeated 4 and 5, so older citations by number
-    are ambiguous.
   DELETED, not archived: `notes/problem-instrument-profiles.md`. Its mechanism
   half had already moved to the instrument model under the parameterization
   ruling. Its one surviving question - whether the arrival and volatility
@@ -484,9 +470,6 @@ Inline literals (no named const):
 
 ### mogwai-engine
 
-- `commission: Decimal::ZERO` booked on every fill unconditionally - no fee policy
-  or divergence path exists (notable for a crate whose stated purpose is injecting
-  realistic execution divergences).
 - Venue/trade id prefixes `V`/`T` as inline magic strings.
 - Test fixtures repeat `BTCUSDT`/`BTC`/`USDT`, a base price of 100, and
   partial-fill fractions 0.3/0.4/0.5 across dozens of sites (no shared consts).

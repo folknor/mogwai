@@ -33,8 +33,10 @@ use nautilus_common::{
 };
 use nautilus_core::{UUID4, UnixNanos};
 use nautilus_model::{
-    enums::{OrderStatus, OrderType, PositionSideSpecified, TriggerType},
-    identifiers::{ClientId, ClientOrderId, StrategyId, TradeId, TraderId, VenueOrderId},
+    enums::{LiquiditySide, OrderStatus, OrderType, PositionSideSpecified, TriggerType},
+    identifiers::{
+        ClientId, ClientOrderId, PositionId, StrategyId, TradeId, TraderId, VenueOrderId,
+    },
     types::{Price, Quantity},
 };
 use rust_decimal::Decimal;
@@ -211,6 +213,54 @@ async fn fill_reports_are_non_empty_end_to_end() {
     );
     assert_eq!(reports[0].venue_order_id, VenueOrderId::from("V-1"));
     assert_eq!(reports[0].trade_id, TradeId::from("T-1"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn a_maker_fill_reports_maker_liquidity_side() {
+    let fixture = fixture().await;
+    fixture.state.venue_fills.lock().unwrap()[0].liquidity_side =
+        mogwai_protocol::LiquiditySide::Maker;
+    let reports = fixture
+        .client
+        .generate_fill_reports(fill_reports_cmd())
+        .await
+        .unwrap();
+    assert_eq!(reports[0].liquidity_side, LiquiditySide::Maker);
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn a_venue_assigned_position_id_reaches_the_nautilus_fill_report() {
+    let fixture = fixture().await;
+    fixture.state.venue_fills.lock().unwrap()[0].position_id = Some("MNQ-7".into());
+    let reports = fixture
+        .client
+        .generate_fill_reports(fill_reports_cmd())
+        .await
+        .unwrap();
+    assert_eq!(
+        reports[0].venue_position_id,
+        Some(PositionId::from("MNQ-7"))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn a_futures_commission_books_in_the_settlement_currency() {
+    let fixture = fixture().await;
+    {
+        let mut fills = fixture.state.venue_fills.lock().unwrap();
+        fills[0].commission = Decimal::new(125, 2);
+        fills[0].commission_currency = "USD".into();
+    }
+    let reports = fixture
+        .client
+        .generate_fill_reports(fill_reports_cmd())
+        .await
+        .unwrap();
+    assert_eq!(reports[0].commission.currency.code.as_str(), "USD");
+    assert_eq!(reports[0].commission.as_decimal(), Decimal::new(125, 2));
 }
 
 #[tokio::test(flavor = "current_thread")]

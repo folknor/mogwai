@@ -43,5 +43,15 @@ launcher that does not want the log should redirect it to a file or to the null
 device rather than to a pipe it never reads. `scripts/smoke.py` drains it on a
 thread, which is the reference form.
 
+`presets` prints the embedded instrument presets. Bare, it lists the names;
+with one - `mogwai presets MNQ` - it prints that preset's TOML, including the
+`[provenance]` map declaring where every knob came from. The presets ship
+inside the binary, so a fresh clone needs no data directory, and the provenance
+is what makes the asymmetry visible: the crypto cadence knobs are fitted
+against trade-level archives, while the index-future cadence is derived from
+bar counts and its clustering constants are declared with a rationale saying
+they come from nowhere at all. Choosing a preset without reading that is
+choosing a number you have not been told the standing of.
+
 `gen` remains the offline generator command. There are no `stop` or `man`
 subcommands, and documentation is not compiled into the binary.

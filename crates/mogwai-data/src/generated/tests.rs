@@ -6,6 +6,7 @@ use mogwai_protocol::{AggressorSide, MarketRegime, decimal_to_f64};
 use crate::{TickEvent, TickSource};
 
 use super::checkpoint::MAX_CHECKPOINTS;
+use super::consts::SIZE_LOG_SIGMA;
 use super::consts::{GARCH_SIGMA_CAP, MAX_ABS_RETURN, MAX_SESSION_GAP_NS, NS_PER_HOUR};
 use super::session::{utc_hour, utc_hour_dow};
 use super::*;
@@ -234,8 +235,16 @@ fn try_new_accepts_valid_input_and_surfaces_bad_input() {
     let mut bad_session = fp.session_profile.clone();
     bad_session.intensity_hour = [1.0; 24];
     assert_eq!(
-        GeneratedSource::try_new_with_session_profile(scalars, 42, 0, &fp, &bad_session, None)
-            .err(),
+        GeneratedSource::try_new_with_session_profile(
+            scalars,
+            42,
+            0,
+            &fp,
+            &bad_session,
+            None,
+            SizeGrid::spot(),
+        )
+        .err(),
         Some(GeneratedSourceError::Session(SessionProfileError {
             field: "intensity_hour",
             index: usize::MAX,
@@ -881,6 +890,7 @@ fn near_zero_hour_share_reopens_at_the_next_open_hour() {
         &fp,
         &profile,
         None,
+        SizeGrid::spot(),
     );
     let first = src.next_tick().expect("trade").ts_event();
     // The first tick must survive the closed hour 0 (not print inside it)
@@ -905,6 +915,7 @@ fn near_zero_hour_share_reopens_at_the_next_open_hour() {
         &fp,
         &profile,
         None,
+        SizeGrid::spot(),
     );
     assert_eq!(twin.next_tick().expect("trade").ts_event(), first);
     let mut prior = first;
@@ -940,6 +951,7 @@ fn fully_closed_profile_caps_each_gap_and_never_freezes_the_clock() {
         &fp,
         &profile,
         None,
+        SizeGrid::spot(),
     );
     let mut prior = SESSION_START_TS;
     for _ in 0..300 {
@@ -953,6 +965,277 @@ fn fully_closed_profile_caps_each_gap_and_never_freezes_the_clock() {
         );
         prior = ts;
     }
+}
+
+fn mnq_size_grid() -> SizeGrid {
+    SizeGrid {
+        multiplier: Decimal::from(2),
+        integral: true,
+        min_size: Decimal::ONE,
+    }
+}
+
+fn cme_calendar() -> SessionCalendar {
+    let mut open_windows = Vec::new();
+    for day in 0..5 {
+        let session_start = if day == 0 { 1_080 } else { day * 1_440 + 1_080 };
+        let next_day = (day + 1) * 1_440;
+        open_windows.push(WeeklyWindow {
+            start_minute: session_start,
+            end_minute: next_day + 975,
+        });
+        open_windows.push(WeeklyWindow {
+            start_minute: next_day + 990,
+            end_minute: next_day + 1_020,
+        });
+    }
+    SessionCalendar {
+        utc_offset_minutes: 0,
+        open_windows,
+        settlement_minute_of_day: Some(960),
+    }
+}
+
+const DAY_NS: u64 = 86_400_000_000_000;
+const MINUTE_NS: u64 = 60_000_000_000;
+const FIRST_SUNDAY_NS: u64 = 3 * DAY_NS;
+
+fn calendar_source(start: u64) -> GeneratedSource {
+    let fp = Fingerprint::from_repo_json();
+    GeneratedSource::new(GeneratorScalars::xbtusd_anchor(&fp), 42, start, &fp, None)
+        .with_calendar(Some(cme_calendar()))
+}
+
+#[test]
+fn a_calendar_weekend_emits_no_tick_and_reopens_exactly_on_the_boundary() {
+    let friday_close = FIRST_SUNDAY_NS + (5 * 1_440 + 1_020) * MINUTE_NS;
+    let sunday_reopen = FIRST_SUNDAY_NS + 7 * DAY_NS + 1_080 * MINUTE_NS;
+    let mut source = calendar_source(friday_close - 1);
+    let mut timestamps = Vec::new();
+    for _ in 0..1_000 {
+        let ts = source.next_tick().unwrap().ts_event();
+        timestamps.push(ts);
+        if ts >= sunday_reopen {
+            break;
+        }
+    }
+    assert!(
+        timestamps
+            .iter()
+            .all(|ts| *ts < friday_close || *ts >= sunday_reopen)
+    );
+    assert_eq!(
+        timestamps.into_iter().find(|ts| *ts >= sunday_reopen),
+        Some(sunday_reopen)
+    );
+}
+
+#[test]
+fn the_maintenance_halt_is_expressible_at_sub_hour_resolution() {
+    let monday = FIRST_SUNDAY_NS + DAY_NS;
+    let close = monday + 975 * MINUTE_NS;
+    let reopen = monday + 990 * MINUTE_NS;
+    let mut source = calendar_source(close - MINUTE_NS);
+    let ticks: Vec<_> = (0..10_000)
+        .map(|_| source.next_tick().unwrap().ts_event())
+        .take_while(|ts| *ts <= reopen)
+        .collect();
+    assert!(ticks.iter().all(|ts| *ts < close || *ts >= reopen));
+}
+
+#[test]
+fn an_armed_flow_surge_cannot_shorten_a_closure_jump() {
+    let friday_close = FIRST_SUNDAY_NS + (5 * 1_440 + 1_020) * MINUTE_NS;
+    let sunday_reopen = FIRST_SUNDAY_NS + 7 * DAY_NS + 1_080 * MINUTE_NS;
+    let mut source = calendar_source(friday_close - 1);
+    source.arm_flow_surge(friday_close - 1, 4 * 24 * 60 * 60 * 1_000, 100.0, 1.0);
+    for _ in 0..1_000 {
+        let ts = source.next_tick().unwrap().ts_event();
+        assert!(ts < friday_close || ts >= sunday_reopen);
+        if ts >= sunday_reopen {
+            return;
+        }
+    }
+    panic!("source never reached the reopen");
+}
+
+#[test]
+fn checkpoint_resume_across_a_closure_is_byte_identical() {
+    let friday_close = FIRST_SUNDAY_NS + (5 * 1_440 + 1_020) * MINUTE_NS;
+    let sunday_reopen = FIRST_SUNDAY_NS + 7 * DAY_NS + 1_080 * MINUTE_NS;
+    let target = friday_close + DAY_NS;
+    let mut reference = calendar_source(friday_close - 1);
+    let mut expected = Vec::new();
+    while expected.len() < 200
+        || expected
+            .last()
+            .is_none_or(|tick: &(u64, Decimal, Decimal, AggressorSide)| tick.0 < sunday_reopen)
+    {
+        let TickEvent::Trade(tick) = reference.next_tick().unwrap() else {
+            unreachable!()
+        };
+        expected.push((tick.ts_event, tick.price, tick.size, tick.aggressor));
+    }
+    let origin = calendar_source(friday_close - 1);
+    let mut index = CheckpointIndex::new(origin, 8, 100_000);
+    let mut resumed = index.source_at_or_before(target);
+    let start = expected.iter().position(|tick| tick.0 >= target).unwrap();
+    for expected_tick in expected.iter().skip(start).take(100) {
+        let TickEvent::Trade(tick) = resumed.next_tick().unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(
+            (tick.ts_event, tick.price, tick.size, tick.aggressor),
+            *expected_tick
+        );
+    }
+}
+
+#[test]
+fn assert_calendar_dwell_excludes_closed_hours() {
+    let calendar = cme_calendar();
+    let mut source = calendar_source(FIRST_SUNDAY_NS + 4 * DAY_NS);
+    let timestamps: Vec<_> = (0..50_000)
+        .map(|_| source.next_tick().unwrap().ts_event())
+        .collect();
+    assert!(
+        timestamps
+            .iter()
+            .all(|timestamp| calendar.is_open(*timestamp))
+    );
+    let open_gaps: Vec<_> = timestamps
+        .windows(2)
+        .filter(|pair| calendar.is_open(pair[0].saturating_add(MINUTE_NS)))
+        .map(|pair| pair[1] - pair[0])
+        .collect();
+    assert!(open_gaps.iter().all(|gap| *gap < 60 * MINUTE_NS));
+}
+
+#[test]
+fn contract_sizes_are_whole_numbers_and_never_zero() {
+    let mut fp = Fingerprint::from_repo_json();
+    fp.scalar_ranges.typical_notional = MinMedianMax {
+        min: 1.0,
+        median: 200_000.0,
+        max: 1_000_000.0,
+    };
+    let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    scalars.start_price = Decimal::from(21_000);
+    scalars.typical_notional = Decimal::from(200_000);
+    let mut source =
+        GeneratedSource::try_new_with_size_grid(scalars, 73, 0, &fp, None, mnq_size_grid())
+            .expect("MNQ grid is valid");
+    for _ in 0..100_000 {
+        let TickEvent::Trade(tick) = source.next_tick().expect("infinite tape") else {
+            unreachable!()
+        };
+        assert!(tick.size >= Decimal::ONE);
+        assert_eq!(tick.size.fract(), Decimal::ZERO);
+    }
+}
+
+#[test]
+fn contract_size_median_tracks_notional_over_multiplier_times_price() {
+    let mut fp = Fingerprint::from_repo_json();
+    fp.scalar_ranges.typical_notional = MinMedianMax {
+        min: 1.0,
+        median: 200_000.0,
+        max: 1_000_000.0,
+    };
+    let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    scalars.start_price = Decimal::from(21_000);
+    scalars.typical_notional = Decimal::from(200_000);
+    let source = GeneratedSource::try_new_with_size_grid(scalars, 1, 0, &fp, None, mnq_size_grid())
+        .expect("MNQ grid is valid");
+    let expected = 200_000.0 / (21_000.0 * 2.0) / (SIZE_LOG_SIGMA.powi(2) / 2.0).exp();
+    assert_near("contract size median", source.size_median, expected, 1e-12);
+    assert!(source.size_median < 200_000.0 / 21_000.0 / (SIZE_LOG_SIGMA.powi(2) / 2.0).exp());
+}
+
+#[test]
+fn a_lot_snap_on_an_integral_grid_never_produces_a_fractional_lot() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let mut source =
+        GeneratedSource::try_new_with_size_grid(scalars, 9, 0, &fp, None, mnq_size_grid())
+            .expect("integral lot grid is valid");
+    for _ in 0..10_000 {
+        assert_eq!(source.next_size().fract(), Decimal::ZERO);
+    }
+}
+
+#[test]
+fn the_integral_floor_lifts_the_realized_mean_above_the_notional_target() {
+    let mut fp = Fingerprint::from_repo_json();
+    fp.scalar_ranges.typical_notional = MinMedianMax {
+        min: 1.0,
+        median: 20_000.0,
+        max: 1_000_000.0,
+    };
+    let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    scalars.start_price = Decimal::from(21_000);
+    scalars.typical_notional = Decimal::from(20_000);
+    let target = 20_000.0 / (21_000.0 * 2.0);
+    let mut source =
+        GeneratedSource::try_new_with_size_grid(scalars, 81, 0, &fp, None, mnq_size_grid())
+            .expect("MNQ grid is valid");
+    let draws = 100_000;
+    let realized = (0..draws)
+        .map(|_| decimal_to_f64(source.next_size()))
+        .sum::<f64>()
+        / f64::from(draws);
+    // `realized > target` alone cannot fail: the floor is one contract and the
+    // target here is 0.476 of one, so ANY grid passes it, including a broken
+    // one that returns the floor for every draw. What is pinned instead is the
+    // measured RATIO, so a later change to the rounding rule has to re-bless
+    // the number rather than move it silently. A truncating grid reads 1.00
+    // (all mass on the floor); half-away-from-zero reads the value below.
+    let ratio = realized / target;
+    assert_near("integral floor lift", ratio, 2.326, 0.05);
+}
+
+#[test]
+fn spot_draws_are_bit_identical_across_the_size_grid_change() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let mut default_path = GeneratedSource::new(scalars.clone(), 42, 0, &fp, None);
+    let mut gridded =
+        GeneratedSource::try_new_with_size_grid(scalars, 42, 0, &fp, None, SizeGrid::spot())
+            .expect("spot grid is valid");
+    let default_draws: Vec<_> = (0..100_000).map(|_| default_path.next_size()).collect();
+    let gridded_draws: Vec<_> = (0..100_000).map(|_| gridded.next_size()).collect();
+    // The two constructors agreeing proves only that `new` delegates with
+    // `SizeGrid::spot()`, which is a tautology - both run the same code. The
+    // claim the landing actually makes is that the spot draws are the ones the
+    // PRE-GRID generator produced, and only a golden can carry it. These are
+    // the first twelve draws of seed 42 on the committed fingerprint, and they
+    // are the PRE-GRID values: the spot arm of `next_size` is character
+    // identical to the pre-grid expression, and `size_median` gained only a
+    // division by `decimal_to_f64(SizeGrid::spot().multiplier)`, which is
+    // exactly 1.0 and therefore an IEEE identity. Bit-identity is provable
+    // rather than merely asserted, and this golden keeps it provable across
+    // the next edit to either arm.
+    const PRE_GRID_HEAD: [&str; 12] = [
+        "0.00289574",
+        "0.00361598",
+        "0.00124550",
+        "0.00334147",
+        "0.001",
+        "0.02185139",
+        "0.002",
+        "0.00272721",
+        "0.00085280",
+        "0.00118992",
+        "0.00643059",
+        "0.003",
+    ];
+    assert_eq!(default_draws, gridded_draws);
+    let head: Vec<String> = default_draws
+        .iter()
+        .take(PRE_GRID_HEAD.len())
+        .map(std::string::ToString::to_string)
+        .collect();
+    assert_eq!(head, PRE_GRID_HEAD, "the spot grid moved the spot draws");
 }
 
 #[test]

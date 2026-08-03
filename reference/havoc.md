@@ -18,6 +18,12 @@ seeking back across a live surge intentionally does not replay the havoc.
 `LiquidityDrought` remains the inverse rate control: it stretches parent gaps
 while leaving sweep shape unchanged.
 
+`FeeSurcharge { mult, window_ms }` multiplies the configured maker or taker
+charge for fills inside one simulated-time window. The multiplier is restricted
+to `(0, 100]`, the duration to one hour, and a later arm replaces the earlier
+window outright. It expires lazily on the first fill at or after its end, so it
+does not depend on wall time or a background timer.
+
 A planned run completion is not havoc: it emits `RunComplete` and closes
 normally. That announcement is exempt from both suppression windows - a venue
 that reached its declared duration says so even mid-blackout, because dropping

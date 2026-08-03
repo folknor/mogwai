@@ -15,10 +15,11 @@ use mogwai_engine::MAX_ARMED_DIVERGENCES;
 use mogwai_protocol::{
     AccountState, AdmissionSubject, ClientMessage, DEFAULT_HISTORY_LIMIT, InstrumentDef,
     MAX_HISTORY_LIMIT, OrderType, QuoteTick, ServerClock, ServerMessage, SimClock, TradeTick,
-    control::Divergence, truncate_client_id, truncate_reason, validate_client_order_id,
-    validate_divergence, validate_modify_order, validate_request_id, validate_submit_order,
+    control::Divergence, trades_through, truncate_client_id, truncate_reason,
+    validate_client_order_id, validate_divergence, validate_modify_order, validate_request_id,
+    validate_submit_order,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::admission::{ExecLanes, Reservation};
 use crate::config::{Config, sim_now_ns, window_until_ns};
@@ -275,6 +276,29 @@ pub(crate) async fn process_order_cmd(
             reservation,
         };
     }
+    if let ClientMessage::SubmitOrder(order) = &order_cmd
+        && let Some(calendar) = state
+            .profiles
+            .get(&order.symbol)
+            .and_then(|profile| profile.calendar.as_ref())
+        && reject_while_closed(calendar, ts, order, market_px)
+    {
+        let Some(reservation) = lanes.try_reserve_boundary() else {
+            return OrderOutcome::NotAdmitted(ServerMessage::AdmissionRejected {
+                subject: admission_subject(&order_cmd),
+                reason: "execution output admission budget exhausted".into(),
+                ts_event: ts,
+            });
+        };
+        return OrderOutcome::Refused {
+            events: vec![ServerMessage::OrderRejected {
+                client_order_id: order.client_order_id.clone(),
+                reason: "market closed".into(),
+                ts_event: ts,
+            }],
+            reservation,
+        };
+    }
     let mut engine = run.engine.lock().await;
     let shape = engine.book_shape();
     let Some(reservation) = lanes.reserve(&order_cmd, &shape) else {
@@ -294,6 +318,21 @@ pub(crate) async fn process_order_cmd(
     }
 }
 
+fn reject_while_closed(
+    calendar: &mogwai_data::SessionCalendar,
+    ts: u64,
+    order: &mogwai_protocol::SubmitOrder,
+    market_px: Option<mogwai_engine::MarketReading>,
+) -> bool {
+    !calendar.is_open(ts)
+        && (order.order_type == OrderType::Market
+            || (order.order_type == OrderType::Limit
+                && order.price.is_some_and(|price| {
+                    market_px
+                        .is_some_and(|reading| trades_through(order.side, price, reading.last_px))
+                })))
+}
+
 /// The router's share of the run. Deliberately thin: the clock, the history
 /// floor and the instrument all live on `Run`, which owns them, and are read
 /// through it rather than copied here - a second copy of the clock is a second
@@ -307,6 +346,19 @@ pub(crate) struct AppState {
     /// delay. The per-connection lane bounds one client; this bounds the run.
     pub(crate) pending_acts: Arc<tokio::sync::Semaphore>,
     pub(crate) market_readings: Arc<crate::fills::MarketReadingCache>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct Health {
+    status: &'static str,
+    oms_type: mogwai_protocol::OmsType,
+}
+
+pub(crate) async fn health(State(state): State<AppState>) -> Json<Health> {
+    Json(Health {
+        status: "ok",
+        oms_type: state.run.oms_type,
+    })
 }
 
 impl AppState {
@@ -407,6 +459,12 @@ pub(crate) async fn arm_divergence(
                 children_mult,
             );
         }
+        Divergence::FeeSurcharge { mult, window_ms } => {
+            run.engine
+                .lock()
+                .await
+                .arm_fee_surcharge(mult, window_ms, sim_now_ns(state.sim()));
+        }
         // Immediate book action, not an armed trigger: cancel the resting
         // order right now, silently (no lifecycle event - that lost event IS
         // the injected fault; the truth surfaces only via QueryOrders). A
@@ -435,6 +493,7 @@ pub(crate) async fn arm_divergence(
             run.dark_until_ns.store(0, Ordering::Relaxed);
             run.stall_until_ns.store(0, Ordering::Relaxed);
             run.tape.clear_flow_surge();
+            run.engine.lock().await.clear_fee_surcharge();
             // All six `CommandLatency` fields go with them. This clears what the
             // venue will do to commands it has NOT started acting on yet, and it
             // lifts an ack window off frames already queued (the pump reads that
@@ -465,6 +524,7 @@ pub(crate) async fn arm_divergence(
                         | Divergence::GoDark { .. }
                         | Divergence::StallData { .. }
                         | Divergence::FlowSurge { .. }
+                        | Divergence::FeeSurcharge { .. }
                         | Divergence::ClearDivergences
                         | Divergence::CancelOpenOrderSilently { .. }
                 ),
@@ -760,4 +820,67 @@ pub(crate) fn bounded_trades(
     }
 
     out
+}
+
+#[cfg(test)]
+mod calendar_tests {
+    use super::*;
+    use mogwai_data::{SessionCalendar, WeeklyWindow};
+    use mogwai_protocol::{Side, SubmitOrder, TimeInForce};
+    use rust_decimal::Decimal;
+
+    #[test]
+    fn a_market_order_while_closed_is_rejected_not_filled_off_a_stale_print() {
+        let calendar = SessionCalendar {
+            utc_offset_minutes: 0,
+            // Minutes count from local SUNDAY 00:00, and the unix epoch is a
+            // Thursday, so an open window covering `ts = 0` starts at 5_760.
+            open_windows: vec![WeeklyWindow {
+                start_minute: 5_760,
+                end_minute: 5_761,
+            }],
+            settlement_minute_of_day: None,
+        };
+        let order = SubmitOrder {
+            client_order_id: "CLOSED".into(),
+            symbol: "MNQ".into(),
+            position_id: None,
+            side: Side::Buy,
+            order_type: OrderType::Market,
+            quantity: Decimal::ONE,
+            price: None,
+            trigger_price: None,
+            reduce_only: false,
+            post_only: false,
+            time_in_force: TimeInForce::Gtc,
+        };
+        let reading = Some(mogwai_engine::MarketReading {
+            last_px: Decimal::from(21_000),
+            ts_ns: 0,
+            band_ticks: 0,
+        });
+        let closed = 2 * 60_000_000_000;
+        let open = 30_000_000_000;
+        assert!(reject_while_closed(&calendar, closed, &order, reading));
+
+        // The three negative cases, without which the assertion above passes
+        // for a predicate that answers `true` unconditionally.
+        assert!(
+            !reject_while_closed(&calendar, open, &order, reading),
+            "an open market must not refuse a market order"
+        );
+        let mut resting = order.clone();
+        resting.order_type = OrderType::Limit;
+        resting.price = Some(Decimal::from(1));
+        assert!(
+            !reject_while_closed(&calendar, closed, &resting, reading),
+            "a non-marketable limit rests through a closure rather than being refused"
+        );
+        let mut marketable = resting.clone();
+        marketable.price = Some(Decimal::from(30_000));
+        assert!(
+            reject_while_closed(&calendar, closed, &marketable, reading),
+            "a limit marketable against the stale print is refused with the market orders"
+        );
+    }
 }

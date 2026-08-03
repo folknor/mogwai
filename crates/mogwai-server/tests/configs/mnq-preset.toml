@@ -1,0 +1,6 @@
+speed = 60.0
+server_heartbeat_ms = 0
+[balances]
+USD = "100000"
+[instrument]
+preset = "MNQ"

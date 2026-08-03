@@ -44,7 +44,9 @@ use nautilus_model::{
         OrderEventAny, OrderFilled, OrderModifyRejected, OrderRejected, OrderSubmitted,
         OrderTriggered, OrderUpdated,
     },
-    identifiers::{AccountId, ClientId, ClientOrderId, InstrumentId, TradeId, Venue, VenueOrderId},
+    identifiers::{
+        AccountId, ClientId, ClientOrderId, InstrumentId, PositionId, TradeId, Venue, VenueOrderId,
+    },
     orders::Order,
     reports::{ExecutionMassStatus, FillReport, OrderStatusReport, PositionStatusReport},
     types::{AccountBalance, MarginBalance, currency::Currency},
@@ -566,13 +568,6 @@ fn fill_report_from_wire(
             "dropping fill report: unrepresentable value"
         );
     };
-    let quote_currency = match Currency::from_str(&def.quote) {
-        Ok(currency) => currency,
-        Err(err) => {
-            warn_drop("quote currency", &err);
-            return None;
-        }
-    };
     let trade_id = match TradeId::new_checked(&fill.trade_id) {
         Ok(trade_id) => trade_id,
         Err(err) => {
@@ -594,13 +589,24 @@ fn fill_report_from_wire(
             return None;
         }
     };
-    let commission = match convert::money(fill.commission, quote_currency) {
+    let commission_currency = match Currency::from_str(&fill.commission_currency) {
+        Ok(currency) => currency,
+        Err(err) => {
+            warn_drop("commission_currency", &err);
+            return None;
+        }
+    };
+    let commission = match convert::money(fill.commission, commission_currency) {
         Ok(commission) => commission,
         Err(err) => {
             warn_drop("commission", &err);
             return None;
         }
     };
+    let position_id = fill
+        .position_id
+        .as_deref()
+        .and_then(|id| PositionId::new_checked(id).ok());
     // Taker unconditionally: the wire carries no maker/taker flag (see the
     // fill event handler's identical, deliberately lossy mapping).
     Some(FillReport::new(
@@ -612,9 +618,12 @@ fn fill_report_from_wire(
         last_qty,
         last_px,
         commission,
-        LiquiditySide::Taker,
+        match fill.liquidity_side {
+            mogwai_protocol::LiquiditySide::Maker => LiquiditySide::Maker,
+            mogwai_protocol::LiquiditySide::Taker => LiquiditySide::Taker,
+        },
         Some(client_order_id),
-        None,
+        position_id,
         UnixNanos::from(fill.ts_event),
         ts_init,
         None,
@@ -917,6 +926,7 @@ impl ExecutionClient for MogwaiExecutionClient {
         let wire = mogwai_protocol::SubmitOrder {
             client_order_id: cmd.client_order_id.to_string(),
             symbol: symbol_from_instrument(cmd.instrument_id),
+            position_id: cmd.position_id.map(|id| id.to_string()),
             side: convert::wire_side(cmd.order_init.order_side)?,
             order_type: convert::wire_order_type(cmd.order_init.order_type)?,
             quantity: cmd.order_init.quantity.as_decimal(),
@@ -1238,7 +1248,10 @@ impl ExecutionClient for MogwaiExecutionClient {
                     ts_event,
                     ts_init,
                     None,
-                    None,
+                    position
+                        .position_id
+                        .as_deref()
+                        .and_then(|id| PositionId::new_checked(id).ok()),
                     Some(position.avg_px),
                 ))
             })
@@ -2176,10 +2189,11 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
         );
         return;
     };
-    let Ok(quote_currency) = Currency::from_str(&def.quote) else {
+    let settlement_currency = def.class.settlement_currency();
+    let Ok(quote_currency) = Currency::from_str(settlement_currency) else {
         tracing::warn!(
             symbol = %fill.symbol,
-            quote = %def.quote,
+            quote = %settlement_currency,
             order = %client_order_id,
             "dropping order fill: unknown quote currency"
         );
@@ -2303,7 +2317,9 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
         // commission that cannot represent as nautilus Money degrades to no
         // reported commission (with a warning) rather than panicking or
         // dropping the whole fill.
-        match convert::money(fill.commission, quote_currency) {
+        let commission_currency =
+            Currency::from_str(&fill.commission_currency).unwrap_or(quote_currency);
+        match convert::money(fill.commission, commission_currency) {
             Ok(money) => Some(money),
             Err(err) => {
                 tracing::warn!(
@@ -2320,6 +2336,10 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
     // immediately against replayed history, which is taker-equivalent, so every
     // fill is reported as Taker. This is a deliberate, lossy mapping: the wire
     // carries no maker/taker flag to preserve.
+    let position_id = fill
+        .position_id
+        .as_deref()
+        .and_then(|id| PositionId::new_checked(id).ok());
     let event = OrderFilled::new(
         ctx.trader_id,
         record.strategy_id,
@@ -2333,12 +2353,15 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
         last_qty,
         last_px,
         quote_currency,
-        LiquiditySide::Taker,
+        match fill.liquidity_side {
+            mogwai_protocol::LiquiditySide::Maker => LiquiditySide::Maker,
+            mogwai_protocol::LiquiditySide::Taker => LiquiditySide::Taker,
+        },
         UUID4::new(),
         UnixNanos::from(fill.ts_event),
         now_unix_nanos(ctx.sim),
         false,
-        None,
+        position_id,
         commission,
         None,
     );
@@ -2418,6 +2441,25 @@ fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext
             }
         })
         .collect();
+    let instruments = lock_recover(&ctx.instruments, "instrument definitions");
+    let margins = state
+        .margins
+        .iter()
+        .filter_map(|margin| {
+            let currency = Currency::from_str(&margin.currency).ok()?;
+            let initial = convert::money(margin.initial, currency).ok()?;
+            let maintenance = convert::money(margin.maintenance, currency).ok()?;
+            let instrument_id = instruments.get(&margin.symbol).map(convert::instrument_id);
+            match MarginBalance::new_checked(initial, maintenance, instrument_id) {
+                Ok(balance) => Some(balance),
+                Err(err) => {
+                    tracing::warn!(symbol = %margin.symbol, error = %err, "dropping invalid margin balance");
+                    None
+                }
+            }
+        })
+        .collect();
+    drop(instruments);
 
     {
         let mut mirror = lock_recover(&ctx.state, "execution state");
@@ -2442,7 +2484,7 @@ fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext
         ctx.account_id,
         ctx.account_type,
         balances,
-        Vec::new(),
+        margins,
         true,
         UUID4::new(),
         ts_event,

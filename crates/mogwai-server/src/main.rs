@@ -41,7 +41,9 @@ use axum::{
 use clap::{Args, Parser, Subcommand};
 
 use crate::{
-    config::{Config, build_instrument_profiles, build_run_clock, now_ns, refuse_unfunded_quotes},
+    config::{
+        Config, build_instrument_profiles, build_run_clock, now_ns, refuse_unfunded_settlement,
+    },
     http::{AppState, account, arm_divergence, clock, instruments, quotes, trades},
     ws::ws_upgrade,
 };
@@ -74,6 +76,12 @@ struct Cli {
 enum Command {
     Serve(ServeArgs),
     Gen(r#gen::GenArgs),
+    Presets(PresetArgs),
+}
+
+#[derive(Args)]
+struct PresetArgs {
+    name: Option<String>,
 }
 
 #[derive(Args)]
@@ -92,6 +100,16 @@ fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Serve(args) => serve(args),
         Command::Gen(args) => r#gen::run(args),
+        Command::Presets(args) => {
+            if let Some(name) = args.name {
+                let document = config::preset_document(&name)
+                    .ok_or_else(|| anyhow::anyhow!("unknown preset {name}"))?;
+                print!("{document}");
+            } else {
+                println!("MNQ\nMES\nBTCUSDT\nETHUSDT\nSOLUSDT");
+            }
+            Ok(())
+        }
     }
 }
 
@@ -138,7 +156,7 @@ async fn serve_async(
 ) -> anyhow::Result<()> {
     let cfg = Config::load(config)?;
     let profiles = Arc::new(build_instrument_profiles(&cfg)?);
-    refuse_unfunded_quotes(&cfg, &profiles.instrument_defs())?;
+    refuse_unfunded_settlement(&cfg, &profiles.instrument_defs())?;
     let instrument = profiles
         .instrument_defs()
         .into_iter()
@@ -222,6 +240,8 @@ async fn serve_async(
         cfg.speed,
         cfg.fanout_depth,
         cfg.zero_speed_stall_ms,
+        cfg.oms_type,
+        cfg.fill_band_max_ticks,
     );
     tracing::info!(fill_seed = run.seeds.fill, "fill band stream initialized");
     // The band needs something to advance it: a submit decides only its own
@@ -229,9 +249,13 @@ async fn serve_async(
     // when a sweep pass walks the tape it is waiting on. Spawned
     // unconditionally, because there is no configuration in which limits do not
     // rest.
+    let market_readings = Arc::new(fills::MarketReadingCache::default());
     sweeper::spawn_fill_sweeper(sweeper::FillSweep {
         run: Arc::clone(&run),
         profiles: Arc::clone(&profiles),
+        market_readings: Arc::clone(&market_readings),
+        fill_band_vol_mult: cfg.fill_band_vol_mult,
+        fill_band_max_ticks: cfg.fill_band_max_ticks,
         interval_ms: cfg.fill_sweep_interval_ms,
     });
     let state = AppState {
@@ -239,11 +263,11 @@ async fn serve_async(
         cfg: cfg.clone(),
         profiles: Arc::clone(&profiles),
         pending_acts: Arc::new(tokio::sync::Semaphore::new(cfg.global_pending_command_acts)),
-        market_readings: Arc::new(fills::MarketReadingCache::default()),
+        market_readings,
     };
     let completing_run = Arc::clone(&state.run);
     let app = Router::new()
-        .route("/health", get(|| async { "ok" }))
+        .route("/health", get(http::health))
         .route("/account", get(account))
         .route("/instruments", get(instruments))
         .route("/trades", get(trades))

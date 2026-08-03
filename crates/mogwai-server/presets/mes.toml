@@ -1,0 +1,10 @@
+[instrument]
+preset = "MNQ"
+[instrument.override]
+symbol = "MES"
+"class.underlying" = "ES"
+"class.multiplier" = "5"
+[provenance]
+"symbol" = { kind = "declared", rationale = "continuous synthetic contract" }
+"class.underlying" = { kind = "declared", rationale = "S&P 500" }
+"class.multiplier" = { kind = "declared", rationale = "five dollars per point" }

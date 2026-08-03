@@ -9,14 +9,15 @@
 //! pinned golden sequence that must be re-blessed with any intentional walk
 //! mechanism change.
 
-use mogwai_protocol::{AggressorSide, MarketRegime, TradeTick, decimal_to_f64};
+use mogwai_protocol::{AggressorSide, InstrumentDef, MarketRegime, TradeTick, decimal_to_f64};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha12Rng;
 use rand_distr::{ChiSquared, Distribution, LogNormal, Normal, Weibull};
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, RoundingStrategy};
 
 use crate::{TickEvent, TickSource};
 
+use super::calendar::SessionCalendar;
 use super::consts::{
     ARRIVAL_ACTIVE_CHILDREN_MULT, ARRIVAL_MEAN_CAL, ARRIVAL_QUIET_ACTIVE_RATIO,
     ARRIVAL_QUIET_CHILDREN_MULT, ARRIVAL_QUIET_FRACTION, ARRIVAL_STATE_PERSISTENCE,
@@ -50,7 +51,9 @@ pub struct GeneratedSource {
     normal: Normal<f64>,
     chi_squared: ChiSquared<f64>,
     size_dist: LogNormal<f64>,
-    size_median: f64,
+    pub(super) size_median: f64,
+    size_grid: SizeGrid,
+    calendar: Option<SessionCalendar>,
     tick_f64: f64,
     regime: RegimeState,
     pub(super) shape: SweepShape,
@@ -59,6 +62,37 @@ pub struct GeneratedSource {
     surge: Option<SurgeWindow>,
     #[cfg(test)]
     pub(super) latent_updates: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SizeGrid {
+    pub multiplier: Decimal,
+    pub integral: bool,
+    pub min_size: Decimal,
+}
+
+impl SizeGrid {
+    #[must_use]
+    pub fn spot() -> Self {
+        Self {
+            multiplier: Decimal::ONE,
+            integral: false,
+            min_size: Decimal::new(1, SIZE_DECIMALS),
+        }
+    }
+
+    #[must_use]
+    pub fn from_def(def: &InstrumentDef) -> Self {
+        if def.class.is_future() {
+            Self {
+                multiplier: def.class.multiplier(),
+                integral: true,
+                min_size: Decimal::ONE,
+            }
+        } else {
+            Self::spot()
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -78,7 +112,15 @@ impl GeneratedSource {
         fp: &Fingerprint,
         regime: Option<MarketRegime>,
     ) -> Self {
-        Self::new_with_session_profile(scalars, seed, start_ts, fp, &fp.session_profile, regime)
+        Self::new_with_session_profile(
+            scalars,
+            seed,
+            start_ts,
+            fp,
+            &fp.session_profile,
+            regime,
+            SizeGrid::spot(),
+        )
     }
 
     #[must_use]
@@ -89,8 +131,11 @@ impl GeneratedSource {
         fp: &Fingerprint,
         session: &SessionProfile,
         regime: Option<MarketRegime>,
+        size_grid: SizeGrid,
     ) -> Self {
-        Self::with_clamp_override(scalars, seed, start_ts, fp, session, regime, None)
+        Self::with_clamp_override(
+            scalars, seed, start_ts, fp, session, regime, None, size_grid,
+        )
     }
 
     /// Fallible twin of [`GeneratedSource::new`]. Both `scalars` and the
@@ -113,6 +158,27 @@ impl GeneratedSource {
             &fp.session_profile,
             regime,
             None,
+            SizeGrid::spot(),
+        )
+    }
+
+    pub fn try_new_with_size_grid(
+        scalars: GeneratorScalars,
+        seed: u64,
+        start_ts: u64,
+        fp: &Fingerprint,
+        regime: Option<MarketRegime>,
+        size_grid: SizeGrid,
+    ) -> Result<Self, GeneratedSourceError> {
+        Self::try_with_clamp_override(
+            scalars,
+            seed,
+            start_ts,
+            fp,
+            &fp.session_profile,
+            regime,
+            None,
+            size_grid,
         )
     }
 
@@ -126,14 +192,21 @@ impl GeneratedSource {
         fp: &Fingerprint,
         session: &SessionProfile,
         regime: Option<MarketRegime>,
+        size_grid: SizeGrid,
     ) -> Result<Self, GeneratedSourceError> {
-        Self::try_with_clamp_override(scalars, seed, start_ts, fp, session, regime, None)
+        Self::try_with_clamp_override(
+            scalars, seed, start_ts, fp, session, regime, None, size_grid,
+        )
     }
 
     /// Infallible wrapper: panics if either input is outside the fingerprint
     /// ranges. Callers building from the committed fingerprint (valid by
     /// construction) use this via `new` / `new_with_session_profile`; callers
     /// with untrusted config use the `try_*` twins above instead.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "constructor threads the complete generator parameterization"
+    )]
     fn with_clamp_override(
         scalars: GeneratorScalars,
         seed: u64,
@@ -142,9 +215,19 @@ impl GeneratedSource {
         session: &SessionProfile,
         regime: Option<MarketRegime>,
         clamp_override: Option<f64>,
+        size_grid: SizeGrid,
     ) -> Self {
-        Self::try_with_clamp_override(scalars, seed, start_ts, fp, session, regime, clamp_override)
-            .expect("generated source inputs are inside fingerprint ranges")
+        Self::try_with_clamp_override(
+            scalars,
+            seed,
+            start_ts,
+            fp,
+            session,
+            regime,
+            clamp_override,
+            size_grid,
+        )
+        .expect("generated source inputs are inside fingerprint ranges")
     }
 
     // The only fallible inputs are `scalars`/`session`, guarded by the two
@@ -155,6 +238,7 @@ impl GeneratedSource {
     // variant to map them onto, not because a failure is being swallowed.
     #[expect(
         clippy::unwrap_in_result,
+        clippy::too_many_arguments,
         reason = "distribution params are constant and valid; only the validated scalars/session can fail"
     )]
     fn try_with_clamp_override(
@@ -165,6 +249,7 @@ impl GeneratedSource {
         session: &SessionProfile,
         regime: Option<MarketRegime>,
         clamp_override: Option<f64>,
+        size_grid: SizeGrid,
     ) -> Result<Self, GeneratedSourceError> {
         scalars.validate(fp).map_err(GeneratedSourceError::Scalar)?;
         session.validate().map_err(GeneratedSourceError::Session)?;
@@ -175,7 +260,7 @@ impl GeneratedSource {
                 + ARRIVAL_QUIET_FRACTION * ARRIVAL_QUIET_ACTIVE_RATIO);
         let vol = GarchVol::new(decimal_to_f64(scalars.start_price), scalars.vol_scalar);
         let size_median = (decimal_to_f64(scalars.typical_notional)
-            / decimal_to_f64(scalars.start_price)
+            / (decimal_to_f64(scalars.start_price) * decimal_to_f64(size_grid.multiplier))
             / (SIZE_LOG_SIGMA.powi(2) / 2.0).exp())
         .max(f64::MIN_POSITIVE);
         let size_dist = LogNormal::new(size_median.ln(), SIZE_LOG_SIGMA).expect("valid lognormal");
@@ -225,6 +310,8 @@ impl GeneratedSource {
             chi_squared: ChiSquared::new(STUDENT_T_DF).expect("valid chi-squared"),
             size_dist,
             size_median,
+            size_grid,
+            calendar: None,
             regime,
             shape,
             burst: SweepBurst::empty(),
@@ -244,6 +331,12 @@ impl GeneratedSource {
         self.clock_ns
     }
 
+    #[must_use]
+    pub fn with_calendar(mut self, calendar: Option<SessionCalendar>) -> Self {
+        self.calendar = calendar;
+        self
+    }
+
     #[cfg(test)]
     pub(super) fn new_with_clamp_override(
         scalars: GeneratorScalars,
@@ -261,6 +354,7 @@ impl GeneratedSource {
             &fp.session_profile,
             regime,
             Some(clamp_mult),
+            SizeGrid::spot(),
         )
     }
 
@@ -462,14 +556,37 @@ impl GeneratedSource {
         (price.round_dp(self.scalars.price_decimals), side)
     }
 
-    fn next_size(&mut self) -> Decimal {
+    pub(super) fn next_size(&mut self) -> Decimal {
         let base = self.size_dist.sample(&mut self.rng).max(f64::MIN_POSITIVE);
-        let size = if self.rng.random_bool(self.scalars.size_round_frac) {
+        let lot_snap = self.rng.random_bool(self.scalars.size_round_frac);
+        if self.size_grid.integral {
+            let raw = if lot_snap {
+                // The lot on an integral grid is at least one contract, so a
+                // median below ten contracts snaps to whole contracts rather
+                // than to a fractional lot.
+                let lot = 10_f64.powf(self.size_median.log10().floor()).max(1.0);
+                decimal_from_f64((base / lot).round() * lot)
+            } else {
+                decimal_from_f64(base)
+            };
+            // Half-away-from-zero, not truncation (which biases every draw down
+            // and piles the whole sub-1.0 mass onto the floor twice over) and
+            // not banker's rounding (which measurably thins the odd sizes on a
+            // 0.5-heavy discrete grid).
+            return raw
+                .round_dp_with_strategy(0, RoundingStrategy::MidpointAwayFromZero)
+                .max(self.size_grid.min_size);
+        }
+        // The spot arm is the pre-size-grid expression, character for
+        // character: the lot-snap branch is NOT re-rounded to SIZE_DECIMALS,
+        // because it never was, and `spot_draws_are_bit_identical_...` is only
+        // provable if this arm is left alone rather than merely made similar.
+        let size = if lot_snap {
             round_lot_size(base, self.size_median)
         } else {
             decimal_from_f64(base).round_dp(SIZE_DECIMALS)
         };
-        size.max(Decimal::new(1, SIZE_DECIMALS))
+        size.max(self.size_grid.min_size)
     }
 }
 
@@ -525,6 +642,11 @@ impl GeneratedSource {
             self.vol.mid = (self.vol.mid * reopen.gap_frac.exp())
                 .max(self.tick_f64)
                 .min(MID_CEILING);
+        }
+        if let Some(calendar) = &self.calendar
+            && !calendar.is_open(self.clock_ns)
+        {
+            self.clock_ns = calendar.next_open_ns(self.clock_ns);
         }
         let mid = self.next_latent_mid();
         let (price, aggressor) = self.next_price(mid);

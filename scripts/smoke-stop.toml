@@ -1,10 +1,15 @@
-# A stop-market placed a few ticks BELOW the last print cannot be touched by the
-# acceptance-time reading, so the OrderTriggered it eventually gets can only have
-# come from a venue-originated sweep pass walking the canonical tape. That is the
-# whole claim of this mode.
+# A stop-market that RESTED and was then triggered by a venue-originated sweep
+# pass walking the canonical tape. That is the whole claim of this mode, and it
+# is read off the venue's own record - ts_triggered strictly after ts_accepted -
+# rather than assumed from the placement. The earlier note here claimed a stop a
+# few ticks below the last print "cannot be touched by the acceptance-time
+# reading"; that was simply untrue. The reading is memoized on the fill-sweep
+# bucket below, which at speed 100 is five simulated seconds of tape, so a
+# one-tick stop was already through its trigger on acceptance about half the
+# time. The mode now sizes its offset from the observed recent range instead.
 #
 # The clock is accelerated for the same reason smoke-band-swept.toml accelerates
-# its own: the trigger waits on the NEXT PRINT at or below the anchor, and at
+# its own: the trigger waits on the NEXT PRINT through the stop price, and at
 # speed 1.0 the fitted BTCUSDT arrival process legitimately dwells tens of
 # seconds between prints, so a wall-bounded assertion would be a bet on the
 # tape's cadence rather than a gate on the trigger. At speed 100 every wall

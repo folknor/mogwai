@@ -67,6 +67,11 @@ Fill BEHAVIOUR is gated automatically, by
 - `source_positioning` - the sweeper's fixed per-pass cost: a checkpoint restore
   out of a long-lived index taken under a lock, then the residual drain through
   `MergeSource::starting_at` behind a `Box<dyn TickSource>`.
+- `mark_pass_1_future` / `mark_pass_4_futures` - the engine-owned portion of
+  one mark pass over one and four open futures positions: mark application,
+  unrealized P&L, maintenance-equity evaluation, and the authoritative account
+  snapshot. Tape positioning is excluded and remains priced by
+  `source_positioning` plus the uncached market-reading number below.
 
 Every benchmark builds its state in the setup closure and hands it back as part
 of the output. Both matter: an engine reused across iterations grows without
@@ -153,3 +158,30 @@ The uncached 300-second market reading measured 13.86 ms median on the dense
 tape, above the 5 ms submit budget. Caching one reading per symbol per sweep
 interval reduced the repeated-path median and p99 to 30 ns; the first command
 in an interval still pays the synthesis on the blocking worker.
+
+## 2026-08-03 futures mark ledger
+
+Release profile, current instrument-model working tree.
+
+| id | mean | std dev |
+|---|---:|---:|
+| `mark_pass_1_future` | 446.4 ns | 0.17 % |
+| `mark_pass_4_futures` | 2.378 us | 0.07 % |
+
+Both readings satisfy the 5 percent usability rule. The four-position engine
+work is 5.33x the one-position work: super-linear, because the breach check is
+quadratic in the symbols that share a settlement currency - it evaluates the
+whole currency's equity once per symbol. At four symbols that is 2.4 us and
+irrelevant; a run carrying dozens of futures symbols in one currency would want
+the equity hoisted out of the per-symbol loop, which nothing today needs.
+
+An earlier draft of this table read 396.9 ns and 1.677 us. Those were measured
+with a per-POSITION margin row, which under-reported the work and, worse,
+under-reserved the admission budget for a hedged book; the row is now
+aggregated per symbol over positions AND resting orders, which is what the
+current numbers price. These numbers do
+not hide the dominant server cost: a cache miss still pays the previously
+measured 13.86 ms tape walk per symbol, and the cache is single-entry, so a
+multi-symbol pass can evict itself. The landing shares the HTTP cache with the
+sweeper to remove duplicate same-bucket walks when the keys coincide, but it
+does not close the separate market-reading performance item.

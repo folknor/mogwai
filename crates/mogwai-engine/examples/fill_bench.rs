@@ -15,10 +15,11 @@
 use std::collections::HashMap;
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use mogwai_engine::{Engine, EngineConfig, ScanResult};
+use mogwai_engine::{BreachAction, Engine, EngineConfig, MarginPolicy, MarketReading, ScanResult};
 use mogwai_protocol::Hit;
 use mogwai_protocol::{
-    AccountId, ClientMessage, OrderType, Side, SubmitOrder, TimeInForce, default_instruments,
+    AccountId, ClientMessage, InstrumentClass, InstrumentDef, OrderType, Side, SubmitOrder,
+    TimeInForce, WireAssetClass, default_instruments,
 };
 use rust_decimal::Decimal;
 
@@ -41,6 +42,7 @@ fn order(id: String) -> SubmitOrder {
     SubmitOrder {
         client_order_id: id,
         symbol: "BTCUSDT".into(),
+        position_id: None,
         side: Side::Buy,
         order_type: OrderType::Limit,
         quantity: Decimal::ONE,
@@ -76,6 +78,65 @@ fn scans(size: usize, fill: bool) -> (Engine, Vec<ScanResult>) {
         })
         .collect();
     (engine, results)
+}
+
+fn futures_book(size: usize) -> (Engine, Vec<(String, Decimal)>) {
+    let instruments: Vec<_> = (0..size)
+        .map(|index| InstrumentDef {
+            symbol: format!("F{index}"),
+            class: InstrumentClass::Future {
+                underlying: format!("U{index}"),
+                settlement_currency: "USD".into(),
+                multiplier: Decimal::from(2),
+                asset_class: WireAssetClass::Index,
+            },
+            price_precision: 2,
+            size_precision: 0,
+            price_increment: Decimal::new(25, 2),
+            size_increment: Decimal::ONE,
+        })
+        .collect();
+    let mut engine = Engine::build(EngineConfig {
+        account_id: AccountId::parse("BENCH").expect("static account"),
+        instruments,
+        balances: HashMap::from([("USD".into(), Decimal::from(1_000_000))]),
+        fill_seed: 1,
+    });
+    let policy = MarginPolicy {
+        initial_per_contract: Decimal::from(2000),
+        maintenance_per_contract: Decimal::from(1800),
+        breach_action: BreachAction::Refuse,
+    };
+    for index in 0..size {
+        let symbol = format!("F{index}");
+        engine.set_margin_policy(symbol.clone(), policy);
+        let submit = SubmitOrder {
+            client_order_id: format!("OPEN-{index}"),
+            symbol: symbol.clone(),
+            position_id: None,
+            side: Side::Buy,
+            order_type: OrderType::Market,
+            quantity: Decimal::ONE,
+            price: Some(Decimal::from(21_000)),
+            trigger_price: None,
+            reduce_only: false,
+            post_only: false,
+            time_in_force: TimeInForce::Gtc,
+        };
+        let _ = engine.process_with_market(
+            ClientMessage::SubmitOrder(submit),
+            1,
+            Some(MarketReading {
+                last_px: Decimal::from(21_000),
+                ts_ns: 1,
+                band_ticks: 0,
+            }),
+        );
+    }
+    let marks = (0..size)
+        .map(|index| (format!("F{index}"), Decimal::from(21_001)))
+        .collect();
+    (engine, marks)
 }
 
 fn benches(c: &mut Criterion) {
@@ -148,6 +209,18 @@ fn benches(c: &mut Criterion) {
                 |(mut engine, results)| {
                     let out = engine.apply_scans(&results, 2);
                     (engine, results, out)
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+    for (name, size) in [("mark_pass_1_future", 1), ("mark_pass_4_futures", 4)] {
+        c.bench_function(name, |b| {
+            b.iter_batched(
+                || futures_book(size),
+                |(mut engine, marks)| {
+                    let out = engine.mark(&marks, 2);
+                    (engine, marks, out)
                 },
                 BatchSize::SmallInput,
             );

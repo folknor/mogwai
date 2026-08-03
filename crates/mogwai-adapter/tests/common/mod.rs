@@ -60,7 +60,7 @@ use tokio::{
 use tokio_tungstenite::tungstenite::Message;
 
 /// The canonical single-instrument `/instruments` seed both ends agree on.
-pub const INSTRUMENTS_JSON: &str = r#"[{"symbol":"BTCUSDT","base":"BTC","quote":"USDT","price_precision":2,"size_precision":8,"price_increment":"0.01","size_increment":"0.00000001"}]"#;
+pub const INSTRUMENTS_JSON: &str = r#"[{"symbol":"BTCUSDT","class":{"class":"spot","base":"BTC","quote":"USDT"},"price_precision":2,"size_precision":8,"price_increment":"0.01","size_increment":"0.00000001"}]"#;
 
 /// Stable non-zero instant stamped on venue-truth query envelopes.
 pub const VENUE_SNAPSHOT_TS_EVENT: u64 = 1_000_000_000;
@@ -70,6 +70,8 @@ pub const VENUE_SNAPSHOT_TS_EVENT: u64 = 1_000_000_000;
 /// bodies afterwards. Defaults model a clean, honest venue.
 #[derive(Default)]
 pub struct StubState {
+    /// Optional body served by `/instruments`; absent uses BTCUSDT spot.
+    pub instruments_body: Mutex<Option<String>>,
     /// Number of `POST /control/divergence` requests served.
     pub control_hits: AtomicUsize,
     /// Raw bodies of each `/control/divergence` POST (for round-trip asserts).
@@ -203,7 +205,13 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
             None => respond_json(stream, "200 OK", "[]").await,
         }
     } else if path.starts_with("/instruments") {
-        respond_json(stream, "200 OK", INSTRUMENTS_JSON).await;
+        let body = state
+            .instruments_body
+            .lock()
+            .expect("instruments body mutex")
+            .clone()
+            .unwrap_or_else(|| INSTRUMENTS_JSON.to_string());
+        respond_json(stream, "200 OK", &body).await;
     } else if path.starts_with("/trades") {
         state.trades_hits.fetch_add(1, Ordering::Relaxed);
         state
@@ -509,6 +517,7 @@ pub fn venue_order_row(
         client_order_id: client_order_id.to_string(),
         venue_order_id: venue_order_id.to_string(),
         symbol: mogwai_protocol::Symbol::from("BTCUSDT"),
+        position_id: None,
         side: mogwai_protocol::Side::Buy,
         order_type: mogwai_protocol::OrderType::Limit,
         time_in_force: mogwai_protocol::TimeInForce::Gtc,
@@ -538,11 +547,14 @@ pub fn venue_fill_row(
         venue_order_id: venue_order_id.to_string(),
         trade_id: trade_id.to_string(),
         symbol: mogwai_protocol::Symbol::from("BTCUSDT"),
+        position_id: None,
         side: mogwai_protocol::Side::Buy,
         last_qty,
         last_px: rust_decimal::Decimal::from(100),
         leaves_qty: rust_decimal::Decimal::ONE,
         commission: rust_decimal::Decimal::ZERO,
+        commission_currency: "USDT".into(),
+        liquidity_side: mogwai_protocol::LiquiditySide::Taker,
         ts_event,
     }
 }
@@ -794,6 +806,7 @@ pub fn venue_stop_order_row(
         client_order_id: client_order_id.to_string(),
         venue_order_id: venue_order_id.to_string(),
         symbol: mogwai_protocol::Symbol::from("BTCUSDT"),
+        position_id: None,
         side: mogwai_protocol::Side::Sell,
         order_type,
         time_in_force: mogwai_protocol::TimeInForce::Gtc,

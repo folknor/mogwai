@@ -645,7 +645,7 @@ async fn divergence_partial_fill_reports_partial_qty() {
                 .to_string(),
         );
         frames.push(
-            r#"{"type":"OrderFilled","client_order_id":"O-1","venue_order_id":"V-1","trade_id":"T-1","symbol":"BTCUSDT","side":"Buy","last_qty":"0.4","last_px":"100.00","leaves_qty":"0.6","commission":"0","ts_event":11}"#
+            r#"{"type":"OrderFilled","client_order_id":"O-1","venue_order_id":"V-1","trade_id":"T-1","symbol":"BTCUSDT","side":"Buy","last_qty":"0.4","last_px":"100.00","leaves_qty":"0.6","commission":"0","commission_currency":"USDT","liquidity_side":"taker","ts_event":11}"#
                 .to_string(),
         );
     }
@@ -690,7 +690,7 @@ async fn divergence_duplicate_fill_forwards_both_wire_events() {
             r#"{"type":"OrderAccepted","client_order_id":"O-1","venue_order_id":"V-1","ts_event":10}"#
                 .to_string(),
         );
-        let fill = r#"{"type":"OrderFilled","client_order_id":"O-1","venue_order_id":"V-1","trade_id":"T-1","symbol":"BTCUSDT","side":"Buy","last_qty":"1","last_px":"100.00","leaves_qty":"0","commission":"0","ts_event":11}"#;
+        let fill = r#"{"type":"OrderFilled","client_order_id":"O-1","venue_order_id":"V-1","trade_id":"T-1","symbol":"BTCUSDT","side":"Buy","last_qty":"1","last_px":"100.00","leaves_qty":"0","commission":"0","commission_currency":"USDT","liquidity_side":"taker","ts_event":11}"#;
         frames.push(fill.to_string());
         frames.push(fill.to_string());
     }
@@ -736,7 +736,7 @@ async fn divergence_dropped_account_update_leaves_fill_without_snapshot() {
                 .to_string(),
         );
         frames.push(
-            r#"{"type":"OrderFilled","client_order_id":"O-1","venue_order_id":"V-1","trade_id":"T-1","symbol":"BTCUSDT","side":"Buy","last_qty":"1","last_px":"100.00","leaves_qty":"0","commission":"0","ts_event":11}"#
+            r#"{"type":"OrderFilled","client_order_id":"O-1","venue_order_id":"V-1","trade_id":"T-1","symbol":"BTCUSDT","side":"Buy","last_qty":"1","last_px":"100.00","leaves_qty":"0","commission":"0","commission_currency":"USDT","liquidity_side":"taker","ts_event":11}"#
                 .to_string(),
         );
         // Deliberately no AccountState frame.
@@ -833,7 +833,7 @@ async fn havoc_reaches_the_order_a_trigger_produces() {
                 .to_string(),
         );
         frames.push(
-            r#"{"type":"OrderFilled","client_order_id":"O-STOP","venue_order_id":"V-9","trade_id":"T-9","symbol":"BTCUSDT","side":"Sell","last_qty":"1","last_px":"94.97","leaves_qty":"0","commission":"0","ts_event":12}"#
+            r#"{"type":"OrderFilled","client_order_id":"O-STOP","venue_order_id":"V-9","trade_id":"T-9","symbol":"BTCUSDT","side":"Sell","last_qty":"1","last_px":"94.97","leaves_qty":"0","commission":"0","commission_currency":"USDT","liquidity_side":"taker","ts_event":12}"#
                 .to_string(),
         );
     }

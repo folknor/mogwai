@@ -318,6 +318,15 @@ pub fn validate_divergence(div: &control::Divergence) -> Result<(), &'static str
             }
             Ok(())
         }
+        control::Divergence::FeeSurcharge { mult, window_ms } => {
+            if *mult <= Decimal::ZERO || *mult > Decimal::from(100) {
+                return Err("FeeSurcharge mult must be in (0, 100]");
+            }
+            if *window_ms > control::MAX_DIVERGENCE_MS {
+                return Err("FeeSurcharge window_ms must be <= 3600000");
+            }
+            Ok(())
+        }
         control::Divergence::CancelOpenOrderSilently { client_order_id } => {
             if client_order_id.trim().is_empty() {
                 return Err("CancelOpenOrderSilently client_order_id must be non-empty");

@@ -1,0 +1,50 @@
+speed = 60.0
+server_heartbeat_ms = 0
+
+[balances]
+USD = "100000"
+
+[instrument]
+symbol = "MNQ"
+price_precision = 2
+size_precision = 0
+price_increment = "0.25"
+size_increment = "1"
+
+[instrument.class]
+kind = "future"
+underlying = "NQ"
+settlement_currency = "USD"
+multiplier = "2"
+asset_class = "index"
+
+[instrument.margin]
+initial_per_contract = "2000"
+maintenance_per_contract = "1800"
+breach_action = "liquidate"
+
+[instrument.fees.maker]
+basis = "per_contract"
+amount = "0.20"
+
+[instrument.fees.taker]
+basis = "per_contract"
+amount = "0.25"
+
+[instrument.generator]
+symbol = "MNQ"
+modal_tick = "0.25"
+price_decimals = 2
+mean_event_duration_s = 0.17104059420590498
+children_mean = 6.911916756119584
+children_single_frac = 0.493046043756676
+levels_mean = 1.7442105614782686
+size_round_frac = 0.20856767610054022
+start_price = "21000"
+typical_notional = "191.39625649855998"
+vol_scalar = 0.000001
+
+[instrument.calendar]
+utc_offset_minutes = 0
+settlement_minute_of_day = 960
+open_windows = [{ start_minute = 0, end_minute = 10079 }]

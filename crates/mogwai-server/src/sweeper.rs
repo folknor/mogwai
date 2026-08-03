@@ -40,6 +40,9 @@ pub(crate) const MIN_SWEEP_WALL: Duration = Duration::from_millis(5);
 pub(crate) struct FillSweep {
     pub(crate) run: Arc<Run>,
     pub(crate) profiles: Arc<InstrumentProfiles>,
+    pub(crate) market_readings: Arc<fills::MarketReadingCache>,
+    pub(crate) fill_band_vol_mult: f64,
+    pub(crate) fill_band_max_ticks: u32,
     pub(crate) interval_ms: u64,
 }
 
@@ -51,6 +54,7 @@ pub(crate) struct FillSweep {
 pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let sim = sweep.run.sim;
+        let mut last_swept_ns = sim_now_ns(sim);
         let mut completion = sweep.run.completion();
         loop {
             let wall = sim
@@ -64,13 +68,10 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 () = tokio::time::sleep(wall) => {}
                 _ = completion.changed() => break,
             }
-            let scans = { sweep.run.engine.lock().await.pending_scans() };
-            if scans.is_empty() {
-                continue;
-            }
             // Sampled ONCE for the pass, so every order is judged against the
             // same instant no matter how long the walks take.
             let to_ns = sim_now_ns(sim);
+            let scans = { sweep.run.engine.lock().await.pending_scans() };
             let mut groups: HashMap<String, Vec<_>> = HashMap::new();
             for scan in scans {
                 groups.entry(scan.symbol.clone()).or_default().push(scan);
@@ -101,16 +102,99 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     }));
                 }
             }
+            let symbols = { sweep.run.engine.lock().await.futures_mark_symbols() };
+            let marks: Vec<_> = symbols
+                .iter()
+                .filter_map(|symbol| {
+                    sweep
+                        .market_readings
+                        .read(
+                            symbol,
+                            to_ns,
+                            &sweep.profiles,
+                            sweep.fill_band_vol_mult,
+                            sweep.fill_band_max_ticks,
+                            sweep.interval_ms,
+                        )
+                        .map(|reading| (symbol.clone(), reading.last_px))
+                        .or_else(|| {
+                            fills::read_last(symbol, to_ns, &sweep.profiles)
+                                .map(|px| (symbol.clone(), px))
+                        })
+                })
+                .collect();
+            let settlements: Vec<_> = symbols
+                .iter()
+                .filter_map(|symbol| {
+                    sweep
+                        .profiles
+                        .get(symbol)
+                        .and_then(|profile| profile.calendar.as_ref())
+                        .map(|calendar| {
+                            (symbol, calendar.settlement_instants(last_swept_ns, to_ns))
+                        })
+                })
+                .flat_map(|(symbol, instants)| {
+                    instants
+                        .into_iter()
+                        .map(move |instant| (symbol.clone(), instant))
+                })
+                .collect();
+            let settlement_marks: Vec<_> = settlements
+                .iter()
+                .filter_map(|(symbol, instant)| {
+                    fills::read_last(symbol, *instant, &sweep.profiles)
+                        .map(|px| (symbol.clone(), *instant, px))
+                })
+                .collect();
             let mut engine = sweep.run.engine.lock().await;
-            let (events, emitted) = engine.apply_scans(&results, to_ns);
+            let (events, emitted, originated) =
+                apply_engine_pass(&mut engine, &results, settlement_marks, &marks, to_ns);
             let shape = engine.book_shape();
             drop(engine);
+            last_swept_ns = to_ns;
             if events.is_empty() {
                 continue;
             }
-            deliver(&sweep.run, &shape, &events, emitted, to_ns);
+            deliver(&sweep.run, &shape, &events, emitted, originated, to_ns);
         }
     })
+}
+
+fn apply_engine_pass(
+    engine: &mut mogwai_engine::Engine,
+    results: &[ScanResult],
+    settlement_marks: Vec<(mogwai_protocol::Symbol, u64, rust_decimal::Decimal)>,
+    marks: &[(mogwai_protocol::Symbol, rust_decimal::Decimal)],
+    to_ns: u64,
+) -> (Vec<ServerMessage>, usize, usize) {
+    let (mut events, emitted) = engine.apply_scans(results, to_ns);
+    let mut originated = 0;
+    for (symbol, instant, px) in settlement_marks {
+        let settled = engine.settle(&[(symbol, px)], instant);
+        originated += settled.originated_orders;
+        events.extend(settled.events);
+    }
+    let marked = engine.mark(marks, to_ns);
+    originated += marked.originated_orders;
+    events.extend(marked.events);
+    // EXACTLY one `AccountState` per pass, and it is the LAST one: scans,
+    // every settlement and the mark each snapshot, and every snapshot but the
+    // final one reports a stale `mark_px` and `unrealized_pnl`. Dropping the
+    // earlier ones unconditionally is what makes the invariant hold on a pass
+    // where a settlement snapshotted and the mark did not move.
+    let last_state = events
+        .iter()
+        .rposition(|event| matches!(event, ServerMessage::AccountState(_)));
+    if let Some(last_state) = last_state {
+        let mut index = 0;
+        events.retain(|event| {
+            let keep = !matches!(event, ServerMessage::AccountState(_)) || index == last_state;
+            index += 1;
+            keep
+        });
+    }
+    (events, emitted, originated)
 }
 
 /// Hand one executed batch to every connection currently open on the run.
@@ -127,6 +211,7 @@ fn deliver(
     shape: &mogwai_protocol::sizing::BookShape,
     events: &[ServerMessage],
     emitted: usize,
+    originated: usize,
     ts: u64,
 ) {
     let subject = events.iter().find_map(|event| match event {
@@ -148,7 +233,7 @@ fn deliver(
     });
     let mut closed = Vec::new();
     for (id, lane) in run.bound_lanes() {
-        let Some(reservation) = lane.reserve_swept(shape, emitted) else {
+        let Some(reservation) = lane.reserve_swept(shape, emitted + originated) else {
             if refuse(&lane, subject.clone(), ts).is_err() {
                 closed.push(id);
             }
@@ -191,4 +276,236 @@ fn refuse(
             ts_event: ts,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mogwai_engine::{BreachAction, EngineConfig, MarginPolicy, MarketReading};
+    use mogwai_protocol::{
+        AccountId, ClientMessage, Hit, InstrumentClass, InstrumentDef, OrderType, Side,
+        SubmitOrder, TimeInForce, WireAssetClass,
+    };
+    use rust_decimal::Decimal;
+
+    fn engine_with_position() -> mogwai_engine::Engine {
+        let def = InstrumentDef {
+            symbol: "MNQ".into(),
+            class: InstrumentClass::Future {
+                underlying: "NQ".into(),
+                settlement_currency: "USD".into(),
+                multiplier: Decimal::from(2),
+                asset_class: WireAssetClass::Index,
+            },
+            price_precision: 2,
+            size_precision: 0,
+            price_increment: Decimal::new(25, 2),
+            size_increment: Decimal::ONE,
+        };
+        let mut engine = mogwai_engine::Engine::build(EngineConfig {
+            account_id: AccountId::parse("TEST-001").unwrap(),
+            instruments: vec![def],
+            balances: HashMap::from([("USD".into(), Decimal::from(10_000))]),
+            fill_seed: 7,
+        });
+        engine.set_margin_policy(
+            "MNQ".into(),
+            MarginPolicy {
+                initial_per_contract: Decimal::from(2_000),
+                maintenance_per_contract: Decimal::from(1_800),
+                breach_action: BreachAction::Refuse,
+            },
+        );
+        let order = SubmitOrder {
+            client_order_id: "OPEN".into(),
+            symbol: "MNQ".into(),
+            position_id: None,
+            side: Side::Buy,
+            order_type: OrderType::Market,
+            quantity: Decimal::ONE,
+            price: Some(Decimal::from(21_000)),
+            trigger_price: None,
+            reduce_only: false,
+            post_only: false,
+            time_in_force: TimeInForce::Gtc,
+        };
+        engine.process_with_market(
+            ClientMessage::SubmitOrder(order),
+            1,
+            Some(MarketReading {
+                last_px: Decimal::from(21_000),
+                ts_ns: 1,
+                band_ticks: 0,
+            }),
+        );
+        engine
+    }
+
+    #[test]
+    fn a_futures_run_marks_with_no_resting_orders() {
+        let mut engine = engine_with_position();
+        let (events, emitted, _) = apply_engine_pass(
+            &mut engine,
+            &[],
+            Vec::new(),
+            &[("MNQ".into(), Decimal::from(21_001))],
+            2,
+        );
+        assert_eq!(emitted, 0);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ServerMessage::AccountState(_)))
+        );
+    }
+
+    #[test]
+    fn a_pass_emits_exactly_one_account_state_after_marking() {
+        let mut engine = engine_with_position();
+        let (events, _, _) = apply_engine_pass(
+            &mut engine,
+            &[],
+            Vec::new(),
+            &[("MNQ".into(), Decimal::from(21_001))],
+            2,
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ServerMessage::AccountState(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn two_settlements_crossed_by_one_pass_book_at_their_own_prices() {
+        let mut engine = engine_with_position();
+        let (events, _, _) = apply_engine_pass(
+            &mut engine,
+            &[],
+            vec![
+                ("MNQ".into(), 2, Decimal::from(21_001)),
+                ("MNQ".into(), 3, Decimal::from(21_003)),
+            ],
+            &[("MNQ".into(), Decimal::from(21_003))],
+            3,
+        );
+        let state = events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                ServerMessage::AccountState(state) => Some(state),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(state.balances[0].total, Decimal::from(10_006));
+        assert_eq!(state.positions[0].avg_px, Decimal::from(21_003));
+    }
+
+    #[test]
+    fn a_resting_order_survives_a_closure_and_fills_after_the_reopen() {
+        let mut engine = engine_with_position();
+        let order = SubmitOrder {
+            client_order_id: "REST".into(),
+            symbol: "MNQ".into(),
+            position_id: None,
+            side: Side::Sell,
+            order_type: OrderType::Limit,
+            quantity: Decimal::ONE,
+            price: Some(Decimal::from(21_100)),
+            trigger_price: None,
+            reduce_only: true,
+            post_only: false,
+            time_in_force: TimeInForce::Gtc,
+        };
+        engine.process(ClientMessage::SubmitOrder(order), 2);
+        let scan = engine
+            .pending_scans()
+            .into_iter()
+            .find(|scan| scan.client_order_id == "REST")
+            .unwrap();
+        let closed = ScanResult {
+            client_order_id: scan.client_order_id.clone(),
+            from_ns: scan.from_ns,
+            revision: scan.revision,
+            hit: None,
+            scanned_to_ns: 3,
+        };
+        let (closed_events, _) = engine.apply_scans(&[closed], 3);
+        assert!(
+            !closed_events
+                .iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_)))
+        );
+        // SURVIVES, which is the half the fill assertion below cannot see: a
+        // closure that cancelled the order would also produce no fill here.
+        assert!(
+            engine
+                .open_orders()
+                .iter()
+                .any(|order| order.submit.client_order_id == "REST"),
+            "a resting order must persist across a closure, not be cancelled by it"
+        );
+        let scan = engine
+            .pending_scans()
+            .into_iter()
+            .find(|scan| scan.client_order_id == "REST")
+            .unwrap();
+        let reopened = ScanResult {
+            client_order_id: scan.client_order_id,
+            from_ns: scan.from_ns,
+            revision: scan.revision,
+            hit: Some(Hit {
+                ts_ns: 4,
+                px: Decimal::from(21_100),
+            }),
+            scanned_to_ns: 4,
+        };
+        let (events, _) = engine.apply_scans(&[reopened], 4);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_)))
+        );
+    }
+
+    #[test]
+    fn the_mark_freezes_across_a_closure() {
+        let mut engine = engine_with_position();
+        apply_engine_pass(
+            &mut engine,
+            &[],
+            Vec::new(),
+            &[("MNQ".into(), Decimal::from(21_001))],
+            2,
+        );
+        let before = engine.account_snapshot(2).positions[0].clone();
+        assert_eq!(before.mark_px, Decimal::from(21_001));
+
+        // A closure is an EMPTY mark set: there is no tape inside it, so the
+        // sweeper reads no price and hands the engine nothing. Re-passing the
+        // same price instead would assert nothing at all - it holds whether or
+        // not the mark is frozen.
+        for ts in 3..6 {
+            let (events, _, _) = apply_engine_pass(&mut engine, &[], Vec::new(), &[], ts);
+            assert!(events.is_empty(), "a closed pass moves nothing: {events:?}");
+        }
+        let after = engine.account_snapshot(6).positions[0].clone();
+        assert_eq!(after.mark_px, before.mark_px);
+        assert_eq!(after.unrealized_pnl, before.unrealized_pnl);
+
+        // And the freeze thaws: the first mark after the reopen moves again.
+        apply_engine_pass(
+            &mut engine,
+            &[],
+            Vec::new(),
+            &[("MNQ".into(), Decimal::from(21_005))],
+            7,
+        );
+        assert_eq!(
+            engine.account_snapshot(7).positions[0].mark_px,
+            Decimal::from(21_005)
+        );
+    }
 }

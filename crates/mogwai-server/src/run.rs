@@ -25,6 +25,7 @@ pub(crate) struct Run {
     /// `notes/problem-instrument-model.md`; this struct fixes only that there
     /// is exactly one of it.
     pub(crate) instrument: InstrumentDef,
+    pub(crate) oms_type: mogwai_protocol::OmsType,
     pub(crate) engine: AsyncMutex<Engine>,
     pub(crate) seeds: RunSeeds,
     pub(crate) tape: Arc<Tape>,
@@ -78,8 +79,16 @@ impl Run {
         speed: f64,
         fanout_depth: usize,
         zero_speed_stall_ms: u64,
+        oms_type: mogwai_protocol::OmsType,
+        fill_band_max_ticks: u32,
     ) -> Arc<Self> {
         let symbol = instrument.symbol.clone();
+        let margin = profiles
+            .get(&instrument.symbol)
+            .and_then(|profile| profile.margin.clone());
+        let fees = profiles
+            .get(&instrument.symbol)
+            .and_then(|profile| profile.fees.clone());
         let tape = Tape::start(
             symbol,
             TapeSpawn {
@@ -91,14 +100,50 @@ impl Run {
             },
         );
         let (complete_tx, _) = watch::channel(None);
+        let mut engine = Engine::build(EngineConfig {
+            account_id: mogwai_protocol::AccountId::parse("MOGWAI").expect("fixed account id"),
+            instruments: vec![instrument.clone()],
+            balances,
+            fill_seed: seeds.fill,
+        });
+        engine.set_oms_type(oms_type);
+        engine.set_liquidation_band_ticks(fill_band_max_ticks);
+        if let Some(margin) = margin {
+            engine.set_margin_policy(
+                instrument.symbol.clone(),
+                mogwai_engine::MarginPolicy {
+                    initial_per_contract: margin.initial_per_contract,
+                    maintenance_per_contract: margin.maintenance_per_contract,
+                    breach_action: match margin.breach_action {
+                        crate::config::BreachAction::Refuse => mogwai_engine::BreachAction::Refuse,
+                        crate::config::BreachAction::Liquidate => {
+                            mogwai_engine::BreachAction::Liquidate
+                        }
+                    },
+                },
+            );
+        }
+        if let Some(fees) = fees {
+            let convert = |rate: crate::config::FeeRate| match rate {
+                crate::config::FeeRate::BasisPoints { rate } => {
+                    mogwai_engine::FeeRate::BasisPoints { rate }
+                }
+                crate::config::FeeRate::PerContract { amount } => {
+                    mogwai_engine::FeeRate::PerContract { amount }
+                }
+            };
+            engine.set_fee_schedule(
+                instrument.symbol.clone(),
+                mogwai_engine::FeeSchedule {
+                    maker: convert(fees.maker),
+                    taker: convert(fees.taker),
+                },
+            );
+        }
         Arc::new(Self {
-            engine: AsyncMutex::new(Engine::build(EngineConfig {
-                account_id: mogwai_protocol::AccountId::parse("MOGWAI").expect("fixed account id"),
-                instruments: vec![instrument.clone()],
-                balances,
-                fill_seed: seeds.fill,
-            })),
+            engine: AsyncMutex::new(engine),
             instrument,
+            oms_type,
             seeds,
             tape,
             sim,
@@ -207,6 +252,8 @@ mod tests {
             0.0,
             8,
             1,
+            mogwai_protocol::OmsType::Netting,
+            200,
         )
     }
 

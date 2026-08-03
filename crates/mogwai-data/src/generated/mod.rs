@@ -24,6 +24,7 @@
 //! boundaries only regroup code, they never reorder an RNG draw or an
 //! arithmetic expression relative to the original single-file generator.
 
+mod calendar;
 mod checkpoint;
 mod consts;
 mod dynamics;
@@ -36,9 +37,10 @@ mod source;
 #[cfg(test)]
 mod tests;
 
+pub use calendar::{CalendarError, SessionCalendar, WeeklyWindow};
 pub use checkpoint::CheckpointIndex;
 pub use fingerprint::{
     AbsReturnAcf, AnchorRange, Fingerprint, GeneratedSourceError, GeneratorScalars, GoldenTargets,
     MinMedianMax, ScalarError, ScalarRanges, SessionProfile, SessionProfileError,
 };
-pub use source::GeneratedSource;
+pub use source::{GeneratedSource, SizeGrid};

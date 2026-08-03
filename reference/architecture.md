@@ -43,6 +43,49 @@ name; the venue models neither trailing state nor order linkage. No order book
 exists: orders never interact, so self-trade within one account is impossible
 rather than prevented, and every fill is judged only against the tape.
 
+An instrument is a bundle of knobs, not one fixed shape. Two classes are
+selectable: a spot currency pair, and a cash-settled continuous future with a
+contract multiplier, whole-contract quantities on the order path AND on the
+tape, and no expiry or roll. The generator's size grid is multiplier-aware -
+notional per unit is `multiplier * price`, and a contract draw is rounded half
+away from zero and floored at one contract, so no print becomes the zero
+quantity nautilus drops. That floor truncates the lower tail, so a grid whose
+median sits near one contract prints a mean notional above `typical_notional`;
+the property is measured rather than pretended away. `TAPE_PROTOCOL_VERSION` is
+4, having moved twice: once for the size grid, once for the calendar.
+
+A future's ledger is single-currency and collateralized. There is no base leg:
+a fill moves the position and the VWAP, a quantity-reducing fill books
+`(fill - avg) * closed * multiplier` of realized P&L straight into the
+settlement balance, and margin - `maintenance_per_contract` per open contract
+plus `initial_per_contract` per resting non-reduce-only contract - is what the
+account locks, reported per symbol as posted margin the adapter forwards as
+nautilus `MarginBalance` rows. Reduce-only orders reserve nothing, which is
+what makes two bracket legs against one position exclusive rather than
+additive. The sweep pass marks every open futures position to the tape, strikes
+every settlement instant the calendar crossed AT ITS OWN INSTANT rather than at
+the sweep boundary, and emits exactly one account snapshot per pass, after the
+mark, so no consumer sees a stale `mark_px`. Settlement moves the accumulated
+difference into actual cash and resets the VWAP to the settlement price, which
+is why a losing futures position drains an account rather than merely carrying
+a worse unrealized number. A breach is `total_balance + unrealized <
+maintenance` - the TOTAL balance, because the locked amount already IS the
+maintenance requirement and subtracting it twice liquidates solvent accounts.
+
+A scheduled close is configuration, not havoc: `[instrument.calendar]` names
+the open windows of the week in exchange-local time, the generator jumps a
+closure whole rather than emitting inside it, and a consumer can know about it
+in advance. `ReopenGap` remains havoc and remains unscheduled. Fees are a
+per-instrument maker/taker schedule; liquidity side is decided where the fill
+is produced, so a resting limit the sweep fills is a maker fill even though the
+same order would have been a taker fill had it been marketable on arrival.
+
+Margin and fees are treated here as instrument identity, which is not how
+markets work: real schedules vary by account tier and real CME margin varies by
+product, volatility, portfolio and time. A fixed per-contract margin and a
+fixed schedule are declared simplifications of the venue's model, not
+descriptions of the market's.
+
 A run draws one 64-bit seed at launch, or takes it from config, and every
 random stream in the run - the tape generator's and the fill band's - derives
 from it by domain-separated derivation; nothing else in a run is random. The

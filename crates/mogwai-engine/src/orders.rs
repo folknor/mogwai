@@ -8,8 +8,9 @@
 use std::collections::HashMap;
 
 use mogwai_protocol::{
-    ClientOrderId, Hit, OrderFilled, OrderType, ServerMessage, Side, SubmitOrder, TimeInForce,
-    VenueOrderId, WireOrderStatus, control::Divergence, touches_trigger, trades_through,
+    ClientOrderId, Hit, LiquiditySide, OrderFilled, OrderType, ServerMessage, Side, SubmitOrder,
+    TimeInForce, VenueOrderId, WireOrderStatus, control::Divergence, touches_trigger,
+    trades_through,
 };
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -20,10 +21,14 @@ use crate::{Engine, MarketReading, OpenOrder, Resting, ScanResult};
 impl Engine {
     pub(crate) fn on_submit(
         &mut self,
-        order: SubmitOrder,
+        mut order: SubmitOrder,
         ts: u64,
         reading: Option<MarketReading>,
     ) -> Vec<ServerMessage> {
+        if self.oms_type == mogwai_protocol::OmsType::Hedging && order.position_id.is_none() {
+            self.seq = self.seq.saturating_add(1);
+            order.position_id = Some(format!("{}-{}", order.symbol, self.seq));
+        }
         if let Err(reason) = self.validate_submit(&order) {
             return vec![ServerMessage::OrderRejected {
                 client_order_id: order.client_order_id,
@@ -302,7 +307,15 @@ impl Engine {
         // so this never perturbs a normal submit. An armed `DuplicateNextFill`
         // is left in place: it applies to a fill, and no fill was produced.
         if last_qty > Decimal::ZERO {
-            let fill = self.commit_fill(&order, &venue_order_id, last_qty, leaves_qty, fill_px, ts);
+            let fill = self.commit_fill(
+                &order,
+                &venue_order_id,
+                last_qty,
+                leaves_qty,
+                fill_px,
+                LiquiditySide::Taker,
+                ts,
+            );
             out.extend(fill);
         }
 
@@ -483,6 +496,7 @@ impl Engine {
                     last_qty,
                     new_leaves,
                     fill_px,
+                    LiquiditySide::Maker,
                     ts,
                 ));
                 emitted += 1;
@@ -553,7 +567,10 @@ impl Engine {
         let qty = self
             .account
             .positions
-            .get(&order.symbol)
+            .get(&(
+                order.symbol.clone(),
+                self.position_key_id(order.position_id.as_ref()),
+            ))
             .map_or(Decimal::ZERO, |state| state.qty);
         Some(match order.side {
             Side::Sell if qty > Decimal::ZERO => qty,
@@ -639,6 +656,7 @@ impl Engine {
                         fill_qty,
                         leaves,
                         fill_px,
+                        LiquiditySide::Taker,
                         ts,
                     ));
                 }
@@ -710,6 +728,7 @@ impl Engine {
                         fill_qty,
                         leaves,
                         stated,
+                        LiquiditySide::Taker,
                         ts,
                     ));
                 }
@@ -754,6 +773,9 @@ impl Engine {
     fn held_for(&self, order: &SubmitOrder, leaves: Decimal, price: Decimal) -> Decimal {
         if order.reduce_only {
             return Decimal::ZERO;
+        }
+        if let Some(policy) = self.margin.get(&order.symbol) {
+            return policy.initial_per_contract.saturating_mul(leaves);
         }
         match order.side {
             Side::Buy => leaves * price,
@@ -808,6 +830,10 @@ impl Engine {
     /// paths cannot diverge in WHAT they produce, only in when. A limit always
     /// books at its own stated price; only a market order is slipped, and the
     /// slippage is applied by the caller, not here.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "fill booking carries the complete execution fact"
+    )]
     fn commit_fill(
         &mut self,
         order: &SubmitOrder,
@@ -815,18 +841,44 @@ impl Engine {
         last_qty: Decimal,
         leaves_qty: Decimal,
         fill_px: Decimal,
+        liquidity_side: LiquiditySide,
         ts: u64,
     ) -> Vec<ServerMessage> {
+        let surcharge = self.fee_surcharge_multiplier(ts);
+        let def = &self.instruments[&order.symbol];
+        let commission = self
+            .fees
+            .get(&order.symbol)
+            .map_or(Decimal::ZERO, |schedule| {
+                let rate = match liquidity_side {
+                    LiquiditySide::Maker => schedule.maker,
+                    LiquiditySide::Taker => schedule.taker,
+                };
+                match rate {
+                    crate::FeeRate::BasisPoints { rate } => def
+                        .notional(last_qty, fill_px)
+                        .unwrap_or(Decimal::MAX)
+                        .saturating_mul(rate)
+                        .checked_div(Decimal::from(10_000))
+                        .unwrap_or(Decimal::MAX),
+                    crate::FeeRate::PerContract { amount } => amount.saturating_mul(last_qty),
+                }
+            })
+            .saturating_mul(surcharge);
+        let commission_currency = def.class.settlement_currency().to_owned();
         let fill = OrderFilled {
             client_order_id: order.client_order_id.clone(),
             venue_order_id: venue_order_id.clone(),
             trade_id: self.next_id("T"),
             symbol: order.symbol.clone(),
+            position_id: order.position_id.clone(),
             side: order.side,
             last_qty,
             last_px: fill_px,
             leaves_qty,
-            commission: Decimal::ZERO,
+            commission,
+            commission_currency,
+            liquidity_side,
             ts_event: ts,
         };
         self.apply_fill(&fill);
@@ -867,6 +919,10 @@ impl Engine {
         let Some(instrument) = self.instruments.get(&order.symbol) else {
             return Err("unknown instrument".into());
         };
+
+        if !order.reduce_only && self.margin_breached.contains(&order.symbol) {
+            return Err("margin breach: account equity below maintenance requirement".into());
+        }
 
         if order.quantity <= Decimal::ZERO {
             return Err("submit with non-positive quantity".into());
@@ -932,7 +988,7 @@ impl Engine {
         // through must be one `apply_fill` can actually compute. Reject here,
         // at the venue's front door, rather than let a single oversized order
         // panic the engine mid-fill.
-        let Some(notional) = order.quantity.checked_mul(price) else {
+        let Some(notional) = instrument.notional(order.quantity, price) else {
             return Err("order notional exceeds maximum representable value".into());
         };
 
@@ -944,9 +1000,26 @@ impl Engine {
         // skip this entirely and keep the permissive delta-off-zero ledger -
         // see `Engine::enforce_funds`.
         if self.enforce_funds && !order.reduce_only {
+            if instrument.class.is_future() {
+                let policy = self
+                    .margin
+                    .get(&order.symbol)
+                    .ok_or_else(|| "cash-settled futures require the margin ledger".to_string())?;
+                let required = policy.initial_per_contract.saturating_mul(order.quantity);
+                let currency = instrument.class.settlement_currency();
+                if self.free_balance(currency) < required {
+                    return Err(format!("insufficient {currency} balance"));
+                }
+                return Ok(());
+            }
             let (currency, required) = match order.side {
-                Side::Buy => (&instrument.quote, notional),
-                Side::Sell => (&instrument.base, order.quantity),
+                Side::Buy => (instrument.class.settlement_currency(), notional),
+                Side::Sell => (
+                    instrument.class.base_currency().ok_or_else(|| {
+                        "cash-settled futures require the margin ledger".to_string()
+                    })?,
+                    order.quantity,
+                ),
             };
             if self.free_balance(currency) < required {
                 return Err(format!("insufficient {currency} balance"));
@@ -969,15 +1042,36 @@ impl Engine {
         fill_px: Decimal,
         held: Decimal,
     ) -> Result<(), String> {
-        if !self.enforce_funds || order.side == Side::Sell {
+        if !self.enforce_funds {
             return Ok(());
         }
         let instrument = &self.instruments[&order.symbol];
-        let required = qty
-            .checked_mul(fill_px)
-            .ok_or_else(|| "order notional exceeds maximum representable value".to_string())?;
-        if self.free_balance(&instrument.quote).saturating_add(held) < required {
-            return Err(format!("insufficient {} balance", instrument.quote));
+        // Spot keeps its exact pre-futures rule: a sell delivers base it
+        // already holds, so only a buy is checked here, reduce-only included.
+        // A future posts collateral on either side, and a reduce-only futures
+        // fill RELEASES collateral rather than posting it, so it is exempt -
+        // which mirrors `locked_balances` and `validate_submit`, both of which
+        // skip reduce-only outright.
+        if instrument.class.is_future() {
+            if order.reduce_only {
+                return Ok(());
+            }
+        } else if order.side == Side::Sell {
+            return Ok(());
+        }
+        let required = if instrument.class.is_future() {
+            self.margin
+                .get(&order.symbol)
+                .ok_or_else(|| "cash-settled futures require the margin ledger".to_string())?
+                .initial_per_contract
+                .saturating_mul(qty)
+        } else {
+            qty.checked_mul(fill_px)
+                .ok_or_else(|| "order notional exceeds maximum representable value".to_string())?
+        };
+        let currency = instrument.class.settlement_currency();
+        if self.free_balance(currency).saturating_add(held) < required {
+            return Err(format!("insufficient {currency} balance"));
         }
         Ok(())
     }
@@ -1226,20 +1320,50 @@ impl Engine {
             if self.enforce_funds && !self.open[pos].submit.reduce_only {
                 let order = &self.open[pos];
                 let new_leaves = new_total - filled;
-                let (currency, held, required) = match order.submit.side {
-                    Side::Buy => {
-                        let old_price = order
-                            .submit
-                            .price
-                            .or(order.submit.trigger_price)
-                            .unwrap_or_default();
-                        (
-                            &instrument.quote,
-                            order.leaves_qty * old_price,
-                            new_leaves * effective_price,
-                        )
+                // A future posts collateral, not notional, and it posts the
+                // same collateral on either side. Comparing an amended futures
+                // order against `new_leaves * price` would reject every amend
+                // the moment margin is a fraction of notional, which is always.
+                let (currency, held, required) = if instrument.class.is_future() {
+                    let Some(policy) = self.margin.get(&order.submit.symbol) else {
+                        return vec![ServerMessage::OrderModifyRejected {
+                            client_order_id,
+                            venue_order_id: Some(venue_order_id),
+                            reason: "cash-settled futures require the margin ledger".into(),
+                            ts_event: ts,
+                        }];
+                    };
+                    (
+                        instrument.class.settlement_currency(),
+                        policy.initial_per_contract.saturating_mul(order.leaves_qty),
+                        policy.initial_per_contract.saturating_mul(new_leaves),
+                    )
+                } else {
+                    match order.submit.side {
+                        Side::Buy => {
+                            let old_price = order
+                                .submit
+                                .price
+                                .or(order.submit.trigger_price)
+                                .unwrap_or_default();
+                            (
+                                instrument.class.settlement_currency(),
+                                order.leaves_qty * old_price,
+                                new_leaves * effective_price,
+                            )
+                        }
+                        Side::Sell => {
+                            let Some(currency) = instrument.class.base_currency() else {
+                                return vec![ServerMessage::OrderModifyRejected {
+                                    client_order_id,
+                                    venue_order_id: Some(venue_order_id),
+                                    reason: "cash-settled futures require the margin ledger".into(),
+                                    ts_event: ts,
+                                }];
+                            };
+                            (currency, order.leaves_qty, new_leaves)
+                        }
                     }
-                    Side::Sell => (&instrument.base, order.leaves_qty, new_leaves),
                 };
                 if self.free_balance(currency).saturating_add(held) < required {
                     return vec![ServerMessage::OrderModifyRejected {

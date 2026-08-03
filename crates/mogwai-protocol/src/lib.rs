@@ -29,15 +29,18 @@ pub use havoc::{
     MAX_LATENCY_NANOS, MarketRegime, finite_in, finite_in_excl_lo, validate_client_havoc,
     validate_conn_havoc, validate_divergence, validate_market_regime,
 };
-pub use instruments::{InstrumentDef, default_instruments};
+pub use instruments::{
+    InstrumentClass, InstrumentDef, OmsType, WireAssetClass, default_instruments,
+};
 pub use messages::{
     ADMISSION_ENVELOPE_BYTES, ADMISSION_FRAME_MAX_BYTES, AccountId, AccountIdError, AccountState,
     AdmissionSubject, AggressorSide, Balance, ClientMessage, CommandClass, FillSnapshot, Hit,
-    JSON_ESCAPE_FACTOR, MAX_ACCOUNT_ID_LEN, MAX_CLIENT_ID_LEN, MAX_CURRENCY_LEN, MAX_REASON_LEN,
-    MAX_SYMBOL_LEN, OrderFilled, OrderStatusInfo, OrderStatusSnapshot, OrderType, Position,
-    QueryKind, QuoteTick, ScanKind, ServerMessage, Side, SubmitOrder, TimeInForce, TradeTick,
-    WireOrderStatus, touches_trigger, trades_through, truncate_client_id, truncate_reason,
-    validate_client_order_id, validate_modify_order, validate_request_id, validate_submit_order,
+    JSON_ESCAPE_FACTOR, LiquiditySide, MAX_ACCOUNT_ID_LEN, MAX_CLIENT_ID_LEN, MAX_CURRENCY_LEN,
+    MAX_REASON_LEN, MAX_SYMBOL_LEN, OrderFilled, OrderStatusInfo, OrderStatusSnapshot, OrderType,
+    Position, PostedMargin, QueryKind, QuoteTick, ScanKind, ServerMessage, Side, SubmitOrder,
+    TimeInForce, TradeTick, WireOrderStatus, touches_trigger, trades_through, truncate_client_id,
+    truncate_reason, validate_client_order_id, validate_modify_order, validate_request_id,
+    validate_submit_order,
 };
 pub use ready::ReadyRecord;
 pub use seeds::RunSeeds;

@@ -74,7 +74,9 @@ fn ready_record_reports_the_bound_ephemeral_port() {
     // bound, so a connect at this instant must succeed.
     let (status, body) = http_get(&venue.http_base(), "/health");
     assert_eq!(status, 200);
-    assert_eq!(body, "ok");
+    let health: serde_json::Value = serde_json::from_str(&body).expect("health is JSON");
+    assert_eq!(health["status"], "ok");
+    assert_eq!(health["oms_type"], "netting");
 }
 
 /// The defect this whole lifecycle exists to remove: two runs sharing one

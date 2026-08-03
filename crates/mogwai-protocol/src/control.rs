@@ -78,6 +78,8 @@ pub enum Divergence {
         children_mult: f64,
         duration_ms: u64,
     },
+    /// Temporarily multiply the configured maker/taker charge in sim time.
+    FeeSurcharge { mult: Decimal, window_ms: u64 },
     /// Clear the server-owned temporal windows: cancel any armed
     /// `DelayAcks`, any armed `GoDark`, any armed `StallData`, and every
     /// `CommandLatency` field.

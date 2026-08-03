@@ -260,6 +260,7 @@ fn build_source(args: &GenArgs) -> anyhow::Result<mogwai_data::GeneratedSource> 
         fp,
         &profile.session,
         regime,
+        mogwai_data::SizeGrid::from_def(&profile.def),
     )
     .map_err(|e| anyhow::anyhow!("building the generator: {e:?}"))
 }
@@ -662,6 +663,7 @@ mod tests {
             fp,
             &profile.session,
             None,
+            mogwai_data::SizeGrid::spot(),
         );
 
         for _ in 0..50 {
