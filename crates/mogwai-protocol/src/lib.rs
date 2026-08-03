@@ -21,6 +21,9 @@ mod seeds;
 pub mod sizing;
 
 pub mod control;
+/// Launching a venue and learning its endpoint - the launcher half of the
+/// readiness handshake, shipped so consumers do not re-derive it from prose.
+pub mod launch;
 
 pub use clock::{ServerClock, SimClock, now_unix_nanos, validate_sim_clock};
 pub use decimal::{decimal_from_f64, decimal_to_f64};

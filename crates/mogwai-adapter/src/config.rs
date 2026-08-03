@@ -55,6 +55,34 @@ impl Default for MogwaiDataClientConfig {
 }
 
 impl MogwaiDataClientConfig {
+    /// Build a config for the address a launched venue reported.
+    ///
+    /// The endpoint is not choosable and not guessable, so it always arrives as
+    /// a `SocketAddr` out of a `ReadyRecord`; taking it directly removes the
+    /// `ws://{addr}` formatting from every call site, where getting the scheme
+    /// wrong fails as a connect timeout inside the reconnect loop rather than as
+    /// anything that names the cause.
+    ///
+    /// Pair it with [`MogwaiExecClientConfig::for_addr`] and the SAME
+    /// `account_id`: the two clients are two objects speaking for one account,
+    /// and nothing on the wire will notice if they disagree.
+    #[must_use]
+    pub fn for_addr(addr: std::net::SocketAddr, account_id: AccountId) -> Self {
+        Self {
+            account_id,
+            base_url: format!("ws://{addr}"),
+            havoc: None,
+        }
+    }
+
+    /// Arm havoc on this config, for the builder-ish call sites that want one
+    /// expression.
+    #[must_use]
+    pub fn with_havoc(mut self, havoc: Option<HavocSpec>) -> Self {
+        self.havoc = havoc;
+        self
+    }
+
     /// Validates config invariants.
     ///
     /// # Errors
@@ -148,6 +176,46 @@ impl Default for MogwaiExecClientConfig {
 }
 
 impl MogwaiExecClientConfig {
+    /// Build a config for the address a launched venue reported.
+    ///
+    /// See [`MogwaiDataClientConfig::for_addr`]; pass the same `account_id` to
+    /// both, because the pair speaks for one account and the venue has one
+    /// ledger regardless of what either client believes.
+    ///
+    /// Leaves `account_type` at `Cash`. A futures run wants
+    /// `AccountType::Margin` - the venue posts and reports margin either way,
+    /// but a nautilus `CashAccount` has nowhere to keep the rows it receives, so
+    /// they are dropped client-side. See `docs/oms-types.md`.
+    #[must_use]
+    pub fn for_addr(addr: std::net::SocketAddr, account_id: AccountId) -> Self {
+        Self {
+            account_id,
+            base_url: format!("ws://{addr}"),
+            ..Self::default()
+        }
+    }
+
+    /// Arm havoc on this config.
+    #[must_use]
+    pub fn with_havoc(mut self, havoc: Option<HavocSpec>) -> Self {
+        self.havoc = havoc;
+        self
+    }
+
+    /// Set the OMS type this client presents to nautilus.
+    #[must_use]
+    pub fn with_oms_type(mut self, oms_type: OmsType) -> Self {
+        self.oms_type = oms_type;
+        self
+    }
+
+    /// Set the account type. `Margin` is what a futures run wants.
+    #[must_use]
+    pub fn with_account_type(mut self, account_type: AccountType) -> Self {
+        self.account_type = account_type;
+        self
+    }
+
     /// Validates config invariants.
     ///
     /// # Errors

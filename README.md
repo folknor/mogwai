@@ -75,7 +75,11 @@ they all speak for the same account, so anything they submit lands in one shared
 ledger.
 
 Normally a launcher starts the venue, and normally that launcher is an agent
-rather than a person. The contract is four steps:
+rather than a person. A Rust consumer gets the launcher from the library -
+`mogwai_protocol::launch::launch(spec)`, also re-exported as
+`mogwai_adapter::launch` - and needs none of what follows. The contract is
+written out because a launcher in another language still has to implement it,
+and because every step below is load-bearing:
 
 1. Spawn `mogwai serve` as a **direct** child, capturing stdout.
 2. Read one line of stdout: a JSON `ReadyRecord`. Check its `version`, then use

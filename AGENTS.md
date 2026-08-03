@@ -20,7 +20,11 @@ A Cargo workspace, five crates under `crates/`:
 
 - `mogwai-protocol` - the wire types (`ClientMessage`, `ServerMessage`) plus
   `control::Divergence`. The single source of truth both ends serialize against;
-  it never imports nautilus.
+  it never imports nautilus. Also carries `launch`, the SHIPPED launcher: it
+  lives here rather than in `mogwai-adapter` because the server's own test
+  binaries drive the venue through it and cannot depend on the adapter, so a
+  launcher shipped from there would leave the contract hand-rolled on both sides.
+  `mogwai-adapter` re-exports it for consumers that already depend on it.
 - `mogwai-engine` - the venue-agnostic exchange core, with the seam that injects
   armed divergences into the event stream.
 - `mogwai-data` - the `TickSource` seam and the k-way `MergeSource`. Carries the

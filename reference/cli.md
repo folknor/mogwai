@@ -41,6 +41,17 @@ line; the same string is what the readiness record reports as
 `version_string`, so an operator can tell whether two runs' tapes are even
 comparable before comparing seeds.
 
+A Rust consumer should not implement any of what follows. `mogwai_protocol::launch`
+(re-exported as `mogwai_adapter::launch`) ships the launcher: `launch(LaunchSpec)`
+returns a `LaunchedVenue` guard that owns the child, exposes `addr()` /
+`base_url()` / `record()`, and kills and reaps on drop. It spawns from a
+dedicated OS thread that it parks for the run, drains stderr from the moment of
+spawn, bounds the readiness read, and checks the schema version before any other
+field is read - which is the whole of the contract below. mogwai's own lifecycle
+gates drive the venue through it, so it cannot drift from the binary it launches.
+The prose remains because a launcher in another language still has to implement
+it.
+
 The launcher starts `mogwai serve` as its direct child with stdout captured,
 reads exactly one JSON `ReadyRecord` line, checks `version`, and uses `addr` for
 both clients. That read blocks for as long as warmup generation takes, which is

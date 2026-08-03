@@ -3,30 +3,40 @@
 
 //! Launcher-side harness for the venue lifecycle gates.
 //!
-//! Every test in `tests/` drives the venue the way the launcher contract in
-//! `reference/cli.md` says a launcher must: spawn `mogwai serve` as a DIRECT
-//! child with its stdout captured, read one line, parse the `ReadyRecord`, and
-//! use its `addr`. Doing it any other way here would test something other than
-//! the contract - in particular, spawning through a wrapper would wire the
-//! parent-death watch to the wrapper and quietly stop covering decision 10.
+//! Every test in `tests/` drives the venue through `mogwai_protocol::launch`,
+//! the SHIPPED launcher - the same code path a consumer uses, rather than a
+//! second hand-rolled implementation of the same contract.
+//!
+//! That is deliberate and is the reason the launcher lives in `mogwai-protocol`
+//! rather than in `mogwai-adapter`: the venue's own gates cannot depend on the
+//! adapter (it would pull nautilus into the server's test graph, and the adapter
+//! is the client of the thing under test), so a launcher shipped from there
+//! would leave mogwai re-deriving the contract by hand forever. Here, a change
+//! to the handshake breaks these tests immediately instead of breaking a
+//! consumer later.
 
 // A shared test-support module: not every item is used by every test binary,
 // and nothing here is reachable outside the crate.
 #![allow(dead_code, unreachable_pub)]
 
 use std::{
-    io::{BufRead, BufReader, Read, Write},
+    ffi::OsString,
+    io::{Read, Write},
     net::TcpStream,
-    process::{Child, Command, Stdio},
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
-use mogwai_protocol::ReadyRecord;
+use mogwai_protocol::{
+    ReadyRecord,
+    launch::{LaunchSpec, LaunchedVenue, StderrSink, VenueExit, launch},
+};
 
-/// A venue process plus the record it reported. Killed on drop, so a failing
-/// assertion cannot leak a listening process into the rest of the suite.
+/// A launched venue plus the record it reported. The inner guard kills and reaps
+/// on drop, so a failing assertion cannot leak a listening process into the rest
+/// of the suite.
 pub struct Venue {
-    pub child: Child,
+    inner: LaunchedVenue,
     pub record: ReadyRecord,
     /// Wall instant the readiness line was read. The acceleration gate measures
     /// the served run from here, because that is when the launcher could first
@@ -36,38 +46,31 @@ pub struct Venue {
 
 impl Venue {
     pub fn http_base(&self) -> String {
-        format!("http://{}", self.record.addr)
+        self.inner.http_base()
     }
 
     pub fn ws_url(&self) -> String {
-        format!("ws://{}/ws", self.record.addr)
+        format!("{}/ws", self.inner.base_url())
     }
 
     /// Waits for exit, failing the test if the venue outlives `timeout`.
-    pub fn wait_for_exit(&mut self, timeout: Duration) -> std::process::ExitStatus {
+    pub fn wait_for_exit(&mut self, timeout: Duration) -> VenueExit {
         let deadline = Instant::now() + timeout;
         loop {
-            match self.child.try_wait().expect("poll venue") {
-                Some(status) => return status,
-                None if Instant::now() >= deadline => {
-                    self.child.kill().ok();
-                    panic!("venue did not exit within {timeout:?}");
-                }
-                None => std::thread::sleep(Duration::from_millis(10)),
+            if let Some(exit) = self.inner.exited() {
+                return exit;
             }
+            assert!(
+                Instant::now() < deadline,
+                "venue did not exit within {timeout:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
     /// True once the process has exited, without blocking.
     pub fn has_exited(&mut self) -> bool {
-        self.child.try_wait().expect("poll venue").is_some()
-    }
-}
-
-impl Drop for Venue {
-    fn drop(&mut self) {
-        self.child.kill().ok();
-        self.child.wait().ok();
+        self.inner.exited().is_some()
     }
 }
 
@@ -76,34 +79,44 @@ pub fn venue_binary() -> &'static str {
     env!("CARGO_BIN_EXE_mogwai")
 }
 
-/// Spawns a venue with its stdout captured and returns the child. Split out of
-/// [`spawn`] so a test that wants to observe a boot FAILURE can read the closed
-/// stdout itself.
-///
-/// No fd bookkeeping: the readiness record is one line on stdout, so there is no
-/// pipe to create, no number to agree on, and no `dup2` to get right.
-pub fn spawn_raw(extra_args: &[&str]) -> Child {
-    Command::new(venue_binary())
-        .arg("serve")
-        .args(extra_args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn venue")
+/// A spec pointing at the binary this test binary was built alongside, with the
+/// log captured so a boot failure can report why.
+pub fn spec(extra_args: &[&str]) -> LaunchSpec {
+    let mut spec = LaunchSpec {
+        binary: Some(OsString::from(venue_binary())),
+        stderr: StderrSink::Discard,
+        ..LaunchSpec::default()
+    };
+    // The gates state their arguments the way the CLI does, and this maps them
+    // onto the launcher's typed fields - which is also a small check that the
+    // two agree about what `serve` accepts.
+    let mut args = extra_args.iter();
+    while let Some(flag) = args.next() {
+        let value = args
+            .next()
+            .unwrap_or_else(|| panic!("{flag} takes a value"));
+        match *flag {
+            "--config" => spec.config = Some(PathBuf::from(*value)),
+            "--duration" => {
+                spec.duration = Some(
+                    humantime::parse_duration(value)
+                        .unwrap_or_else(|err| panic!("{value} is not a duration: {err}")),
+                );
+            }
+            other => panic!("the harness does not model {other}"),
+        }
+    }
+    spec
 }
 
-/// The launcher contract, executed. Panics with the boot failure if stdout
-/// closes without a line.
+/// The launcher contract, executed through the shipped launcher. Panics with the
+/// boot failure - including the venue's own stderr - if it does not come up.
 pub fn spawn(extra_args: &[&str]) -> Venue {
-    let mut child = spawn_raw(extra_args);
-    let stdout = child.stdout.take().expect("venue stdout is piped");
-    let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
-    reader.read_line(&mut line).expect("read readiness line");
+    let inner = launch(spec(extra_args)).expect("the venue launches and reports ready");
     let ready_at = Instant::now();
     Venue {
-        child,
-        record: parse_ready(&line),
+        record: inner.record().clone(),
+        inner,
         ready_at,
     }
 }

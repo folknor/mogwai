@@ -90,7 +90,7 @@ async fn venue_announces_run_complete_and_exits_zero_at_the_declared_sim_deadlin
 
     let status = venue.wait_for_exit(Duration::from_secs(20));
     assert_eq!(
-        status.code(),
+        status.code,
         Some(0),
         "a planned completion is exit 0, not a crash"
     );
@@ -121,7 +121,7 @@ async fn run_complete_reaches_every_open_socket() {
     );
     assert!(left.1 && right.1, "both sockets were closed with WS 1000");
 
-    assert_eq!(venue.wait_for_exit(Duration::from_secs(20)).code(), Some(0));
+    assert_eq!(venue.wait_for_exit(Duration::from_secs(20)).code, Some(0));
 }
 
 /// A signal is not a planned completion and must not be reported as one. This
@@ -180,5 +180,5 @@ async fn a_short_accelerated_run_is_not_over_before_it_is_ready() {
         sim_now_ns >= venue.record.run_start_ns + 30_000_000_000,
         "sim-now at completion is at least the declared duration past run_start_ns"
     );
-    assert_eq!(venue.wait_for_exit(Duration::from_secs(20)).code(), Some(0));
+    assert_eq!(venue.wait_for_exit(Duration::from_secs(20)).code, Some(0));
 }

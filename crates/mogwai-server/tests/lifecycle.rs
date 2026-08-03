@@ -17,7 +17,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use common::{fast_config, http_get, spawn, spawn_raw, venue_binary};
+use common::{fast_config, http_get, spawn, venue_binary};
+use mogwai_protocol::launch::{LaunchError, LaunchSpec, launch};
 
 #[test]
 #[ignore = "binds two loopback listeners"]
@@ -156,7 +157,7 @@ fn sigterm_stops_the_venue_within_the_shutdown_grace() {
         "SIGTERM took {elapsed:?}; the venue must stop within its shutdown grace"
     );
     assert!(
-        status.success() || status.code().is_none(),
+        status.success || status.code.is_none(),
         "a signalled venue exits cleanly or by the signal, got {status:?}"
     );
 }
@@ -240,20 +241,39 @@ fn serve_needs_no_endpoint_flags_and_reports_where_it_landed() {
 
 /// Stdout closing with no line is how a launcher learns the venue failed to
 /// boot, per step 2 of the contract. A config naming an unfunded quote currency
-/// is a boot refusal, so it exercises exactly that path.
+/// is a boot refusal, so it exercises exactly that path - and the shipped
+/// launcher must both classify it and carry the venue's own reason, since a
+/// launcher that only says "no record" sends the operator to the wrong repo.
 #[test]
 #[ignore = "spawns the venue binary"]
-fn a_boot_failure_closes_stdout_without_a_line() {
+fn a_boot_failure_reports_no_record_and_says_why() {
     let config = format!("{}/tests/configs/unfunded.toml", env!("CARGO_MANIFEST_DIR"));
-    let mut child = spawn_raw(&["--config", &config]);
-    let stdout = child.stdout.take().expect("venue stdout is piped");
-    let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
-    reader.read_line(&mut line).expect("read venue stdout");
+    let error = launch(common::spec(&["--config", &config]))
+        .expect_err("a venue that refuses to boot cannot report ready");
+
+    let LaunchError::NoRecord { stderr } = &error else {
+        panic!("expected a missing-record boot failure, got {error:?}");
+    };
+    let log = stderr.join("\n");
     assert!(
-        line.is_empty(),
-        "a venue that refused to boot must not report readiness: {line}"
+        log.contains("balances") || log.to_lowercase().contains("fund"),
+        "the boot failure must carry the venue's reason, got: {log}"
     );
-    let status = child.wait().expect("reap the venue");
-    assert!(!status.success(), "a refused boot exits nonzero");
+}
+
+/// The ready read blocks for as long as warmup generation takes, so a launcher
+/// that does not bound it hangs forever on a venue that will never answer. The
+/// shipped launcher bounds it and names the knob.
+#[test]
+#[ignore = "spawns the venue binary"]
+fn a_ready_timeout_expires_rather_than_hanging() {
+    let error = launch(LaunchSpec {
+        // Far below the ~1.5 s a default warmup needs, so the bound trips on a
+        // venue that is booting perfectly well.
+        ready_timeout: Some(Duration::from_millis(1)),
+        ..common::spec(&["--config", &fast_config()])
+    })
+    .expect_err("a one-millisecond bound cannot be met");
+    assert!(matches!(error, LaunchError::Timeout { .. }), "{error:?}");
+    assert!(error.to_string().contains("ready_timeout"), "{error}");
 }

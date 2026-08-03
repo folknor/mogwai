@@ -24,6 +24,15 @@ pub use clock::{MogwaiClock, mogwai_clock_factory};
 pub use config::{MogwaiDataClientConfig, MogwaiExecClientConfig, UNSET_ACCOUNT_ID};
 pub use factories::{MogwaiDataClientFactory, MogwaiExecutionClientFactory};
 
+/// Launching a venue and learning its endpoint.
+///
+/// Re-exported from `mogwai-protocol`, where it lives so that mogwai's OWN gates
+/// can drive the venue through the same launcher a consumer uses - the server's
+/// test binaries cannot depend on this crate, and a launcher shipped from here
+/// would leave the contract hand-rolled on both sides of it. A consumer that
+/// already depends on this crate needs no second dependency to launch.
+pub use mogwai_protocol::launch;
+
 /// The canonical MOGWAI venue identifier, single-sourced so a future rename
 /// propagates to the `Venue`, the factory `name()` impls, and any test that
 /// names the venue.

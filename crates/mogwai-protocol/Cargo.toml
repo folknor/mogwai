@@ -7,9 +7,11 @@ license.workspace = true
 [dependencies]
 serde.workspace = true
 rust_decimal.workspace = true
+# The launcher parses the venue's readiness line, so this is a runtime dep
+# rather than a test-only one.
+serde_json.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
 
 [lints]
 workspace = true
