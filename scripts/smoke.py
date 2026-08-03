@@ -6,12 +6,11 @@
 
 This script IS the contract from reference/cli.md, executed:
 
-  1. Create a pipe. Spawn `mogwai serve --config <path> --ready-fd N` as a
-     DIRECT child, passing the pipe's write end through as fd N and capturing
-     stderr. (The contract in reference/cli.md writes fd 3; any inherited
-     writable fd works, and this script passes the one the pipe was given.)
-  2. Read one line. A closed pipe without a line means the venue failed to
-     boot; the child's stderr and exit status say why.
+  1. Spawn `mogwai serve --config <path>` as a DIRECT child, capturing both
+     stdout and stderr. There is no endpoint flag and no fd to nominate: the
+     venue always binds an ephemeral loopback port and reports it on stdout.
+  2. Read one line of stdout. Stdout closing without a line means the venue
+     failed to boot; the child's stderr and exit status say why.
   3. Parse the ReadyRecord, checking `version` FIRST. Use `addr` as the
      endpoint.
   4. Run. On RunComplete the child exits 0 on its own; otherwise SIGTERM it.
@@ -96,17 +95,20 @@ class Venue:
     """One venue process and the record it reported."""
 
     def __init__(self, config: str | None, duration: str | None) -> None:
-        read_fd, write_fd = os.pipe()
-        os.set_inheritable(write_fd, True)
-        command = [venue_binary(), "serve", "--ready-fd", str(write_fd)]
+        command = [venue_binary(), "serve"]
         if config:
             command.extend(["--config", config])
         if duration:
             command.extend(["--duration", duration])
+        # The readiness record is one JSON line on STDOUT, so capturing it needs
+        # no inherited pipe and no fd bookkeeping - the venue cannot be told the
+        # wrong number because it is never told a number.
         self.child = subprocess.Popen(
-            command, pass_fds=(write_fd,), stderr=subprocess.PIPE, text=True
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
         )
-        os.close(write_fd)
         # A launcher that CAPTURES the child's stderr must also DRAIN it. The
         # venue logs to stderr by design (decision 5), a pipe holds only about
         # 64 KiB, and a full pipe blocks the writer - so an undrained capture
@@ -116,8 +118,8 @@ class Venue:
         self.stderr_lines: list[str] = []
         self._drain = threading.Thread(target=self._drain_stderr, daemon=True)
         self._drain.start()
-        with os.fdopen(read_fd) as ready:
-            line = ready.readline()
+        assert self.child.stdout is not None
+        line = self.child.stdout.readline()
         if not line:
             self.child.wait(timeout=10)
             self._drain.join(timeout=5)

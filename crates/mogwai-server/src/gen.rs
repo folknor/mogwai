@@ -73,7 +73,7 @@ pub(crate) struct GenArgs {
     #[arg(long)]
     regime: Option<String>,
     /// Read a full HavocSpec from this JSON file and apply its `data` market
-    /// regime. The whole spec is validated (a file broadarrow would reject is
+    /// regime. The whole spec is validated (a file the server would reject is
     /// rejected here), but the client, conn, and server surfaces do not affect an
     /// offline tape dump and are noted on stderr. Mutually exclusive with
     /// --regime.

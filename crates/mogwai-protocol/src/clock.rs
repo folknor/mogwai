@@ -22,7 +22,7 @@ pub fn now_unix_nanos() -> u64 {
 }
 
 /// Affine wall-to-simulated time map shared by the server, adapter, and the
-/// nautilus clock injected into broadarrow's live node.
+/// nautilus clock injected into the host's live node.
 ///
 /// The scaling step (`offset as f64 * speed` / `offset as f64 / speed` in
 /// `sim_ns`/`wall_ns`/`wall_span`) goes through `f64`, so it is only exact

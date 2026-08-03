@@ -116,7 +116,7 @@ pub struct MogwaiExecClientConfig {
     /// Account type reported to nautilus.
     pub account_type: AccountType,
     /// Order-management-system type the venue presents to nautilus. Defaults to
-    /// `Netting` (one position per instrument). broadarrow can override this
+    /// `Netting` (one position per instrument). The host can override this
     /// per-venue without an adapter change - `Unspecified` defers to the venue
     /// OMS, `Hedging` allows multiple positions per instrument (D.7).
     #[serde(default = "default_oms_type")]

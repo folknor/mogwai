@@ -4,12 +4,11 @@
 //! Launcher-side harness for the venue lifecycle gates.
 //!
 //! Every test in `tests/` drives the venue the way the launcher contract in
-//! `reference/cli.md` says a launcher must: create a pipe, spawn `mogwai serve
-//! --ready-fd 3` as a DIRECT child with the write end at fd 3, read one line,
-//! parse the `ReadyRecord`, and use its `addr`. Doing it any other way here
-//! would test something other than the contract - in particular, spawning
-//! through a wrapper would wire the parent-death watch to the wrapper and
-//! quietly stop covering decision 10.
+//! `reference/cli.md` says a launcher must: spawn `mogwai serve` as a DIRECT
+//! child with its stdout captured, read one line, parse the `ReadyRecord`, and
+//! use its `addr`. Doing it any other way here would test something other than
+//! the contract - in particular, spawning through a wrapper would wire the
+//! parent-death watch to the wrapper and quietly stop covering decision 10.
 
 // A shared test-support module: not every item is used by every test binary,
 // and nothing here is reachable outside the crate.
@@ -18,15 +17,11 @@
 use std::{
     io::{BufRead, BufReader, Read, Write},
     net::TcpStream,
-    os::fd::{AsRawFd, OwnedFd},
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
 
 use mogwai_protocol::ReadyRecord;
-
-/// The fd number the launcher contract nominates for the readiness record.
-pub const READY_FD: i32 = 3;
 
 /// A venue process plus the record it reported. Killed on drop, so a failing
 /// assertion cannot leak a listening process into the rest of the suite.
@@ -81,43 +76,30 @@ pub fn venue_binary() -> &'static str {
     env!("CARGO_BIN_EXE_mogwai")
 }
 
-/// Spawns a venue with a readiness pipe wired to [`READY_FD`] and returns the
-/// child together with the read end. Split out of [`spawn`] so a test that
-/// wants to observe a boot FAILURE can read the closed pipe itself.
-pub fn spawn_raw(extra_args: &[&str]) -> (Child, OwnedFd) {
-    let (read_fd, write_fd) = nix::unistd::pipe().expect("readiness pipe");
-    let raw_write = write_fd.as_raw_fd();
-    let mut command = Command::new(venue_binary());
-    command
+/// Spawns a venue with its stdout captured and returns the child. Split out of
+/// [`spawn`] so a test that wants to observe a boot FAILURE can read the closed
+/// stdout itself.
+///
+/// No fd bookkeeping: the readiness record is one line on stdout, so there is no
+/// pipe to create, no number to agree on, and no `dup2` to get right.
+pub fn spawn_raw(extra_args: &[&str]) -> Child {
+    Command::new(venue_binary())
         .arg("serve")
-        .arg("--ready-fd")
-        .arg(READY_FD.to_string())
         .args(extra_args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    // dup2 rather than inherit-by-number: the write end lands on fd 3 in the
-    // child regardless of which fd the pipe happened to get here, and dup2
-    // clears CLOEXEC on the duplicate so it survives exec.
-    unsafe {
-        std::os::unix::process::CommandExt::pre_exec(&mut command, move || {
-            if nix::libc::dup2(raw_write, READY_FD) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let child = command.spawn().expect("spawn venue");
-    drop(write_fd);
-    (child, read_fd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn venue")
 }
 
-/// The four-step launcher contract, executed. Panics with the boot failure if
-/// the pipe closes without a line.
+/// The launcher contract, executed. Panics with the boot failure if stdout
+/// closes without a line.
 pub fn spawn(extra_args: &[&str]) -> Venue {
-    let (child, read_fd) = spawn_raw(extra_args);
-    let mut reader = BufReader::new(std::fs::File::from(read_fd));
+    let mut child = spawn_raw(extra_args);
+    let stdout = child.stdout.take().expect("venue stdout is piped");
+    let mut reader = BufReader::new(stdout);
     let mut line = String::new();
-    reader.read_line(&mut line).expect("read readiness pipe");
+    reader.read_line(&mut line).expect("read readiness line");
     let ready_at = Instant::now();
     Venue {
         child,

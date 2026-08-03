@@ -29,6 +29,6 @@
 - **Session calendar**: the weekly open windows in exchange-local time. A
   scheduled close is configuration and the market is genuinely shut inside it,
   as distinct from `ReopenGap`, which is unscheduled havoc.
-- **ReadyRecord**: one versioned JSON line sent over the inherited ready fd.
+- **ReadyRecord**: one versioned JSON line, the venue's only stdout output.
 - **RunComplete**: the terminal WebSocket announcement for a planned duration
   completion, followed by a normal close.

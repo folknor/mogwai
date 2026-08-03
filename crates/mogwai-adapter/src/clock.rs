@@ -25,7 +25,7 @@ use ustr::Ustr;
 
 use crate::client::join_url;
 
-/// The nautilus `Clock` mogwai injects into a broadarrow node, reading and
+/// The nautilus `Clock` mogwai injects into a live node, reading and
 /// firing on the shared simulated axis (`reference/clock.md`).
 ///
 /// Host requirement: its timers fire from a `tokio::task::spawn_local` task (see
@@ -349,7 +349,7 @@ impl MogwaiTimer {
         // owner-thread check passes (common/src/runner.rs). Bar-aggregation
         // timers register exactly such local callbacks on this clock, so this
         // is load-bearing, not a corner case. This requires the host to run a
-        // `LocalSet` on that thread; broadarrow's worker does, and the unit
+        // `LocalSet` on that thread; a nautilus live worker does, and the unit
         // tests below wrap their bodies in one.
         let handle = tokio::task::spawn_local(async move {
             // Past-start catch-up (AE15) is a DELIBERATE deviation from nautilus
@@ -598,7 +598,7 @@ mod tests {
 
     // Each timer test runs its body on a `LocalSet` because `MogwaiTimer::start`
     // now uses `spawn_local` (see its doc comment); the free `spawn_local`
-    // panics without a local task set, which broadarrow's current-thread worker
+    // panics without a local task set, which a current-thread live worker
     // provides in production but `#[tokio::test]` does not.
     #[tokio::test]
     async fn alert_timer_fires_with_sim_event_timestamp() {

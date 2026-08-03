@@ -5,8 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 # This is the sole mogwai crate that imports nautilus. The broker core crates
-# stay protocol-native; this adapter is the broadarrow-facing client pair and
-# path-depends the sibling checkout, not the read-only research snapshot.
+# stay protocol-native; this adapter is the host-facing client pair and
+# depends on the published crates.io releases, not the read-only research
+# snapshot and no longer the sibling checkout.
 [dependencies]
 mogwai-data.workspace = true
 mogwai-protocol.workspace = true
@@ -21,9 +22,9 @@ rust_decimal.workspace = true
 tokio.workspace = true
 tokio-tungstenite = "0.30.0"
 # The `log` feature bridges this crate's `tracing` diagnostics onto the `log`
-# facade. The adapter's only runtime host is the broadarrow ba-worker, which
-# installs nautilus_common's global `log` backend and NO tracing subscriber, so
-# without this bridge every `tracing::warn!` here (dropped fills/positions, the
+# facade. A nautilus trading host typically installs nautilus_common's global
+# `log` backend and NO tracing subscriber, so without this bridge every
+# `tracing::warn!` here (dropped fills/positions, the
 # A.11 unsurfaced rejects, unrepresentable balances, and omitted status reports)
 # is discarded unseen. With it, tracing events fall back to emitting `log` records
 # when no subscriber consumes them, so they reach the worker log alongside
@@ -32,11 +33,11 @@ tokio-tungstenite = "0.30.0"
 tracing = { workspace = true, features = ["log"] }
 ustr = "1.1.0"
 
-nautilus-common = { path = "../../../nautilus_trader/crates/common", default-features = false }
-nautilus-core = { path = "../../../nautilus_trader/crates/core", default-features = false }
-nautilus-live = { path = "../../../nautilus_trader/crates/live", default-features = false }
-nautilus-model = { path = "../../../nautilus_trader/crates/model", default-features = false }
-nautilus-network = { path = "../../../nautilus_trader/crates/network", default-features = false }
+nautilus-common = { version = "0.61", default-features = false }
+nautilus-core = { version = "0.61", default-features = false }
+nautilus-live = { version = "0.61", default-features = false }
+nautilus-model = { version = "0.61", default-features = false }
+nautilus-network = { version = "0.61", default-features = false }
 
 [dev-dependencies]
 serde_urlencoded = "0.7"

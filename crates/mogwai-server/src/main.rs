@@ -11,6 +11,7 @@ mod config;
 mod fills;
 mod r#gen;
 mod http;
+mod man;
 mod run;
 mod source;
 mod sweeper;
@@ -24,15 +25,7 @@ mod ws;
 #[cfg(test)]
 mod fill_golden;
 
-use std::{
-    fs::File,
-    io::Write,
-    net::SocketAddr,
-    os::fd::{FromRawFd, RawFd},
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{io::Write, path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{
     Router,
@@ -66,7 +59,7 @@ fn long_version() -> String {
 }
 
 #[derive(Parser)]
-#[command(name = "mogwai", version = long_version(), about = "Fake broker/exchange that drives broadarrow's live trading path", arg_required_else_help = true)]
+#[command(name = "mogwai", version = long_version(), about = "Fake broker/exchange that drives a nautilus live trading path", arg_required_else_help = true)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -77,6 +70,15 @@ enum Command {
     Serve(ServeArgs),
     Gen(r#gen::GenArgs),
     Presets(PresetArgs),
+    /// Print a bundled reference doc, or list the topics.
+    Man(ManArgs),
+}
+
+#[derive(Args)]
+struct ManArgs {
+    /// Reference topic to display. Omit to list the available topics.
+    #[arg(value_name = "TOPIC")]
+    topic: Option<man::ManTopic>,
 }
 
 #[derive(Args)]
@@ -88,10 +90,6 @@ struct PresetArgs {
 struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
-    #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:0")]
-    addr: SocketAddr,
-    #[arg(long, value_name = "FD")]
-    ready_fd: Option<RawFd>,
     #[arg(long, value_name = "DURATION")]
     duration: Option<humantime::Duration>,
 }
@@ -110,24 +108,30 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Command::Man(args) => {
+            man::run(args.topic);
+            Ok(())
+        }
     }
 }
 
-/// Decision 9: an ephemeral port reported nowhere serves nobody. Any explicit
-/// non-zero port without a ready fd is fine - the caller already knows the
-/// endpoint - so only the combination is refused, and the message names both
-/// flags.
-fn check_endpoint_is_discoverable(addr: SocketAddr, ready_fd: Option<RawFd>) -> anyhow::Result<()> {
-    if addr.port() == 0 && ready_fd.is_none() {
-        anyhow::bail!(
-            "--addr with port 0 requires --ready-fd; otherwise the endpoint cannot be discovered"
-        );
-    }
-    Ok(())
-}
+/// The venue always binds loopback on an EPHEMERAL port, and there is no flag to
+/// change either half.
+///
+/// The port is not choosable because one venue serves one run: a fixed default
+/// port is what let two runs on one machine collide - or worse, silently connect
+/// to each other's venue, with each other's config, clock and instrument - and a
+/// per-run port an operator hand-assigns is the same problem with extra
+/// bookkeeping. The kernel allocates, and the endpoint reaches its owner through
+/// the readiness record (or, for a human, the `mogwai listening` log line).
+///
+/// The HOST is not choosable because the venue models latency on the sim axis
+/// only and runs on the same machine as its client, where physical latency is
+/// negligible by construction. Serving another interface would put a real
+/// network under a fixture that does not model one.
+const BIND_ADDR: &str = "127.0.0.1:0";
 
 fn serve(args: ServeArgs) -> anyhow::Result<()> {
-    check_endpoint_is_discoverable(args.addr, args.ready_fd)?;
     unsafe {
         if nix::libc::prctl(nix::libc::PR_SET_PDEATHSIG, nix::libc::SIGTERM) != 0 {
             return Err(std::io::Error::last_os_error().into());
@@ -140,18 +144,11 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(serve_async(
-            args.config,
-            args.addr,
-            args.ready_fd,
-            duration_ns,
-        ))
+        .block_on(serve_async(args.config, duration_ns))
 }
 
 async fn serve_async(
     config: Option<PathBuf>,
-    addr: SocketAddr,
-    ready_fd: Option<RawFd>,
     duration_override_ns: Option<u64>,
 ) -> anyhow::Result<()> {
     let cfg = Config::load(config)?;
@@ -276,25 +273,37 @@ async fn serve_async(
         .route("/ws", get(ws_upgrade))
         .route("/control/divergence", post(arm_divergence))
         .with_state(state);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = tokio::net::TcpListener::bind(BIND_ADDR).await?;
     let bound_addr = listener.local_addr()?;
-    if let Some(fd) = ready_fd {
-        let symbol = instrument.symbol.clone();
-        let record = mogwai_protocol::ReadyRecord {
-            version: mogwai_protocol::ReadyRecord::VERSION,
-            addr: bound_addr,
-            pid: std::process::id(),
-            symbol: symbol.clone(),
-            run_seed: seeds.run,
-            data_origin_ns,
-            run_start_ns,
-            run_duration_ns,
-            warmup_ns: cfg.warmup_ns,
-            version_string: long_version(),
-        };
-        let mut ready = unsafe { File::from_raw_fd(fd) };
-        ready.write_all(format!("{}\n", serde_json::to_string(&record)?).as_bytes())?;
-        ready.flush()?;
+    // The readiness record goes to STDOUT, unconditionally, as the first and
+    // only thing this process ever writes there. A launcher captures stdout and
+    // reads one line; a human running by hand sees the same line in the
+    // terminal. It is not gated behind a flag because the earlier `--ready-fd
+    // <FD>` form took an unvalidated integer straight into `from_raw_fd`: a
+    // number naming some OTHER inherited fd wrote the record into whatever that
+    // was and then CLOSED it, while the launcher blocked forever on a pipe that
+    // received neither a line nor an EOF. Stdout cannot be misaddressed, needs
+    // no coordination between the spawn call and the argv, and is a first-class
+    // primitive in every process API a launcher might be written against.
+    //
+    // Logs are on stderr (`init_stderr_logging`), so the two streams never
+    // interleave and stdout stays exactly one line of JSON.
+    let record = mogwai_protocol::ReadyRecord {
+        version: mogwai_protocol::ReadyRecord::VERSION,
+        addr: bound_addr,
+        pid: std::process::id(),
+        symbol: instrument.symbol.clone(),
+        run_seed: seeds.run,
+        data_origin_ns,
+        run_start_ns,
+        run_duration_ns,
+        warmup_ns: cfg.warmup_ns,
+        version_string: long_version(),
+    };
+    {
+        let mut stdout = std::io::stdout().lock();
+        writeln!(stdout, "{}", serde_json::to_string(&record)?)?;
+        stdout.flush()?;
     }
     tracing::info!(%bound_addr, "mogwai listening");
     // The deadline task announces completion on every open socket and only
@@ -381,19 +390,17 @@ fn init_stderr_logging() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
 
+    /// The endpoint is not configurable, and this pins the two halves that
+    /// matter: loopback, so no real network sits under a fixture that models
+    /// none, and port zero, so the kernel allocates and two concurrent runs
+    /// cannot collide on a shared default. A literal port reappearing here is
+    /// the regression - it is what let one run connect to another's venue.
     #[test]
-    fn serve_refuses_ephemeral_port_without_a_ready_fd() {
-        let ephemeral: SocketAddr = "127.0.0.1:0".parse().expect("literal addr");
-        let err = check_endpoint_is_discoverable(ephemeral, None)
-            .expect_err("a port reported nowhere serves nobody");
-        let message = err.to_string();
-        assert!(message.contains("--addr"), "{message}");
-        assert!(message.contains("--ready-fd"), "{message}");
-
-        check_endpoint_is_discoverable(ephemeral, Some(3))
-            .expect("an ephemeral port IS discoverable once it is reported");
-        check_endpoint_is_discoverable("127.0.0.1:8787".parse().expect("literal addr"), None)
-            .expect("an explicit port needs no report; the caller already knows it");
+    fn the_venue_always_binds_an_ephemeral_loopback_port() {
+        let addr: SocketAddr = BIND_ADDR.parse().expect("BIND_ADDR is a literal addr");
+        assert!(addr.ip().is_loopback(), "{addr}");
+        assert_eq!(addr.port(), 0, "{addr}");
     }
 }

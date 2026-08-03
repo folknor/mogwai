@@ -5,7 +5,7 @@
 //!
 //! This is the reason mogwai exists as an external process - it can emit ugly,
 //! realistic event streams an in-process matching engine never would, to drive
-//! broadarrow's `classify` → brake/quarantine/restart layer.
+//! a host's error-classification and brake/quarantine/restart layer.
 
 use crate::{ClientOrderId, Decimal, Deserialize, Serialize};
 

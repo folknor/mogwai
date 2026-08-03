@@ -5,7 +5,7 @@
 //!
 //! The rest of mogwai remains independent of nautilus and speaks the native
 //! JSON-over-WebSocket vocabulary from `mogwai-protocol`. This crate is the
-//! deliberate boundary where broadarrow can construct nautilus data and
+//! deliberate boundary where a nautilus host can construct data and
 //! execution clients for the synthetic MOGWAI venue.
 
 use std::sync::LazyLock;

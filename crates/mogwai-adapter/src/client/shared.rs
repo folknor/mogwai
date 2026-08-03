@@ -195,7 +195,7 @@ pub(crate) async fn seed_instruments(
 ///
 /// Seeding only fills the adapter's local `InstrumentDef` map, which the
 /// adapter consults for price/precision conversion. Nautilus's own cache is a
-/// separate store fed exclusively by `DataEvent::Instrument`, and broadarrow's
+/// separate store fed exclusively by `DataEvent::Instrument`, and a host's
 /// executor refuses to process a bar whose instrument is absent from that cache
 /// (a desync guard against advancing the shadow with no real order). A forward
 /// run that subscribes to bars but never to the instrument itself would
@@ -223,7 +223,7 @@ pub(crate) fn emit_seeded_instruments(
 /// warning loudly on failure instead of swallowing it. `convert::instrument_any`
 /// errors when the def carries a base/quote currency unknown to nautilus (an
 /// exotic pair), and a silent drop here cascades: the instrument never reaches
-/// the Nautilus cache, so broadarrow's executor refuses EVERY bar for the
+/// the Nautilus cache, so a host executor gating on it refuses EVERY bar for the
 /// symbol with no log line pointing at the cause - the exact failure
 /// `emit_seeded_instruments` exists to prevent. Naming the symbol and the error
 /// at every swallow site turns that into a diagnosable log.
@@ -237,7 +237,7 @@ pub(crate) fn instrument_any_or_warn(
                 symbol = %def.symbol,
                 error = %err,
                 "dropping instrument: unrepresentable (currency unknown to nautilus?); \
-                 broadarrow will refuse every bar for this symbol"
+                 downstream consumers will refuse every bar for this symbol"
             );
         })
         .ok()

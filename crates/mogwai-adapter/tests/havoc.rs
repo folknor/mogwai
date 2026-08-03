@@ -679,7 +679,7 @@ async fn divergence_duplicate_fill_forwards_both_wire_events() {
     // trade_id) twice. Per the A.1 contract, the adapter's reconciliation mirror
     // dedups the fill by trade_id (so filled_qty is not double-counted), but the
     // duplicate wire event is STILL forwarded downstream - that is the intended
-    // divergence broadarrow's classify layer must see. So two identical Filled
+    // divergence a host's classify layer must see. So two identical Filled
     // events must reach the sink. (The mirror's internal dedup is not observable
     // from the egress sink; it is covered by the client.rs unit tests. This test
     // pins the wire-forwarding half of A.1.)

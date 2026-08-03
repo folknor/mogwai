@@ -2,17 +2,17 @@
 
 ## Project
 
-mogwai is a fake broker/exchange that plugs into broadarrow to exercise the
-*live* trading path. It synthesizes market data from a committed fingerprint
+mogwai is a fake broker/exchange that plugs into a nautilus trading system to
+exercise the *live* trading path. It synthesizes market data from a committed fingerprint
 fitted offline to Kraken trade history (the running server opens no CSV) and
 injects the messy, realistic execution divergences (partial fills, rejects,
 delays,
 duplicate fills, dropped account updates, venue blackouts) that an in-process
 backtest sandbox structurally cannot produce. The broker core never imports
 nautilus; the `mogwai-adapter` crate is the lone, deliberate exception - it
-depends on the published nautilus crates to ship the `ExecutionClient`/`DataClient` pair broadarrow
-constructs to drive the `MOGWAI` venue over this workspace's native JSON-over-WS
-protocol.
+depends on the published nautilus crates to ship the
+`ExecutionClient`/`DataClient` pair a host constructs to drive the `MOGWAI`
+venue over this workspace's native JSON-over-WS protocol.
 
 ## Workspace
 
@@ -27,13 +27,16 @@ A Cargo workspace, five crates under `crates/`:
   `GeneratedSource` synthetic generator the running server uses (fitted to the
   committed fingerprint) plus the `KrakenCsvSource` streaming loader kept as the
   offline-analysis lineage.
-- `mogwai-server` - the axum binary that owns the sockets, the clock, replay
-  pacing, and its own daemon lifecycle (`serve` daemonizes by default, `-f` stays
-  foreground, `stop` ends it via a PID-file lock), synthesizing market data per
-  subscription; exposes `/health`, `/ws`, `/control/divergence`, `/orders`,
-  `/instruments` and `/trades`.
+- `mogwai-server` - the axum binary that owns the sockets, the clock and replay
+  pacing, synthesizing market data per subscription; exposes `/health`, `/ws`,
+  `/control/divergence`, `/orders`, `/instruments` and `/trades`. `serve` runs
+  ONE venue in the foreground for one run and owns no PID, log or config files:
+  it reports its bound address as a single JSON readiness line on stdout,
+  and `PR_SET_PDEATHSIG` makes the kernel kill it when its launcher dies. There
+  is no daemon mode and no `stop` subcommand - lifecycle is the launcher's job.
+  See `reference/cli.md`.
 - `mogwai-adapter` - the nautilus venue adapter: the `MogwaiDataClientFactory` /
-  `MogwaiExecutionClientFactory`, their configs, and the client pair broadarrow
+  `MogwaiExecutionClientFactory`, their configs, and the client pair a host
   registers for the `MOGWAI` venue. The only crate that depends on nautilus -
   the published crates.io crates pinned in its `Cargo.toml`, default-features
   off, no pyo3; the other four build nautilus-free.
@@ -71,24 +74,22 @@ or broadarrow APIs) has two distinct access paths - never conflate them:
 - Read the source from the in-tree copies `research/nautilus_trader` and
   `research/broadarrow`. Agents cannot read anything outside this repo, so these
   copies are the only place to study those APIs.
-- Build against the SIBLING CHECKOUT `../nautilus_trader`, path-depended from
+- Build against the PUBLISHED crates.io release, version-pinned in
   `mogwai-adapter/Cargo.toml` with default-features off so no pyo3 or Python
-  linkage is pulled in. A build therefore REQUIRES that checkout to exist
-  alongside this repo; it is not optional and it is not the `research/` copy.
-  broadarrow is never a build input at all - it is the consumer that depends on
-  this workspace, not the reverse. `research/` is read-only reference, never a
-  build input; `members = ["crates/*"]` already excludes it, so no workspace
-  `exclude` is needed.
+  linkage is pulled in. A build needs no sibling checkout: cargo fetches the
+  five nautilus crates like any other dependency and `Cargo.lock` pins them by
+  version and checksum. broadarrow is never a build input at all - it is the
+  consumer that depends on this workspace, not the reverse. `research/` is
+  read-only reference, never a build input; `members = ["crates/*"]` already
+  excludes it, so no workspace `exclude` is needed.
 
-The path dependency is deliberate and temporary. The published nautilus release
-still carries bugs this project hits, which are being fixed upstream; once the
-queued fixes land in a release, the manifest moves to pinned crates.io versions
-and this section changes with it. Until then a path dep is the honest
-description: it carries no version requirement and no checksum, so `Cargo.lock`
-cannot pin it and whatever sits in that checkout at build time is what compiles.
+The adapter previously path-depended a sibling `../nautilus_trader` checkout
+because the published release carried bugs this project hits. Those fixes landed
+in 0.61, so the manifest now pins that release and the build is reproducible
+from a fresh clone.
 
 Every implementation spec that references these APIs states both paths: the
-implementer reads from `research/` and builds against the sibling checkout. The
+implementer reads from `research/` and builds against the pinned release. The
 two are kept in sync, so what you read in `research/` is what compiles.
 
 ### Bash rules

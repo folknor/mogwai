@@ -103,18 +103,20 @@ fn two_concurrent_venues_bind_distinct_ports() {
 /// worse than no venue, because the launcher would wait on it.
 #[test]
 #[ignore = "spawns the venue binary"]
-fn serve_exits_nonzero_when_the_ready_fd_is_unwritable() {
-    // fd 3 is never opened in the child, so the write fails with EBADF.
+fn serve_exits_nonzero_when_the_readiness_line_cannot_be_written() {
+    // Close the read end straight away, so the venue's write to stdout fails
+    // with EPIPE. Rust ignores SIGPIPE at startup, so this surfaces as an error
+    // on the write rather than killing the process by signal - which is the
+    // path that has to stay fatal.
     let mut child = Command::new(venue_binary())
         .arg("serve")
         .arg("--config")
         .arg(fast_config())
-        .arg("--ready-fd")
-        .arg("3")
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn venue");
+    drop(child.stdout.take().expect("venue stdout is piped"));
 
     let deadline = Instant::now() + Duration::from_secs(60);
     let status = loop {
@@ -129,7 +131,7 @@ fn serve_exits_nonzero_when_the_ready_fd_is_unwritable() {
     };
     assert!(
         !status.success(),
-        "an unwritable ready fd must be fatal, got {status:?}"
+        "an unwritable readiness stream must be fatal, got {status:?}"
     );
 }
 
@@ -168,8 +170,10 @@ fn venue_dies_when_its_launcher_is_killed_without_cleanup() {
     // The intermediate is a shell that spawns the venue and then blocks
     // forever. SIGKILLing it gives it no chance to clean up, which is exactly
     // the orphaned-venue case a SIGTERM handler alone cannot cover.
+    // The venue inherits the shell's stdout, which is our pipe, so the readiness
+    // line reaches us with no fd plumbing in the script at all.
     let script = format!(
-        "exec 3>&1; \"{}\" serve --config \"{}\" --ready-fd 3 2>/dev/null & sleep 3600",
+        "\"{}\" serve --config \"{}\" 2>/dev/null & sleep 3600",
         venue_binary(),
         fast_config()
     );
@@ -214,31 +218,38 @@ fn venue_dies_when_its_launcher_is_killed_without_cleanup() {
     }
 }
 
-/// Decision 9's other half, over a real process rather than the unit check: a
-/// port reported nowhere serves nobody, so `serve` refuses to start.
+/// Starting a venue takes NO endpoint flags at all: no port to pick and no fd to
+/// nominate. The endpoint is the kernel's choice and it comes back on stdout, so
+/// this pins both halves of what a launcher may assume - loopback, and a port
+/// nobody chose.
 #[test]
-#[ignore = "spawns the venue binary"]
-fn a_bare_serve_refuses_to_start() {
-    let output = Command::new(venue_binary())
-        .arg("serve")
-        .output()
-        .expect("run the venue");
-    assert!(!output.status.success(), "a bare serve must refuse");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("--ready-fd"), "{stderr}");
+#[ignore = "binds a loopback listener"]
+fn serve_needs_no_endpoint_flags_and_reports_where_it_landed() {
+    let venue = spawn(&["--config", &fast_config()]);
+    assert!(
+        venue.record.addr.ip().is_loopback(),
+        "{}",
+        venue.record.addr
+    );
+    assert_ne!(
+        venue.record.addr.port(),
+        0,
+        "the reported port must be the one the kernel actually allocated"
+    );
 }
 
-/// The pipe closing with no line is how a launcher learns the venue failed to
+/// Stdout closing with no line is how a launcher learns the venue failed to
 /// boot, per step 2 of the contract. A config naming an unfunded quote currency
 /// is a boot refusal, so it exercises exactly that path.
 #[test]
 #[ignore = "spawns the venue binary"]
-fn a_boot_failure_closes_the_ready_pipe_without_a_line() {
+fn a_boot_failure_closes_stdout_without_a_line() {
     let config = format!("{}/tests/configs/unfunded.toml", env!("CARGO_MANIFEST_DIR"));
-    let (mut child, read_fd) = spawn_raw(&["--config", &config]);
-    let mut reader = BufReader::new(std::fs::File::from(read_fd));
+    let mut child = spawn_raw(&["--config", &config]);
+    let stdout = child.stdout.take().expect("venue stdout is piped");
+    let mut reader = BufReader::new(stdout);
     let mut line = String::new();
-    reader.read_line(&mut line).expect("read the ready pipe");
+    reader.read_line(&mut line).expect("read venue stdout");
     assert!(
         line.is_empty(),
         "a venue that refused to boot must not report readiness: {line}"

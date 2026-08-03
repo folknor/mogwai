@@ -295,8 +295,8 @@ async fn a_subscribe_for_another_instrument_is_refused_locally() {
 /// The failure arms of `request_trades`/`request_bars` used to log and return
 /// straight out of the spawned task, so no `DataResponse` was ever emitted and
 /// the request hung forever. From the consumer that is indistinguishable from a
-/// dead venue: broadarrow burns its entire warmup timeout and dies
-/// `WarmupHandoffFailed` with nothing to go on but a line in the worker log.
+/// dead venue: the host burns its entire warmup timeout and fails the handoff
+/// with nothing to go on but a line in the worker log.
 /// An empty response is the truthful answer that at least completes the
 /// exchange.
 #[tokio::test(flavor = "current_thread")]

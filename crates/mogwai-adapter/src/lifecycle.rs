@@ -521,6 +521,16 @@ pub(crate) async fn run_ws_connection<
 /// silently while an unrelated WARN storm named phantom causes - so the one
 /// line announcing the disconnect must say what actually happened on the
 /// socket.
+///
+/// The close CODE is reported, never acted on. A venue fault closes the socket
+/// with WS 1011 after a `FeedLagged` frame naming it, and that is deliberately
+/// treated here as an ordinary disconnect: the adapter reconnects, resubscribes,
+/// and carries on with a hole in its history. Making a venue fault terminal end
+/// to end is the CONSUMER's decision, not the adapter's - mogwai's job is to
+/// state the fault as clearly as it can and decline to repair it downstream, the
+/// same principle that governs reconnect account staleness above. An adapter
+/// that unilaterally killed the run would be making a policy call on behalf of
+/// whoever embedded it.
 fn disconnect_cause(
     inbound: &Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
 ) -> Option<String> {

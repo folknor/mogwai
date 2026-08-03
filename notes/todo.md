@@ -253,19 +253,6 @@ Or both. There are no exceptions.
   `MarketReadingCache`). Putting the reading instant on `OrderFilled` would buy
   the contract back cheaply and independently of the re-scoping.
 
-- Move the adapter off the `../nautilus_trader` path dependency onto a pinned
-  crates.io release. `crates/mogwai-adapter/Cargo.toml` path-depends five
-  nautilus crates from the sibling checkout, which is deliberate: the published
-  release still carries bugs this project hits. Those are being fixed upstream
-  (60+ PRs merged as of 2026-08-01, roughly 15-20 more queued), and once they
-  land in a release the manifest pins that version instead. Until then the
-  build is not reproducible - a path dep has no version requirement and no
-  checksum, so `Cargo.lock` records the crates with no `source` and cannot pin
-  them, and whatever sits in the sibling checkout at build time is what
-  compiles. A fresh clone also cannot build `mogwai-adapter` without that
-  checkout present. Blocked on upstream, not on a decision here; `AGENTS.md`
-  describes the current path-dep arrangement rather than the intended one.
-
 - mogwai-engine `next_position` unbounded accumulation. The per-fill weighted-
   average is now overflow-guarded (a single oversized order is rejected before
   it reaches the arithmetic), but `current.qty` still accumulates across many
@@ -315,20 +302,6 @@ Or both. There are no exceptions.
   EXPECTATION with a defined failure mode, names the adapter as a deliberate
   violator under `reorder_prob`, and is pinned by
   `an_out_of_order_trade_folds_into_the_open_window_without_wedging`.)
-
-- DECIDE (client side only now, and it is broadarrow's half): should a venue
-  fault be terminal for the consumer? The MOGWAI-SIDE half is settled - a venue
-  fault is mogwai failing to perform its duties, it is terminal, and the venue
-  says so as clearly as it can. What remains is what the consumer does with
-  that, which is theirs. mogwai now distinguishes failing from misbehaving on the wire -
-  `ServerMessage::FeedLagged` closes the socket with WS 1011 naming the fault
-  (see `reference/architecture.md`). But the adapter's ordinary reconnect logic
-  still fires on that close, so the client reconnects,
-  resubscribes, and carries on with a hole in its history. Making the fault
-  terminal end to end means the adapter treating 1011 differently from a routine
-  disconnect AND broadarrow failing the run rather than resuming. Deliberately
-  not taken here: the venue says clearly what happened, what the consumer does
-  with that is the consumer's call.
 
 - DECIDE: does `analysis/` deserve a test harness? Surfaced 2026-08-02 landing
   the drought elimination. The dwell statistics are computed TWICE against the
@@ -405,11 +378,17 @@ Or both. There are no exceptions.
 - `research/` is gitignored and holds the read-only nautilus and broadarrow
   clones plus `market-data/` (the Binance archives and TradingView exports) and
   `binance-public-data/` (the vendored downloader). Read those APIs from there.
-  mogwai BUILDS against the sibling `../nautilus_trader` checkout, per the open
-  path-dependency item above and `AGENTS.md` - not against crates.io, and never
-  against `research/`.
+  mogwai BUILDS against the pinned crates.io nautilus release (0.61), never
+  against `research/` and no longer against a sibling checkout; see `AGENTS.md`.
 
 ## Hardcoded-value and env-var inventory (read-only sweep, 2026-07-01)
+
+STALE BY CONSTRUCTION, and not covered by the removal rule at the top of this
+file: it is a point-in-time catalogue rather than a set of work items, so
+nothing here gets removed on completion and nothing re-sweeps it. Entries have
+already been found describing code that no longer exists. Treat every line as a
+LEAD to verify against the source, never as a statement of fact, and re-sweep
+the section wholesale before relying on it.
 
 Catalogue only, for later evaluation of what deserves to become a knob - nothing
 here was changed. Pervasive test-fixture literals (repeated `BTCUSDT`/`BTC`/
@@ -420,7 +399,8 @@ full.
 ### Environment variables (whole workspace)
 
 The Rust crates are deliberately env-var-free for runtime knobs; run config lives
-in `mogwai.toml`. The only reads:
+in `mogwai.toml`. `RUST_LOG` is the only ambient read on the SERVING path. The
+reads:
 
 - `RUST_LOG` - `mogwai-server` via `EnvFilter::try_from_default_env`, falls back
   to `mogwai=info`. The one documented, deliberate ambient exception; a prior
@@ -476,8 +456,9 @@ Inline literals (no named const):
 
 ### mogwai-server
 
-- Bind: `--addr` default `127.0.0.1:0` (ephemeral, reported on the ready fd);
-  tests bind `127.0.0.1:0` too.
+- Bind: the `BIND_ADDR` const, `127.0.0.1:0`, not configurable at all - the
+  `--addr` flag is gone, so ephemeral loopback is the only endpoint and it is
+  reported on stdout as the readiness line, and on stderr as `mogwai listening`.
 - HTTP route strings (`/health`, `/account`, `/instruments`, `/trades`,
   `/quotes`, `/clock`, `/orders`, `/ws`, `/control/divergence`) as inline
   literals, no shared registry with the adapter's route segments.
@@ -532,8 +513,7 @@ golden-test seed.
 ### Non-crate (scripts, analysis, root config)
 
 - `scripts/smoke.py`: spawns its own venue and learns the bound address from
-  the readiness record read off the child's `--ready-fd` pipe (no hardcoded
-  host/port). `WINDOW_LOOKBACK_NS 1h`, `ACCEL_DELAY_MS 1000`,
+  the readiness record read off the child's stdout (no hardcoded host/port). `WINDOW_LOOKBACK_NS 1h`, `ACCEL_DELAY_MS 1000`,
   `ACCEL_CLOCK_SLACK_WALL_NS 50ms`, `ACCEL_ANCHOR_TIMEOUT_S 120`, fixed order
   shape (`BTCUSDT`/`Limit`/qty 10/px 100), plus many inline per-assertion
   socket timeouts and latency tolerances (not centralised; first place to look
@@ -555,9 +535,8 @@ golden-test seed.
   rust_decimal 1 with serde-with-str, rand 0.10, rand_distr 0.6, rand_chacha 0.10,
   and the rest) centralised as workspace deps; `[profile.release]` opt-level 3 /
   lto fat / codegen-units 1; `rust-version 1.96`, `resolver 3`. The nautilus
-  deps live in `mogwai-adapter/Cargo.toml`, not root, and are five SIBLING PATH
-  dependencies rather than pinned crates.io versions - this line previously said
-  pinned, contradicting the open path-dependency item above. `brokkr.toml` only sets
+  deps live in `mogwai-adapter/Cargo.toml`, not root, and are five crates.io
+  dependencies pinned at 0.61 with default-features off. `brokkr.toml` only sets
   `project = "mogwai"`. Root `mogwai.toml` carries the run knobs (`sim_epoch_ns 0`,
   `wall_anchor_ns 0`, `speed 1.0`, `gap_cap_ms 1000`, `server_heartbeat_ms 0`,
   `run_duration_ns 0`, `warmup_ns`, `fanout_depth 4096`,

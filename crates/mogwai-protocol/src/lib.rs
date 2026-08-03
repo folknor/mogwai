@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Wire protocol shared by the mogwai fake broker and its broadarrow adapter.
+//! Wire protocol shared by the mogwai fake broker and its nautilus adapter.
 //!
 //! This is the single source of truth for the native JSON-over-WS protocol. The
-//! broadarrow-side adapter path-deps this crate so both ends serialize identical types.
+//! adapter side depends on this crate so both ends serialize identical types.
 //! mogwai never imports nautilus; nautilus types are mirrored here only as far as
 //! the wire needs them.
 

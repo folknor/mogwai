@@ -32,6 +32,10 @@ anyhow.workspace = true
 humantime = "2"
 nix = { version = "0.31.3", features = ["fs", "process", "signal"] }
 
+# `mogwai man` renders the bundled reference/*.md docs to the terminal.
+owo-colors = "4"
+pulldown-cmark = "0.13"
+
 [dev-dependencies]
 tungstenite = "0.30.0"
 tokio-tungstenite = "0.30.0"

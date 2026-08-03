@@ -100,8 +100,7 @@ skip-tree = []
 # Dependency Sources
 # =============================================================================
 [sources]
-# Only crates.io. The nautilus and broadarrow siblings are path dependencies,
-# not registry or git sources, so they are not subject to this gate.
+# Only crates.io. Every dependency, nautilus included, comes from the registry.
 unknown-registry = "deny"
 unknown-git = "deny"
 

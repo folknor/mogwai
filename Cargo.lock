@@ -478,9 +478,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.6.4"
+version = "4.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d91e0c145792ef73a6ad36d27c75ac09f1832222a3c209689d90f534685ee5b7"
+checksum = "301b56658598e48f3648647ac6fc887be7e7108eddfa4e9b63fcf3ec58c0cadf"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -488,9 +488,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.6.2"
+version = "4.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f09628afdcc538b57f3c6341e9c8e9970f18e4a481690a64974d7023bd33548b"
+checksum = "94a65403d1a1bd28f7dc68eb8506e8874808ee5eecb59298de588e2e1407a078"
 dependencies = [
  "anstream",
  "anstyle",
@@ -1018,6 +1018,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "getopts"
+version = "0.2.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfe4fbac503b8d1f88e6676011885f34b7174f46e59956bba534ba83abded4df"
+dependencies = [
+ "unicode-width",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1395,9 +1404,9 @@ dependencies = [
 
 [[package]]
 name = "ipnet"
-version = "2.12.0"
+version = "2.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
+checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
 
 [[package]]
 name = "is_terminal_polyfill"
@@ -1652,6 +1661,8 @@ dependencies = [
  "mogwai-engine",
  "mogwai-protocol",
  "nix",
+ "owo-colors",
+ "pulldown-cmark",
  "rand 0.10.2",
  "rust_decimal",
  "serde",
@@ -1667,6 +1678,8 @@ dependencies = [
 [[package]]
 name = "nautilus-common"
 version = "0.61.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11b85fd775296485846a045df0fef963f34457324dabcfcb3546465edab7c360"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -1698,6 +1711,8 @@ dependencies = [
 [[package]]
 name = "nautilus-core"
 version = "0.61.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12316f237cacf730c2c651c2646444b5ee53ff111004e62e0f80d01388cba32c"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -1720,6 +1735,8 @@ dependencies = [
 [[package]]
 name = "nautilus-cryptography"
 version = "0.61.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fffbedf6c4dcac86e162044b9c61560d2a8b81f199413070f1527f3b218e6568"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -1735,6 +1752,8 @@ dependencies = [
 [[package]]
 name = "nautilus-execution"
 version = "0.61.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c78e97aab4a25bd8261bc8d372b3c7c60edfb2900092cfe5ee5cdc86882273b4"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -1760,6 +1779,8 @@ dependencies = [
 [[package]]
 name = "nautilus-live"
 version = "0.61.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1b228cac0eb92edcb91408bbb97cf472178cf8b565cb21209c828485a186ff3"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -1782,6 +1803,8 @@ dependencies = [
 [[package]]
 name = "nautilus-model"
 version = "0.61.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d65dcbf1f85d98871f73b7a646c533fbea5cb941778262d90ca46990484e398"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -1808,6 +1831,8 @@ dependencies = [
 [[package]]
 name = "nautilus-network"
 version = "0.61.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26a00bd5828e893279d2af37b33bfe73575c25eee9b451a21ebd5fe414725b76"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -1920,6 +1945,12 @@ name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
+
+[[package]]
+name = "owo-colors"
+version = "4.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d211803b9b6b570f68772237e415a029d5a50c65d382910b879fb19d3271f94d"
 
 [[package]]
 name = "page_size"
@@ -2058,6 +2089,25 @@ dependencies = [
  "quote",
  "syn 1.0.109",
 ]
+
+[[package]]
+name = "pulldown-cmark"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+dependencies = [
+ "bitflags",
+ "getopts",
+ "memchr",
+ "pulldown-cmark-escape",
+ "unicase",
+]
+
+[[package]]
+name = "pulldown-cmark-escape"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
 
 [[package]]
 name = "quinn"
@@ -3292,6 +3342,12 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "unicase"
+version = "2.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
 
 [[package]]
 name = "unicode-ident"

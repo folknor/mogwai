@@ -851,7 +851,7 @@ pub async fn next_data_event(
 /// On connect the data client publishes its seeded instrument definitions to
 /// the sink before any trade or bar (`emit_seeded_instruments`), so nautilus
 /// caches the instrument first. That ordering is load-bearing, not incidental:
-/// broadarrow's executor refuses a bar whose instrument is absent from the
+/// a host executor refuses a bar whose instrument is absent from the
 /// cache. A transport test asserting the first TRADE must therefore skip past
 /// this instrument prologue rather than mistake it for the trade.
 pub async fn next_non_instrument_data_event(
