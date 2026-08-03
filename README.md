@@ -88,8 +88,9 @@ rather than a person. The contract is four steps:
 "Direct child" is load-bearing rather than stylistic: the venue arms
 `PR_SET_PDEATHSIG` against its immediate parent, so a shell, a `cargo run`, or a
 double fork in between wires the death watch to the wrapper and leaves a real
-orphan behind. `scripts/smoke.py` is this contract executed, and is the reference
-to copy from.
+orphan behind. The signal also tracks the parent THREAD, so spawn from a thread
+that outlives the run or the venue dies mid-run under a healthy launcher.
+`scripts/smoke.py` is this contract executed, and is the reference to copy from.
 
 ## Documentation
 

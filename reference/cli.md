@@ -50,6 +50,24 @@ a line is a boot failure, and the child's stderr and exit status say why. It kee
 handling terminates the venue if that launcher dies. On a `RunComplete` frame,
 the process exits successfully; otherwise the launcher terminates and reaps it.
 
+Two properties of that parent-death handling decide whether a launcher is
+written correctly, and neither is guessable from the outside.
+
+`PR_SET_PDEATHSIG` fires on the death of the parent THREAD, not the parent
+process. A launcher that spawns the venue from a worker thread and then lets
+that thread finish gets its venue terminated mid-run while the launcher itself
+is perfectly healthy. Spawn from a thread that outlives the run - the main
+thread, or a pool thread deliberately parked for the run's duration. At fleet
+scale, spawning from a short-lived pool task is the natural thing to write and
+the wrong thing to write.
+
+The venue refuses to start if its launcher died during its own startup. It reads
+its parent before arming the signal and again after; a change means it was
+reparented in the window where no signal could be delivered, so it exits nonzero
+with `launcher died during startup` rather than serving a run nobody owns. A
+launcher sees this the same way as any other boot failure - stdout closes with no
+line - so no special handling is needed for it.
+
 A launcher that CAPTURES the child's stderr must also DRAIN it, continuously,
 from the moment of spawn. Logs go to stderr by design, a pipe holds roughly
 64 KiB, and a full pipe blocks the writer - so an undrained capture wedges the

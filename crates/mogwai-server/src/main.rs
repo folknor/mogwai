@@ -131,12 +131,49 @@ fn main() -> anyhow::Result<()> {
 /// network under a fixture that does not model one.
 const BIND_ADDR: &str = "127.0.0.1:0";
 
-fn serve(args: ServeArgs) -> anyhow::Result<()> {
+/// Arms the kernel's parent-death signal, and refuses to serve if the launcher
+/// is already gone.
+///
+/// `PR_SET_PDEATHSIG` fires only on a FUTURE death of the parent, so on its own
+/// it carries a race: a launcher that dies between forking this process and this
+/// call is never signalled for, and the venue serves a run nobody owns, forever,
+/// holding a port whose number died with the launcher that was going to read it.
+/// With no PID file and no `stop` subcommand, the kernel is the only reaper
+/// there is, so that window has to be closed here rather than tolerated.
+///
+/// Reading the parent BEFORE arming and again after closes it: if the two
+/// differ, this process was reparented in between, which means the launcher died
+/// inside the window and no signal is coming. Comparing against the observed
+/// value rather than against pid 1 keeps this correct under a subreaper, where
+/// an orphan is reparented to the subreaper and never to init.
+///
+/// One residual window is NOT closed and cannot be from inside this process: a
+/// launcher that dies before this program reaches `main` was already gone at the
+/// first read, so both reads agree and nothing looks wrong. That leaves the
+/// venue running with a reparented owner. It is bounded by process startup
+/// rather than by warmup, which is the difference between microseconds and
+/// minutes.
+fn arm_parent_death_signal() -> anyhow::Result<()> {
+    let before = nix::unistd::getppid();
+    // SAFETY: prctl with PR_SET_PDEATHSIG takes a signal number by value and
+    // touches no memory this process owns.
     unsafe {
         if nix::libc::prctl(nix::libc::PR_SET_PDEATHSIG, nix::libc::SIGTERM) != 0 {
             return Err(std::io::Error::last_os_error().into());
         }
     }
+    let after = nix::unistd::getppid();
+    if before != after {
+        anyhow::bail!(
+            "launcher died during startup (reparented from {before} to {after}); \
+             refusing to serve a run nobody owns"
+        );
+    }
+    Ok(())
+}
+
+fn serve(args: ServeArgs) -> anyhow::Result<()> {
+    arm_parent_death_signal()?;
     init_stderr_logging()?;
     let duration_ns = args
         .duration
