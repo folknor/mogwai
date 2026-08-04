@@ -40,7 +40,7 @@ use nautilus_common::{
     live::runner::replace_data_event_sender,
     messages::{
         DataEvent,
-        data::{DataResponse, SubscribeTrades},
+        data::{DataResponse, SubscribeQuotes, SubscribeTrades},
     },
 };
 use nautilus_core::{UUID4, UnixNanos};
@@ -167,6 +167,124 @@ async fn subscribe_and_request_drive_data_events() {
                 first.ts_event < second.ts_event,
                 "trades must arrive in ascending ts order"
             );
+            break;
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn a_host_subscribing_quotes_after_connect_receives_the_book_immediately() {
+    let state = Arc::new(StubState::default());
+    state.ws_trades.lock().expect("ws frames mutex").push(
+        r#"{"type":"Quote","symbol":"BTCUSDT","bid_px":"99.00","ask_px":"100.00","bid_sz":"2","ask_sz":"3","ts_event":9}"#.to_string(),
+    );
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
+    replace_data_event_sender(sink_tx);
+    let mut client = data_client(base_url);
+    client.start().expect("start grabs the sink");
+    client.connect().await.expect("connect opens the socket");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    client
+        .subscribe_quotes(SubscribeQuotes::new(
+            instrument_id(),
+            Some(ClientId::from("MOGWAI-DATA")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        ))
+        .expect("subscribe quotes");
+
+    match next_non_instrument_data_event(&mut sink_rx, Duration::from_secs(5)).await {
+        DataEvent::Data(Data::Quote(quote)) => {
+            assert_eq!(quote.instrument_id, instrument_id());
+            assert_eq!(quote.bid_price, Price::from("99.00"));
+            assert_eq!(quote.ask_price, Price::from("100.00"));
+            assert_eq!(quote.bid_size, Quantity::from("2"));
+            assert_eq!(quote.ask_size, Quantity::from("3"));
+            assert_eq!(quote.ts_event, UnixNanos::from(9));
+        }
+        other => panic!("expected an immediate cached quote, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn an_unrepresentable_quote_is_dropped_not_panicked() {
+    let state = Arc::new(StubState::default());
+    {
+        let mut frames = state.ws_trades.lock().expect("ws frames mutex");
+        frames.push(
+            r#"{"type":"Quote","symbol":"BTCUSDT","bid_px":"100000000000000000000","ask_px":"100000000000000000001","bid_sz":"2","ask_sz":"3","ts_event":8}"#.to_string(),
+        );
+        frames.push(
+            r#"{"type":"Quote","symbol":"BTCUSDT","bid_px":"99.00","ask_px":"100.00","bid_sz":"2","ask_sz":"3","ts_event":9}"#.to_string(),
+        );
+    }
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
+    replace_data_event_sender(sink_tx);
+    let mut client = data_client(base_url);
+    client.start().expect("start grabs the sink");
+    client
+        .subscribe_quotes(SubscribeQuotes::new(
+            instrument_id(),
+            Some(ClientId::from("MOGWAI-DATA")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        ))
+        .expect("subscribe quotes before connect");
+    client
+        .connect()
+        .await
+        .expect("connect survives invalid quote");
+    match next_non_instrument_data_event(&mut sink_rx, Duration::from_secs(5)).await {
+        DataEvent::Data(Data::Quote(quote)) => assert_eq!(quote.ts_event, UnixNanos::from(9)),
+        other => panic!("the task did not survive to the valid quote: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn request_quotes_uses_the_live_history_route() {
+    use nautilus_common::messages::data::RequestQuotes;
+
+    let state = Arc::new(StubState::default());
+    *state.quotes_body.lock().expect("quotes body mutex") = Some(
+        r#"[{"symbol":"BTCUSDT","bid_px":"99.00","ask_px":"100.00","bid_sz":"2","ask_sz":"3","ts_event":9}]"#.to_string(),
+    );
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
+    replace_data_event_sender(sink_tx);
+    let mut client = data_client(base_url);
+    client.start().expect("start grabs the sink");
+    client.connect().await.expect("connect opens the socket");
+    client
+        .request_quotes(RequestQuotes::new(
+            instrument_id(),
+            None,
+            None,
+            None,
+            Some(ClientId::from("MOGWAI-DATA")),
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+        ))
+        .expect("request quotes");
+    loop {
+        if let DataEvent::Response(DataResponse::Quotes(response)) =
+            next_data_event(&mut sink_rx, Duration::from_secs(5)).await
+        {
+            assert_eq!(response.data.len(), 1);
+            assert_eq!(response.data[0].bid_price, Price::from("99.00"));
+            assert_eq!(response.data[0].ask_price, Price::from("100.00"));
             break;
         }
     }

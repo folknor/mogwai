@@ -78,6 +78,8 @@ pub struct StubState {
     pub control_bodies: Mutex<Vec<String>>,
     /// Trade frames the WS leg pushes after a client `Subscribe`.
     pub ws_trades: Mutex<Vec<String>>,
+    /// Optional body served by `/quotes`.
+    pub quotes_body: Mutex<Option<String>>,
     /// Execution frames the WS leg pushes after a client `SubmitOrder`.
     pub ws_exec_frames: Mutex<Vec<String>>,
     /// Execution frames the WS leg pushes after a client `ModifyOrder`. The
@@ -244,6 +246,14 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
                 .unwrap_or_else(|| "[]".to_string());
             respond_json(stream, "200 OK", &body).await;
         }
+    } else if path.starts_with("/quotes") {
+        let body = state
+            .quotes_body
+            .lock()
+            .expect("quotes body mutex")
+            .clone()
+            .unwrap_or_else(|| "[]".to_string());
+        respond_json(stream, "200 OK", &body).await;
     } else if path.starts_with("/control/divergence") {
         state.control_hits.fetch_add(1, Ordering::Relaxed);
         state

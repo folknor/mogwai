@@ -147,6 +147,18 @@ weekend and its daily maintenance halt as zero-volume runs; before this the
 offline path dropped the calendar and printed straight through both, so a chart
 taken from it disagreed with the served tape it was supposed to illustrate.
 
+`tick-composition` is the offline measurement the BBO budget constants are
+derived from. It walks all five presets across eight seeds and four arrival
+configurations, counting protocol-6 and protocol-7 frames off one traversal, and
+writes the paired fixtures named by `--out-6` and `--out-7`. Each preset is
+resolved the way `serve` resolves it, so the futures are measured on their own
+size grid and session calendar. It is a long run - hours at the default
+2,000,000 parent events per combination - and `--jobs` bounds its concurrency;
+`--parents` shortens it for a smoke run, at which point the output is no longer
+the shipped fixture. Both destinations are staged and renamed at the end, and
+both documents carry the same pairing identifier so a half-replaced pair is
+detectable.
+
 `man` renders the bundled reference docs. Bare, it lists the topics; with one -
 `mogwai man cli` - it renders that document to the terminal, colour dropped when
 stdout is not a TTY or `NO_COLOR` is set. The docs travel inside the binary via

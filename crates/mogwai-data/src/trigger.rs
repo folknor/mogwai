@@ -130,6 +130,7 @@ pub fn scan_triggers(
             break;
         }
         reached_ns = event.ts_event();
+        let is_trade = matches!(event, TickEvent::Trade(_));
         if let TickEvent::Trade(trade) = event {
             let any_price_can_hit = fill_buy_max.is_some_and(|px| trade.price < px)
                 || fill_sell_min.is_some_and(|px| trade.price > px)
@@ -160,7 +161,7 @@ pub fn scan_triggers(
                 };
             }
         }
-        if reached_ns == to_ns {
+        if reached_ns == to_ns && is_trade {
             break;
         }
     }

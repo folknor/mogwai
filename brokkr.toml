@@ -30,10 +30,34 @@ gate_profile = "gate"
 # test) pair no lane runs must be justified below or `#[ignore]`d at the
 # source, so a test quietly dropping out of the run is an error rather than a
 # silence.
+# `include_ignored` pulls in two unrelated families, and only one of them is
+# what this gate is for. The socket-backed tests are `#[ignore]`d for an
+# ENVIRONMENT reason - they bind loopback listeners - and are fast, so the gate
+# runs them. The six below are `#[ignore]`d for a COST reason: they are
+# measurement instruments that walk millions of ticks, and every one of them
+# outlives the 20-second per-test hang watchdog by design. Under
+# `include_ignored` they do not report slow, they get killed and fail the gate,
+# which is how `brokkr check --gate` came to be unrunnable in this workspace.
+#
+# Skipping them costs no coverage: the audit accepts a non-run pair that is
+# `#[ignore]`d at the source, and each stays runnable by name, which is the
+# documented way to use an instrument anyway -
+# `brokkr test -p mogwai-server vol_probe` and its five siblings. Each pattern
+# below matches exactly one test; an over-broad one would silently stop running
+# a real test, and the coverage audit would then fail it as orphaned rather than
+# let it disappear.
 [test.profiles.gate]
 description = "Everything, including the socket-backed adapter tests"
 sweeps = ["workspace"]
 include_ignored = true
+skip = [
+    "vol_probe",
+    "read_market_latency_stays_within_submit_budget",
+    "dwell_is_bounded_across_run_seeds",
+    "standardized_candidate_rail_sizing",
+    "realized_return_envelope_under_regime_scaling",
+    "synthetic_spread_decomposition_at_protocol_seven",
+]
 certifies = "complete"
 
 # Doctests are off (the `[test] doctests` default) to match CI, which runs

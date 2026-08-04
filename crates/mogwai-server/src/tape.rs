@@ -7,7 +7,7 @@ use crate::{config::now_ns, source};
 use mogwai_protocol::SimClock;
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -19,9 +19,11 @@ use tokio::sync::broadcast;
 #[derive(Clone)]
 pub(crate) struct TapeFrame {
     pub(crate) payload: Arc<str>,
+    pub(crate) ts_event: u64,
 }
 pub(crate) struct Tape {
     tx: broadcast::Sender<TapeFrame>,
+    last_quote: Mutex<Option<TapeFrame>>,
     cancel: Arc<AtomicBool>,
     control: mpsc::Sender<FlowSurgeArm>,
 }
@@ -45,6 +47,7 @@ impl Tape {
         let (control, controls) = mpsc::channel();
         let tape = Arc::new(Self {
             tx,
+            last_quote: Mutex::new(None),
             cancel: Arc::new(AtomicBool::new(false)),
             control,
         });
@@ -82,6 +85,8 @@ impl Tape {
                 if worker.cancel.load(Ordering::Relaxed) {
                     break;
                 }
+                let ts_event = tick.ts_event();
+                let is_quote = matches!(tick, mogwai_data::TickEvent::Quote(_));
                 let event = match tick {
                     mogwai_data::TickEvent::Trade(trade) => {
                         mogwai_protocol::ServerMessage::Trade(trade)
@@ -93,15 +98,43 @@ impl Tape {
                 let Ok(payload) = serde_json::to_string(&event) else {
                     break;
                 };
-                drop(worker.tx.send(TapeFrame {
+                let frame = TapeFrame {
                     payload: Arc::from(payload),
-                }));
+                    ts_event,
+                };
+                worker.publish(frame, is_quote);
             }
         });
         tape
     }
-    pub(crate) fn subscribe(&self) -> broadcast::Receiver<TapeFrame> {
-        self.tx.subscribe()
+    pub(crate) fn subscribe_with_snapshot(
+        &self,
+    ) -> (broadcast::Receiver<TapeFrame>, Option<TapeFrame>) {
+        self.subscribe_with_snapshot_inner(|| {})
+    }
+    fn subscribe_with_snapshot_inner(
+        &self,
+        after_subscribe: impl FnOnce(),
+    ) -> (broadcast::Receiver<TapeFrame>, Option<TapeFrame>) {
+        let last = self
+            .last_quote
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let receiver = self.tx.subscribe();
+        after_subscribe();
+        (receiver, last.clone())
+    }
+    fn publish(&self, frame: TapeFrame, is_quote: bool) {
+        if is_quote {
+            let mut last = self
+                .last_quote
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *last = Some(frame.clone());
+            drop(self.tx.send(frame));
+        } else {
+            drop(self.tx.send(frame));
+        }
     }
     pub(crate) fn arm_flow_surge(
         &self,
@@ -197,5 +230,92 @@ fn sleep_until_wall_cancellable(
             return;
         }
         thread::sleep((due - now).min(TAPE_SLEEP_POLL));
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn a_concurrent_publish_cannot_advance_the_snapshot_past_a_queued_frame() {
+        let (tx, _) = broadcast::channel(16);
+        let tape = Arc::new(Tape {
+            tx,
+            last_quote: Mutex::new(None),
+            cancel: Arc::new(AtomicBool::new(false)),
+            control: mpsc::channel().0,
+        });
+        tape.publish(
+            TapeFrame {
+                payload: Arc::from("q1"),
+                ts_event: 1,
+            },
+            true,
+        );
+        let subscribed = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let subscriber_tape = Arc::clone(&tape);
+        let subscriber_subscribed = Arc::clone(&subscribed);
+        let subscriber_release = Arc::clone(&release);
+        let subscriber = thread::spawn(move || {
+            subscriber_tape.subscribe_with_snapshot_inner(|| {
+                subscriber_subscribed.wait();
+                subscriber_release.wait();
+            })
+        });
+        subscribed.wait();
+        let publisher_started = Arc::new(std::sync::Barrier::new(2));
+        let worker = Arc::clone(&tape);
+        let worker_started = Arc::clone(&publisher_started);
+        let publisher = thread::spawn(move || {
+            worker_started.wait();
+            worker.publish(
+                TapeFrame {
+                    payload: Arc::from("q2"),
+                    ts_event: 2,
+                },
+                true,
+            );
+        });
+        publisher_started.wait();
+        release.wait();
+        let (mut receiver, snapshot) = subscriber.join().unwrap();
+        publisher.join().unwrap();
+        let snapshot = snapshot.unwrap();
+        let queued = receiver.try_recv().expect("concurrent quote was queued");
+        assert_eq!(snapshot.ts_event, 1);
+        assert_eq!(queued.ts_event, 2);
+    }
+
+    #[test]
+    fn a_subscriber_sees_a_bbo_before_its_first_trade() {
+        let (tx, _) = broadcast::channel(16);
+        let tape = Tape {
+            tx,
+            last_quote: Mutex::new(None),
+            cancel: Arc::new(AtomicBool::new(false)),
+            control: mpsc::channel().0,
+        };
+        tape.publish(
+            TapeFrame {
+                payload: Arc::from("quote"),
+                ts_event: 10,
+            },
+            true,
+        );
+        let (mut receiver, snapshot) = tape.subscribe_with_snapshot();
+        tape.publish(
+            TapeFrame {
+                payload: Arc::from("trade"),
+                ts_event: 11,
+            },
+            false,
+        );
+        let snapshot = snapshot.expect("current BBO snapshot");
+        let trade = receiver.try_recv().expect("queued trade");
+        assert_eq!(snapshot.payload.as_ref(), "quote");
+        assert_eq!(trade.payload.as_ref(), "trade");
+        assert!(snapshot.ts_event <= trade.ts_event);
     }
 }

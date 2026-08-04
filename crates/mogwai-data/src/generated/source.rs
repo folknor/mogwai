@@ -9,7 +9,9 @@
 //! pinned golden sequence that must be re-blessed with any intentional walk
 //! mechanism change.
 
-use mogwai_protocol::{AggressorSide, InstrumentDef, MarketRegime, TradeTick, decimal_to_f64};
+use mogwai_protocol::{
+    AggressorSide, InstrumentDef, MarketRegime, QuoteTick, TradeTick, decimal_to_f64,
+};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha12Rng;
 use rand_distr::{ChiSquared, Distribution, LogNormal, Normal, Weibull};
@@ -24,13 +26,14 @@ use super::consts::{
     ARRIVAL_WEIBULL_MEAN, ARRIVAL_WEIBULL_SHAPE, DRIFT_RECENTER_FRAC, EVENT_PRICE_REPEAT_PROB,
     HIGH_REGIME_LEVEL_STEP_MULT, INTRA_EVENT_STEP_NS, LOW_REGIME_LEVEL_STEP_MULT,
     MAX_SESSION_GAP_NS, MID_CEILING, NS_PER_HOUR, REALIZED_RETURN_CEILING, SESSION_CLOSED_ARR_MULT,
-    SIZE_DECIMALS, SIZE_LOG_SIGMA, STUDENT_T_DF, TRADE_BOUNCE_HALF_WIDTH_TICKS,
+    SIZE_DECIMALS, SIZE_LOG_SIGMA, STUDENT_T_DF,
 };
 use super::dynamics::{
     ArrivalClock, BounceState, GarchVol, SweepBurst, SweepShape, draw_standardized_innovation,
 };
 use super::fingerprint::{Fingerprint, GeneratedSourceError, GeneratorScalars, SessionProfile};
 use super::numeric::{decimal_from_f64, round_lot_size};
+use super::quote::{PublishedBook, book_mid_ticks, place_book};
 use super::regime::RegimeState;
 use super::session::SessionModulator;
 
@@ -46,6 +49,7 @@ pub struct GeneratedSource {
     rng: ChaCha12Rng,
     pub(super) clock_ns: u64,
     arrival: ArrivalClock,
+    arrival_override: Option<bool>,
     pub(super) vol: GarchVol,
     session: SessionModulator,
     // `pub(super)` for the same reason as `vol` and `clock_ns`: the sibling test
@@ -65,9 +69,15 @@ pub struct GeneratedSource {
     pub(super) shape: SweepShape,
     pub(super) burst: SweepBurst,
     last_event_price_ticks: Option<f64>,
+    pending_quote: Option<QuoteTick>,
+    last_book: Option<PublishedBook>,
     surge: Option<SurgeWindow>,
     #[cfg(test)]
     pub(super) latent_updates: u64,
+    #[cfg(test)]
+    pub(super) repeat_draws: u64,
+    #[cfg(test)]
+    pub(super) rejected_repeat_draws: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,6 +249,13 @@ impl GeneratedSource {
         scalars
             .validate_size_grid(size_grid.min_size)
             .map_err(GeneratedSourceError::Scalar)?;
+        for size in [scalars.top_sizes.bid, scalars.top_sizes.ask] {
+            if size < size_grid.min_size || (size_grid.integral && size.fract() != Decimal::ZERO) {
+                return Err(GeneratedSourceError::Scalar(
+                    super::fingerprint::ScalarError { field: "top_sizes" },
+                ));
+            }
+        }
         session.validate().map_err(GeneratedSourceError::Session)?;
         let mean_event_duration_s = scalars.mean_event_duration_s;
         let calibrated_mean_s = ARRIVAL_MEAN_CAL * mean_event_duration_s;
@@ -262,6 +279,7 @@ impl GeneratedSource {
         // which the literal moves; `start_ts` is the tape anchor RegimeState
         // needs to fail-close an already-elapsed ReopenGap.
         let regime = RegimeState::new(regime, start_ts, &scalars.symbol);
+        let trade_bounce_ticks = scalars.trade_displacement_ticks.ticks();
         Ok(Self {
             tick_f64: decimal_to_f64(scalars.modal_tick),
             scalars,
@@ -275,6 +293,7 @@ impl GeneratedSource {
                 quiet: false,
                 last_quiet: false,
             },
+            arrival_override: None,
             vol,
             session: SessionModulator::new(session),
             bounce: BounceState {
@@ -292,7 +311,7 @@ impl GeneratedSource {
                 drift_ticks: 0,
                 drift_dir: 1,
                 drift_hot: false,
-                trade_bounce_ticks: TRADE_BOUNCE_HALF_WIDTH_TICKS,
+                trade_bounce_ticks,
             },
             duration_dist: Weibull::new(1.0, ARRIVAL_WEIBULL_SHAPE).expect("valid weibull"),
             normal: Normal::new(0.0, 1.0).expect("valid normal"),
@@ -305,9 +324,15 @@ impl GeneratedSource {
             shape,
             burst: SweepBurst::empty(),
             last_event_price_ticks: None,
+            pending_quote: None,
+            last_book: None,
             surge: None,
             #[cfg(test)]
             latent_updates: 0,
+            #[cfg(test)]
+            repeat_draws: 0,
+            #[cfg(test)]
+            rejected_repeat_draws: 0,
         })
     }
 
@@ -326,7 +351,19 @@ impl GeneratedSource {
         self
     }
 
+    /// Force one arrival state for the committed tick-composition measurement.
+    /// `None` restores the natural Markov chain. This is hidden from generated
+    /// API documentation and is public only because Cargo examples compile as
+    /// external crates; it is not a venue configuration seam.
+    #[doc(hidden)]
+    pub fn set_arrival_quiet_for_measurement(&mut self, quiet: Option<bool>) {
+        self.arrival_override = quiet;
+    }
+
     fn next_duration_ns(&mut self) -> u64 {
+        if let Some(quiet) = self.arrival_override {
+            self.arrival.quiet = quiet;
+        }
         let raw_eps = self.duration_dist.sample(&mut self.rng);
         self.arrival.last_quiet = self.arrival.quiet;
         let state_mean = if self.arrival.quiet {
@@ -340,6 +377,9 @@ impl GeneratedSource {
         } else {
             self.rng.random_bool(self.arrival.active_to_quiet)
         };
+        if let Some(quiet) = self.arrival_override {
+            self.arrival.quiet = quiet;
+        }
         let arr_mult = self.session.arrival_mult(self.clock_ns);
         if arr_mult >= SESSION_CLOSED_ARR_MULT {
             // Open-market path: the multiplier sampled at the instant the gap
@@ -481,32 +521,16 @@ impl GeneratedSource {
         self.vol.mid
     }
 
-    fn next_price(&mut self, mid: f64) -> (Decimal, AggressorSide) {
+    fn next_side_and_book(&mut self, mid: f64) -> (AggressorSide, PublishedBook) {
         let side = self.bounce.next_side(&mut self.rng);
         self.bounce.next_drift(&mut self.rng);
-        let mid_ticks = mid / self.tick_f64 + self.bounce.drift_ticks as f64;
-        let price_ticks = match side {
-            AggressorSide::Buyer => (mid_ticks + self.bounce.trade_bounce_ticks).ceil(),
-            AggressorSide::Seller => (mid_ticks - self.bounce.trade_bounce_ticks).floor(),
-            // Invariant-protected, not a runtime check: `side` is the return of
-            // `BounceState::next_side` directly above, whose every branch yields
-            // Buyer or Seller (its flip match collapses NoAggressor into Buyer).
-            // The generator never produces a neutral aggressor - that side exists
-            // only for the CSV/tick-rule lineage - so this arm is dead by
-            // construction. It stays as a guard so a future edit to next_side that
-            // started emitting NoAggressor would fail loudly here rather than
-            // silently printing a mid-priced trade.
-            AggressorSide::NoAggressor => unreachable!("bounce only emits buyer or seller"),
-        };
-        // `mid` is floored at one tick (see next_latent_mid), but drift_ticks
-        // is an unbounded accumulated random walk with no such floor: a long
-        // enough same-direction high-regime streak can push mid_ticks (and
-        // hence price_ticks) to zero or negative, printing a zero/negative
-        // price. Clamp the printed tick count the same way mid itself is
-        // clamped, so the drifted print can never undercut one tick.
-        let price_ticks = price_ticks.max(1.0);
-        let price = decimal_from_f64(price_ticks * self.tick_f64);
-        (price.round_dp(self.scalars.price_decimals), side)
+        let drifted_mid_ticks = mid / self.tick_f64 + self.bounce.drift_ticks as f64;
+        let book = place_book(
+            drifted_mid_ticks,
+            &self.scalars.quoted_width,
+            &self.scalars.top_sizes,
+        );
+        (side, book)
     }
 
     pub(super) fn next_size(&mut self) -> Decimal {
@@ -551,10 +575,26 @@ pub(super) fn integral_lot(latent_size_median: f64) -> f64 {
     10_f64.powf(latent_size_median.log10().floor()).max(1.0)
 }
 
+pub(super) fn repeat_is_compatible(
+    price_ticks: f64,
+    frozen_book: &PublishedBook,
+    aggressor: AggressorSide,
+) -> bool {
+    match aggressor {
+        AggressorSide::Buyer => price_ticks >= book_mid_ticks(frozen_book),
+        AggressorSide::Seller => price_ticks <= book_mid_ticks(frozen_book),
+        AggressorSide::NoAggressor => false,
+    }
+}
+
 impl TickSource for GeneratedSource {
     fn next_tick(&mut self) -> Option<TickEvent> {
+        if let Some(quote) = self.pending_quote.take() {
+            return Some(TickEvent::Quote(quote));
+        }
         if self.burst.remaining == 0 {
             self.begin_event();
+            return self.pending_quote.take().map(TickEvent::Quote);
         }
         Some(TickEvent::Trade(self.next_child()))
     }
@@ -580,6 +620,15 @@ impl TickSource for GeneratedSource {
 }
 
 impl GeneratedSource {
+    #[cfg(test)]
+    pub(super) fn diagnostic_place_book(&self) -> PublishedBook {
+        place_book(
+            self.vol.mid / self.tick_f64 + self.bounce.drift_ticks as f64,
+            &self.scalars.quoted_width,
+            &self.scalars.top_sizes,
+        )
+    }
+
     fn begin_event(&mut self) {
         let (rate_mult, children_mult) = self
             .surge
@@ -610,7 +659,7 @@ impl GeneratedSource {
             self.clock_ns = calendar.next_open_ns(self.clock_ns);
         }
         let mid = self.next_latent_mid();
-        let (price, aggressor) = self.next_price(mid);
+        let (aggressor, fresh_book) = self.next_side_and_book(mid);
         // Sweep size is conditional on the arrival state, and the two branches
         // are constructed to reproduce the DECLARED unconditional shape:
         //
@@ -658,15 +707,52 @@ impl GeneratedSource {
             self.shape.truncated += event_shape.truncated;
             count
         };
-        let price_ticks = if count == 1
-            && !self.bounce.high_regime
-            && self.rng.random_bool(EVENT_PRICE_REPEAT_PROB)
+        let repeat_draw =
+            count == 1 && !self.bounce.high_regime && self.rng.random_bool(EVENT_PRICE_REPEAT_PROB);
+        let compatible_repeat = repeat_draw
+            && self
+                .last_event_price_ticks
+                .zip(self.last_book.as_ref())
+                .is_some_and(|(price, frozen_book)| {
+                    repeat_is_compatible(price, frozen_book, aggressor)
+                });
+        #[cfg(test)]
         {
-            self.last_event_price_ticks
-                .unwrap_or_else(|| decimal_to_f64(price) / self.tick_f64)
+            self.repeat_draws += u64::from(repeat_draw);
+            self.rejected_repeat_draws += u64::from(repeat_draw && !compatible_repeat);
+        }
+        let book = if compatible_repeat {
+            self.last_book
+                .clone()
+                .expect("compatible repeat has a prior book")
         } else {
-            decimal_to_f64(price) / self.tick_f64
+            fresh_book
         };
+        let normal_price_ticks = match aggressor {
+            AggressorSide::Buyer => {
+                (book_mid_ticks(&book) + self.bounce.trade_bounce_ticks).round()
+            }
+            AggressorSide::Seller => {
+                (book_mid_ticks(&book) - self.bounce.trade_bounce_ticks).round()
+            }
+            AggressorSide::NoAggressor => unreachable!("bounce only emits buyer or seller"),
+        }
+        .max(1.0);
+        let price_ticks = if compatible_repeat {
+            self.last_event_price_ticks
+                .expect("compatible repeat has a prior price")
+        } else {
+            normal_price_ticks
+        };
+        self.pending_quote = Some(QuoteTick {
+            symbol: self.scalars.symbol.clone(),
+            bid_px: book.bid_price(self.tick_f64, self.scalars.price_decimals),
+            ask_px: book.ask_price(self.tick_f64, self.scalars.price_decimals),
+            bid_sz: book.sizes.bid,
+            ask_sz: book.sizes.ask,
+            ts_event: self.clock_ns,
+        });
+        self.last_book = Some(book);
         self.burst = SweepBurst {
             remaining: count,
             emitted: 0,

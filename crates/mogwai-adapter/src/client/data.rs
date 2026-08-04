@@ -74,6 +74,7 @@ pub struct MogwaiDataClient {
     ws_cmd: Option<UnboundedSender<WsCommand>>,
     instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     subs: Arc<Mutex<HashMap<Symbol, SubState>>>,
+    quote_delivery: Arc<Mutex<()>>,
     bars: Arc<Mutex<HashMap<BarType, BarSubState>>>,
     /// Handles for every task this client spawns (the WS reader and each
     /// short-lived `request_*`/`subscribe_instrument*` fetch). Shared
@@ -114,13 +115,14 @@ impl MogwaiDataClient {
             ws_cmd: None,
             instruments: Arc::new(Mutex::new(HashMap::new())),
             subs: Arc::new(Mutex::new(HashMap::new())),
+            quote_delivery: Arc::new(Mutex::new(())),
             bars: Arc::new(Mutex::new(HashMap::new())),
             task_handles: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
     fn subscribe_symbol(
-        &mut self,
+        &self,
         symbol: Symbol,
         kind: SubKind,
         start_ts: Option<u64>,
@@ -193,11 +195,38 @@ impl MogwaiDataClient {
         Ok(())
     }
 
+    fn subscribe_quotes_inner(
+        &self,
+        symbol: &str,
+        start_ts: Option<u64>,
+        after_enable: impl FnOnce(),
+    ) -> anyhow::Result<()> {
+        let _delivery = self
+            .quote_delivery
+            .lock()
+            .map_err(|_| anyhow::anyhow!("quote delivery mutex poisoned"))?;
+        self.subscribe_symbol(symbol.to_owned(), SubKind::Quotes, start_ts)?;
+        let cached = self
+            .subs
+            .lock()
+            .map_err(|_| anyhow::anyhow!("subscription mutex poisoned"))?
+            .get(symbol)
+            .and_then(|state| state.cached_quote.clone());
+        after_enable();
+        if let Some(quote) = cached
+            && let Some(def) = instrument_def(&self.instruments, symbol)
+        {
+            emit_quote(&quote, &self.sink()?, &def, self.sim);
+        }
+        Ok(())
+    }
+
     #[allow(clippy::needless_pass_by_value)]
     /// The mirror of `subscribe_symbol`, and equally local: dropping the last
-    /// subscriber of every kind retires the symbol's row, which stops the WS
-    /// reader forwarding its ticks. Nothing is sent to the venue, which keeps
-    /// pushing the run's one tape either way.
+    /// subscriber of every kind stops forwarding ticks. A row that has cached
+    /// a quote remains resident so a later quote subscription can replay the
+    /// current book; an as-yet uncached row is retired. Nothing is sent to the
+    /// venue, which keeps pushing the run's one tape either way.
     fn unsubscribe_symbol(&mut self, symbol: Symbol, kind: SubKind) -> anyhow::Result<()> {
         let mut subs = self
             .subs
@@ -205,7 +234,7 @@ impl MogwaiDataClient {
             .map_err(|_| anyhow::anyhow!("subscription mutex poisoned"))?;
         if let Some(state) = subs.get_mut(&symbol) {
             state.decrement(kind);
-            if state.total() == 0 {
+            if state.total() == 0 && state.cached_quote.is_none() {
                 subs.remove(&symbol);
             }
         }
@@ -350,6 +379,7 @@ impl DataClient for MogwaiDataClient {
         let connected = Arc::clone(&self.connected);
         let instruments = Arc::clone(&self.instruments);
         let subs = Arc::clone(&self.subs);
+        let quote_delivery = Arc::clone(&self.quote_delivery);
         let bars = Arc::clone(&self.bars);
         let havoc_filter = Arc::new(tokio::sync::Mutex::new(HavocFilter::from_client(
             &client_havoc,
@@ -365,9 +395,11 @@ impl DataClient for MogwaiDataClient {
             let sink = sink.clone();
             let instruments = Arc::clone(&instruments);
             let subs = Arc::clone(&subs);
+            let quote_delivery = Arc::clone(&quote_delivery);
             let bars = Arc::clone(&bars);
             async move {
-                handle_market_message(msg, &sink, &instruments, &subs, &bars, sim).await;
+                handle_market_message(msg, &sink, &instruments, &subs, &quote_delivery, &bars, sim)
+                    .await;
             }
         });
         track_task(&self.task_handles, pump_handle);
@@ -501,7 +533,7 @@ impl DataClient for MogwaiDataClient {
 
     fn subscribe_quotes(&mut self, cmd: SubscribeQuotes) -> anyhow::Result<()> {
         let symbol = symbol_from_instrument(cmd.instrument_id);
-        self.subscribe_symbol(symbol, SubKind::Quotes, start_ts_param(&cmd.params))
+        self.subscribe_quotes_inner(&symbol, start_ts_param(&cmd.params), || {})
     }
 
     fn subscribe_trades(&mut self, cmd: SubscribeTrades) -> anyhow::Result<()> {
@@ -737,24 +769,74 @@ impl DataClient for MogwaiDataClient {
 
     fn request_quotes(&self, request: RequestQuotes) -> anyhow::Result<()> {
         let sink = self.sink()?;
+        let http = self.http.clone();
+        let http_quota = self.http_quota.clone();
+        let base = self.config.http_base_url();
+        let instruments = Arc::clone(&self.instruments);
         let client_id = request.client_id.unwrap_or(self.client_id);
         let sim = self.sim;
-        track_task(
-            &self.task_handles,
-            get_runtime().spawn(async move {
-                let response = QuotesResponse::new(
+        let start = date_to_unix_nanos(request.start);
+        let end = date_to_unix_nanos(request.end);
+        if let Err(err) = ensure_on_tape(start, self.data_origin_ns) {
+            tracing::error!(error = %err, "request_quotes: refusing an off-tape window; answering empty");
+            drop(sink.send(DataEvent::Response(DataResponse::Quotes(
+                QuotesResponse::new(
                     request.request_id,
                     client_id,
                     request.instrument_id,
                     Vec::new(),
-                    date_to_unix_nanos(request.start),
-                    date_to_unix_nanos(request.end),
+                    start,
+                    end,
                     now_unix_nanos(sim),
                     request.params,
-                );
-                drop(sink.send(DataEvent::Response(DataResponse::Quotes(response))));
-            }),
-        );
+                ),
+            ))));
+            return Ok(());
+        }
+        track_task(&self.task_handles, get_runtime().spawn(async move {
+            let symbol = symbol_from_instrument(request.instrument_id);
+            let data = 'quotes: {
+                let def = match ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await {
+                    Ok(def) => def,
+                    Err(err) => {
+                        tracing::error!(%symbol, error = %err, "request_quotes: instrument lookup failed; answering empty");
+                        break 'quotes Vec::new();
+                    }
+                };
+                let limit = request.limit.map(std::num::NonZeroUsize::get);
+                let quotes = match fetch_quotes_windowed(
+                    &http,
+                    &http_quota,
+                    &base,
+                    QuoteFetch { symbol: &symbol, start, end, limit: request.limit },
+                ).await {
+                    Ok(quotes) => quotes,
+                    Err(err) => {
+                        tracing::error!(%symbol, error = %err, "request_quotes: history fetch failed; answering empty");
+                        break 'quotes Vec::new();
+                    }
+                };
+                quotes.into_iter().take(limit.unwrap_or(usize::MAX)).filter_map(|quote| {
+                    convert::quote_tick(
+                        &quote,
+                        request.instrument_id,
+                        &def,
+                        now_unix_nanos(sim),
+                    ).map_err(|err| tracing::warn!(%symbol, error = %err, "dropping historical quote: unrepresentable tick")).ok()
+                }).collect()
+            };
+            let response = QuotesResponse::new(
+                request.request_id,
+                client_id,
+                request.instrument_id,
+                data,
+                start,
+                end,
+                now_unix_nanos(sim),
+                request.params,
+            );
+            drop(sink.send(DataEvent::Response(DataResponse::Quotes(response))));
+        }));
         Ok(())
     }
 
@@ -1015,6 +1097,7 @@ struct SubState {
     quotes: usize,
     bars: usize,
     start_ts: Option<u64>,
+    cached_quote: Option<mogwai_protocol::QuoteTick>,
 }
 
 impl SubState {
@@ -1060,6 +1143,7 @@ async fn handle_market_message(
     sink: &UnboundedSender<DataEvent>,
     instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
+    quote_delivery: &Arc<Mutex<()>>,
     bars: &Arc<Mutex<HashMap<BarType, BarSubState>>>,
     sim: SimClock,
 ) {
@@ -1068,22 +1152,7 @@ async fn handle_market_message(
             emit_trade(&trade, sink, instruments, subs, bars, sim);
         }
         ServerMessage::Quote(quote) => {
-            let Some(def) = instrument_def(instruments, &quote.symbol) else {
-                warn_missing_instrument_once(&quote.symbol);
-                return;
-            };
-            let state = sub_state(subs, &quote.symbol);
-            if state.as_ref().is_some_and(|s| s.quotes > 0) {
-                let id = convert::instrument_id(&def);
-                match convert::quote_tick(&quote, id, &def, now_unix_nanos(sim)) {
-                    Ok(tick) => drop(sink.send(DataEvent::Data(Data::Quote(tick)))),
-                    Err(err) => tracing::warn!(
-                        symbol = %quote.symbol,
-                        error = %err,
-                        "dropping quote: unrepresentable tick"
-                    ),
-                }
-            }
+            handle_quote_message(&quote, sink, instruments, subs, quote_delivery, sim);
         }
         ServerMessage::Heartbeat { .. } => {
             tracing::trace!("ignoring server heartbeat on data path");
@@ -1116,6 +1185,52 @@ async fn handle_market_message(
             tracing::info!(sim_now_ns, elapsed_ns, "venue run completed on data socket");
         }
         _ => {}
+    }
+}
+
+fn handle_quote_message(
+    quote: &mogwai_protocol::QuoteTick,
+    sink: &UnboundedSender<DataEvent>,
+    instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
+    subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
+    quote_delivery: &Arc<Mutex<()>>,
+    sim: SimClock,
+) {
+    let _delivery = lock_recover(quote_delivery, "quote delivery");
+    if !retain_quote(subs, quote) {
+        return;
+    }
+    let Some(def) = instrument_def(instruments, &quote.symbol) else {
+        warn_missing_instrument_once(&quote.symbol);
+        return;
+    };
+    emit_quote(quote, sink, &def, sim);
+}
+
+fn retain_quote(
+    subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
+    quote: &mogwai_protocol::QuoteTick,
+) -> bool {
+    let mut states = lock_recover(subs, "subscriptions");
+    let state = states.entry(quote.symbol.clone()).or_default();
+    state.cached_quote = Some(quote.clone());
+    state.quotes > 0
+}
+
+fn emit_quote(
+    quote: &mogwai_protocol::QuoteTick,
+    sink: &UnboundedSender<DataEvent>,
+    def: &InstrumentDef,
+    sim: SimClock,
+) {
+    let id = convert::instrument_id(def);
+    match convert::quote_tick(quote, id, def, now_unix_nanos(sim)) {
+        Ok(tick) => drop(sink.send(DataEvent::Data(Data::Quote(tick)))),
+        Err(err) => tracing::warn!(
+            symbol = %quote.symbol,
+            error = %err,
+            "dropping quote: unrepresentable tick"
+        ),
     }
 }
 
@@ -1316,14 +1431,12 @@ fn sub_state(
 }
 struct SubStateSnapshot {
     trades: usize,
-    quotes: usize,
     bars: usize,
 }
 impl From<&SubState> for SubStateSnapshot {
     fn from(state: &SubState) -> Self {
         Self {
             trades: state.trades,
-            quotes: state.quotes,
             bars: state.bars,
         }
     }
@@ -1423,6 +1536,79 @@ async fn fetch_trades_windowed(
     }
     Ok((out, true))
 }
+
+struct QuoteFetch<'a> {
+    symbol: &'a str,
+    start: Option<UnixNanos>,
+    end: Option<UnixNanos>,
+    limit: Option<std::num::NonZeroUsize>,
+}
+
+async fn fetch_quotes(
+    http: &HttpClient,
+    quota: &HttpQuota,
+    base: &str,
+    fetch: QuoteFetch<'_>,
+) -> anyhow::Result<Vec<mogwai_protocol::QuoteTick>> {
+    let params = trade_query_params(fetch.symbol, fetch.start, fetch.end, fetch.limit)?;
+    quota.wait().await;
+    let response = http
+        .get(
+            join_url(base, "quotes"),
+            Some(&params),
+            None,
+            Some(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS),
+            None,
+        )
+        .await?;
+    ensure!(
+        response.status.is_success(),
+        "fetch quotes returned {}",
+        response.status.as_u16()
+    );
+    Ok(serde_json::from_slice(&response.body)?)
+}
+
+async fn fetch_quotes_windowed(
+    http: &HttpClient,
+    quota: &HttpQuota,
+    base: &str,
+    fetch: QuoteFetch<'_>,
+) -> anyhow::Result<Vec<mogwai_protocol::QuoteTick>> {
+    let ceiling = fetch.limit.map_or(MAX_TRADES_PER_REQUEST, |limit| {
+        limit.get().min(MAX_TRADES_PER_REQUEST)
+    });
+    let mut out = Vec::new();
+    let mut start = fetch.start;
+    for _ in 0..MAX_TRADE_PAGES {
+        let remaining = ceiling.saturating_sub(out.len());
+        if remaining == 0 {
+            break;
+        }
+        let page_limit = remaining.min(mogwai_protocol::MAX_HISTORY_LIMIT);
+        let page = fetch_quotes(
+            http,
+            quota,
+            base,
+            QuoteFetch {
+                symbol: fetch.symbol,
+                start,
+                end: fetch.end,
+                limit: std::num::NonZeroUsize::new(page_limit),
+            },
+        )
+        .await?;
+        let full = page.len() == page_limit;
+        let next = page.last().map(|quote| quote.ts_event.saturating_add(1));
+        out.extend(page);
+        if !full {
+            break;
+        }
+        let Some(next) = next else { break };
+        start = Some(UnixNanos::from(next));
+    }
+    Ok(out)
+}
 fn bar_span_reached(trades: &[TradeTick], interval: u64, limit: Option<usize>) -> bool {
     match (trades.first(), trades.last(), limit) {
         (Some(first), Some(last), Some(limit)) if interval > 0 => {
@@ -1464,4 +1650,95 @@ fn start_ts_param(params: &Option<Params>) -> Option<u64> {
     params
         .as_ref()
         .and_then(|params| params.get_u64("start_ts"))
+}
+
+#[cfg(test)]
+mod quote_cache_tests {
+    use super::*;
+    use rust_decimal::Decimal;
+
+    fn quote_for(symbol: &str, ts_event: u64) -> mogwai_protocol::QuoteTick {
+        mogwai_protocol::QuoteTick {
+            symbol: symbol.into(),
+            bid_px: Decimal::from(99),
+            ask_px: Decimal::from(100),
+            bid_sz: Decimal::ONE,
+            ask_sz: Decimal::ONE,
+            ts_event,
+        }
+    }
+
+    #[test]
+    fn a_quote_cached_before_its_instrument_resolves_is_still_replayed() {
+        let subs = Arc::new(Mutex::new(HashMap::new()));
+        assert!(!retain_quote(&subs, &quote_for("LATE", 7)));
+        let cached = lock_recover(&subs, "test")
+            .get("LATE")
+            .and_then(|state| state.cached_quote.clone())
+            .expect("cache does not depend on an instrument definition");
+        assert_eq!(cached.ts_event, 7);
+    }
+
+    #[test]
+    fn a_live_quote_cannot_overtake_the_replayed_book() {
+        let config = MogwaiDataClientConfig {
+            account_id: nautilus_model::identifiers::AccountId::from("MOGWAI-001"),
+            base_url: "ws://127.0.0.1:1/ws".into(),
+            ..MogwaiDataClientConfig::default()
+        };
+        let mut client = MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).unwrap();
+        let (sink_tx, mut sink_rx) = unbounded_channel();
+        client.sink = Some(sink_tx.clone());
+        let def = mogwai_protocol::default_instruments().remove(0);
+        client
+            .instruments
+            .lock()
+            .unwrap()
+            .insert(def.symbol.clone(), def);
+        assert!(!retain_quote(&client.subs, &quote_for("BTCUSDT", 1)));
+
+        let subscribed = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let publisher_started = Arc::new(std::sync::Barrier::new(2));
+        let live_instruments = Arc::clone(&client.instruments);
+        let live_subs = Arc::clone(&client.subs);
+        let live_delivery = Arc::clone(&client.quote_delivery);
+        std::thread::scope(|scope| {
+            let subscribed_worker = Arc::clone(&subscribed);
+            let release_worker = Arc::clone(&release);
+            let subscriber = scope.spawn(|| {
+                client
+                    .subscribe_quotes_inner("BTCUSDT", None, move || {
+                        subscribed_worker.wait();
+                        release_worker.wait();
+                    })
+                    .unwrap();
+            });
+            subscribed.wait();
+            let publisher_worker = Arc::clone(&publisher_started);
+            let live = scope.spawn(move || {
+                publisher_worker.wait();
+                handle_quote_message(
+                    &quote_for("BTCUSDT", 2),
+                    &sink_tx,
+                    &live_instruments,
+                    &live_subs,
+                    &live_delivery,
+                    SimClock::identity(),
+                );
+            });
+            publisher_started.wait();
+            release.wait();
+            subscriber.join().unwrap();
+            live.join().unwrap();
+        });
+
+        let timestamps: Vec<_> = (0..2)
+            .map(|_| match sink_rx.try_recv().unwrap() {
+                DataEvent::Data(Data::Quote(quote)) => quote.ts_event.as_u64(),
+                other => panic!("expected quote data, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(timestamps, vec![1, 2]);
+    }
 }

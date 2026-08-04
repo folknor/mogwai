@@ -342,6 +342,13 @@ def mode_default(venue: Venue) -> str:
     try:
         # No Subscribe frame is sent, and none exists to send: the venue pushes
         # the run's one tape on upgrade.
+        quote = ws.recv()
+        assert quote and quote.get("type") == "Quote", (
+            f"the first market frame must be the BBO snapshot, got {quote}"
+        )
+        assert quote["symbol"] == venue.symbol
+        assert Decimal(quote["bid_px"]) < Decimal(quote["ask_px"])
+        assert Decimal(quote["bid_sz"]) > 0 and Decimal(quote["ask_sz"]) > 0
         trade = ws.until(lambda frame: frame.get("type") == "Trade")
         assert trade, "the venue did not push its tape unbidden"
         assert trade["symbol"] == venue.symbol, (

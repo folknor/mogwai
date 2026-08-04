@@ -19,20 +19,25 @@ use crate::source::{self, InstrumentProfiles};
 /// uncapped and `GeneratedSource` never ends, so the drain needs its own budget
 /// or a far-from-market order walks forever.
 ///
-/// TERMINATION is what 5,000,000 buys: at the raw-fill cadence a multi-hour gap
-/// is ~700k ticks, so a pass that has to cross one still finishes inside the
-/// budget. It is NOT a statement about expected cost - a 100 ms pass expects
-/// about five ticks, six orders of magnitude below this.
+/// The original 5,000,000 cap covered ordinary multi-hour gaps of roughly
+/// 700,000 ticks. The much larger value is driven instead by the protocol 7
+/// REQUIRED-REACH rule: the worst measured maximum-surge p99.9 rate projects
+/// 281,920,200 frames into one 300-second volatility window. Rounded upward,
+/// this prevents a complete supported window from being refused as truncated.
 ///
-/// What the number therefore has to be read as is a WALL bound on a BLOCKING
-/// pass: `SWEEP_DRAIN_BUDGET / measured ticks-per-second` (see
-/// `reference/performance.md` for the measured synthesis throughput), which at
-/// the current throughput is on the order of seconds against a 100 ms sweep
-/// interval. A pass that actually spends more than half the budget is a pass
-/// spending seconds inside a 100 ms tick, so `scan_triggers` WARNs when one
-/// does - that warning, not this constant, is the signal that the venue is
-/// falling behind its own clock.
-pub(crate) const SWEEP_DRAIN_BUDGET: usize = 5_000_000;
+/// This is a refusal ceiling, not an acceptable latency. At the measured 2.9M
+/// synthesis ticks per second, exhausting it would occupy a blocking worker
+/// for roughly 97 seconds. `SWEEP_DRAIN_WARN_TICKS` therefore remains separate
+/// and preserves the old operational warning point.
+pub(crate) const SWEEP_DRAIN_BUDGET: usize = 282_000_000;
+
+/// Latency diagnostic, intentionally independent of the refusal budget.
+/// Protocol 7's required-reach rule enlarged the refusal ceiling to cover a
+/// maximum-surge 300-second window; scaling this warning with that ceiling
+/// would silence the original signal until the synchronous sweep had already
+/// monopolized its worker for an unacceptable interval. This preserves the
+/// old 5,000,000-budget warning point exactly.
+const SWEEP_DRAIN_WARN_TICKS: usize = 2_500_000;
 
 /// One-entry memo of the acceptance-time market reading, keyed on the SWEEP
 /// INTERVAL bucket rather than on the exact command instant.
@@ -151,6 +156,16 @@ pub(crate) fn scan_triggers(
     to_ns: u64,
     profiles: &InstrumentProfiles,
 ) -> Option<Walk> {
+    scan_triggers_with_budget(symbol, scans, to_ns, profiles, SWEEP_DRAIN_BUDGET)
+}
+
+fn scan_triggers_with_budget(
+    symbol: &str,
+    scans: &[PendingScan],
+    to_ns: u64,
+    profiles: &InstrumentProfiles,
+    budget: usize,
+) -> Option<Walk> {
     let earliest = scans.iter().map(|scan| scan.from_ns).min()?;
     let mut source =
         source::build_history_source(symbol, Some(earliest.saturating_add(1)), profiles)?;
@@ -163,14 +178,15 @@ pub(crate) fn scan_triggers(
             from_ns: scan.from_ns,
         })
         .collect();
-    let walk = mogwai_data::scan_triggers(source.as_mut(), &mapped, to_ns, SWEEP_DRAIN_BUDGET);
-    if walk.drained > SWEEP_DRAIN_BUDGET / 2 {
+    let walk = mogwai_data::scan_triggers(source.as_mut(), &mapped, to_ns, budget);
+    if walk.drained > SWEEP_DRAIN_WARN_TICKS {
         tracing::warn!(
             symbol,
             drained = walk.drained,
-            budget = SWEEP_DRAIN_BUDGET,
-            "one sweep pass drained more than half its budget; the pass is \
-             spending wall seconds inside a sweep interval"
+            budget,
+            warning_threshold = SWEEP_DRAIN_WARN_TICKS,
+            "one sweep pass crossed the independent latency warning threshold; \
+             the pass is spending wall seconds inside a sweep interval"
         );
     }
     Some(walk)
@@ -260,14 +276,13 @@ mod tests {
 
     fn trades(start: u64, count: usize) -> Vec<(u64, Decimal)> {
         let mut tape = tape(start);
-        (0..count)
-            .map(
-                |_| match tape.next_tick().expect("infinite generated tape") {
-                    TickEvent::Trade(tick) => (tick.ts_event, tick.price),
-                    TickEvent::Quote(_) => panic!("generated tape is trades-only"),
-                },
-            )
-            .collect()
+        let mut out = Vec::with_capacity(count);
+        while out.len() < count {
+            if let TickEvent::Trade(tick) = tape.next_tick().expect("infinite generated tape") {
+                out.push((tick.ts_event, tick.price));
+            }
+        }
+        out
     }
 
     fn scan(id: &str, side: Side, trigger_px: Decimal, from_ns: u64) -> PendingScan {
@@ -318,7 +333,7 @@ mod tests {
         let walk = scan_triggers("BTCUSDT", &[touch, through], ts, &profiles()).expect("walk");
         assert!(walk.hits[0].is_some());
         assert!(walk.hits[1].is_none());
-        assert_eq!(walk.drained, 1);
+        assert_eq!(walk.drained, 2);
     }
 
     #[test]
@@ -351,7 +366,8 @@ mod tests {
         // 20k prints in that window, so a day does not actually exercise the
         // drain cap.
         let to = TEST_ORIGIN + 3_650 * 24 * 3_600_000_000_000;
-        let walk = scan_triggers("BTCUSDT", &probes, to, &profiles()).expect("walk");
+        let walk =
+            scan_triggers_with_budget("BTCUSDT", &probes, to, &profiles(), 1_024).expect("walk");
         assert!(walk.reached_ns < to);
         assert!(walk.reached_ns > first.0);
         assert!(walk.hits[0].is_none());
@@ -477,7 +493,8 @@ mod tests {
         // cannot - its finest resolution is 3%, and a single refusal reads as a
         // failure. 128 instants resolves 0.78% - one refusal still clears the
         // threshold and two do not - at a 10-minute stride, which spans ~21
-        // simulated hours and keeps the sweep inside the per-test time budget.
+        // simulated hours. This ignored calibration instrument is run by name
+        // with an explicit watchdog above the ordinary 20-second ceiling.
         // The dominant cost is the tape synthesis the SPAN implies, not the
         // readings, which is why the stride shrank rather than the count.
         const PROBE_STRIDE_NS: u64 = 600_000_000_000;
@@ -572,7 +589,7 @@ mod tests {
         // The refusal census above walks every instant; the band table walks a
         // STRIDED SUBSET of them, once per multiplier. Each walk pays a
         // checkpoint restore whose residual is bounded by `CHECKPOINT_K`
-        // (262,144 ticks since the cadence rewrite), so a full cross product
+        // (1,048,576 ticks after protocol 7), so a full cross product
         // costs more than the per-test budget allows. A quantile of a band
         // scale does not need 128 points; a refusal RATE against a 1% threshold
         // does, which is why only one of the two was thinned.

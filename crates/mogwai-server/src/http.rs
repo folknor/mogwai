@@ -781,12 +781,34 @@ pub(crate) async fn trades(
 }
 
 pub(crate) async fn quotes(
-    axum::extract::Query(_query): axum::extract::Query<HistoryQuery>,
-) -> Json<Vec<QuoteTick>> {
-    // Mogwai's generated history is trades-only, so a bounded historical quote
-    // fetch is empty by construction. If synthesized top-of-book is wired in,
-    // this route grows the same seek-and-bound scan as `trades`.
-    Json(Vec::new())
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
+) -> Result<Json<Vec<QuoteTick>>, (StatusCode, String)> {
+    let limit = normalize_limit(query.limit);
+    let profiles = Arc::clone(&state.profiles);
+    let sim_now = sim_now_ns(state.sim());
+    let HistoryQuery {
+        symbol, start, end, ..
+    } = query;
+    if let Some(start) = start
+        && start > sim_now
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "requested start {start} exceeds sim-now {sim_now}; the tape cannot serve past the clock"
+            ),
+        ));
+    }
+    let end = Some(end.map_or(sim_now, |end| end.min(sim_now)));
+    let ticks =
+        tokio::task::spawn_blocking(move || bounded_quotes(&symbol, start, end, limit, &profiles))
+            .await
+            .map_err(|e| {
+                tracing::error!(%e, "quote history synthesis task failed");
+                (StatusCode::INTERNAL_SERVER_ERROR, String::new())
+            })?;
+    Ok(Json(ticks))
 }
 
 /// The single owner of `/trades` page-size policy: a missing `limit` requests a
@@ -837,12 +859,96 @@ pub(crate) fn bounded_trades(
     out
 }
 
+pub(crate) fn bounded_quotes(
+    symbol: &str,
+    start: Option<u64>,
+    end: Option<u64>,
+    limit: usize,
+    profiles: &source::InstrumentProfiles,
+) -> Vec<QuoteTick> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let Some(mut merged) = source::build_history_source(symbol, start, profiles) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    while let Some(tick) = merged.next_tick() {
+        if let Some(end) = end
+            && tick.ts_event() > end
+        {
+            break;
+        }
+        let TickEvent::Quote(quote) = tick else {
+            continue;
+        };
+        if start.is_none_or(|start| quote.ts_event >= start) {
+            out.push(quote);
+        }
+        if out.len() >= limit {
+            break;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod calendar_tests {
     use super::*;
     use mogwai_data::{SessionCalendar, WeeklyWindow};
     use mogwai_protocol::{Side, SubmitOrder, TimeInForce};
     use rust_decimal::Decimal;
+
+    fn generated_profiles() -> source::InstrumentProfiles {
+        source::set_boot_for_test(source::BootTape {
+            seeds: mogwai_protocol::RunSeeds::from_run_seed(42),
+            regime: None,
+        });
+        source::InstrumentProfiles::defaults()
+    }
+
+    #[test]
+    fn bounded_quotes_respects_the_window_and_the_limit() {
+        let profiles = generated_profiles();
+        let first = bounded_quotes("BTCUSDT", Some(0), None, 4, &profiles);
+        assert_eq!(first.len(), 4);
+        assert!(
+            first
+                .windows(2)
+                .all(|pair| pair[0].ts_event <= pair[1].ts_event)
+        );
+        let start = first[1].ts_event;
+        let end = first[2].ts_event;
+        let bounded = bounded_quotes("BTCUSDT", Some(start), Some(end), 10, &profiles);
+        assert!(!bounded.is_empty());
+        assert!(
+            bounded
+                .iter()
+                .all(|quote| (start..=end).contains(&quote.ts_event))
+        );
+    }
+
+    #[test]
+    fn bounded_quotes_reproduce_the_live_quote_sequence() {
+        let profiles = generated_profiles();
+        let history = bounded_quotes("BTCUSDT", Some(0), None, 100, &profiles);
+        let mut live = source::build_live_source("BTCUSDT", &profiles, 0).unwrap();
+        let mut live_quotes = Vec::new();
+        while live_quotes.len() < history.len() {
+            if let TickEvent::Quote(quote) = live.next_tick().unwrap() {
+                live_quotes.push(quote);
+            }
+        }
+        assert_eq!(
+            serde_json::to_string(&history).unwrap(),
+            serde_json::to_string(&live_quotes).unwrap()
+        );
+    }
+
+    #[test]
+    fn the_quotes_route_is_no_longer_empty() {
+        assert!(!bounded_quotes("BTCUSDT", Some(0), None, 1, &generated_profiles()).is_empty());
+    }
 
     #[test]
     fn a_market_order_while_closed_is_rejected_not_filled_off_a_stale_print() {

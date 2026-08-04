@@ -23,7 +23,7 @@ use super::source::GeneratedSource;
 /// would (the golden sequence is unchanged, and `checkpoint_resume_is_byte_identical`
 /// pins the resume path directly).
 /// Hard ceiling on the number of snapshots one `CheckpointIndex` retains. Once
-/// `extend_to` would push past this, `coarsen` halves the count and doubles the
+/// `extend_toward` would push past this, `coarsen` halves the count and doubles the
 /// spacing, so the index's memory is bounded by `MAX_CHECKPOINTS` generator
 /// clones regardless of how long an accelerated session runs - closing the
 /// unbounded per-`k`-ticks growth. 4096 keeps coarsening rare (the first only
@@ -43,11 +43,11 @@ pub struct CheckpointIndex {
     since_snapshot: usize,
     /// Snapshot spacing in ticks.
     k: usize,
-    /// Runaway backstop: the most ticks `extend_to` will walk the lead in a
+    /// Runaway backstop: the most ticks `extend_toward` will walk the lead in a
     /// single call. The server refuses a `start` below `data_origin`, but
     /// nothing rejects an absurd `start` *above* the live frontier (a bogus or
     /// far-future window), and `GeneratedSource::next_tick` never ends - so an
-    /// uncapped `extend_to` would spin the path-dependent walk indefinitely
+    /// uncapped `extend_toward` would spin the path-dependent walk indefinitely
     /// while holding the shared index mutex. A target past this bound leaves the
     /// frontier short; the caller's own `BoundedSeek` then caps too and the seek
     /// yields an empty page instead of hanging. Sized to the same budget as the
@@ -79,7 +79,7 @@ impl CheckpointIndex {
     /// the new delta, so the from-origin walk is paid once across all seeks. The
     /// walk is bounded by `max_extend` per call (the runaway backstop); a target
     /// beyond that leaves the lead short and the caller's seek caps the rest.
-    fn extend_to(&mut self, target: u64) {
+    pub fn extend_toward(&mut self, target: u64) -> usize {
         let mut walked = 0usize;
         while self.lead.clock_ns() < target {
             if walked >= self.max_extend {
@@ -98,6 +98,7 @@ impl CheckpointIndex {
                 }
             }
         }
+        walked
     }
 
     /// Halve the snapshot count once it exceeds `MAX_CHECKPOINTS` by dropping
@@ -131,7 +132,7 @@ impl CheckpointIndex {
     /// the exact target (< K ticks) via the normal seek; the returned source is
     /// an independent clone, so the shared index is untouched by that replay.
     pub fn source_at_or_before(&mut self, target: u64) -> GeneratedSource {
-        self.extend_to(target);
+        self.extend_toward(target);
         // Strictly-before partition (`<`, not `<=`): a checkpoint's `clock_ns`
         // is the `ts_event` of the last tick it has ALREADY consumed, so a
         // checkpoint whose `clock_ns` EQUALS the target has the boundary tick
@@ -161,5 +162,11 @@ impl CheckpointIndex {
     #[must_use]
     pub fn checkpoint_count(&self) -> usize {
         self.checkpoints.len()
+    }
+
+    /// Timestamp reached by the shared lead after the latest bounded extension.
+    #[must_use]
+    pub fn frontier_ns(&self) -> u64 {
+        self.lead.clock_ns()
     }
 }

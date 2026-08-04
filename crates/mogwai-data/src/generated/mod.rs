@@ -30,6 +30,7 @@ mod consts;
 mod dynamics;
 mod fingerprint;
 mod numeric;
+mod quote;
 mod regime;
 mod session;
 mod source;
@@ -43,5 +44,9 @@ pub use fingerprint::{
     AbsReturnAcf, AnchorRange, EmpiricalRanges, Fingerprint, GeneratedSourceError,
     GeneratorScalars, GoldenTargets, MinMedianMax, ScalarDiagnostic, ScalarError, SessionProfile,
     SessionProfileError, TickTraversal,
+};
+pub use quote::{
+    CalibrationProvenance, PublishedBook, QuotedWidth, TopOfBookSizes, TradeDisplacement,
+    book_mid_ticks, place_book,
 };
 pub use source::{GeneratedSource, SizeGrid};

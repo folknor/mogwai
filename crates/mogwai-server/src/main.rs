@@ -16,6 +16,7 @@ mod run;
 mod source;
 mod sweeper;
 mod tape;
+mod tick_composition;
 mod ws;
 
 /// The fill-timing distribution certification. Test-only, and here rather than
@@ -79,6 +80,8 @@ enum Command {
     Serve(ServeArgs),
     Gen(r#gen::GenArgs),
     Presets(PresetArgs),
+    /// Measure BBO protocol composition and write the paired budget fixtures.
+    TickComposition(tick_composition::TickCompositionArgs),
     /// Print a bundled reference doc, or list the topics.
     Man(ManArgs),
 }
@@ -116,6 +119,7 @@ fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Serve(args) => serve(args),
         Command::Gen(args) => r#gen::run(args),
+        Command::TickComposition(args) => tick_composition::run(&args),
         Command::Presets(args) => {
             if let Some(name) = args.name {
                 let document = config::preset_document(&name)

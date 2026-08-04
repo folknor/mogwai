@@ -248,6 +248,12 @@ pub struct GeneratorScalars {
     /// different latent medians collapse onto an observed one-contract median.
     pub latent_size_median: Decimal,
     pub vol_scalar: f64,
+    #[serde(default)]
+    pub quoted_width: super::quote::QuotedWidth,
+    #[serde(default)]
+    pub top_sizes: super::quote::TopOfBookSizes,
+    #[serde(default)]
+    pub trade_displacement_ticks: super::quote::TradeDisplacement,
 }
 
 impl GeneratorScalars {
@@ -273,6 +279,9 @@ impl GeneratorScalars {
                     / (SIZE_LOG_SIGMA.powi(2) / 2.0).exp(),
             ),
             vol_scalar: VOL_SCALAR,
+            quoted_width: super::quote::QuotedWidth::default(),
+            top_sizes: super::quote::TopOfBookSizes::uncalibrated(Decimal::new(1, SIZE_DECIMALS)),
+            trade_displacement_ticks: super::quote::TradeDisplacement::default(),
         }
     }
 
@@ -294,6 +303,9 @@ impl GeneratorScalars {
                     / (SIZE_LOG_SIGMA.powi(2) / 2.0).exp(),
             ),
             vol_scalar: VOL_SCALAR,
+            quoted_width: super::quote::QuotedWidth::default(),
+            top_sizes: super::quote::TopOfBookSizes::uncalibrated(Decimal::new(1, SIZE_DECIMALS)),
+            trade_displacement_ticks: super::quote::TradeDisplacement::default(),
         }
     }
 
@@ -304,6 +316,21 @@ impl GeneratorScalars {
         // the same empty string and cross-contaminating instruments. Reject it.
         if self.symbol.is_empty() {
             return Err(ScalarError { field: "symbol" });
+        }
+        for (field, provenance) in [
+            ("quoted_width", self.quoted_width.provenance()),
+            ("top_sizes", &self.top_sizes.provenance),
+            (
+                "trade_displacement_ticks",
+                self.trade_displacement_ticks.provenance(),
+            ),
+        ] {
+            if matches!(
+                provenance,
+                super::quote::CalibrationProvenance::Fitted { corpus } if corpus.trim().is_empty()
+            ) {
+                return Err(ScalarError { field });
+            }
         }
         if self.modal_tick <= Decimal::ZERO {
             return Err(ScalarError {
@@ -392,6 +419,18 @@ impl GeneratorScalars {
         if !strictly_positive_finite(self.vol_scalar) {
             return Err(ScalarError {
                 field: "vol_scalar",
+            });
+        }
+        // Deliberately no upper coupling to `quoted_width`: the displayed BBO
+        // is only the top level, and an aggressive parent may print beyond the
+        // touch when it consumes a thin book. Width and displacement are
+        // independently calibrated observables; requiring displacement to fit
+        // inside half the width would collapse those seams back into one.
+        if !self.trade_displacement_ticks.ticks().is_finite()
+            || self.trade_displacement_ticks.ticks() < 0.0
+        {
+            return Err(ScalarError {
+                field: "trade_displacement_ticks",
             });
         }
         // `vol_scalar` is the unconditional sigma, and `GarchVol` initializes

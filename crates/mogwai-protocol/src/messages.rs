@@ -992,6 +992,17 @@ mod tests {
 
         let server_frames = [
             (
+                ServerMessage::Quote(QuoteTick {
+                    symbol: "BTCUSDT".into(),
+                    bid_px: Decimal::from(99),
+                    ask_px: Decimal::from(100),
+                    bid_sz: Decimal::from(2),
+                    ask_sz: Decimal::from(3),
+                    ts_event: 7,
+                }),
+                r#"{"type":"Quote","symbol":"BTCUSDT","bid_px":"99","ask_px":"100","bid_sz":"2","ask_sz":"3","ts_event":7}"#,
+            ),
+            (
                 ServerMessage::RunComplete {
                     sim_now_ns: 123,
                     elapsed_ns: 45,

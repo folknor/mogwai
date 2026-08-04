@@ -52,10 +52,22 @@ away from zero and floored at one contract, so no print becomes the zero
 quantity nautilus drops. `latent_size_median` is stated directly in the
 instrument's native size unit and names the continuous lognormal center before
 that grid is applied. The floor truncates its lower tail, so it is deliberately
-not called the observed size median. `TAPE_PROTOCOL_VERSION` is 6; version 5
+not called the observed size median. `TAPE_PROTOCOL_VERSION` is 7; version 5
 removed the quote-notional proxy whose value was actually arithmetic mean
 notional and made the latent size distribution explicit, and version 6 repaired
-the GARCH recursion's second moment.
+the GARCH recursion's second moment. Version 7 added the observable top of book.
+
+Each generated parent event publishes one BBO before its first trade. The book
+has an exact positive integer-tick width and is centered, with one rounding, on
+the drifted latent mid. Every child in the parent sweep shares that book. Parent
+trades are displaced from the published midpoint, so the default one-tick width
+and half-tick displacement print at the touch. Width, top sizes, and trade
+displacement are separate per-instrument calibration seams and remain explicitly
+uncalibrated until a measured TBBO corpus supplies them. Displacement is not
+capped by width: the published BBO is only the top level, so an aggressive
+parent may print beyond the touch without making the book malformed. A connecting WebSocket
+receives the current BBO snapshot before later tape frames, and the adapter
+retains that snapshot until its host activates quote delivery.
 
 The volatility innovation is standardized to unit variance before it reaches
 that recursion. The `a0` derivation has always assumed this, but the innovation
@@ -144,10 +156,11 @@ The protocol crate owns every JSON type shared by server and adapter. The
 adapter uses WebSocket streaming only; `/trades` remains a request endpoint,
 which is how history and warmup are fetched.
 
-The generated tape publishes raw fills, not aggregated trades. One parent
+The generated tape publishes BBO updates and raw fills, not aggregated trades. One parent
 match event updates the latent market once and emits a same-side sweep of one
 or more children, one microsecond apart, walking monotonically in the take
-direction. Consumers that count ticks therefore count raw fills. At the new
+direction. Its BBO is emitted first at the parent timestamp and remains the
+governing book for every child. Consumers that count trade ticks therefore count raw fills. At the new
 cadence a 300-second fill-band window carries about 15,700 returns; the L2
 probe observed zero cold or budget refusals in 128 readings spanning ~21
 simulated hours, closing the former cold-reading defect without changing the

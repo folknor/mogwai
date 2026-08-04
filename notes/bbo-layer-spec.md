@@ -4,7 +4,13 @@ Written against `reference/technical-implementation-spec.md`, which defines what
 this document must contain. Spawned from `DATA-PURCHASE-REPORT.md` section 14.4,
 item B, and step 5c of section 11.
 
-Status: NOT IMPLEMENTED. This is the specification only.
+Status: IMPLEMENTED 2026-08-04.
+
+Post-implementation correction: the measured 24-hour reach is enforced by
+`MAX_WARMUP_MATERIALIZATION_TICKS` across lock-releasing chunks.
+`MAX_EXTEND_TICKS` retains its original per-lock runaway-backstop purpose. The
+sweep refusal ceiling was resized, but its latency warning remains at the old
+2,500,000-tick signal rather than scaling with that ceiling.
 
 Revision 5, after five review rounds. Revision 1's survey claimed the blast
 radius was small because "downstream consumers already filter"; that claim was
@@ -14,8 +20,9 @@ each revision got wrong so the same shortcut is not taken again.
 
 ## 0. What this closes, and what it deliberately does not
 
-`mogwai` publishes no market. Nothing in the workspace constructs a `QuoteTick`:
-the type exists in `mogwai-protocol`, `TickEvent::Quote` exists in `mogwai-data`,
+Before this landing, `mogwai` published no market. Nothing in the workspace
+constructed a `QuoteTick`: the type existed in `mogwai-protocol`,
+`TickEvent::Quote` existed in `mogwai-data`,
 the server's tape loop relays that variant, `mogwai-adapter` converts it to a
 nautilus `QuoteTick` and dispatches it to the host - and no source has ever
 produced one. A subscribed host therefore never sees a bid or an ask, and
@@ -63,7 +70,7 @@ because the two landings are separated by a purchase.
 | `mogwai-server` `fills.rs:267` | **BREAKS LOUDLY.** `TickEvent::Quote(_) => panic!("generated tape is trades-only")` in a test helper. |
 | `mogwai-adapter` `convert::quote_tick` | written and wired, DEAD CODE: never run against a real quote. Uses the panicking `NautilusQuoteTick::new`. |
 | `mogwai-adapter` `client/data.rs:1076` | gates quote dispatch on `s.quotes > 0`. Defeats the connect-time snapshot - see section 4.3. |
-| `source::CHECKPOINT_K`, `fills::SWEEP_DRAIN_BUDGET`, `source::MAX_EXTEND_TICKS` | counted in TICKS. Their sim-time reach shrinks - see section 5.2. |
+| `source::CHECKPOINT_K`, `fills::SWEEP_DRAIN_BUDGET`, `source::MAX_WARMUP_MATERIALIZATION_TICKS` | counted in TICKS. Their sim-time reach shrinks - see section 5.2. |
 
 **`last_trade_at_or_before` is the one that matters most.** It backs `read_last`
 and `stamp_market_price`, which is the order-admission and stale-print path. A
@@ -544,9 +551,10 @@ pending_quote: Option<QuoteTick>,
 last_book: Option<PublishedBook>,
 ```
 
-Both are plain `Clone` fields, which is what makes section 5's claim that
-`CheckpointIndex` needs no change true - it snapshots the whole source by
-`Clone`. Section 6 tests a resumed stream rather than resting on that.
+Both are plain `Clone` fields, so `CheckpointIndex` needs no new snapshot state:
+it snapshots the whole source by `Clone`. Its extension API did gain a bounded
+chunk operation for the post-implementation reach/backstop separation above.
+Section 6 tests a resumed stream rather than resting on that.
 
 **Golden re-bless.** `clean_regime_is_byte_identical` pins a Debug-formatted
 prefix. Quotes interleave and some prices shift, so it is regenerated - with the
@@ -556,7 +564,7 @@ mechanically pasted.
 
 ### 5.2 The tick budgets
 
-`CHECKPOINT_K` (262144), `SWEEP_DRAIN_BUDGET` (5000000) and `MAX_EXTEND_TICKS`
+`CHECKPOINT_K` (262144), `SWEEP_DRAIN_BUDGET` (5000000) and the cumulative warmup reach
 are counted in TICKS. Adding one quote per parent event changes mean ticks per
 parent from `C` to `C + 1`, an inflation factor of
 
@@ -616,7 +624,8 @@ The repairs are behavior-preserving TODAY - no quote exists yet - which is
 exactly why they land first: the suite stays green at this boundary and the
 change is reviewable in isolation.
 
-**Landing A also carries brick 7's instrument**, `examples/tick_composition.rs`,
+**Landing A also carries brick 7's instrument**, the `mogwai tick-composition`
+subcommand,
 and commits its protocol-6 output as `analysis/tick-composition-protocol-6.json`.
 It has to: after landing B the tape is protocol 7 and there is no switch back, so
 a baseline not captured here cannot be captured at all. See brick 7.
@@ -627,7 +636,7 @@ asserted. That test is written here and outlives the landing. Plus the baseline
 run itself:
 
 ```
-brokkr run tick_composition -- --out analysis/tick-composition-protocol-6.json
+brokkr run mogwai -- tick-composition --out-6 analysis/tick-composition-protocol-6.json --out-7 analysis/tick-composition-protocol-7.json
 ```
 
 ### Brick 1: the quote model types
@@ -836,7 +845,7 @@ configurations:
 sizing them off it would miss the case that actually exhausts them.** It captures
 quote inflation and nothing else. A maximum `FlowSurge::rate_mult` shortens the
 gaps BETWEEN parents without changing ticks per parent at all, so it can drain
-`SWEEP_DRAIN_BUDGET`, exhaust `MAX_EXTEND_TICKS` and overrun `fanout_depth` while
+`SWEEP_DRAIN_BUDGET`, exhaust the cumulative warmup reach and overrun `fanout_depth` while
 the ratio reads 1.0. Every budget except the composition record is denominated in
 time or in wall rate, so the measurement must be too:
 
@@ -845,7 +854,7 @@ time or in wall rate, so the measurement must be too:
 | composition (the record, not a sizing input) | `ticks_per_parent` |
 | `SWEEP_DRAIN_BUDGET` | ticks observed within one `VOL_WINDOW_NS` (300 s) window |
 | `CHECKPOINT_K` | ticks per simulated second |
-| `MAX_EXTEND_TICKS` | ticks within the longest warmup any preset configures |
+| `MAX_WARMUP_MATERIALIZATION_TICKS` | ticks within the longest warmup any preset configures |
 | `fanout_depth` | peak frames per WALL second, per the named speed policy below |
 
 `fanout_depth` is the one that is not a simulated-time quantity: the ring buffers
@@ -880,7 +889,7 @@ by it:
 - `SWEEP_DRAIN_BUDGET` must cover a full `VOL_WINDOW_NS` at the worst measured
   in-window tick count, since `vol_reading` refusing on budget is what makes the
   fill band fall back.
-- `MAX_EXTEND_TICKS` must reach the longest warmup any shipped preset configures,
+- `MAX_WARMUP_MATERIALIZATION_TICKS` must reach the longest warmup any shipped preset configures,
   at the worst measured rate.
 - `fanout_depth` must hold at least the same number of WALL SECONDS of tape it
   holds today at 65,536 frames.
@@ -907,7 +916,7 @@ does not make it.
 **Rounding.** `CHECKPOINT_K` rounds up to the next power of two. Nothing in the
 chain arithmetic requires that, but the constant has been a power of two since it
 was introduced and keeping the property costs nothing. `SWEEP_DRAIN_BUDGET` and
-`MAX_EXTEND_TICKS` round up to the next multiple of 1,000,000. `fanout_depth`
+`MAX_WARMUP_MATERIALIZATION_TICKS` round up to the next multiple of 1,000,000. `fanout_depth`
 rounds up to the next power of two, matching its 65,536 default. Rounding is
 always up; a budget rounded down is a refusal.
 
@@ -950,9 +959,13 @@ not switchable, by section 7's own rule.
 So the instrument and its protocol-6 baseline land in **Landing A**, while the
 tape is still protocol 6:
 
-- `crates/mogwai-data/examples/tick_composition.rs`, alongside the existing
-  `fill_walk_bench.rs` example, driving all 160 preset-seed-configuration
-  combinations and every statistic in the table above.
+- `crates/mogwai-server/src/tick_composition.rs`, the `mogwai tick-composition`
+  subcommand, driving all 160 preset-seed-configuration combinations and every
+  statistic in the table above. It sits in the server beside `gen` rather than
+  in a `mogwai-data` example because each preset must be measured through the
+  profile the venue boots - preset inheritance, size grid, session profile and
+  calendar - and that resolution is `config::profile_from_preset`, unreachable
+  from a lower crate.
 - Output: one JSON document per protocol version, keyed by
   `(preset, seed, configuration)`, each entry carrying `ticks_per_parent`,
   `ticks_per_vol_window`, `ticks_per_sim_second`, `ticks_per_warmup` and
@@ -963,15 +976,19 @@ tape is still protocol 6:
   is the only way the ratio can be computed after landing B, and regenerating it
   later would silently measure a different tape.
 
-Exact commands:
+Exact command:
 
 ```
-brokkr run tick_composition -- --out analysis/tick-composition-protocol-6.json
-brokkr run tick_composition -- --out analysis/tick-composition-protocol-7.json
+brokkr run mogwai -- tick-composition --out-6 analysis/tick-composition-protocol-6.json --out-7 analysis/tick-composition-protocol-7.json
 ```
 
-The first runs in Landing A and its output is committed. The second runs in
-brick 7. The ratios are computed by pairing the two files on
+One invocation emits both fixtures. Protocol 6 is a count projection of the
+protocol-7 tape - quote placement consumes no randomness and moves neither
+timestamps nor child counts - so a separate protocol-6 pass would rebuild an
+identical stream to count a subset of it. Both counter sets ride one traversal,
+which pairs the fixtures by construction. `--jobs N` sets the worker count and
+defaults to the machine's parallelism; `--parents N` sets the per-combination
+sample size. The ratios are computed by pairing the two files on
 `(preset, seed, configuration)` and taking the worst ratio per statistic, per
 section above - never by comparing aggregates across files.
 

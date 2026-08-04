@@ -29,6 +29,9 @@ start_price = "21000"
 # the same setting mean quote currency for spot and contracts for futures.
 latent_size_median = "1"
 vol_scalar = 0.000001
+quoted_width = { ticks = 1, provenance = { kind = "uncalibrated" } }
+top_sizes = { bid = "1", ask = "1", provenance = { kind = "uncalibrated" } }
+trade_displacement_ticks = { ticks = 0.5, provenance = { kind = "uncalibrated" } }
 # Exchange-local CME hours: Sunday 18:00 through Friday 17:00 Chicago time,
 # with the daily 16:15-16:30 maintenance halt and the 17:00-18:00 break, and a
 # genuinely shut Saturday. Minutes count from local Sunday 00:00. Local minute
@@ -74,6 +77,13 @@ open_windows = [
 "generator.start_price" = { kind = "declared", rationale = "representative Nasdaq 100 level" }
 "generator.latent_size_median" = { kind = "declared", rationale = "one contract before whole-contract quantization", accepted_diagnostics = ["derived-mean-notional-outside-empirical-corpus-range"] }
 "generator.vol_scalar" = { kind = "declared", rationale = "shared baseline pending an MNQ volatility fit" }
+"generator.quoted_width.ticks" = { kind = "declared", rationale = "one-tick placeholder pending a TBBO fit" }
+"generator.quoted_width.provenance.kind" = { kind = "declared", rationale = "explicitly uncalibrated" }
+"generator.top_sizes.bid" = { kind = "declared", rationale = "minimum tradable placeholder pending a TBBO fit" }
+"generator.top_sizes.ask" = { kind = "declared", rationale = "minimum tradable placeholder pending a TBBO fit" }
+"generator.top_sizes.provenance.kind" = { kind = "declared", rationale = "explicitly uncalibrated" }
+"generator.trade_displacement_ticks.ticks" = { kind = "declared", rationale = "touch-print placeholder pending a TBBO fit" }
+"generator.trade_displacement_ticks.provenance.kind" = { kind = "declared", rationale = "explicitly uncalibrated" }
 "calendar.utc_offset_minutes" = { kind = "declared", rationale = "CME central time; DST is declared unmodelled" }
 "calendar.settlement_minute_of_day" = { kind = "declared", rationale = "16:00 local daily settlement" }
 "calendar.open_windows" = { kind = "declared", rationale = "published CME equity index hours" }

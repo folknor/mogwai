@@ -127,9 +127,14 @@ fn run_into(args: &GenArgs, sink: &mut impl Write) -> anyhow::Result<()> {
 
     let mut source = build_source(args)?;
     let start = args.start;
-    let trades = std::iter::from_fn(move || match source.next_tick() {
-        Some(TickEvent::Trade(t)) => Some(t),
-        _ => None,
+    let trades = std::iter::from_fn(move || {
+        loop {
+            match source.next_tick() {
+                Some(TickEvent::Trade(t)) => break Some(t),
+                Some(TickEvent::Quote(_)) => {}
+                None => break None,
+            }
+        }
     })
     .take_while(move |t| t.ts_event < end);
 
@@ -684,15 +689,7 @@ mod tests {
         for _ in 0..50 {
             let cli_tick = cli_source.next_tick().expect("cli tick");
             let direct_tick = direct_source.next_tick().expect("direct tick");
-            let TickEvent::Trade(cli_trade) = cli_tick else {
-                panic!("generator emits trades");
-            };
-            let TickEvent::Trade(direct_trade) = direct_tick else {
-                panic!("generator emits trades");
-            };
-            assert_eq!(cli_trade.ts_event, direct_trade.ts_event);
-            assert_eq!(cli_trade.price, direct_trade.price);
-            assert_eq!(cli_trade.size, direct_trade.size);
+            assert_eq!(format!("{cli_tick:?}"), format!("{direct_tick:?}"));
         }
     }
 

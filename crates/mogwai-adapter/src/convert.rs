@@ -224,7 +224,7 @@ pub(crate) fn quote_tick(
     def: &InstrumentDef,
     ts_init: UnixNanos,
 ) -> anyhow::Result<NautilusQuoteTick> {
-    Ok(NautilusQuoteTick::new(
+    NautilusQuoteTick::new_checked(
         id,
         price(q.bid_px, def.price_precision)?,
         price(q.ask_px, def.price_precision)?,
@@ -232,7 +232,8 @@ pub(crate) fn quote_tick(
         quantity(q.ask_sz, def.size_precision)?,
         UnixNanos::from(q.ts_event),
         ts_init,
-    ))
+    )
+    .context("convert quote tick")
 }
 
 pub(crate) fn instrument_any(

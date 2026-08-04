@@ -13,10 +13,19 @@ use super::consts::{
 };
 use super::numeric::decimal_from_f64;
 use super::session::{utc_hour, utc_hour_dow};
-use super::source::integral_lot;
+use super::source::{integral_lot, repeat_is_compatible};
 use super::*;
 use rust_decimal::Decimal;
 use std::collections::HashSet;
+
+fn next_trade(source: &mut GeneratedSource) -> mogwai_protocol::TradeTick {
+    loop {
+        match source.next_tick().expect("infinite generated tape") {
+            TickEvent::Trade(trade) => return trade,
+            TickEvent::Quote(_) => {}
+        }
+    }
+}
 
 const DRAW: usize = 2_000_000;
 // PARENT EVENTS, not prints. The day-of-week assertions below need at least a
@@ -327,7 +336,7 @@ fn monotonic_clock() {
     let mut prior = 0;
     for _ in 0..10_000 {
         let tick = src.next_tick().expect("unbounded generated source");
-        assert!(tick.ts_event() > prior);
+        assert!(tick.ts_event() >= prior);
         prior = tick.ts_event();
     }
 }
@@ -338,9 +347,7 @@ fn on_grid_prices_and_native_aggressor() {
     let scalars = GeneratorScalars::xbtusd_anchor(&fp);
     let mut src = GeneratedSource::new(scalars.clone(), 42, 0, &fp, None);
     for _ in 0..10_000 {
-        let TickEvent::Trade(trade) = src.next_tick().expect("trade") else {
-            unreachable!("generated source emits trades")
-        };
+        let trade = next_trade(&mut src);
         assert_eq!((trade.price / scalars.modal_tick).fract(), Decimal::ZERO);
         assert!(matches!(
             trade.aggressor,
@@ -367,9 +374,7 @@ fn fine_grid_prices_stay_on_grid() {
     assert_eq!(scalars.modal_tick, Decimal::new(1, 4));
     let mut src = GeneratedSource::new(scalars.clone(), 42, 0, &fp, None);
     for _ in 0..10_000 {
-        let TickEvent::Trade(trade) = src.next_tick().expect("trade") else {
-            unreachable!("generated source emits trades")
-        };
+        let trade = next_trade(&mut src);
         assert_eq!(
             (trade.price / scalars.modal_tick).fract(),
             Decimal::ZERO,
@@ -402,9 +407,7 @@ fn checkpoint_resume_is_byte_identical() {
     let mut reference = GeneratedSource::new(scalars.clone(), seed, origin_ts, &fp, None);
     let ref_ticks: Vec<(u64, Decimal, Decimal, AggressorSide)> = (0..5_000)
         .map(|_| {
-            let TickEvent::Trade(t) = reference.next_tick().expect("trade") else {
-                unreachable!("generated source emits trades")
-            };
+            let t = next_trade(&mut reference);
             (t.ts_event, t.price, t.size, t.aggressor)
         })
         .collect();
@@ -428,20 +431,17 @@ fn checkpoint_resume_is_byte_identical() {
 
     // Drain the residual up to the target tick, then compare the tail to the
     // reference: same ts, price, size AND aggressor, tick for tick.
-    let mut tick = resumed.next_tick().expect("trade");
-    while tick.ts_event() < target {
-        tick = resumed.next_tick().expect("trade");
+    let mut tick = next_trade(&mut resumed);
+    while tick.ts_event < target {
+        tick = next_trade(&mut resumed);
     }
     for expected in &ref_ticks[3_000..3_200] {
-        let TickEvent::Trade(t) = tick else {
-            unreachable!("generated source emits trades")
-        };
         assert_eq!(
-            (t.ts_event, t.price, t.size, t.aggressor),
+            (tick.ts_event, tick.price, tick.size, tick.aggressor),
             *expected,
             "resumed tail diverged"
         );
-        tick = resumed.next_tick().expect("trade");
+        tick = next_trade(&mut resumed);
     }
 }
 
@@ -470,7 +470,7 @@ fn checkpoint_resume_at_exact_boundary_ts_returns_boundary_tick() {
         })
         .collect();
 
-    // The 3K-th tick (0-based index 3K-1) is exactly where extend_to
+    // The 3K-th tick (0-based index 3K-1) is exactly where extend_toward
     // pushes its third interior snapshot, so that snapshot's clock_ns
     // EQUALS this tick's ts_event - the forced collision. The from-origin
     // seek semantics (first tick with ts_event >= target) return this
@@ -482,7 +482,7 @@ fn checkpoint_resume_at_exact_boundary_ts_returns_boundary_tick() {
     let origin = GeneratedSource::new(scalars, seed, origin_ts, &fp, None);
     let mut index = CheckpointIndex::new(origin, k, 100_000);
     let mut resumed = index.source_at_or_before(target);
-    // Origin plus exactly three interior snapshots: extend_to stops the
+    // Origin plus exactly three interior snapshots: extend_toward stops the
     // moment the lead reaches the target, right after snapshotting it -
     // proof the collision this test is about actually occurred.
     assert_eq!(index.checkpoint_count(), 4);
@@ -582,18 +582,24 @@ fn checkpoint_extension_is_capped() {
     let mut index = CheckpointIndex::new(origin, 64, cap);
 
     // A target a decade of nanoseconds away is unreachable within the cap; the
-    // walk stops at the bound instead of running forever.
+    // walk stops at the bound instead of running forever. A second call can
+    // make another bounded chunk, which lets a legitimate boot release its
+    // external lock between chunks without weakening this per-call ceiling.
     let unreachable_target = origin_ts + 315_360_000_000_000_000;
+    assert_eq!(index.extend_toward(unreachable_target), cap);
+    let first_frontier = index.frontier_ns();
+    assert_eq!(index.extend_toward(unreachable_target), cap);
+    assert!(index.frontier_ns() > first_frontier);
     let positioned = index.source_at_or_before(unreachable_target);
     assert!(
         positioned.clock_ns() < unreachable_target,
         "a target past the extension cap must not be reached in one call"
     );
-    // At most `cap` ticks were walked, so at most `cap / K` interior snapshots
-    // were taken beyond the origin.
+    // Three bounded calls were made, so at most `3 * cap / K` interior
+    // snapshots were taken beyond the origin.
     assert!(
-        index.checkpoint_count() <= 1 + cap / 64 + 1,
-        "the bounded walk took at most cap/K interior checkpoints"
+        index.checkpoint_count() <= 1 + 3 * cap / 64 + 1,
+        "each bounded walk took at most cap/K interior checkpoints"
     );
 }
 
@@ -602,7 +608,7 @@ fn clean_regime_is_byte_identical() {
     let fp = Fingerprint::from_repo_json();
     let scalars = GeneratorScalars::xbtusd_anchor(&fp);
     let mut src = GeneratedSource::new(scalars, 42, 1_000, &fp, None);
-    let expected = [
+    let _protocol_six_expected = [
         r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00016711, aggressor: Buyer, ts_event: 1651680 }))"#,
         r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.002, aggressor: Buyer, ts_event: 1652680 }))"#,
         r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.001, aggressor: Buyer, ts_event: 1653680 }))"#,
@@ -637,6 +643,14 @@ fn clean_regime_is_byte_identical() {
         r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.3, size: 0.00191262, aggressor: Buyer, ts_event: 4455072 }))"#,
     ];
 
+    let expected = [
+        r#"Some(Quote(QuoteTick { symbol: "XBTUSD", bid_px: 60000.1, ask_px: 60000.2, bid_sz: 0.00000001, ask_sz: 0.00000001, ts_event: 1651680 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00016711, aggressor: Buyer, ts_event: 1651680 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.002, aggressor: Buyer, ts_event: 1652680 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.001, aggressor: Buyer, ts_event: 1653680 }))"#,
+        r#"Some(Trade(TradeTick { symbol: "XBTUSD", price: 60000.2, size: 0.00118992, aggressor: Buyer, ts_event: 1654680 }))"#,
+        r#"Some(Quote(QuoteTick { symbol: "XBTUSD", bid_px: 60000.1, ask_px: 60000.2, bid_sz: 0.00000001, ask_sz: 0.00000001, ts_event: 2085712 }))"#,
+    ];
     let actual: Vec<_> = (0..expected.len())
         .map(|_| format!("{:?}", src.next_tick()))
         .collect();
@@ -958,7 +972,7 @@ fn near_zero_hour_share_reopens_at_the_next_open_hour() {
         None,
         SizeGrid::spot(),
     );
-    let first = src.next_tick().expect("trade").ts_event();
+    let first = next_trade(&mut src).ts_event;
     // The first tick must survive the closed hour 0 (not print inside it)
     // and land shortly after hour 1 opens - not months out, and nowhere
     // near u64 saturation. The upper bound leaves room for the draw's own
@@ -983,14 +997,14 @@ fn near_zero_hour_share_reopens_at_the_next_open_hour() {
         None,
         SizeGrid::spot(),
     );
-    assert_eq!(twin.next_tick().expect("trade").ts_event(), first);
+    assert_eq!(next_trade(&mut twin).ts_event, first);
     let mut prior = first;
     for _ in 0..5_000 {
-        let tick = src.next_tick().expect("trade");
-        let twin_tick = twin.next_tick().expect("trade");
+        let tick = next_trade(&mut src);
+        let twin_tick = next_trade(&mut twin);
         assert_eq!(format!("{tick:?}"), format!("{twin_tick:?}"));
-        assert!(tick.ts_event() > prior, "clock stalled at {prior}");
-        prior = tick.ts_event();
+        assert!(tick.ts_event > prior, "clock stalled at {prior}");
+        prior = tick.ts_event;
     }
 }
 
@@ -1021,7 +1035,7 @@ fn fully_closed_profile_caps_each_gap_and_never_freezes_the_clock() {
     );
     let mut prior = SESSION_START_TS;
     for _ in 0..300 {
-        let ts = src.next_tick().expect("trade").ts_event();
+        let ts = next_trade(&mut src).ts_event;
         assert!(ts > prior, "clock froze: ts={ts} prior={prior}");
         assert!(ts < u64::MAX, "clock saturated at the u64 ceiling");
         assert!(
@@ -1137,9 +1151,7 @@ fn checkpoint_resume_across_a_closure_is_byte_identical() {
             .last()
             .is_none_or(|tick: &(u64, Decimal, Decimal, AggressorSide)| tick.0 < sunday_reopen)
     {
-        let TickEvent::Trade(tick) = reference.next_tick().unwrap() else {
-            unreachable!()
-        };
+        let tick = next_trade(&mut reference);
         expected.push((tick.ts_event, tick.price, tick.size, tick.aggressor));
     }
     let origin = calendar_source(friday_close - 1);
@@ -1147,9 +1159,7 @@ fn checkpoint_resume_across_a_closure_is_byte_identical() {
     let mut resumed = index.source_at_or_before(target);
     let start = expected.iter().position(|tick| tick.0 >= target).unwrap();
     for expected_tick in expected.iter().skip(start).take(100) {
-        let TickEvent::Trade(tick) = resumed.next_tick().unwrap() else {
-            unreachable!()
-        };
+        let tick = next_trade(&mut resumed);
         assert_eq!(
             (tick.ts_event, tick.price, tick.size, tick.aggressor),
             *expected_tick
@@ -1183,13 +1193,12 @@ fn contract_sizes_are_whole_numbers_and_never_zero() {
     let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
     scalars.start_price = Decimal::from(21_000);
     scalars.latent_size_median = Decimal::from(2);
+    scalars.top_sizes = TopOfBookSizes::uncalibrated(Decimal::ONE);
     let mut source =
         GeneratedSource::try_new_with_size_grid(scalars, 73, 0, &fp, None, mnq_size_grid())
             .expect("MNQ grid is valid");
     for _ in 0..100_000 {
-        let TickEvent::Trade(tick) = source.next_tick().expect("infinite tape") else {
-            unreachable!()
-        };
+        let tick = next_trade(&mut source);
         assert!(tick.size >= Decimal::ONE);
         assert_eq!(tick.size.fract(), Decimal::ZERO);
     }
@@ -1201,6 +1210,7 @@ fn contract_size_sampler_consumes_the_declared_latent_median_directly() {
     let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
     scalars.start_price = Decimal::from(21_000);
     scalars.latent_size_median = Decimal::new(25, 1);
+    scalars.top_sizes = TopOfBookSizes::uncalibrated(Decimal::ONE);
     let source = GeneratedSource::try_new_with_size_grid(scalars, 1, 0, &fp, None, mnq_size_grid())
         .expect("MNQ grid is valid");
     assert_near(
@@ -1216,6 +1226,7 @@ fn a_lot_snap_on_an_integral_grid_never_produces_a_fractional_lot() {
     let fp = Fingerprint::from_repo_json();
     let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
     scalars.latent_size_median = Decimal::ONE;
+    scalars.top_sizes = TopOfBookSizes::uncalibrated(Decimal::ONE);
     let mut source =
         GeneratedSource::try_new_with_size_grid(scalars, 9, 0, &fp, None, mnq_size_grid())
             .expect("integral lot grid is valid");
@@ -1301,6 +1312,7 @@ fn the_integral_floor_lifts_the_realized_mean_above_the_notional_target() {
     scalars.start_price = Decimal::from(21_000);
     let target = 20_000.0 / (21_000.0 * 2.0);
     scalars.latent_size_median = decimal_from_f64(target / (SIZE_LOG_SIGMA.powi(2) / 2.0).exp());
+    scalars.top_sizes = TopOfBookSizes::uncalibrated(Decimal::ONE);
     let mut source =
         GeneratedSource::try_new_with_size_grid(scalars, 81, 0, &fp, None, mnq_size_grid())
             .expect("MNQ grid is valid");
@@ -1458,9 +1470,9 @@ fn sweep_structure() {
     for _ in 0..5_000 {
         assert_eq!(src.burst.remaining, 0);
         let updates_before = src.latent_updates;
-        let TickEvent::Trade(first) = src.next_tick().expect("trade") else {
-            unreachable!()
-        };
+        let quote = src.next_tick().expect("quote");
+        assert!(matches!(quote, TickEvent::Quote(_)));
+        let first = next_trade(&mut src);
         assert_eq!(src.latent_updates, updates_before + 1);
         let parent_ts = first.ts_event;
         let side = first.aggressor;
@@ -1469,9 +1481,7 @@ fn sweep_structure() {
         let mut levels = 1_u64;
         assert!(parent_ts > prior_ts);
         while src.burst.remaining > 0 {
-            let TickEvent::Trade(child) = src.next_tick().expect("trade") else {
-                unreachable!()
-            };
+            let child = next_trade(&mut src);
             assert_eq!(child.aggressor, side);
             assert_eq!(
                 child.ts_event,
@@ -1518,9 +1528,7 @@ fn checkpoint_resume_mid_sweep_is_byte_identical() {
     let mut mid_sweep = Vec::with_capacity(4_000);
     for _ in 0..4_000 {
         let opens_event = reference.burst.remaining == 0;
-        let TickEvent::Trade(t) = reference.next_tick().expect("trade") else {
-            unreachable!("generated source emits trades")
-        };
+        let t = next_trade(&mut reference);
         // Mid-sweep means: this child did not open its event AND its event is
         // not finished, so a snapshot at this instant carries `remaining > 0`.
         mid_sweep.push(!opens_event && reference.burst.remaining > 0);
@@ -1535,20 +1543,17 @@ fn checkpoint_resume_mid_sweep_is_byte_identical() {
     let mut index = CheckpointIndex::new(origin, 7, 100_000);
     let mut resumed = index.source_at_or_before(target);
     assert!(index.checkpoint_count() > 1);
-    let mut tick = resumed.next_tick().expect("trade");
-    while tick.ts_event() < target {
-        tick = resumed.next_tick().expect("trade");
+    let mut tick = next_trade(&mut resumed);
+    while tick.ts_event < target {
+        tick = next_trade(&mut resumed);
     }
     for expected in &ticks[at..at + 200] {
-        let TickEvent::Trade(t) = tick else {
-            unreachable!("generated source emits trades")
-        };
         assert_eq!(
-            (t.ts_event, t.price, t.size, t.aggressor),
+            (tick.ts_event, tick.price, tick.size, tick.aggressor),
             *expected,
             "resumed tail diverged after a mid-sweep restore"
         );
-        tick = resumed.next_tick().expect("trade");
+        tick = next_trade(&mut resumed);
     }
 }
 
@@ -1827,9 +1832,7 @@ fn measure(src: &mut GeneratedSource, scalars: &GeneratorScalars, draw: usize) -
     let mut neutral_aggressors = 0;
     while prices.len() < draw {
         let starts_event = src.burst.remaining == 0;
-        let TickEvent::Trade(trade) = src.next_tick().expect("unbounded generated source") else {
-            unreachable!("generated source emits trades")
-        };
+        let trade = next_trade(src);
         if (trade.price / scalars.modal_tick).fract() != Decimal::ZERO {
             off_grid_prices += 1;
         }
@@ -2037,10 +2040,10 @@ fn measure_session_curves(src: &mut GeneratedSource, draw: usize) -> SessionCurv
 
     let mut events = 0;
     while events < draw {
-        let starts_event = src.burst.remaining == 0;
         let TickEvent::Trade(trade) = src.next_tick().expect("unbounded generated source") else {
-            unreachable!("generated source emits trades")
+            continue;
         };
+        let starts_event = src.burst.emitted == 1;
         if !starts_event {
             continue;
         }
@@ -2563,10 +2566,9 @@ struct RollEstimate {
 /// which prints they sample, plus the same-mid separation and mid-relative
 /// displacement measured at two of those sampling points.
 ///
-/// The struct is named for the question it serves rather than for what it holds:
-/// no quantity in it is a spread in the market sense, because this generator
-/// publishes no quotes. Every field is a property of the PRINT series or of the
-/// unobservable latent mid.
+/// The protocol-7 schema keeps the published-book and latent-mid referents
+/// separate. Effective spread is measured against the emitted BBO midpoint;
+/// latent-relative displacement remains alongside as a model diagnostic.
 ///
 /// On this synthetic tape the estimators happen to order as
 /// `roll_first_child < same-mid separation < roll_last_child`. That ordering is
@@ -2577,11 +2579,8 @@ struct RollEstimate {
 /// being able to report a surprise.
 #[derive(Debug, Clone)]
 struct SpreadDecomposition {
-    /// Twice [`TRADE_BOUNCE_HALF_WIDTH_TICKS`]: how far apart two opposite-sided
-    /// prints sit at an unchanged mid, BEFORE grid rounding. Named for what it
-    /// is - a print-series property - because the generator publishes no quotes
-    /// and so has no configured quoted width to report.
-    configured_opposite_side_separation_ticks: f64,
+    /// Exact configured BBO width, in integer ticks.
+    configured_quoted_width_ticks: f64,
     same_mid_separation_ticks: Vec<(f64, u32)>,
     /// Samples each burst's FIRST print. Excludes the sweep's own level walk.
     roll_first_child: RollEstimate,
@@ -2592,18 +2591,18 @@ struct SpreadDecomposition {
     /// unavailable estimator documents why ordinary print-layer Roll cannot be
     /// used here, where dropping it would leave the question open forever.
     roll_all_prints: RollEstimate,
-    /// Counterfactual same-mid print separation, sampled at the burst's first
-    /// and last print. NOT a quoted spread - see
-    /// `separation_and_displacement_at`.
+    /// Realized opposite-side print separation around one published midpoint.
     same_mid_separation_at_first_child: f64,
     same_mid_separation_at_last_child: f64,
-    /// `2 * sign * (price - latent_mid)`, in ticks. Shares the effective-spread
-    /// formula but measures against an UNOBSERVABLE mid rather than a published
-    /// book top.
-    mid_relative_displacement_at_first_child: f64,
-    mid_relative_displacement_at_last_child: f64,
+    /// Effective spread against the published midpoint, followed by the same
+    /// formula against the unobservable latent midpoint.
+    effective_spread_at_first_child: f64,
+    effective_spread_at_last_child: f64,
+    latent_mid_relative_displacement_at_first_child: f64,
+    latent_mid_relative_displacement_at_last_child: f64,
     opposite_side_separation: Vec<(i64, f64)>,
     zero_change_frac: f64,
+    accepted_repeat_frac: f64,
     conditional_return_scale: f64,
     tick_return: f64,
     tick_traversal_sigma_units: f64,
@@ -2914,12 +2913,13 @@ fn separation_and_displacement_at(
     mids: &[f64],
     sides: &[AggressorSide],
     tick: f64,
+    configured_displacement_ticks: f64,
 ) -> (f64, f64) {
     let mut separation = 0.0;
     let mut displacement = 0.0;
     for i in 0..prices.len() {
-        let counterfactual_buy = (mids[i] / tick + TRADE_BOUNCE_HALF_WIDTH_TICKS).ceil();
-        let counterfactual_sell = (mids[i] / tick - TRADE_BOUNCE_HALF_WIDTH_TICKS).floor();
+        let counterfactual_buy = (mids[i] / tick + configured_displacement_ticks).round();
+        let counterfactual_sell = (mids[i] / tick - configured_displacement_ticks).round();
         separation += counterfactual_buy - counterfactual_sell;
         let sign = match sides[i] {
             AggressorSide::Buyer => 1.0,
@@ -2948,39 +2948,81 @@ fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecompos
     let mut first_prices: Vec<f64> = Vec::with_capacity(events);
     let mut last_prices: Vec<f64> = Vec::with_capacity(events);
     let mut first_mids: Vec<f64> = Vec::with_capacity(events);
+    let mut first_latent_mids: Vec<f64> = Vec::with_capacity(events);
     let mut sides: Vec<AggressorSide> = Vec::with_capacity(events);
     let mut print_prices: Vec<f64> = Vec::new();
     let mut base_returns: Vec<f64> = Vec::with_capacity(events);
+    let mut current_quote_mid = None;
+    let mut prior_quote_mid = None;
+    let mut prior_last_price = None;
+    let mut accepted_repeats = 0_u64;
 
     while last_prices.len() < events {
-        let starts_event = src.burst.remaining == 0;
-        let TickEvent::Trade(trade) = src.next_tick().expect("infinite tape") else {
-            unreachable!()
+        let event = src.next_tick().expect("infinite tape");
+        let TickEvent::Trade(trade) = event else {
+            if let TickEvent::Quote(quote) = event {
+                current_quote_mid =
+                    Some((decimal_to_f64(quote.bid_px) + decimal_to_f64(quote.ask_px)) / 2.0);
+            }
+            continue;
         };
+        let starts_event = src.burst.emitted == 1;
         let price = decimal_to_f64(trade.price);
         print_prices.push(price);
         if starts_event {
+            if prior_quote_mid == current_quote_mid && prior_last_price == Some(price) {
+                accepted_repeats += 1;
+            }
             first_prices.push(price);
             // The latent mid this event priced against, read directly rather
             // than inferred from the prints it produced.
-            first_mids.push(src.vol.mid);
+            first_mids.push(current_quote_mid.expect("a quote precedes every parent"));
+            first_latent_mids.push(src.vol.mid);
             base_returns.push(src.vol.prev_return);
         }
         if src.burst.remaining == 0 {
             last_prices.push(price);
             sides.push(trade.aggressor);
+            prior_last_price = Some(price);
+            prior_quote_mid = current_quote_mid;
         }
     }
     first_prices.truncate(last_prices.len());
     first_mids.truncate(last_prices.len());
+    first_latent_mids.truncate(last_prices.len());
 
     let roll_first_child = roll_estimate(&first_prices, tick);
     let roll_last_child = roll_estimate(&last_prices, tick);
     let roll_all_prints = roll_estimate(&print_prices, tick);
-    let (separation_first, displacement_first) =
-        separation_and_displacement_at(&first_prices, &first_mids, &sides, tick);
-    let (separation_last, displacement_last) =
-        separation_and_displacement_at(&last_prices, &first_mids, &sides, tick);
+    let configured_displacement_ticks = scalars.trade_displacement_ticks.ticks();
+    let (separation_first, displacement_first) = separation_and_displacement_at(
+        &first_prices,
+        &first_mids,
+        &sides,
+        tick,
+        configured_displacement_ticks,
+    );
+    let (separation_last, displacement_last) = separation_and_displacement_at(
+        &last_prices,
+        &first_mids,
+        &sides,
+        tick,
+        configured_displacement_ticks,
+    );
+    let (_, latent_displacement_first) = separation_and_displacement_at(
+        &first_prices,
+        &first_latent_mids,
+        &sides,
+        tick,
+        configured_displacement_ticks,
+    );
+    let (_, latent_displacement_last) = separation_and_displacement_at(
+        &last_prices,
+        &first_latent_mids,
+        &sides,
+        tick,
+        configured_displacement_ticks,
+    );
 
     let mut separation: std::collections::BTreeMap<i64, u64> = std::collections::BTreeMap::new();
     let mut opposite = 0_u64;
@@ -3001,10 +3043,12 @@ fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecompos
     let mut phase_hist: Vec<(f64, u32)> = Vec::new();
     for step in 0..8_u32 {
         let phase = f64::from(step) / 8.0;
-        let x = 10.0 + phase;
-        let ask = (x + TRADE_BOUNCE_HALF_WIDTH_TICKS).ceil();
-        let bid = (x - TRADE_BOUNCE_HALF_WIDTH_TICKS).floor();
-        phase_hist.push((phase, (ask - bid) as u32));
+        let width = f64::from(scalars.quoted_width.ticks().get());
+        let bid = (10.0 + phase - width / 2.0).round();
+        let book_mid = bid + width / 2.0;
+        let ask = (book_mid + scalars.trade_displacement_ticks.ticks()).round();
+        let bid_print = (book_mid - scalars.trade_displacement_ticks.ticks()).round();
+        phase_hist.push((phase, (ask - bid_print) as u32));
     }
 
     let zero_change = parent_prices
@@ -3017,20 +3061,23 @@ fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecompos
     let tick_return = (1.0 + tick / decimal_to_f64(scalars.start_price)).ln();
 
     SpreadDecomposition {
-        configured_opposite_side_separation_ticks: 2.0 * TRADE_BOUNCE_HALF_WIDTH_TICKS,
+        configured_quoted_width_ticks: f64::from(scalars.quoted_width.ticks().get()),
         same_mid_separation_ticks: phase_hist,
         roll_first_child,
         roll_last_child,
         roll_all_prints,
         same_mid_separation_at_first_child: separation_first,
         same_mid_separation_at_last_child: separation_last,
-        mid_relative_displacement_at_first_child: displacement_first,
-        mid_relative_displacement_at_last_child: displacement_last,
+        effective_spread_at_first_child: displacement_first,
+        effective_spread_at_last_child: displacement_last,
+        latent_mid_relative_displacement_at_first_child: latent_displacement_first,
+        latent_mid_relative_displacement_at_last_child: latent_displacement_last,
         opposite_side_separation: separation
             .into_iter()
             .map(|(ticks, count)| (ticks, count as f64 / opposite as f64))
             .collect(),
         zero_change_frac: zero_change,
+        accepted_repeat_frac: accepted_repeats as f64 / parent_prices.len() as f64,
         conditional_return_scale: scale,
         tick_return,
         tick_traversal_sigma_units: tick_return / scale,
@@ -3055,7 +3102,7 @@ fn mnq_shaped_grid(fp: &Fingerprint) -> GeneratorScalars {
 
 #[test]
 #[ignore = "spread decomposition report; run deliberately with an extended timeout"]
-fn synthetic_spread_decomposition_at_protocol_six() {
+fn synthetic_spread_decomposition_at_protocol_seven() {
     let fp = Fingerprint::from_repo_json();
     // Two grids, because every quantity here is grid-dependent and reporting
     // one would invite the same over-generalization the report already made.
@@ -3071,8 +3118,8 @@ fn synthetic_spread_decomposition_at_protocol_six() {
             crate::TAPE_PROTOCOL_VERSION
         );
         println!(
-            "  configured opposite-side sep     {:.2} ticks  (print separation, NOT a quoted width)",
-            d.configured_opposite_side_separation_ticks
+            "  configured quoted width          {:.2} ticks",
+            d.configured_quoted_width_ticks
         );
         print!("  same-mid grid separation         ");
         for (phase, sep) in &d.same_mid_separation_ticks {
@@ -3104,12 +3151,20 @@ fn synthetic_spread_decomposition_at_protocol_six() {
             d.same_mid_separation_at_last_child
         );
         println!(
-            "  mid_rel_displacement_first_child {:>9.3} ticks  (vs LATENT mid, unobservable)",
-            d.mid_relative_displacement_at_first_child
+            "  effective_spread_first_child     {:>9.3} ticks  (vs PUBLISHED book mid)",
+            d.effective_spread_at_first_child
         );
         println!(
-            "  mid_rel_displacement_last_child  {:>9.3} ticks  (vs LATENT mid, unobservable)",
-            d.mid_relative_displacement_at_last_child
+            "  effective_spread_last_child      {:>9.3} ticks  (vs PUBLISHED book mid)",
+            d.effective_spread_at_last_child
+        );
+        println!(
+            "  latent_mid_relative_first_child  {:>9.3} ticks  (unobservable)",
+            d.latent_mid_relative_displacement_at_first_child
+        );
+        println!(
+            "  latent_mid_relative_last_child   {:>9.3} ticks  (unobservable)",
+            d.latent_mid_relative_displacement_at_last_child
         );
         print!("  opposite-side parent separation  ");
         for (ticks, share) in d.opposite_side_separation.iter().take(7) {
@@ -3119,6 +3174,10 @@ fn synthetic_spread_decomposition_at_protocol_six() {
         println!(
             "  zero_change_frac                 {:.4}",
             d.zero_change_frac
+        );
+        println!(
+            "  accepted_repeat_frac             {:.4}",
+            d.accepted_repeat_frac
         );
         println!(
             "  conditional return scale         {:.4e}",
@@ -3158,6 +3217,7 @@ fn synthetic_spread_decomposition_at_protocol_six() {
             "roll_all_prints must be UNAVAILABLE on every grid: cov={}",
             d.roll_all_prints.covariance
         );
+        assert!(d.accepted_repeat_frac > 0.0);
     }
     // Nothing else is asserted. The ORDERING between the first-child and
     // last-child estimators, and their position relative to the same-mid
@@ -3169,27 +3229,361 @@ fn synthetic_spread_decomposition_at_protocol_six() {
     // ability to report a surprise.
 }
 
-/// The venue publishes no market: `GeneratedSource` never emits a `QuoteTick`.
-///
-/// This is a DIAGNOSIS, not a wish. `TickEvent::Quote` exists, `mogwai-server`
-/// relays it and `mogwai-adapter` converts it, so the plumbing reads as though a
-/// quote stream were live - and the report that drove this work spent several
-/// sections reasoning about a quote placement that does not happen, because a
-/// constant was named `HALF_SPREAD_TICKS` and nobody checked. Pinning the
-/// absence means the day a BBO layer lands, this test fails and has to be
-/// deliberately rewritten rather than silently outgrown.
 #[test]
-fn the_generator_publishes_no_quotes() {
+fn a_quote_precedes_every_parent_burst() {
     let fp = Fingerprint::from_repo_json();
     let scalars = GeneratorScalars::xbtusd_anchor(&fp);
     let mut src = GeneratedSource::new(scalars, 7, 0, &fp, None);
-    for i in 0..20_000 {
+    let mut need_quote = true;
+    for _ in 0..20_000 {
         match src.next_tick().expect("infinite tape") {
-            TickEvent::Trade(_) => {}
             TickEvent::Quote(_) => {
-                panic!("tick {i} was a quote: a BBO layer has landed, so update this test")
+                assert!(need_quote, "only one quote may govern a parent burst");
+                need_quote = false;
+            }
+            TickEvent::Trade(_) => {
+                assert!(
+                    !need_quote,
+                    "a parent trade arrived without a governing quote"
+                );
+                if src.burst.remaining == 0 {
+                    need_quote = true;
+                }
             }
         }
+    }
+}
+
+#[test]
+fn published_books_govern_parent_trades_and_stay_on_grid() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let tick = scalars.modal_tick;
+    let mut src = GeneratedSource::new(scalars, 19, 0, &fp, None);
+    let mut previous_quote: Option<mogwai_protocol::QuoteTick> = None;
+    let mut previous_last_price = None;
+    for _ in 0..20_000 {
+        let TickEvent::Quote(quote) = src.next_tick().expect("parent quote") else {
+            panic!("each parent begins with a quote");
+        };
+        assert_eq!((quote.bid_px / tick).fract(), Decimal::ZERO);
+        assert_eq!((quote.ask_px / tick).fract(), Decimal::ZERO);
+        assert_eq!((quote.ask_px - quote.bid_px) / tick, Decimal::ONE);
+        let trade = next_trade(&mut src);
+        let repeated = previous_quote.as_ref().is_some_and(|prior| {
+            prior.bid_px == quote.bid_px
+                && prior.ask_px == quote.ask_px
+                && previous_last_price == Some(trade.price)
+        });
+        match trade.aggressor {
+            AggressorSide::Buyer => {
+                if !repeated {
+                    assert_eq!(trade.price, quote.ask_px);
+                }
+                assert!(trade.price * Decimal::from(2) >= quote.bid_px + quote.ask_px);
+            }
+            AggressorSide::Seller => {
+                if !repeated {
+                    assert_eq!(trade.price, quote.bid_px);
+                }
+                assert!(trade.price * Decimal::from(2) <= quote.bid_px + quote.ask_px);
+            }
+            AggressorSide::NoAggressor => panic!("generated parents have a native side"),
+        }
+        let mut last_price = trade.price;
+        while src.burst.remaining > 0 {
+            last_price = next_trade(&mut src).price;
+        }
+        previous_quote = Some(quote);
+        previous_last_price = Some(last_price);
+    }
+}
+
+#[test]
+fn every_trade_has_a_governing_quote_at_or_before_it() {
+    let fp = Fingerprint::from_repo_json();
+    let mut src = GeneratedSource::new(GeneratorScalars::xbtusd_anchor(&fp), 31, 0, &fp, None);
+    let mut governing_ts = None;
+    for _ in 0..100_000 {
+        match src.next_tick().unwrap() {
+            TickEvent::Quote(quote) => governing_ts = Some(quote.ts_event),
+            TickEvent::Trade(trade) => assert!(
+                governing_ts.is_some_and(|quote_ts| quote_ts <= trade.ts_event),
+                "trade {} had no governing quote",
+                trade.ts_event
+            ),
+        }
+    }
+}
+
+#[test]
+fn quote_timestamps_are_nondecreasing() {
+    let fp = Fingerprint::from_repo_json();
+    let mut src = GeneratedSource::new(GeneratorScalars::xbtusd_anchor(&fp), 32, 0, &fp, None);
+    let mut prior = 0;
+    let mut quotes = 0;
+    while quotes < 20_000 {
+        if let TickEvent::Quote(quote) = src.next_tick().unwrap() {
+            assert!(quote.ts_event >= prior);
+            prior = quote.ts_event;
+            quotes += 1;
+        }
+    }
+}
+
+#[test]
+fn non_repeat_parents_print_at_the_touch_at_unit_width() {
+    let fp = Fingerprint::from_repo_json();
+    let mut src = GeneratedSource::new(GeneratorScalars::xbtusd_anchor(&fp), 33, 0, &fp, None);
+    let mut previous_last = None;
+    let mut previous_book = None;
+    for _ in 0..20_000 {
+        let TickEvent::Quote(quote) = src.next_tick().unwrap() else {
+            panic!()
+        };
+        let parent = next_trade(&mut src);
+        let repeated = previous_last == Some(parent.price)
+            && previous_book == Some((quote.bid_px, quote.ask_px));
+        if !repeated {
+            assert_eq!(
+                parent.price,
+                match parent.aggressor {
+                    AggressorSide::Buyer => quote.ask_px,
+                    AggressorSide::Seller => quote.bid_px,
+                    AggressorSide::NoAggressor => panic!(),
+                }
+            );
+        }
+        let mut last = parent.price;
+        while src.burst.remaining > 0 {
+            last = next_trade(&mut src).price;
+        }
+        previous_last = Some(last);
+        previous_book = Some((quote.bid_px, quote.ask_px));
+    }
+}
+
+#[test]
+fn a_repeat_parent_republishes_the_frozen_book() {
+    let fp = Fingerprint::from_repo_json();
+    let mut src = GeneratedSource::new(GeneratorScalars::xbtusd_anchor(&fp), 34, 0, &fp, None);
+    let mut previous_last = None;
+    let mut previous_quote: Option<mogwai_protocol::QuoteTick> = None;
+    for _ in 0..200_000 {
+        let TickEvent::Quote(quote) = src.next_tick().unwrap() else {
+            panic!()
+        };
+        let parent = next_trade(&mut src);
+        if previous_last == Some(parent.price)
+            && previous_quote.as_ref().is_some_and(|prior| {
+                prior.bid_px == quote.bid_px
+                    && prior.ask_px == quote.ask_px
+                    && prior.bid_sz == quote.bid_sz
+                    && prior.ask_sz == quote.ask_sz
+            })
+        {
+            assert!(previous_quote.as_ref().unwrap().ts_event < quote.ts_event);
+            return;
+        }
+        let mut last = parent.price;
+        while src.burst.remaining > 0 {
+            last = next_trade(&mut src).price;
+        }
+        previous_last = Some(last);
+        previous_quote = Some(quote);
+    }
+    panic!("no accepted repeat observed");
+}
+
+#[test]
+fn an_incompatible_repeat_is_rejected() {
+    let fp = Fingerprint::from_repo_json();
+    let mut src = GeneratedSource::new(GeneratorScalars::xbtusd_anchor(&fp), 35, 0, &fp, None);
+    while src.rejected_repeat_draws == 0 {
+        src.next_tick().unwrap();
+        assert!(
+            src.repeat_draws < 1_000_000,
+            "no incompatible repeat was exercised"
+        );
+    }
+    assert!(src.rejected_repeat_draws <= src.repeat_draws);
+}
+
+#[test]
+fn repeat_compatibility_uses_the_frozen_governing_book() {
+    let frozen = PublishedBook {
+        bid_ticks: 100.0,
+        ask_ticks: 101.0,
+        sizes: TopOfBookSizes::uncalibrated(Decimal::ONE),
+    };
+    let fresh = PublishedBook {
+        bid_ticks: 105.0,
+        ask_ticks: 106.0,
+        sizes: TopOfBookSizes::uncalibrated(Decimal::ONE),
+    };
+    let previous_sweep_last = 104.0;
+    assert!(repeat_is_compatible(
+        previous_sweep_last,
+        &fresh,
+        AggressorSide::Seller
+    ));
+    assert!(!repeat_is_compatible(
+        previous_sweep_last,
+        &frozen,
+        AggressorSide::Seller
+    ));
+}
+
+#[test]
+fn configured_uncalibrated_top_sizes_are_published_unchanged() {
+    let fp = Fingerprint::from_repo_json();
+    let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    scalars.top_sizes = TopOfBookSizes::uncalibrated(Decimal::TEN);
+    let mut source = GeneratedSource::new(scalars, 91, 0, &fp, None);
+    let TickEvent::Quote(quote) = source.next_tick().unwrap() else {
+        panic!()
+    };
+    assert_eq!(quote.bid_sz, Decimal::TEN);
+    assert_eq!(quote.ask_sz, Decimal::TEN);
+}
+
+#[test]
+fn no_parent_print_crosses_the_wrong_side_of_its_governing_book() {
+    let fp = Fingerprint::from_repo_json();
+    let mut src = GeneratedSource::new(GeneratorScalars::xbtusd_anchor(&fp), 36, 0, &fp, None);
+    for _ in 0..20_000 {
+        let TickEvent::Quote(quote) = src.next_tick().unwrap() else {
+            panic!()
+        };
+        let parent = next_trade(&mut src);
+        let twice_price = parent.price * Decimal::from(2);
+        match parent.aggressor {
+            AggressorSide::Buyer => assert!(twice_price >= quote.bid_px + quote.ask_px),
+            AggressorSide::Seller => assert!(twice_price <= quote.bid_px + quote.ask_px),
+            AggressorSide::NoAggressor => panic!(),
+        }
+        while src.burst.remaining > 0 {
+            let _ = next_trade(&mut src);
+        }
+    }
+}
+
+#[test]
+fn published_book_prices_are_on_the_tick_grid() {
+    let fp = Fingerprint::from_repo_json();
+    for scalars in [GeneratorScalars::xbtusd_anchor(&fp), mnq_shaped_grid(&fp)] {
+        let tick = scalars.modal_tick;
+        let mut src = GeneratedSource::new(scalars, 37, 0, &fp, None);
+        let mut quotes = 0;
+        while quotes < 20_000 {
+            if let TickEvent::Quote(quote) = src.next_tick().unwrap() {
+                assert_eq!((quote.bid_px / tick).fract(), Decimal::ZERO);
+                assert_eq!((quote.ask_px / tick).fract(), Decimal::ZERO);
+                quotes += 1;
+            }
+        }
+    }
+}
+
+#[test]
+fn realized_displacement_changes_only_at_the_grid_boundaries() {
+    let book = PublishedBook {
+        bid_ticks: 100.0,
+        ask_ticks: 101.0,
+        sizes: TopOfBookSizes::uncalibrated(Decimal::ONE),
+    };
+    let mid = book_mid_ticks(&book);
+    for displacement in [0.01, 0.25, 0.49, 0.5] {
+        assert_eq!((mid + displacement).round(), 101.0);
+        assert_eq!((mid - displacement).round(), 100.0);
+    }
+    assert_eq!((mid + 0.51).round(), 101.0);
+    assert_eq!((mid + 1.5).round(), 102.0);
+    assert_eq!((mid - 1.5).round(), 99.0);
+}
+
+#[test]
+fn width_and_displacement_are_independently_settable() {
+    let fp = Fingerprint::from_repo_json();
+    let narrow = GeneratorScalars::xbtusd_anchor(&fp);
+    let mut wide = narrow.clone();
+    wide.quoted_width = QuotedWidth::uncalibrated(std::num::NonZeroU32::new(3).unwrap());
+    let mut displaced = narrow.clone();
+    displaced.trade_displacement_ticks = TradeDisplacement::uncalibrated(1.5);
+    let mut narrow_source = GeneratedSource::new(narrow.clone(), 4, 0, &fp, None);
+    let mut wide_source = GeneratedSource::new(wide, 4, 0, &fp, None);
+    let mut displaced_source = GeneratedSource::new(displaced, 4, 0, &fp, None);
+    let TickEvent::Quote(narrow_quote) = narrow_source.next_tick().unwrap() else {
+        panic!()
+    };
+    let TickEvent::Quote(wide_quote) = wide_source.next_tick().unwrap() else {
+        panic!()
+    };
+    let TickEvent::Quote(displaced_quote) = displaced_source.next_tick().unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        wide_quote.ask_px - wide_quote.bid_px,
+        narrow.modal_tick * Decimal::from(3)
+    );
+    assert_eq!(
+        displaced_quote.ask_px - displaced_quote.bid_px,
+        narrow_quote.ask_px - narrow_quote.bid_px
+    );
+    let baseline = next_trade(&mut narrow_source);
+    let moved = next_trade(&mut displaced_source);
+    assert_ne!(baseline.price, moved.price);
+}
+
+#[test]
+fn quote_construction_consumes_no_randomness() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let mut control = GeneratedSource::new(scalars.clone(), 55, 0, &fp, None);
+    let mut probed = GeneratedSource::new(scalars, 55, 0, &fp, None);
+    for _ in 0..1_000 {
+        let _ = probed.diagnostic_place_book();
+    }
+    for _ in 0..10_000 {
+        assert_eq!(
+            format!("{:?}", control.next_tick()),
+            format!("{:?}", probed.next_tick())
+        );
+    }
+}
+
+#[test]
+fn a_resumed_source_reproduces_quotes_identically() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let mut source = GeneratedSource::new(scalars, 88, 0, &fp, None);
+    for _ in 0..1_337 {
+        source.next_tick();
+    }
+    let mut resumed = source.clone();
+    for _ in 0..10_000 {
+        assert_eq!(
+            format!("{:?}", source.next_tick()),
+            format!("{:?}", resumed.next_tick())
+        );
+    }
+}
+
+#[test]
+fn the_realized_repeat_rate_and_zero_change_frac_are_recorded() {
+    let fp = Fingerprint::from_repo_json();
+    for scalars in [GeneratorScalars::xbtusd_anchor(&fp), mnq_shaped_grid(&fp)] {
+        let measured = decompose_spread(&scalars, 100_000);
+        assert!(
+            fp.golden_targets
+                .zero_change_frac
+                .range
+                .contains(measured.zero_change_frac),
+            "{} zero_change_frac={} left the committed band",
+            scalars.symbol,
+            measured.zero_change_frac
+        );
+        assert!(measured.accepted_repeat_frac > 0.0);
     }
 }
 
@@ -3242,10 +3636,10 @@ fn stratified_matrix(grid_label: &str, index: &GeneratorScalars) {
     let mut parent_of_print: Vec<usize> = Vec::new();
     let mut parent_index = 0_usize;
     while last.len() < 400_000 {
-        let starts = src.burst.remaining == 0;
         let TickEvent::Trade(t) = src.next_tick().expect("infinite tape") else {
-            unreachable!()
+            continue;
         };
+        let starts = src.burst.emitted == 1;
         let p = decimal_to_f64(t.price);
         prints.push(p);
         parent_of_print.push(parent_index);
@@ -3265,10 +3659,7 @@ fn stratified_matrix(grid_label: &str, index: &GeneratorScalars) {
     let boundaries = vol_boundaries(&vols);
     println!();
     println!("=== stratified matrix: {grid_label} grid");
-    // Not `contemporaneous_model_quote`: the generator constructs no QuoteTick at
-    // all, so there is no model quote of any age. Rename this to
-    // `contemporaneous_model_quote` only once a BBO layer actually emits one.
-    println!("  quote-age dimension: no_model_quote (NOT zero milliseconds)");
+    println!("  quote-age dimension: contemporaneous_model_quote");
     println!("  observable axis: trailing realized vol over {TRAILING_VOL_EVENTS} parent events,");
     println!("  parent-event returns, horizon fixed before results were examined");
     print!("  global quantile boundaries:");

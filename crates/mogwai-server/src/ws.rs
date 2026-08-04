@@ -187,7 +187,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let lane_id = state.run.bind_lanes(lanes.clone());
     let pump = spawn_exec_pump(held_rx, Arc::clone(&state.run), state.sim(), out_tx.clone());
     let feed = {
-        let mut tape = state.run.tape.subscribe();
+        let (mut tape, snapshot) = state.run.tape.subscribe_with_snapshot();
         let out_tx = out_tx.clone();
         let feed_state = state.clone();
         // The ONE diagnostic this feed can ever emit is `FeedLagged`, and it is
@@ -198,9 +198,37 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         let mut fault_promise = lanes.reserve_promise();
         let fault_lanes = lanes.clone();
         tokio::spawn(async move {
+            let mut last_market_ts = snapshot.as_ref().map(|frame| frame.ts_event);
+            if let Some(frame) = snapshot
+                && out_tx
+                    .send(Outbound::Frame(OutboundFrame {
+                        payload: frame.payload,
+                        class: FrameClass::MarketData,
+                        charge: None,
+                        slot: None,
+                    }))
+                    .await
+                    .is_err()
+            {
+                return;
+            }
             loop {
                 match tape.recv().await {
                     Ok(frame) => {
+                        if last_market_ts.is_some_and(|prior| frame.ts_event < prior) {
+                            tracing::error!(
+                                prior_ts_event = last_market_ts,
+                                frame_ts_event = frame.ts_event,
+                                "VENUE FAULT: tape feed moved backward in event time; killing \
+                                 the connection rather than silently ending market data"
+                            );
+                            drop(fault_lanes.send_close(CloseSpec::venue_fault(format!(
+                                "venue fault: tape event time moved backward from {:?} to {}",
+                                last_market_ts, frame.ts_event
+                            ))));
+                            break;
+                        }
+                        last_market_ts = Some(frame.ts_event);
                         if out_tx
                             .send(Outbound::Frame(OutboundFrame {
                                 payload: frame.payload,

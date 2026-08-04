@@ -9,8 +9,13 @@ formerly `backfill_horizon_ns`: an operator carrying an old file renames the key
 and keeps the value, since the span it names is the same one - what changed is
 that the venue now MATERIALIZES it at boot instead of merely permitting requests
 into it. `/clock` names the resulting `data_origin_ns` and `warmup_ns`;
-`/trades` refuses a start below the floor or beyond current simulated time, and
-clamps an end past current simulated time to it.
+`/trades` and `/quotes` refuse a start below the floor or beyond current
+simulated time, and clamp an end past current simulated time to it. `/quotes`
+returns only BBO publications whose `ts_event` lies in the inclusive requested
+window. It does not synthesize a leading governing quote when the window begins
+inside a parent burst; callers needing that earlier book request an earlier
+start. The WebSocket feed does not have this boundary issue because connection
+setup sends the current BBO snapshot before later tape frames.
 
 `seed` (absent means a fresh `u64` is drawn at launch, capped at `i64::MAX` so
 it round-trips through TOML) is the run's single source of randomness; the
@@ -148,9 +153,18 @@ The built-in generator profile expresses cadence with
 `levels_mean`. Raw-fill size is expressed as `latent_size_median` in the
 instrument's native size unit. It is the continuous lognormal median before
 minimum-size flooring, grid quantization, or round-lot snapping, so it must not
-be read as the observed post-grid median. The default `fanout_depth` is 65,536. A custom value should exceed one
-wall second of projected frames:
+be read as the observed post-grid median. Explicit `top_sizes` values are
+honored even with `uncalibrated` provenance; that provenance describes evidence,
+not whether configuration is active. `trade_displacement_ticks` is only required
+to be finite and non-negative; it is intentionally not capped at half
+`quoted_width`, because the displayed BBO is one level and an aggressive parent
+may print beyond the touch. The two quantities remain independent calibration
+seams. The default `fanout_depth` is 262,144. At
+boot, a custom value should exceed one wall second of BASELINE projected frames:
 `children_mean / mean_event_duration_s * speed`.
+An armed flow surge can exceed that baseline. Under the measured maximum surge,
+the default preserves the old ring's horizon but holds only 0.029 wall seconds;
+`reference/performance.md` records the paired measurement.
 The fingerprint retains `mean_trade_notional` under its honest name for corpus
 comparison; it is derived from the latent median, reference price, contract
 multiplier, and lognormal shape and never feeds the sampler.

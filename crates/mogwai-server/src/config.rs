@@ -204,11 +204,10 @@ impl Default for Config {
             // loud (off-tape requests are refused, not silently under-served), so
             // the default's exactness is low-stakes.
             warmup_ns: 86_400_000_000_000,
-            // ~8 simulated hours of the default cadence, ~5 wall minutes at
-            // speed 100. A subscriber that cannot keep up with 4096 queued
-            // pre-serialized frames is not a subscriber whose feed is
-            // meaningful.
-            fanout_depth: 65_536,
+            // Sized from the protocol 7 composition fixture to preserve more
+            // than the old ring's measured wall-time horizon at speeds 1 and
+            // 10, including the maximum admitted flow surge.
+            fanout_depth: 262_144,
             zero_speed_stall_ms: 5000,
             exec_held_budget_bytes: crate::admission::EXEC_HELD_BUDGET_BYTES,
             admission_lane_frames: crate::admission::ADMISSION_LANE_FRAMES,
@@ -893,6 +892,9 @@ fn profile_from_configured(
     if configured.generator.is_none() {
         scalars.modal_tick = def.price_increment;
         scalars.price_decimals = u32::from(def.price_precision);
+        scalars.top_sizes = mogwai_data::TopOfBookSizes::uncalibrated(
+            mogwai_data::SizeGrid::from_def(&def).min_size,
+        );
     }
     if scalars.modal_tick != def.price_increment {
         anyhow::bail!(
@@ -905,6 +907,16 @@ fn profile_from_configured(
             "instrument {} generator.price_decimals must equal price_precision",
             def.symbol
         );
+    }
+    for size in [scalars.top_sizes.bid, scalars.top_sizes.ask] {
+        if size.normalize().scale() > u32::from(def.size_precision)
+            || size % def.size_increment != Decimal::ZERO
+        {
+            anyhow::bail!(
+                "instrument {} generator.top_sizes must be representable at size_precision and on size_increment",
+                def.symbol
+            );
+        }
     }
     scalars.validate().map_err(|err| {
         anyhow::anyhow!(
@@ -1259,6 +1271,20 @@ mod tests {
     }
 
     #[test]
+    fn a_future_without_a_generator_derives_top_sizes_from_its_grid() {
+        let mut configured = future_configured();
+        configured.generator = None;
+
+        let mut fp = mogwai_data::Fingerprint::from_repo_json();
+        fp.cadence.targets.mean_trade_notional.anchor = 100_000.0;
+        let profile = profile_from_configured(&configured, &fp)
+            .expect("an absent generator uses instrument-grid defaults");
+
+        assert_eq!(profile.scalars.top_sizes.bid, Decimal::ONE);
+        assert_eq!(profile.scalars.top_sizes.ask, Decimal::ONE);
+    }
+
+    #[test]
     fn a_configured_seed_at_the_signed_maximum_round_trips() {
         let text = format!("seed = {}", i64::MAX);
         let cfg: Config = toml::from_str(&text).expect("maximum signed seed parses");
@@ -1394,6 +1420,72 @@ mod tests {
             let profile = profile_from_configured(&configured, &fp).unwrap();
             assert_preset_diagnostics(name, &profile, &fp, &provenance).unwrap();
         }
+    }
+
+    #[test]
+    fn every_shipped_preset_quotes_a_positive_integral_width() {
+        for name in ["MNQ", "MES", "BTCUSDT", "ETHUSDT", "SOLUSDT"] {
+            let profile = profile_from_preset(name).unwrap();
+            assert!(profile.scalars.quoted_width.ticks().get() > 0, "{name}");
+        }
+    }
+
+    #[test]
+    fn no_shipped_preset_claims_a_fitted_quote_quantity() {
+        use mogwai_data::CalibrationProvenance;
+        for name in ["MNQ", "MES", "BTCUSDT", "ETHUSDT", "SOLUSDT"] {
+            let profile = profile_from_preset(name).unwrap();
+            assert_eq!(
+                profile.scalars.quoted_width.provenance(),
+                &CalibrationProvenance::Uncalibrated,
+                "{name} quoted width"
+            );
+            assert_eq!(
+                profile.scalars.top_sizes.provenance,
+                CalibrationProvenance::Uncalibrated,
+                "{name} top sizes"
+            );
+            assert_eq!(
+                profile.scalars.trade_displacement_ticks.provenance(),
+                &CalibrationProvenance::Uncalibrated,
+                "{name} trade displacement"
+            );
+        }
+    }
+
+    #[test]
+    fn quote_sizes_are_on_the_instrument_grid() {
+        for name in ["MNQ", "MES", "BTCUSDT", "ETHUSDT", "SOLUSDT"] {
+            let profile = profile_from_preset(name).unwrap();
+            for size in [profile.scalars.top_sizes.bid, profile.scalars.top_sizes.ask] {
+                assert!(size >= profile.def.size_increment, "{name}: {size}");
+                assert_eq!(
+                    size % profile.def.size_increment,
+                    Decimal::ZERO,
+                    "{name}: {size}"
+                );
+                if profile.def.class.is_future() {
+                    assert_eq!(size.fract(), Decimal::ZERO, "{name}: {size}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn uncalibrated_top_sizes_are_configuration_not_an_override_signal() {
+        let profile = profile_from_preset("MNQ").unwrap();
+        let mut scalars = profile.scalars.clone();
+        scalars.top_sizes = mogwai_data::TopOfBookSizes::uncalibrated(Decimal::TEN);
+        let rebuilt = crate::source::InstrumentProfile::new(
+            profile.def,
+            scalars,
+            profile.session,
+            profile.margin,
+            profile.fees,
+            profile.calendar,
+        );
+        assert_eq!(rebuilt.scalars.top_sizes.bid, Decimal::TEN);
+        assert_eq!(rebuilt.scalars.top_sizes.ask, Decimal::TEN);
     }
 
     #[test]

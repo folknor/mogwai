@@ -51,14 +51,14 @@ stands in the way:
 | Finding | Nature | What it needs |
 |---|---|---|
 | Size was configured through a crypto mean-notional proxy | **resolved 2026-08-04**: native-unit `latent_size_median` plus grid-aware validation | no purchase required |
-| The venue publishes no quotes at all, and the one tick-width constant is a trade displacement rather than a spread | **blocker, split into A and B**: no observable market exists, and the displacement cannot vary | build the BBO layer, then CME TBBO to fit quoted width and displacement separately; free Binance quotes cover derivatives, not the shipped spot presets |
+| The venue originally published no quotes and conflated a trade displacement with spread | **B resolved at protocol 7; A remains**: the observable BBO and separate calibration seams exist, while the displacement response is still static | CME TBBO can now fit quoted width and displacement separately; free Binance quotes cover derivatives, not the shipped spot presets |
 | Session profile is crypto's flat 24/7 curve | wrong data in a fillable slot | NQ 1-minute bars ALREADY ON DISK, free |
 | Price level, cadence, sizes are crypto's | unfilled slots | tick data, eventually |
 
-The spread blocker is still a design question that precedes any purchase, and it
-is larger than this report first stated: the generator does not place quotes at
-all, so there is nothing for purchased quote data to be fitted against until the
-BBO layer is built. See [3.5](#35-blocker-the-venue-publishes-no-market). The
+The structural spread blocker is resolved: protocol 7 publishes a BBO and gives
+purchased quote data separate width and displacement seams. The remaining
+question is calibration rather than where the evidence could land. See
+[3.5](#35-resolved-the-venue-publishes-an-observable-top-of-book). The
 size blocker was resolved after this report exposed that `typical_notional` was
 both denominated in the wrong unit and, exactly, the arithmetic mean notional of
 a right-skewed lognormal. The session profile is the largest VISIBLE defect and
@@ -117,7 +117,7 @@ from the shipped source, not from documentation.
 | `crates/mogwai-server/presets/*.toml` | the five shipped instrument presets |
 | `crates/mogwai-server/src/source.rs` | how a preset becomes a running generator |
 
-`TAPE_PROTOCOL_VERSION` is currently **5**. Any change to a generator constant,
+`TAPE_PROTOCOL_VERSION` is currently **7**. Any change to a generator constant,
 the arrival clock, a GARCH parameter, the fingerprint, seed derivation, the fill
 band's draw or the tape origin must bump it. Nothing detects a missed bump.
 
@@ -180,9 +180,11 @@ Session and regime volatility compose MULTIPLICATIVELY here. Inside the regime
 envelope, a `SessionEdgeSpike` composes ADDITIVELY onto a storm baseline. Both
 conventions rely on the neutral value being 1.0 and are deliberate.
 
-**Stage 4, the trade displacement.** No quote is constructed at this stage or at
-any other; see [3.5](#35-blocker-the-venue-publishes-no-market). `BounceState` is a two-regime chain over the aggressor
-side. In the low regime the side flips with probability `BOUNCE_LOW_FLIP_PROB =
+**Stage 4, the trade displacement.** The venue constructs and publishes the
+parent event's governing top of book before placing the trade; see
+[3.5](#35-resolved-the-venue-publishes-an-observable-top-of-book). `BounceState`
+is a two-regime chain over the aggressor side. In the low regime the side flips
+with probability `BOUNCE_LOW_FLIP_PROB =
 0.02`; in the high regime, `BOUNCE_HIGH_FLIP_PROB = 0.25`. Regime transitions
 are `BOUNCE_LOW_TO_HIGH_PROB = 0.01` and `BOUNCE_HIGH_TO_LOW_PROB = 0.022`,
 giving a stationary high share of 0.3125 and a mean high-regime run of about 33
@@ -190,21 +192,12 @@ trades. That run length is what sets the abs-return ACF timescale: too long
 flattens the lag1-to-lag10 decay above the lag10 ceiling, too short starves the
 lag50 floor.
 
-The TRADE PRICE is displaced by `TRADE_BOUNCE_HALF_WIDTH_TICKS = 0.5` from the drifted mid -
-above it for a buyer-initiated print, below for a seller-initiated one - then
-ceiled for a buy and floored for a sell. **The displacement is exactly half a
-tick, permanently, in every regime and for every instrument, so consecutive
-opposite-sided prints at an unchanged mid sit exactly two ticks apart.**
-
-The constant's name asserts something the code does not do. There is no bid and
-no ask here; the half-tick is the aggressor-side offset of a print from the
-latent mid, which is the model's bounce amplitude. Calling it a half spread
-invites reading a two-tick print separation as a two-tick quoted width, and
-those are different observables that a real market does not force to agree - a
-trade may execute inside, at, or outside the displayed spread. The constant was
-accordingly renamed from `HALF_SPREAD_TICKS` on 2026-08-04, behavior unchanged
-and no protocol bump; two tests now pin the diagnosis
-(`the_generator_publishes_no_quotes`, `the_trade_displacement_never_varies`).
+The TRADE PRICE is displaced by the per-instrument
+`trade_displacement_ticks` from the published book midpoint on the aggressor's
+side, then rounded once to the price grid. The shipped displacement remains a
+static, explicitly uncalibrated half tick. It is separate from the quoted width:
+a trade may execute inside, at, or outside the displayed spread. Protocol 7
+pins that distinction with independently settable width and displacement tests.
 
 **Stage 5, the sweep.** A parent event spawns `children_mean` child fills that
 walk the price grid, stepping a level with probability `level_step_prob`,
@@ -239,20 +232,22 @@ So the parameterisation divides in two:
 
 **Module-level, shared by every instrument, never per-instrument:** the arrival
 chain, the GARCH coefficients, the bounce chain, `SIZE_LOG_SIGMA`,
-`TRADE_BOUNCE_HALF_WIDTH_TICKS`, `EVENT_PRICE_REPEAT_PROB`, the level-step multipliers, the
-clamps. Roughly thirty constants.
+`EVENT_PRICE_REPEAT_PROB`, the level-step multipliers, the clamps. Roughly
+thirty constants.
 
 **Per-instrument, in `GeneratorScalars`:** `symbol`, `modal_tick`,
 `price_decimals`, `mean_event_duration_s`, `children_mean`,
 `children_single_frac`, `levels_mean`, `size_round_frac`, `start_price`,
-`latent_size_median`, `vol_scalar`. Eleven values.
+`latent_size_median`, `vol_scalar`, `quoted_width`, `top_sizes`,
+`trade_displacement_ticks`. Fourteen values.
 
 Plus `SessionProfile` (55 numbers) and `SessionCalendar` per instrument.
 
-An MNQ preset is therefore: eleven scalars, three session arrays, one calendar.
-Buying tick data buys evidence for the eleven and the three; it also lets you
-CHECK whether the shared shape constants, fitted on crypto, survive contact with
-an index future. The second is the deeper question and nobody has asked it.
+An MNQ preset is therefore: fourteen scalars, three session arrays, one
+calendar. Buying tick data buys evidence for the fourteen and the three; it also
+lets you CHECK whether the shared shape constants, fitted on crypto, survive
+contact with an index future. The second is the deeper question and nobody has
+asked it.
 
 ### 2.4 The fingerprint
 
@@ -384,10 +379,12 @@ what stops it?** Three things do, and only one of them is a data problem.
 | Crypto price level, cadence, session profile | slot awaiting the fit; expected |
 | Size collapsed to a constant 1 contract | resolved by native-unit latent size configuration |
 | Crypto empirical ranges rejected truthful futures | resolved by separating diagnostics from admission |
-| No market is published, and the trade displacement cannot vary | **blocker: no observable spread exists at the protocol boundary** |
+| Observable BBO, configurable width, size and trade displacement | resolved at protocol 7; the seams exist and await TBBO fitting |
 
-The spread blocker remains a design question that precedes any purchase. The
-size and empirical-range blockers were resolved without buying data.
+The structural spread blocker is resolved. The quote and trade-displacement
+seams now exist at the protocol boundary; buying TBBO supplies evidence for
+their values rather than waiting on another design decision. The size and
+empirical-range blockers were also resolved without buying data.
 
 ### 3.1 How a preset resolves
 
@@ -397,19 +394,24 @@ size and empirical-range blockers were resolved without buying data.
 let mut scalars = GeneratorScalars::from_fingerprint_medians(&def.symbol, fp);
 scalars.modal_tick = def.price_increment;
 scalars.price_decimals = u32::from(def.price_precision);
+scalars.top_sizes = TopOfBookSizes::uncalibrated(
+    SizeGrid::from_def(&def).min_size,
+);
 InstrumentProfile::new(def, scalars, fp.session_profile.clone(), ...)
 ```
 
 `config.rs` confirms the same for a configured instrument: if the preset has no
 `[instrument.generator]` table, the scalars come from `from_fingerprint_medians`
-and ONLY `modal_tick` and `price_decimals` are overridden from the instrument
-definition.
+and `modal_tick`, `price_decimals` and `top_sizes` are derived from the
+instrument definition and its size grid.
 
-**`crates/mogwai-server/presets/mnq.toml` has no `[instrument.generator]` table
-and no `[instrument.session]` table.** It carries the instrument definition, the
-margin table and the CME calendar - the parts that are knowable from a contract
-specification - and nothing else. Those are precisely the slots this report
-exists to fill.
+**`crates/mogwai-server/presets/mnq.toml` has an `[instrument.generator]` table
+but no `[instrument.session]` table.** Its generator values are declared
+explicitly rather than inherited from `from_fingerprint_medians`; the table
+also provides the uncalibrated quote-width, quote-size and trade-displacement
+seams added at protocol 7. It carries the instrument definition, margin policy
+and CME calendar alongside those declared generator values. The missing fit is
+an evidential gap, not an absent configuration table.
 
 So the shipped MNQ preset resolves to:
 
@@ -518,64 +520,71 @@ the halt ARE handled. What is not handled is the SHAPE of activity inside the
 open hours: a flat crypto curve says the 03:00 Chicago hour is as busy as the
 08:30 hour, which is wrong by more than an order of magnitude.
 
-### 3.5 Blocker: the venue publishes no market
+### 3.5 Resolved: the venue publishes an observable top of book
+
+RESOLVED 2026-08-04 at tape protocol 7. `GeneratedSource` now emits one BBO
+before every parent burst, `/quotes` scans the deterministic history, a
+connecting WebSocket receives the current BBO snapshot, and the adapter retains
+and replays it when the host activates quote delivery. Quoted width, top sizes,
+and trade displacement are separate per-instrument calibration seams. Their
+shipped values are explicitly uncalibrated placeholders pending CME TBBO.
+
+The remainder of this section records the diagnosis that motivated the layer
+and the distinction the implementation preserves.
 
 Three distinct mechanisms are easy to conflate here, and earlier drafts of this
 report conflated two of them into one. They are separate, and the defect is
 bigger than the constant that first drew attention.
 
-**Nothing in the workspace ever constructs a `QuoteTick`.** The wire type is
+**Before protocol 7, nothing in the workspace constructed a `QuoteTick`.** The wire type was
 defined in `mogwai-protocol`, `TickEvent::Quote` is defined in `mogwai-data`,
-the server's tape loop relays that variant, and `mogwai-adapter` converts it to
-a nautilus `QuoteTick`. No source produces one. The `/quotes` handler in
-`mogwai-server` returns an empty vector unconditionally and says so in a comment:
-the generated history is trades-only, so a bounded historical quote fetch is
-empty by construction. A subscribed host therefore never receives a
-`ServerMessage::Quote`, and there is no bid, no ask, and no top-of-book anywhere
-at the protocol boundary.
+the server's tape loop relayed that variant, and `mogwai-adapter` converted it to
+a nautilus `QuoteTick`, but no source produced one. The `/quotes` handler returned
+an empty vector unconditionally. Protocol 7 closed each of those gaps.
 
-This is the load-bearing finding, and earlier drafts of this report missed it
-entirely because they trusted a constant's name. Purchased quote data has no
-landing site in the venue's output until this layer exists. Fitting a spread to
-a venue that publishes none would leave the fit visible only in the trade prints.
+This was the load-bearing finding, and earlier drafts of this report missed it
+entirely because they trusted a constant's name. Purchased quote data had no
+landing site in the venue's output until protocol 7 added this layer. Fitting a
+spread to a venue that published none would have left the fit visible only in
+the trade prints.
 
-**`TRADE_BOUNCE_HALF_WIDTH_TICKS = 0.5` is a trade displacement, not a spread.**
-Until 2026-08-04 it was called `HALF_SPREAD_TICKS`, and that name is the whole
-reason this took as long to see as it did. It is a
-module-level constant in `mogwai-data`, stored on `BounceState` and read fresh on
-every event by `next_price`, which displaces the TRADE PRICE that far from the
-drifted mid on the aggressor's side. Two consecutive opposite-sided prints at an
-unchanged mid land two ticks apart; that separation is a property of the print
-series, not of a displayed book.
+**`trade_displacement_ticks` is a trade displacement, not a spread.** Until
+2026-08-04 its default was exposed only as `HALF_SPREAD_TICKS`, later renamed
+`TRADE_BOUNCE_HALF_WIDTH_TICKS`, and that original name is the whole reason this
+took as long to see as it did. Protocol 7 moved the value into per-instrument
+`GeneratorScalars`; the constant now supplies only its explicitly uncalibrated
+half-tick default. `next_price` reads the configured value and displaces the
+TRADE PRICE that far from the governing book midpoint on the aggressor's side.
+Two consecutive opposite-sided prints against an unchanged midpoint land two
+displacements apart; that separation is a property of the print series, not of
+the displayed width.
 
-The value is frozen at construction and never mutated, so the displacement is
-identical in every regime and for every instrument. Real MNQ trades close to the
-touch most of the time and both widens its book and displaces its prints further
-under stress - which is precisely when execution quality collapses and precisely
-what a divergence-injecting venue exists to exercise. The tape expresses neither,
-so no armed havoc reproduces a spread-driven bad fill.
+The configured value remains static over a run, so the displacement is
+identical in every regime, but it can differ by instrument. Real MNQ trades
+close to the touch most of the time and both widens its book and displaces its
+prints further under stress - which is precisely when execution quality
+collapses and precisely what a divergence-injecting venue exists to exercise.
+The tape now expresses a displayed book and independent static displacement,
+but neither responds dynamically to that stress.
 
-Note that the storage seam already exists: `trade_bounce_ticks` is a per-instance
-field on `BounceState`, not a constant read at the use site. Making it dynamic is
-a mutation, not a restructuring. An earlier draft claimed "there is nowhere to put a
-regime-varying spread"; that overstated the obstacle for the displacement and
-understated it for the quote layer, which genuinely does not exist.
+The per-instrument configuration seam now exists. Making its response dynamic
+is a mutation, not a restructuring. An earlier draft claimed "there is nowhere
+to put a regime-varying spread"; that overstated the obstacle for the
+displacement and understated it for the quote layer, which genuinely did not
+exist then.
 
 **The blocker therefore splits in two.**
 
 - **A. Volatility-dependent aggressor-side trade displacement.** Drive the
-  displacement from the volatility state the mid already carries. Blast radius is
-  `mogwai-data` alone. The rename to `TRADE_BOUNCE_HALF_WIDTH_TICKS` LANDED
-  2026-08-04, behavior-preserving and with no protocol bump; making the value
-  dynamic changes the
-  stream and does need one.
-- **B. An observable top-of-book market.** Synthesize and emit `QuoteTick`, so a
-  spread exists where a host can see it. Blast radius reaches `mogwai-data`
-  output, the server tape loop and the `/quotes` history scan its comment already
-  anticipates; the adapter conversion is already written.
+  configured displacement from the volatility state the mid already carries.
+  Protocol 7 created the per-instrument seam; making its response dynamic
+  changes the stream and needs another protocol bump.
+- **B. An observable top-of-book market. RESOLVED.** Protocol 7 synthesizes and
+  emits `QuoteTick`, serves bounded history, and preserves the current book
+  through server and adapter subscription races.
 
-A alone is a valid tape-fidelity improvement, but it does not close the
-user-visible blocker. B is what makes spread exist at the protocol boundary.
+A remains a valid tape-fidelity improvement. B now makes spread observable at
+the protocol boundary without pretending that its placeholders are calibrated.
 
 **The two observables are not one parameter.** TBBO identifies the trade
 displacement only RELATIVE TO the contemporaneous quote midpoint, and it must
@@ -820,8 +829,9 @@ archives have no bid or ask. Both fitted quantities need them, and need them
 jointly: the quoted width of the synthesized BBO, and the trade displacement
 measured against that BBO's contemporaneous midpoint. If either is to be a
 fitted, regime-varying quantity for MNQ specifically, that is what the money is
-for. Neither can be fitted before the quote layer exists to carry it - see
-[3.5](#35-blocker-the-venue-publishes-no-market).
+for. Protocol 7 supplies the quote layer and separate configuration seams for
+both. Neither can be fitted for MNQ without the joint trade-and-quote evidence -
+see [3.5](#35-resolved-the-venue-publishes-an-observable-top-of-book).
 
 ---
 
@@ -841,8 +851,8 @@ for. Neither can be fitted before the quote layer exists to carry it - see
 | `return_acf_lag1` | shape check | no; needs ticks | also the Roll spread estimator input |
 | `abs_return_acf` lag 1/10/50 | shape check | partly | long memory is scale-free; minute-scale GARCH persistence is estimable, lag indices differ |
 | `zero_change_frac` | shape check | no; needs ticks AND a raw tick grid | see [section 7](#7-findings-from-the-cme-bar-archives) |
-| Trade displacement (`TRADE_BOUNCE_HALF_WIDTH_TICKS`) and any variation | shape | not for the shipped spot presets: archived Binance quotes are derivatives, and live spot quotes need a collector | CME needs TBBO; measured against the contemporaneous quote mid, not half the quoted width |
-| Quoted BBO width and top-of-book sizes | shape, plus an unresolved size schema | no | no layer exists to carry it yet; sizes are an open input, not to be derived from trade sizes |
+| Trade displacement (`trade_displacement_ticks`) and any variation | per-instrument seam, plus a shape check | not for the shipped spot presets: archived Binance quotes are derivatives, and live spot quotes need a collector | CME needs TBBO; measured against the contemporaneous quote mid, not half the quoted width |
+| Quoted BBO width and top-of-book sizes | per-instrument seams | no | protocol 7 carries both; sizes remain an explicit uncalibrated input and are not derived from trade sizes |
 
 The direction of error matters and is one-sided: every bar-derived substitute
 for a tick-level quantity makes the tape MORE REGULAR than reality. Clustered
@@ -1048,7 +1058,7 @@ standard error binds.
 
 TBBO was meanwhile rationed because it costs 1.667x - and TBBO is the only thing
 in the basket that can address the spread question of
-[3.5](#35-blocker-the-venue-publishes-no-market). Rationing the only external evidence for
+[3.5](#35-resolved-the-venue-publishes-an-observable-top-of-book). Rationing the only external evidence for
 the one quantity with no external calibration at all is the wrong economy.
 
 The honest counter: the `abs_return_acf` tail at lag 50 and the GARCH
@@ -1102,18 +1112,15 @@ ticks, run the `select_windows.py` pipeline, and check whether bar-derived
 strata predict tick-level microstructure ([7.2](#72-method-for-window-selection)).
 If they do not, every basket below needs re-selecting.
 
-**Step 5a. Decompose the SYNTHETIC print separation, free and immediate.** Before
-any real data, measure what the shipped tape's opposite-side print separation
-actually is, because it is not one number here and the earlier draft treated it
-as one. Note what this step CANNOT measure: the tape publishes no quotes, so no
-quoted width and no effective spread exists on the synthetic side at all. Every
-figure below is a property of the print series
-([3.5](#35-blocker-the-venue-publishes-no-market)). The output schema is the
-contract both real-data experiments below must match:
+**Step 5a. Decompose the SYNTHETIC spread. RESOLVED 2026-08-04.** Protocol 7
+reports the shipped tape against its published book and retains the latent-mid
+comparison as a separate unobservable model diagnostic. The output schema is
+the contract both real-data experiments below must match:
 
-- configured continuous opposite-side displacement sum (twice the trade
-  displacement - NOT a quoted width);
-- same-mid grid separation (phase-dependent, and 2 ticks almost surely);
+- configured quoted width and independently configured trade displacement;
+- effective spread against the published midpoint, with the latent-mid-relative
+  quantity retained alongside;
+- repeated and non-repeated parents reported separately against the frozen book;
 - parent-layer price-change covariance;
 - parent-layer Roll spread, in price AND in ticks;
 - an explicit UNAVAILABLE result when the covariance is non-negative, never a
@@ -1125,8 +1132,8 @@ contract both real-data experiments below must match:
 A protocol-5 run of this produced a configured 1 tick, an almost-sure 2-tick
 grid separation and a 1.48-tick Roll estimate - three numbers, none agreeing.
 **That result is historical context only and must not be used as calibration
-evidence.** Protocol 6 changed both the latent scale and event-price traversal,
-so the whole decomposition has to be regenerated before any comparison.
+evidence.** The protocol 7 decomposition has now been regenerated at the
+observable referent and remains a report, not calibration evidence by itself.
 
 **Step 5b. Calibrate the estimator against real quotes, free.** Per
 [5.2.1](#521-correction-free-historical-quote-truth-does-not-cover-the-shipped-presets)
@@ -1143,14 +1150,12 @@ behaves across volatility regimes. If it is good enough, buy CME `trades` and
 infer the spread, which converts Basket B into something far cheaper. If it is
 not, the case for TBBO is established with evidence rather than asserted.
 
-**Step 5c. Build the market before buying data to fit it, free.** The venue
-publishes no quotes ([3.5](#35-blocker-the-venue-publishes-no-market)), so
-purchased TBBO currently has no landing site. The rename-and-diagnose half landed
-2026-08-04 with no protocol bump; what remains is to specify BBO emission
-ordering, history behavior and the unresolved quote-size input. Only
-then does step 5b's estimator work have two separate targets - quoted width and
-effective spread - rather than one conflated one. Full sequencing in
-[14.4](#144-there-is-no-quote-layer-and-the-trade-displacement-is-static).
+**Step 5c. Build the market before buying data to fit it, free. RESOLVED
+2026-08-04.** Tape protocol 7 emits a deterministic BBO before every parent
+burst, serves bounded quote history, snapshots the book at connection, and
+replays it through the adapter. The three new per-instrument quantities remain
+explicitly uncalibrated, so step 5b now has separate landing sites for quoted
+width and effective spread rather than one conflated target.
 
 **Step 6. Buy the paired test, 10.02 dollars.** Answers whether process
 constants are contract-specific or market-specific, and whether NQ's moments
@@ -1266,17 +1271,11 @@ Rules for the observable axis:
 
 #### The synthetic quote-age dimension
 
-The synthetic matrix has no historical quote staleness. Its quote-age dimension
-is labelled `no_model_quote`, NOT zero milliseconds. Zero would imply an observed
-transport timestamp that does not exist, and would invite a comparison against
-real zero-age joins that are a different thing entirely.
-
-The label was previously `contemporaneous_model_quote`, which was itself an
-instance of the error corrected in [3.5](#35-blocker-the-venue-publishes-no-market):
-there is no model quote, contemporaneous or otherwise, because the generator
-emits none. Once the BBO layer of item B lands, a genuinely contemporaneous model
-quote WILL exist by construction, and the label should become
-`contemporaneous_model_quote` at that point and not before.
+The synthetic matrix has no historical quote staleness. Protocol 7 labels its
+quote-age dimension `contemporaneous_model_quote`, because every parent carries
+the book published immediately before it. This is not zero milliseconds: that
+would imply an observed transport timestamp and invite comparison against real
+zero-age joins, which are a different thing.
 
 #### Discovery result, 2026-08-04: the coverage windows do not align
 
@@ -1474,15 +1473,14 @@ purchase design.
 
 #### What the synthetic run already establishes
 
-Against an opposite-side print separation that is CONSTANT at 2.000 ticks by
-construction (twice the fixed trade displacement - the synthetic side has no
-quoted width to compare against, since it publishes no quotes), and with no
-lookahead in the stratification:
+Protocol 7's MNQ-shaped run has a configured one-tick quoted width, an overall
+first-child effective spread of 1.409 ticks against the published midpoint, and
+no lookahead in the stratification:
 
 | convention | calm | middle | stressed | extreme |
 |---|---|---|---|---|
-| `roll_first_child` | 0.975 | 1.287 | 1.835 | 2.470 |
-| `roll_last_child` | 1.026 | 5.627 | 10.074 | 12.396 |
+| `roll_first_child` | 0.987 | 1.324 | 1.911 | 2.633 |
+| `roll_last_child` | 1.077 | 5.549 | 10.078 | 12.297 |
 
 Stated carefully, because the tempting reading is stronger than the evidence:
 
@@ -1601,15 +1599,16 @@ Recorded so they are not re-derived.
   was selected by `fills::vol_probe`'s documented PROCEED rule, with the
   provenance recorded in `config.rs` and `fill_golden.rs`. The accurate
   criticism is narrower and is stated in
-  [3.5](#35-blocker-the-venue-publishes-no-market): it is calibrated to an internal
+  [3.5](#35-resolved-the-venue-publishes-an-observable-top-of-book): it is calibrated to an internal
   usability window rather than to any measured market quantity. The claim also
   conflated it with the generator's trade displacement, which is a different
   mechanism in a different crate.
-- **"The generator places quotes half a tick either side of the mid" was wrong,
-  and it was the load-bearing error of the whole spread investigation.** Nothing
-  in the workspace constructs a `QuoteTick`; the venue publishes no bid, no ask
-  and no top of book, and `/quotes` returns empty by construction. What
-  the constant then called `HALF_SPREAD_TICKS` actually does is displace the
+- **"The generator places quotes half a tick either side of the mid" was wrong
+  when written, and it was the load-bearing error of the original spread
+  investigation.** At that time nothing in the workspace constructed a
+  `QuoteTick`; the venue published no bid, ask or top of book, and `/quotes`
+  returned empty by construction. What the constant then called
+  `HALF_SPREAD_TICKS` actually did was displace the
   TRADE price from the latent mid on the aggressor's side; it is now called
   `TRADE_BOUNCE_HALF_WIDTH_TICKS`. The report read the constant's name and inferred a
   mechanism from it, then built a section, a blocker row, an open item and an
@@ -1626,11 +1625,11 @@ Recorded so they are not re-derived.
   an inference does not prompt a lookup the way a question does.
 - **"There is nowhere to put a regime-varying spread" was wrong in both
   directions.** For the trade displacement it overstated the obstacle:
-  `trade_bounce_ticks` is already a per-instance field on `BounceState`, read
-  fresh at every event, so varying it is a mutation and not a restructuring. For
-  the quote layer it badly understated the obstacle: that layer does not exist at
-  all. The two were one sentence because the report had not yet separated the two
-  observables.
+  `trade_bounce_ticks` was already a per-instance field on `BounceState`, read
+  fresh at every event, so varying it was a mutation and not a restructuring.
+  For the quote layer it badly understated the obstacle: that layer did not
+  exist at all then. Protocol 7 has since added it. The two were one sentence
+  because the report had not yet separated the two observables.
 - **The identifiability claim for TBBO was too strong.** An earlier framing
   implied the trade displacement could be read off the quoted spread. It cannot:
   TBBO identifies the displacement only relative to the CONTEMPORANEOUS quote
@@ -1662,12 +1661,14 @@ python3 analysis/asof_join.py selftest                # the quote-join contract
 python3 analysis/roll_estimator.py conformance        # Python half of the shared fixture
 ```
 
-The Rust-side diagnostics for [3.5](#35-blocker-the-venue-publishes-no-market):
+The Rust-side diagnostics for [3.5](#35-resolved-the-venue-publishes-an-observable-top-of-book):
 
 ```
-brokkr test -p mogwai-data the_generator_publishes_no_quotes
+brokkr test -p mogwai-data a_quote_precedes_every_parent_burst
 brokkr test -p mogwai-data the_trade_displacement_never_varies
-brokkr test -p mogwai-data synthetic_spread_decomposition_at_protocol_six
+brokkr test -p mogwai-data synthetic_spread_decomposition_at_protocol_seven
+brokkr run mogwai -- tick-composition --out-6 analysis/tick-composition-protocol-6.json --out-7 analysis/tick-composition-protocol-7.json
+python3 analysis/tick_composition_ratios.py
 ```
 
 The first two are fast and run under a plain `brokkr check`; the third is
@@ -1735,29 +1736,35 @@ question that affects `TAPE_PROTOCOL_VERSION`. The Kraken corpus can answer it
 for free across hundreds of tick grids; a purchased second grid is confirmation
 only.
 
-### 14.4 There is no quote layer, and the trade displacement is static
+### 14.4 The quote layer has landed; calibration remains separate
 
-Split into two items per [3.5](#35-blocker-the-venue-publishes-no-market), whose
+Item B is RESOLVED at tape protocol 7. The emitted BBO uses an exact integer-tick
+width, top sizes on the instrument grid, quote-before-parent ordering, a frozen
+book for compatible repeats, bounded history, and connect-time replay through
+the adapter. Width, size, and displacement provenance is uncalibrated by type.
+The static volatility response in item A and the joint CME TBBO fit remain the
+separate calibration item identified throughout this report.
+
+Split into two items per [3.5](#35-resolved-the-venue-publishes-an-observable-top-of-book), whose
 sequencing is fixed:
 
-**A. The trade displacement cannot vary.** `TRADE_BOUNCE_HALF_WIDTH_TICKS` is
-frozen at construction. The per-instance storage on `BounceState` already exists,
-so this is a mutation rather than a restructuring. The rename from
-`HALF_SPREAD_TICKS` landed 2026-08-04, behavior-preserving and with no
-`TAPE_PROTOCOL_VERSION` bump; making the value dynamic does need one. The static
-behavior is now pinned by `the_trade_displacement_never_varies`, which drives
+**A. The trade displacement does not vary within a run.** The per-instrument
+`trade_displacement_ticks` value is static. Protocol 7 moved it into
+`GeneratorScalars`; making its response dynamic is a mutation rather than a
+restructuring and needs another `TAPE_PROTOCOL_VERSION` bump. The static
+behavior is pinned by `the_trade_displacement_never_varies`, which drives
 20,000 events on both grids, requires the high bounce regime to have been
 entered, and asserts the displacement never moves - so the first commit that
 makes it respond to volatility must fail this test and rewrite it deliberately.
 
-**B. The venue publishes no market.** Nothing constructs a `QuoteTick`, so
-`/quotes` is empty by construction and no host ever sees a bid or an ask. This is
-the item that makes purchased quote data usable, and it is unspecified. The
-absence is pinned by `the_generator_publishes_no_quotes`, which fails the moment
-a BBO layer lands rather than being silently outgrown.
+**B. The observable market has landed. RESOLVED 2026-08-04.** Protocol 7
+constructs a `QuoteTick` before every parent burst, `/quotes` serves bounded
+history, each WebSocket receives an atomic current-book snapshot, and the
+adapter retains and replays that book when its host activates quote delivery.
+The old absence test became `a_quote_precedes_every_parent_burst`.
 
-The smallest coherent contract for B is NOT an independent quote clock. Emit a
-pre-trade BBO update at each parent event, in this order:
+The landed contract deliberately does not invent an independent quote clock. It
+emits a pre-trade BBO update at each parent event, in this order:
 
 1. Advance the latent mid and the volatility state.
 2. Construct bid and ask from the quote-spread response.
@@ -1772,30 +1779,37 @@ asynchronous quote dynamics in a first implementation. An initial quote on
 subscription is also required, so a host never has to wait for the first trade to
 discover the market.
 
-**Top-of-book sizes are an unresolved schema input.** They must not be silently
-derived from trade sizes. No defensible size model exists before TBBO inspection,
-so the size field is recorded here as an open input rather than filled with
-decorative quantities.
+**Top-of-book sizes remain an uncalibrated schema input.** They are not derived
+from trade sizes. When no `[instrument.generator]` table exists, the synthesized
+profile derives the placeholder from the instrument's minimum representable
+size. Inside an explicit generator table, omission uses serde's
+`TopOfBookSizes::default()`, which is one unit. `mes.toml` omits the key in its
+own override file but does not reach that default: the effective MES preset
+inherits MNQ's explicit one-unit value during preset merging. Both defaulting
+routes carry `Uncalibrated` provenance, and configured values are preserved, so
+TBBO evidence has an explicit landing site later.
 
 The implementation order. The first two steps LANDED 2026-08-04 and are kept
 here so the sequence reads whole, not as remaining work:
 
 1. ~~Correct the report terminology and remove every claim that the generator
-   already places quotes.~~ Done: this section, [3.5](#35-blocker-the-venue-publishes-no-market)
+   already places quotes.~~ Done: this section, [3.5](#35-resolved-the-venue-publishes-an-observable-top-of-book)
    and [12](#12-corrections-things-that-were-wrong-along-the-way).
 2. ~~Rename and diagnose the existing trade-bounce mechanism without changing
    behavior.~~ Done: `TRADE_BOUNCE_HALF_WIDTH_TICKS`, plus the two pinning tests
    named above.
-3. Specify BBO emission ordering, history behavior, and quote-size requirements.
+3. ~~Specify and land BBO emission ordering, history behavior, snapshot replay,
+   and quote-size requirements.~~ Done at protocol 7.
 4. Use TBBO to measure quoted spread and effective spread SEPARATELY against the
    same causal volatility state.
 5. Jointly solve quote width, trade displacement, bounce transitions, repetition
    and traversal.
-6. Land A and B together if calibration couples them, and bump the protocol once.
+6. Land A's dynamic calibration separately; B's structural layer is already
+   present and must not be made conditional on that later fit.
 
 Related but separate: `fill_band_vol_mult` is calibrated to an internal
 usability window rather than to measured spread
-([3.5](#35-blocker-the-venue-publishes-no-market)). Deciding whether it SHOULD be anchored
+([3.5](#35-resolved-the-venue-publishes-an-observable-top-of-book)). Deciding whether it SHOULD be anchored
 to a measured quantity is a design question that also precedes the purchase.
 
 ### 14.5 The two session mechanisms may double-count

@@ -95,6 +95,8 @@ fn default_profile(def: InstrumentDef, fp: &Fingerprint) -> InstrumentProfile {
     let mut scalars = GeneratorScalars::from_fingerprint_medians(&def.symbol, fp);
     scalars.modal_tick = def.price_increment;
     scalars.price_decimals = u32::from(def.price_precision);
+    scalars.top_sizes =
+        mogwai_data::TopOfBookSizes::uncalibrated(SizeGrid::from_def(&def).min_size);
     InstrumentProfile::new(def, scalars, fp.session_profile.clone(), None, None, None)
 }
 fn generator(profile: &InstrumentProfile) -> GeneratedSource {
@@ -123,16 +125,23 @@ fn generator(profile: &InstrumentProfile) -> GeneratedSource {
 /// seek BUDGET that used to cap it: there is no `MAX_HISTORY_SEEK_TICKS` any
 /// more and no request is served short because it ran out of walk. A request
 /// below the floor is refused by name instead, which is the whole point.
-/// 262,144 ticks is about 88 simulated minutes at the default raw-fill rate,
-/// bounds residual seek replay to that many ticks, and delays checkpoint
-/// coarsening to roughly 250 simulated days.
-pub(crate) const CHECKPOINT_K: usize = 262_144;
+/// Protocol 7 composition measurement raised the stride to 1,048,576 ticks.
+/// This is twice the worst paired protocol-7/protocol-6 p99.9 expansion,
+/// rounded up to a power of two; see `reference/performance.md`.
+pub(crate) const CHECKPOINT_K: usize = 1_048_576;
 
-/// Runaway backstop on a SINGLE `extend_to` walk. Deliberately NOT a request
-/// budget: every legitimate target (the warmup floor, sim-now, a live cursor)
-/// sits far inside it, and it exists only so a nonsensical far-future target
-/// cannot spin the never-ending generator while holding the index lock.
+/// Runaway backstop on a SINGLE extension while the global index lock is held.
+/// This retains the original one-billion-tick safety purpose: a nonsensical
+/// far-future request cannot turn one lock acquisition into the 81-billion-tick
+/// warmup reach bound below.
 const MAX_EXTEND_TICKS: usize = 1 << 30;
+
+/// Total legitimate boot reach admitted across lock-releasing extension
+/// chunks. Protocol 7's worst measured p99.9 rate projects 81,193,017,600
+/// frames into the longest shipped warmup; the next-million rounding produces
+/// this ceiling. Keeping it separate from `MAX_EXTEND_TICKS` prevents a reach
+/// requirement from silently disabling the per-lock runaway backstop.
+const MAX_WARMUP_MATERIALIZATION_TICKS: usize = 81_194_000_000;
 
 /// The run's one checkpoint chain, over the run's one realization. Process
 /// global because the run is: one instrument, one regime, one origin for the
@@ -251,15 +260,23 @@ pub(crate) fn materialize_warmup(
     let Some(index) = index(symbol, profiles) else {
         anyhow::bail!("configured warmup symbol {symbol} has no source");
     };
-    let mut guard = locked(index);
-    let mut frontier = guard.source_at_or_before(run_start_ns);
-    // Draw one tick past the resumed frontier, so the chain is proven to REACH
-    // the run start rather than merely to have been asked for it.
-    anyhow::ensure!(
-        frontier.next_tick().is_some(),
-        "warmup generation produced no tick at the run start"
-    );
-    Ok(guard.checkpoint_count())
+    let mut walked_total = 0usize;
+    loop {
+        let (walked, frontier_ns, checkpoints) = {
+            let mut guard = locked(index);
+            let walked = guard.extend_toward(run_start_ns);
+            (walked, guard.frontier_ns(), guard.checkpoint_count())
+        };
+        walked_total = walked_total.saturating_add(walked);
+        anyhow::ensure!(
+            walked_total <= MAX_WARMUP_MATERIALIZATION_TICKS,
+            "warmup generation exceeded its measured {MAX_WARMUP_MATERIALIZATION_TICKS}-tick reach ceiling"
+        );
+        if frontier_ns >= run_start_ns {
+            return Ok(checkpoints);
+        }
+        anyhow::ensure!(walked > 0, "warmup generator stopped before the run start");
+    }
 }
 
 /// The last trade printed at or before `ts`. Positioned from the chain at a
@@ -273,7 +290,10 @@ pub(crate) fn last_trade_at_or_before(
     let index = index(symbol, profiles)?;
     let mut source = locked(index).source_at_or_before(ts);
     let mut last = None;
-    while let Some(TickEvent::Trade(trade)) = source.next_tick() {
+    while let Some(tick) = source.next_tick() {
+        let TickEvent::Trade(trade) = tick else {
+            continue;
+        };
         if trade.ts_event > ts {
             break;
         }

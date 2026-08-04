@@ -211,3 +211,78 @@ checkpoint retention and the frontier draw, not just the walk. Re-measure the
 same way after any change to the generator, the checkpoint stride, or the tape
 protocol - the previous value's stated provenance was a `fill_bench` row, and no
 such row has ever existed in this document.
+
+## 2026-08-04 protocol 7 BBO composition
+
+The `mogwai tick-composition` fixtures measure each of the five presets
+independently over 2,000,000 parent events, eight seeds, and four arrival modes.
+Each preset is resolved through `config::profile_from_preset`, the same path the
+venue boots from, so preset inheritance, scalar defaulting, the size grid, the
+session profile and the calendar are the venue's own: MNQ and MES are measured
+on the whole-contract grid under CME hours rather than the crypto fractional
+grid with no calendar. Every stream starts at the fingerprint's highest-intensity session
+hour. Protocol 6 is the
+trade-frame projection of the same protocol 7 realization; quote placement
+draws no randomness and changes neither timestamps nor child counts. The
+fanout arm continues to 6,000 simulated seconds so both speed 1 and speed 10
+carry the required 600-wall-second sampling horizon even under maximum surge.
+Every simulated second between the first and last measured frame is represented,
+including zero-frame seconds. Wall-rate tails use exactly 600 bins per speed.
+The reported p99.9 is the linearly interpolated empirical quantile at rank
+`(n - 1) * 0.999`, so a 600-bin horizon does not collapse p99.9 to the maximum.
+
+The fixtures currently in the tree predate those corrections: they measured
+BTCUSDT once per seed and mode, relabeled four cloned rows as other presets,
+omitted empty simulated seconds, used a ceiling rank that made every
+600-bin p99.9 equal the maximum, and ran every preset on the spot size grid with
+no calendar. The ratios and derived constants below are the landed values from
+that superseded measurement and remain pending revalidation with corrected
+fixtures.
+
+The maximum paired p99.9 protocol-7/protocol-6 ratios were:
+
+| budget denominator | ratio | resulting constant |
+|---|---:|---:|
+| simulated-second checkpoint work | 1.444444 | 1,048,576 |
+| 300-second sweep work | 1.583429 | 282,000,000 |
+| 24-hour cumulative warmup reach | 1.589438 | 81,194,000,000 |
+| wall-second fanout work | 1.534884 | 262,144 |
+
+Every ratio exceeds the 1.05 materiality threshold. Each resulting constant is
+the old constant multiplied by the ratio and by two for headroom, then rounded
+up as specified by the BBO layer measurement protocol: powers of two for the
+checkpoint and fanout, and the next million for sweep and warmup reach. The sweep
+formula alone produced 16,000,000. The required-reach rule applies the worst
+measured p99.9 rate of 939,734 frames per simulated second over the whole
+horizon, then rounds up. That raises the sweep budget above 281,920,200 frames
+and the cumulative warmup ceiling above 81,193,017,600 frames. The directly observed
+partial-window counts, 258,690,975 and 1,365,354,043, are lower and therefore
+do not set either result.
+
+The warmup reach is not the per-lock runaway backstop. `MAX_EXTEND_TICKS`
+remains 1,073,741,824 ticks per index-lock acquisition; boot materialization may
+use multiple such chunks, releasing the global lock between them, up to the
+81,194,000,000 cumulative measured-reach ceiling. The sweep's refusal ceiling
+is likewise separate from its 2,500,000-tick latency warning threshold.
+
+The checkpoint calculation starts from the prior approximately 88
+simulated-minute spacing contract. The two-times headroom and power-of-two
+rounding make the final bound deliberately longer than an exact preservation;
+it cannot shorten the baseline horizon. At the worst measured wall rate, the
+old 65,536-frame fanout held 0.007367 wall seconds; the resized fanout holds
+0.029427 wall seconds, so its horizon does not shrink. Regenerate both fixtures
+with
+`brokkr run mogwai -- tick-composition --out-6 analysis/tick-composition-protocol-6.json --out-7 analysis/tick-composition-protocol-7.json`,
+then run `python3 analysis/tick_composition_ratios.py` after any
+event-composition change. One invocation emits both: protocol 6 is a count
+projection of the protocol-7 tape, so the two fixtures are counted off a single
+traversal and are paired by construction rather than by two runs agreeing. Both
+documents carry the same `pairing_id`, which the ratio script asserts on, so a
+fixture paired with a stale partner is refused rather than silently ratioed.
+Both are serialized in full and staged beside their destinations before either
+is touched, so a serialization failure or a full disk cannot consume a finished
+run. The two renames remain two operations - a crash between them leaves a new
+protocol 6 beside an old protocol 7, and two paths cannot be replaced atomically
+as a pair - so what is guaranteed is DETECTION of that mismatch, not its
+prevention. `--jobs N` sets worker count, defaulting to the machine's
+parallelism.
