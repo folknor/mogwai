@@ -1269,7 +1269,83 @@ one-day scope is an ANALYTICAL constraint - methodology evidence, a
 coverage-selected date, no temporal generalization - and expanding it is a
 design decision rather than a resource one.
 
-#### The six file contracts, to establish from a downloaded file
+#### The six file contracts, ESTABLISHED 2026-08-04
+
+From the files, via `python3 analysis/inspect_archive.py inspect <zip>`, which
+streams members from inside the archive and never extracts. Facts only; the
+schema adopted below is stated separately as a decision.
+
+| | `trades` | `bookTicker` |
+|---|---|---|
+| member | `BTCUSDT-trades-2024-03-30.csv` | `BTCUSDT-bookTicker-2024-03-30.csv` |
+| uncompressed | 78,335,375 | 697,855,247 |
+| member sha256 | `512b5d1e...caea629` | `0fe4cc97...91c85cb` |
+| rows incl. header | 1,469,268 | 7,398,593 |
+
+**1. Header.** Both present.
+
+```
+trades:     id,price,qty,quote_qty,time,is_buyer_maker
+bookTicker: update_id,best_bid_price,best_bid_qty,best_ask_price,best_ask_qty,transaction_time,event_time
+```
+
+Note the futures `trades` layout is **not** the spot layout: six columns, and no
+`isBestMatch`. Assuming the documented spot schema would have mis-parsed every
+row.
+
+**2. Column order and timestamp units.** Field counts are stable (6 and 7, no
+variation, no malformed rows). Every timestamp is a 13-digit MILLISECOND value.
+Not microseconds - the microsecond change applies to spot from 2025, and this is
+2024 futures.
+
+**3. Transaction versus publication time.** `bookTicker` carries BOTH, named and
+distinct: first row `transaction_time` 1711756800002 against `event_time`
+1711756800008. **`trades` carries only ONE timestamp**, so the trade side has no
+transaction-versus-publication distinction available. That is a limitation of
+the data, recorded rather than resolved by assumption.
+
+**4. Ordering.** Both files are sorted. `update_id` is strictly increasing with
+zero regressions; both timestamp columns are non-decreasing with zero
+regressions.
+
+**5. Duplicates and gaps, counted separately.** Zero adjacent full-row
+duplicates in either file. `update_id` has 7,084,263 gaps greater than one and
+no ties - ids are NOT contiguous, which is a fact rather than a defect.
+Timestamp ties are extensive:
+
+| column | adjacent ties | max tie run |
+|---|---|---|
+| `trades.time` | 986,862 | **349** |
+| `bookTicker.transaction_time` | 2,732,402 | 87 |
+| `bookTicker.event_time` | 3,122,752 | 58 |
+
+**6. Coverage overlap**, on transaction-time candidates only:
+
+```
+trades.time                 2024-03-30T00:00:00.014Z .. 23:59:59.126Z
+bookTicker.transaction_time 2024-03-30T00:00:00.002Z .. 23:59:59.980Z
+```
+
+Quotes bracket trades at both ends, so every trade in the day has an eligible
+prior quote and no trade falls into `no_quote_before` for want of coverage.
+
+#### What these facts mean for the estimator, stated as decisions
+
+- Millisecond resolution is the binding constraint. The parent-inference rule
+  groups contiguous rows sharing timestamp and side, and up to **349 trades
+  share a single millisecond** here. Bursts a microsecond tape would separate
+  are merged, so the synthetic and archive group-size distributions are NOT
+  directly comparable and must both be reported.
+- Because `trades` has one timestamp and `bookTicker` has two, equal-millisecond
+  joins cannot be ordered between the streams. Those matches take the
+  `sequencing_ambiguous` label the join contract already defines, and their
+  share is a reported quantity rather than a nuisance to be cleaned.
+- Quote age will be quantized to milliseconds, so a zero-age join means
+  same-millisecond, NOT synchronized. This is exactly why the contract requires
+  absolute age summaries and zero-age frequency before any age stratum is
+  chosen.
+
+#### The six file contracts, as originally specified
 
 Not from documentation, and not from assumption - assumption is what produced
 the spot-versus-derivatives error in
