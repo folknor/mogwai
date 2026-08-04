@@ -2682,6 +2682,7 @@ fn roll_in_stratum(
     boundaries: &[f64],
     stratum: usize,
     tick: f64,
+    min_pairs: usize,
 ) -> (RollEstimate, usize) {
     let changes: Vec<f64> = prices.windows(2).map(|w| w[1] - w[0]).collect();
     let mut pairs: Vec<(f64, f64)> = Vec::new();
@@ -2697,7 +2698,7 @@ fn roll_in_stratum(
             pairs.push((changes[i], changes[i + 1]));
         }
     }
-    if pairs.len() < MIN_COVARIANCE_PAIRS {
+    if pairs.len() < min_pairs {
         return (
             RollEstimate {
                 covariance: f64::NAN,
@@ -2759,6 +2760,96 @@ fn trailing_vol_includes_the_arriving_return_and_excludes_the_leaving_one() {
         at_probe, 0.0,
         "volatility at price i must EXCLUDE the return leaving i"
     );
+}
+
+/// The Rust half of the shared conformance fixture.
+///
+/// `analysis/roll_estimator.py` runs the SAME file. The two implementations are
+/// deliberately separate - Rust tests generator truth, Python handles archive
+/// analysis - so without this, the claim that both corpora are measured by the
+/// same estimator would rest on two implementations happening to agree. Here it
+/// is a tested contract instead.
+///
+/// The fixture is data, not code, so neither language can quietly redefine the
+/// rules while still passing its own tests.
+#[test]
+fn stratified_roll_matches_the_shared_conformance_fixture() {
+    #[derive(serde::Deserialize)]
+    struct Expect {
+        status: String,
+        pairs: usize,
+        covariance: Option<f64>,
+        roll_ticks: Option<f64>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Case {
+        name: String,
+        tick: f64,
+        prices: Vec<f64>,
+        change_vol: Vec<Option<f64>>,
+        boundaries: Vec<f64>,
+        stratum: usize,
+        min_pairs: usize,
+        expect: Expect,
+    }
+    #[derive(serde::Deserialize)]
+    struct Spec {
+        version: u32,
+        tolerance: f64,
+        cases: Vec<Case>,
+    }
+
+    let raw = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../analysis/spread_conformance.json"
+    ));
+    let spec: Spec = serde_json::from_str(raw).expect("conformance fixture parses");
+    assert_eq!(spec.version, 1, "fixture version changed; re-read it");
+
+    for case in &spec.cases {
+        let (est, pairs) = roll_in_stratum(
+            &case.prices,
+            &case.change_vol,
+            &case.boundaries,
+            case.stratum,
+            case.tick,
+            case.min_pairs,
+        );
+        let status = if pairs < case.min_pairs {
+            "fail_closed"
+        } else if est.ticks.is_some() {
+            "matched"
+        } else {
+            "unavailable"
+        };
+        assert_eq!(status, case.expect.status, "{}: status", case.name);
+        assert_eq!(pairs, case.expect.pairs, "{}: pair count", case.name);
+        match case.expect.covariance {
+            // fail_closed reports no covariance at all, which the Rust side
+            // signals with NaN; the fixture says `null`.
+            None => assert!(
+                est.covariance.is_nan(),
+                "{}: covariance should be absent, got {}",
+                case.name,
+                est.covariance
+            ),
+            Some(want) => assert!(
+                (est.covariance - want).abs() <= spec.tolerance,
+                "{}: covariance {} != {want}",
+                case.name,
+                est.covariance
+            ),
+        }
+        match (est.ticks, case.expect.roll_ticks) {
+            (None, None) => {}
+            (Some(got), Some(want)) => assert!(
+                (got - want).abs() <= spec.tolerance,
+                "{}: roll_ticks {got} != {want}",
+                case.name
+            ),
+            (got, want) => panic!("{}: roll_ticks {got:?} != {want:?}", case.name),
+        }
+    }
 }
 
 /// Roll's estimator over a price series, in TICKS. `2 * sqrt(-cov)` where the
@@ -3073,7 +3164,14 @@ fn synthetic_spread_decomposition_at_protocol_six() {
         ("roll_all_prints", &prints, &print_vols),
     ] {
         for (s, label) in VOL_STRATUM_NAMES.iter().enumerate() {
-            let (est, pairs) = roll_in_stratum(series, change_vols, &boundaries, s, tick);
+            let (est, pairs) = roll_in_stratum(
+                series,
+                change_vols,
+                &boundaries,
+                s,
+                tick,
+                MIN_COVARIANCE_PAIRS,
+            );
             match est.ticks {
                 Some(t) => println!(
                     "  {name:<18} {label:<10} {t:>12.3} {pairs:>10} {:>14.4e}",

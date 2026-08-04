@@ -1358,7 +1358,21 @@ python3 analysis/databento_price.py plan pairv pair   # the NQ/MNQ paired test a
 python3 analysis/databento_price.py plan gcv grid     # the GC second-tick-grid probe
 python3 analysis/databento_price.py cache             # what the response cache holds
 python3 analysis/asof_join.py selftest                # the quote-join contract
+python3 analysis/roll_estimator.py conformance        # Python half of the shared fixture
 ```
+
+The Rust half of that same fixture runs as
+`brokkr test -p mogwai-data stratified_roll_matches_the_shared`. Both read
+`analysis/spread_conformance.json`, which is DATA rather than code, so neither
+language can quietly redefine the estimator while still passing its own tests.
+
+The implementations stay separate on purpose: Rust tests generator truth, Python
+handles archive analysis, and unifying them before the file contract is known
+would add integration work without reducing parser or join risk. The fixture is
+what turns "the same estimator on both corpora" from a hope into a contract. If
+the archive pipeline later becomes production infrastructure, shared Rust code
+may be worth it; for a one-day evidence run, a shared fixture is the cleaner
+boundary.
 
 Scopes: `book`, `parent`, `continuous`, `micros`, `targets`, `nq`, `nqv`,
 `nqmnq`, `pairv`, `gcv`, `equity`. Plans: `basket`, `depth`, `pair`, `grid`.

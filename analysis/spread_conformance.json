@@ -1,0 +1,115 @@
+{
+  "_doc": "Language-neutral conformance fixture for the stratified Roll estimator. The Rust synthetic harness and the Python archive analysis implement this estimator separately, so 'the same estimator applied to both corpora' would otherwise rest on two implementations happening to agree. Running this fixture through both turns that into a tested contract. Keep the implementations separate; keep this fixture shared.",
+  "version": 1,
+  "units": {
+    "prices": "price units, not ticks",
+    "covariance": "squared price units",
+    "roll_ticks": "ticks, i.e. 2*sqrt(-covariance)/tick",
+    "change_vol": "one value per CHANGE, already the volatility known before that change"
+  },
+  "tolerance": 1e-09,
+  "rules": {
+    "pair_assignment": "a pair spans changes[i] and changes[i+1] and is assigned by change_vol[i+1], the LATER of its two changes",
+    "covariance": "mean over pairs of (a - mean_a)*(b - mean_b), where mean_a is the mean of first elements and mean_b the mean of second elements",
+    "availability": "roll_ticks is present only when covariance < 0; a non-negative covariance is UNAVAILABLE, never zero",
+    "fail_closed": "fewer than min_pairs covariance pairs reports fail_closed and no covariance"
+  },
+  "cases": [
+    {
+      "name": "negative_covariance_single_stratum",
+      "why": "clean alternating bounce; the estimator's intended case",
+      "tick": 0.25,
+      "prices": [100.0, 100.5, 100.0, 100.5, 100.0, 100.5],
+      "change_vol": [1.0, 1.0, 1.0, 1.0, 1.0],
+      "boundaries": [10.0],
+      "stratum": 0,
+      "min_pairs": 3,
+      "expect": {
+        "status": "matched",
+        "pairs": 4,
+        "covariance": -0.25,
+        "roll_ticks": 4.0
+      }
+    },
+    {
+      "name": "positive_covariance_unavailable",
+      "why": "trending runs give positive covariance; Roll has no value, and zero is not the answer",
+      "tick": 0.25,
+      "prices": [100.0, 101.0, 102.0, 101.0, 100.0, 101.0, 102.0],
+      "change_vol": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+      "boundaries": [10.0],
+      "stratum": 0,
+      "min_pairs": 3,
+      "expect": {
+        "status": "unavailable",
+        "pairs": 5,
+        "covariance": 0.16,
+        "roll_ticks": null
+      }
+    },
+    {
+      "name": "zero_covariance_unavailable",
+      "why": "constant drift gives exactly zero covariance; the boundary case of the availability rule",
+      "tick": 0.25,
+      "prices": [100.0, 100.5, 101.0, 101.5, 102.0, 102.5],
+      "change_vol": [1.0, 1.0, 1.0, 1.0, 1.0],
+      "boundaries": [10.0],
+      "stratum": 0,
+      "min_pairs": 3,
+      "expect": {
+        "status": "unavailable",
+        "pairs": 4,
+        "covariance": 0.0,
+        "roll_ticks": null
+      }
+    },
+    {
+      "name": "insufficient_pairs_fail_closed",
+      "why": "one pair against a minimum of three; must refuse rather than print an unstable estimate",
+      "tick": 0.25,
+      "prices": [100.0, 100.5, 100.0],
+      "change_vol": [1.0, 1.0],
+      "boundaries": [10.0],
+      "stratum": 0,
+      "min_pairs": 3,
+      "expect": {
+        "status": "fail_closed",
+        "pairs": 1,
+        "covariance": null,
+        "roll_ticks": null
+      }
+    },
+    {
+      "name": "later_observation_assigns_stratum_low",
+      "why": "assigning by the EARLIER change would put two pairs here instead of one; the counts differ, so the rule is testable",
+      "tick": 0.25,
+      "prices": [100.0, 100.5, 100.0, 100.5, 100.0],
+      "change_vol": [1.0, 1.0, 5.0, 5.0],
+      "boundaries": [3.0],
+      "stratum": 0,
+      "min_pairs": 1,
+      "expect": {
+        "status": "unavailable",
+        "pairs": 1,
+        "covariance": 0.0,
+        "roll_ticks": null
+      }
+    },
+    {
+      "name": "later_observation_assigns_stratum_high",
+      "why": "the complement of the case above; assigning by the earlier change would leave one pair here instead of two",
+      "tick": 0.25,
+      "prices": [100.0, 100.5, 100.0, 100.5, 100.0],
+      "change_vol": [1.0, 1.0, 5.0, 5.0],
+      "boundaries": [3.0],
+      "stratum": 1,
+      "min_pairs": 1,
+      "expect": {
+        "status": "matched",
+        "pairs": 2,
+        "covariance": -0.25,
+        "roll_ticks": 4.0
+      }
+    }
+  ]
+}
