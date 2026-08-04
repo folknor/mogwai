@@ -1232,6 +1232,18 @@ variable in a volatility-to-spread fit, because it generates a strong slope
 against a constant-spread ground truth.** That is the evidential case for buying
 quotes, and it replaces the assertion this report started with.
 
+On `roll_all_prints`, scope the claim to what was actually tested. The
+UNSTRATIFIED estimator is unavailable on both synthetic grids, and that is what
+the harness asserts. Its stratified behaviour is an observation on one grid, not
+a property: it currently reads unavailable in all four strata, but an earlier
+run appeared to produce a numeric calm estimate, and that turned out to be an
+artifact of stratifying a print-denominated horizon at parent-denominated
+boundaries. The corrected mapping assigns every print change the parent
+volatility known before it, which also removed a collapsed 34-pair extreme cell
+that had looked like scarcity and was a scale mismatch. Generalizing an
+availability result across every print-layer subset is exactly the step that
+mistake would have justified.
+
 #### Order of work
 
 1. This contract into the report. **Done.**

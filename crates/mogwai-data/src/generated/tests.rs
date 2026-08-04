@@ -2628,6 +2628,40 @@ fn stratum_of(vol: f64, boundaries: &[f64]) -> usize {
     boundaries.iter().filter(|b| vol >= **b).count()
 }
 
+/// Volatility per CHANGE for a parent-event series: change `k` runs from parent
+/// price `k` to `k + 1`, and the value known before it is the volatility AT
+/// price `k`.
+fn parent_change_vols(vols: &[Option<f64>]) -> Vec<Option<f64>> {
+    vols[..vols.len().saturating_sub(1)].to_vec()
+}
+
+/// Volatility per CHANGE for the all-print series, expressed in the SHARED
+/// parent-event currency.
+///
+/// The horizon and the stratum boundaries are both denominated in parent
+/// events, so the print series must borrow that scale rather than compute its
+/// own: a trailing window measured in prints has a different cadence and a
+/// different return distribution, and cutting it at parent-derived boundaries
+/// compares two things that were never the same quantity. That mismatch is what
+/// left the extreme all-print cell with 34 pairs - a scale artifact, not
+/// genuine scarcity.
+///
+/// A change entering parent event `j` takes the trailing parent volatility
+/// available after event `j - 1`. Changes between children of event `j` take
+/// that same pre-event value, since nothing new is observable within a burst.
+fn print_change_vols(parent_of_print: &[usize], vols: &[Option<f64>]) -> Vec<Option<f64>> {
+    (0..parent_of_print.len().saturating_sub(1))
+        .map(|k| {
+            let entering = parent_of_print[k + 1];
+            if entering == 0 {
+                None
+            } else {
+                vols.get(entering - 1).copied().flatten()
+            }
+        })
+        .collect()
+}
+
 /// Roll over a price series restricted to one stratum. A covariance PAIR spans
 /// two consecutive changes, hence three prices, and contributes
 /// `dP_t * dP_{t-1}`.
@@ -2644,7 +2678,7 @@ fn stratum_of(vol: f64, boundaries: &[f64]) -> usize {
 /// exists to measure. Returns the estimate and the pair count behind it.
 fn roll_in_stratum(
     prices: &[f64],
-    vols: &[Option<f64>],
+    change_vols: &[Option<f64>],
     boundaries: &[f64],
     stratum: usize,
     tick: f64,
@@ -2652,11 +2686,11 @@ fn roll_in_stratum(
     let changes: Vec<f64> = prices.windows(2).map(|w| w[1] - w[0]).collect();
     let mut pairs: Vec<(f64, f64)> = Vec::new();
     for i in 0..changes.len().saturating_sub(1) {
-        // The pair is (changes[i], changes[i+1]) = (dP_{t-1}, dP_t). Index i+1
-        // is the volatility observable AT price i+1, i.e. after dP_{t-1} and
-        // strictly before dP_t. Indexing i+2 instead would fold dP_t into its
-        // own stratum assignment.
-        let Some(vol) = vols.get(i + 1).copied().flatten() else {
+        // `change_vols` carries ONE volatility PER CHANGE, already the value
+        // known before that change. Taking it per PRICE instead forced index
+        // arithmetic that differed between conventions and silently mixed a
+        // print-denominated horizon with parent-denominated boundaries.
+        let Some(vol) = change_vols.get(i + 1).copied().flatten() else {
             continue;
         };
         if stratum_of(vol, boundaries) == stratum {
@@ -2685,6 +2719,46 @@ fn roll_in_stratum(
         None
     };
     (RollEstimate { covariance, ticks }, pairs.len())
+}
+
+/// Pins the information set of `trailing_vol`, which the whole no-lookahead
+/// argument rests on and which is easy to break by one index without any test
+/// noticing.
+///
+/// For price index `i` the window is `returns[i - H .. i]`, and `returns[j]`
+/// ends at price `j + 1`. So the volatility AT price `i` includes the return
+/// ARRIVING at `i` and excludes the return LEAVING it. Distinct magnitudes make
+/// the two cases separable rather than merely plausible.
+#[test]
+fn trailing_vol_includes_the_arriving_return_and_excludes_the_leaving_one() {
+    let horizon = TRAILING_VOL_EVENTS;
+    // Flat except for one large step, placed so that it is the return ARRIVING
+    // at the probe index. A flat series has zero volatility, so any non-zero
+    // reading can only come from that step.
+    let mut prices = vec![100.0_f64; horizon + 3];
+    let probe = horizon;
+    for p in prices.iter_mut().skip(probe) {
+        *p = 110.0;
+    }
+    let vols = trailing_vol(&prices);
+    let at_probe = vols[probe].expect("horizon has filled by the probe index");
+    assert!(
+        at_probe > 0.0,
+        "volatility at price i must INCLUDE the return arriving at i, got {at_probe}"
+    );
+
+    // Same step, but now it LEAVES the probe index: everything up to the probe
+    // is flat, so the probe must read exactly zero.
+    let mut prices = vec![100.0_f64; horizon + 3];
+    for p in prices.iter_mut().skip(probe + 1) {
+        *p = 110.0;
+    }
+    let vols = trailing_vol(&prices);
+    let at_probe = vols[probe].expect("horizon has filled by the probe index");
+    assert_eq!(
+        at_probe, 0.0,
+        "volatility at price i must EXCLUDE the return leaving i"
+    );
 }
 
 /// Roll's estimator over a price series, in TICKS. `2 * sqrt(-cov)` where the
@@ -2938,6 +3012,10 @@ fn synthetic_spread_decomposition_at_protocol_six() {
     let mut first: Vec<f64> = Vec::new();
     let mut last: Vec<f64> = Vec::new();
     let mut prints: Vec<f64> = Vec::new();
+    // Which parent event each print belongs to, so the all-print series can be
+    // stratified in the SHARED parent-event currency rather than in its own.
+    let mut parent_of_print: Vec<usize> = Vec::new();
+    let mut parent_index = 0_usize;
     while last.len() < 400_000 {
         let starts = src.burst.remaining == 0;
         let TickEvent::Trade(t) = src.next_tick().expect("infinite tape") else {
@@ -2945,11 +3023,13 @@ fn synthetic_spread_decomposition_at_protocol_six() {
         };
         let p = decimal_to_f64(t.price);
         prints.push(p);
+        parent_of_print.push(parent_index);
         if starts {
             first.push(p);
         }
         if src.burst.remaining == 0 {
             last.push(p);
+            parent_index += 1;
         }
     }
     first.truncate(last.len());
@@ -2981,21 +3061,19 @@ fn synthetic_spread_decomposition_at_protocol_six() {
         "  {:<18} {:<10} {:>12} {:>10} {:>14}",
         "convention", "stratum", "roll ticks", "pairs", "covariance"
     );
-    for (name, series) in [
-        ("roll_first_child", &first),
-        ("roll_last_child", &last),
-        ("roll_all_prints", &prints),
+    // Every convention is cut at the SAME boundaries, in the same parent-event
+    // currency. The print series borrows the parent volatility rather than
+    // computing its own, which is the correction: a print-denominated horizon
+    // cut at parent-denominated boundaries is not the same quantity.
+    let parent_vols = parent_change_vols(&vols);
+    let print_vols = print_change_vols(&parent_of_print, &vols);
+    for (name, series, change_vols) in [
+        ("roll_first_child", &first, &parent_vols),
+        ("roll_last_child", &last, &parent_vols),
+        ("roll_all_prints", &prints, &print_vols),
     ] {
-        // Every convention is cut at the SAME boundaries, which are indexed by
-        // parent event, so the print series is stratified by its enclosing
-        // event rather than re-estimated on its own scale.
-        let series_vols: Vec<Option<f64>> = if std::ptr::eq(series, &prints) {
-            trailing_vol(series)
-        } else {
-            vols.clone()
-        };
         for (s, label) in VOL_STRATUM_NAMES.iter().enumerate() {
-            let (est, pairs) = roll_in_stratum(series, &series_vols, &boundaries, s, tick);
+            let (est, pairs) = roll_in_stratum(series, change_vols, &boundaries, s, tick);
             match est.ticks {
                 Some(t) => println!(
                     "  {name:<18} {label:<10} {t:>12.3} {pairs:>10} {:>14.4e}",
