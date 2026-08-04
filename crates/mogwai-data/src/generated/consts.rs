@@ -124,6 +124,14 @@ pub(super) const INTRA_EVENT_STEP_NS: u64 = 1_000;
 pub(super) const CHILD_CAP: u32 = 4_096;
 pub(super) const MAX_ABS_RETURN: f64 = 0.000_02;
 pub(super) const GARCH_SIGMA_CAP: f64 = 0.000_01;
+/// Construction-time sigma may consume at most this fraction of the runtime
+/// cap. At equality with the cap, GARCH starts saturated and upward shocks are
+/// clipped immediately; the headroom keeps the volatility knob two-sided.
+pub(super) const VOL_SCALAR_CAP_FRACTION: f64 = 0.9;
+/// A latent size center below this fraction of the minimum tradable quantity
+/// is a unit contradiction, not merely an illiquid instrument. Behavioral
+/// tail mass is diagnosed separately so coherent thin contracts remain legal.
+pub(super) const LATENT_SIZE_MIN_RATIO: f64 = 0.01;
 // Hard ceiling `next_latent_mid` clamps the latent mid to (the modal tick is
 // the matching floor). Hoisted so the two clamp sites and `start_price`
 // validation cannot drift: a `start_price` above this is silently collapsed on

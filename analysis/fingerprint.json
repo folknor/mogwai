@@ -561,8 +561,9 @@
       0.11131808595415874
     ]
   },
-  "scalar_ranges": {
-    "_doc": "bound the per-instrument knobs the generator is called with",
+  "empirical_ranges": {
+    "_doc": "observed ranges for diagnostics only; mechanism validation does not use them",
+    "corpus": "Kraken eight-pair fingerprint plus Binance three-pair cadence fit",
     "modal_tick": {
       "min": 1e-07,
       "median": 0.0001,
@@ -593,7 +594,7 @@
       "median": 1.7442105614782686,
       "min": 1.0
     },
-    "typical_notional": {
+    "mean_trade_notional": {
       "max": 466.12754727409384,
       "median": 191.39625649855998,
       "min": 100.7834655729268
@@ -865,7 +866,7 @@
         "p95": 257,
         "zero_frac": 0.13345717592592593
       },
-      "typical_notional": {
+      "mean_trade_notional": {
         "anchor": 310.7516981827292,
         "range": {
           "max": 466.12754727409384,

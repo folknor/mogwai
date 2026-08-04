@@ -1,25 +1,11 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Small numeric helpers shared across the generator: fingerprint-range
-//! membership checks, the saturating f64-to-Decimal conversion the walk uses
-//! for prices/sizes and round-lot snapping.
+//! Small numeric helpers shared across the generator: the saturating
+//! f64-to-Decimal conversion the walk uses for prices/sizes and round-lot
+//! snapping.
 
 use rust_decimal::{Decimal, prelude::FromPrimitive};
-
-use super::fingerprint::{MinMedianMax, ScalarError};
-
-pub(super) fn validate_f64(
-    field: &'static str,
-    value: f64,
-    range: &MinMedianMax,
-) -> Result<(), ScalarError> {
-    if range.contains(value) {
-        Ok(())
-    } else {
-        Err(ScalarError { field })
-    }
-}
 
 // Saturating f64 -> Decimal conversion: no internal generator draw can panic
 // here. The pinned size/price distributions keep draws far inside Decimal

@@ -3,25 +3,27 @@
 
 //! The committed fingerprint's config schema: the `Deserialize` types parsed
 //! straight from `analysis/fingerprint.json`, plus the validation that keeps
-//! caller-supplied [`GeneratorScalars`] and [`SessionProfile`] inputs inside
-//! the bands the generator's calibration assumes.
+//! caller-supplied [`GeneratorScalars`] and [`SessionProfile`] inputs. Hard
+//! validation below is derived from the mechanism. Corpus ranges are retained
+//! separately as diagnostics: what eight crypto pairs happened to do must not
+//! decide whether a futures contract is allowed to exist.
 
 use mogwai_protocol::decimal_to_f64;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
 use super::consts::{
-    GARCH_SIGMA_CAP, SESSION_SHARE_SUM, SESSION_SUM_TOL, SIZE_DECIMALS, SIZE_LOG_SIGMA,
-    START_PRICE_USD, VOL_HOUR_SUM, VOL_SCALAR,
+    GARCH_SIGMA_CAP, LATENT_SIZE_MIN_RATIO, SESSION_SHARE_SUM, SESSION_SUM_TOL, SIZE_DECIMALS,
+    SIZE_LOG_SIGMA, START_PRICE_USD, VOL_HOUR_SUM, VOL_SCALAR, VOL_SCALAR_CAP_FRACTION,
 };
-use super::numeric::{decimal_from_f64, validate_f64};
+use super::numeric::decimal_from_f64;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Fingerprint {
     pub cadence: Cadence,
     pub golden_targets: GoldenTargets,
     pub session_profile: SessionProfile,
-    pub scalar_ranges: ScalarRanges,
+    pub empirical_ranges: EmpiricalRanges,
 }
 
 impl Fingerprint {
@@ -62,7 +64,7 @@ pub struct CadenceTargets {
     pub children_mean: AnchorRange,
     pub children_single_frac: AnchorRange,
     pub levels_mean: AnchorRange,
-    pub typical_notional: AnchorRange,
+    pub mean_trade_notional: AnchorRange,
     pub duration_dispersion_cv2: AnchorRange,
     pub duration_acf_lag1: AnchorRange,
     pub duration_acf_lag5: AnchorRange,
@@ -109,9 +111,8 @@ pub struct MinMedianMax {
 
 impl MinMedianMax {
     /// Inclusive range-membership over the fitted band. The single source of
-    /// truth for "is this scalar inside the fingerprint range" - `validate_f64`
-    /// and the realism tests both route through it so the two cannot drift on
-    /// the inclusive-vs-exclusive convention.
+    /// truth for diagnostic membership and realism tests, so those two cannot
+    /// drift on the inclusive-vs-exclusive convention.
     #[must_use]
     pub fn contains(&self, v: f64) -> bool {
         (self.min..=self.max).contains(&v)
@@ -214,14 +215,17 @@ fn strictly_positive_finite(value: f64) -> bool {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct ScalarRanges {
+pub struct EmpiricalRanges {
+    /// Human-readable identity of the corpus behind every range below. These
+    /// bands are observations, not universal units or mechanism limits.
+    pub corpus: String,
     pub modal_tick: MinMedianMax,
     pub price_decimals: MinMedianMax,
     pub mean_event_duration_s: MinMedianMax,
     pub children_mean: MinMedianMax,
     pub children_single_frac: MinMedianMax,
     pub levels_mean: MinMedianMax,
-    pub typical_notional: MinMedianMax,
+    pub mean_trade_notional: MinMedianMax,
     pub size_round_frac: MinMedianMax,
 }
 
@@ -237,7 +241,11 @@ pub struct GeneratorScalars {
     pub levels_mean: f64,
     pub size_round_frac: f64,
     pub start_price: Decimal,
-    pub typical_notional: Decimal,
+    /// Median of the continuous lognormal before minimum-size flooring, grid
+    /// quantization, or optional round-lot snapping, in this instrument's
+    /// native size unit. Calling this merely `size_median` is a trap: many
+    /// different latent medians collapse onto an observed one-contract median.
+    pub latent_size_median: Decimal,
     pub vol_scalar: f64,
 }
 
@@ -246,15 +254,23 @@ impl GeneratorScalars {
     pub fn from_fingerprint_medians(symbol: &str, fp: &Fingerprint) -> Self {
         Self {
             symbol: symbol.to_string(),
-            modal_tick: decimal_from_f64(fp.scalar_ranges.modal_tick.median),
-            price_decimals: fp.scalar_ranges.price_decimals.median.round() as u32,
+            modal_tick: decimal_from_f64(fp.empirical_ranges.modal_tick.median),
+            price_decimals: fp.empirical_ranges.price_decimals.median.round() as u32,
             mean_event_duration_s: fp.cadence.targets.mean_event_duration_s.anchor,
             children_mean: fp.cadence.targets.children_mean.anchor,
             children_single_frac: fp.cadence.targets.children_single_frac.anchor,
             levels_mean: fp.cadence.targets.levels_mean.anchor,
-            size_round_frac: fp.scalar_ranges.size_round_frac.median,
+            size_round_frac: fp.empirical_ranges.size_round_frac.median,
             start_price: Decimal::from(START_PRICE_USD),
-            typical_notional: decimal_from_f64(fp.cadence.targets.typical_notional.anchor),
+            // Preserve the calibrated crypto stream while removing the proxy
+            // from the public configuration schema. The old field was exactly
+            // MEAN trade notional because it divided by exp(sigma^2 / 2), even
+            // though its `typical_` name suggested a representative center.
+            latent_size_median: decimal_from_f64(
+                fp.cadence.targets.mean_trade_notional.anchor
+                    / START_PRICE_USD as f64
+                    / (SIZE_LOG_SIGMA.powi(2) / 2.0).exp(),
+            ),
             vol_scalar: VOL_SCALAR,
         }
     }
@@ -269,14 +285,18 @@ impl GeneratorScalars {
             children_mean: fp.cadence.targets.children_mean.anchor,
             children_single_frac: fp.cadence.targets.children_single_frac.anchor,
             levels_mean: fp.cadence.targets.levels_mean.anchor,
-            size_round_frac: fp.scalar_ranges.size_round_frac.median,
+            size_round_frac: fp.empirical_ranges.size_round_frac.median,
             start_price: Decimal::from(START_PRICE_USD),
-            typical_notional: decimal_from_f64(fp.cadence.targets.typical_notional.anchor),
+            latent_size_median: decimal_from_f64(
+                fp.cadence.targets.mean_trade_notional.anchor
+                    / START_PRICE_USD as f64
+                    / (SIZE_LOG_SIGMA.powi(2) / 2.0).exp(),
+            ),
             vol_scalar: VOL_SCALAR,
         }
     }
 
-    pub fn validate(&self, fp: &Fingerprint) -> Result<(), ScalarError> {
+    pub fn validate(&self) -> Result<(), ScalarError> {
         // A `symbol` omitted from config serde-defaults to "". Every trade this
         // source emits would then carry an empty symbol, keying
         // `TickRuleAggressor` per-symbol state and any symbol-keyed consumer on
@@ -284,16 +304,11 @@ impl GeneratorScalars {
         if self.symbol.is_empty() {
             return Err(ScalarError { field: "symbol" });
         }
-        validate_f64(
-            "modal_tick",
-            decimal_to_f64(self.modal_tick),
-            &fp.scalar_ranges.modal_tick,
-        )?;
-        validate_f64(
-            "price_decimals",
-            f64::from(self.price_decimals),
-            &fp.scalar_ranges.price_decimals,
-        )?;
+        if self.modal_tick <= Decimal::ZERO {
+            return Err(ScalarError {
+                field: "modal_tick",
+            });
+        }
         // `modal_tick` must be representable at `price_decimals`. `next_price`
         // snaps every quote with `round_dp(price_decimals)`; a tick carrying
         // more decimal places than that is silently coarsened to the
@@ -303,31 +318,34 @@ impl GeneratorScalars {
         // COARSER grid, so no test or runtime check catches it - only this does.
         // The server enforces the same relationship on its instrument defs via
         // `on_increment`; this is the generator-layer twin.
-        if self.modal_tick.normalize().scale() > self.price_decimals {
+        // rust_decimal carries at most 28 fractional digits. Zero is a valid
+        // whole-number grid (YM/MYM are the motivating examples); values above
+        // 28 claim precision the numeric representation cannot provide.
+        if self.price_decimals > 28 || self.modal_tick.normalize().scale() > self.price_decimals {
             return Err(ScalarError {
                 field: "modal_tick",
             });
         }
-        validate_f64(
-            "mean_event_duration_s",
-            self.mean_event_duration_s,
-            &fp.scalar_ranges.mean_event_duration_s,
-        )?;
-        validate_f64(
-            "children_mean",
-            self.children_mean,
-            &fp.scalar_ranges.children_mean,
-        )?;
-        validate_f64(
-            "children_single_frac",
-            self.children_single_frac,
-            &fp.scalar_ranges.children_single_frac,
-        )?;
-        validate_f64(
-            "levels_mean",
-            self.levels_mean,
-            &fp.scalar_ranges.levels_mean,
-        )?;
+        if !strictly_positive_finite(self.mean_event_duration_s) {
+            return Err(ScalarError {
+                field: "mean_event_duration_s",
+            });
+        }
+        if !strictly_positive_finite(self.children_mean) {
+            return Err(ScalarError {
+                field: "children_mean",
+            });
+        }
+        if !self.children_single_frac.is_finite() {
+            return Err(ScalarError {
+                field: "children_single_frac",
+            });
+        }
+        if !strictly_positive_finite(self.levels_mean) {
+            return Err(ScalarError {
+                field: "levels_mean",
+            });
+        }
         if self.children_mean <= 1.0 {
             return Err(ScalarError {
                 field: "children_mean",
@@ -343,11 +361,11 @@ impl GeneratorScalars {
                 field: "levels_mean",
             });
         }
-        validate_f64(
-            "size_round_frac",
-            self.size_round_frac,
-            &fp.scalar_ranges.size_round_frac,
-        )?;
+        if !self.size_round_frac.is_finite() || !(0.0..=1.0).contains(&self.size_round_frac) {
+            return Err(ScalarError {
+                field: "size_round_frac",
+            });
+        }
         // `start_price` seeds `vol.mid`, which `next_latent_mid` clamps to
         // [modal_tick, MID_CEILING] on the very first tick. A start_price above
         // the ceiling instantly collapses the mid (an ~80 percent crash for
@@ -360,22 +378,14 @@ impl GeneratorScalars {
                 field: "start_price",
             });
         }
-        validate_f64(
-            "typical_notional",
-            decimal_to_f64(self.typical_notional),
-            &fp.scalar_ranges.typical_notional,
-        )?;
-        if self.typical_notional <= Decimal::ZERO {
+        if self.latent_size_median <= Decimal::ZERO {
             return Err(ScalarError {
-                field: "typical_notional",
+                field: "latent_size_median",
             });
         }
-        let median_size = decimal_to_f64(self.typical_notional)
-            / decimal_to_f64(self.start_price)
-            / (SIZE_LOG_SIGMA.powi(2) / 2.0).exp();
-        if decimal_from_f64(median_size).round_dp(SIZE_DECIMALS) <= Decimal::ZERO {
+        if self.latent_size_median.round_dp(SIZE_DECIMALS) <= Decimal::ZERO {
             return Err(ScalarError {
-                field: "typical_notional",
+                field: "latent_size_median",
             });
         }
         if !strictly_positive_finite(self.vol_scalar) {
@@ -391,13 +401,185 @@ impl GeneratorScalars {
         // a value the base regime cannot honor rather than accept a dead knob (a
         // VolStorm can lift the cap, but that is a transient per-subscription
         // overlay, not the construction-time scalar's contract).
-        if self.vol_scalar > GARCH_SIGMA_CAP {
+        // Equality initializes GARCH on the ceiling: low shocks may pull it
+        // down and later shocks may raise it again, but every upward shock at
+        // initialization saturates. Reserve ten percent headroom so the
+        // configured unconditional sigma is not born partially clipped.
+        if self.vol_scalar >= GARCH_SIGMA_CAP * VOL_SCALAR_CAP_FRACTION {
             return Err(ScalarError {
                 field: "vol_scalar",
             });
         }
         Ok(())
     }
+
+    /// Grid-dependent mechanism validation belongs beside scalar validation,
+    /// not in a crypto-fitted range. A latent center two orders of magnitude
+    /// below the smallest tradable quantity is the numerical signature of the
+    /// unit mismatch which used to turn MNQ into a constant-one-contract tape.
+    pub fn validate_size_grid(&self, min_size: Decimal) -> Result<(), ScalarError> {
+        if min_size <= Decimal::ZERO
+            || decimal_to_f64(self.latent_size_median)
+                < decimal_to_f64(min_size) * LATENT_SIZE_MIN_RATIO
+        {
+            return Err(ScalarError {
+                field: "latent_size_median",
+            });
+        }
+        Ok(())
+    }
+
+    /// Closed-form, dimensionless view of how the latent mid meets the price
+    /// grid. `expected_updates_per_tick` is the random-walk order estimate
+    /// `(tick_return / sigma)^2`, not a promise about printed prices: bounce,
+    /// sweep children, tick phase, recentering, and explicit event repetition
+    /// all remain downstream. This is the principled input for a future
+    /// derivation of `zero_change_frac`; the old corpus constant is not.
+    #[must_use]
+    pub fn tick_traversal(&self) -> TickTraversal {
+        self.tick_traversal_at(1.0)
+            .expect("the neutral volatility multiplier is positive and finite")
+    }
+
+    /// The same traversal estimate under a composed session/regime volatility
+    /// multiplier. Callers inspecting a particular hour or armed regime must
+    /// use this form; the zero-argument helper is intentionally the neutral
+    /// baseline rather than an implied all-hours claim.
+    #[must_use]
+    pub fn tick_traversal_at(&self, vol_multiplier: f64) -> Option<TickTraversal> {
+        if !strictly_positive_finite(vol_multiplier) {
+            return None;
+        }
+        let tick_return =
+            (1.0 + decimal_to_f64(self.modal_tick) / decimal_to_f64(self.start_price)).ln();
+        let effective_sigma = self.vol_scalar * vol_multiplier;
+        let sigma_units = tick_return / effective_sigma;
+        Some(TickTraversal {
+            tick_return,
+            effective_sigma,
+            sigma_units,
+            expected_updates_per_tick: sigma_units.powi(2),
+        })
+    }
+
+    /// Grid-aware behavioral warnings. Unlike `validate_size_grid`, this does
+    /// not call a thin but coherent contract invalid. The 1 percent tail rule
+    /// warns that quantization will hide almost all size variation; the hard
+    /// one-hundredth ratio check above is reserved for contradictory units.
+    /// This deliberately models the final integral rounding and floor only.
+    /// It does not fold in the optional `size_round_frac` lot-snap branch,
+    /// whose decade-sized lots matter once the latent median reaches ten; the
+    /// separately pinned `integral_lot` transitions keep that limitation
+    /// visible rather than letting this probability masquerade as the whole
+    /// output distribution.
+    #[must_use]
+    pub fn size_diagnostics(&self, min_size: Decimal, integral: bool) -> Vec<ScalarDiagnostic> {
+        if !integral {
+            return Vec::new();
+        }
+        let median = decimal_to_f64(self.latent_size_median);
+        let threshold = decimal_to_f64(min_size) + 0.5;
+        let z = (threshold / median).ln() / SIZE_LOG_SIGMA;
+        // Phi^-1(0.99). P(X >= threshold) < 0.01 exactly when z exceeds it.
+        if z > 2.326_347_874_040_840_8 {
+            vec![ScalarDiagnostic {
+                code: "quantized-size-variation-below-one-percent",
+                field: "latent_size_median",
+                corpus: "mechanism-derived".to_string(),
+            }]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Corpus comparisons are intentionally advisory. Operators may choose an
+    /// instrument outside Kraken's observed envelope; shipped presets must
+    /// accept every diagnostic explicitly in provenance, with stale
+    /// acceptances rejected by the server's preset-validation test.
+    #[must_use]
+    pub fn empirical_diagnostics(
+        &self,
+        fp: &Fingerprint,
+        multiplier: Decimal,
+    ) -> Vec<ScalarDiagnostic> {
+        let observed = &fp.empirical_ranges;
+        let mut diagnostics = [
+            (
+                "modal_tick",
+                decimal_to_f64(self.modal_tick),
+                &observed.modal_tick,
+            ),
+            (
+                "price_decimals",
+                f64::from(self.price_decimals),
+                &observed.price_decimals,
+            ),
+            (
+                "mean_event_duration_s",
+                self.mean_event_duration_s,
+                &observed.mean_event_duration_s,
+            ),
+            ("children_mean", self.children_mean, &observed.children_mean),
+            (
+                "children_single_frac",
+                self.children_single_frac,
+                &observed.children_single_frac,
+            ),
+            ("levels_mean", self.levels_mean, &observed.levels_mean),
+            (
+                "size_round_frac",
+                self.size_round_frac,
+                &observed.size_round_frac,
+            ),
+        ]
+        .into_iter()
+        .filter(|(_, value, range)| !range.contains(*value))
+        .map(|(field, _, _)| ScalarDiagnostic {
+            code: "outside-empirical-corpus-range",
+            field,
+            corpus: observed.corpus.clone(),
+        })
+        .collect::<Vec<_>>();
+        if !observed
+            .mean_trade_notional
+            .contains(self.mean_trade_notional(multiplier))
+        {
+            diagnostics.push(ScalarDiagnostic {
+                code: "derived-mean-notional-outside-empirical-corpus-range",
+                field: "latent_size_median",
+                corpus: observed.corpus.clone(),
+            });
+        }
+        diagnostics
+    }
+
+    /// Arithmetic mean notional implied by the latent lognormal at the
+    /// configured reference price. Notional remains useful for comparing a
+    /// preset with the corpus, but it is derived reporting data now, never the
+    /// sampler input. The exp term is explicit because this exact correction
+    /// was hidden behind the old and misleading `typical_notional` field.
+    #[must_use]
+    pub fn mean_trade_notional(&self, multiplier: Decimal) -> f64 {
+        decimal_to_f64(self.latent_size_median)
+            * (SIZE_LOG_SIGMA.powi(2) / 2.0).exp()
+            * decimal_to_f64(self.start_price)
+            * decimal_to_f64(multiplier)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScalarDiagnostic {
+    pub code: &'static str,
+    pub field: &'static str,
+    pub corpus: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TickTraversal {
+    pub tick_return: f64,
+    pub effective_sigma: f64,
+    pub sigma_units: f64,
+    pub expected_updates_per_tick: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -406,8 +588,8 @@ pub struct ScalarError {
 }
 
 /// Why a [`super::GeneratedSource`] construction can fail: either the scalar
-/// config or the session profile is outside the fingerprint's validated
-/// ranges. Returned by the fallible `GeneratedSource::try_new` /
+/// config violates a mechanism constraint or the session profile is invalid.
+/// Returned by the fallible `GeneratedSource::try_new` /
 /// `GeneratedSource::try_new_with_session_profile` so a caller holding config
 /// that has not been pre-validated can surface the error instead of tripping
 /// the panic inside the infallible `GeneratedSource::new` family.

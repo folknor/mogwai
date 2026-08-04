@@ -40,7 +40,8 @@ mod tests;
 pub use calendar::{CalendarError, SessionCalendar, WeeklyWindow};
 pub use checkpoint::CheckpointIndex;
 pub use fingerprint::{
-    AbsReturnAcf, AnchorRange, Fingerprint, GeneratedSourceError, GeneratorScalars, GoldenTargets,
-    MinMedianMax, ScalarError, ScalarRanges, SessionProfile, SessionProfileError,
+    AbsReturnAcf, AnchorRange, EmpiricalRanges, Fingerprint, GeneratedSourceError,
+    GeneratorScalars, GoldenTargets, MinMedianMax, ScalarDiagnostic, ScalarError, SessionProfile,
+    SessionProfileError, TickTraversal,
 };
 pub use source::{GeneratedSource, SizeGrid};

@@ -41,7 +41,7 @@ children_single_frac = 0.493046043756676
 levels_mean = 1.7442105614782686
 size_round_frac = 0.20856767610054022
 start_price = "21000"
-typical_notional = "191.39625649855998"
+latent_size_median = "1"
 vol_scalar = 0.000001
 
 [instrument.calendar]

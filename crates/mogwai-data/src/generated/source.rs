@@ -245,13 +245,16 @@ impl GeneratedSource {
         scalars: GeneratorScalars,
         seed: u64,
         start_ts: u64,
-        fp: &Fingerprint,
+        _fp: &Fingerprint,
         session: &SessionProfile,
         regime: Option<MarketRegime>,
         clamp_override: Option<f64>,
         size_grid: SizeGrid,
     ) -> Result<Self, GeneratedSourceError> {
-        scalars.validate(fp).map_err(GeneratedSourceError::Scalar)?;
+        scalars.validate().map_err(GeneratedSourceError::Scalar)?;
+        scalars
+            .validate_size_grid(size_grid.min_size)
+            .map_err(GeneratedSourceError::Scalar)?;
         session.validate().map_err(GeneratedSourceError::Session)?;
         let mean_event_duration_s = scalars.mean_event_duration_s;
         let calibrated_mean_s = ARRIVAL_MEAN_CAL * mean_event_duration_s;
@@ -259,10 +262,12 @@ impl GeneratedSource {
             / ((1.0 - ARRIVAL_QUIET_FRACTION)
                 + ARRIVAL_QUIET_FRACTION * ARRIVAL_QUIET_ACTIVE_RATIO);
         let vol = GarchVol::new(decimal_to_f64(scalars.start_price), scalars.vol_scalar);
-        let size_median = (decimal_to_f64(scalars.typical_notional)
-            / (decimal_to_f64(scalars.start_price) * decimal_to_f64(size_grid.multiplier))
-            / (SIZE_LOG_SIGMA.powi(2) / 2.0).exp())
-        .max(f64::MIN_POSITIVE);
+        // The config now names the quantity the sampler actually consumes.
+        // The removed `typical_notional` took a circuitous route through price,
+        // contract multiplier, and the lognormal mean correction. Besides
+        // mixing quote currency with contracts, that made a field called
+        // "typical" denote the arithmetic mean of a strongly skewed law.
+        let size_median = decimal_to_f64(scalars.latent_size_median).max(f64::MIN_POSITIVE);
         let size_dist = LogNormal::new(size_median.ln(), SIZE_LOG_SIGMA).expect("valid lognormal");
         let shape = SweepShape::new(
             scalars.children_mean,
@@ -564,7 +569,7 @@ impl GeneratedSource {
                 // The lot on an integral grid is at least one contract, so a
                 // median below ten contracts snaps to whole contracts rather
                 // than to a fractional lot.
-                let lot = 10_f64.powf(self.size_median.log10().floor()).max(1.0);
+                let lot = integral_lot(self.size_median);
                 decimal_from_f64((base / lot).round() * lot)
             } else {
                 decimal_from_f64(base)
@@ -588,6 +593,14 @@ impl GeneratedSource {
         };
         size.max(self.size_grid.min_size)
     }
+}
+
+/// Round-lot scale selected from the latent distribution center. Keeping this
+/// tiny derivation named makes its decade transitions directly testable: the
+/// old crypto notional proxy pinned it at one and left every larger-contract
+/// branch live but unexercised.
+pub(super) fn integral_lot(latent_size_median: f64) -> f64 {
+    10_f64.powf(latent_size_median.log10().floor()).max(1.0)
 }
 
 impl TickSource for GeneratedSource {

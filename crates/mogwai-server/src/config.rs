@@ -478,9 +478,41 @@ fn preset_text(name: &str) -> Option<&'static str> {
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Provenance {
-    Fitted { corpus: String, window: String },
-    Derived { from: Vec<String> },
-    Declared { rationale: String },
+    Fitted {
+        corpus: String,
+        window: String,
+        #[serde(default)]
+        accepted_diagnostics: Vec<String>,
+    },
+    Derived {
+        from: Vec<String>,
+        #[serde(default)]
+        accepted_diagnostics: Vec<String>,
+    },
+    Declared {
+        rationale: String,
+        #[serde(default)]
+        accepted_diagnostics: Vec<String>,
+    },
+}
+
+impl Provenance {
+    fn accepted_diagnostics(&self) -> &[String] {
+        match self {
+            Self::Fitted {
+                accepted_diagnostics,
+                ..
+            }
+            | Self::Derived {
+                accepted_diagnostics,
+                ..
+            }
+            | Self::Declared {
+                accepted_diagnostics,
+                ..
+            } => accepted_diagnostics,
+        }
+    }
 }
 
 fn flatten_knobs(
@@ -567,22 +599,86 @@ fn validate_provenance(
         let entry: Provenance = value.clone().try_into().map_err(|error| {
             anyhow::anyhow!("preset {name} provenance for {path} is invalid: {error}")
         })?;
-        match entry {
-            Provenance::Fitted { corpus, window }
+        match &entry {
+            Provenance::Fitted { corpus, window, .. }
                 if corpus.trim().is_empty() || window.trim().is_empty() =>
             {
                 anyhow::bail!("preset {name} provenance for {path} requires corpus and window")
             }
-            Provenance::Derived { from }
+            Provenance::Derived { from, .. }
                 if from.is_empty() || from.iter().any(|source| !knobs.contains(source)) =>
             {
                 anyhow::bail!("preset {name} provenance for {path} has invalid derived sources")
             }
-            Provenance::Declared { rationale } if rationale.trim().is_empty() => {
+            Provenance::Declared { rationale, .. } if rationale.trim().is_empty() => {
                 anyhow::bail!("preset {name} provenance for {path} requires a rationale")
             }
             _ => {}
         }
+        if entry
+            .accepted_diagnostics()
+            .iter()
+            .any(|code| code.trim().is_empty())
+        {
+            anyhow::bail!("preset {name} provenance for {path} accepts an empty diagnostic")
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn accepted_preset_diagnostics(
+    name: &str,
+    provenance: &toml::Table,
+) -> anyhow::Result<std::collections::BTreeSet<(String, String)>> {
+    let mut accepted = std::collections::BTreeSet::new();
+    for (path, value) in provenance {
+        let entry: Provenance = value.clone().try_into().map_err(|error| {
+            anyhow::anyhow!("preset {name} provenance for {path} is invalid: {error}")
+        })?;
+        for code in entry.accepted_diagnostics() {
+            if code.trim().is_empty() {
+                anyhow::bail!("preset {name} provenance for {path} accepts an empty diagnostic")
+            }
+            if !accepted.insert((path.clone(), code.clone())) {
+                anyhow::bail!("preset {name} provenance for {path} accepts diagnostic {code} twice")
+            }
+        }
+    }
+    Ok(accepted)
+}
+
+#[cfg(test)]
+fn assert_preset_diagnostics(
+    name: &str,
+    profile: &source::InstrumentProfile,
+    fp: &mogwai_data::Fingerprint,
+    provenance: &toml::Table,
+) -> anyhow::Result<()> {
+    let grid = mogwai_data::SizeGrid::from_def(&profile.def);
+    let actual = profile
+        .scalars
+        .empirical_diagnostics(fp, grid.multiplier)
+        .into_iter()
+        .chain(
+            profile
+                .scalars
+                .size_diagnostics(grid.min_size, grid.integral),
+        )
+        .map(|diagnostic| {
+            (
+                format!("generator.{}", diagnostic.field),
+                diagnostic.code.to_string(),
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let accepted = accepted_preset_diagnostics(name, provenance)?;
+    if actual != accepted {
+        let unaccepted = actual.difference(&accepted).cloned().collect::<Vec<_>>();
+        let stale = accepted.difference(&actual).cloned().collect::<Vec<_>>();
+        anyhow::bail!(
+            "shipped preset {name} diagnostics disagree with provenance: unaccepted {unaccepted:?}, stale acceptances {stale:?}"
+        );
     }
     Ok(())
 }
@@ -810,13 +906,40 @@ fn profile_from_configured(
             def.symbol
         );
     }
-    scalars.validate(fp).map_err(|err| {
+    scalars.validate().map_err(|err| {
         anyhow::anyhow!(
             "instrument {} generator.{} failed validation",
             def.symbol,
             err.field
         )
     })?;
+    let size_grid = mogwai_data::SizeGrid::from_def(&def);
+    scalars
+        .validate_size_grid(size_grid.min_size)
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "instrument {} generator.{} failed size-grid validation",
+                def.symbol,
+                err.field
+            )
+        })?;
+    for diagnostic in scalars.empirical_diagnostics(fp, size_grid.multiplier) {
+        tracing::warn!(
+            code = diagnostic.code,
+            field = diagnostic.field,
+            corpus = diagnostic.corpus,
+            symbol = def.symbol,
+            "generator scalar sits outside its empirical corpus range"
+        );
+    }
+    for diagnostic in scalars.size_diagnostics(size_grid.min_size, size_grid.integral) {
+        tracing::warn!(
+            code = diagnostic.code,
+            field = diagnostic.field,
+            symbol = def.symbol,
+            "generator size grid hides almost all latent size variation"
+        );
+    }
     configured
         .session
         .validate()
@@ -1259,14 +1382,46 @@ mod tests {
 
     #[test]
     fn every_shipped_preset_parses_and_validates() {
+        let fp = mogwai_data::Fingerprint::from_repo_json();
         for name in ["MNQ", "MES", "BTCUSDT", "ETHUSDT", "SOLUSDT"] {
+            let (_, provenance) = effective_preset(name).unwrap();
             let table =
                 toml::Table::from_iter([("preset".into(), toml::Value::String(name.into()))]);
             let resolved = resolve_instrument_table(table).unwrap();
             let configured: ConfiguredInstrument = toml::Value::Table(resolved).try_into().unwrap();
             validate_instrument_def(&configured.def()).unwrap();
             validate_instrument_options(&configured, &configured.def()).unwrap();
+            let profile = profile_from_configured(&configured, &fp).unwrap();
+            assert_preset_diagnostics(name, &profile, &fp, &provenance).unwrap();
         }
+    }
+
+    #[test]
+    fn shipped_preset_diagnostics_require_exact_provenance_acceptance() {
+        let fp = mogwai_data::Fingerprint::from_repo_json();
+        let (instrument, mut provenance) = effective_preset("MNQ").unwrap();
+        let configured: ConfiguredInstrument = toml::Value::Table(instrument).try_into().unwrap();
+        let mut profile = profile_from_configured(&configured, &fp).unwrap();
+        profile.scalars.modal_tick = Decimal::ONE;
+
+        let error = assert_preset_diagnostics("TEST", &profile, &fp, &provenance).unwrap_err();
+        assert!(error.to_string().contains("unaccepted"), "{error}");
+
+        let entry = provenance
+            .get_mut("generator.modal_tick")
+            .and_then(toml::Value::as_table_mut)
+            .unwrap();
+        entry.insert(
+            "accepted_diagnostics".into(),
+            toml::Value::Array(vec![toml::Value::String(
+                "outside-empirical-corpus-range".into(),
+            )]),
+        );
+        assert_preset_diagnostics("TEST", &profile, &fp, &provenance).unwrap();
+
+        profile.scalars.modal_tick = Decimal::new(25, 2);
+        let error = assert_preset_diagnostics("TEST", &profile, &fp, &provenance).unwrap_err();
+        assert!(error.to_string().contains("stale acceptances"), "{error}");
     }
 
     #[test]

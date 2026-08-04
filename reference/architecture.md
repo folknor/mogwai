@@ -49,10 +49,28 @@ contract multiplier, whole-contract quantities on the order path AND on the
 tape, and no expiry or roll. The generator's size grid is multiplier-aware -
 notional per unit is `multiplier * price`, and a contract draw is rounded half
 away from zero and floored at one contract, so no print becomes the zero
-quantity nautilus drops. That floor truncates the lower tail, so a grid whose
-median sits near one contract prints a mean notional above `typical_notional`;
-the property is measured rather than pretended away. `TAPE_PROTOCOL_VERSION` is
-4, having moved twice: once for the size grid, once for the calendar.
+quantity nautilus drops. `latent_size_median` is stated directly in the
+instrument's native size unit and names the continuous lognormal center before
+that grid is applied. The floor truncates its lower tail, so it is deliberately
+not called the observed size median. `TAPE_PROTOCOL_VERSION` is 5; version 5
+removed the quote-notional proxy whose value was actually arithmetic mean
+notional and made the latent size distribution explicit.
+
+Fingerprint ranges are corpus-labelled observations. They select defaults and
+produce operator diagnostics, but never admit or reject an instrument. A
+shipped preset must either produce no diagnostic or accept its stable code on
+the matching provenance entry; exact-set validation also rejects stale
+acceptances. Hard
+generator validation is mechanism-derived instead. In particular, the latent
+size center must not sit two orders of magnitude below the minimum tradable
+quantity, volatility must retain headroom below the GARCH sigma cap, and the
+tick must be representable at the declared precision. Return clamps remain the
+shared module-level process shape: a coarse truthful grid is allowed to produce
+a stickier latent mid rather than receiving an uncalibrated stress-tail lift.
+The dimensionless `tick_return / vol_scalar` and its squared random-walk crossing
+estimate are exposed as diagnostics for deriving event-price repetition; they
+do not pretend to model sweep stepping, bounce, recentering, or explicit repeat
+draws by themselves.
 
 A future's ledger is single-currency and collateralized. There is no base leg:
 a fill moves the position and the VWAP, a quantity-reducing fill books

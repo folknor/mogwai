@@ -4,7 +4,11 @@ preset = "MNQ"
 symbol = "MES"
 "class.underlying" = "ES"
 "class.multiplier" = "5"
+"generator.symbol" = "MES"
+"generator.start_price" = "6000"
 [provenance]
 "symbol" = { kind = "declared", rationale = "continuous synthetic contract" }
 "class.underlying" = { kind = "declared", rationale = "S&P 500" }
 "class.multiplier" = { kind = "declared", rationale = "five dollars per point" }
+"generator.symbol" = { kind = "declared", rationale = "generator key matches the instrument" }
+"generator.start_price" = { kind = "declared", rationale = "representative S&P 500 level" }

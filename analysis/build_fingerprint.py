@@ -276,8 +276,9 @@ def main():
             "vol_hour": vol,
             "dow_weight": dow,
         },
-        "scalar_ranges": {
-            "_doc": "bound the per-instrument knobs the generator is called with",
+        "empirical_ranges": {
+            "_doc": "observed ranges for diagnostics only; mechanism validation does not use them",
+            "corpus": "Kraken eight-pair fingerprint plus Binance three-pair cadence fit",
             "modal_tick": rng([r["returns"]["modal_tick"] for r in reps.values()]),
             "price_decimals": rng(
                 [r["returns"]["price_decimals_mode"] for r in reps.values()]),
@@ -285,7 +286,7 @@ def main():
             "children_mean": cadence["targets"]["children_mean"]["range"],
             "children_single_frac": cadence["targets"]["children_single_frac"]["range"],
             "levels_mean": cadence["targets"]["levels_mean"]["range"],
-            "typical_notional": cadence["targets"]["typical_notional"]["range"],
+            "mean_trade_notional": cadence["targets"]["mean_trade_notional"]["range"],
             "size_round_frac": rng(
                 [r["size"]["round_frac"] for r in reps.values()]),
         },

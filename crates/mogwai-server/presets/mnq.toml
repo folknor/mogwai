@@ -14,6 +14,21 @@ asset_class = "index"
 initial_per_contract = "2000"
 maintenance_per_contract = "1800"
 breach_action = "liquidate"
+[instrument.generator]
+symbol = "MNQ"
+modal_tick = "0.25"
+price_decimals = 2
+mean_event_duration_s = 0.17104059420590498
+children_mean = 8.49053255324216
+children_single_frac = 0.5586834546003685
+levels_mean = 2.2471110339199503
+size_round_frac = 0.20856767610054022
+start_price = "21000"
+# This is the continuous lognormal's center before the whole-contract grid.
+# Keeping it in contracts is the point: the removed mean-notional proxy made
+# the same setting mean quote currency for spot and contracts for futures.
+latent_size_median = "1"
+vol_scalar = 0.000001
 # Exchange-local CME hours: Sunday 18:00 through Friday 17:00 Chicago time,
 # with the daily 16:15-16:30 maintenance halt and the 17:00-18:00 break, and a
 # genuinely shut Saturday. Minutes count from local Sunday 00:00. Local minute
@@ -48,6 +63,17 @@ open_windows = [
 "margin.initial_per_contract" = { kind = "declared", rationale = "test collateral, not a CME performance bond" }
 "margin.maintenance_per_contract" = { kind = "declared", rationale = "test collateral, not a CME performance bond" }
 "margin.breach_action" = { kind = "declared", rationale = "exercise liquidation" }
+"generator.symbol" = { kind = "declared", rationale = "generator key matches the instrument" }
+"generator.modal_tick" = { kind = "declared", rationale = "CME contract specification" }
+"generator.price_decimals" = { kind = "declared", rationale = "CME quote convention" }
+"generator.mean_event_duration_s" = { kind = "declared", rationale = "crypto anchor pending an MNQ cadence fit" }
+"generator.children_mean" = { kind = "declared", rationale = "crypto anchor pending an MNQ cadence fit" }
+"generator.children_single_frac" = { kind = "declared", rationale = "crypto anchor pending an MNQ cadence fit" }
+"generator.levels_mean" = { kind = "declared", rationale = "crypto anchor pending an MNQ cadence fit" }
+"generator.size_round_frac" = { kind = "declared", rationale = "crypto median pending an MNQ size fit" }
+"generator.start_price" = { kind = "declared", rationale = "representative Nasdaq 100 level" }
+"generator.latent_size_median" = { kind = "declared", rationale = "one contract before whole-contract quantization", accepted_diagnostics = ["derived-mean-notional-outside-empirical-corpus-range"] }
+"generator.vol_scalar" = { kind = "declared", rationale = "shared baseline pending an MNQ volatility fit" }
 "calendar.utc_offset_minutes" = { kind = "declared", rationale = "CME central time; DST is declared unmodelled" }
 "calendar.settlement_minute_of_day" = { kind = "declared", rationale = "16:00 local daily settlement" }
 "calendar.open_windows" = { kind = "declared", rationale = "published CME equity index hours" }

@@ -76,7 +76,7 @@ def build():
         "children_mean": [primary[p]["children"]["mean"] for p in PAIRS],
         "children_single_frac": [primary[p]["children"]["single_frac"] for p in PAIRS],
         "levels_mean": [primary[p]["levels"]["mean"] for p in PAIRS],
-        "typical_notional": [reports[p]["mean_notional"] for p in PAIRS],
+        "mean_trade_notional": [reports[p]["mean_notional"] for p in PAIRS],
         "duration_dispersion_cv2": [primary[p]["parent_gap"]["cv2"] for p in PAIRS],
         "duration_acf_lag1": [primary[p]["parent_gap"]["acf_lag1"] for p in PAIRS],
         "duration_acf_lag5": [primary[p]["parent_gap"]["acf_lag5"] for p in PAIRS],
@@ -93,7 +93,7 @@ def build():
         "mean_event_duration_s": 1e-9,
         "children_mean": 1.0 + 1e-9,
         "children_single_frac": 0.0,
-        "typical_notional": 1e-9,
+        "mean_trade_notional": 1e-9,
     }
     targets = {}
     for name, values in fields.items():

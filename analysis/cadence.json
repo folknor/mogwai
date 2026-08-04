@@ -259,7 +259,7 @@
       "p95": 257,
       "zero_frac": 0.13345717592592593
     },
-    "typical_notional": {
+    "mean_trade_notional": {
       "anchor": 310.7516981827292,
       "range": {
         "max": 466.12754727409384,

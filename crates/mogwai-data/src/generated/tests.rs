@@ -8,7 +8,9 @@ use crate::{TickEvent, TickSource};
 use super::checkpoint::MAX_CHECKPOINTS;
 use super::consts::SIZE_LOG_SIGMA;
 use super::consts::{GARCH_SIGMA_CAP, MAX_ABS_RETURN, MAX_SESSION_GAP_NS, NS_PER_HOUR};
+use super::numeric::decimal_from_f64;
 use super::session::{utc_hour, utc_hour_dow};
+use super::source::integral_lot;
 use super::*;
 use rust_decimal::Decimal;
 use std::collections::HashSet;
@@ -62,22 +64,43 @@ fn fingerprint_parses() {
     assert_eq!(fp.session_profile.dow_weight.len(), 7);
     assert_eq!(fp.golden_targets.abs_return_acf_anchor.len(), 50);
     assert_eq!(fp.golden_targets.dwell.era_start_ts, 1_546_300_800);
-    assert_eq!(fp.scalar_ranges.price_decimals.min, 1.0);
-    assert_eq!(fp.scalar_ranges.price_decimals.max, 7.0);
+    assert_eq!(fp.empirical_ranges.price_decimals.min, 1.0);
+    assert_eq!(fp.empirical_ranges.price_decimals.max, 7.0);
 }
 
 #[test]
 fn scalars_validate() {
     let fp = Fingerprint::from_repo_json();
     let scalars = GeneratorScalars::from_fingerprint_medians("ETHUSD", &fp);
-    assert!(scalars.validate(&fp).is_ok());
+    assert!(scalars.validate().is_ok());
     let mut bad = scalars.clone();
-    bad.mean_event_duration_s = fp.scalar_ranges.mean_event_duration_s.max + 1.0;
+    bad.mean_event_duration_s = fp.empirical_ranges.mean_event_duration_s.max + 1.0;
+    assert!(bad.validate().is_ok());
     assert_eq!(
-        bad.validate(&fp),
-        Err(ScalarError {
-            field: "mean_event_duration_s"
-        })
+        bad.empirical_diagnostics(&fp, Decimal::ONE)[0].field,
+        "mean_event_duration_s"
+    );
+}
+
+#[test]
+fn mean_notional_is_derived_reporting_not_sampler_input() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::from_fingerprint_medians("BTCUSDT", &fp);
+    assert_near(
+        "derived crypto mean notional",
+        scalars.mean_trade_notional(Decimal::ONE),
+        fp.cadence.targets.mean_trade_notional.anchor,
+        1e-9,
+    );
+
+    let mut mnq = scalars;
+    mnq.start_price = Decimal::from(21_000);
+    mnq.latent_size_median = Decimal::ONE;
+    assert_near(
+        "derived MNQ mean notional",
+        mnq.mean_trade_notional(Decimal::from(2)),
+        21_000.0 * 2.0 * (SIZE_LOG_SIGMA.powi(2) / 2.0).exp(),
+        1e-9,
     );
 }
 
@@ -150,16 +173,13 @@ fn session_profile_rejects_non_normalized_curves() {
 fn scalars_reject_coverage_holes() {
     let fp = Fingerprint::from_repo_json();
     let good = GeneratorScalars::xbtusd_anchor(&fp);
-    assert!(good.validate(&fp).is_ok());
+    assert!(good.validate().is_ok());
 
     // (d) an omitted symbol serde-defaults to "" and cross-contaminates
     // every symbol-keyed consumer.
     let mut no_symbol = good.clone();
     no_symbol.symbol = String::new();
-    assert_eq!(
-        no_symbol.validate(&fp),
-        Err(ScalarError { field: "symbol" })
-    );
+    assert_eq!(no_symbol.validate(), Err(ScalarError { field: "symbol" }));
 
     // (a) modal_tick 1e-7 is in range and price_decimals 1 is in range, but
     // together round_dp(1) silently coarsens the grid to 0.1.
@@ -167,7 +187,7 @@ fn scalars_reject_coverage_holes() {
     fine_tick.modal_tick = Decimal::new(1, 7);
     fine_tick.price_decimals = 1;
     assert_eq!(
-        fine_tick.validate(&fp),
+        fine_tick.validate(),
         Err(ScalarError {
             field: "modal_tick"
         })
@@ -179,7 +199,7 @@ fn scalars_reject_coverage_holes() {
     let mut high_start = good.clone();
     high_start.start_price = Decimal::from(5_000_000_000_i64);
     assert_eq!(
-        high_start.validate(&fp),
+        high_start.validate(),
         Err(ScalarError {
             field: "start_price"
         })
@@ -187,7 +207,7 @@ fn scalars_reject_coverage_holes() {
     let mut low_start = good.clone();
     low_start.start_price = good.modal_tick / Decimal::from(2);
     assert_eq!(
-        low_start.validate(&fp),
+        low_start.validate(),
         Err(ScalarError {
             field: "start_price"
         })
@@ -198,16 +218,45 @@ fn scalars_reject_coverage_holes() {
     let mut hot_vol = good.clone();
     hot_vol.vol_scalar = GARCH_SIGMA_CAP * 10.0;
     assert_eq!(
-        hot_vol.validate(&fp),
+        hot_vol.validate(),
         Err(ScalarError {
             field: "vol_scalar"
         })
     );
 
+    // Equality used to pass even though GARCH then initialized on its cap and
+    // clipped every upward shock. The mechanism now reserves headroom.
+    let mut capped_vol = good.clone();
+    capped_vol.vol_scalar = GARCH_SIGMA_CAP;
+    assert_eq!(
+        capped_vol.validate(),
+        Err(ScalarError {
+            field: "vol_scalar"
+        })
+    );
+
+    // A truthful coarse grid is not rejected merely because its tick return
+    // exceeds the module-level clamp. That ratio predicts sticky latent-mid
+    // traversal; it is a diagnostic, not an admission failure or a reason to
+    // change stressed-tail clipping per instrument.
+    let mut unreachable_tick = good.clone();
+    unreachable_tick.start_price = Decimal::from(44_000);
+    unreachable_tick.modal_tick = Decimal::ONE;
+    unreachable_tick.price_decimals = 0;
+    assert!(unreachable_tick.validate().is_ok());
+
     // The fingerprint-median construction (a fine 4-decimal grid) still
     // passes: its modal_tick scale (4) equals price_decimals (4).
     let medians = GeneratorScalars::from_fingerprint_medians("ETHUSD", &fp);
-    assert!(medians.validate(&fp).is_ok());
+    assert!(medians.validate().is_ok());
+
+    // Whole-number quote grids are structurally representable. Kraken's
+    // observed minimum of one decimal place was never a mechanism bound.
+    let mut whole_number = good;
+    whole_number.modal_tick = Decimal::ONE;
+    whole_number.price_decimals = 0;
+    whole_number.start_price = Decimal::from(100_000);
+    assert!(whole_number.validate().is_ok());
 }
 
 #[test]
@@ -221,7 +270,7 @@ fn try_new_accepts_valid_input_and_surfaces_bad_input() {
     // infallible `new` would. `GeneratedSource` is not `PartialEq`, so drop
     // the Ok half with `.err()` before comparing the error.
     let mut bad_scalars = scalars.clone();
-    bad_scalars.mean_event_duration_s = fp.scalar_ranges.mean_event_duration_s.max + 1.0;
+    bad_scalars.mean_event_duration_s = f64::NAN;
     assert_eq!(
         GeneratedSource::try_new(bad_scalars, 42, 0, &fp, None).err(),
         Some(GeneratedSourceError::Scalar(ScalarError {
@@ -1113,15 +1162,10 @@ fn assert_calendar_dwell_excludes_closed_hours() {
 
 #[test]
 fn contract_sizes_are_whole_numbers_and_never_zero() {
-    let mut fp = Fingerprint::from_repo_json();
-    fp.scalar_ranges.typical_notional = MinMedianMax {
-        min: 1.0,
-        median: 200_000.0,
-        max: 1_000_000.0,
-    };
+    let fp = Fingerprint::from_repo_json();
     let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
     scalars.start_price = Decimal::from(21_000);
-    scalars.typical_notional = Decimal::from(200_000);
+    scalars.latent_size_median = Decimal::from(2);
     let mut source =
         GeneratedSource::try_new_with_size_grid(scalars, 73, 0, &fp, None, mnq_size_grid())
             .expect("MNQ grid is valid");
@@ -1135,27 +1179,26 @@ fn contract_sizes_are_whole_numbers_and_never_zero() {
 }
 
 #[test]
-fn contract_size_median_tracks_notional_over_multiplier_times_price() {
-    let mut fp = Fingerprint::from_repo_json();
-    fp.scalar_ranges.typical_notional = MinMedianMax {
-        min: 1.0,
-        median: 200_000.0,
-        max: 1_000_000.0,
-    };
+fn contract_size_sampler_consumes_the_declared_latent_median_directly() {
+    let fp = Fingerprint::from_repo_json();
     let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
     scalars.start_price = Decimal::from(21_000);
-    scalars.typical_notional = Decimal::from(200_000);
+    scalars.latent_size_median = Decimal::new(25, 1);
     let source = GeneratedSource::try_new_with_size_grid(scalars, 1, 0, &fp, None, mnq_size_grid())
         .expect("MNQ grid is valid");
-    let expected = 200_000.0 / (21_000.0 * 2.0) / (SIZE_LOG_SIGMA.powi(2) / 2.0).exp();
-    assert_near("contract size median", source.size_median, expected, 1e-12);
-    assert!(source.size_median < 200_000.0 / 21_000.0 / (SIZE_LOG_SIGMA.powi(2) / 2.0).exp());
+    assert_near(
+        "contract latent size median",
+        source.size_median,
+        2.5,
+        1e-12,
+    );
 }
 
 #[test]
 fn a_lot_snap_on_an_integral_grid_never_produces_a_fractional_lot() {
     let fp = Fingerprint::from_repo_json();
-    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    scalars.latent_size_median = Decimal::ONE;
     let mut source =
         GeneratedSource::try_new_with_size_grid(scalars, 9, 0, &fp, None, mnq_size_grid())
             .expect("integral lot grid is valid");
@@ -1165,17 +1208,76 @@ fn a_lot_snap_on_an_integral_grid_never_produces_a_fractional_lot() {
 }
 
 #[test]
-fn the_integral_floor_lifts_the_realized_mean_above_the_notional_target() {
-    let mut fp = Fingerprint::from_repo_json();
-    fp.scalar_ranges.typical_notional = MinMedianMax {
-        min: 1.0,
-        median: 20_000.0,
-        max: 1_000_000.0,
-    };
+fn integral_lot_tracks_latent_median_decades() {
+    assert_eq!(integral_lot(0.001), 1.0);
+    assert_eq!(integral_lot(1.0), 1.0);
+    assert_eq!(integral_lot(9.999), 1.0);
+    assert_eq!(integral_lot(10.0), 10.0);
+    assert_eq!(integral_lot(25.0), 10.0);
+    assert_eq!(integral_lot(100.0), 100.0);
+}
+
+#[test]
+fn size_grid_separates_unit_mismatch_from_thin_truthful_sizes() {
+    let fp = Fingerprint::from_repo_json();
+    let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    scalars.latent_size_median = Decimal::new(1337, 6);
+    assert_eq!(
+        scalars.validate_size_grid(Decimal::ONE),
+        Err(ScalarError {
+            field: "latent_size_median"
+        })
+    );
+
+    scalars.latent_size_median = Decimal::new(5, 1);
+    assert!(scalars.validate_size_grid(Decimal::ONE).is_ok());
+    assert!(scalars.size_diagnostics(Decimal::ONE, true).is_empty());
+
+    // A coherent but extremely bottom-heavy latent law is admitted and warned,
+    // rather than conflated with the unit mismatch above.
+    scalars.latent_size_median = Decimal::new(5, 2);
+    assert!(scalars.validate_size_grid(Decimal::ONE).is_ok());
+    assert_eq!(
+        scalars.size_diagnostics(Decimal::ONE, true)[0].code,
+        "quantized-size-variation-below-one-percent"
+    );
+}
+
+#[test]
+fn tick_traversal_uses_grid_return_over_unconditional_sigma() {
+    let fp = Fingerprint::from_repo_json();
     let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
     scalars.start_price = Decimal::from(21_000);
-    scalars.typical_notional = Decimal::from(20_000);
+    scalars.modal_tick = Decimal::new(25, 2);
+    scalars.price_decimals = 2;
+    let traversal = scalars.tick_traversal();
+    assert_near(
+        "MNQ tick return",
+        traversal.tick_return,
+        1.190_469_105e-5,
+        1e-12,
+    );
+    assert_near(
+        "MNQ sigma units",
+        traversal.sigma_units,
+        11.904_691_05,
+        1e-6,
+    );
+    assert_near(
+        "MNQ random-walk updates",
+        traversal.expected_updates_per_tick,
+        traversal.sigma_units.powi(2),
+        f64::EPSILON,
+    );
+}
+
+#[test]
+fn the_integral_floor_lifts_the_realized_mean_above_the_notional_target() {
+    let fp = Fingerprint::from_repo_json();
+    let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    scalars.start_price = Decimal::from(21_000);
     let target = 20_000.0 / (21_000.0 * 2.0);
+    scalars.latent_size_median = decimal_from_f64(target / (SIZE_LOG_SIGMA.powi(2) / 2.0).exp());
     let mut source =
         GeneratedSource::try_new_with_size_grid(scalars, 81, 0, &fp, None, mnq_size_grid())
             .expect("MNQ grid is valid");
@@ -1210,9 +1312,8 @@ fn spot_draws_are_bit_identical_across_the_size_grid_change() {
     // PRE-GRID generator produced, and only a golden can carry it. These are
     // the first twelve draws of seed 42 on the committed fingerprint, and they
     // are the PRE-GRID values: the spot arm of `next_size` is character
-    // identical to the pre-grid expression, and `size_median` gained only a
-    // division by `decimal_to_f64(SizeGrid::spot().multiplier)`, which is
-    // exactly 1.0 and therefore an IEEE identity. Bit-identity is provable
+    // identical to the pre-grid expression, while the direct native-unit
+    // latent median is the same calibrated value. Bit identity is provable
     // rather than merely asserted, and this golden keeps it provable across
     // the next edit to either arm.
     const PRE_GRID_HEAD: [&str; 12] = [
@@ -1287,7 +1388,7 @@ fn realism() {
     assert_in_range(
         "round_lot_frac",
         measured.round_lot_frac,
-        &fp.scalar_ranges.size_round_frac,
+        &fp.empirical_ranges.size_round_frac,
     );
     assert!(measured.size_cv > 0.5, "size_cv={}", measured.size_cv);
     assert_eq!(measured.off_grid_prices, 0);
@@ -1663,9 +1764,7 @@ struct Measured {
 /// two structures that actually read them - the occupied-hour set and the
 /// per-second count vector, both O(simulated seconds) rather than O(prints).
 fn measure(src: &mut GeneratedSource, scalars: &GeneratorScalars, draw: usize) -> Measured {
-    let median_size = decimal_to_f64(scalars.typical_notional)
-        / decimal_to_f64(scalars.start_price)
-        / (super::consts::SIZE_LOG_SIGMA.powi(2) / 2.0).exp();
+    let median_size = decimal_to_f64(scalars.latent_size_median);
     let mut parent_timestamps = Vec::with_capacity(draw);
     let mut prices = Vec::with_capacity(draw);
     let mut size_n = 0_u64;

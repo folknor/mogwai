@@ -9,7 +9,7 @@ this is the cheap path for the case where only the BAND RULE changed, since the
 per-pair statistics the rule consumes are already committed in `cadence.json`.
 It reads and writes nothing else, and it re-mirrors the result into
 `fingerprint.json` exactly as `build_fingerprint.py` would - the `cadence` block
-and the five cadence-derived `scalar_ranges` entries.
+and the cadence-derived `empirical_ranges` entries.
 
 Run `build_cadence.py` instead whenever the MEASUREMENT is what changed.
 """
@@ -31,14 +31,14 @@ FLOORS = {
     "mean_event_duration_s": 1e-9,
     "children_mean": 1.0 + 1e-9,
     "children_single_frac": 0.0,
-    "typical_notional": 1e-9,
+    "mean_trade_notional": 1e-9,
 }
 MIRRORED = (
     "mean_event_duration_s",
     "children_mean",
     "children_single_frac",
     "levels_mean",
-    "typical_notional",
+    "mean_trade_notional",
 )
 
 
@@ -49,7 +49,7 @@ def fields(reports):
         "children_mean": [primary[p]["children"]["mean"] for p in PAIRS],
         "children_single_frac": [primary[p]["children"]["single_frac"] for p in PAIRS],
         "levels_mean": [primary[p]["levels"]["mean"] for p in PAIRS],
-        "typical_notional": [reports[p]["mean_notional"] for p in PAIRS],
+        "mean_trade_notional": [reports[p]["mean_notional"] for p in PAIRS],
         "duration_dispersion_cv2": [primary[p]["parent_gap"]["cv2"] for p in PAIRS],
         "duration_acf_lag1": [primary[p]["parent_gap"]["acf_lag1"] for p in PAIRS],
         "duration_acf_lag5": [primary[p]["parent_gap"]["acf_lag5"] for p in PAIRS],
@@ -74,7 +74,8 @@ def main():
         fingerprint = json.load(stream)
     fingerprint["cadence"] = cadence
     for name in MIRRORED:
-        fingerprint["scalar_ranges"][name] = cadence["targets"][name]["range"]
+        if name in fingerprint["empirical_ranges"]:
+            fingerprint["empirical_ranges"][name] = cadence["targets"][name]["range"]
     # `build_fingerprint.py` writes insertion order with no trailing newline;
     # match it exactly so this tool's output is a value diff, not a re-ordering.
     with open(fingerprint_path, "w") as stream:

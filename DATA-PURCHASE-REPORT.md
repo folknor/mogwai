@@ -49,16 +49,17 @@ stands in the way:
 
 | Finding | Nature | What it needs |
 |---|---|---|
-| `scalar_ranges` rejects a truthful `typical_notional` | **blocker**: the slot cannot be filled at all | a design decision; no data helps |
+| Size was configured through a crypto mean-notional proxy | **resolved 2026-08-04**: native-unit `latent_size_median` plus grid-aware validation | no purchase required |
 | Spread is pinned at one tick with no variation mechanism | **blocker**: no slot exists yet | somewhere to put it, then TBBO or free Binance bookTicker |
 | Session profile is crypto's flat 24/7 curve | wrong data in a fillable slot | NQ 1-minute bars ALREADY ON DISK, free |
 | Price level, cadence, sizes are crypto's | unfilled slots | tick data, eventually |
 
-The two blockers are the news. Both are design questions that precede any
-purchase, and buying data before resolving them means the data arrives with
-nowhere to go. The session profile is the largest VISIBLE defect and is free to
-fix from bars already owned. Only the fourth row is the question this report
-originally set out to answer, and it is the least urgent of the four.
+The spread blocker is still a design question that precedes any purchase. The
+size blocker was resolved after this report exposed that `typical_notional` was
+both denominated in the wrong unit and, exactly, the arithmetic mean notional of
+a right-skewed lognormal. The session profile is the largest VISIBLE defect and
+is free to fix from bars already owned. Only the fourth row is the question this
+report originally set out to answer, and it is the least urgent of the four.
 
 Recommendation: spend nothing until steps 1 to 3 of
 [section 11](#11-recommended-sequence) are done. They cost zero dollars, use
@@ -112,7 +113,7 @@ from the shipped source, not from documentation.
 | `crates/mogwai-server/presets/*.toml` | the five shipped instrument presets |
 | `crates/mogwai-server/src/source.rs` | how a preset becomes a running generator |
 
-`TAPE_PROTOCOL_VERSION` is currently **4**. Any change to a generator constant,
+`TAPE_PROTOCOL_VERSION` is currently **5**. Any change to a generator constant,
 the arrival clock, a GARCH parameter, the fingerprint, seed derivation, the fill
 band's draw or the tape origin must bump it. Nothing detects a missed bump.
 
@@ -227,7 +228,7 @@ clamps. Roughly thirty constants.
 **Per-instrument, in `GeneratorScalars`:** `symbol`, `modal_tick`,
 `price_decimals`, `mean_event_duration_s`, `children_mean`,
 `children_single_frac`, `levels_mean`, `size_round_frac`, `start_price`,
-`typical_notional`, `vol_scalar`. Eleven values.
+`latent_size_median`, `vol_scalar`. Eleven values.
 
 Plus `SessionProfile` (55 numbers) and `SessionCalendar` per instrument.
 
@@ -266,16 +267,17 @@ Cadence targets, which become the per-instrument scalars:
 | `children_mean` | 8.4905 | 4.3026 | 6.9119 | 12.7358 |
 | `children_single_frac` | 0.55868 | 0.25867 | 0.49305 | 0.83803 |
 | `levels_mean` | 2.2471 | 1.0 | 1.7442 | 3.3707 |
-| `typical_notional` | 310.75 | 100.78 | 191.40 | 466.13 |
+| `mean_trade_notional` | 310.75 | 100.78 | 191.40 | 466.13 |
 | `duration_dispersion_cv2` | 4.6188 | 2.3841 | 4.6188 | 15.015 |
 | `duration_acf_lag1` | 0.32204 | 0.18587 | 0.32204 | 0.50472 |
 | `duration_acf_lag5` | 0.22388 | 0.11896 | 0.19759 | 0.33582 |
 
 `per_second_counts`: mean 49.64, median 4, p95 257, zero fraction 0.13346.
 
-`scalar_ranges` bound what a caller may configure:
+The original `scalar_ranges` both recorded these observations and used them as
+admission gates:
 
-| Scalar | min | median | max |
+| Observed quantity | min | median | max |
 |---|---|---|---|
 | `modal_tick` | 1e-07 | 0.0001 | **0.25** |
 | `price_decimals` | 1 | 4 | 7 |
@@ -283,7 +285,7 @@ Cadence targets, which become the per-instrument scalars:
 | `children_mean` | 4.3026 | 6.9119 | 12.7358 |
 | `children_single_frac` | 0.25867 | 0.49305 | 0.83803 |
 | `levels_mean` | 1.0 | 1.7442 | 3.3707 |
-| `typical_notional` | 100.78 | 191.40 | **466.13** |
+| `mean_trade_notional` (derived reporting only) | 100.78 | 191.40 | **466.13** |
 | `size_round_frac` | 0.12179 | 0.20857 | 0.27080 |
 
 Both bolded ceilings matter in [section 3](#3-what-mnq-actually-gets-today).
@@ -363,12 +365,12 @@ what stops it?** Three things do, and only one of them is a data problem.
 | Finding | Status |
 |---|---|
 | Crypto price level, cadence, session profile | slot awaiting the fit; expected |
-| Size collapses to a constant 1 contract | consequence of the unfilled notional slot |
-| `scalar_ranges` rejects the truthful notional | **blocker: the slot cannot be filled** |
+| Size collapsed to a constant 1 contract | resolved by native-unit latent size configuration |
+| Crypto empirical ranges rejected truthful futures | resolved by separating diagnostics from admission |
 | Spread has nowhere to vary | **blocker: no slot exists to fill** |
 
-The two blockers are the real content of this section. Both are design questions
-that precede any purchase, and neither is resolved by data.
+The spread blocker remains a design question that precedes any purchase. The
+size and empirical-range blockers were resolved without buying data.
 
 ### 3.1 How a preset resolves
 
@@ -400,7 +402,7 @@ So the shipped MNQ preset resolves to:
 | `price_decimals` | 2 | filled, from the contract spec |
 | `calendar` | full CME hours | filled, from published CME hours |
 | `start_price` | 60000 (`START_PRICE_USD`) | unfilled; that is Bitcoin's level |
-| `typical_notional` | 310.75 USD | unfilled AND unfillable, see 3.3 |
+| `latent_size_median` | 1 contract | filled as a declared pre-grid center, see 3.3 |
 | `mean_event_duration_s` | 0.17104 | unfilled, crypto anchor |
 | `children_mean` | 8.4905 | unfilled, crypto anchor |
 | `children_single_frac` | 0.55868 | unfilled, crypto anchor |
@@ -418,13 +420,13 @@ crypto; for the index futures it is the whole of the outstanding work.
 
 ### 3.2 The size distribution collapses to a constant
 
-`GeneratedSource::try_with_clamp_override`:
+Before the resolution, `GeneratedSource::try_with_clamp_override` computed:
 
 ```
 size_median = typical_notional / (start_price * multiplier) / exp(SIZE_LOG_SIGMA^2 / 2)
 ```
 
-For MNQ as shipped: `310.75 / (60000 * 2) / 1.9374 = 0.001337` contracts.
+For MNQ before the fix: `310.75 / (60000 * 2) / 1.9374 = 0.001337` contracts.
 
 Sizes are then drawn `LogNormal(ln(0.001337), 1.15)`, and on a futures grid
 `next_size` rounds to zero decimals half-away-from-zero and floors at
@@ -457,7 +459,7 @@ the comment on the round-lot test says plainly that "the floor is one contract
 and the target here is 0.476 of one, so ANY grid passes it, including a broken
 one that returns the floor for every draw."
 
-### 3.3 Blocker: the truthful value is illegal
+### 3.3 Resolved: size is expressed in native units
 
 To make MNQ's median trade one contract at NQ 21,000:
 
@@ -465,23 +467,27 @@ To make MNQ's median trade one contract at NQ 21,000:
 typical_notional = 1 * 21000 * 2 * exp(1.15^2 / 2) = 81,354 USD
 ```
 
-`scalar_ranges.typical_notional.max` is **466.13**. The truthful value is 174x
-above the ceiling, and `GeneratorScalars::validate` rejects anything outside the
-range.
+That calculation exposed the proxy rather than supplying its replacement. The
+field was exactly arithmetic mean trade notional because construction divided
+by `exp(1.15^2 / 2)`. It is now removed. `latent_size_median` states the
+continuous lognormal center directly in the instrument's native size unit,
+before minimum-size flooring, grid quantization and round-lot snapping. MNQ
+declares one contract.
 
-**A correct MNQ configuration is currently unrepresentable.** This is not a data
-problem. No Databento purchase fixes it. It is fixed by refitting or widening
-`scalar_ranges` once a non-crypto instrument is in the corpus - which is itself
-an argument for buying SOMETHING, but a small and cheap something.
+Empirical `scalar_ranges` are now corpus-labelled `empirical_ranges`. They
+produce warnings and select defaults but do not admit instruments. Hard checks
+come from the mechanism: native-unit size coherence, decimal representability,
+sweep relationships and volatility headroom. The shipped-preset test makes all
+unaccepted warnings fatal for committed presets, and also rejects stale
+provenance acceptances after a warning disappears. Operator configs retain
+warnings.
 
 `modal_tick.max` is 0.25 and MNQ's tick is exactly 0.25, so it passes by
 coincidence, inclusively, sitting exactly on the ceiling. An instrument with a
 coarser tick (ES at 0.25 is fine, but a 1.0-tick product is not) would fail.
 
-Note also that the test config `crates/mogwai-server/tests/configs/mnq.toml`
-sets `start_price = "21000"` and `typical_notional = "191.39"` - the crypto
-MEDIAN - and a 24/7 `open_windows = [{ start_minute = 0, end_minute = 10079 }]`.
-Even the MNQ test fixture runs crypto cadence on an always-open calendar.
+The test configs now state `latent_size_median = "1"`. Their deliberately 24/7
+calendar remains a fixture simplification rather than the shipped MNQ calendar.
 
 ### 3.4 The session profile is the wrong shape
 
@@ -712,7 +718,7 @@ for.
 | `SessionCalendar` | per-instrument | already correct in the preset | done |
 | `modal_tick`, `price_decimals` | per-instrument | contract spec | done |
 | `start_price` | per-instrument | any NQ quote | trivial |
-| `typical_notional` | per-instrument | contract spec plus bar volume | BLOCKED by `scalar_ranges` |
+| `latent_size_median` | per-instrument | contract spec plus trade-size evidence | representable; declared as 1 pending a fit |
 | `mean_event_duration_s` | per-instrument | no; needs trade counts | bars carry volume, not trade count |
 | `children_mean`, `children_single_frac`, `levels_mean` | per-instrument | no; needs ticks | sweep structure is sub-bar |
 | `size_round_frac` | per-instrument | no; needs ticks | round-lot mass |
@@ -970,12 +976,10 @@ to the default instrument list, so the claims in section 3 can be seen rather
 than derived. Regenerate `docs/example-generated-bars.png`'s MNQ counterpart.
 This is what turns this document's arithmetic into evidence.
 
-**Step 3. Fix the notional blocker.** Decide how `scalar_ranges.typical_notional`
-should accommodate a contract-denominated instrument
-([3.3](#33-blocker-the-truthful-value-is-illegal)). Options: widen the range,
-make it per-asset-class, or re-express the scalar as a size median rather than a
-notional. No purchase resolves this and nothing else about MNQ is meaningful
-until trade sizes vary.
+**Step 3. Fix the notional blocker. RESOLVED 2026-08-04.** The generator now
+accepts `latent_size_median` in native size units, separates mechanism gates
+from corpus diagnostics, and rejects the old unit-mismatch signature against
+the instrument's minimum tradable size. No purchase was required.
 
 **Step 4. Validate the sampling frame, free.** Build 1-minute bars from Kraken
 ticks, run the `select_windows.py` pipeline, and check whether bar-derived
@@ -1103,10 +1107,9 @@ a re-run never re-buys, land files in `research/market-data`, and fail closed on
 partial success. Undecided: DBN (compact, needs a reader) versus CSV (larger,
 directly consumable by the existing stdlib analysis code).
 
-### 14.2 `scalar_ranges` cannot express a contract-denominated instrument
+### 14.2 Native-unit size configuration
 
-See [3.3](#33-blocker-the-truthful-value-is-illegal). Blocks any honest MNQ
-preset. Needs a design decision, not data.
+RESOLVED 2026-08-04. See [3.3](#33-resolved-size-is-expressed-in-native-units).
 
 ### 14.3 Should `zero_change_frac` be derived rather than fitted?
 

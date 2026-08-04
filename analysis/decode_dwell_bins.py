@@ -45,8 +45,8 @@ def main():
             mark = " (SATURATED, >= hi)" if hi_e >= HI else ""
             print(f"    [{lo_e:>6} .. {hi_e:>6}) s: {c}{mark}")
     fp = json.load(open(os.path.join(here, "fingerprint.json")))
-    md = fp["scalar_ranges"]["mean_event_duration_s"]
-    print("fingerprint scalar_ranges.mean_event_duration_s:", md)
+    md = fp["empirical_ranges"]["mean_event_duration_s"]
+    print("fingerprint empirical_ranges.mean_event_duration_s:", md)
     disp = fp["golden_targets"]["duration_dispersion_cv2"]
     print("fingerprint golden_targets.duration_dispersion_cv2:", disp)
 

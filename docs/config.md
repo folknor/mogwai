@@ -145,8 +145,26 @@ account, tape-cap, subscription, or transport-profile configuration keys.
 
 The built-in generator profile expresses cadence with
 `mean_event_duration_s`, `children_mean`, `children_single_frac`, and
-`levels_mean`. Raw-fill size is expressed as `typical_notional`; its base-size
-median is derived from the configured start price and the fitted lognormal
-shape. The default `fanout_depth` is 65,536. A custom value should exceed one
+`levels_mean`. Raw-fill size is expressed as `latent_size_median` in the
+instrument's native size unit. It is the continuous lognormal median before
+minimum-size flooring, grid quantization, or round-lot snapping, so it must not
+be read as the observed post-grid median. The default `fanout_depth` is 65,536. A custom value should exceed one
 wall second of projected frames:
 `children_mean / mean_event_duration_s * speed`.
+The fingerprint retains `mean_trade_notional` under its honest name for corpus
+comparison; it is derived from the latent median, reference price, contract
+multiplier, and lognormal shape and never feeds the sampler.
+
+Generator admission is based on mechanism constraints: positive finite values,
+grid representability, coherent sweep probabilities, size units compatible with
+the minimum tradable quantity, and volatility headroom below the GARCH cap.
+The fingerprint's corpus ranges are diagnostics, not admission gates. An
+operator configuration outside a fitted range logs a warning naming the corpus;
+the committed preset test requires every shipped preset warning to be accepted
+explicitly on the matching provenance entry using the
+`accepted_diagnostics = ["outside-empirical-corpus-range"]` list. The test
+compares the two sets exactly, so an unaccepted warning fails and a stale
+acceptance fails after the warning disappears.
+Whole-number products therefore use `price_decimals = 0` normally,
+and a tick larger than Kraken's largest observed tick is not rejected merely
+for being outside a crypto corpus.
