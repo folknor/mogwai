@@ -53,6 +53,31 @@
 //!
 //! # Why the committed artifact was last re-blessed
 //!
+//! The GARCH recursion was repaired. Its innovation is now standardized to unit
+//! variance, which is what `GarchVol::new`'s `a0` derivation always assumed; the
+//! raw Student-t(4) it was fed instead has variance 2, so the true second-moment
+//! condition was `a1 * E[z^2] + b1` = 1.115 and the process had no stationary
+//! variance. It stayed bounded only by its own rails, ran 8.17x hotter than
+//! `vol_scalar` claimed, and sat pinned at the variance cap 12.96 percent of the
+//! time. `a1`, `b1` and `vol_scalar` were re-solved against the corrected
+//! condition and the rails re-derived from a measured tail.
+//!
+//! The artifact moved in ONE direction, and it is the direction that repair
+//! predicts: cells that previously CENSORED an order - never filled it inside
+//! the horizon - now fill it, so `censored` drops to zero in four cells and the
+//! latency vectors gain a long entry apiece. A stationary tape at the corrected
+//! scale traverses more ticks per unit time, so a resting limit that used to
+//! outlive the horizon now gets reached. Fill timing did not regress; the tape
+//! stopped being artificially sluggish.
+//!
+//! Note this does NOT re-open the band calibration below. `fill_band_vol_mult`
+//! is selected by `fills::vol_probe` against the tape's realized volatility, and
+//! the tape's volatility has now changed by roughly 1.3x in RMS - so the probe
+//! is worth re-running before the next band change, even though the current
+//! default still lands inside its usable window.
+//!
+//! # Why the committed artifact was re-blessed before that
+//!
 //! The banded scenario runs at `Config::default().fill_band_vol_mult`, and that
 //! default moved from `0.5` to `0.005` when the fill band was re-calibrated for
 //! the raw-fill cadence. The raw-fill tape carries ~15,700 returns in the

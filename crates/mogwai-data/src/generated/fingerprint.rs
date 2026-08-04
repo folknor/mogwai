@@ -13,8 +13,9 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 
 use super::consts::{
-    GARCH_SIGMA_CAP, LATENT_SIZE_MIN_RATIO, SESSION_SHARE_SUM, SESSION_SUM_TOL, SIZE_DECIMALS,
-    SIZE_LOG_SIGMA, START_PRICE_USD, VOL_HOUR_SUM, VOL_SCALAR, VOL_SCALAR_CAP_FRACTION,
+    GARCH_SIGMA_CAP, LATENT_SIZE_MIN_RATIO, SESSION_SHARE_SUM, SESSION_SUM_TOL,
+    SIGMA_RAIL_HEADROOM_RATIO, SIZE_DECIMALS, SIZE_LOG_SIGMA, START_PRICE_USD, VOL_HOUR_SUM,
+    VOL_SCALAR,
 };
 use super::numeric::decimal_from_f64;
 
@@ -393,24 +394,42 @@ impl GeneratorScalars {
                 field: "vol_scalar",
             });
         }
-        // `vol_scalar` feeds GarchVol's unconditional variance (vol_scalar^2),
-        // which `next_latent_mid` caps at (GARCH_SIGMA_CAP * clamp_mult)^2. In
-        // the base (no-regime) path clamp_mult is 1.0, so any vol_scalar above
-        // GARCH_SIGMA_CAP is pinned at the cap on the first tick and the knob's
-        // documented per-tick-volatility meaning silently stops holding. Reject
-        // a value the base regime cannot honor rather than accept a dead knob (a
-        // VolStorm can lift the cap, but that is a transient per-subscription
-        // overlay, not the construction-time scalar's contract).
-        // Equality initializes GARCH on the ceiling: low shocks may pull it
-        // down and later shocks may raise it again, but every upward shock at
-        // initialization saturates. Reserve ten percent headroom so the
-        // configured unconditional sigma is not born partially clipped.
-        if self.vol_scalar >= GARCH_SIGMA_CAP * VOL_SCALAR_CAP_FRACTION {
+        // `vol_scalar` is the unconditional sigma, and `GarchVol` initializes
+        // `sigma2` to its square. At or above the state rail the process is born
+        // clipped and the knob's documented meaning stops holding on the very
+        // first tick, so this much IS a mechanism bound.
+        //
+        // What is NOT enforced here is a HEADROOM ratio. The previous rule
+        // demanded ten percent clearance under the rail, which reads as prudence
+        // and behaves as a universal scale gate: it would deny a legitimately
+        // higher-volatility instrument for no reason but that one corpus sat
+        // lower - the `scalar_ranges` mistake in another dimension. Insufficient
+        // headroom is diagnosed instead, and shipped presets are held to zero
+        // diagnostics.
+        if self.vol_scalar >= GARCH_SIGMA_CAP {
             return Err(ScalarError {
                 field: "vol_scalar",
             });
         }
         Ok(())
+    }
+
+    /// Warns when the state rail sits close enough to `vol_scalar` to take part
+    /// in ordinary operation rather than bounding pathology. The threshold is
+    /// measured, not chosen: the clean process was observed reaching 57.2x its
+    /// unconditional scale over sixteen million updates, so a rail below
+    /// [`SIGMA_RAIL_HEADROOM_RATIO`] would clip the process's normal excursions.
+    #[must_use]
+    pub fn rail_diagnostics(&self) -> Vec<ScalarDiagnostic> {
+        if GARCH_SIGMA_CAP / self.vol_scalar < SIGMA_RAIL_HEADROOM_RATIO {
+            vec![ScalarDiagnostic {
+                code: "sigma-rail-headroom-below-measured-excursion",
+                field: "vol_scalar",
+                corpus: "mechanism-derived".to_string(),
+            }]
+        } else {
+            Vec::new()
+        }
     }
 
     /// Grid-dependent mechanism validation belongs beside scalar validation,

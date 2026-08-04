@@ -23,11 +23,11 @@ use super::consts::{
     ARRIVAL_QUIET_CHILDREN_MULT, ARRIVAL_QUIET_FRACTION, ARRIVAL_STATE_PERSISTENCE,
     ARRIVAL_WEIBULL_MEAN, ARRIVAL_WEIBULL_SHAPE, DRIFT_RECENTER_FRAC, EVENT_PRICE_REPEAT_PROB,
     HALF_SPREAD_TICKS, HIGH_REGIME_LEVEL_STEP_MULT, INTRA_EVENT_STEP_NS,
-    LOW_REGIME_LEVEL_STEP_MULT, MAX_ABS_RETURN, MAX_SESSION_GAP_NS, MID_CEILING, NS_PER_HOUR,
-    SESSION_CLOSED_ARR_MULT, SIZE_DECIMALS, SIZE_LOG_SIGMA, STUDENT_T_DF,
+    LOW_REGIME_LEVEL_STEP_MULT, MAX_SESSION_GAP_NS, MID_CEILING, NS_PER_HOUR,
+    REALIZED_RETURN_CEILING, SESSION_CLOSED_ARR_MULT, SIZE_DECIMALS, SIZE_LOG_SIGMA, STUDENT_T_DF,
 };
 use super::dynamics::{
-    ArrivalClock, BounceState, GarchVol, SweepBurst, SweepShape, draw_student_t,
+    ArrivalClock, BounceState, GarchVol, SweepBurst, SweepShape, draw_standardized_innovation,
 };
 use super::fingerprint::{Fingerprint, GeneratedSourceError, GeneratorScalars, SessionProfile};
 use super::numeric::{decimal_from_f64, round_lot_size};
@@ -64,13 +64,6 @@ pub struct GeneratedSource {
     surge: Option<SurgeWindow>,
     #[cfg(test)]
     pub(super) latent_updates: u64,
-    /// TEST-ONLY counterfactual knob: divides the Student-t innovation before
-    /// it reaches the GARCH step, so a harness can run a standardized-innovation
-    /// arm without this crate shipping one. `1.0` is the shipped behaviour and
-    /// is short-circuited rather than divided, so the golden stream is
-    /// untouched by the existence of this field.
-    #[cfg(test)]
-    pub(super) innovation_divisor: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,9 +135,7 @@ impl GeneratedSource {
         regime: Option<MarketRegime>,
         size_grid: SizeGrid,
     ) -> Self {
-        Self::with_clamp_override(
-            scalars, seed, start_ts, fp, session, regime, None, size_grid,
-        )
+        Self::build(scalars, seed, start_ts, fp, session, regime, size_grid)
     }
 
     /// Fallible twin of [`GeneratedSource::new`]. Both `scalars` and the
@@ -159,14 +150,13 @@ impl GeneratedSource {
         fp: &Fingerprint,
         regime: Option<MarketRegime>,
     ) -> Result<Self, GeneratedSourceError> {
-        Self::try_with_clamp_override(
+        Self::try_build(
             scalars,
             seed,
             start_ts,
             fp,
             &fp.session_profile,
             regime,
-            None,
             SizeGrid::spot(),
         )
     }
@@ -179,14 +169,13 @@ impl GeneratedSource {
         regime: Option<MarketRegime>,
         size_grid: SizeGrid,
     ) -> Result<Self, GeneratedSourceError> {
-        Self::try_with_clamp_override(
+        Self::try_build(
             scalars,
             seed,
             start_ts,
             fp,
             &fp.session_profile,
             regime,
-            None,
             size_grid,
         )
     }
@@ -203,40 +192,24 @@ impl GeneratedSource {
         regime: Option<MarketRegime>,
         size_grid: SizeGrid,
     ) -> Result<Self, GeneratedSourceError> {
-        Self::try_with_clamp_override(
-            scalars, seed, start_ts, fp, session, regime, None, size_grid,
-        )
+        Self::try_build(scalars, seed, start_ts, fp, session, regime, size_grid)
     }
 
     /// Infallible wrapper: panics if either input is outside the fingerprint
     /// ranges. Callers building from the committed fingerprint (valid by
     /// construction) use this via `new` / `new_with_session_profile`; callers
     /// with untrusted config use the `try_*` twins above instead.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "constructor threads the complete generator parameterization"
-    )]
-    fn with_clamp_override(
+    fn build(
         scalars: GeneratorScalars,
         seed: u64,
         start_ts: u64,
         fp: &Fingerprint,
         session: &SessionProfile,
         regime: Option<MarketRegime>,
-        clamp_override: Option<f64>,
         size_grid: SizeGrid,
     ) -> Self {
-        Self::try_with_clamp_override(
-            scalars,
-            seed,
-            start_ts,
-            fp,
-            session,
-            regime,
-            clamp_override,
-            size_grid,
-        )
-        .expect("generated source inputs are inside fingerprint ranges")
+        Self::try_build(scalars, seed, start_ts, fp, session, regime, size_grid)
+            .expect("generated source inputs are inside fingerprint ranges")
     }
 
     // The only fallible inputs are `scalars`/`session`, guarded by the two
@@ -247,17 +220,15 @@ impl GeneratedSource {
     // variant to map them onto, not because a failure is being swallowed.
     #[expect(
         clippy::unwrap_in_result,
-        clippy::too_many_arguments,
         reason = "distribution params are constant and valid; only the validated scalars/session can fail"
     )]
-    fn try_with_clamp_override(
+    fn try_build(
         scalars: GeneratorScalars,
         seed: u64,
         start_ts: u64,
         _fp: &Fingerprint,
         session: &SessionProfile,
         regime: Option<MarketRegime>,
-        clamp_override: Option<f64>,
         size_grid: SizeGrid,
     ) -> Result<Self, GeneratedSourceError> {
         scalars.validate().map_err(GeneratedSourceError::Scalar)?;
@@ -286,7 +257,7 @@ impl GeneratedSource {
         // Built before the struct literal because it borrows `scalars.symbol`,
         // which the literal moves; `start_ts` is the tape anchor RegimeState
         // needs to fail-close an already-elapsed ReopenGap.
-        let regime = RegimeState::new(regime, clamp_override, start_ts, &scalars.symbol);
+        let regime = RegimeState::new(regime, start_ts, &scalars.symbol);
         Ok(Self {
             tick_f64: decimal_to_f64(scalars.modal_tick),
             scalars,
@@ -333,8 +304,6 @@ impl GeneratedSource {
             surge: None,
             #[cfg(test)]
             latent_updates: 0,
-            #[cfg(test)]
-            innovation_divisor: 1.0,
         })
     }
 
@@ -351,27 +320,6 @@ impl GeneratedSource {
     pub fn with_calendar(mut self, calendar: Option<SessionCalendar>) -> Self {
         self.calendar = calendar;
         self
-    }
-
-    #[cfg(test)]
-    pub(super) fn new_with_clamp_override(
-        scalars: GeneratorScalars,
-        seed: u64,
-        start_ts: u64,
-        fp: &Fingerprint,
-        regime: Option<MarketRegime>,
-        clamp_mult: f64,
-    ) -> Self {
-        Self::with_clamp_override(
-            scalars,
-            seed,
-            start_ts,
-            fp,
-            &fp.session_profile,
-            regime,
-            Some(clamp_mult),
-            SizeGrid::spot(),
-        )
     }
 
     fn next_duration_ns(&mut self) -> u64 {
@@ -492,27 +440,15 @@ impl GeneratedSource {
         // `0.0/0.0 = NaN` when `normal` also happens to be 0.0, and
         // `f64::clamp` propagates NaN through `base_return` into `mid`,
         // poisoning the walk for the rest of the session.
-        let student_t = draw_student_t(&mut self.rng, &self.normal, &self.chi_squared);
-        // Short-circuited at the shipped value so the default path performs no
-        // arithmetic at all and the golden stream cannot drift on a rounding
-        // technicality. See the field comment.
-        #[cfg(test)]
-        let student_t = if self.innovation_divisor == 1.0 {
-            student_t
-        } else {
-            student_t / self.innovation_divisor
-        };
-        // FEEDBACK clamp: `base_return` (which feeds `prev_return`) and the
-        // sigma2 cap inside `step` use the regime's BASE clamp lift (vol_mult
-        // for a storm, the test override, or 1.0). A SessionEdgeSpike
-        // deliberately does NOT lift this - keeping the GARCH recursion state
-        // (sigma2, prev_return) byte-identical to a clean run is what lets the
-        // spike leave zero trace outside its hour window.
-        //
-        // GARCH feedback sees the un-modulated return so volatility clustering
-        // is unchanged; the session envelope scales the realized RMS on top,
-        // then the hard clamp still bounds the mid update.
-        let base_return = self.vol.step(student_t, self.regime.clamp_mult).base_return;
+        let innovation =
+            draw_standardized_innovation(&mut self.rng, &self.normal, &self.chi_squared);
+        // The BASE process is regime-independent by construction. `step` applies
+        // the GARCH-state rail and the feedback rail, neither of which takes a
+        // regime multiplier, so an armed storm cannot raise the state ceiling
+        // and thereby alter every later recursion step. GARCH feedback sees the
+        // un-modulated return, so volatility clustering is identical armed or
+        // not; the envelopes below scale only what is realized.
+        let base_return = self.vol.step(innovation).base_return;
         // Vol composition convention (see also RegimeState::vol_mult): the
         // session envelope and the regime envelope COMPOSE MULTIPLICATIVELY here
         // (session 1.0 = no session bias, regime 1.0 = no regime bias, so the
@@ -523,17 +459,18 @@ impl GeneratedSource {
         // (a future regime that set both vol_mult and an edge spike would want the
         // add re-examined - today the match is exclusive so only one is non-unit).
         let vol_mult = self.session.vol_mult(self.clock_ns) * self.regime.vol_mult(self.clock_ns);
-        // REALIZED clamp: the composed return that actually moves the mid uses
-        // the WINDOWED clamp. For VolStorm and the clean/drought/reopen regimes
-        // this equals `feedback_cap` bit for bit (edge_extra is 0), so their
-        // streams are unchanged. A SessionEdgeSpike lifts it only INSIDE its
-        // hour window, by exactly the same (1.0 + extra_vol_mult) that amplifies
-        // vol_mult there - so a large extra_vol_mult no longer saturates the
-        // realized spike against MAX_ABS_RETURN the way it did when this clamp
-        // was pinned at 1.0. Outside the window `realized_clamp_mult` returns the
-        // base clamp, so every out-of-window return stays byte-identical.
-        let realized_cap = MAX_ABS_RETURN * self.regime.realized_clamp_mult(self.clock_ns);
-        let return_n = (base_return * vol_mult).clamp(-realized_cap, realized_cap);
+        // REALIZED ceiling: ABSOLUTE, and deliberately not scaled by anything.
+        // Every regime - VolStorm, SessionEdgeSpike, drought, reopen - and the
+        // session curve reach the mid only through `vol_mult` above, and then
+        // meet the same fixed ceiling. Scaling this by the regime is what used
+        // to let a maximum-strength storm's permitted single-event move ride on
+        // whatever the base rail happened to be; sizing it as a policy against
+        // the measured envelope is what replaced that.
+        //
+        // Bounds ONE event. Cumulative movement is not bounded by it: a
+        // sustained storm walks the mid as far as its duration allows.
+        let return_n =
+            (base_return * vol_mult).clamp(-REALIZED_RETURN_CEILING, REALIZED_RETURN_CEILING);
         self.vol.mid = (self.vol.mid * return_n.exp())
             .max(self.tick_f64)
             .min(MID_CEILING);

@@ -15,8 +15,8 @@ use rand_chacha::ChaCha12Rng;
 
 use super::consts::{
     BOUNCE_HIGH_FLIP_PROB, BOUNCE_HIGH_TO_LOW_PROB, BOUNCE_LOW_FLIP_PROB, BOUNCE_LOW_TO_HIGH_PROB,
-    CHILD_CAP, DRIFT_DIR_FLIP_PROB, GARCH_ARCH, GARCH_GARCH, GARCH_SIGMA_CAP,
-    HIGH_REGIME_DRIFT_PROB, HOT_DRIFT_PROB, MAX_ABS_RETURN, STUDENT_T_DF,
+    CHILD_CAP, DRIFT_DIR_FLIP_PROB, FEEDBACK_RETURN_CEILING, GARCH_ARCH, GARCH_GARCH,
+    GARCH_SIGMA_CAP, HIGH_REGIME_DRIFT_PROB, HOT_DRIFT_PROB, STUDENT_T_DF,
 };
 
 /// The child-count mixture of one parent sweep: with probability `q` exactly
@@ -162,15 +162,18 @@ impl GarchVol {
     /// with the code, which is the failure mode this whole investigation is
     /// about.
     ///
-    /// Bit-for-bit identical to the inline form it replaced: same operation
-    /// order, same clamp order, same assignment to `prev_return`.
-    pub(super) fn step(&mut self, student_t: f64, clamp_mult: f64) -> GarchStep {
+    /// `innovation` must already be STANDARDIZED to unit variance - the `a0`
+    /// derivation in `new` assumes it. Neither rail here takes a regime
+    /// multiplier: a divergence is an output envelope, and letting it lift the
+    /// state ceiling would change every subsequent recursion step rather than
+    /// just the returns during the storm.
+    pub(super) fn step(&mut self, innovation: f64) -> GarchStep {
         let sigma2_candidate = self.a0 + self.a1 * self.prev_return.powi(2) + self.b1 * self.sigma2;
-        let sigma_cap = (GARCH_SIGMA_CAP * clamp_mult).powi(2);
+        let sigma_cap = GARCH_SIGMA_CAP.powi(2);
         self.sigma2 = sigma2_candidate.min(sigma_cap);
-        let feedback_cap = MAX_ABS_RETURN * clamp_mult;
+        let feedback_cap = FEEDBACK_RETURN_CEILING;
         let garch_scale = self.sigma2.sqrt();
-        let unclipped_return = garch_scale * student_t;
+        let unclipped_return = garch_scale * innovation;
         let base_return = unclipped_return.clamp(-feedback_cap, feedback_cap);
         self.prev_return = base_return;
         GarchStep {
@@ -185,11 +188,13 @@ impl GarchVol {
     }
 }
 
-/// One unstandardized Student-t innovation, drawn in the order the walk draws
-/// it: normal first, chi-squared second. Factored out with [`GarchVol::step`]
-/// so the harness consumes the same draw sequence rather than an equivalent
-/// one; the guard on the chi-squared draw is the same NaN floor the walk has
-/// always carried.
+/// One RAW, unstandardized Student-t innovation, drawn in the order the walk
+/// draws it: normal first, chi-squared second. Its variance is
+/// `df / (df - 2)`, not 1 - callers feeding the GARCH recursion must divide by
+/// [`super::consts::STUDENT_T_UNIT_SCALE`] first, which
+/// [`draw_standardized_innovation`] does. Kept raw and separate so the
+/// second-moment instrumentation can demonstrate the unstandardized variance
+/// against the standardized one using the same shipped draw.
 pub(super) fn draw_student_t(
     rng: &mut ChaCha12Rng,
     normal: &rand_distr::Normal<f64>,
@@ -199,6 +204,17 @@ pub(super) fn draw_student_t(
     let z = normal.sample(rng);
     let chi = chi_squared.sample(rng).max(f64::MIN_POSITIVE);
     z / (chi / STUDENT_T_DF).sqrt()
+}
+
+/// The unit-variance innovation the GARCH recursion consumes: a raw
+/// Student-t(df) divided by its own standard deviation. This is the shipped
+/// path; `GarchVol::new`'s `a0` derivation is only correct against it.
+pub(super) fn draw_standardized_innovation(
+    rng: &mut ChaCha12Rng,
+    normal: &rand_distr::Normal<f64>,
+    chi_squared: &rand_distr::ChiSquared<f64>,
+) -> f64 {
+    draw_student_t(rng, normal, chi_squared) / super::consts::STUDENT_T_UNIT_SCALE
 }
 
 /// Everything one call to [`GarchVol::step`] computed.

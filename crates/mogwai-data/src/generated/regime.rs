@@ -4,7 +4,7 @@
 //! The optional per-subscription market regime overlay: [`RegimeState`]
 //! derives the walk's arrival/vol/clamp multipliers from a
 //! [`mogwai_protocol::MarketRegime`] at construction time, and exposes the
-//! per-tick hooks ([`RegimeState::vol_mult`], [`RegimeState::realized_clamp_mult`],
+//! per-tick hooks ([`RegimeState::vol_mult`],
 //! [`RegimeState::take_reopen_crossed`]) the core walk calls into.
 
 use mogwai_protocol::MarketRegime;
@@ -15,22 +15,15 @@ use super::session::utc_hour;
 pub(super) struct RegimeState {
     pub(super) arrival_thin: f64,
     vol_mult: f64,
-    pub(super) clamp_mult: f64,
     edge: Option<EdgeSpike>,
     reopen: Option<Reopen>,
 }
 
 impl RegimeState {
-    pub(super) fn new(
-        regime: Option<MarketRegime>,
-        clamp_override: Option<f64>,
-        start_ts: u64,
-        symbol: &str,
-    ) -> Self {
+    pub(super) fn new(regime: Option<MarketRegime>, start_ts: u64, symbol: &str) -> Self {
         let mut state = Self {
             arrival_thin: 1.0,
             vol_mult: 1.0,
-            clamp_mult: 1.0,
             edge: None,
             reopen: None,
         };
@@ -44,12 +37,11 @@ impl RegimeState {
         // trusted at runtime by EdgeSpike's window comparison below.
         match regime {
             Some(MarketRegime::VolStorm { vol_mult }) => {
+                // A storm scales the REALIZED return only. It no longer lifts
+                // the GARCH state rail or the feedback rail, so the recursion
+                // is byte-identical armed or not and the storm cannot change
+                // what the process does after it ends.
                 state.vol_mult = vol_mult;
-                // Default the clamp lift to the storm multiplier; the test-only
-                // clamp_override below uniformly replaces it when present (it is
-                // how the pricing instrument pins the clamp to disprove the bare
-                // multiply), so there is no need to fold the override in here.
-                state.clamp_mult = vol_mult;
             }
             Some(MarketRegime::LiquidityDrought { thin_factor }) => {
                 state.arrival_thin = thin_factor;
@@ -116,17 +108,11 @@ impl RegimeState {
             None => {}
         }
 
-        if let Some(clamp_mult) = clamp_override {
-            state.clamp_mult = clamp_mult;
-        }
-
         state
     }
 
     // `extra_vol_mult` inside a SessionEdgeSpike's UTC hour window, 0.0 outside
-    // it (and 0.0 when no edge spike is armed). Shared by `vol_mult` and
-    // `realized_clamp_mult` so the RMS amplification and the clamp lift track
-    // the exact same window, by construction, and cannot drift apart.
+    // it (and 0.0 when no edge spike is armed).
     fn edge_extra(&self, clock_ns: u64) -> f64 {
         self.edge.as_ref().map_or(0.0, |edge| {
             let hour = utc_hour(clock_ns);
@@ -148,20 +134,15 @@ impl RegimeState {
         self.vol_mult + self.edge_extra(clock_ns)
     }
 
-    // Clamp multiplier for the REALIZED return (the one that moves the mid), as
-    // opposed to the GARCH feedback which uses `self.clamp_mult` raw. Mirrors
-    // `vol_mult`'s additive structure so the realized clamp is lifted exactly
-    // where and by exactly how much the realized RMS is amplified: the base
-    // clamp (vol_mult for a storm, the test override, or 1.0) plus a
-    // SessionEdgeSpike's in-window `extra_vol_mult`. Keeping this SEPARATE from
-    // the feedback clamp is what lets the edge spike lift its in-window ceiling
-    // while leaving the recursion state - and therefore every out-of-window
-    // tick - byte-identical to a clean run. For VolStorm and the
-    // clean/drought/reopen regimes `edge_extra` is 0.0, so this equals
-    // `self.clamp_mult` and their streams are unchanged.
-    pub(super) fn realized_clamp_mult(&self, clock_ns: u64) -> f64 {
-        self.clamp_mult + self.edge_extra(clock_ns)
-    }
+    // There is no realized CLAMP multiplier any more. The realized return now
+    // meets `REALIZED_RETURN_CEILING`, an absolute ceiling that no regime
+    // scales - see the composition note in `next_latent_mid`. Previously this
+    // mirrored `vol_mult`'s additive structure so the ceiling rose exactly
+    // where the RMS did, which meant a maximum-strength storm's permitted
+    // single-event move rode on whatever the base rail happened to be. Sizing
+    // the ceiling as a policy against the measured envelope replaced that; an
+    // edge spike still amplifies through `vol_mult` and then meets the same
+    // fixed ceiling as everything else.
 
     pub(super) fn take_reopen_crossed(
         &mut self,

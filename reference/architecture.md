@@ -52,9 +52,28 @@ away from zero and floored at one contract, so no print becomes the zero
 quantity nautilus drops. `latent_size_median` is stated directly in the
 instrument's native size unit and names the continuous lognormal center before
 that grid is applied. The floor truncates its lower tail, so it is deliberately
-not called the observed size median. `TAPE_PROTOCOL_VERSION` is 5; version 5
+not called the observed size median. `TAPE_PROTOCOL_VERSION` is 6; version 5
 removed the quote-notional proxy whose value was actually arithmetic mean
-notional and made the latent size distribution explicit.
+notional and made the latent size distribution explicit, and version 6 repaired
+the GARCH recursion's second moment.
+
+The volatility innovation is standardized to unit variance before it reaches
+that recursion. The `a0` derivation has always assumed this, but the innovation
+was a raw Student-t whose variance is `df / (df - 2)`, so the true condition was
+`a1 * E[z^2] + b1 = 1.115` and the process had no finite stationary variance: it
+stayed bounded only by its own rails, ran 8.17x hotter than `vol_scalar`
+claimed, and sat pinned at the variance cap 12.96 percent of the time. `a1`,
+`b1` and `vol_scalar` were re-solved against the corrected condition.
+
+Three rails are named separately because they answer to different things. The
+GARCH state cap and the feedback-return ceiling bound the base process and are
+NEVER scaled by a regime, so an armed divergence cannot raise the process's own
+ceiling and change what it does after the divergence ends. The realized-return
+ceiling is absolute and applies after session and regime scaling, so a
+divergence is an output envelope. That ceiling is a stated product policy sized
+against a measured maximum-strength envelope, not a fitted market quantity: as a
+log return it permits about +5.13 and -4.88 percent in a SINGLE event, and it
+does not bound cumulative movement over many events.
 
 Fingerprint ranges are corpus-labelled observations. They select defaults and
 produce operator diagnostics, but never admit or reject an instrument. A
@@ -63,10 +82,13 @@ the matching provenance entry; exact-set validation also rejects stale
 acceptances. Hard
 generator validation is mechanism-derived instead. In particular, the latent
 size center must not sit two orders of magnitude below the minimum tradable
-quantity, volatility must retain headroom below the GARCH sigma cap, and the
-tick must be representable at the declared precision. Return clamps remain the
-shared module-level process shape: a coarse truthful grid is allowed to produce
-a stickier latent mid rather than receiving an uncalibrated stress-tail lift.
+quantity, volatility must sit below the GARCH sigma cap so the process is not
+born clipped, and the tick must be representable at the declared precision.
+Rail HEADROOM is diagnosed rather than gated: a universal ratio of scale to rail
+would repeat the same mistake in another dimension, denying a legitimately
+higher-volatility instrument. Return ceilings remain shared module-level process
+shape: a coarse truthful grid is allowed to produce a stickier latent mid rather
+than receiving an uncalibrated stress-tail lift.
 The dimensionless `tick_return / vol_scalar` and its squared random-walk crossing
 estimate are exposed as diagnostics for deriving event-price repetition; they
 do not pretend to model sweep stepping, bounce, recentering, or explicit repeat

@@ -97,9 +97,34 @@ pub(super) const LOW_REGIME_LEVEL_STEP_MULT: f64 = 0.3;
 pub(super) const DRIFT_RECENTER_FRAC: f64 = 0.16;
 // GARCH persistence gives clustered latent volatility without letting the
 // continuous mid-price drown out tick-grid flat runs.
-pub(super) const GARCH_ARCH: f64 = 0.12;
-pub(super) const GARCH_GARCH: f64 = 0.875;
+//
+// The innovation is STANDARDIZED to unit variance before it reaches the
+// recursion (see `STUDENT_T_UNIT_SCALE`). That is load-bearing, not cosmetic.
+// `GarchVol::new` derives `a0 = vol_scalar^2 * (1 - a1 - b1)` so that
+// `vol_scalar^2` is the unconditional variance, and that derivation assumes
+// `E[z^2] = 1`. A raw Student-t(4) has variance `df / (df - 2)` = 2, which made
+// the true second-moment condition `a1 * E[z^2] + b1` = 1.115 - above one, so
+// the recursion had NO finite stationary variance and stayed bounded only by
+// its own safety rails. Measured, it ran 8.17x hotter than configured and sat
+// pinned at the variance cap 12.96 percent of the time.
+//
+// `a1` and `b1` were re-solved against the corrected condition over a grid of
+// (a1, persistence, vol_scalar) with the rails held out of reach and an
+// occupancy penalty, scored on the anchor's absolute-return ACF DECAY RATIOS
+// rather than on level-band membership alone. See
+// `garch_second_moment_instrumentation`. Persistence is `a1 + b1` = 0.999.
+pub(super) const GARCH_ARCH: f64 = 0.02;
+pub(super) const GARCH_GARCH: f64 = 0.979;
 pub(super) const STUDENT_T_DF: f64 = 4.0;
+/// `sqrt(df / (df - 2))`, the standard deviation of a raw Student-t(df). The
+/// innovation is divided by this so the GARCH recursion receives a unit-variance
+/// shock, which is what `GarchVol::new`'s `a0` derivation has always assumed.
+/// At the committed `STUDENT_T_DF` of 4 this is exactly `sqrt(2)`, so the
+/// standard constant is used - but the COUPLING is to the degrees of freedom,
+/// not to the number two. `student_t_unit_scale_matches_df` pins that, so a
+/// change to `STUDENT_T_DF` fails a test here instead of silently
+/// de-standardizing the innovation.
+pub(super) const STUDENT_T_UNIT_SCALE: f64 = std::f64::consts::SQRT_2;
 // The high/low bounce regime jointly controls negative lag-1 return ACF
 // (target -0.197 .. -0.057), zero_change_frac (0.336 .. 0.751) and the
 // absolute-return ACF decay (lag1 0.152 .. 0.307, lag10 .. 0.156, lag50 ..
@@ -122,12 +147,56 @@ pub(super) const SIZE_LOG_SIGMA: f64 = 1.15;
 pub(super) const SIZE_DECIMALS: u32 = 8;
 pub(super) const INTRA_EVENT_STEP_NS: u64 = 1_000;
 pub(super) const CHILD_CAP: u32 = 4_096;
-pub(super) const MAX_ABS_RETURN: f64 = 0.000_02;
-pub(super) const GARCH_SIGMA_CAP: f64 = 0.000_01;
-/// Construction-time sigma may consume at most this fraction of the runtime
-/// cap. At equality with the cap, GARCH starts saturated and upward shocks are
-/// clipped immediately; the headroom keeps the volatility knob two-sided.
-pub(super) const VOL_SCALAR_CAP_FRACTION: f64 = 0.9;
+// THREE SEPARATE CONTRACTS, previously overloaded onto two constants that a
+// regime multiplier scaled together. Keeping them apart is what makes a
+// divergence an OUTPUT envelope instead of something that raises the process's
+// own state ceiling and alters every later recursion step - the principle
+// `SessionEdgeSpike` already follows by staying out of feedback state.
+//
+//   1. GARCH_SIGMA_CAP        bounds the recursion STATE. Never regime-scaled.
+//   2. FEEDBACK_RETURN_CEILING bounds what re-enters the recursion. Never
+//                              regime-scaled.
+//   3. REALIZED_RETURN_CEILING bounds the return that actually moves the mid,
+//                              AFTER session and regime scaling. Absolute:
+//                              it never scales with a regime either, which is
+//                              the whole point of naming it separately.
+//
+/// Bounds the GARCH state. Sized from a measured tail rather than chosen: over
+/// eight seeds by two million clean updates the recursion's sigma reached 57.2x
+/// its unconditional scale, so this sits above that at roughly 83x `VOL_SCALAR`
+/// and does not participate in calibration. Not "never hit" - the standardized
+/// t(4) still has infinite kurtosis, so the running maximum grows with the
+/// horizon. The honest statement is NO OBSERVED PARTICIPATION over the 16M
+/// calibration sample. See `standardized_candidate_rail_sizing`.
+pub(super) const GARCH_SIGMA_CAP: f64 = 1e-3;
+/// Bounds the clean feedback return. Same sizing run: the largest clean
+/// |return| observed over 16M updates was 3.33e-3, so this sits just above it
+/// and shapes nothing in ordinary operation.
+pub(super) const FEEDBACK_RETURN_CEILING: f64 = 4e-3;
+/// Absolute ceiling on the realized log return, applied after the session and
+/// regime envelopes and NEVER scaled by either.
+///
+/// This is a PRODUCT POLICY, not a fitted market fact, and its provenance is
+/// the maximum-strength envelope experiment
+/// (`realized_return_envelope_under_regime_scaling`) rather than any MNQ
+/// calibration. As a log return it permits approximately +5.13 percent up and
+/// -4.88 percent down in a single event.
+///
+/// Chosen from the measured policy space: inert during clean operation, where
+/// the unbounded realized maximum at `vol_mult` 1 is 0.82 percent; 0.024
+/// percent occupancy at `vol_mult` 100 and the session vol peak, rare enough
+/// not to become the storm's distribution; and far below the 126 percent move
+/// an unrailed maximum storm would otherwise reach.
+///
+/// NOTE this bounds a SINGLE EVENT. Cumulative movement over many events is not
+/// bounded by it, and a sustained storm can walk the mid arbitrarily far.
+pub(super) const REALIZED_RETURN_CEILING: f64 = 5e-2;
+/// A sigma rail below this multiple of `vol_scalar` would participate in
+/// ordinary calibration rather than bounding pathology, because the clean
+/// process was measured reaching 57.2x. Diagnosed, not enforced: a hard
+/// universal ratio gate would repeat the `scalar_ranges` mistake in another
+/// dimension, denying a legitimately higher-scale instrument.
+pub(super) const SIGMA_RAIL_HEADROOM_RATIO: f64 = 60.0;
 /// A latent size center below this fraction of the minimum tradable quantity
 /// is a unit contradiction, not merely an illiquid instrument. Behavioral
 /// tail mass is diagnosed separately so coherent thin contracts remain legal.
@@ -153,7 +222,13 @@ pub(super) const SESSION_SUM_TOL: f64 = 0.02;
 // the constructors.
 pub(super) const START_PRICE_USD: i64 = 60_000;
 // 0.1 expressed as Decimal::new(mantissa, scale).
-pub(super) const VOL_SCALAR: f64 = 0.000_001;
+// Re-solved with `GARCH_ARCH` and `GARCH_GARCH` against the corrected
+// second-moment condition. The previous 1e-6 was never the realized scale: the
+// unstandardized innovation drove the process 8.17x hotter, so the tape's
+// amplitude came from saturation rather than from this number. At 1.2e-5 the
+// measured unclipped return RMS is 1.2393e-5, so the scalar now means what it
+// says to within 3 percent.
+pub(super) const VOL_SCALAR: f64 = 1.2e-5;
 // Session-gap rails. Trading hours, maintenance breaks and closed weekends are
 // expressed as NEAR-ZERO hour/day shares in a custom SessionProfile - not a
 // separate code path - but the arrival multiplier is sampled once, at the
