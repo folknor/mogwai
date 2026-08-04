@@ -207,6 +207,7 @@ pub fn vol_reading(
             break;
         }
         reached_ns = event.ts_event();
+        let is_trade = matches!(event, TickEvent::Trade(_));
         if let TickEvent::Trade(trade) = event
             && trade.ts_event > from_ns
         {
@@ -219,7 +220,13 @@ pub fn vol_reading(
             last_px = Some(trade.price);
             prices.push(price);
         }
-        if reached_ns == to_ns {
+        // The `is_trade` guard is the twin of the one in `scan_triggers`, and it
+        // matters more here. A parent burst publishes its quote at the SAME
+        // `ts_event` as its first print, so a horizon landing exactly on a parent
+        // would stop this walk on the quote and leave `last_px` holding the
+        // PREVIOUS print - the stale reading this function's contract says it
+        // never returns, delivered silently rather than as a refusal.
+        if reached_ns == to_ns && is_trade {
             break;
         }
     }
@@ -284,6 +291,91 @@ mod tests {
             kind: ScanKind::FillThrough,
             from_ns,
         }
+    }
+    /// A published book, at the same `ts_event` its parent burst prints at -
+    /// which is the shape protocol 7 actually emits and the reason these walks
+    /// cannot treat "an event at the horizon" as "the last print".
+    fn quote(ts_event: u64, bid: i64, ask: i64) -> TickEvent {
+        TickEvent::Quote(mogwai_protocol::QuoteTick {
+            symbol: "BTCUSDT".into(),
+            bid_px: Decimal::from(bid),
+            ask_px: Decimal::from(ask),
+            bid_sz: Decimal::ONE,
+            ask_sz: Decimal::ONE,
+            ts_event,
+        })
+    }
+
+    // ------------------------------------------------------------------------
+    // The trades-only assumption, driven against a hand-built stream rather than
+    // asserted. Every walk in this file consumes `TickEvent`, and before the BBO
+    // layer every one of them could assume the variant. These pin the repairs so
+    // a future edit that reinstates the assumption fails here rather than in a
+    // fill that silently never happened.
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn a_quote_at_the_horizon_does_not_end_the_walk_before_its_parent_print() {
+        // The quote and the print share `ts_event`, so a walk that stops on
+        // "an event whose timestamp equals the horizon" never evaluates the
+        // print - and the trigger it would have hit simply does not fire.
+        let mut source = MemorySource::new(vec![quote(2, 100, 101), trade(2, 101)]);
+        let walk = scan_triggers(&mut source, &[scan(Side::Sell, 100, 0)], 2, 10);
+        assert_eq!(
+            walk.hits[0],
+            Some(Hit {
+                ts_ns: 2,
+                px: Decimal::from(101)
+            }),
+            "the print sharing the horizon with its quote was never evaluated"
+        );
+    }
+
+    #[test]
+    fn a_quote_costs_the_walk_a_tick_of_its_budget() {
+        // Not incidental: the sweep budget is denominated in ticks pulled, and
+        // protocol 7 adds one quote per parent burst. A budget sized against
+        // trade counts alone under-serves every walk by that factor.
+        let mut source = MemorySource::new(vec![quote(1, 98, 99), trade(1, 99)]);
+        let walk = scan_triggers(&mut source, &[scan(Side::Buy, 100, 0)], 1, 10);
+        assert_eq!(walk.drained, 2);
+    }
+
+    #[test]
+    fn a_budget_spent_entirely_on_quotes_leaves_the_walk_short() {
+        let mut source = MemorySource::new(vec![
+            quote(1, 98, 99),
+            quote(2, 98, 99),
+            quote(3, 98, 99),
+            trade(4, 101),
+        ]);
+        let walk = scan_triggers(&mut source, &[scan(Side::Sell, 100, 0)], 4, 2);
+        assert!(walk.hits[0].is_none());
+        assert!(
+            walk.reached_ns < 4,
+            "a short walk must not claim the horizon"
+        );
+    }
+
+    #[test]
+    fn vol_reading_ignores_quotes_and_still_ends_on_the_last_print() {
+        // `last_px` is contractually the last print at or before the reading
+        // instant, and the submit path decides marketability against exactly it.
+        // A quote sharing the horizon's timestamp must not become the stopping
+        // point, or that field silently holds the previous print.
+        let mut ticks = Vec::new();
+        for i in 1..=12_u64 {
+            ticks.push(quote(i, 99, 100));
+            ticks.push(trade(i, 100 + i as i64));
+        }
+        let mut source = MemorySource::new(ticks);
+        let reading = vol_reading(&mut source, 0, 12, 100).expect("a full window reads");
+        assert_eq!(reading.last_px, Decimal::from(112));
+        assert_eq!(reading.last_ts_ns, 12);
+        assert_eq!(
+            reading.samples, 11,
+            "quotes must not enter the return series"
+        );
     }
 
     #[test]

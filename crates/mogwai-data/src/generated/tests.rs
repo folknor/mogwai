@@ -2613,6 +2613,15 @@ struct RollEstimate {
 /// persistence, latent movement, burst grouping and within-burst book changes.
 /// Promoting an observed relationship to an invariant is how a schema stops
 /// being able to report a surprise.
+/// One of the two parent populations section 2.7 separates, with the sample
+/// size beside the statistic: a cohort of forty parents and one of four hundred
+/// thousand carry the same field and must not read as equally supported.
+#[derive(Debug, Clone, Copy)]
+struct Cohort {
+    parents: usize,
+    effective_spread_ticks: f64,
+}
+
 #[derive(Debug, Clone)]
 struct SpreadDecomposition {
     /// Exact configured BBO width, in integer ticks.
@@ -2639,6 +2648,11 @@ struct SpreadDecomposition {
     opposite_side_separation: Vec<(i64, f64)>,
     zero_change_frac: f64,
     accepted_repeat_frac: f64,
+    /// Effective spread split by section 2.7's two mechanisms rather than
+    /// pooled. `None` where the sample carried no parent of that kind, which is
+    /// a fact about the sample and is reported as one rather than as a zero.
+    repeated_parents: Option<Cohort>,
+    fresh_parents: Option<Cohort>,
     conditional_return_scale: f64,
     tick_return: f64,
     tick_traversal_sigma_units: f64,
@@ -2992,6 +3006,10 @@ fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecompos
     let mut prior_quote_mid = None;
     let mut prior_last_price = None;
     let mut accepted_repeats = 0_u64;
+    // Per parent, aligned with `first_prices`: whether this event repeated the
+    // previous price against a frozen book rather than pricing off a fresh one.
+    // Section 2.7 requires the two populations reported apart.
+    let mut repeated: Vec<bool> = Vec::with_capacity(events);
 
     while last_prices.len() < events {
         let event = src.next_tick().expect("infinite tape");
@@ -3006,9 +3024,9 @@ fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecompos
         let price = decimal_to_f64(trade.price);
         print_prices.push(price);
         if starts_event {
-            if prior_quote_mid == current_quote_mid && prior_last_price == Some(price) {
-                accepted_repeats += 1;
-            }
+            let is_repeat = prior_quote_mid == current_quote_mid && prior_last_price == Some(price);
+            accepted_repeats += u64::from(is_repeat);
+            repeated.push(is_repeat);
             first_prices.push(price);
             // The latent mid this event priced against, read directly rather
             // than inferred from the prints it produced.
@@ -3026,6 +3044,7 @@ fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecompos
     first_prices.truncate(last_prices.len());
     first_mids.truncate(last_prices.len());
     first_latent_mids.truncate(last_prices.len());
+    repeated.truncate(last_prices.len());
 
     let roll_first_child = roll_estimate(&first_prices, tick);
     let roll_last_child = roll_estimate(&last_prices, tick);
@@ -3045,6 +3064,41 @@ fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecompos
         tick,
         configured_displacement_ticks,
     );
+    // The two populations of section 2.7, measured apart. A repeat parent
+    // reprints the previous price against a FROZEN book, so its displacement
+    // from that book's midpoint is a different quantity from a fresh parent's
+    // displacement from the book just published. Pooling them reports a blend of
+    // two mechanisms in the one table meant to be compared against the real-data
+    // matrix, where no such blending is possible to undo after the fact.
+    let cohort = |want_repeat: bool| -> Option<Cohort> {
+        let mut prices = Vec::new();
+        let mut mids = Vec::new();
+        let mut cohort_sides = Vec::new();
+        for index in 0..first_prices.len() {
+            if repeated[index] == want_repeat {
+                prices.push(first_prices[index]);
+                mids.push(first_mids[index]);
+                cohort_sides.push(sides[index]);
+            }
+        }
+        if prices.is_empty() {
+            return None;
+        }
+        let (_, effective_spread_ticks) = separation_and_displacement_at(
+            &prices,
+            &mids,
+            &cohort_sides,
+            tick,
+            configured_displacement_ticks,
+        );
+        Some(Cohort {
+            parents: prices.len(),
+            effective_spread_ticks,
+        })
+    };
+    let repeated_parents = cohort(true);
+    let fresh_parents = cohort(false);
+
     let (_, latent_displacement_first) = separation_and_displacement_at(
         &first_prices,
         &first_latent_mids,
@@ -3114,6 +3168,8 @@ fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecompos
             .collect(),
         zero_change_frac: zero_change,
         accepted_repeat_frac: accepted_repeats as f64 / parent_prices.len() as f64,
+        repeated_parents,
+        fresh_parents,
         conditional_return_scale: scale,
         tick_return,
         tick_traversal_sigma_units: tick_return / scale,
@@ -3227,6 +3283,21 @@ fn synthetic_spread_decomposition_at_protocol_seven() {
             "  accepted_repeat_frac             {:.4}",
             d.accepted_repeat_frac
         );
+        // Reported apart, never pooled and never summarized into one number: a
+        // repeat parent prices against a frozen book and a fresh one against the
+        // book just published, and the whole point of separating them is that
+        // the gap between these two rows is readable.
+        for (label, cohort) in [("repeated", d.repeated_parents), ("fresh", d.fresh_parents)] {
+            match cohort {
+                Some(cohort) => println!(
+                    "  effective_spread_{label:<8} parents {:>9} {:>9.3} ticks",
+                    cohort.parents, cohort.effective_spread_ticks
+                ),
+                None => println!(
+                    "  effective_spread_{label:<8} parents UNAVAILABLE: none in the sample"
+                ),
+            }
+        }
         println!(
             "  conditional return scale         {:.4e}",
             d.conditional_return_scale

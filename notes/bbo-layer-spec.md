@@ -620,6 +620,28 @@ revision 1's survey missed three sites and two fail silently.
   number of source events while expecting trades, audited and listed in the
   commit message.
 
+**The inventory above was incomplete, and the gate that would have caught that
+was not written.** Two further sites were found only after the whole layer had
+landed, by re-deriving the list from `TickEvent::Quote` rather than by any test:
+
+- `trigger.rs` `vol_reading` carries the exact `reached_ns == to_ns` break that
+  `scan_triggers` was repaired for, and was missed because the repair was made
+  at one call site rather than to the pattern. It is the worse of the two: a
+  parent publishes its quote at the same `ts_event` as its first print, so a
+  horizon landing on a parent stopped the walk on the quote and returned
+  `last_px` holding the PREVIOUS print - a stale reading, delivered silently,
+  from the one function whose doc says it refuses rather than approximates.
+- `fill_golden.rs` reads one tick and abandons a non-trade, so its
+  "first print of the tape" fallback could only ever return `None` under
+  protocol 7. It does not fire today because `read_last` answers at every
+  scenario instant, which means the arm is unreachable until it is load-bearing.
+
+Both are repaired, and the interleaved-stream test this brick always specified
+now exists in `trigger.rs` - four cases covering the horizon break in both
+walks, the budget a quote consumes, and a budget exhausted by quotes alone. The
+lesson is the one the brick already stated and the implementation did not honor:
+repairing three named sites and asserting the rest is not an inventory.
+
 The repairs are behavior-preserving TODAY - no quote exists yet - which is
 exactly why they land first: the suite stays green at this boundary and the
 change is reviewable in isolation.

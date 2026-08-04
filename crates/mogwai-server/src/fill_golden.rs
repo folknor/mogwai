@@ -269,9 +269,17 @@ fn run_scenario(band_vol_mult: f64, profiles: &InstrumentProfiles) -> Vec<Cell> 
                 .or_else(|| {
                     let mut tape =
                         crate::source::build_history_source(SYMBOL, Some(ORIGIN), profiles)?;
-                    match tape.next_tick()? {
-                        TickEvent::Trade(trade) => Some(trade.price),
-                        TickEvent::Quote(_) => None,
+                    // The tape's first PRINT, not its first FRAME. Protocol 7
+                    // opens every parent burst with a quote, so reading one tick
+                    // and giving up on a non-trade returned None for the
+                    // ordinary case - turning this fallback into a panic at the
+                    // exact moment it was needed. Nothing caught it because
+                    // `read_last` currently answers at every scenario instant,
+                    // so the arm is only reachable when it is load-bearing.
+                    loop {
+                        if let TickEvent::Trade(trade) = tape.next_tick()? {
+                            return Some(trade.price);
+                        }
                     }
                 })
                 .expect("clean tape has an initial price");
