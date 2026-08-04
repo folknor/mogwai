@@ -8,8 +8,8 @@ use crate::{TickEvent, TickSource};
 use super::checkpoint::MAX_CHECKPOINTS;
 use super::consts::SIZE_LOG_SIGMA;
 use super::consts::{
-    FEEDBACK_RETURN_CEILING, GARCH_SIGMA_CAP, HALF_SPREAD_TICKS, MAX_SESSION_GAP_NS, NS_PER_HOUR,
-    REALIZED_RETURN_CEILING, STUDENT_T_DF, STUDENT_T_UNIT_SCALE,
+    FEEDBACK_RETURN_CEILING, GARCH_SIGMA_CAP, MAX_SESSION_GAP_NS, NS_PER_HOUR,
+    REALIZED_RETURN_CEILING, STUDENT_T_DF, STUDENT_T_UNIT_SCALE, TRADE_BOUNCE_HALF_WIDTH_TICKS,
 };
 use super::numeric::decimal_from_f64;
 use super::session::{utc_hour, utc_hour_dow};
@@ -2560,8 +2560,13 @@ struct RollEstimate {
 }
 
 /// Three SAMPLING ESTIMATORS of the same underlying quantity, differing only in
-/// which prints they sample, plus the quoted and effective truth measured at
-/// two of those sampling points.
+/// which prints they sample, plus the same-mid separation and mid-relative
+/// displacement measured at two of those sampling points.
+///
+/// The struct is named for the question it serves rather than for what it holds:
+/// no quantity in it is a spread in the market sense, because this generator
+/// publishes no quotes. Every field is a property of the PRINT series or of the
+/// unobservable latent mid.
 ///
 /// On this synthetic tape the estimators happen to order as
 /// `roll_first_child < same-mid separation < roll_last_child`. That ordering is
@@ -2572,7 +2577,11 @@ struct RollEstimate {
 /// being able to report a surprise.
 #[derive(Debug, Clone)]
 struct SpreadDecomposition {
-    configured_full_spread_ticks: f64,
+    /// Twice [`TRADE_BOUNCE_HALF_WIDTH_TICKS`]: how far apart two opposite-sided
+    /// prints sit at an unchanged mid, BEFORE grid rounding. Named for what it
+    /// is - a print-series property - because the generator publishes no quotes
+    /// and so has no configured quoted width to report.
+    configured_opposite_side_separation_ticks: f64,
     same_mid_separation_ticks: Vec<(f64, u32)>,
     /// Samples each burst's FIRST print. Excludes the sweep's own level walk.
     roll_first_child: RollEstimate,
@@ -2583,10 +2592,16 @@ struct SpreadDecomposition {
     /// unavailable estimator documents why ordinary print-layer Roll cannot be
     /// used here, where dropping it would leave the question open forever.
     roll_all_prints: RollEstimate,
-    quoted_spread_at_first_child: f64,
-    quoted_spread_at_last_child: f64,
-    effective_spread_at_first_child: f64,
-    effective_spread_at_last_child: f64,
+    /// Counterfactual same-mid print separation, sampled at the burst's first
+    /// and last print. NOT a quoted spread - see
+    /// `separation_and_displacement_at`.
+    same_mid_separation_at_first_child: f64,
+    same_mid_separation_at_last_child: f64,
+    /// `2 * sign * (price - latent_mid)`, in ticks. Shares the effective-spread
+    /// formula but measures against an UNOBSERVABLE mid rather than a published
+    /// book top.
+    mid_relative_displacement_at_first_child: f64,
+    mid_relative_displacement_at_last_child: f64,
     opposite_side_separation: Vec<(i64, f64)>,
     zero_change_frac: f64,
     conditional_return_scale: f64,
@@ -2873,32 +2888,48 @@ fn roll_estimate(prices: &[f64], tick: f64) -> RollEstimate {
     RollEstimate { covariance, ticks }
 }
 
-/// Mean quoted and effective spread in ticks at one sampling point.
+/// Mean same-mid print separation and mean mid-relative displacement, in ticks,
+/// at one sampling point.
 ///
-/// `quoted` is the counterfactual same-mid separation - what a buy and a sell
-/// would quote against THIS event's latent mid - and `effective` is
-/// `2 * sign * (price - mid)`, the same formula the real-data experiment will
-/// apply against an as-of joined book top.
+/// NEITHER return is a quoted spread, and the earlier naming of this function
+/// and its locals after `quoted` and `effective` spreads was wrong: the
+/// generator constructs no `QuoteTick`, so no bid and no ask exist to be quoted.
+/// The `counterfactual_buy`/`counterfactual_sell` locals below are exactly that:
+/// where a buy and a sell WOULD print against this event's latent mid. Their
+/// difference is a property of the print series, not a book width.
 ///
-/// Negative effective spreads are NOT clamped. On real data they are evidence
-/// of a stale quote, sequencing ambiguity or price improvement, and clamping
-/// them would erase exactly the diagnostic that says the join is wrong.
-fn spread_at(prices: &[f64], mids: &[f64], sides: &[AggressorSide], tick: f64) -> (f64, f64) {
-    let mut quoted = 0.0;
-    let mut effective = 0.0;
+/// The second return is `2 * sign * (price - mid)` against the LATENT mid. It
+/// shares its formula with the effective spread the real-data experiment
+/// computes, but not its referent: the real one is measured against an as-of
+/// joined book top that a venue actually published, and the latent mid is
+/// unobservable. Comparing the two compares a model internal against a market
+/// observable, which is legitimate only while it is stated.
+///
+/// Negative displacements are NOT clamped. Their real-data counterpart, a
+/// negative effective spread, is evidence of a stale quote, sequencing ambiguity
+/// or price improvement, and clamping would erase exactly the diagnostic that
+/// says the join is wrong.
+fn separation_and_displacement_at(
+    prices: &[f64],
+    mids: &[f64],
+    sides: &[AggressorSide],
+    tick: f64,
+) -> (f64, f64) {
+    let mut separation = 0.0;
+    let mut displacement = 0.0;
     for i in 0..prices.len() {
-        let ask = (mids[i] / tick + HALF_SPREAD_TICKS).ceil();
-        let bid = (mids[i] / tick - HALF_SPREAD_TICKS).floor();
-        quoted += ask - bid;
+        let counterfactual_buy = (mids[i] / tick + TRADE_BOUNCE_HALF_WIDTH_TICKS).ceil();
+        let counterfactual_sell = (mids[i] / tick - TRADE_BOUNCE_HALF_WIDTH_TICKS).floor();
+        separation += counterfactual_buy - counterfactual_sell;
         let sign = match sides[i] {
             AggressorSide::Buyer => 1.0,
             AggressorSide::Seller => -1.0,
             AggressorSide::NoAggressor => 0.0,
         };
-        effective += 2.0 * sign * (prices[i] - mids[i]) / tick;
+        displacement += 2.0 * sign * (prices[i] - mids[i]) / tick;
     }
     let n = prices.len() as f64;
-    (quoted / n, effective / n)
+    (separation / n, displacement / n)
 }
 
 fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecomposition {
@@ -2930,7 +2961,7 @@ fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecompos
         print_prices.push(price);
         if starts_event {
             first_prices.push(price);
-            // The latent mid this event quoted against, read directly rather
+            // The latent mid this event priced against, read directly rather
             // than inferred from the prints it produced.
             first_mids.push(src.vol.mid);
             base_returns.push(src.vol.prev_return);
@@ -2946,8 +2977,10 @@ fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecompos
     let roll_first_child = roll_estimate(&first_prices, tick);
     let roll_last_child = roll_estimate(&last_prices, tick);
     let roll_all_prints = roll_estimate(&print_prices, tick);
-    let (quoted_first, effective_first) = spread_at(&first_prices, &first_mids, &sides, tick);
-    let (quoted_last, effective_last) = spread_at(&last_prices, &first_mids, &sides, tick);
+    let (separation_first, displacement_first) =
+        separation_and_displacement_at(&first_prices, &first_mids, &sides, tick);
+    let (separation_last, displacement_last) =
+        separation_and_displacement_at(&last_prices, &first_mids, &sides, tick);
 
     let mut separation: std::collections::BTreeMap<i64, u64> = std::collections::BTreeMap::new();
     let mut opposite = 0_u64;
@@ -2960,15 +2993,17 @@ fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecompos
     }
     let parent_prices = last_prices;
 
-    // Counterfactual same-mid separation: what a buy and a sell would quote at
-    // the SAME latent mid, as a function of grid phase. Not an observable market
-    // statistic - a mechanism diagnostic - because no two prints share a mid.
+    // Counterfactual same-mid separation: how far apart a buy print and a sell
+    // print would land at the SAME latent mid, as a function of grid phase. Not
+    // an observable market statistic - a mechanism diagnostic - because no two
+    // prints share a mid. `ask`/`bid` name the two sides of the counterfactual,
+    // not a book: the generator publishes none.
     let mut phase_hist: Vec<(f64, u32)> = Vec::new();
     for step in 0..8_u32 {
         let phase = f64::from(step) / 8.0;
         let x = 10.0 + phase;
-        let ask = (x + HALF_SPREAD_TICKS).ceil();
-        let bid = (x - HALF_SPREAD_TICKS).floor();
+        let ask = (x + TRADE_BOUNCE_HALF_WIDTH_TICKS).ceil();
+        let bid = (x - TRADE_BOUNCE_HALF_WIDTH_TICKS).floor();
         phase_hist.push((phase, (ask - bid) as u32));
     }
 
@@ -2982,15 +3017,15 @@ fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecompos
     let tick_return = (1.0 + tick / decimal_to_f64(scalars.start_price)).ln();
 
     SpreadDecomposition {
-        configured_full_spread_ticks: 2.0 * HALF_SPREAD_TICKS,
+        configured_opposite_side_separation_ticks: 2.0 * TRADE_BOUNCE_HALF_WIDTH_TICKS,
         same_mid_separation_ticks: phase_hist,
         roll_first_child,
         roll_last_child,
         roll_all_prints,
-        quoted_spread_at_first_child: quoted_first,
-        quoted_spread_at_last_child: quoted_last,
-        effective_spread_at_first_child: effective_first,
-        effective_spread_at_last_child: effective_last,
+        same_mid_separation_at_first_child: separation_first,
+        same_mid_separation_at_last_child: separation_last,
+        mid_relative_displacement_at_first_child: displacement_first,
+        mid_relative_displacement_at_last_child: displacement_last,
         opposite_side_separation: separation
             .into_iter()
             .map(|(ticks, count)| (ticks, count as f64 / opposite as f64))
@@ -3002,6 +3037,22 @@ fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecompos
     }
 }
 
+/// The XBTUSD anchor re-gridded onto MNQ's quarter-point tick and price level.
+///
+/// Shared by every diagnostic that reports on both grids, so they measure the
+/// SAME second grid by construction rather than by two copies of these five
+/// assignments agreeing. It is not a preset: the arrival, size and session
+/// scalars stay crypto's, because the point is to vary the grid alone.
+fn mnq_shaped_grid(fp: &Fingerprint) -> GeneratorScalars {
+    let mut index = GeneratorScalars::xbtusd_anchor(fp);
+    index.symbol = "MNQ-SHAPED".to_string();
+    index.modal_tick = Decimal::new(25, 2);
+    index.price_decimals = 2;
+    index.start_price = Decimal::from(21_000);
+    index.latent_size_median = Decimal::ONE;
+    index
+}
+
 #[test]
 #[ignore = "spread decomposition report; run deliberately with an extended timeout"]
 fn synthetic_spread_decomposition_at_protocol_six() {
@@ -3009,12 +3060,7 @@ fn synthetic_spread_decomposition_at_protocol_six() {
     // Two grids, because every quantity here is grid-dependent and reporting
     // one would invite the same over-generalization the report already made.
     let crypto = GeneratorScalars::xbtusd_anchor(&fp);
-    let mut index = GeneratorScalars::xbtusd_anchor(&fp);
-    index.symbol = "MNQ-SHAPED".to_string();
-    index.modal_tick = Decimal::new(25, 2);
-    index.price_decimals = 2;
-    index.start_price = Decimal::from(21_000);
-    index.latent_size_median = Decimal::ONE;
+    let index = mnq_shaped_grid(&fp);
 
     for (label, scalars) in [("XBTUSD anchor", &crypto), ("MNQ-shaped grid", &index)] {
         let d = decompose_spread(scalars, 400_000);
@@ -3025,8 +3071,8 @@ fn synthetic_spread_decomposition_at_protocol_six() {
             crate::TAPE_PROTOCOL_VERSION
         );
         println!(
-            "  configured continuous spread     {:.2} ticks",
-            d.configured_full_spread_ticks
+            "  configured opposite-side sep     {:.2} ticks  (print separation, NOT a quoted width)",
+            d.configured_opposite_side_separation_ticks
         );
         print!("  same-mid grid separation         ");
         for (phase, sep) in &d.same_mid_separation_ticks {
@@ -3050,20 +3096,20 @@ fn synthetic_spread_decomposition_at_protocol_six() {
             }
         }
         println!(
-            "  quoted_spread_at_first_child     {:>9.3} ticks",
-            d.quoted_spread_at_first_child
+            "  same_mid_sep_at_first_child      {:>9.3} ticks",
+            d.same_mid_separation_at_first_child
         );
         println!(
-            "  quoted_spread_at_last_child      {:>9.3} ticks",
-            d.quoted_spread_at_last_child
+            "  same_mid_sep_at_last_child       {:>9.3} ticks",
+            d.same_mid_separation_at_last_child
         );
         println!(
-            "  effective_spread_at_first_child  {:>9.3} ticks",
-            d.effective_spread_at_first_child
+            "  mid_rel_displacement_first_child {:>9.3} ticks  (vs LATENT mid, unobservable)",
+            d.mid_relative_displacement_at_first_child
         );
         println!(
-            "  effective_spread_at_last_child   {:>9.3} ticks",
-            d.effective_spread_at_last_child
+            "  mid_rel_displacement_last_child  {:>9.3} ticks  (vs LATENT mid, unobservable)",
+            d.mid_relative_displacement_at_last_child
         );
         print!("  opposite-side parent separation  ");
         for (ticks, share) in d.opposite_side_separation.iter().take(7) {
@@ -3093,10 +3139,10 @@ fn synthetic_spread_decomposition_at_protocol_six() {
     // negative quantity, or worse, coerce it to zero.
     // The stratified matrix, on the grid where both parent estimators return a
     // value. Quote age is a single column here and is NAMED rather than set to
-    // zero: a synthetic quote is contemporaneous with its trade by
-    // construction, and calling that "0 ms" would imply an observed transport
-    // timestamp that does not exist and invite comparison against real
-    // zero-age joins, which are a different thing.
+    // zero: this generator emits no quote at all, so there is no age to report,
+    // and calling that "0 ms" would imply an observed transport timestamp that
+    // does not exist and invite comparison against real zero-age joins, which
+    // are a different thing.
     // BOTH grids, because print dependence changes materially with
     // tick_return / return_scale. Judging a real BTCUSDT result only against an
     // MNQ-shaped synthetic tape compares two different regimes and calls the
@@ -3114,12 +3160,74 @@ fn synthetic_spread_decomposition_at_protocol_six() {
         );
     }
     // Nothing else is asserted. The ORDERING between the first-child and
-    // last-child estimators, and their position relative to the quoted spread,
+    // last-child estimators, and their position relative to the same-mid
+    // print separation,
     // are grid-dependent observations rather than invariants: in real data
     // either can land on either side of quoted spread depending on side
     // persistence, latent movement, burst grouping and within-burst book
     // changes. Pinning an observed relationship is how a schema loses the
     // ability to report a surprise.
+}
+
+/// The venue publishes no market: `GeneratedSource` never emits a `QuoteTick`.
+///
+/// This is a DIAGNOSIS, not a wish. `TickEvent::Quote` exists, `mogwai-server`
+/// relays it and `mogwai-adapter` converts it, so the plumbing reads as though a
+/// quote stream were live - and the report that drove this work spent several
+/// sections reasoning about a quote placement that does not happen, because a
+/// constant was named `HALF_SPREAD_TICKS` and nobody checked. Pinning the
+/// absence means the day a BBO layer lands, this test fails and has to be
+/// deliberately rewritten rather than silently outgrown.
+#[test]
+fn the_generator_publishes_no_quotes() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let mut src = GeneratedSource::new(scalars, 7, 0, &fp, None);
+    for i in 0..20_000 {
+        match src.next_tick().expect("infinite tape") {
+            TickEvent::Trade(_) => {}
+            TickEvent::Quote(_) => {
+                panic!("tick {i} was a quote: a BBO layer has landed, so update this test")
+            }
+        }
+    }
+}
+
+/// The trade displacement is frozen, in every bounce regime and on every grid.
+///
+/// The companion diagnosis to the one above, and the reason item A of the
+/// blocker is worth stating separately: the storage seam is already per-instance
+/// (`BounceState::trade_bounce_ticks`, read fresh by `next_price` on every
+/// event), so making the displacement respond to volatility is a mutation rather
+/// than a restructuring. What is missing is the response, not the slot.
+///
+/// The run is long enough to cross into the high bounce regime many times over
+/// (its stationary share is 0.3125, with a mean run of about 33 events), so a
+/// regime-conditional displacement would be caught here.
+#[test]
+fn the_trade_displacement_never_varies() {
+    let fp = Fingerprint::from_repo_json();
+    let crypto = GeneratorScalars::xbtusd_anchor(&fp);
+    let index = mnq_shaped_grid(&fp);
+
+    for scalars in [crypto, index] {
+        let symbol = scalars.symbol.clone();
+        let mut src = GeneratedSource::new(scalars, 11, 0, &fp, None);
+        let mut saw_high_regime = false;
+        for _ in 0..20_000 {
+            src.next_tick().expect("infinite tape");
+            saw_high_regime |= src.bounce.high_regime;
+            assert!(
+                (src.bounce.trade_bounce_ticks - TRADE_BOUNCE_HALF_WIDTH_TICKS).abs()
+                    < f64::EPSILON,
+                "{symbol}: displacement moved to {} from {TRADE_BOUNCE_HALF_WIDTH_TICKS}",
+                src.bounce.trade_bounce_ticks
+            );
+        }
+        // Without this the assertion above could pass on a tape that never left
+        // the low regime, which would prove nothing about regime dependence.
+        assert!(saw_high_regime, "{symbol}: never entered the high regime");
+    }
 }
 
 fn stratified_matrix(grid_label: &str, index: &GeneratorScalars) {
@@ -3157,7 +3265,10 @@ fn stratified_matrix(grid_label: &str, index: &GeneratorScalars) {
     let boundaries = vol_boundaries(&vols);
     println!();
     println!("=== stratified matrix: {grid_label} grid");
-    println!("  quote-age dimension: contemporaneous_model_quote (NOT zero milliseconds)");
+    // Not `contemporaneous_model_quote`: the generator constructs no QuoteTick at
+    // all, so there is no model quote of any age. Rename this to
+    // `contemporaneous_model_quote` only once a BBO layer actually emits one.
+    println!("  quote-age dimension: no_model_quote (NOT zero milliseconds)");
     println!("  observable axis: trailing realized vol over {TRAILING_VOL_EVENTS} parent events,");
     println!("  parent-event returns, horizon fixed before results were examined");
     print!("  global quantile boundaries:");

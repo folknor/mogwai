@@ -278,13 +278,19 @@ pub(super) struct BounceState {
     /// residual between the sweep's last printed level and the latent mid. The
     /// long-run un-tethering the print-layer generator documented here is
     /// therefore gone - a sweep can walk several ticks off the mid inside one
-    /// event, and the re-centring is what pulls the next event's quote back
+    /// event, and the re-centring is what pulls the next event's print back
     /// toward it instead of letting the excursion become permanent. The
     /// `price_ticks.max(1.0)` floor in `next_price` still fences the downside.
     pub(super) drift_ticks: i64,
     pub(super) drift_dir: i64,
     pub(super) drift_hot: bool,
-    pub(super) half_spread_ticks: f64,
+    /// Per-instance copy of [`TRADE_BOUNCE_HALF_WIDTH_TICKS`], read fresh by
+    /// `next_price` on every event. It is written once at construction and never
+    /// mutated, so the displacement is identical in every regime and for every
+    /// instrument - but the storage seam for a state-dependent displacement is
+    /// already here, and making it vary is a mutation rather than a
+    /// restructuring. See the constant for why this is not a spread.
+    pub(super) trade_bounce_ticks: f64,
 }
 
 impl BounceState {

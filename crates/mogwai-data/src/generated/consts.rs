@@ -66,11 +66,11 @@ pub(super) const ARRIVAL_WEIBULL_MEAN: f64 = 1.0;
 pub(super) const ARRIVAL_QUIET_CHILDREN_MULT: f64 = 0.20;
 pub(super) const ARRIVAL_ACTIVE_CHILDREN_MULT: f64 = 1.430_769_230_769_230_8;
 /// Probability that a SINGLE-child event in the low bounce regime re-prints the
-/// previous event's last price instead of the freshly quoted one. Fitted to the
+/// previous event's last price instead of the freshly priced one. Fitted to the
 /// `zero_change_frac` band: at the raw-fill layer most prints are children that
 /// repeat their parent's level by construction, but the EVENT series the gate
 /// measures (section 6.3) would otherwise almost never repeat, because every
-/// parent re-quotes off a fresh latent mid. A venue whose top of book does not
+/// parent re-prices off a fresh latent mid. A venue whose top of book does not
 /// move between two small takes prints the same price twice, which is what this
 /// reproduces. It costs one Bernoulli draw per event and never applies in the
 /// high regime, where the price is meant to be moving.
@@ -136,7 +136,27 @@ pub(super) const BOUNCE_LOW_FLIP_PROB: f64 = 0.02;
 pub(super) const BOUNCE_HIGH_FLIP_PROB: f64 = 0.25;
 pub(super) const BOUNCE_LOW_TO_HIGH_PROB: f64 = 0.01;
 pub(super) const BOUNCE_HIGH_TO_LOW_PROB: f64 = 0.022;
-pub(super) const HALF_SPREAD_TICKS: f64 = 0.5;
+/// How far the TRADE price is displaced from the drifted latent mid, on the
+/// aggressor's side, before the grid rounding in `next_price`.
+///
+/// This is NOT a spread, and the name it carried until 2026-08-04
+/// (`HALF_SPREAD_TICKS`) asserted a mechanism the generator does not have. The
+/// generator constructs no `QuoteTick` anywhere: there is no bid, no ask and no
+/// top of book, and `mogwai-server`'s `/quotes` route returns empty by
+/// construction. What this constant produces is the bounce amplitude of the
+/// PRINT series - two consecutive opposite-sided prints at an unchanged mid land
+/// `2.0 * TRADE_BOUNCE_HALF_WIDTH_TICKS` apart.
+///
+/// The distinction is load-bearing rather than pedantic. Against real data the
+/// quoted width `ask - bid` and the effective spread
+/// `2 * aggressor_sign * (trade_price - quote_mid)` are separate observables: a
+/// trade may execute inside, at, or outside the displayed spread. Reading a
+/// two-tick print separation as a two-tick quoted width silently assumes they
+/// agree, and a venue that exists to inject execution divergence is precisely
+/// the place that assumption must not be baked in. Whatever eventually fits a
+/// quoted width belongs to a quote layer that does not exist yet; this value
+/// belongs to the trade layer and stays there.
+pub(super) const TRADE_BOUNCE_HALF_WIDTH_TICKS: f64 = 0.5;
 // High-regime drift adds same-direction on-grid movement so volatility clusters
 // are not only alternating bid-ask moves.
 pub(super) const HIGH_REGIME_DRIFT_PROB: f64 = 0.65;

@@ -22,9 +22,9 @@ use super::consts::{
     ARRIVAL_ACTIVE_CHILDREN_MULT, ARRIVAL_MEAN_CAL, ARRIVAL_QUIET_ACTIVE_RATIO,
     ARRIVAL_QUIET_CHILDREN_MULT, ARRIVAL_QUIET_FRACTION, ARRIVAL_STATE_PERSISTENCE,
     ARRIVAL_WEIBULL_MEAN, ARRIVAL_WEIBULL_SHAPE, DRIFT_RECENTER_FRAC, EVENT_PRICE_REPEAT_PROB,
-    HALF_SPREAD_TICKS, HIGH_REGIME_LEVEL_STEP_MULT, INTRA_EVENT_STEP_NS,
-    LOW_REGIME_LEVEL_STEP_MULT, MAX_SESSION_GAP_NS, MID_CEILING, NS_PER_HOUR,
-    REALIZED_RETURN_CEILING, SESSION_CLOSED_ARR_MULT, SIZE_DECIMALS, SIZE_LOG_SIGMA, STUDENT_T_DF,
+    HIGH_REGIME_LEVEL_STEP_MULT, INTRA_EVENT_STEP_NS, LOW_REGIME_LEVEL_STEP_MULT,
+    MAX_SESSION_GAP_NS, MID_CEILING, NS_PER_HOUR, REALIZED_RETURN_CEILING, SESSION_CLOSED_ARR_MULT,
+    SIZE_DECIMALS, SIZE_LOG_SIGMA, STUDENT_T_DF, TRADE_BOUNCE_HALF_WIDTH_TICKS,
 };
 use super::dynamics::{
     ArrivalClock, BounceState, GarchVol, SweepBurst, SweepShape, draw_standardized_innovation,
@@ -48,7 +48,11 @@ pub struct GeneratedSource {
     arrival: ArrivalClock,
     pub(super) vol: GarchVol,
     session: SessionModulator,
-    bounce: BounceState,
+    // `pub(super)` for the same reason as `vol` and `clock_ns`: the sibling test
+    // module reads the trade-displacement state directly to pin that it never
+    // varies, which is the diagnosis that gives the dynamic-displacement work
+    // something to move against.
+    pub(super) bounce: BounceState,
     duration_dist: Weibull<f64>,
     normal: Normal<f64>,
     chi_squared: ChiSquared<f64>,
@@ -288,7 +292,7 @@ impl GeneratedSource {
                 drift_ticks: 0,
                 drift_dir: 1,
                 drift_hot: false,
-                half_spread_ticks: HALF_SPREAD_TICKS,
+                trade_bounce_ticks: TRADE_BOUNCE_HALF_WIDTH_TICKS,
             },
             duration_dist: Weibull::new(1.0, ARRIVAL_WEIBULL_SHAPE).expect("valid weibull"),
             normal: Normal::new(0.0, 1.0).expect("valid normal"),
@@ -482,8 +486,8 @@ impl GeneratedSource {
         self.bounce.next_drift(&mut self.rng);
         let mid_ticks = mid / self.tick_f64 + self.bounce.drift_ticks as f64;
         let price_ticks = match side {
-            AggressorSide::Buyer => (mid_ticks + self.bounce.half_spread_ticks).ceil(),
-            AggressorSide::Seller => (mid_ticks - self.bounce.half_spread_ticks).floor(),
+            AggressorSide::Buyer => (mid_ticks + self.bounce.trade_bounce_ticks).ceil(),
+            AggressorSide::Seller => (mid_ticks - self.bounce.trade_bounce_ticks).floor(),
             // Invariant-protected, not a runtime check: `side` is the return of
             // `BounceState::next_side` directly above, whose every branch yields
             // Buyer or Seller (its flip match collapses NoAggressor into Buyer).
@@ -491,15 +495,15 @@ impl GeneratedSource {
             // only for the CSV/tick-rule lineage - so this arm is dead by
             // construction. It stays as a guard so a future edit to next_side that
             // started emitting NoAggressor would fail loudly here rather than
-            // silently quoting a mid-priced trade.
+            // silently printing a mid-priced trade.
             AggressorSide::NoAggressor => unreachable!("bounce only emits buyer or seller"),
         };
         // `mid` is floored at one tick (see next_latent_mid), but drift_ticks
         // is an unbounded accumulated random walk with no such floor: a long
         // enough same-direction high-regime streak can push mid_ticks (and
-        // hence price_ticks) to zero or negative, quoting a zero/negative
-        // price. Clamp the quoted tick count the same way mid itself is
-        // clamped, so the drifted quote can never undercut one tick.
+        // hence price_ticks) to zero or negative, printing a zero/negative
+        // price. Clamp the printed tick count the same way mid itself is
+        // clamped, so the drifted print can never undercut one tick.
         let price_ticks = price_ticks.max(1.0);
         let price = decimal_from_f64(price_ticks * self.tick_f64);
         (price.round_dp(self.scalars.price_decimals), side)
@@ -703,7 +707,7 @@ impl GeneratedSource {
         self.burst.emitted += 1;
         if self.burst.remaining == 0 {
             // End of the sweep: remember where it finished (the repeat branch
-            // in `begin_event` quotes from here) and RE-CENTRE the bounce
+            // in `begin_event` re-prices from here) and RE-CENTRE the bounce
             // drift on the residual between the last printed level and the
             // latent mid. `BounceState::next_drift` still takes its per-event
             // step, but it no longer accumulates across events - see the field
