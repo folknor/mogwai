@@ -96,6 +96,38 @@
       }
     },
     {
+      "name": "null_volatility_pairs_are_skipped_not_shifted",
+      "why": "warm-up: before the trailing horizon fills there is no volatility. A pair whose LATER change has a null volatility is skipped, and the remaining pairs keep their original alignment. An implementation that instead compacted the array and reindexed would survive 2 pairs here rather than 3, so the count alone distinguishes the two behaviours.",
+      "tick": 0.25,
+      "prices": [100.0, 100.5, 100.0, 100.5, 100.0, 100.5],
+      "change_vol": [null, 1.0, null, 1.0, 1.0],
+      "boundaries": [10.0],
+      "stratum": 0,
+      "min_pairs": 3,
+      "expect": {
+        "status": "matched",
+        "pairs": 3,
+        "covariance": -0.22222222222222224,
+        "roll_ticks": 3.7712361663282534
+      }
+    },
+    {
+      "name": "null_volatility_pairs_do_not_count_toward_min_pairs",
+      "why": "same data at a minimum of four. Only three pairs survive, so this must fail closed; an implementation that counted the skipped null toward the minimum would report a matched estimate instead.",
+      "tick": 0.25,
+      "prices": [100.0, 100.5, 100.0, 100.5, 100.0, 100.5],
+      "change_vol": [null, 1.0, null, 1.0, 1.0],
+      "boundaries": [10.0],
+      "stratum": 0,
+      "min_pairs": 4,
+      "expect": {
+        "status": "fail_closed",
+        "pairs": 3,
+        "covariance": null,
+        "roll_ticks": null
+      }
+    },
+    {
       "name": "later_observation_assigns_stratum_high",
       "why": "the complement of the case above; assigning by the earlier change would leave one pair here instead of two",
       "tick": 0.25,
