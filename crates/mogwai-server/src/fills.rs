@@ -333,7 +333,11 @@ mod tests {
         let walk = scan_triggers("BTCUSDT", &[touch, through], ts, &profiles()).expect("walk");
         assert!(walk.hits[0].is_some());
         assert!(walk.hits[1].is_none());
-        assert_eq!(walk.drained, 2);
+        // Three, not two: the quote opening the burst, the print, and then one
+        // event past `ts` - which is the only thing that can establish that `ts`
+        // held nothing further. The walk cannot stop on the print without
+        // leaving the caller a frontier it has no right to claim.
+        assert_eq!(walk.drained, 3);
     }
 
     #[test]
@@ -355,7 +359,15 @@ mod tests {
         let probe = scan("one", Side::Buy, ticks[0].1 + Decimal::ONE, TEST_ORIGIN);
         let walk = scan_triggers("BTCUSDT", &[probe], ticks[3].0, &profiles()).expect("walk");
         assert!(walk.hits[0].is_some());
-        assert_eq!(walk.reached_ns, ticks[0].0);
+        // Was `ticks[0].0`, the instant the hit printed at. The walk stops there
+        // with every scan answered, but it never saw a later instant, so it has
+        // not established that this one is finished - the quote opening the
+        // burst shares it, and on a coarser source other prints could too. The
+        // frontier stays where the walk began. A triggered stop's product limit
+        // inherits this number and gets its own predicate applied to a span
+        // that was only ever walked for the STOP's, so conceding it is right.
+        assert_eq!(walk.reached_ns, TEST_ORIGIN);
+        assert!(walk.reached_ns < ticks[0].0);
     }
 
     #[test]

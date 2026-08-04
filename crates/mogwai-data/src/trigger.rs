@@ -118,28 +118,46 @@ pub fn scan_triggers(
             (None, _, _) => scan.px,
         });
     }
+    // `reached_ns` names a timestamp this walk has drained COMPLETELY, because
+    // the caller advances an exclusive frontier to it and never revisits what it
+    // passed. Completeness at an instant is only established by an event with a
+    // LATER one, or by the source ending: a parent publishes its quote and its
+    // first print at a single instant, and a source at coarser resolution can
+    // carry many prints there, so stopping at the first event whose timestamp
+    // equals `to_ns` would let the caller step over everything else sharing it -
+    // a trigger crossed by a later child, silently never filled.
     let mut reached_ns = earliest;
+    let mut last_ts: Option<u64> = None;
     let mut drained = 0;
+    let mut proved_past = false;
     for _ in 0..budget {
         let Some(event) = source.next_tick() else {
+            // The source ended, so its final instant carries nothing further and
+            // is itself fully drained.
+            if let Some(previous) = last_ts {
+                reached_ns = reached_ns.max(previous);
+            }
+            proved_past = true;
             break;
         };
         drained += 1;
         if event.ts_event() > to_ns {
             reached_ns = to_ns;
+            proved_past = true;
             break;
         }
-        reached_ns = event.ts_event();
-        let is_trade = matches!(event, TickEvent::Trade(_));
+        if let Some(previous) = last_ts
+            && event.ts_event() != previous
+        {
+            reached_ns = reached_ns.max(previous);
+        }
+        last_ts = Some(event.ts_event());
         if let TickEvent::Trade(trade) = event {
             let any_price_can_hit = fill_buy_max.is_some_and(|px| trade.price < px)
                 || fill_sell_min.is_some_and(|px| trade.price > px)
                 || touch_buy_min.is_some_and(|px| trade.price >= px)
                 || touch_sell_max.is_some_and(|px| trade.price <= px);
             if !any_price_can_hit {
-                if reached_ns == to_ns {
-                    break;
-                }
                 continue;
             }
             for (hit, scan) in hits.iter_mut().zip(scans) {
@@ -154,6 +172,11 @@ pub fn scan_triggers(
                 }
             }
             if hits.iter().all(Option::is_some) {
+                // Every scan is answered, so the walk stops here - but the
+                // frontier it reports is still only what it PROVED, which is the
+                // last instant it saw past. Reporting this print's own timestamp
+                // would hand the caller a frontier covering events at that
+                // instant the walk never read.
                 return Walk {
                     hits,
                     reached_ns,
@@ -161,9 +184,13 @@ pub fn scan_triggers(
                 };
             }
         }
-        if reached_ns == to_ns && is_trade {
-            break;
-        }
+    }
+    if !proved_past && let Some(last) = last_ts {
+        // The budget ran out mid-stream. Every instant STRICTLY BEFORE the last
+        // one seen is drained - the source is time-ordered and was read
+        // contiguously - so the frontier can advance to just short of it. That
+        // instant itself may still carry events this walk never pulled.
+        reached_ns = reached_ns.max(last.saturating_sub(1));
     }
     Walk {
         hits,
@@ -195,19 +222,39 @@ pub fn vol_reading(
     let mut first_ts = None;
     let mut last_ts = None;
     let mut last_px = None;
+    // Same frontier rule as `scan_triggers`, and the stake here is `last_px`.
+    // That field is contractually the last print at or before the reading
+    // instant, and the submit path decides marketability against exactly it, so
+    // stopping at the first event that merely EQUALS `to_ns` returns whichever
+    // print happened to come first at that instant - the quote's own parent when
+    // the tape is protocol 7, an arbitrary one when the source is coarser.
     let mut reached_ns = from_ns;
+    // Distinct from `last_ts`, which is the last PRINT and feeds `last_ts_ns`
+    // and `span_ns`. This one is the last EVENT of any kind, and exists only to
+    // decide when an instant has been drained.
+    let mut last_event_ts: Option<u64> = None;
     let mut drained = 0;
+    let mut proved_past = false;
     for _ in 0..budget {
         let Some(event) = source.next_tick() else {
+            if let Some(previous) = last_event_ts {
+                reached_ns = reached_ns.max(previous);
+            }
+            proved_past = true;
             break;
         };
         drained += 1;
         if event.ts_event() > to_ns {
             reached_ns = to_ns;
+            proved_past = true;
             break;
         }
-        reached_ns = event.ts_event();
-        let is_trade = matches!(event, TickEvent::Trade(_));
+        if let Some(previous) = last_event_ts
+            && event.ts_event() != previous
+        {
+            reached_ns = reached_ns.max(previous);
+        }
+        last_event_ts = Some(event.ts_event());
         if let TickEvent::Trade(trade) = event
             && trade.ts_event > from_ns
         {
@@ -220,15 +267,9 @@ pub fn vol_reading(
             last_px = Some(trade.price);
             prices.push(price);
         }
-        // The `is_trade` guard is the twin of the one in `scan_triggers`, and it
-        // matters more here. A parent burst publishes its quote at the SAME
-        // `ts_event` as its first print, so a horizon landing exactly on a parent
-        // would stop this walk on the quote and leave `last_px` holding the
-        // PREVIOUS print - the stale reading this function's contract says it
-        // never returns, delivered silently rather than as a refusal.
-        if reached_ns == to_ns && is_trade {
-            break;
-        }
+    }
+    if !proved_past && let Some(last) = last_event_ts {
+        reached_ns = reached_ns.max(last.saturating_sub(1));
     }
     // A walk that stopped short holds the OLDEST part of the window - it starts
     // at a checkpoint before the window opens and collects forward - so its
@@ -332,6 +373,44 @@ mod tests {
     }
 
     #[test]
+    fn a_later_print_sharing_the_horizon_still_triggers() {
+        // The first print at `to_ns` cannot end the walk: a coarser source packs
+        // many prints into one instant, and only the second one here crosses.
+        let mut source = MemorySource::new(vec![quote(2, 100, 101), trade(2, 100), trade(2, 105)]);
+        let walk = scan_triggers(&mut source, &[scan(Side::Sell, 103, 0)], 2, 10);
+        assert_eq!(
+            walk.hits[0],
+            Some(Hit {
+                ts_ns: 2,
+                px: Decimal::from(105)
+            }),
+            "the walk stopped on the first print at the horizon"
+        );
+    }
+
+    #[test]
+    fn a_frontier_is_only_claimed_once_the_walk_has_passed_it() {
+        // The budget runs out between the quote and the print that shares its
+        // instant. Claiming `to_ns` here would advance the caller's exclusive
+        // frontier past a print it never read.
+        let mut source = MemorySource::new(vec![trade(1, 99), quote(2, 100, 101), trade(2, 105)]);
+        let walk = scan_triggers(&mut source, &[scan(Side::Sell, 103, 0)], 2, 2);
+        assert!(walk.hits[0].is_none());
+        assert_eq!(
+            walk.reached_ns, 1,
+            "a walk that stopped mid-instant claimed that instant"
+        );
+    }
+
+    #[test]
+    fn a_source_that_ends_proves_its_final_instant_complete() {
+        let mut source = MemorySource::new(vec![trade(1, 99), quote(2, 100, 101), trade(2, 105)]);
+        let walk = scan_triggers(&mut source, &[scan(Side::Buy, 1, 0)], 9, 100);
+        assert!(walk.hits[0].is_none());
+        assert_eq!(walk.reached_ns, 2, "an exhausted source drained everything");
+    }
+
+    #[test]
     fn a_quote_costs_the_walk_a_tick_of_its_budget() {
         // Not incidental: the sweep budget is denominated in ticks pulled, and
         // protocol 7 adds one quote per parent burst. A budget sized against
@@ -376,6 +455,38 @@ mod tests {
             reading.samples, 11,
             "quotes must not enter the return series"
         );
+    }
+
+    #[test]
+    fn vol_reading_takes_the_last_print_of_a_shared_horizon_instant() {
+        // `last_px` is the last print at or before the reading instant. Several
+        // prints can share that instant, and the walk must land on the last of
+        // them rather than on whichever arrived first.
+        let mut ticks = Vec::new();
+        for i in 1..=12_u64 {
+            ticks.push(quote(i, 99, 100));
+            ticks.push(trade(i, 100 + i as i64));
+        }
+        ticks.push(trade(12, 500));
+        let mut source = MemorySource::new(ticks);
+        let reading = vol_reading(&mut source, 0, 12, 100).expect("a full window reads");
+        assert_eq!(reading.last_px, Decimal::from(500));
+    }
+
+    #[test]
+    fn vol_reading_refuses_a_window_it_stopped_inside() {
+        // The budget ends immediately after the quote at the horizon, so the
+        // print sharing that instant was never consumed. Reporting a reading
+        // here hands back the PREVIOUS print as `last_px` while claiming the
+        // window was covered - the silent staleness this function refuses.
+        let mut ticks = Vec::new();
+        for i in 1..=12_u64 {
+            ticks.push(quote(i, 99, 100));
+            ticks.push(trade(i, 100 + i as i64));
+        }
+        let mut source = MemorySource::new(ticks);
+        // 11 full pairs, then the horizon's quote alone.
+        assert!(vol_reading(&mut source, 0, 12, 23).is_none());
     }
 
     #[test]
@@ -455,16 +566,26 @@ mod tests {
         );
     }
     #[test]
-    fn walk_with_a_spent_budget_reports_where_it_stopped() {
+    fn walk_with_a_spent_budget_reports_only_what_it_proved() {
+        // Was `(1, 1)`. Consuming the print at instant 1 does not establish that
+        // instant 1 is finished - another event could share it - and the caller
+        // advances an EXCLUSIVE frontier to this number, so claiming 1 here
+        // would let it step over anything else at that instant. Under-claiming
+        // costs a re-walk; over-claiming loses a fill permanently.
         let mut source = MemorySource::new(vec![trade(1, 100), trade(2, 100)]);
         let walk = scan_triggers(&mut source, &[scan(Side::Buy, 99, 0)], 2, 1);
-        assert_eq!((walk.reached_ns, walk.drained), (1, 1));
+        assert_eq!((walk.reached_ns, walk.drained), (0, 1));
     }
     #[test]
-    fn walk_stops_at_an_exact_boundary_without_pulling_past_it() {
+    fn walk_pulls_exactly_one_event_past_the_boundary_to_prove_it() {
+        // Was `walk_stops_at_an_exact_boundary_without_pulling_past_it`,
+        // asserting `(2, 2)`. That efficiency property is incompatible with
+        // correctness: the ONLY evidence that instant 2 is fully drained is an
+        // event at a later instant, so the walk must pull it. One extra tick of
+        // budget buys the frontier its exclusive semantics depend on.
         let mut source = MemorySource::new(vec![trade(1, 100), trade(2, 100), trade(3, 100)]);
         let walk = scan_triggers(&mut source, &[scan(Side::Buy, 99, 0)], 2, 10);
-        assert_eq!((walk.reached_ns, walk.drained), (2, 2));
+        assert_eq!((walk.reached_ns, walk.drained), (2, 3));
     }
     #[test]
     fn walk_batches_every_scan_into_one_pass() {
