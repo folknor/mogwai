@@ -2531,17 +2531,45 @@ fn realized_return_envelope_under_regime_scaling() {
 // flip the covariance sign outright.
 // ---------------------------------------------------------------------------
 
+/// One Roll estimate plus the covariance behind it, so an unavailable result
+/// still says WHY.
+#[derive(Debug, Clone, Copy)]
+struct RollEstimate {
+    covariance: f64,
+    /// `None` when the covariance is non-negative. Roll is then UNAVAILABLE,
+    /// which is a different statement from a spread of zero and must never be
+    /// coerced into one.
+    ticks: Option<f64>,
+}
+
+/// Three SAMPLING ESTIMATORS of the same underlying quantity, differing only in
+/// which prints they sample, plus the quoted and effective truth measured at
+/// two of those sampling points.
+///
+/// On this synthetic tape the estimators happen to order as
+/// `roll_first_child < same-mid separation < roll_last_child`. That ordering is
+/// RECORDED, not asserted: it is not a general bound. In real data either
+/// estimator can land on either side of the quoted spread depending on side
+/// persistence, latent movement, burst grouping and within-burst book changes.
+/// Promoting an observed relationship to an invariant is how a schema stops
+/// being able to report a surprise.
 #[derive(Debug, Clone)]
 struct SpreadDecomposition {
     configured_full_spread_ticks: f64,
     same_mid_separation_ticks: Vec<(f64, u32)>,
-    parent_price_change_covariance: f64,
-    /// `None` when the covariance is non-negative: Roll is UNAVAILABLE, which is
-    /// a different statement from a spread of zero.
-    roll_spread_price: Option<f64>,
-    roll_spread_ticks: Option<f64>,
-    print_layer_covariance: f64,
-    print_layer_roll_ticks: Option<f64>,
+    /// Samples each burst's FIRST print. Excludes the sweep's own level walk.
+    roll_first_child: RollEstimate,
+    /// Samples each burst's LAST print. Includes the walk, and is what the
+    /// realism gate's event series uses.
+    roll_last_child: RollEstimate,
+    /// Samples every print. Retained precisely BECAUSE it fails: recording an
+    /// unavailable estimator documents why ordinary print-layer Roll cannot be
+    /// used here, where dropping it would leave the question open forever.
+    roll_all_prints: RollEstimate,
+    quoted_spread_at_first_child: f64,
+    quoted_spread_at_last_child: f64,
+    effective_spread_at_first_child: f64,
+    effective_spread_at_last_child: f64,
     opposite_side_separation: Vec<(i64, f64)>,
     zero_change_frac: f64,
     conditional_return_scale: f64,
@@ -2549,22 +2577,53 @@ struct SpreadDecomposition {
     tick_traversal_sigma_units: f64,
 }
 
-fn roll_spread(changes: &[f64]) -> (f64, Option<f64>) {
+/// Roll's estimator over a price series, in TICKS. `2 * sqrt(-cov)` where the
+/// covariance is of consecutive PRICE CHANGES - not of returns, and not a
+/// normalized autocorrelation, both of which drop the scale the estimate needs.
+fn roll_estimate(prices: &[f64], tick: f64) -> RollEstimate {
+    let changes: Vec<f64> = prices.windows(2).map(|w| w[1] - w[0]).collect();
     let n = changes.len() - 1;
     let mean = changes.iter().sum::<f64>() / changes.len() as f64;
-    let cov = (0..n)
+    let covariance = (0..n)
         .map(|i| (changes[i] - mean) * (changes[i + 1] - mean))
         .sum::<f64>()
         / n as f64;
-    // Roll is 2*sqrt(-cov). A non-negative covariance means the bounce
-    // signature the estimator assumes is absent, so it has no value here - not
-    // a zero.
-    let spread = if cov < 0.0 {
-        Some(2.0 * (-cov).sqrt())
+    // A non-negative covariance means the bounce signature the estimator
+    // assumes is absent. It has no value here - not a zero.
+    let ticks = if covariance < 0.0 {
+        Some(2.0 * (-covariance).sqrt() / tick)
     } else {
         None
     };
-    (cov, spread)
+    RollEstimate { covariance, ticks }
+}
+
+/// Mean quoted and effective spread in ticks at one sampling point.
+///
+/// `quoted` is the counterfactual same-mid separation - what a buy and a sell
+/// would quote against THIS event's latent mid - and `effective` is
+/// `2 * sign * (price - mid)`, the same formula the real-data experiment will
+/// apply against an as-of joined book top.
+///
+/// Negative effective spreads are NOT clamped. On real data they are evidence
+/// of a stale quote, sequencing ambiguity or price improvement, and clamping
+/// them would erase exactly the diagnostic that says the join is wrong.
+fn spread_at(prices: &[f64], mids: &[f64], sides: &[AggressorSide], tick: f64) -> (f64, f64) {
+    let mut quoted = 0.0;
+    let mut effective = 0.0;
+    for i in 0..prices.len() {
+        let ask = (mids[i] / tick + HALF_SPREAD_TICKS).ceil();
+        let bid = (mids[i] / tick - HALF_SPREAD_TICKS).floor();
+        quoted += ask - bid;
+        let sign = match sides[i] {
+            AggressorSide::Buyer => 1.0,
+            AggressorSide::Seller => -1.0,
+            AggressorSide::NoAggressor => 0.0,
+        };
+        effective += 2.0 * sign * (prices[i] - mids[i]) / tick;
+    }
+    let n = prices.len() as f64;
+    (quoted / n, effective / n)
 }
 
 fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecomposition {
@@ -2572,46 +2631,59 @@ fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecompos
     let mut src = GeneratedSource::new(scalars.clone(), 42, 0, &fp, None);
     let tick = decimal_to_f64(scalars.modal_tick);
 
-    let mut parent_prices: Vec<f64> = Vec::with_capacity(events);
-    let mut parent_sides: Vec<AggressorSide> = Vec::with_capacity(events);
+    // BURST GROUPING RULE, and it is part of the estimator contract rather than
+    // an implementation detail. Here it is EXACT: `burst.remaining` is the
+    // generator's own structure, so first and last child are known without
+    // inference. Real data has no such field and must approximate the grouping
+    // from equal timestamp plus aggressor side - which makes TIMESTAMP
+    // RESOLUTION part of the contract too, because a millisecond archive merges
+    // events that a microsecond tape separates. Any comparison against this
+    // schema has to state which grouping rule it used.
+    let mut first_prices: Vec<f64> = Vec::with_capacity(events);
+    let mut last_prices: Vec<f64> = Vec::with_capacity(events);
+    let mut first_mids: Vec<f64> = Vec::with_capacity(events);
+    let mut sides: Vec<AggressorSide> = Vec::with_capacity(events);
     let mut print_prices: Vec<f64> = Vec::new();
     let mut base_returns: Vec<f64> = Vec::with_capacity(events);
 
-    // The event price is the burst's LAST child, matching `measure` exactly.
-    // Taking the first child instead is a different series - it excludes the
-    // sweep's own level walk - and mixing the two conventions is how an earlier
-    // pass produced a lag-50 figure fifteen times off. If this schema is to be
-    // the contract the real-data experiments match, it has to agree with the
-    // realism gate first.
-    while parent_prices.len() < events {
+    while last_prices.len() < events {
         let starts_event = src.burst.remaining == 0;
         let TickEvent::Trade(trade) = src.next_tick().expect("infinite tape") else {
             unreachable!()
         };
-        print_prices.push(decimal_to_f64(trade.price));
+        let price = decimal_to_f64(trade.price);
+        print_prices.push(price);
         if starts_event {
+            first_prices.push(price);
+            // The latent mid this event quoted against, read directly rather
+            // than inferred from the prints it produced.
+            first_mids.push(src.vol.mid);
             base_returns.push(src.vol.prev_return);
         }
         if src.burst.remaining == 0 {
-            parent_prices.push(decimal_to_f64(trade.price));
-            parent_sides.push(trade.aggressor);
+            last_prices.push(price);
+            sides.push(trade.aggressor);
         }
     }
+    first_prices.truncate(last_prices.len());
+    first_mids.truncate(last_prices.len());
 
-    let parent_changes: Vec<f64> = parent_prices.windows(2).map(|w| w[1] - w[0]).collect();
-    let (parent_cov, parent_roll) = roll_spread(&parent_changes);
-    let print_changes: Vec<f64> = print_prices.windows(2).map(|w| w[1] - w[0]).collect();
-    let (print_cov, print_roll) = roll_spread(&print_changes);
+    let roll_first_child = roll_estimate(&first_prices, tick);
+    let roll_last_child = roll_estimate(&last_prices, tick);
+    let roll_all_prints = roll_estimate(&print_prices, tick);
+    let (quoted_first, effective_first) = spread_at(&first_prices, &first_mids, &sides, tick);
+    let (quoted_last, effective_last) = spread_at(&last_prices, &first_mids, &sides, tick);
 
     let mut separation: std::collections::BTreeMap<i64, u64> = std::collections::BTreeMap::new();
     let mut opposite = 0_u64;
-    for i in 1..parent_prices.len() {
-        if parent_sides[i] != parent_sides[i - 1] {
-            let ticks = ((parent_prices[i] - parent_prices[i - 1]).abs() / tick).round() as i64;
+    for i in 1..last_prices.len() {
+        if sides[i] != sides[i - 1] {
+            let ticks = ((last_prices[i] - last_prices[i - 1]).abs() / tick).round() as i64;
             *separation.entry(ticks).or_default() += 1;
             opposite += 1;
         }
     }
+    let parent_prices = last_prices;
 
     // Counterfactual same-mid separation: what a buy and a sell would quote at
     // the SAME latent mid, as a function of grid phase. Not an observable market
@@ -2637,11 +2709,13 @@ fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecompos
     SpreadDecomposition {
         configured_full_spread_ticks: 2.0 * HALF_SPREAD_TICKS,
         same_mid_separation_ticks: phase_hist,
-        parent_price_change_covariance: parent_cov,
-        roll_spread_price: parent_roll,
-        roll_spread_ticks: parent_roll.map(|s| s / tick),
-        print_layer_covariance: print_cov,
-        print_layer_roll_ticks: print_roll.map(|s| s / tick),
+        roll_first_child,
+        roll_last_child,
+        roll_all_prints,
+        quoted_spread_at_first_child: quoted_first,
+        quoted_spread_at_last_child: quoted_last,
+        effective_spread_at_first_child: effective_first,
+        effective_spread_at_last_child: effective_last,
         opposite_side_separation: separation
             .into_iter()
             .map(|(ticks, count)| (ticks, count as f64 / opposite as f64))
@@ -2684,27 +2758,38 @@ fn synthetic_spread_decomposition_at_protocol_six() {
             print!("f={phase:.3}:{sep}t ");
         }
         println!();
-        println!(
-            "  parent Cov(dP_t, dP_t-1)         {:.6e}",
-            d.parent_price_change_covariance
-        );
-        match (d.roll_spread_price, d.roll_spread_ticks) {
-            (Some(price), Some(ticks)) => {
-                println!("  parent Roll spread               {price:.6} price = {ticks:.3} ticks")
+        for (name, est) in [
+            ("roll_first_child", d.roll_first_child),
+            ("roll_last_child", d.roll_last_child),
+            ("roll_all_prints", d.roll_all_prints),
+        ] {
+            match est.ticks {
+                Some(ticks) => println!(
+                    "  {name:<32} {ticks:>9.3} ticks  (cov {:.4e})",
+                    est.covariance
+                ),
+                None => println!(
+                    "  {name:<32} UNAVAILABLE        (cov {:.4e} >= 0)",
+                    est.covariance
+                ),
             }
-            _ => println!("  parent Roll spread               UNAVAILABLE (covariance >= 0)"),
         }
         println!(
-            "  print-layer Cov                  {:.6e}",
-            d.print_layer_covariance
+            "  quoted_spread_at_first_child     {:>9.3} ticks",
+            d.quoted_spread_at_first_child
         );
-        match d.print_layer_roll_ticks {
-            Some(ticks) => println!("  print-layer Roll                 {ticks:.3} ticks"),
-            None => println!(
-                "  print-layer Roll                 UNAVAILABLE (covariance >= 0; sweep \
-                 children walk monotonically)"
-            ),
-        }
+        println!(
+            "  quoted_spread_at_last_child      {:>9.3} ticks",
+            d.quoted_spread_at_last_child
+        );
+        println!(
+            "  effective_spread_at_first_child  {:>9.3} ticks",
+            d.effective_spread_at_first_child
+        );
+        println!(
+            "  effective_spread_at_last_child   {:>9.3} ticks",
+            d.effective_spread_at_last_child
+        );
         print!("  opposite-side parent separation  ");
         for (ticks, share) in d.opposite_side_separation.iter().take(7) {
             print!("{ticks}t:{:.1}% ", 100.0 * share);
@@ -2734,14 +2819,18 @@ fn synthetic_spread_decomposition_at_protocol_six() {
     for scalars in [&crypto, &index] {
         let d = decompose_spread(scalars, 400_000);
         assert!(
-            d.print_layer_roll_ticks.is_none(),
-            "print-layer Roll must be UNAVAILABLE on every grid: cov={}",
-            d.print_layer_covariance
+            d.roll_all_prints.ticks.is_none(),
+            "roll_all_prints must be UNAVAILABLE on every grid: cov={}",
+            d.roll_all_prints.covariance
         );
     }
-    // Parent-layer availability is deliberately NOT asserted. It is
-    // grid-dependent - see the report above - and pinning it would turn a
-    // finding into a requirement.
+    // Nothing else is asserted. The ORDERING between the first-child and
+    // last-child estimators, and their position relative to the quoted spread,
+    // are grid-dependent observations rather than invariants: in real data
+    // either can land on either side of quoted spread depending on side
+    // persistence, latent movement, burst grouping and within-burst book
+    // changes. Pinning an observed relationship is how a schema loses the
+    // ability to report a surprise.
 }
 
 fn is_round_lot(size: Decimal, median: f64) -> bool {
