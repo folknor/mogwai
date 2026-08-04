@@ -1178,6 +1178,41 @@ is labelled `contemporaneous_model_quote`, NOT zero milliseconds. Zero would
 imply an observed transport timestamp that does not exist, and would invite a
 comparison against real zero-age joins that are a different thing entirely.
 
+#### Discovery result, 2026-08-04: the coverage windows do not align
+
+Established from the archive index before downloading anything. This answers
+file contract 6 at the index level, and the answer is no.
+
+`data/futures/um/daily/` exposes nine datasets, including both `trades` and
+`bookTicker`, so the futures methodology experiment is viable in principle. But
+for BTCUSDT:
+
+| dataset | first | last | status |
+|---|---|---|---|
+| `bookTicker` | 2023-05-16 | **2024-03-30** | ended |
+| `trades` | (not probed back) | 2026-07-31 present | current |
+
+`BTCUSDT-bookTicker-2026-07-31.zip` returns 404 while the matching `trades` file
+returns 200 at 24,391,078 bytes. A full listing from 2024-01 forward is NOT
+truncated and contains nothing after 2024-03-30, so this is the end of coverage
+rather than a paging artifact.
+
+A matched pair does exist inside the overlap: `trades` for 2024-03-30 returns
+200 at 12,403,562 bytes.
+
+**Stopping here for a design decision rather than proceeding.** The stated rule
+was not to substitute another stream, cadence, endpoint or date range without
+revisiting the experiment design, and using 2024-03-30 is a date-range
+substitution. It is a mild one - the futures experiment validates METHODOLOGY
+rather than supplying preset evidence, and a Roll-versus-truth comparison does
+not obviously decay with age - but the decision belongs upstream of the parser,
+not inside it.
+
+What the choice actually is: accept a quote corpus that ends in March 2024 and
+is therefore roughly two years stale relative to the `trades` data and to any
+CME window under consideration, or revisit the design. Nothing in the archive
+offers a more recent free quote source for this venue.
+
 #### The six file contracts, to establish from a downloaded file
 
 Not from documentation, and not from assumption - assumption is what produced
