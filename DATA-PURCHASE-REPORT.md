@@ -25,6 +25,7 @@ re-deriving anything and can see which steps were wrong the first time.
 - [9. Candidate baskets, priced](#9-candidate-baskets-priced)
 - [10. Objections to the original basket](#10-objections-to-the-original-basket)
 - [11. Recommended sequence](#11-recommended-sequence)
+  - [11.1 The spread experiment contract](#111-the-spread-experiment-contract)
 - [12. Corrections: things that were wrong along the way](#12-corrections-things-that-were-wrong-along-the-way)
 - [13. Scripts](#13-scripts)
 - [14. Open items](#14-open-items)
@@ -1068,6 +1069,142 @@ refinement rather than correction.
 have reshaped it into, plus the GC probe if the Kraken cross-grid work in
 [7.1](#71-zero_change_frac-is-not-an-instrument-constant) leaves a
 cross-asset-class question open.
+
+---
+
+### 11.1 The spread experiment contract
+
+Written BEFORE the data is parsed, deliberately. Every estimator decision below
+is one that a file discovery could otherwise silently redefine after synthetic
+results already exist, at which point the comparison stops meaning anything.
+
+#### Parent inference
+
+The synthetic tape knows its own burst structure (`burst.remaining`). Real data
+does not, so it must infer the grouping - and the inference rule is part of the
+estimator, not an implementation detail.
+
+- A parent groups CONTIGUOUS rows sharing both timestamp and aggressor side.
+- Grouping NEVER combines non-contiguous rows that happen to share a timestamp.
+  Two separate events at the same millisecond are two events.
+- First and last child follow that inferred ordering.
+- TIMESTAMP RESOLUTION and the group-size distribution are reported, not
+  assumed. A millisecond archive merges events a microsecond tape separates, so
+  resolution is part of the contract and a resolution mismatch between two
+  corpora invalidates their comparison.
+
+#### Estimators
+
+- `roll_first_child`, `roll_last_child` and `roll_all_prints` stay SEPARATE. No
+  blending, no "best" one.
+- Roll is UNAVAILABLE, never zero, when the covariance is non-negative.
+- A covariance PAIR is assigned to a stratum by the LATER of its two
+  observations, so a stratum boundary cannot claim a pair that straddles it.
+- Every cell reports both its sample count and its covariance-pair count. These
+  differ, and quoting one for the other overstates the evidence.
+- Sparse cells FAIL CLOSED. An unstable estimate printed without comment is
+  worse than a hole, because it will be read.
+
+#### Quote alignment
+
+- Join the LATEST quote whose transaction timestamp is no later than the trade
+  timestamp. Never the nearest quote in either direction: that permits
+  lookahead, and lookahead in a spread study manufactures the result.
+- Record QUOTE AGE for every match.
+- An equal-timestamp join is SEQUENCING-AMBIGUOUS when the timestamp resolution
+  cannot order the two streams, and is labelled as such rather than treated as
+  a perfect match.
+- Locked and crossed books, negative effective spreads, missing quotes,
+  duplicate update ids and out-of-order rows are REPORTED, never silently
+  cleaned. Each is evidence about the join; removing them removes the evidence.
+- Quote-age strata are chosen only AFTER inspecting timestamp resolution.
+  Absolute age summaries and zero-age frequency are preserved first, because
+  otherwise millisecond ties masquerade as perfect synchronization.
+
+#### Per-trade quantities
+
+```
+mid              = (bid + ask) / 2
+quoted_spread    = ask - bid
+aggressor_sign   = +1 buyer initiated, -1 seller initiated
+effective_spread = 2 * aggressor_sign * (trade_price - mid)
+```
+
+Negative effective spreads are NOT clamped. They are evidence of a stale quote,
+sequencing ambiguity or price improvement, and clamping them erases exactly the
+diagnostic that says the join is wrong.
+
+#### Volatility stratification, and the two axes
+
+One distinction must stay explicit: realized volatility is UNSUITABLE as the
+generator's spread-response input - it would couple the spread to the same
+estimator the fill band already uses - but it is entirely APPROPRIATE as an
+analysis stratum. Real data has no GARCH state, so the comparison needs an
+observable measure both corpora can carry.
+
+Hence two axes, never conflated:
+
+| Axis | Available on | Meaning |
+|---|---|---|
+| `model_return_scale_stratum` | generator only | the conditional return scale, model state |
+| `observable_trailing_vol_stratum` | both | trailing realized volatility, computed identically |
+
+The experiment then measures how well the observable axis RECOVERS the
+model-state ordering, which is a result rather than an assumption.
+
+Rules for the observable axis:
+
+- Trailing observations only. No lookahead.
+- The horizon is FIXED BEFORE results are examined.
+- It is stated whether returns are raw-print or parent-event returns.
+- Boundaries are computed GLOBALLY from the analysis corpus and then reused
+  unchanged across every sampling convention, so conventions stay comparable.
+- At least calm, middle, stressed and extreme strata, with the exact quantile
+  boundaries recorded.
+
+#### The synthetic quote-age dimension
+
+The synthetic matrix has no historical quote staleness. Its quote-age dimension
+is labelled `contemporaneous_model_quote`, NOT zero milliseconds. Zero would
+imply an observed transport timestamp that does not exist, and would invite a
+comparison against real zero-age joins that are a different thing entirely.
+
+#### The six file contracts, to establish from a downloaded file
+
+Not from documentation, and not from assumption - assumption is what produced
+the spot-versus-derivatives error in
+[5.2.1](#521-correction-free-historical-quote-truth-does-not-cover-the-shipped-presets):
+
+1. whether files carry a header;
+2. exact column order and timestamp units;
+3. which book timestamp is exchange transaction time versus event or
+   publication time;
+4. whether rows are sorted and update ids monotonic;
+5. whether duplicate update ids or timestamps occur;
+6. whether daily trade and quote coverage boundaries align.
+
+#### The output
+
+The deliverable is not "does Roll recover spread". It is a matrix:
+
+```
+sampling convention x volatility stratum x quote-age stratum x quoted vs effective truth
+```
+
+which answers three separable questions: whether `roll_first_child` is a useful
+BIASED PROXY, whether `roll_last_child` measures sweep intensity rather than
+spread, and whether either relationship is stable enough to inform the CME
+purchase design.
+
+#### Order of work
+
+1. This contract into the report. **Done.**
+2. Observable-volatility stratification added to the protocol-6 harness.
+3. Freeze that output schema.
+4. Download one futures `trades` day and one matching `bookTicker` day.
+5. Inspect and record the six file contracts.
+6. Implement a fail-closed parser and the strict as-of join.
+7. One-day smoke analysis before expanding coverage.
 
 ---
 

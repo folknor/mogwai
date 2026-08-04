@@ -2531,6 +2531,23 @@ fn realized_return_envelope_under_regime_scaling() {
 // flip the covariance sign outright.
 // ---------------------------------------------------------------------------
 
+/// Trailing realized-volatility horizon, in parent events, for the OBSERVABLE
+/// stratification axis. Fixed here, before any result was examined, which is
+/// the point: a horizon chosen after seeing the strata is a fitted parameter
+/// wearing a methodology's clothes.
+const TRAILING_VOL_EVENTS: usize = 64;
+
+/// Global quantile boundaries for the observable axis. Computed once over the
+/// whole analysis corpus and reused unchanged across every sampling convention,
+/// so conventions stay comparable to each other.
+const VOL_STRATUM_QUANTILES: [f64; 3] = [0.25, 0.75, 0.95];
+const VOL_STRATUM_NAMES: [&str; 4] = ["calm", "middle", "stressed", "extreme"];
+
+/// Minimum covariance pairs before a cell reports an estimate. Below this the
+/// cell FAILS CLOSED: an unstable number printed without comment is worse than
+/// a hole, because it will be read.
+const MIN_COVARIANCE_PAIRS: usize = 500;
+
 /// One Roll estimate plus the covariance behind it, so an unavailable result
 /// still says WHY.
 #[derive(Debug, Clone, Copy)]
@@ -2575,6 +2592,86 @@ struct SpreadDecomposition {
     conditional_return_scale: f64,
     tick_return: f64,
     tick_traversal_sigma_units: f64,
+}
+
+/// Trailing realized volatility per event, from PARENT-EVENT log returns over
+/// `TRAILING_VOL_EVENTS`. Trailing only - element `i` uses returns strictly
+/// before `i`, so no observation can see its own future. Leading elements
+/// before the horizon fills are `None` and are excluded rather than
+/// back-filled.
+fn trailing_vol(prices: &[f64]) -> Vec<Option<f64>> {
+    let returns: Vec<f64> = prices.windows(2).map(|w| (w[1] / w[0]).ln()).collect();
+    let mut out = vec![None; prices.len()];
+    for i in 0..prices.len() {
+        if i < TRAILING_VOL_EVENTS {
+            continue;
+        }
+        let window = &returns[i - TRAILING_VOL_EVENTS..i];
+        let sumsq = window.iter().map(|r| r * r).sum::<f64>();
+        out[i] = Some((sumsq / window.len() as f64).sqrt());
+    }
+    out
+}
+
+/// Global stratum boundaries from the whole corpus, so every sampling
+/// convention is cut at the same places.
+fn vol_boundaries(vols: &[Option<f64>]) -> Vec<f64> {
+    let mut present: Vec<f64> = vols.iter().filter_map(|v| *v).collect();
+    present.sort_by(f64::total_cmp);
+    VOL_STRATUM_QUANTILES
+        .iter()
+        .map(|q| present[((present.len() - 1) as f64 * q) as usize])
+        .collect()
+}
+
+fn stratum_of(vol: f64, boundaries: &[f64]) -> usize {
+    boundaries.iter().filter(|b| vol >= **b).count()
+}
+
+/// Roll over a price series restricted to one stratum. A covariance PAIR spans
+/// two consecutive changes, hence three prices; it is assigned to a stratum by
+/// the LATER observation, so a boundary cannot claim a pair that straddles it.
+/// Returns the estimate and the pair count that produced it.
+fn roll_in_stratum(
+    prices: &[f64],
+    vols: &[Option<f64>],
+    boundaries: &[f64],
+    stratum: usize,
+    tick: f64,
+) -> (RollEstimate, usize) {
+    let changes: Vec<f64> = prices.windows(2).map(|w| w[1] - w[0]).collect();
+    let mut pairs: Vec<(f64, f64)> = Vec::new();
+    for i in 0..changes.len().saturating_sub(1) {
+        // The later observation of the pair is price index i + 2.
+        let Some(vol) = vols.get(i + 2).copied().flatten() else {
+            continue;
+        };
+        if stratum_of(vol, boundaries) == stratum {
+            pairs.push((changes[i], changes[i + 1]));
+        }
+    }
+    if pairs.len() < MIN_COVARIANCE_PAIRS {
+        return (
+            RollEstimate {
+                covariance: f64::NAN,
+                ticks: None,
+            },
+            pairs.len(),
+        );
+    }
+    let mean_a = pairs.iter().map(|p| p.0).sum::<f64>() / pairs.len() as f64;
+    let mean_b = pairs.iter().map(|p| p.1).sum::<f64>() / pairs.len() as f64;
+    let covariance = pairs
+        .iter()
+        .map(|(a, b)| (a - mean_a) * (b - mean_b))
+        .sum::<f64>()
+        / pairs.len() as f64;
+    let ticks = if covariance < 0.0 {
+        Some(2.0 * (-covariance).sqrt() / tick)
+    } else {
+        None
+    };
+    (RollEstimate { covariance, ticks }, pairs.len())
 }
 
 /// Roll's estimator over a price series, in TICKS. `2 * sqrt(-cov)` where the
@@ -2816,6 +2913,89 @@ fn synthetic_spread_decomposition_at_protocol_six() {
     // and the estimator's sign assumption fails outright. A harness that
     // computed it there would silently return a number from a square root of a
     // negative quantity, or worse, coerce it to zero.
+    // The stratified matrix, on the grid where both parent estimators return a
+    // value. Quote age is a single column here and is NAMED rather than set to
+    // zero: a synthetic quote is contemporaneous with its trade by
+    // construction, and calling that "0 ms" would imply an observed transport
+    // timestamp that does not exist and invite comparison against real
+    // zero-age joins, which are a different thing.
+    let fp2 = Fingerprint::from_repo_json();
+    let mut src = GeneratedSource::new(index.clone(), 42, 0, &fp2, None);
+    let tick = decimal_to_f64(index.modal_tick);
+    let mut first: Vec<f64> = Vec::new();
+    let mut last: Vec<f64> = Vec::new();
+    let mut prints: Vec<f64> = Vec::new();
+    while last.len() < 400_000 {
+        let starts = src.burst.remaining == 0;
+        let TickEvent::Trade(t) = src.next_tick().expect("infinite tape") else {
+            unreachable!()
+        };
+        let p = decimal_to_f64(t.price);
+        prints.push(p);
+        if starts {
+            first.push(p);
+        }
+        if src.burst.remaining == 0 {
+            last.push(p);
+        }
+    }
+    first.truncate(last.len());
+
+    // Boundaries are computed ONCE, from the last-child series, and reused for
+    // every convention so the conventions stay comparable to one another.
+    let vols = trailing_vol(&last);
+    let boundaries = vol_boundaries(&vols);
+    println!();
+    println!("=== stratified matrix: MNQ-shaped grid");
+    println!("  quote-age dimension: contemporaneous_model_quote (NOT zero milliseconds)");
+    println!("  observable axis: trailing realized vol over {TRAILING_VOL_EVENTS} parent events,");
+    println!("  parent-event returns, horizon fixed before results were examined");
+    print!("  global quantile boundaries:");
+    for (q, b) in VOL_STRATUM_QUANTILES.iter().zip(&boundaries) {
+        print!(" p{:.0}={b:.4e}", q * 100.0);
+    }
+    println!();
+    println!(
+        "  cells fail closed below {MIN_COVARIANCE_PAIRS} covariance pairs; pairs are assigned by \
+         the LATER observation"
+    );
+    println!();
+    println!(
+        "  {:<18} {:<10} {:>12} {:>10} {:>14}",
+        "convention", "stratum", "roll ticks", "pairs", "covariance"
+    );
+    for (name, series) in [
+        ("roll_first_child", &first),
+        ("roll_last_child", &last),
+        ("roll_all_prints", &prints),
+    ] {
+        // Every convention is cut at the SAME boundaries, which are indexed by
+        // parent event, so the print series is stratified by its enclosing
+        // event rather than re-estimated on its own scale.
+        let series_vols: Vec<Option<f64>> = if std::ptr::eq(series, &prints) {
+            trailing_vol(series)
+        } else {
+            vols.clone()
+        };
+        for (s, label) in VOL_STRATUM_NAMES.iter().enumerate() {
+            let (est, pairs) = roll_in_stratum(series, &series_vols, &boundaries, s, tick);
+            match est.ticks {
+                Some(t) => println!(
+                    "  {name:<18} {label:<10} {t:>12.3} {pairs:>10} {:>14.4e}",
+                    est.covariance
+                ),
+                None if pairs < MIN_COVARIANCE_PAIRS => println!(
+                    "  {name:<18} {label:<10} {:>12} {pairs:>10} {:>14}",
+                    "FAIL-CLOSED", "sparse"
+                ),
+                None => println!(
+                    "  {name:<18} {label:<10} {:>12} {pairs:>10} {:>14.4e}",
+                    "UNAVAILABLE", est.covariance
+                ),
+            }
+        }
+    }
+
     for scalars in [&crypto, &index] {
         let d = decompose_spread(scalars, 400_000);
         assert!(
