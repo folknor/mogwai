@@ -2783,6 +2783,128 @@ fn standardized_candidate_rail_sizing() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Realized-return envelope under regime scaling.
+//
+// Three concepts are currently overloaded onto two constants:
+//
+//   1. the GARCH-STATE safety rail (caps sigma2, so it changes the recursion);
+//   2. the clean FEEDBACK-return rail (caps what re-enters the recursion);
+//   3. the absolute REALIZED-return ceiling, after session and regime scaling.
+//
+// Today `clamp_mult` multiplies 1 and 2 as well as 3, so `VolStorm` does not
+// merely amplify output - it raises the GARCH state ceiling and changes every
+// subsequent recursion step. That contradicts the principle `SessionEdgeSpike`
+// already follows, of not contaminating feedback state.
+//
+// Under the decoupled design the storm is an OUTPUT envelope: rails 1 and 2
+// stay at their clean values, so the base process is identical armed or not,
+// and `base_return * session_mult * regime_mult` is bounded by a separately
+// named realized ceiling. This measures what that ceiling has to be, because
+// multiplying the clean rail by 100 is not a derivation.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore = "regime envelope sweep; run deliberately with an extended timeout"]
+fn realized_return_envelope_under_regime_scaling() {
+    let candidate = GarchOverride {
+        a1: 0.02,
+        b1: 0.979,
+        vol_scalar: 1.2e-5,
+    };
+    const SEEDS: u64 = 8;
+    const HORIZON: u64 = 1_000_000;
+    // Proposed clean rails. Both sit above the observed clean tail, so they do
+    // not participate in ordinary calibration - which is what lets the base
+    // distribution below be treated as the unrailed one.
+    const CLEAN_SIGMA_RAIL: f64 = 1e-3;
+    const CLEAN_FEEDBACK_RAIL: f64 = 4e-3;
+    // Peak of the committed session vol curve; the realized path multiplies by
+    // this as well as by the regime, and ignoring it would under-size the
+    // ceiling by a factor of nearly 2.5.
+    let session_peak = Fingerprint::from_repo_json()
+        .session_profile
+        .vol_hour
+        .iter()
+        .copied()
+        .fold(f64::MIN, f64::max);
+
+    let (mut sigma_tail, mut return_tail, rms, total) =
+        measure_uncapped_tail(candidate, SEEDS, HORIZON);
+    let base_max = return_tail.max();
+    println!();
+    println!("clean base process over {total} updates: RMS {rms:.4e}, max |return| {base_max:.4e}");
+    println!(
+        "proposed clean rails: sigma {CLEAN_SIGMA_RAIL:.1e} (max seen {:.4e}), feedback {CLEAN_FEEDBACK_RAIL:.1e} (max seen {base_max:.4e})",
+        sigma_tail.max()
+    );
+    println!("session vol peak {session_peak:.3}");
+    println!();
+    println!("Realized = base * session * regime. Under the DECOUPLED design the base");
+    println!("distribution is regime-independent, so the envelope scales analytically.");
+    println!();
+    println!(
+        "{:>8} | {:>12} {:>12} {:>12} | {:>10} {:>10}",
+        "vol_mult", "realized RMS", "p99.99", "max", "max move", "today max"
+    );
+    let p9999 = return_tail
+        .value_exceeded_by((total / 10_000) as usize)
+        .expect("tail has p99.99");
+    for mult in [1.0_f64, 2.0, 5.0, 10.0, 100.0] {
+        let scale = mult * session_peak;
+        let realized_max = base_max * scale;
+        // What the shipped constant allows at this multiplier today, for
+        // comparison: MAX_ABS_RETURN is multiplied by the regime.
+        let today = MAX_ABS_RETURN * mult;
+        println!(
+            "{:>8.0} | {:>12.4e} {:>12.4e} {:>12.4e} | {:>9.2}% {:>9.2}%",
+            mult,
+            rms * scale,
+            p9999 * scale,
+            realized_max,
+            100.0 * (realized_max.exp() - 1.0),
+            100.0 * (today.exp() - 1.0)
+        );
+    }
+    println!();
+    println!("Candidate absolute realized ceilings, and the single-event move each permits:");
+    for ceiling in [4e-3_f64, 1e-2, 2.5e-2, 5e-2, 1e-1] {
+        // Occupancy is measured at the WORST case: max regime and peak session.
+        let scale = 100.0 * session_peak;
+        let rank_exceeding = (0..return_tail.values.len())
+            .take_while(|i| return_tail.values[*i] * scale > ceiling)
+            .count();
+        // The tail collector retains a bounded number of values, so a count
+        // that reaches its capacity is CENSORED - a lower bound, not a count.
+        // Reporting it as a count would understate how hard a low ceiling binds.
+        let censored = rank_exceeding >= return_tail.keep;
+        println!(
+            "  ceiling {:.1e} -> {:>6.2}% max move; exceeded {}{} times in {} at vol_mult 100 x session peak",
+            ceiling,
+            100.0 * (ceiling.exp() - 1.0),
+            if censored { ">=" } else { "" },
+            rank_exceeding,
+            total
+        );
+    }
+    println!();
+    println!(
+        "For reference, TODAY's max-strength storm ceiling is {:.1e} = {:.2}% - so any",
+        MAX_ABS_RETURN * 100.0,
+        100.0 * ((MAX_ABS_RETURN * 100.0).exp() - 1.0)
+    );
+    println!("choice here is a deliberate change to divergence behaviour, not a side effect.");
+
+    assert!(
+        base_max < CLEAN_FEEDBACK_RAIL,
+        "the clean feedback rail must sit above the clean tail it is not meant to shape"
+    );
+    assert!(
+        sigma_tail.max() < CLEAN_SIGMA_RAIL,
+        "the clean sigma rail must sit above the clean tail"
+    );
+}
+
 fn is_round_lot(size: Decimal, median: f64) -> bool {
     let lot = 10.0_f64.powf(median.log10().floor());
     let units = decimal_to_f64(size) / lot;
