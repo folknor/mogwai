@@ -7,7 +7,10 @@ use crate::{TickEvent, TickSource};
 
 use super::checkpoint::MAX_CHECKPOINTS;
 use super::consts::SIZE_LOG_SIGMA;
-use super::consts::{GARCH_SIGMA_CAP, MAX_ABS_RETURN, MAX_SESSION_GAP_NS, NS_PER_HOUR};
+use super::consts::{
+    GARCH_SIGMA_CAP, MAX_ABS_RETURN, MAX_SESSION_GAP_NS, NS_PER_HOUR, STUDENT_T_DF,
+    VOL_SCALAR_CAP_FRACTION,
+};
 use super::numeric::decimal_from_f64;
 use super::session::{utc_hour, utc_hour_dow};
 use super::source::integral_lot;
@@ -2086,6 +2089,226 @@ fn acf(values: &[f64], lag: usize) -> f64 {
         .map(|(a, b)| (a - mean) * (b - mean))
         .sum::<f64>();
     num / denom
+}
+
+// ---------------------------------------------------------------------------
+// Standardized-innovation counterfactual, run through the REALISM targets.
+//
+// `garch_second_moment_instrumentation` established that the shipped recursion
+// is non-stationary in second moment and spends 12.96% of its life pinned at
+// the variance cap. This decides what to do about it, by asking whether
+// standardizing the innovation preserves the fitted volatility-memory shape.
+//
+// Three arms, because scale and shape must not be conflated:
+//   1. shipped        - raw t(4), committed vol_scalar
+//   2. standardized   - t(4)/sqrt(2), SAME vol_scalar, so amplitude falls
+//   3. amplitude-matched - t(4)/sqrt(2), vol_scalar raised to reproduce arm 1's
+//                          internal latent return amplitude
+//
+// Amplitude is matched on internal `base_return` RMS - the uncluttered latent
+// measure - never on parent or print returns, which carry bounce, drift and
+// sweep walk on top and are larger than the latent signal they would have to
+// reveal.
+//
+// NOTHING HERE IS LANDED. The committed golden is expected to disagree with
+// arms 2 and 3; this experiment chooses a repair, it is not the re-bless.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ArmReport {
+    base_return_rms: f64,
+    events: usize,
+    cap_occupancy: f64,
+    clamp_occupancy: f64,
+    return_acf_lag1: f64,
+    abs_acf_lag1: f64,
+    abs_acf_lag10: f64,
+    abs_acf_lag50: f64,
+    zero_change_frac: f64,
+    tick_return_over_scale: f64,
+    duration_dispersion_cv2: f64,
+}
+
+/// Run one arm at the SAME configuration the realism gate uses -
+/// `xbtusd_anchor`, unmodified apart from `vol_scalar` - and score it with the
+/// SHIPPED `measure`, not a re-derivation. An earlier draft of this harness got
+/// both wrong: it scored an MNQ-like grid against crypto-fitted anchors and
+/// took each burst's FIRST child as the event price where `measure` takes its
+/// LAST, and the resulting lag-50 figure was off by 15x for reasons that had
+/// nothing to do with the counterfactual under test.
+///
+/// Internal amplitude needs per-event access to `vol.prev_return`, which
+/// `measure` does not expose, so it is collected on a SECOND pass. The walk is
+/// deterministic in seed plus construction, so the two passes traverse an
+/// identical path.
+fn run_arm(
+    vol_scalar: f64,
+    divisor: f64,
+    clamp_mult: f64,
+    events: usize,
+    probe_events: usize,
+) -> ArmReport {
+    let fp = Fingerprint::from_repo_json();
+    let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    scalars.vol_scalar = vol_scalar;
+
+    let build = || {
+        let mut src =
+            GeneratedSource::new_with_clamp_override(scalars.clone(), 42, 0, &fp, None, clamp_mult);
+        src.innovation_divisor = divisor;
+        src
+    };
+
+    let mut scoring = build();
+    let measured = measure(&mut scoring, &scalars, events);
+
+    // Amplitude and occupancy are means over a stationary-in-practice state and
+    // converge orders of magnitude faster than a lag-50 ACF, so the probing
+    // pass is deliberately shorter than the scoring pass rather than repeating
+    // the full draw for statistics that were settled early.
+    let mut probing = build();
+    let mut base_returns: Vec<f64> = Vec::with_capacity(probe_events);
+    let mut capped = 0_u64;
+    let mut clamped = 0_u64;
+    let sigma_cap = (GARCH_SIGMA_CAP * clamp_mult).powi(2);
+    let feedback_cap = MAX_ABS_RETURN * clamp_mult;
+    let mut seen = probing.latent_updates;
+    while base_returns.len() < probe_events {
+        let _ = probing.next_tick().expect("infinite tape");
+        if probing.latent_updates != seen {
+            seen = probing.latent_updates;
+            base_returns.push(probing.vol.prev_return);
+            if probing.vol.sigma2 >= sigma_cap * (1.0 - 1e-12) {
+                capped += 1;
+            }
+            if probing.vol.prev_return.abs() >= feedback_cap * (1.0 - 1e-12) {
+                clamped += 1;
+            }
+        }
+    }
+    let n = base_returns.len() as f64;
+    let base_return_rms = (base_returns.iter().map(|r| r * r).sum::<f64>() / n).sqrt();
+    let tick_return =
+        (1.0 + decimal_to_f64(scalars.modal_tick) / decimal_to_f64(scalars.start_price)).ln();
+
+    ArmReport {
+        base_return_rms,
+        events,
+        cap_occupancy: capped as f64 / n,
+        clamp_occupancy: clamped as f64 / n,
+        return_acf_lag1: measured.return_acf_lag1,
+        abs_acf_lag1: measured.abs_return_acf_lag1,
+        abs_acf_lag10: measured.abs_return_acf_lag10,
+        abs_acf_lag50: measured.abs_return_acf_lag50,
+        zero_change_frac: measured.zero_change_frac,
+        tick_return_over_scale: tick_return / base_return_rms,
+        duration_dispersion_cv2: measured.duration_dispersion_cv2,
+    }
+}
+
+fn print_arm(label: &str, vol_scalar: f64, arm: &ArmReport) {
+    println!("--- {label}   vol_scalar {vol_scalar:.3e}");
+    println!("  events                     {}", arm.events);
+    println!("  internal base_return RMS   {:.4e}", arm.base_return_rms);
+    println!(
+        "  variance cap occupancy     {:.2}%",
+        100.0 * arm.cap_occupancy
+    );
+    println!(
+        "  feedback clamp occupancy   {:.2}%",
+        100.0 * arm.clamp_occupancy
+    );
+    println!(
+        "  tick_return / scale        {:.2}",
+        arm.tick_return_over_scale
+    );
+    println!("  return_acf_lag1            {:+.4}", arm.return_acf_lag1);
+    println!("  abs_return_acf lag1        {:.4}", arm.abs_acf_lag1);
+    println!("  abs_return_acf lag10       {:.4}", arm.abs_acf_lag10);
+    println!("  abs_return_acf lag50       {:.4}", arm.abs_acf_lag50);
+    println!(
+        "  lag1 -> lag10 decay        {:.3}",
+        arm.abs_acf_lag10 / arm.abs_acf_lag1
+    );
+    println!(
+        "  lag10 -> lag50 decay       {:.3}",
+        arm.abs_acf_lag50 / arm.abs_acf_lag10
+    );
+    println!("  zero_change_frac           {:.4}", arm.zero_change_frac);
+    println!(
+        "  duration_dispersion_cv2    {:.3}   (cadence control)",
+        arm.duration_dispersion_cv2
+    );
+}
+
+/// `#[ignore]`d like the other expensive investigative runs: three full 2M-event
+/// realism draws do not belong in `brokkr check`, and the per-test watchdog
+/// would kill them there. Run deliberately:
+///
+/// ```text
+/// brokkr test -p mogwai-data standardized_innovation_counterfactual --timeout 240
+/// ```
+#[test]
+#[ignore = "three full realism draws; run deliberately with an extended timeout"]
+fn standardized_innovation_counterfactual_against_realism_targets() {
+    // The same draw the realism gate uses. A 120k pilot put the SHIPPED arm
+    // outside three committed ranges purely on sample size, which would have
+    // been read as a finding about the counterfactual; the ACF estimators need
+    // the full draw before any arm can be compared against a fitted band.
+    const EVENTS: usize = DRAW;
+    let shipped_vol = 1e-6;
+    let unit = (STUDENT_T_DF / (STUDENT_T_DF - 2.0)).sqrt();
+
+    const PROBE: usize = 200_000;
+    let shipped = run_arm(shipped_vol, 1.0, 1.0, EVENTS, PROBE);
+    let same_scalar = run_arm(shipped_vol, unit, 1.0, EVENTS, PROBE);
+
+    // Arm 3 matches arm 1's LATENT amplitude. Standardization removes a factor
+    // of `unit` from the innovation, and the shipped arm additionally runs
+    // saturated, so the needed vol_scalar is solved from the measured RMS
+    // rather than assumed. The clamp multiplier is lifted so the caps cannot
+    // bind and re-introduce the very saturation under study; `validate` still
+    // bounds vol_scalar itself, and hitting that bound is reported rather than
+    // silently accepted.
+    let target = shipped.base_return_rms;
+    let wanted = target;
+    let legal_max = GARCH_SIGMA_CAP * VOL_SCALAR_CAP_FRACTION * 0.999;
+    let matched_vol = wanted.min(legal_max);
+    let matched = run_arm(matched_vol, unit, 40.0, EVENTS, PROBE);
+
+    println!();
+    print_arm("ARM 1  shipped, raw t(4)", shipped_vol, &shipped);
+    print_arm(
+        "ARM 2  standardized, same vol_scalar",
+        shipped_vol,
+        &same_scalar,
+    );
+    print_arm(
+        "ARM 3  standardized, amplitude-matched",
+        matched_vol,
+        &matched,
+    );
+    println!();
+    println!(
+        "amplitude match: target RMS {:.4e}, achieved {:.4e} ({:.2}x); vol_scalar capped at legal max: {}",
+        target,
+        matched.base_return_rms,
+        matched.base_return_rms / target,
+        wanted > legal_max
+    );
+    println!(
+        "committed anchors: return_acf_lag1 -0.1970, abs lag1 0.3074, lag10 0.1565, lag50 0.1225, zero_change 0.4738"
+    );
+
+    // The harness must actually exercise all three arms; the interpretation is
+    // for the reader, not for an assertion that would prejudge the repair.
+    assert_eq!(shipped.events, EVENTS);
+    assert_eq!(same_scalar.events, EVENTS);
+    assert_eq!(matched.events, EVENTS);
+    assert!(
+        shipped.cap_occupancy > 0.01,
+        "shipped arm should reproduce the saturation the instrumentation found"
+    );
 }
 
 fn is_round_lot(size: Decimal, median: f64) -> bool {

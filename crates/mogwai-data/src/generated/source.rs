@@ -64,6 +64,13 @@ pub struct GeneratedSource {
     surge: Option<SurgeWindow>,
     #[cfg(test)]
     pub(super) latent_updates: u64,
+    /// TEST-ONLY counterfactual knob: divides the Student-t innovation before
+    /// it reaches the GARCH step, so a harness can run a standardized-innovation
+    /// arm without this crate shipping one. `1.0` is the shipped behaviour and
+    /// is short-circuited rather than divided, so the golden stream is
+    /// untouched by the existence of this field.
+    #[cfg(test)]
+    pub(super) innovation_divisor: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -326,6 +333,8 @@ impl GeneratedSource {
             surge: None,
             #[cfg(test)]
             latent_updates: 0,
+            #[cfg(test)]
+            innovation_divisor: 1.0,
         })
     }
 
@@ -484,6 +493,15 @@ impl GeneratedSource {
         // `f64::clamp` propagates NaN through `base_return` into `mid`,
         // poisoning the walk for the rest of the session.
         let student_t = draw_student_t(&mut self.rng, &self.normal, &self.chi_squared);
+        // Short-circuited at the shipped value so the default path performs no
+        // arithmetic at all and the golden stream cannot drift on a rounding
+        // technicality. See the field comment.
+        #[cfg(test)]
+        let student_t = if self.innovation_divisor == 1.0 {
+            student_t
+        } else {
+            student_t / self.innovation_divisor
+        };
         // FEEDBACK clamp: `base_return` (which feeds `prev_return`) and the
         // sigma2 cap inside `step` use the regime's BASE clamp lift (vol_mult
         // for a storm, the test override, or 1.0). A SessionEdgeSpike
