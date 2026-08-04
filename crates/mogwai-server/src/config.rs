@@ -9,6 +9,8 @@
 
 use std::{collections::HashMap, path::PathBuf};
 
+use anyhow::Context as _;
+
 use mogwai_protocol::{InstrumentClass, InstrumentDef, MarketRegime, SimClock, WireAssetClass};
 use rust_decimal::Decimal;
 
@@ -769,65 +771,87 @@ pub(crate) fn build_instrument_profiles(
         return Ok(source::InstrumentProfiles::defaults());
     };
     let fp = mogwai_data::Fingerprint::from_repo_json();
-    let mut profiles = Vec::with_capacity(1);
+    Ok(source::InstrumentProfiles::from_profiles(vec![
+        profile_from_configured(configured, &fp)?,
+    ]))
+}
 
-    {
-        let def = configured.def();
-        validate_instrument_def(&def)?;
-        validate_instrument_options(configured, &def)?;
+/// One validated [`source::InstrumentProfile`] from a deserialized
+/// `[instrument]` table. Factored out of `build_instrument_profiles` so the
+/// offline `gen` command can build the SAME profile from an embedded preset
+/// rather than re-deriving the scalar defaulting, the modal-tick agreement
+/// checks and the three validations - which is how `gen` came to be able to
+/// chart only the built-in BTCUSDT venue.
+fn profile_from_configured(
+    configured: &ConfiguredInstrument,
+    fp: &mogwai_data::Fingerprint,
+) -> anyhow::Result<source::InstrumentProfile> {
+    let def = configured.def();
+    validate_instrument_def(&def)?;
+    validate_instrument_options(configured, &def)?;
 
-        let mut scalars = configured.generator.clone().unwrap_or_else(|| {
-            mogwai_data::GeneratorScalars::from_fingerprint_medians(&def.symbol, &fp)
-        });
-        scalars.symbol = def.symbol.clone();
-        if configured.generator.is_none() {
-            scalars.modal_tick = def.price_increment;
-            scalars.price_decimals = u32::from(def.price_precision);
-        }
-        if scalars.modal_tick != def.price_increment {
-            anyhow::bail!(
-                "instrument {} generator.modal_tick must equal price_increment",
-                def.symbol
-            );
-        }
-        if scalars.price_decimals != u32::from(def.price_precision) {
-            anyhow::bail!(
-                "instrument {} generator.price_decimals must equal price_precision",
-                def.symbol
-            );
-        }
-        scalars.validate(&fp).map_err(|err| {
+    let mut scalars = configured.generator.clone().unwrap_or_else(|| {
+        mogwai_data::GeneratorScalars::from_fingerprint_medians(&def.symbol, fp)
+    });
+    scalars.symbol = def.symbol.clone();
+    if configured.generator.is_none() {
+        scalars.modal_tick = def.price_increment;
+        scalars.price_decimals = u32::from(def.price_precision);
+    }
+    if scalars.modal_tick != def.price_increment {
+        anyhow::bail!(
+            "instrument {} generator.modal_tick must equal price_increment",
+            def.symbol
+        );
+    }
+    if scalars.price_decimals != u32::from(def.price_precision) {
+        anyhow::bail!(
+            "instrument {} generator.price_decimals must equal price_precision",
+            def.symbol
+        );
+    }
+    scalars.validate(fp).map_err(|err| {
+        anyhow::anyhow!(
+            "instrument {} generator.{} failed validation",
+            def.symbol,
+            err.field
+        )
+    })?;
+    configured
+        .session
+        .validate()
+        .map_err(|err| anyhow::anyhow!(session_error_message(&def.symbol, err)))?;
+    if let Some(calendar) = &configured.calendar {
+        calendar.validate().map_err(|err| {
             anyhow::anyhow!(
-                "instrument {} generator.{} failed validation",
+                "instrument {} calendar failed validation: {}",
                 def.symbol,
-                err.field
+                err.0
             )
         })?;
-        configured
-            .session
-            .validate()
-            .map_err(|err| anyhow::anyhow!(session_error_message(&def.symbol, err)))?;
-        if let Some(calendar) = &configured.calendar {
-            calendar.validate().map_err(|err| {
-                anyhow::anyhow!(
-                    "instrument {} calendar failed validation: {}",
-                    def.symbol,
-                    err.0
-                )
-            })?;
-        }
-
-        profiles.push(source::InstrumentProfile::new(
-            def,
-            scalars,
-            configured.session.clone(),
-            configured.margin.clone(),
-            configured.fees.clone(),
-            configured.calendar.clone(),
-        ));
     }
 
-    Ok(source::InstrumentProfiles::from_profiles(profiles))
+    Ok(source::InstrumentProfile::new(
+        def,
+        scalars,
+        configured.session.clone(),
+        configured.margin.clone(),
+        configured.fees.clone(),
+        configured.calendar.clone(),
+    ))
+}
+
+/// The profile a named embedded preset resolves to, for callers that have no
+/// operator config: `mogwai gen --symbol MNQ`. Goes through `effective_preset`
+/// so preset inheritance (MES over MNQ) and the provenance completeness check
+/// apply exactly as they do at boot.
+pub(crate) fn profile_from_preset(name: &str) -> anyhow::Result<source::InstrumentProfile> {
+    let (merged, _provenance) = effective_preset(name)?;
+    let configured: ConfiguredInstrument = merged
+        .try_into()
+        .with_context(|| format!("preset {name} does not deserialize as an instrument"))?;
+    let fp = mogwai_data::Fingerprint::from_repo_json();
+    profile_from_configured(&configured, &fp)
 }
 
 fn validate_instrument_options(

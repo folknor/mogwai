@@ -52,7 +52,9 @@ pub(crate) struct GenArgs {
     /// rejected with `--type trades`.
     #[arg(long)]
     interval: Option<String>,
-    /// Instrument to generate. Selects a built-in fingerprint profile.
+    /// Instrument to generate. A built-in venue symbol first, then an embedded
+    /// preset name (MNQ, MES, BTCUSDT, ETHUSDT, SOLUSDT). A preset brings its
+    /// own session calendar, so a futures tape shows its closed weekend.
     #[arg(long, default_value = "BTCUSDT")]
     symbol: String,
     /// Walk seed. Defaults to `DEFAULT_GEN_SEED`, the realism gate's seed. The
@@ -239,13 +241,7 @@ fn havoc_has_offline_inapplicable_surfaces(spec: &HavocSpec) -> bool {
 /// the fallible constructor (a bad `--start-price` is an error, not a panic).
 fn build_source(args: &GenArgs) -> anyhow::Result<mogwai_data::GeneratedSource> {
     let fp = fingerprint();
-    let profiles = InstrumentProfiles::defaults();
-    let profile = profiles.get(&args.symbol).with_context(|| {
-        format!(
-            "unknown symbol {}: the built-in venue does not list it",
-            args.symbol
-        )
-    })?;
+    let profile = resolve_profile(&args.symbol)?;
     let seed = args.seed.unwrap_or(DEFAULT_GEN_SEED);
     let mut scalars = profile.scalars.clone();
     if let Some(p) = args.start_price {
@@ -253,7 +249,7 @@ fn build_source(args: &GenArgs) -> anyhow::Result<mogwai_data::GeneratedSource> 
     }
     let regime = resolve_regime(args)?;
 
-    mogwai_data::GeneratedSource::try_new_with_session_profile(
+    let source = mogwai_data::GeneratedSource::try_new_with_session_profile(
         scalars,
         seed,
         args.start,
@@ -262,7 +258,26 @@ fn build_source(args: &GenArgs) -> anyhow::Result<mogwai_data::GeneratedSource> 
         regime,
         mogwai_data::SizeGrid::from_def(&profile.def),
     )
-    .map_err(|e| anyhow::anyhow!("building the generator: {e:?}"))
+    .map_err(|e| anyhow::anyhow!("building the generator: {e:?}"))?;
+    // The calendar is NOT optional dressing: without it a session-bearing
+    // instrument prints straight through its own closed weekend and daily
+    // maintenance halt, so the dump misrepresents the very tape it exists to
+    // show. The served path (`source::generator`) has always applied it; this
+    // command did not, which meant an MNQ chart would have been wrong even once
+    // the symbol resolved.
+    Ok(source.with_calendar(profile.calendar.clone()))
+}
+
+/// The instrument to generate: a built-in venue symbol first, then an embedded
+/// preset of that name. Checking the venue first keeps `--symbol BTCUSDT`
+/// byte-identical to what it produced before presets were reachable here.
+fn resolve_profile(symbol: &str) -> anyhow::Result<crate::source::InstrumentProfile> {
+    if let Some(profile) = InstrumentProfiles::defaults().get(symbol) {
+        return Ok(profile.clone());
+    }
+    crate::config::profile_from_preset(symbol).with_context(|| {
+        format!("unknown symbol {symbol}: not a built-in venue symbol and not an embedded preset")
+    })
 }
 
 fn aggressor_word(side: AggressorSide) -> &'static str {
@@ -679,6 +694,51 @@ mod tests {
             assert_eq!(cli_trade.price, direct_trade.price);
             assert_eq!(cli_trade.size, direct_trade.size);
         }
+    }
+
+    #[test]
+    fn a_preset_symbol_resolves_and_carries_its_calendar() {
+        // MNQ is not in the built-in venue, so this only works through the
+        // preset fallback. The calendar assertion is the load-bearing half: a
+        // CME instrument generated WITHOUT its calendar prints continuously,
+        // which is what this command used to do.
+        let profile = resolve_profile("MNQ").expect("MNQ resolves from the embedded preset");
+        assert_eq!(profile.def.symbol, "MNQ");
+        assert_eq!(profile.def.price_increment, Decimal::new(25, 2));
+        let calendar = profile
+            .calendar
+            .as_ref()
+            .expect("the MNQ preset ships a CME calendar");
+        // Saturday is genuinely shut. Derived rather than guessed: the calendar
+        // maps a UTC instant to a local week minute as
+        // `utc_minute + utc_offset_minutes + 5760 (mod 10080)`, where the 5760
+        // places the epoch Thursday at day index 4 of a Sunday-first week. So
+        // Saturday 04:00 local is week minute 6 * 1440 + 240 = 8880, and the
+        // UTC minute solving that is 8880 + 300 - 5760 = 3420 - which is
+        // Saturday 1970-01-03 09:00 UTC. The preset's last open window ends at
+        // 8220, so 8880 sits outside every one of them.
+        let saturday_04h_local_ns = 3_420 * 60 * 1_000_000_000_u64;
+        assert!(
+            !calendar.is_open(saturday_04h_local_ns),
+            "the CME calendar must close Saturday"
+        );
+        // The Wednesday cash session is open, so the assertion above is about
+        // the calendar rather than about everything being shut.
+        let wednesday_15h_local_ns = (3_420 + 4 * 1_440 + 660) * 60 * 1_000_000_000_u64;
+        assert!(
+            calendar.is_open(wednesday_15h_local_ns),
+            "the CME calendar must be open midweek"
+        );
+    }
+
+    #[test]
+    fn an_unknown_symbol_names_both_places_it_was_looked_for() {
+        let err = resolve_profile("NOPE").expect_err("NOPE is neither venue nor preset");
+        let text = format!("{err}");
+        assert!(
+            text.contains("NOPE"),
+            "message should name the symbol: {text}"
+        );
     }
 
     #[test]

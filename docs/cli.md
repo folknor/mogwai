@@ -138,7 +138,14 @@ bar counts and its clustering constants are declared with a rationale saying
 they come from nowhere at all. Choosing a preset without reading that is
 choosing a number you have not been told the standing of.
 
-`gen` remains the offline generator command.
+`gen` remains the offline generator command. `--symbol` resolves against the
+built-in venue first and then against the embedded presets, so
+`mogwai gen --symbol MNQ --type bars --interval 1m --length 3d` charts the index
+future rather than failing on an unknown symbol. A preset carries its session
+calendar into the dump, which is what makes a futures tape show its closed
+weekend and its daily maintenance halt as zero-volume runs; before this the
+offline path dropped the calendar and printed straight through both, so a chart
+taken from it disagreed with the served tape it was supposed to illustrate.
 
 `man` renders the bundled reference docs. Bare, it lists the topics; with one -
 `mogwai man cli` - it renders that document to the terminal, colour dropped when
