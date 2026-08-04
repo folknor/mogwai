@@ -648,21 +648,33 @@ MNQ) and the provenance completeness check apply identically. The built-in venue
 is still consulted first, which keeps `--symbol BTCUSDT` byte-identical.
 
 The second bug: **`gen` never applied the instrument's `SessionCalendar`.** The
-served path (`source::generator`) has always chained `.with_calendar(..)`;
-the offline dump did not. A session-bearing instrument therefore printed
-straight through its own closed weekend and daily maintenance halt, so any chart
-produced from it would have misrepresented the tape even once the symbol
-resolved. Now applied. The difference is immediate:
+served path (`source::generator`) always did; the offline dump did not. A
+session-bearing instrument therefore printed straight through its own closed
+weekend and daily maintenance halt, so any chart produced from it would have
+misrepresented the tape even once the symbol resolved. Now applied - and since
+the session fit, the calendar is a CONSTRUCTION input rather than something
+attached afterwards, so omitting it is no longer expressible.
 
 ```
-$ mogwai gen --symbol MNQ --type bars --interval 1m --length 3d
-bars: 4320, empty (zero-volume): 1650 = 38.2%
+$ python3 analysis/plot_tape.py --gen --symbol MNQ --type bars --interval 1m --length 3d
+plot_tape: wrote analysis/out/chart.html - 4320 bars, 1710 of them empty
 ```
 
-Those 38.2 percent are the CME calendar - the shut Saturday, the Friday
-evening close and the daily 16:15-16:30 halt - which is exactly what
-requirement 5 asks a tape to express and what the crypto session profile alone
-could never produce.
+An earlier revision showed this line under a bare `mogwai gen` invocation, at
+1,650 empty bars. Both halves were wrong. `mogwai gen` emits CSV and prints no
+such summary; the line comes from `plot_tape.py`, which is what actually renders
+the chart. The transcript had been reconstructed rather than captured - the same
+defect section 12 records twice elsewhere, and it survived because a plausible
+line under a plausible command invites no lookup.
+
+The count itself moved from 1,650 to 1,710 with the fitted session profile, and
+the composition of that number is the point. About 1,395 are the CME calendar -
+the shut Saturday, the Friday evening close, the daily halt - which is what
+requirement 5 asks a tape to express. The remaining ~315 are new: OPEN minutes
+carrying no print at all, because the fitted overnight intensity is roughly a
+seventh of the cash-session peak. A flat 1.78x crypto curve cannot produce an
+empty open minute, which is why the old chart's emptiness was entirely calendar
+and the new chart's is not.
 
 ---
 
@@ -1667,8 +1679,9 @@ The Rust-side diagnostics for [3.5](#35-resolved-the-venue-publishes-an-observab
 brokkr test -p mogwai-data a_quote_precedes_every_parent_burst
 brokkr test -p mogwai-data the_trade_displacement_never_varies
 brokkr test -p mogwai-data synthetic_spread_decomposition_at_protocol_seven
-brokkr run mogwai -- tick-composition --out-6 analysis/tick-composition-protocol-6.json --out-7 analysis/tick-composition-protocol-7.json
-python3 analysis/tick_composition_ratios.py
+brokkr run mogwai -- tick-composition --out analysis/tick-composition-protocol-8.json
+python3 analysis/tick_composition_ratios.py --mode projection
+python3 analysis/tick_composition_ratios.py --mode independent
 ```
 
 The first two are fast and run under a plain `brokkr check`; the third is

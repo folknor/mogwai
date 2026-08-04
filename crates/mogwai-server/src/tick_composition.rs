@@ -46,19 +46,14 @@ const WARMUP_SECS: u64 = 86_400;
 const WALL_HORIZON_SECS: u64 = 600;
 const MAX_MEASURED_SPEED: u64 = 10;
 const PRESETS: [&str; 5] = ["MNQ", "MES", "BTCUSDT", "ETHUSDT", "SOLUSDT"];
-const PROJECTION_ALL: &str = "all protocol-7 frames";
-const PROJECTION_TRADES: &str = "protocol-6 count projection: trade frames only; protocol 7 quote placement consumes no randomness and does not change timestamps or child counts";
 
 /// `mogwai tick-composition` arguments. Writes the paired BBO composition
 /// fixtures the budget constants are derived from.
 #[derive(Args)]
 pub(crate) struct TickCompositionArgs {
-    /// Destination for the protocol-6 projection.
-    #[arg(long = "out-6")]
-    out_6: PathBuf,
-    /// Destination for the protocol-7 measurement.
-    #[arg(long = "out-7")]
-    out_7: PathBuf,
+    /// Destination for the fixture.
+    #[arg(long)]
+    out: PathBuf,
     /// Parent events measured per preset/seed/configuration combination.
     #[arg(long, default_value_t = 2_000_000)]
     parents: usize,
@@ -129,9 +124,6 @@ struct Task {
 
 pub(crate) fn run(args: &TickCompositionArgs) -> anyhow::Result<()> {
     let started = Instant::now();
-    if same_destination(&args.out_6, &args.out_7) {
-        anyhow::bail!("--out-6 and --out-7 must name different files");
-    }
     if args.jobs == Some(0) {
         anyhow::bail!("--jobs must be at least 1");
     }
@@ -161,8 +153,7 @@ pub(crate) fn run(args: &TickCompositionArgs) -> anyhow::Result<()> {
     // run still had its slowest combinations to go.
     let completed = AtomicUsize::new(0);
     let total = tasks.len();
-    let results: Vec<Mutex<Option<(Reading, Reading)>>> =
-        tasks.iter().map(|_| Mutex::new(None)).collect();
+    let results: Vec<Mutex<Option<Reading>>> = tasks.iter().map(|_| Mutex::new(None)).collect();
     eprintln!(
         "[tick-composition] measuring {total} combinations at {parents} parent events each, {jobs} workers"
     );
@@ -203,22 +194,17 @@ pub(crate) fn run(args: &TickCompositionArgs) -> anyhow::Result<()> {
         }
     });
 
-    let (entries_6, entries_7): (Vec<Reading>, Vec<Reading>) = results
+    let entries: Vec<Reading> = results
         .into_iter()
         .map(|slot| {
             slot.into_inner()
                 .expect("composition mutex poisoned")
                 .expect("composition worker left a task unmeasured")
         })
-        .unzip();
+        .collect();
 
     let pairing = pairing_id();
-    write_reports(
-        (&args.out_6, entries_6),
-        (&args.out_7, entries_7),
-        &pairing,
-        parents,
-    )?;
+    write_report(&args.out, &pairing, parents, entries)?;
     // The command was silent on success until now, so a finished run and a
     // wedged one looked identical from outside. The elapsed time is also the
     // number `reference/performance.md` wants recorded beside the fixtures, and
@@ -226,10 +212,10 @@ pub(crate) fn run(args: &TickCompositionArgs) -> anyhow::Result<()> {
     // five-thousand-line document - while being the thing the ratio script
     // refuses a mismatched pair on.
     println!(
-        "tick-composition wrote {} and {} in {}, pairing {pairing}",
-        args.out_6.display(),
-        args.out_7.display(),
-        humanize(started.elapsed())
+        "tick-composition wrote {} in {}, protocol {}, pairing {pairing}",
+        args.out.display(),
+        humanize(started.elapsed()),
+        mogwai_data::TAPE_PROTOCOL_VERSION
     );
     Ok(())
 }
@@ -278,32 +264,6 @@ fn tasks() -> Vec<Task> {
         .collect()
 }
 
-/// Whether two destinations would land on the same file. String inequality is
-/// not enough: `a.json` and `./a.json` are the same file, and writing protocol 7
-/// over protocol 6 would produce a pair nothing downstream can detect, since the
-/// survivor is internally consistent.
-fn same_destination(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-    let resolved = |path: &Path| {
-        let parent = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty());
-        parent
-            .unwrap_or(Path::new("."))
-            .canonicalize()
-            .map(|parent| parent.join(path.file_name().unwrap_or_default()))
-    };
-    match (resolved(left), resolved(right)) {
-        (Ok(left), Ok(right)) => left == right,
-        // A destination whose directory does not exist yet cannot collide with
-        // one that resolves, and the write itself will report the missing
-        // directory far more clearly than a guess here would.
-        _ => false,
-    }
-}
-
 /// Distinguishes this traversal from every other. The run is hours long, so
 /// second resolution plus the pid is ample; this identifies a pairing, it does
 /// not have to be unguessable.
@@ -314,39 +274,34 @@ fn pairing_id() -> String {
     format!("{nanos:032x}-{:08x}", process::id())
 }
 
-/// Both documents are serialized in full and staged beside their destinations
-/// before either destination is touched, so a serialization failure or a full
-/// disk cannot consume a finished run.
+/// Serialized in full and staged beside its destination before that destination
+/// is touched, so a serialization failure or a full disk cannot consume an
+/// hours-long run by truncating the file it was replacing.
 ///
-/// The two renames are still two operations: a crash between them leaves a new
-/// protocol 6 beside an old protocol 7. That mismatch is DETECTABLE - the
-/// shared `pairing_id` differs and the ratio script refuses the pair - which is
-/// the guarantee on offer. Two paths cannot be replaced atomically as a pair.
-fn write_reports(
-    six: (&Path, Vec<Reading>),
-    seven: (&Path, Vec<Reading>),
+/// This emits ONE fixture, at the live `TAPE_PROTOCOL_VERSION`. It used to emit
+/// two, because protocol 6 is a count PROJECTION of the protocol-7 stream -
+/// quote placement draws no randomness, so the same traversal carries both. That
+/// trick is specific to 6-and-7 and does not generalize: the protocol-8 session
+/// profile divides the duration draw and scales the return, so its tape has
+/// different timestamps and different prices. 7 and 8 are two walks, and the
+/// committed protocol-7 fixture is the baseline the new one is compared against.
+fn write_report(
+    path: &Path,
     pairing: &str,
     parents: usize,
+    entries: Vec<Reading>,
 ) -> anyhow::Result<()> {
-    let (path_6, entries_6) = six;
-    let (path_7, entries_7) = seven;
-    let bytes_6 = serialize(6, PROJECTION_TRADES, pairing, parents, entries_6)?;
-    let bytes_7 = serialize(7, PROJECTION_ALL, pairing, parents, entries_7)?;
-    let staged_6 = staging_path(path_6, pairing);
-    let staged_7 = staging_path(path_7, pairing);
-    fs::write(&staged_6, bytes_6).with_context(|| format!("staging {}", staged_6.display()))?;
-    if let Err(err) = fs::write(&staged_7, bytes_7) {
-        if let Err(cleanup) = fs::remove_file(&staged_6) {
-            eprintln!(
-                "staged fixture {} left behind: {cleanup}",
-                staged_6.display()
-            );
-        }
-        return Err(anyhow::Error::new(err).context(format!("staging {}", staged_7.display())));
-    }
-    fs::rename(&staged_6, path_6).with_context(|| format!("publishing {}", path_6.display()))?;
-    fs::rename(&staged_7, path_7).with_context(|| format!("publishing {}", path_7.display()))?;
-    Ok(())
+    let version = mogwai_data::TAPE_PROTOCOL_VERSION;
+    let bytes = serialize(
+        version,
+        &format!("all protocol-{version} frames"),
+        pairing,
+        parents,
+        entries,
+    )?;
+    let staged = staging_path(path, pairing);
+    fs::write(&staged, bytes).with_context(|| format!("staging {}", staged.display()))?;
+    fs::rename(&staged, path).with_context(|| format!("publishing {}", path.display()))
 }
 
 fn staging_path(path: &Path, pairing: &str) -> PathBuf {
@@ -470,8 +425,8 @@ fn build_source(
         &profile.session,
         None,
         SizeGrid::from_def(&profile.def),
+        profile.calendar.clone(),
     )
-    .with_calendar(profile.calendar.clone())
 }
 
 #[expect(
@@ -488,7 +443,7 @@ fn measure(
     start_ns: u64,
     fanout_span: usize,
     fp: &mogwai_data::Fingerprint,
-) -> (Reading, Reading) {
+) -> Reading {
     let fanout_end_ns = start_ns.saturating_add(fanout_span as u64 * 1_000_000_000);
     let start_second = start_ns / 1_000_000_000;
     let mut source = build_source(profile, seed, start_ns, fp);
@@ -498,54 +453,36 @@ fn measure(
         Mode::Natural => {}
         Mode::Surged => source.arm_flow_surge(start_ns, u64::MAX, 1_000.0, 100.0),
     }
-    let mut trades = Counters::new(fanout_span);
-    let mut all = Counters::new(fanout_span);
+    let mut counters = Counters::new(fanout_span);
     let mut recorded = 0_usize;
     let mut seen_parents = 0_usize;
     loop {
         let event = source.next_tick().expect("generated source is infinite");
         let ts = event.ts_event();
-        let is_quote = matches!(event, TickEvent::Quote(_));
-        if is_quote {
+        if matches!(event, TickEvent::Quote(_)) {
             if seen_parents > 0 && recorded < parents {
-                trades.per_parent.add(trades.current);
-                all.per_parent.add(all.current);
+                counters.per_parent.add(counters.current);
                 recorded += 1;
             }
             if recorded == parents && ts >= fanout_end_ns {
                 break;
             }
             seen_parents += 1;
-            trades.current = 0;
-            all.current = 0;
+            counters.current = 0;
         }
         let second = ts / 1_000_000_000;
-        let fanout_index = if ts < fanout_end_ns {
-            second
-                .checked_sub(start_second)
-                .map(|offset| offset as usize)
-        } else {
-            None
-        };
-        for counters in [Some(&mut all), (!is_quote).then_some(&mut trades)]
-            .into_iter()
-            .flatten()
+        if recorded < parents {
+            counters.current += 1;
+            counters.per_second.add(second);
+        }
+        if ts < fanout_end_ns
+            && let Some(index) = second.checked_sub(start_second)
+            && let Some(bin) = counters.fanout_second.get_mut(index as usize)
         {
-            if recorded < parents {
-                counters.current += 1;
-                counters.per_second.add(second);
-            }
-            if let Some(index) = fanout_index
-                && let Some(bin) = counters.fanout_second.get_mut(index)
-            {
-                *bin += 1;
-            }
+            *bin += 1;
         }
     }
-    (
-        trades.finish(preset, seed, mode, parents),
-        all.finish(preset, seed, mode, parents),
-    )
+    counters.finish(preset, seed, mode, parents)
 }
 
 /// Contiguous per-second bins. The stream is time-ordered, so an event's bin is
@@ -819,61 +756,38 @@ mod tests {
         }
     }
 
-    /// The premise the whole single-traversal optimization rests on: the two
-    /// counter sets see the same trades, and protocol 7 adds exactly the one
-    /// quote that opens each parent.
+    /// The prediction the protocol 7-to-8 comparison rests on, checkable in
+    /// seconds rather than after an hour of measurement.
+    ///
+    /// The session profile changes WHEN events happen, never HOW MANY: child
+    /// count comes from `next_count`, whose inputs are the arrival-state Markov
+    /// chain and the surge window, neither of which reads the profile. So the
+    /// RNG draw sequence is identical across the change and `ticks_per_parent`
+    /// must be too - only time-denominated fields may move. If this fails, the
+    /// change did something other than reshape the session and the budget ratios
+    /// are measuring the wrong thing.
     #[test]
-    fn protocol_six_is_protocol_seven_less_one_quote_per_parent() {
+    fn a_session_profile_moves_timestamps_but_never_the_parent_fanout() {
         let profiles = resolve_profiles().expect("every measured preset resolves");
         let start_ns = peak_hour_ns();
-        for preset in ["BTCUSDT", "MNQ"] {
-            let (six, seven) = measure(
-                preset,
-                &profiles[preset],
-                1,
-                Mode::Active,
-                64,
-                start_ns,
-                8,
-                fingerprint(),
-            );
-            assert_eq!(six.preset, seven.preset);
-            assert_eq!(six.seed, seven.seed);
-            assert_eq!(six.configuration, seven.configuration);
-            assert_eq!(six.parents, seven.parents);
+        let fp = fingerprint();
+        for preset in ["MNQ", "MES"] {
+            let fitted = &profiles[preset];
+            // The same instrument measured against the fingerprint's flat curve
+            // instead of its own fitted one - the protocol-7 shape.
+            let mut flat = fitted.clone();
+            flat.session = fp.session_profile.clone();
+            let with_fit = measure(preset, fitted, 1, Mode::Active, 512, start_ns, 8, fp);
+            let with_flat = measure(preset, &flat, 1, Mode::Active, 512, start_ns, 8, fp);
             assert_eq!(
-                six.frames_per_wall_second.keys().collect::<Vec<_>>(),
-                seven.frames_per_wall_second.keys().collect::<Vec<_>>()
+                with_fit.ticks_per_parent.max, with_flat.ticks_per_parent.max,
+                "{preset} parent fanout max moved with the session profile"
             );
-            // Every parent contributes its trades to both counters and its one
-            // opening quote to protocol 7 alone, so the whole per-parent
-            // distribution is shifted by exactly one.
-            assert_eq!(seven.ticks_per_parent.max, six.ticks_per_parent.max + 1.0);
-            assert!(
-                (seven.ticks_per_parent.p999 - (six.ticks_per_parent.p999 + 1.0)).abs() < 1e-9,
-                "p999 shifted by {} not 1",
-                seven.ticks_per_parent.p999 - six.ticks_per_parent.p999
+            assert_eq!(
+                with_fit.ticks_per_parent.p999, with_flat.ticks_per_parent.p999,
+                "{preset} parent fanout p99.9 moved with the session profile"
             );
-            assert!(seven.ticks_per_sim_second.max >= six.ticks_per_sim_second.max);
         }
-    }
-
-    #[test]
-    fn same_destination_sees_through_path_spelling() {
-        assert!(same_destination(
-            Path::new("analysis/x.json"),
-            Path::new("analysis/x.json")
-        ));
-        // Resolved through a directory that exists relative to the package
-        // root, which is where cargo runs the test from.
-        assert!(same_destination(
-            Path::new("src/x.json"),
-            Path::new("./src/x.json")
-        ));
-        assert!(!same_destination(
-            Path::new("analysis/tick-composition-protocol-6.json"),
-            Path::new("analysis/tick-composition-protocol-7.json")
-        ));
     }
 
     #[test]

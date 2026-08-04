@@ -147,17 +147,26 @@ weekend and its daily maintenance halt as zero-volume runs; before this the
 offline path dropped the calendar and printed straight through both, so a chart
 taken from it disagreed with the served tape it was supposed to illustrate.
 
-`tick-composition` is the offline measurement the BBO budget constants are
+`tick-composition` is the offline measurement the tape budget constants are
 derived from. It walks all five presets across eight seeds and four arrival
-configurations, counting protocol-6 and protocol-7 frames off one traversal, and
-writes the paired fixtures named by `--out-6` and `--out-7`. Each preset is
-resolved the way `serve` resolves it, so the futures are measured on their own
-size grid and session calendar. It is a long run - hours at the default
-2,000,000 parent events per combination - and `--jobs` bounds its concurrency;
-`--parents` shortens it for a smoke run, at which point the output is no longer
-the shipped fixture. Both destinations are staged and renamed at the end, and
-both documents carry the same pairing identifier so a half-replaced pair is
-detectable.
+configurations and writes ONE fixture, named by `--out` and stamped with the
+live `TAPE_PROTOCOL_VERSION`. Each preset is resolved the way `serve` resolves
+it, so the futures are measured on their own size grid and session calendar. It
+is a long run - about an hour at the default 2,000,000 parent events per
+combination, nearly all of it the maximum-surge arm - and `--jobs` bounds its
+concurrency; `--parents` shortens it for a smoke run, at which point the output
+is no longer the shipped fixture. The destination is staged and renamed at the
+end, and the document carries a pairing identifier naming the traversal that
+produced it.
+
+It emitted two files until protocol 8. Protocol 6 was a count PROJECTION of the
+protocol-7 stream - quote placement draws no randomness, so one traversal
+carried both - but that is specific to those two versions. A session profile
+divides the duration draw and scales the return, so protocol 8's tape has
+different timestamps and prices and cannot be projected from protocol 7. Version
+pairs are compared by `analysis/tick_composition_ratios.py`, whose `--mode
+projection` keeps the 6-to-7 contract and whose `--mode independent` compares
+two separately measured tapes.
 
 `man` renders the bundled reference docs. Bare, it lists the topics; with one -
 `mogwai man cli` - it renders that document to the terminal, colour dropped when

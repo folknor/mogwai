@@ -952,9 +952,13 @@ fn profile_from_configured(
             "generator size grid hides almost all latent size variation"
         );
     }
+    // Contextual, matching what `GeneratedSource` will apply later. This is the
+    // gate a preset actually meets first: a calendar-conditional profile carries
+    // relative factors that satisfy no particular sum, and validating it through
+    // the legacy path would reject it here long before the source ever saw it.
     configured
         .session
-        .validate()
+        .validate_for(configured.calendar.is_some())
         .map_err(|err| anyhow::anyhow!(session_error_message(&def.symbol, err)))?;
     if let Some(calendar) = &configured.calendar {
         calendar.validate().map_err(|err| {

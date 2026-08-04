@@ -304,6 +304,7 @@ fn try_new_accepts_valid_input_and_surfaces_bad_input() {
             &bad_session,
             None,
             SizeGrid::spot(),
+            None,
         )
         .err(),
         Some(GeneratedSourceError::Session(SessionProfileError {
@@ -971,6 +972,7 @@ fn near_zero_hour_share_reopens_at_the_next_open_hour() {
         &profile,
         None,
         SizeGrid::spot(),
+        None,
     );
     let first = next_trade(&mut src).ts_event;
     // The first tick must survive the closed hour 0 (not print inside it)
@@ -996,6 +998,7 @@ fn near_zero_hour_share_reopens_at_the_next_open_hour() {
         &profile,
         None,
         SizeGrid::spot(),
+        None,
     );
     assert_eq!(next_trade(&mut twin).ts_event, first);
     let mut prior = first;
@@ -1032,6 +1035,7 @@ fn fully_closed_profile_caps_each_gap_and_never_freezes_the_clock() {
         &profile,
         None,
         SizeGrid::spot(),
+        None,
     );
     let mut prior = SESSION_START_TS;
     for _ in 0..300 {
@@ -1082,8 +1086,16 @@ const FIRST_SUNDAY_NS: u64 = 3 * DAY_NS;
 
 fn calendar_source(start: u64) -> GeneratedSource {
     let fp = Fingerprint::from_repo_json();
-    GeneratedSource::new(GeneratorScalars::xbtusd_anchor(&fp), 42, start, &fp, None)
-        .with_calendar(Some(cme_calendar()))
+    GeneratedSource::new_with_session_profile(
+        GeneratorScalars::xbtusd_anchor(&fp),
+        42,
+        start,
+        &fp,
+        &fp.session_profile,
+        None,
+        SizeGrid::spot(),
+        Some(cme_calendar()),
+    )
 }
 
 #[test]
@@ -3346,6 +3358,67 @@ fn synthetic_spread_decomposition_at_protocol_seven() {
     // persistence, latent movement, burst grouping and within-burst book
     // changes. Pinning an observed relationship is how a schema loses the
     // ability to report a surprise.
+}
+
+/// Calendar-aware normalization must not move a calendar-free tape by one ulp.
+///
+/// Without a calendar every minute is exposed, and the schema's sum-to-one
+/// contract makes the week-mean of `intensity_hour * 24 * dow_weight * 7`
+/// exactly 1.0. So the normalizer is not an approximation of that value, it IS
+/// that value, and the modulator returns a literal `1.0` rather than recomputing
+/// it - a floating-point sum could land a few ulps away and perturb every gap in
+/// every existing operator profile, which is not something a protocol migration
+/// may do silently to configurations it was not aiming at.
+///
+/// The three shipped crypto presets and the fingerprint anchor carry no
+/// calendar, so this is the gate that says the MNQ session work left them alone.
+/// `clean_regime_is_byte_identical` would catch a regression here too, but it
+/// would report it as a golden mismatch rather than as what it is.
+#[test]
+fn calendar_free_profiles_are_untouched_by_calendar_aware_normalization() {
+    let fp = Fingerprint::from_repo_json();
+    for scalars in [
+        GeneratorScalars::xbtusd_anchor(&fp),
+        GeneratorScalars::from_fingerprint_medians("BTCUSDT", &fp),
+        mnq_shaped_grid(&fp),
+    ] {
+        let symbol = scalars.symbol.clone();
+        let mut source = GeneratedSource::new(scalars.clone(), 42, 1_000, &fp, None);
+        // The multiplier the legacy arithmetic produces, reproduced here from
+        // the profile alone so the assertion does not just restate the code.
+        for hour in 0..24_u64 {
+            for day in 0..7_u64 {
+                let clock_ns = (day * 24 + hour) * 3_600_000_000_000;
+                // The epoch fell on a Thursday, so the day index is not `day`.
+                // Re-derived here rather than borrowed from `utc_hour_dow`, so
+                // the test pins the convention instead of restating it.
+                let dow = ((clock_ns / 86_400_000_000_000 + 4) % 7) as usize;
+                // Associated exactly as the modulator associates it - the claim
+                // is bit equality, and a different grouping of the same three
+                // multiplications can differ in the last place.
+                let expected = (fp.session_profile.intensity_hour[hour as usize] * 24.0)
+                    * (fp.session_profile.dow_weight[dow] * 7.0);
+                assert_eq!(
+                    source.arrival_mult_for_test(clock_ns),
+                    expected,
+                    "{symbol} hour {hour} dow {dow} arrival multiplier moved"
+                );
+                assert_eq!(
+                    source.vol_mult_for_test(clock_ns),
+                    fp.session_profile.vol_hour[hour as usize],
+                    "{symbol} hour {hour} volatility multiplier moved"
+                );
+            }
+        }
+        // And the stream itself, not only the multipliers.
+        let mut twin = GeneratedSource::new(scalars, 42, 1_000, &fp, None);
+        for _ in 0..2_000 {
+            assert_eq!(
+                format!("{:?}", source.next_tick()),
+                format!("{:?}", twin.next_tick())
+            );
+        }
+    }
 }
 
 #[test]

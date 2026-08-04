@@ -63,7 +63,7 @@ pub use trigger::{
 /// Identity of the tape generation process, not of any one path. Two runs are
 /// comparable only if their venues report the same value. `AGENTS.md` carries
 /// the obligation to bump this for every tape-determinism change.
-pub const TAPE_PROTOCOL_VERSION: u32 = 7;
+pub const TAPE_PROTOCOL_VERSION: u32 = 8;
 
 /// One replayable market-data event.
 #[derive(Debug, Clone)]

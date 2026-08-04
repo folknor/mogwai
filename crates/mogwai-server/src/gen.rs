@@ -254,7 +254,14 @@ fn build_source(args: &GenArgs) -> anyhow::Result<mogwai_data::GeneratedSource> 
     }
     let regime = resolve_regime(args)?;
 
-    let source = mogwai_data::GeneratedSource::try_new_with_session_profile(
+    // The calendar is NOT optional dressing: without it a session-bearing
+    // instrument prints straight through its own closed weekend and daily
+    // maintenance halt, so the dump misrepresents the very tape it exists to
+    // show. The served path (`source::generator`) has always applied it; this
+    // command did not, which meant an MNQ chart would have been wrong even once
+    // the symbol resolved. It is now a construction input rather than something
+    // applied afterwards, so forgetting it is no longer expressible.
+    mogwai_data::GeneratedSource::try_new_with_session_profile(
         scalars,
         seed,
         args.start,
@@ -262,15 +269,9 @@ fn build_source(args: &GenArgs) -> anyhow::Result<mogwai_data::GeneratedSource> 
         &profile.session,
         regime,
         mogwai_data::SizeGrid::from_def(&profile.def),
+        profile.calendar.clone(),
     )
-    .map_err(|e| anyhow::anyhow!("building the generator: {e:?}"))?;
-    // The calendar is NOT optional dressing: without it a session-bearing
-    // instrument prints straight through its own closed weekend and daily
-    // maintenance halt, so the dump misrepresents the very tape it exists to
-    // show. The served path (`source::generator`) has always applied it; this
-    // command did not, which meant an MNQ chart would have been wrong even once
-    // the symbol resolved.
-    Ok(source.with_calendar(profile.calendar.clone()))
+    .map_err(|e| anyhow::anyhow!("building the generator: {e:?}"))
 }
 
 /// The instrument to generate: a built-in venue symbol first, then an embedded
@@ -684,6 +685,7 @@ mod tests {
             &profile.session,
             None,
             mogwai_data::SizeGrid::spot(),
+            profile.calendar.clone(),
         );
 
         for _ in 0..50 {

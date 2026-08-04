@@ -249,19 +249,29 @@ pub(super) const START_PRICE_USD: i64 = 60_000;
 // measured unclipped return RMS is 1.2393e-5, so the scalar now means what it
 // says to within 3 percent.
 pub(super) const VOL_SCALAR: f64 = 1.2e-5;
-// Session-gap rails. Trading hours, maintenance breaks and closed weekends are
-// expressed as NEAR-ZERO hour/day shares in a custom SessionProfile - not a
-// separate code path - but the arrival multiplier is sampled once, at the
-// instant a gap opens, and dividing a whole duration draw by a near-zero share
-// stretches it far past the closed window (share 1e-6 turns a ~7 s draw into
-// ~80 days) and can push the ns cast to saturate at u64::MAX, pinning the
-// clock there forever. Gaps that open BELOW this multiplier gate therefore
-// take the hour-integrating path (`closed_window_gap_ns`); gaps at or above it
-// keep the original once-sampled math bit for bit, which is what keeps the
-// committed fingerprint's stream byte-identical - its smallest hour*day
+// Low-intensity gap rails. This gate is a NUMERICAL safeguard, not a closure
+// mechanism. `SessionCalendar` owns hard closure - trading hours, maintenance
+// breaks and shut weekends - and `SessionProfile` describes relative activity
+// while the market is open. A profile factor may still be very small, because a
+// genuinely thin open hour is a real thing to model, and that is the case this
+// exists for.
+//
+// The arrival multiplier is sampled once, at the instant a gap opens, and
+// dividing a whole duration draw by a near-zero factor stretches it absurdly
+// (1e-6 turns a ~7 s draw into ~80 days) and can push the ns cast to saturate
+// at u64::MAX, pinning the clock there forever. Gaps opening BELOW this gate
+// therefore take the hour-integrating path (`low_intensity_gap_ns`); gaps at or
+// above it keep the original once-sampled math bit for bit, which is what keeps
+// the committed fingerprint's stream byte-identical - its smallest hour*day
 // multiplier is ~0.58, two orders of magnitude above the gate, so the
 // fingerprint profile can never cross it.
-pub(super) const SESSION_CLOSED_ARR_MULT: f64 = 0.01;
+//
+// This constant was `SESSION_CLOSED_ARR_MULT` and the path it gates was
+// `closed_window_gap_ns`. Both names asserted that a small factor MEANS closed,
+// which is the conflation the calendar-conditional contract removed: encoding a
+// known closure as a near-zero share is no longer the intended idiom, and only
+// the calendar may say a market is shut.
+pub(super) const LOW_INTENSITY_ARR_MULT: f64 = 0.01;
 // Hard per-gap ceiling (366 days in ns) for BOTH paths. On the open path it is
 // unreachable for any multiplier above the gate paired with the validated
 // thin_factor <= 1000 and realistic duration draws - it exists so no f64->u64

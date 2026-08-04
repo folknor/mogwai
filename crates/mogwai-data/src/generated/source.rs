@@ -25,7 +25,7 @@ use super::consts::{
     ARRIVAL_QUIET_CHILDREN_MULT, ARRIVAL_QUIET_FRACTION, ARRIVAL_STATE_PERSISTENCE,
     ARRIVAL_WEIBULL_MEAN, ARRIVAL_WEIBULL_SHAPE, DRIFT_RECENTER_FRAC, EVENT_PRICE_REPEAT_PROB,
     HIGH_REGIME_LEVEL_STEP_MULT, INTRA_EVENT_STEP_NS, LOW_REGIME_LEVEL_STEP_MULT,
-    MAX_SESSION_GAP_NS, MID_CEILING, NS_PER_HOUR, REALIZED_RETURN_CEILING, SESSION_CLOSED_ARR_MULT,
+    MAX_SESSION_GAP_NS, MID_CEILING, NS_PER_HOUR, REALIZED_RETURN_CEILING, LOW_INTENSITY_ARR_MULT,
     SIZE_DECIMALS, SIZE_LOG_SIGMA, STUDENT_T_DF,
 };
 use super::dynamics::{
@@ -136,9 +136,14 @@ impl GeneratedSource {
             &fp.session_profile,
             regime,
             SizeGrid::spot(),
+            None,
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the calendar is a construction input rather than a later attachment; see SessionModulator::new"
+    )]
     #[must_use]
     pub fn new_with_session_profile(
         scalars: GeneratorScalars,
@@ -148,8 +153,11 @@ impl GeneratedSource {
         session: &SessionProfile,
         regime: Option<MarketRegime>,
         size_grid: SizeGrid,
+        calendar: Option<SessionCalendar>,
     ) -> Self {
-        Self::build(scalars, seed, start_ts, fp, session, regime, size_grid)
+        Self::build(
+            scalars, seed, start_ts, fp, session, regime, size_grid, calendar,
+        )
     }
 
     /// Fallible twin of [`GeneratedSource::new`]. Both `scalars` and the
@@ -172,6 +180,7 @@ impl GeneratedSource {
             &fp.session_profile,
             regime,
             SizeGrid::spot(),
+            None,
         )
     }
 
@@ -191,12 +200,17 @@ impl GeneratedSource {
             &fp.session_profile,
             regime,
             size_grid,
+            None,
         )
     }
 
     /// Fallible twin of [`GeneratedSource::new_with_session_profile`] - same
     /// rationale as [`GeneratedSource::try_new`], but for the explicit-session
     /// path where the profile is also untrusted config.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the calendar is a construction input rather than a later attachment; see SessionModulator::new"
+    )]
     pub fn try_new_with_session_profile(
         scalars: GeneratorScalars,
         seed: u64,
@@ -205,14 +219,21 @@ impl GeneratedSource {
         session: &SessionProfile,
         regime: Option<MarketRegime>,
         size_grid: SizeGrid,
+        calendar: Option<SessionCalendar>,
     ) -> Result<Self, GeneratedSourceError> {
-        Self::try_build(scalars, seed, start_ts, fp, session, regime, size_grid)
+        Self::try_build(
+            scalars, seed, start_ts, fp, session, regime, size_grid, calendar,
+        )
     }
 
     /// Infallible wrapper: panics if either input is outside the fingerprint
     /// ranges. Callers building from the committed fingerprint (valid by
     /// construction) use this via `new` / `new_with_session_profile`; callers
     /// with untrusted config use the `try_*` twins above instead.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the calendar is a construction input rather than a later attachment; see SessionModulator::new"
+    )]
     fn build(
         scalars: GeneratorScalars,
         seed: u64,
@@ -221,9 +242,12 @@ impl GeneratedSource {
         session: &SessionProfile,
         regime: Option<MarketRegime>,
         size_grid: SizeGrid,
+        calendar: Option<SessionCalendar>,
     ) -> Self {
-        Self::try_build(scalars, seed, start_ts, fp, session, regime, size_grid)
-            .expect("generated source inputs are inside fingerprint ranges")
+        Self::try_build(
+            scalars, seed, start_ts, fp, session, regime, size_grid, calendar,
+        )
+        .expect("generated source inputs are inside fingerprint ranges")
     }
 
     // The only fallible inputs are `scalars`/`session`, guarded by the two
@@ -236,6 +260,10 @@ impl GeneratedSource {
         clippy::unwrap_in_result,
         reason = "distribution params are constant and valid; only the validated scalars/session can fail"
     )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the calendar is a construction input rather than a later attachment; see SessionModulator::new"
+    )]
     fn try_build(
         scalars: GeneratorScalars,
         seed: u64,
@@ -244,6 +272,7 @@ impl GeneratedSource {
         session: &SessionProfile,
         regime: Option<MarketRegime>,
         size_grid: SizeGrid,
+        calendar: Option<SessionCalendar>,
     ) -> Result<Self, GeneratedSourceError> {
         scalars.validate().map_err(GeneratedSourceError::Scalar)?;
         scalars
@@ -256,7 +285,17 @@ impl GeneratedSource {
                 ));
             }
         }
-        session.validate().map_err(GeneratedSourceError::Session)?;
+        // Contextual, per the calendar-conditional contract. Without a calendar
+        // the profile must still be the fraction/per-mean shares the legacy
+        // arithmetic assumes, because that arithmetic is what runs. With one,
+        // the modulator normalizes over open minutes and any positive scale is
+        // equivalent - so requiring a sum would force a fitted profile to
+        // satisfy a constraint that no longer means anything, and would make
+        // Saturday's unidentifiable placeholder distort the six days that are
+        // identifiable.
+        session
+            .validate_for(calendar.is_some())
+            .map_err(GeneratedSourceError::Session)?;
         let mean_event_duration_s = scalars.mean_event_duration_s;
         let calibrated_mean_s = ARRIVAL_MEAN_CAL * mean_event_duration_s;
         let active_mean_s = calibrated_mean_s
@@ -295,7 +334,7 @@ impl GeneratedSource {
             },
             arrival_override: None,
             vol,
-            session: SessionModulator::new(session),
+            session: SessionModulator::new(session, calendar.as_ref()),
             bounce: BounceState {
                 // Every realization opens on the Buyer side regardless of seed:
                 // `prev_side` seeds to Buyer and the low regime flips it only at
@@ -319,7 +358,7 @@ impl GeneratedSource {
             size_dist,
             size_median,
             size_grid,
-            calendar: None,
+            calendar,
             regime,
             shape,
             burst: SweepBurst::empty(),
@@ -345,10 +384,15 @@ impl GeneratedSource {
         self.clock_ns
     }
 
-    #[must_use]
-    pub fn with_calendar(mut self, calendar: Option<SessionCalendar>) -> Self {
-        self.calendar = calendar;
-        self
+
+    #[cfg(test)]
+    pub(super) fn arrival_mult_for_test(&self, clock_ns: u64) -> f64 {
+        self.session.arrival_mult(clock_ns)
+    }
+
+    #[cfg(test)]
+    pub(super) fn vol_mult_for_test(&self, clock_ns: u64) -> f64 {
+        self.session.vol_mult(clock_ns)
     }
 
     /// Force one arrival state for the committed tick-composition measurement.
@@ -381,7 +425,7 @@ impl GeneratedSource {
             self.arrival.quiet = quiet;
         }
         let arr_mult = self.session.arrival_mult(self.clock_ns);
-        if arr_mult >= SESSION_CLOSED_ARR_MULT {
+        if arr_mult >= LOW_INTENSITY_ARR_MULT {
             // Open-market path: the multiplier sampled at the instant the gap
             // opens stretches the whole draw - the original math, unchanged
             // bit for bit so the committed fingerprint's golden stream stays
@@ -404,11 +448,11 @@ impl GeneratedSource {
                 .max(1.0)
                 .min(MAX_SESSION_GAP_NS as f64) as u64;
         }
-        self.closed_window_gap_ns(duration_s)
+        self.low_intensity_gap_ns(duration_s)
     }
 
     /// Wall-clock gap for a duration draw whose gap OPENS inside a closed
-    /// session window (arrival multiplier below `SESSION_CLOSED_ARR_MULT`).
+    /// session window (arrival multiplier below `LOW_INTENSITY_ARR_MULT`).
     ///
     /// The open-market path in `next_duration_ns` samples the arrival
     /// multiplier once and stretches the entire draw by `1/mult` - fine while
@@ -444,7 +488,7 @@ impl GeneratedSource {
     ///   u64::MAX at all now requires actually simulating the ~580-year u64
     ///   nanosecond epoch - an inherent representation limit, no longer a
     ///   session artifact.
-    fn closed_window_gap_ns(&self, duration_s: f64) -> u64 {
+    fn low_intensity_gap_ns(&self, duration_s: f64) -> u64 {
         let mut budget_s = duration_s;
         let mut pos_ns = self.clock_ns;
         let mut gap_ns: u64 = 0;

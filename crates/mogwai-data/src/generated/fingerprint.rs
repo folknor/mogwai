@@ -128,7 +128,26 @@ pub struct SessionProfile {
 }
 
 impl SessionProfile {
+    /// Calendar-free validation, kept as the bare name so every existing caller
+    /// and every operator profile without a calendar behaves exactly as before.
     pub fn validate(&self) -> Result<(), SessionProfileError> {
+        self.validate_for(false)
+    }
+
+    /// Validation conditional on whether a `SessionCalendar` owns closure.
+    ///
+    /// With a calendar the modulator normalizes the composite over open minutes,
+    /// so any positive scale is equivalent and the sum contracts below are not
+    /// merely unnecessary - they are harmful. A fitted profile's factors are
+    /// relative effects conditional on being open and satisfy no particular sum;
+    /// forcing one would distort them, and it would make Saturday's
+    /// unidentifiable placeholder - zero exposure, so 0/0, so a declared 1.0 -
+    /// push error into the six days that ARE identifiable.
+    ///
+    /// The bug the sum guard exists to catch also disappears under that
+    /// normalization rather than going unguarded: an all-ones profile no longer
+    /// yields a 168x arrival multiplier, it yields exactly 1.0.
+    pub fn validate_for(&self, calendar_owns_closure: bool) -> Result<(), SessionProfileError> {
         for (index, share) in self.intensity_hour.iter().enumerate() {
             if !strictly_positive_finite(*share) {
                 return Err(SessionProfileError {
@@ -167,15 +186,24 @@ impl SessionProfile {
         //
         // The bound is ONE-SIDED for the two distributions and two-sided for
         // vol: a sum ABOVE 1.0 is the compression pathology and is rejected,
-        // but a sum BELOW 1.0 is the deliberate near-zero-share encoding of
-        // closed sessions (a closed hour carries ~0 mass) and, at the
-        // degenerate extreme, the every-hour-closed profile that
-        // `closed_window_gap_ns`' cap machinery exists to survive - so a low
-        // sum stays legal. `vol_hour` has no closed-hour use (a closed hour
-        // prints no trades, so its vol value is irrelevant), so both an
+        // but a sum BELOW 1.0 is a legitimately thin profile - and at the
+        // degenerate extreme the all-but-silent one that `low_intensity_gap_ns`'
+        // cap machinery exists to survive - so a low sum stays legal. That is a
+        // NUMERICAL allowance, not a closure idiom: a calendar-free profile
+        // whose author means "shut" has no way to say so, which is exactly why
+        // closure belongs to `SessionCalendar`. `vol_hour` has no such use, so
+        // both an
         // inflated and a deflated curve are misconfigurations and get a
         // symmetric band. The sentinel `index` of `usize::MAX` marks a
         // whole-array (sum) violation rather than a single bad element.
+        //
+        // ALL OF THE ABOVE IS CONDITIONAL ON THERE BEING NO CALENDAR. When one
+        // owns closure the modulator divides the composite by its own
+        // exposure-weighted mean, so scale carries no meaning to constrain and
+        // the "no modulation" pathology this guard was built for cannot occur.
+        if calendar_owns_closure {
+            return Ok(());
+        }
         let intensity_sum: f64 = self.intensity_hour.iter().sum();
         if intensity_sum > SESSION_SHARE_SUM * (1.0 + SESSION_SUM_TOL) {
             return Err(SessionProfileError {

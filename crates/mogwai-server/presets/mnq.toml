@@ -32,25 +32,86 @@ vol_scalar = 0.000001
 quoted_width = { ticks = 1, provenance = { kind = "uncalibrated" } }
 top_sizes = { bid = "1", ask = "1", provenance = { kind = "uncalibrated" } }
 trade_displacement_ticks = { ticks = 0.5, provenance = { kind = "uncalibrated" } }
-# Exchange-local CME hours: Sunday 18:00 through Friday 17:00 Chicago time,
-# with the daily 16:15-16:30 maintenance halt and the 17:00-18:00 break, and a
-# genuinely shut Saturday. Minutes count from local Sunday 00:00. Local minute
-# 960 is 16:00, when the daily settlement price is struck; without this table
-# the instrument would carry margin it never settles.
+# Intraday shape, fitted from the NQ one-minute archive. These factors are
+# RELATIVE and CONDITIONAL ON THE MARKET BEING OPEN: the calendar below owns
+# whether an event may exist at all, and this table owns how intense it is given
+# that it may. The modulator divides the composite by its own exposure-weighted
+# mean over the calendar's open minutes, so the arrays satisfy no particular sum
+# and any positive rescaling of them is equivalent.
+#
+# Limitations, none of which the fitted/corpus/window provenance schema can
+# structurally carry:
+#
+# - Hour 21 UTC is UNEXPOSED. It is the 16:00-17:00 Central daily break, closed
+#   every day of the model week, so no observation can inform it. Its 1.0 is a
+#   convention, not a measurement.
+# - Hour 20 UTC is PARTIALLY exposed, 73,035 open minutes against 97,380 for a
+#   full hour, because the break consumes part of it. Its factor is estimated
+#   from the open portion, which is correct, but on three quarters of the
+#   evidence its neighbours have.
+# - Saturday is UNEXPOSED for the same reason and its 1.0 is likewise a
+#   convention: zero exposure makes its estimate 0/0.
+# - Sunday rests on an order of magnitude less exposure than any weekday, 36,480
+#   open minutes against roughly 400,000, because the model week opens Sunday
+#   17:00. Its factor is identified but carries much wider uncertainty.
+# - intensity_hour is contract-VOLUME intensity used as an arrival-count proxy.
+#   Bars carry volume, not trade counts, and mean trade size is larger during the
+#   cash session, so this OVERSTATES the intraday arrival swing. The fitted
+#   27.51x peak-to-trough is an upper bound on the arrival swing, not an estimate
+#   of it. The direction of the bias is known; its magnitude is not.
+# - Closing that gap is an obligation on the paired NQ and MNQ tick purchase,
+#   which carries trade counts: it must compare volume-per-minute against
+#   count-per-minute SESSION CURVES, not merely their aggregate moments, because
+#   the quantity in question is the ratio of the two peak-to-trough figures.
+# - The profile is conditional on the permanent-CDT calendar below. Refitting it
+#   against a different calendar, or changing that calendar, invalidates it.
+[instrument.session]
+intensity_hour = [
+  0.2463, 0.2217, 0.1742, 0.1389, 0.1332, 0.1692, 0.2400, 0.3993,
+  0.3635, 0.2880, 0.3018, 0.4005, 0.7852, 3.2665, 3.6634, 2.5743,
+  1.9670, 1.8072, 1.9361, 2.7106, 0.7826, 1.0000, 0.2052, 0.1732,
+]
+# Sun, Mon, Tue, Wed, Thu, Fri, Sat
+dow_weight = [1.5179, 0.9080, 0.9865, 1.0157, 1.0535, 1.0225, 1.0000]
+vol_hour = [
+  0.7733, 0.7113, 0.6349, 0.5533, 0.5591, 0.6666, 0.7446, 0.9350,
+  0.8506, 0.7417, 0.7625, 0.8393, 1.0956, 1.7876, 1.8702, 1.4981,
+  1.2985, 1.3097, 1.3897, 1.5489, 0.9138, 1.0000, 0.8323, 0.6596,
+]
+
+# Exchange-local CME equity-index hours on a PERMANENT CDT clock: Sunday 17:00
+# through Friday 16:00 Chicago time, with the daily 15:15-15:30 halt, the
+# 16:00-17:00 break, and a genuinely shut Saturday. Minutes count from local
+# Sunday 00:00. Local minute 900 is 15:00, when the daily settlement price is
+# struck; without this table the instrument would carry margin it never settles.
+#
+# The offset is fixed at -300 and DST transitions are unmodelled, so the model
+# week is CDT all year. Half of a real calendar year is CST, and those sessions
+# occur one UTC hour later than this table places them. That is a stated
+# limitation of the fixed-offset model, not an approximation that averages out.
+#
+# These figures previously read 18:00-17:00 with a 16:15-16:30 halt, which was
+# the same schedule rendered one hour forward - the winter UTC instants shown on
+# a CDT clock. It described no civil session CME publishes, and the comment
+# calling it Chicago time was wrong: CME equity index opens at 17:00 Central,
+# not 18:00. Correcting it moved settlement from 960 to 900, which is the same
+# real instant rather than a new choice, and which the calendar validator
+# requires: 960 is now the exclusive end of the 15:30-16:00 window, and a
+# settlement minute that is not open on any day is refused outright.
 [instrument.calendar]
 utc_offset_minutes = -300
-settlement_minute_of_day = 960
+settlement_minute_of_day = 900
 open_windows = [
-  { start_minute = 1080, end_minute = 2415 },
-  { start_minute = 2430, end_minute = 2460 },
-  { start_minute = 2520, end_minute = 3855 },
-  { start_minute = 3870, end_minute = 3900 },
-  { start_minute = 3960, end_minute = 5295 },
-  { start_minute = 5310, end_minute = 5340 },
-  { start_minute = 5400, end_minute = 6735 },
-  { start_minute = 6750, end_minute = 6780 },
-  { start_minute = 6840, end_minute = 8175 },
-  { start_minute = 8190, end_minute = 8220 },
+  { start_minute = 1020, end_minute = 2355 },
+  { start_minute = 2370, end_minute = 2400 },
+  { start_minute = 2460, end_minute = 3795 },
+  { start_minute = 3810, end_minute = 3840 },
+  { start_minute = 3900, end_minute = 5235 },
+  { start_minute = 5250, end_minute = 5280 },
+  { start_minute = 5340, end_minute = 6675 },
+  { start_minute = 6690, end_minute = 6720 },
+  { start_minute = 6780, end_minute = 8115 },
+  { start_minute = 8130, end_minute = 8160 },
 ]
 [provenance]
 "symbol" = { kind = "declared", rationale = "continuous synthetic contract" }
@@ -84,6 +145,9 @@ open_windows = [
 "generator.top_sizes.provenance.kind" = { kind = "declared", rationale = "explicitly uncalibrated" }
 "generator.trade_displacement_ticks.ticks" = { kind = "declared", rationale = "touch-print placeholder pending a TBBO fit" }
 "generator.trade_displacement_ticks.provenance.kind" = { kind = "declared", rationale = "explicitly uncalibrated" }
-"calendar.utc_offset_minutes" = { kind = "declared", rationale = "CME central time; DST is declared unmodelled" }
-"calendar.settlement_minute_of_day" = { kind = "declared", rationale = "16:00 local daily settlement" }
-"calendar.open_windows" = { kind = "declared", rationale = "published CME equity index hours" }
+"session.intensity_hour" = { kind = "fitted", corpus = "NQ one-minute ratio-back-adjusted bars; contract volume per calendar-open minute used as an arrival-count proxy", window = "2020-01-01 through 2026-07-08; recent era selected by preregistered separability and era-stability rules" }
+"session.dow_weight" = { kind = "fitted", corpus = "NQ one-minute ratio-back-adjusted bars; contract volume per calendar-open minute used as an arrival-count proxy", window = "2020-01-01 through 2026-07-08; recent era selected by preregistered separability and era-stability rules" }
+"session.vol_hour" = { kind = "fitted", corpus = "NQ one-minute ratio-back-adjusted bars; RMS of adjacent within-session close returns with one largest squared return trimmed per session", window = "2020-01-01 through 2026-07-08; recent era selected by preregistered separability and era-stability rules" }
+"calendar.utc_offset_minutes" = { kind = "declared", rationale = "permanent CDT model clock; DST transitions unmodelled, so CST sessions sit one UTC hour later than this table places them" }
+"calendar.settlement_minute_of_day" = { kind = "declared", rationale = "15:00 Central daily settlement" }
+"calendar.open_windows" = { kind = "declared", rationale = "published CME equity index civil hours, 17:00 to 16:00 with the 15:15 to 15:30 halt" }

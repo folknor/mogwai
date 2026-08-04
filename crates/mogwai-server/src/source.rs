@@ -111,8 +111,8 @@ fn generator(profile: &InstrumentProfile) -> GeneratedSource {
         &profile.session,
         boot.regime,
         SizeGrid::from_def(&profile.def),
+        profile.calendar.clone(),
     )
-    .with_calendar(profile.calendar.clone())
 }
 
 /// Snapshot spacing of the run's checkpoint chain, in ticks. The generator is
