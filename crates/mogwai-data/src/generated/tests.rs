@@ -8,7 +8,7 @@ use crate::{TickEvent, TickSource};
 use super::checkpoint::MAX_CHECKPOINTS;
 use super::consts::SIZE_LOG_SIGMA;
 use super::consts::{
-    FEEDBACK_RETURN_CEILING, GARCH_SIGMA_CAP, MAX_SESSION_GAP_NS, NS_PER_HOUR,
+    FEEDBACK_RETURN_CEILING, GARCH_SIGMA_CAP, HALF_SPREAD_TICKS, MAX_SESSION_GAP_NS, NS_PER_HOUR,
     REALIZED_RETURN_CEILING, STUDENT_T_DF, STUDENT_T_UNIT_SCALE,
 };
 use super::numeric::decimal_from_f64;
@@ -2511,6 +2511,237 @@ fn realized_return_envelope_under_regime_scaling() {
         sigma_tail.max() < CLEAN_SIGMA_RAIL,
         "the clean sigma rail must sit above the clean tail"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Synthetic spread decomposition.
+//
+// "The spread" is not one number in this model, and treating it as one is how
+// an earlier analysis reached three mutually inconsistent figures without
+// noticing. This reports each one separately and names it.
+//
+// The output schema here is deliberately the CONTRACT that the real-data
+// experiments must match, so a Roll estimate from a venue archive can be
+// compared against the same quantity rather than against whichever number was
+// convenient.
+//
+// Two things it must never do: report a Roll spread when the covariance is
+// non-negative (the estimator is undefined there, and zero is not the answer),
+// and compute at the print layer, where sweep children walk monotonically and
+// flip the covariance sign outright.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct SpreadDecomposition {
+    configured_full_spread_ticks: f64,
+    same_mid_separation_ticks: Vec<(f64, u32)>,
+    parent_price_change_covariance: f64,
+    /// `None` when the covariance is non-negative: Roll is UNAVAILABLE, which is
+    /// a different statement from a spread of zero.
+    roll_spread_price: Option<f64>,
+    roll_spread_ticks: Option<f64>,
+    print_layer_covariance: f64,
+    print_layer_roll_ticks: Option<f64>,
+    opposite_side_separation: Vec<(i64, f64)>,
+    zero_change_frac: f64,
+    conditional_return_scale: f64,
+    tick_return: f64,
+    tick_traversal_sigma_units: f64,
+}
+
+fn roll_spread(changes: &[f64]) -> (f64, Option<f64>) {
+    let n = changes.len() - 1;
+    let mean = changes.iter().sum::<f64>() / changes.len() as f64;
+    let cov = (0..n)
+        .map(|i| (changes[i] - mean) * (changes[i + 1] - mean))
+        .sum::<f64>()
+        / n as f64;
+    // Roll is 2*sqrt(-cov). A non-negative covariance means the bounce
+    // signature the estimator assumes is absent, so it has no value here - not
+    // a zero.
+    let spread = if cov < 0.0 {
+        Some(2.0 * (-cov).sqrt())
+    } else {
+        None
+    };
+    (cov, spread)
+}
+
+fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecomposition {
+    let fp = Fingerprint::from_repo_json();
+    let mut src = GeneratedSource::new(scalars.clone(), 42, 0, &fp, None);
+    let tick = decimal_to_f64(scalars.modal_tick);
+
+    let mut parent_prices: Vec<f64> = Vec::with_capacity(events);
+    let mut parent_sides: Vec<AggressorSide> = Vec::with_capacity(events);
+    let mut print_prices: Vec<f64> = Vec::new();
+    let mut base_returns: Vec<f64> = Vec::with_capacity(events);
+
+    // The event price is the burst's LAST child, matching `measure` exactly.
+    // Taking the first child instead is a different series - it excludes the
+    // sweep's own level walk - and mixing the two conventions is how an earlier
+    // pass produced a lag-50 figure fifteen times off. If this schema is to be
+    // the contract the real-data experiments match, it has to agree with the
+    // realism gate first.
+    while parent_prices.len() < events {
+        let starts_event = src.burst.remaining == 0;
+        let TickEvent::Trade(trade) = src.next_tick().expect("infinite tape") else {
+            unreachable!()
+        };
+        print_prices.push(decimal_to_f64(trade.price));
+        if starts_event {
+            base_returns.push(src.vol.prev_return);
+        }
+        if src.burst.remaining == 0 {
+            parent_prices.push(decimal_to_f64(trade.price));
+            parent_sides.push(trade.aggressor);
+        }
+    }
+
+    let parent_changes: Vec<f64> = parent_prices.windows(2).map(|w| w[1] - w[0]).collect();
+    let (parent_cov, parent_roll) = roll_spread(&parent_changes);
+    let print_changes: Vec<f64> = print_prices.windows(2).map(|w| w[1] - w[0]).collect();
+    let (print_cov, print_roll) = roll_spread(&print_changes);
+
+    let mut separation: std::collections::BTreeMap<i64, u64> = std::collections::BTreeMap::new();
+    let mut opposite = 0_u64;
+    for i in 1..parent_prices.len() {
+        if parent_sides[i] != parent_sides[i - 1] {
+            let ticks = ((parent_prices[i] - parent_prices[i - 1]).abs() / tick).round() as i64;
+            *separation.entry(ticks).or_default() += 1;
+            opposite += 1;
+        }
+    }
+
+    // Counterfactual same-mid separation: what a buy and a sell would quote at
+    // the SAME latent mid, as a function of grid phase. Not an observable market
+    // statistic - a mechanism diagnostic - because no two prints share a mid.
+    let mut phase_hist: Vec<(f64, u32)> = Vec::new();
+    for step in 0..8_u32 {
+        let phase = f64::from(step) / 8.0;
+        let x = 10.0 + phase;
+        let ask = (x + HALF_SPREAD_TICKS).ceil();
+        let bid = (x - HALF_SPREAD_TICKS).floor();
+        phase_hist.push((phase, (ask - bid) as u32));
+    }
+
+    let zero_change = parent_prices
+        .windows(2)
+        .filter(|w| (w[1] - w[0]).abs() < f64::EPSILON)
+        .count() as f64
+        / (parent_prices.len() - 1) as f64;
+    let scale =
+        (base_returns.iter().map(|r| r * r).sum::<f64>() / base_returns.len() as f64).sqrt();
+    let tick_return = (1.0 + tick / decimal_to_f64(scalars.start_price)).ln();
+
+    SpreadDecomposition {
+        configured_full_spread_ticks: 2.0 * HALF_SPREAD_TICKS,
+        same_mid_separation_ticks: phase_hist,
+        parent_price_change_covariance: parent_cov,
+        roll_spread_price: parent_roll,
+        roll_spread_ticks: parent_roll.map(|s| s / tick),
+        print_layer_covariance: print_cov,
+        print_layer_roll_ticks: print_roll.map(|s| s / tick),
+        opposite_side_separation: separation
+            .into_iter()
+            .map(|(ticks, count)| (ticks, count as f64 / opposite as f64))
+            .collect(),
+        zero_change_frac: zero_change,
+        conditional_return_scale: scale,
+        tick_return,
+        tick_traversal_sigma_units: tick_return / scale,
+    }
+}
+
+#[test]
+#[ignore = "spread decomposition report; run deliberately with an extended timeout"]
+fn synthetic_spread_decomposition_at_protocol_six() {
+    let fp = Fingerprint::from_repo_json();
+    // Two grids, because every quantity here is grid-dependent and reporting
+    // one would invite the same over-generalization the report already made.
+    let crypto = GeneratorScalars::xbtusd_anchor(&fp);
+    let mut index = GeneratorScalars::xbtusd_anchor(&fp);
+    index.symbol = "MNQ-SHAPED".to_string();
+    index.modal_tick = Decimal::new(25, 2);
+    index.price_decimals = 2;
+    index.start_price = Decimal::from(21_000);
+    index.latent_size_median = Decimal::ONE;
+
+    for (label, scalars) in [("XBTUSD anchor", &crypto), ("MNQ-shaped grid", &index)] {
+        let d = decompose_spread(scalars, 400_000);
+        println!();
+        println!("=== {label}");
+        println!(
+            "  TAPE_PROTOCOL_VERSION            {}",
+            crate::TAPE_PROTOCOL_VERSION
+        );
+        println!(
+            "  configured continuous spread     {:.2} ticks",
+            d.configured_full_spread_ticks
+        );
+        print!("  same-mid grid separation         ");
+        for (phase, sep) in &d.same_mid_separation_ticks {
+            print!("f={phase:.3}:{sep}t ");
+        }
+        println!();
+        println!(
+            "  parent Cov(dP_t, dP_t-1)         {:.6e}",
+            d.parent_price_change_covariance
+        );
+        match (d.roll_spread_price, d.roll_spread_ticks) {
+            (Some(price), Some(ticks)) => {
+                println!("  parent Roll spread               {price:.6} price = {ticks:.3} ticks")
+            }
+            _ => println!("  parent Roll spread               UNAVAILABLE (covariance >= 0)"),
+        }
+        println!(
+            "  print-layer Cov                  {:.6e}",
+            d.print_layer_covariance
+        );
+        match d.print_layer_roll_ticks {
+            Some(ticks) => println!("  print-layer Roll                 {ticks:.3} ticks"),
+            None => println!(
+                "  print-layer Roll                 UNAVAILABLE (covariance >= 0; sweep \
+                 children walk monotonically)"
+            ),
+        }
+        print!("  opposite-side parent separation  ");
+        for (ticks, share) in d.opposite_side_separation.iter().take(7) {
+            print!("{ticks}t:{:.1}% ", 100.0 * share);
+        }
+        println!();
+        println!(
+            "  zero_change_frac                 {:.4}",
+            d.zero_change_frac
+        );
+        println!(
+            "  conditional return scale         {:.4e}",
+            d.conditional_return_scale
+        );
+        println!("  tick_return                      {:.4e}", d.tick_return);
+        println!(
+            "  tick_return / return scale       {:.3}",
+            d.tick_traversal_sigma_units
+        );
+    }
+
+    // The invariant this report exists to keep honest: Roll is UNAVAILABLE at
+    // the print layer, on every grid. Sweep children walk monotonically in one
+    // direction, so consecutive child price changes are POSITIVELY correlated
+    // and the estimator's sign assumption fails outright. A harness that
+    // computed it there would silently return a number from a square root of a
+    // negative quantity, or worse, coerce it to zero.
+    for scalars in [&crypto, &index] {
+        let d = decompose_spread(scalars, 400_000);
+        assert!(
+            d.print_layer_roll_ticks.is_none(),
+            "print-layer Roll must be UNAVAILABLE on every grid: cov={}",
+            d.print_layer_covariance
+        );
+    }
+    // Parent-layer availability is deliberately NOT asserted. It is
+    // grid-dependent - see the report above - and pinning it would turn a
+    // finding into a requirement.
 }
 
 fn is_round_lot(size: Decimal, median: f64) -> bool {

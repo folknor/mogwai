@@ -50,7 +50,7 @@ stands in the way:
 | Finding | Nature | What it needs |
 |---|---|---|
 | Size was configured through a crypto mean-notional proxy | **resolved 2026-08-04**: native-unit `latent_size_median` plus grid-aware validation | no purchase required |
-| Spread is pinned at one tick with no variation mechanism | **blocker**: no slot exists yet | somewhere to put it, then TBBO or free Binance bookTicker |
+| Spread is pinned at one tick with no variation mechanism | **blocker**: no slot exists yet | somewhere to put it, then CME TBBO; free Binance quotes cover derivatives, not the shipped spot presets |
 | Session profile is crypto's flat 24/7 curve | wrong data in a fillable slot | NQ 1-minute bars ALREADY ON DISK, free |
 | Price level, cadence, sizes are crypto's | unfilled slots | tick data, eventually |
 
@@ -540,8 +540,10 @@ any measured market quantity. Nothing in the pipeline has ever compared it to a
 real quoted or effective spread.
 
 That is the honest case for quote data: not that the band is arbitrary, but that
-its calibration target is internal. TBBO, or free Binance `bookTicker`, is what
-would let the band be anchored to measured spread instead.
+its calibration target is internal. CME TBBO is what would let the band be
+anchored to a measured spread. Free Binance quotes do not substitute for the
+shipped spot presets - see
+[5.2.1](#521-correction-free-historical-quote-truth-does-not-cover-the-shipped-presets).
 
 ### 3.6 The offline generator can now chart a preset
 
@@ -655,19 +657,53 @@ CME_MINI_MES1!, 15S_d2dee.csv
 BINANCE_BTCUSDT, 15S_213af.csv
 ```
 
-Two things make this materially better than the Kraken corpus for fitting:
+One thing makes this materially better than the Kraken corpus for fitting.
+Binance `trades` carries `isBuyerMaker`, the AGGRESSOR SIDE, which Kraken's dump
+does not. Signed order flow drives adverse selection, and the generator already
+models an aggressor-side chain it currently has no way to validate.
 
-- Binance `trades` carries `isBuyerMaker`, the AGGRESSOR SIDE. Kraken's does
-  not. Signed order flow is what drives adverse selection, and the generator
-  already models an aggressor-side chain it currently has no way to validate.
-- The archive also publishes `bookTicker` (best bid and ask) and `bookDepth` for
-  USD-M futures. If those cover the shipped symbols, **spread ground truth is
-  free** for three of the five presets.
+The documented spot trade schema, confirmed against the vendor's own
+`binance/binance-public-data` documentation rather than inferred:
 
-The archive is downloadable at will. Throttling thresholds are unknown.
+```
+tradeId, price, qty, quoteQty, time, isBuyerMaker, isBestMatch
+```
 
-I have not opened any of these files or verified the bookTicker coverage. Both
-should be confirmed before anything is planned on them.
+Spot timestamps are MICROSECONDS from 2025 onward, which is a trap for any
+parser that assumes milliseconds.
+
+### 5.2.1 Correction: free historical quote truth does NOT cover the shipped presets
+
+An earlier draft of this report claimed the archive publishes `bookTicker`, and
+concluded that spread ground truth was free for three of the five shipped
+presets. **That was wrong, and it conflated two different markets.**
+
+The official archive documents exactly three historical SPOT datasets:
+`aggTrades`, `klines` and `trades`. Historical spot `bookTicker` is not among
+them. Archived `bookTicker` is a DERIVATIVES dataset. The shipped BTCUSDT,
+ETHUSDT and SOLUSDT presets are spot instruments, so the archived quotes do not
+describe the instruments the presets model.
+
+Binance spot does expose live `<symbol>@bookTicker` updates over websocket, with
+update id, symbol, and bid and ask price and quantity - but that is a live
+stream, not a historical archive.
+
+So there are two free experiments, and they have DIFFERENT STANDING. Conflating
+them is what produced the error:
+
+| | What it validates | What it does not |
+|---|---|---|
+| **USD-M futures archive**: pair futures `trades` with futures `bookTicker` | the Roll-versus-truth methodology, and volatility stratification | it is not direct evidence for the shipped SPOT presets |
+| **Live spot collection**: record spot `trades` and `<symbol>@bookTicker` concurrently | matches the shipped presets exactly | requires accumulating a new synchronized corpus over time, so it is not available today |
+
+The methodology experiment is available immediately and is worth running on its
+own terms. Direct evidence for the spot presets requires building a collector
+and waiting.
+
+The archive is downloadable at will. Throttling thresholds are unknown. The
+archived futures `bookTicker` column layout is still unverified and must be read
+off a downloaded daily file rather than assumed - assuming a layout is precisely
+the mistake corrected above.
 
 ### 5.3 CME 1-minute bar archives, on disk
 
@@ -726,7 +762,7 @@ for.
 | `return_acf_lag1` | shape check | no; needs ticks | also the Roll spread estimator input |
 | `abs_return_acf` lag 1/10/50 | shape check | partly | long memory is scale-free; minute-scale GARCH persistence is estimable, lag indices differ |
 | `zero_change_frac` | shape check | no; needs ticks AND a raw tick grid | see [section 7](#7-findings-from-the-cme-bar-archives) |
-| `HALF_SPREAD_TICKS` and any variation | shape | crypto only, via Binance bookTicker | CME needs TBBO |
+| `HALF_SPREAD_TICKS` and any variation | shape | not for the shipped spot presets: archived Binance quotes are derivatives, and live spot quotes need a collector | CME needs TBBO |
 
 The direction of error matters and is one-sided: every bar-derived substitute
 for a tick-level quantity makes the tape MORE REGULAR than reality. Clustered
@@ -986,14 +1022,41 @@ ticks, run the `select_windows.py` pipeline, and check whether bar-derived
 strata predict tick-level microstructure ([7.2](#72-method-for-window-selection)).
 If they do not, every basket below needs re-selecting.
 
-**Step 5. Calibrate the spread estimator, free.** Binance `trades` plus
-`bookTicker` for BTCUSDT gives both a Roll-style estimate and the truth. The
-report's own `return_acf_lag1` target IS the Roll estimator input: effective
-spread is approximately `2 * sqrt(-cov(r_t, r_t-1))`. Measure how well the
-inference recovers true effective spread and how the bias behaves across
-volatility regimes. If it is good enough, buy CME `trades` and infer the spread,
-which converts Basket B into something far cheaper. If it is not, the case for
-TBBO is established with evidence rather than asserted.
+**Step 5a. Decompose the SYNTHETIC spread, free and immediate.** Before any real
+data, measure what the shipped tape's spread actually is, because "the spread"
+is not one number here and the earlier draft treated it as one. The output
+schema is the contract both real-data experiments below must match:
+
+- configured continuous full spread;
+- same-mid grid separation (phase-dependent, and 2 ticks almost surely);
+- parent-layer price-change covariance;
+- parent-layer Roll spread, in price AND in ticks;
+- an explicit UNAVAILABLE result when the covariance is non-negative, never a
+  zero or a silently dropped row;
+- the opposite-side parent separation distribution;
+- `zero_change_frac`;
+- the conditional return scale and tick-traversal strata.
+
+A protocol-5 run of this produced a configured 1 tick, an almost-sure 2-tick
+grid separation and a 1.48-tick Roll estimate - three numbers, none agreeing.
+**That result is historical context only and must not be used as calibration
+evidence.** Protocol 6 changed both the latent scale and event-price traversal,
+so the whole decomposition has to be regenerated before any comparison.
+
+**Step 5b. Calibrate the estimator against real quotes, free.** Per
+[5.2.1](#521-correction-free-historical-quote-truth-does-not-cover-the-shipped-presets)
+this is TWO experiments with different standing. The USD-M futures archive pairs
+`trades` with `bookTicker` today and validates the Roll-versus-truth methodology
+and the volatility stratification, but it is not direct evidence for the spot
+presets. Direct evidence needs a live spot collector recording `trades` and
+`<symbol>@bookTicker` concurrently, accumulated over time.
+
+Either way the mechanism is the same: `return_acf_lag1` IS the Roll estimator's
+input, since effective spread is approximately `2 * sqrt(-cov(dP_t, dP_t-1))`.
+Measure how well the inference recovers true effective spread and how its bias
+behaves across volatility regimes. If it is good enough, buy CME `trades` and
+infer the spread, which converts Basket B into something far cheaper. If it is
+not, the case for TBBO is established with evidence rather than asserted.
 
 **Step 6. Buy the paired test, 10.02 dollars.** Answers whether process
 constants are contract-specific or market-specific, and whether NQ's moments
@@ -1032,9 +1095,17 @@ Recorded so they are not re-derived.
 - **The whole-book price quotes were never the right comparison.** The owner's
   original figures (17.78 for 2025-09 and so on) match a narrow scope, not the
   entire CME catalog.
-- **"No free data can supply spread" was wrong as stated.** It is true for CME
-  only. `data.binance.vision` publishes `bookTicker` for USD-M futures, so
-  spread is plausibly free for three of the five shipped presets. Unverified.
+- **"No free data can supply spread" was wrong, and so was the correction to
+  it.** The original claim was too broad: it is true for CME only. But the
+  correction then asserted that `data.binance.vision` publishes `bookTicker`
+  covering the shipped presets, and that conflated spot with derivatives. The
+  documented historical SPOT datasets are `aggTrades`, `klines` and `trades`
+  only; archived `bookTicker` is derivatives data, and the three shipped crypto
+  presets are spot. Free historical quote truth therefore does NOT cover them -
+  see [5.2.1](#521-correction-free-historical-quote-truth-does-not-cover-the-shipped-presets).
+  The lesson is procedural rather than factual: the claim was flagged
+  "unverified" in this very document and then relied on anyway in the
+  recommended sequence. A flag is not a substitute for checking.
 - **The GC probe was over-sold.** It was argued as the only way to obtain a
   second tick grid. The Kraken corpus supplies hundreds of tick grids for free.
   GC remains cheap and worth having, but as confirmation, not as evidence of
@@ -1138,10 +1209,13 @@ determined. See [2.6](#26-the-two-session-mechanisms).
 
 ### 14.6 Unverified claims in this document
 
-- Binance `bookTicker` coverage for the three shipped crypto symbols, and the
-  exact `trades` column layout. Asserted from knowledge of the archive layout,
-  not checked. Unlike the Kraken dumps there is no in-tree parser to confirm
-  against, so this needs either a download or the vendor's documentation.
+- The archived USD-M futures `bookTicker` COLUMN LAYOUT. The spot `trades`
+  schema is now confirmed against vendor documentation, and the spot-versus-
+  derivatives coverage question is resolved in
+  [5.2.1](#521-correction-free-historical-quote-truth-does-not-cover-the-shipped-presets),
+  but the futures quote layout is still assumed. It must be read off one
+  downloaded daily file before a parser is written against it, because assuming
+  a layout is exactly the error that section documents.
 
 ### 14.7 GC gap features are not fully comparable
 
