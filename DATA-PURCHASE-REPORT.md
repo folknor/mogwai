@@ -14,6 +14,7 @@ re-deriving anything and can see which steps were wrong the first time.
 ## Contents
 
 - [0. Summary](#0-summary)
+  - [0.1 State of play, and the one thing that is unfinished](#01-state-of-play-2026-08-04-and-the-one-thing-that-is-unfinished)
 - [1. The question, correctly stated](#1-the-question-correctly-stated)
 - [2. How the tape is generated today](#2-how-the-tape-is-generated-today)
 - [3. What MNQ actually gets today](#3-what-mnq-actually-gets-today)
@@ -34,9 +35,11 @@ re-deriving anything and can see which steps were wrong the first time.
 
 ## 0. Summary
 
-The tape's PROCESS is good. Its PARAMETERS are Bitcoin's, and for the MNQ and
-MES presets that is true of everything except the tick size, the price precision
-and the session calendar.
+The tape's PROCESS is good. MNQ and MES now carry their contract grid, corrected
+calendar, representative price and native-unit size, plus a fitted NQ session
+profile. Their cadence and the shared process shape remain crypto-derived, and
+their quoted width, top sizes and trade displacement remain explicit
+uncalibrated placeholders.
 
 That is expected rather than broken: the five presets are aspirational, added
 recently to facilitate exactly the tapes this report is about. They fill in the
@@ -52,8 +55,8 @@ stands in the way:
 |---|---|---|
 | Size was configured through a crypto mean-notional proxy | **resolved 2026-08-04**: native-unit `latent_size_median` plus grid-aware validation | no purchase required |
 | The venue originally published no quotes and conflated a trade displacement with spread | **B resolved at protocol 7; A remains**: the observable BBO and separate calibration seams exist, while the displacement response is still static | CME TBBO can now fit quoted width and displacement separately; free Binance quotes cover derivatives, not the shipped spot presets |
-| Session profile is crypto's flat 24/7 curve | wrong data in a fillable slot | NQ 1-minute bars ALREADY ON DISK, free |
-| Price level, cadence, sizes are crypto's | unfilled slots | tick data, eventually |
+| Session profile is crypto's flat 24/7 curve | **resolved 2026-08-04 at protocol 8**: fitted from the NQ 1-minute archive, 1.78x becomes 27.51x peak-to-trough | no purchase required; one obligation added to the paired tick buy |
+| Cadence and remaining generator scalars are crypto-derived | unfilled slots | tick data, eventually |
 
 The structural spread blocker is resolved: protocol 7 publishes a BBO and gives
 purchased quote data separate width and displacement seams. The remaining
@@ -61,13 +64,88 @@ question is calibration rather than where the evidence could land. See
 [3.5](#35-resolved-the-venue-publishes-an-observable-top-of-book). The
 size blocker was resolved after this report exposed that `typical_notional` was
 both denominated in the wrong unit and, exactly, the arithmetic mean notional of
-a right-skewed lognormal. The session profile is the largest VISIBLE defect and
-is free to fix from bars already owned. Only the fourth row is the question this
+a right-skewed lognormal. The session profile was the largest VISIBLE defect and
+was free to fix from bars already owned; it is fixed, and section 3.4 records
+what it cost and what it did not buy. Only the fourth row is the question this
 report originally set out to answer, and it is the least urgent of the four.
 
-Recommendation: spend nothing until steps 1 to 5c of
-[section 11](#11-recommended-sequence) are done. They cost zero dollars, use
-data already on disk, and they change what the money should buy.
+Recommendation: spend nothing until step 4 of
+[section 11](#11-recommended-sequence) and the unfinished protocol-8 composition
+measurement below are done. They cost zero dollars, use data already on disk,
+and they change what the money should buy.
+
+---
+
+## 0.1 State of play, 2026-08-04, and the one thing that is unfinished
+
+Read this before starting anything. It is the handover, not a summary.
+
+**Landed.** Protocol 8. The BBO layer at protocol 7 with three uncalibrated
+calibration seams, then MNQ's session profile fitted from the NQ 1-minute
+archive. `TAPE_PROTOCOL_VERSION` is 8. `notes/mnq-session-fit.md` is the fit
+report; `analysis/fit_session_profile.py` is the estimator, with every
+acceptance threshold preregistered as a named constant at the top.
+
+**UNFINISHED, and it blocks calling protocol 8 complete.** The protocol-8
+tick-composition fixture was never produced. The run was started and killed. So
+`analysis/tick-composition-protocol-8.json` does not exist, and the four budget
+constants -
+
+```
+CHECKPOINT_K                      1,048,576
+SWEEP_DRAIN_BUDGET              282,000,000
+MAX_WARMUP_MATERIALIZATION_TICKS 81,124,000,000
+fanout_depth                        262,144
+```
+
+- along with `reference/performance.md` still describe a protocol-7 tape that no
+longer exists for MNQ and MES. The functional suite is green, but budget safety
+is unverified: the constants are ceilings and the denser tape may have made them
+too small. That is precisely why this must be measured rather than assumed.
+
+To finish it:
+
+```
+brokkr run mogwai -- tick-composition --out analysis/tick-composition-protocol-8.json
+python3 analysis/tick_composition_ratios.py --mode independent
+```
+
+**Fix one known comparison-script defect before trusting its proposal.** The
+new independent mode correctly enforces the 7-to-8 fixture contract, but
+`analysis/tick_composition_ratios.py` still has one shared `OLD` constant table.
+Those values are the PRE-protocol-7 baseline used by projection mode:
+`checkpoint_k = 262,144`, `sweep_drain_budget = 5,000,000`,
+`max_extend_ticks = 1 << 30`, `fanout_depth = 65,536`. Independent mode must
+resize the CURRENT protocol-7 constants listed above instead. Make the baseline
+mode-specific before accepting `proposed`; otherwise checkpoint and fanout in
+particular can be under-proposed even when all fixture acceptance assertions
+pass. This fix does not require rerunning the measurement.
+
+Expect roughly 90 minutes, up from an hour, and the increase IS the result: the
+fitted profile roughly doubles MNQ's and MES's arrival multiplier in the
+measurement window, and `ticks_per_sim_second` and `ticks_per_vol_window` are
+exactly what the sweep and checkpoint budgets are denominated in. The run holds
+the global cargo lock throughout, so nothing else can build meanwhile.
+
+`--mode independent` gates on acceptance assertions BEFORE computing any ratio:
+`ticks_per_parent` must be bit-identical for all five presets, and every measured
+field must be identical for BTCUSDT, ETHUSDT and SOLUSDT, whose normalizer is a
+literal 1.0 and whose tape is therefore byte-identical. If either fails, the run
+measured something unintended and no ratio from it is worth reading.
+
+**Also unfinished, and cosmetic.** `docs/example-generated-bars.png` is a
+BTCUSDT image and remains valid; what is missing is the promised committed MNQ
+counterpart. The existing renderer produces interactive HTML, and turning that
+into a PNG needs a browser and screenshot, so it cannot be completed on a
+remote host:
+
+```
+python3 analysis/plot_tape.py --gen --open --symbol MNQ --type bars --interval 1m --length 3d
+```
+
+**Last verification.** `brokkr check` passed 434 tests after the mechanism,
+calendar, fitted profile, protocol bump and comparison modes landed. The
+protocol-8 composition run above was deliberately not completed.
 
 ---
 
@@ -117,9 +195,11 @@ from the shipped source, not from documentation.
 | `crates/mogwai-server/presets/*.toml` | the five shipped instrument presets |
 | `crates/mogwai-server/src/source.rs` | how a preset becomes a running generator |
 
-`TAPE_PROTOCOL_VERSION` is currently **7**. Any change to a generator constant,
+`TAPE_PROTOCOL_VERSION` is currently **8**. Any change to a generator constant,
 the arrival clock, a GARCH parameter, the fingerprint, seed derivation, the fill
 band's draw or the tape origin must bump it. Nothing detects a missed bump.
+Version 7 added the observable top of book; version 8 made the session profile
+conditional on the calendar and fitted MNQ's from the NQ archive.
 
 ### 2.2 The walk
 
@@ -338,19 +418,26 @@ The shipped MNQ preset already carries a full CME calendar: Sunday 18:00 through
 Friday 17:00 Chicago, the daily 16:15-16:30 maintenance halt, the 17:00-18:00
 break, a genuinely shut Saturday, and settlement at local minute 960.
 
-### 2.6 The two session mechanisms
+### 2.6 The two session mechanisms, and who owns closure
 
-There are now two ways to express "quiet or closed":
+RESOLVED 2026-08-04 at protocol 8; see
+[14.5](#145-resolved-the-two-session-mechanisms-compose-one-owns-closure).
 
-- near-zero shares in `SessionProfile`, handled by `closed_window_gap_ns`;
-- hard windows in `SessionCalendar`, handled by a jump to `next_open_ns` in
-  `begin_event`.
+There were two ways to express "quiet or closed", and `consts.rs` documented the
+WRONG one as intended: near-zero shares in `SessionProfile`, handled by what was
+then called `closed_window_gap_ns`, versus hard windows in `SessionCalendar`
+handled by a jump to `next_open_ns` in `begin_event`.
 
-`consts.rs` documents the first as the intended mechanism ("Trading hours,
-maintenance breaks and closed weekends are expressed as NEAR-ZERO hour/day
-shares in a custom SessionProfile - not a separate code path"), but the calendar
-exists and runs. Whether they compose correctly, or double-count a closure, is
-[open item 14.5](#14-open-items). It was not resolved here.
+Ownership is now explicit. The calendar decides whether an event may exist at
+all. The profile describes relative arrival and volatility conditional on being
+open, and the modulator normalizes it over the calendar's open minutes. A
+near-zero factor is still legal and now means only what it says - a genuinely
+thin OPEN hour. The integrating path remains as the numerical safeguard it
+always was, under a name that no longer claims otherwise
+- `LOW_INTENSITY_ARR_MULT` and `low_intensity_gap_ns`.
+
+The `consts.rs` prose asserting near-zero shares as the intended closure idiom
+is gone with it.
 
 ---
 
@@ -376,7 +463,8 @@ what stops it?** Three things do, and only one of them is a data problem.
 
 | Finding | Status |
 |---|---|
-| Crypto price level, cadence, session profile | slot awaiting the fit; expected |
+| Crypto session profile | resolved at protocol 8; fitted from the NQ 1-minute archive, 2020-2026 |
+| Crypto price level and cadence | slots awaiting the fit; expected |
 | Size collapsed to a constant 1 contract | resolved by native-unit latent size configuration |
 | Crypto empirical ranges rejected truthful futures | resolved by separating diagnostics from admission |
 | Observable BBO, configurable width, size and trade displacement | resolved at protocol 7; the seams exist and await TBBO fitting |
@@ -508,17 +596,53 @@ coarser tick (ES at 0.25 is fine, but a 1.0-tick product is not) would fail.
 The test configs now state `latent_size_median = "1"`. Their deliberately 24/7
 calendar remains a fixture simplification rather than the shipped MNQ calendar.
 
-### 3.4 The session profile is the wrong shape
+### 3.4 Resolved: the session profile is fitted
 
-Covered in [2.4](#24-the-fingerprint). Crypto's hour curve spans 1.78x
-peak-to-trough. An index future's spans something closer to 20x to 50x between
-the cash open and the Asian overnight, and drops to zero across the weekend and
-the daily maintenance break.
+RESOLVED 2026-08-04 at tape protocol 8. The diagnosis stands as written and is
+kept because the guessed magnitude turned out to be checkable: crypto's hour
+curve spans 1.78x peak-to-trough, this report estimated an index future at "20x
+to 50x", and the fit measured 27.51x. A flat crypto curve said the 03:00 Chicago
+hour was as busy as the 08:30 hour, wrong by more than an order of magnitude.
 
-The MNQ preset's CME calendar closes the market correctly, so the weekend and
-the halt ARE handled. What is not handled is the SHAPE of activity inside the
-open hours: a flat crypto curve says the 03:00 Chicago hour is as busy as the
-08:30 hour, which is wrong by more than an order of magnitude.
+Full fit report in `notes/mnq-session-fit.md`. What matters here:
+
+**Closure and intensity became separate concerns.** `SessionCalendar` owns
+whether an event may exist; `SessionProfile` owns how intense flow is given that
+it may. The modulator divides both composites by their own exposure-weighted
+mean over open minutes, so a profile is conditional on being open and any
+positive rescaling of it is equivalent. This was open item 14.5, and the answer
+was not "they double-count" - it was that the question is unanswerable until the
+curve is defined as conditional. Encoding a known closure as a near-zero share
+is no longer the intended idiom; `SESSION_CLOSED_ARR_MULT` became
+`LOW_INTENSITY_ARR_MULT`, and the integrating path it gates is retained as a
+numerical safeguard for genuinely thin OPEN hours.
+
+**MNQ's calendar was wrong and had to be corrected first**, because the fit is
+conditional on it. It declared `18:00 -> 17:00` with a `16:15` halt and called
+those exchange-local Chicago hours. CME equity index trades `17:00 -> 16:00`
+with a `15:15` halt. The old figures were that schedule rendered one hour
+forward - winter UTC instants shown on a permanent CDT clock - and described no
+civil session CME publishes. Settlement moved from local minute 960 to 900, the
+same real instant re-expressed, and forced: under the corrected close 960 is an
+exclusive window end and the calendar validator refuses a settlement minute open
+on no day. Correcting it cut rows falling outside the declared calendar from
+175,394 to 44,737 and halved the sessions misread as early closes.
+
+**The era mattered more than the corpus size.** Separability passed everywhere,
+but era stability failed at 22.83% divergent exposure against a 5% allowance, so
+the preregistered rule selected 2020-2026 over the full archive. Intraday
+concentration has fallen fourfold across seventeen years - 117.55x, 37.99x,
+27.51x by era - and the full corpus would have shipped a 36.45x curve for a
+market currently running 27.51x. That is the same trap
+[7.1](#71-zero_change_frac-is-not-an-instrument-constant) documented for
+`zero_change_frac`, caught this time because the threshold was fixed first.
+
+**What it did not buy.** `intensity_hour` is contract-VOLUME intensity used as
+an arrival-count proxy, because bars carry volume and not trade counts. Mean
+trade size is larger during the cash session, so 27.51x is an UPPER BOUND on the
+arrival swing rather than an estimate of it. See
+[11](#11-recommended-sequence) step 6 for the obligation this places on the
+paired tick purchase.
 
 ### 3.5 Resolved: the venue publishes an observable top of book
 
@@ -793,14 +917,15 @@ them is what produced the error:
 | **USD-M futures archive**: pair futures `trades` with futures `bookTicker` | the Roll-versus-truth methodology, and volatility stratification | it is not direct evidence for the shipped SPOT presets |
 | **Live spot collection**: record spot `trades` and `<symbol>@bookTicker` concurrently | matches the shipped presets exactly | requires accumulating a new synchronized corpus over time, so it is not available today |
 
-The methodology experiment is available immediately and is worth running on its
-own terms. Direct evidence for the spot presets requires building a collector
-and waiting.
+The one-day methodology experiment was subsequently run on the retained,
+checksum-verified 2024-03-30 pair. Its six file contracts and result are recorded
+in section 11.1, and `analysis/binance_spread.py` is the fail-closed parser and
+matrix implementation. Direct evidence for the spot presets still requires
+building a collector and waiting.
 
 The archive is downloadable at will. Throttling thresholds are unknown. The
-archived futures `bookTicker` column layout is still unverified and must be read
-off a downloaded daily file rather than assumed - assuming a layout is precisely
-the mistake corrected above.
+futures `bookTicker` layout was read from the retained file before its parser was
+written; it is no longer an unverified assumption.
 
 ### 5.3 CME 1-minute bar archives, on disk
 
@@ -827,12 +952,20 @@ RETURNS exactly, so regime stratification is unaffected; what dies is price
 LEVEL and the tick grid. NQ, ES and CL can therefore never source a `modal_tick`
 or a `zero_change_frac` analogue. GC could, being raw.
 
-**These bars can source the entire session profile.** `intensity_hour`,
+**These bars sourced the entire session profile**, 2026-08-04. `intensity_hour`,
 `vol_hour` and `dow_weight` are hour-of-day and day-of-week aggregates: volume
-per minute gives intensity, RMS return per minute gives the vol curve,
-day-of-week volume gives the day weights. Seventeen years of NQ minutes is a far
-larger sample than any month of ticks. This is the free fix for the largest
-visible defect.
+per OPEN minute gives intensity, RMS of adjacent within-session close returns
+gives the vol curve, day-of-week volume gives the day weights. This was the free
+fix for the largest visible defect and it worked.
+
+Two things the fit learned that this paragraph originally got wrong. Seventeen
+years is NOT a larger effective sample: intraday concentration fell fourfold
+across the archive, era stability failed its preregistered test, and only
+2020-2026 was usable - so the corpus is six years, not seventeen. And exposure
+must come from the calendar rather than from row presence, because the archive
+omits zero-volume minutes entirely; deriving it from rows would shrink each quiet
+hour's denominator in proportion to its own quietness and compress the very
+peak-to-trough ratio the fit exists to measure. See `notes/mnq-session-fit.md`.
 
 ### 5.4 What no free source supplies
 
@@ -851,7 +984,7 @@ see [3.5](#35-resolved-the-venue-publishes-an-observable-top-of-book).
 
 | Quantity | Level | Free source available? | Notes |
 |---|---|---|---|
-| `intensity_hour`, `vol_hour`, `dow_weight` | per-instrument | **yes, NQ 1m bars on disk** | the biggest visible win |
+| `intensity_hour`, `vol_hour`, `dow_weight` | per-instrument | **DONE 2026-08-04, NQ 1m bars, free** | fitted 2020-2026; volume stands in for arrival count, so the swing is an upper bound |
 | `SessionCalendar` | per-instrument | already correct in the preset | done |
 | `modal_tick`, `price_decimals` | per-instrument | contract spec | done |
 | `start_price` | per-instrument | any NQ quote | trivial |
@@ -1103,16 +1236,19 @@ grid, and nothing in the fit wants them.
 Ordered by value per dollar and by what unblocks what. Steps 1 to 3 cost
 nothing.
 
-**Step 1. Refit the session profile from bars already on disk.** Compute
-`intensity_hour`, `vol_hour` and `dow_weight` from `nq-1m_bk.zip`, pair with the
-CME calendar already in `mnq.toml`. This fixes the largest visible defect
-([3.4](#34-the-session-profile-is-the-wrong-shape)) for zero dollars.
-Bumps `TAPE_PROTOCOL_VERSION`.
+**Step 1. Refit the session profile from bars already on disk. RESOLVED
+2026-08-04 at protocol 8.** `intensity_hour`, `vol_hour` and `dow_weight` are
+fitted from `nq-1m_bk.zip` against the corrected CME calendar in `mnq.toml`. See
+[3.4](#34-resolved-the-session-profile-is-fitted) and
+`notes/mnq-session-fit.md`. Zero dollars. One measurement remains outstanding -
+see [0.1](#01-state-of-play-2026-08-04-and-the-one-thing-that-is-unfinished).
 
-**Step 2. Make MNQ chartable.** Teach `mogwai gen` to load a preset, or add MNQ
-to the default instrument list, so the claims in section 3 can be seen rather
-than derived. Regenerate `docs/example-generated-bars.png`'s MNQ counterpart.
-This is what turns this document's arithmetic into evidence.
+**Step 2. Make MNQ chartable. RESOLVED 2026-08-04.** `mogwai gen --symbol`
+resolves an embedded preset through the same `effective_preset` path the server
+boots from, and applies the instrument's calendar - which is now a construction
+input rather than a builder call, so omitting it is not expressible. The
+`docs/example-generated-bars.png` MNQ counterpart still needs regenerating from
+a machine with a browser; see [0.1](#01-state-of-play-2026-08-04-and-the-one-thing-that-is-unfinished).
 
 **Step 3. Fix the notional blocker. RESOLVED 2026-08-04.** The generator now
 accepts `latent_size_median` in native size units, separates mechanism gates
@@ -1174,6 +1310,20 @@ constants are contract-specific or market-specific, and whether NQ's moments
 fall inside the existing cross-pair tolerances. If they do, the fingerprint is
 already MNQ-ish within its own stated band and the rest of the budget buys
 refinement rather than correction.
+
+**This purchase acquired a SECOND job at protocol 8, and it is not optional.**
+The fitted `intensity_hour` is contract-volume intensity standing in for
+arrival-count intensity, because bars carry volume and not trade counts. Mean
+trade size is larger during the cash session, so the fitted 27.51x peak-to-trough
+overstates the true arrival swing by an unknown factor whose DIRECTION is known.
+This window carries trade counts and can measure it.
+
+It must compare volume-per-minute against count-per-minute SESSION CURVES, not
+merely their aggregate moments: the quantity in question is the ratio of the two
+peak-to-trough figures, which no aggregate comparison can see. If the count curve
+is materially flatter, `intensity_hour` is biased by that factor and the
+provenance caveat in `mnq.toml` becomes a measured correction rather than a
+stated direction.
 
 **Step 7. Spend the rest with evidence.** Basket B, or whatever steps 4 and 5
 have reshaped it into, plus the GC probe if the Kraken cross-grid work in
@@ -1671,7 +1821,18 @@ python3 analysis/databento_price.py plan gcv grid     # the GC second-tick-grid 
 python3 analysis/databento_price.py cache             # what the response cache holds
 python3 analysis/asof_join.py selftest                # the quote-join contract
 python3 analysis/roll_estimator.py conformance        # Python half of the shared fixture
+python3 analysis/fit_session_profile.py preflight     # what the NQ archive actually contains
+python3 analysis/fit_session_profile.py fit           # the session fit and its report
+python3 analysis/plot_tape.py --gen --open --symbol MNQ --type bars --interval 1m --length 3d
 ```
+
+`fit_session_profile.py preflight` is an executable GATE rather than a summary:
+it answers whether the archive carries zero-volume rows, which decides whether
+exposure may come from row presence or must come from the calendar. Run it before
+trusting any fit. Its constants - the separability ratio, the material-exposure
+allowance, the era boundaries, the designated era, the early-close tolerance -
+are preregistered at the top of the file, and changing one after reading a result
+invalidates the acceptance claim it supports.
 
 The Rust-side diagnostics for [3.5](#35-resolved-the-venue-publishes-an-observable-top-of-book):
 
@@ -1825,21 +1986,41 @@ usability window rather than to measured spread
 ([3.5](#35-resolved-the-venue-publishes-an-observable-top-of-book)). Deciding whether it SHOULD be anchored
 to a measured quantity is a design question that also precedes the purchase.
 
-### 14.5 The two session mechanisms may double-count
+### 14.5 Resolved: the two session mechanisms compose, one owns closure
 
-`SessionProfile` near-zero shares and `SessionCalendar` hard windows both
-express closure, and both run. Whether they compose or double-count was not
-determined. See [2.6](#26-the-two-session-mechanisms).
+RESOLVED 2026-08-04 at protocol 8. The question as posed - do near-zero shares
+double-count the calendar - had no answer, because it presumed both mechanisms
+were entitled to express closure. They are not, and settling ownership dissolved
+it.
 
-### 14.6 Unverified claims in this document
+`SessionCalendar` owns closure. `SessionProfile` describes relative arrival and
+volatility CONDITIONAL on being open, normalized by the modulator over the
+calendar's open minutes. A near-zero factor remains legal and means a genuinely
+thin open hour, never a shut one. The integrating path survives as the numerical
+safeguard it always was, renamed from the closure claim its old name made:
+`SESSION_CLOSED_ARR_MULT` is `LOW_INTENSITY_ARR_MULT` and `closed_window_gap_ns`
+is `low_intensity_gap_ns`.
 
-- The archived USD-M futures `bookTicker` COLUMN LAYOUT. The spot `trades`
-  schema is now confirmed against vendor documentation, and the spot-versus-
-  derivatives coverage question is resolved in
-  [5.2.1](#521-correction-free-historical-quote-truth-does-not-cover-the-shipped-presets),
-  but the futures quote layout is still assumed. It must be read off one
-  downloaded daily file before a parser is written against it, because assuming
-  a layout is exactly the error that section documents.
+Validation is contextual rather than relaxed: without a calendar the legacy
+sum contract still holds, because the legacy arithmetic still runs and existing
+operator profiles must not shift. With one, the sums are not merely unnecessary
+but harmful - they would force fitted relative factors to satisfy a constraint
+that carries no meaning, and would make Saturday's unidentifiable 0/0 placeholder
+distort the six days that ARE identifiable.
+
+The practical consequence for anyone fitting a second instrument: closed minutes
+contribute neither activity nor exposure to the fit, and the profile is only
+valid against the calendar it was fitted with. See
+[3.4](#34-resolved-the-session-profile-is-fitted).
+
+### 14.6 Resolved: the futures archive contract is observed, not assumed
+
+RESOLVED 2026-08-04. The retained 2024-03-30 USD-M `trades` and `bookTicker`
+archives were checksum-verified, inspected before parsing, and recorded under
+the six file contracts in section 11.1. The futures quote layout, timestamp
+units, ordering, duplicate behavior and coverage overlap are therefore observed
+facts rather than assumptions. `analysis/binance_spread.py` is the fail-closed
+parser and one-day matrix implementation built against that recorded contract.
 
 ### 14.7 GC gap features are not fully comparable
 
@@ -1853,9 +2034,22 @@ Refitting anything bumps `TAPE_PROTOCOL_VERSION`. A preset's provenance must
 record which windows were bought, on which symbol (`v.0`, not `c.0`), and how
 the strata were chosen, since that choice is part of the fit.
 
-The MNQ preset's provenance map is currently all `kind = "declared"`, which is
-correct today: nothing in it is fitted, and it says so. The measure of this
-whole project succeeding is how many of those entries become
-`kind = "fitted"` with a named corpus and window, in the manner of
-`btcusdt.toml`'s one fitted entry. That is a better completion criterion than
-any dollar figure, and it should be the thing tracked.
+The MNQ preset's provenance map was all `kind = "declared"` until 2026-08-04. It
+now carries THREE `kind = "fitted"` entries - `session.intensity_hour`,
+`session.dow_weight` and `session.vol_hour` - each naming the NQ 1-minute corpus
+and the 2020-2026 window, and stating that the window was selected by
+preregistered rules rather than chosen after seeing results.
+
+That is the completion criterion this section proposed, and it now has a
+denominator: three of roughly twenty entries are fitted. It is a better measure
+than any dollar figure and it should be the thing tracked.
+
+One limit worth naming, because it will recur. The `Fitted` schema accepts
+`corpus`, `window` and `accepted_diagnostics` and nothing else, so it cannot
+structurally carry a caveat. MNQ's session fit has seven of them - two
+conventional values at unexposed buckets, one partially exposed hour, Sunday's
+thin exposure, the volume-to-arrival proxy, the purchase obligation, and
+conditionality on the calendar - and they live in prose immediately above
+`[instrument.session]` in the preset itself. Durable, self-contained, and citing
+no transient note. A future fitted quantity with caveats should do the same
+rather than compress them into the corpus string.
