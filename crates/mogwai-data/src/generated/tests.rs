@@ -2591,6 +2591,198 @@ fn standardized_garch_parameter_sweep() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Rail sizing for the standardized candidate.
+//
+// With standardized t(4) and persistence 0.999 the SECOND moment is
+// stationary, but the fourth is not: t(4) has infinite kurtosis, so sigma2 has
+// infinite variance and its running maximum grows without bound in the horizon.
+// "Zero hits in two million updates" therefore cannot mean "this rail never
+// binds" - it means the horizon was short. A rail is a POLICY: choose a clean
+// calibration horizon, choose how many hits are tolerable within it, and read
+// the rail off the measured tail.
+//
+// Rails are reported as scale-free RATIOS - sigma rail over vol_scalar, return
+// rail over return RMS - so the policy survives a later change to vol_scalar,
+// and so the replacement for the `vol_scalar < 0.9 * cap` headroom rule falls
+// out as 1/ratio rather than inheriting 0.9 by inertia.
+// ---------------------------------------------------------------------------
+
+/// Bounded high-tail collector: keeps the largest `keep` values seen without
+/// retaining the whole sample, which at sixteen million draws would be hundreds
+/// of megabytes for statistics that only read the extreme upper tail.
+struct TopK {
+    keep: usize,
+    values: Vec<f64>,
+    threshold: f64,
+    seen: u64,
+}
+
+impl TopK {
+    fn new(keep: usize) -> Self {
+        Self {
+            keep,
+            values: Vec::with_capacity(keep * 2),
+            threshold: f64::NEG_INFINITY,
+            seen: 0,
+        }
+    }
+    fn push(&mut self, value: f64) {
+        self.seen += 1;
+        if value <= self.threshold {
+            return;
+        }
+        self.values.push(value);
+        if self.values.len() >= self.keep * 2 {
+            self.compact();
+        }
+    }
+    fn compact(&mut self) {
+        self.values.sort_unstable_by(|a, b| b.total_cmp(a));
+        self.values.truncate(self.keep);
+        self.threshold = *self.values.last().unwrap_or(&f64::NEG_INFINITY);
+    }
+    /// The value exceeded by exactly `rank` samples, i.e. the rail that would
+    /// have been hit `rank` times over the whole sample.
+    fn value_exceeded_by(&mut self, rank: usize) -> Option<f64> {
+        self.compact();
+        if rank >= self.values.len() {
+            return None;
+        }
+        Some(self.values[rank])
+    }
+    fn max(&mut self) -> f64 {
+        self.compact();
+        self.values.first().copied().unwrap_or(f64::NAN)
+    }
+}
+
+/// Drive the standardized candidate's recursion with the rails effectively
+/// removed, so the measured tail is the process rather than the fence.
+fn measure_uncapped_tail(over: GarchOverride, seeds: u64, horizon: u64) -> (TopK, TopK, f64, u64) {
+    use rand::SeedableRng;
+    use rand_distr::{ChiSquared, Normal};
+
+    // Large enough that neither rail can be reached by any draw this process
+    // produces; occupancy is asserted zero below so the claim is checked.
+    const OPEN: f64 = 1e6;
+    let unit = (STUDENT_T_DF / (STUDENT_T_DF - 2.0)).sqrt();
+    let mut sigma_tail = TopK::new(65_536);
+    let mut return_tail = TopK::new(65_536);
+    let mut sumsq = 0.0_f64;
+    let mut total = 0_u64;
+
+    for seed in 0..seeds {
+        let mut vol = super::dynamics::GarchVol::new(21_000.0, over.vol_scalar);
+        let uncond = over.vol_scalar.powi(2);
+        vol.a0 = uncond * (1.0 - over.a1 - over.b1);
+        vol.a1 = over.a1;
+        vol.b1 = over.b1;
+        vol.sigma2 = uncond;
+        let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(seed);
+        let normal = Normal::new(0.0, 1.0).expect("valid normal");
+        let chi_squared = ChiSquared::new(STUDENT_T_DF).expect("valid chi-squared");
+        for _ in 0..horizon {
+            let z = super::dynamics::draw_student_t(&mut rng, &normal, &chi_squared) / unit;
+            let step = vol.step(z, OPEN);
+            assert!(
+                !step.hit_variance_cap() && !step.hit_feedback_clamp(),
+                "the sizing run must be unrailed; the fence was reached"
+            );
+            sigma_tail.push(step.sigma2.sqrt());
+            return_tail.push(step.unclipped_return.abs());
+            sumsq += step.unclipped_return * step.unclipped_return;
+            total += 1;
+        }
+    }
+    let rms = (sumsq / total as f64).sqrt();
+    (sigma_tail, return_tail, rms, total)
+}
+
+#[test]
+#[ignore = "long multi-seed tail measurement; run deliberately with an extended timeout"]
+fn standardized_candidate_rail_sizing() {
+    // The stage-1 winner.
+    let candidate = GarchOverride {
+        a1: 0.02,
+        b1: 0.979,
+        vol_scalar: 1.2e-5,
+    };
+    const SEEDS: u64 = 8;
+    const HORIZON: u64 = 2_000_000;
+
+    let (mut sigma_tail, mut return_tail, rms, total) =
+        measure_uncapped_tail(candidate, SEEDS, HORIZON);
+
+    println!();
+    println!(
+        "standardized candidate a1 {:.2} b1 {:.3} vol_scalar {:.2e}",
+        candidate.a1, candidate.b1, candidate.vol_scalar
+    );
+    println!("{SEEDS} seeds x {HORIZON} updates = {total} unrailed latent updates");
+    println!("unclipped return RMS {rms:.4e}");
+    println!();
+    println!(
+        "A rail placed at the value exceeded by K samples is hit K times across the whole run,"
+    );
+    println!("i.e. K/{SEEDS} times per {HORIZON}-update clean calibration horizon.");
+    println!();
+    println!(
+        "{:>10} {:>14} {:>12} | {:>14} {:>12}",
+        "hits/run", "sigma rail", "/ vol_scalar", "return rail", "/ RMS"
+    );
+    for rank in [0_usize, 1, 8, 80, 800, 8_000] {
+        let sigma = sigma_tail.value_exceeded_by(rank);
+        let ret = return_tail.value_exceeded_by(rank);
+        let (Some(sigma), Some(ret)) = (sigma, ret) else {
+            continue;
+        };
+        println!(
+            "{:>10} {:>14.4e} {:>12.1} | {:>14.4e} {:>12.1}",
+            rank,
+            sigma,
+            sigma / candidate.vol_scalar,
+            ret,
+            ret / rms
+        );
+    }
+    println!();
+    println!(
+        "observed maxima: sigma {:.4e} ({:.1}x vol_scalar), |return| {:.4e} ({:.1}x RMS)",
+        sigma_tail.max(),
+        sigma_tail.max() / candidate.vol_scalar,
+        return_tail.max(),
+        return_tail.max() / rms
+    );
+    println!();
+    println!("shipped rails for comparison:");
+    println!(
+        "  GARCH_SIGMA_CAP {:.4e} = {:.1}x this candidate's vol_scalar",
+        GARCH_SIGMA_CAP,
+        GARCH_SIGMA_CAP / candidate.vol_scalar
+    );
+    println!(
+        "  MAX_ABS_RETURN  {:.4e} = {:.1}x this candidate's return RMS",
+        MAX_ABS_RETURN,
+        MAX_ABS_RETURN / rms
+    );
+    println!();
+    println!("headroom rule: with a sigma rail at R x vol_scalar, the validation bound");
+    println!("becomes vol_scalar <= cap / R, replacing the inherited 0.9 factor.");
+
+    // The shipped rails are BELOW this candidate's ordinary operating range,
+    // which is the concrete reason the repair cannot land without re-deriving
+    // them: vol_scalar 1.2e-5 already exceeds GARCH_SIGMA_CAP 1e-5.
+    assert!(
+        candidate.vol_scalar > GARCH_SIGMA_CAP,
+        "candidate is expected to need a raised sigma rail"
+    );
+    assert!(
+        sigma_tail.max() / candidate.vol_scalar > 1.0,
+        "sigma excursions should exceed the unconditional scale"
+    );
+}
+
 fn is_round_lot(size: Decimal, median: f64) -> bool {
     let lot = 10.0_f64.powf(median.log10().floor());
     let units = decimal_to_f64(size) / lot;
