@@ -74,14 +74,25 @@ def main() -> None:
             if old[k]["frames_per_wall_second"][speed]["p999"] > 0
         ),
     }
-    reach = {
-        "sweep_drain_budget": max(
-            max(row["ticks_per_vol_window"]["p999"] for row in new.values()),
-            max(row["ticks_per_sim_second"]["p999"] for row in new.values()) * 300,
+    # The required reach is the larger of two candidates, and which one wins is
+    # the whole argument: a rate projected across the window, or the window count
+    # actually observed. `reference/performance.md` quotes both and says the
+    # observed ones lose, so both are printed - a figure a document cites and its
+    # source does not emit is a figure that drifts.
+    rate = max(row["ticks_per_sim_second"]["p999"] for row in new.values())
+    observed = {
+        "frames_per_sim_second": rate,
+        "vol_window_count": max(
+            row["ticks_per_vol_window"]["p999"] for row in new.values()
         ),
+        "warmup_window_count": max(
+            row["ticks_per_warmup"]["p999"] for row in new.values()
+        ),
+    }
+    reach = {
+        "sweep_drain_budget": max(observed["vol_window_count"], rate * 300),
         "warmup_materialization_ticks": max(
-            max(row["ticks_per_warmup"]["p999"] for row in new.values()),
-            max(row["ticks_per_sim_second"]["p999"] for row in new.values()) * 86_400,
+            observed["warmup_window_count"], rate * 86_400
         ),
     }
     proposed = {
@@ -118,7 +129,13 @@ def main() -> None:
     }
     print(
         json.dumps(
-            {"ratios": ratios, "required_reach": reach, "proposed": proposed, "horizons": horizons},
+            {
+                "ratios": ratios,
+                "observed": observed,
+                "required_reach": reach,
+                "proposed": proposed,
+                "horizons": horizons,
+            },
             indent=2,
             sort_keys=True,
         )

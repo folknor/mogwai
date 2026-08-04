@@ -31,7 +31,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
     thread,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Context;
@@ -128,6 +128,7 @@ struct Task {
 }
 
 pub(crate) fn run(args: &TickCompositionArgs) -> anyhow::Result<()> {
+    let started = Instant::now();
     if same_destination(&args.out_6, &args.out_7) {
         anyhow::bail!("--out-6 and --out-7 must name different files");
     }
@@ -154,11 +155,21 @@ pub(crate) fn run(args: &TickCompositionArgs) -> anyhow::Result<()> {
     // in cost, so the fixed shape paid the slowest preset's tail on every
     // worker and pinned concurrency at 32 regardless of the machine.
     let cursor = AtomicUsize::new(0);
+    // Distinct from `cursor`, which counts combinations CLAIMED. Progress has to
+    // report finished work: with one worker per core the claimed count runs a
+    // whole cohort ahead, and on a long tail it would sit at the total while the
+    // run still had its slowest combinations to go.
+    let completed = AtomicUsize::new(0);
+    let total = tasks.len();
     let results: Vec<Mutex<Option<(Reading, Reading)>>> =
         tasks.iter().map(|_| Mutex::new(None)).collect();
+    eprintln!(
+        "[tick-composition] measuring {total} combinations at {parents} parent events each, {jobs} workers"
+    );
     thread::scope(|scope| {
         for _ in 0..jobs.min(tasks.len()) {
-            let (cursor, tasks, results, profiles) = (&cursor, &tasks, &results, &profiles);
+            let (cursor, completed, tasks, results, profiles) =
+                (&cursor, &completed, &tasks, &results, &profiles);
             scope.spawn(move || {
                 loop {
                     let index = cursor.fetch_add(1, Ordering::Relaxed);
@@ -176,6 +187,17 @@ pub(crate) fn run(args: &TickCompositionArgs) -> anyhow::Result<()> {
                         fp,
                     );
                     *results[index].lock().expect("composition mutex poisoned") = Some(reading);
+                    // Naming the combination is the point, not the count: a run
+                    // that wedges does so on one preset/seed/mode, and this is
+                    // the only place that identity is ever printed.
+                    let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    eprintln!(
+                        "[tick-composition] {done}/{total} {} seed {} {} - {} elapsed",
+                        task.preset,
+                        task.seed,
+                        task.mode.label(),
+                        humanize(started.elapsed())
+                    );
                 }
             });
         }
@@ -190,11 +212,43 @@ pub(crate) fn run(args: &TickCompositionArgs) -> anyhow::Result<()> {
         })
         .unzip();
 
+    let pairing = pairing_id();
     write_reports(
         (&args.out_6, entries_6),
         (&args.out_7, entries_7),
-        &pairing_id(),
+        &pairing,
         parents,
+    )?;
+    // The command was silent on success until now, so a finished run and a
+    // wedged one looked identical from outside. The elapsed time is also the
+    // number `reference/performance.md` wants recorded beside the fixtures, and
+    // the pairing identifier is otherwise only reachable by opening a
+    // five-thousand-line document - while being the thing the ratio script
+    // refuses a mismatched pair on.
+    println!(
+        "tick-composition wrote {} and {} in {}, pairing {pairing}",
+        args.out_6.display(),
+        args.out_7.display(),
+        humanize(started.elapsed())
+    );
+    Ok(())
+}
+
+/// Wall time at both ends of this command's range: a sub-minute smoke run with
+/// `--parents` turned down, and a full measurement that runs for hours.
+fn humanize(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        return format!("{:.1}s", elapsed.as_secs_f64());
+    }
+    if secs < 3_600 {
+        return format!("{}m {:02}s", secs / 60, secs % 60);
+    }
+    format!(
+        "{}h {:02}m {:02}s",
+        secs / 3_600,
+        secs % 3_600 / 60,
+        secs % 60
     )
 }
 
@@ -820,6 +874,17 @@ mod tests {
             Path::new("analysis/tick-composition-protocol-6.json"),
             Path::new("analysis/tick-composition-protocol-7.json")
         ));
+    }
+
+    #[test]
+    fn humanize_reads_at_both_ends_of_the_range() {
+        assert_eq!(humanize(Duration::from_millis(1_500)), "1.5s");
+        assert_eq!(humanize(Duration::from_secs(59)), "59.0s");
+        assert_eq!(humanize(Duration::from_secs(60)), "1m 00s");
+        assert_eq!(humanize(Duration::from_secs(905)), "15m 05s");
+        assert_eq!(humanize(Duration::from_secs(3_599)), "59m 59s");
+        assert_eq!(humanize(Duration::from_secs(3_600)), "1h 00m 00s");
+        assert_eq!(humanize(Duration::from_secs(7_384)), "2h 03m 04s");
     }
 
     #[test]

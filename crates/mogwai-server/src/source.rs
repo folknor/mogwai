@@ -137,11 +137,11 @@ pub(crate) const CHECKPOINT_K: usize = 1_048_576;
 const MAX_EXTEND_TICKS: usize = 1 << 30;
 
 /// Total legitimate boot reach admitted across lock-releasing extension
-/// chunks. Protocol 7's worst measured p99.9 rate projects 81,193,017,600
+/// chunks. Protocol 7's worst measured p99.9 rate projects 81,123,436,742
 /// frames into the longest shipped warmup; the next-million rounding produces
 /// this ceiling. Keeping it separate from `MAX_EXTEND_TICKS` prevents a reach
 /// requirement from silently disabling the per-lock runaway backstop.
-const MAX_WARMUP_MATERIALIZATION_TICKS: usize = 81_194_000_000;
+const MAX_WARMUP_MATERIALIZATION_TICKS: usize = 81_124_000_000;
 
 /// The run's one checkpoint chain, over the run's one realization. Process
 /// global because the run is: one instrument, one regime, one origin for the

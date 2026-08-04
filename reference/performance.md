@@ -231,46 +231,55 @@ including zero-frame seconds. Wall-rate tails use exactly 600 bins per speed.
 The reported p99.9 is the linearly interpolated empirical quantile at rank
 `(n - 1) * 0.999`, so a 600-bin horizon does not collapse p99.9 to the maximum.
 
-The fixtures currently in the tree predate those corrections: they measured
-BTCUSDT once per seed and mode, relabeled four cloned rows as other presets,
-omitted empty simulated seconds, used a ceiling rank that made every
-600-bin p99.9 equal the maximum, and ran every preset on the spot size grid with
-no calendar. The ratios and derived constants below are the landed values from
-that superseded measurement and remain pending revalidation with corrected
-fixtures.
+An earlier measurement predated those corrections: it measured BTCUSDT once per
+seed and mode and relabeled four cloned rows as other presets, omitted empty
+simulated seconds, used a ceiling rank that made every 600-bin p99.9 equal the
+maximum, and ran every preset on the spot size grid with no calendar. Its
+figures are gone from this document; the ones below are the corrected
+measurement. The correction moved one constant, the cumulative warmup ceiling,
+by 70,000,000 frames out of 81 billion. That the other three survived it intact
+is a property of the two-times headroom and the power-of-two rounding, which are
+coarse enough to absorb the whole error - not evidence that the defects were
+harmless.
+
+The run costs about an hour on a workstation, nearly all of it the surged arm:
+maximum surge compresses arrivals 1000-fold, so 2,000,000 parent events span
+roughly 340 simulated seconds and the traversal must then continue to the
+6,000-second fanout horizon on tape that feeds the wall-rate bins alone.
 
 The maximum paired p99.9 protocol-7/protocol-6 ratios were:
 
 | budget denominator | ratio | resulting constant |
 |---|---:|---:|
-| simulated-second checkpoint work | 1.444444 | 1,048,576 |
-| 300-second sweep work | 1.583429 | 282,000,000 |
-| 24-hour cumulative warmup reach | 1.589438 | 81,194,000,000 |
-| wall-second fanout work | 1.534884 | 262,144 |
+| simulated-second checkpoint work | 1.388889 | 1,048,576 |
+| 300-second sweep work | 1.583145 | 282,000,000 |
+| 24-hour cumulative warmup reach | 1.589436 | 81,124,000,000 |
+| wall-second fanout work | 1.546711 | 262,144 |
 
 Every ratio exceeds the 1.05 materiality threshold. Each resulting constant is
 the old constant multiplied by the ratio and by two for headroom, then rounded
 up as specified by the BBO layer measurement protocol: powers of two for the
 checkpoint and fanout, and the next million for sweep and warmup reach. The sweep
 formula alone produced 16,000,000. The required-reach rule applies the worst
-measured p99.9 rate of 939,734 frames per simulated second over the whole
-horizon, then rounds up. That raises the sweep budget above 281,920,200 frames
-and the cumulative warmup ceiling above 81,193,017,600 frames. The directly observed
-partial-window counts, 258,690,975 and 1,365,354,043, are lower and therefore
-do not set either result.
+measured p99.9 rate of 938,928.666 frames per simulated second over the whole
+horizon, then rounds up. That raises the sweep budget above 281,678,599 frames
+and the cumulative warmup ceiling above 81,123,436,742 frames. The directly observed
+partial-window counts, 258,678,966 and 1,364,836,628, are lower and therefore
+do not set either result. All four are fractional now, because the p99.9 is an
+interpolated quantile rather than an element of the sample.
 
 The warmup reach is not the per-lock runaway backstop. `MAX_EXTEND_TICKS`
 remains 1,073,741,824 ticks per index-lock acquisition; boot materialization may
 use multiple such chunks, releasing the global lock between them, up to the
-81,194,000,000 cumulative measured-reach ceiling. The sweep's refusal ceiling
+81,124,000,000 cumulative measured-reach ceiling. The sweep's refusal ceiling
 is likewise separate from its 2,500,000-tick latency warning threshold.
 
 The checkpoint calculation starts from the prior approximately 88
 simulated-minute spacing contract. The two-times headroom and power-of-two
 rounding make the final bound deliberately longer than an exact preservation;
 it cannot shorten the baseline horizon. At the worst measured wall rate, the
-old 65,536-frame fanout held 0.007367 wall seconds; the resized fanout holds
-0.029427 wall seconds, so its horizon does not shrink. Regenerate both fixtures
+old 65,536-frame fanout held 0.007398 wall seconds; the resized fanout holds
+0.029553 wall seconds, so its horizon does not shrink. Regenerate both fixtures
 with
 `brokkr run mogwai -- tick-composition --out-6 analysis/tick-composition-protocol-6.json --out-7 analysis/tick-composition-protocol-7.json`,
 then run `python3 analysis/tick_composition_ratios.py` after any

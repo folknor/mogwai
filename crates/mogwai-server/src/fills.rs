@@ -22,7 +22,7 @@ use crate::source::{self, InstrumentProfiles};
 /// The original 5,000,000 cap covered ordinary multi-hour gaps of roughly
 /// 700,000 ticks. The much larger value is driven instead by the protocol 7
 /// REQUIRED-REACH rule: the worst measured maximum-surge p99.9 rate projects
-/// 281,920,200 frames into one 300-second volatility window. Rounded upward,
+/// 281,678,599 frames into one 300-second volatility window. Rounded upward,
 /// this prevents a complete supported window from being refused as truncated.
 ///
 /// This is a refusal ceiling, not an acceptable latency. At the measured 2.9M
@@ -484,6 +484,18 @@ mod tests {
     /// indistinguishable from the degenerate `u = 0` case; above 100 the p90
     /// band approaches the move the tape makes over a whole `VOL_WINDOW_NS`, at
     /// which point a fill is decided by the draw rather than by the tape.
+    // MEASUREMENT INSTRUMENT. Its name is in the gate profile's `skip` list in
+    // `brokkr.toml`, and has to be: the gate sets `include_ignored` deliberately
+    // - that is how the socket-backed suites get covered - so `#[ignore]` does
+    // not keep this out of it. Every instrument of this shape MUST be added to
+    // that list as well. Nothing detects the omission; the symptom is
+    // `brokkr check --gate` dying on the 20-second per-test hang watchdog,
+    // blaming a test that was never meant to run there.
+    //
+    // Run it deliberately by name, raising the watchdog for that one run:
+    //   brokkr test -p mogwai-server vol_probe --timeout 280
+    // `--timeout` applies to `brokkr test` only, takes 1 to 280 seconds, and is
+    // refused when the name matches more than one test. 280 is a hard cap.
     #[test]
     #[ignore = "calibration instrument"]
     fn vol_probe() {
@@ -624,6 +636,18 @@ mod tests {
     /// `VOL_WINDOW_NS`, second caching one reading per symbol per sweep interval
     /// and serving submits from it, which is sound because the band is a coarse
     /// scale rather than a per-microsecond quantity.
+    // MEASUREMENT INSTRUMENT. Its name is in the gate profile's `skip` list in
+    // `brokkr.toml`, and has to be: the gate sets `include_ignored` deliberately
+    // - that is how the socket-backed suites get covered - so `#[ignore]` does
+    // not keep this out of it. Every instrument of this shape MUST be added to
+    // that list as well. Nothing detects the omission; the symptom is
+    // `brokkr check --gate` dying on the 20-second per-test hang watchdog,
+    // blaming a test that was never meant to run there.
+    //
+    // Run it deliberately by name, raising the watchdog for that one run:
+    //   brokkr test -p mogwai-server read_market_latency_stays_within_submit_budget --timeout 280
+    // `--timeout` applies to `brokkr test` only, takes 1 to 280 seconds, and is
+    // refused when the name matches more than one test. 280 is a hard cap.
     #[test]
     #[ignore = "latency instrument"]
     fn read_market_latency_stays_within_submit_budget() {
