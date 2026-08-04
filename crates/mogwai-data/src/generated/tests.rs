@@ -2129,6 +2129,42 @@ struct ArmReport {
     duration_dispersion_cv2: f64,
 }
 
+/// Committed anchor decay ratios. The absolute-return ACF's SHAPE, expressed so
+/// amplitude cannot disguise it: a candidate can sit inside all three broad
+/// cross-pair level bands while decaying nothing like the anchor.
+const ANCHOR_DECAY_10_1: f64 = 0.156_494_548_959_599_02 / 0.307_406_127_222_509_8;
+const ANCHOR_DECAY_50_10: f64 = 0.122_524_185_719_926_79 / 0.156_494_548_959_599_02;
+
+impl ArmReport {
+    fn decay_10_1(&self) -> f64 {
+        self.abs_acf_lag10 / self.abs_acf_lag1
+    }
+    fn decay_50_10(&self) -> f64 {
+        self.abs_acf_lag50 / self.abs_acf_lag10
+    }
+    /// Relative shape error against the anchor decay profile, plus a penalty
+    /// for any time spent saturated. The penalty is what stops a search
+    /// quietly re-adopting the variance cap as a fitted nonlinearity, which is
+    /// exactly how the shipped calibration came to depend on it.
+    fn shape_error(&self) -> f64 {
+        let d1 = (self.decay_10_1() - ANCHOR_DECAY_10_1).abs() / ANCHOR_DECAY_10_1;
+        let d2 = (self.decay_50_10() - ANCHOR_DECAY_50_10).abs() / ANCHOR_DECAY_50_10;
+        d1 + d2 + 10.0 * (self.cap_occupancy + self.clamp_occupancy)
+    }
+}
+
+/// TEST-ONLY GARCH parameterization. `GarchVol` reads only `a0`, `a1`, `b1` and
+/// its running `sigma2`, so writing those four expresses any `(a1, b1,
+/// vol_scalar)` triple without routing through `vol_scalar` validation - which
+/// matters because the shipped bound sits below the amplitude a stationary
+/// process needs.
+#[derive(Debug, Clone, Copy)]
+struct GarchOverride {
+    a1: f64,
+    b1: f64,
+    vol_scalar: f64,
+}
+
 /// Run one arm at the SAME configuration the realism gate uses -
 /// `xbtusd_anchor`, unmodified apart from `vol_scalar` - and score it with the
 /// SHIPPED `measure`, not a re-derivation. An earlier draft of this harness got
@@ -2147,6 +2183,7 @@ fn run_arm(
     clamp_mult: f64,
     events: usize,
     probe_events: usize,
+    over: Option<GarchOverride>,
 ) -> ArmReport {
     let fp = Fingerprint::from_repo_json();
     let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
@@ -2156,6 +2193,17 @@ fn run_arm(
         let mut src =
             GeneratedSource::new_with_clamp_override(scalars.clone(), 42, 0, &fp, None, clamp_mult);
         src.innovation_divisor = divisor;
+        if let Some(o) = over {
+            // `a0 = uncond * (1 - a1 - b1)` is the CORRECT derivation once the
+            // innovation carries unit variance, which is the whole point of the
+            // standardized arm: the shipped formula is right, it was only ever
+            // applied to a variance-2 innovation.
+            let uncond = o.vol_scalar.powi(2);
+            src.vol.a0 = uncond * (1.0 - o.a1 - o.b1);
+            src.vol.a1 = o.a1;
+            src.vol.b1 = o.b1;
+            src.vol.sigma2 = uncond;
+        }
         src
     };
 
@@ -2260,8 +2308,8 @@ fn standardized_innovation_counterfactual_against_realism_targets() {
     let unit = (STUDENT_T_DF / (STUDENT_T_DF - 2.0)).sqrt();
 
     const PROBE: usize = 200_000;
-    let shipped = run_arm(shipped_vol, 1.0, 1.0, EVENTS, PROBE);
-    let same_scalar = run_arm(shipped_vol, unit, 1.0, EVENTS, PROBE);
+    let shipped = run_arm(shipped_vol, 1.0, 1.0, EVENTS, PROBE, None);
+    let same_scalar = run_arm(shipped_vol, unit, 1.0, EVENTS, PROBE, None);
 
     // Arm 3 matches arm 1's LATENT amplitude. Standardization removes a factor
     // of `unit` from the innovation, and the shipped arm additionally runs
@@ -2274,7 +2322,7 @@ fn standardized_innovation_counterfactual_against_realism_targets() {
     let wanted = target;
     let legal_max = GARCH_SIGMA_CAP * VOL_SCALAR_CAP_FRACTION * 0.999;
     let matched_vol = wanted.min(legal_max);
-    let matched = run_arm(matched_vol, unit, 40.0, EVENTS, PROBE);
+    let matched = run_arm(matched_vol, unit, 40.0, EVENTS, PROBE, None);
 
     println!();
     print_arm("ARM 1  shipped, raw t(4)", shipped_vol, &shipped);
@@ -2308,6 +2356,238 @@ fn standardized_innovation_counterfactual_against_realism_targets() {
     assert!(
         shipped.cap_occupancy > 0.01,
         "shipped arm should reproduce the saturation the instrumentation found"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Stage 1 of the re-solve: standardized GARCH parameter sweep.
+//
+// The counterfactual established that standardization is the right mechanism
+// repair but not a drop-in parameter change, because the shipped calibration
+// depends materially on saturation. This sweep asks how much of the remaining
+// absolute-return ACF failure belongs to GARCH ALONE, before the event-price
+// layer is reopened.
+//
+// Held fixed on purpose: the bounce transition chain, EVENT_PRICE_REPEAT_PROB,
+// DRIFT_RECENTER_FRAC, the level-step multipliers and every sweep constant.
+// Turning those loose in the same search is how a fit stops being attributable.
+//
+// The caps are raised far out of reach through `clamp_mult` and occupancy is
+// scored with a penalty, so the search cannot re-adopt saturation as a fitted
+// nonlinearity - which is how the shipped calibration got here.
+//
+// The shipped arm's latent amplitude is a REFERENCE, not a target: it is now
+// known to be an artifact of the defect, so `vol_scalar` is swept rather than
+// pinned to reproduce it.
+// ---------------------------------------------------------------------------
+
+/// Candidates are scored on a shorter draw than the realism gate uses. Absolute
+/// ACF levels carry a common-mode small-sample bias at this size, so candidates
+/// are comparable TO EACH OTHER and the winner is re-scored at the full draw
+/// before anything is concluded about range membership.
+const SWEEP_EVENTS: usize = 300_000;
+const SWEEP_PROBE: usize = 100_000;
+/// Far above any innovation the swept scales can produce, so both rails are
+/// inert and occupancy measures the process rather than the fence.
+const SWEEP_CLAMP_MULT: f64 = 60.0;
+
+#[test]
+#[ignore = "parameter sweep over the standardized GARCH; run deliberately with an extended timeout"]
+fn standardized_garch_parameter_sweep() {
+    let unit = (STUDENT_T_DF / (STUDENT_T_DF - 2.0)).sqrt();
+
+    // Reference: the shipped process, measured the same way.
+    let shipped = run_arm(1e-6, 1.0, 1.0, SWEEP_EVENTS, SWEEP_PROBE, None);
+
+    // A first pass over a1 in 0.04..0.16, persistence 0.97..0.999 and
+    // vol_scalar 3e-6..1.2e-5 put the optimum at the LOW a1 edge and the HIGH
+    // vol_scalar edge, so it never bracketed. The grid below brackets both, and
+    // the upper vol_scalar values are bounded from above in practice by
+    // zero_change_frac falling out of range as the tick stops binding.
+    let arch_values = [0.01_f64, 0.02, 0.04, 0.08];
+    let persistences = [0.985_f64, 0.995, 0.999];
+    let vol_scalars = [1.2e-5_f64, 2.4e-5, 4.8e-5];
+
+    let mut rows: Vec<(GarchOverride, ArmReport)> = Vec::new();
+    for a1 in arch_values {
+        for persistence in persistences {
+            let b1 = persistence - a1;
+            if b1 <= 0.0 {
+                continue;
+            }
+            for vol_scalar in vol_scalars {
+                let over = GarchOverride { a1, b1, vol_scalar };
+                let report = run_arm(
+                    1e-6,
+                    unit,
+                    SWEEP_CLAMP_MULT,
+                    SWEEP_EVENTS,
+                    SWEEP_PROBE,
+                    Some(over),
+                );
+                rows.push((over, report));
+            }
+        }
+    }
+
+    println!();
+    println!(
+        "anchor decays: lag10/lag1 {ANCHOR_DECAY_10_1:.3}, lag50/lag10 {ANCHOR_DECAY_50_10:.3}"
+    );
+    println!(
+        "SHIPPED reference: decays {:.3} / {:.3}, abs1 {:.3}, cap {:.1}%, RMS {:.3e}",
+        shipped.decay_10_1(),
+        shipped.decay_50_10(),
+        shipped.abs_acf_lag1,
+        100.0 * shipped.cap_occupancy,
+        shipped.base_return_rms
+    );
+    println!();
+    println!(
+        "{:>5} {:>6} {:>9} | {:>7} {:>7} | {:>7} {:>7} {:>7} | {:>8} {:>8} | {:>6} {:>6}",
+        "a1",
+        "b1",
+        "vol",
+        "d10/1",
+        "d50/10",
+        "abs1",
+        "abs10",
+        "abs50",
+        "racf1",
+        "zerochg",
+        "cap%",
+        "err"
+    );
+    rows.sort_by(|a, b| {
+        a.1.shape_error()
+            .partial_cmp(&b.1.shape_error())
+            .expect("finite shape error")
+    });
+    for (over, report) in &rows {
+        println!(
+            "{:>5.2} {:>6.3} {:>9.2e} | {:>7.3} {:>7.3} | {:>7.3} {:>7.3} {:>7.3} | {:>8.4} {:>8.4} | {:>6.2} {:>6.3}",
+            over.a1,
+            over.b1,
+            over.vol_scalar,
+            report.decay_10_1(),
+            report.decay_50_10(),
+            report.abs_acf_lag1,
+            report.abs_acf_lag10,
+            report.abs_acf_lag50,
+            report.return_acf_lag1,
+            report.zero_change_frac,
+            100.0 * report.cap_occupancy,
+            report.shape_error()
+        );
+    }
+
+    let (best_over, best) = &rows[0];
+    println!();
+    println!(
+        "best by shape error: a1 {:.2} b1 {:.3} vol_scalar {:.2e}",
+        best_over.a1, best_over.b1, best_over.vol_scalar
+    );
+    println!(
+        "  decays {:.3} / {:.3} vs anchor {ANCHOR_DECAY_10_1:.3} / {ANCHOR_DECAY_50_10:.3}",
+        best.decay_10_1(),
+        best.decay_50_10()
+    );
+    println!(
+        "  shipped decays {:.3} / {:.3}  (lower error is closer to the anchor)",
+        shipped.decay_10_1(),
+        shipped.decay_50_10()
+    );
+    println!(
+        "  cap occupancy {:.3}%  clamp occupancy {:.3}%  latent RMS {:.3e}",
+        100.0 * best.cap_occupancy,
+        100.0 * best.clamp_occupancy,
+        best.base_return_rms
+    );
+    println!(
+        "  tick_return / scale {:.3}  (shipped {:.3})",
+        best.tick_return_over_scale, shipped.tick_return_over_scale
+    );
+    println!(
+        "  cadence control duration_dispersion_cv2 {:.3}  (shipped {:.3})",
+        best.duration_dispersion_cv2, shipped.duration_dispersion_cv2
+    );
+
+    // Best candidate that also sits inside every committed level band. Shape
+    // and level are reported separately on purpose: the lowest shape error in
+    // the grid overshoots two level bands, so "best shape" and "admissible"
+    // are different candidates and collapsing them would hide that.
+    let fp = Fingerprint::from_repo_json();
+    let in_range = |r: &ArmReport| {
+        fp.golden_targets
+            .return_acf_lag1
+            .range
+            .contains(r.return_acf_lag1)
+            && fp
+                .golden_targets
+                .abs_return_acf
+                .lag1
+                .range
+                .contains(r.abs_acf_lag1)
+            && fp
+                .golden_targets
+                .abs_return_acf
+                .lag10
+                .range
+                .contains(r.abs_acf_lag10)
+            && fp
+                .golden_targets
+                .abs_return_acf
+                .lag50
+                .range
+                .contains(r.abs_acf_lag50)
+            && fp
+                .golden_targets
+                .zero_change_frac
+                .range
+                .contains(r.zero_change_frac)
+    };
+    let admissible: Vec<_> = rows.iter().filter(|(_, r)| in_range(r)).collect();
+    println!();
+    println!(
+        "{} of {} candidates sit inside all five committed level bands",
+        admissible.len(),
+        rows.len()
+    );
+    if let Some((over, report)) = admissible.first() {
+        println!(
+            "best ADMISSIBLE: a1 {:.2} b1 {:.3} vol_scalar {:.2e}  decays {:.3} / {:.3}  err {:.3}",
+            over.a1,
+            over.b1,
+            over.vol_scalar,
+            report.decay_10_1(),
+            report.decay_50_10(),
+            report.shape_error()
+        );
+        // Re-score at the realism gate's own draw: the sweep runs short, and a
+        // level band is only meaningful at the sample size it was fitted for.
+        let full = run_arm(1e-6, unit, SWEEP_CLAMP_MULT, DRAW, SWEEP_PROBE, Some(*over));
+        println!();
+        print_arm(
+            "BEST ADMISSIBLE at the full realism draw",
+            over.vol_scalar,
+            &full,
+        );
+        println!(
+            "  all five bands at full draw: {}",
+            if in_range(&full) { "PASS" } else { "FAIL" }
+        );
+    }
+
+    // The sweep must actually explore, and the raised rails must be inert -
+    // otherwise the occupancy penalty is measuring the fence, not the process.
+    assert!(rows.len() >= 30, "sweep should cover the grid");
+    assert!(
+        best.cap_occupancy < 1e-6 && best.clamp_occupancy < 1e-6,
+        "raised rails should be inert for the best candidate"
+    );
+    assert!(
+        (best.duration_dispersion_cv2 - shipped.duration_dispersion_cv2).abs() < 1e-9,
+        "cadence is a control and must not move with the GARCH parameters"
     );
 }
 
