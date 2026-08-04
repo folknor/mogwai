@@ -1200,7 +1200,37 @@ rather than a paging artifact.
 A matched pair does exist inside the overlap: `trades` for 2024-03-30 returns
 200 at 12,403,562 bytes.
 
-**Stopping here for a design decision rather than proceeding.** The stated rule
+#### Scope constraints, accepted 2026-08-04 and recorded BEFORE downloading
+
+2024-03-30 is accepted for a narrow methodology experiment. What it is permitted
+to conclude is deliberately smaller than what it will be tempting to conclude,
+so the limits are written down first:
+
+- **Historical USD-M BTCUSDT methodology evidence only.**
+- **One completed matched UTC day: 2024-03-30.**
+- The date was selected by COVERAGE, being the latest available `bookTicker`
+  day, and NOT by market conditions. It is not a chosen regime.
+- No temporal generalization, and no transfer to CME.
+- Archive age is a LIMITATION, never an input to any fit.
+- Any result that motivates calibration still requires current,
+  instrument-relevant quote data.
+
+The permitted question is exactly two things: whether the three trade-derived
+Roll conventions diverge from contemporaneous quoted and effective spread truth,
+and whether their apparent volatility dependence survives quote-age
+stratification.
+
+It must NOT estimate a correction factor, calibrate the spread response,
+represent current Binance conditions, or substitute for CME TBBO. The synthetic
+result already establishes that trade-only estimation is unsuitable for fitting
+the response; this experiment's narrower job is to show how that failure
+presents against observed quotes in a real event stream, where quote staleness,
+sequencing ambiguity and locked or crossed books exist and the synthetic tape
+has none of them.
+
+#### The decision that was taken here
+
+The stated rule
 was not to substitute another stream, cadence, endpoint or date range without
 revisiting the experiment design, and using 2024-03-30 is a date-range
 substitution. It is a mild one - the futures experiment validates METHODOLOGY
@@ -1212,6 +1242,32 @@ What the choice actually is: accept a quote corpus that ends in March 2024 and
 is therefore roughly two years stale relative to the `trades` data and to any
 CME window under consideration, or revisit the design. Nothing in the archive
 offers a more recent free quote source for this venue.
+
+#### Retained archives, downloaded and verified 2026-08-04
+
+Downloaded unchanged into `research/market-data/` (gitignored), with the
+published checksum files, and verified before anything read them. Both pass.
+
+| file | bytes | sha256 verified |
+|---|---|---|
+| `BTCUSDT-trades-2024-03-30.zip` | 12,403,562 | OK |
+| `BTCUSDT-bookTicker-2024-03-30.zip` | 87,758,829 | OK |
+
+```
+https://data.binance.vision/data/futures/um/daily/trades/BTCUSDT/BTCUSDT-trades-2024-03-30.zip
+https://data.binance.vision/data/futures/um/daily/trades/BTCUSDT/BTCUSDT-trades-2024-03-30.zip.CHECKSUM
+https://data.binance.vision/data/futures/um/daily/bookTicker/BTCUSDT/BTCUSDT-bookTicker-2024-03-30.zip
+https://data.binance.vision/data/futures/um/daily/bookTicker/BTCUSDT/BTCUSDT-bookTicker-2024-03-30.zip.CHECKSUM
+```
+
+The archives are kept as downloaded. Nothing is transformed before the six file
+contracts below are recorded, so a parsing decision cannot be justified by a
+file that was already reshaped to suit it.
+
+Note the download volume is limited only by disk space, not by policy. The
+one-day scope is an ANALYTICAL constraint - methodology evidence, a
+coverage-selected date, no temporal generalization - and expanding it is a
+design decision rather than a resource one.
 
 #### The six file contracts, to establish from a downloaded file
 
