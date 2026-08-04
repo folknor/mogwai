@@ -2629,9 +2629,19 @@ fn stratum_of(vol: f64, boundaries: &[f64]) -> usize {
 }
 
 /// Roll over a price series restricted to one stratum. A covariance PAIR spans
-/// two consecutive changes, hence three prices; it is assigned to a stratum by
-/// the LATER observation, so a boundary cannot claim a pair that straddles it.
-/// Returns the estimate and the pair count that produced it.
+/// two consecutive changes, hence three prices, and contributes
+/// `dP_t * dP_{t-1}`.
+///
+/// NO-LOOKAHEAD RULE, and it is load-bearing. The pair belongs to the LATER of
+/// its two changes, `dP_t`, so a boundary cannot claim a pair that straddles
+/// it - but the volatility that assigns it must be computed from information
+/// available BEFORE `dP_t`. It may include `dP_{t-1}`, matching what a
+/// conditional volatility process would know.
+///
+/// An earlier version indexed `vols` at the pair's third PRICE, whose trailing
+/// window includes `dP_t` itself. That stratifies on one of the two terms being
+/// multiplied, and mechanically amplifies exactly the relationship the matrix
+/// exists to measure. Returns the estimate and the pair count behind it.
 fn roll_in_stratum(
     prices: &[f64],
     vols: &[Option<f64>],
@@ -2642,8 +2652,11 @@ fn roll_in_stratum(
     let changes: Vec<f64> = prices.windows(2).map(|w| w[1] - w[0]).collect();
     let mut pairs: Vec<(f64, f64)> = Vec::new();
     for i in 0..changes.len().saturating_sub(1) {
-        // The later observation of the pair is price index i + 2.
-        let Some(vol) = vols.get(i + 2).copied().flatten() else {
+        // The pair is (changes[i], changes[i+1]) = (dP_{t-1}, dP_t). Index i+1
+        // is the volatility observable AT price i+1, i.e. after dP_{t-1} and
+        // strictly before dP_t. Indexing i+2 instead would fold dP_t into its
+        // own stratum assignment.
+        let Some(vol) = vols.get(i + 1).copied().flatten() else {
             continue;
         };
         if stratum_of(vol, boundaries) == stratum {
@@ -2956,8 +2969,12 @@ fn synthetic_spread_decomposition_at_protocol_six() {
     }
     println!();
     println!(
-        "  cells fail closed below {MIN_COVARIANCE_PAIRS} covariance pairs; pairs are assigned by \
-         the LATER observation"
+        "  cells fail closed below {MIN_COVARIANCE_PAIRS} covariance pairs; a pair belongs to the \
+         LATER of its"
+    );
+    println!(
+        "  two changes, stratified by volatility observable strictly BEFORE that change - no \
+         lookahead"
     );
     println!();
     println!(

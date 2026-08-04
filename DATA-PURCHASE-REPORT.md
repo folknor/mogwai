@@ -1098,8 +1098,17 @@ estimator, not an implementation detail.
 - `roll_first_child`, `roll_last_child` and `roll_all_prints` stay SEPARATE. No
   blending, no "best" one.
 - Roll is UNAVAILABLE, never zero, when the covariance is non-negative.
-- A covariance PAIR is assigned to a stratum by the LATER of its two
-  observations, so a stratum boundary cannot claim a pair that straddles it.
+- A covariance PAIR contributes `dP_t * dP_{t-1}` and is assigned to a stratum
+  by the LATER of its two changes, `dP_t`, so a stratum boundary cannot claim a
+  pair that straddles it.
+- **The volatility that assigns it must be computed from information available
+  strictly BEFORE `dP_t`.** It may include `dP_{t-1}`, matching what a
+  conditional volatility process would know. Including `dP_t` stratifies on one
+  of the two terms being multiplied and mechanically amplifies the very
+  relationship the matrix measures. The first implementation of this harness got
+  it wrong by indexing the pair's third PRICE, whose trailing window contains
+  `dP_t`; correcting it moved the extreme cells from 3.1x and 16.9x to 2.5x and
+  12.1x, so the contamination was real and material but not the whole effect.
 - Every cell reports both its sample count and its covariance-pair count. These
   differ, and quoting one for the other overstates the evidence.
 - Sparse cells FAIL CLOSED. An unstable estimate printed without comment is
@@ -1196,12 +1205,49 @@ BIASED PROXY, whether `roll_last_child` measures sweep intensity rather than
 spread, and whether either relationship is stable enough to inform the CME
 purchase design.
 
+#### What the synthetic run already establishes
+
+Against a spread that is CONSTANT at 2.000 ticks by construction, and with no
+lookahead in the stratification:
+
+| convention | calm | middle | stressed | extreme |
+|---|---|---|---|---|
+| `roll_first_child` | 0.975 | 1.287 | 1.835 | 2.470 |
+| `roll_last_child` | 1.026 | 5.627 | 10.074 | 12.396 |
+
+Stated carefully, because the tempting reading is stronger than the evidence:
+
+- First-child's rising estimate proves that EXCLUDING THE SWEEP does not remove
+  the artifact. Bounce, latent movement, grid phase, repetition and volatility
+  conditioning all remain in it.
+- Last-child's much steeper rise is CONSISTENT WITH additional sweep-walk
+  contamination.
+- The two agreeing in calm conditions and diverging under stress supports that
+  explanation but does not identify sweep walking as the only difference
+  between them.
+
+The purchase consequence is direct and does not depend on resolving which
+mechanism dominates: **a trade-derived proxy cannot serve as the dependent
+variable in a volatility-to-spread fit, because it generates a strong slope
+against a constant-spread ground truth.** That is the evidential case for buying
+quotes, and it replaces the assertion this report started with.
+
 #### Order of work
 
 1. This contract into the report. **Done.**
 2. Observable-volatility stratification added to the protocol-6 harness.
-3. Freeze that output schema.
+   **Done.**
+3. Freeze the SEMANTIC CORE, not the physical schema. The futures files may add
+   transaction time, publication or event time, update ids and other provenance
+   fields with no synthetic analogue, so the column set cannot be fixed before
+   they are inspected. Version the complete schema after step 5, extending it
+   with source-specific timing fields while the shared analytical outputs stay
+   unchanged.
 4. Download one futures `trades` day and one matching `bookTicker` day.
+   Deliberately narrow: ONE completed UTC day, ONE USD-M perpetual symbol,
+   matching dates, original ZIPs and checksums retained, and NO transformation
+   before headers, row counts, first and last timestamps, timestamp units,
+   ordering, duplicates and coverage overlap are recorded.
 5. Inspect and record the six file contracts.
 6. Implement a fail-closed parser and the strict as-of join.
 7. One-day smoke analysis before expanding coverage.
