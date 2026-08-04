@@ -70,11 +70,15 @@
 //! outlive the horizon now gets reached. Fill timing did not regress; the tape
 //! stopped being artificially sluggish.
 //!
-//! Note this does NOT re-open the band calibration below. `fill_band_vol_mult`
-//! is selected by `fills::vol_probe` against the tape's realized volatility, and
-//! the tape's volatility has now changed by roughly 1.3x in RMS - so the probe
-//! is worth re-running before the next band change, even though the current
-//! default still lands inside its usable window.
+//! This did NOT re-open the band calibration below, and that is measured rather
+//! than assumed. `fill_band_vol_mult` is selected by `fills::vol_probe` against
+//! the tape's realized volatility, and the repair moved that volatility by
+//! roughly 1.3x in RMS. Re-run against protocol 6 the probe reads `0.001` at
+//! median 0 and p90 1, `0.002` at median 1 and p90 3, `0.005` at median 4 and
+//! p90 8, and `0.010` at median 9 and p90 16 - so `0.005` is still the smallest
+//! multiplier satisfying the 3-to-100-tick median rule and the default stands.
+//! Only the p90 moved, from 7 to 8, which is why the durable comments quoting it
+//! were updated with this landing.
 //!
 //! # Why the committed artifact was re-blessed before that
 //!

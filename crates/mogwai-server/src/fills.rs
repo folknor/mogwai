@@ -490,7 +490,7 @@ mod tests {
         // reach the multipliers that land in the window, or its PROCEED rule
         // has no candidate to select.
         //
-        // The rule SELECTED 0.005 here (median 4, p90 7) and that is the shipped
+        // The rule SELECTED 0.005 here (median 4, p90 8) and that is the shipped
         // `fill_band_vol_mult` default. The wider multipliers are retained rather
         // than pruned: the table is the provenance for that choice, and a table
         // that only spans the neighbourhood of the answer cannot show why the

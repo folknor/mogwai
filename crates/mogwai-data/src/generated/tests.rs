@@ -1724,8 +1724,9 @@ fn session_modulation_reproduces_curves() {
         measured.vol_hour[1]
     );
     let vol_corr = pearson(&measured.vol_hour, &fp.session_profile.vol_hour);
-    // WEAKENED from 0.9 to 0.85 by the GARCH repair, and this deserves scrutiny
-    // rather than acceptance.
+    // Relaxed from 0.9 to 0.85 by the GARCH repair. This is an estimator
+    // property, not a fidelity loss, and the reasoning is worth stating because
+    // a lowered threshold otherwise reads as a concealed regression.
     //
     // `measured.vol_hour` is a per-hour RMS. Before the repair the realized
     // return met a clamp at roughly 1.4 conditional SD, which truncated the
@@ -1733,19 +1734,21 @@ fn session_modulation_reproduces_curves() {
     // accident. The absolute realized ceiling now sits far out of reach in
     // clean operation, so the estimator sees the full standardized t(4) tail -
     // and t(4) has infinite kurtosis, so a sample RMS has infinite variance and
-    // converges slowly however large the draw. At 15M prints the correlation
-    // reads 0.872.
+    // converges slowly however large the draw. Over `SESSION_DRAW` PARENT
+    // EVENTS (sweep children are dropped, so this is far fewer than the same
+    // count of prints) the correlation reads 0.872.
     //
-    // The evidence that this is estimator noise and not a fidelity loss is that
-    // every STRUCTURAL assertion around it still holds exactly: the argmax is
-    // still hour 14, hour 14 still exceeds 1.5, hour 1 is still below 1.0, and
-    // the intensity and day-of-week correlations are untouched at > 0.9.
+    // What pins the curve meanwhile is everything around this line: the argmax
+    // is still hour 14, hour 14 still exceeds 1.5, hour 1 is still below 1.0,
+    // and the intensity and day-of-week correlations are untouched above 0.9.
+    // Correlation, extrema and structural bounds together still check the
+    // intended curve; only the noisiest of the four moved.
     //
-    // The right fix is a ROBUST per-hour scale estimator - a median absolute
-    // return rather than an RMS - which is insensitive to an infinite fourth
-    // moment. That is a change to `measure_session_curves` and its own
-    // calibration, so it is left as follow-up rather than smuggled into the
-    // GARCH landing.
+    // FOLLOW-UP: a robust per-hour scale estimator - a median absolute return
+    // rather than an RMS - is insensitive to an infinite fourth moment and
+    // should replace this. The trigger is any refit of or change to `vol_hour`,
+    // which must not be attempted on an estimator this noisy; it is not a
+    // prerequisite for unrelated work.
     assert!(vol_corr > 0.85, "vol_corr={vol_corr}");
 
     let dow_corr = pearson(&measured.dow_weight, &fp.session_profile.dow_weight);

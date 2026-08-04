@@ -163,9 +163,15 @@ the whole clamp range no matter what the tape is doing, which is the mirror
 image of the inert `0.0` band - in neither case does the tape decide the fill.
 The shipped default is now `0.005`, the smallest multiplier whose median implied
 band falls inside the probe's usable 3-to-100-tick window (median 4 ticks, p90
-7). The probe is the provenance: re-run it if the fingerprint or the cadence
+8). The probe is the provenance: re-run it if the fingerprint or the cadence
 moves again, and re-bless the fill golden, whose banded scenario reads the
 default rather than restating it.
+
+Re-run against tape protocol 6, whose GARCH repair moved realized volatility by
+roughly 1.3x in RMS, the selection is unchanged: `0.001` reads median 0 and p90
+1, `0.002` median 1 and p90 3, `0.005` median 4 and p90 8, `0.010` median 9 and
+p90 16. `0.005` is still the smallest multiplier satisfying the median rule, so
+neither the band nor the fill golden's banded half needed to move.
 
 Reading the market at a submit is correspondingly more expensive: the walk costs
 about 12.6 ms, so acceptance-time readings are memoized per symbol per

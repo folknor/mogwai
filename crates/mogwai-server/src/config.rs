@@ -55,7 +55,7 @@ pub(crate) struct Config {
     /// `0.005` is the RAW-FILL-CADENCE calibration, selected by
     /// `fills::vol_probe`'s PROCEED rule - the smallest multiplier whose median
     /// implied band lands in the 3-to-100-tick usable window. On the committed
-    /// BTCUSDT profile it reads a median implied band of 4 ticks and a p90 of 7.
+    /// BTCUSDT profile it reads a median implied band of 4 ticks and a p90 of 8.
     ///
     /// It replaces `0.5`, which was calibrated against the PRINT-layer tape where
     /// a 300 s window carried ~32 returns. The same window now carries ~15,700,

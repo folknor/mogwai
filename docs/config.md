@@ -35,7 +35,7 @@ through-at-the-stated-price fill. The default is `0.005`, selected by
 more than one percent cold-window refusals (currently zero), and picks the
 smallest multiplier whose median implied band lands in the usable 3-to-100-tick
 window. On the committed BTCUSDT fingerprint `0.005` reads a median band of 4
-ticks and a p90 of 7. It replaced `0.5`, which was fitted to the print-layer
+ticks and a p90 of 8. It replaced `0.5`, which was fitted to the print-layer
 tape and implies a median 439 ticks at the raw-fill cadence - past the clamp, so
 the band stopped tracking volatility at all. `fill_band_max_ticks` defaults to
 `200`.
