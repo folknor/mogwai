@@ -1255,6 +1255,29 @@ mistake would have justified.
    they are inspected. Version the complete schema after step 5, extending it
    with source-specific timing fields while the shared analytical outputs stay
    unchanged.
+3b. The adversarial join fixture, BEFORE any download. **Done** -
+   `analysis/asof_join.py selftest`, 24 checks. It joins TYPED RECORDS and knows
+   nothing about Binance column positions, so a temporal-join defect and a
+   parsing defect cannot be mistaken for one another. It pins transaction versus
+   publication time as distinct values, equality accepted at the boundary, a
+   future quote never selected even when far closer, newest-eligible-wins, quote
+   age as `trade.time - quote.transaction_time`, tie resolution only through a
+   documented update-id rule with ambiguity labelled rather than guessed, trades
+   before the first quote and stale quotes failing closed into named categories,
+   no borrowing across coverage boundaries, and input-order independence.
+
+   Fixture values are chosen so every off-by-one and wrong-column choice yields
+   a DIFFERENT answer: transaction and event times differ per quote, ages are
+   all distinct, ids are far from timestamps, and ids are spaced with gaps so
+   the resolvable-tie case is representable at all. Writing it caught a fixture
+   defect of exactly that kind - consecutive ids made the resolvable tie
+   impossible to express, which presented as a code failure.
+
+   This exists because the last three defects in the synthetic harness - the
+   first/last child convention, the stratification lookahead and the
+   print-to-parent scale mismatch - were all found by reading rather than by any
+   test. A join defect will produce a plausible number, not a failure.
+
 4. Download one futures `trades` day and one matching `bookTicker` day.
    Deliberately narrow: ONE completed UTC day, ONE USD-M perpetual symbol,
    matching dates, original ZIPs and checksums retained, and NO transformation
@@ -1334,6 +1357,7 @@ python3 analysis/databento_price.py plan nqv depth    # the shortened, all-TBBO 
 python3 analysis/databento_price.py plan pairv pair   # the NQ/MNQ paired test alone
 python3 analysis/databento_price.py plan gcv grid     # the GC second-tick-grid probe
 python3 analysis/databento_price.py cache             # what the response cache holds
+python3 analysis/asof_join.py selftest                # the quote-join contract
 ```
 
 Scopes: `book`, `parent`, `continuous`, `micros`, `targets`, `nq`, `nqv`,
