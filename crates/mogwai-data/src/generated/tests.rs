@@ -3097,6 +3097,32 @@ fn synthetic_spread_decomposition_at_protocol_six() {
     // construction, and calling that "0 ms" would imply an observed transport
     // timestamp that does not exist and invite comparison against real
     // zero-age joins, which are a different thing.
+    // BOTH grids, because print dependence changes materially with
+    // tick_return / return_scale. Judging a real BTCUSDT result only against an
+    // MNQ-shaped synthetic tape compares two different regimes and calls the
+    // difference a finding.
+    for (grid_label, grid) in [("MNQ-shaped", &index), ("BTCUSDT-shaped", &crypto)] {
+        stratified_matrix(grid_label, grid);
+    }
+
+    for scalars in [&crypto, &index] {
+        let d = decompose_spread(scalars, 400_000);
+        assert!(
+            d.roll_all_prints.ticks.is_none(),
+            "roll_all_prints must be UNAVAILABLE on every grid: cov={}",
+            d.roll_all_prints.covariance
+        );
+    }
+    // Nothing else is asserted. The ORDERING between the first-child and
+    // last-child estimators, and their position relative to the quoted spread,
+    // are grid-dependent observations rather than invariants: in real data
+    // either can land on either side of quoted spread depending on side
+    // persistence, latent movement, burst grouping and within-burst book
+    // changes. Pinning an observed relationship is how a schema loses the
+    // ability to report a surprise.
+}
+
+fn stratified_matrix(grid_label: &str, index: &GeneratorScalars) {
     let fp2 = Fingerprint::from_repo_json();
     let mut src = GeneratedSource::new(index.clone(), 42, 0, &fp2, None);
     let tick = decimal_to_f64(index.modal_tick);
@@ -3130,7 +3156,7 @@ fn synthetic_spread_decomposition_at_protocol_six() {
     let vols = trailing_vol(&last);
     let boundaries = vol_boundaries(&vols);
     println!();
-    println!("=== stratified matrix: MNQ-shaped grid");
+    println!("=== stratified matrix: {grid_label} grid");
     println!("  quote-age dimension: contemporaneous_model_quote (NOT zero milliseconds)");
     println!("  observable axis: trailing realized vol over {TRAILING_VOL_EVENTS} parent events,");
     println!("  parent-event returns, horizon fixed before results were examined");
@@ -3188,22 +3214,6 @@ fn synthetic_spread_decomposition_at_protocol_six() {
             }
         }
     }
-
-    for scalars in [&crypto, &index] {
-        let d = decompose_spread(scalars, 400_000);
-        assert!(
-            d.roll_all_prints.ticks.is_none(),
-            "roll_all_prints must be UNAVAILABLE on every grid: cov={}",
-            d.roll_all_prints.covariance
-        );
-    }
-    // Nothing else is asserted. The ORDERING between the first-child and
-    // last-child estimators, and their position relative to the quoted spread,
-    // are grid-dependent observations rather than invariants: in real data
-    // either can land on either side of quoted spread depending on side
-    // persistence, latent movement, burst grouping and within-burst book
-    // changes. Pinning an observed relationship is how a schema loses the
-    // ability to report a surprise.
 }
 
 fn is_round_lot(size: Decimal, median: f64) -> bool {

@@ -66,6 +66,17 @@ def _member_lines(path):
                     yield line
 
 
+def count_physical_rows(path):
+    """Total physical rows, header included.
+
+    File-level validation must see the WHOLE file. The streaming join stops
+    pulling quotes once trades are exhausted, so quotes it never consumed would
+    otherwise escape validation entirely - and "we validated the file" would
+    mean "we validated the part we happened to read".
+    """
+    return sum(1 for _ in _member_lines(path))
+
+
 def _positive_finite(value, label, row):
     if not math.isfinite(value) or value <= 0.0:
         raise FailClosed(f"row {row}: {label} is not finite and positive: {value!r}")
@@ -213,6 +224,40 @@ def infer_parents(matches):
     return groups
 
 
+ZERO_AGE = "zero_ambiguous"
+
+
+def age_stratum(age, positive_boundaries):
+    """Zero age is its OWN CATEGORICAL stratum, not the bottom bin.
+
+    A zero-age join is not "very fresh". At millisecond stamps an equal-time
+    quote may actually FOLLOW the trade, so the as-of rule can admit lookahead
+    inside the millisecond. That is a different kind of thing from a 3 ms quote,
+    and binning them together would let an unorderable majority set the tone of
+    a cell that reads as freshness.
+    """
+    if age == 0:
+        return ZERO_AGE
+    return f"age_{sum(1 for b in positive_boundaries if age > b)}"
+
+
+def trailing_vol_events(prices, horizon):
+    """Volatility AT each price, from returns strictly before the change leaving
+    it. Same information set as the synthetic harness: it may include the return
+    arriving at the price, never the one leaving."""
+    returns = [math.log(b / a) for a, b in zip(prices, prices[1:])]
+    out = [None] * len(prices)
+    for i in range(horizon, len(prices)):
+        window = returns[i - horizon:i]
+        out[i] = math.sqrt(sum(r * r for r in window) / len(window))
+    return out
+
+
+def quantiles(values, points):
+    ordered = sorted(values)
+    return [ordered[min(len(ordered) - 1, int((len(ordered) - 1) * p))] for p in points]
+
+
 def percentiles(values, points=(0.5, 0.9, 0.99, 1.0)):
     if not values:
         return {}
@@ -236,6 +281,11 @@ def smoke(trades_zip, quotes_zip, tick=0.1):
     trade_stats = {"parsed": 0}
     quote_stats = {"parsed": 0, "locked": 0, "crossed": 0}
 
+    # File-level counts, taken independently of the join so unconsumed rows are
+    # still validated and still reconcile.
+    trade_rows = count_physical_rows(trades_zip)
+    quote_rows = count_physical_rows(quotes_zip)
+
     matches = list(
         streaming_asof(
             stream_trades(trades_zip, trade_stats),
@@ -245,21 +295,54 @@ def smoke(trades_zip, quotes_zip, tick=0.1):
 
     by_status = {}
     ages = []
-    ambiguous = 0
     quoted = []
     effective = []
+    per_trade = []
     for match in matches:
         by_status[match.status] = by_status.get(match.status, 0) + 1
         if match.status != aj.STATUS_MATCHED:
+            per_trade.append(None)
             continue
         ages.append(match.quote_age)
+        q = aj.quoted_spread(match.quote) / tick
+        e = aj.effective_spread(match.trade, match.quote) / tick
+        quoted.append(q)
+        effective.append(e)
         # SEQUENCING: an equal-millisecond match cannot be ordered between two
         # independently written files. Row order within a ZIP is not evidence of
         # cross-file ordering and is deliberately not consulted.
-        if match.quote_age == 0:
-            ambiguous += 1
-        quoted.append(aj.quoted_spread(match.quote) / tick)
-        effective.append(aj.effective_spread(match.trade, match.quote) / tick)
+        per_trade.append({"age": match.quote_age, "quoted": q, "effective": e})
+
+    positive_ages = [a for a in ages if a > 0]
+    # Boundaries from POSITIVE ages only, and fixed here - before any Roll value
+    # in this run has been looked at.
+    age_boundaries = quantiles(positive_ages, (0.5, 0.9)) if positive_ages else []
+
+    def negatives(subset):
+        return {
+            "count": sum(1 for e in subset if e < 0),
+            "fraction": (sum(1 for e in subset if e < 0) / len(subset)) if subset else None,
+            "n": len(subset),
+        }
+
+    zero_eff = [p["effective"] for p in per_trade if p and p["age"] == 0]
+    positive_eff = [p["effective"] for p in per_trade if p and p["age"] > 0]
+    negative_breakdown = {
+        "zero_age_sequencing_ambiguous": negatives(zero_eff),
+        "strictly_positive_age": negatives(positive_eff),
+        "by_positive_age_stratum": {
+            stratum: negatives(
+                [
+                    p["effective"]
+                    for p in per_trade
+                    if p and p["age"] > 0 and age_stratum(p["age"], age_boundaries) == stratum
+                ]
+            )
+            for stratum in sorted(
+                {age_stratum(a, age_boundaries) for a in positive_ages}
+            )
+        },
+    }
 
     groups = infer_parents(matches)
     group_sizes = [len(g) for g in groups]
@@ -267,24 +350,49 @@ def smoke(trades_zip, quotes_zip, tick=0.1):
     last_prices = [g[-1].trade.price for g in groups]
     all_prices = [m.trade.price for m in matches]
 
+    zero_count = sum(1 for a in ages if a == 0)
     report = {
         "inputs": {"trades": os.path.basename(trades_zip), "quotes": os.path.basename(quotes_zip)},
         "tick": tick,
-        "parsed": {"trades": trade_stats["parsed"], "quotes": quote_stats["parsed"]},
+        "row_accounting": {
+            "trades": {
+                "physical_rows": trade_rows,
+                "header_rows": 1,
+                "data_rows": trade_rows - 1,
+                "parsed": trade_stats["parsed"],
+                "rejected": 0,
+                "skipped_blank": 0,
+                "balanced": trade_rows - 1 == trade_stats["parsed"],
+            },
+            "quotes": {
+                "physical_rows": quote_rows,
+                "header_rows": 1,
+                "data_rows": quote_rows - 1,
+                # The join stops pulling quotes once trades run out. Consumed
+                # and unconsumed are reported separately: a single "parsed"
+                # number here would silently mean "the part we read".
+                "consumed_by_join": quote_stats["parsed"],
+                "unconsumed_trailing": (quote_rows - 1) - quote_stats["parsed"],
+                "balanced": (quote_rows - 1) >= quote_stats["parsed"],
+            },
+            "note": "the earlier 1,469,268 figure was PHYSICAL rows including the header; 1,469,267 is parsed data rows. Same file, different quantity.",
+        },
         "quote_book_state": {"locked": quote_stats["locked"], "crossed": quote_stats["crossed"]},
         "join": {
             "by_status": by_status,
             "match_rate": by_status.get(aj.STATUS_MATCHED, 0) / max(1, len(matches)),
         },
         "quote_age_ms": {
-            "zero_age_count": sum(1 for a in ages if a == 0),
-            "zero_age_fraction": sum(1 for a in ages if a == 0) / max(1, len(ages)),
+            "zero_age_count": zero_count,
+            "zero_age_fraction": zero_count / max(1, len(ages)),
+            "positive_age_boundaries": age_boundaries,
             **percentiles(ages),
         },
         "sequencing_ambiguous": {
-            "count": ambiguous,
-            "fraction": ambiguous / max(1, len(ages)),
+            "count": zero_count,
+            "fraction": zero_count / max(1, len(ages)),
         },
+        "negative_effective_spread": negative_breakdown,
         "parent_inference": {
             "groups": len(groups),
             "group_size_histogram": histogram(group_sizes),
@@ -293,19 +401,21 @@ def smoke(trades_zip, quotes_zip, tick=0.1):
         "spread_ticks": {
             "quoted": percentiles(quoted),
             "effective": percentiles(effective),
-            "negative_effective_count": sum(1 for e in effective if e < 0),
         },
         "reconciliation": {
+            "trade_physical_rows": trade_rows,
+            "header": 1,
             "trades_parsed": trade_stats["parsed"],
             "matches_emitted": len(matches),
             "status_total": sum(by_status.values()),
-            "balanced": trade_stats["parsed"] == len(matches) == sum(by_status.values()),
+            "every_physical_row_accounted": trade_rows
+            == 1 + trade_stats["parsed"],
+            "every_parsed_trade_has_one_outcome": trade_stats["parsed"]
+            == len(matches)
+            == sum(by_status.values()),
         },
     }
 
-    # Roll by convention, over the whole day. Stratification by volatility and
-    # quote age is the next layer and is reported per convention here so the
-    # unstratified baseline exists first.
     report["roll_unstratified_ticks"] = {}
     for name, series in (
         ("roll_first_child", first_prices),
@@ -321,9 +431,85 @@ def smoke(trades_zip, quotes_zip, tick=0.1):
             "roll_ticks": roll,
         }
 
+    # ---- the matrix: convention x volatility stratum x quote-age stratum ----
+    horizon = 64
+    parent_vols = trailing_vol_events(last_prices, horizon)
+    present = [v for v in parent_vols if v is not None]
+    vol_boundaries = quantiles(present, (0.25, 0.75, 0.95)) if present else []
+    # One attribute set per parent event, taken from the event's FIRST trade,
+    # which is the trade whose quote the parent was joined against.
+    parent_age = [g[0].quote_age for g in groups]
+    parent_amb = [1 if g[0].quote_age == 0 else 0 for g in groups]
+    parent_quoted = [
+        aj.quoted_spread(g[0].quote) / tick if g[0].quote else None for g in groups
+    ]
+    parent_eff = [
+        aj.effective_spread(g[0].trade, g[0].quote) / tick if g[0].quote else None
+        for g in groups
+    ]
+
+    def cell(series, change_vol, change_age, vol_s, age_s, min_pairs=500):
+        """One matrix cell. A pair is keyed on its LATER change for BOTH axes."""
+        changes = [b - a for a, b in zip(series, series[1:])]
+        pairs, idx = [], []
+        for i in range(max(0, len(changes) - 1)):
+            if i + 1 >= len(change_vol) or i + 1 >= len(change_age):
+                continue
+            v, a = change_vol[i + 1], change_age[i + 1]
+            if v is None or a is None:
+                continue
+            if sum(1 for b in vol_boundaries if v >= b) != vol_s:
+                continue
+            if age_stratum(a, age_boundaries) != age_s:
+                continue
+            pairs.append((changes[i], changes[i + 1]))
+            idx.append(i + 2)
+        out = {"covariance_pairs": len(pairs), "trades": len(idx)}
+        if len(pairs) < min_pairs:
+            out.update({"status": "fail_closed", "roll_ticks": None, "covariance_sign": None})
+            return out
+        ma = sum(p[0] for p in pairs) / len(pairs)
+        mb = sum(p[1] for p in pairs) / len(pairs)
+        cov = sum((a - ma) * (b - mb) for a, b in pairs) / len(pairs)
+        eff = [parent_eff[j] for j in idx if j < len(parent_eff) and parent_eff[j] is not None]
+        qu = [parent_quoted[j] for j in idx if j < len(parent_quoted) and parent_quoted[j] is not None]
+        amb = [parent_amb[j] for j in idx if j < len(parent_amb)]
+        out.update(
+            {
+                "status": "matched" if cov < 0 else "unavailable",
+                "covariance_sign": "negative" if cov < 0 else "non_negative",
+                "roll_ticks": (2.0 * math.sqrt(-cov) / tick) if cov < 0 else None,
+                "quoted_spread_median": quantiles(qu, (0.5,))[0] if qu else None,
+                "effective_spread_median": quantiles(eff, (0.5,))[0] if eff else None,
+                "negative_effective_fraction": (
+                    sum(1 for e in eff if e < 0) / len(eff) if eff else None
+                ),
+                "sequencing_ambiguous_fraction": (sum(amb) / len(amb)) if amb else None,
+            }
+        )
+        return out
+
+    age_strata = [ZERO_AGE] + sorted(
+        {age_stratum(a, age_boundaries) for a in positive_ages}
+    )
+    change_vol = parent_vols[: max(0, len(last_prices) - 1)]
+    change_age = parent_age[: max(0, len(last_prices) - 1)]
+    report["matrix"] = {
+        "volatility_horizon_parent_events": horizon,
+        "volatility_boundaries": vol_boundaries,
+        "age_boundaries_positive_only": age_boundaries,
+        "cells": {
+            f"roll_last_child|vol{v}|{a}": cell(last_prices, change_vol, change_age, v, a)
+            for v in range(len(vol_boundaries) + 1)
+            for a in age_strata
+        },
+    }
+
     print(json.dumps(report, indent=1))
-    if not report["reconciliation"]["balanced"]:
+    if not report["reconciliation"]["every_parsed_trade_has_one_outcome"]:
         raise FailClosed("reconciliation failed: not every parsed trade has exactly one outcome")
+    if not report["reconciliation"]["every_physical_row_accounted"]:
+        raise FailClosed("reconciliation failed: physical rows do not account")
     return report
 
 
