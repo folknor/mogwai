@@ -15,8 +15,8 @@ use rand_chacha::ChaCha12Rng;
 
 use super::consts::{
     BOUNCE_HIGH_FLIP_PROB, BOUNCE_HIGH_TO_LOW_PROB, BOUNCE_LOW_FLIP_PROB, BOUNCE_LOW_TO_HIGH_PROB,
-    CHILD_CAP, DRIFT_DIR_FLIP_PROB, GARCH_ARCH, GARCH_GARCH, HIGH_REGIME_DRIFT_PROB,
-    HOT_DRIFT_PROB,
+    CHILD_CAP, DRIFT_DIR_FLIP_PROB, GARCH_ARCH, GARCH_GARCH, GARCH_SIGMA_CAP,
+    HIGH_REGIME_DRIFT_PROB, HOT_DRIFT_PROB, MAX_ABS_RETURN, STUDENT_T_DF,
 };
 
 /// The child-count mixture of one parent sweep: with probability `q` exactly
@@ -151,6 +151,102 @@ impl GarchVol {
             prev_return: 0.0,
             mid,
         }
+    }
+
+    /// One GARCH recursion step plus both clamps, returning every intermediate
+    /// a caller might need to observe.
+    ///
+    /// Factored out of `next_latent_mid` so the instrumentation harness drives
+    /// the SHIPPED recursion instead of a re-derivation of it. A harness that
+    /// re-implements the arithmetic can agree with a comment while disagreeing
+    /// with the code, which is the failure mode this whole investigation is
+    /// about.
+    ///
+    /// Bit-for-bit identical to the inline form it replaced: same operation
+    /// order, same clamp order, same assignment to `prev_return`.
+    pub(super) fn step(&mut self, student_t: f64, clamp_mult: f64) -> GarchStep {
+        let sigma2_candidate = self.a0 + self.a1 * self.prev_return.powi(2) + self.b1 * self.sigma2;
+        let sigma_cap = (GARCH_SIGMA_CAP * clamp_mult).powi(2);
+        self.sigma2 = sigma2_candidate.min(sigma_cap);
+        let feedback_cap = MAX_ABS_RETURN * clamp_mult;
+        let garch_scale = self.sigma2.sqrt();
+        let unclipped_return = garch_scale * student_t;
+        let base_return = unclipped_return.clamp(-feedback_cap, feedback_cap);
+        self.prev_return = base_return;
+        GarchStep {
+            sigma2_candidate,
+            sigma2: self.sigma2,
+            sigma_cap,
+            garch_scale,
+            unclipped_return,
+            base_return,
+            feedback_cap,
+        }
+    }
+}
+
+/// One unstandardized Student-t innovation, drawn in the order the walk draws
+/// it: normal first, chi-squared second. Factored out with [`GarchVol::step`]
+/// so the harness consumes the same draw sequence rather than an equivalent
+/// one; the guard on the chi-squared draw is the same NaN floor the walk has
+/// always carried.
+pub(super) fn draw_student_t(
+    rng: &mut ChaCha12Rng,
+    normal: &rand_distr::Normal<f64>,
+    chi_squared: &rand_distr::ChiSquared<f64>,
+) -> f64 {
+    use rand_distr::Distribution as _;
+    let z = normal.sample(rng);
+    let chi = chi_squared.sample(rng).max(f64::MIN_POSITIVE);
+    z / (chi / STUDENT_T_DF).sqrt()
+}
+
+/// Everything one call to [`GarchVol::step`] computed.
+///
+/// `garch_scale` is `sqrt(sigma2)`, a SCALE parameter - it is NOT the
+/// conditional standard deviation of the return. The innovation is an
+/// unstandardized Student-t whose variance is `df / (df - 2)`, so the
+/// unclipped conditional SD is `garch_scale * sqrt(df / (df - 2))`. Keeping
+/// both names present is deliberate: conflating them is what hid the
+/// second-moment problem this struct exists to measure.
+#[derive(Debug, Clone, Copy)]
+#[allow(
+    dead_code,
+    reason = "the walk reads only base_return; the rest exist to be observed by \
+              the second-moment harness, and returning them unconditionally is \
+              what keeps the harness on the shipped recursion rather than a copy"
+)]
+pub(super) struct GarchStep {
+    /// Recursion output BEFORE the variance cap is applied.
+    pub(super) sigma2_candidate: f64,
+    /// Recursion output after the cap; what the next step recurses on.
+    pub(super) sigma2: f64,
+    pub(super) sigma_cap: f64,
+    /// `sqrt(sigma2)`. A scale, not an SD - see the struct comment.
+    pub(super) garch_scale: f64,
+    pub(super) unclipped_return: f64,
+    /// The clamped return that feeds back into the next recursion.
+    pub(super) base_return: f64,
+    pub(super) feedback_cap: f64,
+}
+
+#[allow(
+    dead_code,
+    reason = "observation helpers for the second-moment harness; see GarchStep"
+)]
+impl GarchStep {
+    /// The unclipped conditional standard deviation implied by this step, with
+    /// the innovation's own variance folded in.
+    pub(super) fn unclipped_conditional_sd(&self) -> f64 {
+        self.garch_scale * (STUDENT_T_DF / (STUDENT_T_DF - 2.0)).sqrt()
+    }
+
+    pub(super) fn hit_variance_cap(&self) -> bool {
+        self.sigma2_candidate > self.sigma_cap
+    }
+
+    pub(super) fn hit_feedback_clamp(&self) -> bool {
+        self.unclipped_return.abs() > self.feedback_cap
     }
 }
 

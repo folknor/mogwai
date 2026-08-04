@@ -22,11 +22,13 @@ use super::consts::{
     ARRIVAL_ACTIVE_CHILDREN_MULT, ARRIVAL_MEAN_CAL, ARRIVAL_QUIET_ACTIVE_RATIO,
     ARRIVAL_QUIET_CHILDREN_MULT, ARRIVAL_QUIET_FRACTION, ARRIVAL_STATE_PERSISTENCE,
     ARRIVAL_WEIBULL_MEAN, ARRIVAL_WEIBULL_SHAPE, DRIFT_RECENTER_FRAC, EVENT_PRICE_REPEAT_PROB,
-    GARCH_SIGMA_CAP, HALF_SPREAD_TICKS, HIGH_REGIME_LEVEL_STEP_MULT, INTRA_EVENT_STEP_NS,
+    HALF_SPREAD_TICKS, HIGH_REGIME_LEVEL_STEP_MULT, INTRA_EVENT_STEP_NS,
     LOW_REGIME_LEVEL_STEP_MULT, MAX_ABS_RETURN, MAX_SESSION_GAP_NS, MID_CEILING, NS_PER_HOUR,
     SESSION_CLOSED_ARR_MULT, SIZE_DECIMALS, SIZE_LOG_SIGMA, STUDENT_T_DF,
 };
-use super::dynamics::{ArrivalClock, BounceState, GarchVol, SweepBurst, SweepShape};
+use super::dynamics::{
+    ArrivalClock, BounceState, GarchVol, SweepBurst, SweepShape, draw_student_t,
+};
 use super::fingerprint::{Fingerprint, GeneratedSourceError, GeneratorScalars, SessionProfile};
 use super::numeric::{decimal_from_f64, round_lot_size};
 use super::regime::RegimeState;
@@ -476,36 +478,23 @@ impl GeneratedSource {
         {
             self.latent_updates += 1;
         }
-        let normal = self.normal.sample(&mut self.rng);
-        // Guard against a chi-squared draw that underflows to exactly 0.0: an
-        // unguarded 0.0 denominator makes `student_t` `0.0/0.0 = NaN` when
-        // `normal` also happens to be 0.0, and `f64::clamp` propagates NaN
-        // through `base_return` into `mid`, poisoning the walk for the rest of
-        // the session. Astronomically unlikely from a continuous distribution,
-        // but cheap to close off (matches the `f64::MIN_POSITIVE` floors used
-        // elsewhere in this file for the same reason).
-        let chi = self
-            .chi_squared
-            .sample(&mut self.rng)
-            .max(f64::MIN_POSITIVE);
-        let student_t = normal / (chi / STUDENT_T_DF).sqrt();
-        self.vol.sigma2 = self.vol.a0
-            + self.vol.a1 * self.vol.prev_return.powi(2)
-            + self.vol.b1 * self.vol.sigma2;
-        let sigma_cap = (GARCH_SIGMA_CAP * self.regime.clamp_mult).powi(2);
-        self.vol.sigma2 = self.vol.sigma2.min(sigma_cap);
+        // The chi-squared draw inside `draw_student_t` is floored at
+        // `f64::MIN_POSITIVE`: an unguarded 0.0 denominator makes `student_t`
+        // `0.0/0.0 = NaN` when `normal` also happens to be 0.0, and
+        // `f64::clamp` propagates NaN through `base_return` into `mid`,
+        // poisoning the walk for the rest of the session.
+        let student_t = draw_student_t(&mut self.rng, &self.normal, &self.chi_squared);
         // FEEDBACK clamp: `base_return` (which feeds `prev_return`) and the
-        // sigma2 cap above use the regime's BASE clamp lift (vol_mult for a
-        // storm, the test override, or 1.0). A SessionEdgeSpike deliberately
-        // does NOT lift this - keeping the GARCH recursion state (sigma2,
-        // prev_return) byte-identical to a clean run is what lets the spike
-        // leave zero trace outside its hour window.
-        let feedback_cap = MAX_ABS_RETURN * self.regime.clamp_mult;
-        let base_return = (self.vol.sigma2.sqrt() * student_t).clamp(-feedback_cap, feedback_cap);
+        // sigma2 cap inside `step` use the regime's BASE clamp lift (vol_mult
+        // for a storm, the test override, or 1.0). A SessionEdgeSpike
+        // deliberately does NOT lift this - keeping the GARCH recursion state
+        // (sigma2, prev_return) byte-identical to a clean run is what lets the
+        // spike leave zero trace outside its hour window.
+        //
         // GARCH feedback sees the un-modulated return so volatility clustering
         // is unchanged; the session envelope scales the realized RMS on top,
         // then the hard clamp still bounds the mid update.
-        self.vol.prev_return = base_return;
+        let base_return = self.vol.step(student_t, self.regime.clamp_mult).base_return;
         // Vol composition convention (see also RegimeState::vol_mult): the
         // session envelope and the regime envelope COMPOSE MULTIPLICATIVELY here
         // (session 1.0 = no session bias, regime 1.0 = no regime bias, so the

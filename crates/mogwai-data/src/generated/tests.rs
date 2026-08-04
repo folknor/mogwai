@@ -2143,3 +2143,222 @@ fn pearson<const N: usize>(a: &[f64; N], b: &[f64; N]) -> f64 {
     }
     numerator / (denom_a.sqrt() * denom_b.sqrt())
 }
+
+// ---------------------------------------------------------------------------
+// GARCH second-moment instrumentation
+//
+// The recursion is a textbook GARCH(1,1), and `GarchVol::new` sets
+// `a0 = vol_scalar^2 * (1 - a1 - b1)` so `vol_scalar^2` is the unconditional
+// variance. That derivation assumes a UNIT-VARIANCE innovation. The innovation
+// is a raw Student-t(df) whose variance is `df / (df - 2)` = 2 at the committed
+// `STUDENT_T_DF`, so the true second-moment condition is
+//
+//     a1 * E[z^2] + b1  =  0.12 * 2 + 0.875  =  1.115  >  1
+//
+// which has no finite stationary variance. The implemented process stays
+// bounded only because `sigma2` is capped and the feedback return is clamped,
+// which makes it a materially different process from the one its own
+// initialization and comments describe.
+//
+// This harness measures what the recursion actually does, driving the SHIPPED
+// `GarchVol::step` and `draw_student_t` rather than re-deriving them. Prices,
+// bounce, sweeps and the session envelope are bypassed on purpose: reading this
+// off emitted prices does not work, because the almost-sure two-tick bounce is
+// larger than the latent return it would have to reveal.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, Default)]
+struct GarchReport {
+    updates: u64,
+    candidate_over_cap: u64,
+    at_cap: u64,
+    longest_cap_run: u64,
+    feedback_clamped: u64,
+    first_cap_hit: Option<u64>,
+    mean_scale: f64,
+    /// `E[sigma2]`, the quantity `GarchVol::new` intends to equal
+    /// `vol_scalar^2`. Reported alongside the mean SCALE because the two are
+    /// not interchangeable: sigma2 is heavily right-skewed at this
+    /// persistence, so `E[sqrt(sigma2)]` sits well below `sqrt(E[sigma2])` and
+    /// comparing the former against `vol_scalar` understates the fit.
+    mean_sigma2: f64,
+    mean_z2: f64,
+    scale_p50: f64,
+    scale_p99: f64,
+    /// Median of `GarchStep::unclipped_conditional_sd`, taken from the shipped
+    /// method rather than recomputed here: the point of the exercise is that
+    /// the scale and the conditional SD are different numbers.
+    unclipped_sd_p50: f64,
+}
+
+impl GarchReport {
+    fn frac(count: u64, total: u64) -> f64 {
+        if total == 0 {
+            0.0
+        } else {
+            count as f64 / total as f64
+        }
+    }
+    fn cap_occupancy(&self) -> f64 {
+        Self::frac(self.at_cap, self.updates)
+    }
+    fn clamp_occupancy(&self) -> f64 {
+        Self::frac(self.feedback_clamped, self.updates)
+    }
+    /// `a1 * E[z^2] + b1`, estimated from realized draws rather than assumed.
+    fn effective_persistence(&self) -> f64 {
+        super::consts::GARCH_ARCH * self.mean_z2 + super::consts::GARCH_GARCH
+    }
+}
+
+/// Drive the shipped recursion for `total` updates after `burn_in`. When
+/// `standardize` is set the innovation is divided by `sqrt(df / (df - 2))`.
+/// That arm is a TEST-ONLY counterfactual; nothing shipped does it.
+fn run_garch_harness(vol_scalar: f64, burn_in: u64, total: u64, standardize: bool) -> GarchReport {
+    use rand::SeedableRng;
+    use rand_distr::{ChiSquared, Normal};
+
+    let mut vol = super::dynamics::GarchVol::new(21_000.0, vol_scalar);
+    let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(42);
+    let normal = Normal::new(0.0, 1.0).expect("valid normal");
+    let chi_squared = ChiSquared::new(super::consts::STUDENT_T_DF).expect("valid chi-squared");
+    let unit = (super::consts::STUDENT_T_DF / (super::consts::STUDENT_T_DF - 2.0)).sqrt();
+
+    let mut report = GarchReport::default();
+    let mut scales: Vec<f64> = Vec::with_capacity(total as usize);
+    let mut conditional_sds: Vec<f64> = Vec::with_capacity(total as usize);
+    let mut run = 0_u64;
+    for i in 0..(burn_in + total) {
+        let raw = super::dynamics::draw_student_t(&mut rng, &normal, &chi_squared);
+        let z = if standardize { raw / unit } else { raw };
+        let step = vol.step(z, 1.0);
+        if step.hit_variance_cap() && report.first_cap_hit.is_none() {
+            report.first_cap_hit = Some(i);
+        }
+        if i < burn_in {
+            continue;
+        }
+        report.updates += 1;
+        report.mean_z2 += z * z;
+        report.mean_scale += step.garch_scale;
+        report.mean_sigma2 += step.sigma2;
+        if step.hit_variance_cap() {
+            report.candidate_over_cap += 1;
+        }
+        if step.hit_feedback_clamp() {
+            report.feedback_clamped += 1;
+        }
+        // "At the cap" is the state that matters for dynamic range: pinned
+        // there, the recursion cannot express an upward cluster at all.
+        if step.sigma2 >= step.sigma_cap * (1.0 - 1e-12) {
+            report.at_cap += 1;
+            run += 1;
+            report.longest_cap_run = report.longest_cap_run.max(run);
+        } else {
+            run = 0;
+        }
+        scales.push(step.garch_scale);
+        conditional_sds.push(step.unclipped_conditional_sd());
+    }
+    let n = report.updates as f64;
+    report.mean_z2 /= n;
+    report.mean_scale /= n;
+    report.mean_sigma2 /= n;
+    scales.sort_by(|a, b| a.partial_cmp(b).expect("finite scales"));
+    conditional_sds.sort_by(|a, b| a.partial_cmp(b).expect("finite conditional sds"));
+    report.scale_p50 = scales[scales.len() / 2];
+    report.scale_p99 = scales[scales.len() * 99 / 100];
+    report.unclipped_sd_p50 = conditional_sds[conditional_sds.len() / 2];
+    report
+}
+
+fn print_garch_report(label: &str, vol_scalar: f64, report: &GarchReport) {
+    let unit = (super::consts::STUDENT_T_DF / (super::consts::STUDENT_T_DF - 2.0)).sqrt();
+    println!("--- {label}");
+    println!("  updates                        {}", report.updates);
+    println!("  empirical E[z^2]               {:.4}", report.mean_z2);
+    println!(
+        "  effective persistence a1E+b1   {:.4}  (stationary iff < 1)",
+        report.effective_persistence()
+    );
+    println!("  vol_scalar (intended sigma)    {vol_scalar:.4e}");
+    println!("  mean garch_scale sqrt(sigma2)  {:.4e}", report.mean_scale);
+    println!("  garch_scale p50                {:.4e}", report.scale_p50);
+    println!("  garch_scale p99                {:.4e}", report.scale_p99);
+    println!(
+        "  unclipped conditional SD p50   {:.4e}  (scale * {unit:.4})",
+        report.unclipped_sd_p50
+    );
+    println!(
+        "  sqrt(E[sigma2])                {:.4e}",
+        report.mean_sigma2.sqrt()
+    );
+    println!(
+        "  sqrt(E[sigma2]) / vol_scalar   {:.2}x  (1.00x is the intended fit)",
+        report.mean_sigma2.sqrt() / vol_scalar
+    );
+    println!(
+        "  sigma2 cap                     {:.4e}",
+        GARCH_SIGMA_CAP.powi(2)
+    );
+    println!(
+        "  candidate over cap             {:.2}%",
+        100.0 * GarchReport::frac(report.candidate_over_cap, report.updates)
+    );
+    println!(
+        "  cap occupancy                  {:.2}%",
+        100.0 * report.cap_occupancy()
+    );
+    println!(
+        "  longest consecutive cap run    {}",
+        report.longest_cap_run
+    );
+    println!(
+        "  feedback clamp occupancy       {:.2}%",
+        100.0 * report.clamp_occupancy()
+    );
+    println!(
+        "  first cap hit at update        {:?}",
+        report.first_cap_hit
+    );
+}
+
+/// Reports the recursion's realized second-moment behaviour and pins the
+/// finding, so a future GARCH repair has to re-bless this deliberately rather
+/// than quietly changing what the generator's volatility means.
+#[test]
+fn garch_second_moment_instrumentation() {
+    const BURN_IN: u64 = 100_000;
+    const UPDATES: u64 = 1_000_000;
+    let vol_scalar = 1e-6;
+
+    let raw = run_garch_harness(vol_scalar, BURN_IN, UPDATES, false);
+    let standardized = run_garch_harness(vol_scalar, BURN_IN, UPDATES, true);
+    print_garch_report("raw Student-t(4), AS SHIPPED", vol_scalar, &raw);
+    print_garch_report(
+        "standardized t(4)/sqrt(2), COUNTERFACTUAL",
+        vol_scalar,
+        &standardized,
+    );
+
+    assert!(
+        (raw.mean_z2 - 2.0).abs() < 0.5,
+        "raw innovation variance should sit near the t(4) value 2, got {}",
+        raw.mean_z2
+    );
+    assert!(
+        raw.effective_persistence() > 1.0,
+        "raw recursion should be non-stationary in second moment, got {}",
+        raw.effective_persistence()
+    );
+    assert!(
+        (standardized.mean_z2 - 1.0).abs() < 0.25,
+        "standardized innovation should have unit variance, got {}",
+        standardized.mean_z2
+    );
+    assert!(
+        standardized.effective_persistence() < 1.0,
+        "standardized recursion should be stationary, got {}",
+        standardized.effective_persistence()
+    );
+}
