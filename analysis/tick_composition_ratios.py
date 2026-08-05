@@ -106,8 +106,18 @@ MODES = {
 # The 8/9 identity contract: 5fc974d split parent advancement from wire
 # materialization with an unchanged draw order, so the protocol-9 tape is
 # byte-identical to protocol 8 and a freshly measured protocol-9 fixture must
-# equal the historical protocol-8 fixture in every field EXCEPT these two.
-IDENTITY_EXCLUDED_FIELDS = ("tape_protocol_version", "pairing_id")
+# equal the historical protocol-8 fixture in every MEASUREMENT field. These
+# fields are NOT ignored - each is separately validated before the generic
+# equality comparison omits it: the version labels are asserted directly, the
+# pairing ids must both exist and differ (identity is remeasured, never
+# copied), and `projection` must equal the producer's deterministic
+# `all protocol-<version> frames` label for its OWN fixture's version. The
+# projection entry was added after the first B0 run: the gate refused on it,
+# inspection showed every measurement entry exactly equal and the field to be
+# a version-derived label, and the canonical-label check was jointly accepted
+# as the narrower amendment - stricter than exclusion, since a projection
+# text differing beyond the version number still refuses.
+IDENTITY_SEPARATELY_VALIDATED = ("tape_protocol_version", "pairing_id", "projection")
 
 # Presets with no calendar. Their normalizer is the literal 1.0, so protocol 8
 # leaves their tape byte-identical and every measured field must match exactly.
@@ -223,8 +233,20 @@ def verify_8_9_identity(eight_path: Path, nine_path: Path) -> None:
         "the two fixtures carry the same pairing id, so the same traversal "
         "is being compared with itself rather than remeasured"
     )
-    stripped_eight = {k: v for k, v in eight.items() if k not in IDENTITY_EXCLUDED_FIELDS}
-    stripped_nine = {k: v for k, v in nine.items() if k not in IDENTITY_EXCLUDED_FIELDS}
+    for fixture in (eight, nine):
+        version = fixture["tape_protocol_version"]
+        expected = f"all protocol-{version} frames"
+        assert fixture.get("projection") == expected, (
+            f"projection is {fixture.get('projection')!r}, not the "
+            f"producer's canonical {expected!r} - a projection differing "
+            "beyond the version number is a real change, not metadata"
+        )
+    stripped_eight = {
+        k: v for k, v in eight.items() if k not in IDENTITY_SEPARATELY_VALIDATED
+    }
+    stripped_nine = {
+        k: v for k, v in nine.items() if k not in IDENTITY_SEPARATELY_VALIDATED
+    }
     for field in sorted(set(stripped_eight) | set(stripped_nine)):
         assert field in stripped_eight and field in stripped_nine, (
             f"identity check: field {field} exists in only one fixture"
@@ -235,7 +257,8 @@ def verify_8_9_identity(eight_path: Path, nine_path: Path) -> None:
             "does not hold on the current implementation"
         )
     print("8/9 identity: PASS - every field equal outside "
-          f"{', '.join(IDENTITY_EXCLUDED_FIELDS)}")
+          f"{', '.join(IDENTITY_SEPARATELY_VALIDATED)} (each separately "
+          "validated)")
 
 
 def compare(mode_name: str, before: dict, after: dict,
@@ -420,6 +443,7 @@ def selftest() -> None:
             "tape_protocol_version": version,
             "pairing_id": pairing,
             "parent_events_per_combination": 2_000_000,
+            "projection": f"all protocol-{version} frames",
             "entries": rows,
         }
 
@@ -510,6 +534,16 @@ def selftest() -> None:
         del nine_unpaired["pairing_id"]
         p9.write_text(json.dumps(nine_unpaired))
         check("a missing pairing id refuses rather than passing as different",
+              refuses(lambda: verify_8_9_identity(p8, p9)))
+        nine_stale_label = fixture(9, "pair-y", crypto + futures_before)
+        nine_stale_label["projection"] = "all protocol-8 frames"
+        p9.write_text(json.dumps(nine_stale_label))
+        check("a protocol-9 fixture retaining the protocol-8 label refuses",
+              refuses(lambda: verify_8_9_identity(p8, p9)))
+        nine_odd_label = fixture(9, "pair-y", crypto + futures_before)
+        nine_odd_label["projection"] = "some other projection"
+        p9.write_text(json.dumps(nine_odd_label))
+        check("a projection differing beyond the version number refuses",
               refuses(lambda: verify_8_9_identity(p8, p9)))
     finally:
         for child in scratch.iterdir():

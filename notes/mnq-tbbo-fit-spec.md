@@ -704,6 +704,19 @@ byte-identity claim on the current implementation. A mismatch STOPS
 everything and is its own finding. The fixture and its passing
 identity result are kept independently as the current baseline.
 
+RESULT, 2026-08-05: the fixture was measured (160 combinations,
+4m36s) and the gate REFUSED on first run - on `projection`, a
+version-derived producer label (`all protocol-N frames`), while every
+measurement entry was exactly equal. The stop-and-review discipline
+ran as designed: inspection established the field embeds the version
+transitively, and the jointly accepted amendment is the CANONICAL
+LABEL check - each fixture's projection must equal the producer's
+deterministic label for its own version - which is stricter than
+exclusion, since a projection differing beyond the version number
+still refuses. After the amendment the gate PASSES: 5fc974d's
+byte-identity claim holds on the current implementation, and the
+protocol-9 baseline is in force.
+
 **Brick B - composition remeasure (unconditional, on the UNCOMMITTED
 Brick L tree).** `brokkr run mogwai -- tick-composition --out
 analysis/tick-composition-protocol-10.json`, then
