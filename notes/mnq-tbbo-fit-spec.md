@@ -273,7 +273,18 @@ max are reported as stability diagnostics only.
 
 ### 4.3 Size family
 
-All valid trades enter the size histogram, unsided included.
+All valid trades enter the size histogram, unsided included: side and
+book validity are not properties of the size process, so an unsided
+print's size is still size evidence and a broken quote beside a trade
+does not invalidate the trade's size. The generated population has no
+unsided or invalid-book class by construction; the preflight caps (1%
+unsided, 0.1% invalid-width) bound how far the two populations can
+drift. The artifact states this explicitly: `size_population` carries
+the population definition and the print/sided/unsided/valid-book/
+invalid-book counts, so the verdict reader sees the asymmetry and its
+bound instead of discovering it in the code. The hour curves and the
+terminal price anchor share the convention (a data diagnostic
+classifies nothing; the anchor needs a price, not a side).
 
 `latent_size_median`: deterministic inverse solve through the exact
 `materialize_size` transformation (floor at `min_size = 1`,
@@ -448,7 +459,7 @@ Tolerances (generated month against observed July, frozen seeds):
 | size: mean | 15% relative |
 | size: p90, p99 | larger of 1 contract or 20% |
 | displacement: generated median | 0.25 tick absolute |
-| displacement: buyer and seller medians | 0.5 tick of pooled target each |
+| displacement: buyer and seller medians | 0.5 tick of the observed SAME-SIDE median each; a side with zero valid-quote parents in the data gates vacuously and is reported as such |
 | quote-mid one-parent RMS | 10% relative |
 | width | exact configured integer |
 | top sizes | exact configured integers |
@@ -664,8 +675,90 @@ comparison: evaluate m1 and m2, keep [a, m2] when f(m1) <= f(m2)
 (the tie keeps the left), else [m1, b]; the coarse grid selects the
 basin and ternary refinement makes the explicit local-unimodality
 assumption within it; the returned candidate remains the best point
-ever evaluated, smaller winning ties. The reproduction is a
-permanent regression check in the selftest.
+ever evaluated, smaller winning ties. SUPERSEDED the same day by the
+owner's edit (second amendment, item 9): the survivor rule is the
+INCUMBENT form again, now seeded with the coarse grid's already-paid
+scores including the coarse winner. That restores neither classic
+ternary nor local convergence - the 3.2 reproduction still stalls at
+3.136 - and the regression was deliberately weakened to
+preserves-or-improves-the-coarse-incumbent. The accepted trade: the
+stall is bounded by a few percent of the initial bracket, both real
+brackets are narrow relative to their gates (the displacement grid
+spaces 0.0625 ticks against a 0.25-tick gate; the vol log-grid's
+stall is under a percent of value against a 10% gate), so the coarse
+grid does the converging, refinement is polish, and no generator walk
+is re-spent on an already-scored point.
+
+AMENDMENT, 2026-08-05, after a two-reviewer critical read of the
+committed harness and BEFORE any real-data run (no preflight or fit
+artifact existed): (1) identity binding now refuses a ledger-inventoried
+file missing from disk (completeness was only checked disk-to-ledger);
+(2) a header-only data file refuses instead of silently resetting the
+seam check; (3) the ACF diagnostics compute the Pearson correlation of
+exactly the accepted pairs (per-lag pair moments), not a global-mean
+approximation biased by boundary resets; (4) the observed estimators now
+report everything 4.2-4.7 names (per-session cadence stability, width
+median/p90/MAD, top-size distributions and tails, displacement p90 and
+inside-mid/at-touch/beyond-touch fractions, observed-side fixed-horizon
+vol at 60 s and 300 s, `HORIZON_SECONDS` joining the sub-contract);
+(5) the artifact's verdicts are per TARGET with tolerance, measured and
+observed values, both stages separately, the landing set derived from
+them alone, and `size_round_frac` carrying declared-unidentifiable as
+its own status; (6) the size ECDF gate uses the same inclusive-SLACK
+comparison as every other tolerance; (7) the wholesale cadence stop and
+the volatility dependency read the combined run's cadence verdict, not
+the probe alone; (8) artifacts serialize non-finite floats as strings,
+never the non-standard NaN/Infinity tokens; (9) the trisection is
+seeded with the coarse grid's already-paid scores including the coarse
+winner, so the best-ever rule is honest and endpoint re-evaluation
+(whole generator walks) is gone. The sub-contract hash moved; preflight
+must run fresh, which is the binding working as designed.
+
+AMENDMENT, 2026-08-05, after a second two-reviewer critical read,
+still BEFORE any real-data run (no preflight or fit artifact exists).
+Two contract changes and a set of harness fixes, all pre-measurement:
+
+(1) The 4.9 side displacement gate is amended from pooled-target to
+SIDE-VS-SIDE: the original text ("buyer and seller medians each within
+0.5 tick of the pooled target") was wrong as a contract - a symmetric
+static scalar always generates buyer ~ seller ~ scalar ~ pooled, so
+the pooled form passes a generator whose asymmetry is simply not
+represented, which is precisely what declared-misrepresented exists to
+catch. Each generated side median must now sit within 0.5 tick of the
+OBSERVED same-side median; a side with zero valid-quote parents has no
+observed median, so its gate is explicitly vacuous-and-reported, never
+a NaN comparison failing quietly. The pooled 0.25-tick gate and the
+solve target are unchanged. An asymmetric-fixture regression (buyers
+3 ticks off mid, sellers 1) proves the pooled gate passes while the
+side gate refuses.
+
+(2) The 4.3 all-prints size population is KEPT on re-argument
+(excluding ~1% of prints to buy comparison symmetry discards more
+evidence than it gains) but was stated nowhere, which was the actual
+defect: the artifact now carries `size_population` with the definition
+and composition counts (see 4.3).
+
+Harness fixes from the same read: (3) a real fit run refuses on a
+dirty tree - `harness_tree_commit` must name exactly the code that
+ran; (4) generator walks are cached under `analysis/out/`, keyed by
+the full invocation plus the harness commit (sound because of 3), so
+a crashed multi-hour fit resumes instead of restarting and CRN-equal
+re-evaluations are never paid twice; (5) the seam check covers
+multi-row overlaps - any row of the previous file's final timestamp
+recurring at the next file's head refuses, not just an exact
+last-row/first-row match; (6) a fixed-horizon boundary landing exactly
+on a parent's timestamp stays pending until a later parent flushes it,
+so equal-timestamp parents all update the boundary's as-of mid; (7)
+the volatility verdict lists the cadence metrics its family pass
+actually reads, so a cadence miss inside the volatility probe is
+visible in the verdict instead of failing it with all-true checks;
+(8) the displacement solve's early-exit threshold is 0 - both medians
+are bin centers on the shared 0.05 grid, so a nonzero threshold
+implied resolution the estimator lacks; (9) CRLF input parses
+identically to LF; (10) a Refusal exits with its message, not a
+traceback. No sub-contract constant moved, so the sub-contract hash is
+unchanged; the amended gate semantics bind through the harness tree
+commit.
 
 **Brick M2 - preflight.** `python3 analysis/mnq_fit.py preflight`.
 Persists its artifact or refuses; a refusal stops the spec and is

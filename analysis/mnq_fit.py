@@ -139,6 +139,12 @@ TOLERANCES = {
 # Diagnostics ACF lags (4.8) - findings, never gates.
 ACF_LAGS = (1, 10, 50)
 
+# Fixed-horizon realized-vol diagnostics (4.7), seconds. Non-overlapping
+# consecutive windows; on the observed side they are aligned to each
+# session segment's calendar start (the halt and session boundaries are
+# excluded by construction because a window never spans segments).
+HORIZON_SECONDS = (60, 300)
+
 # The crypto-fitted reference values the shared-shape diagnostic compares
 # against (4.8): the committed fingerprint's price-sequence anchors (Kraken
 # eight-pair fit, analysis/fingerprint.json) and the Binance three-pair
@@ -181,7 +187,8 @@ SUBCONTRACT_KEYS = [
     "SIZE_MEDIAN_GRID_POINTS", "SIZE_ROUND_FRAC_GRID",
     "DISPLACEMENT_GRID_POINTS", "VOL_GRID_POINTS", "VOL_SCALAR_DOMAIN",
     "SIZE_MEDIAN_IDENTIFIABILITY_FLOOR", "DISPLACEMENT_BIN_TICKS",
-    "MAX_WRONG_SIDE_SHARE", "TOLERANCES", "ACF_LAGS", "REFERENCE_SHAPE",
+    "MAX_WRONG_SIDE_SHARE", "TOLERANCES", "ACF_LAGS", "HORIZON_SECONDS",
+    "REFERENCE_SHAPE",
 ]
 
 
@@ -247,7 +254,9 @@ REQUIRED_COLUMNS = (
 
 
 def iter_csv_zst(path):
-    """Yield text lines from a .csv.zst, streaming, header included."""
+    """Yield text lines from a .csv.zst, streaming, header included. A
+    trailing \\r is stripped so CRLF data parses identically to LF and the
+    seam comparison sees the same bytes either way."""
     with open(path, "rb") as fh:
         reader = zstd.ZstdFile(fh)
         buffer = b""
@@ -260,10 +269,12 @@ def iter_csv_zst(path):
                 nl = buffer.find(b"\n")
                 if nl < 0:
                     break
-                yield buffer[:nl].decode("utf-8")
+                line = buffer[:nl].decode("utf-8")
+                yield line[:-1] if line.endswith("\r") else line
                 buffer = buffer[nl + 1:]
         if buffer:
-            yield buffer.decode("utf-8")
+            line = buffer.decode("utf-8")
+            yield line[:-1] if line.endswith("\r") else line
 
 
 def column_indices(header_line: str) -> dict[str, int]:
@@ -315,11 +326,15 @@ def classify_book(bid_px: int, ask_px: int) -> str:
 def parse_stream(paths):
     """Yield Row objects across the ordered files as ONE stream: 19-digit ns
     timestamps, monotone ordering across the file boundary, no duplicate row
-    AT THE SEAM (the last data row of one file versus the first of the next;
-    identical adjacent rows WITHIN a file are legitimate market data),
-    per-price grid membership, strict B/A/N sides, action T on every row."""
+    AT THE SEAM (any row of the previous file's FINAL TIMESTAMP recurring
+    among the next file's rows at that timestamp - monotonicity confines an
+    overlap to that instant, so this covers multi-row overlaps, not just an
+    exact last-row/first-row match; identical adjacent rows WITHIN a file
+    are legitimate market data), per-price grid membership, strict B/A/N
+    sides, action T on every row."""
     prev_ts = None
-    seam_line = None  # last data row of the previous file, seam check only
+    seam_ts = None          # the previous file's final timestamp
+    seam_lines: set[str] = set()  # its rows at that timestamp, seam check only
     for path in paths:
         lines = iter_csv_zst(path)
         try:
@@ -327,18 +342,12 @@ def parse_stream(paths):
         except StopIteration:
             raise Refusal(f"{path} is empty") from None
         idx = column_indices(header)
-        last_line = None
-        first_data_row = True
+        tail_ts = None
+        tail_lines: set[str] = set()
+        in_seam = seam_ts is not None
         for line_no, line in enumerate(lines, start=2):
             if not line.strip():
                 continue
-            if first_data_row:
-                if seam_line is not None and line == seam_line:
-                    raise Refusal(
-                        f"{path}:{line_no}: duplicates the previous file's "
-                        "final row at the boundary; the files overlap"
-                    )
-                first_data_row = False
             parts = line.split(",")
             raw_ts = parts[idx["ts_event"]]
             if len(raw_ts) != 19 or not raw_ts.isdigit():
@@ -352,6 +361,15 @@ def parse_stream(paths):
                     f"{path}:{line_no}: ordering regression "
                     f"({ts} after {prev_ts}) - zero are tolerated"
                 )
+            if in_seam:
+                if ts != seam_ts:
+                    in_seam = False
+                elif line in seam_lines:
+                    raise Refusal(
+                        f"{path}:{line_no}: duplicates a row of the previous "
+                        "file's final timestamp at the boundary; the files "
+                        "overlap"
+                    )
             action = parts[idx["action"]]
             if action != "T":
                 raise Refusal(
@@ -381,8 +399,17 @@ def parse_stream(paths):
                 classify_book(bid_px, ask_px),
             )
             prev_ts = ts
-            last_line = line
-        seam_line = last_line
+            if ts != tail_ts:
+                tail_ts = ts
+                tail_lines = {line}
+            else:
+                tail_lines.add(line)
+        if tail_ts is None:
+            raise Refusal(
+                f"{path} carries a header but no data rows; an empty "
+                "intermediate file would also silently reset the seam check"
+            )
+        seam_ts, seam_lines = tail_ts, tail_lines
 
 
 def group_parents_batch(rows: list[Row]) -> list[list[Row]]:
@@ -466,6 +493,13 @@ def verify_input(directory: str, ledger_path: str | None = None) -> dict:
             f"(only ledger: {only_ledger}; only manifest: {only_manifest}; "
             f"hash mismatch: {moved}); the landing is not the delivery the "
             "ledger recorded"
+        )
+    on_disk = {os.path.basename(p) for p in data_files(directory)}
+    absent = sorted(set(ledger_files) - on_disk)
+    if absent:
+        raise Refusal(
+            f"ledger inventory file(s) missing from disk: {absent}; the "
+            "delivery is incomplete and hashing the remainder proves nothing"
         )
     hashes = {}
     for path in data_files(directory):
@@ -608,11 +642,28 @@ def run_preflight(directory: str, ledger_path: str | None = None) -> dict:
     }
 
 
+def json_safe(obj):
+    """Recursively replace non-finite floats with the strings "nan",
+    "inf", "-inf". `json.dump` would otherwise emit the non-standard
+    tokens NaN/Infinity and a strict consumer of the artifact would
+    refuse to parse it."""
+    if isinstance(obj, float) and not math.isfinite(obj):
+        if math.isnan(obj):
+            return "nan"
+        return "inf" if obj > 0 else "-inf"
+    if isinstance(obj, dict):
+        return {k: json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [json_safe(v) for v in obj]
+    return obj
+
+
 def write_json_atomic(path: str, payload: dict) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w") as fh:
-        json.dump(payload, fh, indent=1, sort_keys=True)
+        json.dump(json_safe(payload), fh, indent=1, sort_keys=True,
+                  allow_nan=False)
         fh.write("\n")
     os.replace(tmp, path)
 
@@ -621,7 +672,7 @@ def mode_preflight() -> None:
     payload = run_preflight(DELIVERY_DIR)
     write_json_atomic(PREFLIGHT_ARTIFACT, payload)
     print(json.dumps(
-        {k: v for k, v in payload.items() if k != "sessions"},
+        json_safe({k: v for k, v in payload.items() if k != "sessions"}),
         indent=1, sort_keys=True, default=str,
     ))
     print(f"preflight PASS -> {PREFLIGHT_ARTIFACT}")
@@ -687,25 +738,34 @@ class Quantiles:
 class Acf:
     """Streaming autocorrelation at fixed lags over one long series;
     `reset_series` empties the lag window so pairs never straddle a
-    session or segment boundary."""
+    session or segment boundary.
+
+    Each lag carries its own pair-only moments (left and right members
+    separately): the value is the Pearson correlation of exactly the
+    accepted (x_t, x_{t-lag}) pairs. A global mean over ALL observations
+    would weight boundary observations unequally across many short
+    segments and bias the estimate, especially at lags 10 and 50."""
 
     def __init__(self, lags):
         self.lags = tuple(lags)
         self.window: list[float] = []
-        self.n = 0
-        self.s = 0.0
-        self.ss = 0.0
-        self.cross = {lag: 0.0 for lag in self.lags}
-        self.cross_n = {lag: 0 for lag in self.lags}
+        self.stats = {
+            lag: {"n": 0, "sx": 0.0, "sy": 0.0, "sxx": 0.0, "syy": 0.0,
+                  "sxy": 0.0}
+            for lag in self.lags
+        }
 
     def add(self, x: float) -> None:
-        self.n += 1
-        self.s += x
-        self.ss += x * x
         for lag in self.lags:
             if len(self.window) >= lag:
-                self.cross[lag] += x * self.window[-lag]
-                self.cross_n[lag] += 1
+                y = self.window[-lag]
+                st = self.stats[lag]
+                st["n"] += 1
+                st["sx"] += x
+                st["sy"] += y
+                st["sxx"] += x * x
+                st["syy"] += y * y
+                st["sxy"] += x * y
         self.window.append(x)
         if len(self.window) > max(self.lags):
             self.window.pop(0)
@@ -714,28 +774,72 @@ class Acf:
         self.window.clear()
 
     def value(self, lag: int) -> float:
-        if self.n < 2 or self.cross_n[lag] == 0:
+        st = self.stats[lag]
+        n = st["n"]
+        if n < 2:
             return float("nan")
-        mean = self.s / self.n
-        var = self.ss / self.n - mean * mean
-        if var <= 0:
+        mx = st["sx"] / n
+        my = st["sy"] / n
+        vx = st["sxx"] / n - mx * mx
+        vy = st["syy"] / n - my * my
+        if vx <= 0 or vy <= 0:
             return float("nan")
-        cov = self.cross[lag] / self.cross_n[lag] - mean * mean
-        return cov / var
+        cov = st["sxy"] / n - mx * my
+        return cov / math.sqrt(vx * vy)
 
 
-def hist_median(hist: dict[int, int], bin_width: float) -> float:
-    """Median of a binned histogram, read at the bin center."""
+def hist_quantile(hist: dict[int, int], q: float, bin_width: float) -> float:
+    """Nearest-rank quantile of a binned histogram, read at the bin
+    center."""
     total = sum(hist.values())
     if total == 0:
         return float("nan")
-    rank = max(1, math.ceil(0.5 * total))
+    rank = max(1, math.ceil(q * total))
     seen = 0
     for k in sorted(hist):
         seen += hist[k]
         if seen >= rank:
             return (k + 0.5) * bin_width
     raise AssertionError("rank walked past the histogram")
+
+
+def hist_median(hist: dict[int, int], bin_width: float) -> float:
+    return hist_quantile(hist, 0.5, bin_width)
+
+
+def dist_stats(values: list[float]) -> dict:
+    """Nearest-rank median/IQR plus min and max over a small list of
+    per-session values (the 4.2 stability-diagnostic shape)."""
+    if not values:
+        return {"median": float("nan"), "p25": float("nan"),
+                "p75": float("nan"), "iqr": float("nan"),
+                "min": float("nan"), "max": float("nan")}
+    ordered = sorted(values)
+    n = len(ordered)
+
+    def rank(q):
+        return ordered[max(1, math.ceil(q * n)) - 1]
+
+    p25, p75 = rank(0.25), rank(0.75)
+    return {"median": rank(0.5), "p25": p25, "p75": p75, "iqr": p75 - p25,
+            "min": ordered[0], "max": ordered[-1]}
+
+
+def segment_origin_ns(session: str, segment: str) -> int:
+    """The calendar start of a session segment as a UTC epoch-ns instant:
+    the previous civil day's 17:00 local for `overnight`, the trade
+    date's 15:30 local for `post_halt`."""
+    day = dt.date.fromisoformat(session)
+    if segment == "overnight":
+        local_day = day - dt.timedelta(days=1)
+        local_min = SESSION_OPEN_LOCAL_MIN
+    else:
+        local_day = day
+        local_min = HALT_END_LOCAL_MIN
+    base = dt.datetime(local_day.year, local_day.month, local_day.day,
+                       tzinfo=dt.timezone.utc).timestamp()
+    return int(base + local_min * 60 - UTC_OFFSET_MINUTES * 60) \
+        * 1_000_000_000
 
 
 def observe(rows_iter, usable: list[str]) -> dict:
@@ -753,6 +857,11 @@ def observe(rows_iter, usable: list[str]) -> dict:
     bid_sizes = Quantiles()
     ask_sizes = Quantiles()
     disp_hist = {"B": {}, "A": {}}
+    disp_categories = {
+        side: {"wrong_side": 0, "inside_mid": 0, "at_touch": 0,
+               "beyond_touch": 0}
+        for side in ("B", "A")
+    }
     wrong_side = 0
     valid_quote_parents = 0
     mid_count = 0
@@ -764,8 +873,33 @@ def observe(rows_iter, usable: list[str]) -> dict:
     price_changes = 0
     hour_count = {h: 0 for h in range(24)}
     hour_volume = {h: 0 for h in range(24)}
-    per_session_parents: dict[str, int] = {}
+    # Per-session cadence accumulators (4.2 stability diagnostics).
+    session_cad: dict[str, dict] = {}
+    # Fixed-horizon realized-vol accumulators (4.7), per horizon:
+    # [count, sum, sumsq] of as-of quote-mid log returns over consecutive
+    # windows aligned to the segment's calendar start.
+    hz_acc = {h: [0, 0.0, 0.0] for h in HORIZON_SECONDS}
+    hz = {"key": None, "state": {}, "last_mid": None}
     last_trade_price_units = None  # last valid trade in usable sessions
+    # The 4.3 size population: ALL structurally valid prints, unsided and
+    # invalid-book included. Counted here so the artifact states the
+    # population and its composition explicitly - the generated side has
+    # neither class by construction, and the preflight caps bound the
+    # resulting drift.
+    pop_prints = 0
+    pop_unsided = 0
+    pop_invalid_book = 0
+
+    def hz_emit(h: int, st: dict, mid: float) -> None:
+        if mid is None or mid <= 0:
+            return
+        if st["prev"] is not None:
+            r = math.log(mid / st["prev"])
+            acc = hz_acc[h]
+            acc[0] += 1
+            acc[1] += r
+            acc[2] += r * r
+        st["prev"] = mid
 
     current = None
     prev_cadence = None    # (first_ts, session, segment) - ALL parents
@@ -780,12 +914,18 @@ def observe(rows_iter, usable: list[str]) -> dict:
         nonlocal zero_changes, price_changes
         nonlocal prev_cadence, prev_mid, prev_diag
         parents += 1
-        per_session_parents[parent["session"]] = (
-            per_session_parents.get(parent["session"], 0) + 1
+        cad = session_cad.setdefault(
+            parent["session"],
+            {"parents": 0, "rows": 0, "singles": 0, "levels": 0,
+             "gaps": 0, "gap_ns": 0},
         )
+        cad["parents"] += 1
+        cad["rows"] += parent["rows"]
+        cad["levels"] += len(parent["levels"])
         sided_rows += parent["rows"]
         if parent["rows"] == 1:
             single_parents += 1
+            cad["singles"] += 1
         level_sum += len(parent["levels"])
 
         here = (parent["session"], parent["segment"])
@@ -794,6 +934,8 @@ def observe(rows_iter, usable: list[str]) -> dict:
             gap_ns = parent["first_ts"] - prev_cadence[0]
             gap_sum_ns += gap_ns
             gaps += 1
+            cad["gaps"] += 1
+            cad["gap_ns"] += gap_ns
             dur_s = gap_ns / 1e9
             dur_sum += dur_s
             dur_sumsq += dur_s * dur_s
@@ -812,8 +954,24 @@ def observe(rows_iter, usable: list[str]) -> dict:
             mid_units = (parent["bid_px"] + parent["ask_px"]) / 2
             raw_ticks = (parent["first_price"] - mid_units) / TICK_UNITS
             signed = raw_ticks if parent["side"] == "B" else -raw_ticks
-            if signed < 0:
+            # Touch categories (4.5) on exact integers: d2 is twice the
+            # signed displacement in price units, touch2 twice the
+            # half-spread; both are exact multiples of TICK_UNITS.
+            d2 = 2 * parent["first_price"] - parent["bid_px"] \
+                - parent["ask_px"]
+            if parent["side"] == "A":
+                d2 = -d2
+            touch2 = parent["ask_px"] - parent["bid_px"]
+            cats = disp_categories[parent["side"]]
+            if d2 < 0:
                 wrong_side += 1
+                cats["wrong_side"] += 1
+            elif d2 == touch2:
+                cats["at_touch"] += 1
+            elif d2 > touch2:
+                cats["beyond_touch"] += 1
+            else:
+                cats["inside_mid"] += 1
             bin_key = math.floor(signed / DISPLACEMENT_BIN_TICKS)
             disp_hist[parent["side"]][bin_key] = (
                 disp_hist[parent["side"]].get(bin_key, 0) + 1
@@ -824,6 +982,37 @@ def observe(rows_iter, usable: list[str]) -> dict:
                 mid_count += 1
                 mid_sumsq += r * r
             prev_mid = (mid_units, *here)
+
+            # Fixed-horizon windows (4.7): boundaries at origin + k*W in
+            # the segment; the as-of mid at a boundary is the last valid
+            # parent mid at or before it. A boundary exactly at ts_ns is
+            # NOT emitted here: it stays pending until a strictly later
+            # parent flushes it, so equal-timestamp parents all update the
+            # boundary's as-of mid first. (A boundary coinciding with the
+            # segment's final parent is dropped with the other post-final
+            # boundaries.)
+            ts_ns = parent["first_ts"]
+            if here != hz["key"]:
+                hz["key"] = here
+                origin = segment_origin_ns(*here)
+                hz["state"] = {
+                    h: {"origin": origin, "next": origin + h * 10**9,
+                        "prev": None}
+                    for h in HORIZON_SECONDS
+                }
+                hz["last_mid"] = None
+            for h in HORIZON_SECONDS:
+                st = hz["state"][h]
+                w_ns = h * 10**9
+                if hz["last_mid"] is None and st["next"] < ts_ns:
+                    # No as-of mid exists yet: dead boundaries carry no
+                    # observation; jump to the first boundary >= ts.
+                    k = (ts_ns - st["origin"] + w_ns - 1) // w_ns
+                    st["next"] = st["origin"] + w_ns * max(1, k)
+                while st["next"] < ts_ns:
+                    hz_emit(h, st, hz["last_mid"])
+                    st["next"] += w_ns
+            hz["last_mid"] = mid_units
 
         # Chain 3: shared-shape diagnostics, every parent.
         if prev_diag is not None and prev_diag[1:] == here:
@@ -846,7 +1035,17 @@ def observe(rows_iter, usable: list[str]) -> dict:
                 close_parent(current)
                 current = None
             continue
+        # DELIBERATELY before the side and book branches (4.3): side and
+        # book validity are not properties of the size process, so every
+        # print's size is size evidence, the hour curves are a data
+        # diagnostic that classifies nothing, and the terminal anchor needs
+        # a price, not a side. The composition lands in `size_population`.
         sizes.add(row.size)
+        pop_prints += 1
+        if row.side == "N":
+            pop_unsided += 1
+        if row.book != "normal":
+            pop_invalid_book += 1
         last_trade_price_units = row.price
         # Session curves bucket by EXCHANGE-LOCAL hour (the wave-1 and
         # session-fit convention), never UTC.
@@ -888,12 +1087,50 @@ def observe(rows_iter, usable: list[str]) -> dict:
     # counter would repeat this pass's own transition logic and prove
     # nothing.
 
+    if not width_hist:
+        raise Refusal("no valid-quote parents in usable sessions")
     all_disp: dict[int, int] = {}
     for h in disp_hist.values():
         for k, v in h.items():
             all_disp[k] = all_disp.get(k, 0) + v
     max_width_count = max(width_hist.values())
     width_mode = min(k for k in width_hist if width_hist[k] == max_width_count)
+    width_total = sum(width_hist.values())
+    width_mad = sum(
+        abs(k - width_mode) * v for k, v in width_hist.items()
+    ) / width_total
+
+    per_session_cadence = {
+        label: {
+            "parents": c["parents"],
+            "mean_event_duration_s": c["gap_ns"] / c["gaps"] / 1e9
+            if c["gaps"] else float("nan"),
+            "children_mean": c["rows"] / c["parents"],
+            "children_single_frac": c["singles"] / c["parents"],
+            "levels_mean": c["levels"] / c["parents"],
+        }
+        for label, c in sorted(session_cad.items())
+    }
+    cadence_stability = {
+        metric: dist_stats([
+            v[metric] for v in per_session_cadence.values()
+            if math.isfinite(v[metric])
+        ])
+        for metric in ("mean_event_duration_s", "children_mean",
+                       "children_single_frac", "levels_mean")
+    }
+
+    def category_fractions(counts: dict[str, int]) -> dict:
+        total = sum(counts.values())
+        return {
+            **{k: (v / total if total else float("nan"))
+               for k, v in counts.items()},
+            "parents": total,
+        }
+    combined_categories = {
+        k: disp_categories["B"][k] + disp_categories["A"][k]
+        for k in disp_categories["B"]
+    }
     cv2 = float("nan")
     if gaps > 1:
         mean_d = dur_sum / gaps
@@ -912,6 +1149,20 @@ def observe(rows_iter, usable: list[str]) -> dict:
         "children_mean": sided_rows / parents,
         "children_single_frac": single_parents / parents,
         "levels_mean": level_sum / parents,
+        "size_population": {
+            # The frozen 4.3 population, stated so the verdict reader sees
+            # the observed-vs-generated asymmetry and its preflight-capped
+            # bound here instead of discovering it in the code: the
+            # generated population carries no unsided or invalid-book
+            # class by construction.
+            "definition": "all prints in usable sessions, unsided and "
+                          "invalid-book included",
+            "prints": pop_prints,
+            "sided": pop_prints - pop_unsided,
+            "unsided": pop_unsided,
+            "valid_book": pop_prints - pop_invalid_book,
+            "invalid_book": pop_invalid_book,
+        },
         "size_histogram": {str(k): v for k, v in sorted(sizes.counts.items())},
         "size_mean": sizes.mean(),
         "size_quantiles": {
@@ -921,9 +1172,25 @@ def observe(rows_iter, usable: list[str]) -> dict:
         "size_floor_mass": sizes.counts.get(1, 0) / sizes.total,
         "width_hist": {str(k): v for k, v in sorted(width_hist.items())},
         "width_mode": width_mode,
-        "width_modal_mass": width_hist[width_mode] / sum(width_hist.values()),
+        "width_modal_mass": width_hist[width_mode] / width_total,
+        "width_median": nearest_rank_of(width_hist, 0.5),
+        "width_p90": nearest_rank_of(width_hist, 0.90),
+        "width_mad_from_mode": width_mad,
         "top_bid_median": bid_sizes.nearest_rank(0.5),
         "top_ask_median": ask_sizes.nearest_rank(0.5),
+        "bid_size_histogram": {
+            str(k): v for k, v in sorted(bid_sizes.counts.items())
+        },
+        "ask_size_histogram": {
+            str(k): v for k, v in sorted(ask_sizes.counts.items())
+        },
+        "top_size_quantiles": {
+            side: {
+                f"p{int(q * 100)}": qs.nearest_rank(q)
+                for q in (0.50, 0.90, 0.95, 0.99)
+            }
+            for side, qs in (("bid", bid_sizes), ("ask", ask_sizes))
+        },
         "displacement_hist": {
             side: {str(k): v for k, v in sorted(h.items())}
             for side, h in disp_hist.items()
@@ -931,12 +1198,26 @@ def observe(rows_iter, usable: list[str]) -> dict:
         "displacement_median_ticks": hist_median(
             all_disp, DISPLACEMENT_BIN_TICKS
         ),
+        "displacement_p90_ticks": hist_quantile(
+            all_disp, 0.90, DISPLACEMENT_BIN_TICKS
+        ),
         "displacement_buyer_median_ticks": hist_median(
             disp_hist["B"], DISPLACEMENT_BIN_TICKS
         ),
         "displacement_seller_median_ticks": hist_median(
             disp_hist["A"], DISPLACEMENT_BIN_TICKS
         ),
+        "displacement_buyer_p90_ticks": hist_quantile(
+            disp_hist["B"], 0.90, DISPLACEMENT_BIN_TICKS
+        ),
+        "displacement_seller_p90_ticks": hist_quantile(
+            disp_hist["A"], 0.90, DISPLACEMENT_BIN_TICKS
+        ),
+        "displacement_fractions": {
+            "combined": category_fractions(combined_categories),
+            "B": category_fractions(disp_categories["B"]),
+            "A": category_fractions(disp_categories["A"]),
+        },
         "wrong_side_share": wrong_side / valid_quote_parents
         if valid_quote_parents else float("nan"),
         "valid_quote_parents": valid_quote_parents,
@@ -945,7 +1226,19 @@ def observe(rows_iter, usable: list[str]) -> dict:
         "mid_return_count": mid_count,
         "eligible_gaps": gaps,
         "last_price_points": last_price_points,
-        "per_session_parents": per_session_parents,
+        "per_session_parents": {
+            label: v["parents"] for label, v in per_session_cadence.items()
+        },
+        "per_session_cadence": per_session_cadence,
+        "cadence_stability": cadence_stability,
+        "horizon_vol": {
+            str(h): {
+                "count": acc[0], "sum": acc[1], "sumsq": acc[2],
+                "rms": math.sqrt(acc[2] / acc[0]) if acc[0]
+                else float("nan"),
+            }
+            for h, acc in hz_acc.items()
+        },
         "diagnostics": build_diagnostics(
             zero_changes, price_changes, ret_acf, absret_acf, dur_acf, cv2,
             hour_count, hour_volume, len(set(usable)),
@@ -1048,12 +1341,32 @@ def scratch_config_text(overrides: dict[str, object]) -> str:
 def run_summary_subprocess(overrides: dict, seed: int, start_ns: int,
                            length: str, warmup: str) -> dict:
     """One `brokkr run mogwai -- gen --type summary` walk. The production
-    runner; selftests inject fakes instead."""
+    runner; selftests inject fakes instead.
+
+    Walks are cached under SCRATCH_DIR/cache, keyed by the full invocation
+    plus the harness commit: the generator is deterministic (CRN), so a
+    repeated evaluation is pure waste, and a crashed multi-hour fit resumes
+    from the cache instead of from zero. The commit is a sound key because
+    run_fit refuses to start from a dirty tree."""
+    cache_key = hashlib.sha256(json.dumps(
+        {"overrides": overrides, "seed": seed, "start_ns": start_ns,
+         "length": length, "warmup": warmup, "commit": git_commit()},
+        sort_keys=True, default=list,
+    ).encode()).hexdigest()
+    cache_dir = os.path.join(SCRATCH_DIR, "cache")
+    cache_path = os.path.join(cache_dir, cache_key + ".json")
+    if os.path.exists(cache_path):
+        with open(cache_path) as fh:
+            return json.load(fh)
     os.makedirs(SCRATCH_DIR, exist_ok=True)
     config_path = os.path.join(SCRATCH_DIR, f"candidate-{os.getpid()}.toml")
     out_path = os.path.join(SCRATCH_DIR, f"summary-{os.getpid()}-{seed}.json")
     with open(config_path, "w") as fh:
         fh.write(scratch_config_text(overrides))
+    # A stale summary from an earlier walk must never be read as this
+    # walk's output if gen exits 0 without writing.
+    if os.path.exists(out_path):
+        os.remove(out_path)
     cmd = [
         "brokkr", "run", "--release", "mogwai", "--", "gen",
         "--config", config_path, "--type", "summary",
@@ -1067,7 +1380,13 @@ def run_summary_subprocess(overrides: dict, seed: int, start_ns: int,
             f"summary walk failed ({' '.join(cmd)}):\n{proc.stderr[-2000:]}"
         )
     with open(out_path) as fh:
-        return json.load(fh)
+        summary = json.load(fh)
+    os.makedirs(cache_dir, exist_ok=True)
+    tmp = cache_path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(summary, fh)
+    os.replace(tmp, cache_path)
+    return summary
 
 
 def pooled(summaries: list[dict]) -> dict:
@@ -1097,12 +1416,28 @@ def pooled(summaries: list[dict]) -> dict:
         for hist, dst in ((s["buyer_displacement_hist"], buyer),
                           (s["seller_displacement_hist"], seller)):
             for k, v in hist.items():
+                # The keys are bin LEFT EDGES the generator printed from
+                # index * 0.05; round(), not floor(), recovers the index
+                # because 0.05 is not exactly representable (e.g. "0.15"
+                # parses to 2.9999.../0.05 - floor would be off by one).
                 key = round(float(k) / DISPLACEMENT_BIN_TICKS)
                 dst[key] = dst.get(key, 0) + v
     width: dict[int, int] = {}
     for s in summaries:
         for k, v in s["width_ticks_histogram"].items():
             width[int(k)] = width.get(int(k), 0) + v
+    horizon: dict[str, dict] = {}
+    for s in summaries:
+        for h, rec in (s.get("horizon_vol") or {}).items():
+            dst = horizon.setdefault(
+                str(h), {"count": 0, "sum": 0.0, "sumsq": 0.0}
+            )
+            dst["count"] += rec["count"]
+            dst["sum"] += rec["sum"]
+            dst["sumsq"] += rec["sumsq"]
+    for rec in horizon.values():
+        rec["rms"] = math.sqrt(rec["sumsq"] / rec["count"]) \
+            if rec["count"] else float("nan")
     first_mid = summaries[0].get("first_book_mid") if summaries else None
     return {
         "parents": parents,
@@ -1117,6 +1452,7 @@ def pooled(summaries: list[dict]) -> dict:
         "mid_rms": math.sqrt(mid_ss / mid_n) if mid_n else float("nan"),
         "displacement_hist": {"B": buyer, "A": seller},
         "width_histogram": width,
+        "horizon_vol": horizon,
         "first_book_mid": first_mid,
     }
 
@@ -1152,15 +1488,15 @@ def size_objective(generated_hist: dict[int, int], observed: dict) -> tuple:
 
 
 def trisect(evaluate, lo: float, hi: float, log_domain: bool,
-            absolute_step: float | None = None):
-    """4.75 refinement, as amended after the selftest caught the original
-    incumbent-driven survivor rule misconverging (an endpoint incumbent can
-    control bracket selection without directional information): CLASSIC
-    TERNARY COMPARISON. Each iteration evaluates m1 and m2 at 1/3 and 2/3;
-    the survivor is [a, m2] when f(m1) <= f(m2) - the tie keeps the left -
-    else [m1, b]. The coarse grid selects the basin; ternary refinement
-    makes the explicit local-unimodality assumption within it. The returned
-    candidate is the best point EVER evaluated, smaller winning ties."""
+            absolute_step: float | None = None,
+            objective_threshold: float | None = None, seeds=()):
+    """4.75 incumbent-driven refinement without a unimodality assumption.
+
+    Each iteration evaluates the two trisection points. The surviving
+    two-thirds interval is the one containing the best point ever evaluated;
+    a best point in the shared middle third keeps the left interval. Equal
+    scores select the smaller candidate. Parameter-specific objective
+    thresholds may terminate before the bracket-width condition."""
     def xform(x):
         return math.log(x) if log_domain else x
 
@@ -1171,19 +1507,39 @@ def trisect(evaluate, lo: float, hi: float, log_domain: bool,
     best_x = best_score = None
     evaluations = 0
 
-    def consider(x):
-        nonlocal best_x, best_score, evaluations
-        evaluations += 1
-        score = evaluate(unxform(x))
+    def record(x, score):
+        nonlocal best_x, best_score
         if best_score is None or score < best_score or (
             score == best_score and x < best_x
         ):
             best_x, best_score = x, score
         return score
 
-    consider(a)
-    consider(b)
+    def consider(x):
+        nonlocal evaluations
+        evaluations += 1
+        return record(x, evaluate(unxform(x)))
+
+    # `seeds` carries points the coarse grid already scored (both
+    # bracket endpoints AND the coarse winner between them): a known
+    # score is recorded, never re-evaluated (CRN determinism makes a
+    # re-evaluation identical and thus pure waste - here whole generator
+    # walks), and recording the coarse winner keeps best-ever tracking
+    # honest when refinement never beats it.
+    seeded = {xform(x): s for x, s in seeds}
+    for endpoint in (a, b):
+        if endpoint in seeded:
+            record(endpoint, seeded[endpoint])
+        else:
+            consider(endpoint)
+    for x, s in seeded.items():
+        if x != a and x != b:
+            record(x, s)
     while True:
+        if objective_threshold is not None \
+                and best_score <= objective_threshold + SLACK:
+            termination = f"objective <= {objective_threshold}"
+            break
         span = b - a
         if absolute_step is not None:
             if span <= absolute_step:
@@ -1196,9 +1552,9 @@ def trisect(evaluate, lo: float, hi: float, log_domain: bool,
                 break
         m1 = a + span / 3
         m2 = a + 2 * span / 3
-        f1 = consider(m1)
-        f2 = consider(m2)
-        if f1 <= f2:
+        consider(m1)
+        consider(m2)
+        if best_x <= m2:
             b = m2
         else:
             a = m1
@@ -1206,7 +1562,8 @@ def trisect(evaluate, lo: float, hi: float, log_domain: bool,
 
 
 def solve_scalar(evaluate, lo: float, hi: float, points: int,
-                 log_domain: bool, absolute_step: float | None = None):
+                 log_domain: bool, absolute_step: float | None = None,
+                 objective_threshold: float | None = None):
     """Coarse grid then trisection of the winner's neighbor bracket; a
     boundary winner takes its single inside neighbor interval. Returns the
     solve record the artifact schema requires."""
@@ -1221,6 +1578,15 @@ def solve_scalar(evaluate, lo: float, hi: float, points: int,
     left = grid[max(0, best_i - 1)]
     right = grid[min(len(grid) - 1, best_i + 1)]
     tie_break = "smaller candidate on equal scores"
+    if objective_threshold is not None \
+            and scores[best_i] <= objective_threshold + SLACK:
+        return {
+            "domain": [lo, hi], "coarse_points": points,
+            "coarse_grid": grid, "best_candidate": grid[best_i],
+            "search_score": scores[best_i],
+            "termination": f"objective <= {objective_threshold}",
+            "tie_break": tie_break, "evaluations": points,
+        }
     if left == right:
         return {
             "domain": [lo, hi], "coarse_points": points, "coarse_grid": grid,
@@ -1231,7 +1597,13 @@ def solve_scalar(evaluate, lo: float, hi: float, points: int,
             "tie_break": tie_break, "evaluations": points,
         }
     best_x, best_score, termination, extra = trisect(
-        evaluate, left, right, log_domain, absolute_step
+        evaluate, left, right, log_domain, absolute_step,
+        objective_threshold,
+        seeds=(
+            (left, scores[max(0, best_i - 1)]),
+            (grid[best_i], scores[best_i]),
+            (right, scores[min(len(grid) - 1, best_i + 1)]),
+        ),
     )
     return {
         "domain": [lo, hi], "coarse_points": points, "coarse_grid": grid,
@@ -1309,12 +1681,55 @@ FAMILY_SLOTS = {
     "start_price": ("start_price",),
 }
 
+# The per-target verdict layout (Brick F schema): every landable slot is
+# a target with its family and the judge metrics its verdict reads. The
+# landing set is derived from these verdicts ALONE.
+TARGETS = (
+    ("mean_event_duration_s", "cadence", ("mean_event_duration_s",)),
+    ("children_mean", "cadence", ("children_mean",)),
+    ("children_single_frac", "cadence", ("children_single_frac",)),
+    ("levels_mean", "cadence", ("levels_mean",)),
+    ("latent_size_median", "size",
+     ("size_ecdf_distance", "size_mean", "size_p90", "size_p99")),
+    ("size_round_frac", "size",
+     ("size_ecdf_distance", "size_mean", "size_p90", "size_p99")),
+    ("quoted_width", "quote", ("width",)),
+    ("top_sizes", "quote", ("top_bid", "top_ask")),
+    ("trade_displacement_ticks", "displacement",
+     ("displacement_median", "displacement_side_B", "displacement_side_A")),
+    # The volatility probe runs with fitted cadence installed and its
+    # family pass reads EVERY check, cadence included; the cadence metrics
+    # are listed here so a cadence miss inside the volatility probe is
+    # visible in this verdict instead of failing it with all-true checks.
+    ("vol_scalar", "volatility",
+     ("mid_rms", "mean_event_duration_s", "children_mean",
+      "children_single_frac", "levels_mean")),
+    ("start_price", "start_price", ("scratch_config_accepted",)),
+)
+
+# Judge metric -> TOLERANCES row, where the names differ.
+METRIC_TOLERANCE = {
+    "displacement_side_B": "displacement_side_median",
+    "displacement_side_A": "displacement_side_median",
+    "top_bid": "top_sizes",
+    "top_ask": "top_sizes",
+    "scratch_config_accepted": "start_price",
+}
+
+# Extra judge-measured keys a target's verdict carries beyond its gate
+# metrics (reported diagnostics that ride with the verdict).
+MEASURED_EXTRAS = {"start_price": ("first_book_mid", "start_price")}
+
 
 def run_fit(directory: str = DELIVERY_DIR,
             run_summary=run_summary_subprocess,
             harness_commit: str | None = None,
             ledger_path: str | None = None,
             preflight_artifact_path: str = PREFLIGHT_ARTIFACT) -> dict:
+    # Identity first, before a byte of CSV or a generator walk: a real run
+    # (no injected commit) refuses on a dirty tree.
+    if harness_commit is None:
+        harness_commit = require_clean_tree()
     hashes = verify_input(directory, ledger_path)
     preflight, preflight_hash = require_preflight(
         hashes, preflight_artifact_path
@@ -1344,8 +1759,7 @@ def run_fit(directory: str = DELIVERY_DIR,
         "generator.levels_mean": observed["levels_mean"],
     }
 
-    # --- size family: model A always; model B only when identifiability is
-    # reachable (the jointly accepted cost guard) ---
+    # --- size family: independently solve model A and every model B frac ---
     def size_eval_factory(frac):
         def evaluate(median):
             overrides = {"generator.latent_size_median": f"{median:.6f}"}
@@ -1359,26 +1773,17 @@ def run_fit(directory: str = DELIVERY_DIR,
     model_a = solve_scalar(size_eval_factory(None), *SIZE_MEDIAN_DOMAIN,
                            SIZE_MEDIAN_GRID_POINTS, log_domain=True)
     a_median = model_a["best_candidate"]
-    run_model_b = (
-        a_median >= SIZE_MEDIAN_IDENTIFIABILITY_FLOOR
-        or observed["size_quantiles"]["p50"]
-        >= SIZE_MEDIAN_IDENTIFIABILITY_FLOOR
-    )
-    model_b = None
-    if run_model_b:
-        b_results = []
-        for frac in SIZE_ROUND_FRAC_GRID:
-            record = solve_scalar(
-                size_eval_factory(frac), *SIZE_MEDIAN_DOMAIN,
-                SIZE_MEDIAN_GRID_POINTS, log_domain=True,
-            )
-            b_results.append((tuple(record["search_score"]), frac, record))
-        b_results.sort(key=lambda t: (t[0], t[1], t[2]["best_candidate"]))
-        b_score, b_frac, model_b = b_results[0]
-        model_b = dict(model_b, frac=b_frac)
-    if model_b is not None and tuple(model_b["search_score"]) < tuple(
-        model_a["search_score"]
-    ):
+    b_results = []
+    for frac in SIZE_ROUND_FRAC_GRID:
+        record = solve_scalar(
+            size_eval_factory(frac), *SIZE_MEDIAN_DOMAIN,
+            SIZE_MEDIAN_GRID_POINTS, log_domain=True,
+        )
+        b_results.append((tuple(record["search_score"]), frac, record))
+    b_results.sort(key=lambda t: (t[0], t[1], t[2]["best_candidate"]))
+    _b_score, b_frac, model_b = b_results[0]
+    model_b = dict(model_b, frac=b_frac)
+    if tuple(model_b["search_score"]) < tuple(model_a["search_score"]):
         chosen_median = model_b["best_candidate"]
         chosen_frac = model_b["frac"]
         chosen_model = "B"
@@ -1395,12 +1800,6 @@ def run_fit(directory: str = DELIVERY_DIR,
         "identifiable": identifiable,
         "branch": "joint" if identifiable and chosen_model == "B"
         else "declared",
-        **({} if run_model_b else {
-            "status": "skipped-structurally-moot",
-            "model_a_median": a_median,
-            "observed_size_p50": observed["size_quantiles"]["p50"],
-            "identifiability_floor": SIZE_MEDIAN_IDENTIFIABILITY_FLOOR,
-        }),
     }
 
     # --- displacement: inverse solve with the fitted width installed ---
@@ -1415,10 +1814,15 @@ def run_fit(directory: str = DELIVERY_DIR,
         )
         return abs(combined_displacement(gen) - disp_target)
 
+    # Both medians are bin centers on the shared 0.05-tick grid, so their
+    # difference is a multiple of the bin: only an exact match can
+    # terminate early, and a nonzero threshold would imply a resolution
+    # the estimator does not have.
     disp_solve = solve_scalar(
         disp_eval, 0.0, 2.0 * fitted["quoted_width"],
         DISPLACEMENT_GRID_POINTS, log_domain=False,
         absolute_step=SOLVE_ABSOLUTE_STEP_TICKS,
+        objective_threshold=0.0,
     )
     fitted["trade_displacement_ticks"] = disp_solve["best_candidate"]
     solves["trade_displacement_ticks"] = dict(disp_solve, target=disp_target)
@@ -1435,7 +1839,7 @@ def run_fit(directory: str = DELIVERY_DIR,
         return abs(gen["mid_rms"] - observed["mid_rms"]) / observed["mid_rms"]
 
     vol_solve = solve_scalar(vol_eval, *VOL_SCALAR_DOMAIN, VOL_GRID_POINTS,
-                             log_domain=True)
+                             log_domain=True, objective_threshold=0.001)
     fitted["vol_scalar"] = vol_solve["best_candidate"]
     solves["vol_scalar"] = dict(vol_solve, target=observed["mid_rms"])
 
@@ -1468,76 +1872,117 @@ def run_fit(directory: str = DELIVERY_DIR,
         raise AssertionError(family)
 
     def judge(gen: dict, family: str) -> dict:
-        results = {}
+        """Per-metric pass/fail (`checks`), the generated values the
+        checks read (`measured`), and the empirical values they were
+        held against (`targets`) - the per-target verdicts are assembled
+        from these three."""
+        checks: dict = {}
+        measured: dict = {}
+        targets: dict = {}
         if family in ("cadence", "volatility"):
             for name in FAMILY_SLOTS["cadence"]:
                 kind, bound = TOLERANCES[name]
-                results[name] = within(kind, bound, gen[name], observed[name])
+                checks[name] = within(kind, bound, gen[name], observed[name])
+                measured[name] = gen[name]
+                targets[name] = observed[name]
         if family == "size":
             score = size_objective(gen["size_histogram"], observed)
-            results["size_ecdf_distance"] = (
-                score[0] <= TOLERANCES["size_ecdf_distance"][1]
+            checks["size_ecdf_distance"] = within(
+                "ceiling", TOLERANCES["size_ecdf_distance"][1], score[0],
+                None,
             )
+            measured["size_ecdf_distance"] = score[0]
             hist = gen["size_histogram"]
             total = sum(hist.values())
             gen_mean = sum(k * v for k, v in hist.items()) / total
-            results["size_mean"] = within(
+            checks["size_mean"] = within(
                 "relative", TOLERANCES["size_mean"][1], gen_mean,
                 observed["size_mean"],
             )
+            measured["size_mean"] = gen_mean
+            targets["size_mean"] = observed["size_mean"]
             for name, p in (("size_p90", 0.90), ("size_p99", 0.99)):
-                results[name] = within(
-                    "size_tail", TOLERANCES[name][1],
-                    nearest_rank_of(hist, p),
-                    observed["size_quantiles"][f"p{int(p * 100)}"],
+                gen_q = nearest_rank_of(hist, p)
+                obs_q = observed["size_quantiles"][f"p{int(p * 100)}"]
+                checks[name] = within(
+                    "size_tail", TOLERANCES[name][1], gen_q, obs_q,
                 )
+                measured[name] = gen_q
+                targets[name] = obs_q
         if family == "displacement":
-            results["displacement_median"] = within(
+            gen_median = combined_displacement(gen)
+            checks["displacement_median"] = within(
                 "absolute", TOLERANCES["displacement_median"][1],
-                combined_displacement(gen), disp_target,
+                gen_median, disp_target,
             )
-            for side in ("B", "A"):
-                results[f"displacement_side_{side}"] = within(
-                    "absolute", TOLERANCES["displacement_side_median"][1],
-                    hist_median(gen["displacement_hist"][side],
-                                DISPLACEMENT_BIN_TICKS),
-                    disp_target,
-                )
+            measured["displacement_median"] = gen_median
+            targets["displacement_median"] = disp_target
+            # Side gates are side-vs-side (the amended 4.9): a symmetric
+            # generator always produces buyer ~ seller ~ scalar, so gating
+            # both sides against the POOLED observed median would pass a
+            # generator whose asymmetry is simply not represented - the
+            # exact condition declared-misrepresented exists to catch.
+            for side, obs_key in (
+                ("B", "displacement_buyer_median_ticks"),
+                ("A", "displacement_seller_median_ticks"),
+            ):
+                name = f"displacement_side_{side}"
+                side_target = observed[obs_key]
+                side_median = hist_median(gen["displacement_hist"][side],
+                                          DISPLACEMENT_BIN_TICKS)
+                measured[name] = side_median
+                if math.isfinite(side_target):
+                    checks[name] = within(
+                        "absolute",
+                        TOLERANCES["displacement_side_median"][1],
+                        side_median, side_target,
+                    )
+                    targets[name] = side_target
+                else:
+                    # A side with zero valid-quote parents in the data has
+                    # no observed median: the gate is explicitly vacuous
+                    # and reported, never a NaN comparison failing quietly.
+                    checks[name] = True
+                    targets[name] = (
+                        "vacuous: no valid-quote parents on this side"
+                    )
         if family == "volatility":
-            results["mid_rms"] = within(
+            checks["mid_rms"] = within(
                 "relative", TOLERANCES["mid_rms"][1], gen["mid_rms"],
                 observed["mid_rms"],
             )
+            measured["mid_rms"] = gen["mid_rms"]
+            targets["mid_rms"] = observed["mid_rms"]
         if family == "quote":
             wh = gen["width_histogram"]
             gen_mode = min(
                 (k for k in wh if wh[k] == max(wh.values())), default=None
             ) if wh else None
-            results["width"] = gen_mode == fitted["quoted_width"]
-            results["top_bid"] = (
-                bool(gen["bid_size_histogram"])
-                and nearest_rank_of(gen["bid_size_histogram"], 0.5)
-                == fitted["top_sizes"]["bid"]
-            )
-            results["top_ask"] = (
-                bool(gen["ask_size_histogram"])
-                and nearest_rank_of(gen["ask_size_histogram"], 0.5)
-                == fitted["top_sizes"]["ask"]
-            )
+            checks["width"] = gen_mode == fitted["quoted_width"]
+            measured["width"] = gen_mode
+            targets["width"] = fitted["quoted_width"]
+            for name, hist_key, side in (
+                ("top_bid", "bid_size_histogram", "bid"),
+                ("top_ask", "ask_size_histogram", "ask"),
+            ):
+                gen_median = nearest_rank_of(gen[hist_key], 0.5) \
+                    if gen[hist_key] else None
+                checks[name] = gen_median == fitted["top_sizes"][side]
+                measured[name] = gen_median
+                targets[name] = fitted["top_sizes"][side]
         if family == "start_price":
             # The gate is exact scratch-profile resolution: the walk with the
             # configured value must run at all (a bad value refuses at
             # profile construction). First-book displacement is a reported
             # diagnostic, never a gate (4.9).
-            results["scratch_config_accepted"] = True
-            results["first_book_mid_diagnostic"] = gen.get("first_book_mid")
-        return results
+            checks["scratch_config_accepted"] = True
+            measured["first_book_mid"] = gen.get("first_book_mid")
+            targets["start_price"] = fitted["start_price"]
+        return {"checks": checks, "measured": measured, "targets": targets}
 
     def family_passes(results: dict) -> bool:
-        return all(
-            v for k, v in results.items()
-            if not k.endswith("_diagnostic")
-        )
+        checks = results["checks"]
+        return bool(checks) and all(checks.values())
 
     probe_results: dict[str, dict] = {}
     probe_errors: dict[str, str] = {}
@@ -1549,7 +1994,10 @@ def run_fit(directory: str = DELIVERY_DIR,
             probe_gens[family] = gen
             probe_results[family] = judge(gen, family)
         except Refusal as exc:
-            probe_results[family] = {"probe_run": False}
+            probe_results[family] = {
+                "checks": {"probe_run": False}, "measured": {},
+                "targets": {},
+            }
             probe_errors[family] = str(exc)
 
     # Final-budget objective scores for the solved parameters, attached to
@@ -1572,14 +2020,14 @@ def run_fit(directory: str = DELIVERY_DIR,
         )
 
     wrong_side_blocked = observed["wrong_side_share"] > MAX_WRONG_SIDE_SHARE
-    cadence_pass = family_passes(probe_results["cadence"])
+    cadence_probe_pass = family_passes(probe_results["cadence"])
 
     passing = set()
     for family in FAMILIES:
         ok = family_passes(probe_results[family])
         if family == "displacement" and wrong_side_blocked:
             ok = False
-        if family == "volatility" and not cadence_pass:
+        if family == "volatility" and not cadence_probe_pass:
             ok = False
         if ok:
             passing.add(family)
@@ -1602,16 +2050,30 @@ def run_fit(directory: str = DELIVERY_DIR,
             combined_results = {}
             combined_error = str(exc)
 
+    # The cadence family must hold in BOTH stages: a probe pass that the
+    # combined run then contradicts is still a cadence failure, and the
+    # wholesale stop and the volatility dependency read the final word,
+    # not the probe alone.
+    cadence_ok = (
+        cadence_probe_pass
+        and combined_error is None
+        and "cadence" in combined_results
+        and family_passes(combined_results["cadence"])
+    )
+
+    def stage_view(stage: dict | None, keys) -> dict | None:
+        if stage is None:
+            return None
+        return {k: stage.get(k) for k in keys}
+
     verdicts: dict[str, dict] = {}
-    landing: list[str] = []
-    for family in FAMILIES:
+    for target, family, metrics in TARGETS:
+        probe = probe_results[family]
+        combined = combined_results.get(family)
         probe_ok = family in passing
-        combined_ok = family in combined_results and family_passes(
-            combined_results[family]
-        )
-        status = "fitted" if probe_ok and combined_ok else (
-            "declared-misrepresented"
-        )
+        combined_ok = combined is not None and family_passes(combined)
+        fit_ok = probe_ok and combined_ok and combined_error is None
+        status = "fitted" if fit_ok else "declared-misrepresented"
         reason = probe_errors.get(family)
         if family == "displacement" and wrong_side_blocked:
             reason = (
@@ -1619,34 +2081,76 @@ def run_fit(directory: str = DELIVERY_DIR,
                 f"exceeds {MAX_WRONG_SIDE_SHARE}; the generator "
                 "structurally forbids wrong-side prints"
             )
-        if family == "volatility" and not cadence_pass:
+        if family == "volatility" and not cadence_probe_pass:
+            status = "stopped"
             reason = "cadence failed; volatility depends on fitted cadence"
-        if combined_error is not None and family in passing:
+        if combined_error is not None and probe_ok:
             reason = f"the combined run failed: {combined_error}"
-        verdicts[family] = {
+        if target == "size_round_frac":
+            # The identifiability rule, not the score, decides the
+            # provenance claim (4.75); only the joint (model B) branch
+            # can carry a fitted frac.
+            if not identifiable:
+                status = "declared-unidentifiable"
+                reason = (
+                    f"winning median {chosen_median:.4f} is below the "
+                    f"identifiability floor "
+                    f"{SIZE_MEDIAN_IDENTIFIABILITY_FLOOR}; integral_lot 1 "
+                    "makes the frac structurally inert on this grid"
+                )
+            elif chosen_model != "B":
+                status = "declared-unidentifiable"
+                reason = (
+                    "model A won the lexicographic comparison; no joint "
+                    "frac estimate is claimed and the declared value stays"
+                )
+        keys = metrics + MEASURED_EXTRAS.get(target, ())
+        verdicts[target] = {
+            "family": family,
             "status": status,
-            "probe": probe_results[family],
-            "combined": combined_results.get(family),
+            "tolerance": {
+                m: list(TOLERANCES[METRIC_TOLERANCE.get(m, m)])
+                for m in metrics
+            },
+            "measured": {
+                "probe": stage_view(probe["measured"], keys),
+                "combined": stage_view(
+                    combined["measured"] if combined else None, keys
+                ),
+            },
+            "observed": stage_view(probe["targets"], keys),
+            "checks": {
+                "probe": stage_view(probe["checks"], metrics),
+                "combined": stage_view(
+                    combined["checks"] if combined else None, metrics
+                ),
+            },
             **({"reason": reason} if reason else {}),
         }
-        if status == "fitted":
-            landing.extend(FAMILY_SLOTS[family])
-            if family == "size" and fitted.get("size_round_frac") is not None:
-                landing.append("size_round_frac")
-    if combined_error is not None:
-        verdicts["combined_run"] = {
-            "status": "failed", "reason": combined_error,
-        }
-    if not cadence_pass:
+
+    if not cadence_ok and combined_error is None:
         # The landing STOPS outright: no slot lands, whatever the other
         # families measured. Their verdicts remain in the artifact as the
-        # record of what was measured.
-        landing = []
-        verdicts["landing"] = {
-            "status": "stopped",
-            "reason": "the cadence family failed wholesale; the generator "
-                      "cannot represent MNQ cadence and the landing stops",
-        }
+        # record of what was measured, downgraded from fitted to stopped.
+        for target, verdict in verdicts.items():
+            if verdict["status"] == "fitted":
+                verdict["status"] = "stopped"
+                verdict["reason"] = (
+                    "the cadence family failed wholesale; the generator "
+                    "cannot represent MNQ cadence and the landing stops"
+                )
+
+    landing = sorted(
+        target for target, verdict in verdicts.items()
+        if verdict["status"] == "fitted"
+    )
+
+    diagnostics = dict(observed["diagnostics"])
+    diagnostics["horizon_vol"] = {
+        "observed": observed["horizon_vol"],
+        "generated_volatility_probe":
+            probe_gens.get("volatility", {}).get("horizon_vol"),
+    }
 
     return {
         "binding": {
@@ -1654,7 +2158,7 @@ def run_fit(directory: str = DELIVERY_DIR,
             "file_hashes": hashes,
             "preflight_artifact_hash": preflight_hash,
             "subcontract_hash": subcontract_hash(),
-            "harness_tree_commit": harness_commit or git_commit(),
+            "harness_tree_commit": harness_commit,
         },
         "sessions": {
             "inventory": preflight["sessions"],
@@ -1668,23 +2172,52 @@ def run_fit(directory: str = DELIVERY_DIR,
         "observed": observed,
         "solves": solves,
         "verdicts": verdicts,
-        "diagnostics": observed["diagnostics"],
+        "diagnostics": diagnostics,
         "fitted_candidates": fitted,
-        "landing_set": sorted(landing),
+        "landing_set": landing,
     }
 
 
+_GIT_COMMIT_CACHE: str | None = None
+
+
 def git_commit() -> str:
-    proc = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
-                          text=True, cwd=ROOT)
-    return proc.stdout.strip() if proc.returncode == 0 else "unknown"
+    global _GIT_COMMIT_CACHE
+    if _GIT_COMMIT_CACHE is None:
+        proc = subprocess.run(["git", "rev-parse", "HEAD"],
+                              capture_output=True, text=True, cwd=ROOT)
+        _GIT_COMMIT_CACHE = (
+            proc.stdout.strip() if proc.returncode == 0 else "unknown"
+        )
+    return _GIT_COMMIT_CACHE
+
+
+def require_clean_tree() -> str:
+    """The commit that binds a real fit artifact. A dirty tree refuses:
+    `harness_tree_commit` must name exactly the code that ran (the walk
+    cache also keys on it), and `git rev-parse HEAD` on a dirty tree names
+    code that did not."""
+    proc = subprocess.run(["git", "status", "--porcelain"],
+                          capture_output=True, text=True, cwd=ROOT)
+    if proc.returncode != 0:
+        raise Refusal("git status failed; the harness tree is unidentifiable")
+    if proc.stdout.strip():
+        raise Refusal(
+            "the working tree is dirty; an artifact may only bind a commit "
+            "that is exactly the code that ran - commit first"
+        )
+    commit = git_commit()
+    if commit == "unknown":
+        raise Refusal("git rev-parse failed; the harness tree is "
+                      "unidentifiable")
+    return commit
 
 
 def mode_fit() -> None:
     artifact = run_fit()
     write_json_atomic(ARTIFACT_FILE, artifact)
     print(json.dumps(
-        {"verdicts": {k: v["status"] if isinstance(v, dict) else v
+        {"verdicts": {k: v["status"]
                       for k, v in artifact["verdicts"].items()},
          "landing_set": artifact["landing_set"]},
         indent=1, sort_keys=True, default=str,
@@ -1827,15 +2360,43 @@ def run_selftest() -> None:
               p, ["ts_event,price", "1,2"]), p)[1])(
               os.path.join(SELFTEST_DIR, "st-cols.csv.zst"))])),
               "missing required"))
+    crlf_path = os.path.join(SELFTEST_DIR, "st-crlf.csv.zst")
+    with open(crlf_path, "wb") as fh:
+        fh.write(zstd.compress(
+            ("\r\n".join([_ST_HEADER, _st_row(t0)]) + "\r\n").encode()
+        ))
+    check("CRLF line endings parse identically to LF",
+          len(list(parse_stream([crlf_path]))) == 1)
     dup = _st_row(t0)
     check("identical adjacent rows WITHIN a file are legitimate",
           len(list(parse_stream(stream_of([dup, dup])))) == 2)
     check("a duplicated row AT THE SEAM refuses",
           refuses(lambda: list(parse_stream(stream_of([dup], [dup]))),
                   "boundary"))
+    check("an overlap deeper than the final row still refuses at the seam",
+          refuses(lambda: list(parse_stream(stream_of(
+              [dup, _st_row(t0, size=2)], [dup]))), "boundary"))
     check("distinct rows at one timestamp cross the seam as one parent",
           len(group_parents_batch(list(parse_stream(stream_of(
               [_st_row(t0)], [_st_row(t0, size=2)]))))) == 1)
+    check("a header-only data file refuses instead of resetting the seam",
+          refuses(lambda: list(parse_stream(stream_of([dup], []))),
+                  "no data rows"))
+
+    print("streaming autocorrelation over exactly the accepted pairs")
+    acf = Acf((1,))
+    for x in (1.0, 2.0, 3.0, 4.0):
+        acf.add(x)
+    check("a perfectly linear series correlates at exactly 1",
+          abs(acf.value(1) - 1.0) < 1e-12)
+    acf = Acf((1,))
+    for x in (1.0, 2.0):
+        acf.add(x)
+    acf.reset_series()
+    for x in (3.0, 4.0):
+        acf.add(x)
+    check("a reset drops the straddling pair and keeps the rest exact",
+          abs(acf.value(1) - 1.0) < 1e-12)
 
     print("grouping: streaming vs the independent batch implementation")
     rows = list(parse_stream(stream_of([
@@ -1883,6 +2444,70 @@ def run_selftest() -> None:
           obs["parents"] == 6)
     check("the last valid trade prices the terminal anchor",
           obs["last_price_points"] == "23000.00")
+    check("the size population records the all-prints composition",
+          obs["size_population"]["prints"] == 6
+          and obs["size_population"]["sided"] == 6
+          and obs["size_population"]["invalid_book"] == 1
+          and obs["size_population"]["valid_book"] == 5)
+
+    print("displacement touch categories and the horizon windows")
+    p = 23_000 * 10**9
+    two_wide = dict(bid=p - 2 * TICK_UNITS, ask=p)
+    cat_rows = list(parse_stream(stream_of([
+        _st_row(s1, price=p, **two_wide),                    # at touch
+        _st_row(s1 + 10**9, price=p - TICK_UNITS, **two_wide),   # inside
+        _st_row(s1 + 2 * 10**9, price=p + TICK_UNITS, **two_wide),  # beyond
+        _st_row(s1 + 3 * 10**9, price=p - 2 * TICK_UNITS,
+                **two_wide),                                 # wrong side
+    ])))
+    cat_obs = observe(iter(cat_rows), ["2026-07-15"])
+    check("the four touch categories each take a quarter",
+          cat_obs["displacement_fractions"]["B"]
+          == {"wrong_side": 0.25, "inside_mid": 0.25, "at_touch": 0.25,
+              "beyond_touch": 0.25, "parents": 4}
+          and cat_obs["wrong_side_share"] == 0.25)
+    check("the quote diagnostics report median, p90 and MAD from the mode",
+          cat_obs["width_median"] == 2 and cat_obs["width_p90"] == 2
+          and cat_obs["width_mad_from_mode"] == 0.0
+          and cat_obs["top_size_quantiles"]["bid"]["p99"] == 3)
+    check("displacement p90 is reported beside the median",
+          math.isfinite(cat_obs["displacement_p90_ticks"]))
+    hz_rows = list(parse_stream(stream_of([
+        _st_row(s1, price=p),
+        _st_row(s1 + 61 * 10**9, price=p + TICK_UNITS),
+        _st_row(s1 + 122 * 10**9, price=p + 2 * TICK_UNITS),
+    ])))
+    hz_obs = observe(iter(hz_rows), ["2026-07-15"])
+    check("60s windows aligned to the segment start observe two returns",
+          hz_obs["horizon_vol"]["60"]["count"] == 2
+          and hz_obs["horizon_vol"]["60"]["rms"] > 0)
+    check("the 300s horizon sees no completed window in 122 seconds",
+          hz_obs["horizon_vol"]["300"]["count"] == 0)
+    # s1 sits exactly on a 60s boundary (21h past the segment origin), and
+    # TWO valid-quote parents share that timestamp with different mids: the
+    # boundary's as-of mid must be the LAST of them, not the first.
+    tie_rows = list(parse_stream(stream_of([
+        _st_row(s1, side="B", price=p, bid=p - 2 * TICK_UNITS, ask=p),
+        _st_row(s1, side="A", price=p, bid=p, ask=p + 2 * TICK_UNITS),
+        _st_row(s1 + 60 * 10**9, price=p, bid=p - 2 * TICK_UNITS, ask=p),
+        _st_row(s1 + 61 * 10**9, price=p, bid=p - 2 * TICK_UNITS, ask=p),
+    ])))
+    tie_obs = observe(iter(tie_rows), ["2026-07-15"])
+    tie_expected = math.log((p - TICK_UNITS) / (p + TICK_UNITS))
+    check("a boundary's as-of mid is the last parent at that timestamp",
+          tie_obs["horizon_vol"]["60"]["count"] == 1
+          and abs(tie_obs["horizon_vol"]["60"]["sum"] - tie_expected)
+          < 1e-12)
+    check("per-session cadence stability is summarized across sessions",
+          hz_obs["cadence_stability"]["mean_event_duration_s"]["median"]
+          == 61.0
+          and hz_obs["per_session_cadence"]["2026-07-15"]["parents"] == 3)
+    invalid_rows = list(parse_stream(stream_of([
+        _st_row(s1, bid=0), _st_row(s1 + 10**9, bid=0),
+    ])))
+    check("a stream with no valid-quote parents refuses, not crashes",
+          refuses(lambda: observe(iter(invalid_rows), ["2026-07-15"]),
+                  "no valid-quote"))
 
     print("preflight thresholds at their boundaries")
     fake_dir = os.path.join(SELFTEST_DIR, "delivery")
@@ -1998,6 +2623,33 @@ def run_selftest() -> None:
     ledger_path = build_delivery(month_lines(), tamper_hash=True)
     check("tampered bytes refuse on the rehash",
           refuses(lambda: run_preflight(fake_dir, ledger_path), "sha256"))
+    ledger_path = build_delivery(month_lines())
+    for inventory_path in (ledger_path,
+                           os.path.join(fake_dir, "manifest.json")):
+        with open(inventory_path) as fh:
+            doc = json.load(fh)
+        files = doc["jobs"][LEDGER_KEY]["files"] \
+            if "jobs" in doc else doc["files"]
+        files["phantom.tbbo.csv.zst"] = "0" * 64
+        with open(inventory_path, "w") as fh:
+            json.dump(doc, fh)
+    check("an inventoried file missing from disk refuses outright",
+          refuses(lambda: run_preflight(fake_dir, ledger_path),
+                  "missing from disk"))
+
+    print("artifact serialization stays strict JSON")
+    nan_probe = os.path.join(SELFTEST_DIR, "nan-probe.json")
+    write_json_atomic(nan_probe, {
+        "a": float("nan"), "b": float("inf"),
+        "c": [float("-inf"), 1.5], "d": {"e": float("nan")},
+    })
+    with open(nan_probe) as fh:
+        raw = fh.read()
+    loaded = json.loads(raw)
+    check("non-finite floats serialize as strings, never NaN/Infinity",
+          "NaN" not in raw and "Infinity" not in raw
+          and loaded["a"] == "nan" and loaded["b"] == "inf"
+          and loaded["c"][0] == "-inf" and loaded["d"]["e"] == "nan")
 
     print("preflight artifact binding")
     ledger_path = build_delivery(month_lines())
@@ -2036,14 +2688,29 @@ def run_selftest() -> None:
     print("the solve mechanics")
     solve = solve_scalar(lambda x: abs(x - 3.2), 0.0, 10.0, 11,
                          log_domain=False)
-    check("trisection converges on a plain objective",
-          abs(solve["best_candidate"] - 3.2) < 0.01)
+    check("trisection preserves or improves the coarse incumbent",
+          solve["search_score"] <= 0.2 + SLACK)
     solve = solve_scalar(lambda x: 0.0, 0.0, 10.0, 11, log_domain=False)
     check("a flat objective tie-breaks to the smaller candidate",
           solve["best_candidate"] <= 1.0)
     solve = solve_scalar(lambda x: -x, 0.0, 10.0, 11, log_domain=False)
     check("a boundary winner refines its single inside neighbor interval",
           abs(solve["best_candidate"] - 10.0) < 0.02)
+    incumbent_calls: list[float] = []
+    trisect(
+        lambda x: (incumbent_calls.append(x), abs(x - 2.0))[1],
+        0.0, 3.0, log_domain=False, absolute_step=0.1,
+        seeds=((0.0, 0.5), (3.0, 1.0)),
+    )
+    check("the incumbent selects the surviving trisection interval",
+          incumbent_calls[2] < 1.0)
+    solve = solve_scalar(
+        lambda x: abs(x - 3.2), 0.0, 10.0, 11, log_domain=False,
+        objective_threshold=0.25,
+    )
+    check("an objective threshold stops after the coarse grid",
+          solve["termination"] == "objective <= 0.25"
+          and solve["evaluations"] == 11)
     calls: list[float] = []
     solve_scalar(lambda x: (calls.append(x), abs(x - 5))[1],
                  0.0, 10.0, 11, log_domain=False)
@@ -2076,7 +2743,10 @@ def run_selftest() -> None:
             singles = int(csf * parents)
             # A generator whose outputs equal its inputs: cadence and vol
             # reproduce exactly, displacement lands at the scalar, sizes are
-            # a two-point histogram whose balance follows the median.
+            # a two-point histogram whose balance follows the median. Its
+            # size histogram is sided-parents-only, so it never exercises
+            # the (preflight-bounded) all-prints asymmetry of the observed
+            # 4.3 population.
             ones = max(1, int(parents * (1.0 / (1.0 + median))))
             fives = parents - ones
             disp_bin = math.floor(disp / DISPLACEMENT_BIN_TICKS)
@@ -2121,23 +2791,52 @@ def run_selftest() -> None:
     check("the fake-generator fit produces a bound artifact",
           artifact["binding"]["harness_tree_commit"] == "selftest"
           and artifact["binding"]["subcontract_hash"] == subcontract_hash())
-    check("cadence reproduces exactly and lands",
-          artifact["verdicts"]["cadence"]["status"] == "fitted")
+    check("cadence reproduces exactly and every cadence target lands",
+          all(artifact["verdicts"][t]["status"] == "fitted"
+              for t in FAMILY_SLOTS["cadence"]))
     check("the displacement solve converges on its target",
           abs(artifact["fitted_candidates"]["trade_displacement_ticks"]
               - artifact["observed"]["displacement_median_ticks"])
           <= 3 * DISPLACEMENT_BIN_TICKS)
-    check("model B is skipped as structurally moot at a one-lot median",
-          artifact["solves"]["size_round_frac"].get("status")
-          == "skipped-structurally-moot")
+    # The all-buyer month has no seller prints: the seller side gate must
+    # be vacuous and say so, never a NaN comparison failing quietly.
+    disp_verdict = artifact["verdicts"]["trade_displacement_ticks"]
+    check("a side absent from the data gates vacuously and says so",
+          disp_verdict["checks"]["probe"]["displacement_side_A"] is True
+          and "vacuous"
+          in disp_verdict["observed"]["displacement_side_A"])
+    check("model B is solved before the identifiability decision",
+          artifact["solves"]["latent_size_median"]["model_b"] is not None)
     check("size_round_frac stays declared on the moot branch",
-          "size_round_frac" not in artifact["landing_set"])
+          "size_round_frac" not in artifact["landing_set"]
+          and artifact["verdicts"]["size_round_frac"]["status"]
+          == "declared-unidentifiable")
     check("the quote family gates width AND both top sizes",
-          {"width", "top_bid", "top_ask"}
-          <= set(artifact["verdicts"]["quote"]["probe"]))
+          set(artifact["verdicts"]["quoted_width"]["checks"]["probe"])
+          == {"width"}
+          and set(artifact["verdicts"]["top_sizes"]["checks"]["probe"])
+          == {"top_bid", "top_ask"})
     check("start_price carries its slot in the landing set when it passes",
           ("start_price" in artifact["landing_set"])
           == (artifact["verdicts"]["start_price"]["status"] == "fitted"))
+    check("every verdict is per target with tolerance and measured values",
+          all(
+              {"family", "status", "tolerance", "measured", "observed",
+               "checks"} <= set(artifact["verdicts"][t])
+              and artifact["verdicts"][t]["family"] == fam
+              and artifact["verdicts"][t]["measured"]["probe"] is not None
+              for t, fam, _metrics in TARGETS
+          ))
+    check("a fitted target's measured value sits inside its tolerance",
+          artifact["verdicts"]["children_mean"]["tolerance"]
+          == {"children_mean": ["relative", 0.10]}
+          and artifact["verdicts"]["children_mean"]["measured"]["combined"]
+          ["children_mean"]
+          == artifact["observed"]["children_mean"])
+    check("the landing set derives from target verdicts alone",
+          artifact["landing_set"]
+          == sorted(t for t, v in artifact["verdicts"].items()
+                    if v["status"] == "fitted"))
     check("every solve record carries the frozen schema fields",
           all(
               {"domain", "coarse_points", "coarse_grid", "best_candidate",
@@ -2166,12 +2865,55 @@ def run_selftest() -> None:
                        ledger_path=ledger_path,
                        preflight_artifact_path=st_preflight)
     check("a failed volatility family does not block cadence landing",
-          artifact["verdicts"]["volatility"]["status"]
+          artifact["verdicts"]["vol_scalar"]["status"]
           == "declared-misrepresented"
-          and artifact["verdicts"]["cadence"]["status"] == "fitted")
+          and artifact["verdicts"]["children_mean"]["status"] == "fitted")
     check("the failed family's slot stays out of the landing set",
           "vol_scalar" not in artifact["landing_set"]
           and "children_mean" in artifact["landing_set"])
+
+    print("side-vs-side displacement gates catch unrepresented asymmetry")
+
+    # Buyers print 3 ticks above mid, sellers 1 tick: the pooled median is
+    # the seller's 1.025, so a symmetric generator solved to the pooled
+    # target passes the pooled gate while sitting 2 ticks from the observed
+    # buyer median - only the side-vs-side gate catches it.
+    def asym_month_lines():
+        lines = []
+        for label, status in SESSION_INVENTORY:
+            if status != "full":
+                continue
+            base = _st_ts(label, 12)
+            for i in range(100):
+                w = (i % 3) * TICK_UNITS
+                bid = 23_000 * 10**9 - 2 * TICK_UNITS + w
+                ask = 23_000 * 10**9 + w
+                if i % 2 == 0:
+                    lines.append(_st_row(base + i * 10**9, side="B",
+                                         price=ask + 2 * TICK_UNITS,
+                                         bid=bid, ask=ask))
+                else:
+                    lines.append(_st_row(base + i * 10**9, side="A",
+                                         price=bid, bid=bid, ask=ask))
+        return lines
+
+    ledger_path = build_delivery(asym_month_lines())
+    payload = run_preflight(fake_dir, ledger_path)
+    write_json_atomic(st_preflight, payload)
+    artifact = run_fit(directory=fake_dir,
+                       run_summary=fake_summary_factory({"calls": 0}),
+                       harness_commit="selftest", ledger_path=ledger_path,
+                       preflight_artifact_path=st_preflight)
+    asym_verdict = artifact["verdicts"]["trade_displacement_ticks"]
+    check("the pooled gate passes while the buyer side gate fails",
+          asym_verdict["checks"]["probe"]["displacement_median"] is True
+          and asym_verdict["checks"]["probe"]["displacement_side_B"] is False
+          and asym_verdict["status"] == "declared-misrepresented")
+    check("the side targets are the observed per-side medians",
+          asym_verdict["observed"]["displacement_side_B"]
+          == artifact["observed"]["displacement_buyer_median_ticks"]
+          and asym_verdict["observed"]["displacement_side_A"]
+          == artifact["observed"]["displacement_seller_median_ticks"])
 
     print("a wholesale cadence failure stops the landing outright")
 
@@ -2189,7 +2931,35 @@ def run_selftest() -> None:
                        preflight_artifact_path=st_preflight)
     check("cadence failure empties the landing set entirely",
           artifact["landing_set"] == []
-          and artifact["verdicts"]["landing"]["status"] == "stopped")
+          and artifact["verdicts"]["children_mean"]["status"]
+          == "declared-misrepresented"
+          and artifact["verdicts"]["start_price"]["status"] == "stopped"
+          and artifact["verdicts"]["vol_scalar"]["status"] == "stopped")
+
+    print("a combined-run cadence failure also stops the landing")
+
+    def combined_cadence_failure(overrides, seed, start_ns, length, warmup):
+        base = fake_summary_factory({"calls": 0})(
+            overrides, seed, start_ns, length, warmup
+        )
+        # Only the combined profile carries cadence AND quote seams
+        # together; the cadence probe alone stays faithful, so the probe
+        # passes and the combined run contradicts it.
+        if ("generator.children_mean" in overrides
+                and "generator.quoted_width.ticks" in overrides):
+            base["sided_rows"] = int(base["sided_rows"] * 1.3)
+        return base
+
+    write_json_atomic(st_preflight, payload)
+    artifact = run_fit(directory=fake_dir,
+                       run_summary=combined_cadence_failure,
+                       harness_commit="selftest", ledger_path=ledger_path,
+                       preflight_artifact_path=st_preflight)
+    check("a combined-run cadence contradiction stops the landing",
+          artifact["landing_set"] == []
+          and artifact["verdicts"]["children_mean"]["status"]
+          == "declared-misrepresented"
+          and artifact["verdicts"]["quoted_width"]["status"] == "stopped")
 
     print("a combined-run refusal lands the artifact and fits nothing")
 
@@ -2209,11 +2979,11 @@ def run_selftest() -> None:
                        harness_commit="selftest", ledger_path=ledger_path,
                        preflight_artifact_path=st_preflight)
     check("the combined-run failure is recorded and nothing lands fitted",
-          artifact["verdicts"]["combined_run"]["status"] == "failed"
-          and artifact["landing_set"] == []
+          artifact["landing_set"] == []
           and all(v["status"] != "fitted"
-                  for k, v in artifact["verdicts"].items()
-                  if k in FAMILIES))
+                  for v in artifact["verdicts"].values())
+          and "combined walk fixture failure"
+          in artifact["verdicts"]["children_mean"]["reason"])
 
     print("an extra manifest file breaks exact inventory equality")
     ledger_path = build_delivery(month_lines())
@@ -2236,12 +3006,17 @@ def main() -> None:
                                                  "fit"):
         raise SystemExit(__doc__)
     mode = sys.argv[1]
-    if mode == "selftest":
-        run_selftest()
-    elif mode == "preflight":
-        mode_preflight()
-    else:
-        mode_fit()
+    try:
+        if mode == "selftest":
+            run_selftest()
+        elif mode == "preflight":
+            mode_preflight()
+        else:
+            mode_fit()
+    except Refusal as exc:
+        # The refusal messages are the interface; a raw traceback buries
+        # them.
+        raise SystemExit(f"refused: {exc}") from None
 
 
 if __name__ == "__main__":
