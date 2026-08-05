@@ -1286,8 +1286,93 @@ MNQ proxy at all.
 
 Priced via `plan pairv paircurrent` and `plan nqv contiguous` in
 `analysis/databento_price.py`, metadata calls only, cached. Nothing has been
-bought; the downloader of [14.1](#141-the-downloader-does-not-exist) remains
-unbuilt and unauthorised.
+bought.
+
+> **Extended 2026-08-05 by [9.7](#97-the-extended-program-gated-in-waves)**,
+> which keeps everything above intact as waves 1 and 2A and adds the direct
+> MNQ evidence and the MBO question on top, under an additional 100 dollars
+> of personal budget.
+
+### 9.7 The extended program, gated, in waves
+
+The merged position of two independent reviews, 2026-08-05. Budget: the
+125-dollar credit plus up to 100 dollars of personal funds, 225 total.
+Everything in [9.6](#96-the-contiguous-replacement-basket-priced-2026-08-05)
+survives unchanged; this section adds to it and fills the fail branch 9.6
+left open. Each wave is gated separately: authorizing one wave commits
+nothing about the next, which is the point - spend some now, decide later
+whether and how much more.
+
+**The reasoning that changed the shape.** The pair test's tolerance is about
+process MOMENTS; the quote seams - `quoted_width`, `top_sizes`,
+`trade_displacement_ticks` - are per-instrument, and MNQ's book is thinner
+than NQ's even under a cadence-shape pass. A pass transfers the shape, not
+the book. Direct MNQ TBBO therefore has a landing site in BOTH pair
+branches, and it performs the 27.51x count-versus-volume correction on the
+target instrument itself. MBO is the only dataset that can ever calibrate
+queue behavior - order lifetimes, cancellation, replenishment, queue-ahead,
+liquidity-driven partial fills - which is the class of execution failure
+this venue exists to produce; but consuming it means the venue grows an
+order-book and queue model, at least one major protocol bump and real
+engine work. The 54.52 buys the evidence, not the capability.
+
+**Wave 1 - the paired NQ/MNQ test. 24.06. Priced and verified.**
+Unchanged from 9.6. Gate: explicit arm instruction. Its analysis writes
+`analysis/databento-pair-verdict.json`, bound to the job id and delivered
+file hashes, with an affirmative `pass` or an explicit `fail`.
+
+**Wave 2A - four contiguous NQ TBBO months. 71.79. Priced and verified.**
+Unchanged from 9.6: 2026-04 through 2026-07 at full months, the long-memory
+and persistence evidence. Gate: pair verdict `pass` ONLY - a fail means NQ
+cannot supply MNQ's history and this wave is skipped, not redirected.
+
+**Wave 2B - direct MNQ TBBO. Reported prices, NOT yet verified by our
+instrument.** One full month, 2026-07, reported at 73.41; on a pair FAIL,
+add 2026-06 reported at 70.11 so the target instrument carries two
+contiguous months of trade-and-quote evidence itself. Gate: the pair
+ANALYZED - either verdict, since the per-instrument quote seams need MNQ
+quotes regardless - plus two structural prerequisites: an `mnqv` scope and
+MNQ window entries added to `databento_price.py` and a pricing sweep run,
+because the downloader's drift gate refuses any row without a plan-time
+baseline in our own cache; and the buy whitelist extended with this wave's
+unlock rule. Reported figures are treated as estimates until our tool
+quotes them.
+
+**Wave 3 - two weeks of MNQ MBO, 2026-07-06 to 07-20. Reported at 54.52.
+ALWAYS LAST.** Gate, twofold: an accepted implementation specification for
+where order-lifecycle evidence lands in the venue - independent quote
+clock, depth state, cancellation and replenishment dynamics, queue-position
+mechanics - written per `reference/technical-implementation-spec.md` BEFORE
+the purchase, so the report's original mistake of buying evidence with no
+landing site is not repeated at the architecture level; and a separate
+explicit authorization. MBP-1 (reported 44.64) is the fallback if the spec
+concludes order identity is not needed; MBP-10 (reported 83.24) is rejected
+as dominated.
+
+**Totals.** Pass path: 24.06 + 71.79 + 73.41 + 54.52 + 0.02 = 223.80,
+leaving 1.20. Fail path: 24.06 + 73.41 + 70.11 + 54.52 = 222.10, leaving
+2.90. The thin cash margin is deliberate and is compensated STRUCTURALLY:
+wave 3 is last and spec-gated, so roughly 54 dollars stays uncommitted at
+every earlier decision point as recovery headroom. This replaces 9.6's
+29.13-dollar cash-headroom doctrine (the 10.3 principle) with a sequencing
+mechanism - an amendment accepted 2026-08-05.
+
+**Recorded decisions this program makes.**
+
+- The GC second-grid probe (9.4) is DROPPED, dominated by direct MNQ
+  evidence; the Kraken cross-grid work remains the free path to that
+  question.
+- The MES preset stays all-`declared` and uncalibrated: no ES or MES
+  evidence exists in any wave, by decision, not omission. A roughly
+  30-dollar ES/MES buy is the named next marginal dollar AFTER this
+  program.
+- No stress-window purchase for the dynamic-spread response (item A of
+  14.4): whether the delivered MNQ month spans enough volatility range to
+  fit the response is MEASURED from the delivered data first; buying range
+  is a later decision only if that measurement says the range is missing.
+- Nothing here touches equities, options, depth-beyond-book or crypto
+  purchases, for the reasons already recorded: no landing site, no preset
+  target, or free elsewhere.
 
 ---
 
@@ -1449,11 +1534,11 @@ stated direction.
 **Step 7. Spend the rest with evidence.** Step 4's failure reshaped this:
 Basket B is superseded, and the replacement is the CONTIGUOUS RECENT MONTHS
 design of [9.6](#96-the-contiguous-replacement-basket-priced-2026-08-05),
-designed and priced 2026-08-05 - four newest complete NQ TBBO months, 95.87
-total with the staged pair, 29.13 headroom - plus the GC probe if the Kraken
-cross-grid work in
-[7.1](#71-zero_change_frac-is-not-an-instrument-constant) leaves a
-cross-asset-class question open.
+extended 2026-08-05 into the wave-gated program of
+[9.7](#97-the-extended-program-gated-in-waves): the staged pair and NQ
+months under the credit, then direct MNQ TBBO and the spec-gated MBO
+question under the additional personal budget, each wave authorized
+separately. The GC probe is dropped per 9.7's recorded decisions.
 
 ---
 
@@ -2053,13 +2138,16 @@ byte-unchanged and still cannot spend.
 What remains NOT authorized: any invocation with `--confirm`. The 9.6
 purchase runs one stage at a time - pair first and alone, read, then the
 contiguous months - each on explicit instruction. The tool enforces the
-staging structurally: `buy` is whitelisted to exactly the two staged plans,
+staging structurally: `buy` is whitelisted to exactly the staged plans,
 submission is all-or-nothing with a stop at the first failure, `--max-dollars`
-caps CUMULATIVE plan spend across resumed runs, and stage two stays locked
+caps CUMULATIVE plan spend across resumed runs, and the NQ stage stays locked
 until `analysis/databento-pair-verdict.json` carries an affirmative
 `verdict: pass` bound to the paired test's job id and delivered file hashes -
 the analysis writes that artifact after a human reads the result; delivery
-alone unlocks nothing. Two small open items
+alone unlocks nothing. The whitelist currently implements waves 1 and 2A of
+[9.7](#97-the-extended-program-gated-in-waves); waves 2B and 3 require the
+`mnqv` scope, a pricing sweep, and their own unlock rules added before they
+can arm, which the drift gate enforces anyway - an unpriced row refuses. Two small open items
 before the first armed run: a conscious yes on `pretty_px`/`pretty_ts`
 (currently SDK defaults, fixed-precision ints) and `map_symbols` (currently
 true), and awareness that the SDK deprecates `metadata.get_cost`'s `mode`
