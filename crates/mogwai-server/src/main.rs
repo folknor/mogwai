@@ -78,7 +78,9 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Serve(ServeArgs),
-    Gen(r#gen::GenArgs),
+    // Boxed: GenArgs grew past clippy's variant-size threshold when the
+    // trace window landed, and the CLI parses exactly once.
+    Gen(Box<r#gen::GenArgs>),
     Presets(PresetArgs),
     /// Measure BBO protocol composition and write the paired budget fixtures.
     TickComposition(tick_composition::TickCompositionArgs),
@@ -118,7 +120,7 @@ struct ServeArgs {
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Serve(args) => serve(args),
-        Command::Gen(args) => r#gen::run(args),
+        Command::Gen(args) => r#gen::run(*args),
         Command::TickComposition(args) => tick_composition::run(&args),
         Command::Presets(args) => {
             if let Some(name) = args.name {

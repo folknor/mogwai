@@ -206,16 +206,12 @@ pub(super) fn draw_student_t(
     z / (chi / STUDENT_T_DF).sqrt()
 }
 
-/// The unit-variance innovation the GARCH recursion consumes: a raw
-/// Student-t(df) divided by its own standard deviation. This is the shipped
-/// path; `GarchVol::new`'s `a0` derivation is only correct against it.
-pub(super) fn draw_standardized_innovation(
-    rng: &mut ChaCha12Rng,
-    normal: &rand_distr::Normal<f64>,
-    chi_squared: &rand_distr::ChiSquared<f64>,
-) -> f64 {
-    draw_student_t(rng, normal, chi_squared) / super::consts::STUDENT_T_UNIT_SCALE
-}
+// The former `draw_standardized_innovation` wrapper is inlined at its one
+// call site in `next_latent_mid`: the walk draws raw via `draw_student_t`
+// and divides by `STUDENT_T_UNIT_SCALE` in two named steps, numerically
+// identical, so the observation-only trace can carry BOTH innovations
+// without a second draw. `GarchVol::new`'s `a0` derivation remains correct
+// only against the standardized form.
 
 /// Everything one call to [`GarchVol::step`] computed.
 ///

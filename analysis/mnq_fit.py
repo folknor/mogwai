@@ -29,6 +29,7 @@ import hashlib
 import json
 import math
 import os
+import random
 import subprocess
 import sys
 import threading
@@ -137,7 +138,30 @@ TOLERANCES = {
     "width": ("exact", 0),
     "top_sizes": ("exact", 0),
     "start_price": ("exact", 0),
+    # One-sided upper gates against the session-block-resampled observed
+    # envelope, judged per seed; the bound is data-derived at fit time
+    # under the frozen RESAMPLE_* constants, not a constant here.
+    "minute_range_p99": ("envelope_upper", "resampled"),
+    "minute_range_p99.9": ("envelope_upper", "resampled"),
+    "minute_range_max": ("envelope_upper", "resampled"),
 }
+
+# The joint size solve (successor spec 3.2): 16 fixed sigmas, each a
+# complete median solve, lexicographic winner, NO sigma refinement - the
+# winning grid sigma IS the fitted value, a stated grid-resolution answer
+# the representability gates judge.
+SIGMA_GRID_POINTS = 16
+SIGMA_GRID_DOMAIN = (0.4, 2.0)
+
+# The minute-range envelope (successor spec 3.3): session-block resampling
+# of the observed July per-minute tick ranges. One-sided upper gates at the
+# per-statistic envelope level, judged PER SEED; p99.99 is computed as a
+# diagnostic only.
+RESAMPLE_SEED = 1
+RESAMPLE_REPLICATES = 1000
+RESAMPLE_SESSIONS_PER_REPLICATE = 22
+RESAMPLE_ENVELOPE_LEVEL = 0.99
+MINUTE_RANGE_GATES = ("p99", "p99.9", "max")
 
 # Diagnostics ACF lags (4.8) - findings, never gates.
 ACF_LAGS = (1, 10, 50)
@@ -191,7 +215,10 @@ SUBCONTRACT_KEYS = [
     "DISPLACEMENT_GRID_POINTS", "VOL_GRID_POINTS", "VOL_SCALAR_DOMAIN",
     "SIZE_MEDIAN_IDENTIFIABILITY_FLOOR", "DISPLACEMENT_BIN_TICKS",
     "MAX_WRONG_SIDE_SHARE", "TOLERANCES", "ACF_LAGS", "HORIZON_SECONDS",
-    "REFERENCE_SHAPE",
+    "REFERENCE_SHAPE", "SIGMA_GRID_POINTS", "SIGMA_GRID_DOMAIN",
+    "RESAMPLE_SEED", "RESAMPLE_REPLICATES",
+    "RESAMPLE_SESSIONS_PER_REPLICATE", "RESAMPLE_ENVELOPE_LEVEL",
+    "MINUTE_RANGE_GATES",
 ]
 
 
@@ -892,6 +919,42 @@ def segment_origin_ns(session: str, segment: str) -> int:
         * 1_000_000_000
 
 
+def nearest_rank_list(sorted_values: list, q: float):
+    """Nearest-rank quantile of an ascending list."""
+    if not sorted_values:
+        raise Refusal("empty list has no quantiles")
+    rank = max(1, math.ceil(q * len(sorted_values)))
+    return sorted_values[rank - 1]
+
+
+def minute_range_envelope(session_ranges: dict[str, list[int]]) -> dict:
+    """The successor spec 3.3 envelope: RESAMPLE_REPLICATES replicates,
+    each drawing RESAMPLE_SESSIONS_PER_REPLICATE sessions WITH replacement
+    (matching one generated seed month's exposure), pooling their minute
+    tick ranges, and recording nearest-rank p99, p99.9, p99.99 and the
+    maximum; the envelope is the one-sided upper bound at
+    RESAMPLE_ENVELOPE_LEVEL of each statistic across replicates. p99.99 is
+    a DIAGNOSTIC, never a gate. Deterministic under RESAMPLE_SEED."""
+    rng = random.Random(RESAMPLE_SEED)
+    sessions = sorted(session_ranges)
+    if not sessions:
+        raise Refusal("no sessions carry minute ranges")
+    stats: dict[str, list] = {"p99": [], "p99.9": [], "p99.99": [], "max": []}
+    for _ in range(RESAMPLE_REPLICATES):
+        pool: list[int] = []
+        for _ in range(RESAMPLE_SESSIONS_PER_REPLICATE):
+            pool.extend(session_ranges[rng.choice(sessions)])
+        pool.sort()
+        stats["p99"].append(nearest_rank_list(pool, 0.99))
+        stats["p99.9"].append(nearest_rank_list(pool, 0.999))
+        stats["p99.99"].append(nearest_rank_list(pool, 0.9999))
+        stats["max"].append(pool[-1])
+    return {
+        name: nearest_rank_list(sorted(values), RESAMPLE_ENVELOPE_LEVEL)
+        for name, values in stats.items()
+    }
+
+
 def observe(rows_iter, usable: list[str]) -> dict:
     usable_set = set(usable)
     parents = 0
@@ -931,6 +994,10 @@ def observe(rows_iter, usable: list[str]) -> dict:
     hz_acc = {h: [0, 0.0, 0.0] for h in HORIZON_SECONDS}
     hz = {"key": None, "state": {}, "last_mid": None}
     last_trade_price_units = None  # last valid trade in usable sessions
+    # [minute index, session, low units, high units] of the open minute,
+    # and the completed per-session tick-range lists the envelope resamples.
+    minute_current = None
+    session_minute_ranges: dict[str, list[int]] = {}
     # The 4.3 size population: ALL structurally valid prints, unsided and
     # invalid-book included. Counted here so the artifact states the
     # population and its composition explicitly - the generated side has
@@ -1102,6 +1169,24 @@ def observe(rows_iter, usable: list[str]) -> dict:
         # session-fit convention), never UTC; minute_fields carries it.
         hour_count[hour] += 1
         hour_volume[hour] += row.size
+        # Per-minute tick ranges, PER SESSION, for the resampled envelope
+        # (successor spec 3.3): UTC minute buckets, minutes with at least
+        # one print, high-low in integer ticks - the identical convention
+        # the generated summary carries.
+        minute = row.ts // 60_000_000_000
+        if minute_current is not None and minute_current[0] == minute:
+            if row.price < minute_current[2]:
+                minute_current[2] = row.price
+            if row.price > minute_current[3]:
+                minute_current[3] = row.price
+        else:
+            if minute_current is not None:
+                session_minute_ranges.setdefault(
+                    minute_current[1], []
+                ).append(
+                    (minute_current[3] - minute_current[2]) // TICK_UNITS
+                )
+            minute_current = [minute, session, row.price, row.price]
         if row.side == "N":
             # Contiguity: an unsided row terminates the open parent.
             if current is not None:
@@ -1127,6 +1212,21 @@ def observe(rows_iter, usable: list[str]) -> dict:
             }
     if current is not None:
         close_parent(current)
+    if minute_current is not None:
+        session_minute_ranges.setdefault(minute_current[1], []).append(
+            (minute_current[3] - minute_current[2]) // TICK_UNITS
+        )
+    # The envelope resamples the usable-session population EXACTLY: a
+    # usable session without minute ranges, or a range block outside the
+    # usable set, is an estimator defect that must refuse rather than
+    # quietly change the resampling population.
+    if set(session_minute_ranges) != usable_set:
+        missing = sorted(usable_set - set(session_minute_ranges))
+        extra = sorted(set(session_minute_ranges) - usable_set)
+        raise Refusal(
+            "minute-range session blocks do not match the usable set "
+            f"(missing: {missing}; outside: {extra})"
+        )
 
     if parents == 0:
         raise Refusal("no parents in usable sessions")
@@ -1275,6 +1375,19 @@ def observe(rows_iter, usable: list[str]) -> dict:
         "mid_return_count": mid_count,
         "eligible_gaps": gaps,
         "last_price_points": last_price_points,
+        "minute_ranges_by_session": {
+            label: sorted(ranges)
+            for label, ranges in sorted(session_minute_ranges.items())
+        },
+        "minute_range_observed": (lambda pooled: {
+            "p99": nearest_rank_list(pooled, 0.99),
+            "p99.9": nearest_rank_list(pooled, 0.999),
+            "p99.99": nearest_rank_list(pooled, 0.9999),
+            "max": pooled[-1],
+        })(sorted(
+            r for ranges in session_minute_ranges.values() for r in ranges
+        )),
+        "minute_range_envelope": minute_range_envelope(session_minute_ranges),
         "per_session_parents": {
             label: v["parents"] for label, v in per_session_cadence.items()
         },
@@ -1736,22 +1849,32 @@ def solve_scalar(evaluate, lo: float, hi: float, points: int,
 
 
 def summaries_for(run_summary, overrides: dict, seeds, start_ns: int,
-                  length: str) -> dict:
+                  length: str, with_seeds: bool = False):
     # Seeds of one evaluation are independent walks; fan them out when the
     # runner is the real subprocess (an injected selftest fake stays
     # serial so its call order remains deterministic). `map` preserves
-    # seed order, so `pooled` sees exactly the serial list.
+    # seed order, so `pooled` sees exactly the serial list. The probe
+    # paths pass with_seeds=True and receive the named SeedSummaries shape
+    # {"pooled": ..., "per_seed": [...]} - the per-seed minute-range gates
+    # need the raw summaries - while every solver path keeps the pooled
+    # dict alone, semantics unchanged.
     if run_summary is run_summary_subprocess and len(seeds) > 1:
         with ThreadPoolExecutor(min(len(seeds), WALK_JOBS)) as pool:
-            return pooled(list(pool.map(
+            raw = list(pool.map(
                 lambda seed: run_summary(overrides, seed, start_ns, length,
                                          SUMMARY_WARMUP),
                 seeds,
-            )))
-    return pooled([
-        run_summary(overrides, seed, start_ns, length, SUMMARY_WARMUP)
-        for seed in seeds
-    ])
+            ))
+    else:
+        raw = [
+            run_summary(overrides, seed, start_ns, length, SUMMARY_WARMUP)
+            for seed in seeds
+        ]
+    if with_seeds:
+        # The NAMED SeedSummaries shape the successor spec pins: positional
+        # unpacking invited exactly the consumer swap the names prevent.
+        return {"pooled": pooled(raw), "per_seed": raw}
+    return pooled(raw)
 
 
 def prewarm_walks(run_summary, override_sets, seeds, start_ns: int,
@@ -1826,7 +1949,8 @@ FAMILIES = ("cadence", "size", "quote", "displacement", "volatility",
 FAMILY_SLOTS = {
     "cadence": ("mean_event_duration_s", "children_mean",
                 "children_single_frac", "levels_mean"),
-    "size": ("latent_size_median",),  # size_round_frac joins on the branch
+    "size": ("latent_size_median", "size_log_sigma"),
+    # size_round_frac joins the size family on the joint branch
     "quote": ("quoted_width", "top_sizes"),
     "displacement": ("trade_displacement_ticks",),
     "volatility": ("vol_scalar",),
@@ -1843,6 +1967,8 @@ TARGETS = (
     ("levels_mean", "cadence", ("levels_mean",)),
     ("latent_size_median", "size",
      ("size_ecdf_distance", "size_mean", "size_p90", "size_p99")),
+    ("size_log_sigma", "size",
+     ("size_ecdf_distance", "size_mean", "size_p90", "size_p99")),
     ("size_round_frac", "size",
      ("size_ecdf_distance", "size_mean", "size_p90", "size_p99")),
     ("quoted_width", "quote", ("width",)),
@@ -1854,7 +1980,8 @@ TARGETS = (
     # are listed here so a cadence miss inside the volatility probe is
     # visible in this verdict instead of failing it with all-true checks.
     ("vol_scalar", "volatility",
-     ("mid_rms", "mean_event_duration_s", "children_mean",
+     ("mid_rms", "minute_range_p99", "minute_range_p99.9",
+      "minute_range_max", "mean_event_duration_s", "children_mean",
       "children_single_frac", "levels_mean")),
     ("start_price", "start_price", ("scratch_config_accepted",)),
 )
@@ -1911,27 +2038,51 @@ def run_fit(directory: str = DELIVERY_DIR,
         "generator.levels_mean": observed["levels_mean"],
     }
 
-    # --- size family: independently solve model A and every model B frac ---
-    def size_overrides(median: float, frac) -> dict:
-        overrides = {"generator.latent_size_median": f"{median:.6f}"}
+    # --- size family: the JOINT (sigma, median) solve of the successor
+    # spec 3.2 - sixteen fixed sigmas, each a COMPLETE median solve, the
+    # winner compared lexicographically with NO sigma refinement (the
+    # winning grid sigma IS the fitted value, a stated grid-resolution
+    # answer the representability gates judge) - then model B's frac grid
+    # at the winning sigma behind the moot guard.
+    def size_overrides(median: float, frac, sigma: float) -> dict:
+        overrides = {
+            "generator.latent_size_median": f"{median:.6f}",
+            "generator.size_log_sigma": sigma,
+        }
         if frac is not None:
             overrides["generator.size_round_frac"] = frac
         return overrides
 
-    def size_eval_factory(frac):
+    def size_eval_factory(frac, sigma: float):
         def evaluate(median):
-            gen = summaries_for(run_summary, size_overrides(median, frac),
+            gen = summaries_for(run_summary,
+                                size_overrides(median, frac, sigma),
                                 SEARCH_SEEDS, SEARCH_START_NS, SEARCH_LENGTH)
             return size_objective(gen["size_histogram"], observed)
         return evaluate
 
     size_grid = coarse_grid(*SIZE_MEDIAN_DOMAIN, SIZE_MEDIAN_GRID_POINTS,
                             log_domain=True)
+    sigma_step = (SIGMA_GRID_DOMAIN[1] - SIGMA_GRID_DOMAIN[0]) \
+        / (SIGMA_GRID_POINTS - 1)
+    sigma_grid = [
+        SIGMA_GRID_DOMAIN[0] + i * sigma_step
+        for i in range(SIGMA_GRID_POINTS)
+    ]
     prewarm_walks(run_summary,
-                  [size_overrides(m, None) for m in size_grid],
+                  [size_overrides(m, None, sg)
+                   for sg in sigma_grid for m in size_grid],
                   SEARCH_SEEDS, SEARCH_START_NS, SEARCH_LENGTH)
-    model_a = solve_scalar(size_eval_factory(None), *SIZE_MEDIAN_DOMAIN,
-                           SIZE_MEDIAN_GRID_POINTS, log_domain=True)
+    per_sigma = []
+    for sigma in sigma_grid:
+        record = solve_scalar(size_eval_factory(None, sigma),
+                              *SIZE_MEDIAN_DOMAIN,
+                              SIZE_MEDIAN_GRID_POINTS, log_domain=True)
+        per_sigma.append((tuple(record["search_score"]), sigma, record))
+    # Ties break toward the smaller sigma, then the smaller median.
+    per_sigma.sort(key=lambda t: (t[0], t[1], t[2]["best_candidate"]))
+    _a_score, chosen_sigma, model_a = per_sigma[0]
+    fitted["size_log_sigma"] = chosen_sigma
     a_median = model_a["best_candidate"]
     observed_p50 = observed["size_quantiles"]["p50"]
     # The moot guard (amendment, 2026-08-05, restoring the design-round
@@ -1945,13 +2096,13 @@ def run_fit(directory: str = DELIVERY_DIR,
     if (a_median >= SIZE_MEDIAN_IDENTIFIABILITY_FLOOR
             or observed_p50 >= SIZE_MEDIAN_IDENTIFIABILITY_FLOOR):
         prewarm_walks(run_summary,
-                      [size_overrides(m, f)
+                      [size_overrides(m, f, chosen_sigma)
                        for f in SIZE_ROUND_FRAC_GRID for m in size_grid],
                       SEARCH_SEEDS, SEARCH_START_NS, SEARCH_LENGTH)
         b_results = []
         for frac in SIZE_ROUND_FRAC_GRID:
             record = solve_scalar(
-                size_eval_factory(frac), *SIZE_MEDIAN_DOMAIN,
+                size_eval_factory(frac, chosen_sigma), *SIZE_MEDIAN_DOMAIN,
                 SIZE_MEDIAN_GRID_POINTS, log_domain=True,
             )
             b_results.append((tuple(record["search_score"]), frac, record))
@@ -1973,11 +2124,40 @@ def run_fit(directory: str = DELIVERY_DIR,
         }
         chosen_median, chosen_frac, chosen_model = a_median, None, "A"
     identifiable = chosen_median >= SIZE_MEDIAN_IDENTIFIABILITY_FLOOR
-    fitted["latent_size_median"] = chosen_median
+    # The landing value is the MATERIALIZED median: the scratch-config
+    # transport writes the override as f"{median:.6f}", so that rounded
+    # value is what every judged walk actually ran and what the preset
+    # must pin. The raw optimum stays in the solve record.
+    fitted["latent_size_median"] = float(f"{chosen_median:.6f}")
     if identifiable and chosen_model == "B":
         fitted["size_round_frac"] = chosen_frac
     solves["latent_size_median"] = {
         "model_a": model_a, "model_b": model_b, "chosen_model": chosen_model,
+        "raw_optimum": chosen_median,
+    }
+    # The winning sigma's solve record materialized at the top level per
+    # the Brick F schema (domain, coarse grid, best candidate, search
+    # score, termination, evaluations), with the sigma dimension's own
+    # domain and grid beside it and every per-sigma record retained.
+    solves["size_log_sigma"] = {
+        "domain": list(SIGMA_GRID_DOMAIN),
+        "coarse_grid": sigma_grid,
+        "coarse_points": SIGMA_GRID_POINTS,
+        "best_candidate": chosen_sigma,
+        "search_score": model_a["search_score"],
+        # These describe the SIGMA search, not the winning median subsolve:
+        # the sigma dimension is a fixed grid with no refinement by
+        # contract, and each inner median solve's own termination and cost
+        # live under per_sigma.
+        "termination": "fixed 16-point sigma grid exhausted, no refinement",
+        "evaluations": SIGMA_GRID_POINTS,
+        "nested_median_evaluations": sum(
+            rec["evaluations"] for _score, _sg, rec in per_sigma
+        ),
+        "tie_break": "smaller sigma, then smaller median",
+        "per_sigma": [
+            {"sigma": sg, "record": rec} for _score, sg, rec in per_sigma
+        ],
     }
     solves["size_round_frac"] = {
         "identifiable": identifiable,
@@ -2044,7 +2224,10 @@ def run_fit(directory: str = DELIVERY_DIR,
         if family == "cadence":
             return dict(cadence_overrides)
         if family == "size":
-            over = {"generator.latent_size_median": f"{chosen_median:.6f}"}
+            over = {
+                "generator.latent_size_median": f"{chosen_median:.6f}",
+                "generator.size_log_sigma": chosen_sigma,
+            }
             if fitted.get("size_round_frac") is not None:
                 over["generator.size_round_frac"] = fitted["size_round_frac"]
             return over
@@ -2067,11 +2250,12 @@ def run_fit(directory: str = DELIVERY_DIR,
             return {"generator.start_price": fitted["start_price"]}
         raise AssertionError(family)
 
-    def judge(gen: dict, family: str) -> dict:
+    def judge(gen: dict, family: str, per_seed=None) -> dict:
         """Per-metric pass/fail (`checks`), the generated values the
         checks read (`measured`), and the empirical values they were
         held against (`targets`) - the per-target verdicts are assembled
-        from these three."""
+        from these three. `per_seed` carries the raw per-seed summaries
+        the volatility family's minute-range gates judge seed by seed."""
         checks: dict = {}
         measured: dict = {}
         targets: dict = {}
@@ -2149,6 +2333,31 @@ def run_fit(directory: str = DELIVERY_DIR,
             )
             measured["mid_rms"] = gen["mid_rms"]
             targets["mid_rms"] = observed["mid_rms"]
+            # Minute-range gates (successor spec 3.3): one-sided upper
+            # against the resampled observed envelope, judged PER SEED -
+            # never one pooled maximum against one observed month, an
+            # eightfold exposure asymmetry.
+            envelope = observed["minute_range_envelope"]
+            seed_stats = []
+            for summary in per_seed or []:
+                hist = {
+                    int(k): v
+                    for k, v in summary["minute_range_ticks_hist"].items()
+                }
+                seed_stats.append({
+                    "p99": nearest_rank_of(hist, 0.99) if hist else 0,
+                    "p99.9": nearest_rank_of(hist, 0.999) if hist else 0,
+                    "max": summary["minute_range_max_ticks"],
+                })
+            for stat in MINUTE_RANGE_GATES:
+                name = f"minute_range_{stat}"
+                bound = envelope[stat]
+                values = [s[stat] for s in seed_stats]
+                checks[name] = bool(values) and all(
+                    v <= bound + SLACK for v in values
+                )
+                measured[name] = values
+                targets[name] = bound
         if family == "quote":
             wh = gen["width_histogram"]
             gen_mode = min(
@@ -2188,10 +2397,15 @@ def run_fit(directory: str = DELIVERY_DIR,
                   FINAL_SEEDS, FINAL_START_NS, FINAL_LENGTH)
     for family in FAMILIES:
         try:
-            gen = summaries_for(run_summary, family_overrides(family),
-                                FINAL_SEEDS, FINAL_START_NS, FINAL_LENGTH)
+            seed_summaries = summaries_for(
+                run_summary, family_overrides(family),
+                FINAL_SEEDS, FINAL_START_NS, FINAL_LENGTH, with_seeds=True,
+            )
+            gen = seed_summaries["pooled"]
             probe_gens[family] = gen
-            probe_results[family] = judge(gen, family)
+            probe_results[family] = judge(
+                gen, family, per_seed=seed_summaries["per_seed"]
+            )
         except Refusal as exc:
             probe_results[family] = {
                 "checks": {"probe_run": False}, "measured": {},
@@ -2203,9 +2417,14 @@ def run_fit(directory: str = DELIVERY_DIR,
     # their solve records per the frozen artifact schema: the same objective
     # each search minimized, re-read from the family probe's pooled month.
     if "size" in probe_gens:
-        solves["latent_size_median"]["final_score"] = list(
+        final_size_score = list(
             size_objective(probe_gens["size"]["size_histogram"], observed)
         )
+        solves["latent_size_median"]["final_score"] = final_size_score
+        # The size objective is SHARED: sigma and median were solved jointly
+        # against it, so the winning sigma's final-budget score is the same
+        # reading.
+        solves["size_log_sigma"]["final_score"] = final_size_score
     if "displacement" in probe_gens:
         solves["trade_displacement_ticks"]["final_score"] = abs(
             combined_displacement(probe_gens["displacement"]) - disp_target
@@ -2238,10 +2457,15 @@ def run_fit(directory: str = DELIVERY_DIR,
         for family in passing:
             combined_overrides.update(family_overrides(family))
         try:
-            gen = summaries_for(run_summary, combined_overrides, FINAL_SEEDS,
-                                FINAL_START_NS, FINAL_LENGTH)
+            seed_summaries = summaries_for(
+                run_summary, combined_overrides, FINAL_SEEDS,
+                FINAL_START_NS, FINAL_LENGTH, with_seeds=True,
+            )
             for family in passing:
-                combined_results[family] = judge(gen, family)
+                combined_results[family] = judge(
+                    seed_summaries["pooled"], family,
+                    per_seed=seed_summaries["per_seed"],
+                )
         except Refusal as exc:
             # A failed combined run fits NOTHING: no target may take fitted
             # provenance from a configuration that never produced its final
@@ -2991,6 +3215,15 @@ def run_selftest() -> None:
                 "mid_return_count": parents,
                 "mid_return_sum": 0.0,
                 "mid_return_sumsq": (vol * 10.0) ** 2 * parents,
+                # Minute ranges scale with vol so the volatility family's
+                # envelope gates see a generator the solve can steer: at
+                # the solved scalar the single range key sits inside the
+                # observed envelope, and an inflated scalar overshoots it.
+                "minute_range_ticks_hist": {
+                    str(max(1, int(vol * 1.2e6))): 500,
+                },
+                "minute_range_max_ticks": max(1, int(vol * 1.2e6)),
+                "minute_range_second_max_ticks": max(1, int(vol * 1.2e6)),
                 "horizon_vol": {},
                 "first_book_mid": overrides.get("generator.start_price",
                                                 "21000"),
@@ -3070,6 +3303,68 @@ def run_selftest() -> None:
           artifact["landing_set"]
           == sorted(t for t, v in artifact["verdicts"].items()
                     if v["status"] == "fitted"))
+    sigma_solve = artifact["solves"]["size_log_sigma"]
+    check("the sigma grid is solved per sigma with the winner recorded",
+          len(sigma_solve["per_sigma"]) == SIGMA_GRID_POINTS
+          and sigma_solve["best_candidate"] in sigma_solve["coarse_grid"]
+          and artifact["fitted_candidates"]["size_log_sigma"]
+          == sigma_solve["best_candidate"])
+    check("size_log_sigma carries its own per-target verdict",
+          artifact["verdicts"]["size_log_sigma"]["family"] == "size")
+    vol_probe = artifact["verdicts"]["vol_scalar"]["checks"]["probe"]
+    check("the minute-range gates judge the volatility probe per seed",
+          all(vol_probe[f"minute_range_{stat}"] is True
+              for stat in MINUTE_RANGE_GATES))
+    # HETEROGENEOUS session blocks with one RARE extreme (a single 999 in
+    # one session): sampling rows instead of sessions, ignoring the frozen
+    # seed, drawing the wrong session count, or moving the envelope level
+    # each produce a DIFFERENT exact result than the frozen expectation -
+    # p99 pins the common tier while the tails pin the rare-session draw
+    # composition. Computed once under RESAMPLE_SEED 1 and frozen; the
+    # determinism property under test IS the freeze.
+    labels = [l for l, s in SESSION_INVENTORY if s == "full"]
+    hetero = {
+        label: [(i * 7 + j) % 60 for j in range(50)]
+        for i, label in enumerate(labels)
+    }
+    hetero[labels[7]] = hetero[labels[7]] + [999]
+    env_a = minute_range_envelope(hetero)
+    env_b = minute_range_envelope(hetero)
+    check("the resampled envelope is deterministic under its frozen seed",
+          env_a == env_b and set(env_a) == {"p99", "p99.9", "p99.99", "max"})
+    check("the heterogeneous envelope matches its frozen expectation",
+          env_a == {"p99": 59, "p99.9": 999, "p99.99": 999, "max": 999})
+    both = summaries_for(fake_summary_factory({"calls": 0}),
+                         {}, (1, 2), 0, "1d", with_seeds=True)
+    check("with_seeds returns the NAMED pooled and per_seed members",
+          set(both) == {"pooled", "per_seed"} and len(both["per_seed"]) == 2
+          and both["pooled"]["parents"] == 2000)
+
+    print("an inflated volatility overshoots the minute envelope")
+
+    def inflated_minutes_summary(overrides, seed, start_ns, length, warmup):
+        base = fake_summary_factory({"calls": 0})(
+            overrides, seed, start_ns, length, warmup
+        )
+        if "generator.vol_scalar" in overrides:
+            base["minute_range_ticks_hist"] = {"100": 500}
+            base["minute_range_max_ticks"] = 100
+            base["minute_range_second_max_ticks"] = 100
+        return base
+
+    write_json_atomic(st_preflight, payload)
+    inflated = run_fit(directory=fake_dir,
+                       run_summary=inflated_minutes_summary,
+                       harness_commit="selftest",
+                       ledger_path=ledger_path,
+                       preflight_artifact_path=st_preflight)
+    inflated_checks = inflated["verdicts"]["vol_scalar"]["checks"]["probe"]
+    check("minute gates fail the volatility family while mid_rms passes",
+          inflated_checks["mid_rms"] is True
+          and inflated_checks["minute_range_max"] is False
+          and inflated["verdicts"]["vol_scalar"]["status"]
+          == "declared-misrepresented"
+          and "vol_scalar" not in inflated["landing_set"])
     check("every solve record carries the frozen schema fields",
           all(
               {"domain", "coarse_points", "coarse_grid", "best_candidate",
@@ -3077,8 +3372,18 @@ def run_selftest() -> None:
                "tie_break", "evaluations"}
               <= set(artifact["solves"][k] if k != "latent_size_median"
                      else artifact["solves"][k]["model_a"])
-              for k in ("latent_size_median", "trade_displacement_ticks",
-                        "vol_scalar")
+              for k in ("latent_size_median", "size_log_sigma",
+                        "trade_displacement_ticks", "vol_scalar")
+          )
+          and "per_sigma" in artifact["solves"]["size_log_sigma"]
+          and "final_score" in artifact["solves"]["size_log_sigma"])
+    check("the sigma record's cost fields describe the sigma search",
+          sigma_solve["evaluations"] == SIGMA_GRID_POINTS
+          and sigma_solve["termination"]
+          == "fixed 16-point sigma grid exhausted, no refinement"
+          and sigma_solve["nested_median_evaluations"] == sum(
+              entry["record"]["evaluations"]
+              for entry in sigma_solve["per_sigma"]
           ))
 
     print("the moot guard opens when the observed p50 reaches the floor")

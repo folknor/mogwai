@@ -40,6 +40,11 @@ pub(crate) enum GenType {
     /// calibration instrument of the MNQ TBBO fit: consumes every draw
     /// (sizes, prices, sides, quotes) and emits only sufficient statistics.
     Summary,
+    /// One JSON line per parent inside `--trace-from`/`--trace-until`: the
+    /// volatility intermediates off the real `GarchVol::step` path. The
+    /// forensic instrument of the generator successor spec - observation
+    /// only, byte-identical tape, pinned by test.
+    Trace,
 }
 
 /// `mogwai gen` arguments. Dumps the offline generator as CSV.
@@ -76,6 +81,13 @@ pub(crate) struct GenArgs {
     /// calendar interval with full session weighting.
     #[arg(long)]
     warmup: Option<String>,
+    /// Trace window opening instant, unix ns. Trace mode only; must satisfy
+    /// start <= trace-from < trace-until <= start + length.
+    #[arg(long)]
+    trace_from: Option<u64>,
+    /// Trace window closing instant (exclusive), unix ns. Trace mode only.
+    #[arg(long)]
+    trace_until: Option<u64>,
     /// Walk seed. Defaults to `DEFAULT_GEN_SEED`, the realism gate's seed. The
     /// running server draws or configures its own run seed instead, so this
     /// offline walk matches a served one only when given that run's tape seed.
@@ -140,16 +152,37 @@ fn run_into(args: &GenArgs, sink: &mut impl Write) -> anyhow::Result<()> {
             Some(NonZeroU64::new(ns).context("--interval must be nonzero")?)
         }
         (GenType::Bars, None) => bail!("--type bars requires --interval"),
-        (GenType::Trades | GenType::Summary, Some(_)) => {
+        (GenType::Trades | GenType::Summary | GenType::Trace, Some(_)) => {
             bail!("--interval is only valid with --type bars")
         }
-        (GenType::Trades | GenType::Summary, None) => None,
+        (GenType::Trades | GenType::Summary | GenType::Trace, None) => None,
     };
     if args.warmup.is_some() && !matches!(args.kind, GenType::Summary) {
         bail!("--warmup is only valid with --type summary");
     }
+    if (args.trace_from.is_some() || args.trace_until.is_some())
+        && !matches!(args.kind, GenType::Trace)
+    {
+        bail!("--trace-from/--trace-until are only valid with --type trace");
+    }
 
     let profile = resolve_profile_for(args)?;
+
+    if let GenType::Trace = args.kind {
+        let (Some(from), Some(until)) = (args.trace_from, args.trace_until) else {
+            bail!("--type trace requires both --trace-from and --trace-until");
+        };
+        if !(args.start <= from && from < until && until <= end) {
+            bail!(
+                "trace window must satisfy start <= trace-from < trace-until \
+                 <= start + length ({} <= {from} < {until} <= {end})",
+                args.start
+            );
+        }
+        let mut source = build_source(args, &profile, args.start)?;
+        source.enable_vol_trace();
+        return write_trace(&mut source, from, until, end, sink);
+    }
 
     if let GenType::Summary = args.kind {
         let warmup_ns = match &args.warmup {
@@ -192,8 +225,71 @@ fn run_into(args: &GenArgs, sink: &mut impl Write) -> anyhow::Result<()> {
             let interval = interval.expect("bars validated interval above");
             write_bars(trades, args.start, end, interval, sink)?;
         }
-        GenType::Summary => unreachable!("summary dispatched above"),
+        GenType::Summary | GenType::Trace => {
+            unreachable!("summary and trace dispatched above")
+        }
     }
+    Ok(())
+}
+
+/// One JSON line per parent whose event instant falls inside
+/// `[from, until)`: the parent timestamp, its child count, and the
+/// volatility intermediates the source observed on the REAL step path.
+/// The walk itself runs identically with the trace enabled - pinned by
+/// `trace_consumes_no_draws_and_leaves_the_tape_byte_identical`.
+fn write_trace(
+    source: &mut mogwai_data::GeneratedSource,
+    from: u64,
+    until: u64,
+    end: u64,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    #[derive(serde::Serialize)]
+    struct TraceRecord {
+        parent_ts: u64,
+        child_count: u32,
+        #[serde(flatten)]
+        vol: mogwai_data::VolTrace,
+    }
+
+    let mut pending: Option<TraceRecord> = None;
+    let emit = |record: Option<TraceRecord>, out: &mut dyn Write| -> anyhow::Result<()> {
+        if let Some(record) = record
+            && record.parent_ts >= from
+            && record.parent_ts < until
+        {
+            serde_json::to_writer(&mut *out, &record).context("writing a trace record")?;
+            writeln!(out)?;
+        }
+        Ok(())
+    };
+    while let Some(event) = source.next_tick() {
+        let ts = event.ts_event();
+        if ts >= end {
+            break;
+        }
+        match event {
+            TickEvent::Quote(q) => {
+                emit(pending.take(), out)?;
+                if q.ts_event >= until {
+                    // Every later parent sits past the window; the walk can
+                    // stop - the tape up to here is already fully realized.
+                    break;
+                }
+                pending = source.take_vol_trace().map(|vol| TraceRecord {
+                    parent_ts: q.ts_event,
+                    child_count: 0,
+                    vol,
+                });
+            }
+            TickEvent::Trade(_) => {
+                if let Some(record) = &mut pending {
+                    record.child_count += 1;
+                }
+            }
+        }
+    }
+    emit(pending.take(), out)?;
     Ok(())
 }
 
@@ -458,6 +554,13 @@ pub(crate) struct SummaryAcc {
     mid_return_count: u64,
     mid_return_sum: f64,
     mid_return_sumsq: f64,
+    // Per-minute trade-price ranges in INTEGER TICKS over minutes carrying
+    // at least one in-window trade (the successor spec 3.3; the observed
+    // side uses the identical convention). The per-seed maxima feed the
+    // envelope gates seed by seed - never pooled.
+    minute_range_ticks_hist: std::collections::BTreeMap<u64, u64>,
+    minute_range_max_ticks: u64,
+    minute_range_second_max_ticks: u64,
     horizon_vol: std::collections::BTreeMap<String, MomentAcc>,
     first_book_mid: Option<String>,
     measured_from_ns: u64,
@@ -538,6 +641,9 @@ pub(crate) fn summarize(
         mid_return_count: 0,
         mid_return_sum: 0.0,
         mid_return_sumsq: 0.0,
+        minute_range_ticks_hist: Default::default(),
+        minute_range_max_ticks: 0,
+        minute_range_second_max_ticks: 0,
         horizon_vol: SUMMARY_VOL_HORIZONS_S
             .iter()
             .map(|h| (h.to_string(), MomentAcc::default()))
@@ -566,6 +672,15 @@ pub(crate) fn summarize(
     let mut pending_quote: Option<(f64, u64, Decimal, Decimal)> = None;
     let mut open: Option<OpenParent> = None;
     let mut prev_parent: Option<(u64, f64)> = None; // (first_ts, quote_mid)
+    // (minute index, low, high) of the in-window minute being accumulated.
+    let mut minute_state: Option<(u64, f64, f64)> = None;
+
+    fn flush_minute(acc: &mut SummaryAcc, state: &mut Option<(u64, f64, f64)>, tick_f: f64) {
+        if let Some((_minute, lo, hi)) = state.take() {
+            let range_ticks = ((hi - lo) / tick_f).round().max(0.0) as u64;
+            *acc.minute_range_ticks_hist.entry(range_ticks).or_insert(0) += 1;
+        }
+    }
 
     let finalize = |acc: &mut SummaryAcc, prev: &mut Option<(u64, f64)>, parent: OpenParent| {
         if parent.first_ts < start || parent.first_ts >= end {
@@ -675,6 +790,18 @@ pub(crate) fn summarize(
             TickEvent::Trade(t) => {
                 if t.ts_event >= start && t.ts_event < end {
                     *acc.size_histogram.entry(decimal_key(t.size)).or_insert(0) += 1;
+                    let minute = t.ts_event / 60_000_000_000;
+                    let price = f64::try_from(t.price).unwrap_or(f64::NAN);
+                    match &mut minute_state {
+                        Some((current, lo, hi)) if *current == minute => {
+                            *lo = lo.min(price);
+                            *hi = hi.max(price);
+                        }
+                        _ => {
+                            flush_minute(&mut acc, &mut minute_state, tick_f);
+                            minute_state = Some((minute, price, price));
+                        }
+                    }
                 }
                 match &mut open {
                     Some(parent) => {
@@ -738,6 +865,18 @@ pub(crate) fn summarize(
             *prev_boundary_mid = last_mid;
             *next_k += 1;
         }
+    }
+    flush_minute(&mut acc, &mut minute_state, tick_f);
+    // The two largest minute ranges OBSERVED (not distinct values): a
+    // repeated maximum is its own second maximum.
+    let mut ranges = acc.minute_range_ticks_hist.iter().rev();
+    if let Some((&largest, &count)) = ranges.next() {
+        acc.minute_range_max_ticks = largest;
+        acc.minute_range_second_max_ticks = if count >= 2 {
+            largest
+        } else {
+            ranges.next().map_or(0, |(&next, _)| next)
+        };
     }
     acc
 }
@@ -1103,6 +1242,8 @@ mod tests {
             start_price: None,
             config: None,
             warmup: None,
+            trace_from: None,
+            trace_until: None,
             regime: None,
             havoc: None,
             out: None,
@@ -1188,6 +1329,8 @@ mod tests {
             start_price: None,
             config: None,
             warmup: None,
+            trace_from: None,
+            trace_until: None,
             regime: None,
             havoc: None,
             out: None,
@@ -1260,6 +1403,8 @@ mod tests {
             start_price: None,
             config: None,
             warmup: None,
+            trace_from: None,
+            trace_until: None,
             regime: None,
             havoc: Some(PathBuf::from(
                 "does/not/exist/mogwai-gen-havoc-test-nonexistent.json",
@@ -1427,7 +1572,9 @@ mod tests {
                 "children_single_frac",
                 "\"generator.children_single_frac\" = 0.9",
             ),
-            ("levels_mean", "\"generator.levels_mean\" = 1.2"),
+            // levels_mean must stay at or below the fitted children_mean
+            // 1.1711, so the moved value sits BELOW the preset's 1.1216.
+            ("levels_mean", "\"generator.levels_mean\" = 1.05"),
             (
                 "latent_size_median",
                 "\"generator.latent_size_median\" = \"40\"",
@@ -1604,6 +1751,72 @@ mod tests {
     }
 
     #[test]
+    fn minute_ranges_match_an_independent_bar_pass() {
+        // Brick T of the successor spec: the summary's per-minute tick
+        // ranges against an independent collect-then-compute pass over the
+        // identical seeded walk. Minutes with at least one in-window trade
+        // contribute their high-low in integer ticks; the two largest
+        // OBSERVATIONS (a repeated maximum is its own second maximum) feed
+        // the per-seed envelope gates.
+        const WINDOW_NS: u64 = 45 * 60 * 1_000_000_000;
+        let profile = resolve_profile("MNQ").expect("MNQ profile");
+        let build = || {
+            mogwai_data::GeneratedSource::try_new_with_session_profile(
+                profile.scalars.clone(),
+                DEFAULT_GEN_SEED,
+                0,
+                fingerprint(),
+                &profile.session,
+                None,
+                mogwai_data::SizeGrid::from_def(&profile.def),
+                profile.calendar.clone(),
+            )
+            .expect("source")
+        };
+        let mut streaming = build();
+        let acc = summarize(&mut streaming, &profile, DEFAULT_GEN_SEED, 0, WINDOW_NS);
+        let got = serde_json::to_value(&acc).expect("summary value");
+
+        let mut collected = build();
+        let mut per_minute: std::collections::BTreeMap<u64, (f64, f64)> =
+            std::collections::BTreeMap::new();
+        while let Some(event) = collected.next_tick() {
+            if event.ts_event() >= WINDOW_NS {
+                break;
+            }
+            if let TickEvent::Trade(t) = event {
+                let price = f64::try_from(t.price).expect("price");
+                per_minute
+                    .entry(t.ts_event / 60_000_000_000)
+                    .and_modify(|(lo, hi)| {
+                        *lo = lo.min(price);
+                        *hi = hi.max(price);
+                    })
+                    .or_insert((price, price));
+            }
+        }
+        let tick = f64::try_from(profile.scalars.modal_tick).expect("tick");
+        let mut hist: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+        let mut ranges: Vec<u64> = Vec::new();
+        for (lo, hi) in per_minute.values() {
+            let range = ((hi - lo) / tick).round().max(0.0) as u64;
+            *hist.entry(range.to_string()).or_insert(0) += 1;
+            ranges.push(range);
+        }
+        ranges.sort_unstable_by(|a, b| b.cmp(a));
+        assert!(!ranges.is_empty(), "the window must carry traded minutes");
+        assert_eq!(
+            got["minute_range_ticks_hist"],
+            serde_json::to_value(&hist).unwrap()
+        );
+        assert_eq!(got["minute_range_max_ticks"], serde_json::json!(ranges[0]));
+        assert_eq!(
+            got["minute_range_second_max_ticks"],
+            serde_json::json!(*ranges.get(1).unwrap_or(&0))
+        );
+    }
+
+    #[test]
     fn a_warmup_past_the_start_refuses_instead_of_saturating() {
         // start - warmup must be EXACT: a saturated subtraction would
         // silently shorten the warm-up and shift the walk, so underflow is a
@@ -1618,6 +1831,8 @@ mod tests {
             start_price: None,
             config: None,
             warmup: Some("1s".to_string()),
+            trace_from: None,
+            trace_until: None,
             regime: None,
             havoc: None,
             out: None,

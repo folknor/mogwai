@@ -890,6 +890,21 @@ source requires); `clean_regime_is_byte_identical`,
 are XBTUSD-anchor constructions (2.3) and their passing WITHOUT
 re-bless is the assertion.
 
+RESULT, 2026-08-05, post-measurement resolution on Brick L's value
+rule, agreed by both reviewers before history was rebuilt: "failed
+targets' rationales updated instead" governs PROVENANCE, not values.
+A failed family retains declared provenance but MAY carry the frozen
+solver's best candidate as the closest representable approximation -
+refusing the value would keep a measurably worse tape to punish a
+near-miss, while the declared kind keeps the claim honest. The
+protocol-10 iteration-2 preset therefore carries the size pair
+(median 1.097264, sigma 0.9333...) and vol_scalar 8.701e-6 declared,
+with the eight-entry landing_set alone reading fitted. These are
+best CANDIDATES under the preregistered search and budgets, not
+optima - the volatility search score and its independent final-budget
+score differ by two orders of magnitude, which is exactly why the
+weaker word is the accurate one.
+
 **Brick B0 - the protocol-9 baseline, on the CLEAN SHIPPED tree,
 BEFORE Brick L exists.** The pre-landing state is gone once L is
 built, so this brick is sequenced after Brick R and before any

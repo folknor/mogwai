@@ -37,14 +37,19 @@ re-deriving anything and can see which steps were wrong the first time.
 
 The tape's PROCESS is good. MNQ and MES now carry their contract grid, corrected
 calendar, representative price and native-unit size, plus a fitted NQ session
-profile. Their cadence and the shared process shape remain crypto-derived, and
-their quoted width, top sizes and trade displacement remain explicit
-uncalibrated placeholders.
+profile. As of the protocol-10 landing MNQ additionally carries fitted cadence,
+size, volatility, start-price and quote-seam values from the delivered July
+2026 TBBO month (job GLBX-20260805-HAPEWPABKG; the fit artifact
+`analysis/mnq-fit.json` records every estimator and verdict), and MES inherits
+them as a stated stopgap (its symbol, underlying, multiplier and start price
+stay its own declared overrides). The shared process SHAPE (the GARCH, bounce
+and regime chains) remains crypto-derived for the futures, plus the
+structurally unidentifiable `size_round_frac` and, this iteration, the shared
+`size_log_sigma` default of 1.15.
 
-That is expected rather than broken: the five presets are aspirational, added
-recently to facilitate exactly the tapes this report is about. They fill in the
-slots a contract specification can supply and honestly decline to fill the rest,
-which their all-`declared` provenance maps say out loud.
+The paragraphs below describing uncalibrated futures placeholders are the
+HISTORICAL record of the state this program set out to fix; where they read
+present-tense, the protocol-10 landing supersedes them.
 
 The original framing of this report - "which CME windows maximise value for 125
 dollars" - assumed the outstanding work was buying trade-level evidence for
@@ -85,10 +90,11 @@ settled both the proxy question and the protocol 8 arrival-bias question. See
 
 Read this before starting anything. It is the handover, not a summary.
 
-**Landed.** Protocol 8, now complete. The BBO layer at protocol 7 with three
-uncalibrated calibration seams, then MNQ's session profile fitted from the NQ
-1-minute archive, then the budget remeasurement that profile obliged.
-`TAPE_PROTOCOL_VERSION` is 8. `notes/mnq-session-fit.md` is the fit report;
+**Landed (historical checkpoint, written at protocol 8; protocol 10 has since
+landed the MNQ TBBO fit).** Protocol 8, then complete. The BBO layer at
+protocol 7 with three uncalibrated calibration seams, then MNQ's session
+profile fitted from the NQ 1-minute archive, then the budget remeasurement
+that profile obliged. `notes/mnq-session-fit.md` is the fit report;
 `analysis/fit_session_profile.py` is the estimator, with every acceptance
 threshold preregistered as a named constant at the top.
 
@@ -317,11 +323,14 @@ from the shipped source, not from documentation.
 | `crates/mogwai-server/presets/*.toml` | the five shipped instrument presets |
 | `crates/mogwai-server/src/source.rs` | how a preset becomes a running generator |
 
-`TAPE_PROTOCOL_VERSION` is currently **8**. Any change to a generator constant,
+`TAPE_PROTOCOL_VERSION` is currently **10**. Any change to a generator constant,
 the arrival clock, a GARCH parameter, the fingerprint, seed derivation, the fill
 band's draw or the tape origin must bump it. Nothing detects a missed bump.
 Version 7 added the observable top of book; version 8 made the session profile
-conditional on the calendar and fitted MNQ's from the NQ archive.
+conditional on the calendar and fitted MNQ's from the NQ archive; version 9
+split stochastic parent advancement from wire-object materialization
+byte-identically; version 10 landed the July MNQ TBBO fit with floor-aware
+child conditioning and a per-instrument `size_log_sigma`.
 
 ### 2.2 The walk
 
@@ -369,14 +378,19 @@ place deliberately because fixing it would change every boundary-crossing gap
 and break the golden stream.
 
 **Stage 3, the latent mid.** A GARCH(1,1) recursion with Student-t innovations
-(`STUDENT_T_DF = 4.0`) drives a log-price. `GARCH_ARCH = 0.12`,
-`GARCH_GARCH = 0.875`, so persistence is 0.995 - very close to integrated, which
-is what supplies the long memory in `abs_return_acf` out to lag 50. Two clamps
-apply: a FEEDBACK clamp on the return that re-enters the recursion, and a
-REALIZED clamp on the return that actually moves the mid. They are equal except
-inside a `SessionEdgeSpike` window, which is exactly how a spike leaves zero
-trace on the recursion state outside its own hour. `MAX_ABS_RETURN = 0.00002`
-and `GARCH_SIGMA_CAP = 0.00001` bound both.
+(`STUDENT_T_DF = 4.0`, standardized to unit variance before the recursion)
+drives a log-price. As of the 5fc974d second-moment correction the committed
+coefficients are `GARCH_ARCH = 0.02` and `GARCH_GARCH = 0.979`, so persistence
+is 0.999 - very close to integrated, which is what supplies the long memory in
+`abs_return_acf` out to lag 50. The values this section previously stated
+(0.12 and 0.875, persistence 0.995) predate that correction, under which the
+raw t(4) variance of 2 made the true second-moment condition 1.115 and the
+recursion ran 8.17x hotter than configured. Three separate rails bound the
+path: `GARCH_SIGMA_CAP = 1e-3` bounds the recursion state,
+`FEEDBACK_RETURN_CEILING = 4e-3` bounds the return that re-enters the
+recursion, and `REALIZED_RETURN_CEILING = 5e-2` bounds the return that
+actually moves the mid; the split is exactly how a `SessionEdgeSpike` leaves
+zero trace on the recursion state outside its own hour.
 
 Session and regime volatility compose MULTIPLICATIVELY here. Inside the regime
 envelope, a `SessionEdgeSpike` composes ADDITIVELY onto a storm baseline. Both
@@ -1532,10 +1546,16 @@ earlier decision point.
 - The GC second-grid probe (9.4) is DROPPED, dominated by direct MNQ
   evidence; the Kraken cross-grid work remains the free path to that
   question.
-- The MES preset stays all-`declared` and uncalibrated: no ES or MES
-  evidence exists in any wave, by decision, not omission. A roughly
-  30-dollar ES/MES buy is the named next marginal dollar AFTER this
-  program.
+- No ES or MES evidence exists in any wave, by decision, not omission.
+  As of the protocol-10 landing MES borrows the MNQ fit as a stated
+  stopgap (it inherits every fitted generator value except its own
+  declared identity overrides - symbol, underlying, multiplier, start
+  price - through `preset = "MNQ"`, with corpus strings that name the
+  MNQ evidence so no MES corpus is implied); a roughly 30-dollar ES/MES buy is the named
+  next marginal dollar AFTER this program and remains the route to
+  ending the borrow. The NQ/MNQ proxy FAIL proves family resemblance is
+  not interchangeability - the borrow is a product approximation, not a
+  claim of transfer validity.
 - No stress-window purchase for the dynamic-spread response (item A of
   14.4): whether the delivered MNQ month spans enough volatility range to
   fit the response is MEASURED from the delivered data first; buying range

@@ -52,7 +52,7 @@ away from zero and floored at one contract, so no print becomes the zero
 quantity nautilus drops. `latent_size_median` is stated directly in the
 instrument's native size unit and names the continuous lognormal center before
 that grid is applied. The floor truncates its lower tail, so it is deliberately
-not called the observed size median. `TAPE_PROTOCOL_VERSION` is 9; version 5
+not called the observed size median. `TAPE_PROTOCOL_VERSION` is 10; version 5
 removed the quote-notional proxy whose value was actually arithmetic mean
 notional and made the latent size distribution explicit, and version 6 repaired
 the GARCH recursion's second moment. Version 7 added the observable top of book,
@@ -60,14 +60,23 @@ version 8 added the instrument session profile, and version 9 split stochastic
 parent advancement from wire-object materialization. Version 9 deliberately
 preserves the version-8 tape byte for byte, but changes the generation path and
 therefore advances the process version under the unconditional versioning rule.
+Version 10 landed the July 2026 MNQ TBBO fit: floor-aware child-count
+conditioning (below the point where the quiet-hour multiplier would push the
+mean child count under one, the conditional parameters are re-solved so the
+configured unconditional targets survive the one-child floor; above it the
+legacy path is byte-identical), a per-instrument `size_log_sigma` whose default
+reproduces the shared crypto shape byte for byte, and the fitted MNQ preset
+values with MES inheriting them loudly.
 
 Each generated parent event publishes one BBO before its first trade. The book
 has an exact positive integer-tick width and is centered, with one rounding, on
 the drifted latent mid. Every child in the parent sweep shares that book. Parent
 trades are displaced from the published midpoint, so the default one-tick width
 and half-tick displacement print at the touch. Width, top sizes, and trade
-displacement are separate per-instrument calibration seams and remain explicitly
-uncalibrated until a measured TBBO corpus supplies them. Displacement is not
+displacement are separate per-instrument calibration seams; a measured TBBO
+corpus supplies them for MNQ (and, by stated inheritance, MES) as of protocol
+10, while the crypto presets remain explicitly uncalibrated because no quote
+evidence covers spot. Displacement is not
 capped by width: the published BBO is only the top level, so an aggressive
 parent may print beyond the touch without making the book malformed. A connecting WebSocket
 receives the current BBO snapshot before later tape frames, and the adapter
@@ -90,6 +99,21 @@ divergence is an output envelope. That ceiling is a stated product policy sized
 against a measured maximum-strength envelope, not a fitted market quantity: as a
 log return it permits about +5.13 and -4.88 percent in a SINGLE event, and it
 does not bound cumulative movement over many events.
+
+Two structural fidelity limits of the generated futures tape are stated here
+because no parameter can remove them. First, the calendar-driven baseline has
+no automatic reopen jump: a real session reopen prints a discrete gap where
+the closed-hours information arrives at once, while the generated mid resumes
+its random walk from where it halted. An explicitly armed `ReopenGap`
+divergence can inject such a jump on a subscription's view, but the clean
+baseline tape never produces one, so on it overnight gaps are absent and any
+large single-minute range the tape does produce is a volatility-cluster tail
+inside a session, not a reopen - a different phenomenology occurring at a
+different time of day. Second, the session profile modulates intensity and
+volatility by HOURLY factors, so within-hour structure (the opening minutes'
+concentration at the cash open, the settlement flurry) is smeared uniformly
+across each hour; the profile reproduces hour-scale contour, not
+minute-scale texture.
 
 Fingerprint ranges are corpus-labelled observations. They select defaults and
 produce operator diagnostics, but never admit or reject an instrument. A

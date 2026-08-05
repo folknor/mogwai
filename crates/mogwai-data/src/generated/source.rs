@@ -26,10 +26,10 @@ use super::consts::{
     ARRIVAL_WEIBULL_MEAN, ARRIVAL_WEIBULL_SHAPE, DRIFT_RECENTER_FRAC, EVENT_PRICE_REPEAT_PROB,
     HIGH_REGIME_LEVEL_STEP_MULT, INTRA_EVENT_STEP_NS, LOW_INTENSITY_ARR_MULT,
     LOW_REGIME_LEVEL_STEP_MULT, MAX_SESSION_GAP_NS, MID_CEILING, NS_PER_HOUR,
-    REALIZED_RETURN_CEILING, SIZE_DECIMALS, SIZE_LOG_SIGMA, STUDENT_T_DF,
+    REALIZED_RETURN_CEILING, SIZE_DECIMALS, STUDENT_T_DF, STUDENT_T_UNIT_SCALE,
 };
 use super::dynamics::{
-    ArrivalClock, BounceState, GarchVol, SweepBurst, SweepShape, draw_standardized_innovation,
+    ArrivalClock, BounceState, GarchVol, SweepBurst, SweepShape, draw_student_t,
 };
 use super::fingerprint::{Fingerprint, GeneratedSourceError, GeneratorScalars, SessionProfile};
 use super::numeric::{decimal_from_f64, round_lot_size};
@@ -72,6 +72,13 @@ pub struct GeneratedSource {
     pending_quote: Option<QuoteTick>,
     last_book: Option<PublishedBook>,
     surge: Option<SurgeWindow>,
+    // The observation-only volatility trace (the generator successor spec
+    // 3.3): populated per parent event when enabled, consuming NO draws
+    // and changing NOTHING about the walk, which the byte-identity test
+    // pins. `take_vol_trace` hands the last event's record to the offline
+    // forensic probe.
+    vol_trace_enabled: bool,
+    vol_trace: Option<VolTrace>,
     #[cfg(test)]
     pub(super) latent_updates: u64,
     #[cfg(test)]
@@ -100,6 +107,31 @@ pub struct ParentSummary {
     pub parent_ts_ns: u64,
     pub child_count: u32,
     pub child_stride_ns: u64,
+}
+
+/// One parent event's volatility intermediates, observed off the REAL
+/// `GarchVol::step` path - never a reimplementation, and no extra draws.
+/// The forensic instrument of the generator successor spec (3.3): the
+/// 420.75-point minute's diagnosis needs sigma's path, the clamp hits and
+/// the innovation sequence, which no print-level dissection can see.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct VolTrace {
+    pub innovation_raw: f64,
+    pub innovation_std: f64,
+    pub sigma2_candidate: f64,
+    pub sigma2_realized: f64,
+    pub sigma_cap_hit: bool,
+    pub garch_scale: f64,
+    pub base_return_unclipped: f64,
+    pub base_return: f64,
+    pub feedback_clamp_hit: bool,
+    pub session_vol_mult: f64,
+    pub regime_vol_mult: f64,
+    pub pre_realized_return: f64,
+    pub realized_return: f64,
+    pub realized_clamp_hit: bool,
+    pub mid_before: f64,
+    pub mid_after: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -343,7 +375,8 @@ impl GeneratedSource {
         // mixing quote currency with contracts, that made a field called
         // "typical" denote the arithmetic mean of a strongly skewed law.
         let size_median = decimal_to_f64(scalars.latent_size_median).max(f64::MIN_POSITIVE);
-        let size_dist = LogNormal::new(size_median.ln(), SIZE_LOG_SIGMA).expect("valid lognormal");
+        let size_dist =
+            LogNormal::new(size_median.ln(), scalars.size_log_sigma).expect("valid lognormal");
         let shape = SweepShape::new(
             scalars.children_mean,
             scalars.children_single_frac,
@@ -401,6 +434,8 @@ impl GeneratedSource {
             pending_quote: None,
             last_book: None,
             surge: None,
+            vol_trace_enabled: false,
+            vol_trace: None,
             #[cfg(test)]
             latent_updates: 0,
             #[cfg(test)]
@@ -562,15 +597,20 @@ impl GeneratedSource {
         // `0.0/0.0 = NaN` when `normal` also happens to be 0.0, and
         // `f64::clamp` propagates NaN through `base_return` into `mid`,
         // poisoning the walk for the rest of the session.
-        let innovation =
-            draw_standardized_innovation(&mut self.rng, &self.normal, &self.chi_squared);
+        // Drawn raw then standardized in two named steps - numerically the
+        // identical sequence `draw_standardized_innovation` performs - so the
+        // observation-only trace can carry both without a second draw.
+        let innovation_raw = draw_student_t(&mut self.rng, &self.normal, &self.chi_squared);
+        let innovation = innovation_raw / STUDENT_T_UNIT_SCALE;
         // The BASE process is regime-independent by construction. `step` applies
         // the GARCH-state rail and the feedback rail, neither of which takes a
         // regime multiplier, so an armed storm cannot raise the state ceiling
         // and thereby alter every later recursion step. GARCH feedback sees the
         // un-modulated return, so volatility clustering is identical armed or
         // not; the envelopes below scale only what is realized.
-        let base_return = self.vol.step(innovation).base_return;
+        let mid_before = self.vol.mid;
+        let step = self.vol.step(innovation);
+        let base_return = step.base_return;
         // Vol composition convention (see also RegimeState::vol_mult): the
         // session envelope and the regime envelope COMPOSE MULTIPLICATIVELY here
         // (session 1.0 = no session bias, regime 1.0 = no regime bias, so the
@@ -580,7 +620,9 @@ impl GeneratedSource {
         // both neutral values being 1.0; do NOT restructure either into the other
         // (a future regime that set both vol_mult and an edge spike would want the
         // add re-examined - today the match is exclusive so only one is non-unit).
-        let vol_mult = self.session.vol_mult(self.clock_ns) * self.regime.vol_mult(self.clock_ns);
+        let session_vol_mult = self.session.vol_mult(self.clock_ns);
+        let regime_vol_mult = self.regime.vol_mult(self.clock_ns);
+        let vol_mult = session_vol_mult * regime_vol_mult;
         // REALIZED ceiling: ABSOLUTE, and deliberately not scaled by anything.
         // Every regime - VolStorm, SessionEdgeSpike, drought, reopen - and the
         // session curve reach the mid only through `vol_mult` above, and then
@@ -591,12 +633,43 @@ impl GeneratedSource {
         //
         // Bounds ONE event. Cumulative movement is not bounded by it: a
         // sustained storm walks the mid as far as its duration allows.
-        let return_n =
-            (base_return * vol_mult).clamp(-REALIZED_RETURN_CEILING, REALIZED_RETURN_CEILING);
+        let pre_realized = base_return * vol_mult;
+        let return_n = pre_realized.clamp(-REALIZED_RETURN_CEILING, REALIZED_RETURN_CEILING);
         self.vol.mid = (self.vol.mid * return_n.exp())
             .max(self.tick_f64)
             .min(MID_CEILING);
+        if self.vol_trace_enabled {
+            self.vol_trace = Some(VolTrace {
+                innovation_raw,
+                innovation_std: innovation,
+                sigma2_candidate: step.sigma2_candidate,
+                sigma2_realized: step.sigma2,
+                sigma_cap_hit: step.hit_variance_cap(),
+                garch_scale: step.garch_scale,
+                base_return_unclipped: step.unclipped_return,
+                base_return,
+                feedback_clamp_hit: step.hit_feedback_clamp(),
+                session_vol_mult,
+                regime_vol_mult,
+                pre_realized_return: pre_realized,
+                realized_return: return_n,
+                realized_clamp_hit: pre_realized.abs() > REALIZED_RETURN_CEILING,
+                mid_before,
+                mid_after: self.vol.mid,
+            });
+        }
         self.vol.mid
+    }
+
+    /// Turn on the observation-only volatility trace. Consumes no draws and
+    /// changes nothing about the walk - the byte-identity test pins it.
+    pub fn enable_vol_trace(&mut self) {
+        self.vol_trace_enabled = true;
+    }
+
+    /// The last parent event's volatility intermediates, if tracing is on.
+    pub fn take_vol_trace(&mut self) -> Option<VolTrace> {
+        self.vol_trace.take()
     }
 
     fn next_side_and_book(&mut self, mid: f64) -> (AggressorSide, PublishedBook) {
@@ -793,33 +866,84 @@ impl GeneratedSource {
         // arithmetic on five floats, no allocation; `self.shape` stays the
         // owner of `level_step_prob` and of the truncation counters the realism
         // gate reads, which is why they are folded back in below.
-        let state_children_mult = if self.arrival.last_quiet {
-            ARRIVAL_QUIET_CHILDREN_MULT
+        // The branch is selected on the BASE configured mean, never the
+        // surge-effective one, so no runtime path ever crosses between the
+        // two arithmetics (the generator successor spec, 3.1). Above the
+        // floor - base quiet mean over one child - the legacy identity
+        // holds and runs byte-for-byte; the crypto anchor at 8.49 lives
+        // here always, surged or not. At or below it, the legacy identity
+        // is broken by construction: the quiet mean clamps to one, the
+        // active residual clamps to zero, and any configured near-one mean
+        // generates ~1.44 with the single fraction collapsed - the July
+        // MNQ fit failure. The floor-aware solve re-derives both active
+        // parameters from the unconditional TARGETS at the current
+        // effective mean, preserving them exactly.
+        let floor_branch = self.scalars.children_mean * ARRIVAL_QUIET_CHILDREN_MULT <= 1.0;
+        let (state_mean, state_single_frac) = if !floor_branch {
+            let state_children_mult = if self.arrival.last_quiet {
+                ARRIVAL_QUIET_CHILDREN_MULT
+            } else {
+                ARRIVAL_ACTIVE_CHILDREN_MULT
+            };
+            let single = if self.arrival.last_quiet {
+                self.scalars.children_single_frac
+            } else {
+                ((self.scalars.children_single_frac
+                    - ARRIVAL_QUIET_FRACTION
+                        / (self.scalars.children_mean * ARRIVAL_QUIET_CHILDREN_MULT))
+                    / (1.0 - ARRIVAL_QUIET_FRACTION))
+                    .max(0.0)
+            };
+            (
+                self.scalars.children_mean * children_mult * state_children_mult,
+                single,
+            )
         } else {
-            ARRIVAL_ACTIVE_CHILDREN_MULT
-        };
-        let state_single_frac = if self.arrival.last_quiet {
-            self.scalars.children_single_frac
-        } else {
-            ((self.scalars.children_single_frac
-                - ARRIVAL_QUIET_FRACTION
-                    / (self.scalars.children_mean * ARRIVAL_QUIET_CHILDREN_MULT))
-                / (1.0 - ARRIVAL_QUIET_FRACTION))
-                .max(0.0)
+            let effective_mean = self.scalars.children_mean * children_mult;
+            let quiet_eff = effective_mean * ARRIVAL_QUIET_CHILDREN_MULT;
+            let quiet_mean = quiet_eff.max(1.0);
+            let quiet_single = if quiet_eff <= 1.0 {
+                1.0
+            } else {
+                self.scalars.children_single_frac.max(1.0 / quiet_eff)
+            };
+            if self.arrival.last_quiet {
+                (quiet_mean, quiet_single)
+            } else {
+                let active_mean = (effective_mean - ARRIVAL_QUIET_FRACTION * quiet_mean)
+                    / (1.0 - ARRIVAL_QUIET_FRACTION);
+                let active_single = (self.scalars.children_single_frac
+                    - ARRIVAL_QUIET_FRACTION * quiet_single)
+                    / (1.0 - ARRIVAL_QUIET_FRACTION);
+                (active_mean, active_single)
+            }
         };
         let count = {
-            let mut event_shape = SweepShape::new(
-                self.scalars.children_mean * children_mult * state_children_mult,
-                state_single_frac,
-                // Levels are not drawn here: `next_child` walks the grid off
-                // `self.shape.level_step_prob`, which is solved once from the
-                // declared `levels_mean` and never state-conditioned. Any
-                // value in [1, mean] would do; 1.0 says "unused" plainly.
-                1.0,
-            );
-            let count = event_shape.next_count(&mut self.rng);
+            // A single fraction at or above one means "always exactly one
+            // child" - the floor branch's quiet state. The mixture solve
+            // would divide by zero there, so it is expressed directly.
+            let count = if state_single_frac >= 1.0 {
+                // One uniform consumed, mirroring the mixture's q-branch
+                // draw contract, so the always-one state has the same RNG
+                // stride as a taken single-child mixture draw.
+                let _always_one: f64 = self.rng.random();
+                1
+            } else {
+                let mut event_shape = SweepShape::new(
+                    state_mean,
+                    state_single_frac,
+                    // Levels are not drawn here: `next_child` walks the grid
+                    // off `self.shape.level_step_prob`, which is solved once
+                    // from the declared `levels_mean` and never
+                    // state-conditioned. Any value in [1, mean] would do;
+                    // 1.0 says "unused" plainly.
+                    1.0,
+                );
+                let count = event_shape.next_count(&mut self.rng);
+                self.shape.truncated += event_shape.truncated;
+                count
+            };
             self.shape.drawn += 1;
-            self.shape.truncated += event_shape.truncated;
             count
         };
         let repeat_draw =

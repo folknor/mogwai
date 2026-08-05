@@ -14,24 +14,60 @@ asset_class = "index"
 initial_per_contract = "2000"
 maintenance_per_contract = "1800"
 breach_action = "liquidate"
+# Fitted from the delivered July 2026 MNQ TBBO month (job
+# GLBX-20260805-HAPEWPABKG, 22 usable sessions, 29.6M parents over 34.7M
+# sided prints) under the frozen harness analysis/mnq_fit.py; the fit
+# artifact analysis/mnq-fit.json carries every estimator definition,
+# solve record and per-target verdict. Estimator summaries: cadence is
+# pooled over inferred parents (contiguous timestamp-plus-side runs,
+# halt- and session-boundary gaps excluded); the size median is
+# inverse-solved through the materialization path jointly with
+# size_log_sigma; the quote seams are parent-weighted at trade instants
+# (TBBO observes the book only when trades happen - a trade-conditioned
+# BBO, not a time-weighted one); the displacement scalar is
+# inverse-solved so the generated parent-level effective displacement
+# median matches the observed 1.025 ticks; vol_scalar targets the pooled
+# RMS of adjacent-parent quote-mid log returns; start_price is the last
+# valid trade of the final usable session, an observed terminal anchor.
+# The landing is PARTIAL by verdict: the eight cadence, quote and anchor
+# targets carry fitted provenance; the size pair and vol_scalar carry the
+# solver's best candidates under DECLARED provenance because one frozen
+# gate each refused them - see the per-entry rationales below.
 [instrument.generator]
 symbol = "MNQ"
 modal_tick = "0.25"
 price_decimals = 2
-mean_event_duration_s = 0.17104059420590498
-children_mean = 8.49053255324216
-children_single_frac = 0.5586834546003685
-levels_mean = 2.2471110339199503
+mean_event_duration_s = 0.060859305487494256
+children_mean = 1.1711127211559897
+children_single_frac = 0.9048983982868222
+levels_mean = 1.1215513514243831
+# Structurally unidentifiable on the whole-contract grid at a one-lot
+# median (integral_lot is 1, both size arms materialize identically), so
+# it remains DECLARED; the fit artifact records the moot branch with its
+# precondition values.
 size_round_frac = 0.20856767610054022
-start_price = "21000"
+start_price = "28284.00"
 # This is the continuous lognormal's center before the whole-contract grid.
 # Keeping it in contracts is the point: the removed mean-notional proxy made
 # the same setting mean quote currency for spot and contracts for futures.
-latent_size_median = "1"
-vol_scalar = 0.000001
-quoted_width = { ticks = 1, provenance = { kind = "uncalibrated" } }
-top_sizes = { bid = "1", ask = "1", provenance = { kind = "uncalibrated" } }
-trade_displacement_ticks = { ticks = 0.5, provenance = { kind = "uncalibrated" } }
+latent_size_median = "1.097264"
+# The joint size solve's best candidate (sigma grid point 0.9333 with its
+# nested median), carried as the closest representable approximation: the
+# family's ecdf, mean and p90 checks pass and generated p99 improved from 14
+# to 10 contracts against observed 8, one contract over the frozen bound, so
+# the pair stays DECLARED rather than fitted. Stated explicitly also so the
+# harness can override the sigma path - overriding an unset path is refused.
+size_log_sigma = 0.9333333333333333
+# The frozen solver's best candidate for the pooled quote-mid RMS target
+# (generated 1.26e-5 vs observed 1.18e-5, inside tolerance) - but the
+# per-seed minute-range envelope gates fail around it (p99.9 464-639 ticks
+# vs observed 399; per-seed max up to 4333 vs 968), so the value stays
+# DECLARED: the t(4)/GARCH cluster-tail SHAPE overproduces extreme minutes
+# and no scalar can land a shape. The successor tail spec owns the fix.
+vol_scalar = 0.000008701336943928642
+quoted_width = { ticks = 2, provenance = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO 2026-07, job GLBX-20260805-HAPEWPABKG" } }
+top_sizes = { bid = "3", ask = "3", provenance = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO 2026-07, job GLBX-20260805-HAPEWPABKG" } }
+trade_displacement_ticks = { ticks = 0.5161290322580645, provenance = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO 2026-07, job GLBX-20260805-HAPEWPABKG" } }
 # Intraday shape, fitted from the NQ one-minute archive. These factors are
 # RELATIVE and CONDITIONAL ON THE MARKET BEING OPEN: the calendar below owns
 # whether an event may exist at all, and this table owns how intense it is given
@@ -130,21 +166,25 @@ open_windows = [
 "generator.symbol" = { kind = "declared", rationale = "generator key matches the instrument" }
 "generator.modal_tick" = { kind = "declared", rationale = "CME contract specification" }
 "generator.price_decimals" = { kind = "declared", rationale = "CME quote convention" }
-"generator.mean_event_duration_s" = { kind = "declared", rationale = "crypto anchor pending an MNQ cadence fit" }
-"generator.children_mean" = { kind = "declared", rationale = "crypto anchor pending an MNQ cadence fit" }
-"generator.children_single_frac" = { kind = "declared", rationale = "crypto anchor pending an MNQ cadence fit" }
-"generator.levels_mean" = { kind = "declared", rationale = "crypto anchor pending an MNQ cadence fit" }
-"generator.size_round_frac" = { kind = "declared", rationale = "crypto median pending an MNQ size fit" }
-"generator.start_price" = { kind = "declared", rationale = "representative Nasdaq 100 level" }
-"generator.latent_size_median" = { kind = "declared", rationale = "one contract before whole-contract quantization", accepted_diagnostics = ["derived-mean-notional-outside-empirical-corpus-range"] }
-"generator.vol_scalar" = { kind = "declared", rationale = "shared baseline pending an MNQ volatility fit" }
-"generator.quoted_width.ticks" = { kind = "declared", rationale = "one-tick placeholder pending a TBBO fit" }
-"generator.quoted_width.provenance.kind" = { kind = "declared", rationale = "explicitly uncalibrated" }
-"generator.top_sizes.bid" = { kind = "declared", rationale = "minimum tradable placeholder pending a TBBO fit" }
-"generator.top_sizes.ask" = { kind = "declared", rationale = "minimum tradable placeholder pending a TBBO fit" }
-"generator.top_sizes.provenance.kind" = { kind = "declared", rationale = "explicitly uncalibrated" }
-"generator.trade_displacement_ticks.ticks" = { kind = "declared", rationale = "touch-print placeholder pending a TBBO fit" }
-"generator.trade_displacement_ticks.provenance.kind" = { kind = "declared", rationale = "explicitly uncalibrated" }
+"generator.mean_event_duration_s" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG", window = "2026-07 full month, 22 usable sessions", accepted_diagnostics = ["outside-empirical-corpus-range"] }
+"generator.children_mean" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG", window = "2026-07 full month, 22 usable sessions", accepted_diagnostics = ["outside-empirical-corpus-range"] }
+"generator.children_single_frac" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG", window = "2026-07 full month, 22 usable sessions", accepted_diagnostics = ["outside-empirical-corpus-range"] }
+"generator.levels_mean" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG", window = "2026-07 full month, 22 usable sessions" }
+"generator.size_round_frac" = { kind = "declared", rationale = "structurally unidentifiable on the whole-contract grid at a one-lot median; the fit artifact records the moot branch" }
+"generator.size_log_sigma" = { kind = "declared", rationale = "the joint size solve's best candidate; the family missed one frozen gate, generated p99 10 vs observed 8 with bound 9.6, so it cannot claim fitted" }
+"generator.start_price" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG", window = "2026-07 full month, 22 usable sessions" }
+"generator.latent_size_median" = { kind = "declared", rationale = "the joint size solve's best candidate, closest representable approximation; declared-misrepresented in the fit artifact, one quantile over its frozen bound", accepted_diagnostics = ["derived-mean-notional-outside-empirical-corpus-range"] }
+"generator.vol_scalar" = { kind = "declared", rationale = "the frozen solver's best candidate for the quote-mid RMS target; declared-misrepresented because the minute-range envelope gates fail around it - a tail-shape limit, not a scale error" }
+"generator.quoted_width.ticks" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG", window = "2026-07 full month, 22 usable sessions" }
+"generator.quoted_width.provenance.kind" = { kind = "declared", rationale = "the nested seam states its own fitted corpus" }
+"generator.quoted_width.provenance.corpus" = { kind = "declared", rationale = "names the MNQ TBBO evidence; no other instrument's corpus is implied" }
+"generator.top_sizes.bid" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG", window = "2026-07 full month, 22 usable sessions" }
+"generator.top_sizes.ask" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG", window = "2026-07 full month, 22 usable sessions" }
+"generator.top_sizes.provenance.kind" = { kind = "declared", rationale = "the nested seam states its own fitted corpus" }
+"generator.top_sizes.provenance.corpus" = { kind = "declared", rationale = "names the MNQ TBBO evidence; no other instrument's corpus is implied" }
+"generator.trade_displacement_ticks.ticks" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG", window = "2026-07 full month, 22 usable sessions" }
+"generator.trade_displacement_ticks.provenance.kind" = { kind = "declared", rationale = "the nested seam states its own fitted corpus" }
+"generator.trade_displacement_ticks.provenance.corpus" = { kind = "declared", rationale = "names the MNQ TBBO evidence; no other instrument's corpus is implied" }
 "session.intensity_hour" = { kind = "fitted", corpus = "NQ one-minute ratio-back-adjusted bars; contract volume per calendar-open minute used as an arrival-count proxy", window = "2020-01-01 through 2026-07-08; recent era selected by preregistered separability and era-stability rules" }
 "session.dow_weight" = { kind = "fitted", corpus = "NQ one-minute ratio-back-adjusted bars; contract volume per calendar-open minute used as an arrival-count proxy", window = "2020-01-01 through 2026-07-08; recent era selected by preregistered separability and era-stability rules" }
 "session.vol_hour" = { kind = "fitted", corpus = "NQ one-minute ratio-back-adjusted bars; RMS of adjacent within-session close returns with one largest squared return trimmed per session", window = "2020-01-01 through 2026-07-08; recent era selected by preregistered separability and era-stability rules" }

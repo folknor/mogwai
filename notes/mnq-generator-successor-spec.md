@@ -195,9 +195,10 @@ sigma grid constants join `SUBCONTRACT_KEYS`.
 ### 3.3 Minute-range gates and the forensic probe (harness + Rust)
 
 Summary mode gains per-minute range accumulation over open minutes:
-`minute_range_hist` keyed in INTEGER TICKS (a whole-point bin would
+`minute_range_ticks_hist` keyed in INTEGER TICKS (a whole-point bin would
 discard the native 0.25 resolution and move tail quantiles), plus
-per-seed `minute_range_max` and second maximum. The per-seed gates
+per-seed `minute_range_max_ticks` and `minute_range_second_max_ticks`
+(unit-bearing names, amended in review to match the implementation). The per-seed gates
 require per-seed data, so the probe path RETAINS the raw per-seed
 summaries alongside the pooled view: `summaries_for` returns a
 `SeedSummaries` pair - `{"pooled": <the pooled dict exactly as
@@ -279,9 +280,18 @@ copy-pasteable, on the final protocol-10 tree:
       1783439220000000000 --out analysis/out/mnq-trace-1545.json
 
 (the 15:43-15:47 UTC window around the 420.75-point minute; the
-config regenerated from the successor artifact's candidates). The
+config regenerated from the successor artifact's candidates -
+REGENERATE IT FIRST, the on-disk copy predates the joint solve). The
 trace artifact is REGENERABLE and not committed; its findings are
-recorded in the successor fit report. Expected per the source-level
+recorded in the RESULT sections of this spec, which ARE the
+"successor fit report" the evidence commit names - no separate
+document exists. Amended scope of the claim, agreed in review:
+floor-aware conditioning changes the random path, so the fixed
+seed-42 window may no longer contain the former 420.75-point
+excursion. The trace runs because this spec requires it and records
+exactly what it observes; it explains the NEW per-seed maxima only
+if an excursion is actually present in the window, and locating and
+tracing the new worst minutes belongs to the future tail-shape spec. Expected per the source-level
 diagnosis: zero clamp hits on all three rails, establishing the
 excursion as an unconstrained t(4)/GARCH volatility-cluster tail.
 That verdict decides whether any volatility-mechanism item enters a
@@ -315,8 +325,10 @@ the resolved preset profiles over the named matrix - the three
 crypto presets, seeds 42 and 7, 6-hour windows from start 0, plus
 BTCUSDT with a FlowSurge armed through `TickSource::arm_flow_surge`
 (start 1h, 30m, rate 2.0, children 1.5) - serializing EVERY field of
-every `TickEvent` (trades AND quotes) canonically (the struct Debug
-form, whose field order is fixed) and hashing the stream with
+every `TickEvent` (trades AND quotes) canonically (named separator
+lines with Display-formatted fields - a stable contract, amended in
+review from the Debug form, whose derived layout a field rename could
+silently re-key) and hashing the stream with
 FNV-1a 64, named in the fixture: the workspace carries no crypto
 hash crate, and an oracle detects regressions, not adversaries. Write-once semantics, pinned so a missing fixture can never
 re-bless later-protocol output: when the fixture is MISSING the test
@@ -400,11 +412,58 @@ never carries an intermediate:
    `brokkr check --gate` on the settled code commit, plus every
    brick gate below, plus the artifact's landing_set being what the
    preset carries - exactly.
-7. Reversion of the whole unit is `git reset` past both commits; the
-   walk cache keys on each iteration's commit, so an unchanged
-   protocol between iterations re-pays nothing.
+7. Reversion of the whole unit is `git reset` past both commits. The
+   walk cache keys on each iteration's commit, which binds evidence
+   to the exact tree - and therefore a REPLACEMENT commit runs cold
+   by construction; only a resumed fit on the same commit re-pays
+   nothing. (This line originally claimed the opposite; corrected in
+   review during iteration 3.)
+
+RESULT, 2026-08-05, iteration 1 of the loop (candidate f4a6cb1,
+fit under the moved sub-contract, ~75 minutes cold-cache): the
+landing_set is the EIGHT cadence, quote and anchor targets -
+floor-aware conditioning fixed cadence representability outright,
+the probe reproducing 1.1711127/0.9048984 to five decimals where
+protocol 9 could not express the pair at all. Three targets read
+declared-misrepresented. Size: the joint solve's best candidate
+(sigma 0.9333, median 1.097264) improves generated p99 from 14 to
+10 contracts against observed 8 with bound 9.6 - one contract over
+one quantile, ecdf 0.0057, mean and p90 clean. Volatility:
+vol_scalar 8.701e-6 lands mid_rms 1.26e-5 vs observed 1.18e-5
+inside tolerance, but the per-seed minute-range envelope gates fail
+around it - per-seed p99.9 464-639 ticks vs observed 399, per-seed
+max up to 4333 ticks vs the real month's 968. That quantifies the
+chart-visible tail phenomenology: the t(4)/GARCH cluster-tail SHAPE
+overproduces extreme minutes and no scalar lands a shape. Comparison
+evidence from the same cache: the old 6.96e-6 scalar fails mid_rms
+at 12.6 percent low while leaving the max gate almost identically
+broken (7 of 8 seeds, up to 3464), so depressing the central scale
+is not a tail fix and the solver's candidate is carried. Iteration 2
+folds the three best candidates into the preset under declared
+provenance per the Brick L post-measurement resolution in the fit
+spec. The volatility envelope failure is the recorded outcome that
+motivates the future tail-shape spec (reopen-gap phenomenology plus
+cluster-tail shape), with the 3.3 trace as its first evidence.
 
 **Brick D2 - documentation** per 3.4, bundled.
+
+RESULT, 2026-08-05, reviewed gate amendment for
+`tape_lateness_under_acceleration`: during the loop's step-6 gate,
+`brokkr check --gate` ran red on this one test - a wall-clock pacing
+sample of the accelerated venue with a 50ms p99 bound - and paired
+measurement established the failure as ENVIRONMENTAL, not a candidate
+regression. Debug profile: parent 7fa473e fails at p99 106ms, the
+candidate at 227-330ms. Release profile, N=5 each, minutes apart on
+the same loaded box (load average 1.0, a second workspace building
+intermittently): candidate 262/42/92/181/56ms with one pass, parent
+261/43/249/257/291ms with one pass - indistinguishable distributions,
+while the canonical oracle separately proves the crypto frame content
+byte-identical. Both reviewers accepted: the candidate is no worse
+than its parent under identical conditions, the 50ms release
+threshold stays authoritative and unrelaxed, and the proper reading
+of it is a quiet-box release run. The debug lane the gate uses is
+unsuitable for this wall-clock bound; that mismatch is a recorded
+work item in `notes/todo.md`, not a fix smuggled into this landing.
 
 ## 5. Out of scope, named
 

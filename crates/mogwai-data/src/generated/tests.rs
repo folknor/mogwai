@@ -6,7 +6,6 @@ use mogwai_protocol::{AggressorSide, MarketRegime, decimal_to_f64};
 use crate::{TickEvent, TickSource};
 
 use super::checkpoint::MAX_CHECKPOINTS;
-use super::consts::SIZE_LOG_SIGMA;
 use super::consts::{
     FEEDBACK_RETURN_CEILING, GARCH_SIGMA_CAP, MAX_SESSION_GAP_NS, NS_PER_HOUR,
     REALIZED_RETURN_CEILING, STUDENT_T_DF, STUDENT_T_UNIT_SCALE, TRADE_BOUNCE_HALF_WIDTH_TICKS,
@@ -141,7 +140,7 @@ fn mean_notional_is_derived_reporting_not_sampler_input() {
     assert_near(
         "derived MNQ mean notional",
         mnq.mean_trade_notional(Decimal::from(2)),
-        21_000.0 * 2.0 * (SIZE_LOG_SIGMA.powi(2) / 2.0).exp(),
+        21_000.0 * 2.0 * (mnq.size_log_sigma.powi(2) / 2.0).exp(),
         1e-9,
     );
 }
@@ -1353,7 +1352,8 @@ fn the_integral_floor_lifts_the_realized_mean_above_the_notional_target() {
     let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
     scalars.start_price = Decimal::from(21_000);
     let target = 20_000.0 / (21_000.0 * 2.0);
-    scalars.latent_size_median = decimal_from_f64(target / (SIZE_LOG_SIGMA.powi(2) / 2.0).exp());
+    scalars.latent_size_median =
+        decimal_from_f64(target / (scalars.size_log_sigma.powi(2) / 2.0).exp());
     scalars.top_sizes = TopOfBookSizes::uncalibrated(Decimal::ONE);
     let mut source =
         GeneratedSource::try_new_with_size_grid(scalars, 81, 0, &fp, None, mnq_size_grid())
@@ -4212,5 +4212,254 @@ fn garch_second_moment_instrumentation() {
         standardized.effective_persistence() < 1.0,
         "standardized recursion should be stationary, got {}",
         standardized.effective_persistence()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Brick C of notes/mnq-generator-successor-spec.md: floor-aware child
+// conditioning. July MNQ measured children_mean 1.1711 with a 0.9049
+// single fraction; the legacy identity broke below the one-child floor and
+// generated 1.44/0.74 at ANY configured near-one mean.
+// ---------------------------------------------------------------------------
+
+fn mnq_july_scalars(fp: &Fingerprint) -> GeneratorScalars {
+    let mut scalars = GeneratorScalars::xbtusd_anchor(fp);
+    scalars.children_mean = 1.171_112_721_155_989_7;
+    scalars.children_single_frac = 0.904_898_398_286_822_2;
+    scalars.levels_mean = 1.121_551_351_424_383_1;
+    scalars
+}
+
+fn realized_children(source: &mut GeneratedSource, parents: u64) -> (f64, f64) {
+    let mut rows = 0u64;
+    let mut singles = 0u64;
+    for _ in 0..parents {
+        let summary = source.advance_parent();
+        rows += u64::from(summary.child_count);
+        singles += u64::from(summary.child_count == 1);
+    }
+    (
+        rows as f64 / parents as f64,
+        singles as f64 / parents as f64,
+    )
+}
+
+#[test]
+fn the_floor_branch_reproduces_a_near_single_child_tape() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = mnq_july_scalars(&fp);
+    let mut source = GeneratedSource::new(scalars, 42, 0, &fp, None);
+    let (mean, single) = realized_children(&mut source, 200_000);
+    assert!(
+        (mean - 1.171_112_7).abs() < 0.02,
+        "floor-branch children_mean should track the configured target, \
+         got {mean}"
+    );
+    assert!(
+        (single - 0.904_898_4).abs() < 0.01,
+        "floor-branch single fraction should track the configured target, \
+         got {single}"
+    );
+}
+
+#[test]
+fn the_base_mean_boundary_reproduces_the_target_on_both_sides() {
+    // children_mean 5.0 sits exactly on the floor boundary (quiet mult
+    // 0.20); 5.05 sits just above on the legacy branch. Both must
+    // reproduce their configured unconditional mean - the branch decides
+    // the arithmetic, never the target.
+    let fp = Fingerprint::from_repo_json();
+    for (mean_cfg, single_cfg, single_preserved) in [(5.0, 0.55, true), (5.05, 0.55, false)] {
+        let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
+        scalars.children_mean = mean_cfg;
+        scalars.children_single_frac = single_cfg;
+        scalars.levels_mean = 2.0;
+        let mut source = GeneratedSource::new(scalars, 7, 0, &fp, None);
+        let (mean, single) = realized_children(&mut source, 120_000);
+        assert!(
+            (mean - mean_cfg).abs() / mean_cfg < 0.05,
+            "children_mean {mean_cfg} at the branch boundary generated \
+             {mean}"
+        );
+        if single_preserved {
+            // The floor side preserves the configured single fraction by
+            // construction. The LEGACY side just above the boundary keeps
+            // the old identity byte-for-byte, whose single fraction misses
+            // near the floor - that miss IS the preserved behavior, so it
+            // is deliberately not asserted there.
+            assert!(
+                (single - single_cfg).abs() < 0.02,
+                "floor-side single fraction should track {single_cfg}, \
+                 got {single}"
+            );
+        }
+    }
+}
+
+#[test]
+fn floor_branch_feasibility_is_monotone_under_surge() {
+    // The construction-time feasibility check runs at children_mult = 1;
+    // this proves the solve stays feasible across the whole FlowSurge
+    // range [1, 100], so no runtime refusal is needed. Independent
+    // reimplementation of the 3.1 arithmetic, deliberately: two
+    // implementations of one rule police each other.
+    let (children_mean, single_frac): (f64, f64) =
+        (1.171_112_721_155_989_7, 0.904_898_398_286_822_2);
+    let quiet_share = 0.35_f64;
+    let quiet_mult = 0.20_f64;
+    let mut mult = 1.0_f64;
+    while mult <= 100.0 {
+        let effective = children_mean * mult;
+        let quiet_eff = effective * quiet_mult;
+        let quiet_mean = quiet_eff.max(1.0);
+        let quiet_single = if quiet_eff <= 1.0 {
+            1.0
+        } else {
+            single_frac.max(1.0 / quiet_eff)
+        };
+        let active_mean = (effective - quiet_share * quiet_mean) / (1.0 - quiet_share);
+        let active_single = (single_frac - quiet_share * quiet_single) / (1.0 - quiet_share);
+        assert!(
+            active_mean > 1.0 && active_single >= 1.0 / active_mean && active_single <= 1.0,
+            "infeasible at children_mult {mult}: active mean {active_mean}, \
+             active single {active_single}"
+        );
+        mult += 0.5;
+    }
+}
+
+#[test]
+fn a_surge_crossing_the_floor_boundary_follows_the_branch() {
+    // children_mult 6 pushes the quiet effective mean across one
+    // (1.1711 * 6 * 0.2 = 1.405) - the floor-aware branch's INTERNAL
+    // transition. The surge scales the unconditional TARGET, and the
+    // solve must preserve it: 1.1711 * 6 = 7.027, where the broken legacy
+    // identity would not.
+    let fp = Fingerprint::from_repo_json();
+    let scalars = mnq_july_scalars(&fp);
+    let mut source = GeneratedSource::new(scalars, 11, 0, &fp, None);
+    source.arm_flow_surge(0, 86_400_000, 1.0, 6.0);
+    let (mean, single) = realized_children(&mut source, 120_000);
+    let target = 1.171_112_721_155_989_7 * 6.0;
+    assert!(
+        (mean - target).abs() / target < 0.10,
+        "surged floor-branch children_mean should track {target}, got {mean}"
+    );
+    // The surge scales the MEAN target; the single-fraction target is
+    // unconditional and the solve preserves it across the internal
+    // quiet_eff transition.
+    assert!(
+        (single - 0.904_898_4).abs() < 0.01,
+        "surged floor-branch single fraction should stay at the configured \
+         0.9049, got {single}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Brick S: the target-local size sigma (successor spec 3.2).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn size_log_sigma_reaches_the_draw() {
+    let fp = Fingerprint::from_repo_json();
+    let narrow = GeneratorScalars::xbtusd_anchor(&fp);
+    let mut wide = narrow.clone();
+    wide.size_log_sigma = 2.0;
+    let mut narrow_source = GeneratedSource::new(narrow, 42, 0, &fp, None);
+    let mut wide_source = GeneratedSource::new(wide, 42, 0, &fp, None);
+    let differs =
+        (0..256).any(|_| next_trade(&mut narrow_source).size != next_trade(&mut wide_source).size);
+    assert!(differs, "a changed sigma never reached the size draw");
+}
+
+#[test]
+fn the_default_sigma_is_byte_identical() {
+    // An explicit 1.15 and the serde default are the SAME configuration:
+    // the shared shape value became the default, not a refit.
+    let fp = Fingerprint::from_repo_json();
+    let default_scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let mut explicit = default_scalars.clone();
+    explicit.size_log_sigma = 1.15;
+    let mut a = GeneratedSource::new(default_scalars, 42, 0, &fp, None);
+    let mut b = GeneratedSource::new(explicit, 42, 0, &fp, None);
+    for _ in 0..512 {
+        assert_eq!(
+            format!("{:?}", a.next_tick()),
+            format!("{:?}", b.next_tick())
+        );
+    }
+}
+
+#[test]
+fn a_sigma_outside_its_band_refuses() {
+    let fp = Fingerprint::from_repo_json();
+    let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    scalars.size_log_sigma = 5.0;
+    assert_eq!(
+        scalars
+            .validate()
+            .expect_err("unit mix-up must refuse")
+            .field,
+        "size_log_sigma"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Brick T: the observation-only volatility trace (successor spec 3.3).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn trace_consumes_no_draws_and_leaves_the_tape_byte_identical() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let mut traced = GeneratedSource::new(scalars.clone(), 42, 0, &fp, None);
+    let mut plain = GeneratedSource::new(scalars, 42, 0, &fp, None);
+    traced.enable_vol_trace();
+    let mut records = 0;
+    for _ in 0..512 {
+        assert_eq!(
+            format!("{:?}", traced.next_tick()),
+            format!("{:?}", plain.next_tick()),
+            "the trace must observe, never perturb"
+        );
+        if let Some(trace) = traced.take_vol_trace() {
+            records += 1;
+            assert!(trace.sigma2_realized > 0.0);
+            assert!(trace.mid_before > 0.0 && trace.mid_after > 0.0);
+            assert!(
+                (trace.innovation_raw / trace.innovation_std - super::consts::STUDENT_T_UNIT_SCALE)
+                    .abs()
+                    < 1e-12,
+                "raw and standardized innovations must share one draw"
+            );
+        }
+    }
+    assert!(
+        records > 0,
+        "an enabled trace that records nothing is no trace"
+    );
+    assert!(
+        plain.take_vol_trace().is_none(),
+        "a source never enabled must carry no trace"
+    );
+}
+
+#[test]
+fn an_infeasible_active_solve_refuses_by_name() {
+    // A near-one mean with a LOW single fraction leaves the active state
+    // owing a negative single share - unrepresentable, and exactly the
+    // silent-miss class the floor branch exists to end.
+    let fp = Fingerprint::from_repo_json();
+    let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    scalars.children_mean = 1.05;
+    scalars.children_single_frac = 0.10;
+    scalars.levels_mean = 1.02;
+    let err = scalars
+        .validate()
+        .expect_err("infeasible solve must refuse");
+    assert!(
+        err.field.contains("floor-branch"),
+        "the refusal should name the floor-branch solve, got {}",
+        err.field
     );
 }

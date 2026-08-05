@@ -207,10 +207,11 @@ impl Default for Config {
             // loud (off-tape requests are refused, not silently under-served), so
             // the default's exactness is low-stakes.
             warmup_ns: 86_400_000_000_000,
-            // Sized from the protocol 8 composition fixture to preserve more
-            // than the prior ring's measured wall-time horizon at speeds 1 and
-            // 10, including the maximum admitted flow surge.
-            fanout_depth: 1_048_576,
+            // Sized from the protocol 10 composition fixture (1.84x frame-rate
+            // expansion from the fitted MNQ cadence, doubled, power of two) to
+            // preserve more than the prior ring's measured wall-time horizon
+            // at speeds 1 and 10, including the maximum admitted flow surge.
+            fanout_depth: 4_194_304,
             zero_speed_stall_ms: 5000,
             exec_held_budget_bytes: crate::admission::EXEC_HELD_BUDGET_BYTES,
             admission_lane_frames: crate::admission::ADMISSION_LANE_FRAMES,
@@ -1438,9 +1439,14 @@ mod tests {
     }
 
     #[test]
-    fn no_shipped_preset_claims_a_fitted_quote_quantity() {
+    fn quote_seam_provenance_matches_the_protocol_10_landing() {
+        // The placeholder era is over for the futures: MNQ's quote seams
+        // are FITTED from the July TBBO month and MES inherits them loudly
+        // as the standing stopgap; the crypto presets remain uncalibrated,
+        // since no quote evidence covers spot. The fitted corpus strings
+        // must name the MNQ evidence, so an MES reader can see the borrow.
         use mogwai_data::CalibrationProvenance;
-        for name in ["MNQ", "MES", "BTCUSDT", "ETHUSDT", "SOLUSDT"] {
+        for name in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] {
             let profile = profile_from_preset(name).unwrap();
             assert_eq!(
                 profile.scalars.quoted_width.provenance(),
@@ -1457,6 +1463,29 @@ mod tests {
                 &CalibrationProvenance::Uncalibrated,
                 "{name} trade displacement"
             );
+        }
+        for name in ["MNQ", "MES"] {
+            let profile = profile_from_preset(name).unwrap();
+            for (seam, provenance) in [
+                ("quoted width", profile.scalars.quoted_width.provenance()),
+                (
+                    "trade displacement",
+                    profile.scalars.trade_displacement_ticks.provenance(),
+                ),
+                ("top sizes", &profile.scalars.top_sizes.provenance),
+            ] {
+                match provenance {
+                    CalibrationProvenance::Fitted { corpus } => assert!(
+                        corpus.contains("MNQ.v.0"),
+                        "{name} {seam}: the fitted corpus must name the MNQ \
+                         evidence, got {corpus:?}"
+                    ),
+                    other => panic!(
+                        "{name} {seam}: expected fitted provenance, got \
+                         {other:?}"
+                    ),
+                }
+            }
         }
     }
 
@@ -1577,6 +1606,190 @@ mod tests {
                 .try_into()
                 .unwrap();
         assert_eq!(configured.def().class.multiplier(), Decimal::from(3));
+    }
+
+    #[test]
+    fn fitted_mnq_effective_values_are_the_artifact_values() {
+        // The protocol-10 landing pin: every fitted MNQ effective value is
+        // the literal the fit artifact analysis/mnq-fit.json recorded for
+        // job GLBX-20260805-HAPEWPABKG. A calibration-loop iteration that
+        // moves any candidate value must re-bless this test in the same
+        // change, so the preset can never drift from the artifact silently.
+        let profile = profile_from_preset("MNQ").unwrap();
+        let s = &profile.scalars;
+        assert_eq!(s.mean_event_duration_s, 0.060859305487494256);
+        assert_eq!(s.children_mean, 1.1711127211559897);
+        assert_eq!(s.children_single_frac, 0.9048983982868222);
+        assert_eq!(s.levels_mean, 1.1215513514243831);
+        assert_eq!(s.start_price, Decimal::new(2828400, 2));
+        assert_eq!(s.quoted_width.ticks().get(), 2);
+        assert_eq!(s.top_sizes.bid, Decimal::from(3));
+        assert_eq!(s.top_sizes.ask, Decimal::from(3));
+        assert_eq!(s.trade_displacement_ticks.ticks(), 0.5161290322580645);
+        // The three declared-misrepresented knobs carry the frozen solver's
+        // BEST CANDIDATES as the closest representable approximations (the
+        // size family missed one gate, p99 10 vs bound 9.6; the volatility
+        // family failed the minute-range envelope around a passing mid_rms),
+        // and size_round_frac stays structurally unidentifiable. All four
+        // are pinned so any later fit must show up here.
+        assert_eq!(s.latent_size_median, Decimal::new(1097264, 6));
+        assert_eq!(s.size_log_sigma, 0.9333333333333333);
+        assert_eq!(s.vol_scalar, 0.000008701336943928642);
+        assert_eq!(s.size_round_frac, 0.20856767610054022);
+
+        // The provenance map is half the landing: values alone could pass
+        // while a knob silently reverts to declared. Every landed path must
+        // read fitted with the exact Brick L corpus literal and window.
+        let (_, provenance) = effective_preset("MNQ").unwrap();
+        let corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG";
+        let window = "2026-07 full month, 22 usable sessions";
+        for path in [
+            "generator.mean_event_duration_s",
+            "generator.children_mean",
+            "generator.children_single_frac",
+            "generator.levels_mean",
+            "generator.start_price",
+            "generator.quoted_width.ticks",
+            "generator.top_sizes.bid",
+            "generator.top_sizes.ask",
+            "generator.trade_displacement_ticks.ticks",
+        ] {
+            let entry = provenance
+                .get(path)
+                .and_then(toml::Value::as_table)
+                .unwrap();
+            assert_eq!(
+                entry.get("kind").and_then(toml::Value::as_str),
+                Some("fitted"),
+                "{path}"
+            );
+            assert_eq!(
+                entry.get("corpus").and_then(toml::Value::as_str),
+                Some(corpus),
+                "{path}"
+            );
+            assert_eq!(
+                entry.get("window").and_then(toml::Value::as_str),
+                Some(window),
+                "{path}"
+            );
+        }
+        // The declared set is asserted just as exactly: the landing_set is
+        // the eight fitted paths above and NOTHING else, so the size pair,
+        // vol_scalar and the unidentifiable round fraction must all read
+        // declared - a fitted claim appearing on any of them is drift.
+        for path in [
+            "generator.latent_size_median",
+            "generator.size_log_sigma",
+            "generator.vol_scalar",
+            "generator.size_round_frac",
+        ] {
+            let entry = provenance.get(path).and_then(toml::Value::as_table).unwrap();
+            assert_eq!(
+                entry.get("kind").and_then(toml::Value::as_str),
+                Some("declared"),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn mes_inherits_the_mnq_fit_loudly() {
+        // MES borrows the MNQ fit as a stated stopgap (fit spec section 6):
+        // every generator value except the identity overrides must equal
+        // MNQ's fitted effective values EXACTLY, and the fitted corpus
+        // strings must name the MNQ evidence so no MES corpus is implied.
+        // The named ES/MES purchase is the route to ending the borrow; the
+        // NQ/MNQ proxy FAIL proves family resemblance is not
+        // interchangeability, so nothing here claims transfer validity.
+        let mnq = profile_from_preset("MNQ").unwrap();
+        let mes = profile_from_preset("MES").unwrap();
+        assert_eq!(mes.def.symbol, "MES");
+        assert_eq!(mes.scalars.symbol, "MES");
+        assert_eq!(mes.scalars.start_price, Decimal::from(6000));
+        assert_eq!(mes.def.class.multiplier(), Decimal::from(5));
+        match &mes.def.class {
+            mogwai_protocol::InstrumentClass::Future { underlying, .. } => {
+                assert_eq!(underlying, "ES");
+            }
+            other => panic!("MES must be a future, got {other:?}"),
+        }
+        let borrowed = |s: &mogwai_data::GeneratorScalars| {
+            (
+                s.modal_tick,
+                s.price_decimals,
+                s.mean_event_duration_s,
+                s.children_mean,
+                s.children_single_frac,
+                s.levels_mean,
+                s.size_round_frac,
+                s.latent_size_median,
+                s.size_log_sigma,
+                s.vol_scalar,
+            )
+        };
+        assert_eq!(borrowed(&mes.scalars), borrowed(&mnq.scalars));
+        assert_eq!(
+            mes.scalars.quoted_width.ticks(),
+            mnq.scalars.quoted_width.ticks()
+        );
+        assert_eq!(
+            mes.scalars.quoted_width.provenance(),
+            mnq.scalars.quoted_width.provenance()
+        );
+        assert_eq!(mes.scalars.top_sizes.bid, mnq.scalars.top_sizes.bid);
+        assert_eq!(mes.scalars.top_sizes.ask, mnq.scalars.top_sizes.ask);
+        assert_eq!(
+            mes.scalars.top_sizes.provenance,
+            mnq.scalars.top_sizes.provenance
+        );
+        assert_eq!(
+            mes.scalars.trade_displacement_ticks.ticks(),
+            mnq.scalars.trade_displacement_ticks.ticks()
+        );
+        assert_eq!(
+            mes.scalars.trade_displacement_ticks.provenance(),
+            mnq.scalars.trade_displacement_ticks.provenance()
+        );
+        // The session tables and calendar carry neither PartialEq nor
+        // Serialize; their Debug renderings pin the inheritance just as
+        // tightly - every field is a plain number.
+        assert_eq!(format!("{:?}", mes.session), format!("{:?}", mnq.session));
+        assert_eq!(format!("{:?}", mes.calendar), format!("{:?}", mnq.calendar));
+
+        // The borrow must be loud in the provenance map too: every borrowed
+        // entry is MNQ's verbatim - a MIXTURE of fitted entries naming the
+        // MNQ corpus and declared entries carrying the solver's best
+        // candidates - and the identity overrides stay declared.
+        let (_, mnq_prov) = effective_preset("MNQ").unwrap();
+        let (_, mes_prov) = effective_preset("MES").unwrap();
+        for (path, entry) in &mnq_prov {
+            if matches!(
+                path.as_str(),
+                "symbol"
+                    | "class.underlying"
+                    | "class.multiplier"
+                    | "generator.symbol"
+                    | "generator.start_price"
+            ) {
+                continue;
+            }
+            assert_eq!(mes_prov.get(path), Some(entry), "{path}");
+        }
+        for path in [
+            "symbol",
+            "class.underlying",
+            "class.multiplier",
+            "generator.symbol",
+            "generator.start_price",
+        ] {
+            let entry = mes_prov.get(path).and_then(toml::Value::as_table).unwrap();
+            assert_eq!(
+                entry.get("kind").and_then(toml::Value::as_str),
+                Some("declared"),
+                "{path}"
+            );
+        }
     }
 
     #[test]

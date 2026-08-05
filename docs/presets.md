@@ -74,9 +74,20 @@ visible without you having to diff two TOML files.
   whole-contract sizing, the published CME Sunday-evening-through-
   Friday-evening session with the daily maintenance halt and settlement
   window, margin posted per contract, `breach_action = "liquidate"`.
+  Its cadence, size distribution, volatility scalar, start price and quote
+  seams are fitted from the delivered July 2026 MNQ TBBO month; the preset's
+  provenance map names the corpus per knob and the fit artifact
+  `analysis/mnq-fit.json` records the estimators and verdicts.
 - **MES** - Micro E-mini S&P 500 future. Built as an override of the MNQ
   preset: same session calendar and margin shape, five dollars per index
-  point instead of two.
+  point instead of two. That means MES BORROWS the fitted MNQ values - apart
+  from the identity overrides (symbol, underlying, multiplier and start
+  price), every fitted generator knob, quote seam and session curve is MNQ
+  evidence, and the inherited corpus strings say so, so no MES corpus is
+  implied. This is
+  a stated stopgap product approximation, not a claim that MNQ evidence
+  validates MES; a small ES/MES purchase is the recorded route to ending
+  the borrow.
 - **BTCUSDT**, **ETHUSDT**, **SOLUSDT** - spot pairs against USDT, always
   open (no calendar table), cadence and size distribution fitted against 30
   days of Binance trade-level archives. ETHUSDT and SOLUSDT are built as

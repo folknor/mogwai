@@ -21,17 +21,19 @@ use crate::source::{self, InstrumentProfiles};
 ///
 /// The original 5,000,000 cap covered ordinary multi-hour gaps of roughly
 /// 700,000 ticks. Protocol 7 raised it to 282,000,000 on the REQUIRED-REACH
-/// rule. At protocol 8 the other candidate wins: the fitted session profile
-/// expanded the worst p99.9 300-second window count by 2.54x, and twice that
-/// against the prior ceiling gives this value, above the 289,063,683 frames the
-/// worst measured p99.9 rate now projects into one window. Either way a
-/// complete supported window is never refused as truncated.
+/// rule; protocol 8 to 1,434,000,000 on the doubling rule against its
+/// session-profile expansion. At protocol 10 the doubling rule wins again:
+/// the fitted MNQ cadence expanded the worst p99.9 300-second window count
+/// by 2.02x, twice that against the prior ceiling gives this value, above
+/// the 281,678,600 frames the worst measured p99.9 rate now projects into
+/// one window. Either way a complete supported window is never refused as
+/// truncated.
 ///
 /// This is a refusal ceiling, not an acceptable latency. At the measured 2.9M
-/// synthesis ticks per second, exhausting it would occupy a blocking worker for
-/// roughly 8 minutes. `SWEEP_DRAIN_WARN_TICKS` therefore remains separate and
-/// preserves the old operational warning point.
-pub(crate) const SWEEP_DRAIN_BUDGET: usize = 1_434_000_000;
+/// synthesis ticks per second, exhausting it would occupy a blocking worker
+/// for over half an hour. `SWEEP_DRAIN_WARN_TICKS` therefore remains separate
+/// and preserves the old operational warning point.
+pub(crate) const SWEEP_DRAIN_BUDGET: usize = 5_799_000_000;
 
 /// Latency diagnostic, intentionally independent of the refusal budget.
 /// Protocol 7's required-reach rule enlarged the refusal ceiling to cover a

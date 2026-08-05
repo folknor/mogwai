@@ -394,6 +394,22 @@ Or both. There are no exceptions.
   those are is the migration item's scope question. Sequence accordingly: that
   decision comes first, this one is downstream of it.
 
+- REPAIR the `brokkr check --gate` profile mismatch for
+  `tape_lateness_under_acceleration`. The gate runs the workspace test pass in
+  DEBUG profile, and that test asserts a 50ms p99 WALL-CLOCK pacing bound the
+  debug server cannot reliably meet (measured 2026-08-05: debug p99 106-330ms
+  across trees whose release builds pass at 38-43ms on a quiet box). The test
+  is also load-sensitive even in release: with a second workspace building
+  (load average 1.0), 4 of 5 release repetitions failed at ~250ms on BOTH the
+  protocol-9 parent and the protocol-10 candidate - indistinguishable paired
+  distributions, recorded in `notes/mnq-generator-successor-spec.md` as a
+  reviewed gate exception. The 50ms release threshold stays authoritative and
+  unrelaxed. Options when picked up: exclude the test from the gate's debug
+  lane the way the other perf-bound tests are already `--skip`ped, run it in
+  a release lane, or gate it on a load check. Until then `check --gate`
+  cannot be read as green/red on this one test without a quiet-box release
+  rerun, which is exactly the ambiguity the gate exists to remove.
+
 - UNPROVEN, and it decides whether the venue-identity check needs to stop being
   opt-in: can a full session be established against a stranger holding a reused
   port, and this client's account id stamped onto its state, inside the window

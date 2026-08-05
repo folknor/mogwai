@@ -901,8 +901,10 @@ mod tests {
             let grid = SizeGrid::from_def(&profile.def);
             assert!(grid.integral, "{preset} trades in whole contracts");
             assert_eq!(grid.min_size, Decimal::ONE);
-            assert_eq!(profile.scalars.top_sizes.bid, Decimal::ONE);
-            assert_eq!(profile.scalars.top_sizes.ask, Decimal::ONE);
+            // The protocol-10 landing: three-lot fitted top sizes (MES
+            // inheriting MNQ's July TBBO fit as the standing stopgap).
+            assert_eq!(profile.scalars.top_sizes.bid, Decimal::from(3));
+            assert_eq!(profile.scalars.top_sizes.ask, Decimal::from(3));
             assert!(profile.calendar.is_some(), "{preset} carries CME hours");
         }
         for preset in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] {

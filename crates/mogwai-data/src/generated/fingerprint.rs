@@ -258,6 +258,10 @@ pub struct EmpiricalRanges {
     pub size_round_frac: MinMedianMax,
 }
 
+fn default_size_log_sigma() -> f64 {
+    SIZE_LOG_SIGMA
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct GeneratorScalars {
     #[serde(default)]
@@ -275,6 +279,14 @@ pub struct GeneratorScalars {
     /// native size unit. Calling this merely `size_median` is a trap: many
     /// different latent medians collapse onto an observed one-contract median.
     pub latent_size_median: Decimal,
+    /// Log-scale sigma of the latent size lognormal. The module-level
+    /// `SIZE_LOG_SIGMA = 1.15` is this field's DEFAULT, not a refit: an
+    /// instrument that omits it draws exactly the shared crypto shape,
+    /// byte for byte, while a fitted instrument states its own tail (the
+    /// generator successor spec 3.2 - July MNQ's p99 measured 8 contracts
+    /// against 14 generated at the shared sigma).
+    #[serde(default = "default_size_log_sigma")]
+    pub size_log_sigma: f64,
     pub vol_scalar: f64,
     #[serde(default)]
     pub quoted_width: super::quote::QuotedWidth,
@@ -306,6 +318,7 @@ impl GeneratorScalars {
                     / START_PRICE_USD as f64
                     / (SIZE_LOG_SIGMA.powi(2) / 2.0).exp(),
             ),
+            size_log_sigma: SIZE_LOG_SIGMA,
             vol_scalar: VOL_SCALAR,
             quoted_width: super::quote::QuotedWidth::default(),
             top_sizes: super::quote::TopOfBookSizes::uncalibrated(Decimal::new(1, SIZE_DECIMALS)),
@@ -330,6 +343,7 @@ impl GeneratorScalars {
                     / START_PRICE_USD as f64
                     / (SIZE_LOG_SIGMA.powi(2) / 2.0).exp(),
             ),
+            size_log_sigma: SIZE_LOG_SIGMA,
             vol_scalar: VOL_SCALAR,
             quoted_width: super::quote::QuotedWidth::default(),
             top_sizes: super::quote::TopOfBookSizes::uncalibrated(Decimal::new(1, SIZE_DECIMALS)),
@@ -412,6 +426,32 @@ impl GeneratorScalars {
                 field: "children_single_frac",
             });
         }
+        // Floor-branch feasibility (the generator successor spec, 3.1). An
+        // instrument whose base quiet-state mean sits at or below one child
+        // takes the floor-aware conditioning, whose active-state solve must
+        // be expressible by the one-plus-geometric mixture: the solved
+        // active single fraction has to sit in [1/active_mean, 1].
+        // Evaluated at children_mult = 1; a named test proves feasibility
+        // is monotone across the whole surge range [1, 100], so this
+        // construction-time check covers every runtime state.
+        if self.children_mean * super::consts::ARRIVAL_QUIET_CHILDREN_MULT <= 1.0 {
+            let quiet_share = super::consts::ARRIVAL_QUIET_FRACTION;
+            let quiet_eff = self.children_mean * super::consts::ARRIVAL_QUIET_CHILDREN_MULT;
+            let quiet_mean = quiet_eff.max(1.0);
+            let quiet_single = if quiet_eff <= 1.0 {
+                1.0
+            } else {
+                self.children_single_frac.max(1.0 / quiet_eff)
+            };
+            let active_mean = (self.children_mean - quiet_share * quiet_mean) / (1.0 - quiet_share);
+            let active_single =
+                (self.children_single_frac - quiet_share * quiet_single) / (1.0 - quiet_share);
+            if active_mean <= 1.0 || !(1.0 / active_mean..=1.0).contains(&active_single) {
+                return Err(ScalarError {
+                    field: "children_single_frac (floor-branch active solve infeasible)",
+                });
+            }
+        }
         if !(1.0..=self.children_mean).contains(&self.levels_mean) {
             return Err(ScalarError {
                 field: "levels_mean",
@@ -420,6 +460,14 @@ impl GeneratorScalars {
         if !self.size_round_frac.is_finite() || !(0.0..=1.0).contains(&self.size_round_frac) {
             return Err(ScalarError {
                 field: "size_round_frac",
+            });
+        }
+        // The successor spec 3.2 bound: wide enough for any plausible tail,
+        // tight enough that a unit mix-up (a variance where a sigma belongs)
+        // cannot slip through as configuration.
+        if !self.size_log_sigma.is_finite() || !(0.1..=3.0).contains(&self.size_log_sigma) {
+            return Err(ScalarError {
+                field: "size_log_sigma",
             });
         }
         // `start_price` seeds `vol.mid`, which `next_latent_mid` clamps to
@@ -565,7 +613,7 @@ impl GeneratorScalars {
         }
         let median = decimal_to_f64(self.latent_size_median);
         let threshold = decimal_to_f64(min_size) + 0.5;
-        let z = (threshold / median).ln() / SIZE_LOG_SIGMA;
+        let z = (threshold / median).ln() / self.size_log_sigma;
         // Phi^-1(0.99). P(X >= threshold) < 0.01 exactly when z exceeds it.
         if z > 2.326_347_874_040_840_8 {
             vec![ScalarDiagnostic {
@@ -647,7 +695,7 @@ impl GeneratorScalars {
     #[must_use]
     pub fn mean_trade_notional(&self, multiplier: Decimal) -> f64 {
         decimal_to_f64(self.latent_size_median)
-            * (SIZE_LOG_SIGMA.powi(2) / 2.0).exp()
+            * (self.size_log_sigma.powi(2) / 2.0).exp()
             * decimal_to_f64(self.start_price)
             * decimal_to_f64(multiplier)
     }

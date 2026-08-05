@@ -365,3 +365,51 @@ now costs about 90 minutes rather than an hour, and the increase IS the result.
 Each mode carries its own baseline constant table; a shared one would resize the
 current constants by the pre-protocol-7 baseline and under-propose checkpoint
 and fanout by the factor protocol 7 had already absorbed.
+
+## 2026-08-06 protocol 10 MNQ-fit composition
+
+Protocol 10 landed the July 2026 MNQ TBBO fit: the two futures presets took
+fitted generator scalars (mean event duration 0.0609 s against the
+crypto-derived 0.171 s, near-single-child parents, the fitted quote seams), so
+their cadence and fanout both move while the three crypto presets are untouched
+by construction. The `independent_9_10` mode gates accordingly before any
+ratio: every measured field must be byte-identical for BTCUSDT, ETHUSDT and
+SOLUSDT, `parents` must match for all five, and every measurement entering a
+ratio must be finite and positive on both sides. `ticks_per_parent` is NOT
+frozen for the futures - the fit changes what a parent looks like, which the
+7-to-8 session reshape could not. All gates passed; the protocol-9 side is the
+Brick B0 fixture whose 8/9 byte-identity was separately verified.
+
+The maximum independent p99.9 protocol-10/protocol-9 ratios were:
+
+| budget denominator | ratio | prior constant | resulting constant |
+|---|---:|---:|---:|
+| simulated-second checkpoint work | 1.600000 | 4,194,304 | 16,777,216 |
+| 300-second sweep work | 2.021814 | 1,434,000,000 | 5,799,000,000 |
+| 24-hour cumulative warmup reach | 2.055137 | 162,349,000,000 | 667,299,000,000 |
+| wall-second fanout work | 1.837312 | 1,048,576 | 4,194,304 |
+
+The same standing policy: prior constant times ratio times two for headroom,
+power-of-two rounding for checkpoint and fanout, next-million for sweep and
+warmup reach, then the larger of that and required reach. The headroom formula
+wins everywhere: required reach is 281,678,600 frames for a 300-second window
+and 81,123,436,742 for the 24-hour warmup, both below their resized ceilings.
+The worst measured p99.9 rate is 938,928.67 frames per simulated second;
+directly observed partial-window counts, 258,678,966 and 1,364,836,628, set
+neither result.
+
+`MAX_EXTEND_TICKS` stays 1,073,741,824 per index-lock acquisition and the
+2,500,000-tick sweep latency warning stays where it was, for the recorded
+reasons: a per-lock runaway backstop and an operational signal must not scale
+with refusal ceilings. The sweep refusal ceiling is now roughly 33 minutes of
+blocking-worker time at the measured 2.9 M ticks per second - a ceiling only a
+far-from-market order under maximum surge can reach, with the warning firing
+three orders of magnitude earlier. The resized fanout holds 0.472841 wall
+seconds at the worst measured rate against the prior 0.114123, so no horizon
+shrinks; it remains a fraction of a wall second under maximum surge, and a
+surge-exposed run should size `fanout_depth` deliberately rather than inherit
+the default.
+
+Regenerate with
+`brokkr run mogwai -- tick-composition --out analysis/tick-composition-protocol-10.json`,
+then `python3 analysis/tick_composition_ratios.py --mode independent_9_10`.

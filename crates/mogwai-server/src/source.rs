@@ -125,29 +125,31 @@ fn generator(profile: &InstrumentProfile) -> GeneratedSource {
 /// seek BUDGET that used to cap it: there is no `MAX_HISTORY_SEEK_TICKS` any
 /// more and no request is served short because it ran out of walk. A request
 /// below the floor is refused by name instead, which is the whole point.
-/// Protocol 8's composition measurement raised the stride to 4,194,304 ticks.
-/// This is twice the worst independently measured protocol-8/protocol-7 p99.9
-/// expansion of the prior 1,048,576 stride, rounded up to a power of two; see
-/// `reference/performance.md`. The expansion is the fitted session profile:
-/// MNQ's and MES's cash-session hours now carry several times the arrival rate
-/// a flat crypto curve gave them, and this budget is denominated in ticks per
+/// Protocol 8's composition measurement raised the stride to 4,194,304 ticks
+/// (twice the worst measured 8/7 p99.9 expansion of the prior 1,048,576
+/// stride); protocol 10's raised it again to 16,777,216: the fitted MNQ
+/// cadence (mean event duration 0.0609s against the crypto-derived 0.171s)
+/// expands the peak ticks-per-simulated-second p99.9 by 1.6x, and the
+/// standing headroom rule doubles that and rounds up to a power of two; see
+/// `reference/performance.md`. This budget is denominated in ticks per
 /// simulated second.
-pub(crate) const CHECKPOINT_K: usize = 4_194_304;
+pub(crate) const CHECKPOINT_K: usize = 16_777_216;
 
 /// Runaway backstop on a SINGLE extension while the global index lock is held.
 /// This retains the original one-billion-tick safety purpose: a nonsensical
 /// far-future request cannot turn one lock acquisition into the
-/// 162-billion-tick warmup reach bound below.
+/// 667-billion-tick warmup reach bound below.
 const MAX_EXTEND_TICKS: usize = 1 << 30;
 
 /// Total legitimate boot reach admitted across lock-releasing extension
-/// chunks. Protocol 8's headroom rule doubles the prior 81,124,000,000 ceiling
-/// against the measured 1.0006x reach expansion, which exceeds the 83,250,340,704
-/// frames the worst measured p99.9 rate projects into the longest shipped
-/// warmup; the next-million rounding produces this ceiling. Keeping it separate
-/// from `MAX_EXTEND_TICKS` prevents a reach requirement from silently disabling
+/// chunks. Protocol 10's headroom rule doubles the prior 162,349,000,000
+/// ceiling against the measured 2.055x warmup-reach expansion from the
+/// fitted MNQ cadence, which also exceeds the 81,123,436,742 frames the
+/// worst measured p99.9 rate projects into the longest shipped warmup; the
+/// next-million rounding produces this ceiling. Keeping it separate from
+/// `MAX_EXTEND_TICKS` prevents a reach requirement from silently disabling
 /// the per-lock runaway backstop.
-const MAX_WARMUP_MATERIALIZATION_TICKS: usize = 162_349_000_000;
+const MAX_WARMUP_MATERIALIZATION_TICKS: usize = 667_299_000_000;
 
 /// The run's one checkpoint chain, over the run's one realization. Process
 /// global because the run is: one instrument, one regime, one origin for the

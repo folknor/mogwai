@@ -152,7 +152,7 @@
  "fitted_candidates": {
   "children_mean": 1.1711127211559897,
   "children_single_frac": 0.9048983982868222,
-  "latent_size_median": 0.9556033700632409,
+  "latent_size_median": 0.955603,
   "levels_mean": 1.1215513514243831,
   "mean_event_duration_s": 0.060859305487494256,
   "quoted_width": 2,
@@ -2246,6 +2246,7 @@
  "solves": {
   "latent_size_median": {
    "chosen_model": "A",
+   "raw_optimum": 0.9556033700632409,
    "final_score": [
     0.027309079310669948,
     0.25321136698145263,
