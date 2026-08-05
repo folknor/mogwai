@@ -18,6 +18,10 @@ Four modes:
     plan       fresh (uncached) quotes for one scope/plan, the would-submit
                table with drift verdicts; free metadata endpoints only
     buy        the lifecycle driver: submit (gated), poll, download, verify.
+               Whitelisted to the staged purchase - pairv/paircurrent, then
+               nqv/contiguous once the paired test has landed - and
+               all-or-nothing: preflight covers every row before the first
+               POST, and the first failure stops further submissions.
                Without BOTH --confirm and --max-dollars it SUBMITS nothing,
                but it still polls and downloads jobs the ledger already owns
                over the network - those bytes are already paid for.
@@ -294,13 +298,27 @@ def load_ledger(path=LEDGER_FILE):
     return jobs
 
 
-def save_ledger(jobs, path=LEDGER_FILE):
+def durable_json_write(path, payload):
+    """Atomic AND durable: os.replace prevents torn JSON but does not survive
+    a system crash before the page cache flushes, and the pre-POST intent is
+    only worth writing if it outlives a power cut. Flush and fsync the temp,
+    replace, then fsync the directory so the rename itself is durable."""
     tmp = path + ".tmp"
     with open(tmp, "w") as fh:
-        json.dump({"_version": LEDGER_VERSION, "jobs": jobs}, fh,
-                  indent=1, sort_keys=True)
+        json.dump(payload, fh, indent=1, sort_keys=True)
         fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
     os.replace(tmp, path)
+    dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def save_ledger(jobs, path=LEDGER_FILE):
+    durable_json_write(path, {"_version": LEDGER_VERSION, "jobs": jobs})
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +445,51 @@ def ledger_entry_planned_for_selftest(entry):
 # be adopted as ours.
 RECONCILE_WINDOW_BEFORE_S = 600
 RECONCILE_WINDOW_AFTER_S = 3600
+
+# A no-match listing is NOT proof the POST failed: vendor job visibility may
+# lag the charge. A pending intent may be cleared for resubmission only after
+# the full adoption window has elapsed - if the job were going to surface
+# inside the window, clearing before the window closes could resubmit while
+# it still might - AND enough no-match listings with VALID timestamps spaced
+# a real interval apart have been recorded. Back-to-back listings seconds
+# apart confirm nothing about lag.
+RECONCILE_CLEAR_MIN_AGE_S = RECONCILE_WINDOW_AFTER_S
+RECONCILE_CLEAR_CONFIRMATIONS = 2
+RECONCILE_CONFIRM_SPACING_S = 300
+
+
+def pending_clear_verdict(entry, now=None):
+    """May a no-match pending intent be cleared and resubmitted? Pure
+    decision, fixture-driven in the selftest. Returns (ok, reason).
+
+    Immediate clearing on a single empty listing would let an ambiguous POST
+    whose job has not surfaced yet be bought again seconds later. Clearing
+    requires the intent to have aged past RECONCILE_CLEAR_MIN_AGE_S and at
+    least RECONCILE_CLEAR_CONFIRMATIONS successful listings that each found
+    no matching job."""
+    now = now if now is not None else dt.datetime.now(dt.timezone.utc)
+    stamp = _parse_ts(entry.get("intent_at"))
+    if stamp is None:
+        return False, "no readable intent_at; resolve the ledger by hand"
+    age = (now - stamp).total_seconds()
+    if age < RECONCILE_CLEAR_MIN_AGE_S:
+        return False, ("intent is %ds old, inside the %ds reconciliation "
+                       "delay; vendor listing may lag the charge" % (
+                           age, RECONCILE_CLEAR_MIN_AGE_S))
+    listings = [_parse_ts(x) for x in entry.get("no_match_listings") or []]
+    listings = [x for x in listings if x is not None]
+    if len(listings) < RECONCILE_CLEAR_CONFIRMATIONS:
+        return False, ("%d of %d confirming no-match listings with valid "
+                       "timestamps recorded; re-run to confirm" % (
+                           len(listings), RECONCILE_CLEAR_CONFIRMATIONS))
+    spread = (max(listings) - min(listings)).total_seconds()
+    if spread < RECONCILE_CONFIRM_SPACING_S:
+        return False, ("confirming listings span %ds, need %ds between "
+                       "first and last; back-to-back listings confirm "
+                       "nothing about vendor lag" % (
+                           spread, RECONCILE_CONFIRM_SPACING_S))
+    return True, ("aged %ds with %d confirming no-match listings spanning "
+                  "%ds" % (age, len(listings), spread))
 
 # The request-defining fields the submit body carries beyond the market-data
 # selection. Any of these the vendor echoes must match; a selection-identical
@@ -825,19 +888,92 @@ def verify_landing(dest_dir, files):
 
 
 def write_manifest(dest_dir, entry):
-    """The per-directory provenance record of spec decision 7. The committed
-    record is the ledger; this one travels with the (gitignored) bytes."""
-    tmp = os.path.join(dest_dir, "manifest.json.tmp")
-    with open(tmp, "w") as fh:
-        json.dump(dict(entry, tool_version=TOOL_VERSION), fh,
-                  indent=1, sort_keys=True)
-        fh.write("\n")
-    os.replace(tmp, os.path.join(dest_dir, "manifest.json"))
+    """The per-directory provenance record. The committed record is the
+    ledger; this one travels with the (gitignored) bytes. Durable like the
+    ledger, and for the same reason."""
+    durable_json_write(os.path.join(dest_dir, "manifest.json"),
+                       dict(entry, tool_version=TOOL_VERSION))
 
 
 # ---------------------------------------------------------------------------
 # Modes
 # ---------------------------------------------------------------------------
+
+
+# buy is whitelisted to the staged 9.6 purchase and nothing else. The pricing
+# tool exposes every scope/plan combination for COMPARISON, including the
+# superseded regime-selected baskets; none of those may be bought, and the
+# contiguous stage stays locked until the paired test - the asymmetric stop
+# condition - has landed AND been affirmatively judged.
+AUTHORIZED_BUYS = {
+    ("pairv", "paircurrent"): None,
+    ("nqv", "contiguous"): ("pairv", "2026-07.2wk", "trades"),
+}
+
+# The affirmative analysis decision that unlocks stage two. This tool only
+# READS it; it is written by the analysis that judges the paired test, after
+# a human has read that result. Delivery is not judgment: a downloaded pair
+# whose proxy test FAILED must keep the 71.79-dollar second stage locked, so
+# "downloaded" alone never unlocks anything. The verdict binds to the exact
+# job id and the exact delivered file hashes, so a verdict written against
+# one delivery cannot authorize a different one.
+PAIR_VERDICT_FILE = os.path.join(
+    ROOT, "analysis", "databento-pair-verdict.json")
+
+
+def authorize_buy(scope, variant, jobs, verdict_path=PAIR_VERDICT_FILE):
+    """Refuse any buy outside the staged design; refuse a stage whose
+    prerequisite has not been downloaded AND affirmatively judged. Every
+    branch fails closed with a named reason."""
+    prereq = AUTHORIZED_BUYS.get((scope, variant), "unlisted")
+    if prereq == "unlisted":
+        allowed = ", ".join("%s/%s" % pair for pair in sorted(AUTHORIZED_BUYS))
+        raise Refusal("buy is whitelisted to the staged purchase (%s); "
+                      "%s/%s is not in it" % (allowed, scope, variant))
+    if prereq is None:
+        return
+    key = ledger_key(*prereq)
+    entry = jobs.get(key)
+    if not entry or entry.get("state") != "downloaded":
+        raise Refusal("stage locked: %s/%s requires the paired test %s to "
+                      "be downloaded first" % (scope, variant, key))
+    if not os.path.exists(verdict_path):
+        raise Refusal("stage locked: no pair verdict at %s; the paired test "
+                      "must be ANALYZED and affirmatively passed, delivery "
+                      "alone unlocks nothing" % verdict_path)
+    try:
+        verdict = json.loads(open(verdict_path).read())
+    except (json.JSONDecodeError, OSError) as exc:
+        raise Refusal("stage locked: pair verdict unreadable (%s)" % exc)
+    if verdict.get("verdict") != "pass":
+        raise Refusal("stage locked: pair verdict is %r, not the required "
+                      "affirmative pass" % verdict.get("verdict"))
+    if verdict.get("job_id") != entry.get("job_id"):
+        raise Refusal("stage locked: pair verdict names job %r but the "
+                      "ledger's paired test is job %r" % (
+                          verdict.get("job_id"), entry.get("job_id")))
+    if verdict.get("files") != entry.get("files"):
+        raise Refusal("stage locked: pair verdict's file hashes do not match "
+                      "the delivered files; the verdict must be re-issued "
+                      "against the bytes actually analyzed")
+
+
+def plan_prior_spend(jobs, scope, variant):
+    """Dollars already committed to THIS plan's entries, submitted or
+    pending. --max-dollars caps CUMULATIVE plan spend: a run that submitted
+    one job and crashed must not grant the rerun the full cap again for the
+    remaining jobs."""
+    total = 0.0
+    for window, schema in resolve_plan(scope, variant):
+        entry = jobs.get(ledger_key(scope, window[0], schema))
+        if not entry:
+            continue
+        spent = entry.get("live_quote_at_submit")
+        if spent is None:
+            spent = entry.get("live_quote_at_intent")
+        if isinstance(spent, (int, float)) and math.isfinite(spent):
+            total += spent
+    return total
 
 
 def resolve_plan(scope, variant):
@@ -941,115 +1077,181 @@ def mode_status(args):
 
 
 def mode_buy(args):
-    """The lifecycle driver. For each plan row: an entry with a job id is
-    polled and, when done, downloaded and verified; an entry without one goes
-    through submit_gated(), which is the only path to batch.submit_job and
-    refuses unless the double gate and the drift check all pass. Any failed
-    file fails the run with a nonzero exit and a named list."""
+    """The lifecycle driver, in phases, so money-touching work is
+    all-or-nothing:
+
+    1. AUTHORIZE: only the staged 9.6 plans; the contiguous stage stays
+       locked until the paired test has landed.
+    2. RECONCILE pending intents (armed runs), with the no-match delay: an
+       empty listing is not proof the POST failed, so clearing requires age
+       plus repeated confirmations.
+    3. REVIEW: quotes and verdicts for submission-eligible rows, with
+       --max-dollars capping CUMULATIVE plan spend across runs.
+    4. SUBMIT, armed runs only, all-or-nothing: every eligible row must pass
+       preflight before the FIRST post, and the first failure or unknown
+       outcome stops all further submissions - a four-month plan must never
+       buy months 1, 3 and 4 around a failed month 2.
+    5. SETTLE: poll, download and re-verify every owned entry.
+
+    Exit codes: 0 settled, 3 nonterminal (pending or undelivered), 1 any
+    failure."""
     # The lock covers the ENTIRE lifecycle - ledger load, verdicts, intent
     # writes, POSTs, response persistence - and is held until process exit.
     buy_lock = acquire_buy_lock()  # noqa: F841  kept alive on purpose
     jobs = load_ledger()
-    rows, _quote_failures = print_review(
-        args.scope, args.plan, args.confirm, args.max_dollars, jobs)
-    remaining = args.max_dollars
+    authorize_buy(args.scope, args.plan, jobs)
+    armed = args.confirm and args.max_dollars is not None
     failures = []
     waiting = []
-    for window, schema, key, entry, would_submit in rows:
-        print("\n== %s" % key)
-        entry = jobs.get(key)  # reread: earlier rows may have updated it
-        if (entry is not None and entry.get("state") == "submitting"
+
+    # Phase 2: reconcile pending intents before anything is priced.
+    for window, schema in resolve_plan(args.scope, args.plan):
+        key = ledger_key(args.scope, window[0], schema)
+        entry = jobs.get(key)
+        if not (entry and entry.get("state") == "submitting"
                 and not entry.get("job_id")):
-            # A durable intent with no job id: a previous run died with the
-            # POST's fate unknown. The vendor listing decides - adopt the job
-            # it created, or clear the intent when it created none. Guessing
-            # in either direction risks a double buy or an orphaned charge.
-            if not (args.confirm and args.max_dollars is not None):
-                print("  pending submission intent; run armed to reconcile")
-                failures.append("%s: pending intent unreconciled" % key)
-                continue
-            try:
-                match = reconcile_pending(args.scope, window, schema,
-                                          entry.get("intent_at"))
-            except Refusal as exc:
-                print("  %s" % exc)
-                failures.append("%s: reconciliation refused" % key)
-                continue
-            if match is not None:
-                entry.update({
-                    "job_id": match["id"],
-                    "state": match.get("state", "queued"),
-                    "reconciled_at":
-                        dt.datetime.now(dt.timezone.utc).isoformat(),
-                    # The intent's quote stands in for the submit-time quote
-                    # so mode_status's spend total stays honest: this job WAS
-                    # bought, at approximately this price.
-                    "live_quote_at_submit":
-                        entry.get("live_quote_at_intent"),
-                })
-                jobs[key] = entry
-                save_ledger(jobs)
-                print("  adopted vendor job %s from pending intent" %
-                      match["id"])
-            else:
-                del jobs[key]
-                save_ledger(jobs)
-                entry = None
-                print("  pending intent matched no vendor job; cleared, "
-                      "safe to submit")
-        if entry is None or not entry.get("job_id"):
-            if not (args.confirm and args.max_dollars is not None):
-                print("  dry run: would %ssubmit" %
-                      ("" if would_submit else "NOT "))
-                continue
-
-            def write_intent(live, _key=key, _window=window, _schema=schema):
-                # Durable BEFORE the POST: see submit_gated's before_post
-                # note. Runs only after every refusal opportunity has passed.
-                jobs[_key] = {
-                    "state": "submitting",
-                    "intent_at":
-                        dt.datetime.now(dt.timezone.utc).isoformat(),
-                    "scope": args.scope,
-                    "window": _window[0],
-                    "schema": _schema,
-                    "live_quote_at_intent": live,
-                }
-                save_ledger(jobs)
-
-            try:
-                # entry is None here by construction; the verdict's ledger
-                # checks were already applied to the real entry above and by
-                # print_review, and the intent this run writes must not
-                # refuse its own POST.
-                job, live = submit_gated(
-                    args.scope, window, schema, args.confirm, remaining,
-                    None, before_post=write_intent)
-            except Refusal as exc:
-                # A verdict refusal happens BEFORE the intent write, so no
-                # intent exists. If one does exist here, the POST itself
-                # failed with unknown fate and the intent stays for the next
-                # run's reconciliation.
-                print("  %s" % exc)
-                failures.append("%s: not submitted" % key)
-                continue
-            remaining -= live
-            entry = {
-                "job_id": job["id"],
-                "state": job.get("state", "queued"),
-                "submitted_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                "live_quote_at_submit": live,
-                "planned_quote": planned_quote(args.scope, window, schema),
-                "scope": args.scope,
-                "window": window[0],
-                "schema": schema,
-                "encoding": ENCODING,
-                "compression": COMPRESSION,
-                "split_duration": SPLIT_DURATION,
-            }
+            continue
+        print("== %s: pending intent" % key)
+        if not armed:
+            print("  run armed to reconcile")
+            waiting.append("%s: pending intent unreconciled" % key)
+            continue
+        try:
+            match = reconcile_pending(args.scope, window, schema,
+                                      entry.get("intent_at"))
+        except Refusal as exc:
+            print("  %s" % exc)
+            failures.append("%s: reconciliation refused" % key)
+            continue
+        if match is not None:
+            entry.update({
+                "job_id": match["id"],
+                "state": match.get("state", "queued"),
+                "reconciled_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                # The intent's quote stands in for the submit-time quote so
+                # mode_status's spend total stays honest: this job WAS
+                # bought, at approximately this price.
+                "live_quote_at_submit": entry.get("live_quote_at_intent"),
+            })
             jobs[key] = entry
             save_ledger(jobs)
-            print("  submitted job %s at %.2f" % (job["id"], live))
+            print("  adopted vendor job %s from pending intent" % match["id"])
+            continue
+        # No match THIS listing. Record the confirmation and clear only when
+        # the pure verdict says the intent has aged past vendor-lag doubt.
+        entry.setdefault("no_match_listings", []).append(
+            dt.datetime.now(dt.timezone.utc).isoformat())
+        save_ledger(jobs)
+        ok, reason = pending_clear_verdict(entry)
+        if ok:
+            del jobs[key]
+            save_ledger(jobs)
+            print("  pending intent cleared for resubmission: %s" % reason)
+        else:
+            print("  intent stays pending: %s" % reason)
+            waiting.append("%s: pending, %s" % (key, reason))
+
+    # Phase 3: review, with the cap reduced by spend already committed to
+    # this plan in earlier runs - submitted or still pending.
+    cap = args.max_dollars
+    if cap is not None:
+        prior = plan_prior_spend(jobs, args.scope, args.plan)
+        if prior:
+            print("\nprior committed spend for this plan: %.2f; "
+                  "cap %.2f leaves %.2f" % (prior, cap, cap - prior))
+        cap -= prior
+    print()
+    rows, _quote_failures = print_review(
+        args.scope, args.plan, args.confirm, cap, jobs)
+
+    def is_eligible(key):
+        entry = jobs.get(key)
+        return entry is None or (not entry.get("job_id")
+                                 and entry.get("state") != "submitting")
+
+    eligible = [(w, s, k, ok) for w, s, k, _e, ok in rows if is_eligible(k)]
+
+    # Phase 4: all-or-nothing submission.
+    if eligible and not armed:
+        for _w, _s, key, ok in eligible:
+            print("dry run: would %ssubmit %s" % ("" if ok else "NOT ", key))
+    elif eligible and armed:
+        preflight_failed = [key for _w, _s, key, ok in eligible if not ok]
+        if preflight_failed:
+            print("\nPREFLIGHT FAILED; nothing submitted, the plan submits "
+                  "all rows or none:")
+            for key in preflight_failed:
+                failures.append("%s: preflight failed" % key)
+                print("  %s" % key)
+        else:
+            halted = False
+            remaining = cap
+            for window, schema, key, _ok in eligible:
+                print("\n== %s" % key)
+                if halted:
+                    print("  skipped: an earlier submission failed and the "
+                          "plan stops at the first failure")
+                    failures.append("%s: skipped after earlier failure" % key)
+                    continue
+
+                def write_intent(live, _key=key, _window=window,
+                                 _schema=schema):
+                    # Durable BEFORE the POST: see submit_gated's
+                    # before_post note. Runs only after every refusal
+                    # opportunity has passed.
+                    jobs[_key] = {
+                        "state": "submitting",
+                        "intent_at":
+                            dt.datetime.now(dt.timezone.utc).isoformat(),
+                        "scope": args.scope,
+                        "window": _window[0],
+                        "schema": _schema,
+                        "live_quote_at_intent": live,
+                    }
+                    save_ledger(jobs)
+
+                try:
+                    # ledger_entry None by construction: eligibility was
+                    # checked against the live ledger above, and the intent
+                    # this run writes must not refuse its own POST.
+                    job, live = submit_gated(
+                        args.scope, window, schema, True, remaining,
+                        None, before_post=write_intent)
+                except Refusal as exc:
+                    # A verdict refusal happens BEFORE the intent write. An
+                    # intent that exists here means the POST itself failed
+                    # with unknown fate; it stays for reconciliation. Either
+                    # way, no further row is submitted.
+                    print("  %s" % exc)
+                    failures.append("%s: not submitted" % key)
+                    halted = True
+                    continue
+                remaining -= live
+                jobs[key] = {
+                    "job_id": job["id"],
+                    "state": job.get("state", "queued"),
+                    "submitted_at":
+                        dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "live_quote_at_submit": live,
+                    "planned_quote": planned_quote(args.scope, window,
+                                                   schema),
+                    "scope": args.scope,
+                    "window": window[0],
+                    "schema": schema,
+                    "encoding": ENCODING,
+                    "compression": COMPRESSION,
+                    "split_duration": SPLIT_DURATION,
+                }
+                save_ledger(jobs)
+                print("  submitted job %s at %.2f" % (job["id"], live))
+
+    # Phase 5: settle every entry that owns a vendor job.
+    for window, schema in resolve_plan(args.scope, args.plan):
+        key = ledger_key(args.scope, window[0], schema)
+        entry = jobs.get(key)
+        if not entry or not entry.get("job_id"):
+            continue
+        print("\n== %s" % key)
         if entry.get("state") == "downloaded":
             dest = landing_dir(args.scope, window[0], schema)
             bad = verify_landing(dest, entry.get("files") or {})
@@ -1095,6 +1297,7 @@ def mode_buy(args):
         write_manifest(dest, entry)
         save_ledger(jobs)
         print("  %d file(s) verified into %s" % (len(verified), dest))
+
     print()
     if failures:
         print("FAILED: %d item(s) incomplete" % len(failures))
@@ -1105,7 +1308,7 @@ def mode_buy(args):
         # A distinct NONTERMINAL exit: nothing failed, but claiming "settled"
         # here would let orchestration treat an undelivered purchase as
         # finished. Exit 3 means exactly "come back and poll".
-        print("WAITING: %d job(s) not yet deliverable; re-run buy to poll" %
+        print("WAITING: %d item(s) nonterminal; re-run buy to continue" %
               len(waiting))
         for line in waiting:
             print("   ", line)
@@ -1321,7 +1524,8 @@ def selftest():
           match is not None and match["id"] == "GLBX-RECOVERED")
     match = reconcile_pending("pairv", window, "trades", intent_at,
                               fetch=lambda *a, **k: [other])
-    check("no matching job returns None, safe to clear", match is None)
+    check("no matching job returns None for the clear-delay gate to judge",
+          match is None)
     scrambled = dict(vendor_job, symbols=[
         s.strip().lower() for s in
         reversed(params["symbols"].split(","))])
@@ -1388,6 +1592,125 @@ def selftest():
     except Refusal:
         refused = True
     check("a missing intent timestamp refuses reconciliation", refused)
+
+    print("no-match intents cannot clear inside the vendor-lag window")
+    verdict_now = dt.datetime(2026, 8, 5, 12, 30, tzinfo=dt.timezone.utc)
+    recent = {"intent_at": "2026-08-05T12:25:00+00:00",
+              "no_match_listings": ["a", "b", "c"]}
+    ok, reason = pending_clear_verdict(recent, now=verdict_now)
+    check("a recent unmatched intent cannot resubmit, whatever the "
+          "listing count", not ok and "delay" in reason)
+    aged_unconfirmed = {"intent_at": "2026-08-05T11:00:00+00:00",
+                        "no_match_listings": ["one"]}
+    ok, reason = pending_clear_verdict(aged_unconfirmed, now=verdict_now)
+    check("an aged intent with one listing still waits",
+          not ok and "confirming" in reason)
+    aged_confirmed = {"intent_at": "2026-08-05T11:00:00+00:00",
+                      "no_match_listings": ["2026-08-05T12:00:00+00:00",
+                                            "2026-08-05T12:10:00+00:00"]}
+    ok, _reason = pending_clear_verdict(aged_confirmed, now=verdict_now)
+    check("aged plus two spaced valid listings clears", ok)
+    back_to_back = {"intent_at": "2026-08-05T11:00:00+00:00",
+                    "no_match_listings": ["2026-08-05T12:10:00+00:00",
+                                          "2026-08-05T12:10:30+00:00"]}
+    ok, reason = pending_clear_verdict(back_to_back, now=verdict_now)
+    check("back-to-back listings confirm nothing and wait",
+          not ok and "span" in reason)
+    ok, _reason = pending_clear_verdict({"no_match_listings": ["a", "b"]},
+                                        now=verdict_now)
+    check("an intent without a timestamp never clears", not ok)
+
+    print("the cap is cumulative across runs")
+    crash_jobs = {
+        ledger_key("nqv", "2026-04.full", "tbbo"):
+            {"job_id": "GLBX-M1", "live_quote_at_submit": 16.08},
+        ledger_key("nqv", "2026-05.full", "tbbo"):
+            {"state": "submitting", "live_quote_at_intent": 17.47},
+    }
+    prior = plan_prior_spend(crash_jobs, "nqv", "contiguous")
+    check("prior spend counts submitted and pending plan entries",
+          abs(prior - 33.55) < 1e-9)
+    # Crash-and-resume: a 100-dollar cap with 33.55 committed leaves 66.45;
+    # the remaining two months at 19.26 + 18.98 fit, but a full-cap reset
+    # would have allowed rebuying everything. Prove the reduced cap refuses
+    # what the full cap would have accepted.
+    ok, _reason = submission_verdict(True, 100.0 - prior, None, 70.0, 70.0)
+    check("a rerun cannot spend the full cap again", not ok)
+    ok, _reason = submission_verdict(True, 100.0 - prior, None, 38.24, 38.24)
+    check("the reduced cap still admits the genuinely remaining rows", ok)
+    check("plans without ledger entries carry no prior spend",
+          plan_prior_spend({}, "nqv", "contiguous") == 0.0)
+
+    print("buy is whitelisted to the staged purchase")
+    try:
+        authorize_buy("nqv", "basket", {})
+        refused = False
+    except Refusal:
+        refused = True
+    check("a superseded basket cannot be bought", refused)
+    try:
+        authorize_buy("pairv", "contiguous", {})
+        refused = False
+    except Refusal:
+        refused = True
+    check("a mismatched scope/plan pairing cannot be bought", refused)
+    try:
+        authorize_buy("pairv", "paircurrent", {})
+        allowed = True
+    except Refusal:
+        allowed = False
+    check("stage one is available with an empty ledger", allowed)
+    try:
+        authorize_buy("nqv", "contiguous", {})
+        refused = False
+    except Refusal:
+        refused = True
+    check("stage two is locked before the paired test lands", refused)
+    pair_files = {"glbx-mdp3-20260706.trades.csv.zst": "a" * 64}
+    downloaded_pair = {ledger_key("pairv", "2026-07.2wk", "trades"):
+                       {"job_id": "GLBX-PAIR", "state": "downloaded",
+                        "files": pair_files}}
+    submitted_only = {ledger_key("pairv", "2026-07.2wk", "trades"):
+                      {"job_id": "GLBX-PAIR", "state": "done"}}
+    try:
+        authorize_buy("nqv", "contiguous", submitted_only)
+        refused = False
+    except Refusal:
+        refused = True
+    check("a merely submitted pair does not unlock stage two", refused)
+    verdict_path = os.path.join(SELFTEST_DIR, "pair-verdict.json")
+
+    def try_stage_two():
+        try:
+            authorize_buy("nqv", "contiguous", downloaded_pair,
+                          verdict_path=verdict_path)
+            return True
+        except Refusal:
+            return False
+
+    check("a downloaded pair with NO verdict artifact stays locked",
+          not try_stage_two())
+    with open(verdict_path, "w") as fh:
+        json.dump({"verdict": "fail", "job_id": "GLBX-PAIR",
+                   "files": pair_files}, fh)
+    check("a FAILED pair verdict keeps stage two locked",
+          not try_stage_two())
+    with open(verdict_path, "w") as fh:
+        json.dump({"verdict": "pass", "job_id": "GLBX-OTHER",
+                   "files": pair_files}, fh)
+    check("a pass verdict for a different job id stays locked",
+          not try_stage_two())
+    with open(verdict_path, "w") as fh:
+        json.dump({"verdict": "pass", "job_id": "GLBX-PAIR",
+                   "files": {"glbx-mdp3-20260706.trades.csv.zst": "b" * 64}},
+                  fh)
+    check("a pass verdict against different bytes stays locked",
+          not try_stage_two())
+    with open(verdict_path, "w") as fh:
+        json.dump({"verdict": "pass", "job_id": "GLBX-PAIR",
+                   "files": pair_files}, fh)
+    check("only the affirmative verdict bound to job and bytes unlocks",
+          try_stage_two())
 
     print("buy-lock mutual exclusion")
     lock_path = os.path.join(SELFTEST_DIR, "jobs.json.lock")
@@ -1672,8 +1995,10 @@ def main():
     parser.add_argument("--confirm", action="store_true",
                         help="arm submission; alone it still submits nothing")
     parser.add_argument("--max-dollars", type=float, default=None,
-                        help="hard cap on this run's total submission cost; "
-                             "required, with --confirm, to submit anything")
+                        help="cumulative cap on the PLAN's submitted spend "
+                             "across runs - prior submitted and pending "
+                             "entries count against it; required, with "
+                             "--confirm, to submit anything")
     args = parser.parse_args()
     if args.mode == "selftest":
         selftest()

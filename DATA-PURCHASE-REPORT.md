@@ -2052,7 +2052,14 @@ byte-unchanged and still cannot spend.
 
 What remains NOT authorized: any invocation with `--confirm`. The 9.6
 purchase runs one stage at a time - pair first and alone, read, then the
-contiguous months - each on explicit instruction. Two small open items
+contiguous months - each on explicit instruction. The tool enforces the
+staging structurally: `buy` is whitelisted to exactly the two staged plans,
+submission is all-or-nothing with a stop at the first failure, `--max-dollars`
+caps CUMULATIVE plan spend across resumed runs, and stage two stays locked
+until `analysis/databento-pair-verdict.json` carries an affirmative
+`verdict: pass` bound to the paired test's job id and delivered file hashes -
+the analysis writes that artifact after a human reads the result; delivery
+alone unlocks nothing. Two small open items
 before the first armed run: a conscious yes on `pretty_px`/`pretty_ts`
 (currently SDK defaults, fixed-precision ints) and `map_symbols` (currently
 true), and awareness that the SDK deprecates `metadata.get_cost`'s `mode`
