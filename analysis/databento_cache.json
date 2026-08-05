@@ -73,6 +73,10 @@
    "body": 670045440,
    "fetched": "2026-08-05T08:06:04.094339+00:00"
   },
+  "metadata.get_billable_size|json|dataset=GLBX.MDP3&end=2026-06-30T21%3A00%3A00&schema=tbbo&start=2026-05-31T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 2688628160,
+   "fetched": "2026-08-05T12:12:02.624448+00:00"
+  },
   "metadata.get_billable_size|json|dataset=GLBX.MDP3&end=2026-06-30T21%3A00%3A00&schema=tbbo&start=2026-05-31T22%3A00%3A00&stype_in=continuous&symbols=NQ.v.0": {
    "body": 738576240,
    "fetched": "2026-08-05T08:06:39.152990+00:00"
@@ -88,6 +92,10 @@
   "metadata.get_billable_size|json|dataset=GLBX.MDP3&end=2026-07-19T21%3A00%3A00&schema=trades&start=2026-07-05T22%3A00%3A00&stype_in=continuous&symbols=NQ.v.0%2CMNQ.v.0": {
    "body": 922587552,
    "fetched": "2026-08-05T08:05:19.131954+00:00"
+  },
+  "metadata.get_billable_size|json|dataset=GLBX.MDP3&end=2026-07-31T21%3A00%3A00&schema=tbbo&start=2026-06-30T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 2814964880,
+   "fetched": "2026-08-05T12:12:01.686144+00:00"
   },
   "metadata.get_billable_size|json|dataset=GLBX.MDP3&end=2026-07-31T21%3A00%3A00&schema=tbbo&start=2026-06-30T22%3A00%3A00&stype_in=continuous&symbols=NQ.v.0": {
    "body": 727920640,
@@ -317,9 +325,17 @@
    "body": 28.955775797367,
    "fetched": "2026-08-05T09:13:36.161188+00:00"
   },
+  "metadata.get_cost|json|dataset=GLBX.MDP3&end=2026-06-30T21%3A00%3A00&mode=historical-streaming&schema=definition&start=2026-05-31T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1.5389174e-05,
+   "fetched": "2026-08-05T12:12:18.433265+00:00"
+  },
   "metadata.get_cost|json|dataset=GLBX.MDP3&end=2026-06-30T21%3A00%3A00&mode=historical-streaming&schema=definition&start=2026-05-31T22%3A00%3A00&stype_in=continuous&symbols=NQ.v.0": {
    "body": 1.5389174e-05,
    "fetched": "2026-08-04T04:28:44.426713+00:00"
+  },
+  "metadata.get_cost|json|dataset=GLBX.MDP3&end=2026-06-30T21%3A00%3A00&mode=historical-streaming&schema=statistics&start=2026-05-31T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0.005771398544,
+   "fetched": "2026-08-05T12:12:56.614661+00:00"
   },
   "metadata.get_cost|json|dataset=GLBX.MDP3&end=2026-06-30T21%3A00%3A00&mode=historical-streaming&schema=statistics&start=2026-05-31T22%3A00%3A00&stype_in=continuous&symbols=NQ.v.0": {
    "body": 0.004848659039,
@@ -385,6 +401,10 @@
    "body": 24.058345198631,
    "fetched": "2026-08-05T08:05:00.532107+00:00"
   },
+  "metadata.get_cost|json|dataset=GLBX.MDP3&end=2026-07-31T21%3A00%3A00&mode=historical-streaming&schema=definition&start=2026-06-30T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1.5959144e-05,
+   "fetched": "2026-08-05T12:12:12.957323+00:00"
+  },
   "metadata.get_cost|json|dataset=GLBX.MDP3&end=2026-07-31T21%3A00%3A00&mode=historical-streaming&schema=definition&start=2026-06-30T22%3A00%3A00&stype_in=continuous&symbols=NQ.v.0": {
    "body": 1.5959144e-05,
    "fetched": "2026-08-05T08:07:42.231322+00:00"
@@ -400,6 +420,10 @@
   "metadata.get_cost|json|dataset=GLBX.MDP3&end=2026-07-31T21%3A00%3A00&mode=historical-streaming&schema=mbp-10&start=2026-06-30T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
    "body": 188.229471027851,
    "fetched": "2026-08-05T09:12:13.971043+00:00"
+  },
+  "metadata.get_cost|json|dataset=GLBX.MDP3&end=2026-07-31T21%3A00%3A00&mode=historical-streaming&schema=statistics&start=2026-06-30T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0.004818201065,
+   "fetched": "2026-08-05T12:12:47.523164+00:00"
   },
   "metadata.get_cost|json|dataset=GLBX.MDP3&end=2026-07-31T21%3A00%3A00&mode=historical-streaming&schema=statistics&start=2026-06-30T22%3A00%3A00&stype_in=continuous&symbols=NQ.v.0": {
    "body": 0.004448831081,
@@ -641,9 +665,17 @@
    "body": 23133205,
    "fetched": "2026-08-05T09:13:37.782796+00:00"
   },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-06-30T21%3A00%3A00&schema=definition&start=2026-05-31T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 27,
+   "fetched": "2026-08-05T12:12:34.484504+00:00"
+  },
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-06-30T21%3A00%3A00&schema=definition&start=2026-05-31T22%3A00%3A00&stype_in=continuous&symbols=NQ.v.0": {
    "body": 27,
    "fetched": "2026-08-04T04:28:45.112063+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-06-30T21%3A00%3A00&schema=statistics&start=2026-05-31T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 96828,
+   "fetched": "2026-08-05T12:12:59.569696+00:00"
   },
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-06-30T21%3A00%3A00&schema=statistics&start=2026-05-31T22%3A00%3A00&stype_in=continuous&symbols=NQ.v.0": {
    "body": 81347,
@@ -709,6 +741,10 @@
    "body": 19220574,
    "fetched": "2026-08-05T08:05:17.527504+00:00"
   },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-31T21%3A00%3A00&schema=definition&start=2026-06-30T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 28,
+   "fetched": "2026-08-05T12:12:15.789727+00:00"
+  },
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-31T21%3A00%3A00&schema=definition&start=2026-06-30T22%3A00%3A00&stype_in=continuous&symbols=NQ.v.0": {
    "body": 28,
    "fetched": "2026-08-05T08:07:44.636438+00:00"
@@ -724,6 +760,10 @@
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-31T21%3A00%3A00&schema=mbp-10&start=2026-06-30T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
    "body": 1098423128,
    "fetched": "2026-08-05T09:12:22.751651+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-31T21%3A00%3A00&schema=statistics&start=2026-06-30T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 80836,
+   "fetched": "2026-08-05T12:12:49.168439+00:00"
   },
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-31T21%3A00%3A00&schema=statistics&start=2026-06-30T22%3A00%3A00&stype_in=continuous&symbols=NQ.v.0": {
    "body": 74639,

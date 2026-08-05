@@ -65,6 +65,11 @@ model = "gpt-5.6-sol"
 effort = "xhigh"
 sandbox = "read-only"
 
+[bygg.codex.spar]
+model = "gpt-5.6-sol"
+effort = "low"
+sandbox = "read-only"
+
 [bygg.codex.quick]
 model = "gpt-5.6-sol"
 effort = "low"

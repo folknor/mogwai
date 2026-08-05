@@ -195,12 +195,22 @@ rerun the wave 1 deciding report: its one-run verdict is final and preserved in
 only by its frozen preflight and deciding harness and needs no further action.
 Nothing in wave 2B or wave 3 has been bought.
 
-1. If wave 2B is authorized: add the `mnqv` scope + window entries to
-   `databento_price.py`, run the pricing sweep (drift gate requires it),
-   extend `AUTHORIZED_BUYS` with 2B's unlock rule (pair ANALYZED, either
-   verdict), then arm per stage. This groundwork is safe to build without a
-   purchase, but submitting remains a new explicit authorization. Budget
-   headroom after both fail-branch months: 57.42 dollars.
+1. **Wave 2B groundwork: DONE 2026-08-05, unarmed.** The `mnqv` scope
+   (`MNQ.v.0`, continuous) and the `mnq2b` plan (2026-07.full + 2026-06.full,
+   both TBBO - the fail-branch composition, fixed now the verdict is final)
+   are in `databento_price.py`; the existing windows were reused, since
+   WINDOWS describes time bounds, not instruments. `AUTHORIZED_BUYS` grew a
+   policy shape - each gated stage names its prerequisite ledger entry plus
+   an explicit `accepted_verdicts` set - so `nqv/contiguous` still demands
+   `pass` while `mnqv/mnq2b` unlocks on `pass` OR `fail`, always bound to
+   job id and delivered hashes, with structural verdict-artifact validation
+   failing closed. Selftest is 115 checks green. The pricing run is done:
+   73.41 + 70.11 = 143.52, matching 9.7, cached 2026-08-05 as the drift
+   baselines the submit gate requires. Submitting remains a new explicit
+   authorization; nothing is armed. Budget headroom after both fail-branch
+   months: 57.42 dollars. (Known cosmetic: `phase_plan` totals against the
+   static 125 credit, so `mnq2b` prints negative headroom; the 9.7 program
+   budget is 225 with 24.06 spent.)
 2. The MNQ fit itself: wave 2B's data feeds the per-instrument scalars
    and quote seams - that work bumps `TAPE_PROTOCOL_VERSION` and needs its
    own spec per `reference/technical-implementation-spec.md`.
@@ -1434,7 +1444,11 @@ because the downloader's drift gate refuses any row without a plan-time
 baseline in our own cache; and the buy whitelist extended with this wave's
 unlock rule. These prices were produced by our tool and are verified current
 quotes, not reported estimates; they must still pass the downloader's normal
-drift check at the later plan and submission times.
+drift check at the later plan and submission times. **Groundwork BUILT
+2026-08-05**: the `mnqv` scope and `mnq2b` plan exist, the pricing run
+matched these figures exactly and refreshed the drift baselines, and the
+unlock rule is live in the whitelist - analyzed pair, either verdict, bound
+to job and bytes. Only the explicit buy authorization is outstanding.
 
 **Wave 3 - two weeks of MNQ MBO, 2026-07-06 to 07-20. 54.52, verified
 2026-08-05 alongside the wave 2B quotes. ALWAYS LAST.** Gate, twofold: an accepted implementation specification for
@@ -2245,10 +2259,13 @@ caps CUMULATIVE plan spend across resumed runs, and the NQ stage stays locked
 until `analysis/databento-pair-verdict.json` carries an affirmative
 `verdict: pass` bound to the paired test's job id and delivered file hashes -
 the analysis writes that artifact after a human reads the result; delivery
-alone unlocks nothing. The whitelist currently implements waves 1 and 2A of
-[9.7](#97-the-extended-program-gated-in-waves); waves 2B and 3 require the
-`mnqv` scope, a pricing sweep, and their own unlock rules added before they
-can arm, which the drift gate enforces anyway - an unpriced row refuses. Two small open items
+alone unlocks nothing. The whitelist implements waves 1, 2A and - since the
+2026-08-05 groundwork - 2B of
+[9.7](#97-the-extended-program-gated-in-waves), each gated stage carrying an
+explicit accepted-verdicts policy (`nqv/contiguous` demands `pass`;
+`mnqv/mnq2b` accepts `pass` or `fail`, both bound to job and bytes); wave 3
+still requires its own scope, pricing sweep and unlock rule before it can
+arm, which the drift gate enforces anyway - an unpriced row refuses. Two small open items
 before the first armed run: a conscious yes on `pretty_px`/`pretty_ts`
 (currently SDK defaults, fixed-precision ints) and `map_symbols` (currently
 true), and awareness that the SDK deprecates `metadata.get_cost`'s `mode`

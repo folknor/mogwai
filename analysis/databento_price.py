@@ -94,6 +94,10 @@ SCOPES = {
     # comparison has to be the same ranking as the rest of the basket or the
     # difference it measures is partly a difference in contract selection.
     "pairv": ("NQ.v.0,MNQ.v.0", "continuous"),
+    # MNQ alone on v.0: the wave 2B scope. Wave 1 judged NQ not a usable MNQ
+    # proxy, so direct MNQ evidence is the operative path; the quote seams are
+    # per-instrument and need MNQ quotes under either pair verdict.
+    "mnqv": ("MNQ.v.0", "continuous"),
     # GC alone. Not a preset target, but the only cheap way to get a SECOND
     # tick-size-to-price ratio: NQ and MNQ share the 0.25 tick and the same
     # index, so they cannot between them test whether a derived zero_change_frac
@@ -447,9 +451,23 @@ CONTIGUOUS_PLAN = [
 # moments, not quotes, per the original 9.3 design.
 PAIR_CURRENT_PLAN = [("2026-07.2wk", "trades")]
 
+# Wave 2B of 9.7: direct MNQ TBBO, priced against scope "mnqv". This is the
+# OPERATIVE FAIL-BRANCH composition, fixed now that wave 1's verdict is final:
+# the pair test FAILED, so the target instrument carries two contiguous months
+# of trade-and-quote evidence itself. A pass would have bought 2026-07 alone;
+# that is provenance, not a latent branch - the plan never inspects the
+# verdict. Both windows already exist in WINDOWS (added for the superseded
+# nqv contiguous design); reusing them is deliberate, since WINDOWS describes
+# time bounds, not instruments, and the cache keys on the full request
+# parameters. Do not duplicate them for MNQ.
+MNQ2B_PLAN = [
+    ("2026-07.full", "tbbo"),
+    ("2026-06.full", "tbbo"),
+]
+
 PLANS = {"basket": PLAN, "depth": DEPTH_PLAN, "pair": PAIR_PLAN,
          "grid": GRID_PLAN, "contiguous": CONTIGUOUS_PLAN,
-         "paircurrent": PAIR_CURRENT_PLAN}
+         "paircurrent": PAIR_CURRENT_PLAN, "mnq2b": MNQ2B_PLAN}
 BUDGET = 125.0
 
 

@@ -18,8 +18,10 @@ Four modes:
     plan       fresh (uncached) quotes for one scope/plan, the would-submit
                table with drift verdicts; free metadata endpoints only
     buy        the lifecycle driver: submit (gated), poll, download, verify.
-               Whitelisted to the staged purchase - pairv/paircurrent, then
-               nqv/contiguous once the paired test has landed - and
+               Whitelisted to the staged purchase - pairv/paircurrent first;
+               nqv/contiguous only on an affirmative pair pass (wave 1
+               FAILED, so it is locked in practice); mnqv/mnq2b, wave 2B,
+               once the pair is analyzed under either verdict - and
                all-or-nothing: preflight covers every row before the first
                POST, and the first failure stops further submissions.
                Without BOTH --confirm and --max-dollars it SUBMITS nothing,
@@ -900,14 +902,27 @@ def write_manifest(dest_dir, entry):
 # ---------------------------------------------------------------------------
 
 
-# buy is whitelisted to the staged 9.6 purchase and nothing else. The pricing
-# tool exposes every scope/plan combination for COMPARISON, including the
-# superseded regime-selected baskets; none of those may be bought, and the
-# contiguous stage stays locked until the paired test - the asymmetric stop
-# condition - has landed AND been affirmatively judged.
+# buy is whitelisted to the staged 9.6/9.7 purchase and nothing else. The
+# pricing tool exposes every scope/plan combination for COMPARISON, including
+# the superseded regime-selected baskets; none of those may be bought. A None
+# policy means stage one, no prerequisite. Otherwise the policy names the
+# prerequisite ledger entry and the set of verdict values that unlock the
+# stage: nqv/contiguous requires an affirmative pass - wave 1 FAILED, so that
+# stage is permanently locked in practice - while mnqv/mnq2b (wave 2B) unlocks
+# on pass OR fail, because the paired test must be ANALYZED but the
+# per-instrument MNQ quote seams need MNQ quotes under either verdict. The
+# verdict value must still be an explicitly accepted one: "analyzed" is a
+# policy label here, never an artifact value, and an unknown value locks.
 AUTHORIZED_BUYS = {
     ("pairv", "paircurrent"): None,
-    ("nqv", "contiguous"): ("pairv", "2026-07.2wk", "trades"),
+    ("nqv", "contiguous"): {
+        "prereq": ("pairv", "2026-07.2wk", "trades"),
+        "accepted_verdicts": frozenset({"pass"}),
+    },
+    ("mnqv", "mnq2b"): {
+        "prereq": ("pairv", "2026-07.2wk", "trades"),
+        "accepted_verdicts": frozenset({"pass", "fail"}),
+    },
 }
 
 # The affirmative analysis decision that unlocks stage two. This tool only
@@ -923,31 +938,43 @@ PAIR_VERDICT_FILE = os.path.join(
 
 def authorize_buy(scope, variant, jobs, verdict_path=PAIR_VERDICT_FILE):
     """Refuse any buy outside the staged design; refuse a stage whose
-    prerequisite has not been downloaded AND affirmatively judged. Every
-    branch fails closed with a named reason."""
-    prereq = AUTHORIZED_BUYS.get((scope, variant), "unlisted")
-    if prereq == "unlisted":
+    prerequisite has not been downloaded AND judged with a verdict the
+    stage's policy accepts. Every branch fails closed with a named reason."""
+    policy = AUTHORIZED_BUYS.get((scope, variant), "unlisted")
+    if policy == "unlisted":
         allowed = ", ".join("%s/%s" % pair for pair in sorted(AUTHORIZED_BUYS))
         raise Refusal("buy is whitelisted to the staged purchase (%s); "
                       "%s/%s is not in it" % (allowed, scope, variant))
-    if prereq is None:
+    if policy is None:
         return
-    key = ledger_key(*prereq)
+    key = ledger_key(*policy["prereq"])
+    accepted = policy["accepted_verdicts"]
     entry = jobs.get(key)
     if not entry or entry.get("state") != "downloaded":
         raise Refusal("stage locked: %s/%s requires the paired test %s to "
                       "be downloaded first" % (scope, variant, key))
     if not os.path.exists(verdict_path):
         raise Refusal("stage locked: no pair verdict at %s; the paired test "
-                      "must be ANALYZED and affirmatively passed, delivery "
-                      "alone unlocks nothing" % verdict_path)
+                      "must be ANALYZED and judged, delivery alone unlocks "
+                      "nothing" % verdict_path)
     try:
         verdict = json.loads(open(verdict_path).read())
     except (json.JSONDecodeError, OSError) as exc:
         raise Refusal("stage locked: pair verdict unreadable (%s)" % exc)
-    if verdict.get("verdict") != "pass":
-        raise Refusal("stage locked: pair verdict is %r, not the required "
-                      "affirmative pass" % verdict.get("verdict"))
+    # Structural validation before any lookup: valid JSON that is not an
+    # object, or a verdict value that is not a string, must fail closed with
+    # a named reason rather than raise on .get or on set membership.
+    if not isinstance(verdict, dict):
+        raise Refusal("stage locked: pair verdict must be a JSON object, "
+                      "got %s" % type(verdict).__name__)
+    verdict_value = verdict.get("verdict")
+    if not isinstance(verdict_value, str):
+        raise Refusal("stage locked: pair verdict value must be a string, "
+                      "got %s" % type(verdict_value).__name__)
+    if verdict_value not in accepted:
+        raise Refusal("stage locked: pair verdict is %r, but %s/%s accepts "
+                      "only %s" % (verdict_value, scope, variant,
+                                   ", ".join(sorted(accepted))))
     if verdict.get("job_id") != entry.get("job_id"):
         raise Refusal("stage locked: pair verdict names job %r but the "
                       "ledger's paired test is job %r" % (
@@ -1080,8 +1107,9 @@ def mode_buy(args):
     """The lifecycle driver, in phases, so money-touching work is
     all-or-nothing:
 
-    1. AUTHORIZE: only the staged 9.6 plans; the contiguous stage stays
-       locked until the paired test has landed.
+    1. AUTHORIZE: only the staged 9.6/9.7 plans; each gated stage stays
+       locked until the paired test is analyzed with a verdict its policy
+       accepts.
     2. RECONCILE pending intents (armed runs), with the no-match delay: an
        empty listing is not proof the POST failed, so clearing requires age
        plus repeated confirmations.
@@ -1711,6 +1739,74 @@ def selftest():
                    "files": pair_files}, fh)
     check("only the affirmative verdict bound to job and bytes unlocks",
           try_stage_two())
+
+    print("wave 2B unlocks on either verdict, bound the same way")
+
+    def try_wave_2b():
+        try:
+            authorize_buy("mnqv", "mnq2b", downloaded_pair,
+                          verdict_path=verdict_path)
+            return True
+        except Refusal:
+            return False
+
+    try:
+        authorize_buy("mnqv", "mnq2b", {})
+        refused = False
+    except Refusal:
+        refused = True
+    check("wave 2B is locked with an empty ledger", refused)
+    try:
+        authorize_buy("mnqv", "mnq2b", submitted_only,
+                      verdict_path=verdict_path)
+        refused = False
+    except Refusal:
+        refused = True
+    check("a merely submitted pair does not unlock wave 2B", refused)
+    os.remove(verdict_path)
+    check("a downloaded pair with NO verdict artifact locks wave 2B",
+          not try_wave_2b())
+    with open(verdict_path, "w") as fh:
+        fh.write("{not json")
+    check("a malformed verdict artifact locks wave 2B", not try_wave_2b())
+    with open(verdict_path, "w") as fh:
+        fh.write("[]")
+    check("a valid non-object verdict artifact locks wave 2B",
+          not try_wave_2b())
+    with open(verdict_path, "w") as fh:
+        json.dump({"verdict": ["fail"], "job_id": "GLBX-PAIR",
+                   "files": pair_files}, fh)
+    check("a non-string verdict value locks wave 2B", not try_wave_2b())
+    with open(verdict_path, "w") as fh:
+        json.dump({"verdict": "analyzed", "job_id": "GLBX-PAIR",
+                   "files": pair_files}, fh)
+    check("the policy label analyzed is not an artifact value; it locks",
+          not try_wave_2b())
+    with open(verdict_path, "w") as fh:
+        json.dump({"verdict": "pending", "job_id": "GLBX-PAIR",
+                   "files": pair_files}, fh)
+    check("an unknown verdict value locks wave 2B", not try_wave_2b())
+    with open(verdict_path, "w") as fh:
+        json.dump({"verdict": "fail", "job_id": "GLBX-OTHER",
+                   "files": pair_files}, fh)
+    check("a fail verdict for a different job id locks wave 2B",
+          not try_wave_2b())
+    with open(verdict_path, "w") as fh:
+        json.dump({"verdict": "fail", "job_id": "GLBX-PAIR",
+                   "files": {"glbx-mdp3-20260706.trades.csv.zst": "b" * 64}},
+                  fh)
+    check("a fail verdict against different bytes locks wave 2B",
+          not try_wave_2b())
+    with open(verdict_path, "w") as fh:
+        json.dump({"verdict": "fail", "job_id": "GLBX-PAIR",
+                   "files": pair_files}, fh)
+    check("a bound FAIL verdict unlocks wave 2B", try_wave_2b())
+    check("the same bound FAIL keeps nqv contiguous locked",
+          not try_stage_two())
+    with open(verdict_path, "w") as fh:
+        json.dump({"verdict": "pass", "job_id": "GLBX-PAIR",
+                   "files": pair_files}, fh)
+    check("a bound pass verdict also unlocks wave 2B", try_wave_2b())
 
     print("buy-lock mutual exclusion")
     lock_path = os.path.join(SELFTEST_DIR, "jobs.json.lock")
