@@ -21,6 +21,14 @@ scripts/probe-warmup.log
 # priced baskets checkable without an API key, and it can hold no secret because
 # only successful response bodies are ever written.
 /analysis/cme_daily_features.json
+# Per-month 1-minute bars, 126 MB, derived from the gitignored Binance archives
+# under research/market-data. Nobody without those archives can use them and
+# anybody with them rebuilds in one command. The DERIVED SUMMARIES beside them
+# are committed and are the durable artifact: bar-scores-frozen.json is 8 KB,
+# targets-frozen.json likewise, and analysis/preflight/ is 232 KB of per-month
+# contract evidence that records why the 19-month span was confirmed.
+/analysis/bars/
+/analysis/targets/
 .agents
 .brokkr
 .claude

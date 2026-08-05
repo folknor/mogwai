@@ -303,6 +303,42 @@ Or both. There are no exceptions.
   violator under `reorder_prob`, and is pinned by
   `an_out_of_order_trade_folds_into_the_open_window_without_wedging`.)
 
+- BUILD, eventually: a CLI binary in `mogwai-data` that becomes the standing
+  home for the offline data machinery, in Rust. The repo now carries 30+
+  Python scripts across `analysis/` and `scripts/`, which is too much surface
+  to keep correct by convention; the corpus-scale work (archive preflight,
+  fidelity probes, fingerprint characterization) is exactly the streaming-
+  parse-and-count shape Rust is good at. The 2026-08-05 preflight optimization
+  measured the Python ceiling honestly: a bytes-mode hot loop plus a process
+  pool gets a 128.7M-row month to ~58 s, which is 2.21M rows/sec.
+
+  Do NOT justify this item with the 2.9M ticks/sec figure. That is
+  `SYNTHESIS_TICKS_PER_SEC`, the rate at which the generator MANUFACTURES a tick
+  - GARCH recursion, RNG draws, checkpoint retention, measured over a whole boot
+  interval - and manufacturing a tick is far heavier per item than splitting a
+  CSV line. Set beside Python's 2.21M rows/sec it looks like near-parity and so
+  argues AGAINST the migration, which is the opposite of the truth. The real
+  comparator is a Rust byte-level parse, which should run far faster than
+  either, and NOBODY HAS MEASURED IT. The expected win is large but currently
+  unquantified; a one-month Rust parse prototype timed against the same
+  128.7M-row archive would settle it for the cost of an afternoon, and this item
+  should carry that number before it is scheduled on performance grounds.
+
+  Prior art that cuts against the stated home: `tick-composition` started as
+  `mogwai-data/examples/tick_composition.rs` and was MOVED to
+  `mogwai-server/src/tick_composition.rs` as a subcommand of the `mogwai` bin
+  (494f00f). It needed the server's preset resolution, which is a real reason
+  and may not apply here - archive preflight only parses files and wants nothing
+  from the server. So `mogwai-data` may still be right, but the precedent points
+  the other way and should be distinguished deliberately rather than overlooked.
+
+  Consolidating also collapses the twice-computed-definition risk the
+  `analysis/` test-harness item below records (`dwell_stats` versus
+  `empty_hour_stats`), since one implementation would serve both the corpus
+  measurement and the generator gate. Scope decisions when picked up: which
+  scripts migrate versus die, whether the bin reads ZIP archives directly
+  (a new dependency), and how the per-month JSON result contract carries over.
+
 - DECIDE: does `analysis/` deserve a test harness? Surfaced 2026-08-02 landing
   the drought elimination. The dwell statistics are computed TWICE against the
   same definition - `dwell_stats` in `analysis/characterize.py` measures the
@@ -323,6 +359,14 @@ Or both. There are no exceptions.
   manual step, and whether the existing analysis code - `dwell_stats` first -
   gets retrofitted onto it. Adding a second test toolchain to a workspace whose
   gate is `brokkr check` is a project-shape call, not a local fix.
+
+  Read this WITH the Rust-consolidation item above, which may moot part of it.
+  If `dwell_stats` migrates to Rust it stops needing a Python harness and stops
+  being a second definition at all, so investing in a Python test toolchain for
+  it first would be work with a known expiry. The part that survives either way
+  is the surviving Python that does NOT migrate, and deciding which scripts
+  those are is the migration item's scope question. Sequence accordingly: that
+  decision comes first, this one is downstream of it.
 
 - UNPROVEN, and it decides whether the venue-identity check needs to stop being
   opt-in: can a full session be established against a stranger holding a reused
@@ -401,9 +445,16 @@ Or both. There are no exceptions.
   disconnect/backoff/reconnect/exhaustion per socket.)
 - The offline Kraken corpus is trades only - no quotes, no L2, no aggressor side.
   This shapes the offline analysis only; the running server synthesizes trades
-  with a native `Buyer`/`Seller` aggressor and serves no quotes (`/quotes` is
-  always empty). `KrakenCsvSource` and `TickRuleAggressor` survive in
-  `mogwai-data` for the offline lineage and its unit tests.
+  with a native `Buyer`/`Seller` aggressor AND, since tape protocol 7, publishes
+  an observable top of book - one BBO before every parent burst, bounded history
+  on `/quotes`, and a connect-time snapshot. This line asserted the opposite
+  until 2026-08-05, and `DATA-PURCHASE-REPORT.md` section 12 records it as one of
+  two existing records that contradicted that report and went unconsulted, so it
+  is worth keeping accurate rather than deleting. The quoted width, top sizes and
+  trade displacement remain explicitly uncalibrated placeholders pending CME
+  TBBO; what is absent is the calibration, not the layer. `KrakenCsvSource` and
+  `TickRuleAggressor` survive in `mogwai-data` for the offline lineage and its
+  unit tests.
 - `MOGWAI_DATA_DIR` (default `/home/folk/Kraken`) is an
   offline-analysis input only (`analysis/`), never a server runtime knob.
 - `research/` is gitignored and holds read-only nautilus, broadarrow and piners

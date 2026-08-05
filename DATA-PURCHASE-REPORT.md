@@ -319,16 +319,43 @@ asked it.
 
 ### 2.4 The fingerprint
 
-`analysis/fingerprint.json` was fitted to **8 Kraken pairs** (ADAUSD, DOTUSD,
-ETHUSD, SOLUSD, USDTUSD, XBTUSD, XDGUSD, XRPUSD), **298,003,956 trades**,
-anchored on XBTUSD.
+The committed fingerprint combines TWO evidence corpora, and earlier revisions of
+this section attributed all of it to the first.
+
+Its price-sequence golden targets were fitted across **8 Kraken pairs** (ADAUSD,
+DOTUSD, ETHUSD, SOLUSD, USDTUSD, XBTUSD, XDGUSD, XRPUSD), **298,003,956
+trades**, anchored on XBTUSD - the `source` block of
+`analysis/fingerprint.json`. Its cadence targets were fitted from **3 Binance
+spot pairs** (BTCUSDT, ETHUSDT, SOLUSDT) over **2026-06**, anchored on BTCUSDT
+and recorded in `analysis/cadence.json`; the anchor archive is
+`BTCUSDT-trades-2026-06.zip` at 128,668,052 rows.
+
+The correction was forced by independent measurement rather than by rereading:
+the resolution-fidelity probe of `notes/sampling-frame-preregistration.md`
+recomputed that archive at native microsecond resolution and reproduced every
+cadence anchor below to five decimals. The lineage is therefore verified, not
+inferred.
+
+Why it was wrong for so long is the familiar shape. Kraken carries WHOLE-SECOND
+timestamps - measured, all 81,810,187 XBTUSD rows - so it cannot express
+sub-second arrival structure at all, and the cadence work moved to Binance for
+exactly that reason. This section nevertheless presented the cadence table under
+the Kraken heading, and placement then read as provenance. The venue attribution
+matters because [section 6](#6-what-each-quantity-needs-and-where-it-can-come-from)
+turns on which quantities have which evidence behind them.
+
+One trap the split makes visible: **`duration_dispersion_cv2` appears in BOTH
+tables with different values** - 12.6366 from Kraken and 4.6188 from Binance.
+They are the same statistic over different corpora at different timestamp
+resolutions, not a transcription error.
 
 Its structure is genuinely good and should be kept: each target carries an
 `anchor` (the deepest series) plus a `range` of min/median/max across pairs,
 and the range IS the tolerance. That design generalises to any corpus. Re-anchor
 on NQ, keep other instruments as the range, and the machinery is unchanged.
 
-Golden targets, which the synthetic stream must reproduce:
+**Kraken price-sequence targets**, which the synthetic stream must reproduce.
+8 pairs, anchored on XBTUSD:
 
 | Target | Anchor | min | median | max |
 |---|---|---|---|---|
@@ -339,7 +366,9 @@ Golden targets, which the synthetic stream must reproduce:
 | `abs_return_acf.lag50` | 0.12252 | 0.03887 | 0.09254 | 0.12252 |
 | `zero_change_frac` | 0.47376 | 0.33620 | 0.40242 | 0.75108 |
 
-Cadence targets, which become the per-instrument scalars:
+**Binance cadence targets**, which become the per-instrument scalars. 3 spot
+pairs over 2026-06, anchored on BTCUSDT. Every row here is established by
+`analysis/cadence.json`, field for field including the ranges:
 
 | Target | Anchor | min | median | max |
 |---|---|---|---|---|
@@ -352,21 +381,36 @@ Cadence targets, which become the per-instrument scalars:
 | `duration_acf_lag1` | 0.32204 | 0.18587 | 0.32204 | 0.50472 |
 | `duration_acf_lag5` | 0.22388 | 0.11896 | 0.19759 | 0.33582 |
 
-`per_second_counts`: mean 49.64, median 4, p95 257, zero fraction 0.13346.
+`per_second_counts`: mean 49.64, median 4, p95 257, zero fraction 0.13346. Also
+Binance, from the same three-pair fit.
+
+Note the ranges here span THREE pairs, not eight. A range built from three
+observations is a much weaker tolerance than the same column in the Kraken
+table, and the two tables should not be read as carrying equal evidential
+weight merely because they share a shape.
 
 The original `scalar_ranges` both recorded these observations and used them as
-admission gates:
+admission gates. **This table is a MIXED corpus** - `fingerprint.json` labels the
+block "Kraken eight-pair fingerprint plus Binance three-pair cadence fit" - so
+provenance is per row and is stated per row:
 
-| Observed quantity | min | median | max |
-|---|---|---|---|
-| `modal_tick` | 1e-07 | 0.0001 | **0.25** |
-| `price_decimals` | 1 | 4 | 7 |
-| `mean_event_duration_s` | 0.09834 | 0.17104 | 0.77438 |
-| `children_mean` | 4.3026 | 6.9119 | 12.7358 |
-| `children_single_frac` | 0.25867 | 0.49305 | 0.83803 |
-| `levels_mean` | 1.0 | 1.7442 | 3.3707 |
-| `mean_trade_notional` (derived reporting only) | 100.78 | 191.40 | **466.13** |
-| `size_round_frac` | 0.12179 | 0.20857 | 0.27080 |
+| Observed quantity | corpus | min | median | max |
+|---|---|---|---|---|
+| `modal_tick` | Kraken | 1e-07 | 0.0001 | **0.25** |
+| `price_decimals` | Kraken | 1 | 4 | 7 |
+| `size_round_frac` | Kraken | 0.12179 | 0.20857 | 0.27080 |
+| `mean_event_duration_s` | Binance | 0.09834 | 0.17104 | 0.77438 |
+| `children_mean` | Binance | 4.3026 | 6.9119 | 12.7358 |
+| `children_single_frac` | Binance | 0.25867 | 0.49305 | 0.83803 |
+| `levels_mean` | Binance | 1.0 | 1.7442 | 3.3707 |
+| `mean_trade_notional` (derived reporting only) | Binance | 100.78 | 191.40 | **466.13** |
+
+The five Binance rows are the ones `cadence.json` establishes by exact value
+match. The three Kraken rows are assigned by ELIMINATION - they appear in
+`empirical_ranges` and are absent from `cadence.json`, and their content is
+consistent with an eight-pair spot corpus spanning many tick grids, which the
+three-pair cadence fit is not. That is weaker evidence than the Binance five and
+is labelled as such rather than presented as equally established.
 
 Both bolded ceilings matter in [section 3](#3-what-mnq-actually-gets-today).
 
@@ -1768,12 +1812,14 @@ Recorded so they are not re-derived.
   `bookTicker` entry above, one layer deeper: a name is a claim, and an unchecked
   claim propagates further the earlier it enters the document.
 
-  Worse, the correct fact was already written down. `notes/todo.md` states that
-  the running server "serves no quotes (`/quotes` is always empty)", and
-  `http.rs` says the same in a comment at the handler. Two existing records
+  Worse, the correct fact was already written down. `notes/todo.md` stated at the
+  time that the running server "serves no quotes (`/quotes` is always empty)",
+  and `http.rs` said the same in a comment at the handler. Two existing records
   contradicted this report and neither was consulted, because the error entered
   as an inference about a constant rather than as a question about behavior - and
-  an inference does not prompt a lookup the way a question does.
+  an inference does not prompt a lookup the way a question does. Both records
+  have since been corrected to describe the protocol 7 quote layer, so neither
+  reads as evidence for this entry any more; the entry is the record.
 - **"There is nowhere to put a regime-varying spread" was wrong in both
   directions.** For the trade displacement it overstated the obstacle:
   `trade_bounce_ticks` was already a per-instance field on `BounceState`, read
@@ -1781,6 +1827,20 @@ Recorded so they are not re-derived.
   For the quote layer it badly understated the obstacle: that layer did not
   exist at all then. Protocol 7 has since added it. The two were one sentence
   because the report had not yet separated the two observables.
+- **The fingerprint's cadence targets were attributed to the wrong venue.**
+  Section 2.4 opened by stating the fingerprint was fitted to eight Kraken pairs
+  anchored on XBTUSD, then printed the cadence table underneath that sentence.
+  The cadence half is Binance: three spot pairs over 2026-06, anchored on
+  BTCUSDT, recorded in `analysis/cadence.json`. Only the price-sequence golden
+  targets are Kraken's. The error is the same shape as the `HALF_SPREAD_TICKS`
+  entry above, one layer out: nothing asserted the wrong provenance, PLACEMENT
+  did, and a table under a heading inherits that heading's claim whether or not
+  anyone intended it. It survived because the true fact was inconvenient to
+  notice - Kraken carries whole-second timestamps and therefore CANNOT have
+  produced a sub-second cadence fit, which the repo already documented in
+  `analysis/probe_timestamp_precision.py`. A reader who did the arithmetic would
+  have caught it; nobody did until an unrelated experiment recomputed the anchor
+  archive and matched every value to five decimals.
 - **The identifiability claim for TBBO was too strong.** An earlier framing
   implied the trade displacement could be read off the quoted spread. It cannot:
   TBBO identifies the displacement only relative to the CONTEMPORANEOUS quote

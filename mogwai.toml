@@ -17,7 +17,11 @@ run_duration_ns = 0
 # precise error rather than silently served short. Formerly backfill_horizon_ns;
 # an operator with an old file renames the key and keeps the value.
 warmup_ns = 86400000000000
-fanout_depth = 65536
+# Broadcast ring capacity. A subscriber falling further behind than this has its
+# connection killed as a venue fault. This is the measured protocol 8 default;
+# under maximum surge it holds about 0.114 wall seconds, so a surge-exposed run
+# should size it deliberately rather than inherit it. See reference/performance.md.
+fanout_depth = 1048576
 zero_speed_stall_ms = 5000
 fill_band_vol_mult = 0.005
 fill_band_max_ticks = 200
