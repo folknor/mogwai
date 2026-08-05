@@ -20,8 +20,10 @@ Four modes:
     buy        the lifecycle driver: submit (gated), poll, download, verify.
                Whitelisted to the staged purchase - pairv/paircurrent first;
                nqv/contiguous only on an affirmative pair pass (wave 1
-               FAILED, so it is locked in practice); mnqv/mnq2b, wave 2B,
-               once the pair is analyzed under either verdict - and
+               FAILED, so it is locked in practice); mnqv/mnq07, wave 2B's
+               credit-sized July month, once the pair is analyzed under
+               either verdict. mnqv/mnq06 is priced but NOT whitelisted:
+               personal cash, argued only from measured July data - and
                all-or-nothing: preflight covers every row before the first
                POST, and the first failure stops further submissions.
                Without BOTH --confirm and --max-dollars it SUBMITS nothing,
@@ -908,18 +910,28 @@ def write_manifest(dest_dir, entry):
 # policy means stage one, no prerequisite. Otherwise the policy names the
 # prerequisite ledger entry and the set of verdict values that unlock the
 # stage: nqv/contiguous requires an affirmative pass - wave 1 FAILED, so that
-# stage is permanently locked in practice - while mnqv/mnq2b (wave 2B) unlocks
-# on pass OR fail, because the paired test must be ANALYZED but the
-# per-instrument MNQ quote seams need MNQ quotes under either verdict. The
-# verdict value must still be an explicitly accepted one: "analyzed" is a
-# policy label here, never an artifact value, and an unknown value locks.
+# stage is permanently locked in practice - while mnqv/mnq07 (wave 2B, the
+# July month, inside the remaining free credit) unlocks on pass OR fail,
+# because the paired test must be ANALYZED but the per-instrument MNQ quote
+# seams need MNQ quotes under either verdict. The verdict value must still be
+# an explicitly accepted one: "analyzed" is a policy label here, never an
+# artifact value, and an unknown value locks.
+#
+# mnqv/mnq06 is deliberately ABSENT under the credit-first policy: the June
+# month crosses from free credit into personal cash, and the case for it
+# must come from MEASURING the delivered July data under a decision contract
+# that does not exist yet. Absence fails closed through the unlisted
+# refusal. Delivery of July must never become its unlock - that would repeat
+# the mistake the 2A gate exists to prevent. When the contract exists, its
+# entry gets a dedicated analysis artifact bound to the mnq07 job id and
+# file hashes with its own recognized decision value.
 AUTHORIZED_BUYS = {
     ("pairv", "paircurrent"): None,
     ("nqv", "contiguous"): {
         "prereq": ("pairv", "2026-07.2wk", "trades"),
         "accepted_verdicts": frozenset({"pass"}),
     },
-    ("mnqv", "mnq2b"): {
+    ("mnqv", "mnq07"): {
         "prereq": ("pairv", "2026-07.2wk", "trades"),
         "accepted_verdicts": frozenset({"pass", "fail"}),
     },
@@ -1740,24 +1752,33 @@ def selftest():
     check("only the affirmative verdict bound to job and bytes unlocks",
           try_stage_two())
 
-    print("wave 2B unlocks on either verdict, bound the same way")
+    print("wave 2B: July unlocks on either verdict; June has no buy path")
+    check("mnq06 has no buy-whitelist entry",
+          ("mnqv", "mnq06") not in AUTHORIZED_BUYS)
+    try:
+        authorize_buy("mnqv", "mnq06", downloaded_pair,
+                      verdict_path=verdict_path)
+        refused = False
+    except Refusal:
+        refused = True
+    check("mnq06 is unlisted: personal cash has no live buy path", refused)
 
     def try_wave_2b():
         try:
-            authorize_buy("mnqv", "mnq2b", downloaded_pair,
+            authorize_buy("mnqv", "mnq07", downloaded_pair,
                           verdict_path=verdict_path)
             return True
         except Refusal:
             return False
 
     try:
-        authorize_buy("mnqv", "mnq2b", {})
+        authorize_buy("mnqv", "mnq07", {})
         refused = False
     except Refusal:
         refused = True
     check("wave 2B is locked with an empty ledger", refused)
     try:
-        authorize_buy("mnqv", "mnq2b", submitted_only,
+        authorize_buy("mnqv", "mnq07", submitted_only,
                       verdict_path=verdict_path)
         refused = False
     except Refusal:

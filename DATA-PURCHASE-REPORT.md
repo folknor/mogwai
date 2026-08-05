@@ -73,9 +73,10 @@ Recommendation, updated 2026-08-05 end of day: both deciding experiments are
 DONE and both FAILED - the sampling frame (volatility-stratified selection
 rejected) and the paired proxy test (NQ cannot stand in for MNQ). The
 operative purchase path is direct MNQ evidence: wave 2B of
-[9.7](#97-the-extended-program-gated-in-waves), available but unauthorized.
-24.06 of the 225 budget is spent, on evidence that settled both the proxy
-question and the protocol 8 arrival-bias question. See
+[9.7](#97-the-extended-program-gated-in-waves), split credit-first into a
+whitelisted July month and an unwhitelisted personal-cash June month,
+neither authorized. 24.06 of the 125 credit is spent, on evidence that
+settled both the proxy question and the protocol 8 arrival-bias question. See
 [0.1](#01-state-of-play-2026-08-05) for the full handover.
 
 ---
@@ -149,12 +150,18 @@ both FAILED, and the failures decided everything.**
    hash and harness commit. Full record in
    [9.7](#97-the-extended-program-gated-in-waves) and step 6.
 
-**Money.** 24.06 spent of 225 (125 credit + 100 personal). Wave 2A (NQ
-months, 71.79) is PERMANENTLY SKIPPED and structurally locked - the fail
-artifact refuses it in the downloader's stage gate. Wave 2B (direct MNQ
-TBBO, 2026-07 at 73.41 + 2026-06 at 70.11, quotes verified, drift
-baselines valid to 2026-08-12) is the operative path and NOT authorized.
-Wave 3 (MNQ MBO 54.52) is spec-gated, always last, not authorized.
+**Money, under the CREDIT-FIRST policy (owner restated 2026-08-05): the
+125 free credit is spent as optimally as possible first; personal cash is
+a CAN, argued case-by-case and put to the owner only on joint agreement,
+never a committed path.** 24.06 of the credit is spent; 100.94 remains.
+Wave 2A (NQ months, 71.79) is PERMANENTLY SKIPPED and structurally locked -
+the fail artifact refuses it in the downloader's stage gate. Wave 2B is
+SPLIT by that policy: the July month (`mnqv`/`mnq07`, 73.41, inside
+credit) is the operative purchase, whitelisted and NOT authorized; the
+June month (`mnq06`, 70.11, personal cash) is priced but deliberately NOT
+buy-whitelisted - its case must come from measuring the delivered July
+data under a decision contract that does not exist yet. Wave 3 (MNQ MBO
+54.52) is spec-gated, always last, not authorized.
 
 **The tool inventory a next agent must know.**
 
@@ -195,22 +202,27 @@ rerun the wave 1 deciding report: its one-run verdict is final and preserved in
 only by its frozen preflight and deciding harness and needs no further action.
 Nothing in wave 2B or wave 3 has been bought.
 
-1. **Wave 2B groundwork: DONE 2026-08-05, unarmed.** The `mnqv` scope
-   (`MNQ.v.0`, continuous) and the `mnq2b` plan (2026-07.full + 2026-06.full,
-   both TBBO - the fail-branch composition, fixed now the verdict is final)
-   are in `databento_price.py`; the existing windows were reused, since
-   WINDOWS describes time bounds, not instruments. `AUTHORIZED_BUYS` grew a
-   policy shape - each gated stage names its prerequisite ledger entry plus
-   an explicit `accepted_verdicts` set - so `nqv/contiguous` still demands
-   `pass` while `mnqv/mnq2b` unlocks on `pass` OR `fail`, always bound to
-   job id and delivered hashes, with structural verdict-artifact validation
-   failing closed. Selftest is 115 checks green. The pricing run is done:
-   73.41 + 70.11 = 143.52, matching 9.7, cached 2026-08-05 as the drift
-   baselines the submit gate requires. Submitting remains a new explicit
-   authorization; nothing is armed. Budget headroom after both fail-branch
-   months: 57.42 dollars. (Known cosmetic: `phase_plan` totals against the
-   static 125 credit, so `mnq2b` prints negative headroom; the 9.7 program
-   budget is 225 with 24.06 spent.)
+1. **Wave 2B groundwork: DONE 2026-08-05, unarmed, split credit-first.**
+   The `mnqv` scope (`MNQ.v.0`, continuous) and two SINGLE-MONTH plans are
+   in `databento_price.py`: `mnq07` (2026-07.full TBBO, 73.41, inside the
+   remaining credit) and `mnq06` (2026-06.full TBBO, 70.11, personal
+   cash). The existing windows were reused, since WINDOWS describes time
+   bounds, not instruments. A combined two-month plan was built first and
+   rejected in review: one armed invocation could have submitted both
+   months, and the cumulative cap cannot express "buy July, measure, then
+   argue June". `AUTHORIZED_BUYS` grew a policy shape - each gated stage
+   names its prerequisite ledger entry plus an explicit
+   `accepted_verdicts` set - so `nqv/contiguous` still demands `pass`
+   while `mnqv`/`mnq07` unlocks on `pass` OR `fail`, always bound to job
+   id and delivered hashes, with structural verdict-artifact validation
+   failing closed. `mnq06` is deliberately NOT in the whitelist at all;
+   absence fails closed as unlisted, and July's delivery must never
+   become its unlock - the 2A lesson. Selftest is 117 checks green,
+   including that `mnq06` has no whitelist entry at all AND that a bound
+   pass verdict plus a downloaded pair still refuses it behaviorally.
+   Both months' quotes are cached 2026-08-05 as the
+   drift baselines the submit gate requires. Submitting `mnq07` remains a
+   new explicit authorization; nothing is armed.
 2. The MNQ fit itself: wave 2B's data feeds the per-instrument scalars
    and quote seams - that work bumps `TAPE_PROTOCOL_VERSION` and needs its
    own spec per `reference/technical-implementation-spec.md`.
@@ -1377,8 +1389,12 @@ bought.
 
 ### 9.7 The extended program, gated, in waves
 
-The merged position of two independent reviews, 2026-08-05. Budget: the
-125-dollar credit plus up to 100 dollars of personal funds, 225 total.
+The merged position of two independent reviews, 2026-08-05. Budget, as the
+owner restated it later that day: CREDIT-FIRST - the 125-dollar credit is
+spent as optimally as possible, and the further 100 dollars of personal
+funds is a CAN, argued case-by-case when the time comes and put to the
+owner only when both reviewers agree it is warranted. The 225-dollar
+totals below therefore price the outer envelope, not a committed path.
 Everything in [9.6](#96-the-contiguous-replacement-basket-priced-2026-08-05)
 survives unchanged; this section adds to it and fills the fail branch 9.6
 left open. Each wave is gated separately: authorizing one wave commits
@@ -1445,10 +1461,14 @@ baseline in our own cache; and the buy whitelist extended with this wave's
 unlock rule. These prices were produced by our tool and are verified current
 quotes, not reported estimates; they must still pass the downloader's normal
 drift check at the later plan and submission times. **Groundwork BUILT
-2026-08-05**: the `mnqv` scope and `mnq2b` plan exist, the pricing run
-matched these figures exactly and refreshed the drift baselines, and the
-unlock rule is live in the whitelist - analyzed pair, either verdict, bound
-to job and bytes. Only the explicit buy authorization is outstanding.
+2026-08-05, split credit-first**: the `mnqv` scope and the single-month
+`mnq07` and `mnq06` plans exist, the pricing run matched these figures
+exactly and refreshed the drift baselines, and `mnq07`'s unlock rule is
+live in the whitelist - analyzed pair, either verdict, bound to job and
+bytes. `mnq06` is priced but deliberately NOT whitelisted: it crosses into
+personal cash, and its case must come from measuring the delivered July
+data under a decision contract to be defined then. Only `mnq07`'s explicit
+buy authorization is outstanding.
 
 **Wave 3 - two weeks of MNQ MBO, 2026-07-06 to 07-20. 54.52, verified
 2026-08-05 alongside the wave 2B quotes. ALWAYS LAST.** Gate, twofold: an accepted implementation specification for
@@ -1461,13 +1481,15 @@ explicit authorization. MBP-1 (44.64, verified) is the fallback if the spec
 concludes order identity is not needed; MBP-10 (83.24, verified) is
 rejected as dominated.
 
-**Totals.** Pass path: 24.06 + 71.79 + 73.41 + 54.52 + 0.02 = 223.80,
-leaving 1.20. Fail path: 24.06 + 73.41 + 70.11 + 54.52 = 222.10, leaving
-2.90. The thin cash margin is deliberate and is compensated STRUCTURALLY:
-wave 3 is last and spec-gated, so roughly 54 dollars stays uncommitted at
-every earlier decision point as recovery headroom. This replaces 9.6's
-29.13-dollar cash-headroom doctrine (the 10.3 principle) with a sequencing
-mechanism - an amendment accepted 2026-08-05.
+**Totals, as HYPOTHETICAL outer-envelope pricing under the credit-first
+policy.** If every later personal-cash case were separately argued,
+jointly agreed and explicitly authorized, the pass path would have summed
+24.06 + 71.79 + 73.41 + 54.52 + 0.02 = 223.80, leaving 1.20; the fail
+path 24.06 + 73.41 + 70.11 + 54.52 = 222.10, leaving 2.90. Nothing about
+approaching those ceilings is planned or deliberate - each stage past the
+credit is its own case, and the sequencing (wave 3 last and spec-gated)
+still means roughly 54 dollars is structurally uncommitted at every
+earlier decision point.
 
 **Recorded decisions this program makes.**
 
@@ -2260,12 +2282,14 @@ until `analysis/databento-pair-verdict.json` carries an affirmative
 `verdict: pass` bound to the paired test's job id and delivered file hashes -
 the analysis writes that artifact after a human reads the result; delivery
 alone unlocks nothing. The whitelist implements waves 1, 2A and - since the
-2026-08-05 groundwork - 2B of
+2026-08-05 groundwork, split credit-first - 2B's July month of
 [9.7](#97-the-extended-program-gated-in-waves), each gated stage carrying an
 explicit accepted-verdicts policy (`nqv/contiguous` demands `pass`;
-`mnqv/mnq2b` accepts `pass` or `fail`, both bound to job and bytes); wave 3
-still requires its own scope, pricing sweep and unlock rule before it can
-arm, which the drift gate enforces anyway - an unpriced row refuses. Two small open items
+`mnqv`/`mnq07` accepts `pass` or `fail`, both bound to job and bytes).
+`mnq06`, the personal-cash month, is priced but deliberately absent from
+the whitelist; wave 3 likewise still requires its own scope, pricing sweep
+and unlock rule before it can arm, which the drift gate enforces anyway -
+an unpriced row refuses. Two small open items
 before the first armed run: a conscious yes on `pretty_px`/`pretty_ts`
 (currently SDK defaults, fixed-precision ints) and `map_symbols` (currently
 true), and awareness that the SDK deprecates `metadata.get_cost`'s `mode`

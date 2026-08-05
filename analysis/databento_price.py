@@ -451,23 +451,27 @@ CONTIGUOUS_PLAN = [
 # moments, not quotes, per the original 9.3 design.
 PAIR_CURRENT_PLAN = [("2026-07.2wk", "trades")]
 
-# Wave 2B of 9.7: direct MNQ TBBO, priced against scope "mnqv". This is the
-# OPERATIVE FAIL-BRANCH composition, fixed now that wave 1's verdict is final:
-# the pair test FAILED, so the target instrument carries two contiguous months
-# of trade-and-quote evidence itself. A pass would have bought 2026-07 alone;
-# that is provenance, not a latent branch - the plan never inspects the
-# verdict. Both windows already exist in WINDOWS (added for the superseded
-# nqv contiguous design); reusing them is deliberate, since WINDOWS describes
+# Wave 2B of 9.7: direct MNQ TBBO, priced against scope "mnqv", split into
+# SINGLE-MONTH plans under the credit-first policy: the free credit is spent
+# as optimally as possible first, and personal cash is a case-by-case
+# argument, never a committed path. 2026-07 (73.41) fits inside the
+# remaining credit and is the operative purchase. 2026-06 (70.11) would
+# cross into personal cash; it stays priced here so its quote and drift
+# baseline remain prepared, but it is deliberately NOT buy-whitelisted in
+# the downloader - the case for a second month must come from measuring the
+# first, under a decision contract that does not exist yet. A combined plan
+# was rejected because one armed invocation could submit both months.
+# Both windows already exist in WINDOWS (added for the superseded nqv
+# contiguous design); reusing them is deliberate, since WINDOWS describes
 # time bounds, not instruments, and the cache keys on the full request
 # parameters. Do not duplicate them for MNQ.
-MNQ2B_PLAN = [
-    ("2026-07.full", "tbbo"),
-    ("2026-06.full", "tbbo"),
-]
+MNQ07_PLAN = [("2026-07.full", "tbbo")]
+MNQ06_PLAN = [("2026-06.full", "tbbo")]
 
 PLANS = {"basket": PLAN, "depth": DEPTH_PLAN, "pair": PAIR_PLAN,
          "grid": GRID_PLAN, "contiguous": CONTIGUOUS_PLAN,
-         "paircurrent": PAIR_CURRENT_PLAN, "mnq2b": MNQ2B_PLAN}
+         "paircurrent": PAIR_CURRENT_PLAN,
+         "mnq07": MNQ07_PLAN, "mnq06": MNQ06_PLAN}
 BUDGET = 125.0
 
 
