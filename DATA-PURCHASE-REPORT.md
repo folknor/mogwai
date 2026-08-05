@@ -188,10 +188,19 @@ together. `pretty_px`/`pretty_ts`/`map_symbols` defaults are recorded in
 
 **What is next, when work resumes, in order.**
 
+**Stop state.** The worktree was clean at handoff. No download, analysis or
+pricing process is running; no purchase authorization remains armed. Do not
+rerun the wave 1 deciding report: its one-run verdict is final and preserved in
+`analysis/databento-pair-verdict.json`. The delivered wave 1 data has been read
+only by its frozen preflight and deciding harness and needs no further action.
+Nothing in wave 2B or wave 3 has been bought.
+
 1. If wave 2B is authorized: add the `mnqv` scope + window entries to
    `databento_price.py`, run the pricing sweep (drift gate requires it),
    extend `AUTHORIZED_BUYS` with 2B's unlock rule (pair ANALYZED, either
-   verdict), then arm per stage. Budget headroom after 2B: ~53.
+   verdict), then arm per stage. This groundwork is safe to build without a
+   purchase, but submitting remains a new explicit authorization. Budget
+   headroom after both fail-branch months: 57.42 dollars.
 2. The MNQ fit itself: wave 2B's data feeds the per-instrument scalars
    and quote seams - that work bumps `TAPE_PROTOCOL_VERSION` and needs its
    own spec per `reference/technical-implementation-spec.md`.
@@ -1423,8 +1432,9 @@ quotes regardless - plus two structural prerequisites: an `mnqv` scope and
 MNQ window entries added to `databento_price.py` and a pricing sweep run,
 because the downloader's drift gate refuses any row without a plan-time
 baseline in our own cache; and the buy whitelist extended with this wave's
-unlock rule. Reported figures are treated as estimates until our tool
-quotes them.
+unlock rule. These prices were produced by our tool and are verified current
+quotes, not reported estimates; they must still pass the downloader's normal
+drift check at the later plan and submission times.
 
 **Wave 3 - two weeks of MNQ MBO, 2026-07-06 to 07-20. 54.52, verified
 2026-08-05 alongside the wave 2B quotes. ALWAYS LAST.** Gate, twofold: an accepted implementation specification for
