@@ -2031,14 +2031,34 @@ spend money or download data.
 
 ## 14. Open items
 
-### 14.1 The downloader does not exist
+### 14.1 The downloader exists; running it armed stays separately authorized
 
-Building it was offered and not authorised. It should use `batch.submit_job`
-rather than streaming, be dry-run by default behind an explicit confirm flag,
-re-price immediately before submitting and refuse above a cap, record job IDs so
-a re-run never re-buys, land files in `research/market-data`, and fail closed on
-partial success. Undecided: DBN (compact, needs a reader) versus CSV (larger,
-directly consumable by the existing stdlib analysis code).
+BUILT 2026-08-05: `analysis/databento_download.py`, implemented against the
+contract in `notes/databento-downloader-spec.md`, stdlib-only, selftest
+39 checks. Every requirement this item listed is in place: batch not
+streaming, dry-run by default, submission doubly gated behind `--confirm`
+AND an explicit `--max-dollars`, a fresh re-price at submit time refusing
+above the cap or beyond 10 percent drift from the plan-time quote, job IDs
+recorded in the committed ledger `analysis/databento-jobs.json` so a re-run
+polls instead of re-buying, files landing under
+`research/market-data/databento/` with per-directory manifests, and
+fail-closed partial success. The format question is decided: CSV plus zstd,
+because `compression.zstd` is stdlib from Python 3.14 and the analysis
+pipeline already parses CSV bytes; DBN would force a non-stdlib reader.
+
+The audit invariant matches the pricing script's: exactly one
+`batch.submit_job` call site, reachable only through the function that
+enforces the double gate and the re-price. `databento_price.py` is
+byte-unchanged and still cannot spend.
+
+What remains NOT authorized: any invocation with `--confirm`. The 9.6
+purchase runs one stage at a time - pair first and alone, read, then the
+contiguous months - each on explicit instruction. Two small open items
+before the first armed run: a conscious yes on `pretty_px`/`pretty_ts`
+(currently SDK defaults, fixed-precision ints) and `map_symbols` (currently
+true), and awareness that the SDK deprecates `metadata.get_cost`'s `mode`
+parameter, which both pricing and downloader still send so their quotes
+stay comparable.
 
 ### 14.2 Native-unit size configuration
 
