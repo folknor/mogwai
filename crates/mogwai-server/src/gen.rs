@@ -1470,6 +1470,100 @@ mod tests {
         );
     }
 
+    /// Brick O of notes/mnq-generator-successor-spec.md: the protocol-9
+    /// tape oracle. Walks the resolved crypto preset profiles directly -
+    /// quotes AND trades, every field via the fixed-order Debug form -
+    /// and hashes each stream with FNV-1a 64 into the committed fixture.
+    /// Write-once semantics: a MISSING fixture is written only at
+    /// TAPE_PROTOCOL_VERSION 9 and refused by name under any other
+    /// protocol, so it can never re-bless later-protocol output; a
+    /// present fixture always asserts equality. This is the frozen
+    /// oracle the successor's byte-identity tests compare against.
+    #[test]
+    #[ignore = "the tape oracle walks seven 6-hour streams; run focused"]
+    fn protocol9_tape_oracle() {
+        const WINDOW_NS: u64 = 6 * 3_600 * 1_000_000_000;
+        let fixture_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../analysis/protocol9-tape-hashes.json"
+        );
+        let matrix: &[(&str, u64, bool)] = &[
+            ("BTCUSDT", 42, false),
+            ("BTCUSDT", 7, false),
+            ("ETHUSDT", 42, false),
+            ("ETHUSDT", 7, false),
+            ("SOLUSDT", 42, false),
+            ("SOLUSDT", 7, false),
+            ("BTCUSDT", 42, true),
+        ];
+        let mut hashes = serde_json::Map::new();
+        for &(symbol, seed, surged) in matrix {
+            let profile = resolve_profile(symbol).expect("preset resolves");
+            let mut source = mogwai_data::GeneratedSource::try_new_with_session_profile(
+                profile.scalars.clone(),
+                seed,
+                0,
+                fingerprint(),
+                &profile.session,
+                None,
+                mogwai_data::SizeGrid::from_def(&profile.def),
+                profile.calendar.clone(),
+            )
+            .expect("oracle source");
+            if surged {
+                source.arm_flow_surge(3_600 * 1_000_000_000, 30 * 60 * 1_000, 2.0, 1.5);
+            }
+            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+            let mut events: u64 = 0;
+            while let Some(event) = source.next_tick() {
+                if event.ts_event() >= WINDOW_NS {
+                    break;
+                }
+                events += 1;
+                for byte in format!("{event:?}").bytes() {
+                    hash ^= u64::from(byte);
+                    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            }
+            assert!(events > 0, "{symbol}-{seed}: an empty stream is no oracle");
+            let name = if surged {
+                format!("{symbol}-{seed}-surged")
+            } else {
+                format!("{symbol}-{seed}")
+            };
+            hashes.insert(name, serde_json::json!(format!("{hash:016x}")));
+        }
+        let observed = serde_json::json!({
+            "tape_protocol_version": mogwai_data::TAPE_PROTOCOL_VERSION,
+            "hash": "fnv1a64 over TickEvent Debug bytes",
+            "window_ns": WINDOW_NS,
+            "surge": "start 1h, 30m, rate 2.0, children 1.5",
+            "entries": hashes,
+        });
+        if std::path::Path::new(fixture_path).exists() {
+            let frozen: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(fixture_path).expect("fixture reads"),
+            )
+            .expect("fixture parses");
+            assert_eq!(
+                frozen["entries"], observed["entries"],
+                "a crypto tape moved against the protocol-9 oracle"
+            );
+        } else {
+            assert_eq!(
+                mogwai_data::TAPE_PROTOCOL_VERSION,
+                9,
+                "the oracle fixture is missing and the protocol is not 9: \
+                 writing now would re-bless later-protocol output, refused"
+            );
+            std::fs::write(
+                fixture_path,
+                serde_json::to_string_pretty(&observed).expect("serialize"),
+            )
+            .expect("fixture writes");
+        }
+    }
+
     #[test]
     fn a_warmup_past_the_start_refuses_instead_of_saturating() {
         // start - warmup must be EXACT: a saturated subtraction would

@@ -1,0 +1,15 @@
+{
+  "entries": {
+    "BTCUSDT-42": "e89b6d1f0f7f24ce",
+    "BTCUSDT-42-surged": "a76d04007680b44e",
+    "BTCUSDT-7": "a75d576b257ca944",
+    "ETHUSDT-42": "f014be85235f7c6e",
+    "ETHUSDT-7": "5cce15a8d6503130",
+    "SOLUSDT-42": "87bf6d0b3b5ee764",
+    "SOLUSDT-7": "bda6153fd5af2a1b"
+  },
+  "hash": "fnv1a64 over TickEvent Debug bytes",
+  "surge": "start 1h, 30m, rate 2.0, children 1.5",
+  "tape_protocol_version": 9,
+  "window_ns": 21600000000000
+}
