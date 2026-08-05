@@ -69,15 +69,14 @@ was free to fix from bars already owned; it is fixed, and section 3.4 records
 what it cost and what it did not buy. Only the fourth row is the question this
 report originally set out to answer, and it is the least urgent of the four.
 
-Recommendation, updated 2026-08-05: step 4 of
-[section 11](#11-recommended-sequence) is done and it FAILED, which changed
-what the money should buy exactly as anticipated. Volatility-stratified
-selection is rejected; the purchase design is now the paired NQ/MNQ test
-first, then a contiguous-recent-months basket, priced before anything is
-spent. See [7.2](#72-method-for-window-selection) and the superseded banner on
-[section 9](#9-candidate-baskets-priced). The protocol-8 composition
-measurement that used to sit alongside it here is complete; see
-[0.1](#01-state-of-play-2026-08-05).
+Recommendation, updated 2026-08-05 end of day: both deciding experiments are
+DONE and both FAILED - the sampling frame (volatility-stratified selection
+rejected) and the paired proxy test (NQ cannot stand in for MNQ). The
+operative purchase path is direct MNQ evidence: wave 2B of
+[9.7](#97-the-extended-program-gated-in-waves), available but unauthorized.
+24.06 of the 225 budget is spent, on evidence that settled both the proxy
+question and the protocol 8 arrival-bias question. See
+[0.1](#01-state-of-play-2026-08-05) for the full handover.
 
 ---
 
@@ -128,18 +127,82 @@ remote host:
 python3 analysis/plot_tape.py --gen --open --symbol MNQ --type bars --interval 1m --length 3d
 ```
 
-**What is next, with protocol 8 closed and the sampling frame REJECTED.**
-Step 4 of [section 11](#11-recommended-sequence) resolved 2026-08-05: the
-bar-derived frame FAILED its preregistered association test, so every
-section 9 basket is superseded and the replacement purchase design is
-contiguous recent months ([7.2](#72-method-for-window-selection)). The paired
-NQ/MNQ test remains the first purchase - the failed frame never answered
-whether NQ is a valid proxy for MNQ - followed by the contiguous basket, which
-must be designed and priced before anything is spent.
+**The purchase program, end of 2026-08-05: both deciding experiments ran,
+both FAILED, and the failures decided everything.**
 
-**Last verification.** `brokkr check` passed 437 tests after the mechanism,
-calendar, fitted profile, protocol bump, comparison modes and the protocol-8
-budget resize landed.
+1. **The sampling frame FAILED** its preregistered Spearman association
+   ([7.2](#72-method-for-window-selection),
+   `analysis/association-result.json`): volatility-stratified window
+   selection is rejected, every section 9 basket is superseded, and the
+   19-month target table is frozen in `analysis/targets-frozen.json`.
+   Preflight was corrected to schema 3 along the way (the spot archives are
+   SEVEN columns, headerless; `notes/sampling-frame-preregistration.md`
+   deviation 3.10) and the corpus hot loops run 3.2x faster, bit-exact.
+2. **Wave 1, the paired NQ/MNQ test, was BOUGHT and FAILED**: 24.06
+   dollars, job `GLBX-20260805-JUBCRPRLG8`, delivered, hash-verified,
+   preflighted, and judged once under the frozen
+   `notes/pair-test-preregistration.md` (prose) +
+   `analysis/pair-test-preregistration.json` (executable rule). NQ is NOT
+   a usable MNQ proxy: mandatory P5 failed on `zero_change_frac`, the 7.1
+   activity-tracking finding arriving as predicted. Verdict artifact:
+   `analysis/databento-pair-verdict.json`, bound to job, hashes, prereg
+   hash and harness commit. Full record in
+   [9.7](#97-the-extended-program-gated-in-waves) and step 6.
+
+**Money.** 24.06 spent of 225 (125 credit + 100 personal). Wave 2A (NQ
+months, 71.79) is PERMANENTLY SKIPPED and structurally locked - the fail
+artifact refuses it in the downloader's stage gate. Wave 2B (direct MNQ
+TBBO, 2026-07 at 73.41 + 2026-06 at 70.11, quotes verified, drift
+baselines valid to 2026-08-12) is the operative path and NOT authorized.
+Wave 3 (MNQ MBO 54.52) is spec-gated, always last, not authorized.
+
+**The tool inventory a next agent must know.**
+
+- `analysis/databento_price.py` - pricing, free metadata only, cached;
+  the audited no-spend invariant. Single source of truth for scopes,
+  windows, plans, session bounds.
+- `analysis/databento_download.py` - the purchase tool. Dry-run default;
+  submission needs `--confirm` AND `--max-dollars` (a CUMULATIVE plan
+  cap); durable pre-POST intent with lag-aware reconciliation (it caught a
+  real 504 on the first armed run and adopted the job instead of double
+  buying); committed ledger `analysis/databento-jobs.json`; buy
+  whitelisted to the staged plans with the pair-verdict stage gate; exit 3
+  means undelivered, not settled. 102-check offline selftest.
+- `analysis/pair_harness.py` - selftest (90 checks) / preflight / report.
+  Loads the frozen JSON rule, binds input to job + ledger + manifest +
+  rehash, preflight REFUSES bad contracts and persists an artifact report
+  requires. Never writes the verdict.
+- Verdict artifacts: `analysis/databento-pair-verdict.json` (wave gate),
+  `analysis/targets-frozen.json` + `analysis/bar-scores-frozen.json` +
+  `analysis/association-result.json` (sampling frame).
+
+**Traps already paid for - do not re-derive.** The DBN side alphabet is
+B=buy, A=SELL, N=none (`research/dbn/rust/dbn/src/enums.rs`); reading B/S
+manufactures a FAIL. Binance monthly spot trades are seven columns,
+headerless. The delivered CME csv echoes CONTINUOUS labels (`NQ.v.0`) in
+the symbol column, so the minority-contract guard is blind there;
+`instrument_id` is the sharper witness if ever needed. The SDK deprecates
+`metadata.get_cost`'s `mode` param - pricing and downloader must migrate
+together. `pretty_px`/`pretty_ts`/`map_symbols` defaults are recorded in
+14.1 and await a conscious yes before any future submit.
+
+**What is next, when work resumes, in order.**
+
+1. If wave 2B is authorized: add the `mnqv` scope + window entries to
+   `databento_price.py`, run the pricing sweep (drift gate requires it),
+   extend `AUTHORIZED_BUYS` with 2B's unlock rule (pair ANALYZED, either
+   verdict), then arm per stage. Budget headroom after 2B: ~53.
+2. The MNQ fit itself: wave 2B's data feeds the per-instrument scalars
+   and quote seams - that work bumps `TAPE_PROTOCOL_VERSION` and needs its
+   own spec per `reference/technical-implementation-spec.md`.
+3. Wave 3 only after an accepted book/queue landing-site spec (14.1's
+   discipline, one level up).
+4. Named next marginal dollar after the program: ~30 for ES/MES, so the
+   MES preset stops being inherited faith (recorded decision in 9.7).
+
+**Still unfinished, and cosmetic.** The MNQ chart PNG (browser needed),
+as before. **Last verification:** `brokkr check` 437 tests green at
+protocol 8; every analysis gate green at `f29e789`.
 
 ---
 
