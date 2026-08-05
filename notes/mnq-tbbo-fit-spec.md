@@ -820,6 +820,35 @@ per-row and per-parent `setdefault` calls no longer allocate their
 default dict/set on every hit, the parser's column indices are locals,
 and the ACF lag window is a deque.
 
+**RESULT, Bricks M3 and V, 2026-08-05: the fit ran to completion
+under the fast harness (~380 cached walks) and STOPPED THE LANDING.**
+`analysis/mnq-fit.json` is the artifact; `landing_set` is empty. The
+cadence family failed representability wholesale, and the joint read
+confirmed the mechanism to within 0.02% on both failed values: at the
+observed `children_mean` 1.1711 the quiet-state multiplier draws a
+0.234-child mean that `SweepShape` clamps to one, breaking the
+mean-preserving identity the multipliers assume - the realized mean
+rises to 1.439 (probe: 1.4394) and the single fraction collapses to
+0.738 (probe: 0.7378) at ANY configured value in this regime. July
+MNQ is a nearly-single-child tape (90.5% one-print parents); the
+crypto-fitted conditioning cannot express it. Duration and levels
+passed. The size family independently misses on generated p99 (14 vs
+observed 8). The quote family is clean (width mode 2 ticks, top sizes
+3x3, effective displacement median 1.025 ticks from a fitted scalar
+of 0.5161), volatility solved (6.96e-6), start price anchored
+(28284.00), and the moot guard fired as designed (model B skipped,
+`size_round_frac` declared-unidentifiable). The owner's chart review
+of the fitted-candidate tape added two findings and confirmed the
+calendar machinery: a lone 420.75-point one-minute bar (next largest
+135) - an intra-minute directional run no gate caught because the
+volatility target is an RMS, not a max - and the structural absence
+of reopen gaps (the mid freezes through closures); the halt and break
+windows behaved exactly to contract, and the session profile's HOURLY
+granularity smears the 13:30 UTC cash open across the 13:00 bucket.
+The successor spec (floor-aware child conditioning, a minute-range
+representability gate, the reopen-gap limitation recorded) is the
+gate to any landing; the frozen fit reruns after it.
+
 **Brick M2 - preflight.** `python3 analysis/mnq_fit.py preflight`.
 Persists its artifact or refuses; a refusal stops the spec and is
 reported as a delivery finding.

@@ -243,9 +243,23 @@ Nothing in wave 2B or wave 3 has been bought.
    intent, reconciliation, bounds and hash safeguards. No recommendation
    for `mnq06`, and the wave 3 MBO spec stays parked until the July fit
    demonstrates whether a queue-model need exists.
-2. The MNQ fit itself: wave 2B's data feeds the per-instrument scalars
-   and quote seams - that work bumps `TAPE_PROTOCOL_VERSION` and needs its
-   own spec per `reference/technical-implementation-spec.md`.
+2. The MNQ fit itself: **MEASURED 2026-08-05, landing STOPPED by its
+   own contract.** The July data was preflighted (35,187,061 rows, all
+   22 sessions usable at exact purity) and fitted under the frozen
+   harness (`analysis/mnq_fit.py`, spec
+   `notes/mnq-tbbo-fit-spec.md`); the artifact is
+   `analysis/mnq-fit.json`. The cadence family failed representability
+   wholesale - July MNQ is a nearly-single-child tape (children_mean
+   1.17, single fraction 0.905) and the crypto-fitted arrival-state
+   child conditioning floors out below roughly five children per
+   parent, inflating any configured near-one mean to ~1.44
+   (mechanism confirmed to 0.02% in joint review). The quote seams
+   fitted cleanly (width 2 ticks, sizes 3x3, displacement scalar
+   0.5161) and wait unlanded. Next: a bounded successor generator
+   spec - floor-aware child conditioning, a minute-range gate (the
+   owner's chart review found a lone 420-point one-minute bar), the
+   reopen-gap limitation recorded - then the frozen fit reruns and
+   the protocol-10 landing follows its verdicts.
 3. Wave 3 only after an accepted book/queue landing-site spec (14.1's
    discipline, one level up).
 4. Named next marginal dollar after the program: ~30 for ES/MES, so the
