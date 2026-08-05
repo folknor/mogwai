@@ -1,0 +1,559 @@
+{
+  "analysis_tree_commit": "73e07d2",
+  "harness": {
+    "constants": {
+      "CALIBRATION_MIN_ABS_RHO": 0.5,
+      "DIRECTION_MUST_REPRODUCE": true,
+      "EXACT_PERMUTATION_MAX_N": 10,
+      "FAMILIES": {
+        "F1": [
+          "mean_event_duration_s",
+          "duration_dispersion_cv2",
+          "duration_acf_lag1",
+          "duration_acf_lag5"
+        ],
+        "F2": [
+          "children_mean",
+          "children_single_frac",
+          "levels_mean"
+        ],
+        "F3": [
+          "size_round_frac",
+          "size_dispersion"
+        ],
+        "F4": [
+          "return_acf_lag1"
+        ],
+        "F5": [
+          "abs_acf_lag1",
+          "abs_acf_lag10",
+          "abs_acf_lag50"
+        ],
+        "F6": [
+          "zero_change_frac"
+        ]
+      },
+      "HELD_OUT_MIN_ABS_RHO": 0.7,
+      "MANDATORY_FAMILIES": [
+        "F1",
+        "F2"
+      ],
+      "MONTE_CARLO_PERMUTATIONS": 1000000,
+      "PERMUTATION_SEED": 20260805
+    },
+    "implementation": "analysis/spearman_association.py, unchanged",
+    "selftest": "21 checks, 0 failed, rerun immediately before this"
+  },
+  "inputs": {
+    "bar_scores_frozen": {
+      "path": "bar-scores-frozen.json",
+      "sha256": "6497df85bc1c172da85bb11073c7fae1bb1ad60340788b34e096e08340c910f9"
+    },
+    "targets_frozen": {
+      "path": "targets-frozen.json",
+      "sha256": "453c5817c8252e36f86e6b0b4132196ae46036118b2b7a47ac3f30dd650ba7b0"
+    }
+  },
+  "result_schema_version": 1,
+  "split": {
+    "bar_score_feature": "rv",
+    "calibration_months": [
+      "2025-01",
+      "2025-02",
+      "2025-03",
+      "2025-04",
+      "2025-05",
+      "2025-06",
+      "2025-07",
+      "2025-08",
+      "2025-09",
+      "2025-10",
+      "2025-11",
+      "2025-12"
+    ],
+    "held_out_months": [
+      "2026-01",
+      "2026-02",
+      "2026-03",
+      "2026-04",
+      "2026-05",
+      "2026-06",
+      "2026-07"
+    ]
+  },
+  "standing": "THE DECIDING RUN of the sampling-frame experiment, preregistration section 7.1. Held-out decides.",
+  "unavailable_inputs": {},
+  "verdicts": {
+    "families": {
+      "F1": {
+        "pass": false,
+        "passed": 2,
+        "targets": 4
+      },
+      "F2": {
+        "pass": false,
+        "passed": 1,
+        "targets": 3
+      },
+      "F3": {
+        "pass": false,
+        "passed": 0,
+        "targets": 2
+      },
+      "F4": {
+        "pass": false,
+        "passed": 0,
+        "targets": 1
+      },
+      "F5": {
+        "pass": false,
+        "passed": 0,
+        "targets": 3
+      },
+      "F6": {
+        "pass": false,
+        "passed": 0,
+        "targets": 1
+      }
+    },
+    "family_majority": false,
+    "mandatory_families_pass": false,
+    "per_target": {
+      "abs_acf_lag1": {
+        "calibration_p": {
+          "draws": 1000000,
+          "method": "monte_carlo",
+          "p": 0.939005
+        },
+        "calibration_rho": -0.027972027972027972,
+        "held_out_p": {
+          "draws": 5040,
+          "method": "exact",
+          "p": 0.9634920634920635
+        },
+        "held_out_rho": 0.03571428571428571,
+        "leave_one_out": {
+          "max": 0.2571428571428571,
+          "min": -0.5428571428571428,
+          "sign_reverses": true,
+          "values": [
+            0.2571428571428571,
+            0.14285714285714285,
+            0.08571428571428572,
+            -0.02857142857142857,
+            -0.5428571428571428,
+            0.08571428571428572,
+            0.2571428571428571
+          ]
+        },
+        "pass": false,
+        "reason": "calibration |rho| 0.0280 < 0.5; held-out |rho| 0.0357 < 0.7; direction does not reproduce",
+        "target": "abs_acf_lag1"
+      },
+      "abs_acf_lag10": {
+        "calibration_p": {
+          "draws": 1000000,
+          "method": "monte_carlo",
+          "p": 0.851789
+        },
+        "calibration_rho": -0.06293706293706294,
+        "held_out_p": {
+          "draws": 5040,
+          "method": "exact",
+          "p": 0.8396825396825397
+        },
+        "held_out_rho": -0.10714285714285714,
+        "leave_one_out": {
+          "max": 0.14285714285714285,
+          "min": -0.37142857142857144,
+          "sign_reverses": true,
+          "values": [
+            0.14285714285714285,
+            -0.2571428571428571,
+            -0.2571428571428571,
+            -0.02857142857142857,
+            -0.37142857142857144,
+            -0.02857142857142857,
+            0.14285714285714285
+          ]
+        },
+        "pass": false,
+        "reason": "calibration |rho| 0.0629 < 0.5; held-out |rho| 0.1071 < 0.7",
+        "target": "abs_acf_lag10"
+      },
+      "abs_acf_lag50": {
+        "calibration_p": {
+          "draws": 1000000,
+          "method": "monte_carlo",
+          "p": 0.66735
+        },
+        "calibration_rho": -0.13986013986013987,
+        "held_out_p": {
+          "draws": 5040,
+          "method": "exact",
+          "p": 0.9634920634920635
+        },
+        "held_out_rho": 0.03571428571428571,
+        "leave_one_out": {
+          "max": 0.3142857142857143,
+          "min": -0.37142857142857144,
+          "sign_reverses": true,
+          "values": [
+            0.3142857142857143,
+            -0.02857142857142857,
+            -0.02857142857142857,
+            0.14285714285714285,
+            -0.37142857142857144,
+            -0.02857142857142857,
+            0.3142857142857143
+          ]
+        },
+        "pass": false,
+        "reason": "calibration |rho| 0.1399 < 0.5; held-out |rho| 0.0357 < 0.7; direction does not reproduce",
+        "target": "abs_acf_lag50"
+      },
+      "children_mean": {
+        "calibration_p": {
+          "draws": 1000000,
+          "method": "monte_carlo",
+          "p": 0.319569
+        },
+        "calibration_rho": 0.3146853146853147,
+        "held_out_p": {
+          "draws": 5040,
+          "method": "exact",
+          "p": 0.10952380952380952
+        },
+        "held_out_rho": 0.6785714285714286,
+        "leave_one_out": {
+          "max": 0.8857142857142857,
+          "min": 0.5428571428571428,
+          "sign_reverses": false,
+          "values": [
+            0.7714285714285715,
+            0.8857142857142857,
+            0.6571428571428571,
+            0.6,
+            0.5428571428571428,
+            0.6571428571428571,
+            0.5428571428571428
+          ]
+        },
+        "pass": false,
+        "reason": "calibration |rho| 0.3147 < 0.5; held-out |rho| 0.6786 < 0.7",
+        "target": "children_mean"
+      },
+      "children_single_frac": {
+        "calibration_p": {
+          "draws": 1000000,
+          "method": "monte_carlo",
+          "p": 0.000186
+        },
+        "calibration_rho": -0.8951048951048951,
+        "held_out_p": {
+          "draws": 5040,
+          "method": "exact",
+          "p": 0.023809523809523808
+        },
+        "held_out_rho": -0.8571428571428571,
+        "leave_one_out": {
+          "max": -0.7714285714285715,
+          "min": -0.9428571428571428,
+          "sign_reverses": false,
+          "values": [
+            -0.7714285714285715,
+            -0.9428571428571428,
+            -0.9428571428571428,
+            -0.7714285714285715,
+            -0.7714285714285715,
+            -0.9428571428571428,
+            -0.7714285714285715
+          ]
+        },
+        "pass": true,
+        "reason": "passes",
+        "target": "children_single_frac"
+      },
+      "duration_acf_lag1": {
+        "calibration_p": {
+          "draws": 1000000,
+          "method": "monte_carlo",
+          "p": 0.008571
+        },
+        "calibration_rho": 0.7342657342657343,
+        "held_out_p": {
+          "draws": 5040,
+          "method": "exact",
+          "p": 0.2357142857142857
+        },
+        "held_out_rho": 0.5357142857142857,
+        "leave_one_out": {
+          "max": 0.7142857142857143,
+          "min": 0.2571428571428571,
+          "sign_reverses": false,
+          "values": [
+            0.7142857142857143,
+            0.2571428571428571,
+            0.7142857142857143,
+            0.6,
+            0.2571428571428571,
+            0.5428571428571428,
+            0.6
+          ]
+        },
+        "pass": false,
+        "reason": "held-out |rho| 0.5357 < 0.7",
+        "target": "duration_acf_lag1"
+      },
+      "duration_acf_lag5": {
+        "calibration_p": {
+          "draws": 1000000,
+          "method": "monte_carlo",
+          "p": 0.025427
+        },
+        "calibration_rho": 0.6503496503496503,
+        "held_out_p": {
+          "draws": 5040,
+          "method": "exact",
+          "p": 0.7130952380952381
+        },
+        "held_out_rho": 0.17857142857142858,
+        "leave_one_out": {
+          "max": 0.42857142857142855,
+          "min": -0.3142857142857143,
+          "sign_reverses": true,
+          "values": [
+            0.42857142857142855,
+            -0.08571428571428572,
+            0.3142857142857143,
+            0.3142857142857143,
+            -0.3142857142857143,
+            0.3142857142857143,
+            0.2
+          ]
+        },
+        "pass": false,
+        "reason": "held-out |rho| 0.1786 < 0.7",
+        "target": "duration_acf_lag5"
+      },
+      "duration_dispersion_cv2": {
+        "calibration_p": {
+          "draws": 1000000,
+          "method": "monte_carlo",
+          "p": 0.007687
+        },
+        "calibration_rho": 0.7412587412587412,
+        "held_out_p": {
+          "draws": 5040,
+          "method": "exact",
+          "p": 0.034126984126984124
+        },
+        "held_out_rho": 0.8214285714285714,
+        "leave_one_out": {
+          "max": 0.8857142857142857,
+          "min": 0.7142857142857143,
+          "sign_reverses": false,
+          "values": [
+            0.8857142857142857,
+            0.7142857142857143,
+            0.7714285714285715,
+            0.8857142857142857,
+            0.7142857142857143,
+            0.7714285714285715,
+            0.8857142857142857
+          ]
+        },
+        "pass": true,
+        "reason": "passes",
+        "target": "duration_dispersion_cv2"
+      },
+      "levels_mean": {
+        "calibration_p": {
+          "draws": 1000000,
+          "method": "monte_carlo",
+          "p": 0.218088
+        },
+        "calibration_rho": 0.38461538461538464,
+        "held_out_p": {
+          "draws": 5040,
+          "method": "exact",
+          "p": 0.04801587301587302
+        },
+        "held_out_rho": 0.7857142857142857,
+        "leave_one_out": {
+          "max": 0.8285714285714286,
+          "min": 0.6571428571428571,
+          "sign_reverses": false,
+          "values": [
+            0.7714285714285715,
+            0.8285714285714286,
+            0.7714285714285715,
+            0.6571428571428571,
+            0.8285714285714286,
+            0.7714285714285715,
+            0.7714285714285715
+          ]
+        },
+        "pass": false,
+        "reason": "calibration |rho| 0.3846 < 0.5",
+        "target": "levels_mean"
+      },
+      "mean_event_duration_s": {
+        "calibration_p": {
+          "draws": 1000000,
+          "method": "monte_carlo",
+          "p": 0.007642
+        },
+        "calibration_rho": -0.7412587412587412,
+        "held_out_p": {
+          "draws": 5040,
+          "method": "exact",
+          "p": 0.06626984126984127
+        },
+        "held_out_rho": -0.75,
+        "leave_one_out": {
+          "max": -0.6,
+          "min": -0.8857142857142857,
+          "sign_reverses": false,
+          "values": [
+            -0.8857142857142857,
+            -0.6,
+            -0.8285714285714286,
+            -0.8285714285714286,
+            -0.6,
+            -0.7142857142857143,
+            -0.7142857142857143
+          ]
+        },
+        "pass": true,
+        "reason": "passes",
+        "target": "mean_event_duration_s"
+      },
+      "return_acf_lag1": {
+        "calibration_p": {
+          "draws": 1000000,
+          "method": "monte_carlo",
+          "p": 0.63519
+        },
+        "calibration_rho": -0.15384615384615385,
+        "held_out_p": {
+          "draws": 5040,
+          "method": "exact",
+          "p": 0.4976190476190476
+        },
+        "held_out_rho": -0.32142857142857145,
+        "leave_one_out": {
+          "max": -0.08571428571428572,
+          "min": -0.6571428571428571,
+          "sign_reverses": false,
+          "values": [
+            -0.6571428571428571,
+            -0.2,
+            -0.2,
+            -0.4857142857142857,
+            -0.08571428571428572,
+            -0.3142857142857143,
+            -0.2571428571428571
+          ]
+        },
+        "pass": false,
+        "reason": "calibration |rho| 0.1538 < 0.5; held-out |rho| 0.3214 < 0.7",
+        "target": "return_acf_lag1"
+      },
+      "size_dispersion": {
+        "calibration_p": {
+          "draws": 1000000,
+          "method": "monte_carlo",
+          "p": 0.139234
+        },
+        "calibration_rho": -0.45504414820549716,
+        "held_out_p": {
+          "draws": 5040,
+          "method": "exact",
+          "p": 0.4857142857142857
+        },
+        "held_out_rho": -0.3335621924974955,
+        "leave_one_out": {
+          "max": -0.030358837035945812,
+          "min": -0.5768179036829705,
+          "sign_reverses": false,
+          "values": [
+            -0.5768179036829705,
+            -0.2608969660436018,
+            -0.2608969660436018,
+            -0.4058397249567139,
+            -0.2125118592516207,
+            -0.5161002296110788,
+            -0.030358837035945812
+          ]
+        },
+        "pass": false,
+        "reason": "calibration |rho| 0.4550 < 0.5; held-out |rho| 0.3336 < 0.7",
+        "target": "size_dispersion"
+      },
+      "size_round_frac": {
+        "calibration_p": {
+          "draws": 1000000,
+          "method": "monte_carlo",
+          "p": 0.266805
+        },
+        "calibration_rho": -0.34965034965034963,
+        "held_out_p": {
+          "draws": 5040,
+          "method": "exact",
+          "p": 0.16666666666666666
+        },
+        "held_out_rho": -0.6071428571428571,
+        "leave_one_out": {
+          "max": -0.37142857142857144,
+          "min": -0.9428571428571428,
+          "sign_reverses": false,
+          "values": [
+            -0.9428571428571428,
+            -0.6,
+            -0.6,
+            -0.6571428571428571,
+            -0.37142857142857144,
+            -0.6571428571428571,
+            -0.37142857142857144
+          ]
+        },
+        "pass": false,
+        "reason": "calibration |rho| 0.3497 < 0.5; held-out |rho| 0.6071 < 0.7",
+        "target": "size_round_frac"
+      },
+      "zero_change_frac": {
+        "calibration_p": {
+          "draws": 1000000,
+          "method": "monte_carlo",
+          "p": 0.733195
+        },
+        "calibration_rho": -0.11188811188811189,
+        "held_out_p": {
+          "draws": 5040,
+          "method": "exact",
+          "p": 0.1388888888888889
+        },
+        "held_out_rho": -0.6428571428571429,
+        "leave_one_out": {
+          "max": -0.4857142857142857,
+          "min": -0.8285714285714286,
+          "sign_reverses": false,
+          "values": [
+            -0.6571428571428571,
+            -0.4857142857142857,
+            -0.4857142857142857,
+            -0.5428571428571428,
+            -0.8285714285714286,
+            -0.7142857142857143,
+            -0.6571428571428571
+          ]
+        },
+        "pass": false,
+        "reason": "calibration |rho| 0.1119 < 0.5; held-out |rho| 0.6429 < 0.7",
+        "target": "zero_change_frac"
+      }
+    },
+    "verdict": "FAIL"
+  }
+}
