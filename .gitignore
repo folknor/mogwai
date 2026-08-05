@@ -29,6 +29,10 @@ scripts/probe-warmup.log
 # contract evidence that records why the 19-month span was confirmed.
 /analysis/bars/
 /analysis/targets/
+
+# The buy-lock beside the committed job ledger: kernel-held runtime state,
+# empty, never content.
+/analysis/databento-jobs.json.lock
 .agents
 .brokkr
 .claude

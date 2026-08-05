@@ -2033,8 +2033,7 @@ spend money or download data.
 
 ### 14.1 The downloader exists; running it armed stays separately authorized
 
-BUILT 2026-08-05: `analysis/databento_download.py`, implemented against the
-contract in `notes/databento-downloader-spec.md`, stdlib-only, selftest
+BUILT 2026-08-05: `analysis/databento_download.py`, stdlib-only, selftest
 39 checks. Every requirement this item listed is in place: batch not
 streaming, dry-run by default, submission doubly gated behind `--confirm`
 AND an explicit `--max-dollars`, a fresh re-price at submit time refusing
