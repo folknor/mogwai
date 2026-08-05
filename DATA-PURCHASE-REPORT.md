@@ -1255,9 +1255,9 @@ bind on length - the one argument the FAIL does not touch.
 **The paired NQ/MNQ test stays first and moves to a recent window.** The pair
 question - is NQ a valid proxy for MNQ - is untouched by the FAIL, but its old
 2024-05 window was itself regime-selected as the p0 calm month. The
-replacement is two weeks from the first Monday after the 2026-06-19 quarterly
-expiry, no roll inside the window, `trades` schema per the original 9.3
-design. It costs 2.4x the 2024 pairing because MNQ's print count has grown
+replacement is a recent post-expiry fortnight, 2026-07-06 to 07-20, with no
+roll inside the window, `trades` schema per the original 9.3 design. It costs
+2.4x the 2024 pairing because MNQ's print count has grown
 that much - 19.2M records against 8.0M - which is itself the trend that makes
 an MNQ refit expensive and the proxy question urgent.
 
@@ -1276,6 +1276,13 @@ botched window, which basket A's 7.41 was criticised for not being, or to add
 the GC grid probe (2.81, section 9.4) if the free Kraken cross-grid work
 leaves the question open. The purchase is staged: the paired test first and
 alone, its result read, and only then the four contiguous months.
+
+One accepted cost of that staging, explicit rather than discovered later: if
+the pair PASSES, its NQ trade records overlap the 2026-07 NQ TBBO month
+bought afterwards - the same prints, once as trades and once inside TBBO.
+That duplication is the price of the asymmetric stop condition, and it is
+preferable to buying the full basket before establishing that NQ is a valid
+MNQ proxy at all.
 
 Priced via `plan pairv paircurrent` and `plan nqv contiguous` in
 `analysis/databento_price.py`, metadata calls only, cached. Nothing has been
@@ -1440,12 +1447,13 @@ provenance caveat in `mnq.toml` becomes a measured correction rather than a
 stated direction.
 
 **Step 7. Spend the rest with evidence.** Step 4's failure reshaped this:
-Basket B is superseded, and the replacement is a CONTIGUOUS RECENT MONTHS
-design - the newest complete months at full coverage, no regime selection -
-plus the GC probe if the Kraken cross-grid work in
+Basket B is superseded, and the replacement is the CONTIGUOUS RECENT MONTHS
+design of [9.6](#96-the-contiguous-replacement-basket-priced-2026-08-05),
+designed and priced 2026-08-05 - four newest complete NQ TBBO months, 95.87
+total with the staged pair, 29.13 headroom - plus the GC probe if the Kraken
+cross-grid work in
 [7.1](#71-zero_change_frac-is-not-an-instrument-constant) leaves a
-cross-asset-class question open. The contiguous basket must be designed and
-priced before anything is spent.
+cross-asset-class question open.
 
 ---
 

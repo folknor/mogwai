@@ -440,11 +440,11 @@ CONTIGUOUS_PLAN = [
 # The paired NQ/MNQ test on a RECENT no-roll window. The pair question - is NQ
 # a valid proxy for MNQ - survives the sampling-frame FAIL untouched, but its
 # old 2024-05 window was itself regime-selected as the p0 calm month, which is
-# exactly the rationale the FAIL rejected. Two weeks starting the first Monday
-# after the 2026-06-19 quarterly expiry: front month stable, no roll inside
-# the window, and recency serves the protocol 8 volume-versus-count obligation
-# directly. Trades schema: the pair question needs counts and moments, not
-# quotes, per the original 9.3 design.
+# exactly the rationale the FAIL rejected. A recent post-expiry fortnight,
+# 2026-07-06 to 07-20: front month stable after the 06-19 quarterly expiry, no
+# roll inside the window, and recency serves the protocol 8 volume-versus-count
+# obligation directly. Trades schema: the pair question needs counts and
+# moments, not quotes, per the original 9.3 design.
 PAIR_CURRENT_PLAN = [("2026-07.2wk", "trades")]
 
 PLANS = {"basket": PLAN, "depth": DEPTH_PLAN, "pair": PAIR_PLAN,
