@@ -1326,10 +1326,12 @@ Unchanged from 9.6: 2026-04 through 2026-07 at full months, the long-memory
 and persistence evidence. Gate: pair verdict `pass` ONLY - a fail means NQ
 cannot supply MNQ's history and this wave is skipped, not redirected.
 
-**Wave 2B - direct MNQ TBBO. Reported prices, NOT yet verified by our
-instrument.** One full month, 2026-07, reported at 73.41; on a pair FAIL,
-add 2026-06 reported at 70.11 so the target instrument carries two
-contiguous months of trade-and-quote evidence itself. Gate: the pair
+**Wave 2B - direct MNQ TBBO. Prices verified 2026-08-05 through our own
+cache** (`analysis/databento_cache.json`, MNQ.v.0 entries fetched
+09:09-09:13 UTC, usable as drift baselines until 2026-08-12). One full
+month, 2026-07, at 73.41; on a pair FAIL, add 2026-06 at 70.11 so the
+target instrument carries two contiguous months of trade-and-quote
+evidence itself. Gate: the pair
 ANALYZED - either verdict, since the per-instrument quote seams need MNQ
 quotes regardless - plus two structural prerequisites: an `mnqv` scope and
 MNQ window entries added to `databento_price.py` and a pricing sweep run,
@@ -1338,16 +1340,16 @@ baseline in our own cache; and the buy whitelist extended with this wave's
 unlock rule. Reported figures are treated as estimates until our tool
 quotes them.
 
-**Wave 3 - two weeks of MNQ MBO, 2026-07-06 to 07-20. Reported at 54.52.
-ALWAYS LAST.** Gate, twofold: an accepted implementation specification for
+**Wave 3 - two weeks of MNQ MBO, 2026-07-06 to 07-20. 54.52, verified
+2026-08-05 alongside the wave 2B quotes. ALWAYS LAST.** Gate, twofold: an accepted implementation specification for
 where order-lifecycle evidence lands in the venue - independent quote
 clock, depth state, cancellation and replenishment dynamics, queue-position
 mechanics - written per `reference/technical-implementation-spec.md` BEFORE
 the purchase, so the report's original mistake of buying evidence with no
 landing site is not repeated at the architecture level; and a separate
-explicit authorization. MBP-1 (reported 44.64) is the fallback if the spec
-concludes order identity is not needed; MBP-10 (reported 83.24) is rejected
-as dominated.
+explicit authorization. MBP-1 (44.64, verified) is the fallback if the spec
+concludes order identity is not needed; MBP-10 (83.24, verified) is
+rejected as dominated.
 
 **Totals.** Pass path: 24.06 + 71.79 + 73.41 + 54.52 + 0.02 = 223.80,
 leaving 1.20. Fail path: 24.06 + 73.41 + 70.11 + 54.52 = 222.10, leaving
