@@ -650,6 +650,23 @@ execution (selftest included). Nothing below starts before that.
 permits committing the harness at all; a failing one sends H1-H2 back
 uncommitted.
 
+RESULT, 2026-08-05: the owner cleared the first run; the selftest
+caught TWO defects before passing at 68 checks, both fixed under
+joint agreement with the discovery sequence recorded here, before any
+real-data measurement. (1) Inclusive tolerance boundaries computed a
+hair above the bound in binary; `within` adopted the pair-harness
+SLACK 1e-12 convention. (2) The 4.75 refinement's
+keep-the-subinterval-containing-the-best-point survivor rule was
+MATHEMATICALLY DEFECTIVE - an endpoint incumbent can control bracket
+selection without directional information, reproduced misconverging
+to 3.136 on abs(x - 3.2) - and is AMENDED to classic ternary
+comparison: evaluate m1 and m2, keep [a, m2] when f(m1) <= f(m2)
+(the tie keeps the left), else [m1, b]; the coarse grid selects the
+basin and ternary refinement makes the explicit local-unimodality
+assumption within it; the returned candidate remains the best point
+ever evaluated, smaller winning ties. The reproduction is a
+permanent regression check in the selftest.
+
 **Brick M2 - preflight.** `python3 analysis/mnq_fit.py preflight`.
 Persists its artifact or refuses; a refusal stops the spec and is
 reported as a delivery finding.
