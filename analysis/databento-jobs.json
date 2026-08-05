@@ -1,0 +1,22 @@
+{
+ "_version": 1,
+ "jobs": {
+  "pairv|2026-07.2wk|trades": {
+   "files": {
+    "condition.json": "573e5fe7e384b31f221b1c7b55c8e2f27adc0009a1da03da54f431548f705366",
+    "glbx-mdp3-20260705-20260719.trades.csv.zst": "38bde84575342d073b7783dea8701404e8b6b70d39c487466aecbdee92b4e1f5",
+    "manifest.json": "c14417ef0c7576618394972efcfe3023a78f6d26a1cf0218d26f75fe67700d98",
+    "metadata.json": "eeb6a8021bfae9ea88763efd414cae642d47574c3d29c2e3a0c59d93826024c5"
+   },
+   "intent_at": "2026-08-05T09:22:34.909636+00:00",
+   "job_id": "GLBX-20260805-JUBCRPRLG8",
+   "live_quote_at_intent": 24.058345198631,
+   "live_quote_at_submit": 24.058345198631,
+   "reconciled_at": "2026-08-05T09:23:54.367162+00:00",
+   "schema": "trades",
+   "scope": "pairv",
+   "state": "downloaded",
+   "window": "2026-07.2wk"
+  }
+ }
+}
