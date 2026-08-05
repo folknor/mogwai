@@ -157,11 +157,16 @@ never a committed path.** 24.06 of the credit is spent; 100.94 remains.
 Wave 2A (NQ months, 71.79) is PERMANENTLY SKIPPED and structurally locked -
 the fail artifact refuses it in the downloader's stage gate. Wave 2B is
 SPLIT by that policy: the July month (`mnqv`/`mnq07`, 73.41, inside
-credit) is the operative purchase, whitelisted and NOT authorized; the
-June month (`mnq06`, 70.11, personal cash) is priced but deliberately NOT
-buy-whitelisted - its case must come from measuring the delivered July
-data under a decision contract that does not exist yet. Wave 3 (MNQ MBO
-54.52) is spec-gated, always last, not authorized.
+credit) was authorized 2026-08-05 after the joint recommendation and the
+free-corpus stress test, and is **BOUGHT AND DELIVERED**: job
+`GLBX-20260805-HAPEWPABKG`, submitted at the planned 73.41 with zero
+drift under a 74-dollar cap, five files hash-verified into
+`research/market-data/databento/mnqv/2026-07.full.tbbo/`. Credit spent:
+97.47 of 125; 27.53 remains as contingency. The June month (`mnq06`,
+70.11, personal cash) is priced but deliberately NOT buy-whitelisted -
+its case must come from measuring the delivered July data under a
+decision contract that does not exist yet. Wave 3 (MNQ MBO 54.52) is
+spec-gated, always last, not authorized.
 
 **The tool inventory a next agent must know.**
 

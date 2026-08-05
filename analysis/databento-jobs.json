@@ -4,13 +4,20 @@
   "mnqv|2026-07.full|tbbo": {
    "compression": "zstd",
    "encoding": "csv",
+   "files": {
+    "condition.json": "c990cfd64a8b539c28da0bd1c5411482f22eee25d5a65d1d2178cde161db0240",
+    "glbx-mdp3-20260630.tbbo.csv.zst": "18c218aa2dc4df44678222912d4811d5aeee4fd29df40577c0e432fc8a02dc01",
+    "glbx-mdp3-20260701-20260731.tbbo.csv.zst": "b5ede9b3c0a544367196cad91c60bd35ec01a11f8e536a6a04525aa34fc0d6fd",
+    "manifest.json": "8d627b13457b6eb0bb3713329dbde750af755114783e71d97eacfd325a3dd175",
+    "metadata.json": "81617eba940569c9d47af85203dfed827d127c88596d1f40952864f2e03410eb"
+   },
    "job_id": "GLBX-20260805-HAPEWPABKG",
    "live_quote_at_submit": 73.405929505825,
    "planned_quote": 73.405929505825,
    "schema": "tbbo",
    "scope": "mnqv",
    "split_duration": "month",
-   "state": "queued",
+   "state": "downloaded",
    "submitted_at": "2026-08-05T12:44:31.110428+00:00",
    "window": "2026-07.full"
   },
