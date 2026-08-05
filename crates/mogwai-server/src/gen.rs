@@ -1472,7 +1472,7 @@ mod tests {
 
     /// Brick O of notes/mnq-generator-successor-spec.md: the protocol-9
     /// tape oracle. Walks the resolved crypto preset profiles directly -
-    /// quotes AND trades, every field via the fixed-order Debug form -
+    /// quotes AND trades, every field via canonical named-separator lines -
     /// and hashes each stream with FNV-1a 64 into the committed fixture.
     /// Write-once semantics: a MISSING fixture is written only at
     /// TAPE_PROTOCOL_VERSION 9 and refused by name under any other
@@ -1520,7 +1520,25 @@ mod tests {
                     break;
                 }
                 events += 1;
-                for byte in format!("{event:?}").bytes() {
+                // Canonical serialization: every field, named separator
+                // layout, Display for decimals - a STABLE contract, unlike
+                // Debug text, whose derived layout could drift with a field
+                // rename and silently re-key the oracle.
+                let line = match &event {
+                    TickEvent::Trade(t) => format!(
+                        "T|{}|{}|{}|{}|{}",
+                        t.symbol,
+                        t.price,
+                        t.size,
+                        aggressor_word(t.aggressor),
+                        t.ts_event
+                    ),
+                    TickEvent::Quote(q) => format!(
+                        "Q|{}|{}|{}|{}|{}|{}",
+                        q.symbol, q.bid_px, q.ask_px, q.bid_sz, q.ask_sz, q.ts_event
+                    ),
+                };
+                for byte in line.bytes() {
                     hash ^= u64::from(byte);
                     hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
                 }
@@ -1535,7 +1553,7 @@ mod tests {
         }
         let observed = serde_json::json!({
             "tape_protocol_version": mogwai_data::TAPE_PROTOCOL_VERSION,
-            "hash": "fnv1a64 over TickEvent Debug bytes",
+            "hash": "fnv1a64 over canonical TickEvent lines",
             "window_ns": WINDOW_NS,
             "surge": "start 1h, 30m, rate 2.0, children 1.5",
             "entries": hashes,
@@ -1545,6 +1563,27 @@ mod tests {
                 &std::fs::read_to_string(fixture_path).expect("fixture reads"),
             )
             .expect("fixture parses");
+            // The WHOLE frozen contract is asserted, not merely the entry
+            // hashes: a fixture whose version, window, hash convention or
+            // surge parameters silently changed is a different oracle
+            // wearing this one's filename.
+            assert_eq!(
+                frozen["tape_protocol_version"],
+                serde_json::json!(9),
+                "the oracle fixture must remain the protocol-9 record"
+            );
+            assert_eq!(
+                frozen["hash"], observed["hash"],
+                "the fixture's hash convention moved"
+            );
+            assert_eq!(
+                frozen["window_ns"], observed["window_ns"],
+                "the fixture's window moved"
+            );
+            assert_eq!(
+                frozen["surge"], observed["surge"],
+                "the fixture's surge parameters moved"
+            );
             assert_eq!(
                 frozen["entries"], observed["entries"],
                 "a crypto tape moved against the protocol-9 oracle"
