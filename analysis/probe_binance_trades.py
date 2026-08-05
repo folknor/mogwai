@@ -10,23 +10,34 @@ primary rule, and consecutive rows with the same timestamp only, matching the
 aggTrades probe. Memory is bounded by histograms and the current event.
 """
 
-import csv
-import io
 import math
 import sys
 import zipfile
 
 try:
     from analysis.probe_binance_aggtrades import AutoCorr
+    from analysis.preflight import _byte_lines
 except ModuleNotFoundError:
     from probe_binance_aggtrades import AutoCorr
+    from preflight import _byte_lines
 
 
 class EventStats:
+    __slots__ = (
+        "with_side", "key_stamp", "key_side", "count", "prices", "events",
+        "single", "single_level", "children_sum", "children_hist",
+        "children_max", "levels_sum", "prev_time", "gaps", "gap_sum",
+        "gap_sumsq", "gap_acf", "subsecond_distinct_gaps",
+        "subsecond_gap_sum_us",
+    )
+
     def __init__(self, with_side):
         self.with_side = with_side
-        self.key = None
-        self.time = None
+        # The group key is held as two scalars rather than a (stamp, side)
+        # tuple, so the hot path allocates nothing per row. A None stamp marks
+        # "no open event"; real stamps are never None.
+        self.key_stamp = None
+        self.key_side = None
         self.count = 0
         self.prices = set()
         self.events = 0
@@ -45,7 +56,7 @@ class EventStats:
         self.subsecond_gap_sum_us = 0
 
     def _close(self):
-        if self.key is None:
+        if self.key_stamp is None:
             return
         self.events += 1
         self.children_sum += self.count
@@ -56,7 +67,7 @@ class EventStats:
         self.single += self.count == 1
         self.single_level += levels == 1
         if self.prev_time is not None:
-            gap_us = self.time - self.prev_time
+            gap_us = self.key_stamp - self.prev_time
             gap = gap_us / 1_000_000.0
             self.gaps += 1
             self.gap_sum += gap
@@ -65,16 +76,17 @@ class EventStats:
             if 0 < gap_us < 1_000_000:
                 self.subsecond_distinct_gaps += 1
                 self.subsecond_gap_sum_us += gap_us
-        self.prev_time = self.time
+        self.prev_time = self.key_stamp
 
     def push(self, stamp, side, price):
-        key = (stamp, side) if self.with_side else stamp
-        if key != self.key:
+        if stamp != self.key_stamp or (self.with_side and side != self.key_side):
             self._close()
-            self.key = key
-            self.time = stamp
+            self.key_stamp = stamp
+            self.key_side = side
             self.count = 0
-            self.prices = set()
+            # _close has already read len(self.prices), so the set is reused
+            # rather than reallocated once per event (~15M events a month).
+            self.prices.clear()
         self.count += 1
         self.prices.add(price)
 
@@ -126,23 +138,39 @@ def probe(path):
     first = None
     last = None
     second_counts = {}
+    primary_push = primary.push
+    timestamp_push = timestamp.push
     with zipfile.ZipFile(path) as archive:
-        info = archive.getinfo(archive.namelist()[0])
+        info = archive.infolist()[0]
         with archive.open(info) as stream:
-            for row in csv.reader(io.TextIOWrapper(stream, newline="")):
-                if not row or not row[0].lstrip("-").isdigit():
+            # Raw byte lines, no TextIOWrapper decode and no csv state machine:
+            # every field is plain ASCII and the layout carries no quoting. The
+            # price stays raw bytes - both accumulators take it as an opaque
+            # set key, so only the distinct count matters.
+            for line in _byte_lines(stream):
+                if line.endswith(b"\r"):
+                    line = line[:-1]
+                if not line:
+                    continue
+                # Full split: the real dumps carry a seventh trailing column
+                # (is_best_match), so a maxsplit of 5 would fold it into the
+                # side field.
+                row = line.split(b",")
+                if not row[0].lstrip(b"-").isdigit():
                     continue
                 price = row[1]
                 stamp = int(row[4])
-                side = row[5].strip().lower() == "true"
+                side_text = row[5]
+                side = side_text == b"True" or side_text == b"true"
                 rows += 1
                 quote += float(row[3])
-                first = stamp if first is None else first
+                if first is None:
+                    first = stamp
                 last = stamp
                 second = stamp // 1_000_000
                 second_counts[second] = second_counts.get(second, 0) + 1
-                primary.push(stamp, side, price)
-                timestamp.push(stamp, side, price)
+                primary_push(stamp, side, price)
+                timestamp_push(stamp, side, price)
     span_seconds = (last // 1_000_000 - first // 1_000_000) + 1
     histogram = {}
     for value in second_counts.values():

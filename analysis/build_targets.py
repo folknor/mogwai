@@ -63,6 +63,8 @@ OUT = ROOT / "analysis/targets"
 
 IDX_QTY = 2
 MAX_LAG = 50
+# The only ACF lags any target reads. F4 takes lag 1; F5 takes 1, 10 and 50.
+REPORTED_LAGS = (1, 10, 50)
 LVL_BINS = 120
 
 TARGET_SCHEMA_VERSION = 1
@@ -99,25 +101,43 @@ def targets_path(year: int, month: int) -> Path:
 def compute_targets(path: Path) -> dict:
     """One traversal. Fifteen targets, every estimator imported."""
     events = EventStats(True)
-    ret_acf = AutoCorr(MAX_LAG)
-    abs_acf = AutoCorr(MAX_LAG)
+    # Only lags 1, 10 and 50 are ever reported, so only those are accumulated.
+    # Bit-identical to the full sweep at those lags and roughly sixteen times
+    # cheaper in the inner loop; conformance_f3_f6 asserts the identity.
+    ret_acf = AutoCorr(MAX_LAG, lags=REPORTED_LAGS)
+    abs_acf = AutoCorr(MAX_LAG, lags=REPORTED_LAGS)
     size_hist = [0] * LVL_BINS
-    size_dec_hist = [0] * 9
-    size_n = 0
+    # Only decimals <= 2 is ever read (size_round_frac), so a single counter
+    # replaces the nine-bin histogram; the count is the same integer.
+    size_round = 0
     zero_change = 0
     change_n = 0
     prev_px = None
+    prev_log = 0.0
     rows = 0
+
+    # CPython hot-loop bindings: global and attribute lookups hoisted out of a
+    # loop that runs ~128M times per archive.
+    log = math.log
+    events_push = events.push
+    ret_push = ret_acf.push
+    abs_push = abs_acf.push
+    _decimals_used = decimals_used
+    _lvl_bin = lvl_bin
 
     started = time.time()
     with zipfile.ZipFile(path) as zf:
-        info = zf.getinfo(zf.namelist()[0])
+        info = zf.infolist()[0]
         with zf.open(info) as stream:
             for line in _byte_lines(stream):
                 if line.endswith(b"\r"):
-                    line = line.rstrip(b"\r")
+                    line = line[:-1]
                 if not line:
                     continue
+                # FULL split, no maxsplit: the real dumps carry a seventh
+                # trailing column (is_best_match) beyond the documented six,
+                # so capping at 5 would leave parts[5] as b"True,True" and
+                # misread every buyer-maker row.
                 parts = line.split(b",")
                 if not parts[IDX_ID].lstrip(b"-").isdigit():
                     continue
@@ -126,31 +146,40 @@ def compute_targets(path: Path) -> dict:
                     continue
                 rows += 1
 
-                price_text = parts[IDX_PRICE].decode("ascii")
-                qty_text = parts[IDX_QTY].decode("ascii")
+                price_text = parts[IDX_PRICE]
+                qty_text = parts[IDX_QTY]
                 stamp = int(stamp_text)
-                side = parts[5].strip().lower() == b"true"
+                side_text = parts[5]
+                side = side_text == b"True" or side_text == b"true"
 
                 # F1 and F2, through the class that produced cadence.json. It
                 # takes the price as an opaque key for the level count, so the
-                # raw string is passed exactly as the standalone probe passes it.
-                events.push(stamp, side, parts[IDX_PRICE])
+                # raw field is passed exactly as the standalone probe passes it.
+                events_push(stamp, side, price_text)
 
+                # float() parses ASCII bytes directly, so neither field is
+                # decoded; decimals_used counts on the raw bytes the same way.
                 px = float(price_text)
                 qty = float(qty_text)
 
-                size_n += 1
-                size_dec_hist[min(8, decimals_used(qty_text))] += 1
+                if _decimals_used(qty_text) < 3:
+                    size_round += 1
                 if qty > 0:
-                    size_hist[lvl_bin(qty)] += 1
+                    size_hist[_lvl_bin(qty)] += 1
 
                 if prev_px is not None:
                     change_n += 1
                     if px == prev_px:
                         zero_change += 1
-                    ret = math.log(px) - math.log(prev_px)
-                    ret_acf.push(ret)
-                    abs_acf.push(abs(ret))
+                    # log(prev_px) is the previous row's log(px), retained
+                    # rather than recomputed - the identical double either way.
+                    log_px = log(px)
+                    ret = log_px - prev_log
+                    ret_push(ret)
+                    abs_push(abs(ret))
+                    prev_log = log_px
+                else:
+                    prev_log = log(px)
                 prev_px = px
 
     report = events.report()
@@ -173,7 +202,7 @@ def compute_targets(path: Path) -> dict:
             "children_single_frac": report["children"]["single_frac"],
             "levels_mean": report["levels"]["mean"],
             # F3 size shape
-            "size_round_frac": (sum(size_dec_hist[:3]) / size_n) if size_n else None,
+            "size_round_frac": (size_round / rows) if rows else None,
             "size_dispersion": (p90 / p50) if (p90 and p50) else None,
             # F4 return ACF
             "return_acf_lag1": racf[0] if racf else None,
@@ -268,13 +297,19 @@ def mode_build(jobs: int = 4) -> int:
             year, month = futures[future]
             result = future.result()
             done += 1
-            t = result["targets"]
             tag = "cached" if result["from_cache"] else f"{result['elapsed_s']}s"
+            # PROGRESS ONLY. No target value is printed, deliberately.
+            #
+            # An earlier version of this line displayed children_mean,
+            # mean_event_duration_s and zero_change_frac for every month, which
+            # made the progress log a cross-month disclosure channel for three
+            # of the fourteen targets - inside the one stage whose contract is
+            # that the table is frozen WITHOUT inspection. Knowing one month's
+            # level is harmless; seeing nineteen months side by side is the rank
+            # information the association test exists to measure.
             print(
                 f"[{done:2d}/{len(wanted)}] {year:04d}-{month:02d}  "
-                f"children {t['children_mean']:.4f}  "
-                f"dur {t['mean_event_duration_s']:.6f}  "
-                f"zero {t['zero_change_frac']:.6f}  {tag}",
+                f"rows {result['rows']:,}  {tag}",
                 flush=True,
             )
     print()

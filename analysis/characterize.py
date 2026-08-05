@@ -203,7 +203,17 @@ def log_bin(value, lo, hi, nbins):
 
 
 def decimals_used(num_str):
-    """Significant decimal places after stripping trailing zeros (round-lot tell)."""
+    """Significant decimal places after stripping trailing zeros (round-lot tell).
+
+    Accepts str or bytes. The bytes path exists so hot loops reading raw CSV
+    fields need not decode a field just to count its decimals; both paths run
+    the identical strip/split/rstrip sequence, so the count cannot differ.
+    """
+    if isinstance(num_str, bytes):
+        s = num_str.strip()
+        if b"." not in s:
+            return 0
+        return len(s.split(b".", 1)[1].rstrip(b"0"))
     s = num_str.strip()
     if "." not in s:
         return 0
