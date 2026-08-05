@@ -1316,22 +1316,45 @@ this venue exists to produce; but consuming it means the venue grows an
 order-book and queue model, at least one major protocol bump and real
 engine work. The 54.52 buys the evidence, not the capability.
 
-**Wave 1 - the paired NQ/MNQ test. 24.06. Priced and verified.**
-Unchanged from 9.6. Gate: explicit arm instruction. Its analysis writes
-`analysis/databento-pair-verdict.json`, bound to the job id and delivered
-file hashes, with an affirmative `pass` or an explicit `fail`.
+**Wave 1 - the paired NQ/MNQ test. 24.06. BOUGHT, DELIVERED, DECIDED:
+FAIL, 2026-08-05.** Job `GLBX-20260805-JUBCRPRLG8`, delivered and
+hash-verified, preflighted (19,220,574 rows, uniformly nanosecond, zero
+regressions, 30 unsided rows in 19.2M), then run once through the frozen
+rule of `notes/pair-test-preregistration.md`: ten usable sessions, family
+majority TRUE (4 of 6), mandatory families FALSE - P2 and P4 passed,
+mandatory P5 failed on `zero_change_frac` at median d -0.1075 against the
+frozen 0.10 tolerance. MNQ prints 4.3x NQ on the same tick and therefore
+repeats prices ~11 points more often: the 7.1 finding that zero-change
+tracks activity, not the instrument, arriving exactly as anticipated. The
+verdict artifact `analysis/databento-pair-verdict.json` records `fail`,
+bound to the job id, all four delivered hashes, the preregistration hash
+and the harness tree commit.
 
-**Wave 2A - four contiguous NQ TBBO months. 71.79. Priced and verified.**
-Unchanged from 9.6: 2026-04 through 2026-07 at full months, the long-memory
-and persistence evidence. Gate: pair verdict `pass` ONLY - a fail means NQ
-cannot supply MNQ's history and this wave is skipped, not redirected.
+Two secondary findings, recorded as findings and NOT as a partial pass:
+the shape agreement in P3, P4 and P6 is tight (long-memory ACFs within
+0.008 absolute), so NQ can inform shared process-shape REASONING while
+remaining unable to unlock purchased NQ evidence under the frozen proxy
+rule. And the protocol 8 correction measured MNQ count peak-to-trough
+13.67 against volume 13.04 (ratio 0.95; NQ 0.96) over these ten July
+sessions - removing the assumption that volume necessarily overstates
+arrivals in this window, while establishing neither a stable correction
+nor grounds to change the fitted 2020-2026 profile of 27.51 from ten
+sessions.
+
+**Wave 2A - four contiguous NQ TBBO months. 71.79. PERMANENTLY SKIPPED,
+2026-08-05**, by the frozen fail consequence: NQ cannot supply MNQ's
+history, the wave is skipped, not redirected, and its 71.79 is not respent
+within it. The downloader's stage gate enforces this structurally - the
+fail artifact refuses `nqv contiguous`, verified.
 
 **Wave 2B - direct MNQ TBBO. Prices verified 2026-08-05 through our own
 cache** (`analysis/databento_cache.json`, MNQ.v.0 entries fetched
 09:09-09:13 UTC, usable as drift baselines until 2026-08-12). One full
 month, 2026-07, at 73.41; on a pair FAIL, add 2026-06 at 70.11 so the
 target instrument carries two contiguous months of trade-and-quote
-evidence itself. Gate: the pair
+evidence itself. **The fail branch is now the operative one** per wave 1's
+verdict; the wave remains available and NOT authorized, behind its
+groundwork as stated. Gate: the pair
 ANALYZED - either verdict, since the per-instrument quote seams need MNQ
 quotes regardless - plus two structural prerequisites: an `mnqv` scope and
 MNQ window entries added to `databento_price.py` and a pricing sweep run,
@@ -1510,14 +1533,17 @@ replays it through the adapter. The three new per-instrument quantities remain
 explicitly uncalibrated, so step 5b now has separate landing sites for quoted
 width and effective spread rather than one conflated target.
 
-**Step 6. Buy the paired test, now 24.06 dollars on the 2026-07 window.**
-Answers whether process constants are contract-specific or market-specific,
-and whether NQ's moments fall inside the existing cross-pair tolerances. If
-they do, the fingerprint is already MNQ-ish within its own stated band and the
-rest of the budget buys refinement rather than correction. Repriced and moved
-2026-08-05: the old 2024-05 window was regime-selected as the p0 calm month,
-which the sampling-frame FAIL rejects, so the pair moves to a recent no-roll
-window - see [9.6](#96-the-contiguous-replacement-basket-priced-2026-08-05).
+**Step 6. Buy the paired test. DONE AND DECIDED 2026-08-05: FAIL.** Bought
+at 24.06 on the 2026-07 window, delivered, verified, and judged under the
+frozen preregistration: NQ is NOT a usable MNQ proxy - mandatory P5 failed
+on `zero_change_frac`, the activity-tracking failure 7.1 predicted, while
+the process-shape families agreed tightly (a secondary finding, not a
+partial pass). Wave 2A is permanently skipped; the operative path is direct
+MNQ evidence per
+[9.7](#97-the-extended-program-gated-in-waves). The volume-versus-count
+obligation this step carried is measured: count and volume peak-to-trough
+agree within 5 percent in the July window, so the 27.51x proxy caveat is
+not compounded by a large arrival bias there; the fitted profile stands.
 
 **This purchase acquired a SECOND job at protocol 8, and it is not optional.**
 The fitted `intensity_hour` is contract-volume intensity standing in for
