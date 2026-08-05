@@ -25,11 +25,14 @@ Three modes:
                instruments; run this before trusting the batch
     run        the batch, resumable, atomic per month
     report     summarize completed per-month results and propose the span
+    migrate    re-adjudicate version 2 results under the version 3 contract,
+               from recorded facts only, no archive reads
 
 Usage:
     python3 -u analysis/preflight.py validate
     python3 -u analysis/preflight.py run
     python3 -u analysis/preflight.py report
+    python3 -u analysis/preflight.py migrate
 """
 
 from __future__ import annotations
@@ -53,14 +56,27 @@ SPAN = ((2025, 1), (2026, 7))
 
 # Bumping this invalidates every cached per-month result. Resume compares it, so
 # a changed estimator cannot be silently mixed with results from the old one.
-SCHEMA_VERSION = 2
+# Version 3 corrected EXPECTED_COLUMNS to the observed seven-column spot layout
+# and made the header and layout contracts part of the fail-closed verdict; the
+# `migrate` mode re-adjudicates version 2 results from their recorded raw facts
+# without rereading any archive.
+SCHEMA_VERSION = 3
 
 # Expected microsecond epoch width. 13 digits is millisecond, 16 microsecond.
 MICROSECOND_DIGITS = 16
 
-# The documented spot layout. Position, not name, is what the parser uses, so
-# the header is checked AGAINST this rather than trusted to define it.
-EXPECTED_COLUMNS = ("id", "price", "qty", "quote_qty", "time", "is_buyer_maker")
+# The OBSERVED spot layout: seven columns, with the trailing is_best_match the
+# vendor's own documentation lists and every archive in this corpus carries.
+# Version 2 of this file recorded six here while accepting stable seven-column
+# data, because the verdict never compared the shape against the schema - see
+# the version 3 note above. Position, not name, is what the parser uses, so a
+# header, when one exists, is checked AGAINST this rather than trusted to
+# define it. The monthly spot dumps carry NO header row - verified across all
+# nineteen archives - so header equality is enforced conditionally: absent is
+# the documented vendor format, present-but-different is a failure.
+EXPECTED_COLUMNS = (
+    "id", "price", "qty", "quote_qty", "time", "is_buyer_maker", "is_best_match",
+)
 IDX_ID, IDX_PRICE, IDX_TIME, IDX_SIDE = 0, 1, 4, 5
 
 # Known-good values for `validate`, taken from analysis/cadence.json, which was
@@ -138,6 +154,13 @@ def archive_identity(path: Path, rehash: bool = False) -> dict:
         "size": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
     }
+
+
+def header_matches(header: list[str] | None) -> bool:
+    """Exact normalized equality against EXPECTED_COLUMNS."""
+    if header is None:
+        return False
+    return [c.strip().lower() for c in header] == list(EXPECTED_COLUMNS)
 
 
 def percentile(hist: dict[int, int], total: int, q: float) -> int:
@@ -351,12 +374,11 @@ def scan(path: Path) -> dict:
         "contract_1_header": {
             "present": header is not None,
             "columns": header,
-            "matches_expected_positions": (
-                header is not None
-                and len(header) >= len(EXPECTED_COLUMNS)
-                and header[IDX_TIME].strip().lower() in ("time", "transact_time")
-                and "buyer" in header[IDX_SIDE].strip().lower()
-            ),
+            # EXACT normalized equality, not a two-position spot check. The
+            # old positional check would have accepted any header naming a
+            # time-ish column 4 and a buyer-ish column 5, whatever else it
+            # claimed.
+            "matches_expected_columns": header_matches(header),
         },
         "contract_2_layout": {
             "field_counts": field_counts,
@@ -415,9 +437,30 @@ def scan(path: Path) -> dict:
 
 
 def diagnostics_verdict(result: dict) -> tuple[bool, list[str]]:
-    """Preregistration section 9. A month failing any of these FAILS CLOSED."""
+    """Preregistration section 9. A month failing any of these FAILS CLOSED.
+
+    Schema version 3 added the header and layout-agreement contracts. The
+    monthly spot dumps carry no header row, so absence is the accepted vendor
+    format; a header that IS present must equal EXPECTED_COLUMNS exactly. The
+    field-count histogram must contain exactly one shape and that shape must be
+    the recorded schema's width - stable_field_count alone proved consistency,
+    not agreement.
+    """
     problems = []
+    header = result["contract_1_header"]
+    if header["present"] and not header["matches_expected_columns"]:
+        problems.append(
+            f"header does not match the recorded schema: {header['columns']}"
+        )
     layout = result["contract_2_layout"]
+    # JSON round-trips int keys as strings, and the verdict must adjudicate
+    # both fresh scans and reloaded artifacts identically.
+    field_counts = {int(k): v for k, v in layout["field_counts"].items()}
+    if set(field_counts) != {len(EXPECTED_COLUMNS)}:
+        problems.append(
+            "field shape disagrees with the recorded schema: "
+            f"want exactly {len(EXPECTED_COLUMNS)} fields, saw {field_counts}"
+        )
     if not layout["uniform_resolution"]:
         problems.append(
             "mixed timestamp resolution inside the month: "
@@ -480,6 +523,83 @@ def write_result(year: int, month: int, payload: dict) -> None:
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
     os.replace(tmp, path)
+
+
+REQUIRED_MIGRATION_FACTS = (
+    "rows", "contract_1_header", "contract_2_layout", "archive_identity",
+    "malformed_rows", "contract_4_ordering",
+)
+
+
+def migrate_month(year: int, month: int) -> tuple[str, list[str]]:
+    """Re-adjudicate one version 2 result under the version 3 contract.
+
+    From RECORDED RAW FACTS only - the complete header observation, the
+    field-count histogram, the row count and the archive identity. No archive
+    is reread. Refuses, rather than guessing, when a required fact is absent.
+    Archive identity is preserved verbatim, and the migrated artifact records
+    `migrated_from_schema_version` so the re-adjudication is never mistaken
+    for a fresh scan.
+
+    Returns (status, problems) where status is one of `migrated`, `current`,
+    `refused`.
+    """
+    path = result_path(year, month)
+    if not path.exists():
+        return "refused", ["no result file"]
+    try:
+        payload = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return "refused", ["unparseable result file"]
+    if payload.get("schema_version") == SCHEMA_VERSION:
+        ok, problems = diagnostics_verdict(payload)
+        return "current", ([] if ok else problems)
+    if payload.get("schema_version") != 2:
+        return "refused", [f"schema_version {payload.get('schema_version')!r}"]
+    if not payload.get("complete"):
+        return "refused", ["incomplete result"]
+    missing = [f for f in REQUIRED_MIGRATION_FACTS if f not in payload]
+    header = payload.get("contract_1_header", {})
+    if "present" not in header or "columns" not in header:
+        missing.append("contract_1_header facts")
+    if not payload.get("contract_2_layout", {}).get("field_counts"):
+        missing.append("field_counts")
+    identity = payload.get("archive_identity") or {}
+    if not identity.get("published_sha256") or not identity.get("size"):
+        missing.append("archive_identity facts")
+    if missing:
+        return "refused", [f"required fact absent: {name}" for name in missing]
+
+    header["matches_expected_columns"] = header_matches(header["columns"])
+    header.pop("matches_expected_positions", None)
+    payload["schema_version"] = SCHEMA_VERSION
+    payload["migrated_from_schema_version"] = 2
+    ok, problems = diagnostics_verdict(payload)
+    payload["diagnostics_pass"] = ok
+    payload["problems"] = problems
+    write_result(year, month, payload)
+    return "migrated", problems
+
+
+def mode_migrate() -> int:
+    wanted = list(months(*SPAN))
+    print(f"re-adjudicating {len(wanted)} months under schema version "
+          f"{SCHEMA_VERSION}, from recorded facts, no archive reads\n", flush=True)
+    failures = 0
+    for year, month in wanted:
+        status, problems = migrate_month(year, month)
+        ok = status != "refused" and not problems
+        if not ok:
+            failures += 1
+        detail = "" if ok else "  " + "; ".join(problems)
+        print(f"  {'ok  ' if ok else 'FAIL'}  {year:04d}-{month:02d}  "
+              f"{status}{detail}", flush=True)
+    print()
+    if failures:
+        print(f"{failures} month(s) failed re-adjudication")
+        return 1
+    print(f"all {len(wanted)} months pass the corrected verdict")
+    return 0
 
 
 def mode_validate() -> int:
@@ -675,7 +795,7 @@ def mode_report() -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("validate", "run", "report"))
+    parser.add_argument("mode", choices=("validate", "run", "report", "migrate"))
     parser.add_argument(
         "--jobs",
         type=int,
@@ -694,7 +814,11 @@ def main() -> None:
     args = parser.parse_args()
     if args.mode == "run":
         sys.exit(mode_run(args.jobs, args.rehash))
-    sys.exit({"validate": mode_validate, "report": mode_report}[args.mode]())
+    sys.exit({
+        "validate": mode_validate,
+        "report": mode_report,
+        "migrate": mode_migrate,
+    }[args.mode]())
 
 
 if __name__ == "__main__":

@@ -339,6 +339,32 @@ Or both. There are no exceptions.
   scripts migrate versus die, whether the bin reads ZIP archives directly
   (a new dependency), and how the per-month JSON result contract carries over.
 
+- NUMERICAL STABILITY in `AutoCorr`, and it needs cadence-impact analysis before
+  anyone touches it. Surfaced 2026-08-05 by the F3-F6 conformance fixtures. Its
+  `acf()` guards zero variance with `if var <= 0: return [0.0] * k`, and that
+  guard fires only when the variance is EXACTLY zero. A series constant at an
+  irrational value - the fixture case is `abs(log return)` constant at ln2 -
+  leaves a tiny positive float residue from `sumsq / n - mean * mean`, so the
+  guard misses and the returned ACF comes out of catastrophic cancellation
+  rather than measurement. Both branches are wrong in the same way the report
+  keeps recording: a number is substituted where the honest answer is that the
+  quantity is undefined for a constant series.
+
+  NOT fixed, deliberately, and not during the sampling-frame experiment.
+  `AutoCorr` computes the F1 duration ACFs as well as the return ACFs, and its
+  output is bit-exact against `analysis/cadence.json` - `duration_acf_lag1`
+  0.32204142581620676 and `duration_acf_lag5` 0.22388204486699373 - which is the
+  lineage the fingerprint's cadence half rests on. Changing the estimator
+  invalidates that equivalence, which is a stronger guarantee than the fix buys.
+
+  What a fix would need: return an explicit unavailable rather than zeros, a
+  relative rather than absolute variance floor, and possibly a two-pass or
+  Welford accumulation to stop the cancellation at source. Each changes numbers,
+  so the work is the ANALYSIS of what moves in the cadence targets and whether
+  the fingerprint must be refitted, not the code change. Real monthly series
+  carry positive return variance and come nowhere near the degenerate case, so
+  nothing currently depends on this being fixed.
+
 - DECIDE: does `analysis/` deserve a test harness? Surfaced 2026-08-02 landing
   the drought elimination. The dwell statistics are computed TWICE against the
   same definition - `dwell_stats` in `analysis/characterize.py` measures the

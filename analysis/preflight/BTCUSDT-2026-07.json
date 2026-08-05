@@ -9,7 +9,7 @@
   "complete": true,
   "contract_1_header": {
     "columns": null,
-    "matches_expected_positions": false,
+    "matches_expected_columns": false,
     "present": false
   },
   "contract_2_layout": {
@@ -583,10 +583,11 @@
   },
   "malformed_rows": 0,
   "member": "BTCUSDT-trades-2026-07.csv",
+  "migrated_from_schema_version": 2,
   "month": 7,
   "problems": [],
   "rows": 84214146,
-  "schema_version": 2,
+  "schema_version": 3,
   "uncompressed_bytes": 6401338669,
   "year": 2026
 }

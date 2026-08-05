@@ -508,6 +508,135 @@ evidence the decision matches the vendor's own aggregation.
 
 Target vectors are unblocked by this gate.
 
+### 3.9 DEVIATION: F3-F6 estimator conformance is POST-OBSERVATION
+
+Recorded in full because the standing of an evidence claim is being reduced,
+and a reduced claim that is not written down reads later as a full one.
+
+**What happened, in order.** The brick 4 equivalence gate was written to print
+the seven ungated targets alongside the seven gated ones. It ran on 2026-06 and
+those seven real market values were displayed and read:
+
+```
+size_round_frac  size_dispersion  return_acf_lag1
+abs_acf_lag1     abs_acf_lag10    abs_acf_lag50     zero_change_frac
+```
+
+Only THEN were synthetic conformance fixtures for F3-F6 built. The batch had
+also been started before those fixtures existed, and was stopped; no per-month
+target artifact was opened.
+
+**The sequencing error, named precisely.** Importing an estimator unchanged
+prevents implementation DRIFT. It does not validate the estimator against a
+known answer, and `build_targets.py` said as much in its `UNGATED_TARGETS`
+comment - the gap was noticed and then walked past, which is worse than not
+noticing it.
+
+**Standing lost.** F3-F6 estimator conformance cannot be described as
+preregistered or blind. `analysis/conformance_f3_f6.py` and its frozen
+expectations validate implementation behaviour against independently derived
+answers, and that is all they do. Writing fixtures now cannot recover blindness.
+
+**Standing retained, and why.** The Spearman thresholds and acceptance rules of
+[7.1](#71-the-continuous-redesign-preregistered) are UNCHANGED and remain
+preregistered. Exactly one month was observed - 2026-06, in the held-out span -
+and a single level reveals nothing about its rank among the other six, nor about
+any correlation. No calibration-month value, no cross-month rank and no
+association result was seen. The F1/F2 equivalence gate is also undamaged: it
+compares against `cadence.json` values recorded long before this experiment, so
+observing them proves nothing that could have been tuned to.
+
+**The fixtures.** Eight cases, expectations derived from explicit formulas or
+hand-auditable sequences and never from production output, tolerances fixed
+before the estimators ran: exact for `zero_change_frac` and `size_round_frac`,
+1e-9 relative for `size_dispersion`, 1e-12 relative for the ACFs. Unavailable
+cases are covered - insufficient length, an empty size histogram, and a
+constant series - and each asserts `None` rather than a substituted number.
+Fixtures run through the real entry point as genuine ZIP archives, so no
+production code was reshaped to be testable. Result: 19 checks, 0 failed.
+
+**A second, smaller deviation inside the first.** The first freeze carried one
+WRONG expectation, `abs_acf_lag1 = 0.0` on the alternating fixture, from a bad
+hand-derivation: it assumed `AutoCorr`'s `var <= 0` guard fires for a constant
+`|return|` series. It does not. The expectations were re-frozen after that
+assertion was removed and replaced.
+
+The correction was NOT to adopt the observed 1.0. That value is decided by
+catastrophic cancellation, so pinning it would test the FPU rather than the
+estimator. The ill-conditioned assertion was deleted and a well-conditioned
+fixture added in its place - `|return|` alternating between ln2 and ln4, where
+alternating a and b gives cov = -((a-b)/2)^2 = -var and therefore acf(1) = -1 by
+algebra. It lands at 5.55e-15 relative, comfortably inside the pre-fixed 1e-12.
+
+**Finding worth keeping, and its exact standing.** The zero-variance guard fires
+only for an EXACTLY REPRESENTABLE constant. A series constant at an irrational
+value leaves a tiny positive float residue as its variance, so the guard misses
+and the answer comes from catastrophic cancellation.
+
+The two halves have different standing and the distinction matters:
+
+- The exactly-zero path IS PINNED. `constant_price` asserts
+  `return_acf_lag1 == 0.0`, so that is a regression contract and a change to the
+  guard breaks the fixture.
+- The irrational-constant path is a RECORDED LIMITATION, not pinned. The
+  ill-conditioned assertion was deleted precisely because its value is decided
+  by rounding, so nothing protects that behaviour and nothing should - pinning
+  it would test the FPU rather than the estimator.
+
+`AutoCorr` MUST NOT be changed during this experiment. Its bit-exact F1/F2
+lineage against `cadence.json` matters more here than the degenerate case, and
+real monthly series carry positive return variance and come nowhere near it. Any
+numerical-stability fix is separate future work requiring explicit
+cadence-impact analysis, since `AutoCorr` also computes the F1 duration ACFs and
+`duration_acf_lag1` and `duration_acf_lag5` are gated targets. Tracked in
+`notes/todo.md`.
+
+### 3.10 DEVIATION: the preflight schema contract was corrected AFTER the batch
+
+Recorded 2026-08-05, before the association harness runs. Surfaced by a
+performance regression rather than by any diagnostic: an optimization capped
+`split` at five commas on the documented six-column layout, the F1/F2
+equivalence gate failed, and the investigating scan
+(`analysis/side_predicate_scan.py`, retained until this record landed) showed
+every row of the 2026-06 archive carries SEVEN fields. The vendor's own
+documentation lists the seventh trailing column, `is_best_match`; preflight's
+`EXPECTED_COLUMNS` recorded six.
+
+**What the version 2 gate actually checked, and the gap.** `stable_field_count`
+proved every row shared ONE shape but never compared that shape against the
+recorded schema, so `{7: rows}` passed while the file said six. The header
+check tested two positions rather than the full column list, and neither
+header nor layout agreement was part of `diagnostics_verdict` at all. The gate
+therefore accepted stable seven-column data while documenting six columns.
+
+**Why no rows were reread.** The version 2 artifacts retained the complete raw
+facts - the header observation, the full field-count histogram, the row count,
+the published archive SHA-256 - so the corrected contract could be
+re-adjudicated blind, from recorded evidence only. Schema version 3 corrects
+`EXPECTED_COLUMNS` to seven, requires the field-count histogram to contain
+exactly the schema's width, folds header and layout agreement into the
+fail-closed verdict, and adds a `migrate` mode that refuses when a required
+fact is absent, preserves archive identity verbatim, and records
+`migrated_from_schema_version = 2`.
+
+**One amendment to the repair as specified.** The instruction was to require
+exact normalized header equality. The recorded facts show the monthly spot
+dumps carry NO header row - all nineteen artifacts record `present: false`,
+and the first line of the archives themselves is data (the headered files in
+`DATA-PURCHASE-REPORT.md` section 11.1 are the DAILY futures archives, a
+different product). A hard header requirement would have refused all nineteen
+months for want of a row the vendor never writes. The landed contract is:
+header absent is the accepted vendor format; a header that IS present must
+equal `EXPECTED_COLUMNS` exactly.
+
+**Outcome and standing.** All nineteen months pass the corrected verdict,
+19/19, `migrated`. The confirmed span and the calibration boundary are
+unchanged: 2025-01 through 2026-07, first twelve calibrate. No target value
+was read during the migration - it adjudicates layout facts only - so the
+freeze-without-inspection contract is intact. The parse defect this exposed
+never reached a frozen number: the equivalence gate caught it at the first
+seven gated targets and the fix was proven bit-exact before the batch ran.
+
 ## 4. Unit of analysis
 
 The **calendar month**, matching the CME window-selection machinery in
