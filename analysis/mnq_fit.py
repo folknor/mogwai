@@ -31,6 +31,9 @@ import math
 import os
 import subprocess
 import sys
+import threading
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 from compression import zstd  # stdlib from Python 3.14
 
@@ -243,6 +246,26 @@ def assign_session(ts_ns: int) -> tuple[str | None, str | None]:
     return None, None  # 16:00-17:00 daily break
 
 
+_MINUTE_FIELDS: dict[int, tuple] = {}
+
+
+def minute_fields(ts_ns: int) -> tuple:
+    """(session, segment, exchange-local hour), memoized on the UTC
+    minute. The permanent -300 offset is a whole number of minutes, so
+    all three are constant within one UTC minute; a month is ~44k
+    distinct minutes against 35M rows, and the memo removes the per-row
+    datetime and ISO-string construction of local_fields/assign_session
+    without touching their semantics."""
+    key = ts_ns // 60_000_000_000
+    hit = _MINUTE_FIELDS.get(key)
+    if hit is None:
+        session, segment = assign_session(ts_ns)
+        _date, local_minute = local_fields(ts_ns)
+        hit = (session, segment, local_minute // 60)
+        _MINUTE_FIELDS[key] = hit
+    return hit
+
+
 # ---------------------------------------------------------------------------
 # Streaming input (4.1 stream contract)
 # ---------------------------------------------------------------------------
@@ -256,25 +279,26 @@ REQUIRED_COLUMNS = (
 def iter_csv_zst(path):
     """Yield text lines from a .csv.zst, streaming, header included. A
     trailing \\r is stripped so CRLF data parses identically to LF and the
-    seam comparison sees the same bytes either way."""
+    seam comparison sees the same bytes either way. Each chunk is split
+    exactly once: the per-line remainder slice this replaced re-copied
+    the buffer tail for every row, quadratic per chunk."""
     with open(path, "rb") as fh:
         reader = zstd.ZstdFile(fh)
-        buffer = b""
+        pending = b""
         while True:
             chunk = reader.read(1 << 20)
             if not chunk:
                 break
-            buffer += chunk
-            while True:
-                nl = buffer.find(b"\n")
-                if nl < 0:
-                    break
-                line = buffer[:nl].decode("utf-8")
-                yield line[:-1] if line.endswith("\r") else line
-                buffer = buffer[nl + 1:]
-        if buffer:
-            line = buffer.decode("utf-8")
-            yield line[:-1] if line.endswith("\r") else line
+            pieces = (pending + chunk).split(b"\n")
+            pending = pieces.pop()
+            for raw in pieces:
+                if raw.endswith(b"\r"):
+                    raw = raw[:-1]
+                yield raw.decode("utf-8")
+        if pending:
+            if pending.endswith(b"\r"):
+                pending = pending[:-1]
+            yield pending.decode("utf-8")
 
 
 def column_indices(header_line: str) -> dict[str, int]:
@@ -342,6 +366,14 @@ def parse_stream(paths):
         except StopIteration:
             raise Refusal(f"{path} is empty") from None
         idx = column_indices(header)
+        # Locals for the per-row hot path: a dict subscript per field per
+        # row is measurable at 35M rows.
+        i_ts, i_iid, i_action, i_side = (
+            idx["ts_event"], idx["instrument_id"], idx["action"], idx["side"]
+        )
+        i_price, i_size = idx["price"], idx["size"]
+        i_bpx, i_apx = idx["bid_px_00"], idx["ask_px_00"]
+        i_bsz, i_asz = idx["bid_sz_00"], idx["ask_sz_00"]
         tail_ts = None
         tail_lines: set[str] = set()
         in_seam = seam_ts is not None
@@ -349,7 +381,7 @@ def parse_stream(paths):
             if not line.strip():
                 continue
             parts = line.split(",")
-            raw_ts = parts[idx["ts_event"]]
+            raw_ts = parts[i_ts]
             if len(raw_ts) != 19 or not raw_ts.isdigit():
                 raise Refusal(
                     f"{path}:{line_no}: ts_event {raw_ts!r} is not a "
@@ -370,32 +402,39 @@ def parse_stream(paths):
                         "file's final timestamp at the boundary; the files "
                         "overlap"
                     )
-            action = parts[idx["action"]]
+            action = parts[i_action]
             if action != "T":
                 raise Refusal(
                     f"{path}:{line_no}: action {action!r} is not T; the "
                     "tbbo schema carries one trade per row"
                 )
-            side = parts[idx["side"]]
+            side = parts[i_side]
             if side not in ("B", "A", "N"):
                 raise Refusal(
                     f"{path}:{line_no}: side {side!r} outside the DBN "
                     "alphabet B/A/N"
                 )
-            price = int(parts[idx["price"]])
-            bid_px = int(parts[idx["bid_px_00"]])
-            ask_px = int(parts[idx["ask_px_00"]])
-            for label, value in (("price", price), ("bid_px_00", bid_px),
-                                 ("ask_px_00", ask_px)):
-                if value > 0 and value % TICK_UNITS != 0:
-                    raise Refusal(
-                        f"{path}:{line_no}: {label} {value} is off the "
-                        "0.25 grid"
-                    )
+            price = int(parts[i_price])
+            bid_px = int(parts[i_bpx])
+            ask_px = int(parts[i_apx])
+            if price > 0 and price % TICK_UNITS != 0:
+                raise Refusal(
+                    f"{path}:{line_no}: price {price} is off the 0.25 grid"
+                )
+            if bid_px > 0 and bid_px % TICK_UNITS != 0:
+                raise Refusal(
+                    f"{path}:{line_no}: bid_px_00 {bid_px} is off the "
+                    "0.25 grid"
+                )
+            if ask_px > 0 and ask_px % TICK_UNITS != 0:
+                raise Refusal(
+                    f"{path}:{line_no}: ask_px_00 {ask_px} is off the "
+                    "0.25 grid"
+                )
             yield Row(
-                ts, parts[idx["instrument_id"]], side, price,
-                int(parts[idx["size"]]), bid_px, ask_px,
-                int(parts[idx["bid_sz_00"]]), int(parts[idx["ask_sz_00"]]),
+                ts, parts[i_iid], side, price,
+                int(parts[i_size]), bid_px, ask_px,
+                int(parts[i_bsz]), int(parts[i_asz]),
                 classify_book(bid_px, ask_px),
             )
             prev_ts = ts
@@ -547,13 +586,15 @@ def run_preflight(directory: str, ledger_path: str | None = None) -> dict:
         if row.side == "N":
             unsided += 1
         book_counts[row.book] += 1
-        session, _segment = assign_session(row.ts)
+        session, _segment, _hour = minute_fields(row.ts)
         if session is None or session not in INVENTORY_STATUS:
             outside_sessions += 1
         else:
-            state = per_session.setdefault(
-                session, {"rows": 0, "ids": set(), "invalid_books": 0}
-            )
+            state = per_session.get(session)
+            if state is None:
+                state = per_session[session] = {
+                    "rows": 0, "ids": set(), "invalid_books": 0
+                }
             state["rows"] += 1
             state["ids"].add(row.instrument_id)
             if row.book != "normal":
@@ -757,7 +798,9 @@ class Acf:
 
     def __init__(self, lags):
         self.lags = tuple(lags)
-        self.window: list[float] = []
+        # maxlen evicts the stale head in C; a list's pop(0) shifted the
+        # whole window per observation.
+        self.window: deque[float] = deque(maxlen=max(self.lags))
         self.stats = {
             lag: {"n": 0, "sx": 0.0, "sy": 0.0, "sxx": 0.0, "syy": 0.0,
                   "sxy": 0.0}
@@ -776,8 +819,6 @@ class Acf:
                 st["syy"] += y * y
                 st["sxy"] += x * y
         self.window.append(x)
-        if len(self.window) > max(self.lags):
-            self.window.pop(0)
 
     def reset_series(self) -> None:
         self.window.clear()
@@ -923,11 +964,12 @@ def observe(rows_iter, usable: list[str]) -> dict:
         nonlocal zero_changes, price_changes
         nonlocal prev_cadence, prev_mid, prev_diag
         parents += 1
-        cad = session_cad.setdefault(
-            parent["session"],
-            {"parents": 0, "rows": 0, "singles": 0, "levels": 0,
-             "gaps": 0, "gap_ns": 0},
-        )
+        cad = session_cad.get(parent["session"])
+        if cad is None:
+            cad = session_cad[parent["session"]] = {
+                "parents": 0, "rows": 0, "singles": 0, "levels": 0,
+                "gaps": 0, "gap_ns": 0,
+            }
         cad["parents"] += 1
         cad["rows"] += parent["rows"]
         cad["levels"] += len(parent["levels"])
@@ -1038,7 +1080,7 @@ def observe(rows_iter, usable: list[str]) -> dict:
         prev_diag = (parent["first_price"], *here)
 
     for row in rows_iter:
-        session, segment = assign_session(row.ts)
+        session, segment, hour = minute_fields(row.ts)
         if session not in usable_set:
             if current is not None:
                 close_parent(current)
@@ -1057,9 +1099,7 @@ def observe(rows_iter, usable: list[str]) -> dict:
             pop_invalid_book += 1
         last_trade_price_units = row.price
         # Session curves bucket by EXCHANGE-LOCAL hour (the wave-1 and
-        # session-fit convention), never UTC.
-        _date, local_minute = local_fields(row.ts)
-        hour = local_minute // 60
+        # session-fit convention), never UTC; minute_fields carries it.
         hour_count[hour] += 1
         hour_volume[hour] += row.size
         if row.side == "N":
@@ -1335,6 +1375,45 @@ def build_diagnostics(zero_changes, price_changes, ret_acf, absret_acf,
 # ---------------------------------------------------------------------------
 
 
+# Execution mechanics, not measurement contract: the walk fan-out width.
+# Walks are independent subprocesses over disjoint scratch paths; the
+# results are byte-identical to a serial run (CRN determinism), so this
+# is deliberately OUTSIDE the sub-contract hash.
+WALK_JOBS = 12
+
+_GEN_BINARY = os.path.join(ROOT, "target", "release", "mogwai")
+_GEN_DIRECT = False
+_WARM_LOCK = threading.Lock()
+
+
+def warm_gen_build() -> None:
+    """One `brokkr run` pass so cargo's freshness check runs exactly once
+    per fit. Later walks exec the release binary directly: per-walk
+    `brokkr run` pays metadata discovery plus the freshness check and
+    serializes every parallel walk on cargo's global lock. The tree is
+    clean (require_clean_tree) and untouched for the run's duration, so
+    one successful freshness pass attests the binary for the whole fit.
+    If the warm pass fails, walks fall back to per-walk `brokkr run`,
+    which is slower but never stale."""
+    global _GEN_DIRECT
+    with _WARM_LOCK:
+        if _GEN_DIRECT:
+            return
+        proc = subprocess.run(
+            ["brokkr", "run", "--release", "mogwai", "--", "gen", "--help"],
+            capture_output=True, text=True, cwd=ROOT,
+        )
+        _GEN_DIRECT = (
+            proc.returncode == 0 and os.access(_GEN_BINARY, os.X_OK)
+        )
+
+
+def gen_command_prefix() -> list[str]:
+    if _GEN_DIRECT:
+        return [_GEN_BINARY]
+    return ["brokkr", "run", "--release", "mogwai", "--"]
+
+
 def scratch_config_text(overrides: dict[str, object]) -> str:
     lines = ["[instrument]", 'preset = "MNQ"']
     if overrides:
@@ -1368,16 +1447,21 @@ def run_summary_subprocess(overrides: dict, seed: int, start_ns: int,
         with open(cache_path) as fh:
             return json.load(fh)
     os.makedirs(SCRATCH_DIR, exist_ok=True)
-    config_path = os.path.join(SCRATCH_DIR, f"candidate-{os.getpid()}.toml")
-    out_path = os.path.join(SCRATCH_DIR, f"summary-{os.getpid()}-{seed}.json")
+    # Scratch paths key on the walk's cache hash, never the PID: distinct
+    # concurrent walks own disjoint files by construction, where a shared
+    # per-PID config raced under any parallelism and corrupted silently.
+    config_path = os.path.join(
+        SCRATCH_DIR, f"candidate-{cache_key[:16]}.toml"
+    )
+    out_path = os.path.join(SCRATCH_DIR, f"summary-{cache_key[:16]}.json")
     with open(config_path, "w") as fh:
         fh.write(scratch_config_text(overrides))
     # A stale summary from an earlier walk must never be read as this
     # walk's output if gen exits 0 without writing.
     if os.path.exists(out_path):
         os.remove(out_path)
-    cmd = [
-        "brokkr", "run", "--release", "mogwai", "--", "gen",
+    cmd = gen_command_prefix() + [
+        "gen",
         "--config", config_path, "--type", "summary",
         "--seed", str(seed), "--start", str(start_ns),
         "--length", length, "--warmup", warmup,
@@ -1391,10 +1475,12 @@ def run_summary_subprocess(overrides: dict, seed: int, start_ns: int,
     with open(out_path) as fh:
         summary = json.load(fh)
     os.makedirs(cache_dir, exist_ok=True)
-    tmp = cache_path + ".tmp"
+    tmp = f"{cache_path}.{threading.get_ident()}.tmp"
     with open(tmp, "w") as fh:
         json.dump(summary, fh)
     os.replace(tmp, cache_path)
+    os.remove(config_path)
+    os.remove(out_path)
     return summary
 
 
@@ -1499,13 +1585,18 @@ def size_objective(generated_hist: dict[int, int], observed: dict) -> tuple:
 def trisect(evaluate, lo: float, hi: float, log_domain: bool,
             absolute_step: float | None = None,
             objective_threshold: float | None = None, seeds=()):
-    """4.75 incumbent-driven refinement without a unimodality assumption.
-
-    Each iteration evaluates the two trisection points. The surviving
-    two-thirds interval is the one containing the best point ever evaluated;
-    a best point in the shared middle third keeps the left interval. Equal
-    scores select the smaller candidate. Parameter-specific objective
-    thresholds may terminate before the bracket-width condition."""
+    """4.75 refinement: CLASSIC TERNARY COMPARISON with coarse-score
+    seeding. Each iteration evaluates the two trisection points and keeps
+    [a, m2] when f(m1) <= f(m2) (the tie keeps the left), else [m1, b] -
+    the fresh interior pair alone decides the bracket, because an
+    incumbent (endpoint or seed) carries no directional information and
+    provably dragged the bracket off the optimum (the 3.2 reproduction).
+    Seeding and ternary were never in conflict: seeds save re-evaluating
+    already-paid coarse scores and keep best-ever tracking honest, while
+    the survivor decision costs the same two evaluations either way. The
+    returned candidate is the best point ever evaluated, smaller winning
+    score ties. Parameter-specific objective thresholds may terminate
+    before the bracket-width condition."""
     def xform(x):
         return math.log(x) if log_domain else x
 
@@ -1554,6 +1645,14 @@ def trisect(evaluate, lo: float, hi: float, log_domain: bool,
             if span <= absolute_step:
                 termination = f"absolute step <= {absolute_step}"
                 break
+        elif log_domain:
+            # a and b are logs, so their span IS the relative width:
+            # log(hi/lo) <= log1p(step). Dividing a log span by |log x|
+            # is not a relative error in x - it over-refined near x = 1
+            # and under-refined far from it.
+            if span <= math.log1p(SOLVE_RELATIVE_STEP):
+                termination = f"relative step <= {SOLVE_RELATIVE_STEP}"
+                break
         else:
             mid_abs = max(abs(a), abs(b), 1e-30)
             if span / mid_abs <= SOLVE_RELATIVE_STEP:
@@ -1561,13 +1660,24 @@ def trisect(evaluate, lo: float, hi: float, log_domain: bool,
                 break
         m1 = a + span / 3
         m2 = a + 2 * span / 3
-        consider(m1)
-        consider(m2)
-        if best_x <= m2:
+        f1 = consider(m1)
+        f2 = consider(m2)
+        if f1 <= f2:
             b = m2
         else:
             a = m1
     return unxform(best_x), best_score, termination, evaluations
+
+
+def coarse_grid(lo: float, hi: float, points: int,
+                log_domain: bool) -> list[float]:
+    """The deterministic coarse grid, shared by solve_scalar and the
+    prewarm calls so both name exactly the same candidates."""
+    if log_domain:
+        step = (math.log(hi) - math.log(lo)) / (points - 1)
+        return [math.exp(math.log(lo) + i * step) for i in range(points)]
+    step = (hi - lo) / (points - 1)
+    return [lo + i * step for i in range(points)]
 
 
 def solve_scalar(evaluate, lo: float, hi: float, points: int,
@@ -1576,12 +1686,7 @@ def solve_scalar(evaluate, lo: float, hi: float, points: int,
     """Coarse grid then trisection of the winner's neighbor bracket; a
     boundary winner takes its single inside neighbor interval. Returns the
     solve record the artifact schema requires."""
-    if log_domain:
-        step = (math.log(hi) - math.log(lo)) / (points - 1)
-        grid = [math.exp(math.log(lo) + i * step) for i in range(points)]
-    else:
-        step = (hi - lo) / (points - 1)
-        grid = [lo + i * step for i in range(points)]
+    grid = coarse_grid(lo, hi, points, log_domain)
     scores = [evaluate(x) for x in grid]
     best_i = min(range(len(grid)), key=lambda i: (scores[i], grid[i]))
     left = grid[max(0, best_i - 1)]
@@ -1632,10 +1737,48 @@ def solve_scalar(evaluate, lo: float, hi: float, points: int,
 
 def summaries_for(run_summary, overrides: dict, seeds, start_ns: int,
                   length: str) -> dict:
+    # Seeds of one evaluation are independent walks; fan them out when the
+    # runner is the real subprocess (an injected selftest fake stays
+    # serial so its call order remains deterministic). `map` preserves
+    # seed order, so `pooled` sees exactly the serial list.
+    if run_summary is run_summary_subprocess and len(seeds) > 1:
+        with ThreadPoolExecutor(min(len(seeds), WALK_JOBS)) as pool:
+            return pooled(list(pool.map(
+                lambda seed: run_summary(overrides, seed, start_ns, length,
+                                         SUMMARY_WARMUP),
+                seeds,
+            )))
     return pooled([
         run_summary(overrides, seed, start_ns, length, SUMMARY_WARMUP)
         for seed in seeds
     ])
+
+
+def prewarm_walks(run_summary, override_sets, seeds, start_ns: int,
+                  length: str) -> None:
+    """Populate the walk cache in parallel for evaluations whose override
+    sets are known up front (every coarse grid, every family probe). The
+    solver then replays them serially from the cache, so its evaluation
+    order, tie-breaks and the selftest's determinism assertions are
+    untouched - the cache is the synchronization point. A failing walk is
+    swallowed here and left for the serial pass to re-raise
+    deterministically. The sequential trisection tail is deliberately not
+    prewarmed: its points depend on earlier scores."""
+    if run_summary is not run_summary_subprocess:
+        return
+    warm_gen_build()
+    with ThreadPoolExecutor(WALK_JOBS) as pool:
+        futures = [
+            pool.submit(run_summary, overrides, seed, start_ns, length,
+                        SUMMARY_WARMUP)
+            for overrides in override_sets
+            for seed in seeds
+        ]
+        for future in futures:
+            try:
+                future.result()
+            except Refusal:
+                pass
 
 
 # Boundary slack for the inclusive tolerance comparisons, the pair-harness
@@ -1769,34 +1912,65 @@ def run_fit(directory: str = DELIVERY_DIR,
     }
 
     # --- size family: independently solve model A and every model B frac ---
+    def size_overrides(median: float, frac) -> dict:
+        overrides = {"generator.latent_size_median": f"{median:.6f}"}
+        if frac is not None:
+            overrides["generator.size_round_frac"] = frac
+        return overrides
+
     def size_eval_factory(frac):
         def evaluate(median):
-            overrides = {"generator.latent_size_median": f"{median:.6f}"}
-            if frac is not None:
-                overrides["generator.size_round_frac"] = frac
-            gen = summaries_for(run_summary, overrides, SEARCH_SEEDS,
-                                SEARCH_START_NS, SEARCH_LENGTH)
+            gen = summaries_for(run_summary, size_overrides(median, frac),
+                                SEARCH_SEEDS, SEARCH_START_NS, SEARCH_LENGTH)
             return size_objective(gen["size_histogram"], observed)
         return evaluate
 
+    size_grid = coarse_grid(*SIZE_MEDIAN_DOMAIN, SIZE_MEDIAN_GRID_POINTS,
+                            log_domain=True)
+    prewarm_walks(run_summary,
+                  [size_overrides(m, None) for m in size_grid],
+                  SEARCH_SEEDS, SEARCH_START_NS, SEARCH_LENGTH)
     model_a = solve_scalar(size_eval_factory(None), *SIZE_MEDIAN_DOMAIN,
                            SIZE_MEDIAN_GRID_POINTS, log_domain=True)
     a_median = model_a["best_candidate"]
-    b_results = []
-    for frac in SIZE_ROUND_FRAC_GRID:
-        record = solve_scalar(
-            size_eval_factory(frac), *SIZE_MEDIAN_DOMAIN,
-            SIZE_MEDIAN_GRID_POINTS, log_domain=True,
-        )
-        b_results.append((tuple(record["search_score"]), frac, record))
-    b_results.sort(key=lambda t: (t[0], t[1], t[2]["best_candidate"]))
-    _b_score, b_frac, model_b = b_results[0]
-    model_b = dict(model_b, frac=b_frac)
-    if tuple(model_b["search_score"]) < tuple(model_a["search_score"]):
-        chosen_median = model_b["best_candidate"]
-        chosen_frac = model_b["frac"]
-        chosen_model = "B"
+    observed_p50 = observed["size_quantiles"]["p50"]
+    # The moot guard (amendment, 2026-08-05, restoring the design-round
+    # rule): model B runs only if model A's solved median or the observed
+    # p50 reaches the identifiability floor. Below it, integral_lot is 1
+    # and the frac is structurally inert - both size arms materialize
+    # identically - so the 51 frac solves would be 51 reruns of model A
+    # with a dead knob: identical walks, identical scores, differing only
+    # in tie-break bookkeeping. The skip record with its precondition
+    # values IS the complete evidence on that branch.
+    if (a_median >= SIZE_MEDIAN_IDENTIFIABILITY_FLOOR
+            or observed_p50 >= SIZE_MEDIAN_IDENTIFIABILITY_FLOOR):
+        prewarm_walks(run_summary,
+                      [size_overrides(m, f)
+                       for f in SIZE_ROUND_FRAC_GRID for m in size_grid],
+                      SEARCH_SEEDS, SEARCH_START_NS, SEARCH_LENGTH)
+        b_results = []
+        for frac in SIZE_ROUND_FRAC_GRID:
+            record = solve_scalar(
+                size_eval_factory(frac), *SIZE_MEDIAN_DOMAIN,
+                SIZE_MEDIAN_GRID_POINTS, log_domain=True,
+            )
+            b_results.append((tuple(record["search_score"]), frac, record))
+        b_results.sort(key=lambda t: (t[0], t[1], t[2]["best_candidate"]))
+        _b_score, b_frac, model_b = b_results[0]
+        model_b = dict(model_b, frac=b_frac)
+        if tuple(model_b["search_score"]) < tuple(model_a["search_score"]):
+            chosen_median = model_b["best_candidate"]
+            chosen_frac = model_b["frac"]
+            chosen_model = "B"
+        else:
+            chosen_median, chosen_frac, chosen_model = a_median, None, "A"
     else:
+        model_b = {
+            "skipped": "structurally-moot",
+            "model_a_median": a_median,
+            "observed_p50": observed_p50,
+            "floor": SIZE_MEDIAN_IDENTIFIABILITY_FLOOR,
+        }
         chosen_median, chosen_frac, chosen_model = a_median, None, "A"
     identifiable = chosen_median >= SIZE_MEDIAN_IDENTIFIABILITY_FLOOR
     fitted["latent_size_median"] = chosen_median
@@ -1814,14 +1988,22 @@ def run_fit(directory: str = DELIVERY_DIR,
     # --- displacement: inverse solve with the fitted width installed ---
     disp_target = observed["displacement_median_ticks"]
 
+    def disp_overrides(scalar: float) -> dict:
+        return {"generator.trade_displacement_ticks.ticks": scalar,
+                "generator.quoted_width.ticks": fitted["quoted_width"]}
+
     def disp_eval(scalar):
         gen = summaries_for(
-            run_summary,
-            {"generator.trade_displacement_ticks.ticks": scalar,
-             "generator.quoted_width.ticks": fitted["quoted_width"]},
+            run_summary, disp_overrides(scalar),
             SEARCH_SEEDS, SEARCH_START_NS, SEARCH_LENGTH,
         )
         return abs(combined_displacement(gen) - disp_target)
+
+    prewarm_walks(run_summary,
+                  [disp_overrides(x) for x in coarse_grid(
+                      0.0, 2.0 * fitted["quoted_width"],
+                      DISPLACEMENT_GRID_POINTS, log_domain=False)],
+                  SEARCH_SEEDS, SEARCH_START_NS, SEARCH_LENGTH)
 
     # Both medians are bin centers on the shared 0.05-tick grid, so their
     # difference is a multiple of the bin: only an exact match can
@@ -1847,6 +2029,11 @@ def run_fit(directory: str = DELIVERY_DIR,
             return float("inf")
         return abs(gen["mid_rms"] - observed["mid_rms"]) / observed["mid_rms"]
 
+    prewarm_walks(run_summary,
+                  [dict(cadence_overrides, **{"generator.vol_scalar": x})
+                   for x in coarse_grid(*VOL_SCALAR_DOMAIN, VOL_GRID_POINTS,
+                                        log_domain=True)],
+                  SEARCH_SEEDS, SEARCH_START_NS, SEARCH_LENGTH)
     vol_solve = solve_scalar(vol_eval, *VOL_SCALAR_DOMAIN, VOL_GRID_POINTS,
                              log_domain=True, objective_threshold=0.001)
     fitted["vol_scalar"] = vol_solve["best_candidate"]
@@ -1996,6 +2183,9 @@ def run_fit(directory: str = DELIVERY_DIR,
     probe_results: dict[str, dict] = {}
     probe_errors: dict[str, str] = {}
     probe_gens: dict[str, dict] = {}
+    prewarm_walks(run_summary,
+                  [family_overrides(family) for family in FAMILIES],
+                  FINAL_SEEDS, FINAL_START_NS, FINAL_LENGTH)
     for family in FAMILIES:
         try:
             gen = summaries_for(run_summary, family_overrides(family),
@@ -2564,7 +2754,8 @@ def run_selftest() -> None:
     # A usable month: one parent per second for 100 seconds in each of 22
     # sessions, prices walking a few ticks (so mid returns exist and the
     # volatility target is nonzero), plus controllable defect rows.
-    def month_lines(extra=(), unsided=0, locked=0, impure_session=None):
+    def month_lines(extra=(), unsided=0, locked=0, impure_session=None,
+                    size=1):
         lines = []
         for label, status in SESSION_INVENTORY:
             if status != "full":
@@ -2574,7 +2765,7 @@ def run_selftest() -> None:
             for i in range(100):
                 price = 23_000 * 10**9 + (i % 3) * TICK_UNITS
                 lines.append(_st_row(base + i * 10**9, price=price,
-                                     iid="12345"))
+                                     iid="12345", size=size))
             if label == impure_session:
                 lines.append(_st_row(base + 100 * 10**9, iid=iid))
         base = _st_ts("2026-07-15", 13)
@@ -2711,22 +2902,24 @@ def run_selftest() -> None:
     print("the solve mechanics")
     solve = solve_scalar(lambda x: abs(x - 3.2), 0.0, 10.0, 11,
                          log_domain=False)
-    check("trisection preserves or improves the coarse incumbent",
-          solve["search_score"] <= 0.2 + SLACK)
+    check("trisection converges on a plain objective",
+          abs(solve["best_candidate"] - 3.2) < 0.01)
     solve = solve_scalar(lambda x: 0.0, 0.0, 10.0, 11, log_domain=False)
     check("a flat objective tie-breaks to the smaller candidate",
           solve["best_candidate"] <= 1.0)
     solve = solve_scalar(lambda x: -x, 0.0, 10.0, 11, log_domain=False)
     check("a boundary winner refines its single inside neighbor interval",
           abs(solve["best_candidate"] - 10.0) < 0.02)
-    incumbent_calls: list[float] = []
-    trisect(
-        lambda x: (incumbent_calls.append(x), abs(x - 2.0))[1],
+    seeded_calls: list[float] = []
+    seeded_best, _score, _term, _n = trisect(
+        lambda x: (seeded_calls.append(x), abs(x - 2.0))[1],
         0.0, 3.0, log_domain=False, absolute_step=0.1,
         seeds=((0.0, 0.5), (3.0, 1.0)),
     )
-    check("the incumbent selects the surviving trisection interval",
-          incumbent_calls[2] < 1.0)
+    check("seeded endpoints are never re-evaluated",
+          0.0 not in seeded_calls and 3.0 not in seeded_calls)
+    check("the fresh interior pair, not the seeds, decides the bracket",
+          abs(seeded_best - 2.0) < 0.1)
     solve = solve_scalar(
         lambda x: abs(x - 3.2), 0.0, 10.0, 11, log_domain=False,
         objective_threshold=0.25,
@@ -2734,6 +2927,11 @@ def run_selftest() -> None:
     check("an objective threshold stops after the coarse grid",
           solve["termination"] == "objective <= 0.25"
           and solve["evaluations"] == 11)
+    solve = solve_scalar(lambda x: 0.0, 1e-8, 1e-4, 11, log_domain=True)
+    check("log-domain relative termination reads the log span directly",
+          solve["termination"] == f"relative step <= {SOLVE_RELATIVE_STEP}"
+          and solve["best_candidate"] <= 1.001e-8
+          and solve["evaluations"] < 60)
     calls: list[float] = []
     solve_scalar(lambda x: (calls.append(x), abs(x - 5))[1],
                  0.0, 10.0, 11, log_domain=False)
@@ -2828,8 +3026,20 @@ def run_selftest() -> None:
           disp_verdict["checks"]["probe"]["displacement_side_A"] is True
           and "vacuous"
           in disp_verdict["observed"]["displacement_side_A"])
-    check("model B is solved before the identifiability decision",
-          artifact["solves"]["latent_size_median"]["model_b"] is not None)
+    # The moot guard (amendment, 2026-08-05): a one-lot tape leaves both
+    # preconditions below the floor, so model B is SKIPPED as
+    # structurally moot and the skip record carries the precondition
+    # values - this supersedes the pre-amendment behavior of solving all
+    # 51 fracs before the identifiability decision.
+    moot_b = artifact["solves"]["latent_size_median"]["model_b"]
+    check("model B is skipped structurally moot on a one-lot tape",
+          moot_b["skipped"] == "structurally-moot"
+          and moot_b["observed_p50"] == 1
+          and moot_b["model_a_median"]
+          < SIZE_MEDIAN_IDENTIFIABILITY_FLOOR
+          and moot_b["floor"] == SIZE_MEDIAN_IDENTIFIABILITY_FLOOR
+          and artifact["solves"]["latent_size_median"]["chosen_model"]
+          == "A")
     check("size_round_frac stays declared on the moot branch",
           "size_round_frac" not in artifact["landing_set"]
           and artifact["verdicts"]["size_round_frac"]["status"]
@@ -2870,6 +3080,25 @@ def run_selftest() -> None:
               for k in ("latent_size_median", "trade_displacement_ticks",
                         "vol_scalar")
           ))
+
+    print("the moot guard opens when the observed p50 reaches the floor")
+    ledger_path = build_delivery(month_lines(size=12))
+    payload12 = run_preflight(fake_dir, ledger_path)
+    write_json_atomic(st_preflight, payload12)
+    artifact = run_fit(directory=fake_dir,
+                       run_summary=fake_summary_factory({"calls": 0}),
+                       harness_commit="selftest", ledger_path=ledger_path,
+                       preflight_artifact_path=st_preflight)
+    open_b = artifact["solves"]["latent_size_median"]["model_b"]
+    check("a 12-lot tape solves model B in full, no skip record",
+          "skipped" not in open_b
+          and "search_score" in open_b
+          and "frac" in open_b
+          and artifact["observed"]["size_quantiles"]["p50"] == 12)
+    # Restore the one-lot delivery the following sections' ledger_path
+    # and payload refer to.
+    ledger_path = build_delivery(month_lines())
+    payload = run_preflight(fake_dir, ledger_path)
 
     print("family isolation")
 

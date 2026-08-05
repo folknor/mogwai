@@ -681,13 +681,20 @@ INCUMBENT form again, now seeded with the coarse grid's already-paid
 scores including the coarse winner. That restores neither classic
 ternary nor local convergence - the 3.2 reproduction still stalls at
 3.136 - and the regression was deliberately weakened to
-preserves-or-improves-the-coarse-incumbent. The accepted trade: the
-stall is bounded by a few percent of the initial bracket, both real
-brackets are narrow relative to their gates (the displacement grid
-spaces 0.0625 ticks against a 0.25-tick gate; the vol log-grid's
-stall is under a percent of value against a 10% gate), so the coarse
-grid does the converging, refinement is polish, and no generator walk
-is re-spent on an already-scored point.
+preserves-or-improves-the-coarse-incumbent, on the argument that the
+stall is bounded by a few percent of the initial bracket and no walk
+is re-spent. RESOLVED the same day, both reviewers: that trade rested
+on a FALSE CONFLICT. Classic ternary comparison spends the identical
+two evaluations per iteration, so the incumbent form bought zero
+walks while returning a provably wrong scalar - and the returned
+candidate feeds the model A/B choice and the moot guard, so estimator
+correctness is not excused by downstream gate width. The final form
+keeps the coarse-score seeding (endpoints and winner recorded, never
+re-evaluated; best-ever return honest) and decides the survivor by
+the FRESH INTERIOR PAIR alone: keep [a, m2] when f(m1) <= f(m2), the
+tie keeping the left. The 3.2 convergence regression is restored, and
+a seeded-adversarial check pins that a wrong seeded score can neither
+be re-evaluated nor drag the bracket.
 
 AMENDMENT, 2026-08-05, after a two-reviewer critical read of the
 committed harness and BEFORE any real-data run (no preflight or fit
@@ -759,6 +766,59 @@ identically to LF; (10) a Refusal exits with its message, not a
 traceback. No sub-contract constant moved, so the sub-contract hash is
 unchanged; the amended gate semantics bind through the harness tree
 commit.
+
+AMENDMENT, 2026-08-05, after a two-reviewer performance read, before
+any fit artifact exists (the first real preflight is the only
+real-data pass so far). One contract change and a set of execution
+fixes:
+
+(1) The 4.75 model B sweep regains its MOOT GUARD: model B (the 51
+frac solves) runs only if model A's solved median or the observed size
+p50 reaches the identifiability floor of 10. Below the floor,
+`integral_lot` is 1 and the frac is structurally inert - both size
+arms materialize identically - so the sweep's ~8,300 walks are 51
+reruns of model A with a dead knob: identical walks, identical scores,
+differing only in tie-break bookkeeping. The artifact records the skip
+as `model_b: {skipped: structurally-moot}` with the precondition
+values (model A's median, the observed p50, the floor); that record IS
+the complete evidence on the moot branch. Loop closed for the record:
+the guard was designed in the design round, dropped in the owner
+restructure that moved identifiability to a post-hoc provenance rule
+(the "refines the median independently to termination under each"
+text above, and the selftest's model-B-solved-before-the-decision
+assertion, now superseded), and is restored by this amendment. On the
+expected one-lot MNQ tape the guard closes and the size family costs
+~170 walks, not ~8,300. This is a solve-procedure amendment: no
+sub-contract constant moved, so the hash is unchanged and no preflight
+re-run is forced.
+
+(2) The log-domain relative-step termination now reads the log span
+directly (`log(hi/lo) <= log1p(SOLVE_RELATIVE_STEP)`). The prior form
+divided the log-bracket span by the magnitude of the log endpoints,
+which is not a relative step in the candidate: it over-refined near
+1.0 and under-refined far from it. `SOLVE_RELATIVE_STEP` itself is
+unchanged; this is the faithful implementation of "relative step" for
+the log-spaced solves.
+
+Execution fixes from the same read, all behavior-preserving (walk
+results are CRN-deterministic and byte-identical to a serial run):
+(3) walk scratch paths key on the walk's cache hash, never the PID -
+the shared per-PID config file made any parallelism silently
+corrupting; (4) coarse grids and family probes prewarm the walk cache
+through a bounded parallel fan-out and the solver then replays them
+serially from the cache, so evaluation order, tie-breaks and the
+determinism selftest are untouched, while the sequential trisection
+tail is deliberately not prewarmed; (5) one `brokkr run` pass per fit
+warms the build (cargo's freshness check runs exactly once against the
+clean tree) and later walks exec the release binary directly instead
+of serializing on cargo's global lock; (6) the compressed CSV reader
+splits each chunk once instead of re-slicing the buffer tail per row
+(accidentally quadratic per chunk); (7) session, segment and local
+hour are memoized on the UTC minute (the permanent -300 offset is
+whole minutes), removing two datetime constructions per row; (8) the
+per-row and per-parent `setdefault` calls no longer allocate their
+default dict/set on every hit, the parser's column indices are locals,
+and the ACF lag window is a deque.
 
 **Brick M2 - preflight.** `python3 analysis/mnq_fit.py preflight`.
 Persists its artifact or refuses; a refusal stops the spec and is
