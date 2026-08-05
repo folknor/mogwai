@@ -168,6 +168,13 @@ pairs are compared by `analysis/tick_composition_ratios.py`, whose `--mode
 projection` keeps the 6-to-7 contract and whose `--mode independent` compares
 two separately measured tapes.
 
+From protocol 9 onward, the command consumes compact parent summaries from the
+same stochastic kernel as the served wire path. The kernel still advances every
+child draw and every path-dependent price and clock state, but the measurement
+does not construct symbols or decimal payloads it never reads. Fixed-stride
+child timestamps are added to per-second bins as short runs. The wire path and
+the compact path are continuation-tested from identical initial states.
+
 `man` renders the bundled reference docs. Bare, it lists the topics; with one -
 `mogwai man cli` - it renders that document to the terminal, colour dropped when
 stdout is not a TTY or `NO_COLOR` is set. The docs travel inside the binary via

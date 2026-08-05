@@ -27,6 +27,36 @@ fn next_trade(source: &mut GeneratedSource) -> mogwai_protocol::TradeTick {
     }
 }
 
+#[test]
+fn compact_parent_advancement_matches_wire_frames_and_continuation() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let mut compact = GeneratedSource::new(scalars.clone(), 4242, 1_000, &fp, None);
+    let mut wire = GeneratedSource::new(scalars, 4242, 1_000, &fp, None);
+
+    for _ in 0..512 {
+        let summary = compact.advance_parent();
+        let quote = wire.next_tick().expect("parent quote");
+        assert!(matches!(quote, TickEvent::Quote(_)));
+        assert_eq!(quote.ts_event(), summary.parent_ts_ns);
+        for child in 0..summary.child_count {
+            let trade = wire.next_tick().expect("parent child");
+            assert!(matches!(trade, TickEvent::Trade(_)));
+            assert_eq!(
+                trade.ts_event(),
+                summary.parent_ts_ns + u64::from(child) * summary.child_stride_ns
+            );
+        }
+    }
+
+    for _ in 0..1_000 {
+        assert_eq!(
+            format!("{:?}", compact.next_tick()),
+            format!("{:?}", wire.next_tick())
+        );
+    }
+}
+
 const DRAW: usize = 2_000_000;
 // PARENT EVENTS, not prints. The day-of-week assertions below need at least a
 // full week of simulated tape and want several, so this is denominated in SIM

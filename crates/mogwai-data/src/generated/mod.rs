@@ -49,4 +49,4 @@ pub use quote::{
     CalibrationProvenance, PublishedBook, QuotedWidth, TopOfBookSizes, TradeDisplacement,
     book_mid_ticks, place_book,
 };
-pub use source::{GeneratedSource, SizeGrid};
+pub use source::{GeneratedSource, ParentSummary, SizeGrid};

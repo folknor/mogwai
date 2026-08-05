@@ -50,9 +50,9 @@ pub use bars::{BarAcc, fold_trade, window_close_ns};
 pub use generated::{
     AbsReturnAcf, AnchorRange, CalendarError, CalibrationProvenance, CheckpointIndex,
     EmpiricalRanges, Fingerprint, GeneratedSource, GeneratedSourceError, GeneratorScalars,
-    GoldenTargets, MinMedianMax, PublishedBook, QuotedWidth, ScalarDiagnostic, ScalarError,
-    SessionCalendar, SessionProfile, SessionProfileError, SizeGrid, TickTraversal, TopOfBookSizes,
-    TradeDisplacement, WeeklyWindow, book_mid_ticks, place_book,
+    GoldenTargets, MinMedianMax, ParentSummary, PublishedBook, QuotedWidth, ScalarDiagnostic,
+    ScalarError, SessionCalendar, SessionProfile, SessionProfileError, SizeGrid, TickTraversal,
+    TopOfBookSizes, TradeDisplacement, WeeklyWindow, book_mid_ticks, place_book,
 };
 pub use mogwai_protocol::MarketRegime;
 pub use trigger::{
@@ -63,7 +63,7 @@ pub use trigger::{
 /// Identity of the tape generation process, not of any one path. Two runs are
 /// comparable only if their venues report the same value. `AGENTS.md` carries
 /// the obligation to bump this for every tape-determinism change.
-pub const TAPE_PROTOCOL_VERSION: u32 = 8;
+pub const TAPE_PROTOCOL_VERSION: u32 = 9;
 
 /// One replayable market-data event.
 #[derive(Debug, Clone)]

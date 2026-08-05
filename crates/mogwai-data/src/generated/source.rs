@@ -24,9 +24,9 @@ use super::consts::{
     ARRIVAL_ACTIVE_CHILDREN_MULT, ARRIVAL_MEAN_CAL, ARRIVAL_QUIET_ACTIVE_RATIO,
     ARRIVAL_QUIET_CHILDREN_MULT, ARRIVAL_QUIET_FRACTION, ARRIVAL_STATE_PERSISTENCE,
     ARRIVAL_WEIBULL_MEAN, ARRIVAL_WEIBULL_SHAPE, DRIFT_RECENTER_FRAC, EVENT_PRICE_REPEAT_PROB,
-    HIGH_REGIME_LEVEL_STEP_MULT, INTRA_EVENT_STEP_NS, LOW_REGIME_LEVEL_STEP_MULT,
-    MAX_SESSION_GAP_NS, MID_CEILING, NS_PER_HOUR, REALIZED_RETURN_CEILING, LOW_INTENSITY_ARR_MULT,
-    SIZE_DECIMALS, SIZE_LOG_SIGMA, STUDENT_T_DF,
+    HIGH_REGIME_LEVEL_STEP_MULT, INTRA_EVENT_STEP_NS, LOW_INTENSITY_ARR_MULT,
+    LOW_REGIME_LEVEL_STEP_MULT, MAX_SESSION_GAP_NS, MID_CEILING, NS_PER_HOUR,
+    REALIZED_RETURN_CEILING, SIZE_DECIMALS, SIZE_LOG_SIGMA, STUDENT_T_DF,
 };
 use super::dynamics::{
     ArrivalClock, BounceState, GarchVol, SweepBurst, SweepShape, draw_standardized_innovation,
@@ -85,6 +85,41 @@ pub struct SizeGrid {
     pub multiplier: Decimal,
     pub integral: bool,
     pub min_size: Decimal,
+}
+
+/// Compact description of one fully advanced stochastic parent event.
+///
+/// The generator has already consumed every child draw and updated all
+/// path-dependent state when this is returned. Consumers that only need tape
+/// composition can therefore count the quote and the fixed-stride child run
+/// without constructing protocol decimals or cloning the symbol. The regular
+/// [`TickSource`] path uses the same advancement primitives and materializes
+/// the wire objects afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParentSummary {
+    pub parent_ts_ns: u64,
+    pub child_count: u32,
+    pub child_stride_ns: u64,
+}
+
+#[derive(Clone, Copy)]
+struct SizeDraw {
+    base: f64,
+    lot_snap: bool,
+}
+
+/// Everything one child print needs, captured at the instant the child is
+/// stochastically resolved.
+///
+/// `price_ticks` is carried rather than re-read from `self.burst` after the
+/// fact. The two agree today only because `step_child`'s tail happens not to
+/// touch `price_ticks`, and a future change to that tail - the sweep-end
+/// re-centring is already there and already writes neighbouring fields - would
+/// otherwise silently move every child's printed price by one step.
+#[derive(Clone, Copy)]
+struct ChildDraw {
+    size: SizeDraw,
+    price_ticks: f64,
 }
 
 impl SizeGrid {
@@ -384,7 +419,6 @@ impl GeneratedSource {
         self.clock_ns
     }
 
-
     #[cfg(test)]
     pub(super) fn arrival_mult_for_test(&self, clock_ns: u64) -> f64 {
         self.session.arrival_mult(clock_ns)
@@ -577,9 +611,14 @@ impl GeneratedSource {
         (side, book)
     }
 
-    pub(super) fn next_size(&mut self) -> Decimal {
+    fn draw_size(&mut self) -> SizeDraw {
         let base = self.size_dist.sample(&mut self.rng).max(f64::MIN_POSITIVE);
         let lot_snap = self.rng.random_bool(self.scalars.size_round_frac);
+        SizeDraw { base, lot_snap }
+    }
+
+    fn materialize_size(&self, draw: SizeDraw) -> Decimal {
+        let SizeDraw { base, lot_snap } = draw;
         if self.size_grid.integral {
             let raw = if lot_snap {
                 // The lot on an integral grid is at least one contract, so a
@@ -609,6 +648,12 @@ impl GeneratedSource {
         };
         size.max(self.size_grid.min_size)
     }
+
+    #[cfg(test)]
+    pub(super) fn next_size(&mut self) -> Decimal {
+        let draw = self.draw_size();
+        self.materialize_size(draw)
+    }
 }
 
 /// Round-lot scale selected from the latent distribution center. Keeping this
@@ -637,7 +682,7 @@ impl TickSource for GeneratedSource {
             return Some(TickEvent::Quote(quote));
         }
         if self.burst.remaining == 0 {
-            self.begin_event();
+            self.begin_event(true);
             return self.pending_quote.take().map(TickEvent::Quote);
         }
         Some(TickEvent::Trade(self.next_child()))
@@ -664,6 +709,32 @@ impl TickSource for GeneratedSource {
 }
 
 impl GeneratedSource {
+    /// Advance exactly one parent and all of its children without constructing
+    /// protocol objects.
+    ///
+    /// Every random draw belongs to the advancement side of the seam. In
+    /// particular, size draws and child price evolution still run even though
+    /// their `Decimal` representation is discarded. Starting this operation in
+    /// the middle of a wire parent would make its compact run ambiguous, so the
+    /// boundary is enforced rather than silently repaired.
+    #[must_use]
+    pub fn advance_parent(&mut self) -> ParentSummary {
+        assert!(
+            self.pending_quote.is_none() && self.burst.remaining == 0,
+            "advance_parent requires a parent boundary"
+        );
+        self.begin_event(false);
+        let summary = ParentSummary {
+            parent_ts_ns: self.burst.parent_ts_ns,
+            child_count: self.burst.remaining,
+            child_stride_ns: INTRA_EVENT_STEP_NS,
+        };
+        while self.burst.remaining > 0 {
+            self.step_child();
+        }
+        summary
+    }
+
     #[cfg(test)]
     pub(super) fn diagnostic_place_book(&self) -> PublishedBook {
         place_book(
@@ -673,7 +744,7 @@ impl GeneratedSource {
         )
     }
 
-    fn begin_event(&mut self) {
+    fn begin_event(&mut self, materialize_quote: bool) {
         let (rate_mult, children_mult) = self
             .surge
             .as_ref()
@@ -788,7 +859,7 @@ impl GeneratedSource {
         } else {
             normal_price_ticks
         };
-        self.pending_quote = Some(QuoteTick {
+        self.pending_quote = materialize_quote.then(|| QuoteTick {
             symbol: self.scalars.symbol.clone(),
             bid_px: book.bid_price(self.tick_f64, self.scalars.price_decimals),
             ask_px: book.ask_price(self.tick_f64, self.scalars.price_decimals),
@@ -806,7 +877,7 @@ impl GeneratedSource {
         };
     }
 
-    fn next_child(&mut self) -> TradeTick {
+    fn step_child(&mut self) -> ChildDraw {
         let level_step_prob = if self.bounce.high_regime {
             (self.shape.level_step_prob * HIGH_REGIME_LEVEL_STEP_MULT).min(1.0)
         } else {
@@ -824,14 +895,9 @@ impl GeneratedSource {
             .burst
             .parent_ts_ns
             .saturating_add(u64::from(self.burst.emitted).saturating_mul(INTRA_EVENT_STEP_NS));
-        let price = decimal_from_f64(self.burst.price_ticks * self.tick_f64)
-            .round_dp(self.scalars.price_decimals);
-        let tick = TradeTick {
-            symbol: self.scalars.symbol.clone(),
-            price,
-            size: self.next_size(),
-            aggressor: self.burst.side,
-            ts_event: self.clock_ns,
+        let draw = ChildDraw {
+            size: self.draw_size(),
+            price_ticks: self.burst.price_ticks,
         };
         self.burst.remaining -= 1;
         self.burst.emitted += 1;
@@ -847,6 +913,18 @@ impl GeneratedSource {
                 * (self.burst.price_ticks - self.vol.mid / self.tick_f64))
                 .round() as i64;
         }
-        tick
+        draw
+    }
+
+    fn next_child(&mut self) -> TradeTick {
+        let draw = self.step_child();
+        TradeTick {
+            symbol: self.scalars.symbol.clone(),
+            price: decimal_from_f64(draw.price_ticks * self.tick_f64)
+                .round_dp(self.scalars.price_decimals),
+            size: self.materialize_size(draw.size),
+            aggressor: self.burst.side,
+            ts_event: self.clock_ns,
+        }
     }
 }

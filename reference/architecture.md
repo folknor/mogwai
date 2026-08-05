@@ -52,10 +52,14 @@ away from zero and floored at one contract, so no print becomes the zero
 quantity nautilus drops. `latent_size_median` is stated directly in the
 instrument's native size unit and names the continuous lognormal center before
 that grid is applied. The floor truncates its lower tail, so it is deliberately
-not called the observed size median. `TAPE_PROTOCOL_VERSION` is 7; version 5
+not called the observed size median. `TAPE_PROTOCOL_VERSION` is 9; version 5
 removed the quote-notional proxy whose value was actually arithmetic mean
 notional and made the latent size distribution explicit, and version 6 repaired
-the GARCH recursion's second moment. Version 7 added the observable top of book.
+the GARCH recursion's second moment. Version 7 added the observable top of book,
+version 8 added the instrument session profile, and version 9 split stochastic
+parent advancement from wire-object materialization. Version 9 deliberately
+preserves the version-8 tape byte for byte, but changes the generation path and
+therefore advances the process version under the unconditional versioning rule.
 
 Each generated parent event publishes one BBO before its first trade. The book
 has an exact positive integer-tick width and is centered, with one rounding, on

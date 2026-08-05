@@ -36,7 +36,7 @@ use std::{
 
 use anyhow::Context;
 use clap::Args;
-use mogwai_data::{GeneratedSource, SizeGrid, TickEvent, TickSource};
+use mogwai_data::{GeneratedSource, ParentSummary, SizeGrid, TickSource};
 use serde::Serialize;
 
 use crate::source::{InstrumentProfile, fingerprint};
@@ -105,7 +105,6 @@ struct Reading {
 #[derive(Serialize)]
 struct Report {
     tape_protocol_version: u32,
-    measured_from_protocol_7_stream: bool,
     /// Identifies the traversal both fixtures were counted off. Two files whose
     /// identifiers differ were not paired, whatever their row keys say.
     pairing_id: String,
@@ -142,6 +141,7 @@ pub(crate) fn run(args: &TickCompositionArgs) -> anyhow::Result<()> {
     let parents = args.parents;
 
     let tasks = tasks();
+    let work_order = work_order(&tasks);
     // A shared cursor over the flat task list, rather than one thread per
     // seed/mode pair walking five presets in series: presets differ severalfold
     // in cost, so the fixed shape paid the slowest preset's tail on every
@@ -159,14 +159,21 @@ pub(crate) fn run(args: &TickCompositionArgs) -> anyhow::Result<()> {
     );
     thread::scope(|scope| {
         for _ in 0..jobs.min(tasks.len()) {
-            let (cursor, completed, tasks, results, profiles) =
-                (&cursor, &completed, &tasks, &results, &profiles);
+            let (cursor, completed, tasks, work_order, results, profiles) = (
+                &cursor,
+                &completed,
+                &tasks,
+                &work_order,
+                &results,
+                &profiles,
+            );
             scope.spawn(move || {
                 loop {
-                    let index = cursor.fetch_add(1, Ordering::Relaxed);
-                    let Some(task) = tasks.get(index) else {
+                    let claim = cursor.fetch_add(1, Ordering::Relaxed);
+                    let Some(&index) = work_order.get(claim) else {
                         break;
                     };
+                    let task = &tasks[index];
                     let reading = measure(
                         task.preset,
                         &profiles[task.preset],
@@ -264,6 +271,20 @@ fn tasks() -> Vec<Task> {
         .collect()
 }
 
+/// Claim expensive combinations first while retaining fixture order in
+/// `tasks` and `results`. Surged work dominates by a wide margin because it
+/// multiplies both arrival rate and child fanout.
+fn work_order(tasks: &[Task]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..tasks.len()).collect();
+    order.sort_by_key(|&index| match tasks[index].mode {
+        Mode::Surged => 0,
+        Mode::Active => 1,
+        Mode::Natural => 2,
+        Mode::Quiet => 3,
+    });
+    order
+}
+
 /// Distinguishes this traversal from every other. The run is hours long, so
 /// second resolution plus the pid is ample; this identifies a pairing, it does
 /// not have to be unguessable.
@@ -283,8 +304,14 @@ fn pairing_id() -> String {
 /// quote placement draws no randomness, so the same traversal carries both. That
 /// trick is specific to 6-and-7 and does not generalize: the protocol-8 session
 /// profile divides the duration draw and scales the return, so its tape has
-/// different timestamps and different prices. 7 and 8 are two walks, and the
-/// committed protocol-7 fixture is the baseline the new one is compared against.
+/// different timestamps and different prices. 7 and 8 are two walks. Protocol 9
+/// is a third case again: it preserves the protocol-8 tape exactly and only
+/// changes how the traversal is counted, so the protocol-8 fixture is the
+/// baseline a protocol-9 report is compared against. The seeds are fixed and
+/// each combination is an independent deterministic walk, so the comparison is
+/// not merely commensurable: every measured field should match EXACTLY, and
+/// only the metadata - protocol version, projection and pairing id - differs. A
+/// discrepancy in any counter is a defect in the compact traversal, not noise.
 fn write_report(
     path: &Path,
     pairing: &str,
@@ -319,7 +346,6 @@ fn serialize(
 ) -> anyhow::Result<Vec<u8>> {
     serde_json::to_vec_pretty(&Report {
         tape_protocol_version: version,
-        measured_from_protocol_7_stream: true,
         pairing_id: pairing.to_owned(),
         projection: projection.into(),
         parent_events_per_combination: parents,
@@ -360,7 +386,6 @@ struct Counters {
     per_parent: Histogram,
     per_second: SecondBins,
     fanout_second: Vec<u64>,
-    current: u64,
 }
 
 impl Counters {
@@ -369,7 +394,6 @@ impl Counters {
             per_parent: Histogram::default(),
             per_second: SecondBins::default(),
             fanout_second: vec![0; fanout_span],
-            current: 0,
         }
     }
 
@@ -455,31 +479,30 @@ fn measure(
     }
     let mut counters = Counters::new(fanout_span);
     let mut recorded = 0_usize;
-    let mut seen_parents = 0_usize;
     loop {
-        let event = source.next_tick().expect("generated source is infinite");
-        let ts = event.ts_event();
-        if matches!(event, TickEvent::Quote(_)) {
-            if seen_parents > 0 && recorded < parents {
-                counters.per_parent.add(counters.current);
-                recorded += 1;
-            }
-            if recorded == parents && ts >= fanout_end_ns {
-                break;
-            }
-            seen_parents += 1;
-            counters.current = 0;
+        let parent = source.advance_parent();
+        if recorded == parents && parent.parent_ts_ns >= fanout_end_ns {
+            break;
         }
-        let second = ts / 1_000_000_000;
         if recorded < parents {
-            counters.current += 1;
-            counters.per_second.add(second);
+            counters.per_parent.add(u64::from(parent.child_count) + 1);
+            counters.per_second.add(parent.parent_ts_ns / 1_000_000_000);
+            add_child_run_to_second_bins(&mut counters.per_second, parent);
+            recorded += 1;
         }
-        if ts < fanout_end_ns
-            && let Some(index) = second.checked_sub(start_second)
-            && let Some(bin) = counters.fanout_second.get_mut(index as usize)
-        {
-            *bin += 1;
+        if parent.parent_ts_ns < fanout_end_ns {
+            add_fanout(
+                &mut counters.fanout_second,
+                start_second,
+                parent.parent_ts_ns / 1_000_000_000,
+                1,
+            );
+            add_child_run_to_fanout(
+                &mut counters.fanout_second,
+                parent,
+                start_second,
+                fanout_end_ns,
+            );
         }
     }
     counters.finish(preset, seed, mode, parents)
@@ -496,6 +519,10 @@ struct SecondBins {
 
 impl SecondBins {
     fn add(&mut self, second: u64) {
+        self.add_count(second, 1);
+    }
+
+    fn add_count(&mut self, second: u64, count: u64) {
         let first = *self.first.get_or_insert(second);
         // Time order is the invariant this indexing rests on. Were it ever
         // broken, release mode would turn the wrap into a colossal `resize` and
@@ -505,7 +532,7 @@ impl SecondBins {
         if index >= self.counts.len() {
             self.counts.resize(index + 1, 0);
         }
-        self.counts[index] += 1;
+        self.counts[index] += count;
     }
 
     /// Counts from the first observed second through the last, quiet seconds in
@@ -513,6 +540,62 @@ impl SecondBins {
     fn into_dense(self) -> Vec<u64> {
         self.counts
     }
+}
+
+fn child_run_bins(parent: ParentSummary, end_ns: Option<u64>, mut add: impl FnMut(u64, u64)) {
+    let mut ts = parent.parent_ts_ns;
+    let mut remaining = u64::from(parent.child_count);
+    while remaining > 0 && end_ns.is_none_or(|end| ts < end) {
+        let second = ts / 1_000_000_000;
+        let boundary = second.saturating_add(1).saturating_mul(1_000_000_000);
+        let until_boundary = boundary.saturating_sub(ts);
+        let fit = if until_boundary == 0 {
+            remaining
+        } else {
+            until_boundary.saturating_add(parent.child_stride_ns - 1) / parent.child_stride_ns
+        };
+        let before_end = end_ns.map_or(remaining, |end| {
+            end.saturating_sub(ts)
+                .saturating_add(parent.child_stride_ns - 1)
+                / parent.child_stride_ns
+        });
+        let count = remaining.min(fit).min(before_end);
+        add(second, count);
+        remaining -= count;
+        ts = ts.saturating_add(count.saturating_mul(parent.child_stride_ns));
+    }
+}
+
+fn add_child_run_to_second_bins(bins: &mut SecondBins, parent: ParentSummary) {
+    child_run_bins(parent, None, |second, count| {
+        bins.add_count(second, count);
+    });
+}
+
+/// Fold `count` frames into the wall-second bin for `second`, dropping anything
+/// outside the window. The horizon is a nanosecond interval and the bins are
+/// whole seconds, so the two align only while the traversal's start instant sits
+/// on a second boundary. That is true of today's `peak_hour_ns` anchor and is
+/// exactly the kind of assumption a later caller would break silently, so the
+/// bounds live here rather than in a comment: an out-of-window frame is dropped,
+/// not counted into a neighbouring second and not a panic hours into a run.
+fn add_fanout(bins: &mut [u64], start_second: u64, second: u64, count: u64) {
+    if let Some(index) = second.checked_sub(start_second)
+        && let Some(bin) = bins.get_mut(index as usize)
+    {
+        *bin += count;
+    }
+}
+
+fn add_child_run_to_fanout(
+    bins: &mut [u64],
+    parent: ParentSummary,
+    start_second: u64,
+    end_ns: u64,
+) {
+    child_run_bins(parent, Some(end_ns), |second, count| {
+        add_fanout(bins, start_second, second, count);
+    });
 }
 
 /// Frequency histogram over small bounded values, indexed by the value itself.
@@ -568,46 +651,54 @@ impl Histogram {
 /// Rolling 300-second and 24-hour counts in one pass over the dense seconds.
 /// The bins are contiguous, so each window is exactly the trailing `width`
 /// entries and both sums advance off the same iteration.
-fn rolling_tails(counts: &[u64]) -> (Tail, Tail) {
-    let mut vol = Vec::with_capacity(counts.len());
-    let mut warmup = Vec::with_capacity(counts.len());
-    let (mut vol_sum, mut warmup_sum) = (0_u64, 0_u64);
+fn rolling_tail(counts: &[u64], width: usize) -> Tail {
+    let mut values = Vec::with_capacity(counts.len());
+    let mut sum = 0_u64;
     for (end, count) in counts.iter().enumerate() {
-        vol_sum += count;
-        warmup_sum += count;
-        if let Some(dropped) = end.checked_sub(VOL_WINDOW_SECS as usize) {
-            vol_sum -= counts[dropped];
+        sum += count;
+        if let Some(dropped) = end.checked_sub(width) {
+            sum -= counts[dropped];
         }
-        if let Some(dropped) = end.checked_sub(WARMUP_SECS as usize) {
-            warmup_sum -= counts[dropped];
-        }
-        vol.push(vol_sum);
-        warmup.push(warmup_sum);
+        values.push(sum);
     }
-    (tail_of(vol), tail_of(warmup))
+    tail_of(values)
 }
 
-fn tail_of(mut sorted: Vec<u64>) -> Tail {
-    if sorted.is_empty() {
+fn rolling_tails(counts: &[u64]) -> (Tail, Tail) {
+    (
+        rolling_tail(counts, VOL_WINDOW_SECS as usize),
+        rolling_tail(counts, WARMUP_SECS as usize),
+    )
+}
+
+fn tail_of(mut values: Vec<u64>) -> Tail {
+    if values.is_empty() {
         return Tail {
             p999: 0.0,
             max: 0.0,
         };
     }
-    sorted.sort_unstable();
-    let rank = (sorted.len() - 1) as f64 * 0.999;
+    let max = *values.iter().max().expect("non-empty");
+    let rank = (values.len() - 1) as f64 * 0.999;
     let lower = rank.floor() as usize;
     let upper = rank.ceil() as usize;
     let fraction = rank - lower as f64;
-    let p999 = sorted[lower] as f64 + (sorted[upper] as f64 - sorted[lower] as f64) * fraction;
+    let upper_value = *values.select_nth_unstable(upper).1;
+    let lower_value = if lower == upper {
+        upper_value
+    } else {
+        *values[..upper].select_nth_unstable(lower).1
+    };
+    let p999 = lower_value as f64 + (upper_value as f64 - lower_value as f64) * fraction;
     Tail {
         p999,
-        max: *sorted.last().expect("non-empty") as f64,
+        max: max as f64,
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use mogwai_data::TickEvent;
     use rust_decimal::Decimal;
 
     use super::*;
@@ -686,6 +777,102 @@ mod tests {
             (tasks[20].seed, tasks[20].mode.label(), tasks[20].preset),
             (2, "quiet", "MNQ")
         );
+    }
+
+    #[test]
+    fn work_claims_surged_first_without_changing_fixture_order() {
+        let tasks = tasks();
+        let order = work_order(&tasks);
+        assert_eq!(order.len(), tasks.len());
+        assert!(
+            order[..40]
+                .iter()
+                .all(|&index| matches!(tasks[index].mode, Mode::Surged))
+        );
+        assert_eq!(tasks[0].mode.label(), "quiet");
+        assert_eq!(tasks[order[0]].mode.label(), "surged");
+    }
+
+    #[test]
+    fn child_runs_split_at_second_boundaries_and_clip_the_horizon() {
+        let parent = ParentSummary {
+            parent_ts_ns: 1_999_998_000,
+            child_count: 5,
+            child_stride_ns: 1_000,
+        };
+        let mut measured = SecondBins::default();
+        add_child_run_to_second_bins(&mut measured, parent);
+        assert_eq!(measured.into_dense(), vec![2, 3]);
+
+        let mut fanout = vec![0; 2];
+        add_child_run_to_fanout(&mut fanout, parent, 1, 2_000_002_000);
+        assert_eq!(fanout, vec![2, 2]);
+    }
+
+    fn assert_compact_matches_wire(
+        compact: &mut GeneratedSource,
+        wire: &mut GeneratedSource,
+        parents: usize,
+    ) {
+        for _ in 0..parents {
+            let summary = compact.advance_parent();
+            let quote = wire.next_tick().expect("wire quote");
+            assert!(matches!(quote, TickEvent::Quote(_)));
+            assert_eq!(quote.ts_event(), summary.parent_ts_ns);
+            for child in 0..summary.child_count {
+                let trade = wire.next_tick().expect("wire child");
+                assert!(matches!(trade, TickEvent::Trade(_)));
+                assert_eq!(
+                    trade.ts_event(),
+                    summary.parent_ts_ns + u64::from(child) * summary.child_stride_ns
+                );
+            }
+        }
+        for _ in 0..64 {
+            assert_eq!(
+                format!("{:?}", compact.next_tick()),
+                format!("{:?}", wire.next_tick())
+            );
+        }
+    }
+
+    #[test]
+    fn compact_sink_matches_every_preset_mode_and_a_surge_transition() {
+        let profiles = resolve_profiles().expect("every measured preset resolves");
+        let fp = fingerprint();
+        let start_ns = peak_hour_ns();
+        for preset in PRESETS {
+            for mode in MODES {
+                let mut compact = build_source(&profiles[preset], 17, start_ns, fp);
+                let mut wire = compact.clone();
+                match mode {
+                    Mode::Quiet => {
+                        compact.set_arrival_quiet_for_measurement(Some(true));
+                        wire.set_arrival_quiet_for_measurement(Some(true));
+                    }
+                    Mode::Active => {
+                        compact.set_arrival_quiet_for_measurement(Some(false));
+                        wire.set_arrival_quiet_for_measurement(Some(false));
+                    }
+                    Mode::Natural => {}
+                    Mode::Surged => {
+                        compact.arm_flow_surge(start_ns, 50, 1_000.0, 100.0);
+                        wire.arm_flow_surge(start_ns, 50, 1_000.0, 100.0);
+                    }
+                }
+                assert_compact_matches_wire(&mut compact, &mut wire, 64);
+            }
+        }
+
+        // Thursday 21:59:59 UTC approaches the CME maintenance boundary used
+        // by the futures presets. The calendar jump is deterministic and must
+        // leave both sinks at the same continuation state.
+        let boundary_start_ns = 21 * 3_600_000_000_000 + 3_599_000_000_000;
+        for preset in ["MNQ", "MES"] {
+            let mut compact = build_source(&profiles[preset], 29, boundary_start_ns, fp);
+            let mut wire = compact.clone();
+            assert_compact_matches_wire(&mut compact, &mut wire, 128);
+        }
     }
 
     /// Every preset, not the two self-contained documents. MES, ETHUSDT and
