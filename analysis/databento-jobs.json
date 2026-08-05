@@ -1,6 +1,19 @@
 {
  "_version": 1,
  "jobs": {
+  "mnqv|2026-07.full|tbbo": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260805-HAPEWPABKG",
+   "live_quote_at_submit": 73.405929505825,
+   "planned_quote": 73.405929505825,
+   "schema": "tbbo",
+   "scope": "mnqv",
+   "split_duration": "month",
+   "state": "queued",
+   "submitted_at": "2026-08-05T12:44:31.110428+00:00",
+   "window": "2026-07.full"
+  },
   "pairv|2026-07.2wk|trades": {
    "files": {
     "condition.json": "573e5fe7e384b31f221b1c7b55c8e2f27adc0009a1da03da54f431548f705366",

@@ -190,8 +190,11 @@ headerless. The delivered CME csv echoes CONTINUOUS labels (`NQ.v.0`) in
 the symbol column, so the minority-contract guard is blind there;
 `instrument_id` is the sharper witness if ever needed. The SDK deprecates
 `metadata.get_cost`'s `mode` param - pricing and downloader must migrate
-together. `pretty_px`/`pretty_ts`/`map_symbols` defaults are recorded in
-14.1 and await a conscious yes before any future submit.
+together, later, as their own coordinated change; it demonstrably still
+works. `pretty_px`/`pretty_ts`/`map_symbols` are DECIDED 2026-08-05
+(both reviewers, under owner delegation): False/False/True stand - see
+14.1 for the rationale. No format question remains open for a future
+`mnq07` submit.
 
 **What is next, when work resumes, in order.**
 
@@ -222,7 +225,19 @@ Nothing in wave 2B or wave 3 has been bought.
    pass verdict plus a downloaded pair still refuses it behaviorally.
    Both months' quotes are cached 2026-08-05 as the
    drift baselines the submit gate requires. Submitting `mnq07` remains a
-   new explicit authorization; nothing is armed.
+   new explicit authorization; nothing is armed. **Both reviewers jointly
+   recommend (2026-08-05) that the owner authorize `mnq07`**: it is the
+   only purchase with an implemented landing site (the protocol 7 quote
+   seams are per-instrument; trades cannot fill them, and TBBO is the
+   least-granular schema that directly fills them), the pair FAIL
+   forecloses NQ substitution, every alternative is superseded, locked,
+   dropped, deferred or spec-gated, and it performs the count-versus-
+   volume check on the target instrument at full-month scale. The 27.53
+   credit left after it is contingency, not re-buy capacity for a 73.41
+   window; the botched-window risk is instead carried by the downloader's
+   intent, reconciliation, bounds and hash safeguards. No recommendation
+   for `mnq06`, and the wave 3 MBO spec stays parked until the July fit
+   demonstrates whether a queue-model need exists.
 2. The MNQ fit itself: wave 2B's data feeds the per-instrument scalars
    and quote seams - that work bumps `TAPE_PROTOCOL_VERSION` and needs its
    own spec per `reference/technical-implementation-spec.md`.
@@ -1448,14 +1463,16 @@ fail artifact refuses `nqv contiguous`, verified.
 **Wave 2B - direct MNQ TBBO. Prices verified 2026-08-05 through our own
 cache** (`analysis/databento_cache.json`, MNQ.v.0 entries fetched
 09:09-09:13 UTC, usable as drift baselines until 2026-08-12). One full
-month, 2026-07, at 73.41; on a pair FAIL, add 2026-06 at 70.11 so the
-target instrument carries two contiguous months of trade-and-quote
-evidence itself. **The fail branch is now the operative one** per wave 1's
-verdict; the wave remains available and NOT authorized, behind its
-groundwork as stated. Gate: the pair
+month, 2026-07, at 73.41. The original design added 2026-06 at 70.11
+automatically on a pair FAIL; **that automatic addition is SUPERSEDED by
+the credit-first split** - June crosses into personal cash and now
+requires a future measurement-backed case from the delivered July data,
+never an automatic branch. The wave remains available and NOT
+authorized, behind its groundwork as stated. Gate: the pair
 ANALYZED - either verdict, since the per-instrument quote seams need MNQ
-quotes regardless - plus two structural prerequisites: an `mnqv` scope and
-MNQ window entries added to `databento_price.py` and a pricing sweep run,
+quotes regardless - plus two structural prerequisites: the `mnqv` scope
+and single-month MNQ plans added to `databento_price.py` (the existing
+time windows deliberately reused) and a pricing sweep run,
 because the downloader's drift gate refuses any row without a plan-time
 baseline in our own cache; and the buy whitelist extended with this wave's
 unlock rule. These prices were produced by our tool and are verified current
@@ -2289,12 +2306,24 @@ explicit accepted-verdicts policy (`nqv/contiguous` demands `pass`;
 `mnq06`, the personal-cash month, is priced but deliberately absent from
 the whitelist; wave 3 likewise still requires its own scope, pricing sweep
 and unlock rule before it can arm, which the drift gate enforces anyway -
-an unpriced row refuses. Two small open items
-before the first armed run: a conscious yes on `pretty_px`/`pretty_ts`
-(currently SDK defaults, fixed-precision ints) and `map_symbols` (currently
-true), and awareness that the SDK deprecates `metadata.get_cost`'s `mode`
-parameter, which both pricing and downloader still send so their quotes
-stay comparable.
+an unpriced row refuses. The submit format flags are DECIDED, 2026-08-05,
+by both reviewers under owner delegation, and no format question remains
+open before an armed run. `pretty_px = False`: fixed-precision integer
+prices are lossless, and the analysis path consumes them as integers -
+pretty decimals invite float parsing. `pretty_ts = False`: the pair
+harness preflight REFUSES anything but uniform 19-digit nanosecond
+epochs, so pretty timestamps would break our own frozen contract.
+`map_symbols = True`: it preserves the symbol column of the established
+CSV shape while `stype_out = instrument_id` remains the sharper contract
+witness; turning it off would change the layout our tooling was built
+against for no compensating benefit. The tiebreaker throughout: wave 1
+was delivered, hashed, preflighted and judged under exactly these values,
+and format continuity with the only delivery ever consumed beats any
+theoretical improvement. One item stays parked deliberately: the SDK
+deprecates `metadata.get_cost`'s `mode` parameter, which both pricing and
+downloader still send so their quotes stay comparable; it demonstrably
+still works, and migrating is a later coordinated change to both scripts
+with a baseline refresh, not something to bundle into a format decision.
 
 ### 14.2 Native-unit size configuration
 
