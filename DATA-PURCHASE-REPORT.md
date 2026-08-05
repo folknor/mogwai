@@ -14,7 +14,7 @@ re-deriving anything and can see which steps were wrong the first time.
 ## Contents
 
 - [0. Summary](#0-summary)
-  - [0.1 State of play, and the one thing that is unfinished](#01-state-of-play-2026-08-04-and-the-one-thing-that-is-unfinished)
+  - [0.1 State of play](#01-state-of-play-2026-08-05)
 - [1. The question, correctly stated](#1-the-question-correctly-stated)
 - [2. How the tape is generated today](#2-how-the-tape-is-generated-today)
 - [3. What MNQ actually gets today](#3-what-mnq-actually-gets-today)
@@ -70,70 +70,51 @@ what it cost and what it did not buy. Only the fourth row is the question this
 report originally set out to answer, and it is the least urgent of the four.
 
 Recommendation: spend nothing until step 4 of
-[section 11](#11-recommended-sequence) and the unfinished protocol-8 composition
-measurement below are done. They cost zero dollars, use data already on disk,
-and they change what the money should buy.
+[section 11](#11-recommended-sequence) is done. It costs zero dollars, uses data
+already on disk, and it changes what the money should buy. The protocol-8
+composition measurement that used to sit alongside it here is complete; see
+[0.1](#01-state-of-play-2026-08-05).
 
 ---
 
-## 0.1 State of play, 2026-08-04, and the one thing that is unfinished
+## 0.1 State of play, 2026-08-05
 
 Read this before starting anything. It is the handover, not a summary.
 
-**Landed.** Protocol 8. The BBO layer at protocol 7 with three uncalibrated
-calibration seams, then MNQ's session profile fitted from the NQ 1-minute
-archive. `TAPE_PROTOCOL_VERSION` is 8. `notes/mnq-session-fit.md` is the fit
-report; `analysis/fit_session_profile.py` is the estimator, with every
-acceptance threshold preregistered as a named constant at the top.
+**Landed.** Protocol 8, now complete. The BBO layer at protocol 7 with three
+uncalibrated calibration seams, then MNQ's session profile fitted from the NQ
+1-minute archive, then the budget remeasurement that profile obliged.
+`TAPE_PROTOCOL_VERSION` is 8. `notes/mnq-session-fit.md` is the fit report;
+`analysis/fit_session_profile.py` is the estimator, with every acceptance
+threshold preregistered as a named constant at the top.
 
-**UNFINISHED, and it blocks calling protocol 8 complete.** The protocol-8
-tick-composition fixture was never produced. The run was started and killed. So
-`analysis/tick-composition-protocol-8.json` does not exist, and the four budget
-constants -
+**The budget remeasurement is done, and three of the four ceilings were too
+small.** `analysis/tick-composition-protocol-8.json` exists, both independent
+mode acceptance gates passed, and the constants were resized under the standing
+policy:
 
-```
-CHECKPOINT_K                      1,048,576
-SWEEP_DRAIN_BUDGET              282,000,000
-MAX_WARMUP_MATERIALIZATION_TICKS 81,124,000,000
-fanout_depth                        262,144
-```
+| constant | protocol 7 | protocol 8 | ratio |
+|---|---:|---:|---:|
+| `CHECKPOINT_K` | 1,048,576 | 4,194,304 | 1.640000 |
+| `SWEEP_DRAIN_BUDGET` | 282,000,000 | 1,434,000,000 | 2.541999 |
+| `MAX_WARMUP_MATERIALIZATION_TICKS` | 81,124,000,000 | 162,349,000,000 | 1.000619 |
+| `fanout_depth` default | 262,144 | 1,048,576 | 1.595696 |
 
-- along with `reference/performance.md` still describe a protocol-7 tape that no
-longer exists for MNQ and MES. The functional suite is green, but budget safety
-is unverified: the constants are ceilings and the denser tape may have made them
-too small. That is precisely why this must be measured rather than assumed.
+`MAX_EXTEND_TICKS` and `SWEEP_DRAIN_WARN_TICKS` are deliberately unchanged: the
+first is a per-lock runaway backstop and the second an operational signal, and
+neither should scale with a refusal ceiling. Full derivation, including why the
+warmup ceiling doubles on a 1.0006x ratio and why the winning candidate switched
+from required reach to the headroom formula, is in `reference/performance.md`
+under the protocol 8 section. `brokkr check` passes 437 tests after the resize.
 
-To finish it:
+The comparison script's shared-baseline defect is fixed with it:
+`analysis/tick_composition_ratios.py` now carries a per-mode baseline table, so
+independent mode resizes the CURRENT constants rather than the pre-protocol-7
+ones. Reading a proposal from the old shared table would have under-proposed
+checkpoint and fanout by the factor protocol 7 had already absorbed, and every
+acceptance assertion would still have passed.
 
-```
-brokkr run mogwai -- tick-composition --out analysis/tick-composition-protocol-8.json
-python3 analysis/tick_composition_ratios.py --mode independent
-```
-
-**Fix one known comparison-script defect before trusting its proposal.** The
-new independent mode correctly enforces the 7-to-8 fixture contract, but
-`analysis/tick_composition_ratios.py` still has one shared `OLD` constant table.
-Those values are the PRE-protocol-7 baseline used by projection mode:
-`checkpoint_k = 262,144`, `sweep_drain_budget = 5,000,000`,
-`max_extend_ticks = 1 << 30`, `fanout_depth = 65,536`. Independent mode must
-resize the CURRENT protocol-7 constants listed above instead. Make the baseline
-mode-specific before accepting `proposed`; otherwise checkpoint and fanout in
-particular can be under-proposed even when all fixture acceptance assertions
-pass. This fix does not require rerunning the measurement.
-
-Expect roughly 90 minutes, up from an hour, and the increase IS the result: the
-fitted profile roughly doubles MNQ's and MES's arrival multiplier in the
-measurement window, and `ticks_per_sim_second` and `ticks_per_vol_window` are
-exactly what the sweep and checkpoint budgets are denominated in. The run holds
-the global cargo lock throughout, so nothing else can build meanwhile.
-
-`--mode independent` gates on acceptance assertions BEFORE computing any ratio:
-`ticks_per_parent` must be bit-identical for all five presets, and every measured
-field must be identical for BTCUSDT, ETHUSDT and SOLUSDT, whose normalizer is a
-literal 1.0 and whose tape is therefore byte-identical. If either fails, the run
-measured something unintended and no ratio from it is worth reading.
-
-**Also unfinished, and cosmetic.** `docs/example-generated-bars.png` is a
+**Still unfinished, and cosmetic.** `docs/example-generated-bars.png` is a
 BTCUSDT image and remains valid; what is missing is the promised committed MNQ
 counterpart. The existing renderer produces interactive HTML, and turning that
 into a PNG needs a browser and screenshot, so it cannot be completed on a
@@ -143,9 +124,16 @@ remote host:
 python3 analysis/plot_tape.py --gen --open --symbol MNQ --type bars --interval 1m --length 3d
 ```
 
-**Last verification.** `brokkr check` passed 434 tests after the mechanism,
-calendar, fitted profile, protocol bump and comparison modes landed. The
-protocol-8 composition run above was deliberately not completed.
+**What is next, with protocol 8 closed.** Nothing on the critical path costs
+money. Step 4 of [section 11](#11-recommended-sequence) - validating the
+bar-derived sampling frame against Kraken ticks - is the outstanding free work,
+and it is what decides whether the baskets in
+[section 9](#9-candidate-baskets-priced) are selected on the right strata at
+all. Only after that does the paired NQ/MNQ buy in step 6 make sense.
+
+**Last verification.** `brokkr check` passed 437 tests after the mechanism,
+calendar, fitted profile, protocol bump, comparison modes and the protocol-8
+budget resize landed.
 
 ---
 
@@ -1240,15 +1228,16 @@ nothing.
 2026-08-04 at protocol 8.** `intensity_hour`, `vol_hour` and `dow_weight` are
 fitted from `nq-1m_bk.zip` against the corrected CME calendar in `mnq.toml`. See
 [3.4](#34-resolved-the-session-profile-is-fitted) and
-`notes/mnq-session-fit.md`. Zero dollars. One measurement remains outstanding -
-see [0.1](#01-state-of-play-2026-08-04-and-the-one-thing-that-is-unfinished).
+`notes/mnq-session-fit.md`. Zero dollars. The budget remeasurement the denser
+tape obliged is also done, and resized three of the four ceilings - see
+[0.1](#01-state-of-play-2026-08-05).
 
 **Step 2. Make MNQ chartable. RESOLVED 2026-08-04.** `mogwai gen --symbol`
 resolves an embedded preset through the same `effective_preset` path the server
 boots from, and applies the instrument's calendar - which is now a construction
 input rather than a builder call, so omitting it is not expressible. The
 `docs/example-generated-bars.png` MNQ counterpart still needs regenerating from
-a machine with a browser; see [0.1](#01-state-of-play-2026-08-04-and-the-one-thing-that-is-unfinished).
+a machine with a browser; see [0.1](#01-state-of-play-2026-08-05).
 
 **Step 3. Fix the notional blocker. RESOLVED 2026-08-04.** The generator now
 accepts `latent_size_median` in native size units, separates mechanism gates

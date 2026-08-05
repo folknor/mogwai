@@ -20,16 +20,18 @@ use crate::source::{self, InstrumentProfiles};
 /// or a far-from-market order walks forever.
 ///
 /// The original 5,000,000 cap covered ordinary multi-hour gaps of roughly
-/// 700,000 ticks. The much larger value is driven instead by the protocol 7
-/// REQUIRED-REACH rule: the worst measured maximum-surge p99.9 rate projects
-/// 281,678,599 frames into one 300-second volatility window. Rounded upward,
-/// this prevents a complete supported window from being refused as truncated.
+/// 700,000 ticks. Protocol 7 raised it to 282,000,000 on the REQUIRED-REACH
+/// rule. At protocol 8 the other candidate wins: the fitted session profile
+/// expanded the worst p99.9 300-second window count by 2.54x, and twice that
+/// against the prior ceiling gives this value, above the 289,063,683 frames the
+/// worst measured p99.9 rate now projects into one window. Either way a
+/// complete supported window is never refused as truncated.
 ///
 /// This is a refusal ceiling, not an acceptable latency. At the measured 2.9M
-/// synthesis ticks per second, exhausting it would occupy a blocking worker
-/// for roughly 97 seconds. `SWEEP_DRAIN_WARN_TICKS` therefore remains separate
-/// and preserves the old operational warning point.
-pub(crate) const SWEEP_DRAIN_BUDGET: usize = 282_000_000;
+/// synthesis ticks per second, exhausting it would occupy a blocking worker for
+/// roughly 8 minutes. `SWEEP_DRAIN_WARN_TICKS` therefore remains separate and
+/// preserves the old operational warning point.
+pub(crate) const SWEEP_DRAIN_BUDGET: usize = 1_434_000_000;
 
 /// Latency diagnostic, intentionally independent of the refusal budget.
 /// Protocol 7's required-reach rule enlarged the refusal ceiling to cover a

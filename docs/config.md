@@ -159,12 +159,14 @@ not whether configuration is active. `trade_displacement_ticks` is only required
 to be finite and non-negative; it is intentionally not capped at half
 `quoted_width`, because the displayed BBO is one level and an aggressive parent
 may print beyond the touch. The two quantities remain independent calibration
-seams. The default `fanout_depth` is 262,144. At
+seams. The default `fanout_depth` is 1,048,576. At
 boot, a custom value should exceed one wall second of BASELINE projected frames:
 `children_mean / mean_event_duration_s * speed`.
 An armed flow surge can exceed that baseline. Under the measured maximum surge,
-the default preserves the old ring's horizon but holds only 0.029 wall seconds;
-`reference/performance.md` records the paired measurement.
+the default holds only 0.114 wall seconds - longer than the 0.030 the previous
+262,144 default held, but still far short of a wall second, so a surge-exposed
+run should size this deliberately rather than inherit it.
+`reference/performance.md` records the measurement under its protocol 8 section.
 The fingerprint retains `mean_trade_notional` under its honest name for corpus
 comparison; it is derived from the latent median, reference price, contract
 multiplier, and lognormal shape and never feeds the sampler.

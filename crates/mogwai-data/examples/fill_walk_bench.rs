@@ -24,11 +24,17 @@ use rust_decimal::Decimal;
 const ORIGIN: u64 = 1_700_438_400_000_000_000;
 const SPAN_NS: u64 = 1_000_000_000;
 /// The sweeper's own per-pass drain budget (`fills::SWEEP_DRAIN_BUDGET`).
-const BUDGET: usize = 5_000_000;
+/// Both this and the stride below had held their pre-protocol-7 values and so
+/// no longer mirrored what they claim to; resynchronized at protocol 8. Neither
+/// changes a measured number: this budget bounds a walk over `SPAN_NS`, one
+/// simulated second, which does not approach the cap at either value.
+const BUDGET: usize = 1_434_000_000;
 /// Mirrors the server's checkpoint spacing (`source::CHECKPOINT_K`), so the
 /// positioning benchmark restores from the same grid and pays the same residual
-/// drain the sweeper does.
-const CHECKPOINT_K: usize = 262_144;
+/// drain the sweeper does. Note the stride exceeds `BENCH_SEEK_TICKS` at this
+/// value as it did at the old one, so the restore is from the origin snapshot
+/// and the residual is the whole bench walk either way.
+const CHECKPOINT_K: usize = 4_194_304;
 /// This BENCH's own walk length. It has no server counterpart: the server's
 /// per-request seek budget (`MAX_HISTORY_SEEK_TICKS`) died with the lazy
 /// history path, because a declared warmup is materialized eagerly and a

@@ -26,18 +26,54 @@ ROOT = Path(__file__).resolve().parents[1]
 #                 projected from protocol 7. The pairings MUST differ here, and
 #                 equal pairings would mean the same run had been compared with
 #                 itself.
+#
+# Each mode carries its OWN baseline constants, and that is not bookkeeping. A
+# ratio is meaningless without the number it resizes, and the number it resizes
+# is whatever was shipping at the mode's BEFORE version - not whatever ships
+# today. Sharing one table resized the protocol-7 constants by the
+# pre-protocol-7 baseline and under-proposed checkpoint and fanout by the factor
+# protocol 7 had already absorbed, while every acceptance assertion still passed.
+#
+# So a baseline table is a historical record and is frozen once its mode's
+# resize has landed. A protocol-9 comparison adds a mode whose baseline is the
+# protocol-8 column, and does not edit the one below.
+#
+# `warmup_baseline` is separate from `max_extend_ticks` for the same reason.
+# Before protocol 7 the warmup reach had no constant of its own and borrowed the
+# extend ceiling; protocol 7 gave it `MAX_WARMUP_MATERIALIZATION_TICKS`, so that
+# is what protocol 8 resizes.
 MODES = {
     "projection": {
         "versions": (6, 7),
         "before": "analysis/tick-composition-protocol-6.json",
         "after": "analysis/tick-composition-protocol-7.json",
         "same_pairing": True,
+        # Pre-protocol-7, as shipped when the 6-to-7 comparison was made.
+        "baseline": {
+            "checkpoint_k": 262_144,
+            "sweep_drain_budget": 5_000_000,
+            "max_extend_ticks": 1 << 30,
+            "warmup_baseline": 1 << 30,
+            "fanout_depth": 65_536,
+        },
     },
     "independent": {
         "versions": (7, 8),
         "before": "analysis/tick-composition-protocol-7.json",
         "after": "analysis/tick-composition-protocol-8.json",
         "same_pairing": False,
+        # The protocol-7 constants, as shipped when this comparison was made.
+        # Protocol 8 has since replaced four of the five with the values this
+        # mode proposed, so do not read these as current. `max_extend_ticks` is
+        # the exception and does still ship at 1 << 30: it is a per-lock runaway
+        # backstop rather than a reach ceiling, and is deliberately not scaled.
+        "baseline": {
+            "checkpoint_k": 1_048_576,
+            "sweep_drain_budget": 282_000_000,
+            "max_extend_ticks": 1 << 30,
+            "warmup_baseline": 81_124_000_000,
+            "fanout_depth": 262_144,
+        },
     },
 }
 
@@ -48,13 +84,6 @@ MODES = {
 # from the run means anything.
 CALENDAR_FREE = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
 CALENDAR_BEARING = ("MNQ", "MES")
-
-OLD = {
-    "checkpoint_k": 262_144,
-    "sweep_drain_budget": 5_000_000,
-    "max_extend_ticks": 1 << 30,
-    "fanout_depth": 65_536,
-}
 
 
 def power_of_two(value: float) -> int:
@@ -103,6 +132,7 @@ def main() -> None:
     parser.add_argument("--after", type=Path)
     args = parser.parse_args()
     mode = MODES[args.mode]
+    old_consts = mode["baseline"]
     before_path = args.before or ROOT / mode["before"]
     after_path = args.after or ROOT / mode["after"]
 
@@ -193,25 +223,32 @@ def main() -> None:
         ),
     }
     proposed = {
-        "checkpoint_k": power_of_two(OLD["checkpoint_k"] * ratios["checkpoint_k"] * 2),
+        "checkpoint_k": power_of_two(
+            old_consts["checkpoint_k"] * ratios["checkpoint_k"] * 2
+        ),
         "sweep_drain_budget": million(
             max(
-                OLD["sweep_drain_budget"] * ratios["sweep_drain_budget"] * 2,
+                old_consts["sweep_drain_budget"] * ratios["sweep_drain_budget"] * 2,
                 reach["sweep_drain_budget"],
             )
         ),
-        "max_extend_ticks": OLD["max_extend_ticks"],
+        "max_extend_ticks": old_consts["max_extend_ticks"],
         "warmup_materialization_ticks": million(
             max(
-                OLD["max_extend_ticks"] * ratios["warmup_materialization_ticks"] * 2,
+                old_consts["warmup_baseline"]
+                * ratios["warmup_materialization_ticks"]
+                * 2,
                 reach["warmup_materialization_ticks"],
             )
         ),
-        "fanout_depth": power_of_two(OLD["fanout_depth"] * ratios["fanout_depth"] * 2),
+        "fanout_depth": power_of_two(
+            old_consts["fanout_depth"] * ratios["fanout_depth"] * 2
+        ),
     }
     horizons = {
         "fanout_old_wall_seconds": min(
-            OLD["fanout_depth"] / old[k]["frames_per_wall_second"][speed]["p999"]
+            old_consts["fanout_depth"]
+            / old[k]["frames_per_wall_second"][speed]["p999"]
             for k in old
             for speed in ("1.0", "10.0")
             if old[k]["frames_per_wall_second"][speed]["p999"] > 0

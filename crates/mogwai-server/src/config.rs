@@ -119,9 +119,12 @@ pub(crate) struct Config {
     /// the tape instead is not an option either - every other subscriber on the
     /// symbol shares it.
     ///
-    /// The default 65,536 holds about 22 simulated minutes at the raw-fill
-    /// cadence and more than one wall second at speed 100. It is a backstop
-    /// against a wedged consumer, not a modeled pathology.
+    /// The default is a measured backstop against a wedged consumer, not a
+    /// modeled pathology. Protocol 8's composition run raised it to 1,048,576:
+    /// twice the worst measured p99.9 expansion of wall-second frame work over
+    /// the prior 262,144, rounded up to a power of two. That holds 0.114 wall
+    /// seconds at the worst measured rate, up from the 0.030 the prior value
+    /// held, so the resize lengthens the horizon rather than shortening it.
     /// UNLIKE every neighbouring count knob, `0` is NOT "unbounded" here:
     /// `broadcast::channel(0)` panics, so `validate()` rejects it at load.
     pub(crate) fanout_depth: usize,
@@ -204,10 +207,10 @@ impl Default for Config {
             // loud (off-tape requests are refused, not silently under-served), so
             // the default's exactness is low-stakes.
             warmup_ns: 86_400_000_000_000,
-            // Sized from the protocol 7 composition fixture to preserve more
-            // than the old ring's measured wall-time horizon at speeds 1 and
+            // Sized from the protocol 8 composition fixture to preserve more
+            // than the prior ring's measured wall-time horizon at speeds 1 and
             // 10, including the maximum admitted flow surge.
-            fanout_depth: 262_144,
+            fanout_depth: 1_048_576,
             zero_speed_stall_ms: 5000,
             exec_held_budget_bytes: crate::admission::EXEC_HELD_BUDGET_BYTES,
             admission_lane_frames: crate::admission::ADMISSION_LANE_FRAMES,

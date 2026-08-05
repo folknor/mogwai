@@ -295,3 +295,73 @@ protocol 6 beside an old protocol 7, and two paths cannot be replaced atomically
 as a pair - so what is guaranteed is DETECTION of that mismatch, not its
 prevention. `--jobs N` sets worker count, defaulting to the machine's
 parallelism.
+
+## 2026-08-05 protocol 8 session-profile composition
+
+The four constants above were measured against a tape that no longer exists for
+MNQ and MES. Protocol 8 fitted MNQ's session profile from the NQ 1-minute
+archive and made MES inherit it, taking the hour curve from crypto's flat 1.78x
+peak-to-trough to 27.51x. Every budget above is denominated in ticks per
+simulated second, per volatility window, or per wall second, so concentrating
+the same parent count into the cash session raises all of them.
+
+Protocol 8 cannot be projected from protocol 7. The profile divides the duration
+draw and scales the return, so timestamps and prices both move and the two
+fixtures come from SEPARATE traversals. `tick_composition_ratios.py --mode
+independent` therefore gates before computing any ratio: `ticks_per_parent` must
+be bit-identical for all five presets, because the profile changes when events
+happen and never how many, and every measured field must be identical for
+BTCUSDT, ETHUSDT and SOLUSDT, whose calendar-free normalizer is the literal 1.0
+and whose tape is byte-identical across the change. Both gates passed.
+
+The maximum independent p99.9 protocol-8/protocol-7 ratios were:
+
+| budget denominator | ratio | prior constant | resulting constant |
+|---|---:|---:|---:|
+| simulated-second checkpoint work | 1.640000 | 1,048,576 | 4,194,304 |
+| 300-second sweep work | 2.541999 | 282,000,000 | 1,434,000,000 |
+| 24-hour cumulative warmup reach | 1.000619 | 81,124,000,000 | 162,349,000,000 |
+| wall-second fanout work | 1.595696 | 262,144 | 1,048,576 |
+
+The same policy applies unchanged: prior constant times ratio times two for
+headroom, rounded up to a power of two for checkpoint and fanout and to the next
+million for sweep and warmup reach, then taken as the larger of that and the
+required reach. Which candidate wins moved. At protocol 7 required reach set
+both the sweep budget and the warmup ceiling; at protocol 8 the headroom formula
+wins for both, at 1,434,000,000 against a required reach of 289,063,683 frames
+and 162,349,000,000 against 83,250,340,704. The worst measured p99.9 rate is now
+963,545.61 frames per simulated second. Directly observed partial-window counts,
+270,931,449 and 1,364,836,628, remain lower and set neither result.
+
+The warmup ratio is the one that reads oddly. At 1.000619 it is the only one of
+the four that FAILS the 1.05 materiality threshold, yet its ceiling doubles. The
+reason is that the 24-hour reach is dominated by the maximum-surge arm, where
+arrival compression already saturates the horizon and a session profile has
+almost nothing left to concentrate. The doubling is entirely the standing
+two-times headroom rule reapplied to a constant that protocol 7 had set at bare
+required reach with none. The old 81,124,000,000 was in genuine danger: the new
+required reach of 83,250,340,704 exceeds it, so the ceiling had to move
+regardless of the ratio.
+
+`MAX_EXTEND_TICKS` is unchanged at 1,073,741,824 ticks per index-lock
+acquisition, and the 2,500,000-tick sweep latency warning is likewise unchanged.
+Both are deliberately not scaled with the reach ceilings: the first is a
+per-lock runaway backstop and the second an operational signal, and scaling
+either with a refusal ceiling would silence it.
+
+The sweep refusal ceiling is now roughly 8 minutes of blocking-worker time at
+the measured 2.9 M ticks per second, up from 97 seconds. That is a ceiling
+reached only by a far-from-market order under maximum surge, not a latency
+anyone should see, and `SWEEP_DRAIN_WARN_TICKS` still fires three orders of
+magnitude earlier. The resized fanout holds 0.114123 wall seconds at the worst
+measured rate against the prior value's 0.029553, so no horizon shrinks. Note
+this is still a fraction of a wall second under maximum surge; a surge-exposed
+run should size `fanout_depth` deliberately rather than inherit the default.
+
+Regenerate with
+`brokkr run mogwai -- tick-composition --out analysis/tick-composition-protocol-8.json`,
+then `python3 analysis/tick_composition_ratios.py --mode independent`. The run
+now costs about 90 minutes rather than an hour, and the increase IS the result.
+Each mode carries its own baseline constant table; a shared one would resize the
+current constants by the pre-protocol-7 baseline and under-propose checkpoint
+and fanout by the factor protocol 7 had already absorbed.
