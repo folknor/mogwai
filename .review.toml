@@ -50,6 +50,11 @@ model = "gpt-5.6-terra"
 effort = "medium"
 sandbox = "workspace-write"
 
+[plantasjen.codex.spar]
+model = "gpt-5.6-sol"
+effort = "low"
+sandbox = "read-only"
+
 [plantasjen.codex.quick]
 model = "gpt-5.6-sol"
 effort = "low"
