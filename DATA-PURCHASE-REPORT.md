@@ -69,10 +69,14 @@ was free to fix from bars already owned; it is fixed, and section 3.4 records
 what it cost and what it did not buy. Only the fourth row is the question this
 report originally set out to answer, and it is the least urgent of the four.
 
-Recommendation: spend nothing until step 4 of
-[section 11](#11-recommended-sequence) is done. It costs zero dollars, uses data
-already on disk, and it changes what the money should buy. The protocol-8
-composition measurement that used to sit alongside it here is complete; see
+Recommendation, updated 2026-08-05: step 4 of
+[section 11](#11-recommended-sequence) is done and it FAILED, which changed
+what the money should buy exactly as anticipated. Volatility-stratified
+selection is rejected; the purchase design is now the paired NQ/MNQ test
+first, then a contiguous-recent-months basket, priced before anything is
+spent. See [7.2](#72-method-for-window-selection) and the superseded banner on
+[section 9](#9-candidate-baskets-priced). The protocol-8 composition
+measurement that used to sit alongside it here is complete; see
 [0.1](#01-state-of-play-2026-08-05).
 
 ---
@@ -124,12 +128,14 @@ remote host:
 python3 analysis/plot_tape.py --gen --open --symbol MNQ --type bars --interval 1m --length 3d
 ```
 
-**What is next, with protocol 8 closed.** Nothing on the critical path costs
-money. Step 4 of [section 11](#11-recommended-sequence) - validating the
-bar-derived sampling frame against Kraken ticks - is the outstanding free work,
-and it is what decides whether the baskets in
-[section 9](#9-candidate-baskets-priced) are selected on the right strata at
-all. Only after that does the paired NQ/MNQ buy in step 6 make sense.
+**What is next, with protocol 8 closed and the sampling frame REJECTED.**
+Step 4 of [section 11](#11-recommended-sequence) resolved 2026-08-05: the
+bar-derived frame FAILED its preregistered association test, so every
+section 9 basket is superseded and the replacement purchase design is
+contiguous recent months ([7.2](#72-method-for-window-selection)). The paired
+NQ/MNQ test remains the first purchase - the failed frame never answered
+whether NQ is a valid proxy for MNQ - followed by the contiguous basket, which
+must be designed and priced before anything is spent.
 
 **Last verification.** `brokkr check` passed 437 tests after the mechanism,
 calendar, fitted profile, protocol bump, comparison modes and the protocol-8
@@ -1092,13 +1098,31 @@ are chosen on VOLATILITY AND VOLUME regimes, not on microstructure regimes. The
 tick data itself is what reports whether those coincided. Either answer is a
 finding.
 
-**This assumption is testable for free and has not been tested.** Build 1-minute
-bars FROM the Kraken ticks, run the `select_windows.py` feature pipeline on
-them, then compute the tick-level targets directly and check whether the
-bar-derived stratification predicts the microstructure. Same instrument, same
-period, same venue, no vendor mismatch. If it fails, the volatility-stratified
-window selection underpinning every basket below is unjustified and the money
-should go to contiguous recent months instead.
+**TESTED 2026-08-05, and it FAILED.** The sampling-frame experiment of
+`notes/sampling-frame-preregistration.md` ran the preregistered rank
+association on 19 months of Binance BTCUSDT: bar-derived monthly realized
+volatility against fourteen tick-level targets, twelve calibration months,
+seven held out, thresholds fixed before any data. The deciding result is
+`analysis/association-result.json`, written atomically before inspection, with
+the SHA-256 of both frozen inputs and the analysis tree commit recorded inside
+it.
+
+Verdict: **FAIL on both prongs independently.** Three of fourteen targets
+passed - `mean_event_duration_s`, `duration_dispersion_cv2` and
+`children_single_frac`, all cadence or sweep targets - so no family reached a
+majority and both mandatory families failed. The long-memory F5 family
+(`abs_return_acf` at lags 1, 10, 50) showed essentially no stable association
+with monthly realized volatility on either span, and every leave-one-month-out
+sign flip in the result concentrates in the ACF targets. P-values were
+diagnostic, never gates; even the strongest passing association is not
+multiplicity-adjusted evidence across fourteen targets.
+
+The preregistered consequence (section 8 of the preregistration) is therefore
+in force: **volatility-stratified window selection is REJECTED, and the money
+goes to contiguous recent months instead.** Every basket in
+[section 9](#9-candidate-baskets-priced) is superseded. The experiment did its
+job - it prevented roughly 100 dollars from being spent on windows selected by
+an assumption the data does not support.
 
 ---
 
@@ -1139,6 +1163,17 @@ All via free metadata calls.
 ---
 
 ## 9. Candidate baskets, priced
+
+> **SUPERSEDED 2026-08-05, all of them.** The sampling-frame experiment
+> FAILED its preregistered association test - see
+> [7.2](#72-method-for-window-selection) - so the volatility-stratified
+> selection every basket below is built on is rejected, not caveated. The
+> stratified windows, the p0/p100 anchors and the farthest-point picks are
+> all void as selection rationale. The replacement design is contiguous
+> recent months; see [11](#11-recommended-sequence) step 4 and step 7. The
+> paired NQ/MNQ test of 9.3 survives on its own merits - the failed frame
+> never spoke to whether NQ is a valid proxy for MNQ - and remains first.
+> The tables are retained for their pricing facts only.
 
 All priced against the live API on 2026-08-04 and cached in
 `analysis/databento_cache.json`. Symbol `NQ.v.0` unless stated, dataset
@@ -1206,6 +1241,46 @@ a cross-asset-class confirmation rather than the only available second grid.
 
 Basket B plus the paired test plus the GC probe: **103.82 dollars, ~3.98 GB**,
 leaving 21.18 of the free credit unspent.
+
+### 9.6 The contiguous replacement basket, priced 2026-08-05
+
+The design the sampling-frame FAIL mandates, priced live and cached. Recency
+is the whole selection - no stratum labels, no regime picks. All TBBO at full
+months: the synthetic decomposition established that trade-derived spread
+proxies cannot serve as the dependent variable of a spread fit, the protocol 7
+width and displacement seams are the slots only quote evidence fills, and full
+contiguous months are where the ACF-tail and GARCH-persistence estimators
+bind on length - the one argument the FAIL does not touch.
+
+**The paired NQ/MNQ test stays first and moves to a recent window.** The pair
+question - is NQ a valid proxy for MNQ - is untouched by the FAIL, but its old
+2024-05 window was itself regime-selected as the p0 calm month. The
+replacement is two weeks from the first Monday after the 2026-06-19 quarterly
+expiry, no roll inside the window, `trades` schema per the original 9.3
+design. It costs 2.4x the 2024 pairing because MNQ's print count has grown
+that much - 19.2M records against 8.0M - which is itself the trend that makes
+an MNQ refit expensive and the proxy question urgent.
+
+| Item | Scope | Window | Schema | Cost | Size |
+|---|---|---|---|---|---|
+| paired test, FIRST | `pairv` | 2026-07-06 to 07-20 | trades | 24.06 | 0.92 GB |
+| contiguous month | `nqv` | 2026-04 full | tbbo | 16.08 | 0.62 GB |
+| contiguous month | `nqv` | 2026-05 full | tbbo | 17.47 | 0.67 GB |
+| contiguous month | `nqv` | 2026-06 full | tbbo | 19.26 | 0.74 GB |
+| contiguous month | `nqv` | 2026-07 full | tbbo | 18.98 | 0.73 GB |
+| definition + statistics | both | all windows | | 0.02 | negligible |
+| | | | **total** | **95.87** | **~3.67 GB** |
+
+29.13 of the 125-dollar credit remains as headroom - enough to re-buy one
+botched window, which basket A's 7.41 was criticised for not being, or to add
+the GC grid probe (2.81, section 9.4) if the free Kraken cross-grid work
+leaves the question open. The purchase is staged: the paired test first and
+alone, its result read, and only then the four contiguous months.
+
+Priced via `plan pairv paircurrent` and `plan nqv contiguous` in
+`analysis/databento_price.py`, metadata calls only, cached. Nothing has been
+bought; the downloader of [14.1](#141-the-downloader-does-not-exist) remains
+unbuilt and unauthorised.
 
 ---
 
@@ -1288,10 +1363,13 @@ accepts `latent_size_median` in native size units, separates mechanism gates
 from corpus diagnostics, and rejects the old unit-mismatch signature against
 the instrument's minimum tradable size. No purchase was required.
 
-**Step 4. Validate the sampling frame, free.** Build 1-minute bars from Kraken
-ticks, run the `select_windows.py` pipeline, and check whether bar-derived
-strata predict tick-level microstructure ([7.2](#72-method-for-window-selection)).
-If they do not, every basket below needs re-selecting.
+**Step 4. Validate the sampling frame, free. RESOLVED 2026-08-05: it FAILED.**
+The preregistered association test rejected the bar-derived frame - three of
+fourteen targets, no family majority, both mandatory families failed
+([7.2](#72-method-for-window-selection), `analysis/association-result.json`).
+The preregistered consequence stands unmodified: contiguous recent months
+replace regime-selected windows, and every section 9 basket is superseded.
+ETHUSDT was not consulted, per the failure rules.
 
 **Step 5a. Decompose the SYNTHETIC spread. RESOLVED 2026-08-04.** Protocol 7
 reports the shipped tape against its published book and retains the latent-mid
@@ -1338,11 +1416,14 @@ replays it through the adapter. The three new per-instrument quantities remain
 explicitly uncalibrated, so step 5b now has separate landing sites for quoted
 width and effective spread rather than one conflated target.
 
-**Step 6. Buy the paired test, 10.02 dollars.** Answers whether process
-constants are contract-specific or market-specific, and whether NQ's moments
-fall inside the existing cross-pair tolerances. If they do, the fingerprint is
-already MNQ-ish within its own stated band and the rest of the budget buys
-refinement rather than correction.
+**Step 6. Buy the paired test, now 24.06 dollars on the 2026-07 window.**
+Answers whether process constants are contract-specific or market-specific,
+and whether NQ's moments fall inside the existing cross-pair tolerances. If
+they do, the fingerprint is already MNQ-ish within its own stated band and the
+rest of the budget buys refinement rather than correction. Repriced and moved
+2026-08-05: the old 2024-05 window was regime-selected as the p0 calm month,
+which the sampling-frame FAIL rejects, so the pair moves to a recent no-roll
+window - see [9.6](#96-the-contiguous-replacement-basket-priced-2026-08-05).
 
 **This purchase acquired a SECOND job at protocol 8, and it is not optional.**
 The fitted `intensity_hour` is contract-volume intensity standing in for
@@ -1358,10 +1439,13 @@ is materially flatter, `intensity_hour` is biased by that factor and the
 provenance caveat in `mnq.toml` becomes a measured correction rather than a
 stated direction.
 
-**Step 7. Spend the rest with evidence.** Basket B, or whatever steps 4 and 5
-have reshaped it into, plus the GC probe if the Kraken cross-grid work in
+**Step 7. Spend the rest with evidence.** Step 4's failure reshaped this:
+Basket B is superseded, and the replacement is a CONTIGUOUS RECENT MONTHS
+design - the newest complete months at full coverage, no regime selection -
+plus the GC probe if the Kraken cross-grid work in
 [7.1](#71-zero_change_frac-is-not-an-instrument-constant) leaves a
-cross-asset-class question open.
+cross-asset-class question open. The contiguous basket must be designed and
+priced before anything is spent.
 
 ---
 

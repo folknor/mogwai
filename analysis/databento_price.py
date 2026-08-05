@@ -137,6 +137,14 @@ WINDOWS = [
     ("2011-08.full", "2011-08-01", "2011-09-01", "drift probe, pre-micro era"),
     ("2011-08.2wk", "2011-08-01", "2011-08-15", "drift probe, pre-micro era"),
     ("2016-01.full", "2016-01-01", "2016-02-01", "drift probe, pre-micro era"),
+    # Contiguous recent months, added 2026-08-05 after the sampling-frame
+    # experiment FAILED its preregistered association test and the
+    # preregistered consequence replaced regime-selected windows with
+    # contiguous recent ones. No stratum labels: recency IS the selection.
+    ("2026-04.full", "2026-04-01", "2026-05-01", "contiguous recent"),
+    ("2026-05.full", "2026-05-01", "2026-06-01", "contiguous recent"),
+    ("2026-07.full", "2026-07-01", "2026-08-01", "contiguous recent, newest complete"),
+    ("2026-07.2wk", "2026-07-06", "2026-07-20", "paired test, post 06-19 expiry, no roll"),
 ]
 
 SCHEMAS = ["trades", "tbbo", "definition", "statistics"]
@@ -413,8 +421,35 @@ PAIR_PLAN = [("2024-05.2wk", "trades")]
 # two different volatilities rather than at one point.
 GRID_PLAN = [("2024-05.2wk", "trades"), ("2025-04.2wk", "trades")]
 
+# The replacement design, 2026-08-05, after the sampling-frame FAIL rejected
+# every volatility-stratified basket above. Contiguous recent months at full
+# coverage, all TBBO: the failed frame removes the license to pick regimes, so
+# recency is the whole selection; TBBO because the synthetic decomposition
+# established that a trade-derived proxy cannot serve as the dependent
+# variable in a spread fit, and the protocol 7 width and displacement seams
+# are the slots only quote evidence can fill; full months because the
+# abs-return ACF tail and GARCH persistence are where contiguous LENGTH binds,
+# an argument the FAIL does not touch.
+CONTIGUOUS_PLAN = [
+    ("2026-04.full", "tbbo"),
+    ("2026-05.full", "tbbo"),
+    ("2026-06.full", "tbbo"),
+    ("2026-07.full", "tbbo"),
+]
+
+# The paired NQ/MNQ test on a RECENT no-roll window. The pair question - is NQ
+# a valid proxy for MNQ - survives the sampling-frame FAIL untouched, but its
+# old 2024-05 window was itself regime-selected as the p0 calm month, which is
+# exactly the rationale the FAIL rejected. Two weeks starting the first Monday
+# after the 2026-06-19 quarterly expiry: front month stable, no roll inside
+# the window, and recency serves the protocol 8 volume-versus-count obligation
+# directly. Trades schema: the pair question needs counts and moments, not
+# quotes, per the original 9.3 design.
+PAIR_CURRENT_PLAN = [("2026-07.2wk", "trades")]
+
 PLANS = {"basket": PLAN, "depth": DEPTH_PLAN, "pair": PAIR_PLAN,
-         "grid": GRID_PLAN}
+         "grid": GRID_PLAN, "contiguous": CONTIGUOUS_PLAN,
+         "paircurrent": PAIR_CURRENT_PLAN}
 BUDGET = 125.0
 
 
