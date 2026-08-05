@@ -494,7 +494,16 @@ def verify_input(directory: str, ledger_path: str | None = None) -> dict:
             f"hash mismatch: {moved}); the landing is not the delivery the "
             "ledger recorded"
         )
-    on_disk = {os.path.basename(p) for p in data_files(directory)}
+    # Presence is judged against the WHOLE directory: the ledger inventories
+    # the sidecars (manifest, condition, metadata) alongside the data files,
+    # and deriving presence from the csv.zst-filtered list read every
+    # sidecar as missing - the first real preflight refused on exactly that.
+    # Presence means a REGULAR FILE: a name shadowed by a directory or a
+    # dangling symlink is not a delivered file.
+    with os.scandir(directory) as entries:
+        on_disk = {
+            e.name for e in entries if e.is_file(follow_symlinks=False)
+        }
     absent = sorted(set(ledger_files) - on_disk)
     if absent:
         raise Refusal(
@@ -2523,15 +2532,29 @@ def run_selftest() -> None:
         digest = sha256_file(data_path)
         if tamper_hash:
             digest = "0" * 64
+        # The inventory mirrors the REAL delivery: sidecars are inventoried
+        # alongside the data file. The first real preflight refused because
+        # the fixture ledgers listed only csv.zst files and never exercised
+        # a sidecar-bearing inventory against the completeness check.
+        inventory = {
+            "glbx-st.tbbo.csv.zst": digest,
+            "condition.json": "d" * 64,
+            "manifest.json": "f" * 64,
+            "metadata.json": "e" * 64,
+        }
         manifest = {
             "job_id": job if not tamper_manifest else "GLBX-OTHER",
-            "files": {"glbx-st.tbbo.csv.zst": digest},
+            "files": dict(inventory),
         }
         with open(os.path.join(fake_dir, "manifest.json"), "w") as fh:
             json.dump(manifest, fh)
+        with open(os.path.join(fake_dir, "metadata.json"), "w") as fh:
+            json.dump({"job_id": job}, fh)
+        with open(os.path.join(fake_dir, "condition.json"), "w") as fh:
+            json.dump({}, fh)
         ledger = {"_version": 1, "jobs": {LEDGER_KEY: {
             "state": ledger_state, "job_id": job,
-            "files": {"glbx-st.tbbo.csv.zst": digest},
+            "files": dict(inventory),
         }}}
         ledger_path = os.path.join(fake_dir, "ledger.json")
         with open(ledger_path, "w") as fh:
