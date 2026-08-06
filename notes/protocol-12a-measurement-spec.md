@@ -1357,7 +1357,45 @@ mnq-measure-12a.json
                 worsening_23: {point, se, ucb} | null}
 ```
 
-## 11. Stopping rule
+## 11. RESULT (Brick M, 2026-08-06)
+
+The measurement ran from the clean committed tree 1e9506c and the
+artifact `analysis/mnq-measure-12a.json` landed under both validation
+gates. VERDICT: `no-family-eligible` - no rung fired. Cost: observed
+333.6 s, generated replays 324.3 s, bootstrap and assembly 10.5 s,
+total 668.4 s; peak tree RSS 734 MiB; scratch 83 MB - every budget
+held. Five of six family inventories are COMPLETE; the verdict is
+measured, not a refusal cascade, with one deliberate exception:
+
+- ARRIVAL failed CLOSED, and it carries the loudest evidence. The
+  generated arrival process is massively under-dispersed against the
+  observed tape: Fano-factor log ratios at the fail hours are -1.22 to
+  -3.07 (generated 3.4x to 21x less dispersed) and count-p99 log
+  ratios -0.43 to -1.33, all with 7-of-8 seed agreement and every fold
+  retaining the side. But five required conditional bins have observed
+  support the generated months never populate at floor (Amendment D
+  fails the rung closed), and the count substitution refuses 22 of 24
+  hours on observed-support-without-generated-support, so the closure
+  is unmeasurable. The generated parent-count COMPOSITION is too far
+  from the observed one for the counterfactual to have support at all.
+- INNOVATION subcheck a FIRED: the pooled nonzero abs-z p99.9/p99
+  ratio is outside the band with envelope, seeds and folds (generated
+  tail 31 percent heavy). But initiation held in only 4 of 8 seeds
+  (7 required) and the escalation contrast with controls was not
+  clean, so b and c failed on measured forensic evidence.
+- REVERSION and GARCH: the 300 s wall-time discrepancy is present in
+  point estimates (generated hot 27 to 36 percent at hours 19 and 20)
+  but the 95 percent simultaneous envelopes (critical values 2.65 to
+  3.09) do not exclude the band edge over 22 sessions, and neither
+  shuffle closure cleared the 0.50 floor everywhere; the hour-19
+  covariance direction came out opposite-signed.
+- CHILD_WALK and BOUNDARY: clean in point; nothing to fire.
+
+The verdict goes to the owner (spec 1.1): a 12b drafted against this
+evidence would target the arrival composition first - the failure
+that blocked its own measurement - but that choice is the owner's.
+
+## 12. Stopping rule
 
 Out of scope: any generator change (`mogwai-data` is untouched), any
 preset change, any `TAPE_PROTOCOL_VERSION` bump, the 12b mechanism
