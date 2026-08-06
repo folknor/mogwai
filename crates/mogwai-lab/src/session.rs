@@ -87,7 +87,7 @@ pub fn session_segment_at(ts_ns: u64, offset_minutes: i32) -> Option<SessionSegm
 /// Howard Hinnant's `civil_from_days`: proleptic-Gregorian (year, month, day)
 /// from a day count since the 1970-01-01 epoch. Avoids a `chrono` dependency
 /// for the one thing this crate needs a calendar for.
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
+pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = (z - era * 146_097) as u64; // [0, 146096]
@@ -123,6 +123,93 @@ pub fn assign_session(ts_ns: u64) -> (Option<String>, Option<&'static str>) {
         Some(seg) => (Some(format_trade_date(seg.trade_day)), Some(seg.segment)),
         None => (None, None),
     }
+}
+
+/// Howard Hinnant's `days_from_civil`: the inverse of `civil_from_days`.
+#[must_use]
+pub fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64;
+    let mp = u64::from(if m > 2 { m - 3 } else { m + 9 });
+    let doy = (153 * mp + 2) / 5 + u64::from(d) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe as i64 - 719_468
+}
+
+/// `"YYYY-MM-DD"` to a day count since the epoch.
+#[must_use]
+pub fn days_from_iso(label: &str) -> i64 {
+    let mut parts = label.split('-');
+    let mut next = || {
+        parts
+            .next()
+            .unwrap_or_else(|| panic!("a YYYY-MM-DD session label, got {label:?}"))
+    };
+    let y: i64 = next().parse().expect("a four-digit year");
+    let m: u32 = next().parse().expect("a two-digit month");
+    let d: u32 = next().parse().expect("a two-digit day");
+    days_from_civil(y, m, d)
+}
+
+fn local_instant_ns(day: i64, local_min: i64) -> u64 {
+    let seconds =
+        day * 86_400 + local_min * 60 - i64::from(crate::subcontract::UTC_OFFSET_MINUTES) * 60;
+    u64::try_from(seconds).expect("session instants are after the epoch") * 1_000_000_000
+}
+
+/// `segment_origin_ns`: the calendar START of a session segment as a UTC
+/// epoch-ns instant - the previous civil day's 17:00 local for `overnight`,
+/// the trade date's 15:30 local for `post_halt`. Derived from the LABEL
+/// alone, so the expected-exposure judge never consults a candidate's data.
+#[must_use]
+pub fn segment_origin_ns(session: &str, segment: &str) -> u64 {
+    let day = days_from_iso(session);
+    if segment == "overnight" {
+        local_instant_ns(day - 1, i64::from(SESSION_OPEN_LOCAL_MIN))
+    } else {
+        local_instant_ns(day, i64::from(HALT_END_LOCAL_MIN))
+    }
+}
+
+/// `segment_end_ns`: the calendar END - the trade date's 15:15 local (halt
+/// start) for `overnight`, its 16:00 local (close) for `post_halt`.
+#[must_use]
+pub fn segment_end_ns(session: &str, segment: &str) -> u64 {
+    let day = days_from_iso(session);
+    let local_min = if segment == "overnight" {
+        HALT_START_LOCAL_MIN
+    } else {
+        SESSION_CLOSE_LOCAL_MIN
+    };
+    local_instant_ns(day, i64::from(local_min))
+}
+
+/// `expected_scheduled_windows`: the CALENDAR-derived scheduled-window count
+/// for one `(session, hour, window length)`, independent of any candidate's
+/// own data (spec 3.3 scheduled-exposure completeness) - 59 per full hour at
+/// 60 s, 44 at the halt hour.
+///
+/// Judging exposure by a max over the candidate's own sessions would be
+/// self-referential: a systematically short generator would define its own
+/// shortfall as complete. The count comes from the same
+/// [`crate::measure12a::window_schedule`] iterator the block-2 accumulator
+/// consumes, so the endpoint-hour rule cannot drift between them.
+#[must_use]
+pub fn expected_scheduled_windows(session: &str, hour: i64, w: i64) -> i64 {
+    #[expect(clippy::cast_sign_loss, reason = "window lengths are 1, 5 and 60")]
+    let w_ns = w as u64 * 1_000_000_000;
+    ["overnight", "post_halt"]
+        .into_iter()
+        .map(|segment| {
+            let origin = segment_origin_ns(session, segment);
+            let end = segment_end_ns(session, segment);
+            crate::measure12a::window_schedule(origin, end, w_ns)
+                .into_iter()
+                .filter(|(_, _, h)| *h == Some(hour.unsigned_abs()))
+                .count() as i64
+        })
+        .sum()
 }
 
 /// `parent_count_bin`: the half-open parent-count-bin name for `n`.

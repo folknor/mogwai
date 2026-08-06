@@ -14,6 +14,7 @@
 //! stays authoritative through phase 4 (notes/rust-rewrite-phases.md) - where
 //! this port and the Python disagree, the Python wins and the port changes.
 
+pub mod aggregate;
 pub mod error;
 pub mod kernel;
 pub mod ledger;

@@ -173,6 +173,32 @@ pub fn median_or_none(values: &[Option<f64>]) -> Option<f64> {
     Some(vals[idx])
 }
 
+/// CPython's builtin `sum()` over FLOATS, which is not a naive left fold:
+/// since 3.12 it applies the improved Kahan-Babuska (Neumaier) compensated
+/// summation and adds the compensation term at the end.
+///
+/// This is not a refinement the port chose - it is a parity requirement. A
+/// naive fold over the 10,000 bootstrap replicates lands several ulps away
+/// from the committed artifact's `se`, and through the simultaneous critical
+/// value that error reaches every interval in every family. Use this
+/// wherever the Python writes `sum(...)` over floats; a Python `+=` loop is
+/// a naive fold and must stay one.
+#[must_use]
+pub fn py_sum(values: impl IntoIterator<Item = f64>) -> f64 {
+    let mut sum = 0.0f64;
+    let mut c = 0.0f64;
+    for x in values {
+        let t = sum + x;
+        if sum.abs() >= x.abs() {
+            c += (sum - t) + x;
+        } else {
+            c += (x - t) + sum;
+        }
+        sum = t;
+    }
+    sum + c
+}
+
 // -- Type-strict canonical serialization ------------------------------------
 
 /// CPython's `repr(float)`: shortest round-trip digits, fixed notation when
@@ -546,6 +572,20 @@ mod tests {
             assert_eq!(via_json.to_bits(), via_std.to_bits(), "{s}");
             assert_eq!(py_float_repr(via_json), s, "{s}");
         }
+    }
+
+    #[test]
+    fn py_sum_is_compensated_and_a_naive_fold_is_not() {
+        // The textbook exhibit: a naive left fold loses the two ones
+        // entirely, CPython's `sum` does not. Verified against
+        // `sum([1.0, 1e100, 1.0, -1e100])` on the reference interpreter.
+        let values = [1.0, 1e100, 1.0, -1e100];
+        assert_eq!(py_sum(values), 2.0);
+        assert_eq!(values.iter().sum::<f64>(), 0.0);
+        // Exact arithmetic is untouched, and the empty sum is zero.
+        assert_eq!(py_sum([0.5, 0.25, 0.125]), 0.875);
+        assert_eq!(py_sum([]), 0.0);
+        assert_eq!(py_sum([1.5]), 1.5);
     }
 
     #[test]

@@ -119,6 +119,51 @@ subphase's own Rust tests.
   substitution, forensic subchecks, the ladder, the union-zero
   histogram centralization. Gate: reproduce the committed artifact's
   bootstrap and ladder sections from 2a's records.
+
+  LANDED 2026-08-06. `mogwai_lab::aggregate` carries it in seven
+  modules: `monthly` (the block pooling, the permutation combination
+  and the union-zero central blocks), `bootstrap` (the fixed-seed
+  circular block draw, the ISO-week folds, the weighted median and
+  `QuantileSupport`), `context` (`ObsContext` and its vote caches,
+  including the two STRICT no-K-of-N accessors), `family` (the stat
+  closures, the Q1 helpers, the 6.4 inventories and the Amendment-D
+  envelope), `countsub` (the 5.2 substitution and the 5.3 gap
+  closures), `ladder` (the six rungs, the closures, the forensic
+  subchecks) and `assemble` (the 2b-owned artifact sections, shaped
+  so 2c pastes rather than re-derives). `expected_scheduled_windows`
+  and the label-derived segment bounds joined `session.rs`.
+
+  The gate is `crates/mogwai-cli/tests/parity12a_aggregate.rs`,
+  ignored and named `parity12a_aggregate_*`: from the cached observed
+  per-session records, the eight walk records and
+  `bootstrap_multiplicities(22)` it reproduces `observed.monthly`,
+  `observed.permutations_monthly`, the whole `bootstrap` section, the
+  whole `ladder` section, every seed's `blocks` and
+  `count_substitution`, `generated.central` and
+  `diagnostics.worsening_23` typed-canon-identically. It passes in
+  2.2 s against the Python's roughly 10 s, and asserts the artifact's
+  dark corners by name - the incomplete arrival family with its five
+  force-refused conditional metrics, the null `worsening_23` from an
+  unfired reversion rung, the no-family-eligible verdict.
+
+  One finding, and it is the kind this program exists to catch:
+  **CPython's builtin `sum()` over floats is not a naive left fold.**
+  Since 3.12 it applies improved Kahan-Babuska - Neumaier -
+  compensated summation. A plain fold reproduced every point estimate
+  but landed the bootstrap `se` several ulps off, and through the
+  simultaneous critical value that error reached every interval in
+  every family. `mogwai_lab::kernel::py_sum` is that compensated
+  summation, used wherever the Python writes `sum(...)` over floats:
+  `stdev_ddof1` and the count-substitution weight sums. A Python `+=`
+  loop is a naive fold and must stay one, so the two spellings are
+  now semantically different in the port exactly as they are in
+  CPython.
+
+  A second, quieter hazard the port had to pin: several float
+  accumulations walk a `dict` in INSERTION order, so
+  `aggregate::monthly::PooledHist` is an insertion-ordered map rather
+  than a `BTreeMap`. Sorting those walks moves the last ulp of
+  `counterfactual_exceed_968`.
 - **2c, assembly and the CLI**: artifact assembly, the schema and
   semantic validators, the resource-sampled cost contract, `mogwai
   measure`. GATE, the program's centerpiece: reproduce
