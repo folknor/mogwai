@@ -4,10 +4,10 @@
    "glbx-mdp3-20260630.tbbo.csv.zst": "18c218aa2dc4df44678222912d4811d5aeee4fd29df40577c0e432fc8a02dc01",
    "glbx-mdp3-20260701-20260731.tbbo.csv.zst": "b5ede9b3c0a544367196cad91c60bd35ec01a11f8e536a6a04525aa34fc0d6fd"
   },
-  "harness_tree_commit": "015e281381d40348bf23a9d241b344b8cf64c36f",
+  "harness_tree_commit": "ac6b016578c2cf81f43318b3c9cb5324a6c2ea3e",
   "job_id": "GLBX-20260805-HAPEWPABKG",
-  "preflight_artifact_hash": "d0980e4c09d252eede4114299e7686e830e366bbae9a33c5592f10fd818ed10e",
-  "subcontract_hash": "0bd7085babc87b77e5bfad9437911a41e75299cad4c50506d03aff50dee9e48a"
+  "preflight_artifact_hash": "adf6b8e77e001d2b7fb54ae0af4136fcad9598eda47953ee8a6de3fbaf063f95",
+  "subcontract_hash": "35e5b033133f12205cf26938db10d16b7bbd9f7f686cc82b91e265ffea1e1924"
  },
  "diagnostics": {
   "count_vs_volume": {
@@ -207,13 +207,18 @@
   "vol_scalar": 1.3570223097752063e-05
  },
  "landing_rule": {
-  "arrays_land": false,
+  "arrays_land": true,
   "cadence_ok": true,
   "envelope_ok": false,
   "pooled_rms_ok": true,
-  "session_ok": false
+  "session_ok": true,
+  "walltime_hourly_ok": false,
+  "walltime_pooled_ok": true
  },
- "landing_set": [],
+ "landing_set": [
+  "intensity_hour",
+  "vol_hour"
+ ],
  "observed": {
   "ask_size_histogram": {
    "1": 8196734,
@@ -157650,8 +157655,7 @@
      0.3879851752021565
     ]
    },
-   "reason": "a session family failed; the atomic group does not land",
-   "status": "declared-misrepresented",
+   "status": "fitted",
    "tolerance": {
     "session_arrival_hour": [
      "relative",
@@ -157755,8 +157759,7 @@
      0.931623
     ]
    },
-   "reason": "a session family failed; the atomic group does not land",
-   "status": "declared-misrepresented",
+   "status": "fitted",
    "tolerance": {
     "session_vol_hour": [
      "band",
@@ -157877,8 +157880,8 @@
     "minute_range_p99": 250,
     "minute_range_p99.9": 399
    },
-   "reason": "a session family failed; the atomic group does not land",
-   "status": "declared-misrepresented",
+   "reason": "the minute-range envelope failed; the best candidate is carried under declared provenance as protocol 12's motivating evidence",
+   "status": "declared-best-candidate",
    "tolerance": {
     "children_mean": [
      "relative",
