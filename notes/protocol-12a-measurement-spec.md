@@ -23,7 +23,19 @@ found four residual violations in the implementation (cross-language
 log-mid arithmetic, trade-driven initiation closure, a stale
 arch_share_next under a superseding largest innovation, duplicate
 shared-control refusals); session 019fd7c4-ae4e-7c52-9ba4-b80497657832
-signed the repaired Brick G with no residual violations. The
+signed the repaired Brick G with no residual violations. The Brick M
+driver went through four rounds on 2026-08-06: session
+019fd7e1-a006-70a3-b64c-4f420a718117 ruled on the design (keep all 23
+complete generated sessions; live observed rerun cross-checked against
+the cache; cost-attestation replays of all eight walks under the
+external sampler instead of the cached VmHWM figures; semantic gates
+beyond the schema validator); sessions
+019fd7ed-7810-7740-a1f6-02555306797e,
+019fd805-22b1-7e53-a61c-2dad889ff4b6 and
+019fd812-d81e-7711-9e47-f5a1a8f1c39d drove the read-only Brick G cache
+lookup, sampler-death refusal, type-strict typed-canonical
+comparisons, boolean-proof cost gates and mixed-type usable-list
+refusals to a clean signature. The
 Brick O implementation surfaced eight contract violations; per the
 freeze protocol the brick failed, the amendments were argued to
 consensus, and this revision writes them in. Revision 1 was refused

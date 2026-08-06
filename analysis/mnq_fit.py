@@ -3154,6 +3154,13 @@ def nearest_rank_p(sorted_vals: list, q: float):
 def measure12a_observe(rows_iter, usable: list[str]) -> list[dict]:
     """The observed half of the 12a artifact: one chronological pass,
     one session retained at a time."""
+    if not all(isinstance(d, str) for d in usable):
+        # A mixed-type usable list would raise a raw TypeError from the
+        # final sorted() comparison; refuse it by name up front.
+        raise Refusal(
+            f"the usable session list carries non-string entries: "
+            f"{usable!r}"
+        )
     usable_set = set(usable)
     records: list[dict] = []
     state: _M12aSession | None = None
@@ -7156,25 +7163,434 @@ def measure12a_schema_errors(artifact: dict) -> list[str]:
     return errs
 
 
-def mode_measure12a() -> None:
-    observed = run_measure12a_observed()
-    write_json_atomic(MEASURE12A_OBSERVED_CACHE, observed)
-    print(f"observed half -> {MEASURE12A_OBSERVED_CACHE}")
-    # The eight FINAL walks into the measure12a cache (spec Brick G).
-    # The cache keys on the harness commit, so a dirty tree refuses.
-    require_clean_tree()
-    for seed in range(1, 9):
-        record = run_measure12a_subprocess(seed)
-        print(
-            f"seed {seed} walk cached: "
-            f"{len(record['per_session'])} complete sessions, "
-            f"{len(record['forensic']['records'])} forensic records"
+def _fresh_tree_state() -> tuple[str, bool]:
+    """(HEAD, clean) read FRESH from git - never the cached
+    git_commit() - so a HEAD move or a new dirty file DURING the run is
+    caught at the final gate before the artifact writes."""
+    status = subprocess.run(["git", "status", "--porcelain"],
+                            capture_output=True, text=True, cwd=ROOT)
+    head = subprocess.run(["git", "rev-parse", "HEAD"],
+                          capture_output=True, text=True, cwd=ROOT)
+    clean = (status.returncode == 0 and status.stdout.strip() == ""
+             and head.returncode == 0)
+    return head.stdout.strip(), clean
+
+
+class _ResourceSampler:
+    """1 s background sampling of this process tree's RSS (the walk
+    subprocesses are children, so the tree covers them) and the
+    measure12a on-disk scratch footprint including replay temporaries;
+    peaks retained. Runs across the WHOLE mode including artifact
+    serialization (the json_safe copy is a late memory peak)."""
+
+    def __init__(self):
+        self.peak_rss = 0
+        self.peak_scratch = 0
+        self.failure: str | None = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+        return self
+
+    @staticmethod
+    def _scratch_bytes() -> int:
+        # Replay temporaries appear and vanish between listdir and
+        # getsize: that race is tolerated per file, never fatal.
+        total = 0
+        paths = [MEASURE12A_OBSERVED_CACHE]
+        if os.path.isdir(MEASURE12A_CACHE_DIR):
+            paths.extend(
+                os.path.join(MEASURE12A_CACHE_DIR, name)
+                for name in os.listdir(MEASURE12A_CACHE_DIR)
+            )
+        for path in paths:
+            try:
+                total += os.path.getsize(path)
+            except OSError:
+                continue
+        return total
+
+    def sample(self) -> None:
+        self.peak_rss = max(self.peak_rss, _tree_rss_bytes(os.getpid()))
+        self.peak_scratch = max(self.peak_scratch,
+                                self._scratch_bytes())
+
+    def _run(self) -> None:
+        try:
+            while not self._stop.is_set():
+                self.sample()
+                self._stop.wait(1.0)
+        except Exception as exc:  # noqa: BLE001 - any death voids the run
+            self.failure = repr(exc)
+
+    def stop(self) -> None:
+        """A dead sampler VOIDS the cost attestation: the run refuses
+        rather than reporting a peak measured over a partial window."""
+        self._stop.set()
+        self._thread.join()
+        if self.failure is not None:
+            raise Refusal(f"the resource sampler died: {self.failure}")
+        self.sample()
+
+
+def load_brick_g_walks() -> dict[int, dict]:
+    """READ-ONLY index of the Brick G walk cache, grouped by seed. The
+    cache keys embed the commit that produced them, so a later commit
+    cannot re-derive the file names; the attestation instead loads
+    every committed record and requires the eight seeds EXACTLY once
+    each. An absent or ambiguous cache refuses - Brick M never fills
+    the reference cache itself (that would compare a replay against a
+    same-run twin instead of the Brick G record)."""
+    if not os.path.isdir(MEASURE12A_CACHE_DIR):
+        raise Refusal(
+            "no Brick G walk cache exists; the Brick G walks must land "
+            "before Brick M runs"
         )
-    raise Refusal(
-        "the eight generated walks are cached; aggregation, the "
-        "bootstrap, the ladder and the committed artifact land with "
-        "Brick M"
+    by_seed: dict[int, dict] = {}
+    for name in sorted(os.listdir(MEASURE12A_CACHE_DIR)):
+        if not name.endswith(".json") or ".tmp" in name:
+            continue
+        with open(os.path.join(MEASURE12A_CACHE_DIR, name)) as fh:
+            record = json.load(fh)
+        if not isinstance(record, dict):
+            raise Refusal(f"Brick G cache record {name} is not an object")
+        seed = record.get("seed")
+        if not _strict_int(seed):
+            raise Refusal(
+                f"Brick G cache record {name} carries a non-integer "
+                f"seed {seed!r}"
+            )
+        if seed in by_seed:
+            raise Refusal(
+                f"ambiguous Brick G cache: seed {seed} appears in more "
+                f"than one record"
+            )
+        by_seed[seed] = record
+    if sorted(by_seed) != list(range(1, 9)):
+        raise Refusal(
+            f"the Brick G cache carries seeds {sorted(by_seed)}, "
+            f"not 1..8"
+        )
+    return by_seed
+
+
+def replay_measure12a_walk(seed: int, attested: dict) -> dict:
+    """The Brick M cost-attestation replay: one FRESH walk under the
+    external sampler, content-compared (cost fields excluded - they are
+    live measurements) against the read-only Brick G record `attested`;
+    ANY divergence refuses. The replayed record is the authoritative
+    artifact input - no selection among outputs."""
+    out_path = os.path.join(MEASURE12A_CACHE_DIR,
+                            f"replay-{seed}.tmp.json")
+    if os.path.exists(out_path):
+        os.remove(out_path)
+    cmd = gen_command_prefix() + [
+        "gen", "--symbol", "MNQ", "--type", "measure12a",
+        "--seed", str(seed), "--start", str(FINAL_START_NS),
+        "--length", FINAL_LENGTH, "--warmup", SUMMARY_WARMUP,
+        "--out", out_path,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
+    if proc.returncode != 0:
+        raise Refusal(
+            f"measure12a replay failed ({' '.join(cmd)}):\n"
+            f"{proc.stderr[-2000:]}"
+        )
+    with open(out_path) as fh:
+        replay = json.load(fh)
+    os.remove(out_path)
+    replayed = {k: v for k, v in replay.items() if k != "cost"}
+    reference = {k: v for k, v in attested.items() if k != "cost"}
+    if _typed_canon(replayed) != _typed_canon(reference):
+        raise Refusal(
+            f"seed {seed} replay diverges from the cached Brick G walk"
+        )
+    return replay
+
+
+def _typed_canon(x) -> str:
+    """TYPE-STRICT canonical serialization for equality gates: Python
+    equality treats 1 == True == 1.0, so a JSON mutation from 1 to true
+    would escape a plain != - every leaf carries an explicit type tag
+    and floats compare by repr."""
+    def tag(node):
+        if isinstance(node, bool):
+            return ["b", node]
+        if isinstance(node, int):
+            return ["i", node]
+        if isinstance(node, float):
+            return ["f", repr(node)]
+        if isinstance(node, str):
+            return ["s", node]
+        if node is None:
+            return ["n"]
+        if isinstance(node, list):
+            return ["l", [tag(v) for v in node]]
+        if isinstance(node, dict):
+            return ["d", sorted((str(k), tag(v))
+                                for k, v in node.items())]
+        return ["x", repr(node)]
+    return json.dumps(tag(x))
+
+
+def _strict_int(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _strict_number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _nonfinite_paths(node, path: str = "artifact") -> list[str]:
+    out: list[str] = []
+    if isinstance(node, dict):
+        for k, v in node.items():
+            out.extend(_nonfinite_paths(v, f"{path}.{k}"))
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            out.extend(_nonfinite_paths(v, f"{path}[{i}]"))
+    elif isinstance(node, float) and not math.isfinite(node):
+        out.append(path)
+    return out
+
+
+MEASURE12A_BUDGETS_S = {
+    "observed_s": 2 * 3600, "generated_s": 10 * 3600,
+    "bootstrap_s": 2 * 3600, "total_s": 12 * 3600,
+}
+MEASURE12A_RSS_BUDGET = 4 << 30
+MEASURE12A_SCRATCH_BUDGET = 20 << 30
+
+
+def measure12a_semantic_errors(artifact: dict,
+                               usable: list[str]) -> list[str]:
+    """The Brick M semantic gates beyond the exact-key validator:
+    population cardinality, exact metric inventories, monthly
+    reconstruction, ladder coherence, finite numerics, and the cost
+    contract."""
+    errs: list[str] = []
+    obs = artifact["observed"]
+    dates = [r["session_date"] for r in obs["per_session"]]
+    if not all(isinstance(d, str) for d in dates):
+        errs.append("observed session dates carry non-string values")
+    elif not all(isinstance(d, str) for d in usable):
+        errs.append(f"the preflight usable list carries non-string "
+                    f"entries: {usable!r}")
+    elif dates != sorted(usable) or dates != sorted(set(dates)) \
+            or len(dates) != 22:
+        errs.append(f"observed sessions {len(dates)} do not equal the "
+                    f"preflight usable list")
+    seeds = [g["seed"] for g in artifact["generated"]["per_seed"]]
+    if not all(_strict_int(s) for s in seeds) \
+            or seeds != list(range(1, 9)):
+        errs.append(f"generated seeds {seeds!r} are not the strict "
+                    f"integers 1..8")
+
+    # Monthly blocks and permutations_monthly must reconstruct exactly
+    # from the per-session records - type-strictly (1 vs true vs 1.0
+    # are distinct).
+    def canon(x):
+        return _typed_canon(json_safe(x))
+
+    pooled = pool_block1_hists(
+        [r["block1_hist"] for r in obs["per_session"]]
     )
+    rebuilt = {
+        "block1": block1_blocks(pooled),
+        "block2": pool_block2([r["block2"] for r in obs["per_session"]]),
+        "block3": aggregate_block3(
+            [r["block3"] for r in obs["per_session"]]
+        ),
+        "block4": aggregate_block4(
+            [r["block4"] for r in obs["per_session"]]
+        ),
+    }
+    if canon(rebuilt) != canon(obs["monthly"]):
+        errs.append("observed monthly does not reconstruct from "
+                    "per_session")
+    if canon(aggregate_permutations(
+        [r["permutations"] for r in obs["per_session"]]
+    )) != canon(obs["permutations_monthly"]):
+        errs.append("permutations_monthly does not reconstruct from "
+                    "per_session")
+
+    # Exact family metric inventories, names and order.
+    cond = artifact["generated"]["per_seed"][0]["count_substitution"][
+        "conditional_adequacy"]
+    expected = {
+        "child_walk": [f"print_excess_h{h}" for h in FAIL_HOURS_300] + [
+            f"quote_robust_{w}_h{h}"
+            for h in FAIL_HOURS_300 for w in (60, 300)
+        ],
+        "arrival": [f"fano_60_h{h}" for h in FAIL_HOURS_300]
+        + [f"count_p99_60_h{h}" for h in FAIL_HOURS_300]
+        + [f"cond_sqrtn_p99_h{r['hour']}_{r['bin_name']}"
+           for r in cond if r["required"]],
+        "innovation": [f"tail_ratio_h{h}" for h in FAIL_HOURS_300]
+        + ["tail_ratio_all"],
+        "reversion": ["robust_300_h19", "robust_300_h20",
+                      "robust_60_h20", "covnorm_h19", "covnorm_h20"],
+        "garch": ["robust_300_h19", "robust_300_h20", "robust_60_h20"],
+        "boundary": [
+            f"{stem}_{case}{suffix}"
+            for case in ("pre_halt_close", "post_halt_reopen")
+            for suffix in ("", "_comparator")
+            for stem in ("quote_p99", "robust_60")
+        ],
+    }
+    for fam, names in expected.items():
+        got = [m["name"] for m in
+               artifact["bootstrap"]["per_family"][fam]["metrics"]]
+        if got != names:
+            errs.append(f"family {fam} inventory {got} is not the "
+                        f"frozen {names}")
+
+    # Ladder coherence.
+    ladder = artifact["ladder"]
+    fired = [r["name"] for r in ladder["rungs"] if r["fired"]]
+    if ladder["eligible"] != fired:
+        errs.append("eligible does not equal the fired rungs in order")
+    selected = fired[0] if fired else None
+    if ladder["selected"] != selected:
+        errs.append("selected is not the first eligible or null")
+    verdict = "family-eligible" if fired else "no-family-eligible"
+    if ladder["verdict"] != verdict:
+        errs.append("verdict disagrees with the fired rungs")
+
+    # Finite numerics: a non-finite float would serialize as a string
+    # AFTER validation, so it must refuse here.
+    errs.extend(f"non-finite value at {p}"
+                for p in _nonfinite_paths(artifact)[:8])
+
+    # The cost contract: finite, nonnegative, arithmetically
+    # consistent (EXACT phase sum), within every budget.
+    cost = artifact["cost"]
+    for key, bound in MEASURE12A_BUDGETS_S.items():
+        v = cost[key]
+        if not (_strict_number(v) and math.isfinite(v) and v >= 0):
+            errs.append(f"cost.{key} is not a nonnegative finite number")
+        elif v > bound:
+            errs.append(f"cost.{key} {v:.1f}s breaches the {bound}s "
+                        f"budget")
+    if not all(_strict_number(cost[k]) for k in MEASURE12A_BUDGETS_S) \
+            or cost["total_s"] != (cost["observed_s"]
+                                   + cost["generated_s"]
+                                   + cost["bootstrap_s"]):
+        errs.append("cost.total_s is not the exact sum of its phases")
+    for key, bound in (("peak_rss_bytes", MEASURE12A_RSS_BUDGET),
+                       ("scratch_bytes", MEASURE12A_SCRATCH_BUDGET)):
+        v = cost[key]
+        if not (_strict_int(v) and v >= 0):
+            errs.append(f"cost.{key} is not a nonnegative strict "
+                        f"integer")
+        elif v > bound:
+            errs.append(f"cost.{key} {v} breaches the {bound} budget")
+    return errs
+
+
+def mode_measure12a() -> None:
+    harness_commit = require_clean_tree()
+    # The Brick G references load READ-ONLY before anything runs: an
+    # absent or ambiguous walk cache refuses up front.
+    brick_g = load_brick_g_walks()
+    with open(PREFLIGHT_ARTIFACT) as fh:
+        usable = json.load(fh)["usable_sessions"]
+    sampler = _ResourceSampler().start()
+    # Observed pass, LIVE (the authoritative input): the pre-existing
+    # observed cache carries no commit binding, so it serves as a
+    # MANDATORY structural cross-check - absence or divergence refuses.
+    t0 = time.monotonic()
+    observed = run_measure12a_observed()
+    observed_s = time.monotonic() - t0
+    live = json.loads(json.dumps(json_safe(observed)))
+    if not os.path.exists(MEASURE12A_OBSERVED_CACHE):
+        raise Refusal(
+            "no cached observed half to cross-check against; the "
+            "Brick G observed pass must exist"
+        )
+    with open(MEASURE12A_OBSERVED_CACHE) as fh:
+        cached_obs = json.load(fh)
+    if _typed_canon(cached_obs) != _typed_canon(live):
+        raise Refusal(
+            "the live observed pass diverges from the cached "
+            "observed half"
+        )
+    write_json_atomic(MEASURE12A_OBSERVED_CACHE, observed)
+    print(f"observed pass: {observed_s:.1f}s")
+    # The eight FINAL walks as cost-attestation replays under the
+    # sampler (Brick M ruling: cached VmHWM figures cannot stand in for
+    # the external process-tree measurement).
+    t1 = time.monotonic()
+    generated_seeds = []
+    for seed in range(1, 9):
+        record = replay_measure12a_walk(seed, brick_g[seed])
+        generated_seeds.append(record)
+        print(f"seed {seed} replay attested: "
+              f"{len(record['per_session'])} complete sessions")
+    generated_s = time.monotonic() - t1
+    # Input-side population gates.
+    for g in generated_seeds:
+        g_dates = [r["session_date"] for r in g["per_session"]]
+        if not all(isinstance(d, str) for d in g_dates):
+            raise Refusal(
+                f"seed {g['seed']} carries non-string session dates"
+            )
+        if g_dates != sorted(set(g_dates)) or len(g_dates) != 23:
+            raise Refusal(
+                f"seed {g['seed']} carries {len(g_dates)} sessions, "
+                f"not 23 sorted unique"
+            )
+    if len({tuple(r["session_date"] for r in g["per_session"])
+            for g in generated_seeds}) != 1:
+        raise Refusal("the generated seeds disagree on session dates")
+    # Assembly with a provisional MUTABLE cost record (two-phase: the
+    # bootstrap clock stops after assembly, then the fields finalize
+    # in place before validation).
+    t2 = time.monotonic()
+    mults = bootstrap_multiplicities(len(usable))
+    cost = {"observed_s": observed_s, "generated_s": generated_s,
+            "bootstrap_s": 0.0, "total_s": 0.0,
+            "peak_rss_bytes": 0, "scratch_bytes": 0}
+    artifact = assemble_measure12a_artifact(
+        observed, generated_seeds,
+        {"harness_tree_commit": harness_commit,
+         "generated": {"seeds": list(range(1, 9)),
+                       "window_start_ns": FINAL_START_NS,
+                       "window_length_ns": FINAL_END_NS
+                       - FINAL_START_NS,
+                       "warmup": SUMMARY_WARMUP}},
+        mults, cost,
+    )
+    # A throwaway serialization pass realizes the late json_safe memory
+    # peak while the sampler still runs and BEFORE the cost freezes.
+    json.dumps(json_safe(artifact))
+    cost["bootstrap_s"] = time.monotonic() - t2
+    cost["total_s"] = (cost["observed_s"] + cost["generated_s"]
+                       + cost["bootstrap_s"])
+    sampler.stop()
+    cost["peak_rss_bytes"] = sampler.peak_rss
+    cost["scratch_bytes"] = sampler.peak_scratch
+    errs = measure12a_schema_errors(artifact)
+    errs.extend(measure12a_semantic_errors(artifact, usable))
+    if errs:
+        raise Refusal(
+            "the measure12a artifact violates the contract: "
+            + "; ".join(errs[:10])
+        )
+    head, clean = _fresh_tree_state()
+    if not clean or head != harness_commit:
+        raise Refusal(
+            "the tree changed during the measure12a run; the artifact "
+            "is unbound"
+        )
+    write_json_atomic(MEASURE12A_ARTIFACT, artifact)
+    print(f"artifact -> {MEASURE12A_ARTIFACT}")
+    print(f"cost: {json.dumps(cost)}")
+    print(f"eligible: {artifact['ladder']['eligible']}")
+    print(f"selected: {artifact['ladder']['selected']}")
+    print(f"verdict: {artifact['ladder']['verdict']}")
 
 
 # ---------------------------------------------------------------------------
@@ -8957,6 +9373,20 @@ def run_selftest() -> None:
               "block1"]
           and artifact_fx["generated"]["central"]["blocks"]["block3"][
               "cells"]["19"]["300"]["robust_scale"] is not None)
+    check("the semantic gates pass the fixture artifact",
+          measure12a_semantic_errors(artifact_fx, list(m12a_dates))
+          == [])
+    check("a mixed-type usable list refuses by name on both paths",
+          refuses(
+              lambda: measure12a_observe(iter([]), ["2026-07-01", 1]),
+              "non-string",
+          )
+          and any(
+              "non-string" in e
+              for e in measure12a_semantic_errors(
+                  artifact_fx, ["2026-07-01", 1]
+              )
+          ))
 
     print(f"{checks} check(s), 0 failed")
     print("selftest PASS")
