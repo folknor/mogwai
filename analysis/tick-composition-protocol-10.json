@@ -1,0 +1,5128 @@
+{
+  "tape_protocol_version": 10,
+  "pairing_id": "000000000000000018c90efbf402c2d7-0009e35d",
+  "projection": "all protocol-10 frames",
+  "parent_events_per_combination": 2000000,
+  "entries": [
+    {
+      "preset": "MNQ",
+      "seed": 1,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 2.0,
+        "max": 2.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 14110.0,
+        "max": 14346.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 64.0,
+        "max": 84.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1046452.0,
+        "max": 1046974.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 46.80199999999991,
+          "max": 48.0
+        },
+        "10.0": {
+          "p999": 322.0,
+          "max": 322.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 1,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 2.0,
+        "max": 2.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 14110.0,
+        "max": 14346.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 64.0,
+        "max": 84.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1046452.0,
+        "max": 1046974.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 46.80199999999991,
+          "max": 48.0
+        },
+        "10.0": {
+          "p999": 322.0,
+          "max": 322.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 1,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 18.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2786.0,
+        "max": 2924.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 40.0
+      },
+      "ticks_per_warmup": {
+        "p999": 566160.0,
+        "max": 566288.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 27.20299999999986,
+          "max": 29.0
+        },
+        "10.0": {
+          "p999": 129.00499999999977,
+          "max": 132.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 1,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 18.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2786.0,
+        "max": 2924.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 40.0
+      },
+      "ticks_per_warmup": {
+        "p999": 566160.0,
+        "max": 566288.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 27.20299999999986,
+          "max": 29.0
+        },
+        "10.0": {
+          "p999": 129.00499999999977,
+          "max": 132.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 1,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 18.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2786.0,
+        "max": 2924.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 40.0
+      },
+      "ticks_per_warmup": {
+        "p999": 566160.0,
+        "max": 566288.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 27.20299999999986,
+          "max": 29.0
+        },
+        "10.0": {
+          "p999": 129.00499999999977,
+          "max": 132.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 1,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 18.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1306559.647,
+        "max": 1306724.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 4669.606000000002,
+        "max": 4680.0
+      },
+      "ticks_per_warmup": {
+        "p999": 4525937.803,
+        "max": 4528764.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 4674.6089999999995,
+          "max": 4680.0
+        },
+        "10.0": {
+          "p999": 44316.233,
+          "max": 44336.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 1,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 18.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1306559.647,
+        "max": 1306724.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 4669.606000000002,
+        "max": 4680.0
+      },
+      "ticks_per_warmup": {
+        "p999": 4525937.803,
+        "max": 4528764.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 4674.6089999999995,
+          "max": 4680.0
+        },
+        "10.0": {
+          "p999": 44316.233,
+          "max": 44336.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 1,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 148.0,
+        "max": 321.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1829818.697,
+        "max": 1830309.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7624.469999999999,
+        "max": 7772.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26250895.214,
+        "max": 26271277.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7391.382999999992,
+          "max": 7501.0
+        },
+        "10.0": {
+          "p999": 65037.11599999992,
+          "max": 66065.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 1,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 148.0,
+        "max": 321.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1829818.697,
+        "max": 1830309.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7624.469999999999,
+        "max": 7772.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26250895.214,
+        "max": 26271277.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7391.382999999992,
+          "max": 7501.0
+        },
+        "10.0": {
+          "p999": 65037.11599999992,
+          "max": 66065.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 1,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 148.0,
+        "max": 321.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1829818.697,
+        "max": 1830309.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7624.469999999999,
+        "max": 7772.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26250895.214,
+        "max": 26271277.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7391.382999999992,
+          "max": 7501.0
+        },
+        "10.0": {
+          "p999": 65037.11599999992,
+          "max": 66065.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 1,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 8.0,
+        "max": 17.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 45807.36999999998,
+        "max": 46622.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 547.7899999999936,
+        "max": 998.0
+      },
+      "ticks_per_warmup": {
+        "p999": 3232076.38,
+        "max": 3232890.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 513.8269999999987,
+          "max": 530.0
+        },
+        "10.0": {
+          "p999": 1792.4559999999974,
+          "max": 1826.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 1,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 8.0,
+        "max": 17.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 45807.36999999998,
+        "max": 46622.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 547.7899999999936,
+        "max": 998.0
+      },
+      "ticks_per_warmup": {
+        "p999": 3232076.38,
+        "max": 3232890.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 513.8269999999987,
+          "max": 530.0
+        },
+        "10.0": {
+          "p999": 1792.4559999999974,
+          "max": 1826.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 1,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 138.0,
+        "max": 324.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 35209.06399999978,
+        "max": 39859.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1771.2579999999725,
+        "max": 3651.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5309236.516,
+        "max": 5313732.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 1642.4459999999979,
+          "max": 1670.0
+        },
+        "10.0": {
+          "p999": 4584.4489999999605,
+          "max": 5093.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 1,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 138.0,
+        "max": 324.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 35209.06399999978,
+        "max": 39859.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1771.2579999999725,
+        "max": 3651.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5309236.516,
+        "max": 5313732.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 1642.4459999999979,
+          "max": 1670.0
+        },
+        "10.0": {
+          "p999": 4584.4489999999605,
+          "max": 5093.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 1,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 138.0,
+        "max": 324.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 35209.06399999978,
+        "max": 39859.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1771.2579999999725,
+        "max": 3651.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5309236.516,
+        "max": 5313732.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 1642.4459999999979,
+          "max": 1670.0
+        },
+        "10.0": {
+          "p999": 4584.4489999999605,
+          "max": 5093.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 1,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 215533120.018,
+        "max": 215560927.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 855588.885,
+        "max": 858351.0
+      },
+      "ticks_per_warmup": {
+        "p999": 215533120.018,
+        "max": 215560927.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 858083.846,
+          "max": 858351.0
+        },
+        "10.0": {
+          "p999": 8245268.501999999,
+          "max": 8257669.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 1,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 215533120.018,
+        "max": 215560927.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 855588.885,
+        "max": 858351.0
+      },
+      "ticks_per_warmup": {
+        "p999": 215533120.018,
+        "max": 215560927.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 858083.846,
+          "max": 858351.0
+        },
+        "10.0": {
+          "p999": 8245268.501999999,
+          "max": 8257669.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 1,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258234969.076,
+        "max": 258286522.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 932106.316,
+        "max": 933614.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1361746814.32,
+        "max": 1362439614.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 930599.2519999999,
+          "max": 932068.0
+        },
+        "10.0": {
+          "p999": 8810479.157,
+          "max": 8820277.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 1,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258234969.076,
+        "max": 258286522.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 932106.316,
+        "max": 933614.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1361746814.32,
+        "max": 1362439614.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 930599.2519999999,
+          "max": 932068.0
+        },
+        "10.0": {
+          "p999": 8810479.157,
+          "max": 8820277.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 1,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258234969.076,
+        "max": 258286522.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 932106.316,
+        "max": 933614.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1361746814.32,
+        "max": 1362439614.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 930599.2519999999,
+          "max": 932068.0
+        },
+        "10.0": {
+          "p999": 8810479.157,
+          "max": 8820277.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 2,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 2.0,
+        "max": 2.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 14088.0,
+        "max": 14328.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 64.0,
+        "max": 88.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1046388.0,
+        "max": 1046650.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 46.0,
+          "max": 46.0
+        },
+        "10.0": {
+          "p999": 310.0,
+          "max": 310.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 2,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 2.0,
+        "max": 2.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 14088.0,
+        "max": 14328.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 64.0,
+        "max": 88.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1046388.0,
+        "max": 1046650.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 46.0,
+          "max": 46.0
+        },
+        "10.0": {
+          "p999": 310.0,
+          "max": 310.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 2,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 18.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2775.0,
+        "max": 2909.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 44.0
+      },
+      "ticks_per_warmup": {
+        "p999": 566281.0,
+        "max": 566491.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 28.400999999999954,
+          "max": 29.0
+        },
+        "10.0": {
+          "p999": 135.60399999999981,
+          "max": 138.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 2,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 18.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2775.0,
+        "max": 2909.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 44.0
+      },
+      "ticks_per_warmup": {
+        "p999": 566281.0,
+        "max": 566491.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 28.400999999999954,
+          "max": 29.0
+        },
+        "10.0": {
+          "p999": 135.60399999999981,
+          "max": 138.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 2,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 18.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2775.0,
+        "max": 2909.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 44.0
+      },
+      "ticks_per_warmup": {
+        "p999": 566281.0,
+        "max": 566491.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 28.400999999999954,
+          "max": 29.0
+        },
+        "10.0": {
+          "p999": 135.60399999999981,
+          "max": 138.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 2,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 20.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1303598.957,
+        "max": 1303630.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 4659.0,
+        "max": 4737.0
+      },
+      "ticks_per_warmup": {
+        "p999": 4522767.788000001,
+        "max": 4524259.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 4659.0,
+          "max": 4659.0
+        },
+        "10.0": {
+          "p999": 44341.629,
+          "max": 44359.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 2,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 20.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1303598.957,
+        "max": 1303630.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 4659.0,
+        "max": 4737.0
+      },
+      "ticks_per_warmup": {
+        "p999": 4522767.788000001,
+        "max": 4524259.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 4659.0,
+          "max": 4659.0
+        },
+        "10.0": {
+          "p999": 44341.629,
+          "max": 44359.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 2,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 149.0,
+        "max": 376.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1838925.45,
+        "max": 1839372.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7797.700000000006,
+        "max": 8195.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26287719.45,
+        "max": 26310092.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7791.520999999994,
+          "max": 7864.0
+        },
+        "10.0": {
+          "p999": 65233.75099999994,
+          "max": 66043.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 2,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 149.0,
+        "max": 376.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1838925.45,
+        "max": 1839372.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7797.700000000006,
+        "max": 8195.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26287719.45,
+        "max": 26310092.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7791.520999999994,
+          "max": 7864.0
+        },
+        "10.0": {
+          "p999": 65233.75099999994,
+          "max": 66043.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 2,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 149.0,
+        "max": 376.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1838925.45,
+        "max": 1839372.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7797.700000000006,
+        "max": 8195.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26287719.45,
+        "max": 26310092.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7791.520999999994,
+          "max": 7864.0
+        },
+        "10.0": {
+          "p999": 65233.75099999994,
+          "max": 66043.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 2,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 8.0,
+        "max": 17.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 45226.698000000004,
+        "max": 46388.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 534.0,
+        "max": 848.0
+      },
+      "ticks_per_warmup": {
+        "p999": 3216731.886,
+        "max": 3217806.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 591.8169999999992,
+          "max": 602.0
+        },
+        "10.0": {
+          "p999": 1651.0799999999963,
+          "max": 1699.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 2,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 8.0,
+        "max": 17.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 45226.698000000004,
+        "max": 46388.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 534.0,
+        "max": 848.0
+      },
+      "ticks_per_warmup": {
+        "p999": 3216731.886,
+        "max": 3217806.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 591.8169999999992,
+          "max": 602.0
+        },
+        "10.0": {
+          "p999": 1651.0799999999963,
+          "max": 1699.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 2,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 138.0,
+        "max": 318.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 34306.716000000015,
+        "max": 38715.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1752.0,
+        "max": 3205.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5410652.0,
+        "max": 5413069.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 1730.7089999999948,
+          "max": 1796.0
+        },
+        "10.0": {
+          "p999": 3551.3179999999948,
+          "max": 3622.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 2,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 138.0,
+        "max": 318.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 34306.716000000015,
+        "max": 38715.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1752.0,
+        "max": 3205.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5410652.0,
+        "max": 5413069.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 1730.7089999999948,
+          "max": 1796.0
+        },
+        "10.0": {
+          "p999": 3551.3179999999948,
+          "max": 3622.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 2,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 138.0,
+        "max": 318.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 34306.716000000015,
+        "max": 38715.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1752.0,
+        "max": 3205.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5410652.0,
+        "max": 5413069.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 1730.7089999999948,
+          "max": 1796.0
+        },
+        "10.0": {
+          "p999": 3551.3179999999948,
+          "max": 3622.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 2,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 215080690.19,
+        "max": 215224938.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 854319.9799999999,
+        "max": 855908.0
+      },
+      "ticks_per_warmup": {
+        "p999": 215080690.19,
+        "max": 215224938.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 861410.1209999993,
+          "max": 869629.0
+        },
+        "10.0": {
+          "p999": 8251312.4679999985,
+          "max": 8274834.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 2,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 215080690.19,
+        "max": 215224938.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 854319.9799999999,
+        "max": 855908.0
+      },
+      "ticks_per_warmup": {
+        "p999": 215080690.19,
+        "max": 215224938.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 861410.1209999993,
+          "max": 869629.0
+        },
+        "10.0": {
+          "p999": 8251312.4679999985,
+          "max": 8274834.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 2,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258304645.44,
+        "max": 258311123.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 935805.9280000002,
+        "max": 938971.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1361490086.124,
+        "max": 1362350758.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 931101.9369999993,
+          "max": 938971.0
+        },
+        "10.0": {
+          "p999": 8830723.447999999,
+          "max": 8848842.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 2,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258304645.44,
+        "max": 258311123.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 935805.9280000002,
+        "max": 938971.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1361490086.124,
+        "max": 1362350758.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 931101.9369999993,
+          "max": 938971.0
+        },
+        "10.0": {
+          "p999": 8830723.447999999,
+          "max": 8848842.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 2,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258304645.44,
+        "max": 258311123.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 935805.9280000002,
+        "max": 938971.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1361490086.124,
+        "max": 1362350758.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 931101.9369999993,
+          "max": 938971.0
+        },
+        "10.0": {
+          "p999": 8830723.447999999,
+          "max": 8848842.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 3,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 2.0,
+        "max": 2.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 14052.0,
+        "max": 14252.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 64.0,
+        "max": 88.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1045954.0,
+        "max": 1046296.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 47.603999999999814,
+          "max": 50.0
+        },
+        "10.0": {
+          "p999": 314.8019999999999,
+          "max": 316.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 3,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 2.0,
+        "max": 2.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 14052.0,
+        "max": 14252.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 64.0,
+        "max": 88.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1045954.0,
+        "max": 1046296.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 47.603999999999814,
+          "max": 50.0
+        },
+        "10.0": {
+          "p999": 314.8019999999999,
+          "max": 316.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 3,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 18.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2765.0,
+        "max": 2871.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 43.0
+      },
+      "ticks_per_warmup": {
+        "p999": 568173.0,
+        "max": 568338.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 28.20299999999986,
+          "max": 30.0
+        },
+        "10.0": {
+          "p999": 131.40099999999995,
+          "max": 132.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 3,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 18.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2765.0,
+        "max": 2871.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 43.0
+      },
+      "ticks_per_warmup": {
+        "p999": 568173.0,
+        "max": 568338.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 28.20299999999986,
+          "max": 30.0
+        },
+        "10.0": {
+          "p999": 131.40099999999995,
+          "max": 132.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 3,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 18.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2765.0,
+        "max": 2871.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 43.0
+      },
+      "ticks_per_warmup": {
+        "p999": 568173.0,
+        "max": 568338.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 28.20299999999986,
+          "max": 30.0
+        },
+        "10.0": {
+          "p999": 131.40099999999995,
+          "max": 132.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 3,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 19.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1305602.488,
+        "max": 1305638.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 4685.0340000000015,
+        "max": 4733.0
+      },
+      "ticks_per_warmup": {
+        "p999": 4526008.050000001,
+        "max": 4526646.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 4704.846999999998,
+          "max": 4733.0
+        },
+        "10.0": {
+          "p999": 44374.079999999994,
+          "max": 44422.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 3,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 19.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1305602.488,
+        "max": 1305638.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 4685.0340000000015,
+        "max": 4733.0
+      },
+      "ticks_per_warmup": {
+        "p999": 4526008.050000001,
+        "max": 4526646.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 4704.846999999998,
+          "max": 4733.0
+        },
+        "10.0": {
+          "p999": 44374.079999999994,
+          "max": 44422.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 3,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 148.00099999993108,
+        "max": 341.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1841782.899,
+        "max": 1842351.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7663.612999999998,
+        "max": 7739.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26322805.125,
+        "max": 26342963.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7709.049999999997,
+          "max": 7739.0
+        },
+        "10.0": {
+          "p999": 65499.08399999998,
+          "max": 65789.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 3,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 148.00099999993108,
+        "max": 341.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1841782.899,
+        "max": 1842351.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7663.612999999998,
+        "max": 7739.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26322805.125,
+        "max": 26342963.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7709.049999999997,
+          "max": 7739.0
+        },
+        "10.0": {
+          "p999": 65499.08399999998,
+          "max": 65789.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 3,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 148.00099999993108,
+        "max": 341.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1841782.899,
+        "max": 1842351.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7663.612999999998,
+        "max": 7739.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26322805.125,
+        "max": 26342963.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7709.049999999997,
+          "max": 7739.0
+        },
+        "10.0": {
+          "p999": 65499.08399999998,
+          "max": 65789.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 3,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 8.0,
+        "max": 19.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 45737.96000000002,
+        "max": 46922.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 540.0,
+        "max": 931.0
+      },
+      "ticks_per_warmup": {
+        "p999": 3213918.58,
+        "max": 3214678.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 499.85699999999736,
+          "max": 534.0
+        },
+        "10.0": {
+          "p999": 1579.0799999999963,
+          "max": 1627.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 3,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 8.0,
+        "max": 19.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 45737.96000000002,
+        "max": 46922.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 540.0,
+        "max": 931.0
+      },
+      "ticks_per_warmup": {
+        "p999": 3213918.58,
+        "max": 3214678.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 499.85699999999736,
+          "max": 534.0
+        },
+        "10.0": {
+          "p999": 1579.0799999999963,
+          "max": 1627.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 3,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 139.0,
+        "max": 311.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 35355.64000000007,
+        "max": 42274.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1819.0,
+        "max": 4426.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5405171.784,
+        "max": 5408502.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 2148.048999999979,
+          "max": 2417.0
+        },
+        "10.0": {
+          "p999": 4056.490999999996,
+          "max": 4111.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 3,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 139.0,
+        "max": 311.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 35355.64000000007,
+        "max": 42274.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1819.0,
+        "max": 4426.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5405171.784,
+        "max": 5408502.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 2148.048999999979,
+          "max": 2417.0
+        },
+        "10.0": {
+          "p999": 4056.490999999996,
+          "max": 4111.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 3,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 139.0,
+        "max": 311.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 35355.64000000007,
+        "max": 42274.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1819.0,
+        "max": 4426.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5405171.784,
+        "max": 5408502.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 2148.048999999979,
+          "max": 2417.0
+        },
+        "10.0": {
+          "p999": 4056.490999999996,
+          "max": 4111.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 3,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 215343892.986,
+        "max": 215513755.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 856132.088,
+        "max": 856646.0
+      },
+      "ticks_per_warmup": {
+        "p999": 215343892.986,
+        "max": 215513755.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 857532.2099999998,
+          "max": 858856.0
+        },
+        "10.0": {
+          "p999": 8250190.827,
+          "max": 8256197.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 3,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 215343892.986,
+        "max": 215513755.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 856132.088,
+        "max": 856646.0
+      },
+      "ticks_per_warmup": {
+        "p999": 215343892.986,
+        "max": 215513755.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 857532.2099999998,
+          "max": 858856.0
+        },
+        "10.0": {
+          "p999": 8250190.827,
+          "max": 8256197.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 3,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258678966.468,
+        "max": 258698998.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 931967.2350000003,
+        "max": 939574.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1364573384.7910001,
+        "max": 1365148269.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 928209.6919999999,
+          "max": 929343.0
+        },
+        "10.0": {
+          "p999": 8870436.665999997,
+          "max": 8908333.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 3,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258678966.468,
+        "max": 258698998.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 931967.2350000003,
+        "max": 939574.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1364573384.7910001,
+        "max": 1365148269.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 928209.6919999999,
+          "max": 929343.0
+        },
+        "10.0": {
+          "p999": 8870436.665999997,
+          "max": 8908333.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 3,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258678966.468,
+        "max": 258698998.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 931967.2350000003,
+        "max": 939574.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1364573384.7910001,
+        "max": 1365148269.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 928209.6919999999,
+          "max": 929343.0
+        },
+        "10.0": {
+          "p999": 8870436.665999997,
+          "max": 8908333.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 4,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 2.0,
+        "max": 2.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 14088.0,
+        "max": 14264.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 64.0,
+        "max": 82.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1046742.0,
+        "max": 1047266.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 46.80199999999991,
+          "max": 48.0
+        },
+        "10.0": {
+          "p999": 320.8019999999999,
+          "max": 322.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 4,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 2.0,
+        "max": 2.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 14088.0,
+        "max": 14264.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 64.0,
+        "max": 82.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1046742.0,
+        "max": 1047266.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 46.80199999999991,
+          "max": 48.0
+        },
+        "10.0": {
+          "p999": 320.8019999999999,
+          "max": 322.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 4,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 19.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2766.0,
+        "max": 2899.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 40.0
+      },
+      "ticks_per_warmup": {
+        "p999": 567707.0,
+        "max": 567912.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 27.400999999999954,
+          "max": 28.0
+        },
+        "10.0": {
+          "p999": 127.00499999999977,
+          "max": 130.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 4,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 19.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2766.0,
+        "max": 2899.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 40.0
+      },
+      "ticks_per_warmup": {
+        "p999": 567707.0,
+        "max": 567912.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 27.400999999999954,
+          "max": 28.0
+        },
+        "10.0": {
+          "p999": 127.00499999999977,
+          "max": 130.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 4,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 19.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2766.0,
+        "max": 2899.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 40.0
+      },
+      "ticks_per_warmup": {
+        "p999": 567707.0,
+        "max": 567912.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 27.400999999999954,
+          "max": 28.0
+        },
+        "10.0": {
+          "p999": 127.00499999999977,
+          "max": 130.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 4,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 20.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1305044.278,
+        "max": 1305059.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 4635.916,
+        "max": 4641.0
+      },
+      "ticks_per_warmup": {
+        "p999": 4523512.630000001,
+        "max": 4525608.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 4620.633999999998,
+          "max": 4641.0
+        },
+        "10.0": {
+          "p999": 44465.53299999998,
+          "max": 44665.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 4,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 20.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1305044.278,
+        "max": 1305059.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 4635.916,
+        "max": 4641.0
+      },
+      "ticks_per_warmup": {
+        "p999": 4523512.630000001,
+        "max": 4525608.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 4620.633999999998,
+          "max": 4641.0
+        },
+        "10.0": {
+          "p999": 44465.53299999998,
+          "max": 44665.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 4,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 150.0,
+        "max": 367.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1832582.5,
+        "max": 1833521.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7716.750000000005,
+        "max": 8140.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26273039.05,
+        "max": 26293319.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7490.846999999998,
+          "max": 7519.0
+        },
+        "10.0": {
+          "p999": 66456.34999999998,
+          "max": 66666.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 4,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 150.0,
+        "max": 367.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1832582.5,
+        "max": 1833521.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7716.750000000005,
+        "max": 8140.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26273039.05,
+        "max": 26293319.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7490.846999999998,
+          "max": 7519.0
+        },
+        "10.0": {
+          "p999": 66456.34999999998,
+          "max": 66666.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 4,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 150.0,
+        "max": 367.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1832582.5,
+        "max": 1833521.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7716.750000000005,
+        "max": 8140.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26273039.05,
+        "max": 26293319.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7490.846999999998,
+          "max": 7519.0
+        },
+        "10.0": {
+          "p999": 66456.34999999998,
+          "max": 66666.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 4,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 8.0,
+        "max": 16.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 45231.35200000001,
+        "max": 46289.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 549.3520000000135,
+        "max": 841.0
+      },
+      "ticks_per_warmup": {
+        "p999": 3221450.0520000006,
+        "max": 3223040.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 524.4359999999983,
+          "max": 546.0
+        },
+        "10.0": {
+          "p999": 1868.0049999999997,
+          "max": 1871.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 4,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 8.0,
+        "max": 16.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 45231.35200000001,
+        "max": 46289.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 549.3520000000135,
+        "max": 841.0
+      },
+      "ticks_per_warmup": {
+        "p999": 3221450.0520000006,
+        "max": 3223040.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 524.4359999999983,
+          "max": 546.0
+        },
+        "10.0": {
+          "p999": 1868.0049999999997,
+          "max": 1871.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 4,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 139.0,
+        "max": 305.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 35497.72100000002,
+        "max": 38921.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1793.1030000000028,
+        "max": 3585.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5367475.0,
+        "max": 5372959.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 1436.886999999996,
+          "max": 1489.0
+        },
+        "10.0": {
+          "p999": 4748.71799999993,
+          "max": 5658.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 4,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 139.0,
+        "max": 305.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 35497.72100000002,
+        "max": 38921.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1793.1030000000028,
+        "max": 3585.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5367475.0,
+        "max": 5372959.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 1436.886999999996,
+          "max": 1489.0
+        },
+        "10.0": {
+          "p999": 4748.71799999993,
+          "max": 5658.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 4,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 139.0,
+        "max": 305.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 35497.72100000002,
+        "max": 38921.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1793.1030000000028,
+        "max": 3585.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5367475.0,
+        "max": 5372959.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 1436.886999999996,
+          "max": 1489.0
+        },
+        "10.0": {
+          "p999": 4748.71799999993,
+          "max": 5658.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 4,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 214924055.34399998,
+        "max": 215129385.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 862354.5919999996,
+        "max": 868363.0
+      },
+      "ticks_per_warmup": {
+        "p999": 214924055.34399998,
+        "max": 215129385.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 859894.9369999993,
+          "max": 868363.0
+        },
+        "10.0": {
+          "p999": 8212899.664,
+          "max": 8213537.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 4,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 214924055.34399998,
+        "max": 215129385.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 862354.5919999996,
+        "max": 868363.0
+      },
+      "ticks_per_warmup": {
+        "p999": 214924055.34399998,
+        "max": 215129385.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 859894.9369999993,
+          "max": 868363.0
+        },
+        "10.0": {
+          "p999": 8212899.664,
+          "max": 8213537.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 4,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258543784.308,
+        "max": 258568199.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 935723.106,
+        "max": 940373.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1358947997.706,
+        "max": 1360273947.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 932569.2279999994,
+          "max": 940373.0
+        },
+        "10.0": {
+          "p999": 8852084.441999998,
+          "max": 8867444.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 4,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258543784.308,
+        "max": 258568199.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 935723.106,
+        "max": 940373.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1358947997.706,
+        "max": 1360273947.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 932569.2279999994,
+          "max": 940373.0
+        },
+        "10.0": {
+          "p999": 8852084.441999998,
+          "max": 8867444.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 4,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258543784.308,
+        "max": 258568199.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 935723.106,
+        "max": 940373.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1358947997.706,
+        "max": 1360273947.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 932569.2279999994,
+          "max": 940373.0
+        },
+        "10.0": {
+          "p999": 8852084.441999998,
+          "max": 8867444.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 5,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 2.0,
+        "max": 2.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 14076.0,
+        "max": 14242.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 64.0,
+        "max": 86.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1047900.0,
+        "max": 1048208.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 50.0,
+          "max": 50.0
+        },
+        "10.0": {
+          "p999": 319.6039999999998,
+          "max": 322.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 5,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 2.0,
+        "max": 2.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 14076.0,
+        "max": 14242.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 64.0,
+        "max": 86.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1047900.0,
+        "max": 1048208.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 50.0,
+          "max": 50.0
+        },
+        "10.0": {
+          "p999": 319.6039999999998,
+          "max": 322.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 5,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 19.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2754.0,
+        "max": 2868.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 48.0
+      },
+      "ticks_per_warmup": {
+        "p999": 567369.0,
+        "max": 567473.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 29.400999999999954,
+          "max": 30.0
+        },
+        "10.0": {
+          "p999": 130.20299999999986,
+          "max": 132.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 5,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 19.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2754.0,
+        "max": 2868.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 48.0
+      },
+      "ticks_per_warmup": {
+        "p999": 567369.0,
+        "max": 567473.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 29.400999999999954,
+          "max": 30.0
+        },
+        "10.0": {
+          "p999": 130.20299999999986,
+          "max": 132.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 5,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 19.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2754.0,
+        "max": 2868.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 48.0
+      },
+      "ticks_per_warmup": {
+        "p999": 567369.0,
+        "max": 567473.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 29.400999999999954,
+          "max": 30.0
+        },
+        "10.0": {
+          "p999": 130.20299999999986,
+          "max": 132.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 5,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 18.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1304445.02,
+        "max": 1304470.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 4676.647999999999,
+        "max": 4719.0
+      },
+      "ticks_per_warmup": {
+        "p999": 4526570.676,
+        "max": 4527601.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 4624.851999999997,
+          "max": 4656.0
+        },
+        "10.0": {
+          "p999": 44294.689,
+          "max": 44348.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 5,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 18.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1304445.02,
+        "max": 1304470.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 4676.647999999999,
+        "max": 4719.0
+      },
+      "ticks_per_warmup": {
+        "p999": 4526570.676,
+        "max": 4527601.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 4624.851999999997,
+          "max": 4656.0
+        },
+        "10.0": {
+          "p999": 44294.689,
+          "max": 44348.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 5,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 149.0,
+        "max": 356.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1838188.8,
+        "max": 1839576.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7624.300000000001,
+        "max": 8040.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26327998.25,
+        "max": 26350306.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7651.738999999993,
+          "max": 7735.0
+        },
+        "10.0": {
+          "p999": 65213.008999999984,
+          "max": 65458.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 5,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 149.0,
+        "max": 356.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1838188.8,
+        "max": 1839576.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7624.300000000001,
+        "max": 8040.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26327998.25,
+        "max": 26350306.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7651.738999999993,
+          "max": 7735.0
+        },
+        "10.0": {
+          "p999": 65213.008999999984,
+          "max": 65458.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 5,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 149.0,
+        "max": 356.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1838188.8,
+        "max": 1839576.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7624.300000000001,
+        "max": 8040.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26327998.25,
+        "max": 26350306.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7651.738999999993,
+          "max": 7735.0
+        },
+        "10.0": {
+          "p999": 65213.008999999984,
+          "max": 65458.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 5,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 8.0,
+        "max": 18.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 45855.141,
+        "max": 47388.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 529.0,
+        "max": 885.0
+      },
+      "ticks_per_warmup": {
+        "p999": 3186859.326,
+        "max": 3187449.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 537.5759999999918,
+          "max": 643.0
+        },
+        "10.0": {
+          "p999": 1616.490999999996,
+          "max": 1671.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 5,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 8.0,
+        "max": 18.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 45855.141,
+        "max": 47388.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 529.0,
+        "max": 885.0
+      },
+      "ticks_per_warmup": {
+        "p999": 3186859.326,
+        "max": 3187449.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 537.5759999999918,
+          "max": 643.0
+        },
+        "10.0": {
+          "p999": 1616.490999999996,
+          "max": 1671.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 5,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 139.0,
+        "max": 303.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 36334.10400000005,
+        "max": 40596.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1803.2760000000126,
+        "max": 3623.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5462700.0,
+        "max": 5466036.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 2016.4669999999692,
+          "max": 2416.0
+        },
+        "10.0": {
+          "p999": 4446.106999999985,
+          "max": 4630.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 5,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 139.0,
+        "max": 303.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 36334.10400000005,
+        "max": 40596.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1803.2760000000126,
+        "max": 3623.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5462700.0,
+        "max": 5466036.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 2016.4669999999692,
+          "max": 2416.0
+        },
+        "10.0": {
+          "p999": 4446.106999999985,
+          "max": 4630.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 5,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 139.0,
+        "max": 303.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 36334.10400000005,
+        "max": 40596.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1803.2760000000126,
+        "max": 3623.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5462700.0,
+        "max": 5466036.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 2016.4669999999692,
+          "max": 2416.0
+        },
+        "10.0": {
+          "p999": 4446.106999999985,
+          "max": 4630.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 5,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 214862417.158,
+        "max": 214874796.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 854217.904,
+        "max": 854685.0
+      },
+      "ticks_per_warmup": {
+        "p999": 214862417.158,
+        "max": 214874796.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 856721.2779999998,
+          "max": 859763.0
+        },
+        "10.0": {
+          "p999": 8191855.96,
+          "max": 8197822.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 5,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 214862417.158,
+        "max": 214874796.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 854217.904,
+        "max": 854685.0
+      },
+      "ticks_per_warmup": {
+        "p999": 214862417.158,
+        "max": 214874796.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 856721.2779999998,
+          "max": 859763.0
+        },
+        "10.0": {
+          "p999": 8191855.96,
+          "max": 8197822.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 5,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258016799.655,
+        "max": 258060335.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 936738.2149999999,
+        "max": 940673.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1358876924.35,
+        "max": 1360173530.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 936666.5209999997,
+          "max": 939734.0
+        },
+        "10.0": {
+          "p999": 8771573.782,
+          "max": 8778152.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 5,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258016799.655,
+        "max": 258060335.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 936738.2149999999,
+        "max": 940673.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1358876924.35,
+        "max": 1360173530.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 936666.5209999997,
+          "max": 939734.0
+        },
+        "10.0": {
+          "p999": 8771573.782,
+          "max": 8778152.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 5,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258016799.655,
+        "max": 258060335.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 936738.2149999999,
+        "max": 940673.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1358876924.35,
+        "max": 1360173530.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 936666.5209999997,
+          "max": 939734.0
+        },
+        "10.0": {
+          "p999": 8771573.782,
+          "max": 8778152.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 6,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 2.0,
+        "max": 2.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 14036.0,
+        "max": 14210.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 64.0,
+        "max": 92.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1046951.356,
+        "max": 1047340.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 48.0,
+          "max": 48.0
+        },
+        "10.0": {
+          "p999": 318.0,
+          "max": 318.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 6,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 2.0,
+        "max": 2.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 14036.0,
+        "max": 14210.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 64.0,
+        "max": 92.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1046951.356,
+        "max": 1047340.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 48.0,
+          "max": 48.0
+        },
+        "10.0": {
+          "p999": 318.0,
+          "max": 318.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 6,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 17.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2762.0,
+        "max": 2862.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 45.0
+      },
+      "ticks_per_warmup": {
+        "p999": 568505.0,
+        "max": 568678.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 27.40599999999972,
+          "max": 31.0
+        },
+        "10.0": {
+          "p999": 140.82199999999898,
+          "max": 154.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 6,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 17.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2762.0,
+        "max": 2862.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 45.0
+      },
+      "ticks_per_warmup": {
+        "p999": 568505.0,
+        "max": 568678.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 27.40599999999972,
+          "max": 31.0
+        },
+        "10.0": {
+          "p999": 140.82199999999898,
+          "max": 154.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 6,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 17.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2762.0,
+        "max": 2862.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 45.0
+      },
+      "ticks_per_warmup": {
+        "p999": 568505.0,
+        "max": 568678.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 27.40599999999972,
+          "max": 31.0
+        },
+        "10.0": {
+          "p999": 140.82199999999898,
+          "max": 154.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 6,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 17.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1302341.724,
+        "max": 1302356.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 4619.912,
+        "max": 4634.0
+      },
+      "ticks_per_warmup": {
+        "p999": 4523226.3719999995,
+        "max": 4525859.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 4625.614,
+          "max": 4634.0
+        },
+        "10.0": {
+          "p999": 44468.104999999996,
+          "max": 44531.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 6,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 17.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1302341.724,
+        "max": 1302356.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 4619.912,
+        "max": 4634.0
+      },
+      "ticks_per_warmup": {
+        "p999": 4523226.3719999995,
+        "max": 4525859.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 4625.614,
+          "max": 4634.0
+        },
+        "10.0": {
+          "p999": 44468.104999999996,
+          "max": 44531.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 6,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 149.0,
+        "max": 341.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1843105.708,
+        "max": 1843973.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7692.944000000003,
+        "max": 8085.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26288814.625,
+        "max": 26312083.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7912.487999999987,
+          "max": 8085.0
+        },
+        "10.0": {
+          "p999": 65195.17699999998,
+          "max": 65421.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 6,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 149.0,
+        "max": 341.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1843105.708,
+        "max": 1843973.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7692.944000000003,
+        "max": 8085.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26288814.625,
+        "max": 26312083.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7912.487999999987,
+          "max": 8085.0
+        },
+        "10.0": {
+          "p999": 65195.17699999998,
+          "max": 65421.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 6,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 149.0,
+        "max": 341.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1843105.708,
+        "max": 1843973.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7692.944000000003,
+        "max": 8085.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26288814.625,
+        "max": 26312083.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7912.487999999987,
+          "max": 8085.0
+        },
+        "10.0": {
+          "p999": 65195.17699999998,
+          "max": 65421.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 6,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 8.0,
+        "max": 17.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 45502.51900000003,
+        "max": 46327.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 538.3910000000033,
+        "max": 970.0
+      },
+      "ticks_per_warmup": {
+        "p999": 3201093.5640000002,
+        "max": 3202338.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 515.9169999999946,
+          "max": 586.0
+        },
+        "10.0": {
+          "p999": 1832.1369999999843,
+          "max": 2034.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 6,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 8.0,
+        "max": 17.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 45502.51900000003,
+        "max": 46327.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 538.3910000000033,
+        "max": 970.0
+      },
+      "ticks_per_warmup": {
+        "p999": 3201093.5640000002,
+        "max": 3202338.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 515.9169999999946,
+          "max": 586.0
+        },
+        "10.0": {
+          "p999": 1832.1369999999843,
+          "max": 2034.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 6,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 138.0,
+        "max": 324.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 34526.388000000035,
+        "max": 40460.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1783.0,
+        "max": 3709.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5379793.652,
+        "max": 5385435.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 1479.4059999999997,
+          "max": 1483.0
+        },
+        "10.0": {
+          "p999": 4591.221999999981,
+          "max": 4844.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 6,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 138.0,
+        "max": 324.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 34526.388000000035,
+        "max": 40460.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1783.0,
+        "max": 3709.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5379793.652,
+        "max": 5385435.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 1479.4059999999997,
+          "max": 1483.0
+        },
+        "10.0": {
+          "p999": 4591.221999999981,
+          "max": 4844.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 6,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 138.0,
+        "max": 324.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 34526.388000000035,
+        "max": 40460.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1783.0,
+        "max": 3709.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5379793.652,
+        "max": 5385435.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 1479.4059999999997,
+          "max": 1483.0
+        },
+        "10.0": {
+          "p999": 4591.221999999981,
+          "max": 4844.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 6,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 213682124.52,
+        "max": 213689182.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 855321.8750000001,
+        "max": 857104.0
+      },
+      "ticks_per_warmup": {
+        "p999": 213682124.52,
+        "max": 213689182.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 855898.8119999999,
+          "max": 857104.0
+        },
+        "10.0": {
+          "p999": 8223391.616,
+          "max": 8224120.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 6,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 213682124.52,
+        "max": 213689182.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 855321.8750000001,
+        "max": 857104.0
+      },
+      "ticks_per_warmup": {
+        "p999": 213682124.52,
+        "max": 213689182.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 855898.8119999999,
+          "max": 857104.0
+        },
+        "10.0": {
+          "p999": 8223391.616,
+          "max": 8224120.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 6,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258183198.116,
+        "max": 258185985.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 938928.666,
+        "max": 943609.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1360690912.69,
+        "max": 1361794570.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 938925.819,
+          "max": 939057.0
+        },
+        "10.0": {
+          "p999": 8837758.48,
+          "max": 8838046.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 6,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258183198.116,
+        "max": 258185985.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 938928.666,
+        "max": 943609.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1360690912.69,
+        "max": 1361794570.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 938925.819,
+          "max": 939057.0
+        },
+        "10.0": {
+          "p999": 8837758.48,
+          "max": 8838046.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 6,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258183198.116,
+        "max": 258185985.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 938928.666,
+        "max": 943609.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1360690912.69,
+        "max": 1361794570.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 938925.819,
+          "max": 939057.0
+        },
+        "10.0": {
+          "p999": 8837758.48,
+          "max": 8838046.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 7,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 2.0,
+        "max": 2.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 14106.0,
+        "max": 14272.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 64.0,
+        "max": 88.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1047238.0,
+        "max": 1047606.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 48.80199999999991,
+          "max": 50.0
+        },
+        "10.0": {
+          "p999": 315.6039999999998,
+          "max": 318.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 7,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 2.0,
+        "max": 2.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 14106.0,
+        "max": 14272.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 64.0,
+        "max": 88.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1047238.0,
+        "max": 1047606.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 48.80199999999991,
+          "max": 50.0
+        },
+        "10.0": {
+          "p999": 315.6039999999998,
+          "max": 318.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 7,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 21.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2765.402000000002,
+        "max": 2956.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 41.0
+      },
+      "ticks_per_warmup": {
+        "p999": 566950.0,
+        "max": 567070.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 25.801999999999907,
+          "max": 27.0
+        },
+        "10.0": {
+          "p999": 140.61399999999935,
+          "max": 149.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 7,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 21.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2765.402000000002,
+        "max": 2956.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 41.0
+      },
+      "ticks_per_warmup": {
+        "p999": 566950.0,
+        "max": 567070.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 25.801999999999907,
+          "max": 27.0
+        },
+        "10.0": {
+          "p999": 140.61399999999935,
+          "max": 149.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 7,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 21.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2765.402000000002,
+        "max": 2956.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 41.0
+      },
+      "ticks_per_warmup": {
+        "p999": 566950.0,
+        "max": 567070.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 25.801999999999907,
+          "max": 27.0
+        },
+        "10.0": {
+          "p999": 140.61399999999935,
+          "max": 149.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 7,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 18.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1304320.14,
+        "max": 1304324.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 4631.882000000003,
+        "max": 4656.0
+      },
+      "ticks_per_warmup": {
+        "p999": 4527477.131,
+        "max": 4528695.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 4626.648999999998,
+          "max": 4656.0
+        },
+        "10.0": {
+          "p999": 44288.278,
+          "max": 44335.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 7,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 18.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1304320.14,
+        "max": 1304324.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 4631.882000000003,
+        "max": 4656.0
+      },
+      "ticks_per_warmup": {
+        "p999": 4527477.131,
+        "max": 4528695.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 4626.648999999998,
+          "max": 4656.0
+        },
+        "10.0": {
+          "p999": 44288.278,
+          "max": 44335.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 7,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 150.0,
+        "max": 339.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1830855.95,
+        "max": 1831725.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7651.850000000001,
+        "max": 7800.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26268620.900000002,
+        "max": 26288459.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7659.410999999999,
+          "max": 7666.0
+        },
+        "10.0": {
+          "p999": 65496.05399999998,
+          "max": 65768.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 7,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 150.0,
+        "max": 339.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1830855.95,
+        "max": 1831725.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7651.850000000001,
+        "max": 7800.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26268620.900000002,
+        "max": 26288459.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7659.410999999999,
+          "max": 7666.0
+        },
+        "10.0": {
+          "p999": 65496.05399999998,
+          "max": 65768.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 7,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 150.0,
+        "max": 339.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1830855.95,
+        "max": 1831725.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7651.850000000001,
+        "max": 7800.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26268620.900000002,
+        "max": 26288459.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7659.410999999999,
+          "max": 7666.0
+        },
+        "10.0": {
+          "p999": 65496.05399999998,
+          "max": 65768.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 7,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 8.0,
+        "max": 19.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 46049.40199999997,
+        "max": 46726.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 546.1339999999909,
+        "max": 953.0
+      },
+      "ticks_per_warmup": {
+        "p999": 3214054.567,
+        "max": 3215055.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 634.6339999999984,
+          "max": 655.0
+        },
+        "10.0": {
+          "p999": 1725.0449999999978,
+          "max": 1752.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 7,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 8.0,
+        "max": 19.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 46049.40199999997,
+        "max": 46726.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 546.1339999999909,
+        "max": 953.0
+      },
+      "ticks_per_warmup": {
+        "p999": 3214054.567,
+        "max": 3215055.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 634.6339999999984,
+          "max": 655.0
+        },
+        "10.0": {
+          "p999": 1725.0449999999978,
+          "max": 1752.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 7,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 139.0,
+        "max": 316.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 35122.0,
+        "max": 37360.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1779.0,
+        "max": 3464.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5317183.308,
+        "max": 5321785.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 1778.490999999996,
+          "max": 1833.0
+        },
+        "10.0": {
+          "p999": 3545.4109999999996,
+          "max": 3552.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 7,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 139.0,
+        "max": 316.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 35122.0,
+        "max": 37360.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1779.0,
+        "max": 3464.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5317183.308,
+        "max": 5321785.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 1778.490999999996,
+          "max": 1833.0
+        },
+        "10.0": {
+          "p999": 3545.4109999999996,
+          "max": 3552.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 7,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 139.0,
+        "max": 316.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 35122.0,
+        "max": 37360.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1779.0,
+        "max": 3464.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5317183.308,
+        "max": 5321785.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 1778.490999999996,
+          "max": 1833.0
+        },
+        "10.0": {
+          "p999": 3545.4109999999996,
+          "max": 3552.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 7,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 216020638.821,
+        "max": 216110067.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 853898.3160000001,
+        "max": 857490.0
+      },
+      "ticks_per_warmup": {
+        "p999": 216020638.821,
+        "max": 216110067.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 855432.4349999998,
+          "max": 857490.0
+        },
+        "10.0": {
+          "p999": 8201250.357,
+          "max": 8206975.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 7,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 216020638.821,
+        "max": 216110067.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 853898.3160000001,
+        "max": 857490.0
+      },
+      "ticks_per_warmup": {
+        "p999": 216020638.821,
+        "max": 216110067.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 855432.4349999998,
+          "max": 857490.0
+        },
+        "10.0": {
+          "p999": 8201250.357,
+          "max": 8206975.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 7,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258100376.464,
+        "max": 258126627.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 932637.1680000001,
+        "max": 941532.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1361602752.556,
+        "max": 1362159692.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 927614.7849999999,
+          "max": 928085.0
+        },
+        "10.0": {
+          "p999": 8828098.788,
+          "max": 8829649.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 7,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258100376.464,
+        "max": 258126627.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 932637.1680000001,
+        "max": 941532.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1361602752.556,
+        "max": 1362159692.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 927614.7849999999,
+          "max": 928085.0
+        },
+        "10.0": {
+          "p999": 8828098.788,
+          "max": 8829649.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 7,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258100376.464,
+        "max": 258126627.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 932637.1680000001,
+        "max": 941532.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1361602752.556,
+        "max": 1362159692.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 927614.7849999999,
+          "max": 928085.0
+        },
+        "10.0": {
+          "p999": 8828098.788,
+          "max": 8829649.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 8,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 2.0,
+        "max": 2.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 14048.0,
+        "max": 14194.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 64.0,
+        "max": 88.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1046040.0,
+        "max": 1046450.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 56.0,
+          "max": 56.0
+        },
+        "10.0": {
+          "p999": 318.0,
+          "max": 318.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 8,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 2.0,
+        "max": 2.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 14048.0,
+        "max": 14194.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 64.0,
+        "max": 88.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1046040.0,
+        "max": 1046450.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 56.0,
+          "max": 56.0
+        },
+        "10.0": {
+          "p999": 318.0,
+          "max": 318.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 8,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 17.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2754.0,
+        "max": 2824.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 41.0
+      },
+      "ticks_per_warmup": {
+        "p999": 566402.0,
+        "max": 566560.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 28.801999999999907,
+          "max": 30.0
+        },
+        "10.0": {
+          "p999": 142.80699999999968,
+          "max": 147.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 8,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 17.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2754.0,
+        "max": 2824.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 41.0
+      },
+      "ticks_per_warmup": {
+        "p999": 566402.0,
+        "max": 566560.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 28.801999999999907,
+          "max": 30.0
+        },
+        "10.0": {
+          "p999": 142.80699999999968,
+          "max": 147.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 8,
+      "configuration": "quiet",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 17.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 2754.0,
+        "max": 2824.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 25.0,
+        "max": 41.0
+      },
+      "ticks_per_warmup": {
+        "p999": 566402.0,
+        "max": 566560.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 28.801999999999907,
+          "max": 30.0
+        },
+        "10.0": {
+          "p999": 142.80699999999968,
+          "max": 147.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 8,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 18.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1305915.412,
+        "max": 1305941.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 4625.706,
+        "max": 4680.0
+      },
+      "ticks_per_warmup": {
+        "p999": 4523307.144,
+        "max": 4525891.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 4643.4609999999975,
+          "max": 4680.0
+        },
+        "10.0": {
+          "p999": 44391.22999999999,
+          "max": 44529.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 8,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 9.0,
+        "max": 18.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1305915.412,
+        "max": 1305941.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 4625.706,
+        "max": 4680.0
+      },
+      "ticks_per_warmup": {
+        "p999": 4523307.144,
+        "max": 4525891.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 4643.4609999999975,
+          "max": 4680.0
+        },
+        "10.0": {
+          "p999": 44391.22999999999,
+          "max": 44529.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 8,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 148.0,
+        "max": 352.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1842444.784,
+        "max": 1843386.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7670.959999999999,
+        "max": 8238.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26317956.686,
+        "max": 26338200.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7650.788999999992,
+          "max": 7764.0
+        },
+        "10.0": {
+          "p999": 65178.11399999993,
+          "max": 66085.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 8,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 148.0,
+        "max": 352.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1842444.784,
+        "max": 1843386.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7670.959999999999,
+        "max": 8238.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26317956.686,
+        "max": 26338200.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7650.788999999992,
+          "max": 7764.0
+        },
+        "10.0": {
+          "p999": 65178.11399999993,
+          "max": 66085.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 8,
+      "configuration": "active",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 148.0,
+        "max": 352.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 1842444.784,
+        "max": 1843386.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 7670.959999999999,
+        "max": 8238.0
+      },
+      "ticks_per_warmup": {
+        "p999": 26317956.686,
+        "max": 26338200.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 7650.788999999992,
+          "max": 7764.0
+        },
+        "10.0": {
+          "p999": 65178.11399999993,
+          "max": 66085.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 8,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 8.0,
+        "max": 18.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 46946.84,
+        "max": 48223.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 547.8559999999998,
+        "max": 1045.0
+      },
+      "ticks_per_warmup": {
+        "p999": 3235757.568,
+        "max": 3236587.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 540.8169999999992,
+          "max": 551.0
+        },
+        "10.0": {
+          "p999": 1737.2579999999973,
+          "max": 1772.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 8,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 8.0,
+        "max": 18.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 46946.84,
+        "max": 48223.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 547.8559999999998,
+        "max": 1045.0
+      },
+      "ticks_per_warmup": {
+        "p999": 3235757.568,
+        "max": 3236587.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 540.8169999999992,
+          "max": 551.0
+        },
+        "10.0": {
+          "p999": 1737.2579999999973,
+          "max": 1772.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 8,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 138.0,
+        "max": 352.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 33633.47900000005,
+        "max": 37901.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1788.4930000000168,
+        "max": 4162.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5405157.479,
+        "max": 5407985.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 2190.522999999985,
+          "max": 2384.0
+        },
+        "10.0": {
+          "p999": 4621.474999999931,
+          "max": 5505.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 8,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 138.0,
+        "max": 352.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 33633.47900000005,
+        "max": 37901.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1788.4930000000168,
+        "max": 4162.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5405157.479,
+        "max": 5407985.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 2190.522999999985,
+          "max": 2384.0
+        },
+        "10.0": {
+          "p999": 4621.474999999931,
+          "max": 5505.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 8,
+      "configuration": "natural",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 138.0,
+        "max": 352.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 33633.47900000005,
+        "max": 37901.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 1788.4930000000168,
+        "max": 4162.0
+      },
+      "ticks_per_warmup": {
+        "p999": 5405157.479,
+        "max": 5407985.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 2190.522999999985,
+          "max": 2384.0
+        },
+        "10.0": {
+          "p999": 4621.474999999931,
+          "max": 5505.0
+        }
+      }
+    },
+    {
+      "preset": "MNQ",
+      "seed": 8,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 216070398.771,
+        "max": 216184164.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 868938.7330000001,
+        "max": 874546.0
+      },
+      "ticks_per_warmup": {
+        "p999": 216070398.771,
+        "max": 216184164.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 863994.6149999992,
+          "max": 874546.0
+        },
+        "10.0": {
+          "p999": 8232591.469,
+          "max": 8233711.0
+        }
+      }
+    },
+    {
+      "preset": "MES",
+      "seed": 8,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 216070398.771,
+        "max": 216184164.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 868938.7330000001,
+        "max": 874546.0
+      },
+      "ticks_per_warmup": {
+        "p999": 216070398.771,
+        "max": 216184164.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 863994.6149999992,
+          "max": 874546.0
+        },
+        "10.0": {
+          "p999": 8232591.469,
+          "max": 8233711.0
+        }
+      }
+    },
+    {
+      "preset": "BTCUSDT",
+      "seed": 8,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258570908.93,
+        "max": 258602686.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 936960.0500000002,
+        "max": 949230.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1364836628.3400002,
+        "max": 1365519350.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 936942.0049999999,
+          "max": 938143.0
+        },
+        "10.0": {
+          "p999": 8826985.705,
+          "max": 8833398.0
+        }
+      }
+    },
+    {
+      "preset": "ETHUSDT",
+      "seed": 8,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258570908.93,
+        "max": 258602686.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 936960.0500000002,
+        "max": 949230.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1364836628.3400002,
+        "max": 1365519350.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 936942.0049999999,
+          "max": 938143.0
+        },
+        "10.0": {
+          "p999": 8826985.705,
+          "max": 8833398.0
+        }
+      }
+    },
+    {
+      "preset": "SOLUSDT",
+      "seed": 8,
+      "configuration": "surged",
+      "parents": 2000000,
+      "ticks_per_parent": {
+        "p999": 4097.0,
+        "max": 4097.0
+      },
+      "ticks_per_vol_window": {
+        "p999": 258570908.93,
+        "max": 258602686.0
+      },
+      "ticks_per_sim_second": {
+        "p999": 936960.0500000002,
+        "max": 949230.0
+      },
+      "ticks_per_warmup": {
+        "p999": 1364836628.3400002,
+        "max": 1365519350.0
+      },
+      "frames_per_wall_second": {
+        "1.0": {
+          "p999": 936942.0049999999,
+          "max": 938143.0
+        },
+        "10.0": {
+          "p999": 8826985.705,
+          "max": 8833398.0
+        }
+      }
+    }
+  ]
+}

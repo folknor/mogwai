@@ -445,6 +445,47 @@ spec. The volatility envelope failure is the recorded outcome that
 motivates the future tail-shape spec (reopen-gap phenomenology plus
 cluster-tail shape), with the 3.3 trace as its first evidence.
 
+RESULT, 2026-08-06, iterations 2 and 3, loop CONVERGED on 3a48f32.
+Iteration 2 (candidate 4719c15, the fitted preset carrying the
+declared best candidates): verdicts and fitted_candidates reproduced
+iteration 1 byte-for-byte - values converged - but the composition
+gate proposed resized ceilings, since the fitted cadence roughly
+doubles peak tape density. Iteration 3 folded the four resizes
+(CHECKPOINT_K 16,777,216; SWEEP_DRAIN_BUDGET 5,799,000,000; warmup
+reach 667,299,000,000; fanout_depth 4,194,304; derivation in
+reference/performance.md) and its fit reproduced the verdicts and
+candidates byte-for-byte again, the artifact binding 3a48f32. The
+composition remeasured ON the settled commit is measurement-identical
+to iteration 2's and the proposal now equals exactly what the source
+carries - convergence per Brick B. Workflow binding for the fixture,
+which carries no commit field of its own: produced on 3a48f32 by
+`brokkr run --release mogwai -- tick-composition --out
+analysis/tick-composition-protocol-10.json`, pairing_id
+000000000000000018c90efbf402c2d7-0009e35d, sha256
+01aacbff8ef8a41014452957493735c8f5ea09e48adcf93ce0689a8af873ffd2,
+gated green by `tick_composition_ratios.py --mode independent_9_10`
+(acceptance assertions passed; ratios 1.60 / 2.02 / 2.055 / 1.84;
+required reach below every resized ceiling). The evidence lands as
+the child commit of 3a48f32; the iteration-1 and iteration-2
+artifacts are evacuated to `analysis/out/` as
+mnq-fit-iteration1-f4a6cb1.json and mnq-fit-iteration2-4719c15.json
+for reconstruction.
+
+RESULT, 2026-08-06, the frozen trace assignment, run on the settled
+tree 3a48f32 from the regenerated candidates config: 10,706 parents
+in the 15:43-15:47 window, ZERO clamp hits on all three rails
+(sigma cap, feedback ceiling, realized ceiling), session vol mult
+constant at 1.498, regime mult 1.0. The window no longer contains a
+large excursion under the floor-aware random path - the mid spanned
+27,957 to 28,015, about 58 points - exactly the possibility the
+amended claim scope anticipated, so this trace establishes ONLY that
+the rails are untouched in an ordinary busy window and that the
+instrument works end to end (raw t(4) innovations reached 20.5,
+standardized 14.5, without any rail engaging). It does NOT explain
+the per-seed envelope maxima; locating and tracing the new worst
+minutes is the future tail-shape spec's first task, with this
+instrument ready for it.
+
 **Brick D2 - documentation** per 3.4, bundled.
 
 RESULT, 2026-08-05, reviewed gate amendment for
