@@ -214,6 +214,32 @@ pub fn run_preflight(directory: &Path, ledger_path: &Path) -> LabResult<Prefligh
     })
 }
 
+/// `require_preflight`: `(preflight artifact JSON, sha256 of the artifact
+/// FILE BYTES)`. Refuses an absent artifact or one whose `file_hashes` do
+/// not match the hashes just computed over the delivered corpus - the
+/// artifact and the bytes on disk must agree before anything downstream
+/// trusts either.
+pub fn require_preflight(
+    hashes: &BTreeMap<String, String>,
+    artifact_path: &Path,
+) -> LabResult<(Value, String)> {
+    if !artifact_path.exists() {
+        return Err(LabError::refusal("no preflight artifact; run preflight first"));
+    }
+    let bytes = std::fs::read(artifact_path)?;
+    let artifact_hash = crate::ledger::sha256_bytes(&bytes);
+    let artifact: Value = serde_json::from_slice(&bytes)?;
+    let got_hashes = artifact.get("file_hashes").cloned().unwrap_or(Value::Null);
+    let want_hashes = serde_json::to_value(hashes)?;
+    if got_hashes != want_hashes {
+        return Err(LabError::refusal(
+            "preflight artifact hashes do not match the bytes on disk; re-run preflight \
+             against the current delivery",
+        ));
+    }
+    Ok((artifact, artifact_hash))
+}
+
 /// `json_safe` + `write_json_atomic`: non-finite floats become the strings
 /// `"nan"`/`"inf"`/`"-inf"` (a strict JSON consumer would refuse the
 /// non-standard tokens `json.dump` would otherwise emit), written via a

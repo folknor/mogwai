@@ -1,0 +1,11 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
+//! The library half of the `mogwai` binary: exists so its own integration
+//! tests can call a subcommand's driver function directly rather than
+//! shelling out to `target/release/mogwai`. Today that is exactly
+//! [`measure::run_measure`], the golden-gate parity test's entrypoint
+//! (notes/rust-rewrite-phases.md slice 2c-ii) - every other subcommand
+//! still lives module-private under `src/main.rs`.
+
+pub mod measure;

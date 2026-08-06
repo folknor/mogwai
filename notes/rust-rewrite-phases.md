@@ -214,6 +214,67 @@ subphase's own Rust tests.
     in-process attestation walks, the observed pass, `mogwai
     measure`. Gate: the full live run from the clean tree reproduces
     the artifact minus the honestly-live fields, budgets measured.
+
+    LANDED (code) 2026-08-06, GATE NOT YET DEMONSTRATED PASSING - see
+    below. `mogwai_lab::sampler::ResourceSampler` carries the 1 s
+    background RSS/scratch sampler (`/proc/<pid>/status` VmRSS summed
+    over the live process tree, `/proc/<pid>/task/<pid>/children` for
+    descendants - moot for the in-process walks today, kept general
+    for a future subprocess caller); a dead sampling thread refuses
+    `stop()` rather than reporting a partial-window peak.
+    `mogwai_lab::preflight::require_preflight` joined the existing
+    `run_preflight`/`write_json_atomic` (the `(preflight JSON, sha256
+    of the artifact file bytes)` cross-check `run_measure12a_observed`
+    needs). `crates/mogwai-cli/src/measure.rs` is the driver -
+    `MeasureConfig`/`run_measure` - wired as `mogwai measure` with
+    `--corpus`/`--ledger`/`--preflight`/`--cache-dir`/`--out`, and
+    `crates/mogwai-cli/src/lib.rs` is new (the binary previously had
+    no library target) purely so the golden-gate test can call
+    `run_measure` directly instead of shelling `target/release/mogwai`
+    - every other subcommand stays module-private under `main.rs`.
+    `run_measure` ports `mode_measure12a` field-for-field: Brick G
+    loads read-only first, the live observed pass cross-checks and
+    then overwrites the observed cache, the eight FINAL walks replay
+    in-process through `measure12a::generated::GeneratedAcc` (the same
+    construction `parity12a.rs`'s `run_final_walk` uses) and
+    content-compare cost-excluded against Brick G, the input-side
+    population gates, the two-phase cost finalization (provisional
+    record assembled in, throwaway `json_safe` serialization pass
+    under the running sampler, THEN the sampler stops and the record
+    is finalized and the artifact is RE-ASSEMBLED so the pasted `cost`
+    is the final one, not the provisional one), both validators, the
+    fresh-tree recheck against the bound commit, the atomic write.
+
+    The gate is `crates/mogwai-cli/tests/parity12a_ii.rs`, ignored and
+    named `parity12a_ii_*`. It calls `run_measure` directly with `--out`
+    redirected to a scratch path under `target/` and `--cache-dir`
+    redirected to a scratch COPY of the real `analysis/out` caches (so
+    the mandatory observed-cache rewrite never touches the committed
+    file's bytes), then compares the result against the committed
+    `analysis/mnq-measure-12a.json` with the same three live-field
+    exclusions 2c-i's gate uses (top-level `cost`,
+    `binding.harness_tree_commit`, each seed's own `cost`).
+
+    STRUCTURAL FINDING, not a Python/Rust disagreement: `run_measure`
+    faithfully ports `require_clean_tree` - it refuses outright over
+    ANY working-tree diff, by design, because `binding.harness_tree_commit`
+    must name exactly the code that ran. That is unavoidably true of
+    THIS session's own tree: slice 2c-ii's own new/changed files
+    (`measure.rs`, `sampler.rs`, `lib.rs`, the `preflight.rs`/`lib.rs`
+    additions) are uncommitted while this slice is under review, so
+    `mogwai measure` correctly refuses with "the working tree is
+    dirty" when run now - the same chicken-and-egg an artifact-binding
+    contract always has during its own development, and the same
+    reason slice 2c-i's code had to land at HEAD before this slice
+    could be assigned. I confirmed the refusal fires with the exact
+    Python-matching message (proving that gate wired correctly) rather
+    than fabricating a bypass. `brokkr check` is green (518 passed, 95
+    ignored) and `cargo clippy` is clean over both crates. The true
+    golden-gate PASS - with the measured cost fields and the verdict
+    line - needs one release run of
+    `brokkr test -p mogwai-cli parity12a_ii` from a clean tree AFTER
+    this slice's diff lands at HEAD; nothing about the port is
+    provisional pending that run, only the demonstration is.
   - **2c-iii, retirement**: cli's measure12a.rs deleted, the gen
     measure dispatch re-routed through the lab engine with the CLI
     surface unchanged, the four named tests re-anchored under their

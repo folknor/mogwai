@@ -20,6 +20,7 @@ pub mod kernel;
 pub mod ledger;
 pub mod measure12a;
 pub mod preflight;
+pub mod sampler;
 pub mod session;
 pub mod storage;
 pub mod stream;

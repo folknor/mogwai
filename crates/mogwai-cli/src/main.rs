@@ -22,6 +22,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
+use mogwai_cli::measure;
 use mogwai_server::{config, long_version};
 
 #[derive(Parser)]
@@ -45,6 +46,10 @@ enum Command {
     /// Fail-closed TBBO corpus contract check; persists a hash-bound
     /// preflight artifact.
     Preflight(preflight::PreflightArgs),
+    /// The protocol-12a section-10 measurement gate: the live observed pass
+    /// plus the eight in-process attestation walks, assembled and
+    /// validated into the committed artifact shape.
+    Measure(measure::MeasureArgs),
     /// The cache-storage-class manual controls (stats / clean / clean
     /// --stale).
     Cache(cache::CacheArgs),
@@ -103,6 +108,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Preflight(args) => preflight::run(args),
+        Command::Measure(args) => measure::run(args),
         Command::Cache(args) => cache::run(args),
     }
 }

@@ -1,0 +1,431 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
+//! `mogwai measure`: slice 2c-ii of notes/rust-rewrite-phases.md, ported
+//! from `analysis/mnq_fit.py`'s `mode_measure12a`. The live Brick M run -
+//! the observed pass over the delivered corpus, the eight FINAL walks run
+//! IN-PROCESS through the lab engine and content-compared (cost excluded)
+//! against the read-only Brick G cache, phase-2b/2c-i aggregation and
+//! assembly, both validators, the fresh-tree gate and the atomic artifact
+//! write.
+//!
+//! Lives here rather than in `mogwai-lab` because the generated side needs
+//! `mogwai-server` preset resolution, same reason `crates/mogwai-cli/tests/
+//! parity12a.rs`'s generated gate lives in this crate.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, anyhow, bail};
+use clap::Args;
+use mogwai_data::{TickEvent, TickSource};
+use mogwai_lab::aggregate::artifact::{
+    GeneratedSeed, assemble_measure12a_artifact, load_brick_g_walks, measure12a_schema_errors,
+    measure12a_semantic_errors, write_json_atomic,
+};
+use mogwai_lab::aggregate::bootstrap::bootstrap_multiplicities;
+use mogwai_lab::kernel::typed_canon;
+use mogwai_lab::ledger::verify_input;
+use mogwai_lab::measure12a::generated::GeneratedAcc;
+use mogwai_lab::measure12a::observed;
+use mogwai_lab::preflight::require_preflight;
+use mogwai_lab::sampler::ResourceSampler;
+use mogwai_lab::stream::{data_files, parse_stream};
+use mogwai_lab::subcontract::{FINAL_END_NS, FINAL_LENGTH, FINAL_SEEDS, FINAL_START_NS, SUMMARY_WARMUP};
+use serde_json::Value;
+
+const DEFAULT_CORPUS: &str = "research/market-data/databento/mnqv/2026-07.full.tbbo";
+const DEFAULT_LEDGER: &str = "analysis/databento-jobs.json";
+const DEFAULT_PREFLIGHT: &str = "analysis/out/mnq-fit-preflight.json";
+const DEFAULT_CACHE_DIR: &str = "analysis/out";
+const DEFAULT_OUT: &str = "analysis/mnq-measure-12a.json";
+const WALK_CACHE_SUBDIR: &str = "measure12a-cache";
+const OBSERVED_CACHE_NAME: &str = "mnq-measure12a-observed.json";
+
+#[derive(Args)]
+pub struct MeasureArgs {
+    /// The delivered corpus directory.
+    #[arg(long, value_name = "DIR")]
+    corpus: Option<PathBuf>,
+    /// The Databento job ledger. Read-only.
+    #[arg(long, value_name = "PATH")]
+    ledger: Option<PathBuf>,
+    /// The committed preflight artifact this run's file hashes must match.
+    #[arg(long, value_name = "PATH")]
+    preflight: Option<PathBuf>,
+    /// The cache root carrying the Brick G walk cache
+    /// (`<dir>/measure12a-cache/`) and the observed cross-check cache
+    /// (`<dir>/mnq-measure12a-observed.json`). Defaults to the Python-era
+    /// `analysis/out` layout when run in-repo, else the phase-1 storage
+    /// cache root.
+    #[arg(long, value_name = "DIR")]
+    cache_dir: Option<PathBuf>,
+    /// Where to write the section-10 artifact. An ARTIFACT (storage
+    /// policy): never cached, never auto-deleted.
+    #[arg(long, value_name = "PATH")]
+    out: Option<PathBuf>,
+}
+
+pub struct MeasureConfig {
+    pub corpus: PathBuf,
+    pub ledger: PathBuf,
+    pub preflight_path: PathBuf,
+    pub walk_cache_dir: PathBuf,
+    pub observed_cache_path: PathBuf,
+    pub out: PathBuf,
+}
+
+impl MeasureConfig {
+    #[must_use]
+    pub fn resolve(
+        corpus: Option<PathBuf>,
+        ledger: Option<PathBuf>,
+        preflight: Option<PathBuf>,
+        cache_dir: Option<PathBuf>,
+        out: Option<PathBuf>,
+    ) -> Self {
+        let cache_dir = cache_dir.unwrap_or_else(|| {
+            let repo_default = PathBuf::from(DEFAULT_CACHE_DIR);
+            if repo_default.is_dir() {
+                repo_default
+            } else {
+                mogwai_lab::storage::cache_root(None).join("measure12a")
+            }
+        });
+        Self {
+            corpus: corpus.unwrap_or_else(|| PathBuf::from(DEFAULT_CORPUS)),
+            ledger: ledger.unwrap_or_else(|| PathBuf::from(DEFAULT_LEDGER)),
+            preflight_path: preflight.unwrap_or_else(|| PathBuf::from(DEFAULT_PREFLIGHT)),
+            walk_cache_dir: cache_dir.join(WALK_CACHE_SUBDIR),
+            observed_cache_path: cache_dir.join(OBSERVED_CACHE_NAME),
+            out: out.unwrap_or_else(|| PathBuf::from(DEFAULT_OUT)),
+        }
+    }
+}
+
+pub struct MeasureOutcome {
+    pub artifact: Value,
+    pub cost: Value,
+}
+
+pub fn run(args: MeasureArgs) -> anyhow::Result<()> {
+    let cfg = MeasureConfig::resolve(args.corpus, args.ledger, args.preflight, args.cache_dir, args.out);
+    let outcome = run_measure(&cfg)?;
+    let ladder = &outcome.artifact["ladder"];
+    println!("artifact -> {}", cfg.out.display());
+    println!("cost: {}", serde_json::to_string(&outcome.cost)?);
+    println!("eligible: {}", ladder["eligible"]);
+    println!("selected: {}", ladder["selected"]);
+    println!("verdict: {}", ladder["verdict"]);
+    Ok(())
+}
+
+/// The driver: `mode_measure12a`, callable directly (with `cfg.out`
+/// overridden to a scratch path) by the golden-gate parity test as well as
+/// by the CLI. WRITES the artifact atomically to `cfg.out` on success.
+pub fn run_measure(cfg: &MeasureConfig) -> anyhow::Result<MeasureOutcome> {
+    let harness_commit = require_clean_tree()?;
+
+    // The Brick G references load READ-ONLY before anything runs.
+    let brick_g = load_brick_g_walks(&cfg.walk_cache_dir)
+        .map_err(|e| anyhow!("loading the Brick G walk cache: {e}"))?;
+
+    let preflight_bytes = std::fs::read(&cfg.preflight_path)
+        .with_context(|| format!("reading {}", cfg.preflight_path.display()))?;
+    let preflight_json: Value = serde_json::from_slice(&preflight_bytes)?;
+    let usable: Vec<Value> = preflight_json["usable_sessions"]
+        .as_array()
+        .cloned()
+        .ok_or_else(|| anyhow!("preflight artifact carries no usable_sessions array"))?;
+
+    let sampler = ResourceSampler::start(
+        vec![cfg.observed_cache_path.clone()],
+        Some(cfg.walk_cache_dir.clone()),
+    );
+
+    // -- Observed pass, LIVE (the authoritative input). The pre-existing
+    // observed cache is a MANDATORY structural cross-check: absence or
+    // divergence refuses.
+    let t0 = std::time::Instant::now();
+    let observed = run_measure12a_observed(&cfg.corpus, &cfg.ledger, &cfg.preflight_path)?;
+    let observed_s = t0.elapsed().as_secs_f64();
+    if !cfg.observed_cache_path.exists() {
+        bail!(
+            "no cached observed half to cross-check against ({}); the Brick G observed pass \
+             must exist",
+            cfg.observed_cache_path.display()
+        );
+    }
+    let cached_obs: Value = serde_json::from_slice(&std::fs::read(&cfg.observed_cache_path)?)?;
+    if typed_canon(&cached_obs) != typed_canon(&observed) {
+        bail!("the live observed pass diverges from the cached observed half");
+    }
+    write_json_atomic(&cfg.observed_cache_path, &observed)
+        .map_err(|e| anyhow!("writing {}: {e}", cfg.observed_cache_path.display()))?;
+    println!("observed pass: {observed_s:.1}s");
+
+    // -- The eight FINAL walks as cost-attestation replays, IN-PROCESS: run
+    // through the lab engine and content-compare (cost excluded) against
+    // the read-only Brick G record.
+    let t1 = std::time::Instant::now();
+    let mut generated_seeds: Vec<GeneratedSeed> = Vec::with_capacity(FINAL_SEEDS.len());
+    for &seed in FINAL_SEEDS {
+        let attested = brick_g
+            .get(&seed)
+            .ok_or_else(|| anyhow!("Brick G cache is missing seed {seed}"))?;
+        let seed_u64 = u64::try_from(seed).map_err(|_| anyhow!("seed {seed} is not positive"))?;
+        let replay = run_final_walk(seed_u64)?;
+        let mut replayed = replay.clone();
+        replayed.as_object_mut().expect("a record").remove("cost");
+        let mut reference = attested.clone();
+        reference.as_object_mut().expect("a record").remove("cost");
+        if typed_canon(&replayed) != typed_canon(&reference) {
+            bail!("seed {seed} replay diverges from the cached Brick G walk");
+        }
+        let session_count = replay["per_session"].as_array().map_or(0, Vec::len);
+        println!("seed {seed} replay attested: {session_count} complete sessions");
+        generated_seeds.push(GeneratedSeed {
+            seed,
+            per_session: replay["per_session"].as_array().cloned().unwrap_or_default(),
+            forensic: replay["forensic"].clone(),
+            cost: attested["cost"].clone(),
+        });
+    }
+    let generated_s = t1.elapsed().as_secs_f64();
+
+    // -- Input-side population gates.
+    for g in &generated_seeds {
+        let dates: Vec<Option<&str>> =
+            g.per_session.iter().map(|r| r.get("session_date").and_then(Value::as_str)).collect();
+        if dates.iter().any(Option::is_none) {
+            bail!("seed {} carries non-string session dates", g.seed);
+        }
+        let mut sorted: Vec<&str> = dates.iter().map(|d| d.unwrap_or_default()).collect();
+        let mut unique = sorted.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        sorted.sort_unstable();
+        if sorted != unique || dates.len() != 23 {
+            bail!("seed {} carries {} sessions, not 23 sorted unique", g.seed, dates.len());
+        }
+    }
+    let mut distinct_calendars: std::collections::BTreeSet<Vec<Option<&str>>> = std::collections::BTreeSet::new();
+    for g in &generated_seeds {
+        distinct_calendars.insert(g.per_session.iter().map(|r| r["session_date"].as_str()).collect());
+    }
+    if distinct_calendars.len() != 1 {
+        bail!("the generated seeds disagree on session dates");
+    }
+
+    // -- Assembly with a provisional MUTABLE cost record (two-phase: the
+    // bootstrap clock stops after assembly, then the fields finalize in
+    // place before validation).
+    let t2 = std::time::Instant::now();
+    let n_usable = usable.len();
+    let mults = bootstrap_multiplicities(n_usable);
+    let mut cost = serde_json::json!({
+        "observed_s": observed_s, "generated_s": generated_s,
+        "bootstrap_s": 0.0, "total_s": 0.0,
+        "peak_rss_bytes": 0, "scratch_bytes": 0,
+    });
+    let binding_extra = serde_json::json!({
+        "harness_tree_commit": harness_commit,
+        "generated": {
+            "seeds": FINAL_SEEDS,
+            "window_start_ns": FINAL_START_NS,
+            "window_length_ns": FINAL_END_NS - FINAL_START_NS,
+            "warmup": SUMMARY_WARMUP,
+        },
+    });
+    let artifact = assemble_measure12a_artifact(&observed, &generated_seeds, &binding_extra, &mults, &cost)
+        .map_err(|e| anyhow!("assembly refused: {e}"))?;
+    // A throwaway serialization pass realizes the late json_safe memory
+    // peak while the sampler still runs and BEFORE the cost freezes.
+    drop(serde_json::to_string(&mogwai_lab::aggregate::artifact::json_safe(artifact.clone())));
+    let bootstrap_s = t2.elapsed().as_secs_f64();
+    let total_s = observed_s + generated_s + bootstrap_s;
+
+    let (peak_rss, peak_scratch) = sampler
+        .stop(std::slice::from_ref(&cfg.observed_cache_path), Some(&cfg.walk_cache_dir))
+        .map_err(|e| anyhow!("{e}"))?;
+    cost["bootstrap_s"] = serde_json::json!(bootstrap_s);
+    cost["total_s"] = serde_json::json!(total_s);
+    cost["peak_rss_bytes"] = serde_json::json!(peak_rss);
+    cost["scratch_bytes"] = serde_json::json!(peak_scratch);
+
+    // Re-assemble now that `cost` is final - the artifact pastes `cost`
+    // verbatim, so the provisional one above must be swapped for the
+    // finalized record before validation and the write.
+    let artifact = assemble_measure12a_artifact(&observed, &generated_seeds, &binding_extra, &mults, &cost)
+        .map_err(|e| anyhow!("assembly refused: {e}"))?;
+
+    let mut errs = measure12a_schema_errors(&artifact);
+    errs.extend(measure12a_semantic_errors(&artifact, &usable));
+    if !errs.is_empty() {
+        bail!(
+            "the measure12a artifact violates the contract: {}",
+            errs.iter().take(10).cloned().collect::<Vec<_>>().join("; ")
+        );
+    }
+
+    let (head, clean) = fresh_tree_state()?;
+    if !clean || head != harness_commit {
+        bail!("the tree changed during the measure12a run; the artifact is unbound");
+    }
+
+    write_json_atomic(&cfg.out, &artifact).map_err(|e| anyhow!("writing {}: {e}", cfg.out.display()))?;
+
+    Ok(MeasureOutcome { artifact, cost })
+}
+
+/// `require_clean_tree`: the commit that binds a real artifact. A dirty
+/// tree refuses - `harness_tree_commit` must name exactly the code that
+/// ran.
+fn require_clean_tree() -> anyhow::Result<String> {
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .context("running git status")?;
+    if !status.status.success() {
+        bail!("git status failed; the harness tree is unidentifiable");
+    }
+    if !String::from_utf8_lossy(&status.stdout).trim().is_empty() {
+        bail!(
+            "the working tree is dirty; an artifact may only bind a commit that is exactly the \
+             code that ran - commit first"
+        );
+    }
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .context("running git rev-parse")?;
+    if !head.status.success() {
+        bail!("git rev-parse failed; the harness tree is unidentifiable");
+    }
+    Ok(String::from_utf8_lossy(&head.stdout).trim().to_string())
+}
+
+/// `_fresh_tree_state`: (HEAD, clean) read FRESH from git immediately
+/// before the atomic write - never the value `require_clean_tree` returned
+/// at the top of the run - so a HEAD move or a new dirty file DURING the
+/// run is caught before the artifact writes.
+fn fresh_tree_state() -> anyhow::Result<(String, bool)> {
+    let status = std::process::Command::new("git").args(["status", "--porcelain"]).output()?;
+    let head = std::process::Command::new("git").args(["rev-parse", "HEAD"]).output()?;
+    let clean =
+        status.status.success() && String::from_utf8_lossy(&status.stdout).trim().is_empty() && head.status.success();
+    Ok((String::from_utf8_lossy(&head.stdout).trim().to_string(), clean))
+}
+
+/// `run_measure12a_observed`: the observed half - per-session sufficient
+/// records plus the monthly aggregates, bound to the input and
+/// sub-contract hashes.
+fn run_measure12a_observed(corpus: &Path, ledger: &Path, preflight_path: &Path) -> anyhow::Result<Value> {
+    let hashes: BTreeMap<String, String> =
+        verify_input(corpus, ledger).map_err(|e| anyhow!("verifying the delivered corpus: {e}"))?;
+    let (preflight, preflight_hash) = require_preflight(&hashes, preflight_path)
+        .map_err(|e| anyhow!("checking the preflight artifact: {e}"))?;
+    let usable: Vec<String> = preflight["usable_sessions"]
+        .as_array()
+        .ok_or_else(|| anyhow!("preflight artifact carries no usable_sessions array"))?
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect();
+
+    let files = data_files(corpus).map_err(|e| anyhow!("listing the corpus: {e}"))?;
+    let per_session =
+        observed::observe(parse_stream(files), &usable).map_err(|e| anyhow!("the observed pass refused: {e}"))?;
+
+    let pooled = mogwai_lab::aggregate::monthly::pool_session_hists(&per_session)
+        .map_err(|e| anyhow!("pooling block1: {e}"))?;
+    let monthly = serde_json::json!({
+        "block1": mogwai_lab::aggregate::monthly::block1_blocks(&pooled),
+        "block2": mogwai_lab::aggregate::monthly::pool_block2(
+            &per_session.iter().collect::<Vec<_>>()
+        ),
+        "block3": mogwai_lab::aggregate::monthly::aggregate_block3(
+            &per_session.iter().collect::<Vec<_>>()
+        ),
+        "block4": mogwai_lab::aggregate::monthly::aggregate_block4(
+            &per_session.iter().collect::<Vec<_>>()
+        ),
+    });
+    let perms: Vec<&[Value]> = per_session
+        .iter()
+        .map(|r| r["permutations"].as_array().map(Vec::as_slice).unwrap_or_default())
+        .collect();
+    let permutations_monthly = mogwai_lab::aggregate::monthly::aggregate_permutations(&perms);
+
+    Ok(serde_json::json!({
+        "binding": {
+            "job_id": mogwai_lab::subcontract::JOB_ID,
+            "subcontract_hash": mogwai_lab::subcontract::subcontract_hash(),
+            "preflight_artifact_hash": preflight_hash,
+            "file_hashes": hashes,
+            "tape_protocol_version": 11,
+        },
+        "per_session": per_session,
+        "monthly": monthly,
+        "permutations_monthly": permutations_monthly,
+    }))
+}
+
+/// One FINAL walk, constructed exactly the way `gen.rs`'s `build_source`
+/// does and exactly as `crates/mogwai-cli/tests/parity12a.rs`'s
+/// `run_final_walk` does: the committed MNQ preset, no overrides, the walk
+/// starting at `FINAL_START_NS - SUMMARY_WARMUP` with the vol trace
+/// enabled, measuring `[FINAL_START_NS, FINAL_START_NS + FINAL_LENGTH)`.
+pub fn run_final_walk(seed: u64) -> anyhow::Result<Value> {
+    let profile = mogwai_server::source::InstrumentProfiles::defaults()
+        .get("MNQ")
+        .cloned()
+        .map_or_else(
+            || mogwai_server::config::profile_from_preset("MNQ").map_err(|e| anyhow!("{e}")),
+            Ok,
+        )?;
+    let calendar = profile
+        .calendar
+        .as_ref()
+        .ok_or_else(|| anyhow!("the MNQ preset carries no session calendar"))?;
+    let offset = i32::from(calendar.utc_offset_minutes);
+
+    let start = u64::try_from(FINAL_START_NS).map_err(|_| anyhow!("FINAL_START_NS is not positive"))?;
+    let length_s: u64 = FINAL_LENGTH
+        .trim_end_matches('s')
+        .parse()
+        .map_err(|e| anyhow!("FINAL_LENGTH is not seconds: {e}"))?;
+    let end = start + length_s * 1_000_000_000;
+    let warmup_days: u64 = SUMMARY_WARMUP
+        .trim_end_matches('d')
+        .parse()
+        .map_err(|e| anyhow!("SUMMARY_WARMUP is not days: {e}"))?;
+    let walk_start = start - warmup_days * 86_400 * 1_000_000_000;
+
+    let mut source = mogwai_data::GeneratedSource::try_new_with_session_profile(
+        profile.scalars.clone(),
+        seed,
+        walk_start,
+        mogwai_server::source::fingerprint(),
+        &profile.session,
+        None,
+        mogwai_data::SizeGrid::from_def(&profile.def),
+        profile.calendar.clone(),
+    )
+    .map_err(|e| anyhow!("building the generator: {e:?}"))?;
+    source.enable_vol_trace();
+
+    let mut acc = GeneratedAcc::new(seed, start, end, offset, profile.scalars.modal_tick);
+    while let Some(event) = source.next_tick() {
+        if event.ts_event() >= end {
+            break;
+        }
+        match event {
+            TickEvent::Quote(q) => {
+                let trace = source.take_vol_trace();
+                acc.push_quote(&q, trace).map_err(|e| anyhow!("{e}"))?;
+            }
+            TickEvent::Trade(t) => acc.push_trade(&t).map_err(|e| anyhow!("{e}"))?,
+        }
+    }
+    acc.finish().map_err(|e| anyhow!("the generated measurement pass refused: {e}"))
+}
