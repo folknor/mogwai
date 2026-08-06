@@ -6392,11 +6392,54 @@ def tree_median(trees: list):
 
 def central_blocks_from_seeds(seed_blocks: list[dict]) -> dict:
     """CentralBlocks (spec section 10): SeedBlocks minus block1.hist,
-    every scalar the 8-seed median."""
+    every scalar the 8-seed median. The Block2Cell count_hist and
+    run_length_hist maps are histograms keyed by DATA-DEPENDENT support
+    values, so their key sets legitimately diverge across seeds; per
+    the signed union-zero-median ruling (session 019fd822, 2026-08-06)
+    exactly those two paths centralize over the UNION of the seed
+    supports with an absent support value reading as a zero count.
+    Every other dictionary keeps the strict identical-shape refusal.
+    The padding operates on deep copies - the per-seed evidence is
+    never mutated."""
     stripped = []
     for b in seed_blocks:
         b1 = {k: v for k, v in b["block1"].items() if k != "hist"}
-        stripped.append({**b, "block1": b1})
+        stripped.append({
+            **b,
+            "block1": b1,
+            "block2": json.loads(json.dumps(json_safe(b["block2"]))),
+        })
+    cells = sorted({
+        (h, w)
+        for b in stripped
+        for h, per_w in b["block2"].items()
+        for w in per_w
+    })
+    # ONE complete validation pass over both fields and every present
+    # cell BEFORE any padding: a refusal must leave nothing padded.
+    for h, w in cells:
+        for field in ("count_hist", "run_length_hist"):
+            for b in stripped:
+                cell = b["block2"].get(h, {}).get(w)
+                if cell is not None and field not in cell:
+                    # Non-support shape divergence refuses by name -
+                    # only the SUPPORT of a present histogram may vary.
+                    raise Refusal(
+                        f"a seed block2 cell hour {h} window {w} "
+                        f"lacks {field}"
+                    )
+    for h, w in cells:
+        for field in ("count_hist", "run_length_hist"):
+            union: set = set()
+            for b in stripped:
+                cell = b["block2"].get(h, {}).get(w)
+                if cell is not None:
+                    union |= set(cell[field])
+            for b in stripped:
+                cell = b["block2"].get(h, {}).get(w)
+                if cell is not None:
+                    for key in union:
+                        cell[field].setdefault(key, 0)
     return tree_median(stripped)
 
 
@@ -8615,6 +8658,59 @@ def run_selftest() -> None:
           and refuses(
               lambda: tree_median([{"a": 1}, {"b": 2}]),
               "diverge in shape",
+          ))
+    # The signed union-zero-median ruling: the Block2Cell histograms
+    # centralize over the union of the seed supports with absent
+    # values as zero counts; non-histogram shape divergence still
+    # refuses; the per-seed inputs are never mutated.
+    hist_seed_a = {
+        "block1": {"hist": [1], "summary": {}},
+        "block2": {"1": {"60": {"count_hist": {"2": 4, "7": 1},
+                                "run_length_hist": {"1": 2},
+                                "mean": 1.0}}},
+        "block3": {}, "block4": {},
+    }
+    hist_seed_b = {
+        "block1": {"hist": [2], "summary": {}},
+        "block2": {"1": {"60": {"count_hist": {"2": 6},
+                                "run_length_hist": {"1": 2, "3": 5},
+                                "mean": 3.0}}},
+        "block3": {}, "block4": {},
+    }
+    central_h = central_blocks_from_seeds([hist_seed_a, hist_seed_b])
+    check("central block2 histograms centralize over the union with "
+          "zero fill",
+          central_h["block2"]["1"]["60"]["count_hist"]
+          == {"2": 4, "7": 0}
+          and central_h["block2"]["1"]["60"]["run_length_hist"]
+          == {"1": 2, "3": 0}
+          and central_h["block2"]["1"]["60"]["mean"] == 1.0
+          # The PADDING RECIPIENTS stay unmutated: seed B lacks the
+          # "7" count support and seed A lacks the "3" run support, so
+          # a mutating implementation would alter exactly these two.
+          and hist_seed_b["block2"]["1"]["60"]["count_hist"]
+          == {"2": 6}
+          and hist_seed_a["block2"]["1"]["60"]["run_length_hist"]
+          == {"1": 2}
+          and hist_seed_a["block2"]["1"]["60"]["count_hist"]
+          == {"2": 4, "7": 1}
+          and hist_seed_b["block2"]["1"]["60"]["run_length_hist"]
+          == {"1": 2, "3": 5}
+          and refuses(
+              lambda: central_blocks_from_seeds([
+                  hist_seed_a,
+                  {**hist_seed_b, "block3": {"extra": 1}},
+              ]),
+              "diverge in shape",
+          )
+          and refuses(
+              lambda: central_blocks_from_seeds([
+                  hist_seed_a,
+                  {**hist_seed_b, "block2": {"1": {"60": {
+                      "count_hist": {"2": 6}, "mean": 3.0,
+                  }}}},
+              ]),
+              "lacks run_length_hist",
           ))
 
     print("12a segment labels and bins")
