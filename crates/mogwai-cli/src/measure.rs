@@ -336,20 +336,20 @@ fn run_measure12a_observed(corpus: &Path, ledger: &Path, preflight_path: &Path) 
     let per_session =
         observed::observe(parse_stream(files), &usable).map_err(|e| anyhow!("the observed pass refused: {e}"))?;
 
-    let pooled = mogwai_lab::aggregate::monthly::pool_session_hists(&per_session)
-        .map_err(|e| anyhow!("pooling block1: {e}"))?;
-    let monthly = serde_json::json!({
-        "block1": mogwai_lab::aggregate::monthly::block1_blocks(&pooled),
-        "block2": mogwai_lab::aggregate::monthly::pool_block2(
-            &per_session.iter().collect::<Vec<_>>()
-        ),
-        "block3": mogwai_lab::aggregate::monthly::aggregate_block3(
-            &per_session.iter().collect::<Vec<_>>()
-        ),
-        "block4": mogwai_lab::aggregate::monthly::aggregate_block4(
-            &per_session.iter().collect::<Vec<_>>()
-        ),
-    });
+    // `blocks_from_sessions` extracts each session's `block2`/`block3`/
+    // `block4` SUB-OBJECT before pooling - passing the whole per-session
+    // records to `pool_block2` et al. directly (as this function used to)
+    // is a defect: `rec.as_object()` still succeeds (the whole session
+    // record IS an object), so it silently iterates `session_date`,
+    // `segments`, `permutations`, etc. as if they were per-hour window
+    // maps, and panics the moment it reaches a key whose value is not an
+    // object (found live: the 2c-ii golden-gate run over the real corpus,
+    // `monthly.rs:374`, "a window map"). The 2b/2c-i gates never exercised
+    // this path because they always went through `blocks_from_sessions`
+    // already; this was the one call site that had grown its own
+    // hand-rolled (and wrong) copy.
+    let monthly = mogwai_lab::aggregate::monthly::blocks_from_sessions(&per_session)
+        .map_err(|e| anyhow!("pooling the monthly blocks: {e}"))?;
     let perms: Vec<&[Value]> = per_session
         .iter()
         .map(|r| r["permutations"].as_array().map(Vec::as_slice).unwrap_or_default())
@@ -428,4 +428,78 @@ pub fn run_final_walk(seed: u64) -> anyhow::Result<Value> {
         }
     }
     acc.finish().map_err(|e| anyhow!("the generated measurement pass refused: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    /// Regression for the 2c-ii golden-gate finding: `run_measure12a_observed`
+    /// once passed whole PER-SESSION records (carrying sibling non-object
+    /// fields like `segments` and `permutations`, both arrays) straight into
+    /// `pool_block2`/`aggregate_block3`/`aggregate_block4`, which expect the
+    /// `block2`/`block3`/`block4` SUB-OBJECT. `rec.as_object()` still
+    /// succeeded (a whole session record is an object too), so nothing
+    /// refused until the pooler tried to treat `segments` (an array) as an
+    /// hour's window map and panicked - a defect the 2b/2c-i gates never hit
+    /// because they always went through `blocks_from_sessions`, which
+    /// extracts the named sub-objects first.
+    ///
+    /// This is a real crash the 2a per-session typed-canon parity gate could
+    /// never catch: canon compares the VALUE at each already-agreed-upon
+    /// path, so a call site indexing the WRONG path entirely is invisible to
+    /// it. The regression here is a shape-strict smoke test over a
+    /// minimal but realistically-shaped live per-session record - one
+    /// that carries the array-typed sibling fields the bug tripped on -
+    /// fed through the exact function `run_measure12a_observed` calls.
+    #[test]
+    fn blocks_from_sessions_does_not_choke_on_a_live_shaped_session_record() {
+        let session = serde_json::json!({
+            "session_date": "2026-01-01",
+            "segments": [{"segment_index": 0, "open_ns": 0, "close_ns": 1}],
+            "block1_hist": [],
+            "block2": {},
+            "block3": {
+                "cells": {}, "pairs": {}, "lag1_parent_autocorr": {}, "hour20_labels": {},
+            },
+            "block4": {
+                "all": {
+                    "residual_count": 0, "warmup_excluded": 0, "zero_fraction": null,
+                    "nz_abs_p90": null, "nz_abs_p99": null, "nz_abs_p999": null,
+                    "ratio_p99_p90": null, "ratio_p999_p99": null,
+                    "exceed_4": null, "exceed_8": null, "exceed_16": null,
+                },
+            },
+            "permutations": [],
+            "refusals": [],
+        });
+        let per_session = vec![session];
+
+        // The bug: calling the block-2/3/4 poolers directly on the WHOLE
+        // per-session records panics on the first non-object sibling field
+        // (`segments` is an array) - documented here so the trap stays
+        // visible, not exercised as the "fix".
+        let whole_records: Vec<&serde_json::Value> = per_session.iter().collect();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(mogwai_lab::aggregate::monthly::pool_block2(&whole_records));
+        }))
+        .is_err();
+        assert!(
+            panicked,
+            "pool_block2 over whole per-session records is expected to panic on a non-object \
+             sibling field - if it no longer does, this test's premise is stale"
+        );
+
+        // The fix: `blocks_from_sessions` extracts each named sub-object
+        // before pooling, so it must succeed over the same live-shaped
+        // records `run_measure12a_observed` builds.
+        let monthly = mogwai_lab::aggregate::monthly::blocks_from_sessions(&per_session)
+            .expect("blocks_from_sessions must not choke on a live-shaped session record");
+        assert_eq!(
+            monthly["block2"],
+            serde_json::json!({}),
+            "an empty per-session block2 pools to an empty monthly block2"
+        );
+        for key in ["block1", "block2", "block3", "block4"] {
+            assert!(monthly.get(key).is_some(), "monthly is missing {key}");
+        }
+    }
 }

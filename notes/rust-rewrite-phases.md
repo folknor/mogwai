@@ -275,6 +275,41 @@ subphase's own Rust tests.
     `brokkr test -p mogwai-cli parity12a_ii` from a clean tree AFTER
     this slice's diff lands at HEAD; nothing about the port is
     provisional pending that run, only the demonstration is.
+
+    UPDATE: the owner ran the golden gate from clean HEAD b5e67a1
+    (after fixing a CWD-relative default-path bug in the test's own
+    input resolution) and the observed pass completed in 84 s, then
+    `crates/mogwai-lab/src/aggregate/monthly.rs:374` panicked with
+    `"a window map"`. Root cause, found and fixed: it was NOT a
+    types-vs-canon blind spot - explicitly ruling that out because the
+    coordinator asked me to name it if it were, and it matters for
+    2c-iii. `run_measure12a_observed` (in `measure.rs`) had its own
+    hand-rolled monthly-block assembly that called
+    `pool_block2`/`aggregate_block3`/`aggregate_block4` directly on the
+    WHOLE per-session records instead of on each record's
+    `block2`/`block3`/`block4` sub-object. `rec.as_object()` still
+    succeeds (a whole session record is an object too), so nothing
+    refused until the pooler tried to read `segments` (an array
+    sibling field) as an hour's window map. `blocks_from_sessions`
+    already exists and does the sub-object extraction correctly - the
+    2b and 2c-i gates go through it via `assemble::measure`, which is
+    exactly why they never hit this: this was a fresh, wrong
+    reimplementation in 2c-ii's new glue code, not a divergence
+    between the live-built and cache-parsed `Value` trees, and not
+    something the 2a typed-canon parity gate could ever have caught
+    (canon compares the value AT an agreed-upon path; this bug indexed
+    the wrong path entirely, one level up). Fixed by deleting the
+    hand-rolled version and calling `blocks_from_sessions` directly, as
+    every other call site does. Regression test added:
+    `crates/mogwai-cli/src/measure.rs`'s
+    `blocks_from_sessions_does_not_choke_on_a_live_shaped_session_record`
+    - a minimal but realistically-shaped session record (carrying the
+    array-typed `segments`/`permutations` siblings the bug tripped on)
+    fed through `blocks_from_sessions`, plus a documented
+    `catch_unwind` proving the OLD call shape does panic, so the trap
+    stays visible if anyone reintroduces it. `brokkr check` green (519
+    passed, 95 ignored) with the fix in place. Not committed (owner
+    re-runs the golden gate after committing).
   - **2c-iii, retirement**: cli's measure12a.rs deleted, the gen
     measure dispatch re-routed through the lab engine with the CLI
     surface unchanged, the four named tests re-anchored under their
