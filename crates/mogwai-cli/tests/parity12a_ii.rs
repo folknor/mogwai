@@ -98,10 +98,13 @@ fn parity12a_ii_live_run_matches_the_committed_artifact() {
         std::fs::create_dir_all(parent).expect("creating the scratch output dir");
     }
 
+    // The driver's defaults are CWD-relative (correct for the CLI run
+    // from the repo root); cargo test's CWD is the crate dir, so the
+    // real inputs are passed root-anchored.
     let cfg = MeasureConfig::resolve(
-        None, // corpus: the real delivered July corpus
-        None, // ledger: the real Databento job ledger
-        None, // preflight: the committed analysis/out/mnq-fit-preflight.json
+        Some(root.join("research/market-data/databento/mnqv/2026-07.full.tbbo")),
+        Some(root.join("analysis/databento-jobs.json")),
+        Some(root.join("analysis/out/mnq-fit-preflight.json")),
         Some(cache_dir),
         Some(out.clone()),
     );
