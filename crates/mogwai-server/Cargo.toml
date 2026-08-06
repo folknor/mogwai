@@ -5,19 +5,14 @@ edition.workspace = true
 license.workspace = true
 build = "build.rs"
 
-# The binary is `mogwai`, not the package name `mogwai-server`: the crate stays
-# `mogwai-server` (so `-p mogwai-server` and the path-dep keep working) while the
-# installed/run command is the shorter `mogwai`.
-[[bin]]
-name = "mogwai"
-path = "src/main.rs"
+# A library crate. The `mogwai` binary lives in `mogwai-cli`, which depends on
+# this one for `serve`, config loading and the instrument profiles.
 
 [dependencies]
 mogwai-protocol.workspace = true
 mogwai-engine.workspace = true
 mogwai-data.workspace = true
 
-clap = { version = "4.6.3", features = ["derive", "string"] }
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -29,16 +24,6 @@ futures-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
-humantime = "2"
-nix = { version = "0.31.3", features = ["fs", "process", "signal"] }
-
-# `mogwai man` renders the bundled reference/*.md docs to the terminal.
-owo-colors = "4"
-pulldown-cmark = "0.13"
-
-[dev-dependencies]
-tungstenite = "0.30.0"
-tokio-tungstenite = "0.30.0"
 nix = { version = "0.31.3", features = ["fs", "process", "signal"] }
 
 [lints]

@@ -1026,9 +1026,9 @@ relaxed instead.
 Gate, exact commands:
 
 ```text
-brokkr test -p mogwai-server measure12a_matches_independent_recompute
-brokkr test -p mogwai-server measure12a_selection_is_deterministic
-brokkr test -p mogwai-server measure12a_consumer_leaves_tape_byte_identical
+brokkr test -p mogwai-cli measure12a_matches_independent_recompute
+brokkr test -p mogwai-cli measure12a_selection_is_deterministic
+brokkr test -p mogwai-cli measure12a_consumer_leaves_tape_byte_identical
 brokkr test -p mogwai-data trace_consumes_no_draws_and_leaves_the_tape_byte_identical
 brokkr check
 ```

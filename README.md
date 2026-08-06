@@ -29,12 +29,14 @@ nautilus adapter does.
 The seed is the whole of the reproduction: that command draws the same tape on
 any machine running the same build.
 
-A Cargo workspace of five crates under `crates/`:
+A Cargo workspace of six crates under `crates/`:
 
 - `mogwai-protocol` - the JSON-over-WS wire types and the divergence catalog.
 - `mogwai-engine` - the venue-agnostic exchange core and divergence seam.
 - `mogwai-data` - the synthetic generator and the k-way tick merge.
-- `mogwai-server` - the axum binary owning sockets, clock and replay pacing.
+- `mogwai-server` - the axum library owning sockets, clock and replay pacing.
+- `mogwai-cli` - the `mogwai` binary: `serve` plus the offline generator and
+  measurement subcommands.
 - `mogwai-adapter` - the nautilus venue adapter a host registers for the
   `MOGWAI` venue; the only crate that imports nautilus.
 
@@ -49,7 +51,7 @@ A Cargo workspace of five crates under `crates/`:
 
 ## Building
 
-The four broker crates build nautilus-free. `mogwai-adapter` depends on the
+The five broker crates build nautilus-free. `mogwai-adapter` depends on the
 published nautilus crates from crates.io, pinned in its `Cargo.toml`
 (default-features off, no pyo3), so a full build needs no sibling checkout -
 cargo fetches nautilus like any other dependency.
@@ -59,7 +61,7 @@ Use `cargo` for check/test/run:
 ```sh
 cargo clippy --all-targets               # lints
 cargo test                               # the test suite
-cargo run -p mogwai-server -- serve      # one venue, endpoint printed on stdout
+cargo run -p mogwai-cli -- serve         # one venue, endpoint printed on stdout
 ```
 
 `serve` takes no address: it always binds loopback on an ephemeral port, so two
@@ -69,11 +71,11 @@ captures it, a human reads it off the terminal.
 
 To put a `mogwai` binary on your `PATH` instead, install it. Nothing here is
 published to crates.io, so install from git or from a checkout - the package is
-`mogwai-server`, and the binary it installs is `mogwai`:
+`mogwai-cli`, and the binary it installs is `mogwai`:
 
 ```sh
-cargo install --git https://github.com/folknor/mogwai mogwai-server
-cargo install --path crates/mogwai-server            # from a checkout
+cargo install --git https://github.com/folknor/mogwai mogwai-cli
+cargo install --path crates/mogwai-cli              # from a checkout
 ```
 
 This build graph excludes `mogwai-adapter`, so it pulls no nautilus crates at
@@ -88,7 +90,7 @@ readiness line on stdout; see [`docs/cli.md`](docs/cli.md).
 Linux only, for now. The venue arms `PR_SET_PDEATHSIG` so the kernel terminates
 it when its launcher dies, which is the whole of its cleanup story - there is no
 PID file and no `stop` to fall back on - and that call is unconditional, so
-`mogwai-server` does not build elsewhere.
+`mogwai-server` does not build elsewhere, and neither does the `mogwai` binary.
 
 ## Usage
 

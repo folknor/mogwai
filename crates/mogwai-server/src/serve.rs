@@ -1,31 +1,11 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! One foreground mogwai venue process.
-
-#[cfg(not(unix))]
-compile_error!("mogwai-server requires a Unix target");
-
-mod admission;
-mod config;
-mod fills;
-mod r#gen;
-mod http;
-mod man;
-mod measure12a;
-mod run;
-mod source;
-mod sweeper;
-mod tape;
-mod tick_composition;
-mod ws;
-
-/// The fill-timing distribution certification. Test-only, and here rather than
-/// in `tests/` because this is the only place that can see
-/// `fills::scan_triggers`, `Engine::apply_scans` and `InstrumentProfiles`
-/// at once - precisely the seam it certifies.
-#[cfg(test)]
-mod fill_golden;
+//! One foreground mogwai venue run: boot, bind, announce readiness, serve.
+//!
+//! This is the entry the `mogwai` binary's `serve` subcommand calls. The
+//! argument parsing lives with the CLI; everything the venue actually DOES with
+//! those three values lives here, next to the state it builds.
 
 use std::{io::Write, path::PathBuf, sync::Arc, time::Duration};
 
@@ -33,17 +13,16 @@ use axum::{
     Router,
     routing::{get, post},
 };
-use clap::{Args, Parser, Subcommand};
 
 use crate::{
     config::{
         Config, build_instrument_profiles, build_run_clock, now_ns, refuse_unfunded_settlement,
     },
-    http::{AppState, account, arm_divergence, clock, instruments, quotes, trades},
+    http::{self, AppState, account, arm_divergence, clock, instruments, quotes, trades},
+    long_version,
     ws::ws_upgrade,
+    {fills, run, source, sweeper},
 };
-
-const LONG_VERSION: &str = env!("MOGWAI_LONG_VERSION");
 
 /// Raw fills the generator synthesizes per wall second, used only to project
 /// warmup cost at boot. It is a MEASURED number, not a target: see the
@@ -64,81 +43,6 @@ const SYNTHESIS_TICKS_PER_SEC: f64 = 2_900_000.0;
 /// this discharges is only that an extreme warmup fails loudly rather than
 /// looking like a hung boot.
 const WARMUP_WARN_SECS: f64 = 60.0;
-
-fn long_version() -> String {
-    format!("{LONG_VERSION} tape {}", mogwai_data::TAPE_PROTOCOL_VERSION)
-}
-
-#[derive(Parser)]
-#[command(name = "mogwai", version = long_version(), about = "Fake broker/exchange that drives a nautilus live trading path", arg_required_else_help = true)]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    Serve(ServeArgs),
-    // Boxed: GenArgs grew past clippy's variant-size threshold when the
-    // trace window landed, and the CLI parses exactly once.
-    Gen(Box<r#gen::GenArgs>),
-    Presets(PresetArgs),
-    /// Measure BBO protocol composition and write the paired budget fixtures.
-    TickComposition(tick_composition::TickCompositionArgs),
-    /// Print a bundled reference doc, or list the topics.
-    Man(ManArgs),
-}
-
-#[derive(Args)]
-struct ManArgs {
-    /// Reference topic to display. Omit to list the available topics.
-    #[arg(value_name = "TOPIC")]
-    topic: Option<man::ManTopic>,
-}
-
-#[derive(Args)]
-struct PresetArgs {
-    name: Option<String>,
-}
-
-#[derive(Args)]
-struct ServeArgs {
-    #[arg(long, value_name = "PATH")]
-    config: Option<PathBuf>,
-    #[arg(long, value_name = "DURATION")]
-    duration: Option<humantime::Duration>,
-    /// The launcher's own pid, so the venue can prove it still has the owner it
-    /// was started by.
-    ///
-    /// Optional, and the shipped launcher always passes it. Without it the venue
-    /// can only notice a launcher that dies DURING its startup, never one
-    /// already gone before the first instruction ran - see
-    /// `arm_parent_death_signal`.
-    #[arg(long, value_name = "PID")]
-    launcher_pid: Option<i32>,
-}
-
-fn main() -> anyhow::Result<()> {
-    match Cli::parse().command {
-        Command::Serve(args) => serve(args),
-        Command::Gen(args) => r#gen::run(*args),
-        Command::TickComposition(args) => tick_composition::run(&args),
-        Command::Presets(args) => {
-            if let Some(name) = args.name {
-                let document = config::preset_document(&name)
-                    .ok_or_else(|| anyhow::anyhow!("unknown preset {name}"))?;
-                print!("{document}");
-            } else {
-                println!("MNQ\nMES\nBTCUSDT\nETHUSDT\nSOLUSDT");
-            }
-            Ok(())
-        }
-        Command::Man(args) => {
-            man::run(args.topic);
-            Ok(())
-        }
-    }
-}
 
 /// The venue always binds loopback on an EPHEMERAL port, and there is no flag to
 /// change either half.
@@ -239,8 +143,14 @@ fn arm_parent_death_signal(expected: Option<i32>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn serve(args: ServeArgs) -> anyhow::Result<()> {
-    arm_parent_death_signal(args.launcher_pid)?;
+/// Run one venue in the foreground until its declared duration elapses or a
+/// signal arrives.
+pub fn serve(
+    config: Option<PathBuf>,
+    duration: Option<Duration>,
+    launcher_pid: Option<i32>,
+) -> anyhow::Result<()> {
+    arm_parent_death_signal(launcher_pid)?;
     init_stderr_logging()?;
     // Zero means the same thing here as it does in the config file: NO declared
     // completion. It used to mean the opposite on this path only - a venue that
@@ -248,14 +158,13 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     // `run_duration_ns = 0` ran forever while `--duration 0s` was dead on
     // arrival, and a launcher passing a zero it had defaulted saw a connection
     // refused against a port that had been alive a moment earlier.
-    let duration_ns = args
-        .duration
+    let duration_ns = duration
         .map(|duration| u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX))
         .filter(|ns| *ns != 0);
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(serve_async(args.config, duration_ns))
+        .block_on(serve_async(config, duration_ns))
 }
 
 async fn serve_async(

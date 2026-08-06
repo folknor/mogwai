@@ -13,6 +13,7 @@ repository = "https://github.com/folknor/mogwai"
 mogwai-protocol = { path = "crates/mogwai-protocol" }
 mogwai-engine = { path = "crates/mogwai-engine" }
 mogwai-data = { path = "crates/mogwai-data" }
+mogwai-server = { path = "crates/mogwai-server" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.151"

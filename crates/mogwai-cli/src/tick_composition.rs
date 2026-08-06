@@ -39,7 +39,7 @@ use clap::Args;
 use mogwai_data::{GeneratedSource, ParentSummary, SizeGrid, TickSource};
 use serde::Serialize;
 
-use crate::source::{InstrumentProfile, fingerprint};
+use mogwai_server::source::{InstrumentProfile, fingerprint};
 
 const VOL_WINDOW_SECS: u64 = 300;
 const WARMUP_SECS: u64 = 86_400;
@@ -252,7 +252,7 @@ fn resolve_profiles() -> anyhow::Result<BTreeMap<&'static str, InstrumentProfile
     PRESETS
         .into_iter()
         .map(|preset| {
-            let profile = crate::config::profile_from_preset(preset)
+            let profile = mogwai_server::config::profile_from_preset(preset)
                 .with_context(|| format!("resolving preset {preset} for tick composition"))?;
             Ok((preset, profile))
         })

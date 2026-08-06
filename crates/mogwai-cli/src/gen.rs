@@ -27,7 +27,7 @@ use mogwai_protocol::{
 };
 use rust_decimal::Decimal;
 
-use crate::source::{InstrumentProfiles, fingerprint};
+use mogwai_server::source::{InstrumentProfiles, fingerprint};
 
 /// Default offline realization, shared with the realism certification seed.
 const DEFAULT_GEN_SEED: u64 = 42;
@@ -252,7 +252,7 @@ fn run_into(args: &GenArgs, sink: &mut impl Write) -> anyhow::Result<()> {
 /// walk is the shipped one.
 pub(crate) fn run_measure12a(
     source: &mut mogwai_data::GeneratedSource,
-    profile: &crate::source::InstrumentProfile,
+    profile: &mogwai_server::source::InstrumentProfile,
     seed: u64,
     offset: i16,
     start: u64,
@@ -440,7 +440,7 @@ fn havoc_has_offline_inapplicable_surfaces(spec: &HavocSpec) -> bool {
 /// error, not a panic).
 fn build_source(
     args: &GenArgs,
-    profile: &crate::source::InstrumentProfile,
+    profile: &mogwai_server::source::InstrumentProfile,
     start_ns: u64,
 ) -> anyhow::Result<mogwai_data::GeneratedSource> {
     let fp = fingerprint();
@@ -474,7 +474,7 @@ fn build_source(
 /// The instrument to generate: `--config` resolves an operator config through
 /// the server's real loading path; otherwise `--symbol` resolves a built-in
 /// venue symbol first, then an embedded preset of that name.
-fn resolve_profile_for(args: &GenArgs) -> anyhow::Result<crate::source::InstrumentProfile> {
+fn resolve_profile_for(args: &GenArgs) -> anyhow::Result<mogwai_server::source::InstrumentProfile> {
     if let Some(path) = &args.config {
         return profile_from_config(path);
     }
@@ -486,8 +486,10 @@ fn resolve_profile_for(args: &GenArgs) -> anyhow::Result<crate::source::Instrume
 /// with, so a scratch config exercises exactly the shipped validation and
 /// defaulting. The config must configure an instrument: the built-in default
 /// venue would silently ignore every scratch scalar.
-fn profile_from_config(path: &std::path::Path) -> anyhow::Result<crate::source::InstrumentProfile> {
-    let cfg = crate::config::Config::load(Some(path.to_path_buf()))
+fn profile_from_config(
+    path: &std::path::Path,
+) -> anyhow::Result<mogwai_server::source::InstrumentProfile> {
+    let cfg = mogwai_server::config::Config::load(Some(path.to_path_buf()))
         .with_context(|| format!("loading --config {}", path.display()))?;
     if cfg.instrument.is_none() {
         bail!(
@@ -495,7 +497,7 @@ fn profile_from_config(path: &std::path::Path) -> anyhow::Result<crate::source::
             path.display()
         );
     }
-    let profiles = crate::config::build_instrument_profiles(&cfg)?;
+    let profiles = mogwai_server::config::build_instrument_profiles(&cfg)?;
     let defs = profiles.instrument_defs();
     let [def] = defs.as_slice() else {
         bail!(
@@ -512,11 +514,11 @@ fn profile_from_config(path: &std::path::Path) -> anyhow::Result<crate::source::
 /// A named symbol: a built-in venue symbol first, then an embedded preset.
 /// Checking the venue first keeps `--symbol BTCUSDT` byte-identical to what
 /// it produced before presets were reachable here.
-fn resolve_profile(symbol: &str) -> anyhow::Result<crate::source::InstrumentProfile> {
+fn resolve_profile(symbol: &str) -> anyhow::Result<mogwai_server::source::InstrumentProfile> {
     if let Some(profile) = InstrumentProfiles::defaults().get(symbol) {
         return Ok(profile.clone());
     }
-    crate::config::profile_from_preset(symbol).with_context(|| {
+    mogwai_server::config::profile_from_preset(symbol).with_context(|| {
         format!("unknown symbol {symbol}: not a built-in venue symbol and not an embedded preset")
     })
 }
@@ -842,7 +844,7 @@ struct OpenParent {
 /// its walk start (possibly `start - warmup`).
 pub(crate) fn summarize(
     source: &mut dyn TickSource,
-    profile: &crate::source::InstrumentProfile,
+    profile: &mogwai_server::source::InstrumentProfile,
     seed: u64,
     start: u64,
     end: u64,
@@ -1997,7 +1999,8 @@ mod tests {
         // the embedded preset resolves to.
         let path = scratch_config("plain-mnq.toml", "[instrument]\npreset = \"MNQ\"\n");
         let from_config = profile_from_config(&path).expect("config profile");
-        let from_preset = crate::config::profile_from_preset("MNQ").expect("preset profile");
+        let from_preset =
+            mogwai_server::config::profile_from_preset("MNQ").expect("preset profile");
         assert_eq!(
             format!("{:?}", from_config.def),
             format!("{:?}", from_preset.def)

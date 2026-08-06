@@ -59,8 +59,8 @@ MODE_CONFIGS = {
     "band": "smoke-band.toml",
     "band-swept": "smoke-band-swept.toml",
     "stop": "smoke-stop.toml",
-    "futures": "../crates/mogwai-server/tests/configs/mnq.toml",
-    "fees": "../crates/mogwai-server/tests/configs/fees.toml",
+    "futures": "../crates/mogwai-cli/tests/configs/mnq.toml",
+    "fees": "../crates/mogwai-cli/tests/configs/fees.toml",
 }
 
 

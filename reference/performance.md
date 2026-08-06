@@ -200,7 +200,7 @@ BTCUSDT, 4,288,935 projected ticks, 19 checkpoints retained). Release binary.
 | 3 | 1.4790 s | 2.90 M ticks/s |
 
 **2.9 M ticks/s**, spread 0.9 percent across the three. This is the number
-`SYNTHESIS_TICKS_PER_SEC` in `mogwai-server/src/main.rs` exists to hold, and it
+`SYNTHESIS_TICKS_PER_SEC` in `mogwai-server/src/serve.rs` exists to hold, and it
 had been carrying 5 M - so the boot projection ran 1.7x optimistic, and the
 60-second WARN threshold it gates was really firing at about 104 seconds of
 actual cost. Corrected to 2.9 M.

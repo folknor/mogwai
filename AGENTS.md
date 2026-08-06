@@ -16,7 +16,7 @@ venue over this workspace's native JSON-over-WS protocol.
 
 ## Workspace
 
-A Cargo workspace, five crates under `crates/`:
+A Cargo workspace, six crates under `crates/`:
 
 - `mogwai-protocol` - the wire types (`ClientMessage`, `ServerMessage`) plus
   `control::Divergence`. The single source of truth both ends serialize against;
@@ -31,7 +31,7 @@ A Cargo workspace, five crates under `crates/`:
   `GeneratedSource` synthetic generator the running server uses (fitted to the
   committed fingerprint) plus the `KrakenCsvSource` streaming loader kept as the
   offline-analysis lineage.
-- `mogwai-server` - the axum binary that owns the sockets, the clock and replay
+- `mogwai-server` - the axum LIBRARY that owns the sockets, the clock and replay
   pacing, synthesizing market data per subscription; exposes `/health`, `/ws`,
   `/control/divergence`, `/instruments`, `/trades`, `/quotes`, `/account` and
   `/clock`. Order entry is websocket-only - the `POST /orders` carrier went with
@@ -40,12 +40,22 @@ A Cargo workspace, five crates under `crates/`:
   it reports its bound address as a single JSON readiness line on stdout,
   and `PR_SET_PDEATHSIG` makes the kernel kill it when its launcher dies. There
   is no daemon mode and no `stop` subcommand - lifecycle is the launcher's job.
-  See `docs/cli.md`.
+  See `docs/cli.md`. It ships no binary: `serve`, `config` and `source` are its
+  public surface and `mogwai-cli` calls them.
+- `mogwai-cli` - the `mogwai` BINARY. A clap dispatcher plus the offline
+  subcommands that never bind a socket: `gen` (the tape generator and its
+  measurement consumers, including `measure12a`), `tick-composition`, `presets`
+  and `man`. `serve` does no work here - it hands its three arguments to
+  `mogwai_server::serve`. The bin TARGET name is `mogwai`, not the package name,
+  and that is load-bearing: `brokkr run mogwai`, the shipped launcher and
+  `analysis/mnq_fit.py` all exec `target/release/mogwai` by that name. The
+  socket-backed lifecycle/serving/completion integration tests live here too,
+  because only this crate's tests get `CARGO_BIN_EXE_mogwai`.
 - `mogwai-adapter` - the nautilus venue adapter: the `MogwaiDataClientFactory` /
   `MogwaiExecutionClientFactory`, their configs, and the client pair a host
   registers for the `MOGWAI` venue. The only crate that depends on nautilus -
   the published crates.io crates pinned in its `Cargo.toml`, default-features
-  off, no pyo3; the other four build nautilus-free.
+  off, no pyo3; the other five build nautilus-free.
 
 `scripts/` holds the end-to-end smoke test and the harness-bug flush the
 orchestration loop uses (codex is now driven by the `review` tool, configured

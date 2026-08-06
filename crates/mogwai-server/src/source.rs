@@ -15,30 +15,30 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-pub(crate) fn fingerprint() -> &'static Fingerprint {
+pub fn fingerprint() -> &'static Fingerprint {
     static FP: OnceLock<Fingerprint> = OnceLock::new();
     FP.get_or_init(Fingerprint::from_repo_json)
 }
 
 /// Fixed epoch of every generated tape. The run proper begins one configured
 /// warmup span after this instant.
-pub(crate) const TAPE_ORIGIN_NS: u64 = 0;
+pub const TAPE_ORIGIN_NS: u64 = 0;
 
 #[derive(Debug, Clone)]
-pub(crate) struct InstrumentProfile {
-    pub(crate) def: InstrumentDef,
-    pub(crate) scalars: GeneratorScalars,
-    pub(crate) session: SessionProfile,
+pub struct InstrumentProfile {
+    pub def: InstrumentDef,
+    pub scalars: GeneratorScalars,
+    pub session: SessionProfile,
     /// Collateral policy, copied into the engine at `Run::new`. Absent for
     /// spot, mandatory for a future.
-    pub(crate) margin: Option<crate::config::ConfiguredMargin>,
+    pub margin: Option<crate::config::ConfiguredMargin>,
     /// Maker/taker schedule, copied into the engine at `Run::new`. Absent
     /// means the fee-free venue.
-    pub(crate) fees: Option<crate::config::ConfiguredFees>,
-    pub(crate) calendar: Option<mogwai_data::SessionCalendar>,
+    pub fees: Option<crate::config::ConfiguredFees>,
+    pub calendar: Option<mogwai_data::SessionCalendar>,
 }
 impl InstrumentProfile {
-    pub(crate) fn new(
+    pub fn new(
         def: InstrumentDef,
         mut scalars: GeneratorScalars,
         session: SessionProfile,
@@ -58,11 +58,11 @@ impl InstrumentProfile {
     }
 }
 #[derive(Debug, Clone)]
-pub(crate) struct InstrumentProfiles {
+pub struct InstrumentProfiles {
     by_symbol: HashMap<Symbol, InstrumentProfile>,
 }
 impl InstrumentProfiles {
-    pub(crate) fn defaults() -> Self {
+    pub fn defaults() -> Self {
         Self::from_profiles(
             default_instruments()
                 .into_iter()
@@ -70,7 +70,7 @@ impl InstrumentProfiles {
                 .collect(),
         )
     }
-    pub(crate) fn from_profiles(profiles: Vec<InstrumentProfile>) -> Self {
+    pub fn from_profiles(profiles: Vec<InstrumentProfile>) -> Self {
         Self {
             by_symbol: profiles
                 .into_iter()
@@ -78,10 +78,10 @@ impl InstrumentProfiles {
                 .collect(),
         }
     }
-    pub(crate) fn get(&self, symbol: &str) -> Option<&InstrumentProfile> {
+    pub fn get(&self, symbol: &str) -> Option<&InstrumentProfile> {
         self.by_symbol.get(symbol)
     }
-    pub(crate) fn instrument_defs(&self) -> Vec<InstrumentDef> {
+    pub fn instrument_defs(&self) -> Vec<InstrumentDef> {
         let mut defs: Vec<_> = self
             .by_symbol
             .values()

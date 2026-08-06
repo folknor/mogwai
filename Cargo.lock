@@ -1613,6 +1613,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "mogwai-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures-util",
+ "humantime",
+ "mogwai-data",
+ "mogwai-protocol",
+ "mogwai-server",
+ "nix",
+ "owo-colors",
+ "pulldown-cmark",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tungstenite 0.30.0",
+]
+
+[[package]]
 name = "mogwai-data"
 version = "0.1.0"
 dependencies = [
@@ -1655,25 +1677,19 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "clap",
  "futures-util",
- "humantime",
  "mogwai-data",
  "mogwai-engine",
  "mogwai-protocol",
  "nix",
- "owo-colors",
- "pulldown-cmark",
  "rand 0.10.2",
  "rust_decimal",
  "serde",
  "serde_json",
  "tokio",
- "tokio-tungstenite 0.30.0",
  "toml",
  "tracing",
  "tracing-subscriber",
- "tungstenite 0.30.0",
 ]
 
 [[package]]

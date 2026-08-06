@@ -142,7 +142,7 @@ def venue_binary() -> str:
         )
     print("plot_tape: building mogwai (no binary under target/)", file=sys.stderr)
     build = subprocess.run(
-        ["cargo", "build", "--release", "-p", "mogwai-server", "--bin", "mogwai"],
+        ["cargo", "build", "--release", "-p", "mogwai-cli", "--bin", "mogwai"],
         cwd=REPO_ROOT,
     )
     if build.returncode != 0:

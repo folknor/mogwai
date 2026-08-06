@@ -27,7 +27,7 @@ use crate::source;
 // `deny` (unknown keys are rejected) are orthogonal and compose. Each
 // `[[instrument]]` table is guarded the same way, by `ConfiguredInstrument`.
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct Config {
+pub struct Config {
     /// Simulated duration of one venue run. Zero means the launcher owns
     /// shutdown; a non-zero duration is announced as a clean completion.
     pub(crate) run_duration_ns: u64,
@@ -168,7 +168,7 @@ pub(crate) struct Config {
     /// list: a run serves exactly one instrument, so `[[instrument]]` fails to
     /// parse rather than silently serving whichever entry sorted first.
     #[serde(rename = "instrument")]
-    pub(crate) instrument: Option<ConfiguredInstrument>,
+    pub instrument: Option<ConfiguredInstrument>,
     /// Market regime for this run's tape. Formerly the one knob a consumer
     /// picked for itself per subscription; with no subscriptions left it is
     /// boot config, chosen by whoever launches the run. Absent means the
@@ -442,7 +442,7 @@ impl Config {
     /// Replaces the former MOGWAI_REPLAY_SPEED and MOGWAI_GAP_CAP_MS
     /// environment variables - run knobs belong in explicit input, not ambient
     /// environment.
-    pub(crate) fn load(path: Option<PathBuf>) -> anyhow::Result<Self> {
+    pub fn load(path: Option<PathBuf>) -> anyhow::Result<Self> {
         let cfg: Self = match path {
             Some(path) => {
                 let text = std::fs::read_to_string(path)?;
@@ -696,7 +696,7 @@ fn assert_preset_diagnostics(
     Ok(())
 }
 
-pub(crate) fn preset_document(name: &str) -> Option<&'static str> {
+pub fn preset_document(name: &str) -> Option<&'static str> {
     preset_text(name)
 }
 
@@ -778,7 +778,7 @@ fn replace_dotted(table: &mut toml::Table, path: &str, value: toml::Value) -> an
 /// nonsense one.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ConfiguredInstrument {
+pub struct ConfiguredInstrument {
     pub(crate) symbol: mogwai_protocol::Symbol,
     pub(crate) class: ConfiguredClass,
     pub(crate) price_precision: u8,
@@ -814,7 +814,7 @@ pub(crate) enum ConfiguredClass {
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ConfiguredMargin {
+pub struct ConfiguredMargin {
     pub(crate) initial_per_contract: Decimal,
     pub(crate) maintenance_per_contract: Decimal,
     #[serde(default)]
@@ -831,7 +831,7 @@ pub(crate) enum BreachAction {
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ConfiguredFees {
+pub struct ConfiguredFees {
     pub(crate) maker: FeeRate,
     pub(crate) taker: FeeRate,
 }
@@ -873,9 +873,7 @@ impl ConfiguredInstrument {
     }
 }
 
-pub(crate) fn build_instrument_profiles(
-    cfg: &Config,
-) -> anyhow::Result<source::InstrumentProfiles> {
+pub fn build_instrument_profiles(cfg: &Config) -> anyhow::Result<source::InstrumentProfiles> {
     let Some(configured) = &cfg.instrument else {
         return Ok(source::InstrumentProfiles::defaults());
     };
@@ -998,7 +996,7 @@ fn profile_from_configured(
 /// operator config: `mogwai gen --symbol MNQ`. Goes through `effective_preset`
 /// so preset inheritance (MES over MNQ) and the provenance completeness check
 /// apply exactly as they do at boot.
-pub(crate) fn profile_from_preset(name: &str) -> anyhow::Result<source::InstrumentProfile> {
+pub fn profile_from_preset(name: &str) -> anyhow::Result<source::InstrumentProfile> {
     let (merged, _provenance) = effective_preset(name)?;
     let configured: ConfiguredInstrument = merged
         .try_into()

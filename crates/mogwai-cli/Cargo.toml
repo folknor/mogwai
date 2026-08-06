@@ -1,0 +1,42 @@
+[package]
+name = "mogwai-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# The binary is `mogwai`, not the package name `mogwai-cli`. The target name is
+# load-bearing well beyond convenience: `brokkr run mogwai`, the shipped
+# launcher in `mogwai-protocol`, `analysis/mnq_fit.py` (which execs
+# `target/release/mogwai` directly) and the docs all key on it. Renaming the
+# target breaks the measurement harness silently.
+[[bin]]
+name = "mogwai"
+path = "src/main.rs"
+
+[dependencies]
+mogwai-server.workspace = true
+mogwai-protocol.workspace = true
+mogwai-data.workspace = true
+
+clap = { version = "4.6.3", features = ["derive", "string"] }
+serde.workspace = true
+serde_json.workspace = true
+rust_decimal.workspace = true
+anyhow.workspace = true
+humantime = "2"
+
+# `mogwai man` renders the bundled reference/*.md docs to the terminal.
+owo-colors = "4"
+pulldown-cmark = "0.13"
+
+[dev-dependencies]
+mogwai-protocol.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+serde_json.workspace = true
+tungstenite = "0.30.0"
+tokio-tungstenite = "0.30.0"
+nix = { version = "0.31.3", features = ["fs", "process", "signal"] }
+
+[lints]
+workspace = true
