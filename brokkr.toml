@@ -64,6 +64,14 @@ skip = [
     # Run them by name: `brokkr test -p mogwai-cli parity12a_observed
     # --timeout 279` and `... parity12a_generated_seed_N --timeout 279`.
     "parity12a_",
+    # Phase 3a/3b parity gates: the cadence gate streams three multi-GB
+    # Binance archives, the 3b fit gate reads the delivered July corpus and
+    # the Python-era walk cache, and the session-profile gate needs the NQ
+    # one-minute archive. All need local data no clone carries. Run them by
+    # name: `brokkr test -p mogwai-cli parity3b --timeout 279` and
+    # `brokkr test -p mogwai-lab parity3b_session_profile`.
+    "parity3a_",
+    "parity3b_",
 ]
 certifies = "complete"
 

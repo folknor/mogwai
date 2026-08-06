@@ -115,6 +115,7 @@ pub fn cache_root(cli_override: Option<&Path>) -> PathBuf {
 /// A provenance-keyed cache directory under the cache root's `entries/`
 /// subdirectory - `scratch/` is reserved for [`ScratchDir`], so the two
 /// classes can never collide on a name.
+#[derive(Clone)]
 pub struct CacheStore {
     root: PathBuf,
     token: ProvenanceToken,

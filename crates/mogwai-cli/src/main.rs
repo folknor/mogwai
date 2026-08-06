@@ -22,7 +22,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-use mogwai_cli::measure;
+use mogwai_cli::{fit, measure};
 use mogwai_server::{config, long_version};
 
 #[derive(Parser)]
@@ -50,6 +50,10 @@ enum Command {
     /// plus the eight in-process attestation walks, assembled and
     /// validated into the committed artifact shape.
     Measure(measure::MeasureArgs),
+    /// The protocol-11 session calibration fit: the observed corpus pass,
+    /// the closed-form session refits, the CRN vol_scalar solve and the
+    /// family probes, written as the hash-bound fit artifact.
+    Fit(fit::FitArgs),
     /// The cache-storage-class manual controls (stats / clean / clean
     /// --stale).
     Cache(cache::CacheArgs),
@@ -118,6 +122,7 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Preflight(args) => preflight::run(args),
         Command::Measure(args) => measure::run(args),
+        Command::Fit(args) => fit::run(&args),
         Command::Cache(args) => cache::run(args),
         Command::Synth { command } => synth::run(command),
         Command::CadenceFeasible(args) => synth::run_cadence_feasible(args),

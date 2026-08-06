@@ -199,6 +199,55 @@ pub fn py_sum(values: impl IntoIterator<Item = f64>) -> f64 {
     sum + c
 }
 
+/// CPython's `int.__truediv__`: the CORRECTLY ROUNDED quotient of two
+/// arbitrary-precision integers.
+///
+/// This is a parity requirement, not a nicety. `a as f64 / b as f64` rounds
+/// the numerator to binary64 BEFORE dividing, and the fit's pooled
+/// `mean_event_duration_s` divides a nanosecond gap sum of order 2e16 - past
+/// 2^53 - by an eligible-gap count. That pre-rounding lands one ulp off the
+/// committed artifact. Python never pre-rounds: its ints are exact and the
+/// division is a single correctly-rounded operation.
+///
+/// The implementation shifts the numerator until the integer quotient
+/// carries at least 54 significant bits, then rounds half-to-even on the
+/// remainder, which is exactly what CPython's `long_true_divide` does.
+#[must_use]
+pub fn py_int_div(n: i64, d: i64) -> f64 {
+    assert!(d != 0, "division by zero has no float value");
+    let sign = if (n < 0) != (d < 0) { -1.0 } else { 1.0 };
+    let n_abs = u128::from(n.unsigned_abs());
+    let d_abs = u128::from(d.unsigned_abs());
+    if n_abs == 0 {
+        return sign * 0.0;
+    }
+    let bitlen = |x: u128| -> i32 { 128 - i32::try_from(x.leading_zeros()).expect("a bit count") };
+    // Scale so the integer quotient carries exactly 53 significant bits;
+    // then one half-to-even rounding decision on the exact remainder gives
+    // the correctly-rounded result, and the final scaling by a power of two
+    // is exact.
+    let mut shift = 53 - (bitlen(n_abs) - bitlen(d_abs));
+    let (mut q, mut rem, mut den) = (0u128, 0u128, 0u128);
+    for _ in 0..3 {
+        let sn = n_abs << u32::try_from(shift.max(0)).expect("a shift");
+        let sd = d_abs << u32::try_from((-shift).max(0)).expect("a shift");
+        q = sn / sd;
+        rem = sn % sd;
+        den = sd;
+        if q >= 1u128 << 53 {
+            shift -= 1;
+        } else if q < 1u128 << 52 {
+            shift += 1;
+        } else {
+            break;
+        }
+    }
+    if rem * 2 > den || (rem * 2 == den && q % 2 == 1) {
+        q += 1;
+    }
+    sign * (q as f64) * (2f64).powi(-shift)
+}
+
 // -- Type-strict canonical serialization ------------------------------------
 
 /// CPython's `repr(float)`: shortest round-trip digits, fixed notation when
@@ -441,6 +490,27 @@ fn collect_differences(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The parity case that forced `py_int_div` into existence: the fit's
+    /// pooled `mean_event_duration_s` over eight FINAL seeds. Pre-rounding
+    /// the 2.1e16-nanosecond numerator to binary64 lands one ulp off what
+    /// CPython's exact int/int returns.
+    #[test]
+    fn py_int_div_is_correctly_rounded_past_two_to_the_fifty_third() {
+        // CPython: 20222644286440873 / 353454709 == 57214244.913174644,
+        // while float(n)/float(d) == 57214244.91317464 - one ulp low.
+        let n = 20_222_644_286_440_873i64;
+        let d = 353_454_709i64;
+        assert_eq!(py_float_repr(n as f64 / d as f64), "57214244.91317464");
+        assert_eq!(py_float_repr(py_int_div(n, d)), "57214244.913174644");
+    }
+
+    #[test]
+    fn py_int_div_agrees_with_plain_division_on_small_operands() {
+        for (n, d) in [(1i64, 3i64), (7, 2), (-7, 2), (10, 5), (0, 9), (123, 456)] {
+            assert_eq!(py_int_div(n, d), n as f64 / d as f64, "{n}/{d}");
+        }
+    }
 
     #[test]
     fn splitmix_and_tuple_mix_match_the_frozen_vectors() {

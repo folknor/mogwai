@@ -542,6 +542,201 @@ subphase's own Rust tests.
   `notes/todo.md` as a parity-frozen defect since it is a stale-input
   fact, not a Python/Rust behavioral divergence.
 
+  LANDED 2026-08-07 (3b, the last porting phase). `mogwai_lab::fit`
+  carries the protocol-11 fit in seven modules: `observe` (the one
+  streaming corpus pass with its three chains, the protocol-11
+  session-refit cells, `Quantiles`/`Acf`/`dist_stats`/`hist_quantile`
+  and `minute_range_envelope`), `curves` (the exposure tables,
+  `hourly_robust_curve`, `normalize_hour_curve`, `materialize_curve`,
+  `curve_triple`/`curve_pair`, `fit_vol_hour`, `fit_intensity_hour`,
+  `observed_walltime_curves`), `solve` (the CRN `trisect`/`coarse_grid`/
+  `solve_scalar` with the invariants as unit tests), `walk` (the cached
+  `gen --type summary` evaluation), `driver` (`run_fit`: the vol solve,
+  the family probes, `judge`, the verdicts and tolerance classes, the
+  `session_refit` record builder), `diagnostics` (`build_diagnostics`)
+  and `mtrand`. `mogwai_lab::session_profile` is
+  `analysis/fit_session_profile.py`. CLI: `mogwai fit` with
+  `--corpus/--ledger/--preflight/--cache-dir/--cache-commit/--out` under
+  `crates/mogwai-cli/src/fit.rs`, carrying `mode_fit`'s clean-tree
+  binding; `--out` defaults under `target/` so a bare invocation can
+  never clobber the committed `analysis/mnq-fit.json`.
+
+  THE SUMMARIZE MOVE. `gen.rs`'s `summarize` and its protocol-11 session
+  cells, top-minute records and `session_segment_at` are now
+  `mogwai_lab::summary`; `gen.rs` keeps `write_summary` and the CLI
+  surface and calls straight into it. This is the one place `mogwai-lab`
+  depends on `mogwai-server`: a walk's instrument is an
+  `InstrumentProfile`, resolved through the server's own `Config::load`
+  exactly as `mnq_fit.py`'s `--config` scratch walks were. No cycle -
+  `mogwai-server` does not depend on the lab. `gen --type summary` is
+  byte-identical across the move, pinned by a before/after run of the
+  release binary (MNQ, seed 7, start 1782856800000000000, length 2d,
+  warmup 3d) captured from clean HEAD and re-captured after: `cmp`
+  clean, twice (once after the port, once after the clippy pass).
+
+  GATES, all run:
+
+  1. **The binding one.** `crates/mogwai-cli/tests/parity3b.rs`'s
+     `parity3b_fit_matches_the_committed_artifact_over_the_python_walk_cache`,
+     `#[ignore]`d, 82 s release. `run_fit` over the delivered July corpus,
+     replaying the Python-era cache at `analysis/out/mnq-fit-scratch`
+     under the artifact's own bound commit, reproduces
+     `analysis/mnq-fit.json` typed-canon-identically. WALK CACHE: 132
+     lookups, 132 Python-layout hits, 0 misses - every walk the solve
+     needed (64 SEARCH coarse-grid evaluations over two seeds, 8 arrival
+     probe walks, 3 x 8 shared FINAL probe walks that dedupe onto the 8
+     combined walks, plus the trisection tail) resolved from cache, so
+     nothing was re-walked. The Python key derivation is ported in
+     `fit::walk::python_cache_key`.
+
+     EXCLUSIONS, three, each verified rather than assumed:
+     `binding.harness_tree_commit` (the committed artifact binds the
+     commit the Python ran from; any Rust run binds its own HEAD);
+     `binding.subcontract_hash` and `binding.preflight_artifact_hash`,
+     both CONFIRMED stale-input drift of the same class as phase 3a's
+     `fingerprint.json` finding. The artifact records subcontract
+     `35e5b033...`, which is the sub-contract as it stood at the
+     protocol-11 fit; the protocol-12a constants joined
+     `SUBCONTRACT_KEYS` afterwards, so `mnq_fit.py`'s OWN
+     `subcontract_hash()` returns `1ca79d9c...` today - byte-identical
+     to what this port computes AND to what the committed
+     `analysis/out/mnq-fit-preflight.json` already records. Likewise the
+     artifact hashes the preflight FILE as `adf6b8e7...` while the file
+     on disk today hashes to `96013588...`, again what both the Python
+     and the port compute now. Verified by running the Python directly.
+     `binding.file_hashes` - the field that actually binds the corpus -
+     IS compared and matches. Nothing else is excluded: `solves` with
+     its `evaluations`/`termination`/`final_score`, every `session_refit`
+     record, `landing_rule`, `verdicts`, `diagnostics` and the whole
+     `observed` block are compared byte-of-meaning. `mnq-fit.json`
+     carries no `cost` object, so the timing exclusions 12a needed have
+     no counterpart here.
+
+  2. **fit_session_profile.** The NQ archive IS on disk
+     (`research/market-data/nq-1m_bk.zip`, 72 MB), so the live path ran.
+     `crates/mogwai-lab/tests/parity3b_session_profile.rs`, two ignored
+     tests, 2 s release. The preflight report is field-for-field
+     identical to `python3 analysis/fit_session_profile.py preflight`
+     (5,891,412 rows, 4,539 sessions observed, 4,376 eligible, 163 early
+     closes, 2,025,407 CST rows, 289,404 missing minutes, zero
+     zero-volume rows). The fit reproduces all four scopes against a
+     direct run of the Python: alpha 290.0524/186.8553/239.7084/424.8419,
+     sweeps 21/25/20/21, material shares 0.0000/0.0336/0.0087/0.0000
+     over 0/4/1/0 cells, peak-to-trough 36.45/117.55/37.99/27.51, era
+     stability 0.2283 over 26 cells -> ERA-DEPENDENT, Outcome 2.
+
+     HONEST SCOPE FINDING on "the three fitted entries". The preset's
+     provenance table names three `[instrument.session]` entries, but
+     only ONE still descends from this script: `session.dow_weight`,
+     which the gate reproduces exactly as the shipped
+     `[1.5179, 0.9080, 0.9865, 1.0157, 1.0535, 1.0225, 1.0000]` (the fit
+     returns `1.5178908567396936, 0.9080179424286638, 0.9865270760379059,
+     1.0156734577180422, 1.0534691194906738, 1.0224559786097835, 1.0`,
+     which is those values before the preset's four-decimal rounding).
+     `session.intensity_hour` and `session.vol_hour` were RE-PROVENANCED
+     to the July MNQ TBBO corpus by the protocol-11 refit - their NQ-bar
+     ancestors were overwritten - so no currently-committed value of
+     either can be reproduced from this archive by anyone, Python or
+     Rust. Gate 1 reproduces both, from the corpus that actually fitted
+     them.
+
+  3. **The solve invariants**, ported one for one from the Python
+     selftest's solve-mechanics section into
+     `mogwai_lab::fit::solve`'s tests: trisection convergence on a plain
+     objective, the flat-objective tie-break to the smaller candidate,
+     the boundary winner refining its single inside neighbour interval,
+     seeded endpoints never re-evaluated AND the fresh interior pair
+     (not the seeds) deciding the bracket, the objective threshold
+     stopping after the coarse grid at exactly 11 evaluations,
+     log-domain relative termination reading the log span directly, and
+     end-to-end CRN determinism (two runs name the identical candidate
+     sequence). Plus one the Python has no counterpart for: the coarse
+     grid's endpoints in both domains, because prewarm and solve must
+     name bit-identical candidates or every cache lookup misses. The
+     tolerance-class battery (inclusive boundaries in relative,
+     absolute, ceiling, band and exact) lives in `fit::tests`.
+
+  4. **The move.** `brokkr check` green - 580 passed, 101 ignored - with
+     every pre-existing summary test (`summary_matches_an_independent_
+     tick_walk`, `minute_ranges_match_an_independent_bar_pass`,
+     `halt_boundaries_never_borrow_the_pre_halt_mid`,
+     `session_segment_at_agrees_with_mogwai_lab`, the top-minute and
+     protocol-9 oracle tests) still passing against the moved module,
+     plus the `cmp`-clean byte comparison above.
+
+  TWO CONVENTIONS PINNED, both found by the gate rather than by reading:
+
+  - **CPython's `sum()` over floats is compensated, its `+=` loops are
+    not** - the phase-2b pin, and 3b found three more sites it applies
+    to: `fit_intensity_hour`'s per-hour `weighted` day-factor sum (a
+    naive fold moved the last ulp of EVERY normalized intensity value,
+    and through the materialized array the whole candidate curve),
+    `pooled`'s `mid_return_sumsq` fold across seeds, and
+    `generated_evidence`'s pooled wall-time `sumsq`. `normalize_hour_
+    curve`'s own `num`/`den` accumulation is a Python `+=` loop and
+    stays a naive fold.
+  - **CPython's `int / int` is correctly rounded from EXACT operands.**
+    New this phase: `kernel::py_int_div`. The fit's pooled
+    `mean_event_duration_s` divides a nanosecond gap sum of order 2e16 -
+    past 2^53 - by an eligible-gap count, and `a as f64 / b as f64`
+    rounds the numerator to binary64 BEFORE dividing, landing one ulp
+    off the committed artifact. Python never pre-rounds. Used at the
+    three gap-sum division sites; every other integer division in the
+    fit has operands well inside 2^53 and is left alone.
+
+  Also this phase: `kernel::py_int_div` and `fit::mtrand`, a port of
+  CPython's Mersenne Twister (`init_by_array` seeding, `getrandbits`'s
+  word layout, `_randbelow`'s rejection sampler and `choice`), needed
+  because `minute_range_envelope` draws 22,000 session labels under
+  `random.Random(1)` and its output IS the bound the three minute-range
+  gates judge against. Pinned against CPython's own stream, not against
+  the implementation. `storage::CacheStore` gained `Clone`;
+  `mogwai-lab` gained `#![recursion_limit = "512"]` because the
+  artifact's record literals are wide `json!` blocks. `brokkr.toml`'s
+  complete profile now skips `parity3a_` and `parity3b_` alongside
+  `parity12a_`, for the same reason: local data no clone carries.
+
+  OWNER RULINGS STILL OPEN, assessed and left untouched as briefed:
+
+  - **select_windows.py** (370 lines, `features`/`select`/`drift`/`plan`).
+    Absorbing it is a genuinely small port - four phases over the four
+    committed CME bar archives, a cached `cme_daily_features.json`
+    intermediate, z-scores over eligible months and a
+    farthest-point-first selection - and this phase's
+    `session_profile.rs` already lands most of its infrastructure (the
+    same zip-streaming bar reader, the same 17:00 session-date
+    convention, the same roll trim). Its own docstring calls the
+    `DATABENTO_START` constant load-bearing beyond eligibility, which is
+    exactly the kind of silent re-centring a port must not perturb, so
+    it needs a gate: `analysis/targets-frozen.json` is committed and the
+    `select` phase is deterministic given the feature cache, so
+    reproducing that file from the cache would be a real one. Against
+    that: `cme_daily_features.json` is NOT committed (the triage's own
+    lateral finding about regenerable caches), so a from-archives gate
+    is the only fully honest one, and no purchase decision is on record
+    as coming. The honest verdict looks like either "absorb with a
+    targets-frozen gate, budget one small slice" or "re-sentence to
+    KEEP until a purchase question actually returns"; both are
+    defensible and the choice is about whether more sampling-frame
+    buying is expected, which is owner knowledge, not code knowledge.
+  - **tick_composition_ratios.py** (680 lines). Reading it settles the
+    triage's ambiguity in one direction: it contains NO independent
+    estimator. It reads two committed
+    `analysis/tick-composition-protocol-N.json` fixtures that the RUST
+    side produced (`mogwai tick-composition`), checks their `pairing_id`
+    relationship, and applies a budget-policy arithmetic over frozen
+    per-mode baseline tables to print resize proposals. That is a report
+    generator over Rust output, not a second implementation of a shared
+    contract - the opposite of `roll_estimator.py`, whose whole point is
+    that two languages independently compute the same estimator over one
+    shared fixture. So the ABSORB reading is the one the code supports,
+    and the natural shape is a `--report` mode on the existing
+    `tick-composition` subcommand, which already owns the fixtures. The
+    one thing absorbing costs is the frozen baseline tables: they are
+    historical records ("frozen once its mode's resize has landed"), so
+    they must move as data, not be re-derived. Still an owner call
+    because the triage flagged it as one.
+
 ## Phase 4 - review, then retirement (strictly in that order)
 
 Owner ruling 2026-08-06: the Python does NOT retire until AFTER the

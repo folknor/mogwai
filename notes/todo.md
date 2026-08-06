@@ -12,6 +12,17 @@ Or both. There are no exceptions.
 
 ## Open issues
 
+- OWNER DECISION, rewrite leftovers (assessments in the phase-3b
+  report and notes/rust-rewrite-phases.md): select_windows.py -
+  absorb with a targets-frozen gate (one small slice; the
+  session-profile port already landed its infrastructure) or
+  re-sentence to KEEP until a sampling-frame purchase question
+  returns; tick_composition_ratios.py - reading it settled the triage
+  ambiguity, it is a report generator over Rust-produced fixtures
+  with no independent estimator, so ABSORB as a --report mode on the
+  tick-composition subcommand is the honest verdict, with the frozen
+  baseline tables moving as data, never re-derived.
+
 - OWNER DECISION: the committed `analysis/fingerprint.json` has drifted
   from its gitignored `analysis/char_*.json` inputs - regeneration
   (Python and the Rust port agree) produces
