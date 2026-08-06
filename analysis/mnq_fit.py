@@ -20,12 +20,16 @@ Usage:
     python3 analysis/mnq_fit.py selftest
     python3 analysis/mnq_fit.py preflight
     python3 analysis/mnq_fit.py fit
+    python3 analysis/mnq_fit.py cost12a
     python3 analysis/mnq_fit.py measure12a
 
 `measure12a` is the protocol-12a measurement landing
 (notes/protocol-12a-measurement-spec.md): the observed-side evidence
-blocks and permutation counterfactuals now (Brick O), the generated
-half and the eligibility ladder when Bricks G and M land.
+blocks and permutation counterfactuals (Brick O) plus the eight cached
+generated FINAL walks (Brick G); the aggregation, ladder and committed
+artifact land with Brick M. `cost12a` is the Brick G cost probe: a
+7-day summary-vs-measure12a runtime and RSS gate that must pass before
+the FINAL walks run.
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ import random
 import subprocess
 import sys
 import threading
+import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
@@ -2089,6 +2094,50 @@ def _m12a_block1(state: _M12aSession) -> list[dict]:
     ]
 
 
+def _window_schedule(session: str, segment: str, w: int) -> list:
+    """The pure-calendar window schedule ONE iterator both the block-2
+    accumulator and the expected-exposure judge consume, so their
+    endpoint rules cannot drift: (start, stop, endpoint_hour | None)
+    for every segment-origin-aligned half-open window strictly
+    contained in the segment. None marks an hour-crossing window
+    (endpoint-hour attribution: a window ending exactly ON the hour
+    boundary crosses) - excluded from every cell, resets runs and
+    lag-1 pairs."""
+    origin = segment_origin_ns(session, segment)
+    end = segment_end_ns(session, segment)
+    out = []
+    w_ns = w * 10**9
+    start = origin
+    while start + w_ns <= end:
+        stop = start + w_ns
+        s_hour = (start // 3_600_000_000_000) % 24
+        e_hour = (stop // 3_600_000_000_000) % 24
+        out.append((start, stop, e_hour if s_hour == e_hour else None))
+        start = stop
+    return out
+
+
+_EXPECTED_WINDOWS_CACHE: dict[tuple, dict] = {}
+
+
+def expected_scheduled_windows(session: str, hour: int, w: int) -> int:
+    """The calendar-derived expected scheduled-window count for one
+    (session, hour, window length), independent of any candidate's own
+    data (spec 3.3 scheduled-exposure completeness): 59 per full hour
+    at 60 s, 44 at the halt hour."""
+    key = (session, w)
+    counts = _EXPECTED_WINDOWS_CACHE.get(key)
+    if counts is None:
+        counts = {}
+        for segment in ("overnight", "post_halt"):
+            for _start, _stop, h in _window_schedule(
+                    session, segment, w):
+                if h is not None:
+                    counts[h] = counts.get(h, 0) + 1
+        _EXPECTED_WINDOWS_CACHE[key] = counts
+    return counts.get(hour, 0)
+
+
 def _m12a_block2(state: _M12aSession) -> dict:
     """Per (hour, window_s): scheduled/zero window counts, exact count and
     run-length histograms, and the lag-1 sufficient moments. Windows are
@@ -2110,12 +2159,9 @@ def _m12a_block2(state: _M12aSession) -> dict:
 
     for segment in state.order:
         seg = state.segments[segment]
-        origin = segment_origin_ns(state.session, segment)
-        end = segment_end_ns(state.session, segment)
         pts = seg["parent_ts"]
         n = len(pts)
         for w in COUNT_WINDOWS_S:
-            w_ns = w * 10**9
             i = 0
             prev_count = None   # lag-1 partner within segment+hour
             prev_hour = None    # hour of the previous QUALIFIED window
@@ -2128,11 +2174,8 @@ def _m12a_block2(state: _M12aSession) -> dict:
                     rc[run] = rc.get(run, 0) + 1
                 run = 0
 
-            start = origin
-            while start + w_ns <= end:
-                stop = start + w_ns
-                s_hour = (start // 3_600_000_000_000) % 24
-                e_hour = (stop // 3_600_000_000_000) % 24
+            for start, stop, hour in _window_schedule(
+                    state.session, segment, w):
                 while i < n and pts[i] < start:
                     i += 1
                 j = i
@@ -2140,7 +2183,7 @@ def _m12a_block2(state: _M12aSession) -> dict:
                     j += 1
                 count = j - i
                 i = j
-                if s_hour != e_hour:
+                if hour is None:
                     # Hour-crossing window - INCLUDING one ending
                     # exactly on the hour boundary (endpoint-hour
                     # attribution, matching the fixed-horizon
@@ -2148,9 +2191,7 @@ def _m12a_block2(state: _M12aSession) -> dict:
                     close_run()
                     prev_count = None
                     prev_hour = None
-                    start = stop
                     continue
-                hour = e_hour
                 if prev_hour is not None and hour != prev_hour:
                     # Hour boundary between windows: runs and pairs reset.
                     close_run()
@@ -2174,7 +2215,6 @@ def _m12a_block2(state: _M12aSession) -> dict:
                     run += 1
                 else:
                     close_run()
-                start = stop
             close_run()
     out: dict[str, dict] = {}
     for (hour, w), c in sorted(cells.items()):
@@ -2202,6 +2242,15 @@ def _m12a_block3(state: _M12aSession) -> dict:
         seg = state.segments[segment]
         origin = segment_origin_ns(state.session, segment)
         end = segment_end_ns(state.session, segment)
+        # Amendment A: every (segment, hour) the segment spans - every
+        # UTC hour interval with a positive intersection with
+        # [origin, end) - materializes a permutation cell, so hours
+        # with no emitted windows still emit all-zero PermRecords.
+        hour_ns = 3_600_000_000_000
+        t = (origin // hour_ns) * hour_ns
+        while t < end:
+            perm_windows.setdefault((segment, (t // hour_ns) % 24), {})
+            t += hour_ns
         series = {
             h: _wall_boundaries(seg, h, origin, end)
             for h in WALL_HORIZONS_S
@@ -2358,12 +2407,18 @@ def _h20_shape(h20: dict) -> dict:
     return out
 
 
-def _m12a_block4(state: _M12aSession) -> dict:
+def _m12a_block4(state: _M12aSession) -> tuple[dict, list]:
     """The model-free past-only standardizer (spec block 4): trailing
     300 s same-segment history, minimum 1000 returns, one-max-trimmed
     mean absolute scale excluding the current return, z = r / scale.
-    Zeros stay in history and population."""
+    Zeros stay in history and population. A nonpositive or non-finite
+    scale OMITS that residual (the return still enters history) per
+    the rev-11 frozen exception; the omissions come back as one
+    Amendment-F RefusalRec per (session, hour) - the sole RefusalRec
+    class owning omitted observations rather than refusal-caused
+    nulls. No duplicate record for the pooled "all" cell."""
     per_hour: dict[int, dict] = {}
+    omitted: dict[int, int] = {}
 
     def hour_acc(hour: int) -> dict:
         acc = per_hour.get(hour)
@@ -2401,23 +2456,26 @@ def _m12a_block4(state: _M12aSession) -> dict:
                 mx = maxq[0]
                 scale = (run_sum - mx) / (count - 1)
                 if not math.isfinite(scale) or scale <= 0:
-                    raise Refusal(
-                        f"block-4 scale nonpositive/non-finite at "
-                        f"{state.session} hour {hour}"
-                    )
-                z = r / scale
-                az = abs(z)
-                # The per-hour cell AND the pooled all-hours cell (the
-                # innovation family's fourth inventory metric).
-                for acc in (hour_acc(hour), hour_acc("all")):
-                    acc["residual_count"] += 1
-                    if r == 0.0:
-                        acc["zeros"] += 1
-                    else:
-                        acc["nz_abs"].append(az)
-                    for mi, mult in enumerate(RESIDUAL_EXCEED_MULTIPLES):
-                        if az > mult:
-                            acc["exceed"][mi] += 1
+                    # Omitted from the residual population of BOTH the
+                    # hour cell and the pooled "all" cell; the return
+                    # still enters history below.
+                    omitted[hour] = omitted.get(hour, 0) + 1
+                else:
+                    z = r / scale
+                    az = abs(z)
+                    # The per-hour cell AND the pooled all-hours cell
+                    # (the innovation family's fourth inventory
+                    # metric).
+                    for acc in (hour_acc(hour), hour_acc("all")):
+                        acc["residual_count"] += 1
+                        if r == 0.0:
+                            acc["zeros"] += 1
+                        else:
+                            acc["nz_abs"].append(az)
+                        for mi, mult in enumerate(
+                                RESIDUAL_EXCEED_MULTIPLES):
+                            if az > mult:
+                                acc["exceed"][mi] += 1
             a = abs(r)
             window.append((t, a))
             run_sum += a
@@ -2443,7 +2501,14 @@ def _m12a_block4(state: _M12aSession) -> dict:
             "exceed_8": acc["exceed"][1] / rc if rc else None,
             "exceed_16": acc["exceed"][2] / rc if rc else None,
         }
-    return out
+    refusals = [
+        {"scope": f"observed session {state.session}",
+         "cell": f"block4 hour {hour} standardizer",
+         "reason": f"{n} residuals omitted: nonpositive or "
+                   f"non-finite trailing scale"}
+        for hour, n in sorted(omitted.items())
+    ]
+    return out, refusals
 
 
 def _windows_stats(values: list[float], windows: list[list[int]]):
@@ -2553,6 +2618,7 @@ def m12a_close_session(state: _M12aSession) -> dict:
     state.seg("overnight")
     state.seg("post_halt")
     block3, perm_windows = _m12a_block3(state)
+    block4, block4_refusals = _m12a_block4(state)
     segments = [
         {"segment_index": SEGMENT_INDEX[sgm],
          "open_ns": segment_origin_ns(state.session, sgm),
@@ -2565,9 +2631,9 @@ def m12a_close_session(state: _M12aSession) -> dict:
         "block1_hist": _m12a_block1(state),
         "block2": _m12a_block2(state),
         "block3": block3,
-        "block4": _m12a_block4(state),
+        "block4": block4,
         "permutations": _m12a_permutations(state, perm_windows),
-        "refusals": [],
+        "refusals": block4_refusals,
     }
 
 
@@ -2935,7 +3001,6 @@ def aggregate_block4(sessions: list[dict]) -> dict:
         out[str(hour)] = {
             "residual_count": total,
             "warmup_excluded": warm,
-            "session_votes": len(qualifying),
             **{
                 f: median_or_none([q[f] for q in qualifying])
                 for f in fields
@@ -3360,6 +3425,141 @@ def run_summary_subprocess(overrides: dict, seed: int, start_ns: int,
     os.remove(config_path)
     os.remove(out_path)
     return summary
+
+
+MEASURE12A_CACHE_DIR = os.path.join(ROOT, "analysis", "out",
+                                    "measure12a-cache")
+
+
+def run_measure12a_subprocess(seed: int) -> dict:
+    """One FINAL `gen --type measure12a` walk into the DISTINCT
+    measure12a cache (spec 2.4): keyed by the full command, the harness
+    commit and the measurement-subcontract hash, never shared with the
+    protocol-11 summary cache. The committed MNQ preset drives the walk -
+    no overrides."""
+    warm_gen_build()
+    cmd_tail = [
+        "gen", "--symbol", "MNQ", "--type", "measure12a",
+        "--seed", str(seed), "--start", str(FINAL_START_NS),
+        "--length", FINAL_LENGTH, "--warmup", SUMMARY_WARMUP,
+    ]
+    cache_key = hashlib.sha256(json.dumps(
+        {"cmd": cmd_tail, "commit": git_commit(),
+         "subcontract": subcontract_hash()},
+        sort_keys=True,
+    ).encode()).hexdigest()
+    os.makedirs(MEASURE12A_CACHE_DIR, exist_ok=True)
+    cache_path = os.path.join(MEASURE12A_CACHE_DIR, cache_key + ".json")
+    if os.path.exists(cache_path):
+        with open(cache_path) as fh:
+            return json.load(fh)
+    out_path = os.path.join(
+        MEASURE12A_CACHE_DIR, f"walk-{seed}-{cache_key[:16]}.tmp.json"
+    )
+    if os.path.exists(out_path):
+        os.remove(out_path)
+    cmd = gen_command_prefix() + cmd_tail + ["--out", out_path]
+    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
+    if proc.returncode != 0:
+        raise Refusal(
+            f"measure12a walk failed ({' '.join(cmd)}):\n"
+            f"{proc.stderr[-2000:]}"
+        )
+    with open(out_path) as fh:
+        record = json.load(fh)
+    tmp = f"{cache_path}.{os.getpid()}.tmp"
+    with open(tmp, "w") as fh:
+        json.dump(record, fh)
+    os.replace(tmp, cache_path)
+    os.remove(out_path)
+    return record
+
+
+def _tree_rss_bytes(pid: int) -> int:
+    """VmRSS summed over the process and its live descendants, one
+    sample. Vanished processes read as zero (the sampler races exits)."""
+    total = 0
+    stack = [pid]
+    while stack:
+        p = stack.pop()
+        try:
+            with open(f"/proc/{p}/status") as fh:
+                for line in fh:
+                    if line.startswith("VmRSS:"):
+                        total += int(line.split()[1]) * 1024
+                        break
+            with open(f"/proc/{p}/task/{p}/children") as fh:
+                stack.extend(int(c) for c in fh.read().split())
+        except (FileNotFoundError, ProcessLookupError, ValueError):
+            continue
+    return total
+
+
+def _timed_probe(cmd: list[str]) -> tuple[float, int]:
+    """(wall seconds, peak process-tree RSS bytes at 1 s sampling)."""
+    t0 = time.monotonic()
+    proc = subprocess.Popen(
+        cmd, cwd=ROOT,
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+    )
+    peak = 0
+    while proc.poll() is None:
+        peak = max(peak, _tree_rss_bytes(proc.pid))
+        time.sleep(1.0)
+    runtime = time.monotonic() - t0
+    if proc.returncode != 0:
+        stderr = proc.stderr.read() if proc.stderr else ""
+        raise Refusal(
+            f"cost probe failed ({' '.join(cmd)}):\n{stderr[-2000:]}"
+        )
+    return runtime, peak
+
+
+def mode_cost12a() -> None:
+    """The Brick G cost probe (spec section 9): `--type summary` then
+    `--type measure12a` sequentially, same release binary, seed 1, same
+    anchor, warmup and 7-day window. Enforces measure12a runtime at most
+    1.5x the summary runtime and peak process-tree RSS at most 1 GiB;
+    a breach fails the brick for accumulator redesign, never a relaxed
+    budget."""
+    warm_gen_build()
+    os.makedirs(SCRATCH_DIR, exist_ok=True)
+    results = {}
+    for kind in ("summary", "measure12a"):
+        out_path = os.path.join(SCRATCH_DIR, f"cost12a-{kind}.json")
+        if os.path.exists(out_path):
+            os.remove(out_path)
+        cmd = gen_command_prefix() + [
+            "gen", "--symbol", "MNQ", "--type", kind,
+            "--seed", "1", "--start", str(FINAL_START_NS),
+            "--length", "7d", "--warmup", SUMMARY_WARMUP,
+            "--out", out_path,
+        ]
+        runtime, peak = _timed_probe(cmd)
+        os.remove(out_path)
+        results[kind] = {"runtime_s": runtime, "peak_rss_bytes": peak}
+    ratio = (results["measure12a"]["runtime_s"]
+             / results["summary"]["runtime_s"])
+    verdict = {
+        "summary": results["summary"],
+        "measure12a": results["measure12a"],
+        "runtime_ratio": ratio,
+        "runtime_bound": 1.5,
+        "rss_bound_bytes": 1 << 30,
+    }
+    print(json.dumps(verdict, indent=2))
+    if ratio > 1.5:
+        raise Refusal(
+            f"cost12a: measure12a runtime ratio {ratio:.3f} exceeds 1.5 "
+            f"- the brick stops for accumulator redesign"
+        )
+    if results["measure12a"]["peak_rss_bytes"] > (1 << 30):
+        raise Refusal(
+            "cost12a: measure12a peak RSS "
+            f"{results['measure12a']['peak_rss_bytes']} exceeds 1 GiB "
+            "- the brick stops for accumulator redesign"
+        )
+    print("cost12a PASS")
 
 
 def pooled(summaries: list[dict]) -> dict:
@@ -4900,14 +5100,30 @@ class ObsContext:
                    mult: list[int]):
         """The frozen rule: the pseudo-month is evaluated under all 16
         replicate indices; its counterfactual statistic is their
-        median."""
-        per_rep = [
-            weighted_median_votes(
-                self.perm_votes(variant, hour, h, rep), mult
-            )
-            for rep in range(PERMUTATION_REPLICATES)
-        ]
+        median. Q1 strictness (no K-of-N): a missing or non-finite
+        session vote in ANY replicate - regardless of the multiplicity
+        vector - refuses the whole statistic, as does a missing
+        per-replicate median."""
+        per_rep = []
+        for rep in range(PERMUTATION_REPLICATES):
+            votes = self.perm_votes(variant, hour, h, rep)
+            if any(v is None or not math.isfinite(v) for v in votes):
+                return None
+            med = weighted_median_votes(votes, mult)
+            if med is None or not math.isfinite(med):
+                return None
+            per_rep.append(med)
         return median_or_none(per_rep)
+
+    def b3_robust_strict(self, hour: int, h: int, mult: list[int]):
+        """The all-session-strict robust scale the closure and
+        worsening statistics consume: any missing or non-finite
+        session vote refuses the statistic outright, regardless of
+        the bootstrap or fold multiplicities."""
+        votes = self.b3_votes(hour, h, "robust")
+        if any(v is None or not math.isfinite(v) for v in votes):
+            return None
+        return weighted_median_votes(votes, mult)
 
 
 def stdev_ddof1(values: list[float]):
@@ -4942,34 +5158,33 @@ def evaluate_family(family: str, metrics: list[dict],
 
     prepared = []
     for m in metrics:
-        refused = False
+        # Every cause for one refused metric aggregates into exactly
+        # ONE RefusalRec (spec section 10 ownership): force_refused,
+        # the deterministic observed-seed-session qualification lines,
+        # point-input failure, bootstrap failure, SE failure.
+        reasons: list[str] = []
         t_obs = None
         point = None
         reps = None
         se = None
         if m.get("force_refused"):
-            refused = True
-            refuse(m["name"], m["force_refused"])
-        for reason in m.get("qualify_refusals", ()):
-            refused = True
-            refuse(m["name"], reason)
-        if not refused:
+            reasons.append(m["force_refused"])
+        reasons.extend(m.get("qualify_refusals", ()))
+        if not reasons:
             t_obs = m["obs_fn"](ones)
             g = m["gen_central"]
             if m["kind"] == "log_ratio":
                 if t_obs is None or t_obs <= 0 or g is None or g <= 0:
-                    refused = True
-                    refuse(m["name"],
-                           "nonpositive or missing point inputs")
+                    reasons.append(
+                        "nonpositive or missing point inputs")
                 else:
                     point = math.log(g / t_obs)
             else:
                 if t_obs is None or g is None:
-                    refused = True
-                    refuse(m["name"], "missing point inputs")
+                    reasons.append("missing point inputs")
                 else:
                     point = g - t_obs
-        if not refused:
+        if not reasons:
             reps = []
             for mult in mults:
                 tb = m["obs_fn"](mult)
@@ -4986,14 +5201,16 @@ def evaluate_family(family: str, metrics: list[dict],
             # A missing or non-finite replicate refuses the metric -
             # never a silent omission from the SE population.
             if any(r is None or not math.isfinite(r) for r in reps):
-                refused = True
-                refuse(m["name"],
-                       "missing or non-finite bootstrap replicate")
+                reasons.append(
+                    "missing or non-finite bootstrap replicate")
             else:
                 se = stdev_ddof1(reps)
                 if se is None or se == 0 or not math.isfinite(se):
-                    refused = True
-                    refuse(m["name"], "zero or non-finite bootstrap SE")
+                    reasons.append("zero or non-finite bootstrap SE")
+                    se = None
+        refused = bool(reasons)
+        if refused:
+            refuse(m["name"], "; ".join(reasons))
         prepared.append({**m, "t_obs": t_obs, "point": point,
                          "reps": reps, "se": se, "refused": refused})
 
@@ -5283,16 +5500,22 @@ def q1_floor_refusals(ctxs_named: list, counts_fn, floor: int,
 
 def q1_exposure_refusals(ctxs_named: list, hour: int, w: int) -> list:
     """Count windows are judged by scheduled-exposure completeness:
-    every session must carry the same, nonzero scheduled count."""
+    every session must carry exactly the scheduled count its own
+    CALENDAR expects (never a max over the candidate's sessions - that
+    would be self-referential). A missing serialized cell counts as
+    zero; an expected zero with a scheduled zero passes."""
     out = []
     for who, ctx in ctxs_named:
         sched = ctx.b2_scheduled(hour, w)
-        expected = max((s for s in sched if s), default=0)
         for i, s in enumerate(sched):
-            if not s or s != expected:
+            expected = expected_scheduled_windows(
+                ctx.sessions[i], hour, w
+            )
+            if (s or 0) != expected:
                 out.append(
                     f"{who} session {ctx.sessions[i]} schedules {s} "
-                    f"of {expected} windows at hour {hour} w {w}"
+                    f"of {expected} calendar windows at hour {hour} "
+                    f"w {w}"
                 )
     return out
 
@@ -5479,9 +5702,7 @@ def closure_analysis(obs_ctx: ObsContext, gen_ctxs: list[ObsContext],
         cells.append({
             "hour": hour, "horizon": h, "t_gen": t_gen,
             "obs_fn": lambda mult, hh=hour, w=h:
-                weighted_median_votes(
-                    obs_ctx.b3_votes(hh, w, "robust"), mult
-                ),
+                obs_ctx.b3_robust_strict(hh, w, mult),
             "cf_fn": lambda mult, hh=hour, w=h:
                 obs_ctx.perm_value(variant, hh, w, mult),
         })
@@ -5508,7 +5729,11 @@ def closure_analysis(obs_ctx: ObsContext, gen_ctxs: list[ObsContext],
         if not refused and worst is not None:
             minima.append(worst)
     minima.sort()
-    joint_lcb = nearest_rank_p(minima, 0.05) if minima else None
+    # Spec 5.3 strictness: the joint LCB exists only when EVERY
+    # bootstrap replicate produced a value - an unavailable replicate
+    # refuses the result and the consuming rung fails closed.
+    joint_lcb = (nearest_rank_p(minima, 0.05)
+                 if len(minima) == len(mults) else None)
     return {
         "cells": [
             {"hour": c["hour"], "horizon": c["horizon"],
@@ -5535,8 +5760,7 @@ def worsening_23_analysis(obs_ctx: ObsContext,
     t_gen = median_or_none(gen_vals)
 
     def value(mult):
-        o = weighted_median_votes(obs_ctx.b3_votes(23, 300, "robust"),
-                                  mult)
+        o = obs_ctx.b3_robust_strict(23, 300, mult)
         p = obs_ctx.perm_value("sign", 23, 300, mult)
         if t_gen is None or t_gen <= 0 or o is None or o <= 0 \
                 or p is None or p <= 0:
@@ -5547,11 +5771,13 @@ def worsening_23_analysis(obs_ctx: ObsContext,
     reps = sorted(
         v for v in (value(m) for m in mults) if v is not None
     )
-    ucb = nearest_rank_p(reps, 0.95) if reps else None
-    se = stdev_ddof1(reps)
-    if point is None or ucb is None:
-        return {"point": None, "se": None, "ucb": None}
-    return {"point": point, "se": se, "ucb": ucb}
+    # Spec 5.3 / Amendment E strictness: the whole diagnostic refuses
+    # (None - section 10 makes the OBJECT nullable, not its members)
+    # unless the point and every bootstrap replicate produced a value.
+    if point is None or len(reps) != len(mults):
+        return None
+    return {"point": point, "se": stdev_ddof1(reps),
+            "ucb": nearest_rank_p(reps, 0.95)}
 
 
 class CountSubEval:
@@ -5879,10 +6105,13 @@ def evaluate_ladder(obs_ctx: ObsContext, gen_ctxs: list[ObsContext],
     rungs.append({"name": "innovation", "subchecks": sub3,
                   "fired": all(sub3.values())})
 
-    # Rung 4: signed reversion.
+    # Rung 4: signed reversion. a_closure consumes required reversion
+    # inventory cells, so it is envelope-dependent: false whenever the
+    # family inventory is incomplete (Amendment D).
     sign = closure_analysis(obs_ctx, gen_ctxs, "sign", mults)
     a_closure = (
-        sign["all_points_pass"]
+        complete("reversion")
+        and sign["all_points_pass"]
         and sign["joint_lcb"] is not None
         and sign["joint_lcb"] > GAP_CLOSE_LCB_MIN
     )
@@ -5904,9 +6133,7 @@ def evaluate_ladder(obs_ctx: ObsContext, gen_ctxs: list[ObsContext],
             cl = gap_closure(
                 median_or_none(gen_vals),
                 obs_ctx.perm_value("sign", hour, h, f),
-                weighted_median_votes(
-                    obs_ctx.b3_votes(hour, h, "robust"), f
-                ),
+                obs_ctx.b3_robust_strict(hour, h, f),
                 generated_side=False,
             )
             if cl is None or (cl > 0) != point_sign[(hour, h)]:
@@ -5922,20 +6149,37 @@ def evaluate_ladder(obs_ctx: ObsContext, gen_ctxs: list[ObsContext],
     sub4 = {"a_closure": a_closure, "b_folds": folds_ok,
             "c_covariance": c_cov}
     fired4 = all(sub4.values())
-    w23 = worsening_23_analysis(obs_ctx, gen_ctxs, mults)
+    # Amendment E: worsening_23 is evaluated only after the rung
+    # fires. A refused measurement records null resolution fields WITH
+    # exactly one matching RefusalRec - never a fabricated
+    # hour-resolved. An unfired rung leaves everything null by
+    # inapplicability, no refusal.
+    w23 = None
     uniform = None
     resolution = None
     if fired4:
-        uniform = w23["ucb"] is not None and w23["ucb"] <= 0
-        resolution = "uniform" if uniform else "hour-resolved"
+        w23 = worsening_23_analysis(obs_ctx, gen_ctxs, mults)
+        if w23 is None:
+            refusals.append({
+                "scope": "reversion",
+                "cell": "worsening_23",
+                "reason": "worsening_23 refused: missing point or "
+                          "incomplete bootstrap population",
+            })
+        else:
+            uniform = w23["ucb"] <= 0
+            resolution = "uniform" if uniform else "hour-resolved"
     rungs.append({"name": "reversion", "subchecks": sub4,
                   "fired": fired4, "uniform_eligible": uniform,
                   "required_resolution": resolution})
 
-    # Rung 5: GARCH persistence.
+    # Rung 5: GARCH persistence. a_closure is the envelope-dependent
+    # subcheck: false whenever the family inventory is incomplete
+    # (Amendment D); b_escalation keeps its measured forensic boolean.
     mag = closure_analysis(obs_ctx, gen_ctxs, "magnitude", mults)
     a5 = (
-        mag["all_points_pass"]
+        complete("garch")
+        and mag["all_points_pass"]
         and mag["joint_lcb"] is not None
         and mag["joint_lcb"] > GAP_CLOSE_LCB_MIN
     )
@@ -6153,6 +6397,24 @@ def assemble_measure12a_artifact(observed: dict, generated_seeds: list,
                                  binding_extra: dict,
                                  mults: list[list[int]],
                                  cost: dict) -> dict:
+    """The production artifact assembler: refuses UNCONDITIONALLY
+    unless the supplied bootstrap population is exactly the frozen
+    BOOTSTRAP_REPLICATES. The selftest builds its truncated schema
+    fixture through the internal body below, never through this
+    entrypoint."""
+    if len(mults) != BOOTSTRAP_REPLICATES:
+        raise Refusal(
+            f"bootstrap population {len(mults)} is not the required "
+            f"{BOOTSTRAP_REPLICATES} replicates"
+        )
+    return _assemble_measure12a(observed, generated_seeds,
+                                binding_extra, mults, cost)
+
+
+def _assemble_measure12a(observed: dict, generated_seeds: list,
+                         binding_extra: dict,
+                         mults: list[list[int]],
+                         cost: dict) -> dict:
     """The section-10 artifact from the observed half and the per-seed
     generated records. Each generated seed record carries
     {seed, per_session (the same record shape), forensic, cost}."""
@@ -6287,6 +6549,20 @@ def assemble_measure12a_artifact(observed: dict, generated_seeds: list,
     for seed_rec in gen_per_seed:
         for rec in seed_rec["count_substitution"]["support_refusals"]:
             add_refusal(rec)
+    # The scoped per-session and forensic arrays are MIRRORS of
+    # top-level records (spec section 10): observed per-session
+    # refusals (the Amendment-F standardizer omissions among them),
+    # generated per-seed per-session refusals, per-seed forensic
+    # refusals.
+    for rec in per_session:
+        for r in rec["refusals"]:
+            add_refusal(r)
+    for g in generated_seeds:
+        for rec in g["per_session"]:
+            for r in rec["refusals"]:
+                add_refusal(r)
+        for r in g["forensic"]["refusals"]:
+            add_refusal(r)
 
     empty_bins = [
         {"scope": "observed block1", "cell": f"hour {h} bin {b}"}
@@ -6385,14 +6661,519 @@ def assemble_measure12a_artifact(observed: dict, generated_seeds: list,
     }
 
 
+MEASURE12A_CONSTANT_NAMES = (
+    "FAIL_HOURS_300", "FAIL_HOURS_60", "HOT_HOURS", "COLD_HOURS",
+    "RESIDUAL_WINDOW_S", "RESIDUAL_MIN_HISTORY",
+    "RESIDUAL_EXCEED_MULTIPLES", "INNOVATION_EXCEED_ABS",
+    "PERMUTATION_REPLICATES", "PERMUTATION_VARIANTS",
+    "BOOTSTRAP_REPLICATES", "BOOTSTRAP_BLOCK_SESSIONS",
+    "BOOTSTRAP_BASE_SEED", "PERMUTATION_BASE_SEED",
+    "CONTROL_TIE_BASE_SEED", "FAMILY_ENVELOPE_LEVEL",
+    "SEED_DIRECTION_MIN", "FOLD_MIN_SESSIONS", "MATERIALITY_BAND",
+    "GAP_CLOSE_MIN", "GAP_CLOSE_LCB_MIN", "GAP_CLOSE_EPS",
+    "COUNT_WINDOWS_S", "WALL_HORIZONS_S", "EXCEEDANCE_TICKS",
+    "PARENT_COUNT_BINS", "SEGMENT_OPEN_BINS_S", "SEGMENT_CLOSE_BINS_S",
+    "MIN_1S_CELL_RETURNS", "MIN_5S_CELL_RETURNS",
+    "MIN_15S_CELL_RETURNS", "MIN_60S_CELL_RETURNS",
+    "MIN_300S_CELL_RETURNS", "MIN_RESIDUAL_CELL", "MIN_MINUTES_CELL",
+    "MIN_BOUNDARY_MINUTES_CELL", "MIN_BOUNDARY_60S_CELL_RETURNS",
+    "SIGMA_ESCALATION_MIN", "CONTROL_ESCALATION_MAX",
+    "INITIATION_INNOVATION_MIN",
+)
+
+MEASURE12A_FAMILIES = ("child_walk", "arrival", "innovation",
+                       "reversion", "garch", "boundary")
+
+MEASURE12A_RUNG_SUBCHECKS = {
+    "child_walk": {"a_print_excess", "b_mid_clean"},
+    "arrival": {"a_envelope", "b_closure", "c_conditional"},
+    "innovation": {"a_tail_ratio", "b_initiation", "c_controls"},
+    "reversion": {"a_closure", "b_folds", "c_covariance"},
+    "garch": {"a_closure", "b_escalation"},
+    "boundary": {"a_boundary_band", "b_comparator_clean",
+                 "c_no_prior_rung"},
+}
+
+_B1_HIST_KEYS = {"n", "quote_range_half_ticks", "trade_range_ticks",
+                 "hour", "since_open_bin", "until_close_bin", "count"}
+_B1_BIN_KEYS = {
+    "minute_count", "quote_range_denominator",
+    "quote_range_p50", "quote_range_p90", "quote_range_p99",
+    "quote_range_p999", "trade_range_p50", "trade_range_p90",
+    "trade_range_p99", "trade_range_p999", "trade_range_sqrt_n_p50",
+    "trade_range_sqrt_n_p90", "trade_range_sqrt_n_p99",
+}
+_B1_SUMMARY_KEYS = _B1_BIN_KEYS | {
+    "n_p50", "n_p90", "n_p99", "n_p999",
+    "exceed_399", "exceed_642", "exceed_968", "denominator",
+    "trade_to_quote_p99_ratio", "by_parent_count_bin",
+}
+_B2_CELL_KEYS = {
+    "scheduled_windows", "zero_windows", "count_hist",
+    "run_length_hist", "paired_lag_count", "sum_x", "sum_y",
+    "sumsq_x", "sumsq_y", "sum_xy", "zero_fraction", "mean", "fano",
+    "count_p90", "count_p99", "count_p999", "lag1_autocorr", "run_p90",
+}
+_B3_CELL_KEYS = {"return_count", "robust_scale", "rms_scale"}
+_B3_PAIR_KEYS = {"window_count", "vr", "cov_contrib",
+                 "cov_contrib_norm"}
+_B4_CELL_KEYS = {
+    "residual_count", "warmup_excluded", "zero_fraction",
+    "nz_abs_p90", "nz_abs_p99", "nz_abs_p999",
+    "ratio_p99_p90", "ratio_p999_p99",
+    "exceed_4", "exceed_8", "exceed_16",
+}
+_PERM_KEYS = {
+    "segment_index", "hour", "variant", "replicate",
+    "return_count_60", "sum_abs_60", "max_abs_60",
+    "return_count_300", "sum_abs_300", "max_abs_300",
+}
+_FORENSIC_KEYS = {
+    "seed", "kind", "matched_extreme_minute_start", "minute_start_ns",
+    "minute_end_ns", "utc_hour", "segment_index", "parent_count",
+    "trade_count", "traced_parents", "largest_innovation_std",
+    "largest_innovation_ts_ns", "innovation_exceed_4",
+    "innovation_exceed_8", "innovation_exceed_16", "initiation",
+    "sigma_start", "sigma_peak", "sigma_end", "sigma_escalation",
+    "latent_mid_range_ticks", "quote_mid_range_half_ticks",
+    "trade_range_ticks", "trade_to_quote_range_ratio",
+    "quote_to_latent_range_ratio", "max_signed_run", "clamp_hits",
+    "arch_share_next", "arch_share_minute_max",
+}
+_METRIC_KEYS = {
+    "name", "kind", "predicate", "point", "se", "interval_low",
+    "interval_high", "band_low", "band_high", "outside_band",
+    "envelope_excludes_edge", "interval_inside_band",
+    "seed_same_side_count", "seed_inside_count",
+    "seed_rule_pass", "fold_rule_pass", "refused",
+}
+_METRIC_NULLABLE = _METRIC_KEYS - {"name", "kind", "predicate",
+                                   "refused"}
+_RUNG_KEYS = {"name", "subchecks", "fired", "boundary_localized",
+              "refusals", "uniform_eligible", "required_resolution"}
+_COND_KEYS = {
+    "hour", "bin_name", "observed_p99", "generated_p99", "ratio",
+    "interval_low", "interval_high", "interval_inside_band",
+    "seed_inside_count", "required", "supported",
+}
+_COUNTSUB_KEYS = {
+    "shares_observed", "shares_generated", "weights", "refused_hours",
+    "support_refusals", "counterfactual_p999",
+    "counterfactual_exceed_968", "closure_p999", "closure_lcb",
+    "conditional_adequacy", "diagnostic_closure_to_bound",
+}
+
+
+def measure12a_schema_errors(artifact: dict) -> list[str]:
+    """The recursive section-10 exact-schema validator: every listed
+    key present, no unlisted key, the literal rung subcheck sets, the
+    refusal-null pairing in both directions (with the sole Amendment-F
+    standardizer-omission exception), and the Amendment E truth table.
+    Returns a flat list of violation strings; empty means conformant."""
+    errs: list[str] = []
+
+    def keys_exact(obj, want, where) -> bool:
+        if not isinstance(obj, dict):
+            errs.append(f"{where}: not a dict")
+            return False
+        got = set(obj.keys())
+        if got != set(want):
+            errs.append(f"{where}: key mismatch {sorted(got ^ set(want))}")
+            return False
+        return True
+
+    def refusal_rec(obj, where) -> None:
+        if keys_exact(obj, {"scope", "cell", "reason"}, where):
+            if not all(isinstance(obj[k], str)
+                       for k in ("scope", "cell", "reason")):
+                errs.append(f"{where}: RefusalRec fields must be "
+                            f"three strings")
+
+    def block1_summary_rec(obj, where) -> None:
+        if keys_exact(obj, _B1_SUMMARY_KEYS, where):
+            bins = obj["by_parent_count_bin"]
+            if keys_exact(bins, set(PARENT_COUNT_BIN_NAMES),
+                          f"{where}.by_parent_count_bin"):
+                for name, b in bins.items():
+                    keys_exact(b, _B1_BIN_KEYS, f"{where}.bin[{name}]")
+
+    def block1_blocks_rec(obj, where, with_hist: bool) -> None:
+        want = {"summary", "by_labels"} | ({"hist"} if with_hist
+                                           else set())
+        if not keys_exact(obj, want, where):
+            return
+        if with_hist:
+            for i, row in enumerate(obj["hist"]):
+                keys_exact(row, _B1_HIST_KEYS, f"{where}.hist[{i}]")
+        for h, s in obj["summary"].items():
+            block1_summary_rec(s, f"{where}.summary[{h}]")
+        for lp, per in obj["by_labels"].items():
+            for h, s in per.items():
+                block1_summary_rec(s, f"{where}.by_labels[{lp}][{h}]")
+
+    def block2_map(obj, where) -> None:
+        for h, per_w in obj.items():
+            for w, c in per_w.items():
+                keys_exact(c, _B2_CELL_KEYS, f"{where}[{h}][{w}]")
+
+    def block3_rec(obj, where) -> None:
+        if not keys_exact(obj, {"cells", "pairs",
+                                "lag1_parent_autocorr",
+                                "hour20_labels"}, where):
+            return
+        for h, per in obj["cells"].items():
+            for hz, c in per.items():
+                keys_exact(c, _B3_CELL_KEYS,
+                           f"{where}.cells[{h}][{hz}]")
+        for h, per in obj["pairs"].items():
+            for p, c in per.items():
+                keys_exact(c, _B3_PAIR_KEYS,
+                           f"{where}.pairs[{h}][{p}]")
+        for lp, per in obj["hour20_labels"].items():
+            for hz, c in per.items():
+                keys_exact(c, _B3_CELL_KEYS,
+                           f"{where}.hour20[{lp}][{hz}]")
+
+    def block4_map(obj, where) -> None:
+        if "all" not in obj:
+            errs.append(f"{where}: missing the Amendment-B literal "
+                        f"\"all\" pooled-hours cell")
+        for h, c in obj.items():
+            keys_exact(c, _B4_CELL_KEYS, f"{where}[{h}]")
+
+    def seed_blocks(obj, where, with_hist: bool) -> None:
+        if not keys_exact(obj, {"block1", "block2", "block3",
+                                "block4"}, where):
+            return
+        block1_blocks_rec(obj["block1"], f"{where}.block1", with_hist)
+        block2_map(obj["block2"], f"{where}.block2")
+        block3_rec(obj["block3"], f"{where}.block3")
+        block4_map(obj["block4"], f"{where}.block4")
+
+    if not keys_exact(artifact, {"binding", "constants", "observed",
+                                 "generated", "bootstrap", "ladder",
+                                 "cost", "diagnostics"}, "top"):
+        return errs
+
+    binding = artifact["binding"]
+    if keys_exact(binding, {"harness_tree_commit", "job_id",
+                            "subcontract_hash",
+                            "preflight_artifact_hash", "file_hashes",
+                            "tape_protocol_version", "generated"},
+                  "binding"):
+        keys_exact(binding["generated"],
+                   {"seeds", "window_start_ns", "window_length_ns",
+                    "warmup"}, "binding.generated")
+
+    keys_exact(artifact["constants"], MEASURE12A_CONSTANT_NAMES,
+               "constants")
+
+    observed = artifact["observed"]
+    scoped_refusals: list[dict] = []
+    if keys_exact(observed, {"per_session", "monthly",
+                             "permutations_monthly"}, "observed"):
+        for i, rec in enumerate(observed["per_session"]):
+            where = f"observed.per_session[{i}]"
+            if not keys_exact(rec, {"session_date", "segments",
+                                    "block1_hist", "block2", "block3",
+                                    "block4", "permutations",
+                                    "refusals"}, where):
+                continue
+            for j, sg in enumerate(rec["segments"]):
+                keys_exact(sg, {"segment_index", "open_ns",
+                                "close_ns"}, f"{where}.segments[{j}]")
+            for j, row in enumerate(rec["block1_hist"]):
+                keys_exact(row, _B1_HIST_KEYS, f"{where}.hist[{j}]")
+            block2_map(rec["block2"], f"{where}.block2")
+            block3_rec(rec["block3"], f"{where}.block3")
+            block4_map(rec["block4"], f"{where}.block4")
+            for j, p in enumerate(rec["permutations"]):
+                keys_exact(p, _PERM_KEYS, f"{where}.perm[{j}]")
+            for r in rec["refusals"]:
+                refusal_rec(r, f"{where}.refusals")
+                scoped_refusals.append(r)
+        seed_blocks(observed["monthly"], "observed.monthly",
+                    with_hist=True)
+        pm = observed["permutations_monthly"]
+        if keys_exact(pm, set(PERMUTATION_VARIANTS),
+                      "permutations_monthly"):
+            for v, per in pm.items():
+                for h, c in per.items():
+                    keys_exact(c, {"robust_scale_60",
+                                   "robust_scale_300"},
+                               f"permutations_monthly[{v}][{h}]")
+
+    generated = artifact["generated"]
+    if keys_exact(generated, {"per_seed", "central"}, "generated"):
+        for i, g in enumerate(generated["per_seed"]):
+            where = f"generated.per_seed[{i}]"
+            if not keys_exact(g, {"seed", "blocks",
+                                  "count_substitution", "forensic",
+                                  "cost"}, where):
+                continue
+            seed_blocks(g["blocks"], f"{where}.blocks",
+                        with_hist=True)
+            cs = g["count_substitution"]
+            if keys_exact(cs, _COUNTSUB_KEYS,
+                          f"{where}.count_substitution"):
+                for j, rec in enumerate(cs["conditional_adequacy"]):
+                    keys_exact(rec, _COND_KEYS,
+                               f"{where}.cond_adequacy[{j}]")
+                for r in cs["support_refusals"]:
+                    refusal_rec(r, f"{where}.support_refusals")
+                    scoped_refusals.append(r)
+            if keys_exact(g["forensic"], {"records", "refusals"},
+                          f"{where}.forensic"):
+                for j, rec in enumerate(g["forensic"]["records"]):
+                    keys_exact(rec, _FORENSIC_KEYS,
+                               f"{where}.forensic[{j}]")
+                for r in g["forensic"]["refusals"]:
+                    refusal_rec(r, f"{where}.forensic.refusals")
+                    scoped_refusals.append(r)
+            keys_exact(g["cost"], {"walk_s", "rss_bytes"},
+                       f"{where}.cost")
+        central = generated["central"]
+        if keys_exact(central, {"blocks", "count_substitution",
+                                "pooled_diagnostic_hist"},
+                      "generated.central"):
+            seed_blocks(central["blocks"], "central.blocks",
+                        with_hist=False)
+            keys_exact(central["count_substitution"],
+                       {"closure_p999_median", "refused_hour_union"},
+                       "central.count_substitution")
+
+    bootstrap = artifact["bootstrap"]
+    if keys_exact(bootstrap, {"seed_rule", "replicates",
+                              "per_family"}, "bootstrap"):
+        per_family = bootstrap["per_family"]
+        if keys_exact(per_family, set(MEASURE12A_FAMILIES),
+                      "per_family"):
+            for fam, env in per_family.items():
+                where = f"per_family[{fam}]"
+                if not keys_exact(env, {"metrics", "critical_value",
+                                        "inventory_complete"}, where):
+                    continue
+                complete = env["inventory_complete"] is True
+                if complete and env["critical_value"] is None:
+                    errs.append(f"{where}: complete inventory "
+                                f"without a critical value")
+                if not complete and env["critical_value"] is not None:
+                    errs.append(f"{where}: incomplete inventory "
+                                f"with a critical value")
+                for m in env["metrics"]:
+                    mwhere = f"{where}.metric[{m.get('name')}]"
+                    if not keys_exact(m, _METRIC_KEYS, mwhere):
+                        continue
+                    if m["kind"] not in ("log_ratio", "raw_diff"):
+                        errs.append(f"{mwhere}: unknown kind")
+                    if m["predicate"] not in ("outside", "inside",
+                                              "raw_direction"):
+                        errs.append(f"{mwhere}: unknown predicate")
+                    if m["refused"]:
+                        # An all-null refused MetricRec, distinct from
+                        # predicate-irrelevant nulls.
+                        if any(m[k] is not None
+                               for k in _METRIC_NULLABLE):
+                            errs.append(f"{mwhere}: refused metric "
+                                        f"carries non-null fields")
+                        continue
+                    if m["predicate"] in ("outside", "inside") \
+                            and m["kind"] != "log_ratio":
+                        errs.append(f"{mwhere}: band predicate on "
+                                    f"non-log_ratio kind")
+                    # Required evidence on a non-refused metric: the
+                    # point, SE and the split-rule verdicts always;
+                    # the envelope fields exactly when the family
+                    # inventory is complete (Amendment D).
+                    if m["point"] is None or m["se"] is None \
+                            or m["seed_rule_pass"] is None \
+                            or m["fold_rule_pass"] is None:
+                        errs.append(f"{mwhere}: non-refused metric "
+                                    f"missing required evidence")
+                    env_field = ("interval_inside_band"
+                                 if m["predicate"] == "inside"
+                                 else "envelope_excludes_edge")
+                    if complete:
+                        if m["interval_low"] is None \
+                                or m["interval_high"] is None \
+                                or m[env_field] is None:
+                            errs.append(f"{mwhere}: complete family "
+                                        f"with null envelope fields")
+                    else:
+                        if any(m[k] is not None for k in
+                               ("interval_low", "interval_high",
+                                "envelope_excludes_edge",
+                                "interval_inside_band")):
+                            errs.append(f"{mwhere}: incomplete "
+                                        f"family with non-null "
+                                        f"envelope fields")
+                    if m["predicate"] == "raw_direction":
+                        if m["kind"] != "raw_diff":
+                            errs.append(f"{mwhere}: raw_direction on "
+                                        f"non-raw_diff kind")
+                        if m["band_low"] is not None \
+                                or m["band_high"] is not None:
+                            errs.append(f"{mwhere}: raw_direction "
+                                        f"carries a band")
+                    elif m["band_low"] is None \
+                            or m["band_high"] is None:
+                        errs.append(f"{mwhere}: band predicate "
+                                    f"without a band")
+                    if m["predicate"] in ("outside", "raw_direction"):
+                        if m["interval_inside_band"] is not None \
+                                or m["seed_inside_count"] is not None:
+                            errs.append(f"{mwhere}: inside-only "
+                                        f"evidence on an outside "
+                                        f"metric")
+                        if m["outside_band"] is None \
+                                or m["seed_same_side_count"] is None:
+                            errs.append(f"{mwhere}: outside metric "
+                                        f"missing its evidence")
+                    if m["predicate"] == "inside":
+                        if m["outside_band"] is not None \
+                                or m["seed_same_side_count"] \
+                                is not None:
+                            errs.append(f"{mwhere}: outside-only "
+                                        f"evidence on an inside "
+                                        f"metric")
+                        if m["seed_inside_count"] is None:
+                            errs.append(f"{mwhere}: inside metric "
+                                        f"missing its evidence")
+
+    ladder = artifact["ladder"]
+    rungs = []
+    if keys_exact(ladder, {"rungs", "eligible", "selected",
+                           "verdict"}, "ladder"):
+        rungs = ladder["rungs"]
+        if [r.get("name") for r in rungs] != list(MEASURE12A_FAMILIES):
+            errs.append("ladder: rungs not the six frozen names in "
+                        "ladder order")
+        for r in rungs:
+            where = f"rung[{r.get('name')}]"
+            if not keys_exact(r, _RUNG_KEYS, where):
+                continue
+            want = MEASURE12A_RUNG_SUBCHECKS.get(r["name"])
+            if want is not None and set(r["subchecks"]) != want:
+                errs.append(f"{where}: subcheck keys not the frozen "
+                            f"literal set")
+            for rr in r["refusals"]:
+                refusal_rec(rr, f"{where}.refusals")
+                scoped_refusals.append(rr)
+            if not r["fired"] and (r["uniform_eligible"] is not None
+                                   or r["required_resolution"]
+                                   is not None):
+                errs.append(f"{where}: resolution fields non-null on "
+                            f"an unfired rung")
+        if ladder["verdict"] not in ("family-eligible",
+                                     "no-family-eligible"):
+            errs.append("ladder: unknown verdict")
+
+    keys_exact(artifact["cost"], {"observed_s", "generated_s",
+                                  "bootstrap_s", "total_s",
+                                  "peak_rss_bytes", "scratch_bytes"},
+               "cost")
+
+    diagnostics = artifact["diagnostics"]
+    top_keys: set[tuple] = set()
+    if keys_exact(diagnostics, {"warmup_exclusions", "refused_cells",
+                                "empty_bins", "worsening_23"},
+                  "diagnostics"):
+        for k in diagnostics["warmup_exclusions"]:
+            if not (isinstance(k, str) and k.isdigit()
+                    and 0 <= int(k) <= 23):
+                errs.append(f"warmup_exclusions: non-integer-hour "
+                            f"key {k!r}")
+        for r in diagnostics["refused_cells"]:
+            refusal_rec(r, "refused_cells")
+            top_keys.add((r.get("scope"), r.get("cell"),
+                          r.get("reason")))
+        if len(diagnostics["refused_cells"]) != len(top_keys):
+            errs.append("refused_cells: duplicate logical refusal "
+                        "records")
+        for b in diagnostics["empty_bins"]:
+            keys_exact(b, {"scope", "cell"}, "empty_bins")
+        w23 = diagnostics["worsening_23"]
+        if w23 is not None:
+            keys_exact(w23, {"point", "se", "ucb"},
+                       "diagnostics.worsening_23")
+
+        # Refusal ownership in both directions: every scoped record
+        # mirrors exactly one top-level record; every top-level record
+        # is mirrored somewhere or is a family-envelope/metric record.
+        for r in scoped_refusals:
+            key = (r.get("scope"), r.get("cell"), r.get("reason"))
+            if key not in top_keys:
+                errs.append(f"scoped refusal {key} missing from "
+                            f"refused_cells")
+        mirrored = {
+            (r.get("scope"), r.get("cell"), r.get("reason"))
+            for r in scoped_refusals
+        }
+        for key in top_keys:
+            scope = key[0] or ""
+            if key not in mirrored and not scope.startswith("family:") \
+                    and scope != "count_substitution":
+                errs.append(f"top-level refusal {key} mirrored "
+                            f"nowhere")
+
+        # Amendment E truth table on the reversion rung.
+        rev = next((r for r in rungs
+                    if r.get("name") == "reversion"), None)
+        if rev is not None and set(rev.keys()) == _RUNG_KEYS:
+            w23_refs = [
+                r for r in diagnostics["refused_cells"]
+                if r["scope"] == "reversion"
+                and r["cell"] == "worsening_23"
+            ]
+            if not rev["fired"]:
+                if diagnostics["worsening_23"] is not None or w23_refs:
+                    errs.append("Amendment E: unfired reversion rung "
+                                "with a worsening_23 value or refusal")
+            elif diagnostics["worsening_23"] is None:
+                ok = (rev["uniform_eligible"] is None
+                      and rev["required_resolution"] is None
+                      and len(w23_refs) == 1)
+                if not ok:
+                    errs.append("Amendment E: refused worsening_23 "
+                                "without null resolution fields plus "
+                                "exactly one refusal record")
+            else:
+                if rev["uniform_eligible"] is True \
+                        and rev["required_resolution"] != "uniform":
+                    errs.append("Amendment E: uniform_eligible true "
+                                "without uniform resolution")
+                elif rev["uniform_eligible"] is False \
+                        and rev["required_resolution"] \
+                        != "hour-resolved":
+                    errs.append("Amendment E: uniform_eligible false "
+                                "without hour-resolved resolution")
+                elif rev["uniform_eligible"] is None:
+                    errs.append("Amendment E: measured worsening_23 "
+                                "without a Boolean uniform_eligible")
+                if w23_refs:
+                    errs.append("Amendment E: measured worsening_23 "
+                                "beside a worsening_23 refusal")
+    return errs
+
+
 def mode_measure12a() -> None:
     observed = run_measure12a_observed()
     write_json_atomic(MEASURE12A_OBSERVED_CACHE, observed)
     print(f"observed half -> {MEASURE12A_OBSERVED_CACHE}")
+    # The eight FINAL walks into the measure12a cache (spec Brick G).
+    # The cache keys on the harness commit, so a dirty tree refuses.
+    require_clean_tree()
+    for seed in range(1, 9):
+        record = run_measure12a_subprocess(seed)
+        print(
+            f"seed {seed} walk cached: "
+            f"{len(record['per_session'])} complete sessions, "
+            f"{len(record['forensic']['records'])} forensic records"
+        )
     raise Refusal(
-        "the generated measure12a cache does not exist yet - Brick G "
-        "(GenType::Measure12a) has not landed; the ladder and the "
-        "committed artifact arrive with Brick M"
+        "the eight generated walks are cached; aggregation, the "
+        "bootstrap, the ladder and the committed artifact land with "
+        "Brick M"
     )
 
 
@@ -7504,6 +8285,24 @@ def run_selftest() -> None:
           and m12a_rec0["block4"]["0"]["residual_count"] == 0)
     check("block 4 carries the pooled all-hours cell",
           "all" in m12a_rec0["block4"])
+    # Amendment F: a flat tape drives the trailing scale to zero once
+    # the 1000-return history fills; the residuals are OMITTED (the
+    # returns stay in history) and come back as one standardizer
+    # RefusalRec per (session, hour) - never a raised Refusal.
+    flat_rows = [
+        Row((st_base * 10**9) + k * 200_000_000, "1",
+            "B" if k % 2 == 0 else "A", px0, 1,
+            px0 - TICK_UNITS, px0 + TICK_UNITS, 3, 3,
+            classify_book(px0 - TICK_UNITS, px0 + TICK_UNITS))
+        for k in range(2400)
+    ]
+    flat_rec = measure12a_observe(iter(flat_rows), ["2026-07-07"])[0]
+    check("a nonpositive standardizer scale omits and records",
+          any("standardizer" in r["cell"] for r in flat_rec["refusals"])
+          and all(sorted(r.keys()) == ["cell", "reason", "scope"]
+                  for r in flat_rec["refusals"])
+          and flat_rec["block4"]["0"]["residual_count"] == 0
+          and flat_rec["block4"]["0"]["warmup_excluded"] > 0)
 
     print("12a permutation invariants")
     perm_recs = m12a_rec0["permutations"]
@@ -7589,12 +8388,16 @@ def run_selftest() -> None:
     def fake_rec(date, i, *, robust=1.0, sign_perm=None, mag_perm=None,
                  cov=0.0, fano_d=3, tail=2.0, print_excess=1.0,
                  boundary_quote=10, comp_quote=10, minutes=None,
-                 h23_robust=None):
+                 h23_robust=None, robust_jitter=True):
         """One schema-complete per-session record with analytic knobs.
         `i` jitters most statistics so bootstrap SEs exist (quantile
         carriers vary across sessions); hour 23 stays unjittered so the
-        worsening statistic can be pinned exactly."""
+        worsening statistic can be pinned exactly. robust_jitter=False
+        pins the robust cells session-constant, so their metrics refuse
+        on zero bootstrap SE while the closures stay computable - the
+        Amendment-D completeness-gate regressions need exactly that."""
         j = 1.0 + 0.01 * ((i % 5) - 2)
+        rj = j if robust_jitter else 1.0
         rows = []
         # Fail-hour minutes for the conditional guard and bin counts:
         # bin 1-64 (N=10), small trade ranges so the excess carrier
@@ -7657,13 +8460,27 @@ def run_selftest() -> None:
         # p99 bootstrap variance without disturbing mean or Fano.
         count_hist = {30 - fano_d: 30, 30 + fano_d: 29,
                       30 + fano_d + (i % 22) + 1: 1}
-        b2_cell = finish_block2_cell({
-            "scheduled_windows": 60, "zero_windows": 0,
-            "count_hist": dict(count_hist),
-            "run_length_hist": {60: 1},
-            "paired_lag_count": 59, "sum_x": 0, "sum_y": 0,
-            "sumsq_x": 0, "sumsq_y": 0, "sum_xy": 0,
-        })
+
+        # The scheduled counts come from the session's own CALENDAR
+        # (defect-4 exposure completeness): 59 per full hour at 60 s,
+        # 44 at the halt hour; hours the calendar never schedules get
+        # no cell.
+        def b2_cell_for(exp):
+            return finish_block2_cell({
+                "scheduled_windows": exp, "zero_windows": 0,
+                "count_hist": dict(count_hist),
+                "run_length_hist": {60: 1},
+                "paired_lag_count": 59, "sum_x": 0, "sum_y": 0,
+                "sumsq_x": 0, "sumsq_y": 0, "sum_xy": 0,
+            })
+
+        block2: dict[str, dict] = {}
+        for h in range(24):
+            for w in COUNT_WINDOWS_S:
+                exp = expected_scheduled_windows(date, h, w)
+                if exp:
+                    block2.setdefault(str(h), {})[str(w)] = \
+                        b2_cell_for(exp)
 
         def b3cell(n, a):
             return {"return_count": n, "robust_scale": a,
@@ -7672,7 +8489,7 @@ def run_selftest() -> None:
         cells = {}
         pairs = {}
         for h in range(24):
-            r = robust * j
+            r = robust * rj
             if h == 23 and h23_robust is not None:
                 r = h23_robust
             cells[str(h)] = {
@@ -7687,7 +8504,7 @@ def run_selftest() -> None:
                 "cov_contrib_norm": cn,
             }}
         h20 = {
-            lp: {"60": b3cell(10, robust * j)}
+            lp: {"60": b3cell(10, robust * rj)}
             for lp in ("1800+|0-300", "0-300|300-1800",
                        "1800+|300-1800", "300-1800|300-1800")
         }
@@ -7708,7 +8525,7 @@ def run_selftest() -> None:
             pv = sign_perm if variant == "sign" else mag_perm
             for rep in range(PERMUTATION_REPLICATES):
                 for h in list(range(19, 24)):
-                    v = (pv if pv is not None else robust) * j
+                    v = (pv if pv is not None else robust) * rj
                     if h == 23:
                         v = (pv if pv is not None else robust) \
                             if h23_robust is None else h23_robust
@@ -7726,9 +8543,7 @@ def run_selftest() -> None:
             "session_date": date,
             "segments": [],
             "block1_hist": rows,
-            "block2": {str(h): {"60": dict(b2_cell), "1": dict(b2_cell),
-                                "5": dict(b2_cell)}
-                       for h in range(24)},
+            "block2": block2,
             "block3": {"cells": cells, "pairs": pairs,
                        "lag1_parent_autocorr": {},
                        "hour20_labels": h20},
@@ -7756,16 +8571,38 @@ def run_selftest() -> None:
         ]
         return obs, gens, hists
 
+    def forensic_fx(seed, kind, *, initiation=False, inn=2.0, esc=1.0,
+                    matched=None, minute=1):
+        """One schema-complete ForensicRec (spec section 10)."""
+        return {
+            "seed": seed, "kind": kind,
+            "matched_extreme_minute_start": matched,
+            "minute_start_ns": minute,
+            "minute_end_ns": minute + 60 * 10**9,
+            "utc_hour": 19, "segment_index": 0, "parent_count": 10,
+            "trade_count": 20, "traced_parents": 10,
+            "largest_innovation_std": inn,
+            "largest_innovation_ts_ns": minute,
+            "innovation_exceed_4": 1, "innovation_exceed_8": 0,
+            "innovation_exceed_16": 0,
+            "initiation": initiation, "sigma_start": 1.0,
+            "sigma_peak": esc, "sigma_end": 1.0,
+            "sigma_escalation": esc,
+            "latent_mid_range_ticks": 5,
+            "quote_mid_range_half_ticks": 10, "trade_range_ticks": 6,
+            "trade_to_quote_range_ratio": 1.2,
+            "quote_to_latent_range_ratio": 1.0,
+            "max_signed_run": 3, "clamp_hits": 0,
+            "arch_share_next": 0.1, "arch_share_minute_max": 0.2,
+        }
+
     def quiet_forensic(initiation=False, inn=2.0, esc=1.0,
                        control_esc=1.0):
         return [{"records": [
-            {"kind": "extreme_range", "minute_start_ns": 1,
-             "initiation": initiation, "largest_innovation_std": inn,
-             "sigma_escalation": esc},
-            {"kind": "control", "matched_extreme_minute_start": 1,
-             "initiation": False, "largest_innovation_std": 1.0,
-             "sigma_escalation": control_esc},
-        ]} for _ in range(8)]
+            forensic_fx(s + 1, "extreme_range", initiation=initiation,
+                        inn=inn, esc=esc),
+            forensic_fx(s + 1, "control", matched=1, esc=control_esc),
+        ], "refusals": []} for s in range(8)]
 
     st_mults = bootstrap_multiplicities(22)[:300]
 
@@ -7921,10 +8758,35 @@ def run_selftest() -> None:
               for m in garch_env["metrics"]
           ))
 
+    # Amendment D completeness gate: the raw magnitude closure and the
+    # forensic escalation BOTH pass while the garch inventory refuses
+    # on zero bootstrap SE (session-constant robust cells, which leave
+    # every closure input computable) - the envelope-dependent
+    # a_closure must gate on completeness and the rung must not fire.
+    ladder_gate = run_case(
+        {"robust": 1.0, "mag_perm": 2.0, "sign_perm": 1.0,
+         "robust_jitter": False},
+        {"robust": 2.0},
+        forensic=quiet_forensic(esc=3.0, control_esc=1.0),
+    )
+    gate_rung = next(
+        r for r in ladder_gate["rungs"] if r["name"] == "garch"
+    )
+    check("an incomplete garch inventory gates a passing closure",
+          not ladder_gate["envelopes"]["garch"]["inventory_complete"]
+          and ladder_gate["magnitude_closure"]["all_points_pass"]
+          and ladder_gate["magnitude_closure"]["joint_lcb"] is not None
+          and ladder_gate["magnitude_closure"]["joint_lcb"]
+          > GAP_CLOSE_LCB_MIN
+          and gate_rung["subchecks"]["a_closure"] is False
+          and gate_rung["subchecks"]["b_escalation"] is True
+          and not gate_rung["fired"])
+
     print("12a artifact schema")
     obs_fx, gens_fx, hists_fx = fake_ctxs(base, base)
     observed_fx = {
-        "binding": {"job_id": "TEST", "subcontract_hash": "x",
+        "binding": {"harness_tree_commit": "TESTCOMMIT",
+                    "job_id": "TEST", "subcontract_hash": "x",
                     "preflight_artifact_hash": "y", "file_hashes": {},
                     "tape_protocol_version": 11},
         "per_session": obs_fx.per_session,
@@ -7946,20 +8808,82 @@ def run_selftest() -> None:
             [r["permutations"] for r in obs_fx.per_session]
         ),
     }
-    artifact_fx = assemble_measure12a_artifact(
-        observed_fx,
-        [{"seed": s + 1, "per_session": gens_fx[s].per_session,
-          "forensic": quiet_forensic()[s],
-          "cost": {"walk_s": 1.0, "rss_bytes": 1}}
-         for s in range(8)],
-        {"generated": {"seeds": list(range(1, 9)),
-                       "window_start_ns": FINAL_START_NS,
-                       "window_length_ns": FINAL_END_NS
-                       - FINAL_START_NS, "warmup": SUMMARY_WARMUP}},
-        st_mults,
-        {"observed_s": 1.0, "generated_s": 1.0, "bootstrap_s": 1.0,
-         "total_s": 3.0, "peak_rss_bytes": 1, "scratch_bytes": 1},
+    gen_seeds_fx = [
+        {"seed": s + 1, "per_session": gens_fx[s].per_session,
+         "forensic": quiet_forensic()[s],
+         "cost": {"walk_s": 1.0, "rss_bytes": 1}}
+        for s in range(8)
+    ]
+    binding_extra_fx = {
+        "generated": {"seeds": list(range(1, 9)),
+                      "window_start_ns": FINAL_START_NS,
+                      "window_length_ns": FINAL_END_NS
+                      - FINAL_START_NS, "warmup": SUMMARY_WARMUP}}
+    cost_fx = {"observed_s": 1.0, "generated_s": 1.0,
+               "bootstrap_s": 1.0, "total_s": 3.0,
+               "peak_rss_bytes": 1, "scratch_bytes": 1}
+    check("assembly refuses a truncated bootstrap population",
+          refuses(
+              lambda: assemble_measure12a_artifact(
+                  observed_fx, gen_seeds_fx, binding_extra_fx,
+                  st_mults, cost_fx,
+              ),
+              "replicates",
+          ))
+    # The selftest ladder runs on the documented truncated bootstrap
+    # population, so the schema fixture is built through the internal
+    # assembly body - the production entrypoint above refuses it.
+    artifact_fx = _assemble_measure12a(
+        observed_fx, gen_seeds_fx, binding_extra_fx, st_mults, cost_fx,
     )
+    schema_errs = measure12a_schema_errors(artifact_fx)
+    check("the recursive section-10 validator passes the artifact",
+          schema_errs == [] or bool(print(schema_errs[:8])))
+    bad_fx = json.loads(json.dumps(json_safe(artifact_fx)))
+    bad_fx["observed"]["monthly"]["block4"]["19"]["session_votes"] = 22
+    check("the validator rejects an injected uncontracted field",
+          any("block4" in e
+              for e in measure12a_schema_errors(bad_fx)))
+
+    # The review mutation battery: each mutation of the valid artifact
+    # must produce at least one schema error.
+    def mutated(mutator):
+        m = json.loads(json.dumps(json_safe(artifact_fx)))
+        mutator(m)
+        return measure12a_schema_errors(m)
+
+    def mut_warmup(a):
+        a["diagnostics"]["warmup_exclusions"]["banana"] = 1
+
+    def mut_amendment_e(a):
+        # A fired reversion rung with a measured worsening_23 but null
+        # resolution fields must be rejected.
+        a["ladder"]["rungs"][3]["fired"] = True
+        a["diagnostics"]["worsening_23"] = {
+            "point": 0.0, "se": 1.0, "ucb": 0.0,
+        }
+
+    def mut_dup(a):
+        rec = {"scope": "family:child_walk", "cell": "x",
+               "reason": "y"}
+        a["diagnostics"]["refused_cells"].extend([rec, dict(rec)])
+
+    def mut_metric_null(a):
+        a["bootstrap"]["per_family"]["child_walk"]["metrics"][0][
+            "point"] = None
+
+    def mut_kind(a):
+        a["bootstrap"]["per_family"]["child_walk"]["metrics"][0][
+            "kind"] = "bogus"
+
+    def mut_no_all(a):
+        del a["observed"]["per_session"][0]["block4"]["all"]
+
+    check("the validator rejects the review mutation battery",
+          all(mutated(f) for f in (
+              mut_warmup, mut_amendment_e, mut_dup, mut_metric_null,
+              mut_kind, mut_no_all,
+          )))
     check("the artifact carries exactly the frozen top-level keys",
           sorted(artifact_fx.keys())
           == ["binding", "bootstrap", "constants", "cost",
@@ -8023,11 +8947,9 @@ def run_selftest() -> None:
               sorted(b.keys()) == ["cell", "scope"]
               for b in artifact_fx["diagnostics"]["empty_bins"]
           ))
-    check("the constants block serializes the exact section 7 names",
-          {"PARENT_COUNT_BINS", "SEGMENT_OPEN_BINS_S",
-           "SEGMENT_CLOSE_BINS_S", "MIN_60S_CELL_RETURNS",
-           "MIN_300S_CELL_RETURNS", "BOOTSTRAP_BASE_SEED"}
-          <= set(artifact_fx["constants"].keys()))
+    check("the constants block equals the exact section 7 name set",
+          set(artifact_fx["constants"].keys())
+          == set(MEASURE12A_CONSTANT_NAMES))
     check("the artifact serializes as strict JSON",
           isinstance(json.dumps(json_safe(artifact_fx)), str))
     check("central blocks drop the histogram and keep the medians",
@@ -8042,7 +8964,8 @@ def run_selftest() -> None:
 
 def main() -> None:
     if len(sys.argv) != 2 or sys.argv[1] not in ("selftest", "preflight",
-                                                 "fit", "measure12a"):
+                                                 "fit", "measure12a",
+                                                 "cost12a"):
         raise SystemExit(__doc__)
     mode = sys.argv[1]
     try:
@@ -8052,6 +8975,8 @@ def main() -> None:
             mode_preflight()
         elif mode == "measure12a":
             mode_measure12a()
+        elif mode == "cost12a":
+            mode_cost12a()
         else:
             mode_fit()
     except Refusal as exc:

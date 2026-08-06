@@ -45,6 +45,11 @@ pub(crate) enum GenType {
     /// forensic instrument of the generator successor spec - observation
     /// only, byte-identical tape, pinned by test.
     Trace,
+    /// One JSON object with the protocol-12a generated-side per-seed
+    /// record (spec Brick G): per-session Blocks 1-4 in the observed
+    /// serialized shape plus the Block-5 forensic records. Consumer-only:
+    /// reads events and `VolTrace`, perturbs no draws.
+    Measure12a,
 }
 
 /// `mogwai gen` arguments. Dumps the offline generator as CSV.
@@ -152,13 +157,13 @@ fn run_into(args: &GenArgs, sink: &mut impl Write) -> anyhow::Result<()> {
             Some(NonZeroU64::new(ns).context("--interval must be nonzero")?)
         }
         (GenType::Bars, None) => bail!("--type bars requires --interval"),
-        (GenType::Trades | GenType::Summary | GenType::Trace, Some(_)) => {
+        (GenType::Trades | GenType::Summary | GenType::Trace | GenType::Measure12a, Some(_)) => {
             bail!("--interval is only valid with --type bars")
         }
-        (GenType::Trades | GenType::Summary | GenType::Trace, None) => None,
+        (GenType::Trades | GenType::Summary | GenType::Trace | GenType::Measure12a, None) => None,
     };
-    if args.warmup.is_some() && !matches!(args.kind, GenType::Summary) {
-        bail!("--warmup is only valid with --type summary");
+    if args.warmup.is_some() && !matches!(args.kind, GenType::Summary | GenType::Measure12a) {
+        bail!("--warmup is only valid with --type summary or --type measure12a");
     }
     if (args.trace_from.is_some() || args.trace_until.is_some())
         && !matches!(args.kind, GenType::Trace)
@@ -184,7 +189,7 @@ fn run_into(args: &GenArgs, sink: &mut impl Write) -> anyhow::Result<()> {
         return write_trace(&mut source, from, until, end, sink);
     }
 
-    if let GenType::Summary = args.kind {
+    if matches!(args.kind, GenType::Summary | GenType::Measure12a) {
         let warmup_ns = match &args.warmup {
             Some(raw) => parse_duration(raw).context("parsing --warmup")?,
             None => 0,
@@ -195,14 +200,24 @@ fn run_into(args: &GenArgs, sink: &mut impl Write) -> anyhow::Result<()> {
                 args.start
             )
         })?;
+        let seed = args.seed.unwrap_or(DEFAULT_GEN_SEED);
+        if let GenType::Measure12a = args.kind {
+            // The 12a measurement consumer is defined only over the
+            // fixed CME session structure session_segment_at encodes; a
+            // calendar-free profile would silently emit no sessions.
+            let Some(calendar) = profile.calendar.as_ref() else {
+                bail!("--type measure12a requires a session-bearing instrument profile");
+            };
+            let offset = calendar.utc_offset_minutes;
+            let mut source = build_source(args, &profile, walk_start)?;
+            source.enable_vol_trace();
+            let value = run_measure12a(&mut source, &profile, seed, offset, args.start, end)?;
+            serde_json::to_writer(&mut *sink, &value).context("writing measure12a JSON")?;
+            writeln!(sink)?;
+            return Ok(());
+        }
         let mut source = build_source(args, &profile, walk_start)?;
-        let acc = summarize(
-            &mut source,
-            &profile,
-            args.seed.unwrap_or(DEFAULT_GEN_SEED),
-            args.start,
-            end,
-        );
+        let acc = summarize(&mut source, &profile, seed, args.start, end);
         return write_summary(&acc, sink);
     }
 
@@ -225,11 +240,44 @@ fn run_into(args: &GenArgs, sink: &mut impl Write) -> anyhow::Result<()> {
             let interval = interval.expect("bars validated interval above");
             write_bars(trades, args.start, end, interval, sink)?;
         }
-        GenType::Summary | GenType::Trace => {
-            unreachable!("summary and trace dispatched above")
+        GenType::Summary | GenType::Trace | GenType::Measure12a => {
+            unreachable!("summary, trace and measure12a dispatched above")
         }
     }
     Ok(())
+}
+
+/// Drive the walk through the `Measure12aAcc` (spec Brick G). The
+/// consumer reads events and per-parent `VolTrace` records only; the
+/// walk is the shipped one.
+pub(crate) fn run_measure12a(
+    source: &mut mogwai_data::GeneratedSource,
+    profile: &crate::source::InstrumentProfile,
+    seed: u64,
+    offset: i16,
+    start: u64,
+    end: u64,
+) -> anyhow::Result<serde_json::Value> {
+    let t0 = std::time::Instant::now();
+    crate::measure12a::prepare_trade_tick(profile.scalars.modal_tick);
+    let mut acc =
+        crate::measure12a::Measure12aAcc::new(seed, start, end, offset, profile.scalars.modal_tick);
+    while let Some(event) = source.next_tick() {
+        if event.ts_event() >= end {
+            break;
+        }
+        match event {
+            TickEvent::Quote(q) => {
+                let trace = source.take_vol_trace();
+                acc.push_quote(&q, trace)?;
+            }
+            TickEvent::Trade(t) => acc.push_trade(&t)?,
+        }
+    }
+    acc.finish(
+        t0.elapsed().as_secs_f64(),
+        crate::measure12a::self_peak_rss_bytes(),
+    )
 }
 
 /// One JSON line per parent whose event instant falls inside
@@ -643,11 +691,11 @@ const NS_PER_MIN_I: i128 = 60_000_000_000;
 /// `session_start_ns` keys the session (the local 17:00 open instant);
 /// `segment_origin_ns` anchors the fixed-horizon boundary grid (spec 4.6).
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct SessionSegment {
-    session_start_ns: u64,
-    session_end_ns: u64,
-    segment_origin_ns: u64,
-    segment_end_ns: u64,
+pub(crate) struct SessionSegment {
+    pub(crate) session_start_ns: u64,
+    pub(crate) session_end_ns: u64,
+    pub(crate) segment_origin_ns: u64,
+    pub(crate) segment_end_ns: u64,
 }
 
 /// Maps an OPEN instant to its session segment per spec 4.5: a local minute
@@ -656,7 +704,7 @@ struct SessionSegment {
 /// from 15:30 to 16:00 is the post-halt segment. Closed instants (halt,
 /// break) return None - the calendar keeps generated events out of them, so
 /// a None on a real event is a session-math defect, not a data case.
-fn session_segment_at(ts: u64, offset_minutes: i16) -> Option<SessionSegment> {
+pub(crate) fn session_segment_at(ts: u64, offset_minutes: i16) -> Option<SessionSegment> {
     let offset_ns = i128::from(offset_minutes) * NS_PER_MIN_I;
     let local = i128::from(ts) + offset_ns;
     let day = local.div_euclid(NS_PER_DAY_I);
@@ -696,7 +744,7 @@ fn session_segment_at(ts: u64, offset_minutes: i16) -> Option<SessionSegment> {
     }
 }
 
-fn utc_hour_of(ts: u64) -> usize {
+pub(crate) fn utc_hour_of(ts: u64) -> usize {
     ((ts / 1_000_000_000) % 86_400 / 3_600) as usize
 }
 
@@ -2362,6 +2410,245 @@ mod tests {
         assert_eq!(
             got["top_minutes"][1]["range_ticks"],
             got["minute_range_second_max_ticks"]
+        );
+    }
+
+    /// 2026-07-07T01:00Z, mid-overnight-segment of the July 7 session.
+    const M12A_START_NS: u64 = 1_783_386_000_000_000_000;
+
+    fn m12a_args(start: u64, length: &str) -> GenArgs {
+        GenArgs {
+            kind: GenType::Measure12a,
+            length: length.to_string(),
+            interval: None,
+            symbol: "MNQ".to_string(),
+            seed: Some(7),
+            start,
+            start_price: None,
+            config: None,
+            warmup: None,
+            trace_from: None,
+            trace_until: None,
+            regime: None,
+            havoc: None,
+            out: None,
+        }
+    }
+
+    fn m12a_walk(start: u64, length_ns: u64) -> serde_json::Value {
+        let args = m12a_args(start, "1h");
+        let profile = resolve_profile_for(&args).expect("MNQ profile");
+        let offset = profile
+            .calendar
+            .as_ref()
+            .expect("calendar")
+            .utc_offset_minutes;
+        let mut source = build_source(&args, &profile, start).expect("source");
+        source.enable_vol_trace();
+        run_measure12a(&mut source, &profile, 7, offset, start, start + length_ns)
+            .expect("measure12a walk")
+    }
+
+    #[test]
+    fn measure12a_selection_is_deterministic() {
+        // Two fresh walks of the same seed and window must serialize
+        // identically once the live cost fields are normalized out: the
+        // deterministic payload is seed, per_session and forensic.
+        let normalize = |mut v: serde_json::Value| -> String {
+            v.as_object_mut()
+                .expect("measure12a object")
+                .remove("cost")
+                .expect("cost present");
+            serde_json::to_string(&v).expect("serializable")
+        };
+        let one = m12a_walk(M12A_START_NS, 3_600_000_000_000);
+        let records = one["forensic"]["records"]
+            .as_array()
+            .expect("records")
+            .clone();
+        assert!(
+            records.iter().any(|r| r["kind"] == "extreme_range"),
+            "a real walk selects an extreme: {records:?}"
+        );
+        assert!(
+            records
+                .iter()
+                .all(|r| r["traced_parents"].as_u64().unwrap() >= 1),
+            "every selected minute is trace-grounded"
+        );
+        let two = m12a_walk(M12A_START_NS, 3_600_000_000_000);
+        assert_eq!(normalize(one), normalize(two));
+    }
+
+    #[test]
+    fn measure12a_consumer_leaves_tape_byte_identical() {
+        // A plain --type bars run against one where the Measure12aAcc
+        // consumed the same walk (traces enabled): the consumer must not
+        // perturb draws, so the bar bytes are identical. `summary` emits
+        // no tape bytes, so bars anchor this test.
+        let end = M12A_START_NS + 1_200_000_000_000; // 20 minutes
+        let mut plain = Vec::new();
+        {
+            let mut args = m12a_args(M12A_START_NS, "20m");
+            args.kind = GenType::Bars;
+            args.interval = Some("1m".to_string());
+            run_into(&args, &mut plain).expect("plain bars");
+        }
+        let args = m12a_args(M12A_START_NS, "20m");
+        let profile = resolve_profile_for(&args).expect("MNQ profile");
+        let offset = profile
+            .calendar
+            .as_ref()
+            .expect("calendar")
+            .utc_offset_minutes;
+        crate::measure12a::prepare_trade_tick(profile.scalars.modal_tick);
+        let mut source = build_source(&args, &profile, M12A_START_NS).expect("source");
+        source.enable_vol_trace();
+        let mut acc = crate::measure12a::Measure12aAcc::new(
+            7,
+            M12A_START_NS,
+            end,
+            offset,
+            profile.scalars.modal_tick,
+        );
+        let mut trades: Vec<TradeTick> = Vec::new();
+        while let Some(event) = source.next_tick() {
+            if event.ts_event() >= end {
+                break;
+            }
+            match event {
+                TickEvent::Quote(q) => {
+                    let trace = source.take_vol_trace();
+                    acc.push_quote(&q, trace).expect("quote");
+                }
+                TickEvent::Trade(t) => {
+                    acc.push_trade(&t).expect("trade");
+                    if t.ts_event >= M12A_START_NS {
+                        trades.push(t);
+                    }
+                }
+            }
+        }
+        let _ = acc.finish(0.0, 0).expect("finish");
+        let mut consumed = Vec::new();
+        write_bars(
+            trades.into_iter(),
+            M12A_START_NS,
+            end,
+            NonZeroU64::new(60_000_000_000).expect("nonzero"),
+            &mut consumed,
+        )
+        .expect("consumed bars");
+        assert_eq!(plain, consumed, "the consumer perturbed the tape");
+    }
+
+    #[test]
+    fn arch_coefficients_match_the_shipped_recursion() {
+        // The measure12a-local ARCH/GARCH coefficients are pinned against
+        // the SHIPPED recursion via traces of a real walk: recover all
+        // three parameters of candidate[i+1] = a0 + a1 * base[i]^2 +
+        // b1 * sigma2[i] by least squares over the transitions, then show
+        // a perturbed local coefficient fails the residual bound.
+        let args = m12a_args(M12A_START_NS, "1h");
+        let profile = resolve_profile_for(&args).expect("MNQ profile");
+        let mut source = build_source(&args, &profile, M12A_START_NS).expect("source");
+        source.enable_vol_trace();
+        let end = M12A_START_NS + 1_800_000_000_000;
+        let mut traces: Vec<mogwai_data::VolTrace> = Vec::new();
+        while let Some(event) = source.next_tick() {
+            if event.ts_event() >= end {
+                break;
+            }
+            if matches!(event, TickEvent::Quote(_))
+                && let Some(trace) = source.take_vol_trace()
+            {
+                traces.push(trace);
+            }
+        }
+        let transitions: Vec<(f64, f64, f64)> = traces
+            .windows(2)
+            .map(|w| {
+                (
+                    w[1].sigma2_candidate,
+                    w[0].base_return.powi(2),
+                    w[0].sigma2_realized,
+                )
+            })
+            .filter(|(y, x1, x2)| y.is_finite() && x1.is_finite() && x2.is_finite())
+            .collect();
+        assert!(
+            transitions.len() > 500,
+            "enough transitions: {}",
+            transitions.len()
+        );
+        let mean = |f: fn(&(f64, f64, f64)) -> f64, v: &[(f64, f64, f64)]| {
+            v.iter().map(f).sum::<f64>() / v.len() as f64
+        };
+        let var = |f: fn(&(f64, f64, f64)) -> f64, v: &[(f64, f64, f64)]| {
+            let m = mean(f, v);
+            v.iter().map(|t| (f(t) - m).powi(2)).sum::<f64>() / v.len() as f64
+        };
+        assert!(var(|t| t.1, &transitions) > 0.0, "degenerate base_return^2");
+        assert!(var(|t| t.2, &transitions) > 0.0, "degenerate sigma2");
+        // Centered least squares for y = a0 + a1 x1 + b1 x2: solve the
+        // 2x2 system over mean-centered regressors (the raw normal
+        // equations would be hopelessly ill-conditioned against the
+        // intercept), then recover a0 from the means.
+        let my = mean(|t| t.0, &transitions);
+        let mx1 = mean(|t| t.1, &transitions);
+        let mx2 = mean(|t| t.2, &transitions);
+        let (mut s11, mut s12, mut s22, mut s1y, mut s2y) = (0.0f64, 0.0, 0.0, 0.0, 0.0);
+        for &(y, x1, x2) in &transitions {
+            let (c1, c2, cy) = (x1 - mx1, x2 - mx2, y - my);
+            s11 += c1 * c1;
+            s12 += c1 * c2;
+            s22 += c2 * c2;
+            s1y += c1 * cy;
+            s2y += c2 * cy;
+        }
+        let det = s11 * s22 - s12 * s12;
+        assert!(det != 0.0, "singular centered normal equations");
+        let a1 = (s1y * s22 - s2y * s12) / det;
+        let b1 = (s2y * s11 - s1y * s12) / det;
+        let a0 = my - a1 * mx1 - b1 * mx2;
+        assert!(
+            (a1 - crate::measure12a::ARCH_12A).abs() < 1e-6,
+            "recovered ARCH {a1} drifts from the local constant"
+        );
+        assert!(
+            (b1 - crate::measure12a::GARCH_12A).abs() < 1e-6,
+            "recovered GARCH {b1} drifts from the local constant"
+        );
+        // Scale-aware residual bound with the LOCAL constants (a0 from
+        // the fit): the shipped recursion satisfies them to numerics.
+        let scale = transitions
+            .iter()
+            .map(|&(y, ..)| y.abs())
+            .fold(0.0f64, f64::max);
+        let max_resid = |arch: f64, garch: f64| {
+            transitions
+                .iter()
+                .map(|&(y, x1, x2)| (y - (a0 + arch * x1 + garch * x2)).abs())
+                .fold(0.0f64, f64::max)
+        };
+        let bound = scale * 1e-9;
+        assert!(
+            max_resid(crate::measure12a::ARCH_12A, crate::measure12a::GARCH_12A) <= bound,
+            "the local coefficients violate the shipped recursion"
+        );
+        // Sensitivity: perturbing either local coefficient independently
+        // fails the same bound.
+        assert!(
+            max_resid(
+                crate::measure12a::ARCH_12A * 1.001,
+                crate::measure12a::GARCH_12A
+            ) > bound
+        );
+        assert!(
+            max_resid(
+                crate::measure12a::ARCH_12A,
+                crate::measure12a::GARCH_12A * 1.001
+            ) > bound
         );
     }
 

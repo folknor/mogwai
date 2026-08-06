@@ -12,6 +12,7 @@ mod fills;
 mod r#gen;
 mod http;
 mod man;
+mod measure12a;
 mod run;
 mod source;
 mod sweeper;

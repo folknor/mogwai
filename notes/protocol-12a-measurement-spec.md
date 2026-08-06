@@ -1,9 +1,29 @@
 # Protocol 12a: the tail and aggregation measurement landing
 
-REVISION 11 - the revision-10 freeze (Brick F signed by the
+REVISION 12 - the revision-10 freeze (Brick F signed by the
 reviewing codex session 019fd565-1f36-7ab2-83e1-77af1b32b326 on
 2026-08-06) plus the four narrow amendments A-D negotiated at the
-Brick O implementation review, awaiting formal re-signature. The
+Brick O implementation review, plus the two narrow amendments E-F
+negotiated at the Brick O defect-repair review (co-signed by codex
+session 019fd70c-0881-70c1-a3b8-5bfdc2879a08 on 2026-08-06; the
+original session's cache had gone cold and was unresumable, so the
+repair review restated the full context to a fresh session). The
+repaired Brick O implementation was then verified against this
+revision: session 019fd724-5f17-7e80-9720-388af117df9e signed the
+eight repairs with two blockers (validator enforcement, the
+replicate-gate override), and session
+019fd731-0d4c-74f3-8046-fccaf7906a84 signed the final tree with no
+residual violations on 2026-08-06. Brick G followed the same
+protocol on 2026-08-06: session 019fd792-89b8-7783-bac1-2f0beb778373
+signed the design with three rulings (complete sessions only; local
+ARCH/GARCH constants pinned by coefficient recovery over traces;
+Brick G owns cost12a, the cache runner and the eight FINAL walks)
+and eight corrections; session 019fd7b3-4da1-73a3-a026-6c6d84e04dd1
+found four residual violations in the implementation (cross-language
+log-mid arithmetic, trade-driven initiation closure, a stale
+arch_share_next under a superseding largest innovation, duplicate
+shared-control refusals); session 019fd7c4-ae4e-7c52-9ba4-b80497657832
+signed the repaired Brick G with no residual violations. The
 Brick O implementation surfaced eight contract violations; per the
 freeze protocol the brick failed, the amendments were argued to
 consensus, and this revision writes them in. Revision 1 was refused
@@ -11,7 +31,7 @@ with 22 blockers, revision 2 with 11, revision 3 with 6, revision 4
 with 5, revision 5 with 2, revision 6 with 2, revision 7 with 2,
 revision 8 with 1, revision 9 with 1.
 
-Amendment log (all four co-signed in negotiation, incorporated into
+Amendment log (all six co-signed in negotiation, incorporated into
 the body below):
 
 - A: `PermRecord` carries per-horizon sufficient statistics
@@ -31,6 +51,34 @@ the body below):
   every envelope-dependent subcheck false, and cannot fire; the
   computable metrics keep their point/seed/fold evidence with null
   envelope fields.
+- E: `worsening_23` is evaluated only after the signed-reversion rung
+  fires. If the measurement produces its point estimate, standard
+  error, UCB, and all 10,000 required bootstrap values, the existing
+  uniform-versus-hour-resolved rule applies. If the measurement is
+  refused, `diagnostics.worsening_23 = null`,
+  `uniform_eligible = null`, and `required_resolution = null`.
+  Exactly one logical `RefusalRec` with `scope = "reversion"` and
+  `cell = "worsening_23"` owns those refusal-caused nulls; it appears
+  once in top-level `diagnostics.refused_cells` and is mirrored once
+  in the fired reversion rung's `refusals`. A refused measurement
+  must never be coerced to `uniform_eligible = false` or
+  `required_resolution = "hour-resolved"`. When the reversion rung
+  does not fire, `diagnostics.worsening_23`, `uniform_eligible`, and
+  `required_resolution` are null by inapplicability, with no
+  `worsening_23` refusal record.
+- F: a standardizer residual omitted for a nonpositive or non-finite
+  trailing scale (the frozen Q1 exception) is recorded as one
+  `RefusalRec` per `(side/seed, session, hour)` with a positive
+  omission count, carried in that session's scoped `refusals` array
+  and mirrored into top-level `diagnostics.refused_cells`; no
+  duplicate record for the pooled `"all"` cell; the current return
+  still enters history. These are the SOLE `RefusalRec` class owning
+  omitted observations rather than refusal-caused nulls - the one
+  narrow exception to the reverse direction of the section-10
+  refusal-null pairing, and the exact-key validator recognizes them
+  as such. A post-omission count falling below `MIN_RESIDUAL_CELL`
+  produces a separate, ordinary family-metric refusal that owns that
+  metric's null.
 - Q1 ruling: required family cells qualify only when EVERY usable
   observed session (and, per seed, every complete generated session)
   meets the applicable floor - one failing session refuses the
@@ -728,7 +776,12 @@ except as rung 6's residual.
    at 300 s with `robust_scale`; `uniform_eligible = true` iff the
    `worsening_23` UCB (5.3) is `<= 0`; otherwise
    `uniform_eligible = false` and
-   `required_resolution = "hour-resolved"`.
+   `required_resolution = "hour-resolved"`. Amendment E:
+   `worsening_23` is evaluated only after this rung fires; a refused
+   measurement records `uniform_eligible = null` and
+   `required_resolution = null` with exactly one matching
+   `RefusalRec` (`scope = "reversion"`, `cell = "worsening_23"`) -
+   never a fabricated `hour-resolved`.
 5. **GARCH persistence.** Fires iff (a) the magnitude shuffle's
    closure of the `robust_scale` gap is at least 0.50 at every
    `HOT_HOURS` 300 s cell and at hour 20 at 60 s, with the
@@ -1024,7 +1077,9 @@ emptiness (the parenthesized rules on the shapes below) are NOT
 refusals and appear only in `diagnostics.empty_bins` when a whole
 bin is empty. Exact-key selftests assert this whole tree: every
 listed key present, no unlisted key, and the refusal-null pairing in
-both directions.
+both directions - with the Amendment-F standardizer-omission records
+as the sole class of RefusalRec owning omitted observations rather
+than refusal-caused nulls.
 
 Shared shapes (every field listed is required; `| null` marks the
 only nullable fields):
@@ -1199,10 +1254,14 @@ RungRec      = {name, subchecks: {key: bool}, fired,
                 for every unfired rung and for arrival, innovation
                 and boundary (Amendment C). uniform_eligible and
                 required_resolution are both null unless the
-                reversion rung fired; a fired reversion rung records
-                either uniform_eligible = true with
-                required_resolution = "uniform" or uniform_eligible
-                = false with required_resolution = "hour-resolved")
+                reversion rung fired; a fired reversion rung with a
+                MEASURED worsening_23 records either uniform_eligible
+                = true with required_resolution = "uniform" or
+                uniform_eligible = false with required_resolution =
+                "hour-resolved"; a fired reversion rung with a
+                REFUSED worsening_23 records both null with exactly
+                one matching worsening_23 RefusalRec, per Amendment
+                E - never a fabricated hour-resolved)
 ```
 
 The six rung subcheck key sets, literal and exhaustive:
