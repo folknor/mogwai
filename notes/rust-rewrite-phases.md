@@ -164,12 +164,62 @@ subphase's own Rust tests.
   `aggregate::monthly::PooledHist` is an insertion-ordered map rather
   than a `BTreeMap`. Sorting those walks moves the last ulp of
   `counterfactual_exceed_968`.
-- **2c, assembly and the CLI**: artifact assembly, the schema and
-  semantic validators, the resource-sampled cost contract, `mogwai
-  measure`. GATE, the program's centerpiece: reproduce
-  `analysis/mnq-measure-12a.json` typed-canonical-identical from the
-  same corpus and walk caches. measure12a.rs and the gen measure
-  dispatch are fully retired from cli here.
+- **2c, assembly and the CLI** - resized 2026-08-06 after the first
+  2c launch correctly refused the scope as exceeding the per-launch
+  budget; now THREE slices, each with its own gate:
+  - **2c-i, assembly and validators**: assemble_measure12a_artifact
+    with the 10,000-replicate hard gate, the recursive schema
+    validator, the semantic gates, load_brick_g_walks, json_safe
+    atomic writing. Gate: assembling FROM THE CACHES (observed half
+    plus the eight walk records - no live corpus pass, no walks)
+    reproduces the committed artifact typed-canon-identically minus
+    cost and binding.harness_tree_commit; the validator returns empty
+    on it and rejects the mutation battery.
+
+    LANDED 2026-08-06. `mogwai_lab::aggregate::artifact` carries
+    `assemble_measure12a_artifact` (the hard 10,000-replicate gate)
+    over `assemble_measure12a_body` (the internal, ungated form a
+    truncated fixture goes through directly), the recursive
+    `measure12a_schema_errors`, `measure12a_semantic_errors`,
+    `load_brick_g_walks` (seed-indexed, refusing absence/ambiguity/
+    malformed types) and `json_safe`/`write_json_atomic`. It lives
+    inside `mogwai-lab` rather than `mogwai-cli` because this slice
+    needs no `mogwai-server` preset resolution - assembly is a pure
+    function of the cached records - so the gate is
+    `crates/mogwai-lab/tests/parity12a_i.rs`, ignored and named
+    `parity12a_i_*`; it passes in ~6.5 s
+    (`brokkr test -p mogwai-lab parity12a_i`), reading the observed
+    cache and the eight Brick G walk records and reassembling the
+    artifact with a provisional cost record. The negative batteries
+    (truncated-bootstrap refusal on the public entrypoint, mixed-type
+    usable-list refusal, an injected uncontracted field, and the
+    six-mutation review battery) are asserted in the same test against
+    the real assembled artifact as the mutation baseline, rather than
+    against a hand-built Python-selftest-style fixture.
+
+    One three-way finding, resolved rather than escalated: the
+    coordinator's brief excludes "the cost object" from the compare,
+    naming the top-level `cost` key; the committed artifact's
+    `generated.per_seed[*].cost` (`walk_s`/`rss_bytes`, pasted verbatim
+    from the Brick G cache file) diverges from what is on disk in
+    `analysis/out/measure12a-cache/` TODAY, because that per-seed cost
+    is itself a live wall-time/RSS measurement of whichever walk most
+    recently populated the cache file for that seed - the same
+    reproducibility class as the top-level `cost` object, not a
+    section-10 statistic. The gate excludes it too, for the same
+    reason the brief excludes the top-level object; every other field,
+    including `binding.generated` and every other `binding` key, is
+    compared byte-of-meaning.
+  - **2c-ii, the live run**: the resource sampler, fresh-tree gate,
+    in-process attestation walks, the observed pass, `mogwai
+    measure`. Gate: the full live run from the clean tree reproduces
+    the artifact minus the honestly-live fields, budgets measured.
+  - **2c-iii, retirement**: cli's measure12a.rs deleted, the gen
+    measure dispatch re-routed through the lab engine with the CLI
+    surface unchanged, the four named tests re-anchored under their
+    spec-runbook names, the 2a parity gates re-run, and python
+    cost12a as the end-to-end proof the harness still drives the
+    re-routed binary.
 
 ## Phase 3 - fit and synthesis (two launches)
 

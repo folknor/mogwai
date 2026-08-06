@@ -37,6 +37,7 @@
 
 use serde_json::Value;
 
+pub mod artifact;
 pub mod assemble;
 pub mod bootstrap;
 pub mod context;
