@@ -11,9 +11,11 @@
 #[cfg(not(unix))]
 compile_error!("mogwai requires a Unix target");
 
+mod cache;
 mod r#gen;
 mod man;
 mod measure12a;
+mod preflight;
 mod tick_composition;
 
 use std::path::PathBuf;
@@ -40,6 +42,12 @@ enum Command {
     TickComposition(tick_composition::TickCompositionArgs),
     /// Print a bundled reference doc, or list the topics.
     Man(ManArgs),
+    /// Fail-closed TBBO corpus contract check; persists a hash-bound
+    /// preflight artifact.
+    Preflight(preflight::PreflightArgs),
+    /// The cache-storage-class manual controls (stats / clean / clean
+    /// --stale).
+    Cache(cache::CacheArgs),
 }
 
 #[derive(Args)]
@@ -94,5 +102,7 @@ fn main() -> anyhow::Result<()> {
             man::run(args.topic);
             Ok(())
         }
+        Command::Preflight(args) => preflight::run(args),
+        Command::Cache(args) => cache::run(args),
     }
 }

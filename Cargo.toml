@@ -14,6 +14,7 @@ mogwai-protocol = { path = "crates/mogwai-protocol" }
 mogwai-engine = { path = "crates/mogwai-engine" }
 mogwai-data = { path = "crates/mogwai-data" }
 mogwai-server = { path = "crates/mogwai-server" }
+mogwai-lab = { path = "crates/mogwai-lab" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.151"
@@ -27,6 +28,13 @@ rand_distr = "0.6"
 # position), seedable and deterministic - the substrate the checkpointed seek
 # (CheckpointIndex) needs. rand_core 0.10, so rand_distr 0.6 sampling composes.
 rand_chacha = "0.10"
+# Streaming .csv.zst decode for the mogwai-lab corpus reader. Bindings over
+# libzstd (not a pure-Rust decoder): the corpus files are tens of GB and the
+# offline Python reference already uses the equivalent C library
+# (compression.zstd, stdlib since 3.14), so this keeps decode throughput and
+# format coverage identical rather than trusting a reimplementation.
+zstd = "0.13"
+sha2 = "0.10"
 tokio = { version = "1.53.1", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"

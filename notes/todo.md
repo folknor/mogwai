@@ -12,6 +12,15 @@ Or both. There are no exceptions.
 
 ## Open issues
 
+- The TBBO stream contract has an unguarded conversion class, in BOTH
+  implementations: `parse_stream` (analysis/mnq_fit.py and its
+  phase-1 port crates/mogwai-lab/src/stream.rs) converts
+  price/size/bid_sz/ask_sz without a named Refusal, so a malformed
+  non-integer field crashes instead of refusing cleanly. The Rust
+  port mirrors the Python deliberately (parity first); once the
+  Python retires at rewrite phase 4, decide whether these joins the
+  refusal contract. Found 2026-08-06 by the phase-1 port.
+
 - INVESTIGATE the fanout-capacity accept-before-fill failure. A CORRECTNESS
   investigation, not capacity tuning: with `fanout_depth = 16_777_216`,
   `a_banded_limit_fills_from_the_run_sweep` fails DETERMINISTICALLY - the

@@ -1,0 +1,230 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
+//! Session/segment math, the ONE implementation
+//! (notes/rust-rewrite-phases.md phase 1): a port of `analysis/mnq_fit.py`'s
+//! `local_fields`/`assign_session`/`minute_fields`/`segment_origin_ns`/
+//! `segment_end_ns`/`segment_labels`, unified with the integer-only
+//! `session_segment_at` that `crates/mogwai-cli/src/gen.rs` carries
+//! independently today. `session_segment_at` here is that same pure-integer
+//! algorithm (no `chrono`, no string dates in the hot path); `assign_session`
+//! wraps it to produce the (trade-date label, segment name) pairs the
+//! preflight stream pass needs. `crates/mogwai-cli` is NOT rewired onto this
+//! module yet (phase 2 migration) - a test there pins the two
+//! implementations agree over a wide timestamp sweep.
+
+use std::collections::HashMap;
+
+use crate::subcontract::{
+    HALT_END_LOCAL_MIN, HALT_START_LOCAL_MIN, PARENT_COUNT_BIN_EDGES, PARENT_COUNT_BIN_NAMES,
+    SEGMENT_LABEL_EDGES_S, SESSION_CLOSE_LOCAL_MIN, SESSION_OPEN_LOCAL_MIN, SINCE_OPEN_BIN_NAMES,
+    UNTIL_CLOSE_BIN_NAMES,
+};
+
+const NS_PER_DAY: i128 = 86_400_000_000_000;
+const NS_PER_MIN: i128 = 60_000_000_000;
+
+/// The calendar boundaries of the session/segment a timestamp falls in, as
+/// UTC epoch-ns instants, plus the trade-date civil day (days since the
+/// 1970-01-01 epoch) and segment name that produced them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionSegment {
+    pub session_start_ns: u64,
+    pub session_end_ns: u64,
+    pub segment_origin_ns: u64,
+    pub segment_end_ns: u64,
+    pub trade_day: i64,
+    pub segment: &'static str,
+}
+
+/// Pure-integer port of `crates/mogwai-cli/src/gen.rs`'s `session_segment_at`
+/// (same algorithm, extended to also report the trade-date day number and
+/// segment name so callers here don't need a second pass). `None` inside the
+/// 15:15-15:30 halt or the 16:00-17:00 daily break.
+pub fn session_segment_at(ts_ns: u64, offset_minutes: i32) -> Option<SessionSegment> {
+    let offset_ns = i128::from(offset_minutes) * NS_PER_MIN;
+    let local = i128::from(ts_ns) + offset_ns;
+    let day = local.div_euclid(NS_PER_DAY);
+    let minute_of_day = local.rem_euclid(NS_PER_DAY) / NS_PER_MIN;
+    let to_utc = |local_ns: i128| -> u64 { u64::try_from(local_ns - offset_ns).unwrap_or(0) };
+    let open_of = |d: i128| d * NS_PER_DAY + i128::from(SESSION_OPEN_LOCAL_MIN) * NS_PER_MIN;
+    let close_of = |d: i128| d * NS_PER_DAY + i128::from(SESSION_CLOSE_LOCAL_MIN) * NS_PER_MIN;
+    let halt_start = i128::from(HALT_START_LOCAL_MIN);
+    let halt_end = i128::from(HALT_END_LOCAL_MIN);
+    let open_min = i128::from(SESSION_OPEN_LOCAL_MIN);
+    if minute_of_day >= open_min {
+        Some(SessionSegment {
+            session_start_ns: to_utc(open_of(day)),
+            session_end_ns: to_utc(close_of(day + 1)),
+            segment_origin_ns: to_utc(open_of(day)),
+            segment_end_ns: to_utc((day + 1) * NS_PER_DAY + halt_start * NS_PER_MIN),
+            trade_day: (day + 1) as i64,
+            segment: "overnight",
+        })
+    } else if minute_of_day < halt_start {
+        Some(SessionSegment {
+            session_start_ns: to_utc(open_of(day - 1)),
+            session_end_ns: to_utc(close_of(day)),
+            segment_origin_ns: to_utc(open_of(day - 1)),
+            segment_end_ns: to_utc(day * NS_PER_DAY + halt_start * NS_PER_MIN),
+            trade_day: day as i64,
+            segment: "overnight",
+        })
+    } else if (halt_end..i128::from(SESSION_CLOSE_LOCAL_MIN)).contains(&minute_of_day) {
+        Some(SessionSegment {
+            session_start_ns: to_utc(open_of(day - 1)),
+            session_end_ns: to_utc(close_of(day)),
+            segment_origin_ns: to_utc(day * NS_PER_DAY + halt_end * NS_PER_MIN),
+            segment_end_ns: to_utc(close_of(day)),
+            trade_day: day as i64,
+            segment: "post_halt",
+        })
+    } else {
+        None
+    }
+}
+
+/// Howard Hinnant's `civil_from_days`: proleptic-Gregorian (year, month, day)
+/// from a day count since the 1970-01-01 epoch. Avoids a `chrono` dependency
+/// for the one thing this crate needs a calendar for.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// `"YYYY-MM-DD"` for a day count since the epoch - the session label format.
+pub fn format_trade_date(day: i64) -> String {
+    let (y, m, d) = civil_from_days(day);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// `session_date_int`: `"YYYY-MM-DD"` with the dashes stripped, as an
+/// integer.
+pub fn session_date_int(label: &str) -> i64 {
+    label.replace('-', "").parse().expect("session labels are always YYYY-MM-DD")
+}
+
+/// `assign_session`: (trade-date label, segment name) for a UTC-ns instant
+/// under the permanent `UTC_OFFSET_MINUTES` calendar, or `(None, None)`
+/// outside every session window.
+pub fn assign_session(ts_ns: u64) -> (Option<String>, Option<&'static str>) {
+    match session_segment_at(ts_ns, crate::subcontract::UTC_OFFSET_MINUTES) {
+        Some(seg) => (Some(format_trade_date(seg.trade_day)), Some(seg.segment)),
+        None => (None, None),
+    }
+}
+
+/// `parent_count_bin`: the half-open parent-count-bin name for `n`.
+pub fn parent_count_bin(n: i64) -> &'static str {
+    if n == 0 {
+        return "0";
+    }
+    for (edge, name) in PARENT_COUNT_BIN_EDGES.iter().rev().zip(PARENT_COUNT_BIN_NAMES.iter().rev()) {
+        if n >= *edge {
+            return name;
+        }
+    }
+    unreachable!("every n >= 1 has a bin")
+}
+
+/// `segment_labels`: (since_open_bin, until_close_bin) evaluated at minute
+/// start, per spec 3.2.
+pub fn segment_labels(minute_start_ns: u64, origin_ns: u64, end_ns: u64) -> (&'static str, &'static str) {
+    let since_s = (minute_start_ns as i128 - origin_ns as i128) as f64 / 1e9;
+    let until_s = (end_ns as i128 - minute_start_ns as i128) as f64 / 1e9;
+    let lo = SEGMENT_LABEL_EDGES_S[0] as f64;
+    let hi = SEGMENT_LABEL_EDGES_S[1] as f64;
+    let since = if since_s < lo {
+        SINCE_OPEN_BIN_NAMES[0]
+    } else if since_s < hi {
+        SINCE_OPEN_BIN_NAMES[1]
+    } else {
+        SINCE_OPEN_BIN_NAMES[2]
+    };
+    let until = if until_s > hi {
+        UNTIL_CLOSE_BIN_NAMES[0]
+    } else if until_s > lo {
+        UNTIL_CLOSE_BIN_NAMES[1]
+    } else {
+        UNTIL_CLOSE_BIN_NAMES[2]
+    };
+    (since, until)
+}
+
+/// One resolved minute's `(session, segment, exchange-local hour)`.
+pub type MinuteFields = (Option<String>, Option<&'static str>, i32);
+
+/// `minute_fields`: memoized on the UTC minute, mirroring the Python memo -
+/// a month is ~44k distinct minutes against 35M rows.
+#[derive(Default)]
+pub struct MinuteFieldsCache {
+    memo: HashMap<i64, MinuteFields>,
+}
+
+impl MinuteFieldsCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn minute_fields(&mut self, ts_ns: u64) -> MinuteFields {
+        let key = (ts_ns / 60_000_000_000) as i64;
+        if let Some(hit) = self.memo.get(&key) {
+            return hit.clone();
+        }
+        let (session, segment) = assign_session(ts_ns);
+        let offset_ns = i128::from(crate::subcontract::UTC_OFFSET_MINUTES) * NS_PER_MIN;
+        let local = i128::from(ts_ns) + offset_ns;
+        let local_hour = (local.rem_euclid(NS_PER_DAY) / NS_PER_MIN / 60) as i32;
+        let value = (session, segment, local_hour);
+        self.memo.insert(key, value.clone());
+        value
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_trade_date_matches_known_dates() {
+        assert_eq!(format_trade_date(0), "1970-01-01");
+        // 2026-07-01 is 20636 days after the epoch.
+        assert_eq!(format_trade_date(20635), "2026-07-01");
+    }
+
+    #[test]
+    fn session_date_int_strips_dashes() {
+        assert_eq!(session_date_int("2026-07-01"), 20_260_701);
+    }
+
+    #[test]
+    fn parent_count_bin_matches_python_edges() {
+        assert_eq!(parent_count_bin(0), "0");
+        assert_eq!(parent_count_bin(1), "1-64");
+        assert_eq!(parent_count_bin(64), "1-64");
+        assert_eq!(parent_count_bin(65), "65-256");
+        assert_eq!(parent_count_bin(4096), "1025-4096");
+        assert_eq!(parent_count_bin(4097), "4097+");
+    }
+
+    #[test]
+    fn assign_session_matches_the_halt_and_break_gaps() {
+        // 2026-07-01 15:20 local (in the halt) -> None. Local noon UTC
+        // offset -300 min means local = utc - 5h, so 15:20 local is 20:20
+        // UTC on the same civil day.
+        let day0 = 20635i64; // 2026-07-01
+        let halt_ts = ((day0 * 86_400 + 15 * 3600 + 20 * 60) as i128
+            - i128::from(crate::subcontract::UTC_OFFSET_MINUTES) * 60)
+            as u64
+            * 1_000_000_000;
+        assert_eq!(assign_session(halt_ts), (None, None));
+    }
+}
