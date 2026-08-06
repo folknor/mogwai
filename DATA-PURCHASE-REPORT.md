@@ -14,7 +14,8 @@ re-deriving anything and can see which steps were wrong the first time.
 ## Contents
 
 - [0. Summary](#0-summary)
-  - [0.1 State of play](#01-state-of-play-2026-08-05)
+  - [0.1 State of play, 2026-08-05 (superseded)](#01-state-of-play-2026-08-05)
+  - [0.2 State of play, 2026-08-06](#02-state-of-play-2026-08-06)
 - [1. The question, correctly stated](#1-the-question-correctly-stated)
 - [2. How the tape is generated today](#2-how-the-tape-is-generated-today)
 - [3. What MNQ actually gets today](#3-what-mnq-actually-gets-today)
@@ -81,14 +82,26 @@ operative purchase path is direct MNQ evidence: wave 2B of
 [9.7](#97-the-extended-program-gated-in-waves), split credit-first into a
 whitelisted July month and an unwhitelisted personal-cash June month,
 neither authorized. 24.06 of the 125 credit is spent, on evidence that
-settled both the proxy question and the protocol 8 arrival-bias question. See
-[0.1](#01-state-of-play-2026-08-05) for the full handover.
+settled both the proxy question and the protocol 8 arrival-bias question.
+
+Updated 2026-08-06: the July month was bought, delivered, and has now been
+consumed all the way through THREE landed protocols - the protocol-10 fit,
+the protocol-11 per-parent session refit, and the protocol-12a measurement
+landing whose committed verdict is `no-family-eligible` with the arrival
+COMPOSITION as the loudest (and self-blocking) finding. NO new purchase is
+implied by any of it: the blocking gap is generated-side support, not
+missing observed evidence. See [0.2](#02-state-of-play-2026-08-06) for the
+current handover; [0.1](#01-state-of-play-2026-08-05) is the preserved
+2026-08-05 record.
 
 ---
 
 ## 0.1 State of play, 2026-08-05
 
-Read this before starting anything. It is the handover, not a summary.
+SUPERSEDED by [0.2](#02-state-of-play-2026-08-06); preserved as the
+record of the state protocols 10-12a started from. The money facts here
+remain current (nothing has been bought since); the work-state facts do
+not.
 
 **Landed (historical checkpoint, written at protocol 8; protocol 10 has since
 landed the MNQ TBBO fit).** Protocol 8, then complete. The BBO layer at
@@ -277,6 +290,133 @@ protocol 8; every analysis gate green at `f29e789`.
 
 ---
 
+## 0.2 State of play, 2026-08-06
+
+Read this before starting anything. It is the handover, not a summary.
+Everything in [0.1](#01-state-of-play-2026-08-05) about money, tools and
+traps still holds; this section records what landed since and what the
+next agent picks up.
+
+**Landed since 0.1, in order, all on master.**
+
+1. **Protocol 10**: the July TBBO fit landed (floor-aware child
+   conditioning, per-instrument `size_log_sigma`). Already reflected in
+   the summary above.
+2. **Protocol 11**: the per-parent session refit that woke Asia and
+   London (arrival counts 14.5x peak-to-trough replacing the protocol-8
+   volume proxy; robust per-parent return scale nearly flat). The
+   hourly 60/300 s wall-time contour became a recorded DIAGNOSTIC there,
+   inherited as a hard obligation by the successor. Spec:
+   `notes/protocol-11-session-repair-spec.md`; evidence artifact
+   `analysis/mnq-fit.json`.
+3. **Protocol 12a, COMPLETE 2026-08-06**: the measurement landing that
+   protocol 11 obliged. Spec `notes/protocol-12a-measurement-spec.md`,
+   frozen at revision 12 with six co-signed amendments (A-F) and the
+   full codex signature chain recorded in its header; bricks F, O, G
+   and M all landed codex-signed. The machinery: five evidence blocks,
+   sign/magnitude permutation counterfactuals, a count-substitution
+   counterfactual, a 10,000-replicate fixed-seed block bootstrap, a
+   six-family preregistered eligibility ladder, a recursive exact-schema
+   validator plus semantic gates, and a Rust generated-side consumer
+   (`GenType::Measure12a` in `crates/mogwai-server/src/measure12a.rs`,
+   consumer-only, `TAPE_PROTOCOL_VERSION` stays 11). The committed
+   artifact is `analysis/mnq-measure-12a.json`; the RESULT section of
+   the 12a spec is the full reading.
+
+**The 12a verdict, which is now the owner's decision point:**
+`no-family-eligible` - no ladder rung fired. Five of six family
+inventories are complete, so the verdict is measured, not a refusal
+cascade, with one loud exception: ARRIVAL failed CLOSED while carrying
+the strongest evidence. The generated arrivals are 3.4x to 21x
+under-dispersed against the observed tape at the fail hours (full seed
+and fold agreement), but five required parent-count bins lack generated
+support at floor and the count substitution refuses 22 of 24 hours on
+observed support the generated months never populate. The generated
+parent-count COMPOSITION is too far from observed for the counterfactual
+to measure the gap it was built for. Innovation's tail subcheck fired
+(pooled standardized tail 31 percent heavy) but its forensic initiation
+evidence held in only 4 of 8 seeds; the reversion and garch wall-time
+discrepancies are present in point (27 to 36 percent hot at hours 19
+and 20) but not resolvable at the 95 percent simultaneous level over 22
+sessions.
+
+**What this means for the PURCHASE program: nothing new to buy.** The
+verdict implicates the generator, not the evidence base. The June month
+(`mnq06`) case was always conditioned on the July data demanding it
+under a decision contract; the 12a contract ran and the blocking gap is
+generated-side. `mnq06` stays unwhitelisted, wave 3 stays spec-gated,
+and the ~30-dollar ES/MES purchase stays the named next marginal dollar
+(owner-gated, credit remaining 27.53).
+
+**What is next, in order.**
+
+1. **The 12b direction is RULED, owner decision 2026-08-06: arrival
+   composition, repair-until-measurable.** 12b repairs the generated
+   parent-count composition until the frozen 12a arrival counterfactual
+   has support, then the unamended 12a ladder re-runs and eligibility
+   is measured rather than assumed. The full ruling, its grounds and
+   its binding constraints (instrument resolution, the Brick V
+   wall-time gates, version 12) are recorded in the 12a spec's RESULT
+   section. The 12b spec itself is EXCLUDED from 12a by its stopping
+   rule and must be drafted fresh through the freeze protocol - which
+   waits on codex review capacity returning.
+2. **The owner's stated next engineering task (2026-08-06): rewrite the
+   measurement machinery into mogwai-data proper with its own CLI.**
+   Assessment on record: roughly 10 percent of `analysis/mnq_fit.py`
+   (about 8,900 lines) is genuinely MNQ-specific (frozen constants,
+   session inventory, evidence-derived hour sets - all config-shaped),
+   another 15 percent is CME/Databento-specific (the TBBO parser and
+   the fixed CME session shape, shared with MES), and about 75 percent
+   is instrument-agnostic method. Two recorded caveats: the selftest
+   (about a third of the file) is entangled with both layers and needs
+   re-fixturing per abstraction seam, and code moved beside the
+   generator path loses the "analysis code needs no version bump"
+   shield of 12a spec 2.3 - a separate crate or a cleanly separated
+   module (the `measure12a.rs` precedent) keeps the
+   `TAPE_PROTOCOL_VERSION` rule scoped.
+3. Parked, unchanged: the fanout ordering investigation
+   (`notes/todo.md`, top), the reopen-gap limitation, the MNQ chart
+   PNG (browser needed), the ES/MES purchase.
+
+**Process facts a next agent must know.**
+
+- **Codex usage is EXHAUSTED for the week of 2026-08-06** - the
+  `review` tool will not work until the quota resets. The standing
+  mandate (spar every decision with codex BEFORE changes; verify every
+  brick diff) resumes then. Nothing may be drafted against the 12a
+  freeze protocol without it. Owner gates remain: chart reviews,
+  money/credits, first runs of NEW python scripts.
+- The `mnq_fit.py` modes: `selftest` (170 checks), `preflight`, `fit`,
+  `cost12a` (the Brick G cost probe), `measure12a` (the full Brick M
+  run: live observed pass with mandatory cache cross-check, eight
+  attested walk replays, bootstrap, ladder, artifact, all behind a
+  clean-committed-tree gate). The fit harness refuses dirty trees; the
+  12a constants are in `SUBCONTRACT_KEYS`, so preflight must rerun
+  after any constant change.
+- Caches under `analysis/out/`: `mnq-measure12a-observed.json` (the
+  observed half, cross-check target) and `measure12a-cache/` (the
+  eight walk records, keyed by command + harness commit + subcontract
+  hash; the Brick M loader reads them read-only by embedded seed and
+  refuses absence or ambiguity). Rerunning `measure12a` at a new
+  commit replays walks fresh and compares content against these.
+- The named Rust gates: `measure12a_matches_independent_recompute`,
+  `measure12a_selection_is_deterministic`,
+  `measure12a_consumer_leaves_tape_byte_identical`,
+  `arch_coefficients_match_the_shipped_recursion` (pins the local
+  ARCH/GARCH copies in `measure12a.rs` against the shipped recursion -
+  mogwai-data exports nothing), plus the mogwai-data trace pin.
+- The 12a run costs, measured: observed pass ~334 s, eight replays
+  ~324 s, bootstrap and assembly ~11 s, peak tree RSS 734 MiB -
+  everything far inside the frozen budgets, so reruns are cheap.
+
+**Stop state, 2026-08-06.** Worktree clean at handoff; every commit on
+master, nothing pushed. `brokkr check` 465 tests green; selftest 170
+checks green. No purchase authorization armed, no process running. The
+verdict artifact awaits the owner; 12b and the rewrite both start from
+here.
+
+---
+
 ## 1. The question, correctly stated
 
 The question is NOT "which CME tick-data windows should we buy."
@@ -323,14 +463,17 @@ from the shipped source, not from documentation.
 | `crates/mogwai-server/presets/*.toml` | the five shipped instrument presets |
 | `crates/mogwai-server/src/source.rs` | how a preset becomes a running generator |
 
-`TAPE_PROTOCOL_VERSION` is currently **10**. Any change to a generator constant,
+`TAPE_PROTOCOL_VERSION` is currently **11**. Any change to a generator constant,
 the arrival clock, a GARCH parameter, the fingerprint, seed derivation, the fill
 band's draw or the tape origin must bump it. Nothing detects a missed bump.
 Version 7 added the observable top of book; version 8 made the session profile
 conditional on the calendar and fitted MNQ's from the NQ archive; version 9
 split stochastic parent advancement from wire-object materialization
 byte-identically; version 10 landed the July MNQ TBBO fit with floor-aware
-child conditioning and a per-instrument `size_log_sigma`.
+child conditioning and a per-instrument `size_log_sigma`; version 11 landed
+the per-parent session refit. The protocol-12a measurement landing
+deliberately did NOT bump it - its consumers only read existing events and
+`VolTrace` - and the eventual 12b generator change bumps it to 12.
 
 ### 2.2 The walk
 

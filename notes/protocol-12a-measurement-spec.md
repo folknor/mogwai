@@ -1391,9 +1391,25 @@ measured, not a refusal cascade, with one deliberate exception:
   covariance direction came out opposite-signed.
 - CHILD_WALK and BOUNDARY: clean in point; nothing to fire.
 
-The verdict goes to the owner (spec 1.1): a 12b drafted against this
-evidence would target the arrival composition first - the failure
-that blocked its own measurement - but that choice is the owner's.
+The verdict went to the owner (spec 1.1) and the owner RULED,
+2026-08-06: protocol 12b targets the ARRIVAL COMPOSITION, framed as
+repair-until-measurable. Because no rung fired, this is a recorded
+owner override of the ladder's silence, not a ladder output, grounded
+in two facts: the point evidence (generated Fano 3.4x to 21x low at
+every fail hour, 7 of 8 seeds, every fold) and the failure mode itself
+(the counterfactual refused 22 of 24 hours for missing generated
+support - the rung could not measure arrival at all, which is
+composition evidence in its own right). The 12b success criterion is
+therefore NOT assumed eligibility: 12b repairs the generated
+parent-count composition until the frozen 12a arrival counterfactual
+HAS support, then the unamended 12a ladder re-runs and eligibility is
+measured. Constraints binding that spec: the section-8
+instrument-resolution decision (the arrival chain is shared shape, so
+MNQ receives an instrument-resolved override with the legacy branch
+byte-preserved, no re-bless), the Brick V wall-time hard gates of
+section 1.2, and `TAPE_PROTOCOL_VERSION` 12. Drafting waits on codex
+review capacity (exhausted for the week of 2026-08-06); the freeze
+protocol applies in full.
 
 ## 12. Stopping rule
 
