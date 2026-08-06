@@ -46,6 +46,26 @@ understood mechanically while the tail family cannot be chosen without
 the location evidence this spec produces, and a spec cannot contain
 choose-later.
 
+AMENDED at Brick V, both reviewers, after the first real fit: protocol
+11 repairs the PER-PARENT hourly scale and the parent-arrival
+calibration, and the fit proved both on the real month (arrival worst
+hour 0.63 percent, parent-vol worst 6.6 percent, pooled wall-time and
+pooled parent RMS passing). The hourly wall-time CONTOUR failed at the
+reversion-heavy hours (300 s at hours 19, 20, 23; 60 s marginally at
+hour 20) with arrival and per-parent scale matching to three or four
+decimals at those very hours - a horizon-dependent residual after
+every protocol-11 input matches, which classifies it as higher-order
+aggregation evidence: an hour-dependent serial-dependence or
+aggregation-law mismatch whose mechanism (persistence, bounce and
+reversion, arrival clustering, boundary effects) remains UNSELECTED
+among the protocol-12 candidates. Protocol 12 therefore inherits BOTH
+the minute-range tail failures and the hour-dependent 60 s / 300 s
+aggregation-contour failures, without any claim that one mechanism
+fixes both. The hourly wall-time verdicts become recorded diagnostics
+for the protocol-11 landing (section 4.5); nothing widens their band,
+exempts a failing hour, changes a fitted value or erases a failed
+verdict.
+
 ## 2. Survey of the ground
 
 ### 2.1 The defect
@@ -129,20 +149,23 @@ hour.
 | `generator.vol_scalar` | re-solved under the new arrays; lands fitted only if the whole volatility family, minute envelope included, passes - else best candidate under declared provenance, the protocol-10 precedent |
 | everything else | untouched |
 
-The two session arrays are ONE ATOMIC LANDING GROUP: both receive
-fitted status only if all three session families pass at both probe
-and combined stages and cadence passes on the combined profile. If any
-session family fails, neither array, nor `vol_scalar`, nor protocol 11
-lands - a scalar calibrated under rejected arrays does not land. If
-the session group and cadence pass, the `base_volatility` verdict
-splits three ways: all checks pass, `vol_scalar` lands fitted; the
-pooled parent RMS passes but one or more minute-envelope checks fail,
-the candidate `vol_scalar` lands declared-best-candidate; the pooled
-parent RMS FAILS, protocol 11 REFUSES and neither arrays, scalar, nor
-version bump lands, regardless of the envelope verdict - landing
-arrays with the old scalar would ship a known-wrong scale, and a
-candidate that missed its primary scale target is not covered by the
-envelope-only exception.
+The two session arrays are ONE ATOMIC LANDING GROUP (Brick V
+amendment): both receive fitted status only when session_arrival,
+session_parent_vol, BOTH pooled wall-time gates, cadence
+non-regression and the pooled parent RMS pass at probe and combined
+stages. Hourly wall-time verdicts remain measured diagnostics and do
+not participate in the protocol-11 landing decision. If any landing
+gate fails, neither array, nor `vol_scalar`, nor protocol 11 lands - a
+scalar calibrated under rejected arrays does not land. If the landing
+gates and cadence pass, the `base_volatility` verdict splits three
+ways: all checks pass, `vol_scalar` lands fitted; the pooled parent
+RMS passes but one or more minute-envelope checks fail, the candidate
+`vol_scalar` lands declared-best-candidate; the pooled parent RMS
+FAILS, protocol 11 REFUSES and neither arrays, scalar, nor version
+bump lands, regardless of the envelope verdict - landing arrays with
+the old scalar would ship a known-wrong scale, and a candidate that
+missed its primary scale target is not covered by the envelope-only
+exception.
 
 ### 2.4 What depends on the values
 
@@ -428,8 +451,26 @@ sessions per seed; any other count REFUSES. The observed side has the
 |---|---|---|
 | `session_arrival` | `intensity_hour` | per exposed hour: generated marginal parents-per-open-minute (pooled counts and exposure across `FINAL_SEEDS`, normalized once) within `ARRIVAL_HOUR_REL_TOL = 10%` relative of the observed marginal target of 4.3 |
 | `session_parent_vol` | `vol_hour` | per exposed hour: generated curve within `SESSION_HOUR_BAND = [0.8, 1.25]` multiplicative of the observed factor |
-| `session_walltime` | hourly wall-time contour | pooled 60 s and 300 s RMS within `WALLTIME_POOLED_REL_TOL = 15%` relative; hourly 60 s and 300 s robust curves within `[0.8, 1.25]` per exposed hour |
+| `session_walltime` | wall-time contour | pooled 60 s and 300 s RMS are LANDING GATES at `WALLTIME_POOLED_REL_TOL = 15%` relative; the hourly 60 s and 300 s robust curves retain their frozen `[0.8, 1.25]` verdicts as recorded protocol-12 DIAGNOSTICS (Brick V amendment; `WALLTIME_HOURLY_ROLE = "diagnostic"` binds this in the sub-contract) |
 | `base_volatility` | `vol_scalar` + pooled RMS + minute envelope | pooled parent RMS 10% relative (existing); the three per-seed minute-range envelope gates (existing, unchanged) |
+
+The landing predicates, explicit:
+
+```
+walltime_pooled_ok = probe AND combined pass at BOTH pooled horizons
+walltime_hourly_ok = probe AND combined pass every exposed-hour
+                     60 s and 300 s check   (RECORDED, never gating)
+session_ok = session_arrival_ok AND session_parent_vol_ok
+             AND walltime_pooled_ok
+```
+
+The no-hour-escape rule continues to govern the recorded
+`walltime_hourly_ok` verdict - no hour is exempted and no band widens -
+it simply no longer controls the protocol-11 landing. Protocol 12 must
+treat the hourly 60 s and 300 s bands as HARD successor gates beside
+the minute-range envelope, unless its spec replaces them before
+implementation with a defended, preregistered estimator; they cannot
+silently disappear.
 
 Generated central curves for `session_parent_vol` and
 `session_walltime`: (1) raw hourly median across COMPLETE sessions
@@ -466,10 +507,14 @@ repair.
 
 ### 4.6 Wall-time horizon statistics (new, shared convention)
 
-The new protocol-11 gated horizon statistics do NOT reuse or change
-the legacy `horizon_vol` field on either side (the two legacy
-conventions differ, 2.5, and protocol-10 artifact compatibility keeps
-them frozen). For BOTH observed and generated data:
+The new protocol-11 horizon statistics split by role (Brick V
+amendment): the POOLED horizon RMS values are protocol-11 landing
+gates, the HOURLY robust contours are frozen-band diagnostics and
+mandatory protocol-12 evidence. Neither reuses nor changes the legacy
+`horizon_vol` field on either side (the two legacy conventions differ,
+2.5, and protocol-10 artifact compatibility keeps them frozen). All
+measurement conventions and floors below are unchanged by the
+amendment. For BOTH observed and generated data:
 
 1. State is independent per session segment and horizon W in
    {60 s, 300 s} (`HORIZON_SECONDS`, unchanged).
@@ -785,7 +830,7 @@ resolves to those same values.
 the recorded verdicts alone.
 
 **Brick L - the landing.** In ONE change: `mnq.toml` session arrays
-(the atomic group, only on full session-family + cadence pass) with
+(the atomic group, only on the amended 2.3 landing predicate) with
 provenance `kind = "fitted"`, corpus
 `"MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG"`, window
 `"2026-07 full month, 22 usable sessions"`, estimator named in the
@@ -851,10 +896,12 @@ obligation - artifacts stay as the record.
 
 Out of scope, named: the tail-shape family and any change to GARCH
 constants, Student-t df, bounce, sweep/level-step, drift recentering
-(protocol 12); reopen gaps (separate phenomenology, its own future
-item); `dow_weight` refit; the dynamic width/displacement response
-(14.4-A); `mnq06`, MBO, ES/MES evidence; fingerprint re-anchoring;
-any `SessionModulator` semantic change; calendar values; the legacy
-`horizon_vol` fields. If a session gate fails, nothing lands and the
-outcome is a measured-failure report - a legitimate result of this
-spec, not a failure of it.
+(protocol 12, which also inherits the hourly wall-time contour
+evidence); reopen gaps (separate phenomenology, its own future item);
+`dow_weight` refit; the dynamic width/displacement response (14.4-A);
+`mnq06`, MBO, ES/MES evidence; fingerprint re-anchoring; any
+`SessionModulator` semantic change; calendar values; the legacy
+`horizon_vol` fields. If a LANDING GATE fails (the amended 2.3
+predicate - the hourly wall-time diagnostics are recorded, never
+gating), nothing lands and the outcome is a measured-failure report -
+a legitimate result of this spec, not a failure of it.

@@ -138,6 +138,14 @@ GENERATED_SESSIONS_PER_SEED = 23
 # Mirrors the Brick T threshold frozen in the mogwai-data test; recorded
 # here so the sub-contract hash binds the whole constants block.
 SESSION_VOL_CORR_MIN = 0.90
+# The Brick V amendment, bound in the sub-contract: the hourly wall-time
+# curves are recorded protocol-12 DIAGNOSTICS, not protocol-11 landing
+# gates - the fit proved arrival and per-parent scale to fractions of a
+# percent at the very hours whose 60s/300s contour missed, classifying the
+# residual as an hour-dependent aggregation-law mismatch protocol 12
+# inherits as hard successor gates. The bands and verdicts stay frozen; only
+# their role in the landing decision moved.
+WALLTIME_HOURLY_ROLE = "diagnostic"
 # The shipped MNQ dow_weight, byte-for-byte (crates/mogwai-server/presets/
 # mnq.toml): FROZEN, never refitted here (spec 2.3). The conditional
 # intensity estimator solves the hour parameter GIVEN this day factor, and
@@ -241,7 +249,7 @@ SUBCONTRACT_KEYS = [
     "MIN_300S_CELL_RETURNS", "SESSION_HOUR_BAND", "ARRIVAL_HOUR_REL_TOL",
     "WALLTIME_POOLED_REL_TOL", "SESSION_ARRAY_DECIMALS",
     "TOP_MINUTE_RECORDS", "GENERATED_SESSIONS_PER_SEED",
-    "SESSION_VOL_CORR_MIN", "MNQ_DOW_WEIGHT",
+    "SESSION_VOL_CORR_MIN", "MNQ_DOW_WEIGHT", "WALLTIME_HOURLY_ROLE",
 ]
 
 
@@ -2705,24 +2713,33 @@ def run_fit(directory: str = DELIVERY_DIR,
                 and family in combined_results
                 and family_passes(combined_results[family]))
 
-    session_ok = all(
-        family_ok(f)
-        for f in ("session_arrival", "session_parent_vol",
-                  "session_walltime")
+    def stage_checks(family: str, names) -> bool:
+        probe = probe_results.get(family)
+        combined = combined_results.get(family)
+        return (combined_error is None
+                and probe is not None and combined is not None
+                and all(probe["checks"].get(n) is True for n in names)
+                and all(combined["checks"].get(n) is True for n in names))
+
+    # The Brick V amendment: the wall-time family splits by role. The
+    # pooled gates land; the hourly contour is RECORDED (protocol 12
+    # inherits it as a hard successor gate) and never gates protocol 11.
+    walltime_pooled_ok = stage_checks(
+        "session_walltime", ("walltime_pooled_60", "walltime_pooled_300")
     )
-    base_probe = probe_results["base_volatility"]
-    base_combined = combined_results.get("base_volatility")
-
-    def base_checks(names) -> bool:
-        return (combined_error is None and base_combined is not None
-                and all(base_probe["checks"].get(n) is True for n in names)
-                and all(base_combined["checks"].get(n) is True
-                        for n in names))
-
-    cadence_ok = base_checks(cadence_names)
-    pooled_rms_ok = base_checks(("mid_rms",))
-    envelope_ok = base_checks(
-        tuple(f"minute_range_{stat}" for stat in MINUTE_RANGE_GATES)
+    walltime_hourly_ok = stage_checks(
+        "session_walltime", ("walltime_hour_60", "walltime_hour_300")
+    )
+    session_ok = (
+        family_ok("session_arrival")
+        and family_ok("session_parent_vol")
+        and walltime_pooled_ok
+    )
+    cadence_ok = stage_checks("base_volatility", cadence_names)
+    pooled_rms_ok = stage_checks("base_volatility", ("mid_rms",))
+    envelope_ok = stage_checks(
+        "base_volatility",
+        tuple(f"minute_range_{stat}" for stat in MINUTE_RANGE_GATES),
     )
 
     # The three-way landing rule (spec 2.3): the arrays are one atomic
@@ -2748,7 +2765,8 @@ def run_fit(directory: str = DELIVERY_DIR,
                     "refuses rather than landing arrays with a known-wrong "
                     "scale")
         if not session_ok:
-            return "a session family failed; the atomic group does not land"
+            return ("a session landing gate failed; the atomic group does "
+                    "not land")
         return None
 
     verdicts: dict[str, dict] = {}
@@ -3053,6 +3071,8 @@ def run_fit(directory: str = DELIVERY_DIR,
         "session_refit": session_refit,
         "landing_rule": {
             "session_ok": session_ok,
+            "walltime_pooled_ok": walltime_pooled_ok,
+            "walltime_hourly_ok": walltime_hourly_ok,
             "cadence_ok": cadence_ok,
             "pooled_rms_ok": pooled_rms_ok,
             "envelope_ok": envelope_ok,
@@ -3822,12 +3842,18 @@ def run_selftest() -> None:
             # Session cells: the per-parent scale is vol * vh[h]; the
             # wall-time scale tracks the pooled observed reading at the
             # solved scalar; arrivals follow intensity times day mix.
+            pooled_warp = distort.get("walltime_pooled_warp", 1.0)
             wt_scale = {
                 60: dense_wt["60"]["pooled_rms"] * vol
-                / (target_mid_rms / 10.0),
+                / (target_mid_rms / 10.0) * pooled_warp,
                 300: dense_wt["300"]["pooled_rms"] * vol
-                / (target_mid_rms / 10.0),
+                / (target_mid_rms / 10.0) * pooled_warp,
             }
+            # An hour-local wall-time warp fails the hourly contour while
+            # leaving the pooled RMS inside its tolerance - the amended
+            # landing predicate's deciding case.
+            hour_warp = distort.get("walltime_hour_warp", 1.0)
+            wt_h = [hour_warp if h == 2 else 1.0 for h in range(24)]
             n_sessions = GENERATED_SESSIONS_PER_SEED \
                 - (1 if distort.get("drop_session") else 0)
             cells = []
@@ -3863,13 +3889,13 @@ def run_selftest() -> None:
                     ],
                     "horizon_60_by_hour": [
                         hz_cell(0.0, 0) if h == 21
-                        else hz_cell(wt_scale[60] * vh[h],
+                        else hz_cell(wt_scale[60] * vh[h] * wt_h[h],
                                      42 if h == 20 else 59)
                         for h in range(24)
                     ],
                     "horizon_300_by_hour": [
                         hz_cell(0.0, 0) if h == 21
-                        else hz_cell(wt_scale[300] * vh[h],
+                        else hz_cell(wt_scale[300] * vh[h] * wt_h[h],
                                      6 if h == 20 else 11)
                         for h in range(24)
                     ],
@@ -4028,8 +4054,27 @@ def run_selftest() -> None:
           [0]["pass"] is False
           and artifact["session_refit"]["verdicts"]["session_parent_vol"]
           [0]["worst_hour"] == 2
-          and "session family"
+          and "session landing gate"
           in artifact["verdicts"]["vol_hour"]["reason"])
+    artifact, _state = driver({"walltime_hour_warp": 1.6})
+    check("an hourly wall-time failure with passing pooled gates still "
+          "lands the arrays as a recorded diagnostic",
+          artifact["landing_set"]
+          == ["intensity_hour", "vol_hour", "vol_scalar"]
+          and artifact["landing_rule"]["walltime_hourly_ok"] is False
+          and artifact["landing_rule"]["walltime_pooled_ok"] is True
+          and artifact["landing_rule"]["arrays_land"] is True
+          and artifact["session_refit"]["verdicts"]["session_walltime_60"]
+          [0]["pass"] is False
+          and artifact["session_refit"]["verdicts"]["session_walltime_60"]
+          [0]["worst_hour"] == 2)
+    artifact, _state = driver({"walltime_pooled_warp": 1.5})
+    check("a pooled wall-time failure blocks the atomic group",
+          artifact["landing_set"] == []
+          and artifact["landing_rule"]["walltime_pooled_ok"] is False
+          and artifact["landing_rule"]["arrays_land"] is False
+          and "session landing gate"
+          in artifact["verdicts"]["intensity_hour"]["reason"])
     artifact, _state = driver({"arrival_warp": 1.2})
     check("a warped arrival curve fails session_arrival at its hour",
           artifact["landing_set"] == []
