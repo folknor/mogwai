@@ -3322,7 +3322,10 @@ mod tests {
                     assert_eq!(g.segment_origin_ns, w.segment_origin_ns, "ts={ts}");
                     assert_eq!(g.segment_end_ns, w.segment_end_ns, "ts={ts}");
                 }
-                (g, w) => panic!("disagreement at ts={ts}: gen.rs={g:?} mogwai-lab present={}", w.is_some()),
+                (g, w) => panic!(
+                    "disagreement at ts={ts}: gen.rs={g:?} mogwai-lab present={}",
+                    w.is_some()
+                ),
             }
         }
     }

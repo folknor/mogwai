@@ -17,7 +17,15 @@ mogwai-server = { path = "crates/mogwai-server" }
 mogwai-lab = { path = "crates/mogwai-lab" }
 
 serde = { version = "1", features = ["derive"] }
-serde_json = "1.0.151"
+# `float_roundtrip` is NOT optional dressing here. serde_json's default float
+# parser is a fast approximation that can land one ULP off the correctly
+# rounded value: `from_str("12.344540150041679")` produces a different f64
+# than `str::parse` (and than Python's `float()`). The protocol-12a parity
+# gates compare committed JSON records leaf-by-leaf against freshly computed
+# f64s, so a sloppy parse manufactures divergences that are not in the data -
+# it cost one debugging round on exactly that. The feature makes parsing
+# correctly rounded; writing was already exact (ryu).
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
 toml = "1"
 rust_decimal = { version = "1", features = ["serde-with-str"] }
 rand = "0.10.2"

@@ -335,7 +335,10 @@ mod tests {
         old_store.write("k", b"stale").unwrap();
         assert_eq!(old_store.read("k").unwrap(), Some(b"stale".to_vec()));
 
-        let inputs_new = ProvenanceInputs { fingerprint_hash: "new", ..inputs_old };
+        let inputs_new = ProvenanceInputs {
+            fingerprint_hash: "new",
+            ..inputs_old
+        };
         let new_token = ProvenanceToken::compute(&inputs_new);
         let new_store = CacheStore::open(root.clone(), new_token);
         new_store.write("k", b"fresh").unwrap();

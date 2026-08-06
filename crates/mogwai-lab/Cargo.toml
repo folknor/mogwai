@@ -5,19 +5,29 @@ edition.workspace = true
 license.workspace = true
 build = "build.rs"
 
-# The corpus/evidence layer of the Python-to-Rust rewrite (phase 1 of
-# notes/rust-rewrite-phases.md): the TBBO stream contract, session/segment
-# math, ledger-bound input verification and preflight, plus the storage
-# policy (artifact/cache/scratch). Deliberately depends on none of
-# mogwai-data, mogwai-protocol, mogwai-engine or mogwai-adapter - it never
-# touches the tape or venue paths, so it carries no TAPE_PROTOCOL_VERSION
-# obligation of its own (mirrors why measure12a.rs stays consumer-only
-# inside mogwai-server rather than exporting from mogwai-data).
+# The corpus/evidence and measurement layer of the Python-to-Rust rewrite
+# (phases 1 and 2 of notes/rust-rewrite-phases.md): the TBBO stream contract,
+# session/segment math, ledger-bound input verification and preflight, the
+# storage policy (artifact/cache/scratch), and the unified protocol-12a block
+# engine.
+#
+# It depends on mogwai-data and mogwai-protocol for the GENERATED measurement
+# side only - the TickEvent/VolTrace/Decimal types a walk emits - and READS
+# them exclusively. Nothing here adds, changes or observes a draw, so the
+# crate carries no TAPE_PROTOCOL_VERSION obligation of its own (spec 2.3, the
+# same consumer-only standing measure12a.rs has). It still depends on neither
+# mogwai-server nor mogwai-engine: the parity tests that need preset and
+# profile resolution live in mogwai-cli, which depends on both, precisely so
+# the axum stack never lands under the lab.
 [dependencies]
+mogwai-data.workspace = true
+mogwai-protocol.workspace = true
+
 serde.workspace = true
 serde_json.workspace = true
 zstd.workspace = true
 sha2.workspace = true
+rust_decimal.workspace = true
 
 [lints]
 workspace = true

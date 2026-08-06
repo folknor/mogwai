@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
 use std::path::Path;
 
-use sha2::{Digest, Sha256};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::error::{LabError, LabResult};
 use crate::subcontract::{JOB_ID, LEDGER_KEY};
@@ -94,7 +94,9 @@ pub fn verify_input(directory: &Path, ledger_path: &Path) -> LabResult<BTreeMap<
     let ledger_files = &entry.files;
     let manifest_files = &manifest.files;
     if ledger_files.is_empty() {
-        return Err(LabError::refusal("the ledger entry carries no file inventory"));
+        return Err(LabError::refusal(
+            "the ledger entry carries no file inventory",
+        ));
     }
     if ledger_files != manifest_files {
         let ledger_keys: HashSet<&String> = ledger_files.keys().collect();
@@ -126,8 +128,10 @@ pub fn verify_input(directory: &Path, ledger_path: &Path) -> LabResult<BTreeMap<
         .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
         .filter_map(|e| e.file_name().into_string().ok())
         .collect();
-    let mut absent: Vec<&String> =
-        ledger_files.keys().filter(|n| !on_disk.contains(n.as_str())).collect();
+    let mut absent: Vec<&String> = ledger_files
+        .keys()
+        .filter(|n| !on_disk.contains(n.as_str()))
+        .collect();
     absent.sort();
     if !absent.is_empty() {
         return Err(LabError::refusal(format!(
@@ -137,10 +141,14 @@ pub fn verify_input(directory: &Path, ledger_path: &Path) -> LabResult<BTreeMap<
     }
     let mut hashes = BTreeMap::new();
     for path in crate::stream::data_files(directory)? {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
-        let expected = ledger_files
-            .get(&name)
-            .ok_or_else(|| LabError::refusal(format!("{name} is on disk but not in the ledger inventory")))?;
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let expected = ledger_files.get(&name).ok_or_else(|| {
+            LabError::refusal(format!("{name} is on disk but not in the ledger inventory"))
+        })?;
         let actual = sha256_file(&path)?;
         if &actual != expected {
             return Err(LabError::refusal(format!(

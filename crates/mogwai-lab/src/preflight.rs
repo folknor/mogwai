@@ -60,8 +60,10 @@ pub struct SessionRecord {
 pub fn run_preflight(directory: &Path, ledger_path: &Path) -> LabResult<PreflightArtifact> {
     let hashes = crate::ledger::verify_input(directory, ledger_path)?;
 
-    let inventory_status: BTreeMap<&str, &str> =
-        SESSION_INVENTORY.iter().map(|(label, status)| (*label, *status)).collect();
+    let inventory_status: BTreeMap<&str, &str> = SESSION_INVENTORY
+        .iter()
+        .map(|(label, status)| (*label, *status))
+        .collect();
 
     let mut rows: u64 = 0;
     let mut unsided: u64 = 0;
@@ -84,7 +86,9 @@ pub fn run_preflight(directory: &Path, ledger_path: &Path) -> LabResult<Prefligh
         if row.side == 'N' {
             unsided += 1;
         }
-        *book_counts.get_mut(row.book).expect("classify_book only emits the four known labels") += 1;
+        *book_counts
+            .get_mut(row.book)
+            .expect("classify_book only emits the four known labels") += 1;
         let (session, _segment, _hour) = minute_cache.minute_fields(row.ts as u64);
         match &session {
             Some(label) if inventory_status.contains_key(label.as_str()) => {
@@ -146,7 +150,9 @@ pub fn run_preflight(directory: &Path, ledger_path: &Path) -> LabResult<Prefligh
         }
         match per_session.get(*label) {
             None => excluded.push((label.to_string(), "absent".to_string())),
-            Some(state) if state.rows == 0 => excluded.push((label.to_string(), "absent".to_string())),
+            Some(state) if state.rows == 0 => {
+                excluded.push((label.to_string(), "absent".to_string()));
+            }
             Some(state) if state.ids.len() > 1 => {
                 let mut ids: Vec<&String> = state.ids.iter().collect();
                 ids.sort();

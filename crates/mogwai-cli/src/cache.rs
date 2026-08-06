@@ -10,7 +10,9 @@
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
-use mogwai_lab::storage::{CacheStore, ProvenanceInputs, ProvenanceToken, cache_clean_all, cache_root, cache_stats};
+use mogwai_lab::storage::{
+    CacheStore, ProvenanceInputs, ProvenanceToken, cache_clean_all, cache_root, cache_stats,
+};
 
 #[derive(Args)]
 pub(crate) struct CacheArgs {
@@ -69,11 +71,17 @@ pub(crate) fn run(args: CacheArgs) -> anyhow::Result<()> {
         CacheCommand::Clean { stale: true } => {
             let store = CacheStore::open(root, current_token());
             let removed = store.clean_stale()?;
-            println!("pruned {removed} stale provenance director{}", if removed == 1 { "y" } else { "ies" });
+            println!(
+                "pruned {removed} stale provenance director{}",
+                if removed == 1 { "y" } else { "ies" }
+            );
         }
         CacheCommand::Clean { stale: false } => {
             let removed = cache_clean_all(&root)?;
-            println!("removed {removed} provenance director{}", if removed == 1 { "y" } else { "ies" });
+            println!(
+                "removed {removed} provenance director{}",
+                if removed == 1 { "y" } else { "ies" }
+            );
         }
     }
     Ok(())

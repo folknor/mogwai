@@ -109,7 +109,10 @@ pub fn format_trade_date(day: i64) -> String {
 /// `session_date_int`: `"YYYY-MM-DD"` with the dashes stripped, as an
 /// integer.
 pub fn session_date_int(label: &str) -> i64 {
-    label.replace('-', "").parse().expect("session labels are always YYYY-MM-DD")
+    label
+        .replace('-', "")
+        .parse()
+        .expect("session labels are always YYYY-MM-DD")
 }
 
 /// `assign_session`: (trade-date label, segment name) for a UTC-ns instant
@@ -127,7 +130,11 @@ pub fn parent_count_bin(n: i64) -> &'static str {
     if n == 0 {
         return "0";
     }
-    for (edge, name) in PARENT_COUNT_BIN_EDGES.iter().rev().zip(PARENT_COUNT_BIN_NAMES.iter().rev()) {
+    for (edge, name) in PARENT_COUNT_BIN_EDGES
+        .iter()
+        .rev()
+        .zip(PARENT_COUNT_BIN_NAMES.iter().rev())
+    {
         if n >= *edge {
             return name;
         }
@@ -137,7 +144,11 @@ pub fn parent_count_bin(n: i64) -> &'static str {
 
 /// `segment_labels`: (since_open_bin, until_close_bin) evaluated at minute
 /// start, per spec 3.2.
-pub fn segment_labels(minute_start_ns: u64, origin_ns: u64, end_ns: u64) -> (&'static str, &'static str) {
+pub fn segment_labels(
+    minute_start_ns: u64,
+    origin_ns: u64,
+    end_ns: u64,
+) -> (&'static str, &'static str) {
     let since_s = (minute_start_ns as i128 - origin_ns as i128) as f64 / 1e9;
     let until_s = (end_ns as i128 - minute_start_ns as i128) as f64 / 1e9;
     let lo = SEGMENT_LABEL_EDGES_S[0] as f64;
@@ -222,8 +233,7 @@ mod tests {
         // UTC on the same civil day.
         let day0 = 20635i64; // 2026-07-01
         let halt_ts = ((day0 * 86_400 + 15 * 3600 + 20 * 60) as i128
-            - i128::from(crate::subcontract::UTC_OFFSET_MINUTES) * 60)
-            as u64
+            - i128::from(crate::subcontract::UTC_OFFSET_MINUTES) * 60) as u64
             * 1_000_000_000;
         assert_eq!(assign_session(halt_ts), (None, None));
     }

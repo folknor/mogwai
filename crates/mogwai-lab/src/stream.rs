@@ -41,7 +41,11 @@ struct ZstLines<R> {
 
 impl<R: Read> ZstLines<R> {
     fn new(reader: R) -> Self {
-        Self { reader, pending: Vec::new(), eof: false }
+        Self {
+            reader,
+            pending: Vec::new(),
+            eof: false,
+        }
     }
 }
 
@@ -107,8 +111,11 @@ struct ColumnIndices {
 fn column_indices(header_line: &str) -> LabResult<ColumnIndices> {
     let names: Vec<&str> = header_line.trim().split(',').collect();
     let find = |want: &str| names.iter().position(|n| *n == want);
-    let missing: Vec<&str> =
-        REQUIRED_COLUMNS.iter().filter(|c| find(c).is_none()).copied().collect();
+    let missing: Vec<&str> = REQUIRED_COLUMNS
+        .iter()
+        .filter(|c| find(c).is_none())
+        .copied()
+        .collect();
     if !missing.is_empty() {
         return Err(LabError::refusal(format!(
             "header is missing required column(s) {}; got: {}",
@@ -140,7 +147,10 @@ pub fn data_files(directory: &Path) -> LabResult<Vec<PathBuf>> {
         .filter(|n| n.ends_with(".csv.zst"))
         .collect();
     if names.is_empty() {
-        return Err(LabError::refusal(format!("no .csv.zst files under {}", directory.display())));
+        return Err(LabError::refusal(format!(
+            "no .csv.zst files under {}",
+            directory.display()
+        )));
     }
     names.sort();
     Ok(names.into_iter().map(|n| directory.join(n)).collect())
@@ -176,7 +186,11 @@ pub fn classify_book(bid_px: i64, ask_px: i64) -> &'static str {
 
 fn parse_field_i64(parts: &[&str], idx: usize, path: &Path, line_no: usize, field: &str) -> i64 {
     parts[idx].parse::<i64>().unwrap_or_else(|e| {
-        panic!("{}:{line_no}: malformed integer field {field} {:?}: {e}", path.display(), parts[idx])
+        panic!(
+            "{}:{line_no}: malformed integer field {field} {:?}: {e}",
+            path.display(),
+            parts[idx]
+        )
     })
 }
 
@@ -229,7 +243,12 @@ impl ParseStream {
         let header = match lines.next() {
             Some(Ok(h)) => h,
             Some(Err(e)) => return Some(Err(e)),
-            None => return Some(Err(LabError::refusal(format!("{} is empty", path.display())))),
+            None => {
+                return Some(Err(LabError::refusal(format!(
+                    "{} is empty",
+                    path.display()
+                ))));
+            }
         };
         let idx = match column_indices(&header) {
             Ok(i) => i,
@@ -358,8 +377,10 @@ impl Iterator for ParseStream {
                         ))));
                     }
                     let price = parse_field_i64(&parts, idx.price, &path, self.line_no, "price");
-                    let bid_px = parse_field_i64(&parts, idx.bid_px_00, &path, self.line_no, "bid_px_00");
-                    let ask_px = parse_field_i64(&parts, idx.ask_px_00, &path, self.line_no, "ask_px_00");
+                    let bid_px =
+                        parse_field_i64(&parts, idx.bid_px_00, &path, self.line_no, "bid_px_00");
+                    let ask_px =
+                        parse_field_i64(&parts, idx.ask_px_00, &path, self.line_no, "ask_px_00");
                     if price > 0 && price % TICK_UNITS != 0 {
                         self.finished = true;
                         return Some(Err(LabError::refusal(format!(
@@ -385,8 +406,10 @@ impl Iterator for ParseStream {
                         ))));
                     }
                     let size = parse_field_i64(&parts, idx.size, &path, self.line_no, "size");
-                    let bid_sz = parse_field_i64(&parts, idx.bid_sz_00, &path, self.line_no, "bid_sz_00");
-                    let ask_sz = parse_field_i64(&parts, idx.ask_sz_00, &path, self.line_no, "ask_sz_00");
+                    let bid_sz =
+                        parse_field_i64(&parts, idx.bid_sz_00, &path, self.line_no, "bid_sz_00");
+                    let ask_sz =
+                        parse_field_i64(&parts, idx.ask_sz_00, &path, self.line_no, "ask_sz_00");
                     let row = Row {
                         ts,
                         instrument_id: parts[idx.instrument_id].to_string(),
@@ -436,7 +459,8 @@ pub fn group_parents_batch(rows: &[Row]) -> Vec<(usize, usize)> {
             continue;
         }
         let mut j = i;
-        while j + 1 < rows.len() && rows[j + 1].ts == rows[i].ts && rows[j + 1].side == rows[i].side {
+        while j + 1 < rows.len() && rows[j + 1].ts == rows[i].ts && rows[j + 1].side == rows[i].side
+        {
             j += 1;
         }
         groups.push((i, j + 1));
@@ -475,7 +499,13 @@ mod tests {
 
     #[test]
     fn group_parents_batch_splits_on_ts_side_change_and_unsided_terminates() {
-        let rows = vec![row(1, 'B'), row(1, 'B'), row(1, 'N'), row(1, 'B'), row(2, 'A')];
+        let rows = vec![
+            row(1, 'B'),
+            row(1, 'B'),
+            row(1, 'N'),
+            row(1, 'B'),
+            row(2, 'A'),
+        ];
         let groups = group_parents_batch(&rows);
         assert_eq!(groups, vec![(0, 2), (3, 4), (4, 5)]);
     }

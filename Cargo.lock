@@ -1666,6 +1666,9 @@ dependencies = [
 name = "mogwai-lab"
 version = "0.1.0"
 dependencies = [
+ "mogwai-data",
+ "mogwai-protocol",
+ "rust_decimal",
  "serde",
  "serde_json",
  "sha2 0.10.9",

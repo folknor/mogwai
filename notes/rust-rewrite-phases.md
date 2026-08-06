@@ -93,6 +93,27 @@ subphase's own Rust tests.
   (analysis/out/mnq-measure12a-observed.json) on the observed side
   and to the walk caches (analysis/out/measure12a-cache/, cost
   excluded) on the generated side.
+
+  LANDED 2026-08-06. `mogwai_lab::kernel` carries the deterministic
+  kernel and the typed-canonical comparator;
+  `mogwai_lab::measure12a` carries the one engine, with `observed`
+  and `generated` as its two front-ends over a shared `SessionAcc`
+  and `forensic` as Block 5. The gates are
+  `crates/mogwai-cli/tests/parity12a.rs`, ignored and named
+  `parity12a_*`; they live in the cli because the generated side
+  needs `mogwai-server` preset resolution and the lab must not
+  depend on it. Both passed: observed 22/22 sessions in 83 s,
+  generated seeds 1-8 in ~26 s each. `brokkr.toml`'s complete
+  profile skips `parity12a_` - they are minutes apiece and need the
+  delivered corpus on disk.
+
+  Two findings from the gate work, both fixed rather than mirrored:
+  serde_json's DEFAULT float parser is not correctly rounded (it
+  lands one ULP off on values the 12a records actually carry), so
+  the workspace now pins its `float_roundtrip` feature; and
+  `subcontract.rs` carried a second hand-written CPython float
+  `repr` with the wrong exponent-switch threshold, now deleted in
+  favour of the kernel's one copy.
 - **2b, aggregation and inference**: monthly pooling, ObsContext, the
   10,000-replicate bootstrap, family envelopes, closures, the count
   substitution, forensic subchecks, the ladder, the union-zero
@@ -119,14 +140,40 @@ subphase's own Rust tests.
   generator -> absorb; independent conformance leg like
   roll_estimator -> stays Python).
 
-## Phase 4 - retirement and review
+## Phase 4 - review, then retirement (strictly in that order)
 
-mnq_fit.py and the absorbed scripts retire to `research/dead/`;
-test_characterize.py dissolves into lab unit tests; docs/cli.md,
-reference/architecture.md and AGENTS.md updated to the crate reality;
-the accumulated review debt goes to codex in one program-level pass
-when the quota returns. Nothing is deleted before this phase - a
-parity gate may still want the original.
+Owner ruling 2026-08-06: the Python does NOT retire until AFTER the
+codex program-level review passes. The reviewer needs the originals
+to review against, and every parity gate loses its reference the
+moment the scripts move. Phase 4 therefore runs in two halves:
+
+- 4a, reviewable-state prep: docs/cli.md, reference/architecture.md
+  and AGENTS.md updated to the crate reality; test_characterize.py's
+  coverage dissolved into lab unit tests (the file itself stays); the
+  parity-frozen defect list in notes/todo.md swept into a decision
+  table. The program then STOPS at the codex gate - the accumulated
+  review debt (this program plus the measurement-era relaxations)
+  goes to codex in one pass when the quota returns.
+- 4b, post-signature retirement: only after codex signs do
+  mnq_fit.py and the absorbed scripts move to `research/dead/` and
+  the parity-frozen defects get their real fixes.
+
+Adjudication provision (owner, 2026-08-06): when a phase agent hits
+a contradiction between the Python, the cached artifacts and the
+frozen spec - or any call the orchestrator cannot settle from the
+record - a FABLE agent is launched to adjudicate, briefed to read
+DATA-PURCHASE-REPORT.md for the full program context. Its ruling is
+recorded where the contradiction was found; genuinely owner-shaped
+calls (money, spec amendments) still go to the owner.
+
+Parity-frozen defects fall due here too: bugs found during porting
+that were deliberately MIRRORED into the Rust so the parity gates
+stay honest, each carried in notes/todo.md until the Python retires
+and the fix stops being a parity break. First entry: the unguarded
+numeric conversions in the TBBO stream contract (parse_stream /
+stream.rs - a malformed field crashes instead of refusing; found by
+the phase-1 port). Anything phases 2-3 add to that class lands in
+todo.md with the same tag and gets swept as part of this phase.
 
 ## Permanently out of scope
 

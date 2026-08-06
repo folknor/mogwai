@@ -48,58 +48,13 @@ impl PyValue {
     }
 }
 
-/// CPython `repr(float)`: shortest round-trip digits (Rust's `{:e}` gives the
-/// same shortest-digit guarantee via its own dtoa), formatted fixed when
-/// `-4 < decpt <= 17` and scientific (single-digit-exponent style, always
-/// signed, zero-padded to 2 digits) otherwise. Every float this sub-contract
-/// carries is pinned against the Python reference in this module's test, so
-/// the general formula only has to be right for the shapes exercised there.
-fn py_float_repr(x: f64) -> String {
-    if x == 0.0 {
-        return if x.is_sign_negative() { "-0.0".to_string() } else { "0.0".to_string() };
-    }
-    let neg = x < 0.0;
-    let ax = x.abs();
-    let sci = format!("{ax:e}");
-    let (mantissa, exp_str) = sci.split_once('e').expect("LowerExp always emits 'e'");
-    let exp: i32 = exp_str.parse().expect("LowerExp exponent is an integer");
-    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
-    let decpt = exp + 1;
-    let mut out = String::new();
-    if neg {
-        out.push('-');
-    }
-    if decpt > -4 && decpt <= 17 {
-        if decpt <= 0 {
-            out.push_str("0.");
-            for _ in 0..(-decpt) {
-                out.push('0');
-            }
-            out.push_str(&digits);
-        } else if (decpt as usize) >= digits.len() {
-            out.push_str(&digits);
-            for _ in 0..(decpt as usize - digits.len()) {
-                out.push('0');
-            }
-            out.push_str(".0");
-        } else {
-            out.push_str(&digits[..decpt as usize]);
-            out.push('.');
-            out.push_str(&digits[decpt as usize..]);
-        }
-    } else {
-        out.push(digits.as_bytes()[0] as char);
-        if digits.len() > 1 {
-            out.push('.');
-            out.push_str(&digits[1..]);
-        }
-        let e = decpt - 1;
-        out.push('e');
-        out.push(if e < 0 { '-' } else { '+' });
-        out.push_str(&format!("{:02}", e.abs()));
-    }
-    out
-}
+// `py_float_repr` used to live here as a second, independently written copy
+// of CPython's float `repr`. It carried the exponent-switch threshold as
+// `decpt <= 17` where CPython uses 16, so it would have formatted 1e16 as
+// `10000000000000000.0` instead of `1e+16` - invisible here only because every
+// sub-contract float is small. The one implementation now lives in
+// `crate::kernel`; this module's test still pins the shapes IT depends on.
+use crate::kernel::py_float_repr;
 
 fn escape_str(s: &str, out: &mut String) {
     out.push('"');
@@ -299,21 +254,39 @@ fn tolerances() -> PyValue {
         "mean_event_duration_s",
         PyValue::str_list(&["relative"]).with_num(0.10),
     );
-    m.insert("children_mean", PyValue::str_list(&["relative"]).with_num(0.10));
-    m.insert("children_single_frac", PyValue::str_list(&["absolute"]).with_num(0.05));
-    m.insert("levels_mean", PyValue::str_list(&["relative"]).with_num(0.15));
+    m.insert(
+        "children_mean",
+        PyValue::str_list(&["relative"]).with_num(0.10),
+    );
+    m.insert(
+        "children_single_frac",
+        PyValue::str_list(&["absolute"]).with_num(0.05),
+    );
+    m.insert(
+        "levels_mean",
+        PyValue::str_list(&["relative"]).with_num(0.15),
+    );
     m.insert("mid_rms", PyValue::str_list(&["relative"]).with_num(0.10));
     m.insert(
         "minute_range_p99",
-        PyValue::List(vec![PyValue::Str("envelope_upper"), PyValue::Str("resampled")]),
+        PyValue::List(vec![
+            PyValue::Str("envelope_upper"),
+            PyValue::Str("resampled"),
+        ]),
     );
     m.insert(
         "minute_range_p99.9",
-        PyValue::List(vec![PyValue::Str("envelope_upper"), PyValue::Str("resampled")]),
+        PyValue::List(vec![
+            PyValue::Str("envelope_upper"),
+            PyValue::Str("resampled"),
+        ]),
     );
     m.insert(
         "minute_range_max",
-        PyValue::List(vec![PyValue::Str("envelope_upper"), PyValue::Str("resampled")]),
+        PyValue::List(vec![
+            PyValue::Str("envelope_upper"),
+            PyValue::Str("resampled"),
+        ]),
     );
     m.insert(
         "session_arrival_hour",
@@ -367,28 +340,63 @@ fn tree() -> PyValue {
     m.insert("JOB_ID", PyValue::Str(JOB_ID));
     m.insert("LEDGER_KEY", PyValue::Str(LEDGER_KEY));
     m.insert("MAX_UNSIDED_SHARE", PyValue::Float(MAX_UNSIDED_SHARE));
-    m.insert("MAX_INVALID_WIDTH_SHARE", PyValue::Float(MAX_INVALID_WIDTH_SHARE));
-    m.insert("MIN_VALID_PARENT_QUOTE_SHARE", PyValue::Float(MIN_VALID_PARENT_QUOTE_SHARE));
-    m.insert("MIN_DOMINANT_ID_SHARE", PyValue::Float(MIN_DOMINANT_ID_SHARE));
-    m.insert("MAX_EXCLUDED_SESSIONS", PyValue::Int(MAX_EXCLUDED_SESSIONS as i64));
-    m.insert("MIN_USABLE_SESSIONS", PyValue::Int(MIN_USABLE_SESSIONS as i64));
+    m.insert(
+        "MAX_INVALID_WIDTH_SHARE",
+        PyValue::Float(MAX_INVALID_WIDTH_SHARE),
+    );
+    m.insert(
+        "MIN_VALID_PARENT_QUOTE_SHARE",
+        PyValue::Float(MIN_VALID_PARENT_QUOTE_SHARE),
+    );
+    m.insert(
+        "MIN_DOMINANT_ID_SHARE",
+        PyValue::Float(MIN_DOMINANT_ID_SHARE),
+    );
+    m.insert(
+        "MAX_EXCLUDED_SESSIONS",
+        PyValue::Int(MAX_EXCLUDED_SESSIONS as i64),
+    );
+    m.insert(
+        "MIN_USABLE_SESSIONS",
+        PyValue::Int(MIN_USABLE_SESSIONS as i64),
+    );
     m.insert("PRICE_UNITS_PER_POINT", PyValue::Int(PRICE_UNITS_PER_POINT));
     m.insert("TICK_UNITS", PyValue::Int(TICK_UNITS));
-    m.insert("UTC_OFFSET_MINUTES", PyValue::Int(UTC_OFFSET_MINUTES.into()));
-    m.insert("SESSION_OPEN_LOCAL_MIN", PyValue::Int(SESSION_OPEN_LOCAL_MIN.into()));
-    m.insert("SESSION_CLOSE_LOCAL_MIN", PyValue::Int(SESSION_CLOSE_LOCAL_MIN.into()));
-    m.insert("HALT_START_LOCAL_MIN", PyValue::Int(HALT_START_LOCAL_MIN.into()));
-    m.insert("HALT_END_LOCAL_MIN", PyValue::Int(HALT_END_LOCAL_MIN.into()));
+    m.insert(
+        "UTC_OFFSET_MINUTES",
+        PyValue::Int(UTC_OFFSET_MINUTES.into()),
+    );
+    m.insert(
+        "SESSION_OPEN_LOCAL_MIN",
+        PyValue::Int(SESSION_OPEN_LOCAL_MIN.into()),
+    );
+    m.insert(
+        "SESSION_CLOSE_LOCAL_MIN",
+        PyValue::Int(SESSION_CLOSE_LOCAL_MIN.into()),
+    );
+    m.insert(
+        "HALT_START_LOCAL_MIN",
+        PyValue::Int(HALT_START_LOCAL_MIN.into()),
+    );
+    m.insert(
+        "HALT_END_LOCAL_MIN",
+        PyValue::Int(HALT_END_LOCAL_MIN.into()),
+    );
     m.insert(
         "SESSION_INVENTORY",
         PyValue::List(
             SESSION_INVENTORY
                 .iter()
-                .map(|(label, status)| PyValue::List(vec![PyValue::Str(label), PyValue::Str(status)]))
+                .map(|(label, status)| {
+                    PyValue::List(vec![PyValue::Str(label), PyValue::Str(status)])
+                })
                 .collect(),
         ),
     );
-    m.insert("EXPECTED_FULL_SESSIONS", PyValue::Int(EXPECTED_FULL_SESSIONS));
+    m.insert(
+        "EXPECTED_FULL_SESSIONS",
+        PyValue::Int(EXPECTED_FULL_SESSIONS),
+    );
     m.insert("SEARCH_START_NS", PyValue::Int(SEARCH_START_NS));
     m.insert("SEARCH_LENGTH", PyValue::Str(SEARCH_LENGTH));
     m.insert("SEARCH_SEEDS", PyValue::int_list(SEARCH_SEEDS));
@@ -400,25 +408,46 @@ fn tree() -> PyValue {
     m.insert("SOLVE_RELATIVE_STEP", PyValue::Float(SOLVE_RELATIVE_STEP));
     m.insert("VOL_GRID_POINTS", PyValue::Int(VOL_GRID_POINTS));
     m.insert("VOL_SCALAR_DOMAIN", band_pair(VOL_SCALAR_DOMAIN));
-    m.insert("DISPLACEMENT_BIN_TICKS", PyValue::Float(DISPLACEMENT_BIN_TICKS));
+    m.insert(
+        "DISPLACEMENT_BIN_TICKS",
+        PyValue::Float(DISPLACEMENT_BIN_TICKS),
+    );
     m.insert("TOLERANCES", tolerances());
     m.insert("ACF_LAGS", PyValue::int_list(ACF_LAGS));
     m.insert("HORIZON_SECONDS", PyValue::int_list(HORIZON_SECONDS));
     m.insert("REFERENCE_SHAPE", reference_shape());
     m.insert("RESAMPLE_SEED", PyValue::Int(RESAMPLE_SEED));
     m.insert("RESAMPLE_REPLICATES", PyValue::Int(RESAMPLE_REPLICATES));
-    m.insert("RESAMPLE_SESSIONS_PER_REPLICATE", PyValue::Int(RESAMPLE_SESSIONS_PER_REPLICATE));
-    m.insert("RESAMPLE_ENVELOPE_LEVEL", PyValue::Float(RESAMPLE_ENVELOPE_LEVEL));
+    m.insert(
+        "RESAMPLE_SESSIONS_PER_REPLICATE",
+        PyValue::Int(RESAMPLE_SESSIONS_PER_REPLICATE),
+    );
+    m.insert(
+        "RESAMPLE_ENVELOPE_LEVEL",
+        PyValue::Float(RESAMPLE_ENVELOPE_LEVEL),
+    );
     m.insert("MINUTE_RANGE_GATES", PyValue::str_list(MINUTE_RANGE_GATES));
-    m.insert("MIN_PARENT_CELL_RETURNS", PyValue::Int(MIN_PARENT_CELL_RETURNS));
+    m.insert(
+        "MIN_PARENT_CELL_RETURNS",
+        PyValue::Int(MIN_PARENT_CELL_RETURNS),
+    );
     m.insert("MIN_60S_CELL_RETURNS", PyValue::Int(MIN_60S_CELL_RETURNS));
     m.insert("MIN_300S_CELL_RETURNS", PyValue::Int(MIN_300S_CELL_RETURNS));
     m.insert("SESSION_HOUR_BAND", band_pair(SESSION_HOUR_BAND));
     m.insert("ARRIVAL_HOUR_REL_TOL", PyValue::Float(ARRIVAL_HOUR_REL_TOL));
-    m.insert("WALLTIME_POOLED_REL_TOL", PyValue::Float(WALLTIME_POOLED_REL_TOL));
-    m.insert("SESSION_ARRAY_DECIMALS", PyValue::Int(SESSION_ARRAY_DECIMALS));
+    m.insert(
+        "WALLTIME_POOLED_REL_TOL",
+        PyValue::Float(WALLTIME_POOLED_REL_TOL),
+    );
+    m.insert(
+        "SESSION_ARRAY_DECIMALS",
+        PyValue::Int(SESSION_ARRAY_DECIMALS),
+    );
     m.insert("TOP_MINUTE_RECORDS", PyValue::Int(TOP_MINUTE_RECORDS));
-    m.insert("GENERATED_SESSIONS_PER_SEED", PyValue::Int(GENERATED_SESSIONS_PER_SEED));
+    m.insert(
+        "GENERATED_SESSIONS_PER_SEED",
+        PyValue::Int(GENERATED_SESSIONS_PER_SEED),
+    );
     m.insert("SESSION_VOL_CORR_MIN", PyValue::Float(SESSION_VOL_CORR_MIN));
     m.insert("MNQ_DOW_WEIGHT", PyValue::float_list(MNQ_DOW_WEIGHT));
     m.insert("WALLTIME_HOURLY_ROLE", PyValue::Str(WALLTIME_HOURLY_ROLE));
@@ -428,16 +457,34 @@ fn tree() -> PyValue {
     m.insert("COLD_HOURS", PyValue::int_list(COLD_HOURS));
     m.insert("RESIDUAL_WINDOW_S", PyValue::Int(RESIDUAL_WINDOW_S));
     m.insert("RESIDUAL_MIN_HISTORY", PyValue::Int(RESIDUAL_MIN_HISTORY));
-    m.insert("RESIDUAL_EXCEED_MULTIPLES", PyValue::int_list(RESIDUAL_EXCEED_MULTIPLES));
-    m.insert("INNOVATION_EXCEED_ABS", PyValue::int_list(INNOVATION_EXCEED_ABS));
-    m.insert("PERMUTATION_REPLICATES", PyValue::Int(PERMUTATION_REPLICATES));
-    m.insert("PERMUTATION_VARIANTS", PyValue::str_list(PERMUTATION_VARIANTS));
+    m.insert(
+        "RESIDUAL_EXCEED_MULTIPLES",
+        PyValue::int_list(RESIDUAL_EXCEED_MULTIPLES),
+    );
+    m.insert(
+        "INNOVATION_EXCEED_ABS",
+        PyValue::int_list(INNOVATION_EXCEED_ABS),
+    );
+    m.insert(
+        "PERMUTATION_REPLICATES",
+        PyValue::Int(PERMUTATION_REPLICATES),
+    );
+    m.insert(
+        "PERMUTATION_VARIANTS",
+        PyValue::str_list(PERMUTATION_VARIANTS),
+    );
     m.insert("BOOTSTRAP_REPLICATES", PyValue::Int(BOOTSTRAP_REPLICATES));
-    m.insert("BOOTSTRAP_BLOCK_SESSIONS", PyValue::Int(BOOTSTRAP_BLOCK_SESSIONS));
+    m.insert(
+        "BOOTSTRAP_BLOCK_SESSIONS",
+        PyValue::Int(BOOTSTRAP_BLOCK_SESSIONS),
+    );
     m.insert("BOOTSTRAP_BASE_SEED", PyValue::Int(BOOTSTRAP_BASE_SEED));
     m.insert("PERMUTATION_BASE_SEED", PyValue::Int(PERMUTATION_BASE_SEED));
     m.insert("CONTROL_TIE_BASE_SEED", PyValue::Int(CONTROL_TIE_BASE_SEED));
-    m.insert("FAMILY_ENVELOPE_LEVEL", PyValue::Float(FAMILY_ENVELOPE_LEVEL));
+    m.insert(
+        "FAMILY_ENVELOPE_LEVEL",
+        PyValue::Float(FAMILY_ENVELOPE_LEVEL),
+    );
     m.insert("SEED_DIRECTION_MIN", PyValue::Int(SEED_DIRECTION_MIN));
     m.insert("FOLD_MIN_SESSIONS", PyValue::Int(FOLD_MIN_SESSIONS));
     m.insert("MATERIALITY_BAND", band_pair(MATERIALITY_BAND));
@@ -447,21 +494,48 @@ fn tree() -> PyValue {
     m.insert("COUNT_WINDOWS_S", PyValue::int_list(COUNT_WINDOWS_S));
     m.insert("WALL_HORIZONS_S", PyValue::int_list(WALL_HORIZONS_S));
     m.insert("EXCEEDANCE_TICKS", PyValue::int_list(EXCEEDANCE_TICKS));
-    m.insert("PARENT_COUNT_BIN_EDGES", PyValue::int_list(PARENT_COUNT_BIN_EDGES));
-    m.insert("PARENT_COUNT_BIN_NAMES", PyValue::str_list(PARENT_COUNT_BIN_NAMES));
-    m.insert("SEGMENT_LABEL_EDGES_S", PyValue::int_list(SEGMENT_LABEL_EDGES_S));
-    m.insert("SINCE_OPEN_BIN_NAMES", PyValue::str_list(SINCE_OPEN_BIN_NAMES));
-    m.insert("UNTIL_CLOSE_BIN_NAMES", PyValue::str_list(UNTIL_CLOSE_BIN_NAMES));
+    m.insert(
+        "PARENT_COUNT_BIN_EDGES",
+        PyValue::int_list(PARENT_COUNT_BIN_EDGES),
+    );
+    m.insert(
+        "PARENT_COUNT_BIN_NAMES",
+        PyValue::str_list(PARENT_COUNT_BIN_NAMES),
+    );
+    m.insert(
+        "SEGMENT_LABEL_EDGES_S",
+        PyValue::int_list(SEGMENT_LABEL_EDGES_S),
+    );
+    m.insert(
+        "SINCE_OPEN_BIN_NAMES",
+        PyValue::str_list(SINCE_OPEN_BIN_NAMES),
+    );
+    m.insert(
+        "UNTIL_CLOSE_BIN_NAMES",
+        PyValue::str_list(UNTIL_CLOSE_BIN_NAMES),
+    );
     m.insert("MIN_1S_CELL_RETURNS", PyValue::Int(MIN_1S_CELL_RETURNS));
     m.insert("MIN_5S_CELL_RETURNS", PyValue::Int(MIN_5S_CELL_RETURNS));
     m.insert("MIN_15S_CELL_RETURNS", PyValue::Int(MIN_15S_CELL_RETURNS));
     m.insert("MIN_RESIDUAL_CELL", PyValue::Int(MIN_RESIDUAL_CELL));
     m.insert("MIN_MINUTES_CELL", PyValue::Int(MIN_MINUTES_CELL));
-    m.insert("MIN_BOUNDARY_MINUTES_CELL", PyValue::Int(MIN_BOUNDARY_MINUTES_CELL));
-    m.insert("MIN_BOUNDARY_60S_CELL_RETURNS", PyValue::Int(MIN_BOUNDARY_60S_CELL_RETURNS));
+    m.insert(
+        "MIN_BOUNDARY_MINUTES_CELL",
+        PyValue::Int(MIN_BOUNDARY_MINUTES_CELL),
+    );
+    m.insert(
+        "MIN_BOUNDARY_60S_CELL_RETURNS",
+        PyValue::Int(MIN_BOUNDARY_60S_CELL_RETURNS),
+    );
     m.insert("SIGMA_ESCALATION_MIN", PyValue::Float(SIGMA_ESCALATION_MIN));
-    m.insert("CONTROL_ESCALATION_MAX", PyValue::Float(CONTROL_ESCALATION_MAX));
-    m.insert("INITIATION_INNOVATION_MIN", PyValue::Int(INITIATION_INNOVATION_MIN));
+    m.insert(
+        "CONTROL_ESCALATION_MAX",
+        PyValue::Float(CONTROL_ESCALATION_MAX),
+    );
+    m.insert(
+        "INITIATION_INNOVATION_MIN",
+        PyValue::Int(INITIATION_INNOVATION_MIN),
+    );
     PyValue::Dict(m)
 }
 
