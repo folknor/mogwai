@@ -310,12 +310,103 @@ subphase's own Rust tests.
     stays visible if anyone reintroduces it. `brokkr check` green (519
     passed, 95 ignored) with the fix in place. Not committed (owner
     re-runs the golden gate after committing).
+
+    GOLDEN GATE PASSED, 2026-08-06, from clean HEAD 0cf2d49. The
+    monolithic test exceeds brokkr's hard 280 s per-test ceiling
+    (observed 83-86 s plus eight ~25 s walks plus bootstrap), so the
+    orchestrator ran the identical driver through the release binary
+    against scratch cache copies and compared with the PYTHON
+    harness's own _typed_canon under the three live-field
+    exclusions: typed-canon identical, verdict no-family-eligible.
+    Live cost of the Rust run: observed 83.0 s, generated 202.1 s,
+    bootstrap 3.1 s, total 288.1 s, peak RSS 2.93 GiB (inside the
+    4 GiB budget; the in-process walks hold full Value trees where
+    the Python sampled subprocesses), scratch 93 MB. OBLIGATION for
+    2c-iii: restructure the gate test to fit the 280 s ceiling -
+    split the observed pass and the walks into separate parity
+    tests, or gate the driver over pre-attested cached walks with
+    the live-walk attestation kept as its own per-seed tests like
+    2a's.
   - **2c-iii, retirement**: cli's measure12a.rs deleted, the gen
     measure dispatch re-routed through the lab engine with the CLI
     surface unchanged, the four named tests re-anchored under their
     spec-runbook names, the 2a parity gates re-run, and python
     cost12a as the end-to-end proof the harness still drives the
     re-routed binary.
+
+    LANDED 2026-08-06. `crates/mogwai-cli/src/measure12a.rs` (2,076
+    lines, the CLI-local `Measure12aAcc` twin) is deleted.
+    `gen.rs`'s `run_measure12a` now drives
+    `mogwai_lab::measure12a::generated::GeneratedAcc` - the same
+    construction `parity12a.rs`'s `run_final_walk` and
+    `measure.rs`'s in-process attestation already use - and appends
+    `cost` (`walk_s`/`self_peak_rss_bytes`, VmHWM) itself, since
+    `GeneratedAcc::finish` deliberately returns
+    `{seed, per_session, forensic}` without it (the caller alone
+    knows the walk's wall time). `self_peak_rss_bytes` is a
+    faithful copy of the retired module's own (VmHWM over
+    `/proc/self/status`) - distinct in kind from
+    `mogwai_lab::sampler::ResourceSampler`'s process-tree sampling,
+    which a single offline walk has no need of. The `gen --type
+    measure12a` CLI surface (flags, output shape, cost fields) is
+    UNCHANGED. `gen.rs`'s own `session_segment_at` and `summarize`
+    stay untouched - protocol-11 machinery out of this slice's scope
+    per the phase doc, smallest honest diff.
+
+    The four spec-runbook-named tests are re-anchored, exact names
+    kept: `measure12a_matches_independent_recompute` already lived in
+    `mogwai_lab::measure12a::tests` since phase 2a (nothing to move);
+    `measure12a_selection_is_deterministic`,
+    `measure12a_consumer_leaves_tape_byte_identical` and
+    `arch_coefficients_match_the_shipped_recursion` stay in `gen.rs`
+    (they exercise the CLI's own `run_measure12a`/`build_source`
+    plumbing, not lab-internal machinery) but now drive
+    `GeneratedAcc`/`ARCH_12A`/`GARCH_12A` from
+    `mogwai_lab::measure12a::generated` instead of the deleted
+    module. All four pass under their exact names.
+
+    THE GATE-RESTRUCTURE OBLIGATION from 2c-ii: added
+    `mogwai_cli::measure::WalkSource` (`LiveAttested` /
+    `PreAttestedCacheOnly`) and `run_measure_with(cfg, walk_source)`;
+    `run_measure` and the CLI both still use `LiveAttested`
+    unconditionally, so production behavior is unchanged.
+    `crates/mogwai-cli/tests/parity12a_ii.rs` is now two tests:
+    `parity12a_ii_fast_matches_the_committed_artifact_over_cached_walks`
+    (observed pass LIVE, the eight walks taken straight from the
+    Brick G cache with neither a fresh walk nor the attestation
+    compare - honestly labeled as proving nothing about walk
+    determinism on its own, because the nine `parity12a.rs` gates
+    already prove that independently) at ~85 s, well inside the
+    ceiling; and
+    `parity12a_ii_live_full_run_matches_the_committed_artifact`, the
+    real `LiveAttested` path, kept `#[ignore]`d with its doc comment
+    naming the release-binary invocation and pointing at this
+    section for the measured cost fields, since it still exceeds the
+    280 s ceiling by construction. Together the two suites cover
+    everything the monolithic test did; nothing is weakened, the
+    coverage moved to gates that fit.
+
+    Verification, all from THIS uncommitted tree (git-dirty, so
+    `parity12a_ii_fast`'s own live run correctly refuses exactly as
+    2c-ii's did - confirmed, not worked around):
+    `brokkr check` green (512 passed, 96 ignored); `brokkr check
+    --gate` green modulo the one documented pre-existing failure
+    (`tape_lateness_under_acceleration`, unrelated - a p99-lateness
+    budget in `serving.rs`); all nine 2a parity gates re-run
+    individually with `--timeout 279` and PASS
+    (`parity12a_observed_per_session_matches_the_committed_artifact`
+    82.5 s, `parity12a_generated_seed_1`..`_8` ~26 s each) - proving
+    the re-route changed nothing; `parity12a_aggregate` (2b) and
+    `parity12a_i` (2c-i) re-run and PASS. `python3 analysis/mnq_fit.py
+    cost12a`: `runtime_ratio` 0.8750380890532778 against budget 1.5 -
+    matches the old twin's own ~0.875 to the reported digits, the
+    end-to-end proof the Python harness drives the re-routed binary
+    unchanged.
+
+    Not committed. Phase 2c (assembly, validators, the live run, the
+    CLI, retirement) is now COMPLETE pending the owner's final
+    commit and clean-tree confirmation of the two restructured
+    `parity12a_ii` gates.
 
 ## Phase 3 - fit and synthesis (two launches)
 

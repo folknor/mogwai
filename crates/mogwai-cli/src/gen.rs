@@ -247,9 +247,12 @@ fn run_into(args: &GenArgs, sink: &mut impl Write) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Drive the walk through the `Measure12aAcc` (spec Brick G). The
-/// consumer reads events and per-parent `VolTrace` records only; the
-/// walk is the shipped one.
+/// Drive the walk through `mogwai_lab::measure12a::generated::GeneratedAcc`
+/// (spec Brick G), the UNIFIED block engine phase 2a landed - this CLI
+/// surface used to drive a second, CLI-local twin
+/// (`crate::measure12a::Measure12aAcc`, retired at phase 2c-iii); the walk
+/// itself is unchanged, still the shipped one. The consumer reads events
+/// and per-parent `VolTrace` records only.
 pub(crate) fn run_measure12a(
     source: &mut mogwai_data::GeneratedSource,
     profile: &mogwai_server::source::InstrumentProfile,
@@ -259,9 +262,13 @@ pub(crate) fn run_measure12a(
     end: u64,
 ) -> anyhow::Result<serde_json::Value> {
     let t0 = std::time::Instant::now();
-    crate::measure12a::prepare_trade_tick(profile.scalars.modal_tick);
-    let mut acc =
-        crate::measure12a::Measure12aAcc::new(seed, start, end, offset, profile.scalars.modal_tick);
+    let mut acc = mogwai_lab::measure12a::generated::GeneratedAcc::new(
+        seed,
+        start,
+        end,
+        i32::from(offset),
+        profile.scalars.modal_tick,
+    );
     while let Some(event) = source.next_tick() {
         if event.ts_event() >= end {
             break;
@@ -269,15 +276,41 @@ pub(crate) fn run_measure12a(
         match event {
             TickEvent::Quote(q) => {
                 let trace = source.take_vol_trace();
-                acc.push_quote(&q, trace)?;
+                acc.push_quote(&q, trace).map_err(|e| anyhow::anyhow!("{e}"))?;
             }
-            TickEvent::Trade(t) => acc.push_trade(&t)?,
+            TickEvent::Trade(t) => acc.push_trade(&t).map_err(|e| anyhow::anyhow!("{e}"))?,
         }
     }
-    acc.finish(
-        t0.elapsed().as_secs_f64(),
-        crate::measure12a::self_peak_rss_bytes(),
-    )
+    let mut value = acc.finish().map_err(|e| anyhow::anyhow!("{e}"))?;
+    value.as_object_mut().expect("a record").insert(
+        "cost".to_string(),
+        serde_json::json!({
+            "walk_s": t0.elapsed().as_secs_f64(),
+            "rss_bytes": self_peak_rss_bytes(),
+        }),
+    );
+    Ok(value)
+}
+
+/// `VmHWM` (peak resident set) of THIS process, ported from the retired
+/// `crate::measure12a::self_peak_rss_bytes` - the walk's own cost record,
+/// distinct from `mogwai_lab::sampler::ResourceSampler`'s process-TREE
+/// sampling (slice 2c-ii), which this single-shot walk has no need of.
+fn self_peak_rss_bytes() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status.lines().find_map(|line| {
+                line.strip_prefix("VmHWM:").map(|rest| {
+                    rest.split_whitespace()
+                        .next()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0)
+                        * 1024
+                })
+            })
+        })
+        .unwrap_or(0)
 }
 
 /// One JSON line per parent whose event instant falls inside
@@ -2485,10 +2518,10 @@ mod tests {
 
     #[test]
     fn measure12a_consumer_leaves_tape_byte_identical() {
-        // A plain --type bars run against one where the Measure12aAcc
-        // consumed the same walk (traces enabled): the consumer must not
-        // perturb draws, so the bar bytes are identical. `summary` emits
-        // no tape bytes, so bars anchor this test.
+        // A plain --type bars run against one where GeneratedAcc (the
+        // unified lab engine) consumed the same walk (traces enabled): the
+        // consumer must not perturb draws, so the bar bytes are identical.
+        // `summary` emits no tape bytes, so bars anchor this test.
         let end = M12A_START_NS + 1_200_000_000_000; // 20 minutes
         let mut plain = Vec::new();
         {
@@ -2504,14 +2537,13 @@ mod tests {
             .as_ref()
             .expect("calendar")
             .utc_offset_minutes;
-        crate::measure12a::prepare_trade_tick(profile.scalars.modal_tick);
         let mut source = build_source(&args, &profile, M12A_START_NS).expect("source");
         source.enable_vol_trace();
-        let mut acc = crate::measure12a::Measure12aAcc::new(
+        let mut acc = mogwai_lab::measure12a::generated::GeneratedAcc::new(
             7,
             M12A_START_NS,
             end,
-            offset,
+            i32::from(offset),
             profile.scalars.modal_tick,
         );
         let mut trades: Vec<TradeTick> = Vec::new();
@@ -2532,7 +2564,7 @@ mod tests {
                 }
             }
         }
-        let _ = acc.finish(0.0, 0).expect("finish");
+        let _ = acc.finish().expect("finish");
         let mut consumed = Vec::new();
         write_bars(
             trades.into_iter(),
@@ -2615,11 +2647,11 @@ mod tests {
         let b1 = (s2y * s11 - s1y * s12) / det;
         let a0 = my - a1 * mx1 - b1 * mx2;
         assert!(
-            (a1 - crate::measure12a::ARCH_12A).abs() < 1e-6,
+            (a1 - mogwai_lab::measure12a::generated::ARCH_12A).abs() < 1e-6,
             "recovered ARCH {a1} drifts from the local constant"
         );
         assert!(
-            (b1 - crate::measure12a::GARCH_12A).abs() < 1e-6,
+            (b1 - mogwai_lab::measure12a::generated::GARCH_12A).abs() < 1e-6,
             "recovered GARCH {b1} drifts from the local constant"
         );
         // Scale-aware residual bound with the LOCAL constants (a0 from
@@ -2636,21 +2668,21 @@ mod tests {
         };
         let bound = scale * 1e-9;
         assert!(
-            max_resid(crate::measure12a::ARCH_12A, crate::measure12a::GARCH_12A) <= bound,
+            max_resid(mogwai_lab::measure12a::generated::ARCH_12A, mogwai_lab::measure12a::generated::GARCH_12A) <= bound,
             "the local coefficients violate the shipped recursion"
         );
         // Sensitivity: perturbing either local coefficient independently
         // fails the same bound.
         assert!(
             max_resid(
-                crate::measure12a::ARCH_12A * 1.001,
-                crate::measure12a::GARCH_12A
+                mogwai_lab::measure12a::generated::ARCH_12A * 1.001,
+                mogwai_lab::measure12a::generated::GARCH_12A
             ) > bound
         );
         assert!(
             max_resid(
-                crate::measure12a::ARCH_12A,
-                crate::measure12a::GARCH_12A * 1.001
+                mogwai_lab::measure12a::generated::ARCH_12A,
+                mogwai_lab::measure12a::generated::GARCH_12A * 1.001
             ) > bound
         );
     }

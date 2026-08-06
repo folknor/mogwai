@@ -14,7 +14,6 @@ compile_error!("mogwai requires a Unix target");
 mod cache;
 mod r#gen;
 mod man;
-mod measure12a;
 mod preflight;
 mod tick_composition;
 

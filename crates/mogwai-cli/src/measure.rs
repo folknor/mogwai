@@ -108,9 +108,32 @@ pub struct MeasureOutcome {
     pub cost: Value,
 }
 
+/// Where a run's eight `generated_seeds` come from. The production CLI
+/// always uses [`WalkSource::LiveAttested`]; [`WalkSource::PreAttestedCacheOnly`]
+/// exists ONLY for the parity gate, which cannot fit the full live walk set
+/// (eight in-process month-long walks, ~26 s apiece per the phase-2a gate
+/// timings) inside `brokkr`'s hard per-test ceiling alongside the ~85 s
+/// observed pass. It proves nothing about walk determinism itself - that is
+/// what the nine per-seed 2a parity gates (`parity12a_generated_seed_1..8`,
+/// `parity12a_observed_*`) each prove independently, well under the
+/// ceiling - so using it does not weaken what the suite as a whole covers,
+/// it relocates the coverage to gates that already fit.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum WalkSource {
+    /// The real `mogwai measure` behavior: run each FINAL walk fresh,
+    /// in-process, and content-compare (cost excluded) against the
+    /// read-only Brick G record before trusting it.
+    LiveAttested,
+    /// TEST-ONLY. Skip the walk and the attestation entirely; use the
+    /// cached Brick G record's `per_session`/`forensic`/`cost` as-is.
+    /// `cost.generated_s` reads as `0.0` under this mode - there is no
+    /// live generated-side measurement to report.
+    PreAttestedCacheOnly,
+}
+
 pub fn run(args: MeasureArgs) -> anyhow::Result<()> {
     let cfg = MeasureConfig::resolve(args.corpus, args.ledger, args.preflight, args.cache_dir, args.out);
-    let outcome = run_measure(&cfg)?;
+    let outcome = run_measure_with(&cfg, WalkSource::LiveAttested)?;
     let ladder = &outcome.artifact["ladder"];
     println!("artifact -> {}", cfg.out.display());
     println!("cost: {}", serde_json::to_string(&outcome.cost)?);
@@ -123,7 +146,14 @@ pub fn run(args: MeasureArgs) -> anyhow::Result<()> {
 /// The driver: `mode_measure12a`, callable directly (with `cfg.out`
 /// overridden to a scratch path) by the golden-gate parity test as well as
 /// by the CLI. WRITES the artifact atomically to `cfg.out` on success.
+/// Always runs the real live walk attestation - see [`run_measure_with`]
+/// for the test-only pre-attested seam.
 pub fn run_measure(cfg: &MeasureConfig) -> anyhow::Result<MeasureOutcome> {
+    run_measure_with(cfg, WalkSource::LiveAttested)
+}
+
+/// [`run_measure`], parameterized over [`WalkSource`].
+pub fn run_measure_with(cfg: &MeasureConfig, walk_source: WalkSource) -> anyhow::Result<MeasureOutcome> {
     let harness_commit = require_clean_tree()?;
 
     // The Brick G references load READ-ONLY before anything runs.
@@ -166,32 +196,50 @@ pub fn run_measure(cfg: &MeasureConfig) -> anyhow::Result<MeasureOutcome> {
 
     // -- The eight FINAL walks as cost-attestation replays, IN-PROCESS: run
     // through the lab engine and content-compare (cost excluded) against
-    // the read-only Brick G record.
+    // the read-only Brick G record. Under `PreAttestedCacheOnly` (test-only
+    // seam, see `WalkSource`) the walk and the attestation are both
+    // SKIPPED and the cached record is used as-is.
     let t1 = std::time::Instant::now();
     let mut generated_seeds: Vec<GeneratedSeed> = Vec::with_capacity(FINAL_SEEDS.len());
     for &seed in FINAL_SEEDS {
         let attested = brick_g
             .get(&seed)
             .ok_or_else(|| anyhow!("Brick G cache is missing seed {seed}"))?;
-        let seed_u64 = u64::try_from(seed).map_err(|_| anyhow!("seed {seed} is not positive"))?;
-        let replay = run_final_walk(seed_u64)?;
-        let mut replayed = replay.clone();
-        replayed.as_object_mut().expect("a record").remove("cost");
-        let mut reference = attested.clone();
-        reference.as_object_mut().expect("a record").remove("cost");
-        if typed_canon(&replayed) != typed_canon(&reference) {
-            bail!("seed {seed} replay diverges from the cached Brick G walk");
+        match walk_source {
+            WalkSource::LiveAttested => {
+                let seed_u64 =
+                    u64::try_from(seed).map_err(|_| anyhow!("seed {seed} is not positive"))?;
+                let replay = run_final_walk(seed_u64)?;
+                let mut replayed = replay.clone();
+                replayed.as_object_mut().expect("a record").remove("cost");
+                let mut reference = attested.clone();
+                reference.as_object_mut().expect("a record").remove("cost");
+                if typed_canon(&replayed) != typed_canon(&reference) {
+                    bail!("seed {seed} replay diverges from the cached Brick G walk");
+                }
+                let session_count = replay["per_session"].as_array().map_or(0, Vec::len);
+                println!("seed {seed} replay attested: {session_count} complete sessions");
+                generated_seeds.push(GeneratedSeed {
+                    seed,
+                    per_session: replay["per_session"].as_array().cloned().unwrap_or_default(),
+                    forensic: replay["forensic"].clone(),
+                    cost: attested["cost"].clone(),
+                });
+            }
+            WalkSource::PreAttestedCacheOnly => {
+                generated_seeds.push(GeneratedSeed {
+                    seed,
+                    per_session: attested["per_session"].as_array().cloned().unwrap_or_default(),
+                    forensic: attested["forensic"].clone(),
+                    cost: attested["cost"].clone(),
+                });
+            }
         }
-        let session_count = replay["per_session"].as_array().map_or(0, Vec::len);
-        println!("seed {seed} replay attested: {session_count} complete sessions");
-        generated_seeds.push(GeneratedSeed {
-            seed,
-            per_session: replay["per_session"].as_array().cloned().unwrap_or_default(),
-            forensic: replay["forensic"].clone(),
-            cost: attested["cost"].clone(),
-        });
     }
-    let generated_s = t1.elapsed().as_secs_f64();
+    let generated_s = match walk_source {
+        WalkSource::LiveAttested => t1.elapsed().as_secs_f64(),
+        WalkSource::PreAttestedCacheOnly => 0.0,
+    };
 
     // -- Input-side population gates.
     for g in &generated_seeds {
