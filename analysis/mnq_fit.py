@@ -1960,13 +1960,15 @@ def run_summary_subprocess(overrides: dict, seed: int, start_ns: int,
         with open(cache_path) as fh:
             return json.load(fh)
     os.makedirs(SCRATCH_DIR, exist_ok=True)
-    # Scratch paths key on the walk's cache hash, never the PID: distinct
-    # concurrent walks own disjoint files by construction, where a shared
-    # per-PID config raced under any parallelism and corrupted silently.
-    config_path = os.path.join(
-        SCRATCH_DIR, f"candidate-{cache_key[:16]}.toml"
-    )
-    out_path = os.path.join(SCRATCH_DIR, f"summary-{cache_key[:16]}.json")
+    # Scratch paths key on the walk's cache hash PLUS the invoking thread:
+    # the hash keeps distinct walks disjoint (the old per-PID scheme raced
+    # under parallelism), and the thread id keeps DUPLICATE submissions of
+    # one walk disjoint too - the prewarm dedupes those, but a defense
+    # relying on every caller deduping is no defense. Duplicate walks then
+    # converge on one cache entry through the atomic write below.
+    invocation = f"{cache_key[:16]}-{threading.get_ident()}"
+    config_path = os.path.join(SCRATCH_DIR, f"candidate-{invocation}.toml")
+    out_path = os.path.join(SCRATCH_DIR, f"summary-{invocation}.json")
     with open(config_path, "w") as fh:
         fh.write(scratch_config_text(overrides))
     # A stale summary from an earlier walk must never be read as this
@@ -2260,12 +2262,21 @@ def prewarm_walks(run_summary, override_sets, seeds, start_ns: int,
     if run_summary is not run_summary_subprocess:
         return
     warm_gen_build()
+    # Dedupe identical walks BEFORE fan-out: the protocol-11 probe sets
+    # deliberately share one override set (spec 4.5, shared cached FINAL
+    # walks), and submitting the same (overrides, seed) twice would race
+    # two subprocesses onto one cache entry for no work saved.
+    unique: dict[str, tuple] = {}
+    for overrides in override_sets:
+        for seed in seeds:
+            key = json.dumps({"overrides": overrides, "seed": seed},
+                             sort_keys=True, default=list)
+            unique.setdefault(key, (overrides, seed))
     with ThreadPoolExecutor(WALK_JOBS) as pool:
         futures = [
             pool.submit(run_summary, overrides, seed, start_ns, length,
                         SUMMARY_WARMUP)
-            for overrides in override_sets
-            for seed in seeds
+            for overrides, seed in unique.values()
         ]
         for future in futures:
             try:
