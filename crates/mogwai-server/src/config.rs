@@ -1684,7 +1684,10 @@ mod tests {
             "generator.vol_scalar",
             "generator.size_round_frac",
         ] {
-            let entry = provenance.get(path).and_then(toml::Value::as_table).unwrap();
+            let entry = provenance
+                .get(path)
+                .and_then(toml::Value::as_table)
+                .unwrap();
             assert_eq!(
                 entry.get("kind").and_then(toml::Value::as_str),
                 Some("declared"),

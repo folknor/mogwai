@@ -1783,32 +1783,17 @@ fn session_modulation_reproduces_curves() {
         measured.vol_hour[1]
     );
     let vol_corr = pearson(&measured.vol_hour, &fp.session_profile.vol_hour);
-    // Relaxed from 0.9 to 0.85 by the GARCH repair. This is an estimator
-    // property, not a fidelity loss, and the reasoning is worth stating because
-    // a lowered threshold otherwise reads as a concealed regression.
-    //
-    // `measured.vol_hour` is a per-hour RMS. Before the repair the realized
-    // return met a clamp at roughly 1.4 conditional SD, which truncated the
-    // tail and made that RMS a well-behaved, low-variance estimator almost by
-    // accident. The absolute realized ceiling now sits far out of reach in
-    // clean operation, so the estimator sees the full standardized t(4) tail -
-    // and t(4) has infinite kurtosis, so a sample RMS has infinite variance and
-    // converges slowly however large the draw. Over `SESSION_DRAW` PARENT
-    // EVENTS (sweep children are dropped, so this is far fewer than the same
-    // count of prints) the correlation reads 0.872.
-    //
-    // What pins the curve meanwhile is everything around this line: the argmax
-    // is still hour 14, hour 14 still exceeds 1.5, hour 1 is still below 1.0,
-    // and the intensity and day-of-week correlations are untouched above 0.9.
-    // Correlation, extrema and structural bounds together still check the
-    // intended curve; only the noisiest of the four moved.
-    //
-    // FOLLOW-UP: a robust per-hour scale estimator - a median absolute return
-    // rather than an RMS - is insensitive to an infinite fourth moment and
-    // should replace this. The trigger is any refit of or change to `vol_hour`,
-    // which must not be attempted on an estimator this noisy; it is not a
-    // prerequisite for unrelated work.
-    assert!(vol_corr > 0.85, "vol_corr={vol_corr}");
+    // SESSION_VOL_CORR_MIN of the protocol-11 spec (Brick T), inclusive.
+    // The measured curve is now a MEDIAN absolute latent return per hour -
+    // the robust estimator the earlier follow-up here demanded before any
+    // vol_hour refit could be attempted. The RMS it replaces had infinite
+    // sampling variance under the standardized t(4) innovation (infinite
+    // kurtosis), which is what had forced this threshold down to 0.85; a
+    // median's variance is finite regardless of tail weight, and under the
+    // pure scale family the session multiplier induces, the median ratio
+    // estimates the same curve the fingerprint stores. The threshold is
+    // frozen in the spec and is not lowered from an observed result.
+    assert!(vol_corr >= 0.90, "vol_corr={vol_corr}");
 
     let dow_corr = pearson(&measured.dow_weight, &fp.session_profile.dow_weight);
     assert!(dow_corr > 0.9, "dow_corr={dow_corr}");
@@ -2087,8 +2072,7 @@ struct SessionCurves {
 
 fn measure_session_curves(src: &mut GeneratedSource, draw: usize) -> SessionCurves {
     let mut hour_count = [0_u64; 24];
-    let mut ret_count_hour = [0_u64; 24];
-    let mut sumsq_ret_hour = [0.0; 24];
+    let mut abs_ret_hour: [Vec<f64>; 24] = std::array::from_fn(|_| Vec::new());
     let mut dow_count = [0_u64; 7];
     let mut prev_price: Option<f64> = None;
 
@@ -2121,15 +2105,11 @@ fn measure_session_curves(src: &mut GeneratedSource, draw: usize) -> SessionCurv
         // measuring the final child would mix level count into this curve.
         let price = src.vol.mid;
         if let Some(prev) = prev_price {
-            let ret = (price / prev).ln();
-            sumsq_ret_hour[hour] += ret.powi(2);
-            // The RMS divisor counts only return-contributing trades. The
-            // very first trade of the whole draw has no predecessor and
-            // contributes no squared return, so dividing sumsq by hour_count
-            // (which includes it) would deflate that one hour's RMS by one
-            // trade. ret_count_hour tracks exactly the trades that added a
-            // squared return.
-            ret_count_hour[hour] += 1;
+            // Absolute latent return, for the MEDIAN scale below. Latent
+            // mids are continuous, so no tick-grid zero atom threatens the
+            // median here (unlike observed quote mids, where the protocol-11
+            // estimator must include the zero mass differently).
+            abs_ret_hour[hour].push((price / prev).ln().abs());
         }
         prev_price = Some(price);
     }
@@ -2137,21 +2117,29 @@ fn measure_session_curves(src: &mut GeneratedSource, draw: usize) -> SessionCurv
     let total_hour = hour_count.iter().sum::<u64>() as f64;
     let total_dow = dow_count.iter().sum::<u64>() as f64;
     let mut intensity_hour = [0.0; 24];
-    let mut rms_hour = [0.0; 24];
+    let mut med_hour = [0.0; 24];
     let mut populated_hours = 0;
     for h in 0..24 {
         intensity_hour[h] = hour_count[h] as f64 / total_hour;
-        if ret_count_hour[h] > 0 {
-            rms_hour[h] = (sumsq_ret_hour[h] / ret_count_hour[h] as f64).sqrt();
+        if !abs_ret_hour[h].is_empty() {
+            // Median absolute return: the robust per-hour scale the recorded
+            // follow-up demanded. Under a pure scale family (session
+            // modulation multiplies every return by vol_mult) the median
+            // ratio equals the RMS ratio it replaces, without the infinite
+            // sampling variance a t(4) RMS carries.
+            let mid = abs_ret_hour[h].len() / 2;
+            let (_, m, _) = abs_ret_hour[h]
+                .select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).expect("finite return"));
+            med_hour[h] = *m;
             populated_hours += 1;
         }
     }
 
-    let rms_mean =
-        rms_hour.iter().filter(|value| **value > 0.0).sum::<f64>() / populated_hours as f64;
+    let med_mean =
+        med_hour.iter().filter(|value| **value > 0.0).sum::<f64>() / populated_hours as f64;
     let mut vol_hour = [0.0; 24];
     for h in 0..24 {
-        vol_hour[h] = rms_hour[h] / rms_mean;
+        vol_hour[h] = med_hour[h] / med_mean;
     }
 
     let mut dow_weight = [0.0; 7];

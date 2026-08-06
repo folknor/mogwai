@@ -76,6 +76,31 @@ MODES = {
             "fanout_depth": 262_144,
         },
     },
+    "independent_10_11": {
+        "versions": (10, 11),
+        "before": "analysis/tick-composition-protocol-10.json",
+        "after": "analysis/tick-composition-protocol-11.json",
+        "same_pairing": False,
+        # Protocol 11 is the MNQ session calibration repair
+        # (notes/protocol-11-session-repair-spec.md): only the two session
+        # arrays and vol_scalar move, which changes WHEN parents happen and
+        # how far returns reach - never how many children a parent draws. The
+        # acceptance is therefore the STRICT session-reshape gate, not the
+        # preset-fit allowance below: `parents` and `ticks_per_parent` must
+        # be identical for every pairing, the crypto presets byte-identical,
+        # and a fanout change proves the landing touched something outside
+        # its authorized scope.
+        "acceptance": "session_reshape",
+        # The shipped protocol-10 constants (the 9-to-10 resize values),
+        # frozen here as this mode's historical baseline.
+        "baseline": {
+            "checkpoint_k": 16_777_216,
+            "sweep_drain_budget": 5_799_000_000,
+            "max_extend_ticks": 1 << 30,
+            "warmup_baseline": 667_299_000_000,
+            "fanout_depth": 4_194_304,
+        },
+    },
     "independent_9_10": {
         "versions": (9, 10),
         "before": "analysis/tick-composition-protocol-9.json",
@@ -136,6 +161,31 @@ def million(value: float) -> int:
     return math.ceil(value / 1_000_000) * 1_000_000
 
 
+def assert_numeric_leaves_finite_positive(key: tuple, path: str, node) -> None:
+    """EVERY numeric measurement leaf, not merely the ratio inputs: a NaN
+    in a field the ratios skip today would silently survive into a fixture
+    the next comparison reads. Shared by BOTH independent acceptance gates -
+    a validator that exists in only one path is a validator the other path
+    silently lacks."""
+    if isinstance(node, bool):
+        return
+    if isinstance(node, (int, float)):
+        assert math.isfinite(node) and node > 0, (
+            f"{key}: {path} is {node}, not finite and positive"
+        )
+        return
+    if isinstance(node, dict):
+        for name, child in node.items():
+            assert_numeric_leaves_finite_positive(key, f"{path}.{name}", child)
+
+
+def assert_row_leaves_finite_positive(key: tuple, row: dict) -> None:
+    for name, node in row.items():
+        if name in ("preset", "configuration", "seed"):
+            continue
+        assert_numeric_leaves_finite_positive(key, name, node)
+
+
 def assert_unchanged_where_the_tape_did_not_move(old: dict, new: dict) -> None:
     """The independent mode's acceptance gate, run BEFORE any ratio.
 
@@ -165,6 +215,8 @@ def assert_unchanged_where_the_tape_did_not_move(old: dict, new: dict) -> None:
             )
         else:
             assert preset in CALENDAR_BEARING, f"{k}: unknown preset {preset}"
+        for row in (old[k], new[k]):
+            assert_row_leaves_finite_positive(k, row)
 
 
 def assert_crypto_frozen_and_futures_finite(old: dict, new: dict) -> None:
@@ -177,21 +229,6 @@ def assert_crypto_frozen_and_futures_finite(old: dict, new: dict) -> None:
     and positive on BOTH sides: a NaN or zero would poison the max() silently
     or divide by zero loudly, and neither is a verdict.
     """
-    def assert_numeric_leaves_finite_positive(key: tuple, path: str, node) -> None:
-        # EVERY numeric measurement leaf, not merely the ratio inputs: a NaN
-        # in a field the ratios skip today would silently survive into a
-        # fixture the next comparison reads.
-        if isinstance(node, bool):
-            return
-        if isinstance(node, (int, float)):
-            assert math.isfinite(node) and node > 0, (
-                f"{key}: {path} is {node}, not finite and positive"
-            )
-            return
-        if isinstance(node, dict):
-            for name, child in node.items():
-                assert_numeric_leaves_finite_positive(key, f"{path}.{name}", child)
-
     for k in sorted(old):
         preset = k[0]
         assert old[k]["parents"] == new[k]["parents"], f"{k}: parents moved"
@@ -204,10 +241,7 @@ def assert_crypto_frozen_and_futures_finite(old: dict, new: dict) -> None:
             continue
         assert preset in CALENDAR_BEARING, f"{k}: unknown preset {preset}"
         for row in (old[k], new[k]):
-            for name, node in row.items():
-                if name in ("preset", "configuration", "seed"):
-                    continue
-                assert_numeric_leaves_finite_positive(k, name, node)
+            assert_row_leaves_finite_positive(k, row)
 
 
 def verify_8_9_identity(eight_path: Path, nine_path: Path) -> None:
@@ -506,6 +540,61 @@ def selftest() -> None:
     check("equal pairings refuse in an independent comparison",
           refuses(lambda: compare("independent_9_10", before,
                                   fixture(10, "pair-a", crypto + futures_after),
+                                  Path("b"), Path("a"))))
+
+    print("the independent_10_11 session-reshape gate, both ways")
+    # A session reshape moves timing and price-derived rates but never the
+    # parent fanout: the same rows as the 9-to-10 case are legal here because
+    # row() holds parents and ticks_per_parent constant while the rates move.
+    b11 = fixture(10, "pair-h", crypto + futures_before)
+    a11 = fixture(11, "pair-i", crypto + futures_after)
+    result = compare("independent_10_11", b11, a11, Path("b"), Path("a"))
+    check("doubled MNQ rates ratio to exactly 2.0 in independent_10_11",
+          all(abs(result["ratios"][k] - 2.0) < 1e-12 for k in result["ratios"]))
+    base11 = MODES["independent_10_11"]["baseline"]
+    check("the 10-to-11 checkpoint proposal resizes the protocol-10 baseline",
+          result["proposed"]["checkpoint_k"]
+          == power_of_two(base11["checkpoint_k"] * 2.0 * 2))
+    moved_fanout = row("MNQ", 1, 400.0, 4_000.0, 40_000.0, 200.0)
+    moved_fanout["ticks_per_parent"] = stat(11.0)
+    check("a ticks_per_parent change refuses: the session repair must not "
+          "touch parent fanout",
+          refuses(lambda: compare("independent_10_11", b11,
+                                  fixture(11, "pair-j", crypto + [moved_fanout]),
+                                  Path("b"), Path("a"))))
+    moved_parents = row("MNQ", 1, 400.0, 4_000.0, 40_000.0, 200.0)
+    moved_parents["parents"] = 1_999_999
+    check("a parent-count change refuses in independent_10_11",
+          refuses(lambda: compare("independent_10_11", b11,
+                                  fixture(11, "pair-k",
+                                          crypto + [moved_parents]),
+                                  Path("b"), Path("a"))))
+    check("a moved crypto preset refuses in independent_10_11",
+          refuses(lambda: compare("independent_10_11", b11,
+                                  fixture(11, "pair-l",
+                                          moved_crypto + futures_after),
+                                  Path("b"), Path("a"))))
+    check("a protocol-10 after refuses in independent_10_11",
+          refuses(lambda: compare("independent_10_11", b11,
+                                  fixture(10, "pair-m", crypto + futures_after),
+                                  Path("b"), Path("a"))))
+    check("equal pairings refuse in independent_10_11",
+          refuses(lambda: compare("independent_10_11", b11,
+                                  fixture(11, "pair-h", crypto + futures_after),
+                                  Path("b"), Path("a"))))
+    nan_futures = row("MNQ", 1, 400.0, 4_000.0, 40_000.0, 200.0)
+    nan_futures["ticks_per_vol_window"] = stat(float("nan"))
+    check("a NaN futures measurement refuses in independent_10_11",
+          refuses(lambda: compare("independent_10_11", b11,
+                                  fixture(11, "pair-n",
+                                          crypto + [nan_futures]),
+                                  Path("b"), Path("a"))))
+    zero_futures = row("MNQ", 1, 400.0, 4_000.0, 40_000.0, 200.0)
+    zero_futures["ticks_per_warmup"] = stat(0.0)
+    check("a zero futures measurement refuses in independent_10_11",
+          refuses(lambda: compare("independent_10_11", b11,
+                                  fixture(11, "pair-o",
+                                          crypto + [zero_futures]),
                                   Path("b"), Path("a"))))
 
     print("the 8/9 identity verifier, both ways")

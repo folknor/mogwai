@@ -536,6 +536,173 @@ impl MomentAcc {
     }
 }
 
+// -- Protocol-11 session-cell instrumentation (spec 4.5-4.7) ----------------
+
+/// Robust-scale accumulator: one-maximum-trimmed mean absolute return derives
+/// from these three fields, so no raw returns are stored.
+#[derive(Default, Clone, Copy, serde::Serialize)]
+struct AbsCell {
+    count: u64,
+    sum_abs: f64,
+    max_abs: f64,
+}
+
+impl AbsCell {
+    fn push(&mut self, abs: f64) {
+        self.count += 1;
+        self.sum_abs += abs;
+        if abs > self.max_abs {
+            self.max_abs = abs;
+        }
+    }
+}
+
+/// Fixed-horizon accumulator under the shared segment-origin convention. The
+/// signed moments serve the pooled RMS gates, the absolute pair the hourly
+/// robust curves.
+#[derive(Default, Clone, Copy, serde::Serialize)]
+struct HorizonCell {
+    count: u64,
+    sum: f64,
+    sumsq: f64,
+    sum_abs: f64,
+    max_abs: f64,
+}
+
+impl HorizonCell {
+    fn push(&mut self, r: f64) {
+        self.count += 1;
+        self.sum += r;
+        self.sumsq += r * r;
+        let abs = r.abs();
+        self.sum_abs += abs;
+        if abs > self.max_abs {
+            self.max_abs = abs;
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct GeneratedSessionCells {
+    session_start_ns: u64,
+    session_end_ns: u64,
+    complete: bool,
+    parent_count_by_hour: [u64; 24],
+    mid_abs_by_hour: [AbsCell; 24],
+    horizon_60_by_hour: [HorizonCell; 24],
+    horizon_300_by_hour: [HorizonCell; 24],
+}
+
+impl GeneratedSessionCells {
+    fn new(
+        session_start_ns: u64,
+        session_end_ns: u64,
+        measured_from: u64,
+        measured_until: u64,
+    ) -> Self {
+        Self {
+            session_start_ns,
+            session_end_ns,
+            complete: session_start_ns >= measured_from && session_end_ns <= measured_until,
+            parent_count_by_hour: [0; 24],
+            mid_abs_by_hour: [AbsCell::default(); 24],
+            horizon_60_by_hour: [HorizonCell::default(); 24],
+            horizon_300_by_hour: [HorizonCell::default(); 24],
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct TopMinuteRecord {
+    minute_start_ns: u64,
+    minute_end_ns: u64,
+    utc_hour: u8,
+    range_ticks: u64,
+    parent_count: u64,
+    trade_count: u64,
+    low_price: String,
+    high_price: String,
+    trace_from_ns: u64,
+    trace_until_ns: u64,
+}
+
+/// The CME equity-index session structure the protocol-11 spec fixes: local
+/// 17:00 open, 15:15-15:30 halt, 16:00 close, on the calendar's own fixed UTC
+/// offset. These minutes describe the two shipped futures calendars; a future
+/// calendar with a different in-session structure would need its own
+/// derivation, which is exactly why the constants live here beside the
+/// session math rather than pretending to generality.
+const SESSION_OPEN_LOCAL_MIN: i128 = 17 * 60;
+const SESSION_HALT_START_LOCAL_MIN: i128 = 15 * 60 + 15;
+const SESSION_HALT_END_LOCAL_MIN: i128 = 15 * 60 + 30;
+const SESSION_CLOSE_LOCAL_MIN: i128 = 16 * 60;
+const NS_PER_DAY_I: i128 = 86_400_000_000_000;
+const NS_PER_MIN_I: i128 = 60_000_000_000;
+
+/// One open segment of a trading session, all bounds in UTC nanoseconds.
+/// `session_start_ns` keys the session (the local 17:00 open instant);
+/// `segment_origin_ns` anchors the fixed-horizon boundary grid (spec 4.6).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SessionSegment {
+    session_start_ns: u64,
+    session_end_ns: u64,
+    segment_origin_ns: u64,
+    segment_end_ns: u64,
+}
+
+/// Maps an OPEN instant to its session segment per spec 4.5: a local minute
+/// at or past 17:00 opens the session dated the next civil day; one before
+/// 15:15 belongs to the overnight segment of the prior day's open; the span
+/// from 15:30 to 16:00 is the post-halt segment. Closed instants (halt,
+/// break) return None - the calendar keeps generated events out of them, so
+/// a None on a real event is a session-math defect, not a data case.
+fn session_segment_at(ts: u64, offset_minutes: i16) -> Option<SessionSegment> {
+    let offset_ns = i128::from(offset_minutes) * NS_PER_MIN_I;
+    let local = i128::from(ts) + offset_ns;
+    let day = local.div_euclid(NS_PER_DAY_I);
+    let minute_of_day = local.rem_euclid(NS_PER_DAY_I) / NS_PER_MIN_I;
+    let to_utc = |local_ns: i128| -> u64 { u64::try_from(local_ns - offset_ns).unwrap_or(0) };
+    let open_of = |d: i128| d * NS_PER_DAY_I + SESSION_OPEN_LOCAL_MIN * NS_PER_MIN_I;
+    let close_of = |d: i128| d * NS_PER_DAY_I + SESSION_CLOSE_LOCAL_MIN * NS_PER_MIN_I;
+    if minute_of_day >= SESSION_OPEN_LOCAL_MIN {
+        Some(SessionSegment {
+            session_start_ns: to_utc(open_of(day)),
+            session_end_ns: to_utc(close_of(day + 1)),
+            segment_origin_ns: to_utc(open_of(day)),
+            segment_end_ns: to_utc(
+                (day + 1) * NS_PER_DAY_I + SESSION_HALT_START_LOCAL_MIN * NS_PER_MIN_I,
+            ),
+        })
+    } else if minute_of_day < SESSION_HALT_START_LOCAL_MIN {
+        Some(SessionSegment {
+            session_start_ns: to_utc(open_of(day - 1)),
+            session_end_ns: to_utc(close_of(day)),
+            segment_origin_ns: to_utc(open_of(day - 1)),
+            segment_end_ns: to_utc(
+                day * NS_PER_DAY_I + SESSION_HALT_START_LOCAL_MIN * NS_PER_MIN_I,
+            ),
+        })
+    } else if (SESSION_HALT_END_LOCAL_MIN..SESSION_CLOSE_LOCAL_MIN).contains(&minute_of_day) {
+        Some(SessionSegment {
+            session_start_ns: to_utc(open_of(day - 1)),
+            session_end_ns: to_utc(close_of(day)),
+            segment_origin_ns: to_utc(
+                day * NS_PER_DAY_I + SESSION_HALT_END_LOCAL_MIN * NS_PER_MIN_I,
+            ),
+            segment_end_ns: to_utc(close_of(day)),
+        })
+    } else {
+        None
+    }
+}
+
+fn utc_hour_of(ts: u64) -> usize {
+    ((ts / 1_000_000_000) % 86_400 / 3_600) as usize
+}
+
+/// Per-horizon boundary state: (horizon_ns, next_k, prev_boundary_mid).
+type HorizonState = Vec<(u64, u64, Option<f64>)>;
+
 #[derive(serde::Serialize)]
 pub(crate) struct SummaryAcc {
     seed: u64,
@@ -562,10 +729,22 @@ pub(crate) struct SummaryAcc {
     minute_range_max_ticks: u64,
     minute_range_second_max_ticks: u64,
     horizon_vol: std::collections::BTreeMap<String, MomentAcc>,
+    // Protocol-11 session cells (spec 4.5-4.6): one record per generated
+    // session touched by the window, ascending session_start_ns. Deliberately
+    // per session, not pooled per hour - the estimator gives each session one
+    // vote. Empty when the profile carries no calendar: sessions are a
+    // calendar construct, and the crypto presets have none.
+    session_cells: Vec<GeneratedSessionCells>,
+    // Protocol-11 worst-minute records (spec 4.7): the tail-location evidence
+    // the protocol-12 spec consumes. Bounded at TOP_MINUTE_RECORDS.
+    top_minutes: Vec<TopMinuteRecord>,
     first_book_mid: Option<String>,
     measured_from_ns: u64,
     measured_until_ns: u64,
 }
+
+/// Fixed capacity of the worst-minute collection (spec 4.7).
+const TOP_MINUTE_RECORDS: usize = 32;
 
 /// True when the calendar is open across the whole of `[t1, t2]`. Closure
 /// boundaries sit on calendar minutes, so checking both endpoints and every
@@ -648,10 +827,98 @@ pub(crate) fn summarize(
             .iter()
             .map(|h| (h.to_string(), MomentAcc::default()))
             .collect(),
+        session_cells: Vec::new(),
+        top_minutes: Vec::new(),
         first_book_mid: None,
         measured_from_ns: start,
         measured_until_ns: end,
     };
+
+    // Protocol-11 session-cell state. Sessions exist only under a calendar;
+    // the offset is the calendar's own, and the in-session structure is the
+    // fixed CME shape (see session_segment_at).
+    let cal_offset = calendar.map(|c| c.utc_offset_minutes);
+    let mut sessions: std::collections::BTreeMap<u64, GeneratedSessionCells> = Default::default();
+    // Adjacent-parent valid-mid chain, keyed by segment origin so a segment
+    // transition breaks it without extra bookkeeping (spec 4.1).
+    let mut prev_vol_parent: Option<(u64, f64)> = None;
+    // The active segment's fixed-horizon boundary state: per horizon,
+    // (horizon_ns, next_k, prev_boundary_mid), plus the SEGMENT-LOCAL
+    // as-of mid. Boundaries are segment_origin + k * horizon, k >= 1,
+    // strictly inside the segment (spec 4.6); the first boundary having
+    // an as-of mid establishes. The as-of is deliberately NOT the global
+    // last_mid: state is independent per segment (rule 1), so a pre-halt
+    // quote must never establish or price a post-halt boundary - the
+    // as-of resets to None on every segment change, exactly as the
+    // observed harness resets its chain.
+    let mut seg_state: Option<(SessionSegment, HorizonState, Option<f64>)> = None;
+    // Worst-minute detail: minute index -> (low, high, trade_count) on the
+    // exact price grid, plus parents by first-child minute (spec 4.7).
+    let mut minute_detail: std::collections::BTreeMap<u64, (Decimal, Decimal, u64)> =
+        Default::default();
+    let mut minute_parents: std::collections::BTreeMap<u64, u64> = Default::default();
+
+    // Advance the active segment's boundaries up to `until_ts` - exclusive
+    // during the walk (a boundary equal to an event timestamp waits for a
+    // later event, so equal-timestamp quotes update the as-of mid first -
+    // spec 4.6 rule 6), inclusive at a flush. `as_of` is the last valid
+    // quote mid seen so far; `window` is (measured_from, measured_until).
+    fn advance_segment_boundaries(
+        sessions: &mut std::collections::BTreeMap<u64, GeneratedSessionCells>,
+        seg: &SessionSegment,
+        horizons: &mut HorizonState,
+        until_ts: u64,
+        inclusive: bool,
+        as_of: Option<f64>,
+        window: (u64, u64),
+    ) {
+        let (measured_from, measured_until) = window;
+        for (h_ns, next_k, prev_boundary_mid) in horizons.iter_mut() {
+            loop {
+                let boundary = seg.segment_origin_ns.saturating_add(*next_k * *h_ns);
+                if boundary >= seg.segment_end_ns {
+                    break;
+                }
+                if if inclusive {
+                    boundary > until_ts
+                } else {
+                    boundary >= until_ts
+                } {
+                    break;
+                }
+                match (*prev_boundary_mid, as_of) {
+                    (Some(prev), Some(cur)) if prev > 0.0 && cur > 0.0 => {
+                        let window_start = boundary - *h_ns;
+                        // Rule 7: no return crosses a UTC hour boundary.
+                        if utc_hour_of(window_start) == utc_hour_of(boundary) {
+                            let hour = utc_hour_of(boundary);
+                            let cell = sessions.entry(seg.session_start_ns).or_insert_with(|| {
+                                GeneratedSessionCells::new(
+                                    seg.session_start_ns,
+                                    seg.session_end_ns,
+                                    measured_from,
+                                    measured_until,
+                                )
+                            });
+                            let target = if *h_ns == 60_000_000_000 {
+                                &mut cell.horizon_60_by_hour[hour]
+                            } else {
+                                &mut cell.horizon_300_by_hour[hour]
+                            };
+                            target.push((cur / prev).ln());
+                        }
+                        *prev_boundary_mid = as_of;
+                    }
+                    // Rule 4: the first boundary HAVING an as-of mid
+                    // establishes and emits nothing; a boundary before any
+                    // quote neither establishes nor emits.
+                    (None, Some(_)) => *prev_boundary_mid = as_of,
+                    _ => {}
+                }
+                *next_k += 1;
+            }
+        }
+    }
 
     // As-of state for the fixed-horizon diagnostics: per horizon, the index of
     // the next boundary and the as-of mid at the previous boundary.
@@ -682,10 +949,40 @@ pub(crate) fn summarize(
         }
     }
 
-    let finalize = |acc: &mut SummaryAcc, prev: &mut Option<(u64, f64)>, parent: OpenParent| {
+    let finalize = |acc: &mut SummaryAcc,
+                    prev: &mut Option<(u64, f64)>,
+                    sessions: &mut std::collections::BTreeMap<u64, GeneratedSessionCells>,
+                    prev_vol: &mut Option<(u64, f64)>,
+                    minute_parents: &mut std::collections::BTreeMap<u64, u64>,
+                    parent: OpenParent| {
         if parent.first_ts < start || parent.first_ts >= end {
             return;
         }
+        // Protocol-11 session cells: parent count by endpoint hour, and the
+        // adjacent valid-mid robust-scale chain within the segment (spec 4.1;
+        // the chain key is the segment origin, so a segment transition breaks
+        // it and an out-of-segment predecessor never contributes).
+        if let Some(offset) = cal_offset
+            && let Some(seg) = session_segment_at(parent.first_ts, offset)
+        {
+            let hour = utc_hour_of(parent.first_ts);
+            let cell = sessions.entry(seg.session_start_ns).or_insert_with(|| {
+                GeneratedSessionCells::new(seg.session_start_ns, seg.session_end_ns, start, end)
+            });
+            cell.parent_count_by_hour[hour] += 1;
+            if parent.quote_mid.is_finite() && parent.quote_mid > 0.0 {
+                if let Some((prev_origin, prev_mid)) = *prev_vol
+                    && prev_origin == seg.segment_origin_ns
+                {
+                    let r = (parent.quote_mid / prev_mid).ln();
+                    cell.mid_abs_by_hour[hour].push(r.abs());
+                }
+                *prev_vol = Some((seg.segment_origin_ns, parent.quote_mid));
+            }
+        }
+        *minute_parents
+            .entry(parent.first_ts / 60_000_000_000)
+            .or_insert(0) += 1;
         acc.parents += 1;
         acc.sided_rows += parent.rows;
         if parent.rows == 1 {
@@ -742,7 +1039,57 @@ pub(crate) fn summarize(
             TickEvent::Quote(q) => {
                 // A quote closes the parent that ran under the PREVIOUS book.
                 if let Some(parent) = open.take() {
-                    finalize(&mut acc, &mut prev_parent, parent);
+                    finalize(
+                        &mut acc,
+                        &mut prev_parent,
+                        &mut sessions,
+                        &mut prev_vol_parent,
+                        &mut minute_parents,
+                        parent,
+                    );
+                }
+                // Protocol-11 segment horizon state: settle the outgoing
+                // segment's remaining boundaries before switching, then
+                // advance the active one strictly past-boundary (rule 6).
+                if let Some(offset) = cal_offset
+                    && let Some(seg) = session_segment_at(ts, offset)
+                {
+                    let switch = match &seg_state {
+                        Some((current, _, _)) => *current != seg,
+                        None => true,
+                    };
+                    if switch {
+                        if let Some((old_seg, mut horizons, old_mid)) = seg_state.take() {
+                            advance_segment_boundaries(
+                                &mut sessions,
+                                &old_seg,
+                                &mut horizons,
+                                old_seg.segment_end_ns,
+                                true,
+                                old_mid,
+                                (start, end),
+                            );
+                        }
+                        seg_state = Some((
+                            seg,
+                            SUMMARY_VOL_HORIZONS_S
+                                .iter()
+                                .map(|h| (h * 1_000_000_000, 1, None))
+                                .collect(),
+                            None,
+                        ));
+                    }
+                    if let Some((current, horizons, seg_mid)) = &mut seg_state {
+                        advance_segment_boundaries(
+                            &mut sessions,
+                            current,
+                            horizons,
+                            ts,
+                            false,
+                            *seg_mid,
+                            (start, end),
+                        );
+                    }
                 }
                 let bid = f64::try_from(q.bid_px).unwrap_or(f64::NAN);
                 let ask = f64::try_from(q.ask_px).unwrap_or(f64::NAN);
@@ -786,6 +1133,15 @@ pub(crate) fn summarize(
                     }
                 }
                 last_mid = Some(mid);
+                // Segment-local as-of: only a quote INSIDE the active
+                // segment feeds it - never one from closed time or another
+                // segment (rule 1's independence).
+                if let Some(offset) = cal_offset
+                    && let Some((current, _, seg_mid)) = &mut seg_state
+                    && session_segment_at(ts, offset).as_ref() == Some(current)
+                {
+                    *seg_mid = Some(mid);
+                }
             }
             TickEvent::Trade(t) => {
                 if t.ts_event >= start && t.ts_event < end {
@@ -802,6 +1158,21 @@ pub(crate) fn summarize(
                             minute_state = Some((minute, price, price));
                         }
                     }
+                    // Protocol-11 worst-minute detail on the EXACT grid: the
+                    // records serialize decimal prices and an exact integer
+                    // tick range, where the legacy histogram rounds in f64.
+                    minute_detail
+                        .entry(minute)
+                        .and_modify(|(lo, hi, count)| {
+                            if t.price < *lo {
+                                *lo = t.price;
+                            }
+                            if t.price > *hi {
+                                *hi = t.price;
+                            }
+                            *count += 1;
+                        })
+                        .or_insert((t.price, t.price, 1));
                 }
                 match &mut open {
                     Some(parent) => {
@@ -831,7 +1202,30 @@ pub(crate) fn summarize(
         }
     }
     if let Some(parent) = open.take() {
-        finalize(&mut acc, &mut prev_parent, parent);
+        finalize(
+            &mut acc,
+            &mut prev_parent,
+            &mut sessions,
+            &mut prev_vol_parent,
+            &mut minute_parents,
+            parent,
+        );
+    }
+    // Settle the active segment's remaining boundaries: to the segment end
+    // for a segment the window fully covers, to `end` (inclusive, matching
+    // the legacy flush) for one the window cuts short. The as-of mid is the
+    // final last_mid - no later quote exists in the walk.
+    if let Some((seg, mut horizons, seg_mid)) = seg_state.take() {
+        let until = seg.segment_end_ns.min(end);
+        advance_segment_boundaries(
+            &mut sessions,
+            &seg,
+            &mut horizons,
+            until,
+            true,
+            seg_mid,
+            (start, end),
+        );
     }
     // Flush the fixed-horizon boundaries at or before `end` that no in-window
     // quote arrived strictly after: their as-of mid is the final `last_mid`,
@@ -878,7 +1272,56 @@ pub(crate) fn summarize(
             ranges.next().map_or(0, |(&next, _)| next)
         };
     }
+    acc.top_minutes = rank_top_minutes(&minute_detail, &minute_parents, tick);
+    acc.session_cells = sessions.into_values().collect();
     acc
+}
+
+/// Protocol-11 worst-minute records (spec 4.7): every populated minute,
+/// ordered by range descending then minute ascending, truncated to
+/// capacity; repeated equal ranges occupy distinct entries. The range is
+/// exact integer ticks on the price grid - a nonintegral range is an
+/// off-grid print and refuses.
+fn rank_top_minutes(
+    minute_detail: &std::collections::BTreeMap<u64, (Decimal, Decimal, u64)>,
+    minute_parents: &std::collections::BTreeMap<u64, u64>,
+    tick: Decimal,
+) -> Vec<TopMinuteRecord> {
+    let mut minute_records: Vec<(u64, u64)> = minute_detail
+        .iter()
+        .map(|(&minute, &(lo, hi, _))| {
+            let ticks = (hi - lo) / tick;
+            let rounded = ticks.round();
+            assert!(
+                ticks == rounded,
+                "nonintegral minute range: {lo} .. {hi} on tick {tick}"
+            );
+            let range: u64 = rounded.try_into().unwrap_or(u64::MAX);
+            (range, minute)
+        })
+        .collect();
+    minute_records.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    minute_records.truncate(TOP_MINUTE_RECORDS);
+    minute_records
+        .into_iter()
+        .map(|(range_ticks, minute)| {
+            let (lo, hi, trade_count) = minute_detail[&minute];
+            let minute_start_ns = minute * 60_000_000_000;
+            let minute_end_ns = minute_start_ns + 60_000_000_000;
+            TopMinuteRecord {
+                minute_start_ns,
+                minute_end_ns,
+                utc_hour: utc_hour_of(minute_start_ns) as u8,
+                range_ticks,
+                parent_count: minute_parents.get(&minute).copied().unwrap_or(0),
+                trade_count,
+                low_price: decimal_key(lo),
+                high_price: decimal_key(hi),
+                trace_from_ns: minute_start_ns,
+                trace_until_ns: minute_end_ns,
+            }
+        })
+        .collect()
 }
 
 fn write_summary(acc: &SummaryAcc, out: &mut impl Write) -> anyhow::Result<()> {
@@ -1594,6 +2037,26 @@ mod tests {
             assert_ne!(baseline, moved, "{slot} never reached the summary");
         }
 
+        // Protocol-11 session arrays (spec Brick G2): candidate curves are
+        // the values the session refit solves, so a flat override must
+        // demonstrably reach the new session-cell measurements through the
+        // same scratch-config path.
+        let flat = |name: &str| {
+            let ones = vec!["1.0"; 24].join(", ");
+            format!("\"session.{name}\" = [{ones}]")
+        };
+        for name in ["vol_hour", "intensity_hour"] {
+            let moved = summary_json_for(
+                &mnq(&flat(name)),
+                &format!("mnq-session-{name}.toml"),
+                WINDOW_NS,
+            );
+            assert_ne!(
+                baseline, moved,
+                "session.{name} never reached the summary through the config path"
+            );
+        }
+
         // size_round_frac rides the SAME config transport as every other
         // slot, because the fit will drive it through gen --config. It is
         // structurally inert at MNQ's declared one-contract median
@@ -1814,6 +2277,92 @@ mod tests {
             got["minute_range_second_max_ticks"],
             serde_json::json!(*ranges.get(1).unwrap_or(&0))
         );
+
+        // Protocol-11 top-minute records (spec 4.7), recomputed with a third
+        // pass carrying exact Decimal bounds, trade counts and parent counts
+        // (parents by first-child minute, parents delimited by quotes).
+        let mut third = build();
+        let mut detail: std::collections::BTreeMap<u64, (Decimal, Decimal, u64)> =
+            std::collections::BTreeMap::new();
+        let mut parents_by_minute: std::collections::BTreeMap<u64, u64> =
+            std::collections::BTreeMap::new();
+        let mut in_parent = false;
+        while let Some(event) = third.next_tick() {
+            if event.ts_event() >= WINDOW_NS {
+                break;
+            }
+            match event {
+                TickEvent::Quote(_) => in_parent = false,
+                TickEvent::Trade(t) => {
+                    if !in_parent {
+                        in_parent = true;
+                        *parents_by_minute
+                            .entry(t.ts_event / 60_000_000_000)
+                            .or_insert(0) += 1;
+                    }
+                    detail
+                        .entry(t.ts_event / 60_000_000_000)
+                        .and_modify(|(lo, hi, n)| {
+                            if t.price < *lo {
+                                *lo = t.price;
+                            }
+                            if t.price > *hi {
+                                *hi = t.price;
+                            }
+                            *n += 1;
+                        })
+                        .or_insert((t.price, t.price, 1));
+                }
+            }
+        }
+        let modal = profile.scalars.modal_tick;
+        let mut expected: Vec<serde_json::Value> = detail
+            .iter()
+            .map(|(&minute, &(lo, hi, trade_count))| {
+                let range: u64 = ((hi - lo) / modal).round().try_into().unwrap();
+                let start_ns = minute * 60_000_000_000;
+                serde_json::json!({
+                    "minute_start_ns": start_ns,
+                    "minute_end_ns": start_ns + 60_000_000_000,
+                    "utc_hour": (start_ns / 1_000_000_000) % 86_400 / 3_600,
+                    "range_ticks": range,
+                    "parent_count": parents_by_minute.get(&minute).copied().unwrap_or(0),
+                    "trade_count": trade_count,
+                    "low_price": lo.normalize().to_string(),
+                    "high_price": hi.normalize().to_string(),
+                    "trace_from_ns": start_ns,
+                    "trace_until_ns": start_ns + 60_000_000_000,
+                })
+            })
+            .collect();
+        expected.sort_by(|a, b| {
+            let (ra, rb) = (a["range_ticks"].as_u64(), b["range_ticks"].as_u64());
+            rb.cmp(&ra).then(
+                a["minute_start_ns"]
+                    .as_u64()
+                    .cmp(&b["minute_start_ns"].as_u64()),
+            )
+        });
+        // The 45-minute window populates more minutes than the capacity, so
+        // truncation is exercised; the 20-minute walk in
+        // summary_matches_an_independent_tick_walk exercises the under-
+        // capacity case.
+        assert!(
+            expected.len() > TOP_MINUTE_RECORDS,
+            "the window must overfill the top-minute capacity"
+        );
+        expected.truncate(TOP_MINUTE_RECORDS);
+        assert_eq!(got["top_minutes"], serde_json::Value::Array(expected));
+        // The first and second records reproduce the existing maximum
+        // semantics exactly (spec 4.7).
+        assert_eq!(
+            got["top_minutes"][0]["range_ticks"],
+            got["minute_range_max_ticks"]
+        );
+        assert_eq!(
+            got["top_minutes"][1]["range_ticks"],
+            got["minute_range_second_max_ticks"]
+        );
     }
 
     #[test]
@@ -1841,6 +2390,267 @@ mod tests {
         let err = run_into(&args, &mut sink).expect_err("underflowing warmup must refuse");
         let text = format!("{err:#}");
         assert!(text.contains("underflows"), "names the underflow: {text}");
+    }
+
+    /// The independent recompute of the protocol-11 session cells from a
+    /// collected event stream, as JSON comparable to the summary's
+    /// `session_cells`. `segment_local` selects the CONTRACT as-of rule
+    /// (rule 1: state independent per segment); passing false computes the
+    /// defective global-as-of variant, which the halt-crossing test uses to
+    /// prove its fixture actually distinguishes the two.
+    fn independent_session_cells(
+        events: &[TickEvent],
+        offset: i16,
+        start: u64,
+        end: u64,
+        segment_local: bool,
+    ) -> serde_json::Value {
+        #[derive(Default, Clone, Copy)]
+        struct Abs {
+            count: u64,
+            sum_abs: f64,
+            max_abs: f64,
+        }
+        #[derive(Default, Clone, Copy)]
+        struct Hz {
+            count: u64,
+            sum: f64,
+            sumsq: f64,
+            sum_abs: f64,
+            max_abs: f64,
+        }
+        #[derive(Default)]
+        struct Cells {
+            end_ns: u64,
+            parents: [u64; 24],
+            mid_abs: [Abs; 24],
+            h60: [Hz; 24],
+            h300: [Hz; 24],
+        }
+        struct Chunk {
+            ts: u64,
+            mid: f64,
+            first_trade_ts: Option<u64>,
+        }
+        let hour_of = |ts: u64| ((ts / 1_000_000_000) % 86_400 / 3_600) as usize;
+        let mut chunks: Vec<Chunk> = Vec::new();
+        for e in events {
+            match e {
+                TickEvent::Quote(q) => chunks.push(Chunk {
+                    ts: q.ts_event,
+                    mid: (f64::try_from(q.bid_px).unwrap() + f64::try_from(q.ask_px).unwrap())
+                        / 2.0,
+                    first_trade_ts: None,
+                }),
+                TickEvent::Trade(t) => {
+                    if let Some(c) = chunks.last_mut()
+                        && c.first_trade_ts.is_none()
+                    {
+                        c.first_trade_ts = Some(t.ts_event);
+                    }
+                }
+            }
+        }
+        let mut cells: std::collections::BTreeMap<u64, Cells> = Default::default();
+        // Parent counts and the adjacent valid-mid chain, keyed by segment
+        // origin so a segment change breaks it.
+        let mut chain: Option<(u64, f64)> = None;
+        for c in chunks.iter().filter(|c| c.first_trade_ts.is_some()) {
+            let first_ts = c.first_trade_ts.unwrap();
+            if first_ts < start || first_ts >= end {
+                continue;
+            }
+            let seg = session_segment_at(first_ts, offset).expect("open parent");
+            let entry = cells.entry(seg.session_start_ns).or_insert_with(|| Cells {
+                end_ns: seg.session_end_ns,
+                ..Default::default()
+            });
+            let hour = hour_of(first_ts);
+            entry.parents[hour] += 1;
+            if c.mid.is_finite() && c.mid > 0.0 {
+                if let Some((origin, prev_mid)) = chain
+                    && origin == seg.segment_origin_ns
+                {
+                    let abs = (c.mid / prev_mid).ln().abs();
+                    let cell = &mut entry.mid_abs[hour];
+                    cell.count += 1;
+                    cell.sum_abs += abs;
+                    if abs > cell.max_abs {
+                        cell.max_abs = abs;
+                    }
+                }
+                chain = Some((seg.segment_origin_ns, c.mid));
+            }
+        }
+        // Horizon chains per segment: boundaries strictly inside the
+        // segment, first boundary having an as-of establishes,
+        // hour-crossing windows excluded, the final segment settled to
+        // min(segment end, window end) INCLUSIVELY.
+        let quotes: Vec<(u64, f64)> = chunks.iter().map(|c| (c.ts, c.mid)).collect();
+        let mut segments: Vec<SessionSegment> = Vec::new();
+        for (ts, _) in &quotes {
+            if let Some(seg) = session_segment_at(*ts, offset)
+                && segments.last() != Some(&seg)
+            {
+                segments.push(seg);
+            }
+        }
+        for (idx, seg) in segments.iter().enumerate() {
+            let last = idx + 1 == segments.len();
+            let until = if last {
+                seg.segment_end_ns.min(end)
+            } else {
+                seg.segment_end_ns
+            };
+            for h_ns in [60_000_000_000u64, 300_000_000_000] {
+                let mut prev_mid: Option<f64> = None;
+                let mut k = 1u64;
+                loop {
+                    let boundary = seg.segment_origin_ns + k * h_ns;
+                    if boundary >= seg.segment_end_ns || boundary > until {
+                        break;
+                    }
+                    let asof = quotes
+                        .iter()
+                        .rev()
+                        .filter(|(ts, _)| {
+                            !segment_local || session_segment_at(*ts, offset).as_ref() == Some(seg)
+                        })
+                        .find(|(ts, _)| *ts <= boundary)
+                        .map(|(_, m)| *m);
+                    match (prev_mid, asof) {
+                        (Some(prev), Some(cur)) if prev > 0.0 && cur > 0.0 => {
+                            let window_start = boundary - h_ns;
+                            if hour_of(window_start) == hour_of(boundary) {
+                                let hour = hour_of(boundary);
+                                let entry =
+                                    cells.entry(seg.session_start_ns).or_insert_with(|| Cells {
+                                        end_ns: seg.session_end_ns,
+                                        ..Default::default()
+                                    });
+                                let cell = if h_ns == 60_000_000_000 {
+                                    &mut entry.h60[hour]
+                                } else {
+                                    &mut entry.h300[hour]
+                                };
+                                let r = (cur / prev).ln();
+                                cell.count += 1;
+                                cell.sum += r;
+                                cell.sumsq += r * r;
+                                let abs = r.abs();
+                                cell.sum_abs += abs;
+                                if abs > cell.max_abs {
+                                    cell.max_abs = abs;
+                                }
+                            }
+                            prev_mid = asof;
+                        }
+                        (None, Some(_)) => prev_mid = asof,
+                        _ => {}
+                    }
+                    k += 1;
+                }
+            }
+        }
+        let abs_json = |a: &Abs| {
+            serde_json::json!({
+                "count": a.count, "sum_abs": a.sum_abs, "max_abs": a.max_abs,
+            })
+        };
+        let hz_json = |h: &Hz| {
+            serde_json::json!({
+                "count": h.count, "sum": h.sum, "sumsq": h.sumsq,
+                "sum_abs": h.sum_abs, "max_abs": h.max_abs,
+            })
+        };
+        serde_json::Value::Array(
+            cells
+                .iter()
+                .map(|(&start_ns, c)| {
+                    serde_json::json!({
+                        "session_start_ns": start_ns,
+                        "session_end_ns": c.end_ns,
+                        "complete": start_ns >= start && c.end_ns <= end,
+                        "parent_count_by_hour": c.parents.to_vec(),
+                        "mid_abs_by_hour":
+                            c.mid_abs.iter().map(abs_json).collect::<Vec<_>>(),
+                        "horizon_60_by_hour":
+                            c.h60.iter().map(hz_json).collect::<Vec<_>>(),
+                        "horizon_300_by_hour":
+                            c.h300.iter().map(hz_json).collect::<Vec<_>>(),
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn halt_boundaries_never_borrow_the_pre_halt_mid() {
+        // The rule-1 regression (protocol-11 spec 4.6): fixed-horizon state
+        // is independent per segment, so a pre-halt quote must never
+        // establish or price a post-halt boundary. The generated tape
+        // structurally resumes AT the reopen instant (the arrival clock
+        // jumps to next_open), so the leak window - a post-halt boundary
+        // preceding the first post-halt quote - is built by hand on a
+        // MemorySource: a pre-halt parent at 20:12, then nothing until
+        // 20:41, leaving the 20:31-20:40 60 s boundaries and the 20:35 and
+        // 20:40 300 s boundaries quoteless. A global as-of would establish
+        // and price them from the 20:12 mid; the contract skips them. The
+        // global-variant recompute must DIFFER, proving the fixture bites.
+        const START_NS: u64 = 1_783_455_000_000_000_000; // 20:10Z Jul 7
+        const END_NS: u64 = 1_783_457_400_000_000_000; // 20:50Z
+        let minute = 60_000_000_000u64;
+        let profile = resolve_profile("MNQ").expect("MNQ profile");
+        let tick = profile.scalars.modal_tick;
+        let px = |ticks: i64| {
+            Decimal::try_from(23_000.0).unwrap() + tick * Decimal::try_from(ticks as f64).unwrap()
+        };
+        let one = Decimal::ONE;
+        let quote = |ts: u64, level: i64| {
+            TickEvent::Quote(mogwai_protocol::QuoteTick {
+                symbol: "MNQ".to_string(),
+                bid_px: px(level - 1),
+                ask_px: px(level + 1),
+                bid_sz: one,
+                ask_sz: one,
+                ts_event: ts,
+            })
+        };
+        let trade = |ts: u64, level: i64| {
+            TickEvent::Trade(TradeTick {
+                symbol: "MNQ".to_string(),
+                price: px(level),
+                size: one,
+                aggressor: AggressorSide::Buyer,
+                ts_event: ts,
+            })
+        };
+        let events = vec![
+            quote(START_NS + 2 * minute, 0), // 20:12, pre-halt
+            trade(START_NS + 2 * minute, 0),
+            quote(START_NS + 31 * minute, 4), // 20:41, post-halt
+            trade(START_NS + 31 * minute, 4),
+            quote(START_NS + 33 * minute, 8), // 20:43
+            trade(START_NS + 33 * minute, 8),
+        ];
+        let mut source = mogwai_data::MemorySource::new(events.clone());
+        let acc = summarize(&mut source, &profile, DEFAULT_GEN_SEED, START_NS, END_NS);
+        let got = serde_json::to_value(&acc).expect("summary value");
+        let offset = profile
+            .calendar
+            .as_ref()
+            .expect("MNQ calendar")
+            .utc_offset_minutes;
+        let local = independent_session_cells(&events, offset, START_NS, END_NS, true);
+        let global = independent_session_cells(&events, offset, START_NS, END_NS, false);
+        assert_eq!(
+            got["session_cells"], local,
+            "the summary must be segment-local"
+        );
+        assert_ne!(
+            local, global,
+            "the fixture must distinguish segment-local from global as-of"
+        );
     }
 
     #[test]
@@ -2101,5 +2911,99 @@ mod tests {
                 "h={horizon_s}: {gq} vs {sumsq}"
             );
         }
+
+        // -- Protocol-11 session cells (spec 4.5-4.6), independently -------
+        // The session-date arithmetic itself is pinned against hand-computed
+        // instants first, because both sides share session_segment_at and a
+        // defect there would otherwise cancel out. 2026-07-07T15:00:00Z is
+        // 10:00 Tuesday local under -300: overnight segment of the session
+        // opened Monday 17:00 local (2026-07-06T22:00:00Z), ending Tuesday
+        // 16:00 local (2026-07-07T21:00:00Z), halt at 20:15Z.
+        let seg = session_segment_at(1_783_436_400_000_000_000, -300).expect("open instant");
+        assert_eq!(
+            seg.session_start_ns,
+            1_783_461_600_000_000_000 - 86_400_000_000_000
+        );
+        assert_eq!(seg.session_end_ns, 1_783_458_000_000_000_000);
+        assert_eq!(seg.segment_origin_ns, seg.session_start_ns);
+        assert_eq!(seg.segment_end_ns, 1_783_455_300_000_000_000);
+        // 15:40 local the same Tuesday: the post-halt segment.
+        let post = session_segment_at(1_783_456_800_000_000_000, -300).expect("post-halt");
+        assert_eq!(post.session_start_ns, seg.session_start_ns);
+        assert_eq!(post.segment_origin_ns, 1_783_456_200_000_000_000);
+        assert_eq!(post.segment_end_ns, seg.session_end_ns);
+        // 15:20 local: inside the halt, closed.
+        assert!(session_segment_at(1_783_455_600_000_000_000, -300).is_none());
+
+        let offset = profile
+            .calendar
+            .as_ref()
+            .expect("MNQ calendar")
+            .utc_offset_minutes;
+        let expected = independent_session_cells(&events, offset, 0, WINDOW_NS, true);
+        assert_eq!(got["session_cells"], expected);
+        // The under-capacity top-minute case: a 20-minute walk populates
+        // fewer minutes than the capacity, and every populated minute
+        // appears as a record.
+        let populated = got["minute_range_ticks_hist"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|v| v.as_u64().unwrap())
+            .sum::<u64>();
+        assert!(populated as usize <= TOP_MINUTE_RECORDS);
+        assert_eq!(
+            got["top_minutes"].as_array().unwrap().len() as u64,
+            populated
+        );
+
+        // The frozen top-minute ranking edge cases (spec 4.7), on crafted
+        // maps rather than incidental stream content: empty, repeated
+        // maxima as distinct entries, and equal-range ties ordered by
+        // earlier minute. (The under-capacity and over-capacity cases are
+        // the organic assertions in this test and the bar-pass test.)
+        let tick = profile.scalars.modal_tick;
+        let empty: std::collections::BTreeMap<u64, (Decimal, Decimal, u64)> = Default::default();
+        assert!(rank_top_minutes(&empty, &Default::default(), tick).is_empty());
+        let base = Decimal::try_from(23_000.0).expect("base price");
+        let two_ticks = tick + tick;
+        let mut crafted: std::collections::BTreeMap<u64, (Decimal, Decimal, u64)> =
+            Default::default();
+        crafted.insert(7, (base, base + two_ticks, 3)); // range 2, later
+        crafted.insert(5, (base, base + two_ticks, 4)); // range 2, earlier
+        crafted.insert(9, (base, base + tick, 1)); // range 1
+        let ranked = rank_top_minutes(&crafted, &Default::default(), tick);
+        assert_eq!(
+            ranked.iter().map(|r| r.minute_start_ns).collect::<Vec<_>>(),
+            vec![5 * 60_000_000_000, 7 * 60_000_000_000, 9 * 60_000_000_000],
+            "repeated maxima occupy distinct entries and ties order by \
+             earlier minute"
+        );
+        assert_eq!(ranked[0].range_ticks, 2);
+        assert_eq!(ranked[1].range_ticks, 2);
+
+        // A calendar-free profile has no sessions by construction: the
+        // session-cell vector must be empty, never a fabricated 24/7 week.
+        let crypto = resolve_profile("BTCUSDT").expect("BTCUSDT profile");
+        let mut crypto_source = mogwai_data::GeneratedSource::try_new_with_session_profile(
+            crypto.scalars.clone(),
+            DEFAULT_GEN_SEED,
+            0,
+            fingerprint(),
+            &crypto.session,
+            None,
+            mogwai_data::SizeGrid::from_def(&crypto.def),
+            crypto.calendar.clone(),
+        )
+        .expect("crypto source");
+        let crypto_acc = summarize(
+            &mut crypto_source,
+            &crypto,
+            DEFAULT_GEN_SEED,
+            0,
+            5 * 60 * 1_000_000_000,
+        );
+        let crypto_got = serde_json::to_value(&crypto_acc).expect("crypto summary");
+        assert_eq!(crypto_got["session_cells"], serde_json::json!([]));
     }
 }
