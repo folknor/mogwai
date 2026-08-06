@@ -182,3 +182,47 @@ stdout is not a TTY or `NO_COLOR` is set. The docs travel inside the binary via
 present. The user-facing docs only: the process documents are not bundled.
 
 There is no `stop` subcommand.
+
+## The offline evidence toolbox
+
+The remaining subcommands are the 2026-08 Python-to-Rust rewrite's absorbed
+half of `analysis/`: the corpus-to-fingerprint method library
+(`mogwai_lab`), reached the same way `gen`/`tick-composition` are - offline,
+no socket bound. Each writes an ARTIFACT (the storage policy's term: the
+user's own file, written to `--out` or a working-directory default, never
+cached, never auto-deleted) and every default path is chosen so a bare
+invocation can never overwrite a committed `analysis/` file by accident.
+
+`preflight` runs the fail-closed TBBO corpus contract check against a
+delivered corpus directory and writes a hash-bound preflight artifact -
+`--corpus`, `--ledger` (read-only) and `--out` all default to the paths
+`analysis/mnq_fit.py` used. `measure` runs the protocol-12a section-10
+measurement gate: the live observed pass over the corpus plus the eight
+in-process attestation walks, assembled and validated into the artifact
+shape `analysis/mnq-measure-12a.json` names, and refuses outright over a
+dirty working tree because the artifact's `binding.harness_tree_commit` must
+name exactly the code that ran. `fit` runs the protocol-11 session
+calibration - the observed corpus pass, the closed-form session refits, the
+CRN `vol_scalar` solve and the family probes - under the same clean-tree
+binding, writing under `target/` by default rather than over the committed
+`analysis/mnq-fit.json`.
+
+`synth fingerprint` and `synth cadence` are the fingerprint and cadence
+synthesis paths (`analysis/build_fingerprint.py`/`build_cadence.py`):
+`fingerprint` reads `char_<PAIR>.json` reports plus a cadence measurement,
+`cadence` streams raw Binance trade archives. Neither writes into
+`analysis/` unless `--out` names a path there explicitly - the bare default
+is a `target/mogwai-synth/` scratch path. `cadence-feasible` reads a cadence
+measurement and prints the `check_cadence_feasible.py` L0
+structural-proceed verdict (PROCEED/CLOSE/STOP AND ASK) read off its
+`children_mean`/`children_single_frac` anchors, exiting nonzero on anything
+but PROCEED; it does not re-run that script's default Markov density
+re-simulation, which stays an open scope gap (`notes/todo.md`).
+
+`cache` is the manual-case cover for the storage policy's CACHE class:
+`mogwai cache stats` reports entry/file/byte counts under the cache root
+(`$XDG_CACHE_HOME/mogwai/`, `~/.cache/mogwai/`, `MOGWAI_CACHE_DIR` or
+`--cache-dir`), `mogwai cache clean` removes every provenance directory, and
+`mogwai cache clean --stale` removes only the ones that do not match the
+CURRENT provenance token - the same pruning a cache write already does
+automatically, exposed for manual use.

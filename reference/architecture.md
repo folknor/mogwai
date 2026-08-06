@@ -219,3 +219,69 @@ about 12.6 ms, so acceptance-time readings are memoized per symbol per
 fill-sweep interval and a submit sees a reading that may be up to one interval
 stale. A market order therefore fills at or beyond the market as of that
 reading, not as of the fill instant.
+
+## The workspace and the offline evidence toolbox
+
+Six crates. `mogwai-protocol` owns the wire types and the shipped launcher and
+imports nothing else in the workspace. `mogwai-engine` is the venue-agnostic
+exchange core. `mogwai-data` owns `TickSource`, the k-way merge and the
+`GeneratedSource` synthetic generator fitted to the committed fingerprint.
+`mogwai-server` is a library - it owns the sockets, the clock and the replay
+pacing, and ships no binary of its own. `mogwai-cli` is the `mogwai` BINARY: a
+clap dispatcher over `serve` (which does no work itself, just forwards to
+`mogwai_server::serve`) plus every offline subcommand - `gen`,
+`tick-composition`, `presets`, `man`, `preflight`, `measure`, `fit`, `cache`,
+`synth fingerprint`/`synth cadence` and `cadence-feasible`. `mogwai-adapter` is
+the lone nautilus-dependent crate, unchanged by anything below.
+
+`mogwai-lab` is the fifth non-adapter crate: the corpus-to-fingerprint method
+library the 2026-08 Python-to-Rust rewrite absorbed from `analysis/`
+(`notes/rust-rewrite-phases.md`, `notes/python-script-triage.md` record the
+program and its per-script scope rulings) - streaming TBBO/Binance-trades
+parsing, the protocol-12a measurement engine, aggregation and bootstrap,
+fingerprint and cadence synthesis, and the protocol-11 session-calibration
+fit. Its dependency direction is one-way and asymmetric: `mogwai-lab` depends
+on `mogwai-data`, `mogwai-protocol` AND `mogwai-server` (session-summary work
+needs to resolve an `InstrumentProfile` through `Config::load` exactly as the
+Python's `--config` scratch walks did), but `mogwai-server` depends on none of
+it - there is no cycle, and `mogwai-lab` stays out of the tape-generation path
+`TAPE_PROTOCOL_VERSION` scopes, the same reason `measure12a.rs` was
+consumer-only inside `mogwai-server` before the rewrite moved it. `mogwai-cli`
+depends on `mogwai-lab` for the pieces that need no server preset resolution
+(preflight, cache, most of measure/fit/synth) and calls straight into
+`mogwai-server` for the generated side of measurement.
+
+The rewrite's parity gates are the porting program's whole verification
+story: every absorbed Python computation is checked against a committed JSON
+artifact - `mnq-fit-preflight.json`, the observed and generated halves of
+`mnq-measure-12a.json`, `cadence.json`, `fingerprint.json`, `mnq-fit.json` -
+typed-canon-identically, with named, individually-verified exclusions for
+genuinely live fields (wall-clock cost, the binding harness commit) rather
+than a blanket tolerance. The gates live under
+`crates/mogwai-lab/tests/parity3a*.rs`/`parity3b*.rs` and
+`crates/mogwai-cli/tests/parity12a*.rs`/`parity3b.rs`, `#[ignore]`d because
+they need local corpus or archive state on disk, and are excluded from
+`brokkr.toml`'s complete profile by the shared `parity12a_`/`parity3a_`/
+`parity3b_` naming prefix. `notes/rust-rewrite-review-dossier.md` is the
+program-level map of every gate, every pinned cross-language convention
+(compensated float summation, insertion-ordered accumulation, the ported
+CPython float repr and Mersenne Twister, and the rest) and every open owner
+decision, assembled for the codex review pass the rewrite's phase 4 gates on.
+
+The storage policy `mogwai_lab::storage` implements keeps three classes of
+on-disk data apart, never mixed. ARTIFACTS (preflight, measurement and fit
+outputs) are the user's files: written to `--out` or a subcommand's own
+working-directory default, never cached, never auto-deleted. CACHE
+(recomputable, keyed data - walk summaries, measure12a walk records) lives
+under `$XDG_CACHE_HOME/mogwai/` (falling back to `~/.cache/mogwai/`),
+overridable by `MOGWAI_CACHE_DIR` or `--cache-dir`, keyed by a
+`ProvenanceToken` folding in the crate version, `TAPE_PROTOCOL_VERSION`, the
+fingerprint hash, the full invoked command line, the measurement
+sub-contract hash and (when built from a tree) the git sha; entries under a
+stale token are unreachable by construction and pruned automatically on
+write, with `mogwai cache stats`/`clean`/`clean --stale` covering the manual
+case. SCRATCH (per-run temporaries) is a run-scoped directory under the
+cache root, deleted on clean process exit and safe to leave behind on a
+crash. Repo development pins `MOGWAI_CACHE_DIR` to the Python-era
+`analysis/out` layout so the phase 1-3b parity gates read the caches those
+scripts already produced; that pin is not the installed default.

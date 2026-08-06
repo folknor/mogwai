@@ -24,7 +24,7 @@ the Databento tooling stays Python permanently (owner ruling
 2026-08-06 - it went through its reviews and works); the lab carries a
 small custody module for hash/ledger READING only.
 
-## Phase 0 - carve mogwai-cli (in flight)
+## Phase 0 - carve mogwai-cli (LANDED)
 
 `main.rs`, `gen.rs`, `measure12a.rs` and the CLI-facing modules move
 from `mogwai-server` to a new `crates/mogwai-cli`; the server becomes
@@ -35,7 +35,7 @@ pre-existing documented failure) and the named measure12a release
 tests; `target/release/mogwai` still exists under that exact name.
 Committed on green without deep audit - mechanical, history-recoverable.
 
-## Phase 1 - mogwai-lab: the corpus layer
+## Phase 1 - mogwai-lab: the corpus layer (LANDED)
 
 TBBO csv.zst stream contract (parse refusals and all), parent
 inference, session/segment math UNIFIED (today it exists three times:
@@ -73,7 +73,7 @@ phases 1-2c read the Python-era caches at their current analysis/out
 paths via --cache-dir), so the project's all-data-in-the-project rule
 holds without being the installed default.
 
-## Phase 2 - the 12a measurement engine (three launches)
+## Phase 2 - the 12a measurement engine (three launches) (LANDED)
 
 The Python/Rust twin (mnq_fit.py blocks vs measure12a.rs) dies here,
 taking its cross-language float-divergence defect class with it.
@@ -408,7 +408,7 @@ subphase's own Rust tests.
     commit and clean-tree confirmation of the two restructured
     `parity12a_ii` gates.
 
-## Phase 3 - fit and synthesis (two launches)
+## Phase 3 - fit and synthesis (two launches) (LANDED)
 
 - **3a, characterize and synthesis**: characterize (the estimand
   definitions everything imports), build_cadence +
@@ -754,6 +754,65 @@ moment the scripts move. Phase 4 therefore runs in two halves:
 - 4b, post-signature retirement: only after codex signs do
   mnq_fit.py and the absorbed scripts move to `research/dead/` and
   the parity-frozen defects get their real fixes.
+
+  LANDED 2026-08-07 (4a). No deletions, per the phase's own constraint -
+  `mnq_fit.py` and every absorbed script stay in place; `mogwai-protocol`
+  received the one permitted comment-only touch. `reference/architecture.md`
+  gained a "The workspace and the offline evidence toolbox" section: the
+  seven-crate layout, `mogwai-lab`'s dependency direction (depends on
+  `mogwai-data`/`mogwai-protocol`/`mogwai-server`; `mogwai-server` depends on
+  none of it, no cycle), the parity-gate testing story and the storage
+  policy as built. `docs/cli.md` gained an "offline evidence toolbox"
+  section covering `preflight`/`measure`/`fit`/`synth fingerprint`/
+  `synth cadence`/`cadence-feasible`/`cache` in the file's existing prose
+  register. `AGENTS.md`'s workspace section gained the `mogwai-lab` entry
+  (seven crates, matching the `mogwai-cli` entry's style) and corrected "the
+  other five" to "the other six" build nautilus-free. `reference/
+  performance.md` was checked against the moves and needed no change - every
+  path and target name it cites (`mogwai-server/src/serve.rs`,
+  `brokkr run mogwai -- tick-composition`, `analysis/mnq-fit.json`,
+  `tick_composition_ratios.py`) still resolves exactly as stated.
+
+  `crates/mogwai-protocol/src/launch.rs`'s stale doc comment (flagged by
+  phase 0) is fixed: "the real venue in `mogwai-server`'s lifecycle gates"
+  now reads "`mogwai-cli`'s lifecycle gates", where the socket-backed
+  integration tests actually live post-phase-0.
+
+  `notes/rust-rewrite-review-dossier.md` is new: the program-level map for
+  the codex review pass - phase/gate/commit table, every pinned
+  cross-language convention with its story, every parity gate and its
+  exclusions, the parity-frozen defect (section 4), the documented scope
+  gaps including the cadence-feasible Markov re-simulation, the phase-2b
+  spec-thinness notes (rung 4a/5a completeness gates, the unpaired
+  `a_print_excess`) that had been recorded in the 2b commit message but
+  never copied into this file, the phase-2a accidental-agreement findings
+  (floor-division vs refusal, segment order), both drift findings awaiting
+  owner decisions, the standing-process deviations this program ran under,
+  and the open owner decisions already in `notes/todo.md`.
+
+  `test_characterize.py` dissolution VERIFIED by direct correspondence
+  rather than by re-trusting the phase-3a landing claim: of its 31 tests
+  across 7 classes, 27 assert behavior inside the ABSORB set and all 27 now
+  have a verified Rust counterpart; 4 assert behavior in scripts the triage
+  correctly kept Python (`probe_binance_klines.py`/`probe_binance_aggtrades.py`),
+  outside the dissolution's scope. Two Python assertions had no prior Rust
+  counterpart and are added this phase: `fingerprint.rs::the_committed_cadence_is_loadable`
+  (`load_cadence()` against the real committed `analysis/cadence.json`) and
+  `cadence.rs::probe_returns_structured_result_over_a_synthetic_fixture` (a
+  byte-for-byte port of the Python's synthetic 3-row Binance-trades-zip
+  fixture, pinning the small-N event-grouping distinction the phase-3a
+  landing record's "covered live by gate 2" claim did not actually cover).
+  Full mapping table in the dossier's section 11.
+
+  No parity-frozen defect table was added to `notes/todo.md`: the only
+  entry in that class (the TBBO stream contract's unguarded numeric
+  conversions, phase 1) already reads as a decision-ready single item: a
+  table would have one row. The dossier indexes it in section 4 instead.
+
+  `brokkr check` green with the two added tests; no touch to
+  `mogwai-data`/`mogwai-engine`/`mogwai-adapter` or any Python source. Not
+  committed. The program now STOPS at the codex gate per the owner ruling
+  above.
 
 Adjudication provision (owner, 2026-08-06): when a phase agent hits
 a contradiction between the Python, the cached artifacts and the

@@ -530,4 +530,41 @@ mod tests {
         assert_eq!(fallback["q"].as_f64().unwrap(), 0.0);
         assert_eq!(fallback["m"].as_f64().unwrap(), 5.0);
     }
+
+    /// Counterpart of `analysis/test_characterize.py`'s
+    /// `CadenceTests.test_raw_probe_returns_structured_result`: the phase-3a
+    /// landing record (`notes/rust-rewrite-phases.md`) claimed this
+    /// assertion was "covered live" by the real-archive parity gate instead
+    /// of a synthetic fixture, but that gate never exercises the 3-row
+    /// grouping-distinction shape this pins, so it is added here rather than
+    /// left uncovered.
+    #[test]
+    fn probe_returns_structured_result_over_a_synthetic_fixture() {
+        let dir = std::env::temp_dir().join(format!(
+            "mogwai-lab-cadence-probe-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fixture.zip");
+        let rows = "1,100,1,100,1000000,false,true\n\
+                     2,100,2,200,1000000,false,true\n\
+                     3,101,1,101,2000000,true,true\n";
+        let file = std::fs::File::create(&path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options =
+            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        archive.start_file("fixture.csv", options).unwrap();
+        std::io::Write::write_all(&mut archive, rows.as_bytes()).unwrap();
+        archive.finish().unwrap();
+
+        let result = probe(&path).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(result["rows"].as_i64().unwrap(), 3);
+        assert_eq!(
+            result["timestamp_and_side"]["events"].as_i64().unwrap(),
+            2
+        );
+        assert!(result.get("per_second_counts").is_some());
+    }
 }

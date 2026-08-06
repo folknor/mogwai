@@ -16,7 +16,7 @@ venue over this workspace's native JSON-over-WS protocol.
 
 ## Workspace
 
-A Cargo workspace, six crates under `crates/`:
+A Cargo workspace, seven crates under `crates/`:
 
 - `mogwai-protocol` - the wire types (`ClientMessage`, `ServerMessage`) plus
   `control::Divergence`. The single source of truth both ends serialize against;
@@ -51,11 +51,19 @@ A Cargo workspace, six crates under `crates/`:
   `analysis/mnq_fit.py` all exec `target/release/mogwai` by that name. The
   socket-backed lifecycle/serving/completion integration tests live here too,
   because only this crate's tests get `CARGO_BIN_EXE_mogwai`.
+- `mogwai-lab` - the corpus-to-fingerprint method library the 2026-08
+  Python-to-Rust rewrite absorbed from `analysis/` (`notes/rust-rewrite-phases.md`):
+  TBBO/Binance-trades corpus parsing, the protocol-12a measurement engine,
+  fingerprint/cadence synthesis and the protocol-11 fit. Depends on
+  `mogwai-data`, `mogwai-protocol` and `mogwai-server` (session-summary work
+  resolves an `InstrumentProfile` through `Config::load`); `mogwai-server`
+  depends on none of it, so there is no cycle. `mogwai-cli` calls it for
+  `preflight`, `measure`, `fit`, `cache` and `synth`.
 - `mogwai-adapter` - the nautilus venue adapter: the `MogwaiDataClientFactory` /
   `MogwaiExecutionClientFactory`, their configs, and the client pair a host
   registers for the `MOGWAI` venue. The only crate that depends on nautilus -
   the published crates.io crates pinned in its `Cargo.toml`, default-features
-  off, no pyo3; the other five build nautilus-free.
+  off, no pyo3; the other six build nautilus-free.
 
 `scripts/` holds the end-to-end smoke test and the harness-bug flush the
 orchestration loop uses (codex is now driven by the `review` tool, configured

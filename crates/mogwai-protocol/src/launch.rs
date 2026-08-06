@@ -927,7 +927,7 @@ mod tests {
 
     /// The timeout path needs a process that holds stdout open and stays silent,
     /// and no stock binary does that when handed `serve`. It is covered against
-    /// the real venue in `mogwai-server`'s lifecycle gates, where the binary
+    /// the real venue in `mogwai-cli`'s lifecycle gates, where the binary
     /// exists; here we only pin that the message tells the caller which knob to
     /// turn, since a bare "timed out" would send them hunting the wrong thing.
     #[test]

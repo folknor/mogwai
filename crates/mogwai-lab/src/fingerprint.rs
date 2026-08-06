@@ -625,4 +625,19 @@ mod tests {
                 < 1e-12
         );
     }
+
+    /// Counterpart of `analysis/test_characterize.py`'s
+    /// `CadenceTests.test_committed_cadence_is_loadable`, which the
+    /// phase-3a landing record (`notes/rust-rewrite-phases.md`) did not
+    /// name a Rust counterpart for.
+    #[test]
+    fn the_committed_cadence_is_loadable() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("analysis")
+            .join("cadence.json");
+        let cadence = load_cadence(&path).unwrap();
+        assert_eq!(cadence["anchor"].as_str(), Some("BTCUSDT"));
+    }
 }
