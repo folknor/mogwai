@@ -880,6 +880,36 @@ volume-proxy obligation resolved and the session-fit supersession;
 the `notes/` fit report written from the artifact. Bundled with the
 code commits. Gate: `brokkr check --gate` green after the edits.
 
+RESULT, 2026-08-06, Bricks M through B. The first fit (artifact bound to
+harness commit ac6b016's parent chain, preserved in git history) landed
+NOTHING under the unamended rule: arrival passed at worst-hour 0.63
+percent, parent-vol at worst 6.6 percent, pooled wall-time, pooled
+parent RMS and cadence all green, and the hourly wall-time contour
+failed at the reversion-heavy hours (300 s at UTC 19, 20, 23; 60 s
+marginally at hour 20 - 1.257 against the 1.25 band edge) with arrival
+and per-parent scale matching to fractions of a percent at those same
+hours. The Brick V amendment above reclassified the hourly contour as
+protocol-12 evidence; the rerun under the amended sub-contract landed
+`intensity_hour` and `vol_hour` FITTED and `vol_scalar`
+declared-best-candidate (1.357e-5; the pooled RMS gate passes, the
+minute-range envelope still fails - p99.9 433-607 ticks and per-seed
+maxima to 3614 against the resampled observed bounds, protocol 12's
+standing evidence). The fitted arrival curve reads 14.5x peak-to-trough
+against the volume proxy's 27.51x upper bound; the fitted per-parent
+vol curve is nearly FLAT and slightly INVERTED (overnight 0.99-1.16,
+cash session 0.81-0.94) - the per-minute proxy's 3.4x swing was almost
+entirely the arrival-density double-count. Brick B measured 11/10
+p99.9 ratios of 1.094 (checkpoint), 1.130 (sweep), 1.0004 (warmup) and
+1.014 (fanout); the standing policy proposed four resizes, THREE landed,
+and the fanout proposal received a reviewed exception - the ring is
+eagerly allocated state, the retained depth keeps its designed horizon,
+and the proposed capacity deterministically breaks the
+accept-before-fill serving invariant (5 of 5 against 5 of 5), an
+unresolved finding recorded in notes/todo.md with its exact
+reproduction. Full derivation and the exception's reasoning in
+reference/performance.md. Every Brick L invariant passed without
+re-bless.
+
 ## 6. MES inheritance
 
 Unchanged from protocol 10 (`notes/mnq-tbbo-fit-spec.md` section 6):

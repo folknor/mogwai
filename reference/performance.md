@@ -413,3 +413,66 @@ the default.
 Regenerate with
 `brokkr run mogwai -- tick-composition --out analysis/tick-composition-protocol-10.json`,
 then `python3 analysis/tick_composition_ratios.py --mode independent_9_10`.
+
+## 2026-08-06 protocol 11 session-refit composition
+
+Protocol 11 refit the two MNQ session arrays in the units the runtime
+applies - arrival intensity from July MNQ inferred-parent counts,
+per-parent volatility from quote-mid returns - and re-solved
+`vol_scalar`; the fit artifact is `analysis/mnq-fit.json`. A session
+reshape changes WHEN parents happen and how far returns reach, never how
+many children a parent draws, so the `independent_10_11` mode gates
+STRICTLY: `parents` and `ticks_per_parent` must be identical for every
+pairing, the three crypto presets byte-identical, and every numeric leaf
+finite and positive on both sides. All gates passed.
+
+The maximum independent p99.9 protocol-11/protocol-10 ratios, the
+standing policy's proposals, and what LANDED:
+
+| budget denominator | ratio | prior | policy proposal | landed |
+|---|---:|---:|---:|---:|
+| simulated-second checkpoint work | 1.093750 | 16,777,216 | 67,108,864 | 67,108,864 |
+| 300-second sweep work | 1.130315 | 5,799,000,000 | 13,110,000,000 | 13,110,000,000 |
+| 24-hour cumulative warmup reach | 1.000360 | 667,299,000,000 | 1,335,079,000,000 | 1,335,079,000,000 |
+| wall-second fanout work | 1.014216 | 4,194,304 | 16,777,216 | 4,194,304 |
+
+Three proposals landed under the same standing policy as every prior
+resize: prior times ratio times two for headroom, power-of-two rounding
+for checkpoint, next-million for sweep and warmup, then the larger of
+that and required reach (281,678,600 frames for a 300-second window and
+81,123,436,742 for the 24-hour warmup, both far below the ceilings). The
+worst measured p99.9 rate is 938,928.67 frames per simulated second,
+unchanged from protocol 10: the refit moves density BETWEEN hours rather
+than raising the peak, which is why the ratios sit barely above one
+where the 9-to-10 cadence fit roughly doubled them.
+
+The FANOUT proposal was REJECTED by joint review, the first recorded
+policy exception. The reasoning, carried here in full: the resize
+formula models costless refusal ceilings, but the fanout ring is eagerly
+allocated state proportional to its depth, and compounding a fresh
+two-times headroom onto an already headroom-sized allocation before
+power-of-two rounding turns a 1.014x measured ratio into a 4x
+allocation. The retained depth holds 0.466 wall seconds of ring at the
+protocol-11 worst measured p99.9 frame rate against the 0.472 it held at
+protocol 10 and the 0.114 the protocol-10 resize was justified over.
+Decisively, the proposed 16,777,216 capacity DETERMINISTICALLY breaks
+`a_banded_limit_fills_from_the_run_sweep` (5 of 5 failing against 5 of 5
+passing at 4,194,304, with the other three resizes present in both
+trees, on the default BTCUSDT venue at speed 100): an accept-before-fill
+invariant failure whose mechanism is UNRESOLVED - the assertion cannot
+yet distinguish wire reordering (the fill frame arriving before
+`OrderAccepted`) from timestamp inversion, and ring depth is not
+consulted after construction at nonzero speed, so the suspected channel
+is the eager allocation shifting boot phase relative to the anchored run
+clock. The investigation item in `notes/todo.md` carries the exact
+reproduction; `the_fanout_default_carries_the_protocol_11_exception`
+pins the default so a later mechanical application of the generated
+proposal must be argued, not slipped through.
+
+`MAX_EXTEND_TICKS` and `SWEEP_DRAIN_WARN_TICKS` stay unchanged for the
+recorded standing reasons: a per-lock runaway backstop and an
+operational signal must not scale with refusal ceilings.
+
+Regenerate with
+`brokkr run mogwai -- tick-composition --out analysis/tick-composition-protocol-11.json`,
+then `python3 analysis/tick_composition_ratios.py --mode independent_10_11`.

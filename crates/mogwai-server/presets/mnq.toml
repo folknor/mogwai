@@ -58,61 +58,79 @@ latent_size_median = "1.097264"
 # the pair stays DECLARED rather than fitted. Stated explicitly also so the
 # harness can override the sigma path - overriding an unset path is refused.
 size_log_sigma = 0.9333333333333333
-# The frozen solver's best candidate for the pooled quote-mid RMS target
-# (generated 1.26e-5 vs observed 1.18e-5, inside tolerance) - but the
-# per-seed minute-range envelope gates fail around it (p99.9 464-639 ticks
-# vs observed 399; per-seed max up to 4333 vs 968), so the value stays
-# DECLARED: the t(4)/GARCH cluster-tail SHAPE overproduces extreme minutes
-# and no scalar can land a shape. The successor tail spec owns the fix.
-vol_scalar = 0.000008701336943928642
+# The protocol-11 frozen solver's best candidate for the pooled quote-mid
+# RMS target, re-solved with the fitted per-parent session arrays installed
+# (the flattened vol_hour redistributes scale, so the scalar rises from the
+# protocol-10 candidate 8.70e-6). The pooled RMS gate PASSES around it; the
+# per-seed minute-range envelope gates still fail (p99.9 433-607 ticks vs
+# the resampled observed bound; per-seed max to 3614 vs 968), so the value
+# stays DECLARED: the t(4)/GARCH cluster-tail SHAPE overproduces extreme
+# minutes and no scalar can land a shape. The protocol-12 tail spec owns
+# the fix, and inherits the hourly wall-time contour evidence beside it.
+vol_scalar = 0.000013570223097752063
 quoted_width = { ticks = 2, provenance = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO 2026-07, job GLBX-20260805-HAPEWPABKG" } }
 top_sizes = { bid = "3", ask = "3", provenance = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO 2026-07, job GLBX-20260805-HAPEWPABKG" } }
 trade_displacement_ticks = { ticks = 0.5161290322580645, provenance = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO 2026-07, job GLBX-20260805-HAPEWPABKG" } }
-# Intraday shape, fitted from the NQ one-minute archive. These factors are
-# RELATIVE and CONDITIONAL ON THE MARKET BEING OPEN: the calendar below owns
-# whether an event may exist at all, and this table owns how intense it is given
-# that it may. The modulator divides the composite by its own exposure-weighted
-# mean over the calendar's open minutes, so the arrays satisfy no particular sum
-# and any positive rescaling of them is equivalent.
+# Intraday shape, refitted at protocol 11 from the July 2026 MNQ TBBO
+# month in the units the runtime actually applies (the protocol-8 NQ-bar
+# curves were per-minute quantities applied per parent event, which made
+# the generated minute-level peak-to-trough the product of both swings -
+# the roughly-5x-too-quiet overnight the owner's chart review found).
+# These factors are RELATIVE and CONDITIONAL ON THE MARKET BEING OPEN: the
+# calendar below owns whether an event may exist at all, and this table
+# owns how intense it is given that it may. The modulator divides the
+# composite by its own exposure-weighted mean over the calendar's open
+# minutes, so the arrays satisfy no particular sum and any positive
+# rescaling of them is equivalent.
+#
+# Estimators, definitions in the fit artifact analysis/mnq-fit.json:
+# - intensity_hour is the CONDITIONAL hour parameter under the frozen
+#   dow_weight: inferred-parent counts per (hour, day) cell divided by
+#   dow-weighted calendar exposure, so the runtime's hour-times-day
+#   product does not double-count day concentration. Fitted per-hour
+#   marginal reproduction on the generated month: worst hour 0.63 percent.
+#   Peak-to-trough 14.5x - real parent counts, not the volume proxy whose
+#   27.51x was a stated upper bound.
+# - vol_hour is the PER-PARENT robust scale: one-maximum-trimmed mean
+#   absolute adjacent-parent quote-mid log return per session-hour cell,
+#   median across the 22 sessions. The curve is nearly flat and slightly
+#   INVERTED - overnight parents individually move a little more than
+#   cash-session parents - which is what the per-minute proxy could never
+#   see. Worst generated-vs-observed hour: 6.6 percent.
 #
 # Limitations, none of which the fitted/corpus/window provenance schema can
 # structurally carry:
 #
-# - Hour 21 UTC is UNEXPOSED. It is the 16:00-17:00 Central daily break, closed
-#   every day of the model week, so no observation can inform it. Its 1.0 is a
-#   convention, not a measurement.
-# - Hour 20 UTC is PARTIALLY exposed, 73,035 open minutes against 97,380 for a
-#   full hour, because the break consumes part of it. Its factor is estimated
-#   from the open portion, which is correct, but on three quarters of the
-#   evidence its neighbours have.
-# - Saturday is UNEXPOSED for the same reason and its 1.0 is likewise a
-#   convention: zero exposure makes its estimate 0/0.
-# - Sunday rests on an order of magnitude less exposure than any weekday, 36,480
-#   open minutes against roughly 400,000, because the model week opens Sunday
-#   17:00. Its factor is identified but carries much wider uncertainty.
-# - intensity_hour is contract-VOLUME intensity used as an arrival-count proxy.
-#   Bars carry volume, not trade counts, and mean trade size is larger during the
-#   cash session, so this OVERSTATES the intraday arrival swing. The fitted
-#   27.51x peak-to-trough is an upper bound on the arrival swing, not an estimate
-#   of it. The direction of the bias is known; its magnitude is not.
-# - Closing that gap is an obligation on the paired NQ and MNQ tick purchase,
-#   which carries trade counts: it must compare volume-per-minute against
-#   count-per-minute SESSION CURVES, not merely their aggregate moments, because
-#   the quantity in question is the ratio of the two peak-to-trough figures.
-# - The profile is conditional on the permanent-CDT calendar below. Refitting it
-#   against a different calendar, or changing that calendar, invalidates it.
+# - Hour 21 UTC is UNEXPOSED (the 16:00-17:00 Central daily break); its 1.0
+#   is a convention, not a measurement. Hour 20 is partially exposed, 45
+#   open minutes per session around the 15:15-15:30 halt.
+# - dow_weight is UNTOUCHED by the protocol-11 refit and keeps its NQ-bar
+#   provenance and caveats: Saturday's 1.0 is a zero-exposure convention,
+#   Sunday rests on an order of magnitude less exposure than any weekday,
+#   and 22 July sessions are too thin for a preregistered weekday refit.
+# - The hourly 60s and 300s WALL-TIME contour of the generated month misses
+#   its frozen 0.8-1.25 band at the reversion-heavy hours (300s at UTC 19,
+#   20, 23) even though arrival and per-parent scale match to fractions of
+#   a percent there: an hour-dependent aggregation-law mismatch recorded in
+#   the fit artifact, inherited by the protocol-12 tail spec as a hard
+#   successor gate. The pooled 60s and 300s RMS pass.
+# - The profile is conditional on the permanent-CDT calendar below. Refitting
+#   it against a different calendar, or changing that calendar, invalidates
+#   it.
 [instrument.session]
 intensity_hour = [
-  0.2463, 0.2217, 0.1742, 0.1389, 0.1332, 0.1692, 0.2400, 0.3993,
-  0.3635, 0.2880, 0.3018, 0.4005, 0.7852, 3.2665, 3.6634, 2.5743,
-  1.9670, 1.8072, 1.9361, 2.7106, 0.7826, 1.0000, 0.2052, 0.1732,
+  0.788959, 0.606801, 0.476029, 0.404415, 0.33337, 0.389075, 0.370589,
+  0.385735, 0.425944, 0.289761, 0.286266, 0.428253, 0.677683, 3.200686,
+  4.138113, 2.546961, 1.723787, 1.314281, 1.292247, 1.624038, 0.470938,
+  1.0, 0.33058, 0.357795,
 ]
 # Sun, Mon, Tue, Wed, Thu, Fri, Sat
 dow_weight = [1.5179, 0.9080, 0.9865, 1.0157, 1.0535, 1.0225, 1.0000]
 vol_hour = [
-  0.7733, 0.7113, 0.6349, 0.5533, 0.5591, 0.6666, 0.7446, 0.9350,
-  0.8506, 0.7417, 0.7625, 0.8393, 1.0956, 1.7876, 1.8702, 1.4981,
-  1.2985, 1.3097, 1.3897, 1.5489, 0.9138, 1.0000, 0.8323, 0.6596,
+  1.110005, 1.07247, 1.059488, 0.991918, 1.024188, 1.091588, 1.090355,
+  1.119903, 1.1612, 1.12323, 1.075567, 1.044929, 1.036215, 0.975501,
+  0.939166, 0.871242, 0.845352, 0.82815, 0.81192, 0.840464, 0.939231,
+  1.0, 1.001102, 0.931623,
 ]
 
 # Exchange-local CME equity-index hours on a PERMANENT CDT clock: Sunday 17:00
@@ -174,7 +192,7 @@ open_windows = [
 "generator.size_log_sigma" = { kind = "declared", rationale = "the joint size solve's best candidate; the family missed one frozen gate, generated p99 10 vs observed 8 with bound 9.6, so it cannot claim fitted" }
 "generator.start_price" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG", window = "2026-07 full month, 22 usable sessions" }
 "generator.latent_size_median" = { kind = "declared", rationale = "the joint size solve's best candidate, closest representable approximation; declared-misrepresented in the fit artifact, one quantile over its frozen bound", accepted_diagnostics = ["derived-mean-notional-outside-empirical-corpus-range"] }
-"generator.vol_scalar" = { kind = "declared", rationale = "the frozen solver's best candidate for the quote-mid RMS target; declared-misrepresented because the minute-range envelope gates fail around it - a tail-shape limit, not a scale error" }
+"generator.vol_scalar" = { kind = "declared", rationale = "the protocol-11 solver's best candidate, re-solved under the fitted session arrays; the pooled RMS gate passes but the minute-range envelope still fails - a tail-shape limit the protocol-12 spec owns, not a scale error" }
 "generator.quoted_width.ticks" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG", window = "2026-07 full month, 22 usable sessions" }
 "generator.quoted_width.provenance.kind" = { kind = "declared", rationale = "the nested seam states its own fitted corpus" }
 "generator.quoted_width.provenance.corpus" = { kind = "declared", rationale = "names the MNQ TBBO evidence; no other instrument's corpus is implied" }
@@ -185,9 +203,9 @@ open_windows = [
 "generator.trade_displacement_ticks.ticks" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG", window = "2026-07 full month, 22 usable sessions" }
 "generator.trade_displacement_ticks.provenance.kind" = { kind = "declared", rationale = "the nested seam states its own fitted corpus" }
 "generator.trade_displacement_ticks.provenance.corpus" = { kind = "declared", rationale = "names the MNQ TBBO evidence; no other instrument's corpus is implied" }
-"session.intensity_hour" = { kind = "fitted", corpus = "NQ one-minute ratio-back-adjusted bars; contract volume per calendar-open minute used as an arrival-count proxy", window = "2020-01-01 through 2026-07-08; recent era selected by preregistered separability and era-stability rules" }
+"session.intensity_hour" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG; conditional hour parameter from inferred-parent counts under the frozen dow_weight", window = "2026-07 full month, 22 usable sessions" }
 "session.dow_weight" = { kind = "fitted", corpus = "NQ one-minute ratio-back-adjusted bars; contract volume per calendar-open minute used as an arrival-count proxy", window = "2020-01-01 through 2026-07-08; recent era selected by preregistered separability and era-stability rules" }
-"session.vol_hour" = { kind = "fitted", corpus = "NQ one-minute ratio-back-adjusted bars; RMS of adjacent within-session close returns with one largest squared return trimmed per session", window = "2020-01-01 through 2026-07-08; recent era selected by preregistered separability and era-stability rules" }
+"session.vol_hour" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG; per-parent trimmed mean absolute quote-mid return, median across sessions", window = "2026-07 full month, 22 usable sessions" }
 "calendar.utc_offset_minutes" = { kind = "declared", rationale = "permanent CDT model clock; DST transitions unmodelled, so CST sessions sit one UTC hour later than this table places them" }
 "calendar.settlement_minute_of_day" = { kind = "declared", rationale = "15:00 Central daily settlement" }
 "calendar.open_windows" = { kind = "declared", rationale = "published CME equity index civil hours, 17:00 to 16:00 with the 15:15 to 15:30 halt" }

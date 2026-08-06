@@ -74,10 +74,18 @@ visible without you having to diff two TOML files.
   whole-contract sizing, the published CME Sunday-evening-through-
   Friday-evening session with the daily maintenance halt and settlement
   window, margin posted per contract, `breach_action = "liquidate"`.
-  Its cadence, size distribution, volatility scalar, start price and quote
-  seams are fitted from the delivered July 2026 MNQ TBBO month; the preset's
-  provenance map names the corpus per knob and the fit artifact
-  `analysis/mnq-fit.json` records the estimators and verdicts.
+  Its cadence, size distribution, volatility scalar, start price, quote
+  seams and - since tape protocol 11 - its hourly session arrays are fitted
+  from the delivered July 2026 MNQ TBBO month; the preset's provenance map
+  names the corpus per knob and the fit artifact `analysis/mnq-fit.json`
+  records the estimators and verdicts. The protocol-11 session refit
+  measures the arrays in the units the runtime applies: arrival intensity
+  from inferred-parent counts (14.5x peak-to-trough, replacing the NQ-bar
+  volume proxy) and per-parent volatility from quote-mid returns (nearly
+  flat and slightly inverted - overnight trades individually move a touch
+  more than cash-session trades), which together restore realistic Asia
+  and London session amplitude at bar scale. The day-of-week weights keep
+  their NQ-bar lineage.
 - **MES** - Micro E-mini S&P 500 future. Built as an override of the MNQ
   preset: same session calendar and margin shape, five dollars per index
   point instead of two. That means MES BORROWS the fitted MNQ values - apart

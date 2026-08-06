@@ -12,6 +12,32 @@ Or both. There are no exceptions.
 
 ## Open issues
 
+- INVESTIGATE the fanout-capacity accept-before-fill failure. A CORRECTNESS
+  investigation, not capacity tuning: with `fanout_depth = 16_777_216`,
+  `a_banded_limit_fills_from_the_run_sweep` fails DETERMINISTICALLY - the
+  fill reaches the socket without a prior `OrderAccepted` satisfying
+  `fill.ts_event > accepted_ts` - and passes just as deterministically at
+  the shipped 4,194,304. Exact reproduction, measured 2026-08-06 on the
+  protocol-11 landing tree: `tests/configs/band.toml` (default BTCUSDT
+  venue, speed 100), the other three protocol-11 ceiling resizes present
+  in BOTH trees, and
+  `brokkr test -p mogwai-server a_banded_limit_fills_from_the_run_sweep -N 5`
+  reading 0 of 5 passing at 16,777,216 against 5 of 5 at 4,194,304.
+  The assertion CANNOT yet distinguish wire reordering (the fill frame
+  arriving before `OrderAccepted`) from timestamp inversion -
+  `accepted_ts.is_some_and(..)` fails identically for both - so the first
+  diagnostic must capture separately: whether `OrderAccepted` arrived
+  before the fill; both timestamps when both exist; the sweep pass's
+  `to_ns`; the run-clock anchor and the tape-worker anchor; and the
+  broadcast-channel construction duration (or RSS) if the eager
+  allocation is to be blamed rather than estimated. Ring depth is not
+  consulted after construction at nonzero speed, so the suspected channel
+  is the allocation shifting boot phase relative to the anchored run
+  clock - suspected, not established. The shipped default carries the
+  reviewed protocol-11 policy exception and is pinned by
+  `the_fanout_default_carries_the_protocol_11_exception`; this item is
+  about the latent serving defect the rejected capacity exposes.
+
 - PROBLEM STATEMENTS. **This was the solvable set of problems believed to get
   mogwai to the end state the user needs.** That was a claim rather than an
   inventory: each entry was believed NECESSARY, and the set was believed

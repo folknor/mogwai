@@ -778,7 +778,20 @@ calendar remains a fixture simplification rather than the shipped MNQ calendar.
 
 ### 3.4 Resolved: the session profile is fitted
 
-RESOLVED 2026-08-04 at tape protocol 8. The diagnosis stands as written and is
+RESOLVED 2026-08-04 at tape protocol 8; the two HOUR arrays SUPERSEDED
+2026-08-06 at tape protocol 11, which refit them from the July MNQ TBBO
+month in the units the runtime applies. The protocol-8 bar fit measured
+PER-MINUTE quantities that the generator applies PER PARENT EVENT, so the
+generated minute-level swing compounded both curves - the owner's chart
+review found Asia and London roughly 5x too quiet. Protocol 11 measures
+inferred-parent arrival counts (14.5x peak-to-trough, retiring the
+volume-proxy caveat and its purchase obligation below: the July count
+evidence is now the fitted curve itself, not a correction to a proxy) and
+the per-parent robust return scale (nearly flat, slightly inverted).
+`dow_weight` keeps the protocol-8 NQ-bar fit. The remainder of this
+section is the protocol-8 record.
+
+The diagnosis stands as written and is
 kept because the guessed magnitude turned out to be checkable: crypto's hour
 curve spans 1.78x peak-to-trough, this report estimated an index future at "20x
 to 50x", and the fit measured 27.51x. A flat crypto curve said the 03:00 Chicago

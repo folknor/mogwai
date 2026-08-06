@@ -127,13 +127,14 @@ fn generator(profile: &InstrumentProfile) -> GeneratedSource {
 /// below the floor is refused by name instead, which is the whole point.
 /// Protocol 8's composition measurement raised the stride to 4,194,304 ticks
 /// (twice the worst measured 8/7 p99.9 expansion of the prior 1,048,576
-/// stride); protocol 10's raised it again to 16,777,216: the fitted MNQ
-/// cadence (mean event duration 0.0609s against the crypto-derived 0.171s)
-/// expands the peak ticks-per-simulated-second p99.9 by 1.6x, and the
-/// standing headroom rule doubles that and rounds up to a power of two; see
+/// stride); protocol 10's raised it to 16,777,216 against the fitted MNQ
+/// cadence's 1.6x peak-density expansion; protocol 11's session refit
+/// redistributes arrivals across hours (measured 11/10 p99.9 ratio
+/// 1.09375), and the standing headroom rule - prior times ratio times two,
+/// rounded up to a power of two - lands here; see
 /// `reference/performance.md`. This budget is denominated in ticks per
 /// simulated second.
-pub(crate) const CHECKPOINT_K: usize = 16_777_216;
+pub(crate) const CHECKPOINT_K: usize = 67_108_864;
 
 /// Runaway backstop on a SINGLE extension while the global index lock is held.
 /// This retains the original one-billion-tick safety purpose: a nonsensical
@@ -142,14 +143,14 @@ pub(crate) const CHECKPOINT_K: usize = 16_777_216;
 const MAX_EXTEND_TICKS: usize = 1 << 30;
 
 /// Total legitimate boot reach admitted across lock-releasing extension
-/// chunks. Protocol 10's headroom rule doubles the prior 162,349,000,000
-/// ceiling against the measured 2.055x warmup-reach expansion from the
-/// fitted MNQ cadence, which also exceeds the 81,123,436,742 frames the
-/// worst measured p99.9 rate projects into the longest shipped warmup; the
-/// next-million rounding produces this ceiling. Keeping it separate from
-/// `MAX_EXTEND_TICKS` prevents a reach requirement from silently disabling
-/// the per-lock runaway backstop.
-const MAX_WARMUP_MATERIALIZATION_TICKS: usize = 667_299_000_000;
+/// chunks. Protocol 10's headroom rule set 667,299,000,000 against its
+/// measured 2.055x warmup-reach expansion; protocol 11's session refit
+/// measures an 11/10 ratio of 1.00036, and the standing rule - prior times
+/// ratio times two, next-million rounding, then the larger of that and the
+/// 81,123,436,742-frame required reach - lands here. Keeping it separate
+/// from `MAX_EXTEND_TICKS` prevents a reach requirement from silently
+/// disabling the per-lock runaway backstop.
+const MAX_WARMUP_MATERIALIZATION_TICKS: usize = 1_335_079_000_000;
 
 /// The run's one checkpoint chain, over the run's one realization. Process
 /// global because the run is: one instrument, one regime, one origin for the

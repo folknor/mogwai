@@ -207,10 +207,20 @@ impl Default for Config {
             // loud (off-tape requests are refused, not silently under-served), so
             // the default's exactness is low-stakes.
             warmup_ns: 86_400_000_000_000,
-            // Sized from the protocol 10 composition fixture (1.84x frame-rate
-            // expansion from the fitted MNQ cadence, doubled, power of two) to
-            // preserve more than the prior ring's measured wall-time horizon
-            // at speeds 1 and 10, including the maximum admitted flow surge.
+            // The protocol-10 sizing, RETAINED at protocol 11 as a reviewed
+            // policy exception. The standing resize formula proposed
+            // 16,777,216 from the measured 1.014x frame-rate ratio, and the
+            // proposal was rejected: unlike the pure refusal ceilings, the
+            // fanout ring is EAGERLY ALLOCATED state proportional to this
+            // depth, and the existing depth still holds about 0.466 wall
+            // seconds at the protocol-11 worst measured p99.9 rate against
+            // the 0.114s the protocol-10 resize was justified over. The
+            // rejected capacity also deterministically breaks the
+            // accept-before-fill invariant of
+            // a_banded_limit_fills_from_the_run_sweep (5 of 5 against 5 of
+            // 5 at this value) - an unresolved serving finding recorded in
+            // notes/todo.md. A surge-exposed run should still size this
+            // deliberately rather than inherit the default.
             fanout_depth: 4_194_304,
             zero_speed_stall_ms: 5000,
             exec_held_budget_bytes: crate::admission::EXEC_HELD_BUDGET_BYTES,
@@ -1214,6 +1224,18 @@ mod tests {
         }
     }
 
+    /// The protocol-11 fanout policy exception, pinned: the standing resize
+    /// formula proposed 16,777,216 and both reviewers rejected it (eagerly
+    /// allocated ring state for a 1.4 percent measured ratio, and the
+    /// rejected capacity deterministically breaks the accept-before-fill
+    /// serving invariant - see notes/todo.md). A later mechanical
+    /// application of a generated proposal must fail HERE and be argued,
+    /// not slip through as bookkeeping.
+    #[test]
+    fn the_fanout_default_carries_the_protocol_11_exception() {
+        assert_eq!(Config::default().fanout_depth, 4_194_304);
+    }
+
     /// The venue reported a bare `MOGWAI` for one release, which is a legal
     /// `mogwai_protocol::AccountId` and an ILLEGAL nautilus one - so every run
     /// booted cleanly and was refused by its consumer, which could not name an
@@ -1626,16 +1648,42 @@ mod tests {
         assert_eq!(s.top_sizes.bid, Decimal::from(3));
         assert_eq!(s.top_sizes.ask, Decimal::from(3));
         assert_eq!(s.trade_displacement_ticks.ticks(), 0.5161290322580645);
-        // The three declared-misrepresented knobs carry the frozen solver's
-        // BEST CANDIDATES as the closest representable approximations (the
-        // size family missed one gate, p99 10 vs bound 9.6; the volatility
-        // family failed the minute-range envelope around a passing mid_rms),
-        // and size_round_frac stays structurally unidentifiable. All four
-        // are pinned so any later fit must show up here.
+        // The three declared knobs carry the frozen solvers' BEST
+        // CANDIDATES as the closest representable approximations (the size
+        // family missed one gate, p99 10 vs bound 9.6; vol_scalar is the
+        // protocol-11 re-solve under the fitted session arrays, passing its
+        // pooled RMS gate but not the minute-range envelope), and
+        // size_round_frac stays structurally unidentifiable. All four are
+        // pinned so any later fit must show up here.
         assert_eq!(s.latent_size_median, Decimal::new(1097264, 6));
         assert_eq!(s.size_log_sigma, 0.9333333333333333);
-        assert_eq!(s.vol_scalar, 0.000008701336943928642);
+        assert_eq!(s.vol_scalar, 0.000013570223097752063);
         assert_eq!(s.size_round_frac, 0.20856767610054022);
+
+        // The protocol-11 session arrays: the fitted per-parent hourly
+        // scale and the conditional arrival curve, materialized exactly as
+        // analysis/mnq-fit.json recorded them, with dow_weight untouched
+        // at its NQ-bar values.
+        assert_eq!(
+            profile.session.intensity_hour,
+            [
+                0.788959, 0.606801, 0.476029, 0.404415, 0.33337, 0.389075, 0.370589, 0.385735,
+                0.425944, 0.289761, 0.286266, 0.428253, 0.677683, 3.200686, 4.138113, 2.546961,
+                1.723787, 1.314281, 1.292247, 1.624038, 0.470938, 1.0, 0.33058, 0.357795,
+            ]
+        );
+        assert_eq!(
+            profile.session.vol_hour,
+            [
+                1.110005, 1.07247, 1.059488, 0.991918, 1.024188, 1.091588, 1.090355, 1.119903,
+                1.1612, 1.12323, 1.075567, 1.044929, 1.036215, 0.975501, 0.939166, 0.871242,
+                0.845352, 0.82815, 0.81192, 0.840464, 0.939231, 1.0, 1.001102, 0.931623,
+            ]
+        );
+        assert_eq!(
+            profile.session.dow_weight,
+            [1.5179, 0.9080, 0.9865, 1.0157, 1.0535, 1.0225, 1.0000]
+        );
 
         // The provenance map is half the landing: values alone could pass
         // while a knob silently reverts to declared. Every landed path must
@@ -1674,8 +1722,43 @@ mod tests {
                 "{path}"
             );
         }
-        // The declared set is asserted just as exactly: the landing_set is
-        // the eight fitted paths above and NOTHING else, so the size pair,
+        // The protocol-11 session provenance: both refitted arrays read
+        // fitted with the July TBBO corpus and window; dow_weight keeps its
+        // NQ-bar lineage.
+        for (path, needle) in [
+            ("session.intensity_hour", "conditional hour parameter"),
+            ("session.vol_hour", "per-parent trimmed mean absolute"),
+        ] {
+            let entry = provenance
+                .get(path)
+                .and_then(toml::Value::as_table)
+                .unwrap();
+            assert_eq!(
+                entry.get("kind").and_then(toml::Value::as_str),
+                Some("fitted"),
+                "{path}"
+            );
+            let corpus_text = entry.get("corpus").and_then(toml::Value::as_str).unwrap();
+            assert!(corpus_text.starts_with(corpus), "{path}");
+            assert!(corpus_text.contains(needle), "{path}");
+            assert_eq!(
+                entry.get("window").and_then(toml::Value::as_str),
+                Some(window),
+                "{path}"
+            );
+        }
+        let dow = provenance
+            .get("session.dow_weight")
+            .and_then(toml::Value::as_table)
+            .unwrap();
+        assert!(
+            dow.get("corpus")
+                .and_then(toml::Value::as_str)
+                .unwrap()
+                .starts_with("NQ one-minute"),
+            "dow_weight keeps its NQ-bar provenance"
+        );
+        // The declared set is asserted just as exactly: the size pair,
         // vol_scalar and the unidentifiable round fraction must all read
         // declared - a fitted claim appearing on any of them is drift.
         for path in [
