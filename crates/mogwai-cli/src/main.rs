@@ -15,6 +15,7 @@ mod cache;
 mod r#gen;
 mod man;
 mod preflight;
+mod synth;
 mod tick_composition;
 
 use std::path::PathBuf;
@@ -52,6 +53,15 @@ enum Command {
     /// The cache-storage-class manual controls (stats / clean / clean
     /// --stale).
     Cache(cache::CacheArgs),
+    /// Phase-3a offline synthesis: fingerprint/cadence generation
+    /// (`analysis/build_fingerprint.py`/`build_cadence.py`).
+    Synth {
+        #[command(subcommand)]
+        command: synth::SynthCommand,
+    },
+    /// The `check_cadence_feasible.py` L0 structural-proceed verdict over a
+    /// cadence measurement.
+    CadenceFeasible(synth::CadenceFeasibleArgs),
 }
 
 #[derive(Args)]
@@ -109,5 +119,7 @@ fn main() -> anyhow::Result<()> {
         Command::Preflight(args) => preflight::run(args),
         Command::Measure(args) => measure::run(args),
         Command::Cache(args) => cache::run(args),
+        Command::Synth { command } => synth::run(command),
+        Command::CadenceFeasible(args) => synth::run_cadence_feasible(args),
     }
 }

@@ -422,6 +422,126 @@ subphase's own Rust tests.
   generator -> absorb; independent conformance leg like
   roll_estimator -> stays Python).
 
+  LANDED 2026-08-06 (3a only; 3b unstarted). `mogwai_lab::characterize`
+  carries the phase-0 estimand layer (`lvl_bin`/`histogram_quantile`/
+  `LevelVisits`/`AutoCorr`/`log_bin`/`decimals_used`/`dwell_stats`/
+  `characterize`), a byte-level port of `analysis/characterize.py`.
+  `mogwai_lab::cadence` carries `build_cadence.py`'s synthesis
+  (`band`/`solve_shape`/`build`) plus the internal machinery it needs
+  from `probe_binance_trades.py` (`EventStats`, a byte-line Binance
+  trades-zip `probe`) - the Python probe files themselves are
+  untouched, per the phase-1 triage's KEEP ruling.
+  `mogwai_lab::cadence_feasible` carries `check_cadence_feasible.py`'s
+  `next_count` and the structural `verdict` (see the scope note
+  below). `mogwai_lab::fingerprint` carries `build_fingerprint.py`'s
+  `level_verdict`/`level_queue`/`load_reports`/`load_cadence`/
+  `build_fingerprint` (the `findings.md` side artifact is not ported -
+  a human-readable report, not gated). CLI: `mogwai synth fingerprint`,
+  `mogwai synth cadence`, `mogwai cadence-feasible`, all under
+  `crates/mogwai-cli/src/synth.rs`; default paths are CWD-relative
+  like `measure`/`preflight`'s, and NONE of the three write into
+  `analysis/` by default (`--out` defaults to a `target/mogwai-synth/`
+  scratch path) so a bare invocation can never clobber the committed
+  artifacts.
+
+  GATES, run against what was actually on disk:
+
+  1. **Fingerprint synthesis (binding).** Ran against the real local
+     inputs: the eight gitignored `analysis/char_*.json` reports and
+     the committed `analysis/cadence.json`. Value-identical
+     (typed-canon) on every leaf except one:
+     `empirical_ranges.modal_tick.max` reads `0.25` in the committed
+     `fingerprint.json` but every currently-committed `char_*.json`'s
+     `returns.modal_tick` tops out at `0.1` (XBTUSD). This is
+     CONFIRMED input drift, not a port defect: running
+     `analysis/build_fingerprint.py` itself, unmodified, against
+     today's `char_*.json` files reproduces `0.1`, not `0.25` (checked
+     directly, then the regenerated file was reverted with `git
+     checkout` immediately - the committed `fingerprint.json` was
+     never touched). The eight `char_*.json` files were regenerated
+     locally at some point after the commit that produced
+     `fingerprint.json`, moving the anchor's modal tick without
+     anyone re-running `build_fingerprint.py`. Byte-identical output
+     was not attempted (the Python's `json.dump(fingerprint, f,
+     indent=2)` carries no `sort_keys`, so byte fidelity would need a
+     hand-written insertion-ordered pretty-printer instead of
+     `serde_json::Value`'s alphabetical `Map`; the brief's own floor
+     is "value-identical typed-canon minimum", which this clears).
+     Gate: `crates/mogwai-lab/tests/parity3a.rs`'s
+     `parity3a_fingerprint_matches_the_committed_artifact`, PASS
+     (with the one documented, verified leaf excluded from the
+     assertion by name, not swept under a blanket tolerance).
+  2. **Cadence synthesis.** The raw archives ARE present:
+     `research/market-data/{BTCUSDT,ETHUSDT,SOLUSDT}-trades-2026-06.zip`
+     (9.8/4.5/3.0 GB). Ran the live path, not the degraded one.
+     `parity3a_cadence_matches_the_committed_artifact` streams all
+     three archives (~230M rows total) and reproduces every leaf of
+     the committed `analysis/cadence.json` typed-canon-identically
+     except `provenance.generated_utc`, a live wall-clock stamp
+     excluded the same way the 12a gates exclude `cost` - PASS,
+     ~69 s release.
+  3. **check_cadence_feasible.** PORTED IN PART, gated on what was
+     ported. `next_count` and the structural `verdict()` (the
+     PROCEED/CLOSE/STOP AND ASK threshold read directly off
+     `cadence.json`'s `children_mean`/`children_single_frac` anchors)
+     are exact ports; `parity3a_cadence_feasible_verdict_matches_the_committed_cadence`
+     reproduces `PROCEED` over the committed `cadence.json`, matching
+     the Python's own printed verdict. NOT ported: the default
+     (no-flag) CLI path's 3,000,000-event Markov density
+     re-simulation (`simulate_markov`), which draws from
+     `random.Random(42)` through `weibullvariate` - bit-exact
+     reproduction would need a from-scratch port of CPython's
+     Mersenne Twister and `random.weibullvariate`/`math.gamma`, out
+     of this slice's budget. This is a real scope gap, not a
+     rounding-convention one: `notes/todo.md` should carry it if a
+     later phase wants the full density recheck ported. The
+     structural verdict is what the phase-3a brief calls binding for
+     this script ("the L0 structural-proceed verdict"); the
+     stochastic recheck is a secondary diagnostic in the Python
+     itself (`SystemExit` only on ITS OWN failure, never gating the
+     structural verdict).
+  4. **characterize.** No full-corpus gate (Kraken corpus outside the
+     repo, per brief). `crates/mogwai-lab/src/characterize/tests.rs`
+     reproduces every assertion in `analysis/test_characterize.py`'s
+     `BinningTests`/`QuantileTests`/`VisitClosureTests`/
+     `EraWindowTests`/`ReportTests` (17 tests), plus
+     `crates/mogwai-lab/src/fingerprint.rs`'s `tests` module covers
+     `LevelQueueTests` (7 tests) and `crates/mogwai-lab/src/cadence.rs`'s
+     covers the `CadenceTests` shape/grouping assertions (`solve_shape`,
+     `EventStats` grouping) - the raw-archive `probe` test itself
+     is covered live by gate 2 instead of a synthetic zip fixture.
+     `check_cadence_feasible.py`'s inverse-CDF sampler assertion
+     (`next_count`) is covered in `cadence_feasible.rs`. All pass.
+
+  Conventions pinned, beyond the phase-2 ones this slice inherited
+  unchanged (`kernel::py_sum`, insertion-ordered maps, `float_roundtrip`,
+  `py_float_repr`): `build_fingerprint.py`'s `rng()` is Python's
+  dynamically-typed `min()`/`max()` - an all-integer input list keeps
+  `min`/`max` as JSON integers, only `statistics.median`'s true division
+  always yields a float. `mogwai_lab::fingerprint`'s `rng_typed` (over
+  `serde_json::Value`, not `f64`) is the port of that; the plain-`f64`
+  `rng` wrapper exists for the (majority) case where the Python's own
+  inputs were already floats. `hour_vol`/`avg_curves`/`EventStats::report`'s
+  `sum(...)`-over-floats spots now route through `kernel::py_sum`, per the
+  phase-2b pin; `hour_shares`/`dow_weights` sum integer counts, where a
+  naive fold is exact and was left alone.
+
+  Two crate additions: `zip = { version = "2", default-features = false,
+  features = ["deflate"] }` in `mogwai-lab` (streaming-read the Binance
+  archives; no compression-side feature needed since this crate only
+  reads). `mogwai-lab/tests/parity3a.rs` joins `parity12a*.rs` under the
+  `parity3a_*` naming convention, `#[ignore]`d for the same reason -
+  needs local corpus/archive state, not sandbox-safe by default.
+
+  Lateral finding: the committed `fingerprint.json`/`char_*.json`
+  drift above means ANY future regeneration of `fingerprint.json` from
+  today's `char_*.json` will legitimately change
+  `empirical_ranges.modal_tick.max` from `0.25` to `0.1` - worth a
+  conscious re-commit decision (owner call, not this slice's to make)
+  rather than being discovered as a surprise diff later. Not filed to
+  `notes/todo.md` as a parity-frozen defect since it is a stale-input
+  fact, not a Python/Rust behavioral divergence.
+
 ## Phase 4 - review, then retirement (strictly in that order)
 
 Owner ruling 2026-08-06: the Python does NOT retire until AFTER the

@@ -1,0 +1,628 @@
+// SPDX-FileCopyrightText: 2026 folknor
+// SPDX-License-Identifier: AGPL-3.0-only
+
+//! Synthesis of the generator fingerprint (`analysis/build_fingerprint.py`):
+//! reads every `char_<PAIR>.json` under a directory plus `cadence.json` and
+//! produces the fingerprint contract - golden stylized-fact targets with
+//! tolerances, the pooled UTC session profile, and the level-queue verdict.
+//! Byte-for-byte formula port; see the module docs on [`level_queue`] for
+//! the one refusal-shaped piece of logic.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use serde_json::{Value, json};
+
+use crate::error::{LabError, LabResult};
+
+const ANCHOR: &str = "XBTUSD";
+
+/// The four proceed conditions a trades-only queue-ahead fill model must
+/// clear, matching `build_fingerprint.py`'s `LEVEL_CONDITIONS` order.
+const LEVEL_CONDITIONS: [(&str, &str); 4] = [
+    (
+        "single_print_frac <= 0.50",
+        "a strict majority of level visits carry more than one print, so \
+         visit volume is a real quantity and not a restatement of the \
+         trade-size distribution",
+    ),
+    (
+        "vol_dispersion >= 3.0",
+        "the volume distribution has genuine dispersion, so a draw from it \
+         is not a constant in disguise",
+    ),
+    (
+        "vol_dispersion >= 1.5 * size_dispersion",
+        "that dispersion exceeds the trade-size dispersion it could have \
+         been inherited from",
+    ),
+    (
+        "anchor single_print_frac within 1.5x of the cross-pair median",
+        "the anchor is not the outlier a model would have been fitted to",
+    ),
+];
+
+fn median(mut values: Vec<f64>) -> f64 {
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = values.len();
+    if n % 2 == 1 {
+        values[n / 2]
+    } else {
+        (values[n / 2 - 1] + values[n / 2]) / 2.0
+    }
+}
+
+/// `level_verdict`: evaluate the four proceed conditions against the
+/// anchor's measurement.
+#[must_use]
+pub fn level_verdict(level: &Value, single_fracs: &[f64]) -> Value {
+    let med = median(single_fracs.to_vec());
+    let spf = level["single_print_frac"].as_f64().unwrap_or(0.0);
+    let vol_disp = level["vol_dispersion"].as_f64().unwrap_or(0.0);
+    let size_disp = level["size_dispersion"].as_f64().unwrap_or(0.0);
+    let held = [
+        spf <= 0.50,
+        vol_disp >= 3.0,
+        vol_disp >= 1.5 * size_disp,
+        med / 1.5 <= spf && spf <= med * 1.5,
+    ];
+    let failed: Vec<&str> = LEVEL_CONDITIONS
+        .iter()
+        .zip(held.iter())
+        .filter(|(_, ok)| !**ok)
+        .map(|((test, _why), _)| *test)
+        .collect();
+    let conditions: Vec<Value> = LEVEL_CONDITIONS
+        .iter()
+        .zip(held.iter())
+        .map(|((test, why), ok)| json!({"test": test, "why": why, "held": ok}))
+        .collect();
+    json!({
+        "proceed": held.iter().all(|&h| h),
+        "conditions": conditions,
+        "failed": failed,
+        "single_print_frac_cross_pair_median": med,
+    })
+}
+
+/// `level_queue`: promote the at-touch level-visit measurement into a
+/// golden target. Refuses rather than degrades: a report without a `level`
+/// block was written by a characterization pass older than the
+/// measurement, and the proceed/close verdict is read off the anchor's
+/// numbers, so a stale `char_<PAIR>.json` cannot be silently dropped or
+/// silently accepted.
+///
+/// # Errors
+/// [`LabError::Refusal`] on a stale pair (missing `level` block) or
+/// disagreeing histogram binning across pairs, matching
+/// `build_fingerprint.py`'s `ValueError`s.
+pub fn level_queue(anchor_report: &Value, reports: &BTreeMap<String, Value>) -> LabResult<Value> {
+    let mut stale: Vec<&str> = reports
+        .iter()
+        .filter(|(_, r)| r.get("level").is_none())
+        .map(|(pair, _)| pair.as_str())
+        .collect();
+    stale.sort_unstable();
+    if !stale.is_empty() {
+        return Err(LabError::refusal(format!(
+            "char_<PAIR>.json predates the level measurement, re-run run_corpus.py for: {}",
+            stale.join(", ")
+        )));
+    }
+    let levels: Vec<&Value> = reports.values().map(|r| &r["level"]).collect();
+    let anchor = &anchor_report["level"];
+    let binning_keys = ["bin_lo", "bin_hi", "bins_per_decade"];
+    let anchor_binning: Vec<Value> = binning_keys.iter().map(|k| anchor[k].clone()).collect();
+    for level in &levels {
+        let this: Vec<Value> = binning_keys.iter().map(|k| level[*k].clone()).collect();
+        if this != anchor_binning {
+            return Err(LabError::refusal(
+                "level histogram binning differs across pairs",
+            ));
+        }
+    }
+    let vol_hist: Vec<i64> = anchor["vol_hist"]
+        .as_array()
+        .expect("vol_hist array")
+        .iter()
+        .map(|v| v.as_i64().unwrap_or(0))
+        .collect();
+    let total: i64 = vol_hist.iter().sum();
+    let size_median = anchor["size_median"].as_f64();
+    if total == 0 || size_median.is_none_or(|m| m == 0.0) {
+        return Err(LabError::refusal("anchor has no usable level visits"));
+    }
+    let size_median = size_median.expect("checked above");
+    let bin_lo = anchor["bin_lo"].as_f64().expect("bin_lo present");
+    let bins_per_decade = anchor["bins_per_decade"]
+        .as_f64()
+        .expect("bins_per_decade present");
+    let support: Vec<f64> = (0..vol_hist.len())
+        .map(|index| bin_lo * 10f64.powf((index as f64 + 0.5) / bins_per_decade) / size_median)
+        .collect();
+    let single_fracs: Vec<f64> = levels
+        .iter()
+        .map(|l| l["single_print_frac"].as_f64().unwrap_or(0.0))
+        .collect();
+    let verdict = level_verdict(anchor, &single_fracs);
+    let proceed = verdict["proceed"].as_bool().unwrap_or(false);
+
+    const LEVEL_DOC: &str = "AT-TOUCH TRADED VOLUME per level visit, era-windowed, expressed as a \
+        multiple of the same era's median trade size. NOT book depth and NOT \
+        queue position: cancelled liquidity is invisible so the number is \
+        deflated, liquidity that joined the level mid-visit is counted so it is \
+        also inflated, and the corpus has no aggressor side so buy- and \
+        sell-initiated flow at one price are summed together.";
+    let reading = if proceed {
+        " All four proceed conditions hold, so the queue-ahead fill model \
+          may sample support_norm/pmf as an inverse CDF; single_print_frac \
+          is the credibility reading its landing was judged against."
+            .to_string()
+    } else {
+        let failed: Vec<String> = verdict["failed"]
+            .as_array()
+            .expect("failed array")
+            .iter()
+            .map(|v| v.as_str().unwrap_or("").to_string())
+            .collect();
+        format!(
+            " VERDICT: DECLINED. RFC 4631 phase B is refused in full - {} does \
+              not hold on the anchor (single_print_frac {:.6}, vol_dispersion \
+              {:.6}, size_dispersion {:.6}), so a trades-only queue-ahead \
+              quantity would be a free parameter dressed in a histogram. \
+              Nothing samples support_norm/pmf; they are kept as the durable \
+              corpus fact the refusal was read off.",
+            failed.join(", "),
+            anchor["single_print_frac"].as_f64().unwrap_or(0.0),
+            anchor["vol_dispersion"].as_f64().unwrap_or(0.0),
+            anchor["size_dispersion"].as_f64().unwrap_or(0.0),
+        )
+    };
+
+    let vp50: Vec<f64> = levels
+        .iter()
+        .map(|l| l["vol_p50_norm"].as_f64().unwrap_or(f64::NAN))
+        .collect();
+    let vp90: Vec<f64> = levels
+        .iter()
+        .map(|l| l["vol_p90_norm"].as_f64().unwrap_or(f64::NAN))
+        .collect();
+    let vd: Vec<f64> = levels
+        .iter()
+        .map(|l| l["vol_dispersion"].as_f64().unwrap_or(f64::NAN))
+        .collect();
+    let sd: Vec<f64> = levels
+        .iter()
+        .map(|l| l["size_dispersion"].as_f64().unwrap_or(f64::NAN))
+        .collect();
+
+    Ok(json!({
+        "era_start_ts": anchor["era_start_ts"],
+        "_doc": format!("{LEVEL_DOC}{reading}"),
+        "single_print_frac": {"anchor": anchor["single_print_frac"], "range": rng(&single_fracs)},
+        "vol_p50_norm": {"anchor": anchor["vol_p50_norm"], "range": rng(&vp50)},
+        "vol_p90_norm": {"anchor": anchor["vol_p90_norm"], "range": rng(&vp90)},
+        "vol_dispersion": {"anchor": anchor["vol_dispersion"], "range": rng(&vd)},
+        "size_dispersion": {"anchor": anchor["size_dispersion"], "range": rng(&sd)},
+        "verdict": verdict,
+        "binning": {"bin_lo": anchor["bin_lo"], "bin_hi": anchor["bin_hi"], "bins_per_decade": anchor["bins_per_decade"]},
+        "support_norm": support,
+        "pmf": vol_hist.iter().map(|&c| c as f64 / total as f64).collect::<Vec<_>>(),
+    }))
+}
+
+/// `rng`: min/median/max over the non-null values, or `null` if none.
+/// Callers with plain `f64` inputs use this; [`rng_typed`] is the sibling
+/// that preserves int/float typing the way Python's dynamically-typed
+/// `min()`/`max()` do (an all-integer input list keeps `min`/`max` as JSON
+/// integers - only `statistics.median`'s true division always yields a
+/// float).
+fn rng(values: &[f64]) -> Value {
+    rng_typed(&values.iter().copied().map(Value::from).collect::<Vec<_>>())
+}
+
+/// `rng_typed`: as [`rng`], but over `Value`s so an all-integer input keeps
+/// `min`/`max` as JSON integers, matching `build_fingerprint.py`'s
+/// `rng()` (`min(vals)`/`max(vals)` over whatever Python type the values
+/// already are).
+fn rng_typed(values: &[Value]) -> Value {
+    let vals: Vec<&Value> = values
+        .iter()
+        .filter(|v| !v.is_null() && v.as_f64().is_some_and(f64::is_finite))
+        .collect();
+    if vals.is_empty() {
+        return Value::Null;
+    }
+    let min = (*vals
+        .iter()
+        .min_by(|a, b| {
+            a.as_f64()
+                .unwrap()
+                .partial_cmp(&b.as_f64().unwrap())
+                .unwrap()
+        })
+        .unwrap())
+    .clone();
+    let max = (*vals
+        .iter()
+        .max_by(|a, b| {
+            a.as_f64()
+                .unwrap()
+                .partial_cmp(&b.as_f64().unwrap())
+                .unwrap()
+        })
+        .unwrap())
+    .clone();
+    let mut sorted: Vec<&Value> = vals.clone();
+    sorted.sort_by(|a, b| {
+        a.as_f64()
+            .unwrap()
+            .partial_cmp(&b.as_f64().unwrap())
+            .unwrap()
+    });
+    let n = sorted.len();
+    // `statistics.median`: odd count returns the middle element AS-IS
+    // (native type preserved); even count true-divides the middle pair,
+    // which in Python 3 always yields a float regardless of parity.
+    let med = if n % 2 == 1 {
+        sorted[n / 2].clone()
+    } else {
+        Value::from((sorted[n / 2 - 1].as_f64().unwrap() + sorted[n / 2].as_f64().unwrap()) / 2.0)
+    };
+    json!({"min": min, "median": med, "max": max})
+}
+
+fn hour_shares(rep: &Value) -> Vec<f64> {
+    let c = rep["session"]["count_hour_dow"]
+        .as_array()
+        .expect("count_hour_dow");
+    let hour: Vec<f64> = c
+        .iter()
+        .map(|row| {
+            row.as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_f64().unwrap_or(0.0))
+                .sum()
+        })
+        .collect();
+    let sum: f64 = hour.iter().sum();
+    let tot = if sum == 0.0 { 1.0 } else { sum };
+    hour.iter().map(|x| x / tot).collect()
+}
+
+fn hour_vol(rep: &Value) -> Vec<f64> {
+    let c = rep["session"]["count_hour_dow"]
+        .as_array()
+        .expect("count_hour_dow");
+    let s = rep["session"]["sumsq_ret_hour_dow"]
+        .as_array()
+        .expect("sumsq_ret_hour_dow");
+    let mut out = Vec::with_capacity(24);
+    for h in 0..24 {
+        let cnt: f64 = c[h]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap_or(0.0))
+            .sum();
+        let ssq: f64 = crate::kernel::py_sum(
+            s[h].as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_f64().unwrap_or(0.0)),
+        );
+        out.push(if cnt != 0.0 { (ssq / cnt).sqrt() } else { 0.0 });
+    }
+    let positive: Vec<f64> = out.iter().copied().filter(|v| *v > 0.0).collect();
+    let mean = if out.iter().any(|v| *v != 0.0) {
+        if positive.is_empty() {
+            1.0
+        } else {
+            crate::kernel::py_sum(positive.iter().copied()) / positive.len() as f64
+        }
+    } else {
+        1.0
+    };
+    let mean = if mean == 0.0 { 1.0 } else { mean };
+    out.iter().map(|v| v / mean).collect()
+}
+
+fn dow_weights(rep: &Value) -> Vec<f64> {
+    let c = rep["session"]["count_hour_dow"]
+        .as_array()
+        .expect("count_hour_dow");
+    let mut dow = [0.0f64; 7];
+    for row in c {
+        let row = row.as_array().unwrap();
+        for (d, v) in row.iter().enumerate() {
+            dow[d] += v.as_f64().unwrap_or(0.0);
+        }
+    }
+    let tot: f64 = dow.iter().sum();
+    let tot = if tot == 0.0 { 1.0 } else { tot };
+    dow.iter().map(|x| x / tot).collect()
+}
+
+fn avg_curves(curves: &[Vec<f64>]) -> Vec<f64> {
+    let n = curves.len() as f64;
+    let k = curves[0].len();
+    (0..k)
+        .map(|i| crate::kernel::py_sum(curves.iter().map(|c| c[i])) / n)
+        .collect()
+}
+
+/// Reads `char_<PAIR>.json` files from `char_dir`, keyed by the `pair`
+/// field inside each report (matching `load_reports`'s dict, glob-sorted by
+/// filename but keyed by content).
+///
+/// # Errors
+/// Propagates I/O and JSON parse failure.
+pub fn load_reports(char_dir: &Path) -> LabResult<BTreeMap<String, Value>> {
+    let mut paths: Vec<_> = std::fs::read_dir(char_dir)?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("char_") && n.ends_with(".json"))
+        })
+        .collect();
+    paths.sort();
+    let mut reps = BTreeMap::new();
+    for path in paths {
+        let text = std::fs::read_to_string(&path)?;
+        let value: Value = serde_json::from_str(&text)?;
+        let pair = value["pair"].as_str().unwrap_or("").to_string();
+        reps.insert(pair, value);
+    }
+    Ok(reps)
+}
+
+/// Reads the committed `cadence.json`.
+///
+/// # Errors
+/// [`LabError::Refusal`] if the file is absent (mirrors `build_fingerprint.py`'s
+/// `FileNotFoundError`), or propagates I/O/JSON failure.
+pub fn load_cadence(path: &Path) -> LabResult<Value> {
+    if !path.exists() {
+        return Err(LabError::refusal(
+            "analysis/cadence.json is required; run build_cadence.py first",
+        ));
+    }
+    let text = std::fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&text)?)
+}
+
+/// `build_fingerprint.py`'s `main()` synthesis, minus the `findings.md`
+/// side artifact (a human-readable report the phase-3a brief does not gate
+/// on): reads every `char_<PAIR>.json` in `char_dir` plus `cadence.json` and
+/// returns the fingerprint contract.
+///
+/// # Errors
+/// [`LabError::Refusal`] if no `char_*.json` reports are found or the level
+/// queue detects a stale/disagreeing pair; propagates I/O/JSON failure.
+pub fn build_fingerprint(char_dir: &Path, cadence_path: &Path) -> LabResult<Value> {
+    let reps = load_reports(char_dir)?;
+    let cadence = load_cadence(cadence_path)?;
+    if reps.is_empty() {
+        return Err(LabError::refusal(
+            "no char_*.json found; run run_corpus.py first",
+        ));
+    }
+    let pairs: Vec<String> = reps.keys().cloned().collect();
+    let anchor = reps.get(ANCHOR).unwrap_or_else(|| &reps[&pairs[0]]);
+
+    let intensity = avg_curves(&reps.values().map(hour_shares).collect::<Vec<_>>());
+    let vol = avg_curves(&reps.values().map(hour_vol).collect::<Vec<_>>());
+    let dow = avg_curves(&reps.values().map(dow_weights).collect::<Vec<_>>());
+
+    let ret1: Vec<f64> = reps
+        .values()
+        .map(|r| r["returns"]["acf"][0].as_f64().unwrap_or(f64::NAN))
+        .collect();
+    let abs1: Vec<f64> = reps
+        .values()
+        .map(|r| r["returns"]["abs_acf"][0].as_f64().unwrap_or(f64::NAN))
+        .collect();
+    let abs10: Vec<f64> = reps
+        .values()
+        .map(|r| r["returns"]["abs_acf"][9].as_f64().unwrap_or(f64::NAN))
+        .collect();
+    let abs50: Vec<f64> = reps
+        .values()
+        .map(|r| r["returns"]["abs_acf"][49].as_f64().unwrap_or(f64::NAN))
+        .collect();
+    let zchg: Vec<f64> = reps
+        .values()
+        .map(|r| {
+            r["returns"]["zero_change_frac"]
+                .as_f64()
+                .unwrap_or(f64::NAN)
+        })
+        .collect();
+    let dwell: Vec<&Value> = reps.values().map(|r| &r["duration"]["dwell"]).collect();
+    let dwell_disp_over_mean: Vec<f64> = dwell
+        .iter()
+        .map(|d| {
+            d["dispersion_index"].as_f64().unwrap_or(f64::NAN)
+                / d["mean_s"].as_f64().unwrap_or(f64::NAN)
+        })
+        .collect();
+    let queue = level_queue(anchor, &reps)?;
+
+    let anchor_dwell = &anchor["duration"]["dwell"];
+    let anchor_disp_cv2 = anchor_dwell["dispersion_index"].as_f64().unwrap_or(0.0)
+        / anchor_dwell["mean_s"].as_f64().unwrap_or(1.0);
+
+    let mut fingerprint = json!({
+        "source": {
+            "pairs": pairs,
+            "total_trades": reps.values().map(|r| r["n_trades"].as_i64().unwrap_or(0)).sum::<i64>(),
+            "anchor": anchor["pair"],
+        },
+        "golden_targets": {
+            "_doc": "the generator's synthetic stream must reproduce these; \
+                     tolerances are the cross-pair spread, anchored on the \
+                     deepest series; duration dispersion and duration ACF are \
+                     era-windowed like dwell, everything else full-span",
+            "duration_dispersion_cv2": {"anchor": anchor_disp_cv2, "range": rng(&dwell_disp_over_mean)},
+            "return_acf_lag1": {"anchor": anchor["returns"]["acf"][0], "range": rng(&ret1)},
+            "abs_return_acf": {
+                "lag1": {"anchor": anchor["returns"]["abs_acf"][0], "range": rng(&abs1)},
+                "lag10": {"anchor": anchor["returns"]["abs_acf"][9], "range": rng(&abs10)},
+                "lag50": {"anchor": anchor["returns"]["abs_acf"][49], "range": rng(&abs50)},
+            },
+            "zero_change_frac": {"anchor": anchor["returns"]["zero_change_frac"], "range": rng(&zchg)},
+            "return_acf_anchor": anchor["returns"]["acf"].as_array().unwrap()[..10].to_vec(),
+            "abs_return_acf_anchor": anchor["returns"]["abs_acf"],
+            "dwell": {
+                "era_start_ts": anchor_dwell["era_start_ts"],
+                "mean_s": {"anchor": anchor_dwell["mean_s"], "range": rng(&dwell.iter().map(|d| d["mean_s"].as_f64().unwrap_or(f64::NAN)).collect::<Vec<_>>())},
+                "max_gap_s": {"anchor": anchor_dwell["max_gap_s"], "range": rng(&dwell.iter().map(|d| d["max_gap_s"].as_f64().unwrap_or(f64::NAN)).collect::<Vec<_>>())},
+                "gap_p999_s": {"anchor": anchor_dwell["gap_p999_s"], "range": rng(&dwell.iter().map(|d| d["gap_p999_s"].as_f64().unwrap_or(f64::NAN)).collect::<Vec<_>>())},
+                "empty_hour_frac": {"anchor": anchor_dwell["empty_hour_frac"], "range": rng(&dwell.iter().map(|d| d["empty_hour_frac"].as_f64().unwrap_or(f64::NAN)).collect::<Vec<_>>())},
+                "max_empty_hour_run_h": {"anchor": anchor_dwell["max_empty_hour_run_h"], "range": rng_typed(&dwell.iter().map(|d| d["max_empty_hour_run_h"].clone()).collect::<Vec<_>>())},
+                "_doc": "era-windowed; gate reads the anchor p999, empty-hour fraction, and run, with p999 cadence-scaled against mean_s; max_gap_s is documentation and the range records the dying-symbol spread LiquidityDrought imitates",
+            },
+        },
+        "session_profile": {
+            "_doc": "UTC, instrument-agnostic. intensity[h] and vol[h] index \
+                     hour-of-day 0..23; dow[d] indexes Sun=0..Sat=6",
+            "intensity_hour": intensity,
+            "vol_hour": vol,
+            "dow_weight": dow,
+        },
+        "empirical_ranges": {
+            "_doc": "observed ranges for diagnostics only; mechanism validation does not use them",
+            "corpus": "Kraken eight-pair fingerprint plus Binance three-pair cadence fit",
+            "modal_tick": rng_typed(&reps.values().map(|r| r["returns"]["modal_tick"].clone()).collect::<Vec<_>>()),
+            "price_decimals": rng_typed(&reps.values().map(|r| r["returns"]["price_decimals_mode"].clone()).collect::<Vec<_>>()),
+            "mean_event_duration_s": cadence["targets"]["mean_event_duration_s"]["range"],
+            "children_mean": cadence["targets"]["children_mean"]["range"],
+            "children_single_frac": cadence["targets"]["children_single_frac"]["range"],
+            "levels_mean": cadence["targets"]["levels_mean"]["range"],
+            "mean_trade_notional": cadence["targets"]["mean_trade_notional"]["range"],
+            "size_round_frac": rng(&reps.values().map(|r| r["size"]["round_frac"].as_f64().unwrap_or(f64::NAN)).collect::<Vec<_>>()),
+        },
+        "cadence": cadence,
+    });
+    fingerprint["golden_targets"]["level_queue"] = queue;
+    Ok(fingerprint)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::characterize::{LVL_BINS, LevelVisits};
+
+    fn fixture(single_print_frac: f64, vol_dispersion: f64) -> BTreeMap<String, Value> {
+        let mut acc = LevelVisits::new(1_000_000.0);
+        for &(ts, px, sz) in &[
+            (1_000_000.0, 100.0, 2.0),
+            (1_000_001.0, 100.0, 2.0),
+            (1_000_002.0, 101.0, 2.0),
+            (1_000_003.0, 101.0, 6.0),
+        ] {
+            acc.push(ts, px, sz);
+        }
+        acc.close();
+        let mut report = acc.report();
+        report["single_print_frac"] = json!(single_print_frac);
+        report["vol_dispersion"] = json!(vol_dispersion);
+        report["size_dispersion"] = json!(1.0);
+        let mut reports = BTreeMap::new();
+        reports.insert("XBTUSD".to_string(), json!({"level": report}));
+        reports
+    }
+
+    #[test]
+    fn support_is_increasing_and_the_pmf_sums_to_one() {
+        let reports = fixture(0.2, 5.0);
+        let block = level_queue(&reports["XBTUSD"], &reports).unwrap();
+        let support = block["support_norm"].as_array().unwrap();
+        let pmf = block["pmf"].as_array().unwrap();
+        assert_eq!(support.len(), pmf.len());
+        assert_eq!(pmf.len(), LVL_BINS);
+        let total: f64 = pmf.iter().map(|v| v.as_f64().unwrap()).sum();
+        assert!((total - 1.0).abs() < 1e-9);
+        assert!(support.iter().all(|v| v.as_f64().unwrap() > 0.0));
+        let vals: Vec<f64> = support.iter().map(|v| v.as_f64().unwrap()).collect();
+        assert!(vals.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn a_report_predating_the_measurement_is_refused() {
+        let mut reports = fixture(0.2, 5.0);
+        reports.insert("ETHUSD".to_string(), json!({"session": {}}));
+        let err = level_queue(&reports["XBTUSD"], &reports).unwrap_err();
+        assert!(err.to_string().contains("ETHUSD"));
+    }
+
+    #[test]
+    fn disagreeing_binning_is_refused() {
+        let mut reports = fixture(0.2, 5.0);
+        let mut other = reports["XBTUSD"]["level"].clone();
+        other["bins_per_decade"] = json!(20);
+        reports.insert("ETHUSD".to_string(), json!({"level": other}));
+        assert!(level_queue(&reports["XBTUSD"], &reports).is_err());
+    }
+
+    #[test]
+    fn all_four_conditions_holding_proceeds() {
+        let reports = fixture(0.2, 5.0);
+        let verdict = level_verdict(&reports["XBTUSD"]["level"], &[0.2, 0.25]);
+        assert!(verdict["proceed"].as_bool().unwrap());
+        assert!(verdict["failed"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_degenerate_corpus_declines_and_names_the_failed_condition() {
+        let reports = fixture(0.69, 5.0);
+        let verdict = level_verdict(&reports["XBTUSD"]["level"], &[0.69, 0.7]);
+        assert!(!verdict["proceed"].as_bool().unwrap());
+        assert_eq!(
+            verdict["failed"].as_array().unwrap(),
+            &vec![json!("single_print_frac <= 0.50")]
+        );
+    }
+
+    #[test]
+    fn inherited_dispersion_fails_condition_three() {
+        let mut reports = fixture(0.2, 4.0);
+        reports.get_mut("XBTUSD").unwrap()["level"]["size_dispersion"] = json!(4.0);
+        let level = reports["XBTUSD"]["level"].clone();
+        let verdict = level_verdict(&level, &[0.2]);
+        assert!(!verdict["proceed"].as_bool().unwrap());
+        assert!(
+            verdict["failed"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v.as_str() == Some("vol_dispersion >= 1.5 * size_dispersion"))
+        );
+    }
+
+    #[test]
+    fn an_outlier_anchor_fails_condition_four() {
+        let reports = fixture(0.05, 5.0);
+        let verdict = level_verdict(&reports["XBTUSD"]["level"], &[0.05, 0.4, 0.45]);
+        assert!(!verdict["proceed"].as_bool().unwrap());
+        assert!(
+            verdict["failed"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v.as_str()
+                    == Some("anchor single_print_frac within 1.5x of the cross-pair median"))
+        );
+        assert!(
+            (verdict["single_print_frac_cross_pair_median"]
+                .as_f64()
+                .unwrap()
+                - 0.4)
+                .abs()
+                < 1e-12
+        );
+    }
+}

@@ -224,7 +224,9 @@ pub fn require_preflight(
     artifact_path: &Path,
 ) -> LabResult<(Value, String)> {
     if !artifact_path.exists() {
-        return Err(LabError::refusal("no preflight artifact; run preflight first"));
+        return Err(LabError::refusal(
+            "no preflight artifact; run preflight first",
+        ));
     }
     let bytes = std::fs::read(artifact_path)?;
     let artifact_hash = crate::ledger::sha256_bytes(&bytes);

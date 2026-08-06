@@ -224,6 +224,9 @@ fn parity12a_i_assembles_the_committed_artifact_from_cache() {
         let mut m = got.clone();
         mutator(&mut m);
         let errs = measure12a_schema_errors(&m);
-        assert!(!errs.is_empty(), "mutation {name:?} was not rejected by the schema validator");
+        assert!(
+            !errs.is_empty(),
+            "mutation {name:?} was not rejected by the schema validator"
+        );
     }
 }

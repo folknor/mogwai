@@ -12,6 +12,18 @@ Or both. There are no exceptions.
 
 ## Open issues
 
+- OWNER DECISION: the committed `analysis/fingerprint.json` has drifted
+  from its gitignored `analysis/char_*.json` inputs - regeneration
+  (Python and the Rust port agree) produces
+  `empirical_ranges.modal_tick.max = 0.1` where the committed artifact
+  carries `0.25`, the exact ceiling MNQ's tick sits on. The fingerprint
+  is compiled into the generator via include_str, so re-committing it is
+  a `TAPE_PROTOCOL_VERSION` decision, not a hygiene fix; the ranges are
+  warnings-not-admission since the 3.3 resolution, but the shipped-preset
+  test makes unaccepted warnings fatal for committed presets. Found
+  2026-08-06 by the rewrite phase-3a fingerprint parity gate. Do nothing
+  until ruled.
+
 - The TBBO stream contract has an unguarded conversion class, in BOTH
   implementations: `parse_stream` (analysis/mnq_fit.py and its
   phase-1 port crates/mogwai-lab/src/stream.rs) converts

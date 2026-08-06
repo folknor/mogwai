@@ -276,7 +276,8 @@ pub(crate) fn run_measure12a(
         match event {
             TickEvent::Quote(q) => {
                 let trace = source.take_vol_trace();
-                acc.push_quote(&q, trace).map_err(|e| anyhow::anyhow!("{e}"))?;
+                acc.push_quote(&q, trace)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
             }
             TickEvent::Trade(t) => acc.push_trade(&t).map_err(|e| anyhow::anyhow!("{e}"))?,
         }
@@ -2668,7 +2669,10 @@ mod tests {
         };
         let bound = scale * 1e-9;
         assert!(
-            max_resid(mogwai_lab::measure12a::generated::ARCH_12A, mogwai_lab::measure12a::generated::GARCH_12A) <= bound,
+            max_resid(
+                mogwai_lab::measure12a::generated::ARCH_12A,
+                mogwai_lab::measure12a::generated::GARCH_12A
+            ) <= bound,
             "the local coefficients violate the shipped recursion"
         );
         // Sensitivity: perturbing either local coefficient independently

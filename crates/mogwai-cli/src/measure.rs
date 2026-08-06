@@ -31,7 +31,9 @@ use mogwai_lab::measure12a::observed;
 use mogwai_lab::preflight::require_preflight;
 use mogwai_lab::sampler::ResourceSampler;
 use mogwai_lab::stream::{data_files, parse_stream};
-use mogwai_lab::subcontract::{FINAL_END_NS, FINAL_LENGTH, FINAL_SEEDS, FINAL_START_NS, SUMMARY_WARMUP};
+use mogwai_lab::subcontract::{
+    FINAL_END_NS, FINAL_LENGTH, FINAL_SEEDS, FINAL_START_NS, SUMMARY_WARMUP,
+};
 use serde_json::Value;
 
 const DEFAULT_CORPUS: &str = "research/market-data/databento/mnqv/2026-07.full.tbbo";
@@ -132,7 +134,13 @@ pub enum WalkSource {
 }
 
 pub fn run(args: MeasureArgs) -> anyhow::Result<()> {
-    let cfg = MeasureConfig::resolve(args.corpus, args.ledger, args.preflight, args.cache_dir, args.out);
+    let cfg = MeasureConfig::resolve(
+        args.corpus,
+        args.ledger,
+        args.preflight,
+        args.cache_dir,
+        args.out,
+    );
     let outcome = run_measure_with(&cfg, WalkSource::LiveAttested)?;
     let ladder = &outcome.artifact["ladder"];
     println!("artifact -> {}", cfg.out.display());
@@ -153,7 +161,10 @@ pub fn run_measure(cfg: &MeasureConfig) -> anyhow::Result<MeasureOutcome> {
 }
 
 /// [`run_measure`], parameterized over [`WalkSource`].
-pub fn run_measure_with(cfg: &MeasureConfig, walk_source: WalkSource) -> anyhow::Result<MeasureOutcome> {
+pub fn run_measure_with(
+    cfg: &MeasureConfig,
+    walk_source: WalkSource,
+) -> anyhow::Result<MeasureOutcome> {
     let harness_commit = require_clean_tree()?;
 
     // The Brick G references load READ-ONLY before anything runs.
@@ -221,7 +232,10 @@ pub fn run_measure_with(cfg: &MeasureConfig, walk_source: WalkSource) -> anyhow:
                 println!("seed {seed} replay attested: {session_count} complete sessions");
                 generated_seeds.push(GeneratedSeed {
                     seed,
-                    per_session: replay["per_session"].as_array().cloned().unwrap_or_default(),
+                    per_session: replay["per_session"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default(),
                     forensic: replay["forensic"].clone(),
                     cost: attested["cost"].clone(),
                 });
@@ -229,7 +243,10 @@ pub fn run_measure_with(cfg: &MeasureConfig, walk_source: WalkSource) -> anyhow:
             WalkSource::PreAttestedCacheOnly => {
                 generated_seeds.push(GeneratedSeed {
                     seed,
-                    per_session: attested["per_session"].as_array().cloned().unwrap_or_default(),
+                    per_session: attested["per_session"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default(),
                     forensic: attested["forensic"].clone(),
                     cost: attested["cost"].clone(),
                 });
@@ -243,8 +260,11 @@ pub fn run_measure_with(cfg: &MeasureConfig, walk_source: WalkSource) -> anyhow:
 
     // -- Input-side population gates.
     for g in &generated_seeds {
-        let dates: Vec<Option<&str>> =
-            g.per_session.iter().map(|r| r.get("session_date").and_then(Value::as_str)).collect();
+        let dates: Vec<Option<&str>> = g
+            .per_session
+            .iter()
+            .map(|r| r.get("session_date").and_then(Value::as_str))
+            .collect();
         if dates.iter().any(Option::is_none) {
             bail!("seed {} carries non-string session dates", g.seed);
         }
@@ -254,12 +274,22 @@ pub fn run_measure_with(cfg: &MeasureConfig, walk_source: WalkSource) -> anyhow:
         unique.dedup();
         sorted.sort_unstable();
         if sorted != unique || dates.len() != 23 {
-            bail!("seed {} carries {} sessions, not 23 sorted unique", g.seed, dates.len());
+            bail!(
+                "seed {} carries {} sessions, not 23 sorted unique",
+                g.seed,
+                dates.len()
+            );
         }
     }
-    let mut distinct_calendars: std::collections::BTreeSet<Vec<Option<&str>>> = std::collections::BTreeSet::new();
+    let mut distinct_calendars: std::collections::BTreeSet<Vec<Option<&str>>> =
+        std::collections::BTreeSet::new();
     for g in &generated_seeds {
-        distinct_calendars.insert(g.per_session.iter().map(|r| r["session_date"].as_str()).collect());
+        distinct_calendars.insert(
+            g.per_session
+                .iter()
+                .map(|r| r["session_date"].as_str())
+                .collect(),
+        );
     }
     if distinct_calendars.len() != 1 {
         bail!("the generated seeds disagree on session dates");
@@ -285,16 +315,22 @@ pub fn run_measure_with(cfg: &MeasureConfig, walk_source: WalkSource) -> anyhow:
             "warmup": SUMMARY_WARMUP,
         },
     });
-    let artifact = assemble_measure12a_artifact(&observed, &generated_seeds, &binding_extra, &mults, &cost)
-        .map_err(|e| anyhow!("assembly refused: {e}"))?;
+    let artifact =
+        assemble_measure12a_artifact(&observed, &generated_seeds, &binding_extra, &mults, &cost)
+            .map_err(|e| anyhow!("assembly refused: {e}"))?;
     // A throwaway serialization pass realizes the late json_safe memory
     // peak while the sampler still runs and BEFORE the cost freezes.
-    drop(serde_json::to_string(&mogwai_lab::aggregate::artifact::json_safe(artifact.clone())));
+    drop(serde_json::to_string(
+        &mogwai_lab::aggregate::artifact::json_safe(artifact.clone()),
+    ));
     let bootstrap_s = t2.elapsed().as_secs_f64();
     let total_s = observed_s + generated_s + bootstrap_s;
 
     let (peak_rss, peak_scratch) = sampler
-        .stop(std::slice::from_ref(&cfg.observed_cache_path), Some(&cfg.walk_cache_dir))
+        .stop(
+            std::slice::from_ref(&cfg.observed_cache_path),
+            Some(&cfg.walk_cache_dir),
+        )
         .map_err(|e| anyhow!("{e}"))?;
     cost["bootstrap_s"] = serde_json::json!(bootstrap_s);
     cost["total_s"] = serde_json::json!(total_s);
@@ -304,8 +340,9 @@ pub fn run_measure_with(cfg: &MeasureConfig, walk_source: WalkSource) -> anyhow:
     // Re-assemble now that `cost` is final - the artifact pastes `cost`
     // verbatim, so the provisional one above must be swapped for the
     // finalized record before validation and the write.
-    let artifact = assemble_measure12a_artifact(&observed, &generated_seeds, &binding_extra, &mults, &cost)
-        .map_err(|e| anyhow!("assembly refused: {e}"))?;
+    let artifact =
+        assemble_measure12a_artifact(&observed, &generated_seeds, &binding_extra, &mults, &cost)
+            .map_err(|e| anyhow!("assembly refused: {e}"))?;
 
     let mut errs = measure12a_schema_errors(&artifact);
     errs.extend(measure12a_semantic_errors(&artifact, &usable));
@@ -321,7 +358,8 @@ pub fn run_measure_with(cfg: &MeasureConfig, walk_source: WalkSource) -> anyhow:
         bail!("the tree changed during the measure12a run; the artifact is unbound");
     }
 
-    write_json_atomic(&cfg.out, &artifact).map_err(|e| anyhow!("writing {}: {e}", cfg.out.display()))?;
+    write_json_atomic(&cfg.out, &artifact)
+        .map_err(|e| anyhow!("writing {}: {e}", cfg.out.display()))?;
 
     Ok(MeasureOutcome { artifact, cost })
 }
@@ -358,17 +396,29 @@ fn require_clean_tree() -> anyhow::Result<String> {
 /// at the top of the run - so a HEAD move or a new dirty file DURING the
 /// run is caught before the artifact writes.
 fn fresh_tree_state() -> anyhow::Result<(String, bool)> {
-    let status = std::process::Command::new("git").args(["status", "--porcelain"]).output()?;
-    let head = std::process::Command::new("git").args(["rev-parse", "HEAD"]).output()?;
-    let clean =
-        status.status.success() && String::from_utf8_lossy(&status.stdout).trim().is_empty() && head.status.success();
-    Ok((String::from_utf8_lossy(&head.stdout).trim().to_string(), clean))
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()?;
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    let clean = status.status.success()
+        && String::from_utf8_lossy(&status.stdout).trim().is_empty()
+        && head.status.success();
+    Ok((
+        String::from_utf8_lossy(&head.stdout).trim().to_string(),
+        clean,
+    ))
 }
 
 /// `run_measure12a_observed`: the observed half - per-session sufficient
 /// records plus the monthly aggregates, bound to the input and
 /// sub-contract hashes.
-fn run_measure12a_observed(corpus: &Path, ledger: &Path, preflight_path: &Path) -> anyhow::Result<Value> {
+fn run_measure12a_observed(
+    corpus: &Path,
+    ledger: &Path,
+    preflight_path: &Path,
+) -> anyhow::Result<Value> {
     let hashes: BTreeMap<String, String> =
         verify_input(corpus, ledger).map_err(|e| anyhow!("verifying the delivered corpus: {e}"))?;
     let (preflight, preflight_hash) = require_preflight(&hashes, preflight_path)
@@ -381,8 +431,8 @@ fn run_measure12a_observed(corpus: &Path, ledger: &Path, preflight_path: &Path) 
         .collect();
 
     let files = data_files(corpus).map_err(|e| anyhow!("listing the corpus: {e}"))?;
-    let per_session =
-        observed::observe(parse_stream(files), &usable).map_err(|e| anyhow!("the observed pass refused: {e}"))?;
+    let per_session = observed::observe(parse_stream(files), &usable)
+        .map_err(|e| anyhow!("the observed pass refused: {e}"))?;
 
     // `blocks_from_sessions` extracts each session's `block2`/`block3`/
     // `block4` SUB-OBJECT before pooling - passing the whole per-session
@@ -400,7 +450,12 @@ fn run_measure12a_observed(corpus: &Path, ledger: &Path, preflight_path: &Path) 
         .map_err(|e| anyhow!("pooling the monthly blocks: {e}"))?;
     let perms: Vec<&[Value]> = per_session
         .iter()
-        .map(|r| r["permutations"].as_array().map(Vec::as_slice).unwrap_or_default())
+        .map(|r| {
+            r["permutations"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+        })
         .collect();
     let permutations_monthly = mogwai_lab::aggregate::monthly::aggregate_permutations(&perms);
 
@@ -437,7 +492,8 @@ pub fn run_final_walk(seed: u64) -> anyhow::Result<Value> {
         .ok_or_else(|| anyhow!("the MNQ preset carries no session calendar"))?;
     let offset = i32::from(calendar.utc_offset_minutes);
 
-    let start = u64::try_from(FINAL_START_NS).map_err(|_| anyhow!("FINAL_START_NS is not positive"))?;
+    let start =
+        u64::try_from(FINAL_START_NS).map_err(|_| anyhow!("FINAL_START_NS is not positive"))?;
     let length_s: u64 = FINAL_LENGTH
         .trim_end_matches('s')
         .parse()
@@ -475,7 +531,8 @@ pub fn run_final_walk(seed: u64) -> anyhow::Result<Value> {
             TickEvent::Trade(t) => acc.push_trade(&t).map_err(|e| anyhow!("{e}"))?,
         }
     }
-    acc.finish().map_err(|e| anyhow!("the generated measurement pass refused: {e}"))
+    acc.finish()
+        .map_err(|e| anyhow!("the generated measurement pass refused: {e}"))
 }
 
 #[cfg(test)]

@@ -13,8 +13,8 @@
 //! refuses rather than reporting a peak measured over a partial window.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::error::{LabError, LabResult};
@@ -29,7 +29,11 @@ fn tree_rss_bytes(pid: u32) -> u64 {
         if let Ok(status) = std::fs::read_to_string(format!("/proc/{p}/status")) {
             for line in status.lines() {
                 if let Some(rest) = line.strip_prefix("VmRSS:") {
-                    let kb: u64 = rest.split_whitespace().next().and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let kb: u64 = rest
+                        .split_whitespace()
+                        .next()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
                     total += kb * 1024;
                     break;
                 }
@@ -38,7 +42,11 @@ fn tree_rss_bytes(pid: u32) -> u64 {
             continue;
         }
         if let Ok(children) = std::fs::read_to_string(format!("/proc/{p}/task/{p}/children")) {
-            stack.extend(children.split_whitespace().filter_map(|c| c.parse::<u32>().ok()));
+            stack.extend(
+                children
+                    .split_whitespace()
+                    .filter_map(|c| c.parse::<u32>().ok()),
+            );
         }
     }
     total
@@ -63,7 +71,11 @@ fn scratch_paths(fixed: &[PathBuf], scan_dir: Option<&std::path::Path>) -> Vec<P
     if let Some(dir) = scan_dir
         && let Ok(entries) = std::fs::read_dir(dir)
     {
-        out.extend(entries.filter_map(std::result::Result::ok).map(|e| e.path()));
+        out.extend(
+            entries
+                .filter_map(std::result::Result::ok)
+                .map(|e| e.path()),
+        );
     }
     out
 }
@@ -102,7 +114,13 @@ impl ResourceSampler {
             // "there is no way for this loop to panic", and `failed` exists
             // for future sampling that CAN fail outright.
             while !stop2.load(Ordering::Relaxed) {
-                sample_once(pid, &fixed_scratch_paths, scan_dir.as_deref(), &rss2, &scratch2);
+                sample_once(
+                    pid,
+                    &fixed_scratch_paths,
+                    scan_dir.as_deref(),
+                    &rss2,
+                    &scratch2,
+                );
                 std::thread::sleep(Duration::from_secs(1));
             }
             let _ = &failed2; // reserved for a future fallible sample source
@@ -121,10 +139,15 @@ impl ResourceSampler {
     /// the Python's `stop()` doing one last `self.sample()`), and returns
     /// `(peak_rss_bytes, peak_scratch_bytes)`. Refuses if the sampling
     /// thread died.
-    pub fn stop(mut self, fixed_scratch_paths: &[PathBuf], scan_dir: Option<&std::path::Path>) -> LabResult<(u64, u64)> {
+    pub fn stop(
+        mut self,
+        fixed_scratch_paths: &[PathBuf],
+        scan_dir: Option<&std::path::Path>,
+    ) -> LabResult<(u64, u64)> {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(h) = self.handle.take() {
-            h.join().map_err(|_| LabError::refusal("the resource sampler thread panicked"))?;
+            h.join()
+                .map_err(|_| LabError::refusal("the resource sampler thread panicked"))?;
         }
         if self.failed.load(Ordering::Relaxed) {
             return Err(LabError::refusal("the resource sampler died"));

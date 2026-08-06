@@ -91,8 +91,11 @@ fn seed_scratch_cache(root: &Path, scratch_root: &str) -> PathBuf {
     let scratch = root.join(scratch_root).join("cache");
     let walk_dst = scratch.join("measure12a-cache");
     std::fs::create_dir_all(&walk_dst).expect("creating the scratch cache dir");
-    std::fs::copy(root.join(OBSERVED_CACHE), scratch.join("mnq-measure12a-observed.json"))
-        .expect("seeding the scratch observed cache");
+    std::fs::copy(
+        root.join(OBSERVED_CACHE),
+        scratch.join("mnq-measure12a-observed.json"),
+    )
+    .expect("seeding the scratch observed cache");
     for entry in std::fs::read_dir(root.join(WALK_CACHE)).expect("listing the walk cache") {
         let path = entry.expect("a cache entry").path();
         if path.extension().and_then(|e| e.to_str()) == Some("json") {
@@ -149,7 +152,11 @@ fn parity12a_ii_fast_matches_the_committed_artifact_over_cached_walks() {
     assert_eq!(outcome.artifact["ladder"]["verdict"], "no-family-eligible");
 
     let written = read_json(&out);
-    assert_canon_eq(&written, &outcome.artifact, "the written artifact vs the returned one");
+    assert_canon_eq(
+        &written,
+        &outcome.artifact,
+        "the written artifact vs the returned one",
+    );
     assert_matches_committed(&outcome.artifact, &root);
 }
 
@@ -189,6 +196,10 @@ fn parity12a_ii_live_full_run_matches_the_committed_artifact() {
     assert_eq!(outcome.artifact["ladder"]["verdict"], "no-family-eligible");
 
     let written = read_json(&out);
-    assert_canon_eq(&written, &outcome.artifact, "the written artifact vs the returned one");
+    assert_canon_eq(
+        &written,
+        &outcome.artifact,
+        "the written artifact vs the returned one",
+    );
     assert_matches_committed(&outcome.artifact, &root);
 }

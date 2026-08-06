@@ -15,7 +15,11 @@
 //! this port and the Python disagree, the Python wins and the port changes.
 
 pub mod aggregate;
+pub mod cadence;
+pub mod cadence_feasible;
+pub mod characterize;
 pub mod error;
+pub mod fingerprint;
 pub mod kernel;
 pub mod ledger;
 pub mod measure12a;

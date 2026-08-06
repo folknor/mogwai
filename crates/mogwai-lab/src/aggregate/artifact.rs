@@ -143,16 +143,17 @@ pub fn assemble_measure12a_body(
     // in that order), then the scoped per-session/forensic mirrors.
     let mut seen: BTreeSet<(String, String, String)> = BTreeSet::new();
     let mut refused_cells: Vec<Value> = Vec::new();
-    let add_refusal = |rec: &Value, seen: &mut BTreeSet<(String, String, String)>, out: &mut Vec<Value>| {
-        let key = (
-            js(rec, "scope").to_string(),
-            js(rec, "cell").to_string(),
-            js(rec, "reason").to_string(),
-        );
-        if seen.insert(key) {
-            out.push(rec.clone());
-        }
-    };
+    let add_refusal =
+        |rec: &Value, seen: &mut BTreeSet<(String, String, String)>, out: &mut Vec<Value>| {
+            let key = (
+                js(rec, "scope").to_string(),
+                js(rec, "cell").to_string(),
+                js(rec, "reason").to_string(),
+            );
+            if seen.insert(key) {
+                out.push(rec.clone());
+            }
+        };
     for r in measurement.refusals() {
         add_refusal(&r.to_json(), &mut seen, &mut refused_cells);
     }
@@ -209,7 +210,10 @@ pub fn assemble_measure12a_body(
         let mut sum = 0i64;
         for rec in &per_session {
             if let Some(cell) = rec.get("block4").and_then(|b4| b4.get(&key)) {
-                sum += cell.get("warmup_excluded").and_then(Value::as_i64).unwrap_or(0);
+                sum += cell
+                    .get("warmup_excluded")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
             }
         }
         warmup_exclusions.insert(key, serde_json::json!(sum));
@@ -587,7 +591,11 @@ impl SchemaValidator {
     }
 
     fn block1_summary_rec(&mut self, obj: &Value, where_: &str) {
-        let want: Vec<&str> = B1_BIN_KEYS.iter().chain(B1_SUMMARY_EXTRA_KEYS).copied().collect();
+        let want: Vec<&str> = B1_BIN_KEYS
+            .iter()
+            .chain(B1_SUMMARY_EXTRA_KEYS)
+            .copied()
+            .collect();
         if self.keys_exact(obj, &want, where_)
             && let Some(bins) = obj.get("by_parent_count_bin")
         {
@@ -752,7 +760,11 @@ pub fn measure12a_schema_errors(artifact: &Value) -> Vec<String> {
         );
     }
 
-    v.keys_exact(&artifact["constants"], MEASURE12A_CONSTANT_NAMES, "constants");
+    v.keys_exact(
+        &artifact["constants"],
+        MEASURE12A_CONSTANT_NAMES,
+        "constants",
+    );
 
     let observed = &artifact["observed"];
     let mut scoped_refusals: Vec<Value> = Vec::new();
@@ -843,7 +855,11 @@ pub fn measure12a_schema_errors(artifact: &Value) -> Vec<String> {
                 }
             }
             let forensic = &g["forensic"];
-            if v.keys_exact(forensic, &["records", "refusals"], &format!("{where_}.forensic")) {
+            if v.keys_exact(
+                forensic,
+                &["records", "refusals"],
+                &format!("{where_}.forensic"),
+            ) {
                 for (j, rec) in ja(forensic, "records").iter().enumerate() {
                     v.keys_exact(rec, FORENSIC_KEYS, &format!("{where_}.forensic[{j}]"));
                 }
@@ -852,7 +868,11 @@ pub fn measure12a_schema_errors(artifact: &Value) -> Vec<String> {
                     scoped_refusals.push(r.clone());
                 }
             }
-            v.keys_exact(&g["cost"], &["walk_s", "rss_bytes"], &format!("{where_}.cost"));
+            v.keys_exact(
+                &g["cost"],
+                &["walk_s", "rss_bytes"],
+                &format!("{where_}.cost"),
+            );
         }
         let central = &generated["central"];
         if v.keys_exact(
@@ -870,7 +890,11 @@ pub fn measure12a_schema_errors(artifact: &Value) -> Vec<String> {
     }
 
     let bootstrap = &artifact["bootstrap"];
-    if v.keys_exact(bootstrap, &["seed_rule", "replicates", "per_family"], "bootstrap") {
+    if v.keys_exact(
+        bootstrap,
+        &["seed_rule", "replicates", "per_family"],
+        "bootstrap",
+    ) {
         let per_family = &bootstrap["per_family"];
         if v.keys_exact(per_family, &MEASURE12A_FAMILIES, "per_family")
             && let Some(map) = per_family.as_object()
@@ -886,12 +910,14 @@ pub fn measure12a_schema_errors(artifact: &Value) -> Vec<String> {
                 }
                 let complete = env["inventory_complete"] == Value::Bool(true);
                 if complete && env["critical_value"].is_null() {
-                    v.errs
-                        .push(format!("{where_}: complete inventory without a critical value"));
+                    v.errs.push(format!(
+                        "{where_}: complete inventory without a critical value"
+                    ));
                 }
                 if !complete && !env["critical_value"].is_null() {
-                    v.errs
-                        .push(format!("{where_}: incomplete inventory with a critical value"));
+                    v.errs.push(format!(
+                        "{where_}: incomplete inventory with a critical value"
+                    ));
                 }
                 for m in ja(env, "metrics") {
                     let name = m.get("name").and_then(Value::as_str).unwrap_or("?");
@@ -924,8 +950,9 @@ pub fn measure12a_schema_errors(artifact: &Value) -> Vec<String> {
                         || m["seed_rule_pass"].is_null()
                         || m["fold_rule_pass"].is_null()
                     {
-                        v.errs
-                            .push(format!("{mwhere}: non-refused metric missing required evidence"));
+                        v.errs.push(format!(
+                            "{mwhere}: non-refused metric missing required evidence"
+                        ));
                     }
                     let env_field = if predicate == "inside" {
                         "interval_inside_band"
@@ -937,8 +964,9 @@ pub fn measure12a_schema_errors(artifact: &Value) -> Vec<String> {
                             || m["interval_high"].is_null()
                             || m[env_field].is_null()
                         {
-                            v.errs
-                                .push(format!("{mwhere}: complete family with null envelope fields"));
+                            v.errs.push(format!(
+                                "{mwhere}: complete family with null envelope fields"
+                            ));
                         }
                     } else if !m["interval_low"].is_null()
                         || !m["interval_high"].is_null()
@@ -951,31 +979,38 @@ pub fn measure12a_schema_errors(artifact: &Value) -> Vec<String> {
                     }
                     if predicate == "raw_direction" {
                         if kind != "raw_diff" {
-                            v.errs.push(format!("{mwhere}: raw_direction on non-raw_diff kind"));
+                            v.errs
+                                .push(format!("{mwhere}: raw_direction on non-raw_diff kind"));
                         }
                         if !m["band_low"].is_null() || !m["band_high"].is_null() {
-                            v.errs.push(format!("{mwhere}: raw_direction carries a band"));
+                            v.errs
+                                .push(format!("{mwhere}: raw_direction carries a band"));
                         }
                     } else if m["band_low"].is_null() || m["band_high"].is_null() {
-                        v.errs.push(format!("{mwhere}: band predicate without a band"));
+                        v.errs
+                            .push(format!("{mwhere}: band predicate without a band"));
                     }
                     if predicate == "outside" || predicate == "raw_direction" {
                         if !m["interval_inside_band"].is_null() || !m["seed_inside_count"].is_null()
                         {
-                            v.errs
-                                .push(format!("{mwhere}: inside-only evidence on an outside metric"));
+                            v.errs.push(format!(
+                                "{mwhere}: inside-only evidence on an outside metric"
+                            ));
                         }
                         if m["outside_band"].is_null() || m["seed_same_side_count"].is_null() {
-                            v.errs.push(format!("{mwhere}: outside metric missing its evidence"));
+                            v.errs
+                                .push(format!("{mwhere}: outside metric missing its evidence"));
                         }
                     }
                     if predicate == "inside" {
                         if !m["outside_band"].is_null() || !m["seed_same_side_count"].is_null() {
-                            v.errs
-                                .push(format!("{mwhere}: outside-only evidence on an inside metric"));
+                            v.errs.push(format!(
+                                "{mwhere}: outside-only evidence on an inside metric"
+                            ));
                         }
                         if m["seed_inside_count"].is_null() {
-                            v.errs.push(format!("{mwhere}: inside metric missing its evidence"));
+                            v.errs
+                                .push(format!("{mwhere}: inside metric missing its evidence"));
                         }
                     }
                 }
@@ -984,7 +1019,11 @@ pub fn measure12a_schema_errors(artifact: &Value) -> Vec<String> {
     }
 
     let ladder = &artifact["ladder"];
-    if v.keys_exact(ladder, &["rungs", "eligible", "selected", "verdict"], "ladder") {
+    if v.keys_exact(
+        ladder,
+        &["rungs", "eligible", "selected", "verdict"],
+        "ladder",
+    ) {
         rungs = ja(ladder, "rungs").to_vec();
         let names: Vec<&str> = rungs
             .iter()
@@ -1007,8 +1046,9 @@ pub fn measure12a_schema_errors(artifact: &Value) -> Vec<String> {
                     .unwrap_or_default();
                 let want_set: BTreeSet<&str> = want.iter().copied().collect();
                 if got != want_set {
-                    v.errs
-                        .push(format!("{where_}: subcheck keys not the frozen literal set"));
+                    v.errs.push(format!(
+                        "{where_}: subcheck keys not the frozen literal set"
+                    ));
                 }
             }
             for rr in ja(r, "refusals") {
@@ -1017,8 +1057,9 @@ pub fn measure12a_schema_errors(artifact: &Value) -> Vec<String> {
             }
             let fired = r["fired"] == Value::Bool(true);
             if !fired && (!r["uniform_eligible"].is_null() || !r["required_resolution"].is_null()) {
-                v.errs
-                    .push(format!("{where_}: resolution fields non-null on an unfired rung"));
+                v.errs.push(format!(
+                    "{where_}: resolution fields non-null on an unfired rung"
+                ));
             }
         }
         let verdict = js(ladder, "verdict");
@@ -1044,7 +1085,12 @@ pub fn measure12a_schema_errors(artifact: &Value) -> Vec<String> {
     let mut top_keys: BTreeSet<(String, String, String)> = BTreeSet::new();
     if v.keys_exact(
         diagnostics,
-        &["warmup_exclusions", "refused_cells", "empty_bins", "worsening_23"],
+        &[
+            "warmup_exclusions",
+            "refused_cells",
+            "empty_bins",
+            "worsening_23",
+        ],
         "diagnostics",
     ) {
         if let Some(map) = diagnostics["warmup_exclusions"].as_object() {
@@ -1061,9 +1107,18 @@ pub fn measure12a_schema_errors(artifact: &Value) -> Vec<String> {
         for r in refused_cells {
             v.refusal_rec(r, "refused_cells");
             top_keys.insert((
-                r.get("scope").and_then(Value::as_str).unwrap_or("").to_string(),
-                r.get("cell").and_then(Value::as_str).unwrap_or("").to_string(),
-                r.get("reason").and_then(Value::as_str).unwrap_or("").to_string(),
+                r.get("scope")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                r.get("cell")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                r.get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
             ));
         }
         if refused_cells.len() != top_keys.len() {
@@ -1081,9 +1136,18 @@ pub fn measure12a_schema_errors(artifact: &Value) -> Vec<String> {
         // Refusal ownership in both directions.
         for r in &scoped_refusals {
             let key = (
-                r.get("scope").and_then(Value::as_str).unwrap_or("").to_string(),
-                r.get("cell").and_then(Value::as_str).unwrap_or("").to_string(),
-                r.get("reason").and_then(Value::as_str).unwrap_or("").to_string(),
+                r.get("scope")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                r.get("cell")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                r.get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
             );
             if !top_keys.contains(&key) {
                 v.errs
@@ -1094,22 +1158,36 @@ pub fn measure12a_schema_errors(artifact: &Value) -> Vec<String> {
             .iter()
             .map(|r| {
                 (
-                    r.get("scope").and_then(Value::as_str).unwrap_or("").to_string(),
-                    r.get("cell").and_then(Value::as_str).unwrap_or("").to_string(),
-                    r.get("reason").and_then(Value::as_str).unwrap_or("").to_string(),
+                    r.get("scope")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    r.get("cell")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    r.get("reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
                 )
             })
             .collect();
         for key in &top_keys {
             let scope = key.0.as_str();
-            if !mirrored.contains(key) && !scope.starts_with("family:") && scope != "count_substitution"
+            if !mirrored.contains(key)
+                && !scope.starts_with("family:")
+                && scope != "count_substitution"
             {
-                v.errs.push(format!("top-level refusal {key:?} mirrored nowhere"));
+                v.errs
+                    .push(format!("top-level refusal {key:?} mirrored nowhere"));
             }
         }
 
         // Amendment E truth table on the reversion rung.
-        if let Some(rev) = rungs.iter().find(|r| r.get("name").and_then(Value::as_str) == Some("reversion"))
+        if let Some(rev) = rungs
+            .iter()
+            .find(|r| r.get("name").and_then(Value::as_str) == Some("reversion"))
         {
             let rev_keys: BTreeSet<&str> = rev
                 .as_object()
@@ -1231,7 +1309,9 @@ pub fn measure12a_semantic_errors(artifact: &Value, usable: &[Value]) -> Vec<Str
     if dates.iter().any(Option::is_none) {
         errs.push("observed session dates carry non-string values".to_string());
     } else if usable.iter().any(|d| !d.is_string()) {
-        errs.push(format!("the preflight usable list carries non-string entries: {usable:?}"));
+        errs.push(format!(
+            "the preflight usable list carries non-string entries: {usable:?}"
+        ));
     } else {
         let dates: Vec<&str> = dates.into_iter().map(Option::unwrap_or_default).collect();
         let mut usable_sorted: Vec<&str> = usable.iter().filter_map(Value::as_str).collect();
@@ -1251,7 +1331,9 @@ pub fn measure12a_semantic_errors(artifact: &Value, usable: &[Value]) -> Vec<Str
     let seeds: Vec<Option<i64>> = per_seed.iter().map(|g| strict_i64(&g["seed"])).collect();
     let want_seeds: Vec<Option<i64>> = (1..=8).map(Some).collect();
     if seeds.iter().any(Option::is_none) || seeds != want_seeds {
-        errs.push(format!("generated seeds {seeds:?} are not the strict integers 1..8"));
+        errs.push(format!(
+            "generated seeds {seeds:?} are not the strict integers 1..8"
+        ));
     }
 
     // Monthly and permutations_monthly must reconstruct exactly from
@@ -1275,8 +1357,10 @@ pub fn measure12a_semantic_errors(artifact: &Value, usable: &[Value]) -> Vec<Str
         let cond = ja(&seed0["count_substitution"], "conditional_adequacy");
         let mut expected: BTreeMap<&str, Vec<String>> = BTreeMap::new();
         {
-            let mut names: Vec<String> =
-                FAIL_HOURS_300.iter().map(|h| format!("print_excess_h{h}")).collect();
+            let mut names: Vec<String> = FAIL_HOURS_300
+                .iter()
+                .map(|h| format!("print_excess_h{h}"))
+                .collect();
             for h in FAIL_HOURS_300 {
                 for w in [60, 300] {
                     names.push(format!("quote_robust_{w}_h{h}"));
@@ -1285,8 +1369,10 @@ pub fn measure12a_semantic_errors(artifact: &Value, usable: &[Value]) -> Vec<Str
             expected.insert("child_walk", names);
         }
         {
-            let mut names: Vec<String> =
-                FAIL_HOURS_300.iter().map(|h| format!("fano_60_h{h}")).collect();
+            let mut names: Vec<String> = FAIL_HOURS_300
+                .iter()
+                .map(|h| format!("fano_60_h{h}"))
+                .collect();
             names.extend(FAIL_HOURS_300.iter().map(|h| format!("count_p99_60_h{h}")));
             for r in cond {
                 if r["required"] == Value::Bool(true) {
@@ -1298,8 +1384,10 @@ pub fn measure12a_semantic_errors(artifact: &Value, usable: &[Value]) -> Vec<Str
             expected.insert("arrival", names);
         }
         {
-            let mut names: Vec<String> =
-                FAIL_HOURS_300.iter().map(|h| format!("tail_ratio_h{h}")).collect();
+            let mut names: Vec<String> = FAIL_HOURS_300
+                .iter()
+                .map(|h| format!("tail_ratio_h{h}"))
+                .collect();
             names.push("tail_ratio_all".to_string());
             expected.insert("innovation", names);
         }
@@ -1339,7 +1427,9 @@ pub fn measure12a_semantic_errors(artifact: &Value, usable: &[Value]) -> Vec<Str
                 .collect();
             let want: Vec<Option<&str>> = names.iter().map(|n| Some(n.as_str())).collect();
             if got != want {
-                errs.push(format!("family {fam} inventory {got:?} is not the frozen {want:?}"));
+                errs.push(format!(
+                    "family {fam} inventory {got:?} is not the frozen {want:?}"
+                ));
             }
         }
     }
@@ -1440,7 +1530,10 @@ pub fn load_brick_g_walks(cache_dir: &Path) -> LabResult<BTreeMap<i64, Value>> {
         .collect();
     entries.sort();
     for path in entries {
-        let name = path.file_name().and_then(std::ffi::OsStr::to_str).unwrap_or("");
+        let name = path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("");
         if !name.ends_with(".json") || name.contains(".tmp") {
             continue;
         }
@@ -1451,15 +1544,12 @@ pub fn load_brick_g_walks(cache_dir: &Path) -> LabResult<BTreeMap<i64, Value>> {
                 "Brick G cache record {name} is not an object"
             )));
         }
-        let seed = record
-            .get("seed")
-            .and_then(strict_i64)
-            .ok_or_else(|| {
-                LabError::refusal(format!(
-                    "Brick G cache record {name} carries a non-integer seed {:?}",
-                    record.get("seed")
-                ))
-            })?;
+        let seed = record.get("seed").and_then(strict_i64).ok_or_else(|| {
+            LabError::refusal(format!(
+                "Brick G cache record {name} carries a non-integer seed {:?}",
+                record.get("seed")
+            ))
+        })?;
         if by_seed.contains_key(&seed) {
             return Err(LabError::refusal(format!(
                 "ambiguous Brick G cache: seed {seed} appears in more than one record"
@@ -1499,7 +1589,9 @@ pub fn json_safe(v: Value) -> Value {
             ),
             _ => v,
         },
-        Value::Object(map) => Value::Object(map.into_iter().map(|(k, v)| (k, json_safe(v))).collect()),
+        Value::Object(map) => {
+            Value::Object(map.into_iter().map(|(k, v)| (k, json_safe(v))).collect())
+        }
         Value::Array(items) => Value::Array(items.into_iter().map(json_safe).collect()),
         other => other,
     }
