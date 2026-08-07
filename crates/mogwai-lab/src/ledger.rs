@@ -15,13 +15,26 @@ use sha2::{Digest, Sha256};
 use crate::error::{LabError, LabResult};
 use crate::subcontract::{JOB_ID, LEDGER_KEY};
 
+/// Lowercase hex of a digest. sha2 0.11 finalizes to a `hybrid_array::Array`,
+/// which - unlike the 0.10 `GenericArray` - implements no `LowerHex`, so the
+/// `{:x}` formatting every hash site used has to be spelled out once here.
+pub fn hex_digest(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(HEX[usize::from(b >> 4)] as char);
+        out.push(HEX[usize::from(b & 0x0f)] as char);
+    }
+    out
+}
+
 /// sha256 hex digest of an in-memory byte slice - the provenance token's
 /// fingerprint-hash component hashes `analysis/fingerprint.json`'s bytes
 /// this way rather than reading it as a whole file with [`sha256_file`].
 pub fn sha256_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    hex_digest(&hasher.finalize())
 }
 
 pub fn sha256_file(path: &Path) -> LabResult<String> {
@@ -35,7 +48,7 @@ pub fn sha256_file(path: &Path) -> LabResult<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex_digest(&hasher.finalize()))
 }
 
 #[derive(Deserialize)]

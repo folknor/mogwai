@@ -551,8 +551,8 @@ mod tests {
                      3,101,1,101,2000000,true,true\n";
         let file = std::fs::File::create(&path).unwrap();
         let mut archive = zip::ZipWriter::new(file);
-        let options =
-            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
         archive.start_file("fixture.csv", options).unwrap();
         std::io::Write::write_all(&mut archive, rows.as_bytes()).unwrap();
         archive.finish().unwrap();
@@ -561,10 +561,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
 
         assert_eq!(result["rows"].as_i64().unwrap(), 3);
-        assert_eq!(
-            result["timestamp_and_side"]["events"].as_i64().unwrap(),
-            2
-        );
+        assert_eq!(result["timestamp_and_side"]["events"].as_i64().unwrap(), 2);
         assert!(result.get("per_second_counts").is_some());
     }
 }

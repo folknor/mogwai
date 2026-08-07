@@ -36,13 +36,13 @@ rand_distr = "0.6"
 # position), seedable and deterministic - the substrate the checkpointed seek
 # (CheckpointIndex) needs. rand_core 0.10, so rand_distr 0.6 sampling composes.
 rand_chacha = "0.10"
-# Streaming .csv.zst decode for the mogwai-lab corpus reader. Bindings over
-# libzstd (not a pure-Rust decoder): the corpus files are tens of GB and the
-# offline Python reference already uses the equivalent C library
-# (compression.zstd, stdlib since 3.14), so this keeps decode throughput and
-# format coverage identical rather than trusting a reimplementation.
-zstd = "0.13"
-sha2 = "0.10"
+# Streaming .csv.zst decode for the mogwai-lab corpus reader. A pure-Rust
+# zstd implementation, replacing the former libzstd bindings: it drops the C
+# toolchain from the build. The decoder is level-independent and reads
+# standard frames from any encoder, so the corpus the offline Python reference
+# produces via compression.zstd stays readable here.
+zrip = "0.8"
+sha2 = "0.11"
 tokio = { version = "1.53.1", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"

@@ -550,7 +550,7 @@ pub fn subcontract_dumps() -> String {
 pub fn subcontract_hash() -> String {
     let mut hasher = Sha256::new();
     hasher.update(subcontract_dumps().as_bytes());
-    format!("{:x}", hasher.finalize())
+    crate::ledger::hex_digest(&hasher.finalize())
 }
 
 #[cfg(test)]

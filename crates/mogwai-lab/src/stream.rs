@@ -90,7 +90,7 @@ impl<R: Read> Iterator for ZstLines<R> {
 
 fn iter_csv_zst(path: &Path) -> LabResult<impl Iterator<Item = LabResult<String>> + use<>> {
     let file = File::open(path)?;
-    let decoder = zstd::stream::read::Decoder::new(BufReader::new(file))?;
+    let decoder = zrip::FrameDecoder::new(BufReader::new(file));
     Ok(ZstLines::new(decoder))
 }
 
