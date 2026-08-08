@@ -352,12 +352,32 @@ fn avg_curves(curves: &[Vec<f64>]) -> Vec<f64> {
         .collect()
 }
 
-/// Reads `char_<PAIR>.json` files from `char_dir`, keyed by the `pair`
-/// field inside each report (matching `load_reports`'s dict, glob-sorted by
-/// filename but keyed by content).
+/// Reads `char_<PAIR>.json` files from `char_dir`, keyed by the `pair` field
+/// inside each report.
+///
+/// ORDERING, and why a `BTreeMap` is faithful here rather than merely
+/// convenient. The Python builds a dict by walking `sorted(glob(...))` -
+/// FILENAME order - and keying each entry by the report's own `pair` field, so
+/// its iteration order is filename order. A `BTreeMap` gives PAIR order. Those
+/// coincide exactly when every report's embedded pair matches its filename,
+/// which is a convention nothing previously enforced: a `char_AAA.json`
+/// declaring `"pair": "ZZZ"` put the two orders in different places, and the
+/// port would then iterate differently from the implementation it replaces.
+/// Rather than carry an insertion-ordered map to reproduce an order that is
+/// only ever meaningful under the convention, this refuses the mismatch. The
+/// invariant is then provable rather than incidental.
+///
+/// FAIL-CLOSED on both required fields. The Python indexes `r["pair"]` and
+/// `r["n_trades"]`, so a malformed report raises `KeyError` there. This
+/// previously substituted `""` and `0`, inventing an identity for one and
+/// silently changing an aggregate for the other - the worst class under the
+/// parity contract in `reference/architecture.md`, because it manufactures an
+/// answer from input the original rejected.
 ///
 /// # Errors
-/// Propagates I/O and JSON parse failure.
+/// [`LabError::Refusal`] if a report is missing `pair` or `n_trades`, if
+/// either has the wrong type, or if the embedded pair disagrees with the
+/// filename. Propagates I/O and JSON parse failure.
 pub fn load_reports(char_dir: &Path) -> LabResult<BTreeMap<String, Value>> {
     let mut paths: Vec<_> = std::fs::read_dir(char_dir)?
         .filter_map(Result::ok)
@@ -371,9 +391,41 @@ pub fn load_reports(char_dir: &Path) -> LabResult<BTreeMap<String, Value>> {
     paths.sort();
     let mut reps = BTreeMap::new();
     for path in paths {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| LabError::refusal("char report path is not valid UTF-8"))?
+            .to_string();
+        let from_name = name
+            .strip_prefix("char_")
+            .and_then(|n| n.strip_suffix(".json"))
+            .unwrap_or_default()
+            .to_string();
         let text = std::fs::read_to_string(&path)?;
         let value: Value = serde_json::from_str(&text)?;
-        let pair = value["pair"].as_str().unwrap_or("").to_string();
+        let pair = value
+            .get("pair")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                LabError::refusal(format!(
+                    "{name} carries no string `pair` field; the Python raises KeyError here \
+                     rather than inventing an identity"
+                ))
+            })?
+            .to_string();
+        if pair != from_name {
+            return Err(LabError::refusal(format!(
+                "{name} declares pair `{pair}`, so filename order and pair order disagree; \
+                 rename the file or fix the report rather than letting the two iterate \
+                 differently"
+            )));
+        }
+        if value.get("n_trades").and_then(Value::as_i64).is_none() {
+            return Err(LabError::refusal(format!(
+                "{name} carries no integer `n_trades` field; the Python raises KeyError here \
+                 rather than counting it as zero"
+            )));
+        }
         reps.insert(pair, value);
     }
     Ok(reps)
@@ -458,7 +510,9 @@ pub fn build_fingerprint(char_dir: &Path, cadence_path: &Path) -> LabResult<Valu
     let mut fingerprint = json!({
         "source": {
             "pairs": pairs,
-            "total_trades": reps.values().map(|r| r["n_trades"].as_i64().unwrap_or(0)).sum::<i64>(),
+            // `load_reports` refuses a report without an integer `n_trades`,
+            // so this is total by construction rather than by default.
+            "total_trades": reps.values().filter_map(|r| r["n_trades"].as_i64()).sum::<i64>(),
             "anchor": anchor["pair"],
         },
         "golden_targets": {
@@ -509,6 +563,75 @@ pub fn build_fingerprint(char_dir: &Path, cadence_path: &Path) -> LabResult<Valu
     });
     fingerprint["golden_targets"]["level_queue"] = queue;
     Ok(fingerprint)
+}
+
+#[cfg(test)]
+mod loader_contract_tests {
+    use super::*;
+
+    /// Writes one `char_<name>.json` carrying `body` into a per-test scratch
+    /// directory and returns it. Workspace `target/`, never the system temp
+    /// dir: this repo keeps all data inside the project. `CARGO_TARGET_TMPDIR`
+    /// is only defined for integration tests, and these are unit tests.
+    fn scratch_with(name: &str, body: &Value) -> std::path::PathBuf {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/char-loader-tests")
+            .join(name);
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        std::fs::write(
+            dir.join(format!("char_{name}.json")),
+            serde_json::to_string(body).expect("serialize"),
+        )
+        .expect("write report");
+        dir
+    }
+
+    fn load_one(name: &str, body: &Value) -> LabResult<BTreeMap<String, Value>> {
+        load_reports(&scratch_with(name, body))
+    }
+
+    #[test]
+    fn a_well_formed_report_loads_under_its_own_pair() {
+        let reps = load_one(
+            "AAAUSD",
+            &serde_json::json!({"pair": "AAAUSD", "n_trades": 7}),
+        )
+        .expect("well-formed report loads");
+        assert_eq!(reps.len(), 1);
+        assert_eq!(reps["AAAUSD"]["n_trades"], 7);
+    }
+
+    #[test]
+    fn a_report_without_a_pair_refuses_rather_than_inventing_an_identity() {
+        let err = load_one("BBBUSD", &serde_json::json!({"n_trades": 7}))
+            .expect_err("a missing pair must refuse");
+        assert!(err.to_string().contains("no string `pair`"), "{err}");
+    }
+
+    #[test]
+    fn a_report_without_n_trades_refuses_rather_than_counting_zero() {
+        let err = load_one("CCCUSD", &serde_json::json!({"pair": "CCCUSD"}))
+            .expect_err("a missing n_trades must refuse");
+        assert!(err.to_string().contains("no integer `n_trades`"), "{err}");
+    }
+
+    /// THE ORDERING DISCRIMINATOR. Under the old loader this file silently
+    /// keyed itself as `ZZZUSD` while sorting at the filename position of
+    /// `DDDUSD`, so a `BTreeMap` and the Python dict iterated differently.
+    /// Refusing is what makes pair order and filename order provably the same.
+    #[test]
+    fn a_pair_disagreeing_with_its_filename_refuses() {
+        let err = load_one(
+            "DDDUSD",
+            &serde_json::json!({"pair": "ZZZUSD", "n_trades": 7}),
+        )
+        .expect_err("a filename and pair mismatch must refuse");
+        assert!(
+            err.to_string().contains("filename order and pair order"),
+            "{err}"
+        );
+    }
 }
 
 #[cfg(test)]

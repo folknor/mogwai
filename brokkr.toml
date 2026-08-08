@@ -42,10 +42,17 @@ gate_profile = "gate"
 # Skipping them costs no coverage: the audit accepts a non-run pair that is
 # `#[ignore]`d at the source, and each stays runnable by name, which is the
 # documented way to use an instrument anyway -
-# `brokkr test -p mogwai-server vol_probe` and its five siblings. Each pattern
-# below matches exactly one test; an over-broad one would silently stop running
-# a real test, and the coverage audit would then fail it as orphaned rather than
-# let it disappear.
+# `brokkr test -p mogwai-server vol_probe` and its five siblings.
+#
+# THE INVARIANT every pattern below must satisfy: it may match ONLY tests that
+# are `#[ignore]`d at the source. That is what makes skipping them free - the
+# audit accepts a non-run pair that is ignored, because `include_ignored` is
+# the only reason it was in scope at all. A pattern matching a non-ignored test
+# silently stops running a real one, and the audit then fails it as orphaned
+# rather than letting it disappear. That is not hypothetical: the `parity3a_`
+# prefix did exactly this, and the audit caught it. Prefer full test names;
+# a prefix is only safe while every test that shares it stays ignored, which
+# is a property of files this file cannot see.
 [test.profiles.gate]
 description = "Everything, including the socket-backed adapter tests"
 sweeps = ["workspace"]
@@ -70,7 +77,16 @@ skip = [
     # one-minute archive. All need local data no clone carries. Run them by
     # name: `brokkr test -p mogwai-cli parity3b --timeout 279` and
     # `brokkr test -p mogwai-lab parity3b_session_profile`.
-    "parity3a_",
+    #
+    # The 3a pair is named in full rather than skipped by `parity3a_` prefix.
+    # That prefix ALSO caught
+    # `parity3a_cadence_feasible_verdict_matches_the_committed_cadence`, which
+    # is not `#[ignore]`d and needs nothing but the committed `cadence.json` -
+    # so the complete profile silently stopped running a real test and the
+    # coverage audit failed it as orphaned, exactly the outcome the note above
+    # predicts. Found 2026-08-08 by the codex program review.
+    "parity3a_fingerprint_matches_the_committed_artifact",
+    "parity3a_cadence_matches_the_committed_artifact",
     "parity3b_",
 ]
 certifies = "complete"

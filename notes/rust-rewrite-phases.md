@@ -903,6 +903,37 @@ moment the scripts move. Phase 4 therefore runs in two halves:
      implementations - re-passing the committed artifact proves nothing,
      since it is what the blind spot is made of.
 
+     RESOLVED in the spar, and the two halves go OPPOSITE ways. Measured
+     first: `x ** 0.5` differs from `sqrt(x)` in 1,618 of two million
+     draws over the realistic domain, about one in 1,236, and `hour_vol`
+     takes 192 square roots across the eight pairs - so a fresh
+     characterization run has roughly a 14 percent chance of exposing it.
+     Not a corner case.
+     - **Square root: APPROVED SEMANTIC CHANGE, keep `sqrt`.** CPython
+       delegates the finite case to platform libm `pow`, so matching it
+       bug-for-bug would make a committed artifact that is compiled into
+       the generator by `include_str` a function of the libm belonging to
+       whoever regenerated it. `sqrt` is correctly rounded under IEEE 754
+       and identical on every conforming platform. Add a discriminating
+       test at a value where `powf(0.5)` and `sqrt` differ, so nobody
+       later "restores parity", and narrow the cross-language exception
+       to the affected `session_profile.vol_hour` values while requiring
+       every other field to stay identical.
+     - **fmean: FAITHFUL PORT.** `statistics.fmean` is `fsum(data) / n`,
+       Shewchuk exact summation, and matching it introduces no platform
+       dependence. Add `py_fsum` beside `py_sum` in `kernel`, pin
+       cancellation, halfway rounding, order, overflow, infinity and NaN
+       against the helper's supported contract. Line 168 of
+       `build_fingerprint.py` uses builtin `sum` and line 170 uses
+       `fmean` INSIDE THE SAME FUNCTION, so the two paths must stay
+       distinct - routing both through one helper is the bug.
+     - **The landing bumps `TAPE_PROTOCOL_VERSION`.** Regenerating
+       `fingerprint.json` moves `vol_hour`, which is compiled into the
+       generator, so even a one-ULP change can move generated values or
+       timestamps. This is a genuine tape change, unlike the
+       diagnostics-only `modal_tick.max` re-commit in item 4, which moves
+       no tape byte and needs no bump.
+
   1e. **BLOCKER - `brokkr check --gate` is red**, for two independent
      reasons. `tape_lateness_under_acceleration` measured 90.2 ms
      against its 50 ms ceiling and 163.2 ms on a focused debug rerun;
