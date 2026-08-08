@@ -20,6 +20,7 @@ mod select_windows;
 mod session_profile;
 mod synth;
 mod tick_composition;
+mod tick_composition_ratios;
 
 use std::path::PathBuf;
 
@@ -67,6 +68,9 @@ enum Command {
     /// Bar-frame intake: choose which tick-data windows to buy
     /// (`analysis/select_windows.py`).
     SelectWindows(select_windows::SelectWindowsArgs),
+    /// Apply the BBO budget sizing policy to composition fixtures
+    /// (`analysis/tick_composition_ratios.py`).
+    TickCompositionRatios(tick_composition_ratios::RatiosArgs),
     /// The calendar-conditional session fit over a one-minute bar archive
     /// (`analysis/fit_session_profile.py`).
     SessionProfile {
@@ -142,6 +146,7 @@ fn main() -> anyhow::Result<()> {
         Command::Cache(args) => cache::run(args),
         Command::Characterize(args) => characterize::run(args),
         Command::SelectWindows(args) => select_windows::run(&args),
+        Command::TickCompositionRatios(args) => tick_composition_ratios::run(&args),
         Command::SessionProfile { command } => session_profile::run(command),
         Command::Synth { command } => synth::run(command),
         Command::CadenceFeasible(args) => synth::run_cadence_feasible(args),

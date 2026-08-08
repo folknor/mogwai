@@ -1455,7 +1455,56 @@ moment the scripts move. Phase 4 therefore runs in two halves:
      Re-running that test on a second instrument additionally needs
      `build_bars.py`, `build_targets.py`, `spearman_association.py` and
      `run_association.py` resurrected from `9170f45`.
-  3. **ABSORB `tick_composition_ratios.py` as its OWN subcommand**, not
+  3. **DONE 2026-08-08.** `mogwai_lab::tick_composition_ratios` plus
+     `mogwai tick-composition-ratios compare|verify89-identity|modes`.
+     All four modes and both gate paths reproduce the blessed reference
+     BIT-EXACTLY, and the `compare` output is byte-identical to the
+     Python's - integral rendering included, since the proposals are
+     integers by construction and printing `67108864.0` for a value
+     somebody pastes into a source constant is a small lie about what it
+     is.
+
+     Every constraint recorded below held:
+
+     - **Its own subcommand**, not a `--report` mode. `tick-composition`
+       measures a tape; this turns a measurement into constants and
+       refuses landings. Fused, one invocation could measure a fixture and
+       bless it in the same breath.
+     - **The per-mode baselines are committed DATA**, frozen history, with
+       a test pinning them and a second asserting `max_extend_ticks` is
+       `1 << 30` in every mode - it is a per-lock runaway backstop rather
+       than a reach ceiling and is deliberately never scaled.
+     - **`CALENDAR_FREE`/`CALENDAR_BEARING` are now DERIVED**, from whether
+       a preset carries a calendar, through the server's own loader. The
+       preset list comes from the FIXTURE rather than a constant, which is
+       the point: a sixth instrument appears there and gets classified,
+       where the Python's literal tuples would have left it in neither
+       class and the acceptance gate would have checked nothing for it
+       while still passing. A test proves the derivation reproduces the
+       Python's tuples exactly - without it the claim would be untested
+       prose, since the parity gate feeds the blessed lists in
+       deliberately.
+     - **The rejected protocol-11 fanout proposal carries forward as
+       DATA**, in `REJECTED_PROPOSALS`. `independent_10_11` still
+       mechanically proposes 16,777,216, and the CLI now prints a refusal
+       note when it does. A sizing tool that cannot remember a refusal
+       will keep making it.
+     - **The five `reference/performance.md` citations moved** in the same
+       commit, plus a sixth in `docs/cli.md` that the note did not count.
+
+     THE GATE IS NOT `#[ignore]`d, unlike items 1 and 2. Every input is
+     committed - six fixtures plus the blessed artifact - so it runs on any
+     clone, every time. A sizing policy behind four shipped constants
+     should not be checked only on the machine holding a data delivery.
+
+     The blessing captures the two gate paths that produce no ratios by
+     their VERDICT, since that is their whole claim, and the port is
+     additionally shown to REFUSE a self-comparison - a gate that only
+     ever passes proves nothing about what it rejects.
+
+     The original text follows.
+
+     **ABSORB `tick_composition_ratios.py` as its OWN subcommand**, not
      a `--report` mode on `tick-composition`: it is the sizing policy
      behind four shipped constants (`CHECKPOINT_K`, the sweep drain
      budget, the warmup materialization ceiling, `fanout_depth`) plus

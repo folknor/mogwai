@@ -291,7 +291,7 @@ old 65,536-frame fanout held 0.007398 wall seconds; the resized fanout holds
 0.029553 wall seconds, so its horizon does not shrink. Regenerate both fixtures
 with
 `brokkr run mogwai -- tick-composition --out-6 analysis/tick-composition-protocol-6.json --out-7 analysis/tick-composition-protocol-7.json`,
-then run `python3 analysis/tick_composition_ratios.py` after any
+then run `mogwai tick-composition-ratios compare` after any
 event-composition change. One invocation emits both: protocol 6 is a count
 projection of the protocol-7 tape, so the two fixtures are counted off a single
 traversal and are paired by construction rather than by two runs agreeing. Both
@@ -316,7 +316,7 @@ the same parent count into the cash session raises all of them.
 
 Protocol 8 cannot be projected from protocol 7. The profile divides the duration
 draw and scales the return, so timestamps and prices both move and the two
-fixtures come from SEPARATE traversals. `tick_composition_ratios.py --mode
+fixtures come from SEPARATE traversals. `mogwai tick-composition-ratios compare --mode
 independent` therefore gates before computing any ratio: `ticks_per_parent` must
 be bit-identical for all five presets, because the profile changes when events
 happen and never how many, and every measured field must be identical for
@@ -369,7 +369,7 @@ run should size `fanout_depth` deliberately rather than inherit the default.
 
 Regenerate with
 `brokkr run mogwai -- tick-composition --out analysis/tick-composition-protocol-8.json`,
-then `python3 analysis/tick_composition_ratios.py --mode independent`. The run
+then `mogwai tick-composition-ratios compare --mode independent`. The run
 now costs about 90 minutes rather than an hour, and the increase IS the result.
 Each mode carries its own baseline constant table; a shared one would resize the
 current constants by the pre-protocol-7 baseline and under-propose checkpoint
@@ -421,7 +421,7 @@ the default.
 
 Regenerate with
 `brokkr run mogwai -- tick-composition --out analysis/tick-composition-protocol-10.json`,
-then `python3 analysis/tick_composition_ratios.py --mode independent_9_10`.
+then `mogwai tick-composition-ratios compare --mode independent_9_10`.
 
 ## 2026-08-06 protocol 11 session-refit composition
 
@@ -484,4 +484,4 @@ operational signal must not scale with refusal ceilings.
 
 Regenerate with
 `brokkr run mogwai -- tick-composition --out analysis/tick-composition-protocol-11.json`,
-then `python3 analysis/tick_composition_ratios.py --mode independent_10_11`.
+then `mogwai tick-composition-ratios compare --mode independent_10_11`.

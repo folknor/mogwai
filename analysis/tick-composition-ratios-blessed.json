@@ -1,0 +1,211 @@
+{
+ "_doc": "Reference for the tick_composition_ratios.py absorption, phase 4b item 3. Produced by scripts/bless_tick_composition_ratios.py from the Python's own functions while it was still runnable. The Rust port is matched against this. Floats are exact decimal round-trips, so the comparison is bit-exact.",
+ "constants": {
+  "MODES": {
+   "independent": {
+    "versions": [
+     7,
+     8
+    ],
+    "before": "analysis/tick-composition-protocol-7.json",
+    "after": "analysis/tick-composition-protocol-8.json",
+    "same_pairing": false,
+    "acceptance": "session_reshape",
+    "baseline": {
+     "checkpoint_k": 1048576,
+     "sweep_drain_budget": 282000000,
+     "max_extend_ticks": 1073741824,
+     "warmup_baseline": 81124000000,
+     "fanout_depth": 262144
+    }
+   },
+   "independent_10_11": {
+    "versions": [
+     10,
+     11
+    ],
+    "before": "analysis/tick-composition-protocol-10.json",
+    "after": "analysis/tick-composition-protocol-11.json",
+    "same_pairing": false,
+    "acceptance": "session_reshape",
+    "baseline": {
+     "checkpoint_k": 16777216,
+     "sweep_drain_budget": 5799000000,
+     "max_extend_ticks": 1073741824,
+     "warmup_baseline": 667299000000,
+     "fanout_depth": 4194304
+    }
+   },
+   "independent_9_10": {
+    "versions": [
+     9,
+     10
+    ],
+    "before": "analysis/tick-composition-protocol-9.json",
+    "after": "analysis/tick-composition-protocol-10.json",
+    "same_pairing": false,
+    "acceptance": "preset_fit",
+    "baseline": {
+     "checkpoint_k": 4194304,
+     "sweep_drain_budget": 1434000000,
+     "max_extend_ticks": 1073741824,
+     "warmup_baseline": 162349000000,
+     "fanout_depth": 1048576
+    }
+   },
+   "projection": {
+    "versions": [
+     6,
+     7
+    ],
+    "before": "analysis/tick-composition-protocol-6.json",
+    "after": "analysis/tick-composition-protocol-7.json",
+    "same_pairing": true,
+    "acceptance": null,
+    "baseline": {
+     "checkpoint_k": 262144,
+     "sweep_drain_budget": 5000000,
+     "max_extend_ticks": 1073741824,
+     "warmup_baseline": 1073741824,
+     "fanout_depth": 65536
+    }
+   }
+  },
+  "IDENTITY_SEPARATELY_VALIDATED": [
+   "tape_protocol_version",
+   "pairing_id",
+   "projection"
+  ],
+  "CALENDAR_FREE": [
+   "BTCUSDT",
+   "ETHUSDT",
+   "SOLUSDT"
+  ],
+  "CALENDAR_BEARING": [
+   "MNQ",
+   "MES"
+  ]
+ },
+ "modes": {
+  "independent": {
+   "ratios": {
+    "checkpoint_k": 1.64,
+    "sweep_drain_budget": 2.5419985517740766,
+    "warmup_materialization_ticks": 1.0006194078675688,
+    "fanout_depth": 1.595696020463375
+   },
+   "observed": {
+    "frames_per_sim_second": 963545.6100000006,
+    "vol_window_count": 270931449.365,
+    "warmup_window_count": 1364836628.3400002
+   },
+   "required_reach": {
+    "sweep_drain_budget": 289063683.0000002,
+    "warmup_materialization_ticks": 83250340704.00005
+   },
+   "proposed": {
+    "checkpoint_k": 4194304,
+    "sweep_drain_budget": 1434000000,
+    "max_extend_ticks": 1073741824,
+    "warmup_materialization_ticks": 162349000000,
+    "fanout_depth": 1048576
+   },
+   "horizons": {
+    "fanout_old_wall_seconds": 0.029552547396543248,
+    "fanout_new_wall_seconds": 0.1141228429541298
+   }
+  },
+  "independent_10_11": {
+   "ratios": {
+    "checkpoint_k": 1.09375,
+    "sweep_drain_budget": 1.1303150626423668,
+    "warmup_materialization_ticks": 1.0003600825751464,
+    "fanout_depth": 1.0142159776948965
+   },
+   "observed": {
+    "frames_per_sim_second": 938928.666,
+    "vol_window_count": 258678966.468,
+    "warmup_window_count": 1364836628.3400002
+   },
+   "required_reach": {
+    "sweep_drain_budget": 281678599.8,
+    "warmup_materialization_ticks": 81123436742.4
+   },
+   "proposed": {
+    "checkpoint_k": 67108864,
+    "sweep_drain_budget": 13110000000,
+    "max_extend_ticks": 1073741824,
+    "warmup_materialization_ticks": 1335079000000,
+    "fanout_depth": 16777216
+   },
+   "horizons": {
+    "fanout_old_wall_seconds": 0.47284075834469197,
+    "fanout_new_wall_seconds": 1.8913630333787679
+   }
+  },
+  "independent_9_10": {
+   "ratios": {
+    "checkpoint_k": 1.6,
+    "sweep_drain_budget": 2.0218140068886337,
+    "warmup_materialization_ticks": 2.0551365756685525,
+    "fanout_depth": 1.8373118599802998
+   },
+   "observed": {
+    "frames_per_sim_second": 938928.666,
+    "vol_window_count": 258678966.468,
+    "warmup_window_count": 1364836628.3400002
+   },
+   "required_reach": {
+    "sweep_drain_budget": 281678599.8,
+    "warmup_materialization_ticks": 81123436742.4
+   },
+   "proposed": {
+    "checkpoint_k": 16777216,
+    "sweep_drain_budget": 5799000000,
+    "max_extend_ticks": 1073741824,
+    "warmup_materialization_ticks": 667299000000,
+    "fanout_depth": 4194304
+   },
+   "horizons": {
+    "fanout_old_wall_seconds": 0.1141228429541298,
+    "fanout_new_wall_seconds": 0.47284075834469197
+   }
+  },
+  "projection": {
+   "ratios": {
+    "checkpoint_k": 1.3888888888888888,
+    "sweep_drain_budget": 1.5831447963800904,
+    "warmup_materialization_ticks": 1.589435777679228,
+    "fanout_depth": 1.546711267774503
+   },
+   "observed": {
+    "frames_per_sim_second": 938928.666,
+    "vol_window_count": 258678966.468,
+    "warmup_window_count": 1364836628.3400002
+   },
+   "required_reach": {
+    "sweep_drain_budget": 281678599.8,
+    "warmup_materialization_ticks": 81123436742.4
+   },
+   "proposed": {
+    "checkpoint_k": 1048576,
+    "sweep_drain_budget": 282000000,
+    "max_extend_ticks": 1073741824,
+    "warmup_materialization_ticks": 81124000000,
+    "fanout_depth": 262144
+   },
+   "horizons": {
+    "fanout_old_wall_seconds": 0.0073981855935156575,
+    "fanout_new_wall_seconds": 0.029552547396543248
+   }
+  }
+ },
+ "gates": {
+  "verify_8_9_identity": {
+   "passed": true
+  },
+  "selftest": {
+   "passed": true
+  }
+ }
+}

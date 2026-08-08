@@ -43,5 +43,6 @@ pub mod storage;
 pub mod stream;
 pub mod subcontract;
 pub mod summary;
+pub mod tick_composition_ratios;
 
 pub use error::{LabError, LabResult};

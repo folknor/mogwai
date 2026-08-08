@@ -164,9 +164,12 @@ protocol-7 stream - quote placement draws no randomness, so one traversal
 carried both - but that is specific to those two versions. A session profile
 divides the duration draw and scales the return, so protocol 8's tape has
 different timestamps and prices and cannot be projected from protocol 7. Version
-pairs are compared by `analysis/tick_composition_ratios.py`, whose `--mode
+pairs are compared by `mogwai tick-composition-ratios compare`, whose `--mode
 projection` keeps the 6-to-7 contract and whose `--mode independent` compares
-two separately measured tapes.
+two separately measured tapes. It is a SEPARATE subcommand rather than a report
+mode here: `tick-composition` measures a tape, and that command turns a
+measurement into proposed constants, so fusing them would let one invocation
+measure a fixture and bless it in the same breath.
 
 From protocol 9 onward, the command consumes compact parent summaries from the
 same stochastic kernel as the served wire path. The kernel still advances every
