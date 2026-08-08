@@ -150,13 +150,24 @@ impl LevelVisits {
         let size_p90 = histogram_quantile(&self.size_hist, 0.9);
         let vol_p50 = histogram_quantile(&self.vol_hist, 0.5);
         let vol_p90 = histogram_quantile(&self.vol_hist, 0.9);
+        // Both of these are INTEGERS in the Python - `DWELL_ERA_START_TS` and
+        // `LVL_PER_DEC` are int literals - and the typed-canonical comparator
+        // distinguishes int from float, so emitting them as floats is a real
+        // difference rather than a formatting one. They are held as f64
+        // internally only because every comparison they take part in is
+        // against a float timestamp or a float bin index.
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "an exact integral epoch second and an exact small integer"
+        )]
+        let (era_start_ts, bins_per_decade) = (self.era_start_ts as i64, LVL_PER_DEC as i64);
         json!({
-            "era_start_ts": self.era_start_ts,
+            "era_start_ts": era_start_ts,
             "n_visits": self.count,
             "single_print_frac": if self.count != 0 { Some(self.single as f64 / self.count as f64) } else { None },
             "bin_lo": LVL_LOG_LO,
             "bin_hi": LVL_LOG_HI,
-            "bins_per_decade": LVL_PER_DEC,
+            "bins_per_decade": bins_per_decade,
             "vol_hist": self.vol_hist.to_vec(),
             "n_hist": self.n_hist.to_vec(),
             "size_median": size_p50,

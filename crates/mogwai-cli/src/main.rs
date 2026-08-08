@@ -12,6 +12,7 @@
 compile_error!("mogwai requires a Unix target");
 
 mod cache;
+mod characterize;
 mod r#gen;
 mod man;
 mod preflight;
@@ -57,6 +58,10 @@ enum Command {
     /// The cache-storage-class manual controls (stats / clean / clean
     /// --stale).
     Cache(cache::CacheArgs),
+    /// Stream a trade corpus into `char_<PAIR>.json` stylized-fact reports,
+    /// the input `synth fingerprint` reads
+    /// (`analysis/characterize.py` plus `run_corpus.py`'s fan-out).
+    Characterize(characterize::CharacterizeArgs),
     /// Phase-3a offline synthesis: fingerprint/cadence generation
     /// (`analysis/build_fingerprint.py`/`build_cadence.py`).
     Synth {
@@ -124,6 +129,7 @@ fn main() -> anyhow::Result<()> {
         Command::Measure(args) => measure::run(args),
         Command::Fit(args) => fit::run(&args),
         Command::Cache(args) => cache::run(args),
+        Command::Characterize(args) => characterize::run(args),
         Command::Synth { command } => synth::run(command),
         Command::CadenceFeasible(args) => synth::run_cadence_feasible(args),
     }
