@@ -420,7 +420,11 @@ subphase's own Rust tests.
   and the preset session arrays. select_windows lands here or is
   re-sentenced; tick_composition_ratios gets its owner ruling (report
   generator -> absorb; independent conformance leg like
-  roll_estimator -> stays Python).
+  roll_estimator -> stays Python). RULED 2026-08-08: both ABSORB, and
+  the framing of that second question was a false dichotomy -
+  `tick_composition_ratios.py` is neither, it is the sizing policy for
+  four shipped constants plus a protocol-landing gate. Deferred to 4b,
+  since 3b had already landed when the rulings came.
 
   LANDED 2026-08-06 (3a only; 3b unstarted). `mogwai_lab::characterize`
   carries the phase-0 estimand layer (`lvl_bin`/`histogram_quantile`/
@@ -696,7 +700,16 @@ subphase's own Rust tests.
   complete profile now skips `parity3a_` and `parity3b_` alongside
   `parity12a_`, for the same reason: local data no clone carries.
 
-  OWNER RULINGS STILL OPEN, assessed and left untouched as briefed:
+  OWNER RULINGS, assessed here in phase 3b and RULED 2026-08-08. Both
+  assessments below are superseded and both were wrong in the same way:
+  they priced each script against a CLOSED corpus. The corpus is open -
+  MNQ plus the three crypto pairs is the current state, not the end
+  state - so "no purchase decision is on record as coming" and "still an
+  owner call" both dissolve. Every new symbol re-runs the intake
+  sequence. The authorized work is the 4b scope block in this file; the
+  rulings and their grounds are indexed in
+  `notes/rust-rewrite-review-dossier.md` section 10; the corrections to
+  the specific reasoning are noted inline below.
 
   - **select_windows.py** (370 lines, `features`/`select`/`drift`/`plan`).
     Absorbing it is a genuinely small port - four phases over the four
@@ -719,6 +732,21 @@ subphase's own Rust tests.
     KEEP until a purchase question actually returns"; both are
     defensible and the choice is about whether more sampling-frame
     buying is expected, which is owner knowledge, not code knowledge.
+
+    RULED: ABSORB WHOLE, all four phases. The owner knowledge the
+    assessment asked for is that more buying IS expected, for every
+    instrument added from here. Two factual corrections to the paragraph
+    above. `targets-frozen.json` cannot be the gate - it is the BTCUSDT
+    microstructure target set, one of two hash-pinned frozen INPUTS to
+    the sampling-frame experiment, and the `select` phase neither reads
+    nor produces it; the from-archives gate is therefore not merely the
+    most honest one, it is the only one, and it must be blessed before
+    the port can be matched. And the assessment never registers that the
+    stratification method was preregistered-TESTED and REJECTED on
+    BTCUSDT (`analysis/association-result.json`), which is nonetheless
+    not grounds to drop `select`/`plan`: one observation on one crypto
+    pair, and running it on the next instrument is how it becomes a law
+    or a local fact.
   - **tick_composition_ratios.py** (680 lines). Reading it settles the
     triage's ambiguity in one direction: it contains NO independent
     estimator. It reads two committed
@@ -737,6 +765,25 @@ subphase's own Rust tests.
     they must move as data, not be re-derived. Still an owner call
     because the triage flagged it as one.
 
+    RULED: ABSORB, but as its OWN subcommand, and the "no independent
+    estimator" premise is refuted. The budget-policy arithmetic IS the
+    estimator: worst p99.9 ratio, two-times headroom, power-of-two or
+    next-million rounding, then the larger of that and the required
+    reach - and it decides four SHIPPED constants (`CHECKPOINT_K`, the
+    sweep drain budget, the warmup materialization ceiling,
+    `fanout_depth`). Calling that a report generator confuses the fact
+    that its INPUTS are Rust-produced with the claim that its OUTPUT is
+    descriptive. It is also a protocol-landing gate: three acceptance
+    checks refuse before any ratio is computed, plus a whole-tree
+    finite-and-positive leaf validator and a 27-check selftest.
+    `reference/performance.md` cites it at five sites, and it is where
+    the rejected protocol-11 fanout proposal came from. So NOT a
+    `--report` mode on `tick-composition`: producer and gate stay
+    separate, or one command measures a fixture and blesses it. The
+    baselines-as-data constraint is correct and is kept; add that
+    `CALENDAR_FREE`/`CALENDAR_BEARING` become preset-derived, since
+    hardcoded preset tuples do not survive an open instrument set.
+
 ## Phase 4 - review, then retirement (strictly in that order)
 
 Owner ruling 2026-08-06: the Python does NOT retire until AFTER the
@@ -754,6 +801,93 @@ moment the scripts move. Phase 4 therefore runs in two halves:
 - 4b, post-signature retirement: only after codex signs do
   mnq_fit.py and the absorbed scripts move to `research/dead/` and
   the parity-frozen defects get their real fixes.
+
+  4b SCOPE, as it stands 2026-08-08. Order matters: the first item
+  BLOCKS the retirement and must land before any absorbed script moves.
+
+  1. **BLOCKER - add a `mogwai characterize` subcommand.** There is
+     none. `mogwai_lab::characterize` is a gated library with no CLI
+     driver, and its Python driver `run_corpus.py` was deleted at
+     `9170f45`. The chain only works today because `characterize.py`
+     runs standalone (`python3 analysis/characterize.py <pair>` writes
+     `analysis/char_<PAIR>.json`). Retire it as planned and NOTHING in
+     either language produces `char_*.json` - which
+     `mogwai synth fingerprint` reads as its input, and which is the
+     first step of onboarding any new instrument. Retiring
+     `characterize.py` before this lands severs the intake chain.
+     Note the shape: the Python has both a per-corpus entry point and
+     (formerly) a multi-pair driver, so the subcommand needs to cover
+     the `run_corpus.py` fan-out too, not just the single-file case.
+  2. **ABSORB `select_windows.py` WHOLE**, all four phases, as the
+     bar-frame intake station on top of `session_profile.rs`'s existing
+     archive, session and eligibility machinery. No frozen artifact
+     exists to gate against: `cme_daily_features.json` is a regenerable
+     gitignored cache and `targets-frozen.json` is the BTCUSDT
+     microstructure target set this script never touches. So bless a
+     selection artifact from the current Python over the four CME zips
+     FIRST, then match the port to it. The BTCUSDT rejection
+     (`analysis/association-result.json`) travels as a recorded prior on
+     `select`/`plan`, not as grounds to drop them - and per the
+     preregistration's section 7.1, only the `rv`-rank association was
+     ever tested; the five-feature farthest-point selection the code
+     actually implements was never on trial in either direction.
+     Re-running that test on a second instrument additionally needs
+     `build_bars.py`, `build_targets.py`, `spearman_association.py` and
+     `run_association.py` resurrected from `9170f45`.
+  3. **ABSORB `tick_composition_ratios.py` as its OWN subcommand**, not
+     a `--report` mode on `tick-composition`: it is the sizing policy
+     behind four shipped constants (`CHECKPOINT_K`, the sweep drain
+     budget, the warmup materialization ceiling, `fanout_depth`) plus
+     three protocol-landing acceptance gates, so producer and gate stay
+     separate or one command measures a fixture and blesses it.
+     Constraints: per-mode baseline tables move as committed DATA and
+     are never re-derived (the file's own comment records that sharing
+     one table silently under-proposed two constants while every
+     assertion passed); `CALENDAR_FREE`/`CALENDAR_BEARING` become
+     preset-derived, since hardcoded preset tuples do not survive an
+     open instrument set; and the REJECTED protocol-11 fanout proposal
+     carries forward as data, or the first 12b run mechanically
+     re-proposes 16,777,216 and re-litigates a settled ruling.
+     `reference/performance.md` cites this script by name at five sites;
+     those citations move in the same commit.
+  4. **RE-COMMIT `analysis/fingerprint.json`** regenerated from today's
+     `char_*.json`, accepting `empirical_ranges.modal_tick.max` 0.25 to
+     0.1. No tape byte depends on it - the artifact's own `_doc` says
+     the ranges are diagnostics only and `.max` is read at exactly one
+     site, `Scalars::empirical_diagnostics`. Land together:
+     `generator.modal_tick` in `presets/mnq.toml` gains
+     `accepted_diagnostics = ["outside-empirical-corpus-range"]`,
+     matching what that preset already declares for three other fields;
+     the third arm of
+     `shipped_preset_diagnostics_require_exact_provenance_acceptance`
+     inverts and must be rewritten against a value genuinely in range;
+     and `crates/mogwai-lab/tests/parity3a.rs`'s `allowed` exception is
+     DELETED, its disappearance being the proof. Verify whether MES
+     declares the knob or inherits it. Record the regeneration
+     provenance in the commit - `char_*.json` is gitignored, so the
+     inputs cannot be reconstructed from the tree.
+  5. **Scope the subcontract hash BY MODE.** One flat
+     `SUBCONTRACT_KEYS` namespace means any constant edit retroactively
+     unbinds every prior fit, including for constants that fit never
+     read. With one instrument that is a curiosity; with a dozen, adding
+     one 12b constant silently unbinds every committed fit artifact and
+     the next reader concludes the corpus is stale when nothing moved.
+     (`mnq-fit.json`'s own binding hashes STAY as committed - 35e5b033
+     accurately records what the protocol-11 fit ran under. A fresh fit
+     buys extensibility, not correctness, and is owner-authorized
+     whenever convenient to bundle.)
+  6. The parity-frozen defect (the TBBO stream contract's unguarded
+     conversions in `parse_stream` / `stream.rs`) gets its real fix.
+  7. Then, and only then, the absorbed scripts move to `research/dead/`.
+     `research/` is gitignored, so this is effectively removal from the
+     repo with a local copy retained; git history is the real archive.
+
+  NOT retiring, and the phase should not discover this late: the eleven
+  permanently-KEEP scripts of the "Permanently out of scope" section
+  below, plus `probe_binance_klines.py` (a live `test_characterize.py`
+  import, mis-filed DEAD by the triage) and `test_characterize.py`
+  itself, whose four surviving tests assert behavior in scripts that
+  stay Python.
 
   LANDED 2026-08-07 (4a). No deletions, per the phase's own constraint -
   `mnq_fit.py` and every absorbed script stay in place; `mogwai-protocol`

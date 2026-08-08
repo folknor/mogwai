@@ -4,6 +4,13 @@ Open work only. How the built system works lives in
 `reference/architecture.md`; the landing-by-landing history is in git; the
 per-crate mechanics are in code comments.
 
+**NOT the live arc.** Work that is actively being DONE belongs to its own
+track's document, not here - see `notes/README.md` for the map. This file is
+for what is parked, deferred, unresolved or simply elsewhere: adapter and
+engine items, investigations nobody is running, decisions nobody is taking,
+the value inventory. If an item is on the critical path of the work in flight,
+it is in the wrong file.
+
 Once an item here is completed, it GETS REMOVED ENTIRELY. If the prose contains
 any relevant information that must endure, it gets either (a) added as an inline
 comment in the code, or (b) added to an existing or new ../reference/ document.
@@ -11,38 +18,6 @@ comment in the code, or (b) added to an existing or new ../reference/ document.
 Or both. There are no exceptions.
 
 ## Open issues
-
-- OWNER DECISION, rewrite leftovers (assessments in the phase-3b
-  report and notes/rust-rewrite-phases.md): select_windows.py -
-  absorb with a targets-frozen gate (one small slice; the
-  session-profile port already landed its infrastructure) or
-  re-sentence to KEEP until a sampling-frame purchase question
-  returns; tick_composition_ratios.py - reading it settled the triage
-  ambiguity, it is a report generator over Rust-produced fixtures
-  with no independent estimator, so ABSORB as a --report mode on the
-  tick-composition subcommand is the honest verdict, with the frozen
-  baseline tables moving as data, never re-derived.
-
-- OWNER DECISION: the committed `analysis/fingerprint.json` has drifted
-  from its gitignored `analysis/char_*.json` inputs - regeneration
-  (Python and the Rust port agree) produces
-  `empirical_ranges.modal_tick.max = 0.1` where the committed artifact
-  carries `0.25`, the exact ceiling MNQ's tick sits on. The fingerprint
-  is compiled into the generator via include_str, so re-committing it is
-  a `TAPE_PROTOCOL_VERSION` decision, not a hygiene fix; the ranges are
-  warnings-not-admission since the 3.3 resolution, but the shipped-preset
-  test makes unaccepted warnings fatal for committed presets. Found
-  2026-08-06 by the rewrite phase-3a fingerprint parity gate. Do nothing
-  until ruled.
-
-- The TBBO stream contract has an unguarded conversion class, in BOTH
-  implementations: `parse_stream` (analysis/mnq_fit.py and its
-  phase-1 port crates/mogwai-lab/src/stream.rs) converts
-  price/size/bid_sz/ask_sz without a named Refusal, so a malformed
-  non-integer field crashes instead of refusing cleanly. The Rust
-  port mirrors the Python deliberately (parity first); once the
-  Python retires at rewrite phase 4, decide whether these joins the
-  refusal contract. Found 2026-08-06 by the phase-1 port.
 
 - INVESTIGATE the fanout-capacity accept-before-fill failure. A CORRECTNESS
   investigation, not capacity tuning: with `fanout_depth = 16_777_216`,
@@ -361,42 +336,6 @@ Or both. There are no exceptions.
   violator under `reorder_prob`, and is pinned by
   `an_out_of_order_trade_folds_into_the_open_window_without_wedging`.)
 
-- BUILD, eventually: a CLI binary in `mogwai-data` that becomes the standing
-  home for the offline data machinery, in Rust. The repo now carries 30+
-  Python scripts across `analysis/` and `scripts/`, which is too much surface
-  to keep correct by convention; the corpus-scale work (archive preflight,
-  fidelity probes, fingerprint characterization) is exactly the streaming-
-  parse-and-count shape Rust is good at. The 2026-08-05 preflight optimization
-  measured the Python ceiling honestly: a bytes-mode hot loop plus a process
-  pool gets a 128.7M-row month to ~58 s, which is 2.21M rows/sec.
-
-  Do NOT justify this item with the 2.9M ticks/sec figure. That is
-  `SYNTHESIS_TICKS_PER_SEC`, the rate at which the generator MANUFACTURES a tick
-  - GARCH recursion, RNG draws, checkpoint retention, measured over a whole boot
-  interval - and manufacturing a tick is far heavier per item than splitting a
-  CSV line. Set beside Python's 2.21M rows/sec it looks like near-parity and so
-  argues AGAINST the migration, which is the opposite of the truth. The real
-  comparator is a Rust byte-level parse, which should run far faster than
-  either, and NOBODY HAS MEASURED IT. The expected win is large but currently
-  unquantified; a one-month Rust parse prototype timed against the same
-  128.7M-row archive would settle it for the cost of an afternoon, and this item
-  should carry that number before it is scheduled on performance grounds.
-
-  Prior art that cuts against the stated home: `tick-composition` started as
-  `mogwai-data/examples/tick_composition.rs` and was MOVED to
-  `mogwai-server/src/tick_composition.rs` as a subcommand of the `mogwai` bin
-  (494f00f). It needed the server's preset resolution, which is a real reason
-  and may not apply here - archive preflight only parses files and wants nothing
-  from the server. So `mogwai-data` may still be right, but the precedent points
-  the other way and should be distinguished deliberately rather than overlooked.
-
-  Consolidating also collapses the twice-computed-definition risk the
-  `analysis/` test-harness item below records (`dwell_stats` versus
-  `empty_hour_stats`), since one implementation would serve both the corpus
-  measurement and the generator gate. Scope decisions when picked up: which
-  scripts migrate versus die, whether the bin reads ZIP archives directly
-  (a new dependency), and how the per-month JSON result contract carries over.
-
 - NUMERICAL STABILITY in `AutoCorr`, and it needs cadence-impact analysis before
   anyone touches it. Surfaced 2026-08-05 by the F3-F6 conformance fixtures. Its
   `acf()` guards zero variance with `if var <= 0: return [0.0] * k`, and that
@@ -423,34 +362,33 @@ Or both. There are no exceptions.
   carry positive return variance and come nowhere near the degenerate case, so
   nothing currently depends on this being fixed.
 
-- DECIDE: does `analysis/` deserve a test harness? Surfaced 2026-08-02 landing
-  the drought elimination. The dwell statistics are computed TWICE against the
-  same definition - `dwell_stats` in `analysis/characterize.py` measures the
-  corpus, `empty_hour_stats` in `mogwai-data`'s generator tests measures the
-  synthetic tape, and the gate compares one against the other. If the two hour-
-  bucket conventions ever drift (inclusive end boundary, the era-start ceiling,
-  which trade closes a gap) the gate silently compares two different quantities
-  and still passes. The Rust side has a fixture pinning the convention; the
-  dwell convention on the Python side still has none - the Rust fixture names
-  `dwell_stats` as the counterpart it must match, which is the cheapest honest
-  mitigation and not a real pin. The "no Python test runner at all" half of
-  this is now stale: the queue-ahead measurement landed
-  `analysis/test_characterize.py` plus an `analysis/__init__.py`, runnable as
-  `python3 -m unittest discover -s analysis -t .` with no dependency beyond the
-  stdlib, because a verdict was being read off an untested estimator. That is a
-  bridgehead, not the decision. What is still open: whether that runner becomes
-  the standing one (versus pytest), whether it joins `brokkr check` or stays a
-  manual step, and whether the existing analysis code - `dwell_stats` first -
-  gets retrofitted onto it. Adding a second test toolchain to a workspace whose
-  gate is `brokkr check` is a project-shape call, not a local fix.
+- The dwell definition is computed TWICE and the gate compares one against
+  the other. `dwell_stats` (now `crates/mogwai-lab/src/characterize/mod.rs`,
+  ported from `analysis/characterize.py`) measures the corpus;
+  `empty_hour_stats_over` in `crates/mogwai-data/src/generated/tests.rs`
+  measures the synthetic tape. If the two hour-bucket conventions ever drift -
+  inclusive end boundary, the era-start ceiling, which trade closes a gap - the
+  gate silently compares two different quantities and still passes. Surfaced
+  2026-08-02 landing the drought elimination.
 
-  Read this WITH the Rust-consolidation item above, which may moot part of it.
-  If `dwell_stats` migrates to Rust it stops needing a Python harness and stops
-  being a second definition at all, so investing in a Python test toolchain for
-  it first would be work with a known expiry. The part that survives either way
-  is the surviving Python that does NOT migrate, and deciding which scripts
-  those are is the migration item's scope question. Sequence accordingly: that
-  decision comes first, this one is downstream of it.
+  The Python-test-harness half of this item is CLOSED by the rewrite: both
+  implementations are Rust now, so there is no second toolchain to decide about
+  and `analysis/test_characterize.py` dissolves at phase 4b. What survives is
+  the twice-computed definition itself, which the port did NOT collapse - it
+  moved one copy from Python to Rust and left the other where it was.
+
+  Two ways to close it: have the generator test call
+  `mogwai_lab::characterize::dwell_stats` directly (mogwai-data would gain a
+  dev-dependency on mogwai-lab, which is the wrong dependency direction and may
+  not be acceptable), or keep both and pin them against one shared fixture the
+  way `roll_estimator`/`spread_conformance.json` does. The second is cheaper and
+  matches existing precedent.
+
+  STALE CITATION to fix whichever way it goes: `tests.rs` names
+  `analysis/characterize.py` as the counterpart it must match, at its
+  `empty_hour_stats_over` doc comment and again in
+  `empty_hour_stats_use_complete_utc_buckets`. That file retires at 4b; the
+  comment should name the Rust `dwell_stats` instead.
 
 - REPAIR the `brokkr check --gate` profile mismatch for
   `tape_lateness_under_acceleration`. The gate runs the workspace test pass in

@@ -14,6 +14,17 @@ depends on the published nautilus crates to ship the
 `ExecutionClient`/`DataClient` pair a host constructs to drive the `MOGWAI`
 venue over this workspace's native JSON-over-WS protocol.
 
+The INSTRUMENT SET IS OPEN. The five shipped presets - MNQ and MES plus
+BTCUSDT, ETHUSDT and SOLUSDT - are the
+current state, not the end state - whatever gets traded next, the venue owes
+it a realistic tape, which means a corpus, a measurement, a fit and a preset
+for that symbol. The offline toolbox (`mogwai-lab` and what survives in
+`analysis/`) is therefore reusable intake machinery, not one instrument's
+history: treat a component as spent only when its QUESTION cannot recur, and
+keep per-instrument knowledge in config or a preset rather than hardcoded in
+the method. See the architecture note on the intake sequence for what this
+binds.
+
 ## Workspace
 
 A Cargo workspace, seven crates under `crates/`:

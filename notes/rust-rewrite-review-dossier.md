@@ -179,7 +179,7 @@ side.
   failure, only as a fact worth recording for anyone who later feeds the
   engine data shaped differently than the fitted corpus.
 
-## 8. Drift findings awaiting owner decisions
+## 8. Drift findings (both RULED 2026-08-08, see section 10)
 
 - **`fingerprint.json`'s `empirical_ranges.modal_tick.max`**: committed value
   `0.25` (the exact ceiling MNQ's tick sits on); regenerating from today's
@@ -188,8 +188,10 @@ side.
   locally after the commit that produced `fingerprint.json`, moving the
   anchor's modal tick without anyone re-running `build_fingerprint.py`. Not a
   port defect. `fingerprint.json` is compiled into the generator via
-  `include_str!`, so re-committing it is a `TAPE_PROTOCOL_VERSION` decision.
-  Owner decision recorded in `notes/todo.md`. Found phase 3a.
+  `include_str!`, which is why this was first written up as a
+  `TAPE_PROTOCOL_VERSION` decision - overstated, see section 10: the leaf is
+  diagnostics-only and moves no tape byte. RULED: re-commit at `0.1`. Found
+  phase 3a.
 - **`mnq-fit.json`'s two binding hashes**: `binding.subcontract_hash`
   (artifact: `35e5b033...`) and `binding.preflight_artifact_hash` (artifact:
   `adf6b8e7...`, hashing a preflight file that today reads `96013588...`) are
@@ -197,10 +199,16 @@ side.
   joined `SUBCONTRACT_KEYS` after the protocol-11 fit ran. Running
   `mnq_fit.py`'s OWN `subcontract_hash()` today returns `1ca79d9c...`,
   byte-identical to what the Rust port computes now AND to what the
-  committed `mnq-fit-preflight.json` already records - so this is the same
-  stale-input-drift class as the fingerprint finding above, not a port
-  defect, and both are cross-verified against a direct Python run. Recorded
-  alongside the fingerprint drift as a re-commit decision. Found phase 3b.
+  committed `mnq-fit-preflight.json` already records - not a port defect,
+  and cross-verified against a direct Python run.
+
+  Filing this as the same stale-input-drift class as the fingerprint
+  finding was WRONG, and section 10 rules the other way. The fingerprint's
+  committed value no longer follows from its inputs; this one does. The
+  protocol-11 fit never read a single protocol-12a constant, so 35e5b033 is
+  an accurate record of what it ran under and the divergence from today's
+  tree is expected by construction rather than stale. RULED: leave both
+  hashes as committed. Found phase 3b.
 
 ## 9. Deviations from standing process
 
@@ -212,24 +220,84 @@ here because none of it is otherwise written down, and a reviewer comparing
 this program's process against the repository's normal review cadence needs
 to know it was a deliberate, bounded exception rather than an oversight.
 
-## 10. Open owner decisions
+## 10. Owner decisions, RULED 2026-08-08
 
-All recorded in full in `notes/todo.md`; indexed here.
+All four are closed. The authorized work is recorded in full in
+`notes/rust-rewrite-phases.md`'s 4b scope block; the rulings and their
+grounds are indexed here, including where the phase-3b assessment this
+dossier carried turned out to be wrong. (These entries lived in
+`notes/todo.md` until 2026-08-08, when the live arc moved out of that file
+under the owner's rule that `todo.md` carries only parked work.)
 
-- **`select_windows.py`** - absorb with a `targets-frozen.json` gate (one
-  small slice; `session_profile.rs` already lands most of the needed
-  infrastructure), or re-sentence to KEEP until a sampling-frame purchase
-  question returns. Assessed, not decided, phase 3b.
-- **`tick_composition_ratios.py`** - reading it settled the triage's own
-  ambiguity: no independent estimator, a report generator over Rust-produced
-  fixtures. ABSORB as a `--report` mode on the existing `tick-composition`
-  subcommand is the reading the code supports; the frozen baseline tables
-  must move as data, never re-derived. Assessed, not decided, phase 3b.
-- **The two drift re-commits** (section 8 above): whether to re-run
-  `build_fingerprint.py`/re-commit `fingerprint.json` accepting the `0.25`
-  to `0.1` modal-tick change, and whether to re-commit `mnq-fit.json`'s
-  binding hashes to their current values. Both are "do nothing until ruled"
-  in `notes/todo.md`.
+- **`select_windows.py` - ABSORB, whole.** All four phases become the
+  bar-frame intake station in `mogwai-lab`. Two corrections to the earlier
+  assessment. First, there is no `targets-frozen.json` gate to absorb
+  against: that artifact is the BTCUSDT microstructure target set, one of
+  the two hash-pinned frozen INPUTS to the sampling-frame experiment, and
+  this script never touches it. Its own output is
+  `cme_daily_features.json`, a regenerable gitignored cache, so a gate must
+  be blessed before the port can be matched against one. Second, the
+  "re-sentence to KEEP until a purchase question returns" option rested on
+  a closed corpus. The corpus is open: mogwai must serve whatever symbol
+  gets traded next, so the purchase question returns with every instrument.
+  The BTCUSDT rejection of volatility-stratified selection
+  (`association-result.json`, `DATA-PURCHASE-REPORT.md` 7.2) rides along as
+  a recorded prior on `select`/`plan` rather than retiring them - it is one
+  observation on one crypto pair, and running the method on the next
+  instrument is the only way to learn whether it generalizes.
+
+  Sharper ground, from the preregistration's own section 7.1 (unread when
+  this was ruled): the experiment validated ONLY the `rv`-rank association
+  and states that it does not validate the five-feature farthest-point
+  selection, whose windows "remain unvalidated by this experiment either
+  way it lands." So `plan` carries a real rejection and `select` carries
+  no verdict at all. Costing note: the machinery that ran that test -
+  `build_bars.py`, `build_targets.py`, `spearman_association.py`,
+  `run_association.py` - was deleted at `9170f45` and needs resurrecting
+  from git before the method can run on a second instrument.
+
+- **`tick_composition_ratios.py` - ABSORB, as its own subcommand.** The
+  assessment recorded above ("no independent estimator, a report generator
+  over Rust-produced fixtures") does not survive reading the file. It IS an
+  independent estimator: the resize policy in `compare()` - worst p99.9
+  ratio, two-times headroom, power-of-two or next-million rounding, then
+  the larger of that and the required reach - is the decision procedure for
+  four SHIPPED constants. It also carries three acceptance gates that
+  refuse a protocol landing before any ratio is computed, a whole-tree
+  finite-and-positive leaf validator, and a 27-check selftest pinning the
+  arithmetic. `reference/performance.md` cites it by name at five sites,
+  and it is the origin of the rejected protocol-11 fanout proposal that
+  `the_fanout_default_carries_the_protocol_11_exception` now pins. So it
+  lands as its own subcommand, NOT a `--report` mode on `tick-composition`:
+  fusing them would let one command measure a fixture and bless it. The
+  baseline-tables-as-data constraint from the original assessment was
+  correct and is kept.
+
+- **`fingerprint.json` - RE-COMMIT at `0.1`.** The
+  `TAPE_PROTOCOL_VERSION` framing in section 8 above overstated the
+  stakes: `empirical_ranges` is diagnostics-only by its own `_doc`, and
+  `modal_tick.max` is read at exactly one site,
+  `Scalars::empirical_diagnostics`, so no tape byte depends on it. What
+  the committed `0.25` actually buys is a false negative - it is the exact
+  inclusive ceiling MNQ's tick sits on, so the MNQ preset clears the
+  corpus-range check on a stale input rather than on evidence. The
+  regenerated `0.1` makes the diagnostic fire honestly and MNQ accepts it
+  in provenance, as it already does for three other fields.
+
+- **`mnq-fit.json`'s binding hashes - LEAVE AS COMMITTED.** Filing this
+  alongside the fingerprint drift as the same class was wrong. The
+  fingerprint's committed value no longer follows from its inputs; this
+  one does. `subcontract_hash` 35e5b033 accurately records the constant
+  set the protocol-11 fit ran under, and the protocol-12a block joined
+  `SUBCONTRACT_KEYS` afterwards without that fit ever reading it - which
+  phase 3b itself demonstrated by reproducing every fitted number at
+  132/132 cache hits while only the binding differed. Re-committing to
+  1ca79d9c would assert a binding that never happened, the precise claim
+  `mnq_fit.py`'s tamper selftest exists to refuse. The genuine finding is
+  narrower and stays recorded: `mnq-fit-preflight.json` already carries
+  1ca79d9c, so the artifact is readable but not extensible until a fresh
+  fit runs, and the flat single-namespace subcontract hash is a design
+  defect the port should fix by scoping the hash per mode.
 
 ## 11. `test_characterize.py` dissolution mapping
 
@@ -266,8 +334,12 @@ claim. `analysis/test_characterize.py` carries 31 tests across seven
   **Added this phase**: `cadence.rs::probe_returns_structured_result_over_a_synthetic_fixture`,
   a byte-for-byte port of the Python fixture and assertions.
 - `test_kline_probe_returns_structured_result` (`probe_binance_klines.py`) -
-  no counterpart, none expected: `probe_binance_klines.py` is triaged DEAD
-  (`notes/python-script-triage.md`), never in the ABSORB set.
+  no counterpart, none expected. The REASON stated here was wrong and is
+  corrected 2026-08-08: `probe_binance_klines.py` is not DEAD. This very
+  test imports it (`test_characterize.py:34`), which is why the `9170f45`
+  retirement kept it while deleting the rest of the triage's DEAD list.
+  The conclusion is unchanged - it was never in the ABSORB set - but it
+  survives as a live test dependency, not as a spent one-shot.
 - `test_aggtrades_probe_returns_structured_result` (`probe_binance_aggtrades.py`)
   - no counterpart, none expected: `probe_binance_aggtrades.py` is triaged
   KEEP (a live library import for `pair_harness.py` and others), never in

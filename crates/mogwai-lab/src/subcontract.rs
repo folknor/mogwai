@@ -335,6 +335,27 @@ impl PyValue {
 
 /// Build the sub-contract value tree, mirroring
 /// `{k: globals()[k] for k in SUBCONTRACT_KEYS}` key-for-key.
+///
+/// A STALE-LOOKING HASH IN A COMMITTED ARTIFACT IS NOT NECESSARILY STALE, and
+/// the owner ruled on exactly this case on 2026-08-08: do not "fix" it.
+/// `analysis/mnq-fit.json` records `binding.subcontract_hash` 35e5b033, while
+/// this function returns 1ca79d9c today. The difference is correct history
+/// rather than drift - the protocol-12a constants joined this key set AFTER
+/// the protocol-11 fit ran, and that fit never read one of them. The rewrite's
+/// phase-3b parity gate demonstrated it: every fitted number in the artifact
+/// reproduced at 132/132 walk-cache hits while only the binding differed.
+/// Editing the artifact's hash to today's value would assert a binding that
+/// never happened, which is precisely what the harness's own tamper check
+/// exists to refuse. The artifact is therefore readable but NOT extensible
+/// until a fresh fit runs; that re-run buys extensibility, not correctness.
+///
+/// The design defect this exposes is the flat namespace, not the hash: one
+/// key set spanning every mode means any constant edit retroactively unbinds
+/// every prior fit, including for constants that fit never read. Harmless at
+/// one instrument; corrosive at a dozen, where adding a single constant
+/// silently unbinds every committed fit artifact and the next reader concludes
+/// the corpus is stale when nothing moved. Scoping the hash per mode is the
+/// fix.
 fn tree() -> PyValue {
     let mut m: BTreeMap<&'static str, PyValue> = BTreeMap::new();
     m.insert("JOB_ID", PyValue::Str(JOB_ID));

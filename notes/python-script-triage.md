@@ -1,5 +1,34 @@
 # Python script triage, for the measurement-machinery Rust rewrite
 
+> **THE DEAD AXIS IS INVALID AS WRITTEN. Re-sort before deleting anything.**
+> Owner ruling, 2026-08-08. This document sorts on whether a script's MNQ
+> answer has been banked in a committed artifact. That axis is valid only if
+> the corpus is CLOSED, and it is not: MNQ plus BTC, ETH and SOL is the
+> current state, not the end state, and mogwai must be able to generate a
+> realistic tape for whatever symbol gets traded next - ten individual
+> equities, say. Every new instrument walks the same intake sequence: survey
+> what cheap data exists, decide whether a paid corpus is worth buying and
+> which windows of it, buy, preflight, measure, characterize, fit, ship a
+> preset. So `inspect_archive.py`, `inspect_cme_bars.py`, `run_corpus.py`
+> and the `probe_*` family are intake stations IDLE BETWEEN INSTRUMENTS, not
+> spent one-shots, and marking them DEAD because the MNQ pass finished is the
+> same error as deleting a fixture because its test passed. Genuinely dead is
+> the narrower class whose QUESTION cannot recur - `stratum_occupancy.py`'s
+> pre-purchase power check, `probe_timestamp_precision.py`'s frozen Kraken
+> fact. This is also the answer to why the rewrite is worth doing at all: the
+> pipeline is reusable machinery for arbitrary future instruments, not a
+> transcription of one instrument's history. Re-sort on that axis, then act.
+> The durable statement of this premise and what it binds is in
+> `reference/architecture.md` (the intake-sequence note) and `AGENTS.md`;
+> this paragraph is its consequence for this document, not its source.
+
+> **INVENTORY IS STALE. This is a record of a decision, not a census.**
+> Commit `9170f45` ("Retire 22 spent analysis scripts ahead of the Rust
+> rewrite") executed this document's DEAD verdicts just before rewrite
+> phase 0. `analysis/` now holds 21 Python files, not 44. Everything
+> below describes the tree as it stood when the triage ran; read it for
+> the reasoning, never as a list of what is on disk.
+
 Scope question per script: KEEP (stays Python), ABSORB (belongs in the new
 Rust crate), DEAD (one-shot, findings already frozen in a committed artifact,
 deletable). 49 scripts on disk (44 `analysis/`, 5 `scripts/`); 31 named by
@@ -69,6 +98,24 @@ DATA-PURCHASE-REPORT.md/notes, 18 unnamed, 3 claimed-ghosts checked.
   keep it split like roll_estimator, OR fold the Python read-and-report side
   into the new CLI once it can read generator CSV output natively. Either way
   it belongs in scope discussion, not DEAD.
+
+  RULED 2026-08-08, and the "report generator" reading is REFUTED by the
+  file. `compare()` is an independent estimator - worst p99.9 ratio, times
+  two for headroom, power-of-two or next-million rounding, then the larger of
+  that and the required reach - and its output is four SHIPPED constants:
+  `CHECKPOINT_K`, the sweep drain budget, the warmup materialization ceiling
+  and `fanout_depth`. It also carries three acceptance gates that refuse a
+  protocol landing before any ratio is computed, a whole-tree
+  finite-and-positive leaf validator, and a 27-check selftest pinning the
+  arithmetic. `reference/performance.md` cites it by name at five sites, and
+  it is the origin of the rejected protocol-11 fanout proposal now pinned by
+  `the_fanout_default_carries_the_protocol_11_exception`. ABSORB as its own
+  subcommand, never as a `--report` mode on `tick-composition`: producer and
+  gate stay separate so the command that measures a fixture cannot bless it.
+  Port constraints: per-mode baseline tables move as committed DATA and are
+  never re-derived; `CALENDAR_FREE`/`CALENDAR_BEARING` become preset-derived,
+  so a new instrument does not edit source to be measured; and the rejected
+  fanout proposal carries forward as data.
 - **KEEP `plot_tape.py`** - HTML chart renderer over `mogwai gen` CSV output,
   a dev/debug visualization tool, not measurement. No reason to port a
   TradingView-JS-embedding script to Rust.
@@ -115,9 +162,20 @@ DATA-PURCHASE-REPORT.md/notes, 18 unnamed, 3 claimed-ghosts checked.
   stratifier (features/select/drift/plan). Method (stratify on cheap-bar
   features to pick tick-purchase windows) is instrument-agnostic and reusable
   for any future purchase decision, not spent by protocol landing the way a
-  pure one-shot fit is. Its frozen decision lives in `targets-frozen.json`,
-  but the STRATIFICATION METHOD itself is durable machinery worth keeping
-  live, arguably in the new crate as a "which window to buy next" tool.
+  pure one-shot fit is. RULED 2026-08-08: absorb whole, all four phases.
+  Two corrections to this entry as originally written. It has NO frozen
+  decision in `targets-frozen.json` - that file is the BTCUSDT microstructure
+  target set, a hash-pinned frozen INPUT to the sampling-frame experiment
+  which this script never touches; its own output is the gitignored
+  regenerable `cme_daily_features.json`, so the port must bless a gate before
+  it can match one. And the stratification method was not merely unproven but
+  preregistered-TESTED and REJECTED on BTCUSDT
+  (`analysis/association-result.json`, `DATA-PURCHASE-REPORT.md` 7.2) - which
+  is still not grounds to drop `select`/`plan`, because that is one
+  observation on one crypto pair and running the method on the next
+  instrument is the only way to learn whether it generalizes. The `drift`
+  phase is untouched by the rejection and produced report 7.1, still open at
+  14.3.
 - **DEAD `inspect_archive.py`** - streaming Binance ZIP contract inspector,
   read-only fact-reporter used during corpus survey. Nothing currently cites
   a committed inspect-archive artifact; superseded by `preflight.py`'s
@@ -207,6 +265,17 @@ DATA-PURCHASE-REPORT.md/notes, 18 unnamed, 3 claimed-ghosts checked.
 - **DEAD `probe_binance_klines.py`** - exploratory probe of Binance 1s kline
   archives for arrival rate/trade size; no importer, no committed artifact.
   One-shot venue-comparison exploration.
+
+  WRONG, corrected 2026-08-08: it HAS an importer.
+  `analysis/test_characterize.py:34` does
+  `from analysis.probe_binance_klines import probe as probe_klines`, and
+  `test_kline_probe_returns_structured_result` exercises it. That is why
+  the `9170f45` retirement left it on disk while deleting every other
+  script this document called DEAD. Effective verdict: KEEP for as long
+  as `test_characterize.py` does, and it is one of the four Python tests
+  the dossier's dissolution mapping correctly leaves outside the ABSORB
+  set. The dossier's section 11 repeats "triaged DEAD" from here and
+  inherits the same error.
 - **DEAD `probe_kraken_durations.py`** - one-shot comparison of Kraken
   duration statistics against the Binance aggTrades finding, explicitly
   framed as checking whether Kraken "carries its own timestamp collisions."
@@ -266,7 +335,18 @@ that's a separate decision for whoever owns lifecycle testing.
 
 ABSORB set: `mnq_fit.py`, `fit_session_profile.py`, `build_fingerprint.py`,
 `characterize.py`, `build_cadence.py`, `check_cadence_feasible.py`,
-`select_windows.py`, and (contested) `tick_composition_ratios.py`.
+`select_windows.py`, and `tick_composition_ratios.py`.
+
+Both formerly-open members were RULED into the set on 2026-08-08, with the
+grounds in `notes/rust-rewrite-review-dossier.md` section 10 and the
+authorized work in `notes/rust-rewrite-phases.md`'s 4b scope block. `select_windows.py` goes in WHOLE, `select`/`plan` included,
+carrying the BTCUSDT rejection as a recorded prior rather than as grounds for
+retirement. `tick_composition_ratios.py` is no longer contested and the
+entry below understates it: it is not a report generator over Rust fixtures
+but the sizing policy behind four shipped constants plus three
+protocol-landing acceptance gates, so it lands as its OWN subcommand, never
+as a `--report` mode on `tick-composition` - the command that measures a
+fixture must not also bless it.
 
 That's not "measurement only" - it's measurement AND fit AND fingerprint
 synthesis AND window selection, i.e. the full offline-analysis-to-generator
@@ -337,7 +417,11 @@ bound the crate's shape, not just its name:
    `roll_estimator.py`/`spread_conformance.json` explicitly is. If it's a
    report generator, it's ABSORB; if it's meant to stay an independent
    cross-check like roll_estimator, it's KEEP. This wants an owner decision,
-   not a triage guess.
+   not a triage guess. SETTLED 2026-08-08: it is neither. It is the sizing
+   policy behind four shipped constants plus three protocol-landing
+   acceptance gates, so it ABSORBS as its own subcommand. The ambiguity came
+   from trusting the tick-composition doc's "third is a report" language about
+   a DIFFERENT artifact instead of reading this file.
 5. **The report's `mnq_fit.py` line estimate is off by more than rounding**:
    section 0.2 says "about 8,900 lines" is the base for the 10/15/75 percent
    split, but the file measures 9,515 lines on disk today (roughly 7% larger).

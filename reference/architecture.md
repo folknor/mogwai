@@ -251,6 +251,27 @@ depends on `mogwai-lab` for the pieces that need no server preset resolution
 (preflight, cache, most of measure/fit/synth) and calls straight into
 `mogwai-server` for the generated side of measurement.
 
+THE INSTRUMENT SET IS OPEN, and that is why `mogwai-lab` is a library rather
+than a folder of scripts. The five shipped presets - MNQ and MES plus BTCUSDT,
+ETHUSDT and SOLUSDT - are the
+current state, not the end state: whatever a strategy needs to trade next -
+another future, a basket of individual equities - the venue owes it a
+realistic tape, and a realistic tape means a corpus, a measurement, a fit and
+a preset for that symbol. So every instrument walks the same intake sequence:
+survey what cheap data exists, decide whether a paid corpus is worth buying
+and which windows of it, buy, preflight, measure, characterize, fit, ship a
+preset with its provenance. The offline toolbox is that sequence made
+reusable, and the two consequences bind anything built on it. A component is
+SPENT only when its QUESTION cannot recur, never merely because the MNQ pass
+answered it - an archive inspector or a corpus driver is idle between
+instruments, not dead. And per-instrument knowledge belongs in config or a
+preset, never in a hardcoded list in the method: a preset tuple naming
+today's five symbols is a defect the sixth exposes. The corollary for
+evidence is that a finding measured on one instrument is one observation, not
+a law, until a second instrument either reproduces it or does not - which is
+why methods a preregistered test rejected are kept runnable rather than
+deleted.
+
 The rewrite's parity gates are the porting program's whole verification
 story: every absorbed Python computation is checked against a committed JSON
 artifact - `mnq-fit-preflight.json`, the observed and generated halves of

@@ -212,6 +212,15 @@ same way after any change to the generator, the checkpoint stride, or the tape
 protocol - the previous value's stated provenance was a `fill_bench` row, and no
 such row has ever existed in this document.
 
+DO NOT COMPARE THIS NUMBER AGAINST A CORPUS-PARSING RATE. It is the rate at
+which the generator MANUFACTURES a tick - GARCH recursion, RNG draws, checkpoint
+retention - and manufacturing a tick is far heavier per item than splitting a
+CSV line. Set beside the measured Python archive-parse ceiling (2.21 M rows/s
+for a 128.7 M-row month, bytes-mode hot loop plus a process pool, 2026-08-05)
+the two look like near-parity, which reads as an argument against moving corpus
+parsing to Rust - the opposite of the truth. The honest comparator for that
+question is a Rust byte-level parse, which nobody has measured.
+
 ## 2026-08-04 protocol 7 BBO composition
 
 The `mogwai tick-composition` fixtures measure each of the five presets
