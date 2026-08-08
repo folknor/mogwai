@@ -116,7 +116,7 @@ fn run_cadence(args: CadenceArgs) -> anyhow::Result<()> {
     println!("cadence: {}", out.display());
     println!(
         "verdict: {}",
-        mogwai_lab::cadence_feasible::verdict(&cadence)
+        mogwai_lab::cadence_feasible::verdict(&cadence)?
     );
     Ok(())
 }
@@ -135,7 +135,7 @@ pub(crate) fn run_cadence_feasible(args: CadenceFeasibleArgs) -> anyhow::Result<
     let text = std::fs::read_to_string(&path)
         .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
     let cadence: serde_json::Value = serde_json::from_str(&text)?;
-    let verdict = mogwai_lab::cadence_feasible::verdict(&cadence);
+    let verdict = mogwai_lab::cadence_feasible::verdict(&cadence)?;
     println!("parent/child verdict: {verdict}");
     println!(
         "measured density: {}",

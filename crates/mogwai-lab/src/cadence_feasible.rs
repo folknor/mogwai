@@ -22,6 +22,8 @@
 
 use serde_json::Value;
 
+use crate::error::{LabError, LabResult};
+
 /// `next_count`: draw a truncated (cap 4096) parent-child count from the
 /// geometric-mixture inverse CDF. `uniform` must yield draws in `[0, 1)`.
 #[must_use]
@@ -50,43 +52,124 @@ pub fn next_count_capped(
     (value.min(cap), value > cap)
 }
 
+/// Reads a required numeric field, refusing rather than defaulting.
+///
+/// The Python indexes these dictionaries directly, so a missing or
+/// non-numeric field raises `KeyError`/`TypeError` and the command stops.
+/// Substituting a default here would be silent acceptance of malformed input
+/// under the parity contract in `reference/architecture.md` - the class that
+/// manufactures an answer instead of refusing.
+fn required(node: &Value, path: &[&str]) -> LabResult<f64> {
+    let mut cursor = node;
+    for key in path {
+        cursor = cursor.get(*key).ok_or_else(|| {
+            LabError::refusal(format!(
+                "cadence measurement is missing `{}`; the Python raises KeyError here rather \
+                 than reading it as zero",
+                path.join(".")
+            ))
+        })?;
+    }
+    cursor.as_f64().ok_or_else(|| {
+        LabError::refusal(format!(
+            "cadence measurement field `{}` is not a number",
+            path.join(".")
+        ))
+    })
+}
+
 /// `density_passes`: the per-second count density feasibility bands a
 /// simulated cadence must clear against the measured `per_second_counts`.
-#[must_use]
-pub fn density_passes(measured: &Value, realized: &Value) -> bool {
-    let m = |k: &str| measured[k].as_f64().unwrap_or(0.0);
-    let r = |k: &str| realized[k].as_f64().unwrap_or(0.0);
-    (r("mean") / m("mean") - 1.0).abs() <= 0.10
-        && m("median") - 1.0 <= r("median")
-        && r("median") <= m("median") + 1.0
-        && 0.5 * m("p95") <= r("p95")
-        && r("p95") <= 2.0 * m("p95")
-        && (r("zero_frac") - m("zero_frac")).abs() <= 0.05
+///
+/// # Errors
+/// [`LabError::Refusal`] if either side is missing a required band field or
+/// carries a non-numeric one. Note that defaulting was not merely imprecise
+/// here: a missing `measured.mean` became zero and the first band then
+/// divided by it.
+pub fn density_passes(measured: &Value, realized: &Value) -> LabResult<bool> {
+    let m = |k: &str| required(measured, &[k]);
+    let r = |k: &str| required(realized, &[k]);
+    Ok((r("mean")? / m("mean")? - 1.0).abs() <= 0.10
+        && m("median")? - 1.0 <= r("median")?
+        && r("median")? <= m("median")? + 1.0
+        && 0.5 * m("p95")? <= r("p95")?
+        && r("p95")? <= 2.0 * m("p95")?
+        && (r("zero_frac")? - m("zero_frac")?).abs() <= 0.05)
 }
 
 /// `verdict`: the structural L0 proceed/close/stop verdict, read directly
 /// off `cadence.json`'s `targets.children_mean`/`children_single_frac`
 /// anchors.
-#[must_use]
-pub fn verdict(cadence: &Value) -> &'static str {
-    let mean = cadence["targets"]["children_mean"]["anchor"]
-        .as_f64()
-        .unwrap_or(0.0);
-    let single = cadence["targets"]["children_single_frac"]["anchor"]
-        .as_f64()
-        .unwrap_or(0.0);
-    if (3.0..=20.0).contains(&mean) && single < 0.90 {
+///
+/// # Errors
+/// [`LabError::Refusal`] if either anchor is absent or non-numeric. This
+/// previously read a missing anchor as zero, which let a document carrying
+/// `children_mean` but no `children_single_frac` return CLOSE, and one
+/// carrying neither return CLOSE as well - a verdict fabricated from input
+/// the Python rejects outright.
+pub fn verdict(cadence: &Value) -> LabResult<&'static str> {
+    let mean = required(cadence, &["targets", "children_mean", "anchor"])?;
+    let single = required(cadence, &["targets", "children_single_frac", "anchor"])?;
+    Ok(if (3.0..=20.0).contains(&mean) && single < 0.90 {
         "PROCEED"
     } else if mean < 1.5 {
         "CLOSE"
     } else {
         "STOP AND ASK"
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// THE CASE THAT PASSED OPEN. A document carrying `children_mean` but no
+    /// `children_single_frac` used to read the missing anchor as zero, so
+    /// `single < 0.90` held and the malformed measurement returned PROCEED.
+    /// The Python raises `KeyError` on the same input.
+    #[test]
+    fn a_measurement_missing_an_anchor_refuses_rather_than_proceeding() {
+        let malformed = serde_json::json!({
+            "targets": {"children_mean": {"anchor": 3.0}}
+        });
+        let err = verdict(&malformed).expect_err("a missing anchor must refuse");
+        assert!(err.to_string().contains("children_single_frac"), "{err}");
+    }
+
+    #[test]
+    fn a_non_numeric_anchor_refuses() {
+        let malformed = serde_json::json!({
+            "targets": {
+                "children_mean": {"anchor": "three"},
+                "children_single_frac": {"anchor": 0.5},
+            }
+        });
+        let err = verdict(&malformed).expect_err("a non-numeric anchor must refuse");
+        assert!(err.to_string().contains("not a number"), "{err}");
+    }
+
+    #[test]
+    fn a_well_formed_measurement_still_reaches_its_verdict() {
+        let good = serde_json::json!({
+            "targets": {
+                "children_mean": {"anchor": 8.49},
+                "children_single_frac": {"anchor": 0.5586},
+            }
+        });
+        assert_eq!(verdict(&good).expect("well formed"), "PROCEED");
+    }
+
+    /// `density_passes` defaulted every band field too, and a missing
+    /// `measured.mean` then divided by zero instead of reporting an invalid
+    /// artifact.
+    #[test]
+    fn density_bands_refuse_a_measurement_missing_a_field() {
+        let measured = serde_json::json!({"median": 4.0, "p95": 20.0, "zero_frac": 0.1});
+        let realized =
+            serde_json::json!({"mean": 3.0, "median": 4.0, "p95": 20.0, "zero_frac": 0.1});
+        let err = density_passes(&measured, &realized).expect_err("a missing band must refuse");
+        assert!(err.to_string().contains("mean"), "{err}");
+    }
 
     #[test]
     fn geometric_sampler_uses_the_pinned_inverse_cdf() {

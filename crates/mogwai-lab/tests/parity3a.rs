@@ -98,5 +98,8 @@ fn parity3a_cadence_feasible_verdict_matches_the_committed_cadence() {
     // `check_cadence_feasible.py`'s `verdict()` over the committed
     // cadence.json prints "parent/child verdict: PROCEED" and proceeds -
     // reproduced exactly here.
-    assert_eq!(mogwai_lab::cadence_feasible::verdict(&cadence), "PROCEED");
+    assert_eq!(
+        mogwai_lab::cadence_feasible::verdict(&cadence).expect("committed cadence is well formed"),
+        "PROCEED"
+    );
 }
