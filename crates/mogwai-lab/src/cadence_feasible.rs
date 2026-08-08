@@ -9,16 +9,25 @@
 //! `children_mean`/`children_single_frac`) and [`density_passes`] (the
 //! per-second density feasibility bands).
 //!
-//! NOT ported: the default (no-flag) CLI path's 3,000,000-event Markov
-//! density RE-simulation (`simulate_markov`), which draws from
-//! `random.Random(42)` via `weibullvariate` - reproducing it bit-exactly
-//! would need a from-scratch port of CPython's Mersenne Twister and
-//! `random.weibullvariate`, out of this slice's scope. The gate this module
-//! supports is therefore the deterministic structural verdict, which is what
-//! `notes/rust-rewrite-phases.md` phase 3a calls binding for this script;
-//! the stochastic density recheck is a secondary diagnostic in the Python
-//! (it degrades to `SystemExit` on failure, never on the structural verdict
-//! alone) and is flagged in the phase landing record as a follow-up.
+//! [`simulate_markov`] is the default CLI path's density RE-simulation, and
+//! it is a GATE rather than a diagnostic: `check_cadence_feasible.py` exits
+//! non-zero when the realized density misses the feasibility bands, so a port
+//! that stops after the structural verdict exits 0 where the script it
+//! replaces does not. The phase-3a record called this a secondary diagnostic;
+//! that is true of the VERDICT and false of the COMMAND, and the difference
+//! was found by the 2026-08-08 program review.
+//!
+//! It was originally skipped as needing a from-scratch CPython Mersenne
+//! Twister. Phase 3b then built exactly that for `minute_range_envelope`, so
+//! the remaining work was `random()`, `weibullvariate` and the simulation
+//! loop - see [`crate::fit::mtrand`], whose stream is pinned against CPython.
+//!
+//! STILL NOT PORTED: the `--fit` and `--fit-markov` grid searches. They are
+//! search tools rather than gates, and both need `math.gamma` at arbitrary
+//! shape - the default path only ever evaluates `gamma(2.0)`, which is
+//! exactly 1. That is why [`simulate_markov`] takes `innovation_mean` as a
+//! parameter instead of computing it: the one value the shipped path needs is
+//! exact, and no half-validated gamma is introduced to fake the rest.
 
 use serde_json::Value;
 
@@ -97,6 +106,165 @@ pub fn density_passes(measured: &Value, realized: &Value) -> LabResult<bool> {
         && (r("zero_frac")? - m("zero_frac")?).abs() <= 0.05)
 }
 
+/// The knobs `simulate_markov` takes, matching the Python's positional
+/// parameters. The shipped default path passes quiet fraction 0.35,
+/// persistence 0.90, ratio 150.0, shape 1.0 and calibration 0.944.
+pub struct MarkovParams {
+    pub quiet_fraction: f64,
+    pub state_persistence: f64,
+    pub quiet_active_ratio: f64,
+    pub weibull_shape: f64,
+    pub calibration: f64,
+    /// `math.gamma(1.0 + 1.0 / weibull_shape)`. Exactly 1.0 at unit shape,
+    /// which is all the shipped path needs; see the module docs.
+    pub innovation_mean: f64,
+}
+
+/// `simulate_markov`: the density re-simulation the default CLI path gates on.
+///
+/// A draw-for-draw port. The order matters as much as the arithmetic: one
+/// `random()` picks the initial state, then per event one `weibullvariate`
+/// for the gap, `next_count`'s one or two draws for the child count, and one
+/// `random()` for the state transition. Any extra or missing draw
+/// desynchronizes the whole stream from CPython and the bands then judge a
+/// different experiment.
+///
+/// # Errors
+/// [`LabError::Refusal`] if the cadence measurement or fingerprint session
+/// profile is missing a required field.
+pub fn simulate_markov(
+    cadence: &Value,
+    fingerprint: &Value,
+    events: usize,
+    seed: u64,
+    params: &MarkovParams,
+) -> LabResult<Value> {
+    let mut rng = crate::fit::mtrand::PyRandom::new(seed);
+    let mean =
+        required(cadence, &["targets", "mean_event_duration_s", "anchor"])? * params.calibration;
+    let children_mean = required(cadence, &["targets", "children_mean", "anchor"])?;
+    let single_frac = required(cadence, &["targets", "children_single_frac", "anchor"])?;
+    let session = fingerprint
+        .get("session_profile")
+        .ok_or_else(|| LabError::refusal("fingerprint carries no session_profile"))?;
+    let intensity = session
+        .get("intensity_hour")
+        .and_then(Value::as_array)
+        .ok_or_else(|| LabError::refusal("session_profile carries no intensity_hour array"))?;
+    let dow = session
+        .get("dow_weight")
+        .and_then(Value::as_array)
+        .ok_or_else(|| LabError::refusal("session_profile carries no dow_weight array"))?;
+
+    let active_mean =
+        mean / ((1.0 - params.quiet_fraction) + params.quiet_fraction * params.quiet_active_ratio);
+    let quiet_mean = active_mean * params.quiet_active_ratio;
+    let q_to_a = (1.0 - params.state_persistence) * (1.0 - params.quiet_fraction);
+    let a_to_q = (1.0 - params.state_persistence) * params.quiet_fraction;
+    let mut quiet = rng.random() < params.quiet_fraction;
+    let quiet_children_mean = children_mean * 0.20;
+    let active_children_mean = children_mean * 1.430_769_230_769_230_8;
+    let (quiet_q, quiet_m) = (0.0, quiet_children_mean);
+    let quiet_single = 1.0 / quiet_children_mean;
+    let active_single =
+        (single_frac - params.quiet_fraction * quiet_single) / (1.0 - params.quiet_fraction);
+    let active_m = (active_children_mean - 1.0) / (1.0 - active_single);
+    let active_q = 1.0 - (active_children_mean - 1.0) / (active_m - 1.0);
+
+    let mut clock = 0.0f64;
+    let mut buckets: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    let mut gaps: Vec<f64> = Vec::with_capacity(events);
+    let mut truncated = 0i64;
+    for _ in 0..events {
+        let gap_mean = if quiet { quiet_mean } else { active_mean };
+        let mut gap =
+            gap_mean * rng.weibullvariate(1.0, params.weibull_shape) / params.innovation_mean;
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "int(clock) on a positive elapsed-seconds float, matching Python"
+        )]
+        let whole = clock as i64;
+        let hour = ((whole % 86_400) / 3_600) as usize;
+        let day = (((whole / 86_400) + 4) % 7) as usize;
+        let mut arrival = intensity
+            .get(hour)
+            .and_then(Value::as_f64)
+            .ok_or_else(|| LabError::refusal("intensity_hour is shorter than 24 entries"))?
+            * 24.0;
+        arrival *= dow
+            .get(day)
+            .and_then(Value::as_f64)
+            .ok_or_else(|| LabError::refusal("dow_weight is shorter than 7 entries"))?
+            * 7.0;
+        gap /= arrival;
+        clock += gap;
+        gaps.push(gap);
+        let (q, m) = if quiet {
+            (quiet_q, quiet_m)
+        } else {
+            (active_q, active_m)
+        };
+        let mut uniform = || rng.random();
+        let (count, clipped) = next_count(&mut uniform, q, m);
+        truncated += i64::from(clipped);
+        #[expect(clippy::cast_possible_truncation, reason = "int(clock), as above")]
+        let second = clock as i64;
+        *buckets.entry(second).or_insert(0) += count;
+        quiet = if quiet {
+            rng.random() >= q_to_a
+        } else {
+            rng.random() < a_to_q
+        };
+    }
+
+    #[expect(clippy::cast_possible_truncation, reason = "int(clock) + 1, as above")]
+    let span = clock as i64 + 1;
+    let mut histogram: std::collections::BTreeMap<i64, i64> = std::collections::BTreeMap::new();
+    histogram.insert(0, span - buckets.len() as i64);
+    for count in buckets.values() {
+        *histogram.entry(*count).or_insert(0) += 1;
+    }
+    let quantile = |fraction: f64| -> LabResult<i64> {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "math.ceil of a fraction of a positive span"
+        )]
+        let rank = (fraction * span as f64).ceil() as i64;
+        let mut seen = 0i64;
+        for (count, frequency) in &histogram {
+            seen += frequency;
+            if seen >= rank {
+                return Ok(*count);
+            }
+        }
+        Err(LabError::refusal("density quantile ran past the histogram"))
+    };
+    let total: i64 = histogram.iter().map(|(count, freq)| count * freq).sum();
+    let gap_mean = crate::kernel::py_fsum(gaps.iter().copied()) / gaps.len() as f64;
+    let gap_var =
+        crate::kernel::py_fsum(gaps.iter().map(|g| (g - gap_mean).powi(2))) / gaps.len() as f64;
+    let acf = |lag: usize| -> f64 {
+        let numerator = crate::kernel::py_sum(
+            gaps.iter()
+                .zip(gaps.iter().skip(lag))
+                .map(|(a, b)| (a - gap_mean) * (b - gap_mean)),
+        );
+        let denominator = crate::kernel::py_sum(gaps.iter().map(|v| (v - gap_mean).powi(2)));
+        numerator / denominator
+    };
+    Ok(serde_json::json!({
+        "mean": total as f64 / span as f64,
+        "median": quantile(0.5)?,
+        "p95": quantile(0.95)?,
+        "zero_frac": histogram[&0] as f64 / span as f64,
+        "truncation_frac": truncated as f64 / events as f64,
+        "gap_mean": gap_mean,
+        "gap_cv2": gap_var / gap_mean.powi(2),
+        "gap_acf1": acf(1),
+        "gap_acf5": acf(5),
+    }))
+}
+
 /// `verdict`: the structural L0 proceed/close/stop verdict, read directly
 /// off `cadence.json`'s `targets.children_mean`/`children_single_frac`
 /// anchors.
@@ -122,6 +290,55 @@ pub fn verdict(cadence: &Value) -> LabResult<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// THE SMALL-EVENT SIMULATION FIXTURE. Five thousand events over the
+    /// committed cadence and fingerprint, against a direct run of
+    /// `check_cadence_feasible.simulate_markov` with the same arguments. Small
+    /// enough to run in a unit test, long enough that a draw-consumption,
+    /// bucketing or state-update difference desynchronizes the stream and
+    /// moves every field - which is what makes it a discriminator rather than
+    /// a smoke test.
+    #[test]
+    fn the_simulation_reproduces_cpython_over_five_thousand_events() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let cadence: Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("analysis/cadence.json")).expect("cadence.json"),
+        )
+        .expect("cadence parses");
+        let fingerprint: Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("analysis/fingerprint.json"))
+                .expect("fingerprint.json"),
+        )
+        .expect("fingerprint parses");
+        let params = MarkovParams {
+            quiet_fraction: 0.35,
+            state_persistence: 0.90,
+            quiet_active_ratio: 150.0,
+            weibull_shape: 1.0,
+            calibration: 0.944,
+            innovation_mean: 1.0,
+        };
+        let got = simulate_markov(&cadence, &fingerprint, 5000, 42, &params).expect("simulates");
+        // From `python3 -c "... simulate_markov(data, 5000, 42, 0.35, 0.90,
+        // 150.0, 1.0, 0.944)"` on CPython 3.14.6.
+        assert_eq!(got["median"], 4);
+        assert_eq!(got["p95"], 385);
+        assert_eq!(got["truncation_frac"], 0.0);
+        for (field, expected) in [
+            ("mean", 61.865_979_381_443_296),
+            ("zero_frac", 0.069_219_440_353_460_98),
+            ("gap_mean", 0.135_782_319_836_986_05),
+            ("gap_cv2", 4.411_391_713_266_563),
+            ("gap_acf1", 0.360_406_934_815_399_5),
+            ("gap_acf5", 0.258_181_483_555_129_2),
+        ] {
+            let actual = got[field].as_f64().expect("numeric field");
+            assert!(
+                (actual - expected).abs() <= expected.abs() * 1e-12,
+                "{field}: {actual} against CPython {expected}"
+            );
+        }
+    }
 
     /// THE CASE THAT PASSED OPEN. A document carrying `children_mean` but no
     /// `children_single_frac` used to read the missing anchor as zero, so

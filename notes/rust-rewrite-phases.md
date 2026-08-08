@@ -862,7 +862,23 @@ moment the scripts move. Phase 4 therefore runs in two halves:
      `fit` have no shipped equivalent. Retiring that script removes a
      runnable fitting capability from the tool.
 
-  1c. **BLOCKER - `cadence-feasible` does not preserve the Python
+  1c. **CLOSED 2026-08-08.** The simulation is ported and wired into the
+     default path, and `mogwai cadence-feasible` now reproduces
+     `python3 analysis/check_cadence_feasible.py` field for field at the
+     full 3,000,000 events - mean 51.019534657973, median 3, p95 357,
+     zero_frac 0.129516386850407, and both gap ACFs to full precision.
+     `PyRandom` gained `random()` and `weibullvariate`, both pinned
+     against the CPython stream by prefix tests, and a 5,000-event
+     fixture pins the simulation itself so a draw-consumption or
+     state-update difference fails loudly. Strict schema refusal landed
+     with it. Note the margin the review predicted: the simulated median
+     is 3 against a measured 4, exactly the band's lower edge, so
+     verdict-only equivalence really would have been one draw from
+     flipping. STILL OPEN, and tracked as capability rather than a
+     retirement blocker: `--fit` and `--fit-markov`, which need
+     `math.gamma` at arbitrary shape. The original text follows.
+
+     **`cadence-feasible` does not preserve the Python
      command, and can pass open.** Two defects, both found by the
      review. First, the Python default path runs the 3,000,000-event
      Markov density re-simulation and exits nonzero when the realized

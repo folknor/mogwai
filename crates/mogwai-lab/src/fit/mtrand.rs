@@ -151,6 +151,31 @@ impl PyRandom {
         out
     }
 
+    /// `random.random()`: CPython's 53-bit double from two tempered draws.
+    ///
+    /// The composition is load-bearing and not interchangeable with any other
+    /// way of building a double from 64 random bits - the FIRST draw supplies
+    /// the high 27 bits and the second the low 26, so a port that swaps them
+    /// or takes one 64-bit draw consumes the same stream and produces a
+    /// different sequence.
+    pub fn random(&mut self) -> f64 {
+        let a = f64::from(self.next_u32() >> 5);
+        let b = f64::from(self.next_u32() >> 6);
+        (a * 67_108_864.0 + b) * (1.0 / 9_007_199_254_740_992.0)
+    }
+
+    /// `random.weibullvariate(alpha, beta)`.
+    ///
+    /// CPython computes `alpha * (-log(1.0 - random())) ** (1.0 / beta)`. The
+    /// `1.0 - u` is not cosmetic: it moves the open endpoint so the logarithm
+    /// can never see zero. At `beta == 1.0` the exponent is exactly 1.0 and
+    /// `powf` is the identity, which is the case the shipped feasibility path
+    /// uses - so that path carries no dependence on libm `pow` at all.
+    pub fn weibullvariate(&mut self, alpha: f64, beta: f64) -> f64 {
+        let u = 1.0 - self.random();
+        alpha * (-u.ln()).powf(1.0 / beta)
+    }
+
     /// `_randbelow_with_getrandbits(n)`: rejection sampling over exactly
     /// `n.bit_length()` bits.
     pub fn randbelow(&mut self, n: u64) -> u64 {
@@ -176,6 +201,46 @@ impl PyRandom {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PREFIX TEST for `random()`, pinned bit for bit against
+    /// `random.Random(42)` in CPython 3.14.6. Six draws, because the failure
+    /// mode this guards against - swapping which draw supplies the high bits -
+    /// still produces plausible uniforms and only shows up as a different
+    /// SEQUENCE.
+    #[test]
+    fn random_reproduces_the_cpython_stream() {
+        let mut rng = PyRandom::new(42);
+        let expected = [
+            0x3fe4_762f_3072_00c5u64, // 0.6394267984578837
+            0x3f99_9c6b_5eeb_2060,    // 0.025010755222666936
+            0x3fd1_9a14_91f5_89dc,    // 0.27502931836911926
+            0x3fcc_922b_623b_8c1c,    // 0.22321073814882275
+            0x3fe7_912c_1468_f47e,    // 0.7364712141640124
+            0x3fe5_a785_aef6_719a,    // 0.6766994874229113
+        ];
+        for (i, bits) in expected.into_iter().enumerate() {
+            assert_eq!(rng.random().to_bits(), bits, "draw {i}");
+        }
+    }
+
+    /// PREFIX TEST for `weibullvariate(1.0, 1.0)`, the shape the shipped
+    /// feasibility path uses. Same seed as above, so it also proves the
+    /// helper consumes exactly one `random()` per call - a port that drew
+    /// twice would still look exponential but would desynchronize the
+    /// simulation from Python at the first state transition.
+    #[test]
+    fn weibullvariate_reproduces_the_cpython_stream_at_unit_shape() {
+        let mut rng = PyRandom::new(42);
+        let expected = [
+            0x3ff0_522a_bc5c_b2bbu64, // 1.020060287274801
+            0x3f99_efcd_9d56_3b89,    // 0.02532883904273889
+            0x3fd4_957d_1933_bfde,    // 0.3216240640749656
+            0x3fd0_2a5f_3fb7_f829,    // 0.25258618567011354
+        ];
+        for (i, bits) in expected.into_iter().enumerate() {
+            assert_eq!(rng.weibullvariate(1.0, 1.0).to_bits(), bits, "draw {i}");
+        }
+    }
 
     /// Pinned against CPython: `random.Random(1).getrandbits(32)` and the
     /// two draws after it. Reproduced by running the stdlib generator, not

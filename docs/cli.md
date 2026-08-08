@@ -216,16 +216,19 @@ is a `target/mogwai-synth/` scratch path. `cadence-feasible` reads a cadence
 measurement and prints the `check_cadence_feasible.py` L0
 structural-proceed verdict (PROCEED/CLOSE/STOP AND ASK) read off its
 `children_mean`/`children_single_frac` anchors, exiting nonzero on anything
-but PROCEED.
+but PROCEED. It then re-simulates the arrival clock over `--events`
+(3,000,000 by default, matching the Python) and exits nonzero when the
+realized per-second density misses the feasibility bands - that
+simulation is a GATE, not a diagnostic, and skipping it would let this
+subcommand exit 0 where the script exits 1. `--skip-density` stops after
+the structural verdict for callers who only want the L0 reading; the
+Python has no such flag, so leaving it off is the matching behaviour.
+`--fingerprint` names the session profile the arrival clock consults.
 
-KNOWN DIVERGENCE, being closed: it does NOT run the Markov density
-re-simulation the Python performs on its default path, and that simulation
-is a gate rather than a diagnostic - `check_cadence_feasible.py` exits
-nonzero when the realized density misses the feasibility bands. So this
-subcommand can exit 0 where the script it ports exits nonzero. The
-subcommand also substitutes zero for missing cadence fields where the
-Python raises, so a malformed measurement can read PROCEED. Both are
-scheduled for repair before the Python retires.
+The simulation reproduces CPython's stream draw for draw, so its output is
+identical to `python3 analysis/check_cadence_feasible.py` field for field
+rather than merely close. Not yet ported: the `--fit` and `--fit-markov`
+grid searches, which are candidate-search tools rather than gates.
 
 `cache` is the manual-case cover for the storage policy's CACHE class:
 `mogwai cache stats` reports entry/file/byte counts under the cache root

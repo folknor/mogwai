@@ -44,6 +44,10 @@ pub(crate) struct FingerprintArgs {
 
 const DEFAULT_CHAR_DIR: &str = "analysis";
 const DEFAULT_CADENCE: &str = "analysis/cadence.json";
+/// The committed fingerprint, READ as the session profile the arrival clock
+/// consults. Distinct from `DEFAULT_FINGERPRINT_OUT`, which is where synthesis
+/// WRITES so a bare invocation cannot clobber the committed artifact.
+const DEFAULT_FINGERPRINT_IN: &str = "analysis/fingerprint.json";
 const DEFAULT_FINGERPRINT_OUT: &str = "target/mogwai-synth/fingerprint.json";
 
 #[derive(Args)]
@@ -121,11 +125,28 @@ fn run_cadence(args: CadenceArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `check_cadence_feasible.py`'s `EVENTS`.
+const DEFAULT_MARKOV_EVENTS: usize = 3_000_000;
+
 #[derive(Args)]
 pub(crate) struct CadenceFeasibleArgs {
     /// The cadence measurement to read. Defaults to `analysis/cadence.json`.
     #[arg(long, value_name = "PATH")]
     cadence: Option<PathBuf>,
+    /// The fingerprint supplying the session profile the arrival clock reads.
+    /// Defaults to `analysis/fingerprint.json`.
+    #[arg(long, value_name = "PATH")]
+    fingerprint: Option<PathBuf>,
+    /// Events to simulate in the density re-check, matching the Python's
+    /// `--events`.
+    #[arg(long, default_value_t = DEFAULT_MARKOV_EVENTS)]
+    events: usize,
+    /// Stop after the structural verdict, skipping the density re-simulation.
+    /// The Python has no such flag; this exists because the simulation is the
+    /// slow half and a caller who only wants the L0 verdict should not pay
+    /// for it. Leaving it off is the behaviour that matches the script.
+    #[arg(long)]
+    skip_density: bool,
 }
 
 pub(crate) fn run_cadence_feasible(args: CadenceFeasibleArgs) -> anyhow::Result<()> {
@@ -137,12 +158,48 @@ pub(crate) fn run_cadence_feasible(args: CadenceFeasibleArgs) -> anyhow::Result<
     let cadence: serde_json::Value = serde_json::from_str(&text)?;
     let verdict = mogwai_lab::cadence_feasible::verdict(&cadence)?;
     println!("parent/child verdict: {verdict}");
-    println!(
-        "measured density: {}",
-        serde_json::to_string(&cadence["targets"]["per_second_counts"])?
-    );
+    let measured = &cadence["targets"]["per_second_counts"];
+    println!("measured density: {}", serde_json::to_string(measured)?);
     if verdict != "PROCEED" {
         anyhow::bail!("{verdict}");
+    }
+    if args.skip_density {
+        return Ok(());
+    }
+
+    // The Python's default path does NOT stop at the structural verdict: it
+    // re-simulates the arrival clock and exits non-zero when the realized
+    // density misses the feasibility bands. Skipping it made this subcommand
+    // exit 0 where the script it ports exits 1.
+    let fingerprint_path = args
+        .fingerprint
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_FINGERPRINT_IN));
+    let fingerprint: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&fingerprint_path)
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", fingerprint_path.display()))?,
+    )?;
+    // The shipped constants, positionally identical to the Python call:
+    // quiet fraction, persistence, quiet/active ratio, Weibull shape and
+    // calibration. `innovation_mean` is `math.gamma(1 + 1/shape)`, exactly 1
+    // at unit shape.
+    let params = mogwai_lab::cadence_feasible::MarkovParams {
+        quiet_fraction: 0.35,
+        state_persistence: 0.90,
+        quiet_active_ratio: 150.0,
+        weibull_shape: 1.0,
+        calibration: 0.944,
+        innovation_mean: 1.0,
+    };
+    let realized = mogwai_lab::cadence_feasible::simulate_markov(
+        &cadence,
+        &fingerprint,
+        args.events,
+        42,
+        &params,
+    )?;
+    println!("simulated density: {}", serde_json::to_string(&realized)?);
+    if !mogwai_lab::cadence_feasible::density_passes(measured, &realized)? {
+        anyhow::bail!("STOP: the specified ACD clock fails the density feasibility bands");
     }
     Ok(())
 }
