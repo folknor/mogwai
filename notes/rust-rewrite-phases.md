@@ -1257,6 +1257,42 @@ moment the scripts move. Phase 4 therefore runs in two halves:
      `gap_pvariance` as a documented wrapper, and keeping the density pins
      beside the implementation while `parity3a` stays honestly scoped to
      the structural verdict - were both confirmed as the right choice.
+  1j. **THE SIXTH REVIEW PASS, 2026-08-08. REFUSED on a debug-only
+     boundary, now closed.** The direct-assembly branch keys off
+     `round_position == -1074`, and that condition covers more than the
+     subnormals: `round_position` is `max(leading - 52, -1074)`, so it
+     pins to the floor for every result whose leading bit sits at or below
+     2^-1022 - which is the whole LOWEST NORMAL BINADE as well, from
+     2^-1022 up to just under 2^-1021. The assembly is correct for all of
+     it, because binary64 encodes both ranges as the same integer multiple
+     of 2^-1074. The `debug_assert` I put beside it was not: it read
+     `mantissa <= 1 << 52`, one binade too narrow, so DEBUG builds
+     panicked on values release computed correctly.
+
+     A wrong bound is worse than no bound, precisely because it fails in
+     the configuration meant to be the stricter one. Widened to
+     `mantissa < 1 << 53` with the branch's real span written out.
+
+     TWO TESTS OF MINE FAILED TO CATCH IT, in different ways, and both are
+     worth naming. The boundary test drove `x^2/4` with `x = 2^-510`,
+     which lands EXACTLY on the join where the mantissa is exactly 2^52 -
+     satisfying an assertion that was wrong for everything above it. And
+     the `subnormal` generator family said in prose that it straddled the
+     subnormal/normal boundary while its filter kept only results strictly
+     below `MIN_POSITIVE`, so every case sat on one side. The prose was
+     aspirational and the code was not, which no amount of rereading the
+     prose would have revealed.
+
+     Closed with a `lowest-binade` family, 60 cases, AIMED rather than
+     sampled: ordinary series around 1e-154 land subnormal far more often
+     than not, so the family is built from the `x^2/4` identity with `x`
+     in `[2^-510, 2^-509.5)`, which puts the result in the binade by
+     construction. The test asserts those expectations really are in
+     `[2^-1022, 2^-1021)`, the same guard the subnormal family already
+     carries. Sweep is 1,000 cases.
+
+     Everything else came back clean, including a 200,000-case release
+     comparison the reviewer ran independently.
   2. **ABSORB `select_windows.py` WHOLE**, all four phases, as the
      bar-frame intake station on top of `session_profile.rs`'s existing
      archive, session and eligibility machinery. No frozen artifact

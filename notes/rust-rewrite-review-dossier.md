@@ -131,9 +131,21 @@ Each found by a parity gate disagreeing, not by reading the Python source.
   one rounding happens for every output class. The first sweep could not see it:
   its 39 zero results exercise underflow TO zero, which is not the same class as
   correct rounding WITHIN the subnormal range. There is now a required
-  `subnormal` family of 120 cases straddling both boundaries, and the test
-  asserts they really are nonzero subnormals rather than zeros - otherwise a
-  regenerated fixture could satisfy the family check while testing nothing.
+  `subnormal` family of 120 cases, and the test asserts they really are nonzero
+  subnormals rather than zeros - otherwise a regenerated fixture could satisfy
+  the family check while testing nothing.
+
+  AND ONE MORE, from the sixth pass, on the same branch. That branch condition
+  covers the subnormals AND the entire lowest normal binade, since
+  `round_position` pins to the floor for any result leading at or below
+  `2^-1022`. The assembly is correct across all of it; the `debug_assert` beside
+  it was one binade too narrow, so debug builds panicked where release was
+  right. A wrong bound is worse than no bound: it fails in the configuration
+  meant to be stricter. The `subnormal` family could not catch it either,
+  because its prose claimed to straddle the join while its filter kept only
+  results below `MIN_POSITIVE`. There is now a separate `lowest-binade` family,
+  aimed via the `x^2/4` identity rather than sampled, with the same
+  really-in-range assertion. Sweep is 1,000 cases.
 
   `f64::powi` was removed from this path in the same change. Its precision is
   documented as varying by platform and Rust version, so leaving `powi(2)` in

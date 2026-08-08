@@ -400,11 +400,29 @@ pub fn population_variance(values: &[f64]) -> f64 {
     // Assemble the bit pattern directly rather than scaling by a power of two,
     // so the single rounding above is the only one.
     if round_position == MIN_SUBNORMAL_EXPONENT {
-        // Subnormal encoding IS the integer multiple of 2^-1074, and a mantissa
-        // that carried all the way to 2^52 lands exactly on the smallest normal
-        // - whose bit pattern is that same integer. So no special case is
-        // needed for the carry.
-        debug_assert!(mantissa <= 1 << 52);
+        // This branch covers MORE than the subnormals, and the extra coverage is
+        // correct rather than accidental. `round_position` is
+        // `max(leading - 52, -1074)`, so it pins to the floor for every result
+        // whose leading bit sits at or below 2^-1022 - which is every subnormal
+        // AND the whole lowest normal binade, from 2^-1022 up to just under
+        // 2^-1021.
+        //
+        // Direct assembly handles all of it in one expression, because binary64
+        // encodes both ranges as the same integer multiple of 2^-1074:
+        // `mantissa` below 2^52 is a subnormal bit pattern, exactly 2^52 is the
+        // smallest normal, and above that it is the lowest normal binade with
+        // its exponent field already reading 1. The carry out of the subnormal
+        // range therefore needs no special case either.
+        //
+        // The assertion here originally read `mantissa <= 1 << 52`, which was
+        // narrower than the branch and panicked in debug builds throughout the
+        // lowest normal binade - on values `from_bits` was constructing
+        // correctly. Release builds were unaffected, which is precisely why the
+        // bound has to be right rather than merely absent.
+        debug_assert!(
+            mantissa < 1 << 53,
+            "the branch spans the subnormals and the lowest normal binade"
+        );
         return f64::from_bits(mantissa);
     }
 
@@ -522,6 +540,32 @@ mod tests {
             variance.to_bits(),
             min_normal.to_bits(),
             "x^2/4 for x = 2^-510 is exactly 2^-1022, the smallest normal"
+        );
+    }
+
+    /// INSIDE THE LOWEST NORMAL BINADE, which the boundary case above does not
+    /// reach and which is a separate branch condition in disguise.
+    ///
+    /// `round_position` pins to the subnormal floor for every result whose
+    /// leading bit sits at or below `2^-1022`, so the direct-assembly branch
+    /// spans the subnormals AND all of `[2^-1022, 2^-1021)`. Landing exactly ON
+    /// the join leaves `mantissa` at exactly `2^52` - which is why the test
+    /// above passed against an assertion that was too narrow by a whole binade.
+    /// Anything strictly inside has `mantissa > 2^52` and used to panic in DEBUG
+    /// builds only, while release computed the correct value throughout. A
+    /// wrong bound is worse than no bound for exactly that reason: it fails in
+    /// the configuration that is supposed to be the stricter one.
+    ///
+    /// `statistics.pvariance([0.0, 0x1.4p-510])` is `0x1.9p-1022`, bit pattern
+    /// `0x0019000000000000`. The `x^2/4` identity gives the expectation without
+    /// a CPython round trip: `(1.25 * 2^-510)^2 / 4` is `1.5625 * 2^-1022`.
+    #[test]
+    fn the_lowest_normal_binade_is_assembled_not_asserted_away() {
+        let got = population_variance(&[0.0, f64::from_bits(0x2014_0000_0000_0000)]);
+        assert_eq!(got.to_bits(), 0x0019_0000_0000_0000);
+        assert!(
+            got > f64::MIN_POSITIVE && got < f64::MIN_POSITIVE * 2.0,
+            "the case only bites STRICTLY inside the lowest normal binade: {got:?}"
         );
     }
 

@@ -99,6 +99,7 @@ fn population_variance_matches_cpython_over_the_generated_sweep() {
         "int",
         "identical",
         "subnormal",
+        "lowest-binade",
     ] {
         assert!(
             per_family.get(family).copied().unwrap_or(0) >= 10,
@@ -122,6 +123,26 @@ fn population_variance_matches_cpython_over_the_generated_sweep() {
         nonzero_subnormals >= 100,
         "the subnormal family must carry nonzero subnormal expectations, not zeros: \
          got {nonzero_subnormals}"
+    );
+
+    // And the lowest-binade family has to sit on the OTHER side of the join.
+    // The implementation takes one branch for both ranges, but the mantissa is
+    // below 2^52 for a subnormal and above it here, which is where a bound too
+    // narrow by one binade hides. The first version of the subnormal family
+    // claimed in prose to straddle this boundary while filtering every normal
+    // result out, so the class went untested.
+    let in_lowest_binade = cases
+        .iter()
+        .filter(|c| c.why == "lowest-binade")
+        .filter(|c| {
+            let expected = parse_bits(&c.expected);
+            (f64::MIN_POSITIVE..f64::MIN_POSITIVE * 2.0).contains(&expected)
+        })
+        .count();
+    assert!(
+        in_lowest_binade >= 50,
+        "the lowest-binade family must carry expectations inside [2^-1022, 2^-1021): \
+         got {in_lowest_binade}"
     );
     assert!(
         nonzero > cases.len() / 2,

@@ -113,24 +113,48 @@ def build() -> list[dict]:
     # 5e-324 and whose ceiling is the smallest normal at 2.2250738585072014e-308.
     # The three magnitudes below aim at the middle of that range and at each of
     # its two boundaries.
+    min_normal = 2.2250738585072014e-308
     subnormal = 0
+    lowest_binade = 0
     attempts = 0
-    while subnormal < 120 and attempts < 20000:
+    # Two distinct output classes, and the distinction is the whole point of
+    # both families. `round_position` pins to the subnormal floor for every
+    # result whose leading bit is at or below 2^-1022, so the implementation
+    # takes ONE branch for the subnormals and the lowest normal binade alike -
+    # but the mantissa is below 2^52 in the first and above it in the second,
+    # which is where a bound that is too narrow by one binade goes unnoticed.
+    # The first version of this generator kept only results below `min_normal`,
+    # so its prose claimed to straddle the boundary while every case sat on one
+    # side of it.
+    while subnormal < 120 and attempts < 200000:
         attempts += 1
         n = rng.choice([2, 3, 5, 8])
         magnitude = rng.choice([1e-162, 1e-160, 1e-158, 3e-155, 1.5e-154])
         gaps = [magnitude * rng.uniform(0.5, 2.0) for _ in range(n)]
         result = statistics.pvariance(gaps)
-        # Nonzero AND strictly below the smallest normal is the class that the
-        # original sweep never produced.
-        if 0.0 < result < 2.2250738585072014e-308:
+        if 0.0 < result < min_normal:
             add(gaps, "subnormal")
             subnormal += 1
 
-    if subnormal < 120:
+    # The lowest normal binade needs aiming rather than sampling: the variance
+    # of `[0, x]` is `x^2/4`, so `x` in `[2^-510, 2^-509.5)` puts the result in
+    # `[2^-1022, 2^-1021)` by construction. Sampling ordinary series around
+    # 1e-154 lands subnormal far more often than not, which is how the first
+    # version of this family came out empty.
+    attempts = 0
+    while lowest_binade < 60 and attempts < 200000:
+        attempts += 1
+        x = 2.0**-510 * rng.uniform(1.0, 1.414)
+        gaps = [0.0, x] if rng.random() < 0.5 else [0.0, x, x * rng.uniform(0.9, 1.1)]
+        result = statistics.pvariance(gaps)
+        if min_normal <= result < min_normal * 2.0:
+            add(gaps, "lowest-binade")
+            lowest_binade += 1
+
+    if subnormal < 120 or lowest_binade < 60:
         raise SystemExit(
-            f"only {subnormal} nonzero-subnormal cases generated; the family that "
-            "catches double rounding must not be thin"
+            f"generated {subnormal} subnormal and {lowest_binade} lowest-binade cases; "
+            "both families guard rounding boundaries and neither may be thin"
         )
 
     return cases

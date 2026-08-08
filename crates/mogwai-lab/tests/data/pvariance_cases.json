@@ -23038,5 +23038,517 @@
    "1fe71c8a7a4bb1cc"
   ],
   "expected": "00000067020822ec"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20167b10c34f210e"
+  ],
+  "expected": "001f9620aae60b71"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "201091f46ea62727"
+  ],
+  "expected": "0011291c4a38039d"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20158661eb828a5a"
+  ],
+  "expected": "001cf529b4b6bad3"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2015feb8cc462801",
+   "201404645888529b"
+  ],
+  "expected": "0018ad5c37a407e2"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20143fb6dd6a7774",
+   "2013345831b74c2e"
+  ],
+  "expected": "0015aa18ab08783b"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2011a176c375f54e",
+   "20132fb71ed860dd"
+  ],
+  "expected": "0012ed5e1cdf2012"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20114bbcf4e4d438",
+   "20118092a41e730b"
+  ],
+  "expected": "0010d1e6cea404c0"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2013928ea5791c80"
+  ],
+  "expected": "0017f151394345cd"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20151c250893a71f"
+  ],
+  "expected": "001bda12b877532a"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2013ffd3147bbd44",
+   "20137c98b648b1ee"
+  ],
+  "expected": "0015aa6ea634ac63"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20164119cf94a462"
+  ],
+  "expected": "001ef40fdcb8fefb"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2011012f19a8185e",
+   "2010f255d99f1808"
+  ],
+  "expected": "0010027ab12f7d43"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20125624028b087b"
+  ],
+  "expected": "001503a0c9253522"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20147356f32f3507",
+   "2014a4bfaebbec76"
+  ],
+  "expected": "001774c071694504"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20166d4922a0d8e6"
+  ],
+  "expected": "001f6f739500704a"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2011bd4364cb88a1"
+  ],
+  "expected": "0013aaedff79a976"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "201698e796b8d64e",
+   "20187d3d63630640"
+  ],
+  "expected": "001ef1570da54f39"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "201563a6cc7e28ec",
+   "2017184302ae860e"
+  ],
+  "expected": "001b9add6eb0abe4"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2015b4abc6b98fc4",
+   "2014c735fe039d3a"
+  ],
+  "expected": "00191a8a042994d7"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "201160f308385811"
+  ],
+  "expected": "0012e04fe445e8f9"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2011db4961b71059",
+   "20129de8bc5b0e9e"
+  ],
+  "expected": "001280285e91f33c"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "201284b0080cf5d8",
+   "20131ecf21062041"
+  ],
+  "expected": "0013b0e904c19fec"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20143012f5e93720",
+   "20158e3957b9ffaf"
+  ],
+  "expected": "00184789840df2a9"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20144cc6315e6e2a"
+  ],
+  "expected": "0019c15fdfd81af9"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20104ff320195490",
+   "2011ef65ce03a465"
+  ],
+  "expected": "0010665c27be3924"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2011aff3cfd4e3bb",
+   "201290a4f0c6d7ad"
+  ],
+  "expected": "0012490a4f2a3f6b"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "201100be4892b08f"
+  ],
+  "expected": "00121194630eb415"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2012be2745cd1419"
+  ],
+  "expected": "0015f4ac4227994e"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20129ae1e2dbb9e5",
+   "2011fb36edc96b1d"
+  ],
+  "expected": "00129b77f604041a"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2011fdc9deff2c83"
+  ],
+  "expected": "00143b0683fd8365"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20140603d0cdcfa0",
+   "20126d634db9748b"
+  ],
+  "expected": "0014a3ef98b3884b"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2015caecfa8832ca"
+  ],
+  "expected": "001daebbbf116259"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20154910ec613e29"
+  ],
+  "expected": "001c511a16fe20ea"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "201477e7a175b3a4"
+  ],
+  "expected": "001a2f45a641446e"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2014f7773e38a575",
+   "2016a6054829cb90"
+  ],
+  "expected": "001a89d9456e9055"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2011767700850cd8"
+  ],
+  "expected": "00130f29ffd77d84"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2015fcb08669c453",
+   "2017047adf208650"
+  ],
+  "expected": "001c2cc9a7e17e2a"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20116bf03ddd99b5",
+   "2012bb6baae72a63"
+  ],
+  "expected": "001239c2ef94f6bc"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20100d591f4f9e68"
+  ],
+  "expected": "00101abd61628ac4"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20153fcae282c386",
+   "2014c239df96cb0e"
+  ],
+  "expected": "001884ebe58ff926"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2014a4f9256452fa",
+   "2015987e584af599"
+  ],
+  "expected": "0018d191784389d2"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "201410bb2e84dbfc",
+   "201459541128d2cf"
+  ],
+  "expected": "0016b03370565a67"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2011c3f79c03bab2",
+   "2013374a905e52b8"
+  ],
+  "expected": "001315200e03e032"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2012dcb03eb9c2d9"
+  ],
+  "expected": "00163c7083744fc3"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20147715ae36bc24",
+   "2012d3d96083200b"
+  ],
+  "expected": "00158e16e6dc9de3"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2012aea89bc37848"
+  ],
+  "expected": "0015d06df8a4770f"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20138f1172b08988"
+  ],
+  "expected": "0017e8c8b858612b"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20162c4511e94846"
+  ],
+  "expected": "001eba386e4e345e"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20153847d26f37d0",
+   "20143157c76226d5"
+  ],
+  "expected": "0017dd0a47f13c16"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "201515454f22c782"
+  ],
+  "expected": "001bc7f236d74314"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2011db7eed9160d8"
+  ],
+  "expected": "0013ee30df6b44ff"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2011fde344824a0c"
+  ],
+  "expected": "00143b3fa1879ed6"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2011a3463051a4f9",
+   "20109cfb505aee1e"
+  ],
+  "expected": "001056546e5505ed"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2016127e23cb1d96"
+  ],
+  "expected": "001e72f042218e6e"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2013c4ffc2a9df09",
+   "20135af0b2cbb1cc"
+  ],
+  "expected": "0015447caf6b6946"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2015a19852163f16",
+   "20167216296b9546"
+  ],
+  "expected": "001b02b4f1d9a4f5"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2014447b6c6d267a"
+  ],
+  "expected": "0019ac59abe295e5"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20162d36ff71992c",
+   "2015f30cff122466"
+  ],
+  "expected": "001b0b9930d5e18f"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "2014a42c1a065d39",
+   "2014b9697e1a04fe"
+  ],
+  "expected": "0017c40507a2a244"
+ },
+ {
+  "why": "lowest-binade",
+  "gaps": [
+   "0000000000000000",
+   "20128ad5fadadc4a",
+   "2010f3ee3e32ff6d"
+  ],
+  "expected": "00119a9f034a253f"
  }
 ]
