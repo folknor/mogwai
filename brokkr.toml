@@ -114,6 +114,11 @@ skip = [
     # Run the gate by name: `brokkr test -p mogwai-lab
     # parity_select_windows_reproduces --timeout 279`.
     "parity_select_windows_reproduces_the_blessed_reference",
+    # The cache-level gate additionally needs the Python's own feature cache,
+    # which is gitignored. It is the layer the blessed artifact structurally
+    # cannot see, so it is a separate gate rather than an extension of the one
+    # above.
+    "parity_select_windows_cache_deviations_are_exactly_the_recorded_ones",
 ]
 certifies = "complete"
 

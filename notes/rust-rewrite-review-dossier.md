@@ -168,9 +168,17 @@ Each found by a parity gate disagreeing, not by reading the Python source.
   rounded and disagrees with the correctly rounded product in roughly one value
   in 1,163 over this domain. A single IEEE multiply always is correctly rounded,
   and exact rational arithmetic confirms the multiply is the right answer, so
-  the port is correct and CPython carries a libm artifact. Approved on the same
-  ground as `sqrt`: reproducing `pow`'s error bug-for-bug would make the tool's
-  output a function of whichever libm the machine carries.
+  the port is correct and CPython carries a libm artifact.
+
+  APPROVED BY REVIEW, session 019fe1ff, on a ground the `sqrt` precedent does
+  not supply: the tool being OFFLINE makes correctness MORE important rather
+  than less, because a purchase decision should not depend on the host libm when
+  a correctly rounded portable operation exists. The same review REFUSED the
+  alternative of re-blessing the artifact from the Rust - on today's archives
+  that would change the provenance, record no numerical correction, keep the
+  blind spot and destroy the independent Python oracle, all without gaining
+  coverage. The artifact stays Python-derived and the corrections are pinned one
+  layer below it instead.
 
   MEASURED, not estimated: eleven of the 111,396 values in a full feature sweep
   differ, all `volume_cv` or `vol_of_vol`, all by one or two ULPs. None moves a

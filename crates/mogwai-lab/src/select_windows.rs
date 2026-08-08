@@ -107,10 +107,18 @@ const MIN_MONTH_SESSIONS: usize = 15;
 /// `614219518925.9357` while `x * x` gives `614219518925.9358`, and the
 /// rational product rounds to the latter.
 ///
-/// APPROVED ON THE SAME GROUND AS `sqrt` ELSEWHERE IN THIS WORKSPACE.
-/// Reproducing `pow`'s error bug-for-bug would make this tool's output a
-/// function of whichever libm the machine happens to carry, which is worse than
-/// a stated one-ULP difference from CPython. The port is the correct one.
+/// APPROVED BY REVIEW 2026-08-08, session 019fe1ff, on the ground that the
+/// tool being OFFLINE makes correctness more important rather than less: a
+/// purchase decision should not depend on the host libm when a correctly
+/// rounded and portable operation exists. Reproducing `pow`'s error bug-for-bug
+/// would make this tool's output a function of whichever libm the machine
+/// happens to carry.
+///
+/// The approval was sought rather than assumed, and that distinction is worth
+/// keeping: the wording here originally cited the `sqrt` precedent and declared
+/// itself approved, which inherited that ruling's reasoning while helping
+/// itself to its authority. The signature this program runs under says any new
+/// parity deviation reopens the gate, so the ruling had to be someone else's.
 ///
 /// MEASURED CONSEQUENCE, so nobody has to guess at the blast radius: of the
 /// 111,396 values in a full feature sweep, ELEVEN differ from the Python's
@@ -153,9 +161,17 @@ impl DayFeatures {
 
 /// A parsed bar: timestamp parts, open, close, volume.
 struct Bar {
-    /// Minutes since the epoch of the civil date, enough for ordering and for
-    /// the missing-minute arithmetic without pulling in a date library.
-    minute: i64,
+    /// SECONDS since the epoch, not minutes.
+    ///
+    /// The Python builds a full `datetime` including seconds, compares whole
+    /// timestamps for the duplicate/backwards check, and derives missing
+    /// minutes from the full difference. Holding minute precision here made two
+    /// valid rows at `17:00:00` and `17:00:30` behave differently: the Python
+    /// accepts both and computes the second return, while a minute-resolution
+    /// clock reads the second as a duplicate and drops it. The committed
+    /// archives are minute-aligned, so no corpus gate could expose that -
+    /// found by review instead.
+    second: i64,
     hour: u32,
     /// Days since 1970-01-01 of the SESSION this bar belongs to.
     session_day: i64,
@@ -234,8 +250,18 @@ fn parse_line(line: &str) -> Option<Bar> {
         Some(raw) => raw.parse().ok()?,
         None => 0,
     };
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute_of_hour > 59 {
-        // `datetime` refuses these; the Python turns that into a skipped row.
+    // `datetime` refuses these outright and the Python turns that into a
+    // skipped row. Day-of-month is validated against the actual month LENGTH,
+    // not against 31: `31/02/2024` is a `ValueError` in Python, and accepting
+    // it here would have manufactured a bar on a date that does not exist and
+    // silently shifted it into March.
+    if !(1..=12).contains(&month)
+        || day < 1
+        || day > days_in_month(year, month)
+        || hour > 23
+        || minute_of_hour > 59
+        || second > 59
+    {
         return None;
     }
     let open: f64 = parts[2].parse().ok()?;
@@ -243,19 +269,40 @@ fn parse_line(line: &str) -> Option<Bar> {
     let volume: i64 = parts[6].parse().ok()?;
 
     let civil = days_from_civil(year, month, day);
-    let minute = civil * 1440 + i64::from(hour) * 60 + i64::from(minute_of_hour);
+    // Full SECOND resolution: the Python compares whole `datetime`s, so two
+    // rows inside the same minute are distinct rather than duplicates.
+    let stamp = civil * 86_400
+        + i64::from(hour) * 3_600
+        + i64::from(minute_of_hour) * 60
+        + i64::from(second);
     // `session_date`: CME runs 17:00 to 16:00 US Central, so a bar at or after
     // 17:00 belongs to the NEXT calendar day's session.
     let session_day = if hour >= 17 { civil + 1 } else { civil };
-    let _ = second;
     Some(Bar {
-        minute,
+        second: stamp,
         hour,
         session_day,
         open,
         close,
         volume,
     })
+}
+
+/// Days in a civil month, so an impossible date is refused rather than rolled
+/// forward.
+fn days_in_month(year: i64, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
 }
 
 /// Formats days-since-epoch as `YYYY-MM-DD`, the cache's session key.
@@ -326,7 +373,7 @@ pub fn build_features(path: &Path) -> LabResult<Vec<(String, DayFeatures)>> {
 
     let mut days: Vec<(i64, Slot)> = Vec::new();
     let mut day_index: HashMap<i64, usize> = HashMap::new();
-    let mut prev_minute: Option<i64> = None;
+    let mut prev_stamp: Option<i64> = None;
     let mut prev_close: Option<f64> = None;
     let mut prev_session: Option<i64> = None;
 
@@ -341,7 +388,7 @@ pub fn build_features(path: &Path) -> LabResult<Vec<(String, DayFeatures)>> {
         let Some(bar) = parse_line(&line) else {
             continue;
         };
-        if prev_minute.is_some_and(|prev| bar.minute <= prev) {
+        if prev_stamp.is_some_and(|prev| bar.second <= prev) {
             continue; // duplicate or backwards timestamp
         }
         if bar.close <= 0.0 || bar.open <= 0.0 {
@@ -365,15 +412,18 @@ pub fn build_features(path: &Path) -> LabResult<Vec<(String, DayFeatures)>> {
             days.len() - 1
         };
 
-        if let (Some(close), Some(previous), Some(prev_min)) =
-            (prev_close, prev_session, prev_minute)
+        if let (Some(close), Some(previous), Some(prev_seconds)) =
+            (prev_close, prev_session, prev_stamp)
             && previous == bar.session_day
         {
             // The vendor omits no-trade minutes rather than writing a
             // zero-volume bar. Those minutes are real zero-return, zero-volume
             // observations, and dropping them inflates `zero_change` and
             // `volume_cv` in exactly the illiquid regimes this cares about.
-            let missing = (bar.minute - prev_min) - 1;
+            // `int((stamp - prev_stamp).total_seconds() // 60) - 1`: FLOOR
+            // division on the second difference, so two bars inside one minute
+            // contribute no missing minutes rather than a negative count.
+            let missing = (bar.second - prev_seconds).div_euclid(60) - 1;
             let slot = &mut days[slot_idx].1;
             if missing > 0 {
                 slot.zero += missing;
@@ -398,7 +448,7 @@ pub fn build_features(path: &Path) -> LabResult<Vec<(String, DayFeatures)>> {
         slot.volume += bar.volume;
         slot.vols.push(bar.volume);
 
-        prev_minute = Some(bar.minute);
+        prev_stamp = Some(bar.second);
         prev_close = Some(bar.close);
         prev_session = Some(bar.session_day);
     }
@@ -1006,6 +1056,57 @@ mod tests {
         assert_eq!(evening.session_day, days_from_civil(2024, 1, 6));
         let morning = parse_line("05/01/2024;16:59;100.0;0;0;100.5;7").expect("parses");
         assert_eq!(morning.session_day, days_from_civil(2024, 1, 5));
+    }
+
+    /// SECONDS PARTICIPATE IN ORDER. The Python compares whole `datetime`s, so
+    /// two rows inside one minute are distinct observations. Holding minute
+    /// precision made the second one look like a duplicate and dropped it,
+    /// which no corpus gate could expose because the committed archives are
+    /// minute-aligned.
+    ///
+    /// The assertion is on the ORDERING CONSEQUENCE rather than on the field,
+    /// because that is what the feature loop acts on.
+    #[test]
+    fn seconds_distinguish_two_bars_inside_one_minute() {
+        let first = parse_line("05/01/2024;17:00:00;100.0;0;0;100.5;7").expect("parses");
+        let second = parse_line("05/01/2024;17:00:30;100.0;0;0;100.6;7").expect("parses");
+        assert!(
+            second.second > first.second,
+            "the later bar must sort after the earlier one, not equal to it"
+        );
+        // And the missing-minute arithmetic must floor to zero across them
+        // rather than going negative.
+        assert_eq!((second.second - first.second).div_euclid(60) - 1, -1);
+
+        // A full minute apart contributes no missing minutes either; two
+        // minutes apart contributes exactly one.
+        let next_minute = parse_line("05/01/2024;17:01:00;100.0;0;0;100.6;7").expect("parses");
+        assert_eq!((next_minute.second - first.second).div_euclid(60) - 1, 0);
+        let two_minutes = parse_line("05/01/2024;17:02:00;100.0;0;0;100.6;7").expect("parses");
+        assert_eq!((two_minutes.second - first.second).div_euclid(60) - 1, 1);
+    }
+
+    /// `datetime` refuses impossible civil dates and out-of-range times, and
+    /// the Python turns that into a skipped row. Validating the day against
+    /// `1..=31` alone accepted `31/02`, which would have manufactured a bar on
+    /// a date that does not exist and silently shifted it into March.
+    #[test]
+    fn impossible_dates_and_times_are_refused() {
+        assert!(parse_line("31/02/2024;12:00;100.0;0;0;100.5;7").is_none());
+        assert!(parse_line("30/02/2024;12:00;100.0;0;0;100.5;7").is_none());
+        assert!(parse_line("31/04/2024;12:00;100.0;0;0;100.5;7").is_none());
+        assert!(parse_line("00/01/2024;12:00;100.0;0;0;100.5;7").is_none());
+        assert!(parse_line("01/13/2024;12:00;100.0;0;0;100.5;7").is_none());
+        assert!(parse_line("01/01/2024;24:00;100.0;0;0;100.5;7").is_none());
+        assert!(parse_line("01/01/2024;12:60;100.0;0;0;100.5;7").is_none());
+        assert!(parse_line("01/01/2024;12:00:60;100.0;0;0;100.5;7").is_none());
+
+        // Leap years, both directions: 2024 has a 29 February and 2023 does
+        // not, and 1900 is not a leap year while 2000 is.
+        assert!(parse_line("29/02/2024;12:00;100.0;0;0;100.5;7").is_some());
+        assert!(parse_line("29/02/2023;12:00;100.0;0;0;100.5;7").is_none());
+        assert!(parse_line("29/02/1900;12:00;100.0;0;0;100.5;7").is_none());
+        assert!(parse_line("29/02/2000;12:00;100.0;0;0;100.5;7").is_some());
     }
 
     /// `parse_line` returns nothing rather than raising, on every shape the

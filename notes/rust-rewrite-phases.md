@@ -1384,9 +1384,58 @@ moment the scripts move. Phase 4 therefore runs in two halves:
      STATED PLAINLY BECAUSE IT MATTERS: no month median moves on today's
      archives, so the blessed gate passes - BY COINCIDENCE, not by
      construction. A different corpus could put one of those eleven
-     sessions on a median's middle. `scripts/compare_cme_caches.py` is the
-     tool that re-measures it, and it exists because the blessed gate
-     structurally cannot.
+     sessions on a median's middle.
+
+     RULED 2026-08-08, session 019fe1ff, and the ruling was SOUGHT rather
+     than assumed. The first version of this work approved the deviation
+     in its own source comment, citing the `sqrt` precedent - which
+     inherited that ruling's reasoning while helping itself to its
+     authority. The signature says any new parity deviation reopens the
+     gate, so the ruling was not mine to make. What came back:
+
+     - **The multiply is approved**, on a ground I had not argued: the
+       tool being OFFLINE makes correctness MORE important, not less,
+       because a purchase decision should not depend on the host libm when
+       a correctly rounded portable operation exists.
+     - **The blessed artifact stays PYTHON-DERIVED.** I had offered
+       re-blessing from the Rust as the alternative; it was refused, and
+       the reasoning is better than mine. On today's archives a Rust
+       re-blessing would produce identical monthly values, so it would
+       change the claimed provenance, record no numerical correction,
+       preserve the same blind spot, and destroy the independent Python
+       oracle - all without gaining coverage. The correct shape is TWO
+       LAYERS: keep the Python-derived artifact as the legacy behavioural
+       reference, and add a lower-layer Rust reference that pins the
+       corrections where they actually occur.
+     - **The signature is reopened**, and not renewed by the approval
+       alone. The retirement SCOPE is unchanged.
+
+     TWO FURTHER DEFECTS came back with it, both real, both now closed:
+
+     1. **The gate did not verify archive provenance.** It compared
+        session COUNTS while its own assertion message claimed that
+        established the archives were the blessed ones. It does not:
+        archives can change while the qualifying-session count holds, and
+        changes confined to discarded sessions are precisely the class the
+        monthly artifact cannot see. It now verifies the recorded SHA-256
+        digests and byte sizes.
+     2. **A FIFTH ordering trap, and a correctness bug rather than a
+        rounding one.** `parse_line` built a minute-resolution stamp and
+        discarded seconds, while the Python compares whole `datetime`s and
+        derives missing minutes from the full difference. Two valid rows
+        at `17:00:00` and `17:00:30` therefore diverged: the Python takes
+        both, the port dropped the second as a duplicate. Related, and
+        also fixed: the Python's `datetime` refuses `31/02` and a seconds
+        field of 60, while the port validated the day against `1..=31`
+        and never checked seconds at all. The committed archives are
+        minute-aligned and well formed, so NO corpus gate could have
+        exposed either - they are pinned by synthetic discriminators now,
+        including leap-year cases in both directions.
+
+     The manifest is `analysis/select-windows-cache-deviations.json`, and
+     its gate re-derives the difference set rather than trusting the file:
+     exactly the recorded eleven, no fewer so a correction cannot vanish,
+     no more so a new divergence cannot hide among the approved ones.
 
      The original text follows.
 

@@ -15,11 +15,26 @@
 //!
 //! WHAT IS COMPARED IS THE STRUCTURE, not printed tables: per-month medians,
 //! the eligible span, the z-scored vectors in key order, the seeds and the
-//! selection. Floats are compared BIT-EXACTLY. That is not optimism - every
-//! accumulation on this path goes through `py_sum`, `py_int_div` or `sqrt`,
-//! all of which are correctly rounded or Neumaier-compensated exactly as
-//! CPython's are, so anything less than bit equality is a defect rather than a
-//! tolerance question.
+//! selection. Floats are compared BIT-EXACTLY, and that is a demand rather than
+//! optimism.
+//!
+//! Why bit equality is the right bar here needs stating precisely, because an
+//! earlier version of this note overclaimed. The `sum()` SITES - the variance
+//! sums, the z-score mean and variance, the farthest-point distances - go
+//! through `py_sum`, which reproduces CPython's Neumaier compensation, and the
+//! integer divisions go through `py_int_div`. But `ret2` and the hourly buckets
+//! are NOT those: they are naive `+=` accumulations, because the Python
+//! accumulates them in a loop rather than through `sum()`, and a compensated
+//! sum there would be the divergence. So the claim is not "everything is
+//! compensated" - it is that each site matches the CPython construct it was
+//! ported from, which is why anything less than bit equality is a defect rather
+//! than a tolerance question.
+//!
+//! One deviation is deliberate and does not appear here: `select_windows::squared`
+//! uses a multiply where the Python uses `** 2`. It changes eleven values in
+//! the CACHE, none of which reaches a surviving monthly median on the committed
+//! archives, so this artifact-level gate cannot see it. That is what
+//! `cache_deviations` and `scripts/compare_cme_caches.py` are for.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -70,14 +85,42 @@ fn parity_select_windows_reproduces_the_blessed_reference() {
     let reference = blessed();
     let cache = build_cache();
 
-    // The archives themselves, first: a mismatch below means the port drifted,
-    // but only if the inputs are the ones the reference was blessed over.
+    // THE ARCHIVES THEMSELVES, first and by DIGEST. A session count is not an
+    // identity: archives can change while the qualifying-session count holds,
+    // and changes confined to discarded sessions are exactly the class the
+    // monthly artifact cannot see - which is the same blind spot that hid the
+    // squaring deviation one layer below the blessed comparison. This assertion
+    // used to check counts alone while its message claimed to establish that
+    // the archives were the blessed ones. It did not.
+    let market = root().join("research/market-data");
+    let provenance = reference["provenance"]["archives"]
+        .as_object()
+        .expect("archive provenance");
+    for (symbol, file) in sw::ARCHIVES {
+        let recorded = &provenance[symbol];
+        let path = market.join(file);
+        let bytes =
+            std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        assert_eq!(
+            u64::try_from(bytes.len()).unwrap(),
+            recorded["bytes"].as_u64().expect("recorded size"),
+            "{symbol}: {file} is not the size the artifact was blessed over"
+        );
+        let digest = <sha2::Sha256 as sha2::Digest>::digest(&bytes);
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            recorded["sha256"].as_str().expect("recorded digest"),
+            "{symbol}: {file} is not the archive the artifact was blessed over"
+        );
+    }
+
     let sessions = &reference["provenance"]["sessions_per_symbol"];
     for (symbol, rows) in &cache {
         assert_eq!(
             u64::try_from(rows.len()).unwrap(),
             sessions[symbol].as_u64().expect("session count"),
-            "{symbol}: session count differs, so the archives are not the blessed ones"
+            "{symbol}: qualifying-session count differs"
         );
     }
 
@@ -250,6 +293,98 @@ fn parity_select_windows_reproduces_the_blessed_reference() {
             &format!("percentile {month}"),
             *value,
             blessed_percentiles[month].as_f64().expect("finite"),
+        );
+    }
+}
+
+/// THE CACHE-LEVEL GATE, one layer below the blessed artifact.
+///
+/// `select-windows-blessed.json` is derived FROM the daily feature cache, so it
+/// cannot see a difference in a session that no surviving monthly median
+/// depends on - and that is exactly where the squaring deviation lives. This
+/// re-derives the difference set against the Python's own cache and asserts it
+/// is EXACTLY the recorded manifest: no fewer, so a correction cannot silently
+/// disappear, and no more, so a new divergence cannot hide among the approved
+/// ones.
+///
+/// Needs both the archives and the Python's cache, so it carries the same
+/// local-data caveat as the gate above. Regenerate the two inputs with
+/// `python3 analysis/select_windows.py features` and
+/// `mogwai select-windows features --cache target/rust-cme-features.json`, then
+/// `python3 scripts/compare_cme_caches.py <python> <rust> --write-manifest`.
+#[test]
+#[ignore = "re-reads the four CME archives and the Python's feature cache"]
+fn parity_select_windows_cache_deviations_are_exactly_the_recorded_ones() {
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root().join("analysis/select-windows-cache-deviations.json"))
+            .expect("the deviation manifest"),
+    )
+    .expect("the manifest parses");
+
+    let python_cache: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root().join("analysis/cme_daily_features.json")).expect(
+            "the Python's feature cache; run `python3 analysis/select_windows.py features`",
+        ),
+    )
+    .expect("the cache parses");
+
+    let cache = build_cache();
+    let mut found: Vec<(String, String, String, u64, u64)> = Vec::new();
+    let mut compared = 0u64;
+    for (symbol, sessions) in &cache {
+        let days = python_cache[symbol]
+            .as_object()
+            .unwrap_or_else(|| panic!("{symbol} is absent from the Python cache"));
+        for (session, features) in sessions {
+            let Some(want) = days.get(session) else {
+                continue;
+            };
+            for feature in sw::FEATURES {
+                compared += 1;
+                let ours = features.get(feature).expect("named feature");
+                let theirs = want[feature].as_f64().expect("numeric feature");
+                if ours.to_bits() != theirs.to_bits() {
+                    found.push((
+                        symbol.clone(),
+                        session.clone(),
+                        feature.to_string(),
+                        theirs.to_bits(),
+                        ours.to_bits(),
+                    ));
+                }
+            }
+        }
+    }
+    found.sort();
+
+    let recorded = manifest["deviations"].as_array().expect("deviations");
+    assert_eq!(
+        compared,
+        manifest["compared_values"].as_u64().expect("count"),
+        "the number of compared values moved, so the corpus is not the recorded one"
+    );
+    assert_eq!(
+        found.len(),
+        recorded.len(),
+        "expected exactly {} approved deviation(s), found {}: {found:#?}",
+        recorded.len(),
+        found.len()
+    );
+    for ((symbol, session, feature, python_bits, rust_bits), want) in
+        found.iter().zip(recorded.iter())
+    {
+        assert_eq!(symbol, want["symbol"].as_str().expect("symbol"));
+        assert_eq!(session, want["session"].as_str().expect("session"));
+        assert_eq!(feature, want["feature"].as_str().expect("feature"));
+        assert_eq!(
+            format!("{python_bits:016x}"),
+            want["python_bits"].as_str().expect("python bits"),
+            "{symbol} {session} {feature}: the Python side moved"
+        );
+        assert_eq!(
+            format!("{rust_bits:016x}"),
+            want["rust_bits"].as_str().expect("rust bits"),
+            "{symbol} {session} {feature}: the corrected value moved"
         );
     }
 }

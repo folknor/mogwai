@@ -20,8 +20,15 @@ on bit patterns rather than on decimal text.
 """
 
 import json
+import os
 import struct
 import sys
+
+MANIFEST = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "analysis",
+    "select-windows-cache-deviations.json",
+)
 
 
 def bits(value):
@@ -29,12 +36,14 @@ def bits(value):
 
 
 def main():
-    if len(sys.argv) != 3:
-        raise SystemExit(f"usage: {sys.argv[0]} <left.json> <right.json>")
+    if len(sys.argv) not in (3, 4):
+        raise SystemExit(f"usage: {sys.argv[0]} <python.json> <rust.json> [--write-manifest]")
+    write_manifest = len(sys.argv) == 4 and sys.argv[3] == "--write-manifest"
     with open(sys.argv[1]) as fh:
         left = json.load(fh)
     with open(sys.argv[2]) as fh:
         right = json.load(fh)
+    entries = []
 
     if sorted(left) != sorted(right):
         raise SystemExit(f"symbols differ: {sorted(left)} against {sorted(right)}")
@@ -55,11 +64,40 @@ def main():
                 lv, rv = ldays[day][feature], rdays[day][feature]
                 if bits(lv) != bits(rv):
                     differences += 1
+                    entries.append({
+                        "symbol": symbol,
+                        "session": day,
+                        "feature": feature,
+                        "python_bits": f"{bits(lv):016x}",
+                        "rust_bits": f"{bits(rv):016x}",
+                    })
                     if differences <= 20:
                         print(f"{symbol} {day} {feature}: "
                               f"{lv!r} ({bits(lv):016x}) against {rv!r} ({bits(rv):016x})")
 
     print(f"compared {compared} values across {len(left)} symbols")
+
+    if write_manifest:
+        entries.sort(key=lambda e: (e["symbol"], e["session"], e["feature"]))
+        manifest = {
+            "_doc": (
+                "The INTENTIONAL cache-level corrections from select_windows::squared, which "
+                "squares with a multiply where the Python uses ** 2 and libm pow. Recorded "
+                "here because analysis/select-windows-blessed.json is derived FROM the cache "
+                "and structurally cannot see a difference in a session no surviving monthly "
+                "median depends on. Every entry is a value where the Rust is correctly "
+                "rounded and CPython is not. Regenerate with scripts/compare_cme_caches.py "
+                "--write-manifest."
+            ),
+            "compared_values": compared,
+            "deviations": entries,
+        }
+        with open(MANIFEST, "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh, indent=1)
+            fh.write("\n")
+        print(f"wrote {MANIFEST} with {len(entries)} deviation(s)")
+        return
+
     if differences:
         raise SystemExit(f"FAIL: {differences} difference(s)")
     print("identical, bit for bit")

@@ -1,0 +1,83 @@
+{
+ "_doc": "The INTENTIONAL cache-level corrections from select_windows::squared, which squares with a multiply where the Python uses ** 2 and libm pow. Recorded here because analysis/select-windows-blessed.json is derived FROM the cache and structurally cannot see a difference in a session no surviving monthly median depends on. Every entry is a value where the Rust is correctly rounded and CPython is not. Regenerate with scripts/compare_cme_caches.py --write-manifest.",
+ "compared_values": 111396,
+ "deviations": [
+  {
+   "symbol": "CL",
+   "session": "2018-04-09",
+   "feature": "volume_cv",
+   "python_bits": "3ff76bbd46531e5c",
+   "rust_bits": "3ff76bbd46531e5d"
+  },
+  {
+   "symbol": "CL",
+   "session": "2023-06-16",
+   "feature": "vol_of_vol",
+   "python_bits": "3fdeec4845e5dd99",
+   "rust_bits": "3fdeec4845e5dd9a"
+  },
+  {
+   "symbol": "ES",
+   "session": "2009-11-30",
+   "feature": "volume_cv",
+   "python_bits": "4003bb4393df4996",
+   "rust_bits": "4003bb4393df4997"
+  },
+  {
+   "symbol": "ES",
+   "session": "2019-03-20",
+   "feature": "vol_of_vol",
+   "python_bits": "3fe64a141a882ecf",
+   "rust_bits": "3fe64a141a882ece"
+  },
+  {
+   "symbol": "GC",
+   "session": "2007-05-24",
+   "feature": "volume_cv",
+   "python_bits": "4006ea991ad5b33f",
+   "rust_bits": "4006ea991ad5b33e"
+  },
+  {
+   "symbol": "GC",
+   "session": "2014-09-30",
+   "feature": "volume_cv",
+   "python_bits": "4000eee2111142fa",
+   "rust_bits": "4000eee2111142f9"
+  },
+  {
+   "symbol": "GC",
+   "session": "2020-02-12",
+   "feature": "volume_cv",
+   "python_bits": "3ff47885ab40a396",
+   "rust_bits": "3ff47885ab40a397"
+  },
+  {
+   "symbol": "NQ",
+   "session": "2011-08-02",
+   "feature": "vol_of_vol",
+   "python_bits": "3fdd7cd1f47ff22f",
+   "rust_bits": "3fdd7cd1f47ff22d"
+  },
+  {
+   "symbol": "NQ",
+   "session": "2017-01-09",
+   "feature": "vol_of_vol",
+   "python_bits": "3fe8fe2d60ea4ea0",
+   "rust_bits": "3fe8fe2d60ea4e9f"
+  },
+  {
+   "symbol": "NQ",
+   "session": "2023-08-01",
+   "feature": "volume_cv",
+   "python_bits": "3ffaf7f86b646417",
+   "rust_bits": "3ffaf7f86b646418"
+  },
+  {
+   "symbol": "NQ",
+   "session": "2025-02-04",
+   "feature": "volume_cv",
+   "python_bits": "3ff8b85b820a169f",
+   "rust_bits": "3ff8b85b820a169e"
+  }
+ ]
+}
