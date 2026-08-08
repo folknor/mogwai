@@ -1385,7 +1385,39 @@ moment the scripts move. Phase 4 therefore runs in two halves:
      declares the knob or inherits it. Record the regeneration
      provenance in the commit - `char_*.json` is gitignored, so the
      inputs cannot be reconstructed from the tree.
-  5. **Scope the subcontract hash BY MODE.** One flat
+  5. **DONE 2026-08-08.** `Mode::Protocol11`/`Mode::Protocol12a` plus
+     `subcontract_hash_for` and `subcontract_dumps_for`. The flat
+     `subcontract_hash` is UNTOUCHED, deliberately: it is what
+     cross-language parity is checked against and `mnq_fit.py` has no
+     per-mode equivalent, so the scoped hashes are additive and apply to
+     artifacts written from here on. `mnq-fit.json`'s committed
+     `binding.subcontract_hash` 35e5b033 is likewise untouched, per the
+     owner's ruling - it records what the protocol-11 fit actually ran
+     under, and rewriting it would assert a binding that never happened.
+
+     THE BOUNDARY IS TAKEN FROM THE PYTHON, not invented here.
+     `mnq_fit.py`'s `SUBCONTRACT_KEYS` carries its own
+     `# Protocol 12a` section marker, and everything after it is the 12a
+     set - 41 keys. That marker is the only place in either language that
+     records which mode reads which constant, so it is the authority.
+
+     A NOTE ON THE TEST, because the obvious one is worthless. The natural
+     assertion - "every key belongs to exactly one mode" - cannot fail,
+     since `Protocol11` is DEFINED as "not in the 12a list". It would be a
+     tautology in the costume of a partition proof, and this program has
+     already shipped two tests that passed while measuring nothing. The
+     real risk is MISCLASSIFICATION, so the test parses `mnq_fit.py`'s key
+     list at the section marker and compares the two sides, plus asserts
+     every named key actually exists in the sub-contract so a typo cannot
+     move a key into protocol-11 while both lists still agree. That test
+     dies with the Python at item 7, which is correct: after that
+     `PROTOCOL_12A_KEYS` IS the authority and there is nothing left to
+     check it against. Landing it before then is the point of the
+     signature's ordering.
+
+     The original text follows.
+
+     **Scope the subcontract hash BY MODE.** One flat
      `SUBCONTRACT_KEYS` namespace means any constant edit retroactively
      unbinds every prior fit, including for constants that fit never
      read. With one instrument that is a curiosity; with a dozen, adding

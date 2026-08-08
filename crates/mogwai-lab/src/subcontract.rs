@@ -560,6 +560,118 @@ fn tree() -> PyValue {
     PyValue::Dict(m)
 }
 
+/// The protocol-12a half of the key set, verbatim from `mnq_fit.py`'s own
+/// section marker: everything after the `# Protocol 12a` comment in
+/// `SUBCONTRACT_KEYS`. Taken from that comment rather than inferred, because
+/// the boundary is a claim about which constants a MODE reads and the Python
+/// is the only place that records it.
+const PROTOCOL_12A_KEYS: &[&str] = &[
+    "BOOTSTRAP_BASE_SEED",
+    "BOOTSTRAP_BLOCK_SESSIONS",
+    "BOOTSTRAP_REPLICATES",
+    "COLD_HOURS",
+    "CONTROL_ESCALATION_MAX",
+    "CONTROL_TIE_BASE_SEED",
+    "COUNT_WINDOWS_S",
+    "EXCEEDANCE_TICKS",
+    "FAIL_HOURS_300",
+    "FAIL_HOURS_60",
+    "FAMILY_ENVELOPE_LEVEL",
+    "FOLD_MIN_SESSIONS",
+    "GAP_CLOSE_EPS",
+    "GAP_CLOSE_LCB_MIN",
+    "GAP_CLOSE_MIN",
+    "HOT_HOURS",
+    "INITIATION_INNOVATION_MIN",
+    "INNOVATION_EXCEED_ABS",
+    "MATERIALITY_BAND",
+    "MIN_15S_CELL_RETURNS",
+    "MIN_1S_CELL_RETURNS",
+    "MIN_5S_CELL_RETURNS",
+    "MIN_BOUNDARY_60S_CELL_RETURNS",
+    "MIN_BOUNDARY_MINUTES_CELL",
+    "MIN_MINUTES_CELL",
+    "MIN_RESIDUAL_CELL",
+    "PARENT_COUNT_BIN_EDGES",
+    "PARENT_COUNT_BIN_NAMES",
+    "PERMUTATION_BASE_SEED",
+    "PERMUTATION_REPLICATES",
+    "PERMUTATION_VARIANTS",
+    "RESIDUAL_EXCEED_MULTIPLES",
+    "RESIDUAL_MIN_HISTORY",
+    "RESIDUAL_WINDOW_S",
+    "SEED_DIRECTION_MIN",
+    "SEGMENT_LABEL_EDGES_S",
+    "SIGMA_ESCALATION_MIN",
+    "SINCE_OPEN_BIN_NAMES",
+    "UNTIL_CLOSE_BIN_NAMES",
+    "WALL_HORIZONS_S",
+];
+
+/// Which measurement mode a sub-contract hash binds.
+///
+/// THE DEFECT THIS FIXES, restated from `tree`'s note: one flat key set
+/// spanning every mode means any constant edit retroactively unbinds every
+/// prior fit, including fits that never read the constant that moved. Adding a
+/// single protocol-12a constant already unbound `mnq-fit.json` once, and the
+/// owner had to rule that the resulting hash mismatch was correct history
+/// rather than drift. At one instrument that is a curiosity to be explained; at
+/// a dozen it is a standing invitation to conclude the corpus is stale when
+/// nothing moved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// The protocol-11 fit: everything ahead of the `# Protocol 12a` marker.
+    Protocol11,
+    /// The protocol-12a measurement block.
+    Protocol12a,
+}
+
+impl Mode {
+    fn contains(self, key: &str) -> bool {
+        let is_12a = PROTOCOL_12A_KEYS.contains(&key);
+        match self {
+            Self::Protocol11 => !is_12a,
+            Self::Protocol12a => is_12a,
+        }
+    }
+}
+
+/// The sub-contract bytes for ONE mode, in the same canonical form as
+/// [`subcontract_dumps`].
+#[must_use]
+pub fn subcontract_dumps_for(mode: Mode) -> String {
+    let PyValue::Dict(all) = tree() else {
+        unreachable!("tree is a dict")
+    };
+    let scoped: BTreeMap<&'static str, PyValue> = all
+        .into_iter()
+        .filter(|(key, _)| mode.contains(key))
+        .collect();
+    let mut out = String::new();
+    dump(&PyValue::Dict(scoped), &mut out);
+    out
+}
+
+/// The sub-contract hash for ONE mode.
+///
+/// A NEW binding, with no Python counterpart: `mnq_fit.py` has only the flat
+/// [`subcontract_hash`], and that flat hash is what cross-language parity is
+/// checked against, so it is untouched. These are for artifacts written from
+/// here on, which record the hash of the constants their own mode actually
+/// reads - so a protocol-12a constant moving no longer unbinds a protocol-11
+/// fit.
+///
+/// It does NOT retroactively rebind anything. `analysis/mnq-fit.json` keeps
+/// `binding.subcontract_hash` 35e5b033 as committed, per the owner's 2026-08-08
+/// ruling: that value accurately records what the protocol-11 fit ran under,
+/// and rewriting it would assert a binding that never happened.
+#[must_use]
+pub fn subcontract_hash_for(mode: Mode) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(subcontract_dumps_for(mode).as_bytes());
+    crate::ledger::hex_digest(&hasher.finalize())
+}
+
 /// The exact bytes `analysis/mnq_fit.py`'s `subcontract_hash()` hashes.
 pub fn subcontract_dumps() -> String {
     let mut out = String::new();
@@ -588,6 +700,125 @@ mod tests {
     #[test]
     fn hash_matches_the_python_reference() {
         assert_eq!(subcontract_hash(), EXPECTED_HASH);
+    }
+
+    /// THE CLASSIFICATION IS CHECKED AGAINST THE PYTHON, not against itself.
+    ///
+    /// Note first what does NOT need testing and why, because the obvious test
+    /// here is worthless: `Mode::Protocol11` is defined as "not in
+    /// `PROTOCOL_12A_KEYS`", so "every key belongs to exactly one mode" is true
+    /// BY CONSTRUCTION and an assertion of it can never fail. It would be a
+    /// tautology wearing the costume of a partition proof.
+    ///
+    /// The real risk is MISCLASSIFICATION - a key sitting in the 12a list that
+    /// protocol-11 actually reads, or missing from it when 12a reads it - and
+    /// the only authority on that is `mnq_fit.py`'s own `# Protocol 12a`
+    /// section marker, since the boundary is a claim about which mode reads
+    /// which constant. So this parses the Python's `SUBCONTRACT_KEYS` and
+    /// compares the two sides.
+    ///
+    /// This test dies with the Python at 4b item 7, which is correct: after
+    /// that, `PROTOCOL_12A_KEYS` IS the authority and there is nothing left to
+    /// cross-check it against. It is deliberately landed before then, while the
+    /// reference still exists.
+    #[test]
+    fn the_twelve_a_classification_matches_the_python_section_marker() {
+        let source = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../analysis/mnq_fit.py"),
+        )
+        .expect("mnq_fit.py is still present; this test retires with it");
+        let block = source
+            .split("SUBCONTRACT_KEYS = [")
+            .nth(1)
+            .expect("the key list")
+            .split(']')
+            .next()
+            .expect("the list terminates");
+        let (_, after_marker) = block
+            .split_once("# Protocol 12a")
+            .expect("the section marker the classification is taken from");
+
+        let mut from_python: Vec<String> = after_marker
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect();
+        from_python.sort();
+        assert!(
+            from_python.len() > 30,
+            "parsed too few 12a keys ({}), so the parse is wrong rather than the list",
+            from_python.len()
+        );
+
+        let mut ours: Vec<String> = PROTOCOL_12A_KEYS.iter().map(|k| (*k).to_string()).collect();
+        ours.sort();
+        assert_eq!(
+            ours, from_python,
+            "the 12a classification has drifted from mnq_fit.py's own section marker"
+        );
+
+        // And every name must exist in the sub-contract, or a typo would move a
+        // key into protocol-11 silently while both lists still agreed.
+        let PyValue::Dict(all) = tree() else {
+            unreachable!("tree is a dict")
+        };
+        let flat: Vec<&str> = all.keys().copied().collect();
+        let missing: Vec<&&str> = PROTOCOL_12A_KEYS
+            .iter()
+            .filter(|key| !flat.contains(*key))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "PROTOCOL_12A_KEYS names constants that are not in the sub-contract: {missing:?}"
+        );
+        assert!(
+            PROTOCOL_12A_KEYS.len() < flat.len(),
+            "protocol-11 must retain keys of its own"
+        );
+    }
+
+    /// The scoped hashes are distinct from each other and from the flat one.
+    /// If any two coincided the split would be decorative.
+    ///
+    /// These are REGRESSION PINS on values of our own, not parity claims:
+    /// `mnq_fit.py` has no per-mode hash to compare against, which is the whole
+    /// reason these are new rather than ported.
+    #[test]
+    fn the_scoped_hashes_are_distinct_and_pinned() {
+        let eleven = subcontract_hash_for(Mode::Protocol11);
+        let twelve_a = subcontract_hash_for(Mode::Protocol12a);
+        assert_ne!(eleven, twelve_a);
+        assert_ne!(eleven, subcontract_hash());
+        assert_ne!(twelve_a, subcontract_hash());
+
+        // The scoped dumps must be strict subsets of the flat one, by length.
+        assert!(subcontract_dumps_for(Mode::Protocol11).len() < subcontract_dumps().len());
+        assert!(subcontract_dumps_for(Mode::Protocol12a).len() < subcontract_dumps().len());
+    }
+
+    /// The point of the exercise, stated as a test rather than as a comment:
+    /// a protocol-12a constant is absent from the protocol-11 binding, so
+    /// moving it cannot unbind a protocol-11 fit. Checked on the bytes, since
+    /// that is what gets hashed.
+    #[test]
+    fn a_protocol_12a_constant_is_absent_from_the_protocol_11_binding() {
+        let eleven = subcontract_dumps_for(Mode::Protocol11);
+        for key in ["BOOTSTRAP_BASE_SEED", "EXCEEDANCE_TICKS", "GAP_CLOSE_MIN"] {
+            assert!(
+                !eleven.contains(key),
+                "{key} is a protocol-12a constant and must not bind the protocol-11 fit"
+            );
+            assert!(
+                subcontract_dumps_for(Mode::Protocol12a).contains(key),
+                "{key} must still bind its own mode"
+            );
+        }
+        // And a protocol-11 constant is in the fit's binding and not in 12a's.
+        for key in ["FINAL_SEEDS", "VOL_GRID_POINTS"] {
+            assert!(eleven.contains(key));
+            assert!(!subcontract_dumps_for(Mode::Protocol12a).contains(key));
+        }
     }
 
     #[test]
