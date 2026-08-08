@@ -12,9 +12,13 @@ mod common;
 
 use std::time::Duration;
 
-use common::{Venue, accelerated_config, fast_config, spawn};
+use common::{Venue, accelerated_config, fast_config, http_get, spawn};
 use futures_util::StreamExt;
-use mogwai_protocol::ServerMessage;
+use mogwai_protocol::{
+    ServerMessage,
+    launch::{LaunchSpec, StderrSink, launch},
+};
+use std::sync::{Arc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 
 /// Opens a socket onto the run and returns the stream.
@@ -94,6 +98,83 @@ async fn venue_announces_run_complete_and_exits_zero_at_the_declared_sim_deadlin
         Some(0),
         "a planned completion is exit 0, not a crash"
     );
+}
+
+/// A source refusal is a venue failure, not an ordinary finite replay.  This
+/// is deliberately an end-to-end gate because it pins the fault side channel,
+/// its ERROR diagnostic and the binary's exit status together.  Sampling
+/// `/health` for a terminal fault is intentionally not gated: the process may
+/// exit before a client can observe that transient state.
+#[test]
+#[ignore = "binds a loopback listener"]
+fn a_faulted_venue_exits_nonzero_and_an_exhausted_one_does_not() {
+    let diagnostics = Arc::new(Mutex::new(Vec::new()));
+    let diagnostics_for_sink = Arc::clone(&diagnostics);
+    let faulted = launch(LaunchSpec {
+        binary: Some(common::venue_binary().into()),
+        config: Some(common::fast_config().into()),
+        stderr: StderrSink::Lines(Box::new(move |line| {
+            diagnostics_for_sink
+                .lock()
+                .expect("diagnostic lock")
+                .push(line);
+        })),
+        ..LaunchSpec::default()
+    })
+    .expect("fault venue reports readiness before its terminal source fault");
+
+    // This first verifies the null side of the field on a healthy venue.  The
+    // faulted configuration is installed after this assertion below, avoiding
+    // a startup race in which no listener ever publishes the diagnostic.
+    let (_, healthy_health) = http_get(&format!("http://{}", faulted.addr()), "/health");
+    assert!(healthy_health.contains("\"fault\":null"));
+    drop(faulted);
+
+    let diagnostics = Arc::new(Mutex::new(Vec::new()));
+    let diagnostics_for_sink = Arc::clone(&diagnostics);
+    let faulted = launch(LaunchSpec {
+        binary: Some(common::venue_binary().into()),
+        config: Some(
+            format!(
+                "{}/tests/configs/arrival-fault.toml",
+                env!("CARGO_MANIFEST_DIR")
+            )
+            .into(),
+        ),
+        stderr: StderrSink::Lines(Box::new(move |line| {
+            diagnostics_for_sink
+                .lock()
+                .expect("diagnostic lock")
+                .push(line);
+        })),
+        ..LaunchSpec::default()
+    })
+    .expect("fault venue reaches readiness");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let exit = loop {
+        if let Some(exit) = faulted.exited() {
+            break exit;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "faulted venue did not exit"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_ne!(exit.code, Some(0), "a source fault is a nonzero venue exit");
+    assert!(
+        diagnostics
+            .lock()
+            .expect("diagnostic lock")
+            .iter()
+            .any(|line| line.contains("tape source faulted")),
+        "the terminal source fault emits the ERROR diagnostic"
+    );
+
+    let mut bounded = spawn(&["--config", &fast_config(), "--duration", "2s"]);
+    let (_, health) = http_get(&bounded.http_base(), "/health");
+    assert!(health.contains("\"fault\":null"));
+    assert_eq!(bounded.wait_for_exit(Duration::from_secs(20)).code, Some(0));
 }
 
 /// The `watch` fanout is the thing under test: with no registry of connections,

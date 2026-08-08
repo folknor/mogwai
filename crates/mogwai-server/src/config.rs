@@ -729,6 +729,21 @@ fn resolve_instrument_table(mut operator: toml::Table) -> anyhow::Result<toml::T
         anyhow::bail!("preset key {key} must be stated under instrument.override");
     }
     for (path, value) in overrides {
+        // Protocol-12b's arrival seam is intentionally absent from every
+        // shipped preset until Brick S.  It is nevertheless a valid
+        // instrument-resolved override, unlike a misspelled path.
+        if path == "generator.arrival"
+            && !merged["generator"]
+                .as_table()
+                .is_some_and(|g| g.contains_key("arrival"))
+        {
+            merged
+                .get_mut("generator")
+                .and_then(toml::Value::as_table_mut)
+                .expect("every preset has a generator table")
+                .insert("arrival".to_string(), value);
+            continue;
+        }
         replace_dotted(&mut merged, &path, value)?;
     }
     Ok(merged)

@@ -24,7 +24,7 @@ use super::consts::{
 /// a fitted knob - both are solved in closed form from the two MEASURED
 /// statistics `children_mean` and `children_single_frac`.
 #[derive(Clone)]
-pub(super) struct SweepShape {
+pub struct SweepShape {
     pub(super) q: f64,
     pub(super) m: f64,
     pub(super) level_step_prob: f64,
@@ -84,6 +84,16 @@ impl SweepShape {
             count as u32
         }
     }
+
+    /// Draws the same mixture after an arrival-side child multiplier. The
+    /// kernel owns a cloned shape, so its accounting is intentionally separate
+    /// from the generated source's diagnostics.
+    pub(super) fn next_count_scaled(&self, multiplier: f64, rng: &mut ChaCha12Rng) -> u32 {
+        let children_mean = self.q + (1.0 - self.q) * self.m;
+        let single_frac = self.q + (1.0 - self.q) / self.m;
+        let mut scaled = Self::new(children_mean * multiplier, single_frac, 1.0);
+        scaled.next_count(rng)
+    }
 }
 
 /// The children of the current parent still owed to `next_tick`. It lives in
@@ -127,6 +137,18 @@ pub(super) struct ArrivalClock {
     /// this, not on `quiet`, so the fat sweeps land on the short gaps rather
     /// than one event later.
     pub(super) last_quiet: bool,
+}
+
+impl ArrivalClock {
+    /// Advances the event-indexed state after recording the state that owns
+    /// the current gap and child law. Kept separate so the contract-A
+    /// conformance vector exercises the same state transition as the source.
+    pub(super) fn advance_after_gap(&mut self, flips: bool) {
+        self.last_quiet = self.quiet;
+        if flips {
+            self.quiet = !self.quiet;
+        }
+    }
 }
 
 #[derive(Clone)]

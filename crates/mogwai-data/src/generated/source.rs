@@ -17,8 +17,9 @@ use rand_chacha::ChaCha12Rng;
 use rand_distr::{ChiSquared, Distribution, LogNormal, Normal, Weibull};
 use rust_decimal::{Decimal, RoundingStrategy};
 
-use crate::{TickEvent, TickSource};
+use crate::{TickEvent, TickFault, TickSource};
 
+use super::arrival::{ArrivalEnv, ArrivalKernel, ArrivalState, PendingReopen, RuntimeModifiers};
 use super::calendar::SessionCalendar;
 use super::consts::{
     ARRIVAL_ACTIVE_CHILDREN_MULT, ARRIVAL_MEAN_CAL, ARRIVAL_QUIET_ACTIVE_RATIO,
@@ -36,6 +37,9 @@ use super::numeric::{decimal_from_f64, round_lot_size};
 use super::quote::{PublishedBook, book_mid_ticks, place_book};
 use super::regime::RegimeState;
 use super::session::SessionModulator;
+use mogwai_protocol::seeds::splitmix64;
+
+const CADENCE_STREAM_TAG: u64 = 0x6D6F6777_61693132;
 
 /// `Clone` is the substrate of the checkpointed seek (`CheckpointIndex`): the
 /// generator is a path-dependent walk whose entire future is a pure function of
@@ -50,6 +54,11 @@ pub struct GeneratedSource {
     pub(super) clock_ns: u64,
     arrival: ArrivalClock,
     arrival_override: Option<bool>,
+    arrival_kernel: Option<ArrivalKernel>,
+    arrival_state: Option<ArrivalState>,
+    arrival_env: Option<ArrivalEnv>,
+    cadence_rng: Option<ChaCha12Rng>,
+    fault: Option<TickFault>,
     pub(super) vol: GarchVol,
     session: SessionModulator,
     // `pub(super)` for the same reason as `vol` and `clock_ns`: the sibling test
@@ -364,10 +373,21 @@ impl GeneratedSource {
             .validate_for(calendar.is_some())
             .map_err(GeneratedSourceError::Session)?;
         let mean_event_duration_s = scalars.mean_event_duration_s;
+        let (quiet_fraction, quiet_active_ratio, switch_rate) = match scalars.arrival {
+            Some(super::arrival::ArrivalConfig::EventMarkov {
+                quiet_share,
+                switch_rate,
+                rate_ratio,
+            }) => (quiet_share, rate_ratio, switch_rate),
+            _ => (
+                ARRIVAL_QUIET_FRACTION,
+                ARRIVAL_QUIET_ACTIVE_RATIO,
+                1.0 - ARRIVAL_STATE_PERSISTENCE,
+            ),
+        };
         let calibrated_mean_s = ARRIVAL_MEAN_CAL * mean_event_duration_s;
-        let active_mean_s = calibrated_mean_s
-            / ((1.0 - ARRIVAL_QUIET_FRACTION)
-                + ARRIVAL_QUIET_FRACTION * ARRIVAL_QUIET_ACTIVE_RATIO);
+        let active_mean_s =
+            calibrated_mean_s / ((1.0 - quiet_fraction) + quiet_fraction * quiet_active_ratio);
         let vol = GarchVol::new(decimal_to_f64(scalars.start_price), scalars.vol_scalar);
         // The config now names the quantity the sampler actually consumes.
         // The removed `typical_notional` took a circuitous route through price,
@@ -386,6 +406,21 @@ impl GeneratedSource {
         // which the literal moves; `start_ts` is the tape anchor RegimeState
         // needs to fail-close an already-elapsed ReopenGap.
         let regime = RegimeState::new(regime, start_ts, &scalars.symbol);
+        let arrival_kernel = scalars
+            .arrival
+            .and_then(super::arrival::ArrivalConfig::kernel);
+        let mut cadence_rng = arrival_kernel
+            .map(|_| ChaCha12Rng::seed_from_u64(splitmix64(seed ^ CADENCE_STREAM_TAG)));
+        let arrival_state = arrival_kernel.as_ref().map(|kernel| {
+            ArrivalState::new(
+                kernel,
+                start_ts,
+                cadence_rng.as_mut().expect("kernel has cadence rng"),
+            )
+        });
+        let arrival_env = arrival_kernel.as_ref().map(|_| {
+            ArrivalEnv::for_profile(session, calendar.as_ref(), regime.arrival_thin, start_ts)
+        });
         let trade_bounce_ticks = scalars.trade_displacement_ticks.ticks();
         Ok(Self {
             tick_f64: decimal_to_f64(scalars.modal_tick),
@@ -394,13 +429,18 @@ impl GeneratedSource {
             clock_ns: start_ts,
             arrival: ArrivalClock {
                 active_mean_s,
-                quiet_mean_s: active_mean_s * ARRIVAL_QUIET_ACTIVE_RATIO,
-                quiet_to_active: (1.0 - ARRIVAL_STATE_PERSISTENCE) * (1.0 - ARRIVAL_QUIET_FRACTION),
-                active_to_quiet: (1.0 - ARRIVAL_STATE_PERSISTENCE) * ARRIVAL_QUIET_FRACTION,
+                quiet_mean_s: active_mean_s * quiet_active_ratio,
+                quiet_to_active: switch_rate * (1.0 - quiet_fraction),
+                active_to_quiet: switch_rate * quiet_fraction,
                 quiet: false,
                 last_quiet: false,
             },
             arrival_override: None,
+            arrival_kernel,
+            arrival_state,
+            arrival_env,
+            cadence_rng,
+            fault: None,
             vol,
             session: SessionModulator::new(session, calendar.as_ref()),
             bounce: BounceState {
@@ -478,18 +518,19 @@ impl GeneratedSource {
             self.arrival.quiet = quiet;
         }
         let raw_eps = self.duration_dist.sample(&mut self.rng);
-        self.arrival.last_quiet = self.arrival.quiet;
         let state_mean = if self.arrival.quiet {
             self.arrival.quiet_mean_s
         } else {
             self.arrival.active_mean_s
         };
         let duration_s = (state_mean * raw_eps / ARRIVAL_WEIBULL_MEAN).max(0.000_000_001);
-        self.arrival.quiet = if self.arrival.quiet {
-            !self.rng.random_bool(self.arrival.quiet_to_active)
+        let flip_probability = if self.arrival.quiet {
+            self.arrival.quiet_to_active
         } else {
-            self.rng.random_bool(self.arrival.active_to_quiet)
+            self.arrival.active_to_quiet
         };
+        self.arrival
+            .advance_after_gap(self.rng.random_bool(flip_probability));
         if let Some(quiet) = self.arrival_override {
             self.arrival.quiet = quiet;
         }
@@ -751,6 +792,9 @@ pub(super) fn repeat_is_compatible(
 
 impl TickSource for GeneratedSource {
     fn next_tick(&mut self) -> Option<TickEvent> {
+        if self.fault.is_some() {
+            return None;
+        }
         if let Some(quote) = self.pending_quote.take() {
             return Some(TickEvent::Quote(quote));
         }
@@ -778,6 +822,10 @@ impl TickSource for GeneratedSource {
 
     fn clear_flow_surge(&mut self) {
         self.surge = None;
+    }
+
+    fn fault(&self) -> Option<TickFault> {
+        self.fault
     }
 }
 
@@ -808,6 +856,34 @@ impl GeneratedSource {
         summary
     }
 
+    /// Advances one integrated parent and exposes the cadence latent used for
+    /// that parent. This is crate-visible solely for the Brick K transcript
+    /// replay: it lets the Stage B integration test compare the full record,
+    /// rather than letting a latent-state drift hide behind matching times.
+    ///
+    /// Test-gated because it exists for no other caller: without the `cfg` the
+    /// lib target builds it unused and `--all-targets` clippy reports dead
+    /// code, which is the honest reading - a production seam with no
+    /// production caller should not be shipped as one.
+    #[cfg(test)]
+    pub(crate) fn advance_parent_with_arrival_latent(&mut self) -> (ParentSummary, u64) {
+        assert!(
+            self.arrival_kernel.is_some(),
+            "arrival transcript requires an integrated kernel"
+        );
+        let summary = self.advance_parent();
+        let latent_x = self
+            .arrival_kernel
+            .expect("integrated branch has kernel")
+            .latent_x(
+                self.arrival_state
+                    .as_ref()
+                    .expect("integrated branch has state"),
+            )
+            .to_bits();
+        (summary, latent_x)
+    }
+
     #[cfg(test)]
     pub(super) fn diagnostic_place_book(&self) -> PublishedBook {
         place_book(
@@ -815,6 +891,83 @@ impl GeneratedSource {
             &self.scalars.quoted_width,
             &self.scalars.top_sizes,
         )
+    }
+
+    fn begin_integrated_event(
+        &mut self,
+        materialize_quote: bool,
+        rate_mult: f64,
+        children_mult: f64,
+    ) {
+        let kernel = self.arrival_kernel.expect("integrated branch has kernel");
+        let pending_reopen = self
+            .regime
+            .pending_reopen()
+            .map(|(at_ts_ns, shift_ns)| PendingReopen { at_ts_ns, shift_ns });
+        let draw = match kernel.next_parent(
+            self.arrival_state
+                .as_mut()
+                .expect("integrated branch has state"),
+            self.clock_ns,
+            self.scalars.mean_event_duration_s * ARRIVAL_MEAN_CAL,
+            &self.shape,
+            self.arrival_env
+                .as_ref()
+                .expect("integrated branch has environment"),
+            RuntimeModifiers {
+                rate_mult,
+                children_mult,
+                pending_reopen,
+            },
+            self.cadence_rng
+                .as_mut()
+                .expect("integrated branch has cadence rng"),
+        ) {
+            Ok(draw) => draw,
+            Err(refusal) => {
+                self.fault = Some(TickFault::Arrival(refusal));
+                return;
+            }
+        };
+        let old_clock_ns = self.clock_ns;
+        self.clock_ns = draw.parent_ts_ns;
+        if draw.reopen_applied {
+            let reopen = self
+                .regime
+                .take_reopen_crossed(old_clock_ns, draw.parent_ts_ns)
+                .expect("arrival kernel and regime disagree about reopen crossing");
+            self.vol.mid = (self.vol.mid * reopen.gap_frac.exp())
+                .max(self.tick_f64)
+                .min(MID_CEILING);
+        }
+        let mid = self.next_latent_mid();
+        let (aggressor, book) = self.next_side_and_book(mid);
+        let price_ticks = match aggressor {
+            AggressorSide::Buyer => {
+                (book_mid_ticks(&book) + self.bounce.trade_bounce_ticks).round()
+            }
+            AggressorSide::Seller => {
+                (book_mid_ticks(&book) - self.bounce.trade_bounce_ticks).round()
+            }
+            AggressorSide::NoAggressor => unreachable!("bounce only emits buyer or seller"),
+        }
+        .max(1.0);
+        self.pending_quote = materialize_quote.then(|| QuoteTick {
+            symbol: self.scalars.symbol.clone(),
+            bid_px: book.bid_price(self.tick_f64, self.scalars.price_decimals),
+            ask_px: book.ask_price(self.tick_f64, self.scalars.price_decimals),
+            bid_sz: book.sizes.bid,
+            ask_sz: book.sizes.ask,
+            ts_event: self.clock_ns,
+        });
+        self.last_book = Some(book);
+        self.burst = SweepBurst {
+            remaining: draw.child_count,
+            emitted: 0,
+            parent_ts_ns: self.clock_ns,
+            side: aggressor,
+            price_ticks,
+        };
     }
 
     fn begin_event(&mut self, materialize_quote: bool) {
@@ -825,6 +978,10 @@ impl GeneratedSource {
             .map_or((1.0, 1.0), |window| {
                 (window.rate_mult, window.children_mult)
             });
+        if self.arrival_kernel.is_some() {
+            self.begin_integrated_event(materialize_quote, rate_mult, children_mult);
+            return;
+        }
         let dt_ns = ((self.next_duration_ns() as f64 / rate_mult).round() as u64).max(1);
         // Order is load-bearing: next_duration_ns reads the arrival multiplier at
         // the START of the gap (the clock has not advanced yet), then the clock

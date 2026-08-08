@@ -366,6 +366,13 @@ pub(crate) struct Health {
     /// record, so a launcher can hand it to its clients and they can check they
     /// are still talking to the venue they were given.
     run_seed: u64,
+    fault: Option<HealthFault>,
+}
+
+#[derive(Serialize)]
+struct HealthFault {
+    kind: &'static str,
+    clock_ns: u64,
 }
 
 pub(crate) async fn health(State(state): State<AppState>) -> Json<Health> {
@@ -373,6 +380,27 @@ pub(crate) async fn health(State(state): State<AppState>) -> Json<Health> {
         status: "ok",
         oms_type: state.run.oms_type,
         run_seed: state.run.seeds.run,
+        fault: state.run.tape.fault().map(|fault| match fault {
+            mogwai_data::TickFault::Arrival(mogwai_data::ArrivalRefusal::NoOpenExposure {
+                from_ns,
+            }) => HealthFault {
+                kind: "arrival.no_open_exposure",
+                clock_ns: from_ns,
+            },
+            mogwai_data::TickFault::Arrival(mogwai_data::ArrivalRefusal::IntensityCeiling {
+                clock_ns,
+                ..
+            }) => HealthFault {
+                kind: "arrival.intensity_ceiling",
+                clock_ns,
+            },
+            mogwai_data::TickFault::Arrival(mogwai_data::ArrivalRefusal::NonFiniteState {
+                clock_ns,
+            }) => HealthFault {
+                kind: "arrival.non_finite_state",
+                clock_ns,
+            },
+        }),
     })
 }
 

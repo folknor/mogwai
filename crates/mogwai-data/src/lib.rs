@@ -48,11 +48,14 @@ use rust_decimal::Decimal;
 
 pub use bars::{BarAcc, fold_trade, window_close_ns};
 pub use generated::{
-    AbsReturnAcf, AnchorRange, CalendarError, CalibrationProvenance, CheckpointIndex,
-    EmpiricalRanges, Fingerprint, GeneratedSource, GeneratedSourceError, GeneratorScalars,
-    GoldenTargets, MinMedianMax, ParentSummary, PublishedBook, QuotedWidth, ScalarDiagnostic,
-    ScalarError, SessionCalendar, SessionProfile, SessionProfileError, SizeGrid, TickTraversal,
-    TopOfBookSizes, TradeDisplacement, VolTrace, WeeklyWindow, book_mid_ticks, place_book,
+    AbsReturnAcf, AnchorRange, ArrivalConfig, ArrivalEnv, ArrivalKernel, ArrivalRefusal,
+    ArrivalState, CalendarError, CalibrationProvenance, CheckpointIndex, EmpiricalRanges,
+    Fingerprint, GeneratedSource, GeneratedSourceError, GeneratorScalars, GoldenTargets,
+    LogOuParams, MinMedianMax, ParentDraw, ParentSummary, PendingReopen, PublishedBook,
+    QuotedWidth, RuntimeModifiers, ScalarDiagnostic, ScalarError, SelfExcitingParams,
+    SessionCalendar, SessionProfile, SessionProfileError, SizeGrid, SweepShape, TickTraversal,
+    TopOfBookSizes, TradeDisplacement, VolTrace, WallMmppParams, WeeklyWindow, book_mid_ticks,
+    place_book,
 };
 pub use mogwai_protocol::MarketRegime;
 pub use trigger::{
@@ -64,6 +67,17 @@ pub use trigger::{
 /// comparable only if their venues report the same value. `AGENTS.md` carries
 /// the obligation to bump this for every tape-determinism change.
 pub const TAPE_PROTOCOL_VERSION: u32 = 11;
+
+/// A terminal condition that ended a [`TickSource`] before ordinary
+/// exhaustion.
+///
+/// Sources report faults only after they have become terminal.  The default
+/// [`TickSource::fault`] implementation is deliberately empty so the existing
+/// finite and replay sources retain their ordinary exhaustion semantics.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TickFault {
+    Arrival(ArrivalRefusal),
+}
 
 /// One replayable market-data event.
 #[derive(Debug, Clone)]
@@ -86,6 +100,14 @@ impl TickEvent {
 pub trait TickSource {
     /// Next tick in replay order, or `None` at end of stream.
     fn next_tick(&mut self) -> Option<TickEvent>;
+
+    /// The terminal fault that ended this source, if any.
+    ///
+    /// `None` means ordinary exhaustion.  Consumers must query this after a
+    /// terminal `None` when exhaustion and failure have different outcomes.
+    fn fault(&self) -> Option<TickFault> {
+        None
+    }
 
     /// Arm a simulated-time flow surge. Non-generated sources ignore it.
     fn arm_flow_surge(
@@ -392,6 +414,7 @@ impl TickSource for MemorySource {
 pub struct MergeSource {
     sources: Vec<Box<dyn TickSource>>,
     heads: Vec<Option<TickEvent>>,
+    fault: Option<TickFault>,
 }
 
 impl MergeSource {
@@ -403,19 +426,37 @@ impl MergeSource {
     /// first merge head is buffered.
     pub fn starting_at(sources: Vec<Box<dyn TickSource>>, start_ts: Option<u64>) -> Self {
         let heads = sources.iter().map(|_| None).collect();
-        let mut s = Self { sources, heads };
+        let mut s = Self {
+            sources,
+            heads,
+            fault: None,
+        };
         for i in 0..s.sources.len() {
             s.heads[i] = match start_ts {
                 Some(ts) => s.sources[i].seek_to(ts),
                 None => s.sources[i].next_tick(),
             };
+            if s.heads[i].is_none()
+                && let Some(fault) = s.sources[i].fault()
+            {
+                s.latch_fault(fault);
+                break;
+            }
         }
         s
+    }
+
+    fn latch_fault(&mut self, fault: TickFault) {
+        self.fault = Some(fault);
+        self.heads.fill(None);
     }
 }
 
 impl TickSource for MergeSource {
     fn next_tick(&mut self) -> Option<TickEvent> {
+        if self.fault.is_some() {
+            return None;
+        }
         // Pick the source whose buffered head has the smallest timestamp.
         let pick = self
             .heads
@@ -426,7 +467,17 @@ impl TickSource for MergeSource {
             .map(|(i, _)| i)?;
         let out = self.heads[pick].take();
         self.heads[pick] = self.sources[pick].next_tick();
+        if self.heads[pick].is_none()
+            && let Some(fault) = self.sources[pick].fault()
+        {
+            self.latch_fault(fault);
+            return None;
+        }
         out
+    }
+
+    fn fault(&self) -> Option<TickFault> {
+        self.fault
     }
 
     fn arm_flow_surge(
@@ -486,6 +537,47 @@ mod tests {
         let order: Vec<u64> =
             std::iter::from_fn(|| src.next_tick().map(|t| t.ts_event())).collect();
         assert_eq!(order, vec![10, 20, 30]);
+    }
+
+    struct FaultAfterFirst {
+        first: Option<TickEvent>,
+        faulted: bool,
+    }
+
+    impl TickSource for FaultAfterFirst {
+        fn next_tick(&mut self) -> Option<TickEvent> {
+            if let Some(tick) = self.first.take() {
+                return Some(tick);
+            }
+            self.faulted = true;
+            None
+        }
+
+        fn fault(&self) -> Option<TickFault> {
+            self.faulted
+                .then_some(TickFault::Arrival(ArrivalRefusal::NoOpenExposure {
+                    from_ns: 42,
+                }))
+        }
+    }
+
+    #[test]
+    fn merge_source_latches_a_child_fault_and_discards_other_heads() {
+        let faulting = FaultAfterFirst {
+            first: Some(trade("fault", 10)),
+            faulted: false,
+        };
+        let healthy = MemorySource::new(vec![trade("healthy", 20), trade("healthy", 30)]);
+        let mut merged = MergeSource::new(vec![Box::new(faulting), Box::new(healthy)]);
+
+        assert!(merged.next_tick().is_none());
+        assert_eq!(
+            merged.fault(),
+            Some(TickFault::Arrival(ArrivalRefusal::NoOpenExposure {
+                from_ns: 42,
+            }))
+        );
+        assert!(merged.next_tick().is_none());
     }
 
     #[test]

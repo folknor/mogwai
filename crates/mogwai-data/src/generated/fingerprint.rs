@@ -294,6 +294,10 @@ pub struct GeneratorScalars {
     pub top_sizes: super::quote::TopOfBookSizes,
     #[serde(default)]
     pub trade_displacement_ticks: super::quote::TradeDisplacement,
+    /// Optional protocol-12b arrival mechanism.  Its absence is structural:
+    /// the generator retains the protocol-11 main-stream path byte for byte.
+    #[serde(default)]
+    pub arrival: Option<super::arrival::ArrivalConfig>,
 }
 
 impl GeneratorScalars {
@@ -323,6 +327,7 @@ impl GeneratorScalars {
             quoted_width: super::quote::QuotedWidth::default(),
             top_sizes: super::quote::TopOfBookSizes::uncalibrated(Decimal::new(1, SIZE_DECIMALS)),
             trade_displacement_ticks: super::quote::TradeDisplacement::default(),
+            arrival: None,
         }
     }
 
@@ -348,6 +353,7 @@ impl GeneratorScalars {
             quoted_width: super::quote::QuotedWidth::default(),
             top_sizes: super::quote::TopOfBookSizes::uncalibrated(Decimal::new(1, SIZE_DECIMALS)),
             trade_displacement_ticks: super::quote::TradeDisplacement::default(),
+            arrival: None,
         }
     }
 
@@ -358,6 +364,9 @@ impl GeneratorScalars {
         // the same empty string and cross-contaminating instruments. Reject it.
         if self.symbol.is_empty() {
             return Err(ScalarError { field: "symbol" });
+        }
+        if self.arrival.is_some_and(|arrival| !arrival.is_valid()) {
+            return Err(ScalarError { field: "arrival" });
         }
         for (field, provenance) in [
             ("quoted_width", self.quoted_width.provenance()),

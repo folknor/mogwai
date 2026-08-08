@@ -1,0 +1,8 @@
+{
+  "vector": "V5",
+  "what_it_checks": "The SweepShape child law and the separate stochastic contracts' draw ordering.",
+  "derivation": "For the geometric tail used by SweepShape with single probability s and continuation probability c, P(N=1)=s, P(N=2)=(1-s)c, P(N=3)=(1-s)c^2 and P(N=4)=(1-s)c^3. The values below use s=1/2 and c=1/2, giving 1/2, 1/4, 1/8 and 1/16. Section 7 places this draw after price/book work on contract A, and inside next_parent after budget and latent updates on contract B.",
+  "params": { "single_fraction": 0.5, "continuation_probability": 0.5 },
+  "inputs": [ { "n": [1, 2, 3, 4] } ],
+  "expected": [ { "probability": ["0x3fe0000000000000", "0x3fd0000000000000", "0x3fc0000000000000", "0x3fb0000000000000"], "contract_a_order": ["gap", "flip", "price", "book", "child"], "contract_b_order": ["budget", "latent_steps", "child"] } ]
+}

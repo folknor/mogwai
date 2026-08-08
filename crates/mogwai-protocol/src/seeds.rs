@@ -20,7 +20,7 @@ pub struct RunSeeds {
 const DOMAIN_TAPE: u64 = u64::from_le_bytes(*b"tape_gen"); // 0x6e65675f65706174
 const DOMAIN_FILL: u64 = u64::from_le_bytes(*b"fill_bnd"); // 0x646e625f6c6c6966
 
-const fn splitmix64(mut x: u64) -> u64 {
+pub const fn splitmix64(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let mut z = x;
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -63,5 +63,18 @@ mod tests {
             RunSeeds::from_run_seed(0).fill,
             RunSeeds::from_run_seed(1).fill
         );
+    }
+
+    #[test]
+    fn splitmix64_matches_its_stable_vectors() {
+        let vectors = [
+            (0, 0xe220_a839_7b1d_cdaf),
+            (1, 0x910a_2dec_8902_5cc1),
+            (u64::MAX, 0xe4d9_7177_1b65_2c20),
+            (0x6d6f_6777_6169_3132, 0xb1d6_30a3_eb8b_9f7f),
+        ];
+        for (input, expected) in vectors {
+            assert_eq!(splitmix64(input), expected, "input {input:#018x}");
+        }
     }
 }

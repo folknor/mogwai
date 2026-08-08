@@ -245,6 +245,9 @@ async fn serve_async(
     );
     let run_duration_ns =
         duration_override_ns.or_else(|| (cfg.run_duration_ns != 0).then_some(cfg.run_duration_ns));
+    // Construct this before Tape::start: a source can fault immediately on its
+    // first walk, so a later shutdown channel would lose the terminal signal.
+    let (fault_tx, fault_rx) = std::sync::mpsc::channel();
     let run = run::Run::new(
         instrument.clone(),
         Arc::clone(&profiles),
@@ -262,6 +265,7 @@ async fn serve_async(
         // Validated at load, so this cannot fail here.
         mogwai_protocol::AccountId::parse(cfg.account_id.trim())
             .map_err(|err| anyhow::anyhow!("account_id: {err}"))?,
+        fault_tx,
     );
     tracing::info!(
         account_id = cfg.account_id.trim(),
@@ -290,6 +294,12 @@ async fn serve_async(
         market_readings,
     };
     let completing_run = Arc::clone(&state.run);
+    let (fault_shutdown_tx, mut fault_shutdown_rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        if let Ok(fault) = fault_rx.recv() {
+            let _shutdown_receiver_gone = fault_shutdown_tx.send(fault);
+        }
+    });
     let app = Router::new()
         .route("/health", get(http::health))
         .route("/account", get(account))
@@ -354,10 +364,27 @@ async fn serve_async(
         }
         None => Some(stop_tx),
     };
+    let terminal_fault = Arc::new(std::sync::Mutex::new(None));
+    let terminal_fault_for_shutdown = Arc::clone(&terminal_fault);
     serve_until_drained(listener, app, async move {
-        tokio::select! { _ = shutdown_signal() => {}, _ = stop_rx.changed() => {} }
+        tokio::select! {
+            _ = shutdown_signal() => {},
+            _ = stop_rx.changed() => {},
+            received = &mut fault_shutdown_rx => {
+                *terminal_fault_for_shutdown
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = received.ok();
+            },
+        }
     })
-    .await
+    .await?;
+    if let Some(fault) = *terminal_fault
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    {
+        anyhow::bail!("tape source fault: {fault:?}");
+    }
+    Ok(())
 }
 
 /// How long a completed or signalled venue waits for its live connections to

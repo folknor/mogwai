@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 folknor
+# SPDX-License-Identifier: AGPL-3.0-only
+
+# A deliberately non-finite protocol-12b cell. The stationary log-OU draw is
+# finite or infinite by construction at this magnitude, and either outcome
+# reaches the terminal refusal path before a tape event is published.
+seed = 42
+warmup_ns = 0
+# Firehose delivery reaches the deliberately unstable cell before the
+# lifecycle test's timeout; the run clock itself remains well-defined.
+speed = 0.0
+
+[balances]
+USD = "100000"
+
+[instrument]
+preset = "MNQ"
+
+[instrument.override]
+"generator.arrival" = { family = "log_ou_cox", sigma_y = 1e308, tau_s = 1.0 }

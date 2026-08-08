@@ -1,0 +1,8 @@
+{
+  "vector": "V7",
+  "what_it_checks": "Degenerate constant-baseline exponential-budget conversion and nanosecond rounding for every family.",
+  "derivation": "With X=1, rate=1 and base_mean_s=1, section 4.2 gives delta_seconds=g. For U=exp(-1), g=-ln(U)=1. The integer-nanosecond conversion is ceil(1*1e9)=1,000,000,000, so all four families resolve the same parent timestamp before their family-specific dynamics matter.",
+  "params": { "base_mean_s": 1.0, "baseline_rate": 1.0 },
+  "inputs": [ { "uniform": "0x3fd78b56362cef38", "from_ns": 0 } ],
+  "expected": [ { "families": ["event_markov", "wall_mmpp", "log_ou_cox", "self_exciting"], "budget": "0x3ff0000000000000", "parent_ts_ns": 1000000000 } ]
+}

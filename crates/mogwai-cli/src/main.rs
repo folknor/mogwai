@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-use mogwai_cli::{fit, measure};
+use mogwai_cli::{fit, measure, minute_range_envelope};
 use mogwai_server::{config, long_version};
 
 #[derive(Parser)]
@@ -58,6 +58,8 @@ enum Command {
     /// the closed-form session refits, the CRN vol_scalar solve and the
     /// family probes, written as the hash-bound fit artifact.
     Fit(fit::FitArgs),
+    /// Build Brick B4's bound minute-range-envelope artifact.
+    MinuteRangeEnvelope(minute_range_envelope::MinuteRangeEnvelopeArgs),
     /// The cache-storage-class manual controls (stats / clean / clean
     /// --stale).
     Cache(cache::CacheArgs),
@@ -141,6 +143,10 @@ fn main() -> anyhow::Result<()> {
         Command::Preflight(args) => preflight::run(args),
         Command::Measure(args) => measure::run(args),
         Command::Fit(args) => fit::run(&args),
+        Command::MinuteRangeEnvelope(args) => {
+            minute_range_envelope::run(args)?;
+            Ok(())
+        }
         Command::Cache(args) => cache::run(args),
         Command::Characterize(args) => characterize::run(args),
         Command::SelectWindows(args) => select_windows::run(&args),

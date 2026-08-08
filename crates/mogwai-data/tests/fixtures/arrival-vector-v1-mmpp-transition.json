@@ -1,0 +1,13 @@
+{
+  "vector": "V1",
+  "what_it_checks": "Sampled CTMC probabilities and post-boundary state use for wall-time MMPP.",
+  "derivation": "Section 5.2: p = 1 - exp(-dt/tau). For dt/tau = ln(2), p = 1/2. With q = 1/4, P(quiet->active) = (1-q)p = (3/4)(1/2) = 3/8 and P(active->quiet) = qp = (1/4)(1/2) = 1/8. The level denominator is q + (1-q)r = 1/4 + (3/4)3 = 5/2. Thus x_active = r/denom = 3/(5/2) = 6/5 = 1.2. The transition is applied at the boundary, so a quiet state which flips at t=1 uses that x_active on [1,2).",
+  "params": { "occupancy": 0.25, "rate_ratio": 3.0, "tau_s": "0x3ff71547652b82fe" },
+  "inputs": [
+    { "dt_s": "0x3ff0000000000000", "from_quiet": true, "uniform": "0x3fd0000000000000" },
+    { "dt_s": "0x3ff0000000000000", "from_quiet": false, "uniform": "0x3fc0000000000000" }
+  ],
+  "expected": [
+    { "quiet_to_active": "0x3fd8000000000000", "active_to_quiet": "0x3fc0000000000000", "post_boundary_quiet": false, "interval_latent_x": "0x3ff3333333333333" }
+  ]
+}

@@ -11,3 +11,4 @@
 
 pub mod fit;
 pub mod measure;
+pub mod minute_range_envelope;

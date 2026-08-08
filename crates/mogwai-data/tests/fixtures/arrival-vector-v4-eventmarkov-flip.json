@@ -1,0 +1,8 @@
+{
+  "vector": "V4",
+  "what_it_checks": "Event-Markov pre-flip child-state read and the intervening main-stream price/book draw order.",
+  "derivation": "Section 7 contract A: the state flip is drawn after the Weibull innovation, last_quiet is recorded before that flip, price and book draws consume the main stream next, and only then does the child draw read last_quiet. Starting quiet and taking a flip therefore makes the successor active while the current child law remains quiet.",
+  "params": { "quiet_share": 0.35, "switch_rate": 0.1, "rate_ratio": 150.0 },
+  "inputs": [ { "initial_quiet": true, "gap_draw": "0x3fe0000000000000", "flip_draw": "0x0000000000000000", "price_draws_before_child": 2, "book_draws_before_child": 3 } ],
+  "expected": [ { "child_reads_quiet": true, "next_quiet": false, "main_stream_order": ["gap", "flip", "latent_mid", "latent_mid", "side_book", "side_book", "side_book", "child"] } ]
+}

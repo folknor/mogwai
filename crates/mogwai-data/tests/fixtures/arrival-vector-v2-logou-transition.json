@@ -1,0 +1,8 @@
+{
+  "vector": "V2",
+  "what_it_checks": "Stationary log-OU initialization and exact one-cell OU update.",
+  "derivation": "Section 5.3: Y_0 = sigma Z_0. For sigma = 1/2 and Z_0 = 2, Y_0 = 1. For dt/tau = ln(2), a = exp(-ln(2)) = 1/2 and sqrt(1-a^2) = sqrt(3)/2. With Z_1 = 0, Y_1 = aY_0 + sigma sqrt(1-a^2)Z_1 = 1/2. X_1 = exp(Y_1 - sigma^2/2) = exp(1/2 - 1/8) = exp(3/8).",
+  "params": { "sigma_y": 0.5, "tau_s": "0x3ff71547652b82fe" },
+  "inputs": [ { "dt_s": "0x3ff0000000000000", "initial_z": "0x4000000000000000", "transition_z": "0x0000000000000000" } ],
+  "expected": [ { "initial_y": "0x3ff0000000000000", "next_y": "0x3fe0000000000000", "next_x": "0x3ff747a513dbef6a" } ]
+}

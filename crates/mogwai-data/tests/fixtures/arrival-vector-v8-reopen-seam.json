@@ -1,0 +1,8 @@
+{
+  "vector": "V8",
+  "what_it_checks": "The six-step reopen ordering: no crossing, a crossing, and a closure-crossing shift.",
+  "derivation": "Section 4.1 uses crossing from < at <= candidate. No crossing leaves candidate unchanged. A crossing shifts candidate before cell assignment and next_from. If that shift lands closed, calendar.next_open_ns supplies the resolved parent, and that snapped time is also the cell and the base for next_from.",
+  "params": { "intra_event_step_ns": 1000 },
+  "inputs": [ { "from_ns": 10, "at_ns": 20, "candidate_ns": 19, "shift_ns": 5, "child_count": 3 }, { "from_ns": 10, "at_ns": 20, "candidate_ns": 20, "shift_ns": 5, "child_count": 3 }, { "from_ns": 10, "at_ns": 20, "candidate_ns": 20, "shift_ns": 50, "child_count": 2, "next_open_ns": 100 } ],
+  "expected": [ { "parent_ts_ns": 19, "reopen_applied": false, "cell": 0, "next_from_ns": 2019 }, { "parent_ts_ns": 25, "reopen_applied": true, "cell": 0, "next_from_ns": 2025 }, { "parent_ts_ns": 100, "reopen_applied": true, "cell": 0, "next_from_ns": 1100 } ]
+}

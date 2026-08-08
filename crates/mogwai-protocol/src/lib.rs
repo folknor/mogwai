@@ -17,7 +17,7 @@ mod havoc;
 mod instruments;
 mod messages;
 mod ready;
-mod seeds;
+pub mod seeds;
 pub mod sizing;
 
 pub mod control;

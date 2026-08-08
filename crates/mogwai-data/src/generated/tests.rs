@@ -4379,6 +4379,25 @@ fn the_default_sigma_is_byte_identical() {
 }
 
 #[test]
+fn an_absent_arrival_seam_keeps_the_legacy_tape_byte_identical() {
+    // Brick K / B1 regression pin.  The protocol-12b fields are deliberately
+    // optional: omitting them must leave the shipped main-RNG path untouched.
+    let fp = Fingerprint::from_repo_json();
+    let legacy_scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let mut explicit_absence = legacy_scalars.clone();
+    explicit_absence.arrival = None;
+    let mut legacy = GeneratedSource::new(legacy_scalars, 7, 0, &fp, None);
+    let mut seamless = GeneratedSource::new(explicit_absence, 7, 0, &fp, None);
+    for _ in 0..10_000 {
+        assert_eq!(
+            format!("{:?}", legacy.next_tick()),
+            format!("{:?}", seamless.next_tick()),
+            "an omitted arrival seam moved a legacy tape byte"
+        );
+    }
+}
+
+#[test]
 fn a_sigma_outside_its_band_refuses() {
     let fp = Fingerprint::from_repo_json();
     let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);

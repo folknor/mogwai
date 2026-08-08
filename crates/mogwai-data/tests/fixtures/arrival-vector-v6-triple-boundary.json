@@ -1,0 +1,8 @@
+{
+  "vector": "V6",
+  "what_it_checks": "Integrated-family budget traversal across a grid boundary, UTC hour boundary and calendar closure.",
+  "derivation": "Section 4.2 consumes intensity segment by segment. With unit intensity, a budget of 3/2 consumes 1/4 before the grid boundary, 1/4 before the UTC-hour boundary, zero through the closed interval, then the remaining 1 at the next open interval. The elapsed offset is 1/4 + 1/4 + 3 + 1 = 9/2 = 4.5 seconds. Thus the closure advances time but spends no budget and the resolved parent is one second after reopen.",
+  "params": { "base_mean_s": 1.0, "latent_x": 1.0, "rate_mult": 1.0 },
+  "inputs": [ { "budget": "0x3ff8000000000000", "segments_s": ["0x3fd0000000000000", "0x3fd0000000000000", "0x4008000000000000", "0x3ff0000000000000"], "open": [true, true, false, true] } ],
+  "expected": [ { "budget_spent": ["0x3fd0000000000000", "0x3fd0000000000000", "0x0000000000000000", "0x3ff0000000000000"], "remaining_after_segments": ["0x3ff4000000000000", "0x3ff0000000000000", "0x3ff0000000000000", "0x0000000000000000"], "parent_offset_s": "0x4012000000000000" } ]
+}

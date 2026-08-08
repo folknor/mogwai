@@ -159,6 +159,12 @@ impl RegimeState {
             None
         }
     }
+
+    pub(super) fn pending_reopen(&self) -> Option<(u64, u64)> {
+        self.reopen
+            .as_ref()
+            .map(|reopen| (reopen.at_ts, reopen.halt_ns))
+    }
 }
 
 #[derive(Debug, Clone)]

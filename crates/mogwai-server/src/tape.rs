@@ -4,6 +4,7 @@
 //! The one process-owned paced tape and its bounded broadcast fanout.
 
 use crate::{config::now_ns, source};
+use mogwai_data::TickFault;
 use mogwai_protocol::SimClock;
 use std::{
     sync::{
@@ -26,6 +27,7 @@ pub(crate) struct Tape {
     last_quote: Mutex<Option<TapeFrame>>,
     cancel: Arc<AtomicBool>,
     control: mpsc::Sender<FlowSurgeArm>,
+    fault: Mutex<Option<TickFault>>,
 }
 struct FlowSurgeArm {
     start_ns: u64,
@@ -40,6 +42,7 @@ pub(crate) struct TapeSpawn {
     pub(crate) speed: f64,
     pub(crate) fanout_depth: usize,
     pub(crate) zero_speed_stall_ms: u64,
+    pub(crate) fault_tx: mpsc::Sender<TickFault>,
 }
 impl Tape {
     pub(crate) fn start(symbol: String, spawn: TapeSpawn) -> Arc<Self> {
@@ -50,6 +53,7 @@ impl Tape {
             last_quote: Mutex::new(None),
             cancel: Arc::new(AtomicBool::new(false)),
             control,
+            fault: Mutex::new(None),
         });
         let worker = Arc::clone(&tape);
         thread::spawn(move || {
@@ -73,6 +77,14 @@ impl Tape {
                     }
                 }
                 let Some(tick) = source.next_tick() else {
+                    if let Some(fault) = source.fault() {
+                        *worker
+                            .fault
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(fault);
+                        tracing::error!(?fault, "tape source faulted");
+                        let _fault_receiver_gone = spawn.fault_tx.send(fault);
+                    }
                     break;
                 };
                 pace(
@@ -160,6 +172,12 @@ impl Tape {
             clear: true,
         }));
     }
+    pub(crate) fn fault(&self) -> Option<TickFault> {
+        *self
+            .fault
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
     #[cfg(test)]
     pub(crate) fn stop_for_test(&self) {
         self.cancel.store(true, Ordering::Relaxed);
@@ -245,6 +263,7 @@ mod snapshot_tests {
             last_quote: Mutex::new(None),
             cancel: Arc::new(AtomicBool::new(false)),
             control: mpsc::channel().0,
+            fault: Mutex::new(None),
         });
         tape.publish(
             TapeFrame {
@@ -296,6 +315,7 @@ mod snapshot_tests {
             last_quote: Mutex::new(None),
             cancel: Arc::new(AtomicBool::new(false)),
             control: mpsc::channel().0,
+            fault: Mutex::new(None),
         };
         tape.publish(
             TapeFrame {

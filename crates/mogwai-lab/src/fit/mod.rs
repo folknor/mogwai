@@ -147,6 +147,9 @@ pub const MINUTE_RANGE_GATES: [&str; 3] = ["p99", "p99.9", "max"];
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    use crate::fit::observe::minute_range_envelope;
 
     /// The selftest's tolerance-class battery, boundary by boundary.
     #[test]
@@ -177,5 +180,23 @@ mod tests {
             tolerance_json("minute_range_max"),
             json!(["envelope_upper", "resampled"])
         );
+    }
+
+    #[test]
+    fn the_minute_range_envelope_supplies_a_lower_bound() {
+        // The separated session ranges make the lower and upper resampled
+        // p99 tails observably different. This catches an implementation
+        // that merely copies the old upper bound into the new field.
+        let sessions = BTreeMap::from([
+            ("quiet".to_string(), (1..=100).collect()),
+            ("active".to_string(), (1_001..=1_100).collect()),
+        ]);
+
+        let envelope = minute_range_envelope(&sessions).expect("nonempty sessions");
+        let lower = envelope["p99_lower"].as_i64().expect("p99 lower bound");
+        let upper = envelope["p99"].as_i64().expect("p99 upper bound");
+
+        assert!(lower < upper, "lower tail must not duplicate upper tail");
+        assert!((1..=1_100).contains(&lower));
     }
 }

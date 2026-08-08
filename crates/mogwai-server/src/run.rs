@@ -82,6 +82,7 @@ impl Run {
         oms_type: mogwai_protocol::OmsType,
         fill_band_max_ticks: u32,
         account_id: mogwai_protocol::AccountId,
+        fault_tx: std::sync::mpsc::Sender<mogwai_data::TickFault>,
     ) -> Arc<Self> {
         let symbol = instrument.symbol.clone();
         let margin = profiles
@@ -98,6 +99,7 @@ impl Run {
                 speed,
                 fanout_depth,
                 zero_speed_stall_ms,
+                fault_tx,
             },
         );
         let (complete_tx, _) = watch::channel(None);
@@ -257,6 +259,7 @@ mod tests {
             200,
             mogwai_protocol::AccountId::parse(crate::config::DEFAULT_ACCOUNT_ID)
                 .expect("the default account id is legal"),
+            std::sync::mpsc::channel().0,
         )
     }
 

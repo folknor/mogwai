@@ -210,8 +210,10 @@ pub fn dist_stats(values: &[f64]) -> Value {
 /// The successor spec 3.3 envelope: `RESAMPLE_REPLICATES` replicates, each
 /// drawing `RESAMPLE_SESSIONS_PER_REPLICATE` sessions WITH replacement,
 /// pooling their minute tick ranges, and recording nearest-rank p99, p99.9,
-/// p99.99 and the maximum; the envelope is the one-sided upper bound at
-/// `RESAMPLE_ENVELOPE_LEVEL` of each statistic across replicates.
+/// p99.99 and the maximum. The p99 envelope is two-sided: its lower bound is
+/// the complementary lower-tail quantile across replicates and its upper
+/// bound is at `RESAMPLE_ENVELOPE_LEVEL`. The remaining statistics retain
+/// their one-sided upper bounds.
 /// Deterministic under `RESAMPLE_SEED` - see `fit::mtrand` for why the
 /// CPython Mersenne Twister had to be ported rather than substituted.
 pub fn minute_range_envelope(session_ranges: &BTreeMap<String, Vec<i64>>) -> LabResult<Value> {
@@ -253,12 +255,17 @@ pub fn minute_range_envelope(session_ranges: &BTreeMap<String, Vec<i64>>) -> Lab
     for (name, values) in stats {
         let mut sorted = values;
         sorted.sort_by(f64::total_cmp);
-        let v = nearest_rank_list(&sorted, RESAMPLE_ENVELOPE_LEVEL)
+        if name == "p99" {
+            let lower = nearest_rank_list(&sorted, 1.0 - RESAMPLE_ENVELOPE_LEVEL)
+                .ok_or_else(|| LabError::refusal("empty replicate list"))?;
+            out.insert("p99_lower".to_string(), json!(lower as i64));
+        }
+        let upper = nearest_rank_list(&sorted, RESAMPLE_ENVELOPE_LEVEL)
             .ok_or_else(|| LabError::refusal("empty replicate list"))?;
         // The pooled values are integer tick counts, so the envelope is an
         // integer too; the Python's list holds Python ints and serializes
         // as such.
-        out.insert(name.to_string(), json!(v as i64));
+        out.insert(name.to_string(), json!(upper as i64));
     }
     Ok(Value::Object(out))
 }
