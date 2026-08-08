@@ -37,9 +37,12 @@ pub struct FitArgs {
     /// The committed preflight artifact this run's file hashes must match.
     #[arg(long, value_name = "PATH")]
     preflight: Option<PathBuf>,
-    /// The PYTHON-ERA walk-cache directory (`mnq-fit-scratch`), read-only.
+    /// A pre-existing walk-cache directory (`mnq-fit-scratch`), read-only.
     /// Its entries are keyed by the harness commit of the run that produced
     /// them, so `--cache-commit` must name that commit for them to resolve.
+    /// The surviving entries were written by the retired Python harness and
+    /// cannot be refilled by it; this crate writes its own cache elsewhere,
+    /// so the flag is for replaying that historical one.
     #[arg(long, value_name = "DIR")]
     cache_dir: Option<PathBuf>,
     /// The harness commit the `--cache-dir` entries were keyed under.

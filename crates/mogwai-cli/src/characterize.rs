@@ -47,11 +47,11 @@ const DEFAULT_OUT_DIR: &str = "analysis";
 pub(crate) struct CharacterizeArgs {
     /// Pairs to characterize. Omit for the representative default set.
     /// A value containing a path separator or ending in `.csv` is treated as
-    /// a path, matching `characterize.py`'s `resolve_path`.
+    /// a path; anything else resolves as `<DATA_DIR>/<SYMBOL>.csv`.
     #[arg(value_name = "PAIR")]
     pairs: Vec<String>,
     /// Directory holding `<PAIR>.csv`. Defaults to `MOGWAI_DATA_DIR`, then
-    /// the Python's own default.
+    /// to the built-in corpus path.
     #[arg(long, value_name = "DIR")]
     data_dir: Option<PathBuf>,
     /// Where to write `char_<PAIR>.json`. Defaults to `analysis/`.

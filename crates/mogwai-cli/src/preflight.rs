@@ -16,7 +16,7 @@ use mogwai_lab::storage::artifact_path;
 #[derive(Args)]
 pub(crate) struct PreflightArgs {
     /// The delivered corpus directory. Defaults to the July MNQ delivery
-    /// path `analysis/mnq_fit.py` uses, relative to the current directory.
+    /// path, relative to the current directory.
     #[arg(long, value_name = "DIR")]
     corpus: Option<PathBuf>,
     /// The Databento job ledger. Read-only: this never writes it.

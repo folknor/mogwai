@@ -57,7 +57,7 @@ pub struct MeasureArgs {
     preflight: Option<PathBuf>,
     /// The cache root carrying the Brick G walk cache
     /// (`<dir>/measure12a-cache/`) and the observed cross-check cache
-    /// (`<dir>/mnq-measure12a-observed.json`). Defaults to the Python-era
+    /// (`<dir>/mnq-measure12a-observed.json`). Defaults to the historical
     /// `analysis/out` layout when run in-repo, else the phase-1 storage
     /// cache root.
     #[arg(long, value_name = "DIR")]

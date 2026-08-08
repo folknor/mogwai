@@ -19,10 +19,9 @@ use mogwai_lab::storage::artifact_path;
 #[derive(Subcommand)]
 pub(crate) enum SynthCommand {
     /// Synthesize the generator fingerprint from `char_<PAIR>.json` reports
-    /// plus `cadence.json` (`analysis/build_fingerprint.py`).
+    /// plus `cadence.json`.
     Fingerprint(FingerprintArgs),
-    /// Synthesize the cadence measurement from raw Binance trade archives
-    /// (`analysis/build_cadence.py`).
+    /// Synthesize the cadence measurement from raw Binance trade archives.
     Cadence(CadenceArgs),
 }
 
@@ -137,14 +136,13 @@ pub(crate) struct CadenceFeasibleArgs {
     /// Defaults to `analysis/fingerprint.json`.
     #[arg(long, value_name = "PATH")]
     fingerprint: Option<PathBuf>,
-    /// Events to simulate in the density re-check, matching the Python's
-    /// `--events`.
+    /// Events to simulate in the density re-check.
     #[arg(long, default_value_t = DEFAULT_MARKOV_EVENTS)]
     events: usize,
     /// Stop after the structural verdict, skipping the density re-simulation.
-    /// The Python has no such flag; this exists because the simulation is the
-    /// slow half and a caller who only wants the L0 verdict should not pay
-    /// for it. Leaving it off is the behaviour that matches the script.
+    /// The simulation is the slow half, so a caller who only wants the L0
+    /// verdict need not pay for it. Leaving it OFF runs the full gate, which
+    /// is the default and the behaviour the density bands are written for.
     #[arg(long)]
     skip_density: bool,
 }
