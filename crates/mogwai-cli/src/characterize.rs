@@ -151,13 +151,31 @@ pub(crate) fn run(args: CharacterizeArgs) -> anyhow::Result<()> {
                             report["elapsed_s"] = serde_json::json!(
                                 (started.elapsed().as_secs_f64() * 100.0).round() / 100.0
                             );
-                            let out = out_dir.join(format!("char_{pair}.json"));
+                            // The output name comes from the report's own
+                            // `pair`, never from the CLI argument. Python
+                            // derives that field as the basename minus
+                            // extension (`characterize.py:247`) and writes
+                            // `char_<rep["pair"]>.json` (`:487`), so a
+                            // path-shaped argument names its report after the
+                            // FILE. Formatting the raw argument instead turned
+                            // `characterize path/to/KEUR.csv` into
+                            // `char_path/to/KEUR.csv.json`, a nested directory
+                            // `load_reports` cannot see - which severed the
+                            // intake chain on exactly the path-shaped input
+                            // this command advertises.
+                            let Some(name) = report["pair"].as_str().map(str::to_owned) else {
+                                eprintln!("{pair}: report carries no `pair` field");
+                                continue;
+                            };
+                            let out = out_dir.join(format!("char_{name}.json"));
                             match mogwai_lab::aggregate::artifact::write_json_atomic(&out, &report)
                             {
-                                Ok(()) => results
-                                    .lock()
-                                    .expect("results lock")
-                                    .push((pair.clone(), report)),
+                                // The cross-pair table keys off the same
+                                // derived name, so `run_corpus.py`'s row labels
+                                // read `KEUR` rather than a path fragment.
+                                Ok(()) => {
+                                    results.lock().expect("results lock").push((name, report));
+                                }
                                 Err(e) => eprintln!("{pair}: writing {}: {e}", out.display()),
                             }
                         }

@@ -370,7 +370,13 @@ pub fn characterize(path: &Path) -> LabResult<Value> {
     let mut tick_counts: Vec<(String, i64)> = Vec::new();
     let mut tick_index: HashMap<String, usize> = HashMap::new();
     let mut tick_capped = false;
-    let mut price_dec_hist: HashMap<usize, i64> = HashMap::new();
+    // Insertion-ordered for the same reason as `tick_counts`:
+    // `characterize.py:387` takes `max(price_dec_hist.items(), key=count)` over
+    // a plain dict, so a tie keeps the first decimal count SEEN. A `HashMap`
+    // here made the tie-break not merely divergent but nondeterministic across
+    // runs of the same input.
+    let mut price_dec_counts: Vec<(usize, i64)> = Vec::new();
+    let mut price_dec_index: HashMap<usize, usize> = HashMap::new();
 
     let mut size_log_hist = vec![0i64; 30];
     let mut size_dec_hist = vec![0i64; 9];
@@ -419,7 +425,12 @@ pub fn characterize(path: &Path) -> LabResult<Value> {
         let dow = ((tsec.div_euclid(86400)) + 4).rem_euclid(7) as usize;
 
         let pd = decimals_used(parts[1]);
-        *price_dec_hist.entry(pd).or_insert(0) += 1;
+        if let Some(&idx) = price_dec_index.get(&pd) {
+            price_dec_counts[idx].1 += 1;
+        } else {
+            price_dec_index.insert(pd, price_dec_counts.len());
+            price_dec_counts.push((pd, 1));
+        }
 
         size_n += 1;
         if sz > 0.0 {
@@ -490,9 +501,16 @@ pub fn characterize(path: &Path) -> LabResult<Value> {
     let mut tick_p10: Option<f64> = None;
     let mut tick_p50: Option<f64> = None;
     if !tick_counts.is_empty() {
+        // `max_by_key` returns the LAST maximal element, which defeats the
+        // insertion-ordered `tick_counts` above: CPython's `max` keeps the
+        // FIRST. Fold explicitly with a strict `>` so a tie holds the
+        // earliest-inserted key, matching `max(items(), key=count)`.
         let (mtkey, _) = tick_counts
             .iter()
-            .max_by_key(|(_, c)| *c)
+            .fold(None::<&(String, i64)>, |best, cur| match best {
+                Some(b) if b.1 >= cur.1 => Some(b),
+                _ => Some(cur),
+            })
             .expect("nonempty");
         modal_tick = mtkey.parse::<f64>().ok();
         let mut items: Vec<(f64, i64)> = tick_counts
@@ -518,9 +536,13 @@ pub fn characterize(path: &Path) -> LabResult<Value> {
             }
         }
     }
-    let price_dec_mode = price_dec_hist
+    // Same first-wins fold as `modal_tick`, over the insertion-ordered counts.
+    let price_dec_mode = price_dec_counts
         .iter()
-        .max_by_key(|(_, c)| **c)
+        .fold(None::<&(usize, i64)>, |best, cur| match best {
+            Some(b) if b.1 >= cur.1 => Some(b),
+            _ => Some(cur),
+        })
         .map(|(k, _)| *k);
 
     let dur_mean = if dur_n != 0 {

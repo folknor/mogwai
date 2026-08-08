@@ -6,6 +6,17 @@ the Python retires. A map, not a story: every claim below cites the file,
 commit or landing record it comes from. Full narrative lives in the phase
 landing records; this document does not repeat it, only indexes it.
 
+**REFRESHED 2026-08-08 for the second review pass.** The first pass (session
+019fe03a, `review bare --profile deep`) REFUSED the signature and named five
+blockers; all five are now closed across eleven commits, `c279661` to
+`32da5cd`. Every section below describes the tree AS IT STANDS after those
+commits, not the state the first pass reviewed - section 12 is the diff, and
+is the right place to start if you are the reviewer who refused. Three of the
+five closures added surface that did not exist when the refusal was written
+(a new `characterize` subcommand, a new `session-profile` pair, a ported
+Markov simulation), so this is a review of new code, not a re-check of a
+checklist.
+
 Companion reading: `notes/rust-rewrite-phases.md` (phase-by-phase landing
 records), `notes/python-script-triage.md` (per-script scope rulings),
 `notes/todo.md` (parity-frozen defect and owner-decision entries),
@@ -29,7 +40,8 @@ runnable beside the port until phase 4b.
 | 2c-iii | Retirement of `crates/mogwai-cli/src/measure12a.rs` twin | `31f1d27` | 9 phase-2a gates + 2b + 2c-i re-pass; `python3 analysis/mnq_fit.py cost12a` end-to-end |
 | 3a | `characterize`, `build_cadence`, `check_cadence_feasible`, `build_fingerprint` | `0c7e3ea` | 3 artifact-reproduction gates + 24 lab unit tests |
 | 3b | `fit_session_profile`, protocol-11 fit + CRN solve | `c850b12` | `mnq-fit.json` reproduction, `fit_session_profile` live-archive gate, solve invariants |
-| 4a | Reviewable-state prep (this phase) | - | docs/AGENTS.md updated, dossier assembled, dissolution mapping verified |
+| 4a | Reviewable-state prep | - | docs/AGENTS.md updated, dossier assembled, dissolution mapping verified |
+| 4b | Blocker closure (items 1 to 4 of the 4b scope) | `c279661`..`32da5cd` | `brokkr check --gate` green at 674 passed, 0 orphaned |
 | 4b | Post-signature retirement (not started) | - | codex signature required first |
 
 All landings by SONNET except 2a/2b/3b (OPUS, per the silent-rot/refusal-
@@ -49,6 +61,87 @@ Each found by a parity gate disagreeing, not by reading the Python source.
   `mid_return_sumsq`, `generated_evidence`'s wall-time `sumsq` (3b). A Python
   `+=` loop stays a naive fold (semantically different from `sum()` in
   CPython itself). First found: phase 2b landing (`7511a20`).
+- **`kernel::py_fsum`** (`kernel.rs:220`, added 2026-08-08) - `statistics.fmean`
+  is `math.fsum(data) / n`, Shewchuk exact summation, which is NOT what
+  `py_sum`'s Neumaier compensation computes. `build_fingerprint.py` uses
+  builtin `sum` at line 168 and `fmean` at line 170 INSIDE THE SAME FUNCTION,
+  so the two helpers must stay distinct - routing both through one is the bug.
+  Note for the reviewer: the first implementation of this folded the partials
+  left-to-right, which is wrong. CPython walks them from the largest down with
+  an explicit half-even correction at the end, and only the embedded CPython
+  reference values caught the difference; pinning against the committed
+  `char_*.json` would have passed while being wrong.
+- **`sqrt` over `x ** 0.5` - an APPROVED DEVIATION, not a parity convention.**
+  The one place the port deliberately does not match CPython. `x ** 0.5`
+  delegates the finite case to platform libm `pow`, so matching it bug-for-bug
+  would make a committed artifact that `include_str!` compiles into the
+  generator a function of the libm belonging to whoever regenerated it. `sqrt`
+  is correctly rounded under IEEE 754 and identical on every conforming
+  platform. Measured before ruling: the two differ in 1,618 of two million
+  draws over the realistic domain, about one in 1,236, and `hour_vol` takes 192
+  square roots across the eight pairs - so this is not a corner case. A
+  discriminating test pins a value where the two differ, so that nobody later
+  "restores parity". The cross-language exception is narrowed to the affected
+  `session_profile.vol_hour` values; every other field must stay identical.
+- **`gap_pvariance` - AN UNBOUNDED ALGORITHMIC DEVIATION, tolerated only
+  because the field cannot gate.** Not a rounding convention at all, and it is
+  filed here rather than omitted because a reader who sees `gap_cv2` disagree
+  needs to find this entry.
+
+  `check_cadence_feasible.py:187` calls `statistics.pvariance(gaps)` with no
+  explicit `mu`. That does NOT subtract a rounded mean before squaring: it
+  evaluates `(n * sum(x^2) - sum(x)^2) / n^2` as an exact rational over the
+  binary64 inputs and rounds once at the end, so CPython's value is correctly
+  rounded. `py_fsum` cannot reproduce that, because its interface rounds before
+  the `n * Q - S * S` cancellation; an exact port needs a retained expansion or
+  a fixed superaccumulator. The port instead sums squared deviations from the
+  rounded mean.
+
+  THE SIZE OF THE DEVIATION IS UNBOUNDED, and the history of getting this wrong
+  is the useful part. A one-ULP bound was claimed from a three-gap fixture. The
+  third review pass refuted it by running `check_cadence_feasible.py --events 14`
+  against `mogwai cadence-feasible --events 14`, which gives two ULPs with every
+  other field agreeing bit for bit. A search then found three. And on three
+  NEARLY-EQUAL gaps the function is wrong by a FACTOR OF THREE - a 200 percent
+  relative error, because the true variance is a difference of quantities
+  agreeing in all but the last two bits. That case is pinned in
+  `cadence_feasible.rs`'s `deviation` tests against CPython's exact value, and it
+  is not adversarial: a quiet cadence regime with near-quantized arrivals has
+  that shape. Three successive ceilings were each an artifact of their fixture,
+  which is why none is claimed now.
+
+  WHAT IS GUARANTEED is narrower and different in kind: the value is a
+  deterministic, platform-independent function of its input, since `py_fsum` is
+  exact summation and IEEE 754 subtract/multiply/divide are correctly rounded
+  everywhere. Contrast the `sqrt` deviation above, which is approved BECAUSE
+  exactness would import platform dependence. This one has no such defence -
+  exact accumulation here would introduce none - so the tolerance rests purely
+  on reachability: `density_passes` (`:227`) decides the nonzero exit at `:276`
+  and reads `mean`, `median`, `p95` and `zero_frac`, never `gap_cv2`.
+  Demonstrated rather than argued at `--events 14`, where both languages exit
+  nonzero on the density bands regardless of the disagreement.
+
+  A HARD GATE, not a caveat: `--fit-markov` may not land until this computes the
+  exact value. Its score divides `gap_cv2` by a cadence anchor, sums seven terms
+  and sorts a grid to select shipped constants. Feeding an unbounded relative
+  error into that is unacceptable at any grid size, and it may not inherit this
+  tolerance by arguing the error is usually small.
+- **`fit::mtrand`'s `random()` and `weibullvariate`** (`mtrand.rs:161`, `:174`,
+  added 2026-08-08) - both pinned against the CPython stream by prefix tests,
+  needed by the Markov density simulation (see 5). `gamma` at arbitrary shape
+  is still absent; the default path only calls it at shape 1, which
+  `weibullvariate` covers.
+- **First-wins tie-breaking on every mode** - CPython's
+  `max(dict.items(), key=...)` returns the FIRST maximal key in insertion
+  order; Rust's `max_by_key` returns the LAST. An insertion-ordered container is
+  therefore only half the fix, and `characterize.rs` shipped exactly that half:
+  `tick_counts` was an ordered `Vec` carrying a comment explaining why order was
+  load-bearing, and then `modal_tick` was taken with `max_by_key`, which
+  discarded it. `price_decimals_mode` was worse - a `HashMap` plus `max_by_key`,
+  so its tie-break was nondeterministic between runs of the same input rather
+  than merely divergent. Both now fold with a strict `>` so the earliest
+  insertion wins, pinned by order-reversed tie fixtures. Found by the second
+  review pass, on valid input the committed corpus happens not to contain.
 - **Insertion-ordered accumulation** - several dict-walking float
   accumulations depend on Python's dict insertion order; sorting them moves
   the last ulp. `aggregate::monthly::PooledHist` is an insertion-ordered map,
@@ -90,9 +183,13 @@ Each found by a parity gate disagreeing, not by reading the Python source.
 
 ## 3. Parity gates and results
 
-All `#[ignore]`d, excluded from `brokkr.toml`'s complete profile by the
-`parity12a_`/`parity3a_`/`parity3b_` name prefixes (`brokkr.toml:60-74`)
-because they need corpus/archive state on disk.
+All `#[ignore]`d, excluded from `brokkr.toml`'s complete profile because they
+need corpus/archive state on disk - EXCEPT
+`parity3a_cadence_feasible_verdict_matches_the_committed_cadence`, which needs
+nothing but the committed `cadence.json` and now runs in the gate. That is why
+the 3a pair is named in full in `brokkr.toml` rather than skipped by the
+`parity3a_` prefix: the broad prefix was catching the cheap non-ignored test
+along with the corpus-dependent ones, and a gate nobody runs is not a gate.
 
 | Gate file | Reproduces | Result | Exclusions (each independently verified) |
 |---|---|---|---|
@@ -100,14 +197,26 @@ because they need corpus/archive state on disk.
 | `mogwai-cli/tests/parity12a_aggregate.rs` | 2b's bootstrap/ladder sections | PASS, 2.2s | none |
 | `mogwai-lab/tests/parity12a_i.rs` | Assembly from caches | PASS, ~6.5s | top-level `cost`, both live-cost classes |
 | `mogwai-cli/tests/parity12a_ii.rs` (two tests) | Live `mogwai measure` run | PASS (golden gate from clean HEAD `0cf2d49`) | top-level `cost`, `binding.harness_tree_commit`, each seed's `cost` |
-| `mogwai-lab/tests/parity3a.rs` (fingerprint) | `fingerprint.json` | PASS, one leaf excluded BY NAME (drift, see 8) | `empirical_ranges.modal_tick.max` |
+| `mogwai-lab/tests/parity3a.rs` (fingerprint) | `fingerprint.json` | PASS, typed-canon identical | NONE - the `allowed` list is DELETED, not updated (see 8) |
 | `mogwai-lab/tests/parity3a.rs` (cadence) | `cadence.json`, live 3-archive (~230M rows) run | PASS, ~69s | `provenance.generated_utc` |
-| `mogwai-lab/tests/parity3a.rs` (cadence-feasible) | structural verdict | PASS (`PROCEED`) | Markov density re-simulation not ported (see 5) |
+| `mogwai-lab/tests/parity3a.rs` (cadence-feasible) | the structural `PROCEED` verdict, and NOTHING MORE - it calls `verdict()` and asserts the string | PASS | see below: this row previously overstated its own coverage |
 | `mogwai-cli/tests/parity3b.rs` | `mnq-fit.json`, 132/132 walk-cache hits | PASS, 82s | `binding.harness_tree_commit`, `binding.subcontract_hash`, `binding.preflight_artifact_hash` (all confirmed stale-input drift, see 8) |
 | `mogwai-lab/tests/parity3b_session_profile.rs` | `fit_session_profile.py preflight`/fit, live NQ archive | PASS, 2s | none (only `session.dow_weight` is reproducible from this archive today; see 8) |
 
 Every exclusion above was verified by direct comparison against a live
 Python run at port time, never assumed honest by construction.
+
+WHERE THIS TABLE LIED, recorded because the correction is the point. The
+cadence-feasible row claimed to cover "structural verdict AND the full
+3,000,000-event Markov density run". It does not: the test calls `verdict()`
+and asserts `PROCEED`. The 3M field-for-field agreement is real but was
+established by hand, so the density report had NO gate at all - which is how a
+one-ULP variance divergence sat in the tree unnoticed behind a `1e-12`
+tolerance in the only test that touched it. The second review pass caught the
+overstatement in the same finding that caught the divergence. What now pins the
+density fields is the 5,000-event fixture, tightened from that tolerance to
+BIT-EXACT equality on `mean`, `zero_frac`, `gap_mean` and both ACFs, with a
+named one-ULP bound on `gap_cv2` alone.
 
 ## 4. Parity-frozen defects awaiting 4b
 
@@ -119,24 +228,46 @@ stay honest. Full text in `notes/todo.md`; summarized here for the reviewer.
   price/size/bid_sz/ask_sz conversions carry no named refusal, so a malformed
   non-integer field crashes instead of refusing. Mirrored deliberately;
   decide whether it joins the refusal contract once the Python retires.
-  Found phase 1.
+  Found phase 1. EXPANDED by the first review and still open: making the
+  numeric parsing fallible is not sufficient, because `stream.rs` panics on a
+  short row before any conversion happens. Row width must be validated first.
+  This is 4b item 6 and is deliberately NOT closed yet - it is a real fix to a
+  deliberately mirrored bug, so it lands with the retirement rather than
+  before it, while the Python is still the parity reference.
 
 No other parity-frozen defect entries exist in `notes/todo.md` as of this
 writing; phases 2-3b added none to that class.
 
 ## 5. Documented scope gaps
 
-- **`check_cadence_feasible.py`'s Markov density re-simulation** - the
-  default (no-flag) CLI path's 3,000,000-event density re-simulation
-  (`simulate_markov`, drawing from `random.Random(42)` through
-  `weibullvariate`/`math.gamma`) was NOT ported. `next_count` and the
-  structural `verdict()` - what the phase-3a brief calls binding, "the L0
-  structural-proceed verdict" - are exact ports and gated. The stochastic
-  recheck is a secondary diagnostic in the Python itself (never gates the
-  structural verdict). Recorded as a real scope gap, not a rounding
-  convention, in the phase-3a landing record; a full port needs
-  `fit::mtrand`-class Mersenne Twister work plus a `weibullvariate`/`gamma`
-  port if a later phase wants it.
+- **`check_cadence_feasible.py`'s Markov density re-simulation - CLOSED
+  2026-08-08.** `simulate_markov` (`cadence_feasible.rs:135`) is ported and
+  wired into the default path, and `mogwai cadence-feasible` now reproduces
+  `python3 analysis/check_cadence_feasible.py` field for field at the full
+  3,000,000 events: mean 51.019534657973, median 3, p95 357, zero_frac
+  0.129516386850407, and both gap ACFs to full precision. A 5,000-event
+  fixture pins the simulation itself, so a draw-consumption, bucketing or
+  state-update difference fails loudly rather than silently reproducing the
+  aggregate.
+
+  TWO CORRECTIONS this dossier previously carried, both material to the
+  reviewer. First, the phase-3a framing above - "a secondary diagnostic in the
+  Python itself (never gates the structural verdict)" - was WRONG. The Python
+  default path exits nonzero when the realized density misses the feasibility
+  bands (`check_cadence_feasible.py:275`); it is a GATE, so the unported Rust
+  could exit 0 where the script exits nonzero. Second, verdict-only
+  equivalence was argued as possibly sufficient for a stochastic band check
+  and was REFUTED with evidence: the simulated median is 3 against a measured
+  4, sitting exactly on the allowed lower boundary of measured-minus-one, so a
+  different draw stream giving 2 flips the verdict. Bit-exactness here is load
+  bearing, not fastidiousness.
+
+  STILL OPEN, and tracked as capability rather than a retirement blocker:
+  `--fit` and `--fit-markov`, which need `math.gamma` at arbitrary shape.
+- **Fail-open decoding in `cadence_feasible.rs` - CLOSED 2026-08-08.** It had
+  substituted `0.0` for missing or nonnumeric fields, so a document carrying
+  `children_mean.anchor` but no `children_single_frac` returned PROCEED where
+  Python raises. Strict schema refusal landed with the simulation.
 - **`build_fingerprint.py`'s `findings.md` side artifact** not ported - a
   human-readable report, not gated by anything (3a).
 
@@ -179,9 +310,27 @@ side.
   failure, only as a fact worth recording for anyone who later feeds the
   engine data shaped differently than the fitted corpus.
 
-## 8. Drift findings (both RULED 2026-08-08, see section 10)
+## 8. Drift findings (both RULED 2026-08-08, see section 10; the first is now LANDED)
 
-- **`fingerprint.json`'s `empirical_ranges.modal_tick.max`**: committed value
+- **`fingerprint.json`'s `empirical_ranges.modal_tick.max` - LANDED at
+  `7852e2f`.** Re-committed at `0.1`, rebuilt from all eight reports
+  regenerated through the new `characterize` subcommand; the diff is exactly
+  one leaf, and XBTUSD, the anchor, reports `0.1` directly. The parity gate's
+  `allowed` exception list is DELETED rather than updated, and its absence is
+  the evidence. No `TAPE_PROTOCOL_VERSION` bump, under a narrow exemption now
+  recorded durably in `AGENTS.md`; the reviewer should read that ruling
+  directly, since the bump rule is otherwise unconditional and the exemption
+  explicitly does not generalize to another leaf.
+
+  LATERAL, found while regenerating: the staleness is broader than this leaf.
+  Two `n_hist` bins disagreed with the committed reports while their sums
+  matched exactly. That looked like a binning defect in the port until a fresh
+  Python run reproduced the Rust numbers - so it is input drift of the same
+  class, not a port defect, but it means the committed `char_*.json` era is not
+  cleanly recoverable. `char_*.json` is gitignored, so the regeneration
+  provenance lives only in `7852e2f`'s commit message.
+
+  The original finding, for context: committed value
   `0.25` (the exact ceiling MNQ's tick sits on); regenerating from today's
   gitignored `char_*.json` inputs - confirmed in BOTH the unmodified Python
   and the Rust port - yields `0.1`. The `char_*.json` files were regenerated
@@ -219,6 +368,16 @@ their own landings rather than a second-agent review per slice. Recorded
 here because none of it is otherwise written down, and a reviewer comparing
 this program's process against the repository's normal review cadence needs
 to know it was a deliberate, bounded exception rather than an oversight.
+
+That exception ENDED with the first review pass. The five blocker closures were
+each argued in a codex spar session before landing, and the implementer lost
+two of four rounds: verdict-equivalence for the Markov gate (refuted on the
+median sitting exactly on the band edge, see 5) and the initial version-bump
+reasoning. One round went the other way - the hardcoding half of the intake
+blocker was withdrawn by codex, on the ground that the Python fixes the same
+pairs, archive month, anchors and preset in the same places, so the port
+mirrored existing debt rather than adding it. That debt is forward work toward
+the open instrument set, not a retirement blocker.
 
 ## 10. Owner decisions, RULED 2026-08-08
 
@@ -273,7 +432,7 @@ under the owner's rule that `todo.md` carries only parked work.)
   baseline-tables-as-data constraint from the original assessment was
   correct and is kept.
 
-- **`fingerprint.json` - RE-COMMIT at `0.1`.** The
+- **`fingerprint.json` - RE-COMMIT at `0.1`. LANDED `7852e2f`.** The
   `TAPE_PROTOCOL_VERSION` framing in section 8 above overstated the
   stakes: `empirical_ranges` is diagnostics-only by its own `_doc`, and
   `modal_tick.max` is read at exactly one site,
@@ -362,3 +521,131 @@ Python assertion IS present - just a stale count in the landing prose,
 worth a correction pass in phase 4b's own record if anyone edits that
 section again (not touched here per the phases-doc no-deletion constraint
 extending, by the same spirit, to not rewriting past landing narrative).
+
+## 12. What changed since the refusal, 2026-08-08
+
+For the reviewer who refused: this is the whole diff between the tree you saw
+and this one. Eleven commits, `c279661` to `32da5cd`. Each blocker's detail is
+in the section named beside it; none of them is summarized here twice.
+
+| Blocker as you raised it | Closed by | Detail in |
+|---|---|---|
+| No `mogwai characterize` subcommand - retiring `characterize.py` severs `char_*.json` production in both languages | `792ce08`. Covers both Python entry points, the per-corpus case and `run_corpus.py`'s multi-pair fan-out | phases doc 4b item 1 |
+| No CLI surface for the session-profile fit | `9399750`. `session-profile preflight` and `fit`; preflight reproduces the Python field for field at 5,891,412 rows. Both lost their hardcoded MNQ preset to a `--preset` argument | phases doc 4b item 1b |
+| `cadence-feasible` drops the Markov density GATE and can pass open; `0.0` substitution returns PROCEED where Python raises | `bd0e01e` (strict schema refusal), `f07f74d` (the simulation) | section 5 |
+| Fingerprint loader: `sqrt`/`fmean` silent float divergence, glob-order dependence, fail-open `pair`/`n_trades` | `8fb8d69`, `1d341b0` | section 2 (`py_fsum`, `sqrt`) |
+| `brokkr check --gate` red: lateness failure plus an orphaned parity gate | `8fb8d69` (un-orphaned), `32da5cd` (lateness quarantined). Green at 674 passed, 0 orphaned | below |
+| The fingerprint drift you were shown as pending | `7852e2f`, plus `7adc008` correcting the durable protocol history | section 8 |
+
+Two of those want your judgement specifically, because they are arguments
+rather than ports:
+
+- **The lateness quarantine (`32da5cd`)** is not a fix and not a relaxation.
+  `tape_lateness_under_acceleration` is excluded from the DEBUG lane only, on
+  the argument that a debug lane cannot validly judge a release wall-clock
+  contract - so its red was not evidence about the property, and running it
+  there was itself a changed measuring instrument. The 50 ms assertion is
+  untouched and the test stays directly runnable. The exclusion claims nothing
+  about whether this host meets the budget, and the honest state is that the
+  environment sensitivity is WORSE than previously recorded: a release rerun
+  failed at 311 ms with a load average of 1.46 across 32 visible CPUs, which
+  rules out the load-average precheck the old note proposed. Open in
+  `notes/todo.md`, deliberately not closed.
+- **The `TAPE_PROTOCOL_VERSION` exemption** for the fingerprint re-commit, now
+  in `AGENTS.md`. The rule is otherwise unconditional and nothing can detect a
+  missed bump, so an exemption is a real cost; the grounds are one leaf, an
+  exhaustive reader audit finding `Scalars::empirical_diagnostics` as its sole
+  consumer, and version 12 already reserved for 12b.
+
+### The second pass, 2026-08-08
+
+Session 019fe13a, 17m25s, pointed at this packet. REFUSED AGAIN, on four
+findings, and accepted both judgement calls above - the lateness quarantine as
+"a correct debug-versus-release measurement boundary" whose release property
+stays explicitly uncertified (its own rerun failed at 360.0 ms p99 under load
+average 1.36, independently confirming the sensitivity is not load-driven), and
+the version exemption, verified the strong way by running a fresh eight-pair
+characterization and synthesis and getting a value identical to the committed
+fingerprint.
+
+The four findings shared one shape, which is the durable lesson: each closure
+held on the committed corpus and failed one layer below where its gate looked.
+That is the same ground the first refusal stood on. Closures were verified
+against the artifacts rather than against the contract.
+
+| Finding | Where it failed | Closed by |
+|---|---|---|
+| `characterize` breaks the path-shaped input it advertises: the output name came from the raw CLI argument, so `characterize path/to/KEUR.csv` wrote `char_path/to/KEUR.csv.json`, invisible to `load_reports` | the subcommand existed, so the blocker read as closed; the write path had no test | name derived from `report["pair"]`, matching `characterize.py:247`/`:487`; three CLI tests driving the real binary, including one asserting the loader can see the result |
+| Both modes tie-break the wrong way, one of them nondeterministically | valid input; the eight committed reports contain no tie | first-wins folds, order-reversed fixtures (see section 2) |
+| `level_verdict`/`level_queue` still fail open on `single_print_frac`, `vol_dispersion`, `size_dispersion` | the loader was made strict, the scorer was not | `level_field` refuses per field; each field dropped individually in the test, plus a case pinning that the fail-open direction was toward a manufactured PASS |
+| `gap_cv2` diverges from `statistics.pvariance`, unstated, hidden by a `1e-12` band | the only test touching the density report used a tolerance | tolerated on reachability, bit-exact pins on every other field - but the one-ULP bound asserted here was WRONG and the third pass refuted it; see the third-pass record below and section 2 |
+
+Consensus on the fourth was reached by argument rather than by capitulation, and
+both sides moved. The reviewer accepted that reachability governs whether a
+deviation is APPROVABLE, and held that the absence of a STATED deviation blocks
+regardless - so a silent difference behind a broad tolerance blocks, while the
+same difference, stated and bounded, does not. It also corrected the
+implementer's premise: CPython does not round the deviation before squaring, so
+the two-double expansion proposed as a cheap exact port would not have been
+parity at all.
+
+Gate after the four closures: 682 passed, 0 orphaned, up from 674.
+
+### The third pass, 2026-08-08
+
+Session 019fe13a again, 6m05s. REFUSED. It re-ran the focused tests for all of
+the second pass's closures - characterize naming and loader visibility, both tie
+modes, all three level-field refusals, the false-PROCEED direction, the variance
+discriminator and the 5,000-event simulation - and found no further defect in
+closures 1 through 3. It also ruled the TBBO short-row panic explicitly NOT
+grounds for refusal, since it mirrors the Python today and item 6 is correctly
+ordered before script removal, while stating that an eventual signature stays
+conditional on fixing both the width check and the panicking numeric conversion
+before item 7.
+
+It refused on two things, and named the first at the level of the pattern
+because it had been asked to.
+
+1. **The one-ULP approval was false for valid CLI input.** Established only over
+   a hand-picked three-gap vector and the 5,000-event artifact, then asserted as
+   a universal envelope. `--events 14` is valid input on both sides and gives
+   two ULPs. This is the same shape as every prior finding: TRUE ON THE SELECTED
+   FIXTURES, FALSE OVER THE ACCEPTED CONTRACT, which is exactly what
+   `reference/architecture.md`'s parity contract forbids. It warned specifically
+   against re-stating the bound as two, since that would repeat the mistake -
+   and it was right to: a search then found three, and a nearly-equal-gap case
+   is wrong by a factor of three. See section 2; the deviation is now recorded as
+   unbounded, with no ceiling claimed.
+
+2. **The claimed green gate did not reproduce.** `brokkr check --gate` stopped
+   at a `clippy::semicolon_if_nothing_returned` error in `characterize.rs`. The
+   cause was ordering: the gate was run, and THEN `brokkr fmt`, which wrapped a
+   match arm into a block and introduced the lint. The 682-pass claim described
+   a tree that no longer existed by the time it was reported. It also noted the
+   claim sat on an uncommitted working tree, so it was not attached to a
+   reviewable commit at all.
+
+Both are closed. The lint is fixed, the gate re-run AFTER formatting - 684
+passed, 0 orphaned - and the false bound is replaced rather than renumbered:
+`gap_pvariance` now states the deviation is unbounded, pins our own values as
+regression pins rather than parity claims, and carries three cases including the
+factor-of-three one. A test written during that work asserted a large ULP
+distance against a hand-rolled "exact" reference that was itself a naive sum,
+1.5e14 ULPs from both real values - it passed while measuring nothing, and was
+replaced with CPython's bit-pinned value. Worth recording as the same disease in
+miniature.
+
+STILL OPEN in 4b, and none of it blocks the signature by the scope as ruled:
+the `select_windows.py` absorption (item 2), the `tick_composition_ratios.py`
+absorption (item 3), per-mode subcontract hash scoping (item 5), the TBBO
+short-row fix (item 6, section 4), and then the retirement itself (item 7).
+`--fit`/`--fit-markov` on `cadence-feasible` remain absent as capability.
+
+The question for this pass is NOT whether these six rows are closed - the tree
+answers that and you can re-run the gates. It is whether the tree is now
+retirement-ready on the ground your refusal actually stood on: what the gates
+do not cover. Three of the closures are new surface that did not exist when you
+wrote that, so findings outside the six rows above are expected rather than out
+of scope.
+
+That question was asked and answered; the second pass is recorded above.

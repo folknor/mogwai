@@ -841,7 +841,14 @@ moment the scripts move. Phase 4 therefore runs in two halves:
   4b SCOPE, as it stands 2026-08-08. Order matters: items 1 to 4 BLOCK
   the retirement and must land before any absorbed script moves.
 
-  1. **BLOCKER - add a `mogwai characterize` subcommand.** There is
+  1. **CLOSED 2026-08-08.** `mogwai characterize` lands and covers both
+     Python entry points - the per-corpus case and the `run_corpus.py`
+     multi-pair fan-out - so `char_*.json` production survives the
+     retirement in Rust. All eight reports were regenerated through it,
+     which is what exposed item 4's stale leaf. The original text
+     follows.
+
+     **add a `mogwai characterize` subcommand.** There is
      none. `mogwai_lab::characterize` is a gated library with no CLI
      driver, and its Python driver `run_corpus.py` was deleted at
      `9170f45`. The chain only works today because `characterize.py`
@@ -913,7 +920,18 @@ moment the scripts move. Phase 4 therefore runs in two halves:
      but no `children_single_frac` returns PROCEED where Python raises.
      Strict schema refusal.
 
-  1d. **BLOCKER - fail-open decoding and silent float divergence in the
+  1d. **CLOSED 2026-08-08.** `py_fsum` landed beside `py_sum` in
+     `kernel` and the two summation paths stay distinct; `sqrt` was kept
+     as the approved semantic change with a discriminating test pinning
+     it against `powf(0.5)`; the loader now fails closed on a missing
+     `pair` or `n_trades`. The first `py_fsum` folded partials
+     left-to-right and was wrong - CPython walks them largest-down with
+     an explicit half-even correction, and only the embedded reference
+     values caught it. Pinning against the committed artifact would have
+     passed while being wrong, which is the blind spot this item named.
+     The original text follows.
+
+     **fail-open decoding and silent float divergence in the
      fingerprint loader.** Per the parity contract in
      `reference/architecture.md`. The silent-divergence half: Python
      computes the hour RMS with `** 0.5` and normalizes with
@@ -968,14 +986,16 @@ moment the scripts move. Phase 4 therefore runs in two halves:
        The runtime function `generator code plus embedded fingerprint
        plus seed plus config` is unchanged; only the offline `corpus plus
        method` function moved.
-       WHAT THIS MEANS FOR ITEM 4: committing a changed
-       `fingerprint.json` DOES owe the bump, and the rule names the
-       committed fingerprint without qualifying which leaf moved. So the
-       `modal_tick.max` re-commit bumps, even though that leaf is
-       diagnostics-only and moves no tape byte - the earlier note here
-       saying it needs no bump was reasoning about the leaf when the rule
-       is about the file. Bumping costs nothing; a missed bump is
-       undetectable by construction.
+       WHAT THIS MEANT FOR ITEM 4, and it was then ruled the other way:
+       this text argued the `modal_tick.max` re-commit owes the bump
+       because the rule names the committed fingerprint without
+       qualifying which leaf moved. `7852e2f` landed WITHOUT one, under a
+       narrow exemption now recorded durably in `AGENTS.md` - one leaf,
+       an exhaustive reader audit finding `empirical_diagnostics` as its
+       sole consumer, and version 12 already reserved for 12b, so a bump
+       would have spent a tape identity on a provably inert change and
+       pushed the real one to 13. `AGENTS.md` is the source of truth on
+       that ruling and states it does not generalize to another leaf.
 
   1e. **CLOSED 2026-08-08. `brokkr check --gate` is GREEN**: 674 passed,
      0 orphaned. The orphaned test is un-skipped and runs. The lateness
@@ -1000,6 +1020,145 @@ moment the scripts move. Phase 4 therefore runs in two halves:
      as ORPHANED, because `brokkr.toml`'s broad `parity3a_` skip catches
      that cheap non-ignored test along with the corpus-dependent ones.
      A gate nobody runs is not a gate.
+  1f. **THE SECOND REVIEW PASS, 2026-08-08. REFUSED AGAIN**, four
+     findings, all CLOSED the same day. Session 019fe13a, 17m25s. Both
+     judgement calls were accepted: the lateness quarantine as a correct
+     debug-versus-release measurement boundary, with the release property
+     left explicitly uncertified - its own release rerun failed at
+     360.0 ms p99 under load average 1.36, which independently confirms
+     the sensitivity is not load-driven and kills the precheck idea for
+     good - and the `TAPE_PROTOCOL_VERSION` exemption, verified the strong
+     way by running a fresh eight-pair characterization and synthesis and
+     getting a value identical to the committed fingerprint.
+
+     THE SHAPE ALL FOUR SHARED, which is the part worth keeping: each of
+     the five earlier closures held on the committed corpus and failed one
+     layer below where its gate looked. Same ground as the first refusal.
+     The closures had been verified against the artifacts instead of
+     against the contract.
+
+     - **`mogwai characterize` broke the path-shaped input it
+       advertises.** The output name was formatted from the raw CLI
+       argument rather than the report's own `pair`, so
+       `characterize path/to/KEUR.csv` wrote
+       `char_path/to/KEUR.csv.json` - a nested directory `load_reports`
+       cannot see, since it scans only the output directory. The command
+       exited zero and the intake chain broke downstream. Item 1 read as
+       closed because the subcommand existed; the write path had no test
+       at all. Fixed by deriving the name from `report["pair"]`, matching
+       `characterize.py:247` and `:487`, with three CLI tests driving the
+       real binary - path-shaped, bare-symbol, and one asserting
+       `load_reports` can actually see the result, since that is the
+       consumer whose failure the defect produced. An attempt to argue
+       this was an ADDED-and-broken capability rather than a lost one
+       failed on the Python: it accepts a path and names the report after
+       the file.
+     - **Both modes tie-broke the wrong way.** `max_by_key` returns the
+       LAST maximal element where CPython's `max` returns the first, so
+       `modal_tick` disagreed on any tie - and `characterize/mod.rs`
+       carried a comment at the container declaration explaining that
+       insertion order was load-bearing for exactly this, which the call
+       site then discarded. Half a fix shipped. `price_decimals_mode` was
+       worse: a `HashMap`, so nondeterministic between runs of the same
+       input rather than merely divergent. Both fold first-wins now,
+       pinned by order-reversed fixtures. Valid input; the eight
+       committed reports contain no tie, so no gate could have seen it.
+     - **The fingerprint fail-open fix stopped at the loader.** `8fb8d69`
+       made `pair` and `n_trades` strict and left `level_verdict` and
+       `level_queue` substituting `0.0` for `single_print_frac`,
+       `vol_dispersion` and `size_dispersion`, where
+       `build_fingerprint.py:61-64` indexes directly and raises. The
+       direction is what makes it a defect: two of the four conditions are
+       lower bounds, so a missing field cleared its own condition and the
+       substitution manufactured `proceed: true` on input the Python
+       refuses to score. Now refuses per field, with each field dropped
+       individually in the test - a fixture missing all three would start
+       passing the moment any one of them refused - plus a case pinning
+       that dropping the field which made a condition FAIL does not
+       rescue it into a pass.
+     - **`gap_cv2` deviated one ULP from `statistics.pvariance`, silently,
+       behind a `1e-12` band.** Ruled an APPROVED DEVIATION after
+       argument, on reachability: `density_passes` decides the nonzero
+       exit and does not read the field, whose only Python consumer is
+       the unported `--fit-markov` ranking score. Both sides moved to get
+       there. The reviewer accepted reachability as what makes a deviation
+       approvable, and held that an UNSTATED deviation blocks regardless -
+       so the same difference blocks while silent and does not once stated
+       and bounded. It also corrected the premise behind the cheap fix
+       offered: CPython does not round the deviation before squaring, it
+       evaluates `(n * sum(x^2) - sum(x)^2) / n^2` as an exact rational
+       and rounds once, so the proposed two-double expansion would not
+       have been parity. Closed by extracting `gap_pvariance` as one
+       documented site, replacing the tolerance with BIT-EXACT pins on
+       `mean`, `zero_frac`, `gap_mean` and both ACFs, and giving
+       `gap_cv2` a named one-ULP bound with a three-gap fixture built to
+       discriminate. The ACFs stay exact deliberately: adjacency to a
+       deviating field is not grounds to loosen them.
+
+     ALSO CORRECTED, and it was the dossier's own error rather than a code
+     defect: the packet claimed the cadence-feasible parity gate covered
+     the full 3,000,000-event density run. It calls `verdict()` and
+     asserts `PROCEED`, nothing more. The 3M agreement is real but was
+     established by hand, so the density report had no gate - which is how
+     an unstated ULP divergence survived in the one test that touched it.
+     `brokkr check --gate` after all four: 682 passed, 0 orphaned.
+
+     WHAT THIS BUYS: `--fit-markov`'s port now owes either exact rational
+     accumulation or a fresh ruling, recorded here because it may not
+     inherit the approval above - the score divides `gap_cv2` by a cadence
+     anchor and sorts a grid by the sum, so one ULP can reorder adjacent
+     grid points and change which constants the mode proposes.
+
+  1g. **THE THIRD REVIEW PASS, 2026-08-08. REFUSED**, on two findings,
+     both now closed. Session 019fe13a, 6m05s. It re-ran every focused
+     test behind the second pass's closures and found no further defect in
+     the first three, and ruled the TBBO short-row panic explicitly NOT
+     grounds for refusal - it mirrors the Python today and item 6 is
+     correctly ordered before item 7 - while holding that a signature
+     stays conditional on fixing both the width check and the panicking
+     numeric conversion before the scripts move.
+
+     - **The one-ULP bound on `gap_cv2` was FALSE, and the failure was
+       mine in the exact shape I had just written up as the standing
+       lesson.** I established the bound over a constructed three-gap
+       vector and the 5,000-event artifact, then stated it as a universal
+       envelope over all valid input. `--events 14` is valid on both sides
+       and gives two ULPs, with every other reported field still agreeing
+       bit for bit. The reviewer warned in the same breath against simply
+       restating the bound as two, which would repeat the error at a
+       larger number, and that warning was well made: a search found
+       three, and then three NEARLY-EQUAL gaps turned out to be wrong by a
+       FACTOR OF THREE - a 200 percent relative error, because the true
+       variance is a difference of quantities agreeing in all but the last
+       two bits. So the deviation is UNBOUNDED and the ULP framing was
+       wrong in kind, not in degree. Closed by claiming no ceiling at all:
+       `gap_pvariance` now documents the deviation as algorithmic and
+       unbounded, states what IS guaranteed instead (the value is a
+       deterministic, platform-independent function of its input, since
+       `py_fsum` is exact and the IEEE operations are correctly rounded),
+       keeps the tolerance resting solely on reachability, and turns
+       `--fit-markov` from a caveat into a hard gate. The three cases are
+       pinned as regression pins on our own values plus recorded CPython
+       observations, never as bounds.
+
+       A SECOND ERROR INSIDE THE FIX, worth the space because it is the
+       same disease in miniature: the first version of the
+       factor-of-three test asserted a huge ULP distance against a
+       hand-rolled "exact" reference that was itself a naive sum, sitting
+       1.5e14 ULPs from both real values. It passed while measuring
+       nothing. Replaced with CPython's value pinned by bit pattern, and
+       the inputs are hex float literals so the case cannot drift through
+       decimal parsing.
+
+     - **The green gate did not reproduce.** `brokkr check --gate` stopped
+       at `clippy::semicolon_if_nothing_returned` in `characterize.rs`.
+       Cause was ordering: I ran the gate, THEN `brokkr fmt`, which
+       wrapped a match arm into a block and introduced the lint, and I
+       never re-ran. The 682-pass claim described a tree that no longer
+       existed when I reported it. The reviewer also noted the claim sat
+       on an uncommitted tree and so was attached to no reviewable commit.
+       Fixed, and the gate is now run AFTER formatting as a matter of
+       order: 684 passed, 0 orphaned.
   2. **ABSORB `select_windows.py` WHOLE**, all four phases, as the
      bar-frame intake station on top of `session_profile.rs`'s existing
      archive, session and eligibility machinery. No frozen artifact
@@ -1032,7 +1191,23 @@ moment the scripts move. Phase 4 therefore runs in two halves:
      re-proposes 16,777,216 and re-litigates a settled ruling.
      `reference/performance.md` cites this script by name at five sites;
      those citations move in the same commit.
-  4. **RE-COMMIT `analysis/fingerprint.json`** regenerated from today's
+  4. **CLOSED 2026-08-08 at `7852e2f`.** The fingerprint is re-committed
+     at `modal_tick.max` 0.1, rebuilt from all eight freshly regenerated
+     reports; the diff is exactly one leaf, and XBTUSD, the anchor,
+     reports 0.1 directly. What the stale value bought was a false
+     negative - MNQ's 0.25 tick sat exactly ON the inclusive ceiling, so
+     the preset cleared the corpus-range check by coincidence. The preset
+     now accepts the diagnostic in provenance and MES inherits it; the
+     inverted provenance test is rewritten around both directions of the
+     contract. The parity gate's `allowed` list is DELETED rather than
+     updated, and its absence is the evidence. No version bump, per the
+     exemption above. Regenerating the reports also showed the staleness
+     is broader than this leaf: two `n_hist` bins disagreed with their
+     sums matching exactly, which looked like a binning defect in the
+     port until a fresh Python run reproduced the Rust numbers. The
+     original text follows.
+
+     **RE-COMMIT `analysis/fingerprint.json`** regenerated from today's
      `char_*.json`, accepting `empirical_ranges.modal_tick.max` 0.25 to
      0.1. No tape byte depends on it - the artifact's own `_doc` says
      the ranges are diagnostics only and `.max` is read at exactly one

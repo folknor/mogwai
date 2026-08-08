@@ -52,14 +52,38 @@ fn median(mut values: Vec<f64>) -> f64 {
     }
 }
 
+/// Reads one numeric field of a level block, refusing rather than
+/// substituting.
+///
+/// `build_fingerprint.py:61-64` indexes `single_print_frac`,
+/// `vol_dispersion` and `size_dispersion` directly, so a level block missing
+/// any of them raises `KeyError`. Substituting `0.0` did not merely diverge:
+/// it manufactured a PASS, because two of the four conditions are lower
+/// bounds. A block with no `single_print_frac` read as `0.0`, which clears
+/// `<= 0.50`, and a missing `size_dispersion` read as `0.0`, which clears
+/// `vol_dispersion >= 1.5 * size_dispersion` for any dispersion at all. The
+/// fail-open direction was toward `proceed: true` on input the Python
+/// refuses to score.
+fn level_field(level: &Value, key: &str) -> LabResult<f64> {
+    level.get(key).and_then(Value::as_f64).ok_or_else(|| {
+        LabError::refusal(format!(
+            "level block carries no numeric `{key}`; the Python raises KeyError here rather \
+             than reading it as zero and scoring a condition it cannot evaluate"
+        ))
+    })
+}
+
 /// `level_verdict`: evaluate the four proceed conditions against the
 /// anchor's measurement.
-#[must_use]
-pub fn level_verdict(level: &Value, single_fracs: &[f64]) -> Value {
+///
+/// # Errors
+/// [`LabError::Refusal`] if the level block is missing any of the three
+/// numeric fields the conditions read.
+pub fn level_verdict(level: &Value, single_fracs: &[f64]) -> LabResult<Value> {
     let med = median(single_fracs.to_vec());
-    let spf = level["single_print_frac"].as_f64().unwrap_or(0.0);
-    let vol_disp = level["vol_dispersion"].as_f64().unwrap_or(0.0);
-    let size_disp = level["size_dispersion"].as_f64().unwrap_or(0.0);
+    let spf = level_field(level, "single_print_frac")?;
+    let vol_disp = level_field(level, "vol_dispersion")?;
+    let size_disp = level_field(level, "size_dispersion")?;
     let held = [
         spf <= 0.50,
         vol_disp >= 3.0,
@@ -77,12 +101,12 @@ pub fn level_verdict(level: &Value, single_fracs: &[f64]) -> Value {
         .zip(held.iter())
         .map(|((test, why), ok)| json!({"test": test, "why": why, "held": ok}))
         .collect();
-    json!({
+    Ok(json!({
         "proceed": held.iter().all(|&h| h),
         "conditions": conditions,
         "failed": failed,
         "single_print_frac_cross_pair_median": med,
-    })
+    }))
 }
 
 /// `level_queue`: promote the at-touch level-visit measurement into a
@@ -140,11 +164,15 @@ pub fn level_queue(anchor_report: &Value, reports: &BTreeMap<String, Value>) -> 
     let support: Vec<f64> = (0..vol_hist.len())
         .map(|index| bin_lo * 10f64.powf((index as f64 + 0.5) / bins_per_decade) / size_median)
         .collect();
+    // Strict for the same reason as `level_field`: the Python builds this list
+    // by direct indexing, so one report missing the field raises rather than
+    // contributing a zero that drags the cross-pair median down and widens the
+    // fourth condition's window around the anchor.
     let single_fracs: Vec<f64> = levels
         .iter()
-        .map(|l| l["single_print_frac"].as_f64().unwrap_or(0.0))
-        .collect();
-    let verdict = level_verdict(anchor, &single_fracs);
+        .map(|l| level_field(l, "single_print_frac"))
+        .collect::<LabResult<Vec<f64>>>()?;
+    let verdict = level_verdict(anchor, &single_fracs)?;
     let proceed = verdict["proceed"].as_bool().unwrap_or(false);
 
     const LEVEL_DOC: &str = "AT-TOUCH TRADED VOLUME per level visit, era-windowed, expressed as a \
@@ -173,9 +201,9 @@ pub fn level_queue(anchor_report: &Value, reports: &BTreeMap<String, Value>) -> 
               Nothing samples support_norm/pmf; they are kept as the durable \
               corpus fact the refusal was read off.",
             failed.join(", "),
-            anchor["single_print_frac"].as_f64().unwrap_or(0.0),
-            anchor["vol_dispersion"].as_f64().unwrap_or(0.0),
-            anchor["size_dispersion"].as_f64().unwrap_or(0.0),
+            level_field(anchor, "single_print_frac")?,
+            level_field(anchor, "vol_dispersion")?,
+            level_field(anchor, "size_dispersion")?,
         )
     };
 
@@ -716,6 +744,74 @@ mod tests {
         assert!(err.to_string().contains("ETHUSD"));
     }
 
+    /// THE FALSE PROCEED. Two of the four conditions are lower bounds, so
+    /// reading a missing field as `0.0` did not merely diverge from the
+    /// Python's `KeyError` - it cleared conditions on evidence that was never
+    /// measured. A block with no `single_print_frac` scored `0.0 <= 0.50` as
+    /// held, and one with no `size_dispersion` cleared
+    /// `vol_dispersion >= 1.5 * size_dispersion` for any dispersion at all.
+    /// Each field is dropped INDIVIDUALLY here: a single fixture missing all
+    /// three would pass the moment any one of them started refusing, and would
+    /// not tell you which.
+    #[test]
+    fn a_level_block_missing_a_scored_field_is_refused() {
+        for field in ["single_print_frac", "vol_dispersion", "size_dispersion"] {
+            let mut reports = fixture(0.2, 5.0);
+            let level = reports
+                .get_mut("XBTUSD")
+                .expect("anchor")
+                .get_mut("level")
+                .expect("level block");
+            level
+                .as_object_mut()
+                .expect("level object")
+                .remove(field)
+                .expect("the fixture carries the field being dropped");
+            let anchor = reports["XBTUSD"].clone();
+
+            let err = level_verdict(&anchor["level"], &[0.2])
+                .expect_err("a dropped scored field must refuse rather than read as zero");
+            assert!(
+                err.to_string().contains(field),
+                "the refusal must name {field}, got: {err}"
+            );
+            assert!(level_queue(&anchor, &reports).is_err());
+        }
+    }
+
+    /// The fail-open direction was toward PASS, which is the part that makes it
+    /// a defect rather than a difference. Pinned as its own case so nobody
+    /// "fixes" the refusal by substituting a value that still scores.
+    #[test]
+    fn the_dropped_field_would_otherwise_have_manufactured_a_proceed() {
+        let mut reports = fixture(0.2, 5.0);
+        let level = reports
+            .get_mut("XBTUSD")
+            .expect("anchor")
+            .get_mut("level")
+            .expect("level block");
+        // vol_dispersion 4.0 against size_dispersion 4.0 fails condition three
+        // honestly; dropping size_dispersion is what used to rescue it.
+        level["vol_dispersion"] = json!(4.0);
+        level["size_dispersion"] = json!(4.0);
+        let scored = level_verdict(&reports["XBTUSD"]["level"], &[0.2]).expect("scores");
+        assert!(!scored["proceed"].as_bool().expect("proceed"));
+
+        let level = reports
+            .get_mut("XBTUSD")
+            .expect("anchor")
+            .get_mut("level")
+            .expect("level block");
+        level
+            .as_object_mut()
+            .expect("level object")
+            .remove("size_dispersion");
+        assert!(
+            level_verdict(&reports["XBTUSD"]["level"], &[0.2]).is_err(),
+            "dropping the field that made the condition fail must not turn a DECLINE into a PASS"
+        );
+    }
+
     #[test]
     fn disagreeing_binning_is_refused() {
         let mut reports = fixture(0.2, 5.0);
@@ -728,7 +824,7 @@ mod tests {
     #[test]
     fn all_four_conditions_holding_proceeds() {
         let reports = fixture(0.2, 5.0);
-        let verdict = level_verdict(&reports["XBTUSD"]["level"], &[0.2, 0.25]);
+        let verdict = level_verdict(&reports["XBTUSD"]["level"], &[0.2, 0.25]).unwrap();
         assert!(verdict["proceed"].as_bool().unwrap());
         assert!(verdict["failed"].as_array().unwrap().is_empty());
     }
@@ -736,7 +832,7 @@ mod tests {
     #[test]
     fn a_degenerate_corpus_declines_and_names_the_failed_condition() {
         let reports = fixture(0.69, 5.0);
-        let verdict = level_verdict(&reports["XBTUSD"]["level"], &[0.69, 0.7]);
+        let verdict = level_verdict(&reports["XBTUSD"]["level"], &[0.69, 0.7]).unwrap();
         assert!(!verdict["proceed"].as_bool().unwrap());
         assert_eq!(
             verdict["failed"].as_array().unwrap(),
@@ -749,7 +845,7 @@ mod tests {
         let mut reports = fixture(0.2, 4.0);
         reports.get_mut("XBTUSD").unwrap()["level"]["size_dispersion"] = json!(4.0);
         let level = reports["XBTUSD"]["level"].clone();
-        let verdict = level_verdict(&level, &[0.2]);
+        let verdict = level_verdict(&level, &[0.2]).unwrap();
         assert!(!verdict["proceed"].as_bool().unwrap());
         assert!(
             verdict["failed"]
@@ -763,7 +859,7 @@ mod tests {
     #[test]
     fn an_outlier_anchor_fails_condition_four() {
         let reports = fixture(0.05, 5.0);
-        let verdict = level_verdict(&reports["XBTUSD"]["level"], &[0.05, 0.4, 0.45]);
+        let verdict = level_verdict(&reports["XBTUSD"]["level"], &[0.05, 0.4, 0.45]).unwrap();
         assert!(!verdict["proceed"].as_bool().unwrap());
         assert!(
             verdict["failed"]

@@ -220,3 +220,82 @@ fn log_bin_clamps_at_the_ends_and_is_monotone() {
     assert_eq!(log_bin(1e9, 1e-3, 86400.0, 40), 39);
     assert!(log_bin(1.0, 1e-3, 86400.0, 40) < log_bin(100.0, 1e-3, 86400.0, 40));
 }
+
+/// Writes a `ts,px,sz` corpus under the workspace target directory. Test
+/// inputs stay inside the project tree, and `target/` is already ignored.
+/// `CARGO_TARGET_TMPDIR` would be the natural home but is only defined for
+/// integration tests, and these are lib unit tests.
+fn corpus(name: &str, rows: &[(&str, &str, &str)]) -> std::path::PathBuf {
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/characterize-fixtures");
+    std::fs::create_dir_all(&dir).expect("creating the fixture directory");
+    let path = dir.join(name);
+    let body: String = rows
+        .iter()
+        .map(|(ts, px, sz)| format!("{ts},{px},{sz}\n"))
+        .collect();
+    std::fs::write(&path, body).expect("writing the corpus fixture");
+    path
+}
+
+/// THE MODAL-TICK TIE. `characterize.py` picks the mode with
+/// `max(items(), key=count)` over an insertion-ordered dict, which keeps the
+/// FIRST key on a tie; `max_by_key` keeps the last. This corpus produces tick
+/// increments of exactly `1` then `2`, one occurrence each, so the two rules
+/// disagree - and the assertion is direction-sensitive, which a tie fixture has
+/// to be to discriminate at all. The committed eight-pair corpus contains no
+/// such tie, so the parity gate could not see this.
+#[test]
+fn a_modal_tick_tie_keeps_the_first_increment_seen() {
+    let path = corpus(
+        "tie_modal_tick_ascending.csv",
+        &[
+            ("1700000000", "100", "1"),
+            ("1700000001", "101", "1"),
+            ("1700000003", "103", "1"),
+        ],
+    );
+    let report = characterize(&path).expect("characterizes");
+    assert_eq!(
+        report["returns"]["modal_tick"], 1.0,
+        "the increment 1 was seen first, so a tie must hold it"
+    );
+
+    // Reversed arrival order, identical multiset of increments. If the mode
+    // were order-independent - or took the last maximum - both corpora would
+    // report the same tick, and this pair would not be a discriminator.
+    let path = corpus(
+        "tie_modal_tick_descending.csv",
+        &[
+            ("1700000000", "100", "1"),
+            ("1700000001", "102", "1"),
+            ("1700000003", "103", "1"),
+        ],
+    );
+    let report = characterize(&path).expect("characterizes");
+    assert_eq!(
+        report["returns"]["modal_tick"], 2.0,
+        "the increment 2 was seen first here, so the tie must flip with arrival order"
+    );
+}
+
+/// THE PRICE-DECIMALS TIE, worse than the tick tie in kind rather than degree:
+/// `price_dec_hist` was a `HashMap`, so its tie-break was not merely divergent
+/// from `characterize.py:387` but nondeterministic between runs of the same
+/// input. Python reads the first decimal count seen.
+#[test]
+fn a_price_decimals_tie_keeps_the_first_count_seen() {
+    let path = corpus(
+        "tie_price_decimals_one_first.csv",
+        &[("1700000000", "100.5", "1"), ("1700000001", "101.25", "1")],
+    );
+    let report = characterize(&path).expect("characterizes");
+    assert_eq!(report["returns"]["price_decimals_mode"], 1);
+
+    let path = corpus(
+        "tie_price_decimals_two_first.csv",
+        &[("1700000000", "100.25", "1"), ("1700000001", "101.5", "1")],
+    );
+    let report = characterize(&path).expect("characterizes");
+    assert_eq!(report["returns"]["price_decimals_mode"], 2);
+}

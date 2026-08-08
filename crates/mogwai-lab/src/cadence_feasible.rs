@@ -241,8 +241,7 @@ pub fn simulate_markov(
     };
     let total: i64 = histogram.iter().map(|(count, freq)| count * freq).sum();
     let gap_mean = crate::kernel::py_fsum(gaps.iter().copied()) / gaps.len() as f64;
-    let gap_var =
-        crate::kernel::py_fsum(gaps.iter().map(|g| (g - gap_mean).powi(2))) / gaps.len() as f64;
+    let gap_var = gap_pvariance(&gaps, gap_mean);
     let acf = |lag: usize| -> f64 {
         let numerator = crate::kernel::py_sum(
             gaps.iter()
@@ -263,6 +262,191 @@ pub fn simulate_markov(
         "gap_acf1": acf(1),
         "gap_acf5": acf(5),
     }))
+}
+
+/// Population variance of the gap series, about an already-rounded mean.
+///
+/// AN ALGORITHMIC DEVIATION FROM `statistics.pvariance`, WITH NO BOUND. This is
+/// the only field in the density report that is not bit-exact against CPython,
+/// and the size of the difference is NOT small in general. Read the whole of
+/// this before quoting a number from it.
+///
+/// `check_cadence_feasible.py:187` calls `statistics.pvariance(gaps)` with no
+/// explicit `mu`, which does NOT subtract a rounded mean before squaring. It
+/// evaluates `(n * sum(x^2) - sum(x)^2) / n^2` as an exact rational over the
+/// binary64 inputs and rounds once, at the end - so CPython's result is
+/// correctly rounded. This function instead sums squared deviations from the
+/// rounded mean. Matching CPython needs the exact value of that cancellation,
+/// which `py_fsum` cannot supply: its interface rounds before the
+/// `n * Q - S * S` subtraction, so an exact port needs a retained expansion or
+/// a fixed superaccumulator.
+///
+/// WHY NO ULP CEILING IS CLAIMED, having twice been claimed wrongly. A
+/// "one-ULP" bound was asserted from a three-gap fixture, then refuted by
+/// `--events 14`, which gives two; "two" was refuted by search, which gives
+/// three. The framing was wrong in kind rather than in degree: on three
+/// NEARLY-EQUAL gaps this function is wrong BY A FACTOR OF THREE, a 200 percent
+/// relative error, because the true variance is then a difference of quantities
+/// agreeing in all but the last two bits and the rounding of each square
+/// dominates the result. That case is pinned in the `deviation` tests below
+/// against CPython's exact value, and it is not adversarial - a quiet cadence
+/// regime with near-quantized arrivals has exactly that shape. Any
+/// fixture-derived ceiling here is an artifact of the fixture.
+///
+/// WHAT IS ACTUALLY GUARANTEED, and it is worth stating because it is stronger
+/// than a cross-language bound in one respect and weaker in another. This value
+/// is a deterministic, platform-independent function of its input: `py_fsum` is
+/// exact summation, and IEEE 754 subtraction, multiplication and division are
+/// correctly rounded on every conforming platform. So the venue's own numbers
+/// are reproducible everywhere - the property the `sqrt` deviation elsewhere in
+/// this workspace exists to protect. What is NOT guaranteed is agreement with
+/// CPython, at any tolerance.
+///
+/// WHY IT IS TOLERATED HERE ANYWAY: the value reaches the report solely as
+/// `gap_cv2`, and `density_passes` (`check_cadence_feasible.py:227`), which
+/// decides the nonzero exit at `:276`, reads `mean`, `median`, `p95` and
+/// `zero_frac`. It does not read `gap_cv2`. The field's only Python consumer is
+/// the ranking score at `:220` inside `fit_markov`. So today the deviation is
+/// observable in a printed diagnostic and cannot move a verdict, an exit
+/// status, or any committed artifact.
+///
+/// THIS IS A HARD GATE ON `--fit-markov`, not a caveat. That mode's score
+/// divides `gap_cv2` by a cadence anchor, sums it with six other terms and
+/// sorts the grid by the result. Feeding an unbounded relative error into a
+/// ranking that selects shipped constants is not acceptable at any grid size,
+/// so `--fit-markov` may not land until this function computes the exact
+/// value. It may not inherit the tolerance above by arguing the error is
+/// usually small.
+fn gap_pvariance(gaps: &[f64], gap_mean: f64) -> f64 {
+    crate::kernel::py_fsum(gaps.iter().map(|g| (g - gap_mean).powi(2))) / gaps.len() as f64
+}
+
+#[cfg(test)]
+mod deviation {
+    use super::*;
+
+    /// Distance in representable steps. Stated as a count rather than a
+    /// relative epsilon so a failure reports how far apart the values are in
+    /// the only unit that does not drift with magnitude.
+    pub(super) fn ulps_between(a: f64, b: f64) -> u64 {
+        if a == b {
+            return 0;
+        }
+        assert!(
+            a.is_finite() && b.is_finite() && a.signum() == b.signum(),
+            "ULP distance is only meaningful for finite same-signed values"
+        );
+        a.to_bits().abs_diff(b.to_bits())
+    }
+
+    /// THE THREE-GAP CASE. Pins THIS crate's value bit-exactly, as a regression
+    /// pin on our own algorithm, and records CPython's differing value as an
+    /// observation. It deliberately does NOT assert a bound: the assertion is
+    /// that the two disagree, which is what makes the case evidence for the
+    /// deviation existing.
+    ///
+    /// CPython 3.14.6: `statistics.pvariance(gaps)` is `0.14509134298012094`
+    /// and `gap_cv2` is `0.33706429233938623`.
+    #[test]
+    fn the_three_gap_case_disagrees_with_cpython() {
+        let gaps = [0.154_148_210_468, 1.076_405_188_57, 0.737_720_944_656];
+        let gap_mean = crate::kernel::py_fsum(gaps.iter().copied()) / gaps.len() as f64;
+        assert_eq!(
+            gap_mean.to_bits(),
+            0.656_091_447_898_f64.to_bits(),
+            "the mean is exact; only the variance deviates, so a failure here means \
+             something other than the variance moved"
+        );
+
+        let ours = gap_pvariance(&gaps, gap_mean);
+        assert_eq!(
+            ours.to_bits(),
+            0.145_091_342_980_120_97_f64.to_bits(),
+            "regression pin on our own algorithm, not a parity claim"
+        );
+        let cpython = 0.145_091_342_980_120_94_f64;
+        assert_ne!(
+            ours.to_bits(),
+            cpython.to_bits(),
+            "if these ever agree the case has stopped being evidence and the deviation \
+             needs re-deriving rather than the test deleting"
+        );
+        assert_eq!(ulps_between(ours, cpython), 1, "observation, not a bound");
+    }
+
+    /// THE CASE THAT REFUTED THE FIRST BOUND, kept because it is a real CLI
+    /// invocation rather than a constructed vector:
+    /// `check_cadence_feasible.py --events 14` against
+    /// `mogwai cadence-feasible --events 14`. Every other reported field agrees
+    /// bit for bit, including both ACFs; `gap_cv2` is two ULPs apart. Recorded
+    /// so nobody re-derives a one-ULP ceiling from the three-gap case alone.
+    ///
+    /// CPython 3.14.6 prints `gap_cv2` `0.6921791630839342`; this crate prints
+    /// `0.6921791630839345`. Both commands exit nonzero, because the density
+    /// bands fail either way - which is the concrete demonstration that the
+    /// field does not gate.
+    #[test]
+    fn the_fourteen_event_cli_case_disagrees_by_more_than_the_three_gap_case() {
+        let ours = 0.692_179_163_083_934_5_f64;
+        let cpython = 0.692_179_163_083_934_2_f64;
+        assert_eq!(
+            ulps_between(ours, cpython),
+            2,
+            "the CLI path produces a larger distance than the constructed case, which is \
+             why no ceiling is claimed from either"
+        );
+    }
+
+    /// THE CASE THAT KILLED THE ULP FRAMING ENTIRELY. Three nearly-equal gaps
+    /// make the true variance a difference of quantities that agree in all but
+    /// the last two bits, so this function's rounding of each square dominates
+    /// the answer completely and the result is WRONG BY A FACTOR OF THREE. Not
+    /// an adversarial construction: a quiet cadence regime with near-quantized
+    /// arrivals produces exactly this shape.
+    ///
+    /// That is the evidence that no ULP ceiling can be stated: the error here is
+    /// 200 percent, not two steps. It also reframes what the deviation IS. It is
+    /// not a last-bit rounding difference that happens to be visible; it is an
+    /// ill-conditioned algorithm whose relative error is unbounded, tolerated
+    /// only because the field it feeds cannot currently gate anything.
+    ///
+    /// Reference from CPython 3.14.6 over the same three inputs:
+    /// `statistics.pvariance(gaps)` is `2.7391003653507353e-33`, exactly
+    /// `0x1.c71c71c71c71cp-109`. This function returns
+    /// `8.217301096052206e-33`, exactly `0x1.5555555555555p-107`. The inputs
+    /// are given as hex float literals so the case cannot drift through decimal
+    /// parsing.
+    #[test]
+    fn three_nearly_equal_gaps_are_wrong_by_a_factor_of_three() {
+        let gaps = [
+            f64::from_bits(0x3FEF_FFFF_FFFF_FFBE),
+            f64::from_bits(0x3FEF_FFFF_FFFF_FFBE),
+            f64::from_bits(0x3FEF_FFFF_FFFF_FFBF),
+        ];
+        let gap_mean = crate::kernel::py_fsum(gaps.iter().copied()) / gaps.len() as f64;
+        assert_eq!(
+            gap_mean.to_bits(),
+            0x3FEF_FFFF_FFFF_FFBF,
+            "the mean is exact here too, so the whole disagreement is the variance"
+        );
+
+        let ours = gap_pvariance(&gaps, gap_mean);
+        assert_eq!(
+            ours.to_bits(),
+            0x3945_5555_5555_5555,
+            "regression pin on our own value, 0x1.5555555555555p-107"
+        );
+
+        // CPython's exact result, 0x1.c71c71c71c71cp-109.
+        let cpython = f64::from_bits(0x392C_71C7_1C71_C71C);
+        assert!(ours > 0.0 && cpython > 0.0);
+        let ratio = ours / cpython;
+        assert!(
+            (ratio - 3.0).abs() < 1e-9,
+            "expected our value to be three times CPython's, got ratio {ratio} \
+             from {ours:?} against {cpython:?}"
+        );
+    }
 }
 
 /// `verdict`: the structural L0 proceed/close/stop verdict, read directly
@@ -324,20 +508,40 @@ mod tests {
         assert_eq!(got["median"], 4);
         assert_eq!(got["p95"], 385);
         assert_eq!(got["truncation_frac"], 0.0);
+        // EXACT, not within a tolerance. The `1e-12` relative band this loop
+        // used to carry was wide enough to hide a real defect: every one of
+        // these fields is bit-reproducible against CPython, so a tolerance
+        // bought nothing except silence about the one field that genuinely
+        // deviates. `mean` and `zero_frac` are gate-driving inputs to
+        // `density_passes`; the ACFs are not, but they are exact and stay
+        // pinned exact - adjacency to `gap_cv2` is not a reason to loosen them.
         for (field, expected) in [
-            ("mean", 61.865_979_381_443_296),
-            ("zero_frac", 0.069_219_440_353_460_98),
-            ("gap_mean", 0.135_782_319_836_986_05),
-            ("gap_cv2", 4.411_391_713_266_563),
-            ("gap_acf1", 0.360_406_934_815_399_5),
-            ("gap_acf5", 0.258_181_483_555_129_2),
+            ("mean", 61.865_979_381_443_296_f64),
+            ("zero_frac", 0.069_219_440_353_460_98_f64),
+            ("gap_mean", 0.135_782_319_836_986_05_f64),
+            ("gap_acf1", 0.360_406_934_815_399_5_f64),
+            ("gap_acf5", 0.258_181_483_555_129_2_f64),
         ] {
             let actual = got[field].as_f64().expect("numeric field");
             assert!(
-                (actual - expected).abs() <= expected.abs() * 1e-12,
-                "{field}: {actual} against CPython {expected}"
+                actual.to_bits() == expected.to_bits(),
+                "{field}: {actual:?} against CPython {expected:?}, and this field is pinned \
+                 bit-exact rather than to a tolerance"
             );
         }
+        // `gap_cv2` AGREES BIT FOR BIT AT THIS EVENT COUNT, and that agreement
+        // is incidental rather than guaranteed - see `gap_pvariance` for why no
+        // bound holds in general, and the `deviation` module for two real cases
+        // where this same field disagrees. Pinned exactly anyway: if it ever
+        // moves HERE, something changed in the summation or the draw stream,
+        // which is worth a loud failure even though cross-language agreement is
+        // not claimed.
+        let cv2 = got["gap_cv2"].as_f64().expect("numeric gap_cv2");
+        assert_eq!(
+            cv2.to_bits(),
+            4.411_391_713_266_563_f64.to_bits(),
+            "gap_cv2 moved at 5,000 events, where it had agreed with CPython exactly"
+        );
     }
 
     /// THE CASE THAT PASSED OPEN. A document carrying `children_mean` but no

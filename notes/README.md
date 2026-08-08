@@ -33,7 +33,7 @@ Three tracks. No document sits above them, which is what this file is for.
 |---|---|---|
 | Evidence and purchase | `DATA-PURCHASE-REPORT.md` (root) | Idle. The ~30 dollar ES/MES purchase is the named next marginal dollar, owner-gated. Nothing to buy for 12b. |
 | Generator fidelity, protocols 10 to 12b | the four protocol specs below | 12a landed `no-family-eligible`; owner ruled 12b targets ARRIVAL COMPOSITION, repair-until-measurable. 12b spec undrafted, gated on codex capacity. |
-| Python-to-Rust rewrite | `rust-rewrite-phases.md` | Stopped at the 4a codex gate. 4b is scoped and blocked - see below. |
+| Python-to-Rust rewrite | `rust-rewrite-phases.md` | TWO review passes, both REFUSED, 2026-08-08. The first pass's five blockers and the second's four are all closed; gate at 682 passed, 0 orphaned. Both judgement calls - the lateness quarantine and the version exemption - were accepted by the second pass. Awaiting a third. |
 
 `todo.md` is the catch-all beneath all three: open work items, parked
 investigations, the hardcoded-value inventory.
@@ -64,17 +64,22 @@ investigations, the hardcoded-value inventory.
 
 ## What blocks what, right now
 
-1. **4b is blocked on a missing `mogwai characterize` subcommand.**
-   `mogwai_lab::characterize` is a gated library with no CLI driver, and its
-   Python driver `run_corpus.py` was deleted at `9170f45`. Retiring
-   `characterize.py` before that lands severs `char_*.json` production in both
-   languages - the input `mogwai synth fingerprint` needs, and the first step
-   of onboarding any instrument. Full 4b order in `rust-rewrite-phases.md`.
+1. **4b's remaining work is unblocked**: per-mode subcontract scoping, the
+   `select_windows.py` and `tick_composition_ratios.py` absorptions, and the
+   TBBO short-row fix. The five signature blockers the review raised - the
+   `characterize` CLI gap, the session-profile CLI gap, the `cadence-feasible`
+   Markov gate and its fail-open decoding, the fingerprint
+   float/ordering/fail-open trio, and the red `--gate` - all closed
+   2026-08-08. Full 4b order in `rust-rewrite-phases.md`.
 2. **12b is blocked on codex capacity**, and may not be drafted outside the
    freeze protocol.
-3. **The codex program-level review** gates 4b's retirement half. The Python
-   originals must stay runnable until it passes; every parity gate loses its
-   reference the moment they move.
+3. **The codex program-level review** still gates 4b's retirement half. Two
+   passes have refused. The lesson both times, and worth reading before
+   assuming a third will pass: every finding was a closure that held on the
+   committed corpus and failed one layer below where its gate looked, so
+   verifying a fix against the artifacts is not verifying it against the
+   contract. The Python originals must stay runnable until it passes; every
+   parity gate loses its reference the moment they move.
 
 ## Traps this repo has actually fallen into
 
