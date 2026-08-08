@@ -1321,7 +1321,43 @@ moment the scripts move. Phase 4 therefore runs in two halves:
      - It accepts the `TAPE_PROTOCOL_VERSION` exemption ONLY for the
        audited `modal_tick.max` correction, and does not generalize it -
        matching the wording already in `AGENTS.md`.
-  2. **ABSORB `select_windows.py` WHOLE**, all four phases, as the
+  2. **IN PROGRESS. The blessing is DONE, 2026-08-08; the port is not.**
+     This item's distinguishing problem is that it has no frozen artifact
+     to port against - the script prints its results and writes only
+     `cme_daily_features.json`, a regenerable gitignored cache, and
+     `targets-frozen.json` is the BTCUSDT target set it never touches. So
+     the reference had to be MADE, from the current Python, before any
+     porting: `scripts/bless_select_windows.py` writes
+     `analysis/select-windows-blessed.json`, committed.
+
+     It IMPORTS `select_windows` rather than reimplementing it, so the
+     artifact is the Python's own arithmetic and not a second opinion
+     about it, and it captures the deterministic STRUCTURE rather than the
+     printed tables - per-month medians, the eligible span, the z-scored
+     vectors with their key order, the seeds and the selection. A port
+     matched against printed text would be pinned to formatting; one
+     matched against the structure reproduces the tables for free. Floats
+     are exact decimal round-trips, so the eventual comparison is
+     bit-exact rather than close.
+
+     Run over the four archives: 210 months, 193 eligible from
+     2010-06 to 2026-06, seeds 2020-03 and 2026-06, selection 2011-08,
+     2014-07, 2017-10, 2019-05, 2020-03, 2020-04, 2025-04, 2026-03,
+     2026-06. Stable across re-runs. The archives' sizes and SHA-256
+     digests are recorded in the artifact's provenance, because the cache
+     is gitignored and the archives sit outside the tree - without that, a
+     later mismatch could not be told apart from the inputs having
+     changed.
+
+     STILL TO DO: the port itself, all four phases, on top of
+     `session_profile.rs`'s existing archive/session/eligibility
+     machinery. Note the two traps already recorded below - the
+     `DATABENTO_START` constant re-centres every z-score rather than just
+     filtering candidates, and the even-session median is load-bearing.
+
+     The original text follows.
+
+     **ABSORB `select_windows.py` WHOLE**, all four phases, as the
      bar-frame intake station on top of `session_profile.rs`'s existing
      archive, session and eligibility machinery. No frozen artifact
      exists to gate against: `cme_daily_features.json` is a regenerable
