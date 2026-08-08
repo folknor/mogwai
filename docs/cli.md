@@ -250,8 +250,13 @@ Python has no such flag, so leaving it off is the matching behaviour.
 
 The simulation reproduces CPython's stream draw for draw, so its output is
 identical to `python3 analysis/check_cadence_feasible.py` field for field
-rather than merely close. Not yet ported: the `--fit` and `--fit-markov`
-grid searches, which are candidate-search tools rather than gates.
+rather than merely close - bit for bit, including `gap_cv2`, which requires
+computing the population variance as the exact rational CPython's
+`statistics.pvariance` uses rather than in floating point. That identity is
+pinned at the default 3,000,000 events, at `--events 14`, and over a
+generated 820-case sweep against CPython. Not yet ported: the `--fit` and
+`--fit-markov` grid searches, which are candidate-search tools rather than
+gates.
 
 `cache` is the manual-case cover for the storage policy's CACHE class:
 `mogwai cache stats` reports entry/file/byte counts under the cache root

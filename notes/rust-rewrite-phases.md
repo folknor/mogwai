@@ -1159,6 +1159,64 @@ moment the scripts move. Phase 4 therefore runs in two halves:
        on an uncommitted tree and so was attached to no reviewable commit.
        Fixed, and the gate is now run AFTER formatting as a matter of
        order: 684 passed, 0 orphaned.
+  1h. **THE FOURTH REVIEW PASS, 2026-08-08. REFUSED, and RULED: build the
+     exact variance accumulator.** The ruling is the valuable part, so it
+     is recorded as reasoning rather than as an instruction. Reachability
+     proves `gap_cv2` cannot change the density exit status; it does NOT
+     make a printed number sound, because CLI output has human and
+     external consumers outside the in-tree call graph. Determinism is not
+     correctness. Suppressing the field was rejected too, since that would
+     remove Python capability rather than preserve it. So the closure is
+     to preserve it ACCURATELY.
+
+     It also found the platform-independence claim made for the float
+     version was not true as implemented: `f64::powi` sat in the same
+     expression, and its precision is documented as varying by platform
+     and Rust version. Two more `powi(2)` sites were in the ACF
+     denominator and the `gap_cv2` division. All are explicit
+     multiplication now, which is correctly rounded everywhere.
+
+     `crates/mogwai-lab/src/exact.rs` computes the same rational CPython
+     does. Every finite binary64 is an integer times a power of two, so
+     against the sample's smallest exponent both sums become exact
+     integers, `n*Q - S^2` is an exact integer, and the ONLY rounding is
+     the final division by `n^2` - once, to nearest, ties to even. It
+     carries a minimal arbitrary-precision natural (add, subtract,
+     schoolbook multiply, shift, divide by one limb) rather than pulling a
+     general-purpose bignum dependency for a single function.
+
+     ORDER OF WORK, because it is the whole methodological point of this
+     entry: the identity `(n*sum(x^2) - (sum x)^2) / n^2` was verified
+     against `statistics.pvariance` over 2,005 cases BEFORE the module was
+     written. It is not an inference from reading CPython's source, and it
+     is not a hypothesis the tests were then written to confirm.
+
+     The evidence is a generated sweep rather than fixtures, since
+     hand-picked fixtures are exactly how three ULP ceilings got claimed
+     and refuted. `scripts/gen_pvariance_cases.py` emits 820 cases across
+     seven families - deliberately including the clustered and
+     adjacent-neighbour ones that broke the float version - with inputs
+     and expectations both as raw bit patterns so no decimal float parser
+     sits on the critical path of an arithmetic test. All 820 pass exactly.
+
+     `gap_cv2` itself is now pinned bit-for-bit against CPython at five
+     places, the reviewer's own list: the nearly-equal factor-of-three
+     vector, the original three-gap vector, the real `--events 14` path,
+     the 5,000-event fixture and the DEFAULT 3,000,000-event run. That
+     last one closes the hole this whole thread came from - the default
+     density report previously had no gate of its own, since the parity
+     test beside it asserts only the structural verdict. Gate cost of
+     adding it: about three seconds.
+
+     `docs/cli.md`'s claim of field-for-field identity with the Python is
+     TRUE again, and now says what backs it. It had been falsified by the
+     committed counterexamples, which the reviewer caught as a durable
+     document asserting something the tree disproved.
+
+     WHAT THIS RETIRES: `--fit-markov` no longer owes a ruling before it
+     can consume `gap_cv2`. The debt is gone rather than deferred, which
+     is what the reviewer meant by removing it before it can enter the
+     ranking path.
   2. **ABSORB `select_windows.py` WHOLE**, all four phases, as the
      bar-frame intake station on top of `session_profile.rs`'s existing
      archive, session and eligibility machinery. No frozen artifact

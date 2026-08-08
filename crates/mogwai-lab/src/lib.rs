@@ -28,6 +28,7 @@ pub mod cadence;
 pub mod cadence_feasible;
 pub mod characterize;
 pub mod error;
+pub mod exact;
 pub mod fingerprint;
 pub mod fit;
 pub mod kernel;

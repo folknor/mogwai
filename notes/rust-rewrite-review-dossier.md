@@ -83,49 +83,52 @@ Each found by a parity gate disagreeing, not by reading the Python source.
   discriminating test pins a value where the two differ, so that nobody later
   "restores parity". The cross-language exception is narrowed to the affected
   `session_profile.vol_hour` values; every other field must stay identical.
-- **`gap_pvariance` - AN UNBOUNDED ALGORITHMIC DEVIATION, tolerated only
-  because the field cannot gate.** Not a rounding convention at all, and it is
-  filed here rather than omitted because a reader who sees `gap_cv2` disagree
-  needs to find this entry.
+- **`exact::population_variance` - EXACT INTEGER ARITHMETIC, because floating
+  point could not do this one.** The only place in the workspace that abandons
+  floating point outright, and the reason is worth carrying: it is the rounding
+  convention that took three wrong answers to get right.
 
   `check_cadence_feasible.py:187` calls `statistics.pvariance(gaps)` with no
   explicit `mu`. That does NOT subtract a rounded mean before squaring: it
   evaluates `(n * sum(x^2) - sum(x)^2) / n^2` as an exact rational over the
-  binary64 inputs and rounds once at the end, so CPython's value is correctly
-  rounded. `py_fsum` cannot reproduce that, because its interface rounds before
-  the `n * Q - S * S` cancellation; an exact port needs a retained expansion or
-  a fixed superaccumulator. The port instead sums squared deviations from the
-  rounded mean.
+  binary64 inputs and rounds once at the end. The natural port - `py_fsum` over
+  squared deviations from the rounded mean - is not a last-bit difference from
+  that but an ILL-CONDITIONED algorithm: for a clustered series the true
+  variance is a difference of quantities agreeing in almost every bit, so the
+  rounding of each individual square dominates the answer.
 
-  THE SIZE OF THE DEVIATION IS UNBOUNDED, and the history of getting this wrong
-  is the useful part. A one-ULP bound was claimed from a three-gap fixture. The
-  third review pass refuted it by running `check_cadence_feasible.py --events 14`
-  against `mogwai cadence-feasible --events 14`, which gives two ULPs with every
-  other field agreeing bit for bit. A search then found three. And on three
-  NEARLY-EQUAL gaps the function is wrong by a FACTOR OF THREE - a 200 percent
-  relative error, because the true variance is a difference of quantities
-  agreeing in all but the last two bits. That case is pinned in
-  `cadence_feasible.rs`'s `deviation` tests against CPython's exact value, and it
-  is not adversarial: a quiet cadence regime with near-quantized arrivals has
-  that shape. Three successive ceilings were each an artifact of their fixture,
-  which is why none is claimed now.
+  THE HISTORY IS THE LESSON. A one-ULP bound was claimed from a three-gap
+  fixture. The third review pass refuted it by running
+  `check_cadence_feasible.py --events 14` against
+  `mogwai cadence-feasible --events 14`, which gave two ULPs with every other
+  field agreeing bit for bit, and warned explicitly against restating the bound
+  as two. A search then found three. And three NEARLY-EQUAL gaps turned out to
+  be wrong BY A FACTOR OF THREE - 200 percent, not two steps - which showed the
+  ULP framing was wrong in kind rather than degree. Three successive ceilings,
+  each an artifact of the fixture it was derived from. A bound established over
+  the fixtures you happen to have is not a bound.
 
-  WHAT IS GUARANTEED is narrower and different in kind: the value is a
-  deterministic, platform-independent function of its input, since `py_fsum` is
-  exact summation and IEEE 754 subtract/multiply/divide are correctly rounded
-  everywhere. Contrast the `sqrt` deviation above, which is approved BECAUSE
-  exactness would import platform dependence. This one has no such defence -
-  exact accumulation here would introduce none - so the tolerance rests purely
-  on reachability: `density_passes` (`:227`) decides the nonzero exit at `:276`
-  and reads `mean`, `median`, `p95` and `zero_frac`, never `gap_cv2`.
-  Demonstrated rather than argued at `--events 14`, where both languages exit
-  nonzero on the density bands regardless of the disagreement.
+  The closure is exactness, not a wider tolerance. Every finite binary64 is an
+  integer times a power of two, so with `s` the smallest exponent in the sample
+  both sums become exact integers against one shared scale, `n*Q - S^2` is an
+  exact integer, and the only rounding in the computation is the final division
+  by `n^2` - once, to nearest, ties to even. `crates/mogwai-lab/src/exact.rs`
+  carries a minimal arbitrary-precision natural for it (add, subtract,
+  schoolbook multiply, shift, divide by a single limb) rather than a bignum
+  dependency for one function. The identity was verified against
+  `statistics.pvariance` over 2,005 cases BEFORE the module was written, and the
+  implementation is pinned by a generated 820-case sweep whose families
+  deliberately include the clustered and adjacent-neighbour cases that broke the
+  float version.
 
-  A HARD GATE, not a caveat: `--fit-markov` may not land until this computes the
-  exact value. Its score divides `gap_cv2` by a cadence anchor, sums seven terms
-  and sorts a grid to select shipped constants. Feeding an unbounded relative
-  error into that is unacceptable at any grid size, and it may not inherit this
-  tolerance by arguing the error is usually small.
+  `f64::powi` was removed from this path in the same change. Its precision is
+  documented as varying by platform and Rust version, so leaving `powi(2)` in
+  the `gap_cv2` division and the ACF denominator would have reintroduced a
+  platform-dependent rounding one operation after the exact variance. Explicit
+  multiplication is correctly rounded everywhere.
+
+  What this buys beyond parity: `--fit-markov` no longer needs a ruling before
+  it can consume `gap_cv2`. The debt was removed rather than deferred.
 - **`fit::mtrand`'s `random()` and `weibullvariate`** (`mtrand.rs:161`, `:174`,
   added 2026-08-08) - both pinned against the CPython stream by prefix tests,
   needed by the Markov density simulation (see 5). `gamma` at arbitrary shape
@@ -209,14 +212,17 @@ Python run at port time, never assumed honest by construction.
 WHERE THIS TABLE LIED, recorded because the correction is the point. The
 cadence-feasible row claimed to cover "structural verdict AND the full
 3,000,000-event Markov density run". It does not: the test calls `verdict()`
-and asserts `PROCEED`. The 3M field-for-field agreement is real but was
+and asserts `PROCEED`. The 3M field-for-field agreement was real but was
 established by hand, so the density report had NO gate at all - which is how a
-one-ULP variance divergence sat in the tree unnoticed behind a `1e-12`
-tolerance in the only test that touched it. The second review pass caught the
-overstatement in the same finding that caught the divergence. What now pins the
-density fields is the 5,000-event fixture, tightened from that tolerance to
-BIT-EXACT equality on `mean`, `zero_frac`, `gap_mean` and both ACFs, with a
-named one-ULP bound on `gap_cv2` alone.
+variance divergence sat in the tree unnoticed behind a `1e-12` tolerance in the
+only test that touched it. The second review pass caught the overstatement in
+the same finding that caught the divergence.
+
+The density report is now gated properly, in `cadence_feasible.rs`'s
+`gap_cv2_parity` module rather than in `parity3a.rs`: BIT-EXACT equality on
+every reported field, at the default 3,000,000 events, at `--events 14`, and at
+the 5,000-event fixture. No tolerance and no ULP bound anywhere - see section 2
+for why the variance is computed exactly rather than approximately.
 
 ## 4. Parity-frozen defects awaiting 4b
 
@@ -605,6 +611,17 @@ before item 7.
 
 It refused on two things, and named the first at the level of the pattern
 because it had been asked to.
+
+RESOLVED after the pass: the reviewer ruled BUILD THE EXACT ACCUMULATOR rather
+than widen the approval, on the ground that reachability shows the value cannot
+change the exit status but does not make a printed number sound - CLI output has
+consumers outside the in-tree call graph, and determinism is not correctness. It
+also refused the alternative of suppressing the field, since that would remove
+Python capability. Both are right, and the debt is now gone rather than
+deferred: see section 2's `exact::population_variance` entry. It further found
+that the platform-independence claim made for the float version was not even
+true as implemented, because `f64::powi` sat in the same expression and its
+precision varies by platform and Rust version.
 
 1. **The one-ULP approval was false for valid CLI input.** Established only over
    a hand-picked three-gap vector and the 5,000-event artifact, then asserted as
