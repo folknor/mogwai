@@ -702,64 +702,28 @@ mod tests {
         assert_eq!(subcontract_hash(), EXPECTED_HASH);
     }
 
-    /// THE CLASSIFICATION IS CHECKED AGAINST THE PYTHON, not against itself.
+    /// WHAT SURVIVES THE ORACLE, and - said plainly - what does not.
     ///
-    /// Note first what does NOT need testing and why, because the obvious test
-    /// here is worthless: `Mode::Protocol11` is defined as "not in
-    /// `PROTOCOL_12A_KEYS`", so "every key belongs to exactly one mode" is true
-    /// BY CONSTRUCTION and an assertion of it can never fail. It would be a
-    /// tautology wearing the costume of a partition proof.
+    /// Until phase 4b item 7 this file carried a test that parsed
+    /// `mnq_fit.py`'s `SUBCONTRACT_KEYS` at its `# Protocol 12a` section marker
+    /// and compared the two sides. That marker was the only INDEPENDENT
+    /// authority on the classification, because the boundary is a claim about
+    /// which mode reads which constant, and no amount of Rust can settle that
+    /// from the inside. It was deliberately landed before the retirement, ran
+    /// green, and was deleted with the oracle rather than redirected at the
+    /// Rust - redirecting it would have made it circular, a test that asserts a
+    /// list matches itself while looking like a cross-check.
     ///
-    /// The real risk is MISCLASSIFICATION - a key sitting in the 12a list that
-    /// protocol-11 actually reads, or missing from it when 12a reads it - and
-    /// the only authority on that is `mnq_fit.py`'s own `# Protocol 12a`
-    /// section marker, since the boundary is a claim about which mode reads
-    /// which constant. So this parses the Python's `SUBCONTRACT_KEYS` and
-    /// compares the two sides.
+    /// So `PROTOCOL_12A_KEYS` is now the authority. These assertions are real
+    /// but NARROWER, and the difference is worth being explicit about: they
+    /// catch a typo or a stale name, not a misclassification.
     ///
-    /// This test dies with the Python at 4b item 7, which is correct: after
-    /// that, `PROTOCOL_12A_KEYS` IS the authority and there is nothing left to
-    /// cross-check it against. It is deliberately landed before then, while the
-    /// reference still exists.
+    /// Note also what is deliberately NOT asserted. "Every key belongs to
+    /// exactly one mode" is true BY CONSTRUCTION, since `Mode::Protocol11` is
+    /// defined as "not in `PROTOCOL_12A_KEYS`", so such an assertion could
+    /// never fail - a tautology wearing the costume of a partition proof.
     #[test]
-    fn the_twelve_a_classification_matches_the_python_section_marker() {
-        let source = std::fs::read_to_string(
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../analysis/mnq_fit.py"),
-        )
-        .expect("mnq_fit.py is still present; this test retires with it");
-        let block = source
-            .split("SUBCONTRACT_KEYS = [")
-            .nth(1)
-            .expect("the key list")
-            .split(']')
-            .next()
-            .expect("the list terminates");
-        let (_, after_marker) = block
-            .split_once("# Protocol 12a")
-            .expect("the section marker the classification is taken from");
-
-        let mut from_python: Vec<String> = after_marker
-            .split('"')
-            .skip(1)
-            .step_by(2)
-            .map(str::to_string)
-            .collect();
-        from_python.sort();
-        assert!(
-            from_python.len() > 30,
-            "parsed too few 12a keys ({}), so the parse is wrong rather than the list",
-            from_python.len()
-        );
-
-        let mut ours: Vec<String> = PROTOCOL_12A_KEYS.iter().map(|k| (*k).to_string()).collect();
-        ours.sort();
-        assert_eq!(
-            ours, from_python,
-            "the 12a classification has drifted from mnq_fit.py's own section marker"
-        );
-
-        // And every name must exist in the sub-contract, or a typo would move a
-        // key into protocol-11 silently while both lists still agreed.
+    fn every_classified_key_exists_and_protocol_eleven_retains_its_own() {
         let PyValue::Dict(all) = tree() else {
             unreachable!("tree is a dict")
         };
@@ -775,6 +739,14 @@ mod tests {
         assert!(
             PROTOCOL_12A_KEYS.len() < flat.len(),
             "protocol-11 must retain keys of its own"
+        );
+        assert_eq!(
+            PROTOCOL_12A_KEYS.len(),
+            40,
+            "the 12a set was 40 keys when the Python marker last validated it, verified against \
+             `mnq_fit.py` before the retirement moved it. A change here is a classification \
+             decision with no oracle left to check it, so it needs its own argument rather than \
+             a quiet edit"
         );
     }
 

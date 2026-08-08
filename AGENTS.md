@@ -58,8 +58,10 @@ A Cargo workspace, seven crates under `crates/`:
   measurement consumers, including `measure12a`), `tick-composition`, `presets`
   and `man`. `serve` does no work here - it hands its three arguments to
   `mogwai_server::serve`. The bin TARGET name is `mogwai`, not the package name,
-  and that is load-bearing: `brokkr run mogwai`, the shipped launcher and
-  `analysis/mnq_fit.py` all exec `target/release/mogwai` by that name. The
+  and that is load-bearing: `brokkr run mogwai` and the shipped launcher both
+  exec `target/release/mogwai` by that name. The Python measurement harness
+  did too, until phase 4b retired it; renaming the target no longer breaks it,
+  because it is gone, but the launcher and every doc still key on the name. The
   socket-backed lifecycle/serving/completion integration tests live here too,
   because only this crate's tests get `CARGO_BIN_EXE_mogwai`.
 - `mogwai-lab` - the corpus-to-fingerprint method library the 2026-08

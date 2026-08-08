@@ -33,7 +33,7 @@ Three tracks. No document sits above them, which is what this file is for.
 |---|---|---|
 | Evidence and purchase | `DATA-PURCHASE-REPORT.md` (root) | Idle. The ~30 dollar ES/MES purchase is the named next marginal dollar, owner-gated. Nothing to buy for 12b. |
 | Generator fidelity, protocols 10 to 12b | the four protocol specs below | 12a landed `no-family-eligible`; owner ruled 12b targets ARRIVAL COMPOSITION, repair-until-measurable. 12b spec undrafted, gated on codex capacity. |
-| Python-to-Rust rewrite | `rust-rewrite-phases.md` | SIGNED 2026-08-08 at `5d3a0af`, after six refusals. Gate at 698 passed, 0 orphaned. The signature is CONDITIONAL on 4b keeping its order - item 6, then 5, then 2, then 3, then 7 - and any new parity deviation or scope change reopens it. |
+| Python-to-Rust rewrite | `rust-rewrite-phases.md` | COMPLETE 2026-08-08. The Python has retired to the gitignored `research/dead/`; the Rust is the reference. Gate at 722 passed, 0 orphaned. One loose end: the signature was reopened by the `select_windows` squaring deviation and the renewal has not been re-requested since the item 7 preparations landed. |
 
 `todo.md` is the catch-all beneath all three: open work items, parked
 investigations, the hardcoded-value inventory.

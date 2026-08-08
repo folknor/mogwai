@@ -13,10 +13,17 @@ would still pass.
 So this compares the caches directly, session by session, feature by feature,
 on bit patterns rather than on decimal text.
 
-    python3 analysis/select_windows.py features
+RETAINED THROUGH THE RETIREMENT. This script imports nothing from `analysis/`,
+so it survives phase 4b item 7 - and its reference side now defaults to the
+COMMITTED `analysis/select-windows-python-cache.json` rather than the
+regenerable `cme_daily_features.json`, which `select_windows.py` produced and
+which nothing can produce any more. The committed copy is the frozen Python
+oracle: 3.7 MB, all 111,396 values, kept whole precisely so a TWELFTH deviation
+would still be visible. An eleven-row snapshot of the known corrections could
+not do that.
+
     mogwai select-windows features --cache target/rust-cme-features.json
-    python3 scripts/compare_cme_caches.py analysis/cme_daily_features.json \\
-        target/rust-cme-features.json
+    python3 scripts/compare_cme_caches.py target/rust-cme-features.json
 """
 
 import json
@@ -24,11 +31,11 @@ import os
 import struct
 import sys
 
-MANIFEST = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "analysis",
-    "select-windows-cache-deviations.json",
-)
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MANIFEST = os.path.join(ROOT, "analysis", "select-windows-cache-deviations.json")
+# The frozen Python oracle. `cme_daily_features.json` was the working file and
+# is no longer producible; this is the committed copy the gate reads.
+PYTHON_CACHE = os.path.join(ROOT, "analysis", "select-windows-python-cache.json")
 
 
 def bits(value):
@@ -36,12 +43,21 @@ def bits(value):
 
 
 def main():
-    if len(sys.argv) not in (3, 4):
-        raise SystemExit(f"usage: {sys.argv[0]} <python.json> <rust.json> [--write-manifest]")
-    write_manifest = len(sys.argv) == 4 and sys.argv[3] == "--write-manifest"
-    with open(sys.argv[1]) as fh:
+    args = [a for a in sys.argv[1:] if a != "--write-manifest"]
+    write_manifest = "--write-manifest" in sys.argv
+    if len(args) == 1:
+        # The common case after retirement: only the Rust side varies, so the
+        # frozen oracle is the default rather than something to remember.
+        python_path, rust_path = PYTHON_CACHE, args[0]
+    elif len(args) == 2:
+        python_path, rust_path = args
+    else:
+        raise SystemExit(
+            f"usage: {sys.argv[0]} [<python.json>] <rust.json> [--write-manifest]"
+        )
+    with open(python_path) as fh:
         left = json.load(fh)
-    with open(sys.argv[2]) as fh:
+    with open(rust_path) as fh:
         right = json.load(fh)
     entries = []
 

@@ -1565,7 +1565,7 @@ moment the scripts move. Phase 4 therefore runs in two halves:
      THE BOUNDARY IS TAKEN FROM THE PYTHON, not invented here.
      `mnq_fit.py`'s `SUBCONTRACT_KEYS` carries its own
      `# Protocol 12a` section marker, and everything after it is the 12a
-     set - 41 keys. That marker is the only place in either language that
+     set - 40 keys. That marker is the only place in either language that
      records which mode reads which constant, so it is the authority.
 
      A NOTE ON THE TEST, because the obvious one is worthless. The natural
@@ -1622,9 +1622,72 @@ moment the scripts move. Phase 4 therefore runs in two halves:
      WELL-FORMED row ahead of the bad one, with a third test asserting
      that row parses - without it, a reader that refused everything would
      pass both refusal tests.
-  7. Then, and only then, the absorbed scripts move to `research/dead/`.
-     `research/` is gitignored, so this is effectively removal from the
-     repo with a local copy retained; git history is the real archive.
+  7. **DONE 2026-08-08. THE PYTHON HAS RETIRED.** Eight absorbed scripts
+     moved to the gitignored `research/dead/`: `mnq_fit.py`,
+     `characterize.py`, `build_cadence.py`, `build_fingerprint.py`,
+     `check_cadence_feasible.py`, `fit_session_profile.py`,
+     `select_windows.py`, `tick_composition_ratios.py`. Git history is the
+     real archive.
+
+     FIVE PREPARATIONS LANDED FIRST, all of them ruled by the review that
+     refused to sign item 7 as originally specified - it would have
+     orphaned a parity gate, left a retained test module unimportable,
+     left three dead executables in `scripts/`, and left binding
+     documentation false. Every one had to happen while the Python could
+     still be captured:
+
+     1. **The full Python cache is COMMITTED**, as
+        `analysis/select-windows-python-cache.json`. My proposal was to
+        reduce the cache-deviation gate to a snapshot of the eleven known
+        corrections; that was refused, and correctly. An eleven-row
+        snapshot confirms the known corrections still hold but CANNOT
+        notice a twelfth deviation appearing, which is the entire property
+        the re-derivation existed for. 3.7 MB buys keeping it. The gate
+        still rebuilds the Rust cache from the four archives, still
+        verifies the archive digests, and still requires all 111,396
+        comparisons with exactly eleven differences.
+     2. **The subcontract cross-check is DELETED**, not redirected.
+        `the_twelve_a_classification_matches_the_python_section_marker`
+        drew its authority from `mnq_fit.py`'s `# Protocol 12a` marker;
+        pointing it at the Rust would have made it assert a list matches
+        itself while still looking like a cross-check. What remains is
+        narrower and honest: every classified key exists, protocol 11
+        retains keys of its own, and the set is pinned at the 40 keys the
+        Python marker last validated - verified against the Python one
+        final time before the move. A change there is now a
+        classification decision with no oracle, and needs its own
+        argument.
+     3. **`test_characterize.py` is TRIMMED to its four retained tests.**
+        This was a missed runtime dependency and the sharpest catch of the
+        review: the module imported four retiring modules at load, so
+        after the move the WHOLE file would have failed to import and
+        taken the four probe tests - over scripts that explicitly stay
+        Python - down with it. A retained suite silently not running
+        because of what was removed around it.
+     4. **Three spent helpers retired with the material they import**:
+        `bless_select_windows.py`, `bless_tick_composition_ratios.py` and
+        `probe_cme_square.py`. Their purposes are complete - the two
+        blessings produced committed artifacts, the probe established the
+        squaring cause now recorded in the manifest. Leaving executables
+        in `scripts/` that fail only because their dependencies were
+        deliberately removed is not an acceptable retirement state.
+        `compare_cme_caches.py` is retained and now DEFAULTS to the
+        committed cache, since it imports nothing retiring.
+     5. **Three false documentation claims corrected**: `AGENTS.md` and
+        `mogwai-cli/Cargo.toml` both said the Python execs
+        `target/release/mogwai`, and `mogwai-lab/src/lib.rs` called the
+        removed file "the Python reference for everything here" and gave
+        it the tie-break. That lib.rs header now states what replaced it:
+        this crate IS the reference, what survives of the oracle is
+        committed artifacts and git history, and a question those cannot
+        answer needs its own argument rather than an appeal to a program
+        that no longer runs. Two prose references in the retained
+        `databento_price.py` were repointed as well.
+
+     AFTER THE MOVE, every gate still runs: `brokkr check --gate` at 722
+     passed and 0 orphaned, both `select_windows` corpus gates, and the
+     84-second observed 12a parity gate over the real 22-session corpus.
+     `python3 -m unittest analysis.test_characterize` passes its four.
 
   NOT retiring, and the phase should not discover this late: the eleven
   permanently-KEEP scripts of the "Permanently out of scope" section

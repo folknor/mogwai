@@ -19,9 +19,28 @@
 //! server's own `Config::load` the way `mnq_fit.py`'s scratch configs were.
 //! It never depends on `mogwai-engine`.
 //!
-//! The Python reference for everything here is `analysis/mnq_fit.py`; it
-//! stays authoritative through phase 4 (notes/rust-rewrite-phases.md) - where
-//! this port and the Python disagree, the Python wins and the port changes.
+//! THE PYTHON REFERENCE HAS RETIRED. `analysis/mnq_fit.py` and the seven other
+//! absorbed scripts were authoritative through phase 4 - where this port and
+//! the Python disagreed, the Python won and the port changed - and phase 4b
+//! item 7 moved them to the gitignored `research/dead/` after a program-level
+//! review signed the retirement.
+//!
+//! So THIS is the reference now, and the difference is worth stating rather
+//! than discovering. What survives of the old oracle is committed artifacts and
+//! git history: the parity gates still run, but against frozen files
+//! (`analysis/mnq-fit.json`, `analysis/fingerprint.json`,
+//! `analysis/select-windows-blessed.json`,
+//! `analysis/select-windows-python-cache.json`, the tick-composition fixtures)
+//! rather than against a program that can be re-run. A disagreement with one of
+//! those is still a defect here; a question they cannot answer no longer has an
+//! oracle, and needs its own argument.
+//!
+//! Three deviations from the Python are deliberate and documented at their
+//! sites: `sqrt` over `x ** 0.5` in the fingerprint synthesis,
+//! `select_windows::squared` over `** 2`, and the exact
+//! [`exact::population_variance`] over the ill-conditioned float variance the
+//! cadence path first used. All three replace a libm-dependent or
+//! ill-conditioned CPython result with a correctly rounded one.
 
 pub mod aggregate;
 pub mod cadence;

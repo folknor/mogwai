@@ -6,9 +6,10 @@ license.workspace = true
 
 # The binary is `mogwai`, not the package name `mogwai-cli`. The target name is
 # load-bearing well beyond convenience: `brokkr run mogwai`, the shipped
-# launcher in `mogwai-protocol`, `analysis/mnq_fit.py` (which execs
-# `target/release/mogwai` directly) and the docs all key on it. Renaming the
-# target breaks the measurement harness silently.
+# launcher in `mogwai-protocol` and the docs all key on it. The Python
+# measurement harness execd `target/release/mogwai` directly too, until phase 4b
+# retired it - so that particular silent breakage is no longer possible, but the
+# remaining consumers still key on the name.
 [[bin]]
 name = "mogwai"
 path = "src/main.rs"

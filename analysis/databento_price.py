@@ -41,7 +41,8 @@ import urllib.parse
 import urllib.request
 from zoneinfo import ZoneInfo
 
-# The bar archives are in CME time and select_windows.py labels a session by its
+# The bar archives are in CME time and the bar-frame intake station labels a
+# session by its
 # 16:00 Central close, so a session D runs from D-1 17:00 to D 16:00 Central.
 # Databento reads a date-only bound as UTC midnight, which would clip the first
 # five or six hours off the intended opening session and pull in the same slice
@@ -114,7 +115,9 @@ SCOPES = {
 
 # Candidate windows. Part-month slices avoid the quarterly roll (third Friday,
 # volume roll about a week earlier) by sitting after it in Mar/Jun/Sep months.
-# Strata from select_windows.py AFTER the roll-trim and session-normalisation
+# Strata from the bar-frame intake station (now
+# mogwai select-windows, ported from the retired select_windows.py) AFTER
+# the roll-trim and session-normalisation
 # fixes. The pre-fix run named 2025-09 and 2025-01; both were artifacts of raw
 # GC roll jumps and unnormalised short sessions, and neither survives.
 #

@@ -307,11 +307,10 @@ fn parity_select_windows_reproduces_the_blessed_reference() {
 /// disappear, and no more, so a new divergence cannot hide among the approved
 /// ones.
 ///
-/// Needs both the archives and the Python's cache, so it carries the same
-/// local-data caveat as the gate above. Regenerate the two inputs with
-/// `python3 analysis/select_windows.py features` and
-/// `mogwai select-windows features --cache target/rust-cme-features.json`, then
-/// `python3 scripts/compare_cme_caches.py <python> <rust> --write-manifest`.
+/// Needs the archives, so it keeps the local-data caveat of the gate above -
+/// but NOT the Python, which is the point: its reference side is the committed
+/// `select-windows-python-cache.json`, so this survives item 7 intact rather
+/// than becoming unrunnable when the oracle moves.
 #[test]
 #[ignore = "re-reads the four CME archives and the Python's feature cache"]
 fn parity_select_windows_cache_deviations_are_exactly_the_recorded_ones() {
@@ -321,10 +320,24 @@ fn parity_select_windows_cache_deviations_are_exactly_the_recorded_ones() {
     )
     .expect("the manifest parses");
 
+    // THE COMMITTED PYTHON CACHE, not the regenerable gitignored one.
+    //
+    // This gate has to outlive the oracle. `analysis/cme_daily_features.json`
+    // is produced by `select_windows.py features`, and phase 4b item 7 retires
+    // that script - so a gate reading it would become permanently unrunnable
+    // the moment the retirement lands, which is how a gate dies quietly rather
+    // than loudly.
+    //
+    // The obvious repair is to reduce this to a snapshot of the eleven recorded
+    // deviations. That was REFUSED, and the reason is the property being
+    // protected: an eleven-row snapshot can confirm the known corrections still
+    // hold, but it cannot notice a TWELFTH deviation appearing, which is the
+    // entire point of re-deriving the difference set. So the whole 3.7 MB
+    // Python cache is committed instead, under a name that says it is an
+    // immutable reference rather than a working file.
     let python_cache: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(root().join("analysis/cme_daily_features.json")).expect(
-            "the Python's feature cache; run `python3 analysis/select_windows.py features`",
-        ),
+        &std::fs::read_to_string(root().join("analysis/select-windows-python-cache.json"))
+            .expect("the committed Python feature cache"),
     )
     .expect("the cache parses");
 
