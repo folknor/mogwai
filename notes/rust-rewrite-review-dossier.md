@@ -6,13 +6,23 @@ the Python retires. A map, not a story: every claim below cites the file,
 commit or landing record it comes from. Full narrative lives in the phase
 landing records; this document does not repeat it, only indexes it.
 
-**SIGNED 2026-08-08 at `5d3a0af`.** The program-level review passed after SIX
-refusals across as many passes. The signature is CONDITIONAL: 4b must keep the
-order item 6, 5, 2, 3, 7; any new parity deviation or change to the retirement
-scope reopens the gate; it does not certify the release lateness budget; and it
-accepts the `TAPE_PROTOCOL_VERSION` exemption only for the audited
-`modal_tick.max` correction. Full wording in `notes/rust-rewrite-phases.md`
-item 1k.
+**COMPLETE. Signature renewed 2026-08-08 at `c783d5f`, and the Python has
+retired.** Nine review passes, eight refusals.
+
+The first signature landed at `5d3a0af` and was REOPENED by a new parity
+deviation in the `select_windows` absorption, exactly as its own conditions
+said it would be. Three further passes followed: the deviation was approved,
+the item 7 retirement was refused as originally specified because it would have
+orphaned a gate and left documentation false, and the renewal came only after
+the shipped-string class was swept through the built binary.
+
+What the signature covers and does not: it accepts TWO numerical deviations,
+`sqrt` over `x ** 0.5` in the fingerprint synthesis and `select_windows::squared`
+over `** 2`, both replacing a libm-dependent CPython result with a correctly
+rounded one. It does NOT certify the release lateness budget, which stays
+explicitly uncertified. The `TAPE_PROTOCOL_VERSION` exemption covers only the
+audited `modal_tick.max` correction. Full wording in
+`notes/rust-rewrite-phases.md`, items 1k and 7.
 
 This document is therefore now a RECORD rather than a request. Read section 12
 first: it carries the six passes and what each one found, and the findings are

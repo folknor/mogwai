@@ -33,7 +33,7 @@ Three tracks. No document sits above them, which is what this file is for.
 |---|---|---|
 | Evidence and purchase | `DATA-PURCHASE-REPORT.md` (root) | Idle. The ~30 dollar ES/MES purchase is the named next marginal dollar, owner-gated. Nothing to buy for 12b. |
 | Generator fidelity, protocols 10 to 12b | the four protocol specs below | 12a landed `no-family-eligible`; owner ruled 12b targets ARRIVAL COMPOSITION, repair-until-measurable. 12b spec undrafted, gated on codex capacity. |
-| Python-to-Rust rewrite | `rust-rewrite-phases.md` | COMPLETE 2026-08-08. The Python has retired to the gitignored `research/dead/`; the Rust is the reference. Gate at 722 passed, 0 orphaned. One loose end: the signature was reopened by the `select_windows` squaring deviation and the renewal has not been re-requested since the item 7 preparations landed. |
+| Python-to-Rust rewrite | `rust-rewrite-phases.md` | **DONE.** Signature renewed 2026-08-08 at `c783d5f`; the Python has retired to the gitignored `research/dead/` and the Rust is the reference. Gate at 722 passed, 0 orphaned. Nine review passes, eight refusals. |
 
 `todo.md` is the catch-all beneath all three: open work items, parked
 investigations, the hardcoded-value inventory.
@@ -73,15 +73,24 @@ investigations, the hardcoded-value inventory.
    2026-08-08. Full 4b order in `rust-rewrite-phases.md`.
 2. **12b is blocked on codex capacity**, and may not be drafted outside the
    freeze protocol.
-3. **The codex program-level review has PASSED**, 2026-08-08 at `5d3a0af`,
-   after six refusals across as many passes. What it cost is the part worth
-   carrying: nearly every finding was a closure that held on the committed
-   corpus and failed one layer below where its gate looked. Verifying a fix
-   against the artifacts is not verifying it against the contract, and a bound
-   established over the fixtures you happen to have is not a bound. The
-   signature is conditional - see `rust-rewrite-phases.md` item 1k for the four
-   conditions, of which the binding one is that 4b keeps its order and that any
-   new parity deviation reopens the gate.
+3. **Nothing blocks the rewrite any more.** It is done: signature renewed
+   2026-08-08 at `c783d5f`, the Python retired, the Rust the reference. Nine
+   review passes and eight refusals to get there.
+
+   What it cost is the part worth carrying, and it is four lessons rather than
+   a verdict. Nearly every code finding was a closure that held on the
+   committed corpus and failed one layer below where its gate looked, so
+   verifying a fix against the artifacts is not verifying it against the
+   contract. A bound established over the fixtures you happen to have is not a
+   bound - three ULP ceilings were claimed and refuted before the answer turned
+   out to be exact arithmetic. A test that passes is not evidence until its
+   reference is independently established; two here passed while measuring
+   nothing. And a claim about what a user sees has to be checked against the
+   built binary, not the source.
+
+   Two limits survive the signature: the release lateness budget is explicitly
+   UNCERTIFIED, and the `TAPE_PROTOCOL_VERSION` exemption covers only the
+   audited `modal_tick.max` correction. See `rust-rewrite-phases.md` item 7.
 
 ## Traps this repo has actually fallen into
 

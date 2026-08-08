@@ -1689,6 +1689,42 @@ moment the scripts move. Phase 4 therefore runs in two halves:
      84-second observed 12a parity gate over the real 22-session corpus.
      `python3 -m unittest analysis.test_characterize` passes its four.
 
+     SIGNATURE RENEWED 2026-08-08 at `c783d5f`. THE PROGRAM IS COMPLETE.
+
+     Two more refusals came between the retirement and the renewal, both
+     on documentation the retirement had falsified rather than on code,
+     and both worth keeping because the second names a class:
+
+     - `mogwai-lab/src/lib.rs` listed `exact::population_variance` among
+       the deliberate deviations. It is the OPPOSITE - it exists to
+       achieve parity, replacing an ill-conditioned float variance with
+       exact integer arithmetic - and the header contradicted
+       `cadence_feasible.rs` two files away. There are TWO deviations,
+       `sqrt` and `select_windows::squared`. My error, and exactly the
+       kind a reader would inherit.
+     - `DATA-PURCHASE-REPORT.md` section 13 still listed removed programs
+       as current executable commands.
+     - THE SHIPPED-STRING CLASS. The CLI's own `--help` cited six deleted
+       paths, which I found by chance and reported; the reviewer then
+       swept that class properly and found three MORE in nested Clap field
+       and variant comments, which ship even though the top-level
+       descriptions were already fixed. Sweeping the rest myself through
+       the BUILT BINARY - not the source - found three further ones. A
+       stale comment is a nuisance; shipped help telling a user to open
+       `analysis/characterize.py` is an instruction to open a file that
+       does not exist.
+
+     The method lesson is the reviewer's, not mine: it verified through
+     the binary rather than the diff. Mine had a substitution leave the
+     cadence help reading "raw Binance trade archives archives", which the
+     diff looked fine for and one `--help` run exposed instantly.
+
+     WHAT THE SIGNATURE STILL DOES NOT COVER, unchanged from `5d3a0af`:
+     the release lateness budget stays explicitly uncertified, and the
+     `TAPE_PROTOCOL_VERSION` exemption applies ONLY to the audited
+     `modal_tick.max` correction. It accepts the two numerical deviations
+     named above and nothing wider.
+
   NOT retiring, and the phase should not discover this late: the eleven
   permanently-KEEP scripts of the "Permanently out of scope" section
   below, plus `probe_binance_klines.py` (a live `test_characterize.py`
