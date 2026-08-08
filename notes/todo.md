@@ -400,11 +400,23 @@ Or both. There are no exceptions.
   protocol-9 parent and the protocol-10 candidate - indistinguishable paired
   distributions, recorded in `notes/mnq-generator-successor-spec.md` as a
   reviewed gate exception. The 50ms release threshold stays authoritative and
-  unrelaxed. Options when picked up: exclude the test from the gate's debug
-  lane the way the other perf-bound tests are already `--skip`ped, run it in
-  a release lane, or gate it on a load check. Until then `check --gate`
-  cannot be read as green/red on this one test without a quiet-box release
-  rerun, which is exactly the ambiguity the gate exists to remove.
+  unrelaxed.
+
+  HALF DONE, 2026-08-08. The debug-lane half is closed: the test is now
+  excluded from the `gate` profile BY FULL NAME, on the argument that running
+  a release wall-clock contract against a debug binary is already a changed
+  measuring instrument, so that lane's red result was never evidence about
+  the property. The assertion is untouched and the test stays directly
+  runnable. Excluding it makes no claim that this host meets the budget.
+
+  WHAT REMAINS is the environment sensitivity, and it is worse than the
+  original note implies: a release rerun on 2026-08-08 failed at 311 ms p99
+  with a load average of only 1.46 across 32 visible CPUs. So a load-average
+  precheck is NOT a sufficient admission test - the earlier "load average 1.0"
+  reading suggested one might be. Whatever admits this test needs to be a
+  property of the machine that actually predicts the failure, and nobody has
+  found it. Until then a release run of this test is informative when it
+  passes and ambiguous when it fails.
 
 - UNPROVEN, and it decides whether the venue-identity check needs to stop being
   opt-in: can a full session be established against a stranger holding a reused
