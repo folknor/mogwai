@@ -62,29 +62,27 @@ enum Command {
     /// --stale).
     Cache(cache::CacheArgs),
     /// Stream a trade corpus into `char_<PAIR>.json` stylized-fact reports,
-    /// the input `synth fingerprint` reads
-    /// (`analysis/characterize.py` plus `run_corpus.py`'s fan-out).
+    /// the input `synth fingerprint` reads. Covers both the per-corpus and
+    /// the multi-pair fan-out cases.
     Characterize(characterize::CharacterizeArgs),
-    /// Bar-frame intake: choose which tick-data windows to buy
-    /// (`analysis/select_windows.py`).
+    /// Bar-frame intake: choose which tick-data windows to buy, stratifying
+    /// on what a one-minute bar can measure.
     SelectWindows(select_windows::SelectWindowsArgs),
-    /// Apply the BBO budget sizing policy to composition fixtures
-    /// (`analysis/tick_composition_ratios.py`).
+    /// Apply the BBO budget sizing policy to composition fixtures, proposing
+    /// the four sized constants.
     TickCompositionRatios(tick_composition_ratios::RatiosArgs),
-    /// The calendar-conditional session fit over a one-minute bar archive
-    /// (`analysis/fit_session_profile.py`).
+    /// The calendar-conditional session fit over a one-minute bar archive.
     SessionProfile {
         #[command(subcommand)]
         command: session_profile::SessionProfileCommand,
     },
-    /// Phase-3a offline synthesis: fingerprint/cadence generation
-    /// (`analysis/build_fingerprint.py`/`build_cadence.py`).
+    /// Offline synthesis: fingerprint and cadence generation.
     Synth {
         #[command(subcommand)]
         command: synth::SynthCommand,
     },
-    /// The `check_cadence_feasible.py` L0 structural-proceed verdict over a
-    /// cadence measurement.
+    /// The L0 structural-proceed verdict over a cadence measurement, plus the
+    /// Markov density feasibility gate.
     CadenceFeasible(synth::CadenceFeasibleArgs),
 }
 

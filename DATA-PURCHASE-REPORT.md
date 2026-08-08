@@ -108,8 +108,9 @@ landed the MNQ TBBO fit).** Protocol 8, then complete. The BBO layer at
 protocol 7 with three uncalibrated calibration seams, then MNQ's session
 profile fitted from the NQ 1-minute archive, then the budget remeasurement
 that profile obliged. `notes/mnq-session-fit.md` is the fit report;
-`analysis/fit_session_profile.py` is the estimator, with every acceptance
-threshold preregistered as a named constant at the top.
+`mogwai session-profile` is the estimator (ported from the retired
+`analysis/fit_session_profile.py`), with every acceptance threshold
+preregistered as a named constant in `mogwai-lab/src/session_profile.rs`.
 
 **The budget remeasurement is done, and three of the four ceilings were too
 small.** `analysis/tick-composition-protocol-8.json` exists, both independent
@@ -131,7 +132,8 @@ from required reach to the headroom formula, is in `reference/performance.md`
 under the protocol 8 section. `brokkr check` passes 437 tests after the resize.
 
 The comparison script's shared-baseline defect is fixed with it:
-`analysis/tick_composition_ratios.py` now carries a per-mode baseline table, so
+the comparison (now `mogwai tick-composition-ratios`, ported from the retired
+`analysis/tick_composition_ratios.py`) carries a per-mode baseline table, so
 independent mode resizes the CURRENT constants rather than the pre-protocol-7
 ones. Reading a proposal from the old shared table would have under-proposed
 checkpoint and fanout by the factor protocol 7 had already absorbed, and every
@@ -1385,7 +1387,8 @@ a cross-asset-class confirmation.
 ### 7.2 Method for window selection
 
 Bars cannot see microstructure, so they are used as a SAMPLING FRAME rather than
-as a source of constants. `analysis/select_windows.py` computes per-session
+as a source of constants. `mogwai select-windows` (ported from the retired
+`analysis/select_windows.py`) computes per-session
 features (realized volatility, hourly vol-of-vol, volume level, per-minute
 volume burstiness, zero-change fraction, overnight gap), aggregates to monthly
 medians, z-scores across months, and runs farthest-point selection plus a
@@ -2383,9 +2386,8 @@ and PEP 668 blocks a system pip, so `databento_price.py` speaks the REST API
 directly with `urllib`.
 
 ```
-python3 analysis/inspect_cme_bars.py                  # format and integrity validation
-python3 analysis/select_windows.py features           # cache per-session metrics
-python3 analysis/select_windows.py select|drift|plan  # selection, era drift, stratified plan
+mogwai select-windows features                        # cache per-session metrics
+mogwai select-windows select|drift|plan               # selection, era drift, stratified plan
 python3 analysis/databento_price.py info              # coverage and schemas
 python3 analysis/databento_price.py resolve           # symbology across eras
 python3 analysis/databento_price.py price <scopes> [schemas]
@@ -2396,18 +2398,26 @@ python3 analysis/databento_price.py plan gcv grid     # the GC second-tick-grid 
 python3 analysis/databento_price.py cache             # what the response cache holds
 python3 analysis/asof_join.py selftest                # the quote-join contract
 python3 analysis/roll_estimator.py conformance        # Python half of the shared fixture
-python3 analysis/fit_session_profile.py preflight     # what the NQ archive actually contains
-python3 analysis/fit_session_profile.py fit           # the session fit and its report
+mogwai session-profile preflight --preset MNQ         # what the NQ archive actually contains
+mogwai session-profile fit --preset MNQ               # the session fit and its report
 python3 analysis/plot_tape.py --gen --open --symbol MNQ --type bars --interval 1m --length 3d
 ```
 
-`fit_session_profile.py preflight` is an executable GATE rather than a summary:
+`mogwai session-profile preflight` is an executable GATE rather than a summary:
 it answers whether the archive carries zero-volume rows, which decides whether
 exposure may come from row presence or must come from the calendar. Run it before
 trusting any fit. Its constants - the separability ratio, the material-exposure
 allowance, the era boundaries, the designated era, the early-close tolerance -
-are preregistered at the top of the file, and changing one after reading a result
-invalidates the acceptance claim it supports.
+are preregistered in `crates/mogwai-lab/src/session_profile.rs`, and changing one
+after reading a result invalidates the acceptance claim it supports.
+
+The commands above are the PORTED ones. Every `mogwai` subcommand in this
+section replaced a `python3 analysis/...` invocation when phase 4b retired the
+Python (notes/rust-rewrite-phases.md item 7); the retired scripts survive only
+in git history and a gitignored local copy, so an older transcript quoting them
+is history rather than an instruction. `inspect_cme_bars.py` was retired
+earlier still and has no successor - its format and integrity validation is
+covered by the stream contract's own refusals in `mogwai-lab/src/stream.rs`.
 
 The Rust-side diagnostics for [3.5](#35-resolved-the-venue-publishes-an-observable-top-of-book):
 
@@ -2416,8 +2426,8 @@ brokkr test -p mogwai-data a_quote_precedes_every_parent_burst
 brokkr test -p mogwai-data the_trade_displacement_never_varies
 brokkr test -p mogwai-data synthetic_spread_decomposition_at_protocol_seven
 brokkr run mogwai -- tick-composition --out analysis/tick-composition-protocol-8.json
-python3 analysis/tick_composition_ratios.py --mode projection
-python3 analysis/tick_composition_ratios.py --mode independent
+mogwai tick-composition-ratios compare --mode projection
+mogwai tick-composition-ratios compare --mode independent
 ```
 
 The first two are fast and run under a plain `brokkr check`; the third is

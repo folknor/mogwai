@@ -35,12 +35,20 @@
 //! those is still a defect here; a question they cannot answer no longer has an
 //! oracle, and needs its own argument.
 //!
-//! Three deviations from the Python are deliberate and documented at their
-//! sites: `sqrt` over `x ** 0.5` in the fingerprint synthesis,
-//! `select_windows::squared` over `** 2`, and the exact
-//! [`exact::population_variance`] over the ill-conditioned float variance the
-//! cadence path first used. All three replace a libm-dependent or
-//! ill-conditioned CPython result with a correctly rounded one.
+//! TWO deviations from the Python are deliberate, and both are documented at
+//! their sites: `sqrt` over `x ** 0.5` in the fingerprint synthesis, and
+//! [`select_windows::squared`] over `** 2`. Each replaces a libm-dependent
+//! CPython result - `pow` is not correctly rounded - with a correctly rounded
+//! one, on the ground that matching bug-for-bug would make output a function of
+//! whichever libm the machine carries.
+//!
+//! [`exact::population_variance`] is NOT one of them, and the distinction
+//! matters enough to state: it exists to ACHIEVE parity, not to depart from it.
+//! The float variance the cadence path first used was ill-conditioned and could
+//! be wrong by a factor of three, so it was replaced by exact integer
+//! arithmetic that reproduces `statistics.pvariance` bit for bit. Every field of
+//! the density report matches CPython exactly, and `cadence_feasible.rs` records
+//! that no deviation remains there.
 
 pub mod aggregate;
 pub mod cadence;
