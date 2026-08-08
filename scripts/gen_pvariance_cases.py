@@ -23,6 +23,18 @@ The families are chosen for what they stress, not for coverage theatre:
 - `pow2`/`int` - values whose arithmetic should be exactly representable, so a
                  rounding bug shows up as a difference rather than a wobble.
 - `identical`  - exact zero variance, including the cancellation path.
+- `subnormal`  - series whose exact variance is a NONZERO subnormal. This is
+                 its own family because rounding inside the subnormal range
+                 obeys a different rule: every subnormal is an integer multiple
+                 of 2^-1074, so the rounding position is pinned there rather
+                 than at 53 significant bits. An implementation that rounds to
+                 53 bits and then scales down rounds twice and lands one ULP
+                 low. The first version of `exact.rs` did exactly that, and the
+                 original sweep missed it - its zero results exercise underflow
+                 TO zero, which is a different class from correct rounding
+                 WITHIN the subnormal range. The family straddles both
+                 boundaries: near the smallest subnormal, and near the
+                 subnormal/normal join.
 
 Inputs and expected outputs are both recorded as raw bit patterns: a decimal
 literal would put CPython's float parser and Rust's on the critical path of a
@@ -95,6 +107,31 @@ def build() -> list[dict]:
     for _ in range(20):
         value = rng.uniform(1e-6, 1e6)
         add([value] * rng.choice([2, 3, 10]), "identical")
+
+    # Variance scales as the square of the spread, so inputs near 1e-160 land
+    # the result near 1e-320: inside the subnormal range, whose floor is
+    # 5e-324 and whose ceiling is the smallest normal at 2.2250738585072014e-308.
+    # The three magnitudes below aim at the middle of that range and at each of
+    # its two boundaries.
+    subnormal = 0
+    attempts = 0
+    while subnormal < 120 and attempts < 20000:
+        attempts += 1
+        n = rng.choice([2, 3, 5, 8])
+        magnitude = rng.choice([1e-162, 1e-160, 1e-158, 3e-155, 1.5e-154])
+        gaps = [magnitude * rng.uniform(0.5, 2.0) for _ in range(n)]
+        result = statistics.pvariance(gaps)
+        # Nonzero AND strictly below the smallest normal is the class that the
+        # original sweep never produced.
+        if 0.0 < result < 2.2250738585072014e-308:
+            add(gaps, "subnormal")
+            subnormal += 1
+
+    if subnormal < 120:
+        raise SystemExit(
+            f"only {subnormal} nonzero-subnormal cases generated; the family that "
+            "catches double rounding must not be thin"
+        )
 
     return cases
 

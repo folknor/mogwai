@@ -249,34 +249,6 @@ fn decompose(value: f64) -> (bool, u64, i32) {
     }
 }
 
-/// Builds `mantissa * 2^exponent` as a binary64 without any rounding, for a
-/// mantissa of at most 53 significant bits.
-///
-/// Multiplication by a power of two is exact, so constructing the scale
-/// directly from its bit pattern and multiplying keeps the single rounding in
-/// [`population_variance`] where it belongs. `f64::powi` is deliberately NOT
-/// used: its precision is documented as varying by platform and Rust version,
-/// which would make the result of an "exact" routine platform-dependent.
-fn scale_by_power_of_two(mantissa: u64, exponent: i32) -> f64 {
-    debug_assert!(mantissa < (1 << 53));
-    let value = mantissa as f64;
-    if mantissa == 0 {
-        return 0.0;
-    }
-    // Split the scaling so neither step overflows or flushes to zero for any
-    // exponent the identity can produce.
-    let mut result = value;
-    let mut remaining = exponent;
-    while remaining != 0 {
-        let step = remaining.clamp(-512, 512);
-        let field = step + 1023;
-        debug_assert!((1..=2046).contains(&field));
-        result *= f64::from_bits((field as u64) << 52);
-        remaining -= step;
-    }
-    result
-}
-
 /// Exact population variance of `values`, matching
 /// `statistics.pvariance(values)` bit for bit.
 ///
@@ -358,42 +330,103 @@ pub fn population_variance(values: &[f64]) -> f64 {
         .expect("count squared fits a u64 for any realistic sample");
     let exponent = 2 * i64::from(scale);
 
-    // Shift up so the quotient carries at least 55 bits: 53 of significand plus
-    // a rounding bit, with anything below captured by the remainder as sticky.
-    let target = 55 + usize::try_from(64 - divisor.leading_zeros()).expect("bit count");
+    // Shift up so the quotient carries plenty of bits above whatever position
+    // the rounding lands on, with anything below the last one captured by the
+    // division remainder as sticky.
+    let target = 64 + usize::try_from(64 - divisor.leading_zeros()).expect("bit count");
     let shift = target.saturating_sub(numerator.bit_len());
     let (quotient, remainder) = numerator.shl_bits(shift).div_rem_small(divisor);
     let sticky_from_division = remainder != 0;
+    debug_assert!(!quotient.is_zero(), "a nonzero numerator keeps a quotient");
 
-    let quotient_bits = quotient.bit_len();
-    assert!(
-        quotient_bits > 53,
-        "the shift must leave more than a significand's worth of quotient"
-    );
-    let drop = quotient_bits - 53;
-    let (mut mantissa, mut carried) = {
+    // `quotient * 2^quotient_exponent` is the exact value, give or take the
+    // remainder already folded into the sticky flag.
+    let quotient_exponent = exponent - i64::try_from(shift).expect("shift fits");
+    let leading =
+        i64::try_from(quotient.bit_len() - 1).expect("bit length fits") + quotient_exponent;
+
+    // WHERE TO ROUND, and this is the whole subtlety. A normal result keeps 53
+    // significant bits, so its least significant bit sits at `leading - 52`. A
+    // SUBNORMAL result has no such freedom: every subnormal is an integer
+    // multiple of 2^-1074, so the rounding position is pinned there and the
+    // result keeps fewer than 53 bits.
+    //
+    // Rounding to 53 bits first and scaling afterwards - which is what this
+    // function used to do - therefore rounds TWICE for a subnormal result, once
+    // to 53 bits and again on the way down into the subnormal range. That is a
+    // real defect and not a theoretical one: five specific finite inputs made it
+    // return one ULP below `statistics.pvariance`, and the 820-case sweep missed
+    // it because none of its families produce a nonzero subnormal variance. Its
+    // 39 zero results exercise underflow TO zero, which is a different class
+    // from correct rounding WITHIN the subnormal range.
+    const MIN_SUBNORMAL_EXPONENT: i64 = -1074;
+    let round_position = (leading - 52).max(MIN_SUBNORMAL_EXPONENT);
+
+    let drop = round_position - quotient_exponent;
+    let mut mantissa: u64 = if drop <= 0 {
+        // The quotient is already finer than the target precision. Only
+        // reachable for absurdly small samples; shift up rather than lose bits.
+        let up = usize::try_from(-drop).expect("shift fits");
+        let widened = quotient.shl_bits(up);
+        debug_assert!(widened.bit_len() <= 64);
         let mut acc = 0u64;
-        for index in (drop..quotient_bits).rev() {
-            acc = (acc << 1) | u64::from(quotient.bit(index));
+        for index in (0..widened.bit_len()).rev() {
+            acc = (acc << 1) | u64::from(widened.bit(index));
         }
-        (acc, false)
+        acc
+    } else {
+        let drop = usize::try_from(drop).expect("drop fits");
+        let bits = quotient.bit_len();
+        let mut acc = 0u64;
+        if drop < bits {
+            for index in (drop..bits).rev() {
+                acc = (acc << 1) | u64::from(quotient.bit(index));
+            }
+        }
+        let round_bit = drop >= 1 && quotient.bit(drop - 1);
+        let sticky = sticky_from_division || (drop >= 2 && quotient.any_bits_below(drop - 1));
+        if round_bit && (sticky || acc & 1 == 1) {
+            acc += 1;
+        }
+        acc
     };
-    let round_bit = quotient.bit(drop - 1);
-    let sticky = sticky_from_division || (drop >= 2 && quotient.any_bits_below(drop - 1));
-    if round_bit && (sticky || mantissa & 1 == 1) {
-        mantissa += 1;
-        if mantissa == 1 << 53 {
-            mantissa >>= 1;
-            carried = true;
-        }
+
+    if mantissa == 0 {
+        // Rounded to nothing: the exact value is below half the smallest
+        // subnormal, which is what CPython returns zero for as well.
+        return 0.0;
     }
 
-    let mut result_exponent = exponent - i64::try_from(shift).expect("shift fits") + drop as i64;
-    if carried {
+    // Assemble the bit pattern directly rather than scaling by a power of two,
+    // so the single rounding above is the only one.
+    if round_position == MIN_SUBNORMAL_EXPONENT {
+        // Subnormal encoding IS the integer multiple of 2^-1074, and a mantissa
+        // that carried all the way to 2^52 lands exactly on the smallest normal
+        // - whose bit pattern is that same integer. So no special case is
+        // needed for the carry.
+        debug_assert!(mantissa <= 1 << 52);
+        return f64::from_bits(mantissa);
+    }
+
+    let mut result_exponent = leading;
+    if mantissa == 1 << 53 {
+        // Rounding carried into the next binade.
+        mantissa >>= 1;
         result_exponent += 1;
     }
-    let clamped = i32::try_from(result_exponent).expect("exponent fits an i32");
-    scale_by_power_of_two(mantissa, clamped)
+    debug_assert!((1 << 52..1 << 53).contains(&mantissa));
+    let field = result_exponent + 1023;
+    assert!(
+        field <= 2046,
+        "population variance overflowed binary64; the inputs are near the representable maximum"
+    );
+    debug_assert!(field >= 1, "the subnormal branch above covers field < 1");
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "field is checked to be in the normal exponent range"
+    )]
+    let bits = ((field as u64) << 52) | (mantissa - (1 << 52));
+    f64::from_bits(bits)
 }
 
 #[cfg(test)]
@@ -425,6 +458,70 @@ mod tests {
         assert_eq!(
             population_variance(&gaps).to_bits(),
             0.145_091_342_980_120_94_f64.to_bits()
+        );
+    }
+
+    /// THE DOUBLE-ROUNDING CASE. Five finite inputs whose exact variance is a
+    /// nonzero SUBNORMAL, which is the one output class the generated sweep did
+    /// not reach: its zero results exercise underflow to zero, a different
+    /// thing from correct rounding inside the subnormal range.
+    ///
+    /// The first implementation rounded the quotient to 53 bits and then scaled
+    /// it down by powers of two, so a subnormal result got rounded twice and
+    /// landed one ULP low. CPython 3.14.6 gives `0x00058bda4738f5c3`; the
+    /// two-step version gave `0x00058bda4738f5c2`.
+    #[test]
+    fn a_nonzero_subnormal_result_rounds_only_once() {
+        let values = [
+            f64::from_bits(0x2236_016C_7435_BC70),
+            f64::from_bits(0x2236_016C_7435_3B90),
+            f64::from_bits(0x2236_016C_7437_8AAE),
+            f64::from_bits(0x2236_016C_7434_8566),
+            f64::from_bits(0x2236_016C_7434_32DF),
+        ];
+        let got = population_variance(&values);
+        assert!(
+            got > 0.0 && got < f64::MIN_POSITIVE,
+            "the case only bites if the result really is a nonzero subnormal: {got:?}"
+        );
+        assert_eq!(got.to_bits(), 0x0005_8BDA_4738_F5C3);
+        assert_ne!(
+            got.to_bits(),
+            0x0005_8BDA_4738_F5C2,
+            "that is the double-rounded value; seeing it again means the rounding \
+             position stopped tracking the subnormal floor"
+        );
+    }
+
+    /// The boundaries either side of the subnormal range, where the rounding
+    /// position changes rule. The largest subnormal and the smallest normal are
+    /// adjacent representable values, so a variance landing between them has to
+    /// pick the right one rather than falling off either branch.
+    #[test]
+    fn the_subnormal_and_normal_boundary_is_handled() {
+        // Smallest positive subnormal as a variance: two values 2*sqrt(that)
+        // apart is awkward to construct, so drive it from the identity instead
+        // and simply assert the branch produces representable, correctly
+        // classified output across the boundary.
+        let min_subnormal = f64::from_bits(1);
+        let min_normal = f64::MIN_POSITIVE;
+
+        let near_zero = population_variance(&[0.0, min_subnormal]);
+        assert_eq!(
+            near_zero.to_bits(),
+            0,
+            "underflows to zero, as CPython does"
+        );
+
+        // A pair whose exact variance is exactly the smallest normal: variance
+        // of [0, x] is x^2/4, so x = 2 * sqrt(min_normal) gives exactly
+        // min_normal when both are exactly representable.
+        let root = f64::from_bits(0x2000_0000_0000_0000); // 2^-511, exact
+        let variance = population_variance(&[0.0, root * 2.0]);
+        assert_eq!(
+            variance.to_bits(),
+            min_normal.to_bits(),
+            "x^2/4 for x = 2^-510 is exactly 2^-1022, the smallest normal"
         );
     }
 

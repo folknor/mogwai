@@ -21705,5 +21705,1338 @@
    "40fca8b4d0cb2260"
   ],
   "expected": "0000000000000000"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f2f9c5cd39c296a",
+   "1f30059aa91a45bd",
+   "1f293dc0b3e2a460",
+   "1f2e1873f753e8d3",
+   "1f27f41873a0b9b7"
+  ],
+  "expected": "00000000000b34d5"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fe0489941f1dca1",
+   "1fe210fd20f0c58f"
+  ],
+  "expected": "000000cb68fc5896"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1ff740a073d65c50",
+   "1ffebbbd75fbf05c",
+   "200e9e74ab8f4af0",
+   "200a1e33b1c5a199",
+   "1ff3270e8cf7426b",
+   "1ffe79bc23c40d7a",
+   "1ff3331eecb8bf77",
+   "200727e1ed4594df"
+  ],
+  "expected": "00037f0afc0a8914"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fcb4b7d87594414",
+   "1fe87abc7b7bfd0f"
+  ],
+  "expected": "00004dee5be79b13"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f21c099c1a170ed",
+   "1f23faa1cbf95b1c",
+   "1f21c8f6ae678964",
+   "1f212149d518f6ae",
+   "1f25ff0ab9e292ec"
+  ],
+  "expected": "00000000000349bc"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "20055b2aecda5620",
+   "20089eb44a9c4776",
+   "1ff1299ef9b004e8",
+   "200f862a80672eb7",
+   "200b95b15f194f78",
+   "20050d7c5ef9bf33",
+   "1fff2455cfec2b33",
+   "2005a91f91bd5247"
+  ],
+  "expected": "0002bb10f4a17c64"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1ebf6ab57a13a2a1",
+   "1ec28a76c9d99112",
+   "1ebebbda7befed7c",
+   "1eba7e7a56a7513a",
+   "1eb47a0e233101d7",
+   "1ec2565a601c0e64",
+   "1ebe9fbe664c9719",
+   "1ebb5d468e225836"
+  ],
+  "expected": "0000000000000068"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "200e46d63ee55c79",
+   "20006fd224d6f0b5",
+   "200d729a5e32ca2c",
+   "200a4728c8cf10b9",
+   "1ff2a28c7ab9cd8c"
+  ],
+  "expected": "00042b0b16f242a2"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1eb9da82c783c200",
+   "1ec34d4c85b2bf5b",
+   "1ec626712fbf0ef7",
+   "1ec63eee717b1ad8",
+   "1eb7b265018b322c",
+   "1ec25bfbfb4b5e62",
+   "1ec184241ce97f17",
+   "1ea7516f6b965af6"
+  ],
+  "expected": "00000000000001c2"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f2dc11787ac3a6f",
+   "1f2bfb3a3ec6fa02",
+   "1f1789b7f637735b",
+   "1f20505d7df38f11",
+   "1f22fae27fff0d66"
+  ],
+  "expected": "00000000002f52ee"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "2002df847f00ee15",
+   "1ffa3259cb4e407c",
+   "1ff4da317f4eb890",
+   "20100a748f17687a",
+   "200bb8b05eb73d69"
+  ],
+  "expected": "00045093a73f7b2c"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fe23620665585b0",
+   "1fdbf5f15470da58",
+   "1fe884542c86b54e",
+   "1fde505b787b873c",
+   "1fe0f807b3ab34d4",
+   "1fd5064c98b92272",
+   "1fe7e34a9838994b",
+   "1fd2e22c72e585c3"
+  ],
+  "expected": "00001af889672db4"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "2000e76ecff56451",
+   "20016dd7f716b86a",
+   "200014e0cd263af9",
+   "2004e56a156b9090",
+   "2007dfdcd80835bc",
+   "1ff955369d111375",
+   "1ffa7d99f96e559d",
+   "1fff70068f22efbc"
+  ],
+  "expected": "0000c3d258b4ef09"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fff6fa1473d3d6d",
+   "200137e2a83da2e3",
+   "1ffd3f3836f42245",
+   "20097d4f5aed90f5",
+   "200aae3a9cbabffe"
+  ],
+  "expected": "00019f230540e105"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "2009ff9a124c91a1",
+   "20062c2159279164"
+  ],
+  "expected": "00003a8e1243fc62"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f16ac7411f0effd",
+   "1f1464f29981f444",
+   "1f315842a416a66f"
+  ],
+  "expected": "00000000007f643e"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fe711cf72bfb269",
+   "1fe40bfae02f9f3f",
+   "1fdc762ebf305561",
+   "1fe774a73568774a",
+   "1fe4006faa28cc04",
+   "1fd750a19e83db71",
+   "1fe2d7abfe2fd560",
+   "1fd01a2f2febb08b"
+  ],
+  "expected": "00001ae2d6614a1d"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fdc66008d80f290",
+   "1fe025113cbf9ff0",
+   "1fe4d27d45d9612c",
+   "1fd89c26c7f2fc64",
+   "1fe10cdd5b3df5a3",
+   "1fe51a72b7c72481",
+   "1fe98b17ba43f02e",
+   "1fda6a5ad7f5ec8b"
+  ],
+  "expected": "000012616b69eca3"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fda5bdaaf7bbf66",
+   "1fdfc3ea14cbb410"
+  ],
+  "expected": "000001d3ae6785d9"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fe2022a72221c04",
+   "1fd98f631baa7c7a",
+   "1fe1b084f67094cf",
+   "1fe0bdf7604b97d7",
+   "1fd4c73e3f88717f",
+   "1fe1d485e8e8be44",
+   "1fe0060d17a145f4",
+   "1fe9253765ad8778"
+  ],
+  "expected": "0000105a2c0402db"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1ec2cbd4748b3157",
+   "1ec0a70e588f2607",
+   "1ec3be8014f3e2f5",
+   "1ec13c6034b93490",
+   "1eb70524d8eef4b1"
+  ],
+  "expected": "0000000000000083"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fe850496b5cbed8",
+   "1fe7d8eedd231932",
+   "1fcf88ca977bf44b"
+  ],
+  "expected": "00003a5585975dcb"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f14c4e7eff3d5bb",
+   "1f2f4b0ccd534e89"
+  ],
+  "expected": "00000000006d4ace"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1ec173e1c02d88a1",
+   "1ec5bc45449a51f9",
+   "1eb08cd1e32d4b5a",
+   "1ec259c0960179b6",
+   "1ead379ee57a1346"
+  ],
+  "expected": "0000000000000214"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fd5c979871b3890",
+   "1fe7f639f1d3b0f0"
+  ],
+  "expected": "00002ab1fa241e68"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1ff3e41840de92f5",
+   "20021f25158aa4fb",
+   "20050ba6176248d3"
+  ],
+  "expected": "00016114fc4334db"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f1b7b14bdbb0b5c",
+   "1f2b7d8ee75a4d8f",
+   "1f1340afbed3888c",
+   "1f287c72118ca0e8",
+   "1f27db986793972a",
+   "1f2ce99744642893",
+   "1f312b112a9736c4",
+   "1f242500fc05de51"
+  ],
+  "expected": "00000000003962a8"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f2ba89e27179dce",
+   "1f1b8b7dffff7302",
+   "1f188e17da9fa4bc"
+  ],
+  "expected": "00000000002ff5cb"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f2588130cb5489e",
+   "1f2e87b228b562a5"
+  ],
+  "expected": "0000000000143e4c"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f1fe3c308169692",
+   "1f1b45b613880afa",
+   "1f3113de65709efa",
+   "1f2962682222f406",
+   "1f287a477cbe4489"
+  ],
+  "expected": "000000000035dfd4"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f18422ae77ad982",
+   "1f1a6557aae7ea68",
+   "1f1a9323cbdf3c59"
+  ],
+  "expected": "00000000000046de"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1ebed9eee94a18a0",
+   "1ec5c266c3fe032e",
+   "1ea7e6911c8eab29",
+   "1eac9345f308d366",
+   "1ea854f2fb161fbf"
+  ],
+  "expected": "000000000000027e"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1eb281fb2fde066f",
+   "1ebe4fd995278d29",
+   "1eb12b47105ab7d2",
+   "1ec6453320982ab5",
+   "1eb293cdf91b1532",
+   "1ec26184084e6b75",
+   "1eb0f2b88a50c4b8",
+   "1ea9cf221059e199"
+  ],
+  "expected": "00000000000001c3"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "200a8ca570e6813a",
+   "200f27033fec39f6",
+   "1ff15cc43817a234",
+   "1ff5159e0f22af7c",
+   "200c2b799a51ae19"
+  ],
+  "expected": "000594728f5e5482"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1ebbaff68b9f66c0",
+   "1ea863abfd54c8cc",
+   "1eb101b24e16d0e2",
+   "1ec44b5d8a08df12",
+   "1ebd9be658a89932",
+   "1eb1db1e5cd3ac80",
+   "1eabfbeb247d9409",
+   "1eb96eedc856613f"
+  ],
+  "expected": "0000000000000141"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f20391588797334",
+   "1f19e6e72fda79fa",
+   "1f22bcb3ef3180fe",
+   "1f22c46a8aee25c2",
+   "1f11c6d05f4bf298",
+   "1f2b93b28ef5f073",
+   "1f2f75aca87bebc2",
+   "1f2972e54297ae32"
+  ],
+  "expected": "0000000000331ec8"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f2a5711288268e8",
+   "1f11d3c28b173466"
+  ],
+  "expected": "00000000004bebbb"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f311659f8436f97",
+   "1f1d353588279a57",
+   "1f273227f5c5b5b2",
+   "1f253eeb69ad27b3",
+   "1f225d3c47e802af",
+   "1f1630d10e77d97f",
+   "1f2bf85b7ea6e58d",
+   "1f218e49d129ad21"
+  ],
+  "expected": "0000000000301b48"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f11e56dd03f9b54",
+   "1f2a2b3a7f7f203d"
+  ],
+  "expected": "00000000004a237d"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f163d3ff0836945",
+   "1f156af467de4c4a",
+   "1f305a802967da7b"
+  ],
+  "expected": "0000000000699127"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1ec3a97965ad165f",
+   "1eb0630387b54df2",
+   "1ea777b5e3fd2558"
+  ],
+  "expected": "0000000000000246"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "20067c2eef4b1811",
+   "2006ae03832b6b22",
+   "1ff86de7bafef095",
+   "200711e8a5629a86",
+   "200d0ef4ab188429"
+  ],
+  "expected": "0001d793d1070721"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "20053f67f9d546de",
+   "200d39aa2ca16bf9",
+   "20059e64882f869c",
+   "200d7b93edd63aac",
+   "20073cbce47ae5af",
+   "200ff596de35b549",
+   "200931d22a759a8c",
+   "1ff907c31126deca"
+  ],
+  "expected": "00021633f18ce9ef"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1ec00469ec5e8842",
+   "1ebd7d26c47c74c0"
+  ],
+  "expected": "0000000000000006"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1eae10a4a64673d3",
+   "1eb9df0b7c9de89c",
+   "1eb02e3fc8786cf7"
+  ],
+  "expected": "000000000000005f"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f272b8b859ff3e9",
+   "1f13996d67ec4290",
+   "1f2d0154a454e015",
+   "1f241bafc7ec3a77",
+   "1f1da025c04972bd"
+  ],
+  "expected": "00000000002c094e"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f2c6218bb7e4a6f",
+   "1f2e7a6301ac142f",
+   "1f27e2f55cd42d6c",
+   "1f1d829d9e4a96f3",
+   "1f2ceafcb08e702f"
+  ],
+  "expected": "0000000000208513"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "200a68c3ed56101a",
+   "200fcf1a6032cef3",
+   "2004d9cedba4ea1a",
+   "200162d43345efa7",
+   "2004d957f601630d",
+   "20014c0a3d3b6e6e",
+   "20018acf6b15bf58",
+   "20095ed96087e577"
+  ],
+  "expected": "0001814f7c8d2a96"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "2001a48fb599cfac",
+   "2006a24d9747c9f8",
+   "1ff10469a413c1d5"
+  ],
+  "expected": "00022353dc5f6573"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "200acdbe6cbb2f44",
+   "2003f6aee8d9a4bf"
+  ],
+  "expected": "0000bb2594fc2035"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f2a1a5847dbbcff",
+   "1f19950ff6fe1ff1"
+  ],
+  "expected": "00000000002c4d02"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fdcaa46e448c575",
+   "1fdb1e55eb845803",
+   "1fdeb2059fc20816",
+   "1fe4730156085816",
+   "1fe14b35ad71d427",
+   "1fe0c1b17fbdabbf",
+   "1fda6715f30dcbf0",
+   "1fe9a6fda7596a70"
+  ],
+  "expected": "00000f5f34858957"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f13a948650124d7",
+   "1f2d6711b74575cc",
+   "1f19ef020533255b",
+   "1f2e6b53613882b0",
+   "1f29630386a3814f"
+  ],
+  "expected": "00000000004935bb"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f2c4895a2dddd68",
+   "1f225c28af3588fb",
+   "1f1a435726620fd7",
+   "1f19fbf65fcb51f0",
+   "1f3038694a8f3008"
+  ],
+  "expected": "00000000003f6353"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f24feecb9550f92",
+   "1f17ddf5ce4d9865",
+   "1f1205094fa54435",
+   "1f22cb40fb1a0cdd",
+   "1f1365c8dd1030eb",
+   "1f152409311e4911",
+   "1f186d643ff73b3b",
+   "1f307cb0dfa2de05"
+  ],
+  "expected": "00000000003aacb8"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1ff2c12f525b041b",
+   "2007a19a99467979",
+   "200bd82a8d7d5264"
+  ],
+  "expected": "0003e709b7e0431a"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f1e5636a7fc5e4e",
+   "1f313289b434878f",
+   "1f20bdf5ea380214",
+   "1f2e5c33fd1fede6",
+   "1f1cc812f0fa221e"
+  ],
+  "expected": "0000000000471a8d"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "20003765d168f143",
+   "200156bd99669bb2",
+   "1ff6fa9f9a0ffdeb",
+   "200888e28b9fcd03",
+   "20078ae4e6d1943a"
+  ],
+  "expected": "000177edf12fce28"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fe1abcaee3726be",
+   "1fd6f257d0341ebe",
+   "1fe216a087a463fb"
+  ],
+  "expected": "00000926431f74fa"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fd677f672f16f35",
+   "1fdb74c7660b8f9d"
+  ],
+  "expected": "0000018e033a1f86"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "200cd332f9082e55",
+   "2004fcb0d015a86f",
+   "200ce77138b64c74",
+   "2008c3791525f987",
+   "2007d8d19ce2ab34",
+   "1fff5b864ff8f1c9",
+   "20022eea700c160b",
+   "200ff78fcc4224c0"
+  ],
+  "expected": "0001becc3b015447"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1ff21a6b61d09375",
+   "2002355b38bfd311"
+  ],
+  "expected": "00014f63bd346e3e"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f1ec127c19786fd",
+   "1f30f9960e5b0f61",
+   "1f27d6d3508cae2e",
+   "1f28430d85116b44",
+   "1f213961c51954e6",
+   "1f3068cc6a0362f2",
+   "1f2e19aea1c986e6",
+   "1f1b30a29b0d9bf2"
+  ],
+  "expected": "00000000003750a5"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f1ea4e416e97582",
+   "1f2da06d21757245",
+   "1f26ead9dbfc6482",
+   "1f272835b6c9b4cd",
+   "1f196289c60fcaa8",
+   "1f126bf368aa8ce4",
+   "1f2d084b39d68859",
+   "1f26dcc165637ca0"
+  ],
+  "expected": "000000000030b6c8"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fe2b0c100fddc69",
+   "1fe69804f3cfb2ed",
+   "1fddf986a963da1b",
+   "1fe3a6528d97f8e3",
+   "1fcee115d7c74ab4",
+   "1fe5db97f532e95a",
+   "1fd1644f0eea405d",
+   "1fd0c30d9d71c4cf"
+  ],
+  "expected": "000022751b917367"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1ec5ef7656a35b0b",
+   "1ebe487050795199",
+   "1ec49ee7b6afe054",
+   "1ead93de2262e3c7",
+   "1eb8dc69a025ea52",
+   "1ec3ea14e3c071e7",
+   "1ec575d546d4c61f",
+   "1ebd5d6d83a0d597"
+  ],
+  "expected": "0000000000000176"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fdb1bcac3f51081",
+   "1fe140000cf89ecc",
+   "1fde049530dd1b53",
+   "1fe9b5c6b2166bd5",
+   "1fe6c54a36a3d508",
+   "1fcfbcc2f3c1cee7",
+   "1fd1c4cbc214e722",
+   "1fe2e0b3e4e11fd7"
+  ],
+  "expected": "000022040e8ed4b0"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "2000f42d1a7fc683",
+   "200139c23203726a",
+   "200e489e16a7b0c7",
+   "1ffc65b16cd3f36d",
+   "2007f729152c26c1"
+  ],
+  "expected": "00022256982abe4e"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fe8e3dc3ef1b6df",
+   "1fe347bcc1b3248c"
+  ],
+  "expected": "000007de1c523d63"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1ec08a8d7c104ece",
+   "1eb0a7498b145ec5",
+   "1ebb16d392dcc384",
+   "1ec1269a95eaeb01",
+   "1ebe724313e2de2a"
+  ],
+  "expected": "00000000000000a0"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fd6df4e9f4f9b57",
+   "1fe80aed4ca3b352",
+   "1fcaef9176dbdd07",
+   "1fe372fd257c1c60",
+   "1fdf8ebfe011d778"
+  ],
+  "expected": "00002466db801df6"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fd404f446290008",
+   "1fe5ee2a196ec383"
+  ],
+  "expected": "0000238686ecbf90"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "2002a40334f09f25",
+   "20071783c35b5dca",
+   "200377959740e465",
+   "1ff08d060166d075",
+   "200409c6d9557d80"
+  ],
+  "expected": "000196eca6a5c5fd"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1ec582c7badc1b01",
+   "1ec1873d7a054013"
+  ],
+  "expected": "000000000000003f"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1ec028402f4e92a0",
+   "1ec3fc581451685c",
+   "1ebe35d5c0180bb3",
+   "1ec2476e5db02974",
+   "1ec57f4fbb52ceed",
+   "1eae257db9b22769",
+   "1ec5691f519fa27c",
+   "1eb5cd9640054cec"
+  ],
+  "expected": "0000000000000164"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "200308eec5302d5f",
+   "1ffe500413de16d6",
+   "2004b414c7899451",
+   "2004cd046bc8f77c",
+   "200cecce6c529913",
+   "1ff1522c266ba009",
+   "2001552b1e694d22",
+   "1ff8d980b13d0e5f"
+  ],
+  "expected": "00020c9cbd63fa50"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fd169b744de6d86",
+   "1fd594df85efcc3d",
+   "1fd229231a6db391",
+   "1fd6f2d4fd2fac51",
+   "1fe11f61cc3e8412",
+   "1fe7f06d76ec1c89",
+   "1fd017d0cabf10c5",
+   "1fe62af33d213938"
+  ],
+  "expected": "000022f14bf2630d"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f20dabe41df9382",
+   "1f2d718e93f4bc3a",
+   "1f2022b7a95ffd1e",
+   "1f25b419ad4c9a82",
+   "1f20e09670adc16e",
+   "1f21fe46ba2eb341",
+   "1f2526e4e5e3debb",
+   "1f215230bb002223"
+  ],
+  "expected": "0000000000114cca"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fe939fc25a51088",
+   "1fe1414a977f5a09",
+   "1fdc644e5ab927cd",
+   "1fd4d8e80406db2d",
+   "1fe6938d1d369a9e",
+   "1fdc56e525907f40",
+   "1fe4768ac1132836",
+   "1fe6080b6b20b8f9"
+  ],
+  "expected": "000016bcb78d23cb"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f29c914ef8f67e6",
+   "1f2477a3599dfa2e",
+   "1f282dd0e3824956",
+   "1f30174cda111a17",
+   "1f12f43e72500d3c",
+   "1f3084d424db8160",
+   "1f2dbe8f6a81b7b9",
+   "1f27546f213e952f"
+  ],
+  "expected": "0000000000327c28"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fdc7d38c8ccf3ba",
+   "1fcb5c5b79d53817"
+  ],
+  "expected": "00000db4ca82a73a"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "200e7ef07caaf187",
+   "200aa88c7e3b9197",
+   "2009d501d5daf7e9",
+   "1ff53b0266c23cd7",
+   "1ffb7e2c189988cb"
+  ],
+  "expected": "0003cfa7a7466dbe"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fcc8b3e68667eaa",
+   "1fd19740f2801235",
+   "1fd98bf308d704c1",
+   "1fd8c921fa3a6b3d",
+   "1fe7cfc2f72b11df",
+   "1fd3f7010da7a486",
+   "1fe1dc823ce3f182",
+   "1fe9077636c5936d"
+  ],
+  "expected": "0000286245d028ed"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1eaa68a2be5316c6",
+   "1eb11a3b19ed55cc"
+  ],
+  "expected": "000000000000000f"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1ffd82a8d7f66047",
+   "2002eb3b68baedab"
+  ],
+  "expected": "000045584ecd79e4"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "200bf2b0dd4f05c8",
+   "200bdb772e65cfde",
+   "200cd5ba4d99dede",
+   "200462d4e136821b",
+   "2008da1f34b7d7bb"
+  ],
+  "expected": "000099f54d12187c"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1ec165e121dddcd9",
+   "1ec4e366f0004daf",
+   "1ec21a1b7828a7a2",
+   "1ec639658f0c8a48",
+   "1eb7c01a2292d542"
+  ],
+  "expected": "00000000000000cd"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fe5340710ada3f3",
+   "1fd2926fe4861e4a",
+   "1fe64f18f0539452",
+   "1fd3f64e53b6b89d",
+   "1fe7b3dcc9654a43",
+   "1fe8617ff1844cd0",
+   "1fe3fba9983e78dd",
+   "1fd042398fc94e1c"
+  ],
+  "expected": "00002a903072ae85"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f208e39653ca696",
+   "1f2f712250b4aac6",
+   "1f11f06776409e8d",
+   "1f2898ec3bae4dc5",
+   "1f27c00708b3b06f"
+  ],
+  "expected": "00000000003accf6"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fe755d11c847f77",
+   "1fe6486d77b3182a",
+   "1fdeb253b8bd23f6",
+   "1fe085fe1cc5ef3f",
+   "1fe5ca7e2e8dc636"
+  ],
+  "expected": "00000aa20808dde1"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fdd2358e18c71be",
+   "1fe52dd764c7becd"
+  ],
+  "expected": "00000aec51f42a47"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f2a5246d9eec982",
+   "1f1231a76388fda9",
+   "1f22c8877c5e1a7f",
+   "1f1f9c717504c5e0",
+   "1f2f15d110d509ac",
+   "1f30ee769117dceb",
+   "1f2891ba07a63e8b",
+   "1f126ff6f9b83191"
+  ],
+  "expected": "00000000004d9110"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f26688b00ce9ed4",
+   "1f2d0f05fc0bf311",
+   "1f31628fbdc37340",
+   "1f2994ddca9d40b4",
+   "1f2ff52ea9e7b167"
+  ],
+  "expected": "000000000013604d"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fd45ec6b35a05b1",
+   "1fe18fb2daa9c61d"
+  ],
+  "expected": "00000d9a2531d047"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f2fafc570a3b9d8",
+   "1f14c7a43b782f91"
+  ],
+  "expected": "000000000071631d"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f25d211729148fd",
+   "1f2d1069844d0e6e",
+   "1f1ecc023a6635c5"
+  ],
+  "expected": "00000000001f299a"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f2c42b742109ed4",
+   "1f2af3138e727790",
+   "1f20d67011d517e0",
+   "1f308f65eda7f3d2",
+   "1f146bd451956724"
+  ],
+  "expected": "0000000000457108"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fcabcf6ac14c6bb",
+   "1fe8a4327ddb1507",
+   "1fe93321f3f1c33b",
+   "1fe58e625aefdd7c",
+   "1fd141f8da43e074"
+  ],
+  "expected": "00004074ff4f6163"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "2005f8388827bc71",
+   "2005f7917b00c75c",
+   "200d8548b846b772",
+   "200cf1348c6e829c",
+   "1fffd778f58cbc31",
+   "1ff5a57fcf4409d6",
+   "1ff2fdd428434b04",
+   "200c37858f971d62"
+  ],
+  "expected": "0003865fc06c1ed0"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f295a94b393c3f7",
+   "1f2aadcedf8b3978"
+  ],
+  "expected": "0000000000007061"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "200f892c35514345",
+   "2009a7118c357dd1",
+   "200d81d442aaf414",
+   "20020f21c4ce0e83",
+   "20024f6ca9ccd6d1"
+  ],
+  "expected": "0001f209f55c22eb"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fde987c68477f16",
+   "1fcaceba0d37ea52",
+   "1fdd3accc7674f95",
+   "1fe897c1631ea6e6",
+   "1fd0eb149925e064",
+   "1fe693da14faa222",
+   "1fe775da2a279299",
+   "1fe262b15c209af1"
+  ],
+  "expected": "000027f162ab1c55"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1ff9733e63676f4f",
+   "20077ddaf1a7299a"
+  ],
+  "expected": "0001cfac5a2b8ede"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "20069d9f74ccfc75",
+   "1ffb3435179779bd",
+   "1ffc5c1b90e6896b",
+   "1ffdf8a4317b6b62",
+   "2002355aea4732dc"
+  ],
+  "expected": "0000b3b3e8d77916"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f1593d0f5f795f4",
+   "1f1d1d4cea46915a",
+   "1f13035fea992a5d",
+   "1f2e092ad2926dab",
+   "1f231b495317f1d9",
+   "1f30cf1ae9df3fbc",
+   "1f1be77d676ba099",
+   "1f3150c5e96cc229"
+  ],
+  "expected": "00000000005eac9e"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "2001060123a8d7f5",
+   "2009ed477fdfad43",
+   "200ec4ba61e38d82",
+   "2003e410fa070a99",
+   "2005c7786ecc6e78",
+   "1ff7793651eb7ecb",
+   "200fc3ef73ebd463",
+   "200dc7f360c0fc91"
+  ],
+  "expected": "0002d57a3e828e43"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "2010028c471a651a",
+   "200a7bde09c41ee8"
+  ],
+  "expected": "00007a97636e1e40"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1ffdf5418ceebc43",
+   "1ff8b11d95787a63",
+   "2000004a64603f54"
+  ],
+  "expected": "000025ef58b36d06"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f311c21f88d8845",
+   "1f1fc45eb833eb21",
+   "1f237e3a8b73367c"
+  ],
+  "expected": "00000000003ee70c"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1eb1cc538b4bb8cf",
+   "1eba630dc687c4ee",
+   "1ec1793fed1fb9de",
+   "1eb3c0d11729c2b9",
+   "1eb54039e8c55598",
+   "1ec49ded80c4fd0e",
+   "1eb3da6ed2bdb235",
+   "1ebedcb8abee490b"
+  ],
+  "expected": "00000000000000fa"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "2000922568ac2092",
+   "200921fa5fcb921b",
+   "20032630f31be4f8",
+   "2001bb429c107089",
+   "200b8496cf84b07e",
+   "1ff84f1c69462e99",
+   "1ff85761f2e89e3a",
+   "200cfa25ff73edc2"
+  ],
+  "expected": "00025fc690d68a2c"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1eb64b33d24921ee",
+   "1ec2412bf0d9a238",
+   "1ec53a65b6fd5ca7",
+   "1eb9b53207db0ebc",
+   "1eb04cb0f1d57ac1",
+   "1eb911e8f5c6d263",
+   "1ebbaa608b16ee94",
+   "1ec60d85190e4ae7"
+  ],
+  "expected": "000000000000015a"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "200dfcd55a2f8908",
+   "2010160aae4401a4",
+   "1ff6e171f9292d07",
+   "200f7d30dde925e7",
+   "200a2e172d6c7f72"
+  ],
+  "expected": "0003b2a0a793af38"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fe2463c62282579",
+   "1fd8d9b6900d498d"
+  ],
+  "expected": "0000088d98321c29"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1ec217029c752fe6",
+   "1eb11c4855b57169",
+   "1ec12e29affb604c",
+   "1ec2ebdf1572844f",
+   "1ec09f9bd25b2256"
+  ],
+  "expected": "00000000000000e0"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fe57c23293bc5ca",
+   "1fe238c41d0027d6",
+   "1fd6df16cbdf30bf",
+   "1fcf7fb9272fd01c",
+   "1fdedf28673ecab8",
+   "1fdb14824062adf0",
+   "1fe12e6a79fc7823",
+   "1fcb109aa3ff75f8"
+  ],
+  "expected": "000016d5347590bb"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "2009b2096b72b29d",
+   "2007cbb0f969d7d6",
+   "1ff193581ca1468b",
+   "1ff34a1c96106392",
+   "20098ec207140ba4"
+  ],
+  "expected": "0003c6f92a834e53"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "20025dce93cca1c7",
+   "2003693b899aafb8",
+   "2001fb3071bb00b6",
+   "200923d7b55a44b5",
+   "200454873ee69e2f",
+   "1ffc541a0d0874c3",
+   "200ffb91ab611c1f",
+   "1ffa61b50eb2fd1f"
+  ],
+  "expected": "0002032b81317563"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1f271a9be81fc7c2",
+   "1f16fa6d9036b739",
+   "1f2cb38b19d82a02"
+  ],
+  "expected": "000000000033636f"
+ },
+ {
+  "why": "subnormal",
+  "gaps": [
+   "1fe7e7e0f06ec718",
+   "1fe8aa46c5d23a47",
+   "1fe71c8a7a4bb1cc"
+  ],
+  "expected": "00000067020822ec"
  }
 ]

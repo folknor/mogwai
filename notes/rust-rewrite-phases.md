@@ -1217,6 +1217,46 @@ moment the scripts move. Phase 4 therefore runs in two halves:
      can consume `gap_cv2`. The debt is gone rather than deferred, which
      is what the reviewer meant by removing it before it can enter the
      ranking path.
+  1i. **THE FIFTH REVIEW PASS, 2026-08-08. REFUSED on one arithmetic
+     boundary, now closed.** `population_variance` DOUBLE-ROUNDED whenever
+     the exact result is a nonzero subnormal: it rounded the quotient to
+     53 bits and then scaled by powers of two, and the scaling rounded a
+     second time on the way down. Every subnormal is an integer multiple
+     of 2^-1074, so its rounding position is pinned at that floor rather
+     than at 53 significant bits. Five specific finite inputs came out one
+     ULP below `statistics.pvariance`.
+
+     The reviewer supplied the counterexample as bit patterns, ran CPython
+     for the reference independently, and - the part worth noting - had
+     transcribed the Rust rounding path to confirm the second value and
+     checked that transcription against all 820 committed cases first. It
+     did not report a difference it had not reproduced from both sides.
+
+     Closed by choosing the rounding position as
+     `max(leading - 52, -1074)` and assembling the bit pattern directly
+     instead of scaling, so exactly one rounding happens for every output
+     class. `scale_by_power_of_two` is deleted rather than fixed; it was
+     the wrong shape, not merely wrong.
+
+     WHY THE SWEEP MISSED IT, which is the reusable part. The 820 cases
+     included 39 zero results, and those exercise underflow TO zero - a
+     different class from correct rounding WITHIN the subnormal range,
+     which no family produced at all. The generated sweep was honest about
+     its families and simply had no member of that output class. A
+     required `subnormal` family now covers it, 120 cases straddling the
+     smallest-subnormal and subnormal/normal boundaries, and the test
+     asserts the family's expectations really ARE nonzero subnormals -
+     without that, a regenerated fixture could satisfy the family check
+     while testing nothing, which is the same trap as the naive-reference
+     test from the pass before.
+
+     Sweep is 940 cases now, all exact. Everything else in the pass came
+     back clean: the integer identity, the normal-range rounding, all
+     three `powi` removals, the 3,000,000-event pin, and the two
+     judgement calls I had flagged for overruling - keeping
+     `gap_pvariance` as a documented wrapper, and keeping the density pins
+     beside the implementation while `parity3a` stays honestly scoped to
+     the structural verdict - were both confirmed as the right choice.
   2. **ABSORB `select_windows.py` WHOLE**, all four phases, as the
      bar-frame intake station on top of `session_profile.rs`'s existing
      archive, session and eligibility machinery. No frozen artifact

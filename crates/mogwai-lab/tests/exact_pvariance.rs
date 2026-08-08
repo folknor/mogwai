@@ -98,12 +98,31 @@ fn population_variance_matches_cpython_over_the_generated_sweep() {
         "pow2",
         "int",
         "identical",
+        "subnormal",
     ] {
         assert!(
             per_family.get(family).copied().unwrap_or(0) >= 10,
             "family {family} is missing or too thin in the fixture: {per_family:?}"
         );
     }
+
+    // The subnormal family has to actually BE subnormal. The original sweep
+    // contained zero results, which exercise underflow to zero, and no nonzero
+    // subnormals, which is the class where the rounding position changes rule -
+    // and that gap is exactly what let a double-rounding defect through.
+    let nonzero_subnormals = cases
+        .iter()
+        .filter(|c| c.why == "subnormal")
+        .filter(|c| {
+            let expected = parse_bits(&c.expected);
+            expected > 0.0 && expected < f64::MIN_POSITIVE
+        })
+        .count();
+    assert!(
+        nonzero_subnormals >= 100,
+        "the subnormal family must carry nonzero subnormal expectations, not zeros: \
+         got {nonzero_subnormals}"
+    );
     assert!(
         nonzero > cases.len() / 2,
         "most cases must have a nonzero variance, or the sweep is mostly testing zero"

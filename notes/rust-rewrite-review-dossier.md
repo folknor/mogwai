@@ -117,9 +117,23 @@ Each found by a parity gate disagreeing, not by reading the Python source.
   schoolbook multiply, shift, divide by a single limb) rather than a bignum
   dependency for one function. The identity was verified against
   `statistics.pvariance` over 2,005 cases BEFORE the module was written, and the
-  implementation is pinned by a generated 820-case sweep whose families
+  implementation is pinned by a generated 940-case sweep whose families
   deliberately include the clustered and adjacent-neighbour cases that broke the
   float version.
+
+  ONE MORE ROUNDING BOUNDARY, found by the fourth pass, and a different failure
+  from every one above. Rounding the exact quotient to 53 bits and THEN scaling
+  by powers of two rounds twice whenever the result is a nonzero subnormal:
+  every subnormal is an integer multiple of `2^-1074`, so its rounding position
+  is pinned at that floor rather than at 53 significant bits. Five specific
+  finite inputs landed one ULP below CPython. The position is now chosen as
+  `max(leading - 52, -1074)` and the bit pattern assembled directly, so exactly
+  one rounding happens for every output class. The first sweep could not see it:
+  its 39 zero results exercise underflow TO zero, which is not the same class as
+  correct rounding WITHIN the subnormal range. There is now a required
+  `subnormal` family of 120 cases straddling both boundaries, and the test
+  asserts they really are nonzero subnormals rather than zeros - otherwise a
+  regenerated fixture could satisfy the family check while testing nothing.
 
   `f64::powi` was removed from this path in the same change. Its precision is
   documented as varying by platform and Rust version, so leaving `powi(2)` in
