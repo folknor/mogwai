@@ -8,7 +8,7 @@
 //! sort_keys=True, default=list)` on the Python side: compact separators
 //! (`", "` / `": "`), keys sorted lexicographically, tuples serialized as
 //! JSON arrays via `default=list`, floats formatted with CPython's `repr()`
-//! rule (shortest round-trip digits, fixed notation when `-4 < decpt <= 17`,
+//! rule (shortest round-trip digits, fixed notation when `-4 < decpt <= 16`,
 //! scientific otherwise with a signed, zero-padded two-digit exponent).
 //! `serde_json`'s compact writer does not reproduce that byte-for-byte (no
 //! space after `:`/`,`, and its float formatter never emits scientific

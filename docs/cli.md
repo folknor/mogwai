@@ -216,8 +216,16 @@ is a `target/mogwai-synth/` scratch path. `cadence-feasible` reads a cadence
 measurement and prints the `check_cadence_feasible.py` L0
 structural-proceed verdict (PROCEED/CLOSE/STOP AND ASK) read off its
 `children_mean`/`children_single_frac` anchors, exiting nonzero on anything
-but PROCEED; it does not re-run that script's default Markov density
-re-simulation, which stays an open scope gap (`notes/todo.md`).
+but PROCEED.
+
+KNOWN DIVERGENCE, being closed: it does NOT run the Markov density
+re-simulation the Python performs on its default path, and that simulation
+is a gate rather than a diagnostic - `check_cadence_feasible.py` exits
+nonzero when the realized density misses the feasibility bands. So this
+subcommand can exit 0 where the script it ports exits nonzero. The
+subcommand also substitutes zero for missing cadence fields where the
+Python raises, so a malformed measurement can read PROCEED. Both are
+scheduled for repair before the Python retires.
 
 `cache` is the manual-case cover for the storage policy's CACHE class:
 `mogwai cache stats` reports entry/file/byte counts under the cache root

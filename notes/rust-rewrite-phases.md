@@ -802,8 +802,44 @@ moment the scripts move. Phase 4 therefore runs in two halves:
   mnq_fit.py and the absorbed scripts move to `research/dead/` and
   the parity-frozen defects get their real fixes.
 
-  4b SCOPE, as it stands 2026-08-08. Order matters: the first item
-  BLOCKS the retirement and must land before any absorbed script moves.
+  THE REVIEW RAN 2026-08-08 AND REFUSED THE SIGNATURE. Codex session
+  019fe03a, `review bare --profile deep`, 26m29s, pointed at the dossier.
+  Verdict: it would not sign the Python retirement in the current tree.
+  It confirmed `brokkr check` green at 582 tests, re-ran the focused 12a,
+  fingerprint and cadence parity gates, independently reproduced the
+  session preflight exactly, and audited every named gate exclusion -
+  finding no numerical divergence disguised as one. The refusal is about
+  what the gates do NOT cover.
+
+  Three of its findings were then argued to consensus in a spar session
+  (019fe054). Recorded because two of them moved:
+
+  - **The hardcoding half of its intake blocker is WITHDRAWN.** It had
+    blocked partly because `cadence.rs`, `fingerprint.rs` and
+    `session_profile.rs` fix pairs, archive month, anchors and the MNQ
+    preset in source. But the Python fixes exactly the same things in
+    exactly the same places - `build_cadence.py:19` and `:62`,
+    `build_fingerprint.py:30`, `fit_session_profile.py:39` - so the port
+    mirrored the debt rather than adding it, and retiring the Python
+    removes no parameterization that exists today. Agreed disposition:
+    forward work toward the open-instrument goal, NOT a retirement
+    blocker. What survives from that blocker is the CLI half, below.
+  - **The parity contract was made explicit** and now lives durably in
+    `reference/architecture.md`. It is what separates the acceptable
+    accidental agreements from the blocking ones, and it settles the
+    fail-open decoding findings in one stroke.
+  - **The Markov gap is a port, not an owner ruling.** Phase 3a recorded
+    it as out of budget because it needed a from-scratch CPython
+    Mersenne Twister; phase 3b then BUILT that (`fit::mtrand`), so what
+    remains is `random()`, `weibullvariate` and a `gamma` the default
+    path calls at shape 1. I argued verdict equivalence might suffice
+    for a stochastic band check; that was refuted with evidence - codex
+    ran the default path and the simulated median lands on 3, exactly
+    the allowed lower boundary of measured median minus one, so a
+    different stream giving 2 flips the verdict. Bit-exact it is.
+
+  4b SCOPE, as it stands 2026-08-08. Order matters: items 1 to 4 BLOCK
+  the retirement and must land before any absorbed script moves.
 
   1. **BLOCKER - add a `mogwai characterize` subcommand.** There is
      none. `mogwai_lab::characterize` is a gated library with no CLI
@@ -818,6 +854,65 @@ moment the scripts move. Phase 4 therefore runs in two halves:
      Note the shape: the Python has both a per-corpus entry point and
      (formerly) a multi-pair driver, so the subcommand needs to cover
      the `run_corpus.py` fan-out too, not just the single-file case.
+
+  1b. **BLOCKER - the session-profile fit has no CLI surface either.**
+     Same class as the above, raised by the review. `mogwai-lab` carries
+     `session_profile.rs`, but the command enum exposes only the
+     protocol-11 `fit`; `analysis/fit_session_profile.py preflight` and
+     `fit` have no shipped equivalent. Retiring that script removes a
+     runnable fitting capability from the tool.
+
+  1c. **BLOCKER - `cadence-feasible` does not preserve the Python
+     command, and can pass open.** Two defects, both found by the
+     review. First, the Python default path runs the 3,000,000-event
+     Markov density re-simulation and exits nonzero when the realized
+     density misses the feasibility bands
+     (`check_cadence_feasible.py:275`) - it is a GATE, not the secondary
+     diagnostic the phase-3a record called it, so `mogwai
+     cadence-feasible` can exit 0 where the script exits nonzero. The
+     `--fit` and `--fit-markov` modes are absent too. Port it, to this
+     standard, agreed in the spar: `PyRandom::random()` bit-exact
+     against CPython with pinned prefix tests; `weibullvariate(1.0, 1.0)`
+     consuming the same draws and producing the same values, also
+     prefix-tested; a small-event simulation fixture that would expose
+     draw-consumption, bucketing or state-update differences; and the
+     full default run matching Python density output AND exit status on
+     the committed `cadence.json`. Pin the discrete outputs exactly
+     (median, p95, bucket and event counts); if a continuous diagnostic
+     cannot be made exactly equal across platform `log`/`exp`, state the
+     ULP rule explicitly rather than loosening silently.
+     Second, `cadence_feasible.rs:71` substitutes `0.0` for missing or
+     nonnumeric fields, so a document carrying `children_mean.anchor`
+     but no `children_single_frac` returns PROCEED where Python raises.
+     Strict schema refusal.
+
+  1d. **BLOCKER - fail-open decoding and silent float divergence in the
+     fingerprint loader.** Per the parity contract in
+     `reference/architecture.md`. The silent-divergence half: Python
+     computes the hour RMS with `** 0.5` and normalizes with
+     `statistics.fmean` (which is `math.fsum`-backed on 3.14.6), while
+     the port uses `sqrt()` and `py_sum` over the length - both can
+     differ by one ULP, and codex constructed positive three-value
+     inputs that do. The committed `char_*.json` happen not to expose
+     it. Ordering is conditional the same way: Python keeps glob
+     filename insertion order while `load_reports` returns a pair-sorted
+     `BTreeMap`, equal today only because the filenames are well formed.
+     The fail-open half: a missing `pair` becomes `""` and a missing
+     `n_trades` becomes zero, where Python fails closed. Fix to Python
+     semantics and pin with fixtures chosen to DISTINGUISH the
+     implementations - re-passing the committed artifact proves nothing,
+     since it is what the blind spot is made of.
+
+  1e. **BLOCKER - `brokkr check --gate` is red**, for two independent
+     reasons. `tape_lateness_under_acceleration` measured 90.2 ms
+     against its 50 ms ceiling and 163.2 ms on a focused debug rerun;
+     this predates the rewrite and is the recorded profile-mismatch item
+     in `notes/todo.md`, so it needs dispositioning with evidence rather
+     than fixing here. Separately, and new: the coverage audit reports
+     `parity3a_cadence_feasible_verdict_matches_the_committed_cadence`
+     as ORPHANED, because `brokkr.toml`'s broad `parity3a_` skip catches
+     that cheap non-ignored test along with the corpus-dependent ones.
+     A gate nobody runs is not a gate.
   2. **ABSORB `select_windows.py` WHOLE**, all four phases, as the
      bar-frame intake station on top of `session_profile.rs`'s existing
      archive, session and eligibility machinery. No frozen artifact
@@ -877,7 +972,10 @@ moment the scripts move. Phase 4 therefore runs in two halves:
      buys extensibility, not correctness, and is owner-authorized
      whenever convenient to bundle.)
   6. The parity-frozen defect (the TBBO stream contract's unguarded
-     conversions in `parse_stream` / `stream.rs`) gets its real fix.
+     conversions in `parse_stream` / `stream.rs`) gets its real fix -
+     EXPANDED per the review: making the numeric parsing fallible is not
+     enough, because `stream.rs:320` still panics on a short row before
+     any conversion happens. Validate row width first.
   7. Then, and only then, the absorbed scripts move to `research/dead/`.
      `research/` is gitignored, so this is effectively removal from the
      repo with a local copy retained; git history is the real archive.

@@ -222,7 +222,7 @@ reading, not as of the fill instant.
 
 ## The workspace and the offline evidence toolbox
 
-Six crates. `mogwai-protocol` owns the wire types and the shipped launcher and
+Seven crates. `mogwai-protocol` owns the wire types and the shipped launcher and
 imports nothing else in the workspace. `mogwai-engine` is the venue-agnostic
 exchange core. `mogwai-data` owns `TickSource`, the k-way merge and the
 `GeneratedSource` synthetic generator fitted to the committed fingerprint.
@@ -265,12 +265,41 @@ reusable, and the two consequences bind anything built on it. A component is
 SPENT only when its QUESTION cannot recur, never merely because the MNQ pass
 answered it - an archive inspector or a corpus driver is idle between
 instruments, not dead. And per-instrument knowledge belongs in config or a
-preset, never in a hardcoded list in the method: a preset tuple naming
+preset rather than a hardcoded list in the method: a preset tuple naming
 today's five symbols is a defect the sixth exposes. The corollary for
 evidence is that a finding measured on one instrument is one observation, not
 a law, until a second instrument either reproduces it or does not - which is
 why methods a preregistered test rejected are kept runnable rather than
 deleted.
+
+THE SECOND CONSEQUENCE IS THE DIRECTION OF TRAVEL, NOT A MET INVARIANT, and
+stating it as met would be false. The offline toolbox still fixes
+per-instrument choices in source, faithfully mirroring the Python it was
+ported from rather than introducing the debt: `cadence.rs` fixes the pair set
+and the archive month and takes BTCUSDT as anchor, `fingerprint.rs` takes
+XBTUSD as anchor, and both `session_profile.rs` entry points resolve the MNQ
+preset. None of these is reachable as an input. Retiring the Python removes no
+parameterization that exists today - it was equally hardcoded - so closing
+this is forward work rather than a porting debt, and it is what a second
+instrument will force.
+
+THE PARITY CONTRACT a port is held to, stated once because every case
+otherwise gets argued from scratch: for every VALID input, the Rust must
+either produce output equivalent to the implementation it replaces or embody
+an explicitly approved semantic change. It MAY additionally reject inputs
+outside the declared input contract. It may NOT silently accept malformed
+input, and it may NOT silently change results for valid input.
+
+The line that follows from it, and the reason it is worth writing down: a
+gate passing on the committed fixtures is evidence about those fixtures, not
+proof of equivalence over the contract. So a Rust refusal where the original
+proceeded is a loud narrowing and needs only to be recorded; a Rust result
+that differs on some valid input the fixtures happen not to contain is a
+silent divergence and must be fixed or approved; and a Rust default where the
+original raised is silent acceptance of malformed input, the worst of the
+three, because it manufactures an answer. Fixing the third class by making
+the committed artifact pass again is not a fix - the repair needs a fixture
+chosen to DISTINGUISH the implementations, or the blind spot survives.
 
 The rewrite's parity gates are the porting program's whole verification
 story: every absorbed Python computation is checked against a committed JSON

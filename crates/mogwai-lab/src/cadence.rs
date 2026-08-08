@@ -35,9 +35,14 @@ pub struct EventStats {
     single: i64,
     single_level: i64,
     children_sum: i64,
-    // Insertion-ordered like the Python dict: only sorted-key reads happen
-    // downstream (the p95 rank walk), so a HashMap is safe here, unlike
-    // characterize.rs's tick_counts modal tie.
+    // KEY-ordered, and that is equivalent here rather than a faithful mirror:
+    // the Python counterpart is an insertion-ordered dict, but the only
+    // downstream read is the sorted-key p95 rank walk, so insertion order is
+    // unobservable and a `BTreeMap` lands the same answer. Contrast
+    // characterize's tick_counts, where a modal TIE is broken by first
+    // insertion and the ordering therefore IS load-bearing. (This comment
+    // previously claimed the map was insertion-ordered and that a `HashMap`
+    // would be safe - the conclusion held, both premises were wrong.)
     children_hist: BTreeMap<i64, i64>,
     children_max: i64,
     levels_sum: i64,
