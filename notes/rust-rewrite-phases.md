@@ -927,12 +927,28 @@ moment the scripts move. Phase 4 therefore runs in two halves:
        `build_fingerprint.py` uses builtin `sum` and line 170 uses
        `fmean` INSIDE THE SAME FUNCTION, so the two paths must stay
        distinct - routing both through one helper is the bug.
-     - **The landing bumps `TAPE_PROTOCOL_VERSION`.** Regenerating
-       `fingerprint.json` moves `vol_hour`, which is compiled into the
-       generator, so even a one-ULP change can move generated values or
-       timestamps. This is a genuine tape change, unlike the
-       diagnostics-only `modal_tick.max` re-commit in item 4, which moves
-       no tape byte and needs no bump.
+     - **The version bump is owed by the COMMIT, not by the code
+       change.** LANDED 2026-08-08 with no bump, and that was argued and
+       agreed: the premise that regenerating would move `vol_hour` turned
+       out to be false. The parity gate reproduces the committed artifact
+       byte for byte after both changes, so today's corpus discriminates
+       at none of the 192 square roots or the eight normalizations.
+       Structurally too, the synthesis is off the tape path - `mogwai-lab`
+       depends on `mogwai-data` and never the reverse, and the generator
+       reads `analysis/fingerprint.json` through `include_str!` rather
+       than calling the synthesis - so editing `fingerprint.rs` cannot
+       move a tape byte until a regenerated artifact actually differs.
+       The runtime function `generator code plus embedded fingerprint
+       plus seed plus config` is unchanged; only the offline `corpus plus
+       method` function moved.
+       WHAT THIS MEANS FOR ITEM 4: committing a changed
+       `fingerprint.json` DOES owe the bump, and the rule names the
+       committed fingerprint without qualifying which leaf moved. So the
+       `modal_tick.max` re-commit bumps, even though that leaf is
+       diagnostics-only and moves no tape byte - the earlier note here
+       saying it needs no bump was reasoning about the leaf when the rule
+       is about the file. Bumping costs nothing; a missed bump is
+       undetectable by construction.
 
   1e. **BLOCKER - `brokkr check --gate` is red**, for two independent
      reasons. `tape_lateness_under_acceleration` measured 90.2 ms

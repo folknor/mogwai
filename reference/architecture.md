@@ -52,7 +52,7 @@ away from zero and floored at one contract, so no print becomes the zero
 quantity nautilus drops. `latent_size_median` is stated directly in the
 instrument's native size unit and names the continuous lognormal center before
 that grid is applied. The floor truncates its lower tail, so it is deliberately
-not called the observed size median. `TAPE_PROTOCOL_VERSION` is 10; version 5
+not called the observed size median. `TAPE_PROTOCOL_VERSION` is 11; version 5
 removed the quote-notional proxy whose value was actually arithmetic mean
 notional and made the latent size distribution explicit, and version 6 repaired
 the GARCH recursion's second moment. Version 7 added the observable top of book,
@@ -67,6 +67,23 @@ configured unconditional targets survive the one-child floor; above it the
 legacy path is byte-identical), a per-instrument `size_log_sigma` whose default
 reproduces the shared crypto shape byte for byte, and the fitted MNQ preset
 values with MES inheriting them loudly.
+
+Version 11 repaired a unit mismatch in the session calibration. `vol_hour` had
+been fitted at protocol 8 as a PER-MINUTE quantity from NQ one-minute bars but
+is applied PER PARENT EVENT, and minute-scale volatility carries the per-parent
+scale times the square root of the arrivals in that minute - so the fitted 3.4x
+hourly swing compounded with the 27.5x arrival swing and left the generated
+Asia and London sessions roughly five times too quiet at bar scale. Both
+session arrays were refitted from the July MNQ TBBO corpus as one atomic group:
+`intensity_hour` from inferred-parent counts conditional on the frozen
+`dow_weight`, landing 14.5x peak-to-trough against the volume proxy's 27.51x
+upper bound, and `vol_hour` as a per-parent robust scale, which comes out
+nearly flat and slightly INVERTED - overnight parents individually move a
+little more than cash-session ones, and the old curve's swing was almost
+entirely the arrival-density double count. `vol_scalar` was re-solved under the
+corrected arrays and ships declared rather than fitted: its pooled scale gate
+passes while the per-seed minute-range envelope still fails, which is the
+standing tail-shape evidence.
 
 Each generated parent event publishes one BBO before its first trade. The book
 has an exact positive integer-tick width and is centered, with one rounding, on
