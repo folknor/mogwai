@@ -46,7 +46,7 @@ fn archive() -> PathBuf {
 #[test]
 #[ignore = "needs research/market-data/nq-1m_bk.zip on local disk"]
 fn parity3b_session_profile_preflight_matches_the_python() {
-    let report = preflight_report(&archive(), Alignment::Civil).expect("the preflight");
+    let report = preflight_report(&archive(), Alignment::Civil, "MNQ").expect("the preflight");
     // Written to target/ scratch so a mismatch is inspectable; a committed
     // artifact is never touched.
     let out = repo_root().join("target/parity3b-scratch/session-profile-preflight.json");
@@ -73,7 +73,7 @@ fn parity3b_session_profile_preflight_matches_the_python() {
 #[test]
 #[ignore = "needs research/market-data/nq-1m_bk.zip on local disk"]
 fn parity3b_session_profile_reproduces_the_preset_dow_weight() {
-    let report = fit_report(&archive(), Alignment::Civil).expect("the fit");
+    let report = fit_report(&archive(), Alignment::Civil, "MNQ").expect("the fit");
     let out = repo_root().join("target/parity3b-scratch/session-profile-fit.json");
     std::fs::create_dir_all(out.parent().expect("a parent")).expect("scratch dir");
     std::fs::write(

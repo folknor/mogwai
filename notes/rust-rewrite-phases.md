@@ -855,7 +855,18 @@ moment the scripts move. Phase 4 therefore runs in two halves:
      (formerly) a multi-pair driver, so the subcommand needs to cover
      the `run_corpus.py` fan-out too, not just the single-file case.
 
-  1b. **BLOCKER - the session-profile fit has no CLI surface either.**
+  1b. **CLOSED 2026-08-08.** `mogwai session-profile preflight` and
+     `... fit` land, and the preflight reproduces the Python
+     field-for-field: 5,891,412 rows, 4,539 sessions observed, 4,376
+     eligible, 163 early closes, 2,025,407 CST rows remapped, 289,404
+     missing minutes, zero zero-volume rows. Both entry points also lost
+     their hardcoded MNQ preset - it is a `--preset` argument now, since
+     the calendar is an INPUT to the estimator rather than a consumer of
+     it. That was the cheapest available dent in the parameterization
+     debt: one argument, taken while the file was open anyway. The
+     original text follows.
+
+     **the session-profile fit has no CLI surface either.**
      Same class as the above, raised by the review. `mogwai-lab` carries
      `session_profile.rs`, but the command enum exposes only the
      protocol-11 `fit`; `analysis/fit_session_profile.py preflight` and

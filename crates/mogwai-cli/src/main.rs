@@ -16,6 +16,7 @@ mod characterize;
 mod r#gen;
 mod man;
 mod preflight;
+mod session_profile;
 mod synth;
 mod tick_composition;
 
@@ -62,6 +63,12 @@ enum Command {
     /// the input `synth fingerprint` reads
     /// (`analysis/characterize.py` plus `run_corpus.py`'s fan-out).
     Characterize(characterize::CharacterizeArgs),
+    /// The calendar-conditional session fit over a one-minute bar archive
+    /// (`analysis/fit_session_profile.py`).
+    SessionProfile {
+        #[command(subcommand)]
+        command: session_profile::SessionProfileCommand,
+    },
     /// Phase-3a offline synthesis: fingerprint/cadence generation
     /// (`analysis/build_fingerprint.py`/`build_cadence.py`).
     Synth {
@@ -130,6 +137,7 @@ fn main() -> anyhow::Result<()> {
         Command::Fit(args) => fit::run(&args),
         Command::Cache(args) => cache::run(args),
         Command::Characterize(args) => characterize::run(args),
+        Command::SessionProfile { command } => session_profile::run(command),
         Command::Synth { command } => synth::run(command),
         Command::CadenceFeasible(args) => synth::run_cadence_feasible(args),
     }

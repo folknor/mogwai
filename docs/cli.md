@@ -193,6 +193,29 @@ user's own file, written to `--out` or a working-directory default, never
 cached, never auto-deleted) and every default path is chosen so a bare
 invocation can never overwrite a committed `analysis/` file by accident.
 
+`characterize` is the intake station: it streams a trade corpus into
+`char_<PAIR>.json` stylized-fact reports, which is what `synth fingerprint`
+reads and the first step of onboarding any instrument. With no arguments it
+sweeps a representative pair set concurrently and prints the cross-pair table
+used to eyeball whether the stylized facts repeat across instruments; name
+pairs to narrow it. `--data-dir` defaults to `MOGWAI_DATA_DIR`, `--out-dir` to
+`analysis/`, and `--jobs` caps concurrency. A bare symbol resolves to
+`<DATA_DIR>/<SYMBOL>.csv`; anything path-shaped is taken as given. Missing or
+empty inputs are skipped by name rather than failing the sweep.
+
+`session-profile preflight` and `session-profile fit` are the
+calendar-conditional session fit over a one-minute bar archive. The preflight
+is a GATE, not a summary: it answers whether the archive carries zero-volume
+rows, which decides whether exposure may come from row presence or must come
+from the calendar - deriving it from row presence would shrink each quiet
+hour's denominator in proportion to its own quietness and compress the
+peak-to-trough ratio the fit exists to measure. Run it before trusting any
+fit. `--preset` selects the session calendar the fit is conditional on, which
+is an INPUT to the estimator rather than a consumer of it; `--alignment`
+chooses between reading historical civil labels against the preset's fixed
+offset (`civil`, the default, so CST and CDT land on the same session phase)
+and reading them as instants.
+
 `preflight` runs the fail-closed TBBO corpus contract check against a
 delivered corpus directory and writes a hash-bound preflight artifact -
 `--corpus`, `--ledger` (read-only) and `--out` all default to the paths

@@ -806,8 +806,12 @@ pub fn peak_to_trough(fit: &Fit, grid: &Grid) -> (f64, f64) {
 // --- modes -----------------------------------------------------------------
 
 /// `preflight`: what the archive actually contains.
-pub fn preflight_report(archive: &std::path::Path, alignment: Alignment) -> LabResult<Value> {
-    let calendar = Calendar::from_preset("MNQ")?;
+pub fn preflight_report(
+    archive: &std::path::Path,
+    alignment: Alignment,
+    preset: &str,
+) -> LabResult<Value> {
+    let calendar = Calendar::from_preset(preset)?;
     let rows = read_archive(archive, alignment)?;
     let (states, outside) = group_sessions(&rows, &calendar);
     let (eligible, excluded_early) = eligible_sessions(&states);
@@ -846,8 +850,12 @@ pub fn preflight_report(archive: &std::path::Path, alignment: Alignment) -> LabR
 /// `fit`: the estimator and its report, as a machine-readable record rather
 /// than the Python's printed text. Every number the printed report showed is
 /// here; the ASCII residual matrix is a rendering of `residuals`.
-pub fn fit_report(archive: &std::path::Path, alignment: Alignment) -> LabResult<Value> {
-    let calendar = Calendar::from_preset("MNQ")?;
+pub fn fit_report(
+    archive: &std::path::Path,
+    alignment: Alignment,
+    preset: &str,
+) -> LabResult<Value> {
+    let calendar = Calendar::from_preset(preset)?;
     let rows = read_archive(archive, alignment)?;
     let (states, _) = group_sessions(&rows, &calendar);
     let (eligible, _) = eligible_sessions(&states);
