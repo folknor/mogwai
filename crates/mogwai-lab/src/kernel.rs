@@ -199,6 +199,82 @@ pub fn py_sum(values: impl IntoIterator<Item = f64>) -> f64 {
     sum + c
 }
 
+/// CPython's `math.fsum`: EXACT summation via Shewchuk partials, rounded once
+/// at the end.
+///
+/// Distinct from [`py_sum`], and the distinction is load-bearing rather than
+/// stylistic. Builtin `sum()` is Neumaier-compensated - very accurate, not
+/// exact. `math.fsum` maintains a list of non-overlapping partial sums whose
+/// exact total equals the true sum, then rounds that total once, half-even.
+/// The two disagree on inputs where compensation is not enough, so a port that
+/// routes both through one helper is wrong wherever Python distinguishes them.
+/// `analysis/build_fingerprint.py`'s `hour_vol` does exactly that: line 168
+/// uses builtin `sum` and line 170 uses `statistics.fmean`, which on 3.14 is
+/// `fsum(data) / n`.
+///
+/// The algorithm is CPython's `math_fsum`: for each input, add it into the
+/// running partials with two-sum error tracking, keeping only the nonzero
+/// partials. Because every partial is exact and they do not overlap, the final
+/// left-to-right fold is the correctly rounded total.
+#[must_use]
+pub fn py_fsum(values: impl IntoIterator<Item = f64>) -> f64 {
+    let mut partials: Vec<f64> = Vec::new();
+    for value in values {
+        let mut x = value;
+        let mut i = 0usize;
+        for index in 0..partials.len() {
+            let mut y = partials[index];
+            if x.abs() < y.abs() {
+                core::mem::swap(&mut x, &mut y);
+            }
+            // Two-sum: `hi` is the rounded sum, `lo` the exact residual.
+            let hi = x + y;
+            let lo = y - (hi - x);
+            if lo != 0.0 {
+                partials[i] = lo;
+                i += 1;
+            }
+            x = hi;
+        }
+        partials.truncate(i);
+        partials.push(x);
+    }
+    // The final rounding is NOT a fold over the partials. CPython walks them
+    // from the LARGEST down, stops at the first inexact addition, and then
+    // applies an explicit round-half-even correction: when the residual `lo`
+    // and the next partial share a sign, the true total is more than halfway
+    // to the next representable value, so doubling `lo` and re-adding it
+    // rounds the tie the way exact arithmetic would. A left-to-right fold
+    // skips that correction and lands one ulp off on ties.
+    let mut n = partials.len();
+    if n == 0 {
+        return 0.0;
+    }
+    n -= 1;
+    let mut hi = partials[n];
+    let mut lo = 0.0f64;
+    while n > 0 {
+        n -= 1;
+        let x = hi;
+        let y = partials[n];
+        hi = x + y;
+        let yr = hi - x;
+        lo = y - yr;
+        if lo != 0.0 {
+            break;
+        }
+    }
+    if n > 0 && ((lo < 0.0 && partials[n - 1] < 0.0) || (lo > 0.0 && partials[n - 1] > 0.0)) {
+        let y = lo * 2.0;
+        let x = hi + y;
+        let yr = x - hi;
+        if y == yr {
+            hi = x;
+        }
+    }
+    hi
+}
+
 /// CPython's `int.__truediv__`: the CORRECTLY ROUNDED quotient of two
 /// arbitrary-precision integers.
 ///
@@ -490,6 +566,54 @@ fn collect_differences(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// THE DISCRIMINATOR between [`py_sum`] and [`py_fsum`]. Both helpers must
+    /// exist because CPython distinguishes builtin `sum` from `math.fsum`, and
+    /// this is an input where that distinction is observable - found by search,
+    /// not constructed, since Neumaier compensation is good enough to agree
+    /// with exact summation across millions of well-conditioned draws.
+    ///
+    /// Note what is NOT a discriminator any more: `sum([0.1] * 10)` returns
+    /// exactly 1.0 on CPython 3.12 and later, because builtin `sum` became
+    /// compensated. The textbook example stopped separating these two.
+    #[test]
+    fn py_sum_and_py_fsum_disagree_by_one_ulp_on_a_cancelling_input() {
+        let values = [
+            f64::from_bits(0xc3c0_11d8_ac03_41e7), // -0x1.011d8ac0341e7p+61
+            f64::from_bits(0x43da_2149_ecaf_9f0b), //  0x1.a2149ecaf9f0bp+62
+            f64::from_bits(0xbc2e_1e05_cd67_c281), // -0x1.e1e05cd67c281p-61
+            f64::from_bits(0xbc24_3c30_5483_d94f), // -0x1.43c305483d94fp-61
+        ];
+        // Reference values taken from CPython 3.14.6 directly.
+        assert_eq!(py_sum(values).to_bits(), 0x43d2_185d_96ad_fe18);
+        assert_eq!(py_fsum(values).to_bits(), 0x43d2_185d_96ad_fe17);
+        assert_ne!(py_sum(values), py_fsum(values));
+    }
+
+    /// `math.fsum` is exact regardless of magnitude spread. A naive fold loses
+    /// the first `1.0` entirely - it is absorbed into `1e100` and never comes
+    /// back - so it returns 1.0 where the true total is 2.0.
+    #[test]
+    fn py_fsum_recovers_a_term_a_naive_fold_annihilates() {
+        assert_eq!(py_fsum([1e100, 1.0, -1e100, 1.0]), 2.0);
+        let naive = [1e100, 1.0, -1e100, 1.0].iter().sum::<f64>();
+        assert_eq!(naive, 1.0);
+    }
+
+    /// The `statistics.fmean` path the fingerprint's `hour_vol` normalization
+    /// takes: `fsum(data) / n`, not builtin `sum` over the length.
+    #[test]
+    fn py_fsum_over_the_count_is_the_fmean_contract() {
+        let tenths = [0.1f64; 10];
+        assert_eq!(py_fsum(tenths), 1.0);
+        assert_eq!(py_fsum(tenths) / 10.0, 0.1);
+    }
+
+    #[test]
+    fn py_fsum_handles_the_empty_and_single_cases() {
+        assert_eq!(py_fsum(std::iter::empty()), 0.0);
+        assert_eq!(py_fsum([2.5]), 2.5);
+    }
 
     /// The parity case that forced `py_int_div` into existence: the fit's
     /// pooled `mean_event_duration_s` over eight FINAL seeds. Pre-rounding

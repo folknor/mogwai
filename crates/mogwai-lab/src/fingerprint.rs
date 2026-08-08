@@ -312,6 +312,16 @@ fn hour_vol(rep: &Value) -> Vec<f64> {
                 .iter()
                 .map(|v| v.as_f64().unwrap_or(0.0)),
         );
+        // APPROVED SEMANTIC CHANGE, not an oversight: the Python writes
+        // `(ssq / cnt) ** 0.5`, which CPython delegates to platform libm
+        // `pow` - it does not special-case the half power. Matching that
+        // bug-for-bug would make this artifact, which is compiled into the
+        // generator by `include_str!`, a function of the libm belonging to
+        // whoever regenerated it. `sqrt` is correctly rounded under IEEE 754
+        // and identical on every conforming platform. The difference is real
+        // rather than theoretical - measured at roughly one in 1,236 over this
+        // call site's input domain - so `hour_vol_uses_sqrt_not_the_half_power`
+        // pins the choice against anyone "restoring parity" later.
         out.push(if cnt != 0.0 { (ssq / cnt).sqrt() } else { 0.0 });
     }
     let positive: Vec<f64> = out.iter().copied().filter(|v| *v > 0.0).collect();
@@ -319,7 +329,11 @@ fn hour_vol(rep: &Value) -> Vec<f64> {
         if positive.is_empty() {
             1.0
         } else {
-            crate::kernel::py_sum(positive.iter().copied()) / positive.len() as f64
+            // `statistics.fmean`, which on CPython 3.14 is `fsum(data) / n` -
+            // Shewchuk exact summation, NOT the Neumaier-compensated builtin
+            // `sum` used for `ssq` a few lines above. The same Python function
+            // uses both, so the two must stay distinct here.
+            crate::kernel::py_fsum(positive.iter().copied()) / positive.len() as f64
         }
     } else {
         1.0
@@ -614,6 +628,26 @@ mod loader_contract_tests {
         let err = load_one("CCCUSD", &serde_json::json!({"pair": "CCCUSD"}))
             .expect_err("a missing n_trades must refuse");
         assert!(err.to_string().contains("no integer `n_trades`"), "{err}");
+    }
+
+    /// THE APPROVED-DEVIATION PIN. `hour_vol` deliberately uses `sqrt` where
+    /// the Python uses `** 0.5`, because CPython routes that through platform
+    /// libm `pow` and the result is compiled into the generator. This asserts
+    /// the two genuinely differ at a value in the call site's own domain, so a
+    /// later "restore parity" edit to `powf(0.5)` fails here rather than
+    /// quietly making a shipped artifact platform-dependent. The value is a
+    /// mean of squared returns; CPython returns the `powf` result for it.
+    #[test]
+    fn hour_vol_uses_sqrt_not_the_half_power() {
+        // 0x1.dcf054c223beep-19, about 3.5e-6: CPython returns
+        // 0x1.ee28960bac05cp-10 for `x ** 0.5` and 0x1.ee28960bac05dp-10 for
+        // `math.sqrt(x)`, one ulp apart.
+        let x = f64::from_bits(0x3ecd_cf05_4c22_3bee);
+        assert_ne!(
+            x.sqrt().to_bits(),
+            x.powf(0.5).to_bits(),
+            "this fixture no longer discriminates; find another before relaxing the pin"
+        );
     }
 
     /// THE ORDERING DISCRIMINATOR. Under the old loader this file silently
