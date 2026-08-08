@@ -162,6 +162,25 @@ Each found by a parity gate disagreeing, not by reading the Python source.
 
   What this buys beyond parity: `--fit-markov` no longer needs a ruling before
   it can consume `gap_cv2`. The debt was removed rather than deferred.
+- **`select_windows::squared` - A THIRD APPROVED DEVIATION, 2026-08-08, and the
+  first one raised AFTER the signature.** The Python squares deviations with
+  `** 2`; CPython's `float ** int` calls libm's `pow`, which is not correctly
+  rounded and disagrees with the correctly rounded product in roughly one value
+  in 1,163 over this domain. A single IEEE multiply always is correctly rounded,
+  and exact rational arithmetic confirms the multiply is the right answer, so
+  the port is correct and CPython carries a libm artifact. Approved on the same
+  ground as `sqrt`: reproducing `pow`'s error bug-for-bug would make the tool's
+  output a function of whichever libm the machine carries.
+
+  MEASURED, not estimated: eleven of the 111,396 values in a full feature sweep
+  differ, all `volume_cv` or `vol_of_vol`, all by one or two ULPs. None moves a
+  monthly median on the committed archives, so the blessed gate reproduces
+  exactly - BY COINCIDENCE rather than by construction, which is why
+  `scripts/compare_cme_caches.py` exists. The blessed artifact is derived FROM
+  the cache, so it structurally cannot see a divergence in a session that no
+  surviving median depends on. That is the same shape as every finding in the
+  six review passes, caught this time by looking one layer below the gate on
+  purpose.
 - **`fit::mtrand`'s `random()` and `weibullvariate`** (`mtrand.rs:161`, `:174`,
   added 2026-08-08) - both pinned against the CPython stream by prefix tests,
   needed by the Markov density simulation (see 5). `gamma` at arbitrary shape

@@ -36,6 +36,7 @@ pub mod ledger;
 pub mod measure12a;
 pub mod preflight;
 pub mod sampler;
+pub mod select_windows;
 pub mod session;
 pub mod session_profile;
 pub mod storage;

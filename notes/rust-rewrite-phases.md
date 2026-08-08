@@ -1349,11 +1349,44 @@ moment the scripts move. Phase 4 therefore runs in two halves:
      later mismatch could not be told apart from the inputs having
      changed.
 
-     STILL TO DO: the port itself, all four phases, on top of
-     `session_profile.rs`'s existing archive/session/eligibility
-     machinery. Note the two traps already recorded below - the
-     `DATABENTO_START` constant re-centres every z-score rather than just
-     filtering candidates, and the even-session median is load-bearing.
+     THE PORT LANDED the same day: `mogwai_lab::select_windows` plus
+     `mogwai select-windows features|select|drift|plan`. All four phases
+     reproduce the blessed artifact BIT-EXACTLY - month table, eligible
+     span, z-scored vectors in key order, seeds, pick order, percentiles,
+     drift years and plan strata - and the `select` and `plan` CLI output
+     is byte-identical to the Python's.
+
+     Both recorded traps survived contact. `DATABENTO_START` re-centres
+     rather than filters, and `drift` uses a DIFFERENT median from
+     `monthly` - the upper middle on an even count - so it gets its own
+     comparison rather than being assumed to follow from the month table
+     matching. Two more turned up: CPython's `round` is half-to-EVEN and
+     `phase_plan` indexes with it, and the hourly volatility buckets and
+     month table must both stay insertion-ordered because they are term
+     orders for `py_sum`.
+
+     A NEW PARITY DEVIATION, DISCLOSED, since the signature says any such
+     deviation reopens the gate. The blessed gate passed on the first run,
+     but comparing the CACHES directly - which the blessed artifact cannot
+     see, being derived from them - found ELEVEN of 111,396 values
+     differing by one or two ULPs, all `volume_cv` or `vol_of_vol`. Cause,
+     confirmed on the actual failing session rather than inferred:
+     the Python squares with `** 2`, which routes through libm's `pow` and
+     is NOT correctly rounded, disagreeing with the correctly rounded
+     product about one value in 1,163. A single IEEE multiply always is
+     correctly rounded, and exact rational arithmetic confirms the
+     multiply is the right answer. So the port is correct and CPython
+     carries a libm artifact - the same shape as `x ** 0.5` against `sqrt`
+     in the fingerprint work, and approved on the same ground: matching
+     bug-for-bug would make this tool's output a function of whichever
+     libm the machine carries.
+
+     STATED PLAINLY BECAUSE IT MATTERS: no month median moves on today's
+     archives, so the blessed gate passes - BY COINCIDENCE, not by
+     construction. A different corpus could put one of those eleven
+     sessions on a median's middle. `scripts/compare_cme_caches.py` is the
+     tool that re-measures it, and it exists because the blessed gate
+     structurally cannot.
 
      The original text follows.
 

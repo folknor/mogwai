@@ -94,6 +94,42 @@ def main():
         month: 100.0 * ordered.index(month) / (len(ordered) - 1) for month in sorted(chosen)
     }
 
+    # phase_drift: yearly medians. NOTE it uses vals[len//2], the UPPER middle
+    # on an even count, where monthly() uses the true median. That difference is
+    # real rather than a slip, so the blessing records what the code does.
+    drift_cols = [
+        "NQ.zero_change", "NQ.volume_cv", "NQ.volume",
+        "ES.zero_change", "CL.zero_change", "GC.zero_change",
+    ]
+    years = {}
+    for month, row in months.items():
+        years.setdefault(month[:4], []).append(row)
+    drift = {}
+    for year in sorted(years):
+        rows = years[year]
+        drift[year] = [
+            sorted(r[col] for r in rows)[len(rows) // 2] for col in drift_cols
+        ]
+
+    # phase_plan.
+    eligible_sorted = sorted(m for m in months if m >= sw.DATABENTO_START)
+    recent = eligible_sorted[-30:]
+    ranked = sorted(recent, key=lambda m: months[m]["NQ.rv"])
+    stratified = []
+    for pct in (0, 20, 40, 60, 80, 100):
+        idx = min(len(ranked) - 1, int(round(pct / 100.0 * (len(ranked) - 1))))
+        stratified.append([pct, ranked[idx]])
+    eras = []
+    for lo, hi in (("2010-06", "2013-12"), ("2014-01", "2017-12"), ("2018-01", "2021-12")):
+        pool = [m for m in eligible_sorted if lo <= m <= hi]
+        stress = max(pool, key=lambda m: months[m]["NQ.rv"])
+        calm = min(pool, key=lambda m: months[m]["NQ.rv"])
+        eras.append({
+            "lo": lo, "hi": hi,
+            "stress": stress, "stress_rv": months[stress]["NQ.rv"],
+            "calm": calm, "calm_rv": months[calm]["NQ.rv"],
+        })
+
     blessed = {
         "_doc": (
             "Reference artifact for the select_windows.py absorption, phase 4b item 2. "
@@ -124,6 +160,14 @@ def main():
             "chosen_in_pick_order": list(chosen),
             "chosen_sorted": sorted(chosen),
             "nq_rv_percentile": percentiles,
+        },
+        "drift": {"columns": drift_cols, "years": drift},
+        "plan": {
+            "pool_first": recent[0],
+            "pool_last": recent[-1],
+            "pool_len": len(recent),
+            "stratified": stratified,
+            "eras": eras,
         },
     }
 

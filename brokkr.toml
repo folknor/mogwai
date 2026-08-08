@@ -106,6 +106,14 @@ skip = [
     "parity3a_fingerprint_matches_the_committed_artifact",
     "parity3a_cadence_matches_the_committed_artifact",
     "parity3b_",
+    # The select_windows gate re-reads the four CME one-minute archives under
+    # `research/market-data`, roughly 1.5 GB that no clone carries. Named in
+    # full rather than by a `parity_select_windows_` prefix, following the 3a
+    # lesson above: `the_blessed_constants_match_the_port` sits in the same file,
+    # needs nothing but the committed artifact, and must keep running here.
+    # Run the gate by name: `brokkr test -p mogwai-lab
+    # parity_select_windows_reproduces --timeout 279`.
+    "parity_select_windows_reproduces_the_blessed_reference",
 ]
 certifies = "complete"
 

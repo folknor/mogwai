@@ -16,6 +16,7 @@ mod characterize;
 mod r#gen;
 mod man;
 mod preflight;
+mod select_windows;
 mod session_profile;
 mod synth;
 mod tick_composition;
@@ -63,6 +64,9 @@ enum Command {
     /// the input `synth fingerprint` reads
     /// (`analysis/characterize.py` plus `run_corpus.py`'s fan-out).
     Characterize(characterize::CharacterizeArgs),
+    /// Bar-frame intake: choose which tick-data windows to buy
+    /// (`analysis/select_windows.py`).
+    SelectWindows(select_windows::SelectWindowsArgs),
     /// The calendar-conditional session fit over a one-minute bar archive
     /// (`analysis/fit_session_profile.py`).
     SessionProfile {
@@ -137,6 +141,7 @@ fn main() -> anyhow::Result<()> {
         Command::Fit(args) => fit::run(&args),
         Command::Cache(args) => cache::run(args),
         Command::Characterize(args) => characterize::run(args),
+        Command::SelectWindows(args) => select_windows::run(&args),
         Command::SessionProfile { command } => session_profile::run(command),
         Command::Synth { command } => synth::run(command),
         Command::CadenceFeasible(args) => synth::run_cadence_feasible(args),
