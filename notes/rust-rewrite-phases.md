@@ -1293,6 +1293,34 @@ moment the scripts move. Phase 4 therefore runs in two halves:
 
      Everything else came back clean, including a 200,000-case release
      comparison the reviewer ran independently.
+  1k. **SIGNED, 2026-08-08, at `5d3a0af`.** Session 019fe13a signs the
+     Python retirement after six refusals. Its evidence: clean committed
+     tree, the interior lowest-normal-binade debug test passing, all 60
+     generated lowest-binade expectations independently verified to fall
+     in the required range, the 1,000-case CPython differential sweep
+     passing bit for bit, and `brokkr check --gate` at 698 passed, 25
+     ignored, 0 orphaned. It also reported no dossier briefing failure.
+
+     THE SIGNATURE IS CONDITIONAL, and the conditions are binding on
+     everything below rather than advisory:
+
+     - Phase 4b keeps this ORDER: item 6 (TBBO row-width validation and
+       fallible numeric refusal) while the Python is still runnable, then
+       item 5 (per-mode subcontract hashing), then item 2
+       (`select_windows.py`), then item 3 (`tick_composition_ratios.py`),
+       and item 7 moves the absorbed scripts only after every preceding
+       gate is green. The ordering is not arbitrary: item 6 loses its
+       reference the moment item 7 runs, and item 5 settles provenance
+       structure before more absorbed methods are added to it rather than
+       migrating hashes twice.
+     - ANY new parity deviation, or any change to the retirement SCOPE,
+       reopens the gate. A signature against this tree is not a signature
+       against a later one.
+     - It does NOT certify the release lateness budget. That property
+       stays explicitly uncertified; see 1e and `notes/todo.md`.
+     - It accepts the `TAPE_PROTOCOL_VERSION` exemption ONLY for the
+       audited `modal_tick.max` correction, and does not generalize it -
+       matching the wording already in `AGENTS.md`.
   2. **ABSORB `select_windows.py` WHOLE**, all four phases, as the
      bar-frame intake station on top of `session_profile.rs`'s existing
      archive, session and eligibility machinery. No frozen artifact
@@ -1367,11 +1395,34 @@ moment the scripts move. Phase 4 therefore runs in two halves:
      accurately records what the protocol-11 fit ran under. A fresh fit
      buys extensibility, not correctness, and is owner-authorized
      whenever convenient to bundle.)
-  6. The parity-frozen defect (the TBBO stream contract's unguarded
-     conversions in `parse_stream` / `stream.rs`) gets its real fix -
-     EXPANDED per the review: making the numeric parsing fallible is not
-     enough, because `stream.rs:320` still panics on a short row before
-     any conversion happens. Validate row width first.
+  6. **DONE 2026-08-08.** The parity-frozen TBBO defect is fixed, first
+     in the signature's required order and deliberately while
+     `mnq_fit.py` is still runnable as the reference it diverges from.
+
+     Both halves, which are independent - fixing either alone leaves the
+     other reachable. `ColumnIndices` now carries `required_width`, one
+     past the largest index any of the ten columns will dereference, and
+     the row loop refuses a short row ONCE before the first indexed
+     access. That ordering is the point: the panic was at
+     `parts[idx.ts_event]`, earlier than any conversion, so fallible
+     parsing could never have reached it. Separately `parse_field_i64`
+     returns `LabResult` and names both the column and the offending
+     value; the six call sites route through one local macro rather than
+     six identical matches, since `Iterator::next` cannot use `?`.
+
+     The divergence from the Python is confined to malformed input, which
+     is what makes it safe to land before retirement: the parity gates
+     compare output over well-formed corpora where neither refusal is
+     reachable. Confirmed rather than assumed -
+     `parity12a_observed_per_session_matches_the_committed_artifact`
+     re-passes over the real 22-session corpus in 84.4 s.
+
+     Fixtures are real `.csv.zst` files, not synthesized in process,
+     because the defect lived in the streaming reader and a fixture that
+     bypassed the decoder would not have exercised it. Each carries a
+     WELL-FORMED row ahead of the bad one, with a third test asserting
+     that row parses - without it, a reader that refused everything would
+     pass both refusal tests.
   7. Then, and only then, the absorbed scripts move to `research/dead/`.
      `research/` is gitignored, so this is effectively removal from the
      repo with a local copy retained; git history is the real archive.

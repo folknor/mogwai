@@ -33,7 +33,7 @@ Three tracks. No document sits above them, which is what this file is for.
 |---|---|---|
 | Evidence and purchase | `DATA-PURCHASE-REPORT.md` (root) | Idle. The ~30 dollar ES/MES purchase is the named next marginal dollar, owner-gated. Nothing to buy for 12b. |
 | Generator fidelity, protocols 10 to 12b | the four protocol specs below | 12a landed `no-family-eligible`; owner ruled 12b targets ARRIVAL COMPOSITION, repair-until-measurable. 12b spec undrafted, gated on codex capacity. |
-| Python-to-Rust rewrite | `rust-rewrite-phases.md` | TWO review passes, both REFUSED, 2026-08-08. The first pass's five blockers and the second's four are all closed; gate at 682 passed, 0 orphaned. Both judgement calls - the lateness quarantine and the version exemption - were accepted by the second pass. Awaiting a third. |
+| Python-to-Rust rewrite | `rust-rewrite-phases.md` | SIGNED 2026-08-08 at `5d3a0af`, after six refusals. Gate at 698 passed, 0 orphaned. The signature is CONDITIONAL on 4b keeping its order - item 6, then 5, then 2, then 3, then 7 - and any new parity deviation or scope change reopens it. |
 
 `todo.md` is the catch-all beneath all three: open work items, parked
 investigations, the hardcoded-value inventory.
@@ -73,13 +73,15 @@ investigations, the hardcoded-value inventory.
    2026-08-08. Full 4b order in `rust-rewrite-phases.md`.
 2. **12b is blocked on codex capacity**, and may not be drafted outside the
    freeze protocol.
-3. **The codex program-level review** still gates 4b's retirement half. Two
-   passes have refused. The lesson both times, and worth reading before
-   assuming a third will pass: every finding was a closure that held on the
-   committed corpus and failed one layer below where its gate looked, so
-   verifying a fix against the artifacts is not verifying it against the
-   contract. The Python originals must stay runnable until it passes; every
-   parity gate loses its reference the moment they move.
+3. **The codex program-level review has PASSED**, 2026-08-08 at `5d3a0af`,
+   after six refusals across as many passes. What it cost is the part worth
+   carrying: nearly every finding was a closure that held on the committed
+   corpus and failed one layer below where its gate looked. Verifying a fix
+   against the artifacts is not verifying it against the contract, and a bound
+   established over the fixtures you happen to have is not a bound. The
+   signature is conditional - see `rust-rewrite-phases.md` item 1k for the four
+   conditions, of which the binding one is that 4b keeps its order and that any
+   new parity deviation reopens the gate.
 
 ## Traps this repo has actually fallen into
 

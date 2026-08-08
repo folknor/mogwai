@@ -6,16 +6,23 @@ the Python retires. A map, not a story: every claim below cites the file,
 commit or landing record it comes from. Full narrative lives in the phase
 landing records; this document does not repeat it, only indexes it.
 
-**REFRESHED 2026-08-08 for the second review pass.** The first pass (session
-019fe03a, `review bare --profile deep`) REFUSED the signature and named five
-blockers; all five are now closed across eleven commits, `c279661` to
-`32da5cd`. Every section below describes the tree AS IT STANDS after those
-commits, not the state the first pass reviewed - section 12 is the diff, and
-is the right place to start if you are the reviewer who refused. Three of the
-five closures added surface that did not exist when the refusal was written
-(a new `characterize` subcommand, a new `session-profile` pair, a ported
-Markov simulation), so this is a review of new code, not a re-check of a
-checklist.
+**SIGNED 2026-08-08 at `5d3a0af`.** The program-level review passed after SIX
+refusals across as many passes. The signature is CONDITIONAL: 4b must keep the
+order item 6, 5, 2, 3, 7; any new parity deviation or change to the retirement
+scope reopens the gate; it does not certify the release lateness budget; and it
+accepts the `TAPE_PROTOCOL_VERSION` exemption only for the audited
+`modal_tick.max` correction. Full wording in `notes/rust-rewrite-phases.md`
+item 1k.
+
+This document is therefore now a RECORD rather than a request. Read section 12
+first: it carries the six passes and what each one found, and the findings are
+more useful than the verdict. One shape recurred in almost every one of them -
+a closure that held on the committed corpus and failed one layer below where
+its gate looked - and the two lessons that came out of it are worth stating
+before the detail. Verifying a fix against the artifacts is not verifying it
+against the contract. And a bound established over the fixtures you happen to
+have is not a bound; it took three refuted ULP ceilings to accept that and
+replace the bound with exact arithmetic.
 
 Companion reading: `notes/rust-rewrite-phases.md` (phase-by-phase landing
 records), `notes/python-script-triage.md` (per-script scope rulings),
@@ -260,12 +267,18 @@ stay honest. Full text in `notes/todo.md`; summarized here for the reviewer.
   price/size/bid_sz/ask_sz conversions carry no named refusal, so a malformed
   non-integer field crashes instead of refusing. Mirrored deliberately;
   decide whether it joins the refusal contract once the Python retires.
-  Found phase 1. EXPANDED by the first review and still open: making the
-  numeric parsing fallible is not sufficient, because `stream.rs` panics on a
-  short row before any conversion happens. Row width must be validated first.
-  This is 4b item 6 and is deliberately NOT closed yet - it is a real fix to a
-  deliberately mirrored bug, so it lands with the retirement rather than
-  before it, while the Python is still the parity reference.
+  Found phase 1. EXPANDED by the first review: making the numeric parsing
+  fallible is not sufficient, because `stream.rs` panicked on a short row
+  before any conversion happened.
+
+  CLOSED 2026-08-08, first in the signature's required order and deliberately
+  while `mnq_fit.py` is still runnable as the reference. `ColumnIndices`
+  carries `required_width` and the row loop refuses a short row before the
+  first indexed access; `parse_field_i64` returns `LabResult` and names the
+  column and the value. The divergence is confined to malformed input - the
+  parity gates compare well-formed corpora where neither refusal is reachable -
+  and that was confirmed by re-running the observed 12a gate over the real
+  22-session corpus rather than assumed. `crates/mogwai-lab/tests/stream_refusals.rs`.
 
 No other parity-frozen defect entries exist in `notes/todo.md` as of this
 writing; phases 2-3b added none to that class.
@@ -684,11 +697,52 @@ absorption (item 3), per-mode subcontract hash scoping (item 5), the TBBO
 short-row fix (item 6, section 4), and then the retirement itself (item 7).
 `--fit`/`--fit-markov` on `cadence-feasible` remain absent as capability.
 
-The question for this pass is NOT whether these six rows are closed - the tree
-answers that and you can re-run the gates. It is whether the tree is now
-retirement-ready on the ground your refusal actually stood on: what the gates
-do not cover. Three of the closures are new surface that did not exist when you
-wrote that, so findings outside the six rows above are expected rather than out
-of scope.
+### The fourth, fifth and sixth passes, 2026-08-08
 
-That question was asked and answered; the second pass is recorded above.
+All three landed on the exact-variance work, and together they are the clearest
+worked example in this repository of the difference between a claim and a
+verified claim.
+
+**Fourth. RULED: build the exact accumulator.** It refused the cheaper closure -
+approving a stated but unbounded deviation - on two grounds worth keeping.
+Reachability proves `gap_cv2` cannot change the density exit status, but it does
+not make a PRINTED number sound: CLI output has consumers outside the in-tree
+call graph, and DETERMINISM IS NOT CORRECTNESS. Suppressing the field was
+rejected too, since that removes Python capability rather than preserving it. It
+also found the platform-independence claim made for the float version was untrue
+as implemented, because `f64::powi` sat in the same expression and its precision
+varies by platform and Rust version. Closed by `exact::population_variance`; see
+section 2.
+
+**Fifth. Double rounding at the subnormal floor.** The exact accumulator rounded
+the quotient to 53 bits and then scaled by powers of two, which rounds twice for
+a nonzero subnormal result. Five finite inputs landed one ULP below CPython. The
+reviewer transcribed the Rust rounding path, validated that transcription
+against all 820 committed cases, and only then reported the divergence - it had
+verified both sides before making the claim.
+
+**Sixth. A debug-only bound, one binade too narrow.** The direct-assembly branch
+spans the subnormals AND the lowest normal binade; the `debug_assert` beside it
+covered only the first, so debug builds panicked on values release computed
+correctly. Two tests failed to catch it for instructive reasons: the boundary
+test landed exactly ON the join, where the mantissa equals `2^52` and the wrong
+bound still holds, and the `subnormal` generator family claimed in prose to
+straddle the boundary while its filter kept only results below `MIN_POSITIVE`.
+The prose was aspirational and the filter was not.
+
+**Then signed**, at `5d3a0af`, with the conditions recorded at the top of this
+document.
+
+WHAT TO TAKE FROM THE SEQUENCE, since a future reviewer will care more about
+this than about any individual defect:
+
+- A test that passes is not evidence until its reference is independently
+  established. Two separate tests here passed while measuring nothing - one
+  against a hand-rolled "exact" value that was itself a naive sum, one against a
+  fixture family that had filtered out the class it claimed to cover.
+- A test that touches a boundary is not a test OF the boundary. It has to land
+  on both sides.
+- Prose in a generator does not constrain the generator. Check the output
+  against the claim, not the claim against itself.
+- A wrong assertion bound is worse than no bound, because it fails in the
+  configuration meant to be the stricter one.

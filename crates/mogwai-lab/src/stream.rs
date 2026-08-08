@@ -106,6 +106,10 @@ struct ColumnIndices {
     ask_px_00: usize,
     bid_sz_00: usize,
     ask_sz_00: usize,
+    /// One past the largest index any of the above will dereference, so a
+    /// short row can be refused ONCE, before the first access, rather than
+    /// guarded at each of the ten sites individually.
+    required_width: usize,
 }
 
 fn column_indices(header_line: &str) -> LabResult<ColumnIndices> {
@@ -123,7 +127,7 @@ fn column_indices(header_line: &str) -> LabResult<ColumnIndices> {
             header_line.trim()
         )));
     }
-    Ok(ColumnIndices {
+    let indices = ColumnIndices {
         ts_event: find("ts_event").unwrap(),
         instrument_id: find("instrument_id").unwrap(),
         action: find("action").unwrap(),
@@ -134,6 +138,26 @@ fn column_indices(header_line: &str) -> LabResult<ColumnIndices> {
         ask_px_00: find("ask_px_00").unwrap(),
         bid_sz_00: find("bid_sz_00").unwrap(),
         ask_sz_00: find("ask_sz_00").unwrap(),
+        required_width: 0,
+    };
+    let required_width = 1 + [
+        indices.ts_event,
+        indices.instrument_id,
+        indices.action,
+        indices.side,
+        indices.price,
+        indices.size,
+        indices.bid_px_00,
+        indices.ask_px_00,
+        indices.bid_sz_00,
+        indices.ask_sz_00,
+    ]
+    .into_iter()
+    .max()
+    .expect("ten fixed columns");
+    Ok(ColumnIndices {
+        required_width,
+        ..indices
     })
 }
 
@@ -184,13 +208,39 @@ pub fn classify_book(bid_px: i64, ask_px: i64) -> &'static str {
     }
 }
 
-fn parse_field_i64(parts: &[&str], idx: usize, path: &Path, line_no: usize, field: &str) -> i64 {
-    parts[idx].parse::<i64>().unwrap_or_else(|e| {
-        panic!(
-            "{}:{line_no}: malformed integer field {field} {:?}: {e}",
-            path.display(),
-            parts[idx]
-        )
+/// Reads one integer column, REFUSING rather than panicking on a malformed
+/// value.
+///
+/// This used to `panic!`, mirroring `mnq_fit.py`'s `parse_stream`, which
+/// carries no named refusal for these conversions either and dies on a
+/// non-integer field. The mirror was deliberate while both implementations had
+/// to agree, and it is fixed here as phase 4b item 6 - before the Python
+/// retires, so its behaviour is still available as the reference this diverges
+/// from knowingly.
+///
+/// The divergence is safe by construction for the parity gates: they compare
+/// output over WELL-FORMED corpora, where no conversion fails and nothing is
+/// reached. What changes is only the behaviour on input the Python crashes on,
+/// which is the class the refusal contract in `reference/architecture.md`
+/// exists to cover.
+fn parse_field_i64(
+    parts: &[&str],
+    idx: usize,
+    path: &Path,
+    line_no: usize,
+    field: &str,
+) -> LabResult<i64> {
+    let raw = parts.get(idx).ok_or_else(|| {
+        LabError::refusal(format!(
+            "{}:{line_no}: row ends before column {field}",
+            path.display()
+        ))
+    })?;
+    raw.parse::<i64>().map_err(|e| {
+        LabError::refusal(format!(
+            "{}:{line_no}: malformed integer field {field} {raw:?}: {e}",
+            path.display()
+        ))
     })
 }
 
@@ -318,6 +368,23 @@ impl Iterator for ParseStream {
                         unreachable!("column indices set with the current file");
                     };
                     let parts: Vec<&str> = line.split(',').collect();
+                    // WIDTH FIRST, before any indexed access. Every dereference
+                    // below uses a position derived from the HEADER, so a row
+                    // with fewer fields than the header promised used to panic
+                    // on the very first one - `parts[idx.ts_event]` - which is
+                    // earlier than any conversion and therefore not reachable by
+                    // making the conversions fallible. Phase 4b item 6.
+                    if parts.len() < idx.required_width {
+                        self.finished = true;
+                        return Some(Err(LabError::refusal(format!(
+                            "{}:{}: row carries {} field(s) but the header promised at least {}; \
+                             truncated or mis-delimited input is refused rather than indexed past",
+                            path.display(),
+                            self.line_no,
+                            parts.len(),
+                            idx.required_width
+                        ))));
+                    }
                     let raw_ts = parts[idx.ts_event];
                     if raw_ts.len() != 19 || !raw_ts.bytes().all(|b| b.is_ascii_digit()) {
                         self.finished = true;
@@ -376,11 +443,25 @@ impl Iterator for ParseStream {
                             side
                         ))));
                     }
-                    let price = parse_field_i64(&parts, idx.price, &path, self.line_no, "price");
-                    let bid_px =
-                        parse_field_i64(&parts, idx.bid_px_00, &path, self.line_no, "bid_px_00");
-                    let ask_px =
-                        parse_field_i64(&parts, idx.ask_px_00, &path, self.line_no, "ask_px_00");
+                    // The refusal has to become the iterator's error item rather
+                    // than propagate with `?`, since this is `Iterator::next`.
+                    // One macro rather than six identical matches, so the
+                    // conversion sites stay as readable as they were when they
+                    // panicked.
+                    macro_rules! field {
+                        ($index:expr, $name:literal) => {
+                            match parse_field_i64(&parts, $index, &path, self.line_no, $name) {
+                                Ok(value) => value,
+                                Err(e) => {
+                                    self.finished = true;
+                                    return Some(Err(e));
+                                }
+                            }
+                        };
+                    }
+                    let price = field!(idx.price, "price");
+                    let bid_px = field!(idx.bid_px_00, "bid_px_00");
+                    let ask_px = field!(idx.ask_px_00, "ask_px_00");
                     if price > 0 && price % TICK_UNITS != 0 {
                         self.finished = true;
                         return Some(Err(LabError::refusal(format!(
@@ -405,11 +486,9 @@ impl Iterator for ParseStream {
                             self.line_no
                         ))));
                     }
-                    let size = parse_field_i64(&parts, idx.size, &path, self.line_no, "size");
-                    let bid_sz =
-                        parse_field_i64(&parts, idx.bid_sz_00, &path, self.line_no, "bid_sz_00");
-                    let ask_sz =
-                        parse_field_i64(&parts, idx.ask_sz_00, &path, self.line_no, "ask_sz_00");
+                    let size = field!(idx.size, "size");
+                    let bid_sz = field!(idx.bid_sz_00, "bid_sz_00");
+                    let ask_sz = field!(idx.ask_sz_00, "ask_sz_00");
                     let row = Row {
                         ts,
                         instrument_id: parts[idx.instrument_id].to_string(),
