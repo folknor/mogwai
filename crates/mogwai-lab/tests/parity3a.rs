@@ -30,26 +30,18 @@ fn parity3a_fingerprint_matches_the_committed_artifact() {
     )
     .expect("fingerprint synthesis");
 
+    // NO EXCEPTIONS. This gate carried one until 2026-08-08:
+    // `empirical_ranges.modal_tick.max` read 0.25 in the committed artifact
+    // while every input reproduced 0.1, because the `char_*.json` reports had
+    // been regenerated after the commit that produced `fingerprint.json` and
+    // nobody re-ran the synthesis. The fingerprint has now been regenerated
+    // from those inputs and re-committed at 0.1, so the exception is gone -
+    // and its absence is the proof the drift is closed rather than tolerated.
+    // If this list ever needs to come back, that is a finding, not a fix.
     let diffs = canon_differences(&committed, &built, "$", 20);
-    // KNOWN, VERIFIED input drift, not a port defect: the on-disk
-    // `analysis/char_*.json` files (gitignored, locally regenerated) no
-    // longer reproduce the committed fingerprint.json's
-    // `empirical_ranges.modal_tick.max` (0.25 in the commit; 0.1 from every
-    // currently-committed pair's `returns.modal_tick`, XBTUSD's own value).
-    // Confirmed independently: running `analysis/build_fingerprint.py`
-    // itself (unmodified) against these same char_*.json files reproduces
-    // 0.1, not 0.25 - so this is stale input, not a Rust/Python
-    // disagreement. See notes/rust-rewrite-phases.md's phase-3a landing
-    // record. Every other leaf, including every float in `session_profile`
-    // and `golden_targets`, is typed-canon identical.
-    let allowed: &[&str] = &["$.empirical_ranges.modal_tick.max"];
-    let unexpected: Vec<&String> = diffs
-        .iter()
-        .filter(|d| !allowed.iter().any(|a| d.starts_with(*a)))
-        .collect();
     assert!(
-        unexpected.is_empty(),
-        "rebuilt fingerprint diverges beyond the known input-drift leaf: {unexpected:#?}"
+        diffs.is_empty(),
+        "rebuilt fingerprint diverges from the committed artifact: {diffs:#?}"
     );
 }
 

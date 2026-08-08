@@ -567,7 +567,7 @@
     "modal_tick": {
       "min": 1e-07,
       "median": 0.0001,
-      "max": 0.25
+      "max": 0.1
     },
     "price_decimals": {
       "min": 1,

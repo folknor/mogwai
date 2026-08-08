@@ -182,7 +182,7 @@ open_windows = [
 "margin.maintenance_per_contract" = { kind = "declared", rationale = "test collateral, not a CME performance bond" }
 "margin.breach_action" = { kind = "declared", rationale = "exercise liquidation" }
 "generator.symbol" = { kind = "declared", rationale = "generator key matches the instrument" }
-"generator.modal_tick" = { kind = "declared", rationale = "CME contract specification" }
+"generator.modal_tick" = { kind = "declared", rationale = "CME contract specification", accepted_diagnostics = ["outside-empirical-corpus-range"] }
 "generator.price_decimals" = { kind = "declared", rationale = "CME quote convention" }
 "generator.mean_event_duration_s" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG", window = "2026-07 full month, 22 usable sessions", accepted_diagnostics = ["outside-empirical-corpus-range"] }
 "generator.children_mean" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG", window = "2026-07 full month, 22 usable sessions", accepted_diagnostics = ["outside-empirical-corpus-range"] }

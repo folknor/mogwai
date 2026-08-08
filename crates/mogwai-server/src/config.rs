@@ -1544,17 +1544,43 @@ mod tests {
         assert_eq!(rebuilt.scalars.top_sizes.ask, Decimal::TEN);
     }
 
+    /// Both directions of the provenance contract: a diagnostic that fires
+    /// without an acceptance refuses, and an acceptance that no longer fires
+    /// refuses as stale.
+    ///
+    /// The arms moved on 2026-08-08 when `empirical_ranges.modal_tick.max`
+    /// was corrected from 0.25 to 0.1. Before that, MNQ's 0.25 tick sat
+    /// exactly ON the inclusive ceiling, so it cleared the range check and
+    /// the shipped preset carried no acceptance for it - which is what let
+    /// this test use `modal_tick` as its example of an UNACCEPTED diagnostic.
+    /// With the corrected ceiling the tick is genuinely outside the crypto
+    /// corpus envelope, the diagnostic fires honestly, and the preset accepts
+    /// it in provenance. So the unaccepted arm now needs a different knob.
     #[test]
     fn shipped_preset_diagnostics_require_exact_provenance_acceptance() {
         let fp = mogwai_data::Fingerprint::from_repo_json();
         let (instrument, mut provenance) = effective_preset("MNQ").unwrap();
         let configured: ConfiguredInstrument = toml::Value::Table(instrument).try_into().unwrap();
         let mut profile = profile_from_configured(&configured, &fp).unwrap();
-        profile.scalars.modal_tick = Decimal::ONE;
 
+        // As shipped: the tick is outside the corpus range, the diagnostic
+        // fires, and provenance accepts it. This is the accepted arm.
+        assert_preset_diagnostics("MNQ", &profile, &fp, &provenance).unwrap();
+
+        // UNACCEPTED: drop the acceptance the preset ships and the same
+        // diagnostic must refuse.
+        let entry = provenance
+            .get_mut("generator.modal_tick")
+            .and_then(toml::Value::as_table_mut)
+            .unwrap();
+        entry.remove("accepted_diagnostics");
         let error = assert_preset_diagnostics("TEST", &profile, &fp, &provenance).unwrap_err();
         assert!(error.to_string().contains("unaccepted"), "{error}");
 
+        // STALE: put the acceptance back, then move the tick to a value
+        // INSIDE the corpus range so the diagnostic stops firing. An
+        // acceptance for a diagnostic that no longer fires is itself a
+        // refusal - provenance may not claim a warning it does not carry.
         let entry = provenance
             .get_mut("generator.modal_tick")
             .and_then(toml::Value::as_table_mut)
@@ -1565,9 +1591,8 @@ mod tests {
                 "outside-empirical-corpus-range".into(),
             )]),
         );
-        assert_preset_diagnostics("TEST", &profile, &fp, &provenance).unwrap();
-
-        profile.scalars.modal_tick = Decimal::new(25, 2);
+        // The corpus median, comfortably inside [1e-7, 0.1].
+        profile.scalars.modal_tick = Decimal::new(1, 4);
         let error = assert_preset_diagnostics("TEST", &profile, &fp, &provenance).unwrap_err();
         assert!(error.to_string().contains("stale acceptances"), "{error}");
     }
