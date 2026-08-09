@@ -19,6 +19,26 @@ Or both. There are no exceptions.
 
 ## Open issues
 
+- DECIDE what the ETHUSDT and SOLUSDT presets are for. Both are thin
+  aliases of BTCUSDT: `ethusdt.toml` is `preset = "BTCUSDT"` plus an
+  override of `symbol` and `class.base`, and `solusdt.toml` is the same
+  shape. Nothing price-related is overridden, so
+  `gen --type trades --symbol ETHUSDT --seed 7 --length 2d` emits a tape
+  BYTE-IDENTICAL to the BTCUSDT one, opening at 59999.56. Measured
+  2026-08-09 while running the protocol-12b brick N B1 gate, which
+  compares five presets and got three copies of one tape; all five
+  digests are recorded in `analysis/mnq-arrival-control.json`.
+  Two things follow, and they are separate. The venue ships a tape
+  where ETH trades at a BTC price, which is a realism claim the project
+  otherwise takes seriously - AGENTS.md says whatever gets traded next
+  owes a corpus, a measurement, a fit and a preset, and these two have
+  a preset only. And every gate that enumerates the five shipped
+  presets is weaker than its count suggests, B1 included: it exercises
+  three distinct tapes, not five. Neither is urgent, because no
+  consumer trades these today; both are cheap to get wrong later. The
+  provenance blocks calling `symbol` fitted from 30 days of Binance
+  trades should be read with this in mind.
+
 - RECONCILE the protocol-12b section 5.5 rescale with the shipped preset
   convention. That section freezes the negative control's re-centring as
   "rescale the 24 values to sum to 1, which the `SessionProfile` schema

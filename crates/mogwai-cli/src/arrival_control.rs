@@ -185,30 +185,40 @@ fn b1_supporting_check(baseline_commit: &str) -> anyhow::Result<Value> {
         .filter(|line| !line.is_empty())
         .filter(|line| FROZEN_PATHS.iter().any(|frozen| line.starts_with(frozen)))
         .collect();
-    // A test module inside a frozen crate cannot reach the shipped tape: it is
-    // compiled only under `cfg(test)`, so no byte it contains is in the binary
-    // that writes a tape. Splitting the two OUT of the verdict rather than out
-    // of the record is deliberate - the paths are still reported, so a reader
-    // sees exactly what moved and can disagree with this reasoning.
-    let (test_only, shipping): (Vec<&str>, Vec<&str>) =
-        frozen.iter().partition(|p| is_test_only(p));
+    // A test, bench or example target inside a frozen crate cannot reach the
+    // shipped tape: none of them is linked into the binary that writes one.
+    // Splitting them OUT of the verdict rather than out of the record is
+    // deliberate - the paths are still reported, so a reader sees exactly what
+    // moved and can disagree with this reasoning.
+    let (non_shipping, shipping): (Vec<&str>, Vec<&str>) =
+        frozen.iter().partition(|p| is_non_shipping(p));
     let version_ok = mogwai_data::TAPE_PROTOCOL_VERSION == 11;
     Ok(json!({
         "command": format!("git diff --name-only {range}"),
         "baseline_commit": baseline_commit,
         "frozen_paths": FROZEN_PATHS,
         "touched_frozen_shipping_paths": shipping,
-        "touched_frozen_test_only_paths": test_only,
+        "touched_frozen_non_shipping_paths": non_shipping,
         "tape_protocol_version": mogwai_data::TAPE_PROTOCOL_VERSION,
         "passed": shipping.is_empty() && version_ok,
     }))
 }
 
-/// Whether a repository path is compiled only under `cfg(test)` and so cannot
-/// contribute a byte to a generated tape. Deliberately narrow: a `tests.rs`
-/// module file or anything under a `tests/` directory, nothing cleverer.
-fn is_test_only(path: &str) -> bool {
-    path.ends_with("/tests.rs") || path.contains("/tests/")
+/// Whether a repository path is outside the shipped library and so cannot
+/// contribute a byte to a generated tape: a `cfg(test)` module, an integration
+/// test, a bench or an example target. None of them is linked into the binary
+/// that writes a tape.
+///
+/// The `examples/` arm is not hypothetical tidiness. The first artifact run
+/// failed B1 on `crates/mogwai-data/examples/fill_walk_bench.rs`, a criterion
+/// bench target whose only change was a comment, while all five tape
+/// comparisons reported byte identity. A supporting check that contradicts the
+/// evidence it supports is worse than no supporting check.
+fn is_non_shipping(path: &str) -> bool {
+    path.ends_with("/tests.rs")
+        || path.contains("/tests/")
+        || path.contains("/benches/")
+        || path.contains("/examples/")
 }
 
 /// B1: byte identity of `gen --type trades` output against the pre-landing
