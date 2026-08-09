@@ -9,9 +9,10 @@ the quarter that is wrong into three more documents.
 Notes-class, like everything else here: transient, no truth guarantee, nothing
 durable may cite it. Its own end state is deletion - see the last section.
 
-**Keep it short.** `DATA-PURCHASE-REPORT.md` was meant to live three hours and
-is now 2,676 lines. This file is a map. If it starts explaining things instead
-of pointing at them, it has failed.
+**Keep it short.** `DATA-PURCHASE-REPORT.md` was meant to live three hours,
+grew to 2,687 lines, and was consolidated back to one page on 2026-08-09.
+This file is a map. If it starts explaining things instead of pointing at
+them, it has failed.
 
 ## The arc
 
@@ -20,7 +21,7 @@ REALISTIC tape for whatever instrument gets traded next, and serve it over the
 live path so a strategy can be forward-tested against it.
 
 Everything below is a phase of that. The current instrument set - MNQ, MES,
-BTCUSDT, ETHUSDT, SOLUSDT - is where the work has reached, not where it stops.
+BTCUSDT - is where the work has reached, not where it stops.
 That premise is load-bearing and is stated durably in `AGENTS.md` and
 `reference/architecture.md`; several assessments have been made wrong by
 assuming the corpus is closed.
@@ -101,10 +102,11 @@ Cheap to state, expensive to rediscover.
 - **Citing a frozen artifact by vibe.** `targets-frozen.json` was described as
   `select_windows.py`'s gate in three documents; it is the BTCUSDT
   microstructure target set and that script never touches it.
-- **Reading a summary and calling it the source.** `DATA-PURCHASE-REPORT.md`
-  section 7.2 summarizes the sampling-frame verdict; the preregistration's
-  sections 7.1 and 8 are what actually scope it, and they say something the
-  summary does not.
+- **Reading a summary and calling it the source.** The purchase report's
+  summary of the sampling-frame verdict got its scope wrong for days; the
+  preregistration's sections 7.1 and 8 are what actually scope it, and they
+  say something no summary carried. Read the deciding document, not the
+  document that cites it.
 - **Verifying a fix against the artifacts instead of the contract.** The
   rewrite's recurring failure shape: a closure that held on the committed
   corpus and failed one layer below where its gate looked. A bound established
