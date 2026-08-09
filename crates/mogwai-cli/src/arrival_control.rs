@@ -85,27 +85,45 @@ fn gate_json(g: &GateRec) -> Value {
 /// the subprocess is gone. The workspace lint forbidding the tool's name in
 /// Rust source is what keeps it gone.
 ///
-/// What replaces it is the gate's own transcript. The operator runs the gate
-/// and captures its output; this function refuses unless that capture exists,
-/// and reads the completion and error markers out of it. That catches what
-/// actually goes wrong - running this command against a stale transcript, or
-/// one from a run that died partway - which the first draft's
-/// `--b5-green-at <commit>` flag could not, since a commit string matches
-/// whether or not the gate was ever run.
+/// What replaces it is the gate's own machine-readable verdict. The operator
+/// runs the gate with its `--json` flag and captures the output; this function
+/// refuses unless that capture exists and its LAST line parses as the gate's
+/// versioned summary object. B5 passes on `verdict == "complete"`.
+///
+/// Reading the summary rather than grepping the human output is deliberate.
+/// The prose lines are console formatting and change freely; `--json` is a
+/// declared contract carrying `schema`, and it reports `failed_phase`, so a
+/// red run says WHICH phase failed instead of being inferred from an error
+/// marker appearing somewhere in the text. A transcript from a run that died
+/// partway has no summary line at all and so cannot read as a pass, which is
+/// what the first draft's `--b5-green-at <commit>` flag could not manage: a
+/// commit string matches whether or not the gate was ever run.
 fn read_b5_log(path: &Path) -> anyhow::Result<(Value, f64)> {
     let started = Instant::now();
     let bytes = std::fs::read(path).map_err(|e| {
         anyhow!(
-            "B5 refused: no gate transcript at {}: {e}. Run the standing build gate and capture \
-             its output there before running this command; see AGENTS.md for the command.",
+            "B5 refused: no gate transcript at {}: {e}. Run the standing build gate with its \
+             --json flag and capture the output there before running this command; see AGENTS.md \
+             for the command.",
             path.display()
         )
     })?;
     let text = String::from_utf8_lossy(&bytes);
-    let completed = text.contains("[result]");
-    let errored = text.contains("[error]");
+    let summary: Value = text
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .and_then(|line| serde_json::from_str(line).ok())
+        .ok_or_else(|| {
+            anyhow!(
+                "B5 refused: {} carries no machine-readable summary on its last line. Capture \
+                 the gate's output with its --json flag; a transcript without a summary is \
+                 either from a run that died partway or from a run without that flag.",
+                path.display()
+            )
+        })?;
     Ok((
-        json!({"gate":"the standing build gate","transcript":path.to_string_lossy(),"transcript_sha256":sha256_bytes(&bytes),"transcript_bytes":bytes.len(),"completed":completed,"errored":errored,"run_by":"the operator, before this command - never spawned from the venue binary"}),
+        json!({"gate":"the standing build gate","transcript":path.to_string_lossy(),"transcript_sha256":sha256_bytes(&bytes),"transcript_bytes":bytes.len(),"summary":summary,"run_by":"the operator, before this command - never spawned from the venue binary"}),
         started.elapsed().as_secs_f64(),
     ))
 }
@@ -307,7 +325,7 @@ fn run_with(args: ArrivalControlArgs, seams: Seams) -> anyhow::Result<Value> {
     // A transcript that did not complete, or that carries an error line, fails
     // B5 rather than refusing the run: a red suite is a legitimate gate result
     // and belongs in the artifact as one.
-    let b5_passed = b5_ev["completed"] == true && b5_ev["errored"] == false;
+    let b5_passed = b5_ev["summary"]["verdict"] == "complete";
     let baseline = args.b1_baseline.unwrap_or_else(|| DEFAULT_BASELINE.into());
     let after = args.b1_after.unwrap_or_else(|| DEFAULT_AFTER.into());
     let baseline_commit = args
@@ -460,31 +478,37 @@ mod tests {
         assert!(err.to_string().contains("B5 refused"));
     }
 
-    /// A transcript that exists but records a failed or truncated gate FAILS
-    /// B5 rather than refusing: a red suite is a real gate result.
+    /// A transcript recording a RED gate reads successfully and reports a
+    /// failing verdict - a red suite is a real gate result and belongs in the
+    /// artifact as one. A transcript with no summary line is a different
+    /// thing: it is not evidence at all, so it REFUSES rather than failing.
     #[test]
-    fn a_red_or_truncated_gate_transcript_fails_b5() {
+    fn a_red_gate_reads_as_failed_and_a_summaryless_one_refuses() {
         let dir = Path::new("target/arrival-control-b5");
         std::fs::create_dir_all(dir).unwrap();
         let green = dir.join("green.log");
-        std::fs::write(&green, b"[run] clippy\n[result]  check complete in 2m37s\n").unwrap();
+        std::fs::write(
+            &green,
+            b"[result]  check complete\n{\"schema\":1,\"verdict\":\"complete\",\"failed_phase\":null}\n",
+        )
+        .unwrap();
         let (ev, _) = read_b5_log(&green).unwrap();
-        assert_eq!(ev["completed"], true);
-        assert_eq!(ev["errored"], false);
+        assert_eq!(ev["summary"]["verdict"], "complete");
 
         let red = dir.join("red.log");
         std::fs::write(
             &red,
-            b"[error]   build: test failed\n[result]  check complete\n",
+            b"[error]   cargo test: 1 failure\n{\"schema\":1,\"verdict\":\"failed\",\"failed_phase\":\"test\"}\n",
         )
         .unwrap();
         let (ev, _) = read_b5_log(&red).unwrap();
-        assert_eq!(ev["errored"], true);
+        assert_eq!(ev["summary"]["verdict"], "failed");
+        assert_eq!(ev["summary"]["failed_phase"], "test");
 
         let truncated = dir.join("truncated.log");
         std::fs::write(&truncated, b"[run] clippy workspace\n").unwrap();
-        let (ev, _) = read_b5_log(&truncated).unwrap();
-        assert_eq!(ev["completed"], false);
+        let err = read_b5_log(&truncated).expect_err("a summaryless transcript is not evidence");
+        assert!(err.to_string().contains("no machine-readable summary"));
     }
 
     #[test]

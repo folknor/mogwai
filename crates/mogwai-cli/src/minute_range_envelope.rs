@@ -102,8 +102,22 @@ fn write_atomic(path: &std::path::Path, value: &Value) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    /// Only meaningful on a DIRTY tree, and it must say so rather than assume
+    /// it. Without the guard this test asserts the development tree is dirty,
+    /// which makes the standing gate RED at every clean commit - exactly when
+    /// the gate is most likely to be run, and the state every artifact command
+    /// requires. Found 2026-08-09 by running the gate immediately after a
+    /// commit; it had passed until then only because the tree happened to be
+    /// dirty every previous time.
+    ///
+    /// The sibling in `arrival_control` carries the same guard for the same
+    /// reason. On a clean tree the refusal cannot be provoked without dirtying
+    /// the tree, which a unit test in the general lane must not do.
     #[test]
     fn minute_range_envelope_refuses_a_dirty_tree_before_reading_inputs() {
+        if require_clean_tree().is_ok() {
+            return;
+        }
         let err = run(MinuteRangeEnvelopeArgs {
             corpus: None,
             ledger: None,

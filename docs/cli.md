@@ -280,9 +280,12 @@ transcript before walking fit seeds 301 through 304 and test seeds 305 through
 five parent-build baselines under `analysis/out/arrival-control-b1-baseline/`.
 
 Gate B5 is EVIDENCE THIS COMMAND READS, never a check it runs. Run
-`brokkr check --gate` yourself first and capture its output to
+`brokkr check --gate --json` yourself first and capture its output to
 `analysis/out/arrival-control-b5-gate.log` (or pass `--b5-log`); the command
-records that transcript's digest and whether it completed without error. The
+records that transcript's digest and the machine-readable summary on its last
+line, and passes B5 only on `verdict: complete`. A transcript with no summary
+line - one from a run that died partway, or one captured without `--json` - is
+refused rather than read as a pass. The
 venue binary never invokes the build tool: a clone without it could not produce
 an artifact at all, and because everything here runs through `brokkr run`, a
 spawned gate would block forever on the workspace lock its own parent holds. A
