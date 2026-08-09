@@ -776,6 +776,19 @@ pub fn blocks_from_sessions(per_session: &[Value]) -> LabResult<Value> {
     }))
 }
 
+/// The Stage A projection's monthly `{block1, block2}` product. It accepts
+/// reduced session records and deliberately shares both poolers with
+/// [`blocks_from_sessions`], so the cadence-only oracle does not grow a
+/// second aggregation implementation.
+pub fn reduced_blocks_from_sessions(per_session: &[Value]) -> LabResult<Value> {
+    let pooled = pool_session_hists(per_session)?;
+    let b2: Vec<&Value> = per_session.iter().map(|r| &r["block2"]).collect();
+    Ok(serde_json::json!({
+        "block1": block1_blocks(&pooled),
+        "block2": pool_block2(&b2),
+    }))
+}
+
 // -- Central blocks (the 8-seed median tree) --------------------------------
 
 /// `tree_median`: the recursive 8-seed median over IDENTICALLY SHAPED JSON

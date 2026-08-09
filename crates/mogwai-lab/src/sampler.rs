@@ -135,6 +135,24 @@ impl ResourceSampler {
         }
     }
 
+    /// Take a synchronous sample and return the peak RSS observed so far.
+    /// Long-running drivers call this at work-unit boundaries so a ceiling is
+    /// enforced during the run rather than merely reported after it.
+    pub fn sample_peak_rss(
+        &self,
+        fixed_scratch_paths: &[PathBuf],
+        scan_dir: Option<&std::path::Path>,
+    ) -> u64 {
+        sample_once(
+            std::process::id(),
+            fixed_scratch_paths,
+            scan_dir,
+            &self.peak_rss,
+            &self.peak_scratch,
+        );
+        self.peak_rss.load(Ordering::Relaxed)
+    }
+
     /// Stops the loop, joins the thread, takes one final sample (matching
     /// the Python's `stop()` doing one last `self.sample()`), and returns
     /// `(peak_rss_bytes, peak_scratch_bytes)`. Refuses if the sampling

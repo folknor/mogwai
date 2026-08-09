@@ -296,6 +296,19 @@ impl SessionAcc {
         }))
     }
 
+    /// Close only the Stage A projection shared surface. This uses the same
+    /// block implementations as `close` and deliberately avoids blocks 3 and
+    /// 4 and permutation work.
+    pub fn close_reduced(mut self, _scope: Scope) -> LabResult<serde_json::Value> {
+        self.seg(0);
+        self.seg(1);
+        Ok(serde_json::json!({
+            "session_date": self.date,
+            "block1_hist": self.block1()?,
+            "block2": self.block2(),
+        }))
+    }
+
     // -- Block 1 ------------------------------------------------------------
 
     /// The exact sparse joint histogram (spec 3.5), one record per distinct

@@ -19,6 +19,46 @@ Or both. There are no exceptions.
 
 ## Open issues
 
+- DECIDE whether a Stage A projection gap should refuse the CELL or abort
+  the RUN. `project_seed` maps `ProjectStop::Lab` to a hard error that
+  ends the whole grid, and `SessionAcc::block1` raises exactly that when a
+  burst's children land in the 15:15 to 15:30 halt. For the shipped
+  family-1 path it is unreachable at a 1 microsecond child stride, but a
+  kernel family could in principle produce it, and one such cell would end
+  an eleven-hour run at whatever hour it reached. This is the same shape
+  as a defect already fixed once during the brick A review, where a parent
+  mapping to no segment aborted the grid instead of refusing its cell; the
+  difference is that the reachable case was clearly a cell refusal while
+  this one is genuinely ambiguous, since children in a halt window may
+  mean the cadence is wrong rather than that the cell is merely bad.
+  Recorded 2026-08-09 rather than decided by the implementer. The cost of
+  being wrong is bounded: per-cell walks are cached, so an aborted run
+  does not repay for cells already evaluated.
+
+- DECIDE whether the protocol-12b Stage A refinement pass should run at
+  all. Deferred by the owner on 2026-08-09 rather than settled, so the
+  frozen pass stands and the budgets were raised to fund it.
+  The case for cutting it: refinement is 29,200 s of the 35,526 s Stage A
+  cost model, 82 percent, and its entire product is a finer loss ORDERING
+  over cells that Stage B then truncates to `STAGE_B_CELL_CAP = 24` per
+  family. It also cannot rescue a family whose coarse admissible region is
+  empty - which is the outcome that would close the landing - because it
+  subdivides around that region's own boundary cells, so an empty region
+  has nothing to subdivide around. And `SELECTION_INDIFFERENCE = 0.01`
+  already declares losses inside that margin as not separating candidates,
+  so a half-spacing lattice buys precision the selection is defined not to
+  use. Cutting it drops Stage A to about 6,326 s, roughly 1.8 hours, and
+  the budget question disappears rather than being negotiated.
+  The case against: the selected parameter point would sit on the coarse
+  lattice, and nobody has shown the coarse spacing is fine enough for the
+  mechanism to be found at all. That is a real risk and it is why this is
+  a ruling rather than an obvious cut.
+  Note this is NOT the same question as `STAGE_B_CELL_CAP`, which earns
+  its place: a Stage B cell is a full month-scale walk per seed at about
+  250 s, so an uncapped 1,508-cell region genuinely is tens of hours.
+  Changing `REFINEMENT_DEPTH` or `REFINEMENT_CELL_CAP` is a section 17
+  amendment against the contract of record.
+
 - DECIDE what the ETHUSDT and SOLUSDT presets are for. Both are thin
   aliases of BTCUSDT: `ethusdt.toml` is `preset = "BTCUSDT"` plus an
   override of `symbol` and `class.base`, and `solusdt.toml` is the same

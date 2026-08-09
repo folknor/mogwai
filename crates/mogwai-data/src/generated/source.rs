@@ -19,7 +19,9 @@ use rust_decimal::{Decimal, RoundingStrategy};
 
 use crate::{TickEvent, TickFault, TickSource};
 
-use super::arrival::{ArrivalEnv, ArrivalKernel, ArrivalState, PendingReopen, RuntimeModifiers};
+use super::arrival::{
+    ArrivalEnv, ArrivalKernel, ArrivalState, CadenceWalk, PendingReopen, RuntimeModifiers,
+};
 use super::calendar::SessionCalendar;
 use super::consts::{
     ARRIVAL_ACTIVE_CHILDREN_MULT, ARRIVAL_MEAN_CAL, ARRIVAL_QUIET_ACTIVE_RATIO,
@@ -37,9 +39,6 @@ use super::numeric::{decimal_from_f64, round_lot_size};
 use super::quote::{PublishedBook, book_mid_ticks, place_book};
 use super::regime::RegimeState;
 use super::session::SessionModulator;
-use mogwai_protocol::seeds::splitmix64;
-
-const CADENCE_STREAM_TAG: u64 = 0x6D6F6777_61693132;
 
 /// `Clone` is the substrate of the checkpointed seek (`CheckpointIndex`): the
 /// generator is a path-dependent walk whose entire future is a pure function of
@@ -406,21 +405,14 @@ impl GeneratedSource {
         // which the literal moves; `start_ts` is the tape anchor RegimeState
         // needs to fail-close an already-elapsed ReopenGap.
         let regime = RegimeState::new(regime, start_ts, &scalars.symbol);
-        let arrival_kernel = scalars
-            .arrival
-            .and_then(super::arrival::ArrivalConfig::kernel);
-        let mut cadence_rng = arrival_kernel
-            .map(|_| ChaCha12Rng::seed_from_u64(splitmix64(seed ^ CADENCE_STREAM_TAG)));
-        let arrival_state = arrival_kernel.as_ref().map(|kernel| {
-            ArrivalState::new(
-                kernel,
-                start_ts,
-                cadence_rng.as_mut().expect("kernel has cadence rng"),
-            )
-        });
-        let arrival_env = arrival_kernel.as_ref().map(|_| {
-            ArrivalEnv::for_profile(session, calendar.as_ref(), regime.arrival_thin, start_ts)
-        });
+        let cadence = CadenceWalk::assemble(
+            &scalars,
+            session,
+            calendar.as_ref(),
+            regime.arrival_thin,
+            seed,
+            start_ts,
+        );
         let trade_bounce_ticks = scalars.trade_displacement_ticks.ticks();
         Ok(Self {
             tick_f64: decimal_to_f64(scalars.modal_tick),
@@ -436,10 +428,10 @@ impl GeneratedSource {
                 last_quiet: false,
             },
             arrival_override: None,
-            arrival_kernel,
-            arrival_state,
-            arrival_env,
-            cadence_rng,
+            arrival_kernel: cadence.kernel,
+            arrival_state: cadence.state,
+            arrival_env: cadence.env,
+            cadence_rng: cadence.rng,
             fault: None,
             vol,
             session: SessionModulator::new(session, calendar.as_ref()),
@@ -909,7 +901,7 @@ impl GeneratedSource {
                 .as_mut()
                 .expect("integrated branch has state"),
             self.clock_ns,
-            self.scalars.mean_event_duration_s * ARRIVAL_MEAN_CAL,
+            super::arrival::cadence_base_mean_s(&self.scalars),
             &self.shape,
             self.arrival_env
                 .as_ref()

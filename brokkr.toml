@@ -110,6 +110,10 @@ skip = [
     # arrival_control_refuses_a_tree_that_changed_during_the_run`.
     "the_lab_walk_matches_the_measure_exposure_contract",
     "arrival_control_refuses_a_tree_that_changed_during_the_run",
+    # Protocol 12b brick A's blocking projection oracle runs eight committed
+    # month-scale walks. It is invoked deliberately with the extended timeout
+    # named by its implementation spec.
+    "arrival_screen_layer1_reproduces_the_committed_12a_generated_blocks",
     # Phase 3a/3b parity gates: the cadence gate streams three multi-GB
     # Binance archives, the 3b fit gate reads the delivered July corpus and
     # the Python-era walk cache, and the session-profile gate needs the NQ

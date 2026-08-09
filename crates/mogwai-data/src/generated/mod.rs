@@ -40,8 +40,9 @@ mod source;
 mod tests;
 
 pub use arrival::{
-    ArrivalConfig, ArrivalEnv, ArrivalKernel, ArrivalRefusal, ArrivalState, LogOuParams,
-    ParentDraw, PendingReopen, RuntimeModifiers, SelfExcitingParams, WallMmppParams,
+    ARRIVAL_KERNEL_VERSION, ArrivalConfig, ArrivalEnv, ArrivalKernel, ArrivalRefusal, ArrivalState,
+    CadenceParts, CadenceWalk, LogOuParams, ParentDraw, PendingReopen, RuntimeModifiers,
+    SelfExcitingParams, WallMmppParams,
 };
 pub use calendar::{CalendarError, SessionCalendar, WeeklyWindow};
 pub use checkpoint::CheckpointIndex;

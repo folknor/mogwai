@@ -309,3 +309,30 @@ git immediately before the atomic write, so a HEAD move or an edit during the
 several minutes of walking unbinds the artifact rather than being recorded as
 a clean run. The corrected curve reaches the generator through an in-memory
 scratch override and is written to no preset; no tape byte moves.
+
+### `mogwai arrival-screen`
+
+Runs protocol 12b's Stage A necessary-condition screen: a corpus-free,
+no-running-generator-change grid walk over the four candidate arrival
+families (event-time Markov renewal, wall-time MMPP, log-OU Cox and
+discrete self-exciting) that advances every admissible family-region pair
+and selects none. It reads `analysis/mnq-measure-12a.json` (`--measure`)
+for the observed parent-count marginal and the exposure binding, and
+writes the hash-bound result to `analysis/mnq-arrival-screen.json`
+(`--out`). `--cache` points at the walk cache root, defaulting to the
+standing storage policy.
+
+`--cost-probe` runs brick A0: one grid cell per family, at two seeds,
+measured against that family's own wall-time and peak-RSS budget. It
+writes no artifact and requires no clean tree, since its whole purpose is
+to be run before the grid that produces one. A per-cell budget miss fails
+the command and stops for an owner ruling on the per-cell price; the full
+run additionally enforces a total wall-time and peak-RSS ceiling across
+the whole grid, stopping without writing an artifact if either is
+crossed.
+
+A full run requires a clean tree before reading any input and re-attests
+it immediately before serializing, exactly as `arrival-control` does. The
+command lands no generator change and moves no tape byte:
+`TAPE_PROTOCOL_VERSION` stays 11, and the artifact's binding block asserts
+that it does.

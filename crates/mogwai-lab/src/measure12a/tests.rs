@@ -649,3 +649,43 @@ fn the_ceil_n_over_2_median_backs_the_control_group_ranges() {
         assert_eq!(crate::kernel::median_or_none(&as_f), Some(want as f64));
     }
 }
+
+#[test]
+fn close_reduced_agrees_with_close_on_block1_and_block2() {
+    // Protocol 12b Stage A drops blocks 3 and 4 to buy budget. It may buy
+    // nothing else: on the same stream the reduced close must emit the two
+    // blocks the screen reads exactly as the full close does, or the
+    // projection has quietly grown a second block-1 or block-2.
+    let seg = SessionSegment {
+        session_start_ns: OPEN_NS,
+        session_end_ns: CLOSE_NS,
+        segment_origin_ns: OPEN_NS,
+        segment_end_ns: CLOSE_NS,
+        trade_day: 0,
+        segment: "overnight",
+    };
+    let fill = |acc: &mut SessionAcc| {
+        for i in 0..400_u64 {
+            let ts = H23_NS + i * 137_000_000;
+            acc.push_print(ts, 0);
+            if i.is_multiple_of(7) {
+                acc.push_parent(0, ts, 0, 0, false).expect("parent");
+            }
+        }
+    };
+    let mut full = SessionAcc::new("2026-07-07".to_string(), &seg, OFFSET);
+    let mut reduced = SessionAcc::new("2026-07-07".to_string(), &seg, OFFSET);
+    fill(&mut full);
+    fill(&mut reduced);
+    let full = full
+        .close(Scope::Generated { seed: 1 })
+        .expect("full close");
+    let reduced = reduced
+        .close_reduced(Scope::Generated { seed: 1 })
+        .expect("reduced close");
+    for key in ["session_date", "block1_hist", "block2"] {
+        assert_eq!(full[key], reduced[key], "{key}");
+    }
+    assert!(reduced.get("block3").is_none(), "block 3 is not computed");
+    assert!(reduced.get("block4").is_none(), "block 4 is not computed");
+}

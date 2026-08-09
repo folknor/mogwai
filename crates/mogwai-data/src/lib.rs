@@ -48,14 +48,14 @@ use rust_decimal::Decimal;
 
 pub use bars::{BarAcc, fold_trade, window_close_ns};
 pub use generated::{
-    AbsReturnAcf, AnchorRange, ArrivalConfig, ArrivalEnv, ArrivalKernel, ArrivalRefusal,
-    ArrivalState, CalendarError, CalibrationProvenance, CheckpointIndex, EmpiricalRanges,
-    Fingerprint, GeneratedSource, GeneratedSourceError, GeneratorScalars, GoldenTargets,
-    LogOuParams, MinMedianMax, ParentDraw, ParentSummary, PendingReopen, PublishedBook,
-    QuotedWidth, RuntimeModifiers, ScalarDiagnostic, ScalarError, SelfExcitingParams,
-    SessionCalendar, SessionProfile, SessionProfileError, SizeGrid, SweepShape, TickTraversal,
-    TopOfBookSizes, TradeDisplacement, VolTrace, WallMmppParams, WeeklyWindow, book_mid_ticks,
-    place_book,
+    ARRIVAL_KERNEL_VERSION, AbsReturnAcf, AnchorRange, ArrivalConfig, ArrivalEnv, ArrivalKernel,
+    ArrivalRefusal, ArrivalState, CadenceParts, CadenceWalk, CalendarError, CalibrationProvenance,
+    CheckpointIndex, EmpiricalRanges, Fingerprint, GeneratedSource, GeneratedSourceError,
+    GeneratorScalars, GoldenTargets, LogOuParams, MinMedianMax, ParentDraw, ParentSummary,
+    PendingReopen, PublishedBook, QuotedWidth, RuntimeModifiers, ScalarDiagnostic, ScalarError,
+    SelfExcitingParams, SessionCalendar, SessionProfile, SessionProfileError, SizeGrid, SweepShape,
+    TickTraversal, TopOfBookSizes, TradeDisplacement, VolTrace, WallMmppParams, WeeklyWindow,
+    book_mid_ticks, place_book,
 };
 pub use mogwai_protocol::MarketRegime;
 pub use trigger::{

@@ -101,6 +101,16 @@ quarter of a percent - the correction really is a reshaping of the hour
 axis and not a level change in disguise. The premise that a new
 stochastic shape is required survives.
 
+UPDATE 2026-08-09: brick A0 and brick A's implementation are landed -
+the `CadenceWalk` public constructor, the `arrival-screen` driver and
+CLI with its `--cost-probe` mode, the layer 1 and layer 2 fidelity
+tests, and the two-tier cost probe's budget amendments (`STAGE_A_
+CELL_BUDGET_S` to 7.0, `STAGE_A_BUDGET_S` to 39600, both recorded in
+section 16). Item 2 is NOT removed from this index: its committed
+artifact, `analysis/mnq-arrival-screen.json`, cannot be produced until
+this landing is committed and the tree is clean, so the full run and
+its verdict remain outstanding.
+
 ### Item 2: bricks A0 and A, the Stage A screen
 
 The screen driver, the `arrival-screen` CLI with its `--cost-probe`
@@ -115,8 +125,10 @@ fail brick A before the grid runs.
   constants), 7 and 8, bricks A0 and A (gate commands), 13.
 - Stage A is corpus-free and consumes neither the corpus nor the B4
   artifact (brick B4 amendment 2).
-- Stop points: a cost-probe miss fails brick A and stops for a grid
-  re-freeze; an empty admissible region closes the landing with
+- Stop points: a PER-CELL cost-probe miss fails brick A and stops for
+  an owner ruling on the per-cell price, which a grid re-freeze cannot
+  fix; a TOTAL-budget miss stops for a grid re-freeze. An empty
+  admissible region closes the landing with
   `no-arrival-admissible-candidate-in-frozen-search-space` and goes
   to the owner.
 
@@ -1838,10 +1850,14 @@ landing FAILS and stops for an amendment, per the 12a stopping rule.
   stopping the run before the reduced grid could ever be used:
   `STAGE_A_GEN_CELL_BUDGET_S = 50.0` for family 1, which runs the real
   generator through `advance_parent`, and
-  `STAGE_A_CELL_BUDGET_S = 4.0` for the kernel families 2 to 4, both at
-  two seeds. Above it, brick A FAILS and stops for a re-freeze of the
-  grids; the budget is never met by trimming the grids silently. Total
-  frozen bounds: `STAGE_A_BUDGET_S = 28800` (8 h) and
+  `STAGE_A_CELL_BUDGET_S = 7.0` for the kernel families 2 to 4, both at
+  two seeds (AMENDED 2026-08-09 from 4.0; see section 16). Above it,
+  brick A FAILS and stops; the budget is never met by trimming the grids
+  silently. Note that a PER-CELL miss is not a grid question at all - the
+  per-cell price does not depend on how many cells the grid holds - so it
+  stops for an owner ruling on the price, while a TOTAL miss is what
+  stops for a grid re-freeze. Total bounds:
+  `STAGE_A_BUDGET_S = 39600` (11 h, AMENDED 2026-08-09 from 28800) and
   `STAGE_A_RSS_BYTES = 8 GiB`, recorded in the artifact and gated like
   12a's cost contract. Grid sizes are in section 16 so the arithmetic
   is checkable rather than asserted.
@@ -2032,9 +2048,19 @@ A pass STOPS the landing with `negative-control-passed`.
 One cell per family, two seeds, measured. Reports wall time and peak
 RSS against the family's OWN bound: `STAGE_A_GEN_CELL_BUDGET_S` (50 s)
 for family 1, which drives the real generator, and
-`STAGE_A_CELL_BUDGET_S` (4 s) for the kernel families 2 to 4. A single
-bound would fail family 1 by construction. A miss FAILS brick A and
-stops for a grid re-freeze.
+`STAGE_A_CELL_BUDGET_S` (7 s, AMENDED 2026-08-09 from 4 s) for the
+kernel families 2 to 4. A single bound would fail family 1 by
+construction. A miss FAILS brick A and stops for an owner ruling on the
+per-cell price - NOT for a grid re-freeze, which cannot change what one
+cell costs.
+
+RUN 2026-08-09, and it overturned the reasoning behind the two tiers.
+Family 1 PASSED its 50 s allowance; WallMmpp missed at 6.322 s against
+the then-frozen 4.0. The two-tier split is still right, but the
+premise that the cadence-only path is an order of magnitude cheaper
+than the real-generator path is not: the projection through
+`SessionAcc` dominates a screen cell, not the draw. The per-cell
+constant was amended to 7.0 by owner ruling on that measurement.
 
 ```text
 brokkr run mogwai -- arrival-screen --cost-probe
@@ -2183,10 +2209,11 @@ EXPECTED_COUNT_FLOOR    = 0.01      (expected parents per grid step)
 MEAN_RATE_BAND          = [0.98, 1.02]
 ZERO_COUNT_BAND         = [0.8, 1.25]
 MEAN_GAP_REL_TOL_12B    = 0.05
-STAGE_A_CELL_BUDGET_S   = 4.0       (kernel cell, two seeds)
+STAGE_A_CELL_BUDGET_S   = 7.0       (kernel cell, two seeds)
+                                    AMENDED 2026-08-09, was 4.0
 STAGE_A_GEN_CELL_BUDGET_S = 50.0    (family 1 real-generator cell)
 STAGE_A_GEN_REFINE_CAP  = 40        (family 1 refinement cells)
-STAGE_A_BUDGET_S        = 28800
+STAGE_A_BUDGET_S        = 39600     AMENDED 2026-08-09, was 28800
 STAGE_A_RSS_BYTES       = 8 GiB
 STAGE_B_CELL_CAP        = 24 per surviving family
 STAGE_B_CELL_BUDGET_S   = 320       (eight search seeds, one cell)
@@ -2251,18 +2278,38 @@ Family 4, discrete self-exciting  (2 fitted)
   on their upper endpoints at j = 6, giving 7 with no append; and
   log3(1, 3600) runs to j = 10 at 2154.43 and appends, giving 12.
 
-  COST, under the two-tier model the kernel narrowing forces:
-    kernel coarse   768 cells * STAGE_A_CELL_BUDGET_S 4.0 s  =  3,072 s
+  COST, under the two-tier model the kernel narrowing forces, RESTATED
+  2026-08-09 at the amended per-cell price:
+    kernel coarse   768 cells * STAGE_A_CELL_BUDGET_S 7.0 s  =  5,376 s
     family 1 coarse  19 cells * STAGE_A_GEN_CELL_BUDGET_S 50 s = 950 s
-    coarse total                                             =  4,022 s
-                                                             =  1.12 h
+    coarse total                                             =  6,326 s
+                                                             =  1.76 h
     kernel refinement    600/family cap, 1,800 cells at 4 seeds
-                         and so twice the per-cell budget    = 14,400 s
+                         and so twice the per-cell budget    = 25,200 s
     family 1 refinement  capped at STAGE_A_GEN_REFINE_CAP 40
                          cells at 4 seeds                    =  4,000 s
-    refinement total                                         = 18,400 s
-                                                             =  5.11 h
-    TOTAL 22,422 s = 6.23 h against STAGE_A_BUDGET_S = 8 h.
+    refinement total                                         = 29,200 s
+                                                             =  8.11 h
+    TOTAL 35,526 s = 9.87 h against STAGE_A_BUDGET_S = 11 h.
+
+  THE PREDICTION THIS MEASUREMENT OVERTURNED, kept because getting it
+  backwards is the interesting part. Brick A0 predicted family 1 would
+  miss: it drives the real generator, price and book draws included, at
+  roughly ten times the per-cell cost of a cadence-only walk. Family 1
+  PASSED its 50 s allowance. The KERNEL families missed, WallMmpp
+  measuring 6.322 s against 4.0. So the expensive path was priced
+  correctly and the cheap one was not, which says the cadence-only walk
+  is not as cheap relative to a full walk as the ten-times reasoning
+  assumed - the projection through SessionAcc, not the draw, is where a
+  screen cell's time goes.
+
+  Refinement is 82 percent of the amended total, and its product is a
+  finer loss ORDERING over cells Stage B truncates to
+  STAGE_B_CELL_CAP = 24 per family. It also cannot rescue a family whose
+  coarse admissible region is empty, since it subdivides around that
+  region's boundary. Whether the pass earns its cost is an open owner
+  question recorded in notes/todo.md; this restatement funds it as
+  frozen rather than deleting it.
   Stage B: at most 4 * 24 = 96 search cells at
   STAGE_B_CELL_BUDGET_S = 8.5 h, plus one confirmation and one 250 ms
   sensitivity re-run on CONFIRMATION_SEEDS, against STAGE_B_BUDGET_S.

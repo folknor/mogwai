@@ -5,18 +5,136 @@
 //! deliberately not connected to [`super::GeneratedSource`] yet: Brick K only
 //! establishes and tests the cadence contract.
 
-use rand::RngExt;
+use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha12Rng;
 use rand_distr::{Distribution, StandardNormal};
 use serde::Deserialize;
 
 use super::{
     calendar::SessionCalendar,
-    consts::{INTRA_EVENT_STEP_NS, MAX_SESSION_GAP_NS},
+    consts::{ARRIVAL_MEAN_CAL, INTRA_EVENT_STEP_NS, MAX_SESSION_GAP_NS},
     dynamics::SweepShape,
-    fingerprint::SessionProfile,
+    fingerprint::{GeneratorScalars, SessionProfile},
     session::SessionModulator,
 };
+use mogwai_protocol::seeds::splitmix64;
+
+const CADENCE_STREAM_TAG: u64 = 0x6D6F6777_61693132;
+
+/// The mean gap `next_parent` is driven with. One definition, called by both
+/// `CadenceWalk::assemble` and `GeneratedSource::begin_integrated_event`: the
+/// point of the shared assembly is that no cadence input is derived twice.
+pub(super) fn cadence_base_mean_s(scalars: &GeneratorScalars) -> f64 {
+    scalars.mean_event_duration_s * ARRIVAL_MEAN_CAL
+}
+
+/// Identity of the cadence draw used by Stage A cache entries.
+///
+/// Changes to `ArrivalKernel::next_parent`, a family's parameterization,
+/// `CADENCE_STREAM_TAG`, or cadence seed derivation must bump this value.
+pub const ARRIVAL_KERNEL_VERSION: u32 = 1;
+
+/// The cadence half of a generated walk, assembled exactly as the generator
+/// assembles it and driven independently under neutral runtime modifiers.
+pub struct CadenceWalk {
+    kernel: ArrivalKernel,
+    state: ArrivalState,
+    env: ArrivalEnv,
+    shape: SweepShape,
+    rng: ChaCha12Rng,
+    base_mean_s: f64,
+    clock_ns: u64,
+}
+
+/// Cadence components consumed by `GeneratedSource`.
+pub struct CadenceParts {
+    pub kernel: Option<ArrivalKernel>,
+    pub state: Option<ArrivalState>,
+    pub env: Option<ArrivalEnv>,
+    pub rng: Option<ChaCha12Rng>,
+    pub base_mean_s: f64,
+}
+
+impl CadenceWalk {
+    #[must_use]
+    pub fn assemble(
+        scalars: &GeneratorScalars,
+        session: &SessionProfile,
+        calendar: Option<&SessionCalendar>,
+        thin: f64,
+        seed: u64,
+        start_ts_ns: u64,
+    ) -> CadenceParts {
+        let kernel = scalars.arrival.and_then(ArrivalConfig::kernel);
+        let mut rng =
+            kernel.map(|_| ChaCha12Rng::seed_from_u64(splitmix64(seed ^ CADENCE_STREAM_TAG)));
+        let state = kernel.as_ref().map(|kernel| {
+            ArrivalState::new(
+                kernel,
+                start_ts_ns,
+                rng.as_mut().expect("kernel has cadence rng"),
+            )
+        });
+        let env = kernel
+            .as_ref()
+            .map(|_| ArrivalEnv::for_profile(session, calendar, thin, start_ts_ns));
+        CadenceParts {
+            kernel,
+            state,
+            env,
+            rng,
+            base_mean_s: cadence_base_mean_s(scalars),
+        }
+    }
+
+    #[must_use]
+    pub fn new(
+        scalars: &GeneratorScalars,
+        session: &SessionProfile,
+        calendar: Option<&SessionCalendar>,
+        thin: f64,
+        seed: u64,
+        start_ts_ns: u64,
+    ) -> Option<Self> {
+        let parts = Self::assemble(scalars, session, calendar, thin, seed, start_ts_ns);
+        Some(Self {
+            kernel: parts.kernel?,
+            state: parts.state?,
+            env: parts.env?,
+            shape: SweepShape::new(
+                scalars.children_mean,
+                scalars.children_single_frac,
+                scalars.levels_mean,
+            ),
+            rng: parts.rng?,
+            base_mean_s: parts.base_mean_s,
+            clock_ns: start_ts_ns,
+        })
+    }
+
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "the frozen Stage A API names one cadence draw next"
+    )]
+    pub fn next(&mut self) -> Result<ParentDraw, ArrivalRefusal> {
+        let draw = self.kernel.next_parent(
+            &mut self.state,
+            self.clock_ns,
+            self.base_mean_s,
+            &self.shape,
+            &self.env,
+            RuntimeModifiers::NEUTRAL,
+            &mut self.rng,
+        )?;
+        self.clock_ns = draw.next_from_ns;
+        Ok(draw)
+    }
+
+    #[must_use]
+    pub const fn child_stride_ns(&self) -> u64 {
+        INTRA_EVENT_STEP_NS
+    }
+}
 
 const CADENCE_STEP_NS: u64 = 1_000_000_000;
 const EXPECTED_COUNT_FLOOR: f64 = 0.01;
@@ -565,6 +683,41 @@ mod tests {
             dow_weight: [1.0 / 7.0; 7],
         };
         ArrivalEnv::for_profile(&profile, calendar, 1.0, 0)
+    }
+
+    #[test]
+    fn a_cadence_walk_and_the_generator_agree_parent_for_parent() {
+        let fp = Fingerprint::from_repo_json();
+        let families = [
+            ArrivalConfig::WallMmpp {
+                occupancy: 0.35,
+                rate_ratio: 20.0,
+                tau_s: 60.0,
+            },
+            ArrivalConfig::LogOuCox {
+                sigma_y: 0.6,
+                tau_s: 60.0,
+            },
+            ArrivalConfig::SelfExciting {
+                phi: 0.4,
+                tau_s: 60.0,
+            },
+        ];
+        for config in families {
+            let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
+            scalars.arrival = Some(config);
+            let mut cadence = CadenceWalk::new(&scalars, &fp.session_profile, None, 1.0, 91, 0)
+                .expect("integrated family");
+            let mut generator = GeneratedSource::new(scalars, 91, 0, &fp, None);
+            for _ in 0..10_000 {
+                let left = cadence.next().expect("cadence draw");
+                let right = generator.advance_parent();
+                assert_eq!(
+                    (left.parent_ts_ns, left.child_count),
+                    (right.parent_ts_ns, right.child_count)
+                );
+            }
+        }
     }
 
     #[test]

@@ -131,18 +131,23 @@ pub fn hourly_zero_second_fraction(ctx: &ObsContext) -> BTreeMap<i64, Option<f64
 /// median, not lower-median, not upper-median. Non-finite readings are dropped
 /// first, and fewer than four finite readings yields `None`, which leaves that
 /// hour's curve unchanged in `recentred_curve`.
-pub fn seed_median(readings: &[Option<f64>; 4]) -> Option<f64> {
+pub fn seed_median(readings: &[Option<f64>]) -> Option<f64> {
     let mut xs: Vec<f64> = readings
         .iter()
         .flatten()
         .copied()
         .filter(|x| x.is_finite())
         .collect();
-    if xs.len() != 4 {
+    if xs.len() != readings.len() || xs.is_empty() {
         return None;
     }
     xs.sort_by(f64::total_cmp);
-    Some((xs[1] + xs[2]) / 2.0)
+    let middle = xs.len() / 2;
+    if xs.len().is_multiple_of(2) {
+        Some((xs[middle - 1] + xs[middle]) / 2.0)
+    } else {
+        Some(xs[middle])
+    }
 }
 
 /// The section 5.5 correction, closed form, one pass, no search: divide each
@@ -620,6 +625,13 @@ mod tests {
             seed_median(&[Some(1.0), Some(2.0), Some(3.0), Some(f64::NAN)]),
             None
         );
+        // The Stage A coarse pass runs two seeds, so the helper had to lose
+        // its fixed arity of four. Two readings average; three take the
+        // middle; an empty set is `None` rather than a division by zero.
+        assert_eq!(seed_median(&[Some(1.0), Some(4.0)]), Some(2.5));
+        assert_eq!(seed_median(&[Some(5.0), Some(1.0), Some(3.0)]), Some(3.0));
+        assert_eq!(seed_median(&[Some(1.0), None]), None);
+        assert_eq!(seed_median(&[]), None);
     }
 
     #[test]
