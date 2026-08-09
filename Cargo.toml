@@ -5,7 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 edition = "2024"
 license = "AGPL-3.0-only"
-rust-version = "1.97"
+rust-version = "1.99"
 authors = ["folknor"]
 repository = "https://github.com/folknor/mogwai"
 

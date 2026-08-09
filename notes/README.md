@@ -25,72 +25,70 @@ That premise is load-bearing and is stated durably in `AGENTS.md` and
 `reference/architecture.md`; several assessments have been made wrong by
 assuming the corpus is closed.
 
-## Where the work stands, 2026-08-08
+## Where the work stands, 2026-08-09
 
-Three tracks. No document sits above them, which is what this file is for.
+Two live tracks and one completed. No document sits above them, which is what
+this file is for.
 
 | Track | Driven from | State |
 |---|---|---|
 | Evidence and purchase | `DATA-PURCHASE-REPORT.md` (root) | Idle. The ~30 dollar ES/MES purchase is the named next marginal dollar, owner-gated. Nothing to buy for 12b. |
-| Generator fidelity, protocols 10 to 12b | the four protocol specs below | 12a landed `no-family-eligible`; owner ruled 12b targets ARRIVAL COMPOSITION, repair-until-measurable. 12b spec undrafted, gated on codex capacity. |
-| Python-to-Rust rewrite | `rust-rewrite-phases.md` | **DONE.** Signature renewed 2026-08-08 at `c783d5f`; the Python has retired to the gitignored `research/dead/` and the Rust is the reference. Gate at 722 passed, 0 orphaned. Nine review passes, eight refusals. |
+| Generator fidelity, protocol 12b | `protocol-12b-arrival-composition-spec.md` (frozen contract of record) plus `protocol-12a-measurement-spec.md` (the binding ladder it re-runs) | Bricks F, K, B4, N, A0 and A are landed (through `9e074d4`). The negative control FAILED as predicted, so the loop proceeds. Item 2's full Stage A run is outstanding, currently STOPPED on the A0/A probe's finding that the integrated frame runs ~6 percent hot on mean parent rate (a structural gap-vs-rate convention mismatch), which voids the kernel families against gate A2 - a section 17 amendment awaiting the owner's ruling. |
+| Python-to-Rust rewrite | git history (its phase records, dossier and script triage are retired) | **DONE.** Signature renewed 2026-08-08 at `c783d5f`; the Python retired to the gitignored `research/dead/`; the Rust is the reference. Nine review passes, eight refusals. What survives durably: the parity contract in `reference/architecture.md`, the version exemption in `AGENTS.md`, the two approved numerical deviations pinned by discriminating tests in the code. |
 
-`todo.md` is the catch-all beneath all three: open work items, parked
+`todo.md` is the catch-all beneath the tracks: open work items, parked
 investigations, the hardcoded-value inventory.
 
 ## Which document drives what
 
-- **`rust-rewrite-phases.md`** - the rewrite program, phase by phase, with
-  every landing record. 4b's scope lives here.
-- **`rust-rewrite-review-dossier.md`** - the map the codex review pass is
-  pointed at. Gates, pinned cross-language conventions, the four ruled owner
-  decisions. NOT a plan; a review packet.
-- **`python-script-triage.md`** - per-script scope rulings. Its inventory is
-  STALE by design: commit `9170f45` already executed its DEAD verdicts.
-- **`protocol-12a-measurement-spec.md`** - 12b's contract. The ladder re-runs
-  unamended against it. Binding.
-- **`protocol-11-session-repair-spec.md`** - landed, but its Brick V amendment
-  makes the hourly 60s/300s wall-time bands HARD GATES for 12b. Binding.
-- **`sampling-frame-preregistration.md`** - the rejected sampling-frame method.
-  Section 7.1 is the part people miss: only the `rv`-rank association was
-  tested; the five-feature farthest-point selection was never on trial.
+- **`protocol-12b-arrival-composition-spec.md`** - the contract of record for
+  the live work. Its section 0 index partitions the remaining bricks; its
+  frozen constants, gates and verdicts bind every sub-spec. Amendments go
+  through section 17, never edits.
+- **`protocol-12a-measurement-spec.md`** - 12b's judge. The ladder re-runs
+  unamended against it. Binding. (It cites the retired protocol-11 spec as its
+  spawn point; that citation resolves to git history.)
+- **`stage-a-optimization.md`** - the performance round preceding brick A:
+  baseline, call chain, the free-lane/amendment-lane constraints, gates,
+  exit criterion.
+- **`protocol-landings.md`** - the consolidated record of protocols 8, 10 and
+  11: what landed, the verdicts, and the obligations later work inherited.
+  Replaces five retired per-protocol documents whose full text is in git
+  history.
+- **`sampling-frame-preregistration.md`** - the rejected sampling-frame method,
+  kept as a frozen record. Section 7.1 is the part people miss: only the
+  `rv`-rank association was tested; the five-feature farthest-point selection
+  was never on trial.
 - **`pair-test-preregistration.md`** - `pair_harness.py` loads its frozen JSON
   twin and is still the live judge for delivered pair data.
-- **`mnq-tbbo-fit-spec.md`**, **`mnq-generator-successor-spec.md`**,
-  **`mnq-session-fit.md`**, **`mnq-session-refit-report.md`** - landed. Their
-  spec bodies are SPENT; only their RESULT sections still carry weight, as the
-  evidence behind values currently shipping.
 - **`bugs-*.md`** - six per-crate bug inventories.
 
 ## What blocks what, right now
 
-1. **4b's remaining work is unblocked**: per-mode subcontract scoping, the
-   `select_windows.py` and `tick_composition_ratios.py` absorptions, and the
-   TBBO short-row fix. The five signature blockers the review raised - the
-   `characterize` CLI gap, the session-profile CLI gap, the `cadence-feasible`
-   Markov gate and its fail-open decoding, the fingerprint
-   float/ordering/fail-open trio, and the red `--gate` - all closed
-   2026-08-08. Full 4b order in `rust-rewrite-phases.md`.
-2. **12b is blocked on codex capacity**, and may not be drafted outside the
-   freeze protocol.
-3. **Nothing blocks the rewrite any more.** It is done: signature renewed
-   2026-08-08 at `c783d5f`, the Python retired, the Rust the reference. Nine
-   review passes and eight refusals to get there.
-
-   What it cost is the part worth carrying, and it is four lessons rather than
-   a verdict. Nearly every code finding was a closure that held on the
-   committed corpus and failed one layer below where its gate looked, so
-   verifying a fix against the artifacts is not verifying it against the
-   contract. A bound established over the fixtures you happen to have is not a
-   bound - three ULP ceilings were claimed and refuted before the answer turned
-   out to be exact arithmetic. A test that passes is not evidence until its
-   reference is independently established; two here passed while measuring
-   nothing. And a claim about what a user sees has to be checked against the
-   built binary, not the source.
-
-   Two limits survive the signature: the release lateness budget is explicitly
-   UNCERTIFIED, and the `TAPE_PROTOCOL_VERSION` exemption covers only the
-   audited `modal_tick.max` correction. See `rust-rewrite-phases.md` item 7.
+1. **12b item 2 (the Stage A screen run) is UNBLOCKED, 2026-08-09.** The
+   frame-calibration finding was diagnosed (`ARRIVAL_MEAN_CAL`
+   double-application in the integrated frame), amended through the freeze
+   protocol (signed, codex session 019fe781), and landed: bare mean for the
+   kernel families, `ARRIVAL_KERNEL_VERSION` 2, `TAPE_PROTOCOL_VERSION` 12
+   (Brick S renumbered to 13, with the coordinated 12a sections 8/11
+   amendment). The A0 probe on the amended tree passes its budgets with the
+   excess eliminated. Before the full screen run: the owner-defined
+   OPTIMIZATION ROUND below.
+2. **A Stage A performance round precedes brick A** (owner step,
+   2026-08-09): the screen is priced at ~9.9 h and the measured hotspot is
+   the `SessionAcc` projection, not the draw. `stage-a-optimization.md` is
+   the work item - entry points, the free-lane/amendment-lane constraint
+   split, gates and exit criterion. Brick A runs when the owner is
+   satisfied with a fresh cost probe.
+3. **12b item 3 (Stage B, the landing, protocol 13) waits on item 2's
+   verdict.**
+3. **Standing owner rulings that reshape the ground, 2026-08-09**: the
+   bit-exactness era toward Python-era artifacts is CLOSED (re-bless instead
+   of preserving CPython arithmetic; determinism per binary plus green
+   statistical gates is the contract), and RUNTIME COST is a first-class
+   concern - a multi-hour computation is presumptively something to optimize
+   before it is run. This bears directly on the Stage A budget question in
+   `todo.md`.
 
 ## Traps this repo has actually fallen into
 
@@ -98,16 +96,21 @@ Cheap to state, expensive to rediscover.
 
 - **Assuming the corpus is closed.** It made three separate script assessments
   wrong. Every new instrument re-runs the whole intake sequence.
-- **Trusting an inventory instead of the tree.** The triage's script list, the
-  hardcoded-value catalogue, and this file's own tables are all point-in-time.
+- **Trusting an inventory instead of the tree.** Point-in-time lists drift.
   Verify against the tree before acting on a list.
 - **Citing a frozen artifact by vibe.** `targets-frozen.json` was described as
   `select_windows.py`'s gate in three documents; it is the BTCUSDT
   microstructure target set and that script never touches it.
 - **Reading a summary and calling it the source.** `DATA-PURCHASE-REPORT.md`
   section 7.2 summarizes the sampling-frame verdict; the preregistration's
-  section 7.1 and 8 are what actually scope it, and they say something the
+  sections 7.1 and 8 are what actually scope it, and they say something the
   summary does not.
+- **Verifying a fix against the artifacts instead of the contract.** The
+  rewrite's recurring failure shape: a closure that held on the committed
+  corpus and failed one layer below where its gate looked. A bound established
+  over the fixtures you happen to have is not a bound; a test that passes is
+  not evidence until its reference is independently established; a claim about
+  what a user sees is checked against the built binary, not the source.
 
 ## The end state of these documents
 
