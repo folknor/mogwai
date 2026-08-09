@@ -3,7 +3,7 @@
 
 //! `mogwai fit`: the protocol-11 session calibration, ported from
 //! `analysis/mnq_fit.py`'s `fit` mode (phase 3b of
-//! notes/rust-rewrite-phases.md).
+//! the retired rewrite plan).
 //!
 //! The driver itself lives in `mogwai_lab::fit::driver`; this module is the
 //! CLI surface plus `mode_fit`'s clean-tree binding, which is the same

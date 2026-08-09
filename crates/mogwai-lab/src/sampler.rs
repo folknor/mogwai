@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Slice 2c-ii of notes/rust-rewrite-phases.md: `_ResourceSampler`, ported
+//! Slice 2c-ii of the retired rewrite plan: `_ResourceSampler`, ported
 //! from `analysis/mnq_fit.py` - a 1 s background thread sampling this
 //! process tree's RSS and a set of on-disk scratch paths, peaks retained.
 //! The Python comment about the walk subprocesses being children is now

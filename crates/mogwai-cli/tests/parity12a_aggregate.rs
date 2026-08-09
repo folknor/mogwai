@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! THE PARITY GATE of notes/rust-rewrite-phases.md phase 2b: the aggregation
+//! THE PARITY GATE of the retired rewrite plan, phase 2b: the aggregation
 //! and inference layer must reproduce the committed artifact's inference
 //! sections typed-canonical-identically, from the cached per-session records
 //! phase 2a already proved.

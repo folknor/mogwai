@@ -3,7 +3,7 @@
 
 //! `mogwai synth fingerprint` / `mogwai synth cadence` /
 //! `mogwai cadence-feasible`: the phase-3a synthesis paths
-//! (`notes/rust-rewrite-phases.md`) over `mogwai_lab::fingerprint`/
+//! (the retired rewrite plan) over `mogwai_lab::fingerprint`/
 //! `mogwai_lab::cadence`/`mogwai_lab::cadence_feasible`. Default paths are
 //! CWD-relative, matching `mogwai measure`/`mogwai preflight`; everything is
 //! overridable. NONE of these subcommands overwrite the committed

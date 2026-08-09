@@ -1198,7 +1198,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Brick G of notes/mnq-tbbo-fit-spec.md: the calibration instrument.
+    // Brick G of the retired protocol-10 fit spec: the calibration instrument.
     // -----------------------------------------------------------------------
 
     /// Scratch configs live under the workspace target dir, never /tmp: all
@@ -1354,7 +1354,7 @@ mod tests {
         );
     }
 
-    /// Brick O of notes/mnq-generator-successor-spec.md: the protocol-9
+    /// Brick O of the retired protocol-10 successor spec: the protocol-9
     /// tape oracle. Walks the resolved crypto preset profiles directly -
     /// quotes AND trades, every field via canonical named-separator lines -
     /// and hashes each stream with FNV-1a 64 into the committed fixture.
@@ -2522,7 +2522,7 @@ mod tests {
         assert_eq!(crypto_got["session_cells"], serde_json::json!([]));
     }
 
-    /// Phase 1 (notes/rust-rewrite-phases.md) unifies the session/segment
+    /// Phase 1 (the retired rewrite plan) unifies the session/segment
     /// math in `mogwai-lab`, but does NOT rewire this crate onto it yet
     /// (phase 2). This test pins that the two implementations agree so the
     /// eventual rewire is behavior-preserving by construction: any

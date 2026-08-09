@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! THE GOLDEN GATE of notes/rust-rewrite-phases.md slice 2c-ii/2c-iii:
+//! THE GOLDEN GATE of the retired rewrite plan, slice 2c-ii/2c-iii:
 //! running the `mogwai measure` driver ([`mogwai_cli::measure`]) from the
 //! clean committed tree must reproduce `analysis/mnq-measure-12a.json`
 //! typed-canonical-identically except the honestly-live fields (top-level
@@ -10,7 +10,7 @@
 //! see `crates/mogwai-lab/tests/parity12a_i.rs`).
 //!
 //! Two tests, split on the OBLIGATION the 2c-ii golden-gate run recorded
-//! (notes/rust-rewrite-phases.md): the monolithic single-test run (observed
+//! (the retired rewrite plan): the monolithic single-test run (observed
 //! pass plus eight in-process FINAL walks plus bootstrap) measured 288.1 s
 //! total against the runner's hard 280 s per-test ceiling.
 //!
@@ -167,7 +167,7 @@ fn parity12a_ii_fast_matches_the_committed_artifact_over_cached_walks() {
             then drive `mogwai_cli::measure::run_measure_with(&cfg, WalkSource::LiveAttested)` \
             (or the equivalent `target/release/mogwai measure --cache-dir <scratch> --out \
             <scratch>` invocation) exactly as the 2c-ii golden-gate demonstration did - see the \
-            2c-ii landing record in notes/rust-rewrite-phases.md for the measured cost fields \
+            2c-ii landing record in the retired rewrite plan for the measured cost fields \
             (observed 83.0 s, generated 202.1 s, bootstrap 3.1 s, total 288.1 s, peak RSS \
             2.93 GiB, scratch 93 MB) and verdict (no-family-eligible) from that run"]
 fn parity12a_ii_live_full_run_matches_the_committed_artifact() {

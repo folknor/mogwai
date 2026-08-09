@@ -6,7 +6,7 @@ license.workspace = true
 build = "build.rs"
 
 # The corpus/evidence and measurement layer of the Python-to-Rust rewrite
-# (phases 1 and 2 of notes/rust-rewrite-phases.md): the TBBO stream contract,
+# (phases 1 and 2 of the retired rewrite plan): the TBBO stream contract,
 # session/segment math, ledger-bound input verification and preflight, the
 # storage policy (artifact/cache/scratch), and the unified protocol-12a block
 # engine.

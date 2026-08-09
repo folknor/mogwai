@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Folds the git sha of the tree this crate was built from into the
-//! provenance token (storage policy, notes/rust-rewrite-phases.md phase 1).
+//! provenance token (storage policy, the retired rewrite plan, phase 1).
 //! A `cargo install`/crates.io build has no `.git` directory, so this is
 //! best-effort: absent git, the token falls back to the crate-version +
 //! `TAPE_PROTOCOL_VERSION` + fingerprint-hash + command components alone,

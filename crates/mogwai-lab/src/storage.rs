@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The storage policy (notes/rust-rewrite-phases.md phase 1): three classes,
+//! The storage policy (the retired rewrite plan, phase 1): three classes,
 //! never mixed.
 //!
 //! - ARTIFACTS: the user's files, written to `--out` or the working

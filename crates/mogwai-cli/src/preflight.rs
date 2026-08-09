@@ -3,7 +3,7 @@
 
 //! `mogwai preflight`: the fail-closed TBBO corpus contract
 //! (`mogwai_lab::preflight`), THE PARITY GATE of
-//! notes/rust-rewrite-phases.md phase 1 - must reproduce
+//! the retired rewrite plan, phase 1 - must reproduce
 //! `analysis/out/mnq-fit-preflight.json` value-identically against the
 //! delivered July corpus.
 

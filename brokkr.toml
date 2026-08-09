@@ -82,7 +82,7 @@ skip = [
     "standardized_candidate_rail_sizing",
     "realized_return_envelope_under_regime_scaling",
     "synthetic_spread_decomposition_at_protocol_seven",
-    # The protocol-12a parity gates (notes/rust-rewrite-phases.md phase 2a):
+    # The protocol-12a parity gates (the retired rewrite plan, phase 2a):
     # one reads the multi-GB delivered July corpus, the eight seed gates each
     # run a month-long walk. Minutes apiece, far past the per-test ceiling, and
     # both need artifacts that only exist on a machine holding the delivery.

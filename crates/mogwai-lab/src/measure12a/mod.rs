@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The UNIFIED protocol-12a block engine (notes/rust-rewrite-phases.md phase
+//! The UNIFIED protocol-12a block engine (the retired rewrite plan, phase
 //! 2a). Blocks 1-4, the permutation records and the Block-5 forensics exist
 //! here ONCE, and both measurement sides drive them:
 //!

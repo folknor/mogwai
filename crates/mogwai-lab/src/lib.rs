@@ -7,7 +7,7 @@
 #![recursion_limit = "512"]
 
 //! `mogwai-lab`: the corpus and measurement layer of the Python-to-Rust
-//! rewrite (notes/rust-rewrite-phases.md phases 1 and 2) - the TBBO stream
+//! rewrite (the retired rewrite plan, phases 1 and 2) - the TBBO stream
 //! contract, the session/segment math, ledger-bound input verification,
 //! preflight, the storage policy (artifact/cache/scratch), the deterministic
 //! kernel ([`kernel`]) and the unified protocol-12a block engine

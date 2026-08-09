@@ -4208,7 +4208,7 @@ fn garch_second_moment_instrumentation() {
 }
 
 // ---------------------------------------------------------------------------
-// Brick C of notes/mnq-generator-successor-spec.md: floor-aware child
+// Brick C of the retired protocol-10 successor spec: floor-aware child
 // conditioning. July MNQ measured children_mean 1.1711 with a 0.9049
 // single fraction; the legacy identity broke below the one-child floor and
 // generated 1.44/0.74 at ANY configured near-one mean.

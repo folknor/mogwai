@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! THE GATE of notes/rust-rewrite-phases.md slice 2c-i: assembling the
+//! THE GATE of the retired rewrite plan, slice 2c-i: assembling the
 //! section-10 artifact PURELY FROM THE CACHES on disk (no live corpus pass,
 //! no walks) reproduces `analysis/mnq-measure-12a.json` typed-canonically
 //! identically except `cost` (a live measurement) and

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Aggregation and inference over the protocol-12a per-session records
-//! (notes/rust-rewrite-phases.md phase 2b): the monthly pooling, the
+//! (the retired rewrite plan, phase 2b): the monthly pooling, the
 //! vote-caching [`context::ObsContext`], the fixed-seed bootstrap, the
 //! Amendment-D family envelopes, the 5.2 count substitution, the gap
 //! closures, the forensic subchecks and the fail-closed 6.2 ladder.

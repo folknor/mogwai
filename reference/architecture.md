@@ -252,9 +252,9 @@ clap dispatcher over `serve` (which does no work itself, just forwards to
 the lone nautilus-dependent crate, unchanged by anything below.
 
 `mogwai-lab` is the fifth non-adapter crate: the corpus-to-fingerprint method
-library the 2026-08 Python-to-Rust rewrite absorbed from `analysis/`
-(`notes/rust-rewrite-phases.md`, `notes/python-script-triage.md` record the
-program and its per-script scope rulings) - streaming TBBO/Binance-trades
+library the 2026-08 Python-to-Rust rewrite absorbed from `analysis/` (the
+rewrite program's phase records and per-script scope rulings are retired to
+git history) - streaming TBBO/Binance-trades
 parsing, the protocol-12a measurement engine, aggregation and bootstrap,
 fingerprint and cadence synthesis, and the protocol-11 session-calibration
 fit. Its dependency direction is one-way and asymmetric: `mogwai-lab` depends
@@ -329,11 +329,11 @@ than a blanket tolerance. The gates live under
 `crates/mogwai-cli/tests/parity12a*.rs`/`parity3b.rs`, `#[ignore]`d because
 they need local corpus or archive state on disk, and are excluded from
 `brokkr.toml`'s complete profile by the shared `parity12a_`/`parity3a_`/
-`parity3b_` naming prefix. `notes/rust-rewrite-review-dossier.md` is the
-program-level map of every gate, every pinned cross-language convention
-(compensated float summation, insertion-ordered accumulation, the ported
-CPython float repr and Mersenne Twister, and the rest) and every open owner
-decision, assembled for the codex review pass the rewrite's phase 4 gates on.
+`parity3b_` naming prefix. The program-level review dossier - every gate,
+every pinned cross-language convention (compensated float summation,
+insertion-ordered accumulation, the ported CPython float repr and Mersenne
+Twister, and the rest) and every owner decision the review adjudicated - is
+retired to git history; the review signed and the program is complete.
 
 The storage policy `mogwai_lab::storage` implements keeps three classes of
 on-disk data apart, never mixed. ARTIFACTS (preflight, measurement and fit

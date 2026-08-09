@@ -478,7 +478,7 @@ Or both. There are no exceptions.
   is also load-sensitive even in release: with a second workspace building
   (load average 1.0), 4 of 5 release repetitions failed at ~250ms on BOTH the
   protocol-9 parent and the protocol-10 candidate - indistinguishable paired
-  distributions, recorded in `notes/mnq-generator-successor-spec.md` as a
+  distributions, recorded in `notes/protocol-landings.md` (protocol 10) as a
   reviewed gate exception. The 50ms release threshold stays authoritative and
   unrelaxed.
 

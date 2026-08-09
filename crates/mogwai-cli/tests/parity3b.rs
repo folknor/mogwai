@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Phase 3b's binding parity gate (notes/rust-rewrite-phases.md): `run_fit`,
+//! Phase 3b's binding parity gate (the retired rewrite plan): `run_fit`,
 //! reading the delivered July corpus and REPLAYING the protocol-11 run's
 //! walk cache at `analysis/out/mnq-fit-scratch` under that run's harness
 //! commit, reproduces the committed `analysis/mnq-fit.json`

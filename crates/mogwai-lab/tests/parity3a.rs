@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Phase-3a parity gates (`notes/rust-rewrite-phases.md`): reproduce the
+//! Phase-3a parity gates (the retired rewrite plan): reproduce the
 //! committed `analysis/fingerprint.json` and `analysis/cadence.json` from
 //! their recorded inputs, and the `check_cadence_feasible.py` structural
 //! verdict. Ignored - they need `analysis/char_*.json` (gitignored, local

@@ -881,7 +881,7 @@ mod tests {
 
     /// Counterpart of `analysis/test_characterize.py`'s
     /// `CadenceTests.test_committed_cadence_is_loadable`, which the
-    /// phase-3a landing record (`notes/rust-rewrite-phases.md`) did not
+    /// phase-3a landing record (the retired rewrite plan) did not
     /// name a Rust counterpart for.
     #[test]
     fn the_committed_cadence_is_loadable() {

@@ -5,7 +5,7 @@
 //! tests can call a subcommand's driver function directly rather than
 //! shelling out to `target/release/mogwai`. Today that is exactly
 //! [`measure::run_measure`], the golden-gate parity test's entrypoint
-//! (notes/rust-rewrite-phases.md slice 2c-ii) and [`fit::run`]'s config
+//! (the retired rewrite plan, slice 2c-ii) and [`fit::run`]'s config
 //! resolution (phase 3b's cache-replay parity gate) - every other
 //! subcommand still lives module-private under `src/main.rs`.
 

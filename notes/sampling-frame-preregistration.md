@@ -597,7 +597,8 @@ Recorded 2026-08-05, before the association harness runs. Surfaced by a
 performance regression rather than by any diagnostic: an optimization capped
 `split` at five commas on the documented six-column layout, the F1/F2
 equivalence gate failed, and the investigating scan
-(`analysis/side_predicate_scan.py`, retained until this record landed) showed
+(`analysis/side_predicate_scan.py`, retained until this record landed and
+since deleted - git history holds it) showed
 every row of the 2026-06 archive carries SEVEN fields. The vendor's own
 documentation lists the seventh trailing column, `is_best_match`; preflight's
 `EXPECTED_COLUMNS` recorded six.
@@ -898,7 +899,9 @@ rather than being skipped over.
 
 Each names its gate. `analysis/` is stdlib-only, no dependencies.
 
-1. **`analysis/fetch_binance_months.py`** - a fail-closed downloader for spot
+1. **`analysis/fetch_binance_months.py`** (post-hoc note: the shipped
+   downloader became `analysis/binance_archive.py fetch`, and this file no
+   longer exists on disk) - a fail-closed downloader for spot
    monthly archives over `urllib`, mirroring the discipline used for the
    2024-03-30 futures pair: original ZIPs and `.CHECKSUM` files retained
    unchanged in `research/market-data/` (gitignored), verified before anything

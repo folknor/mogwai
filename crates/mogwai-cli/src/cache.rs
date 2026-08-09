@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! `mogwai cache`: the manual-case cover for the storage policy's
-//! stale-provenance pruning (notes/rust-rewrite-phases.md phase 1). Phase 1
+//! stale-provenance pruning (the retired rewrite plan, phase 1). Phase 1
 //! lands no cache PRODUCERS - `stats`/`clean` operate on whatever a later
 //! phase has written under the cache root, and are honest about reporting
 //! zero when nothing has.

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! THE PARITY GATES of notes/rust-rewrite-phases.md phase 2a: the unified
+//! THE PARITY GATES of the retired rewrite plan, phase 2a: the unified
 //! `mogwai_lab::measure12a` engine must reproduce the two committed 12a
 //! record sets typed-canonical-identically.
 //!

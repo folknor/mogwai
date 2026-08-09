@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Session/segment math, the ONE implementation
-//! (notes/rust-rewrite-phases.md phase 1): a port of `analysis/mnq_fit.py`'s
+//! (the retired rewrite plan, phase 1): a port of `analysis/mnq_fit.py`'s
 //! `local_fields`/`assign_session`/`minute_fields`/`segment_origin_ns`/
 //! `segment_end_ns`/`segment_labels`, unified with the integer-only
 //! `session_segment_at` that `crates/mogwai-cli/src/gen.rs` carries

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! The deterministic kernel of the 12a measurement engine
-//! (notes/rust-rewrite-phases.md phase 2a): the frozen bit-exact PRNG
+//! (the retired rewrite plan, phase 2a): the frozen bit-exact PRNG
 //! derivation (`splitmix64`, `tuple_mix`, `fisher_yates`), the four quantile
 //! conventions (`nearest_rank_list`, `nearest_rank_p`,
 //! `weighted_nearest_rank`, `median_or_none`) and the type-strict canonical

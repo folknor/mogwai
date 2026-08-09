@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Slice 2c-i of notes/rust-rewrite-phases.md: the section-10 artifact
+//! Slice 2c-i of the retired rewrite plan: the section-10 artifact
 //! assembler and its two validators, ported from `analysis/mnq_fit.py`'s
 //! `assemble_measure12a_artifact`/`_assemble_measure12a`,
 //! `measure12a_schema_errors`, `measure12a_semantic_errors`,

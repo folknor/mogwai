@@ -538,7 +538,7 @@ mod tests {
 
     /// Counterpart of `analysis/test_characterize.py`'s
     /// `CadenceTests.test_raw_probe_returns_structured_result`: the phase-3a
-    /// landing record (`notes/rust-rewrite-phases.md`) claimed this
+    /// landing record (the retired rewrite plan) claimed this
     /// assertion was "covered live" by the real-archive parity gate instead
     /// of a synthetic fixture, but that gate never exercises the 3-row
     /// grouping-distinction shape this pins, so it is added here rather than
