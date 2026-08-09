@@ -239,10 +239,14 @@ fn deriving_the_calendar_split_from_presets_matches_the_python_tuples() {
     assert_eq!(
         names.len(),
         5,
-        "the shipped preset set is five, got {names:?}"
+        "the protocol-11 fixture names five presets, got {names:?}"
     );
 
-    let derived = tcr::PresetCalendars::derive(&names).expect("every preset resolves");
+    // Two of the five (ETHUSDT, SOLUSDT) retired with the 2026-08-09 owner
+    // ruling and classify through the retired-preset table; the derivation
+    // over a historical fixture must still work, which is what this exercises.
+    let derived =
+        tcr::PresetCalendars::derive(&names).expect("every preset resolves or is retired");
 
     let expect = |key: &str| -> Vec<String> {
         let mut out: Vec<String> = reference["constants"][key]

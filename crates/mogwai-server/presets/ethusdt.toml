@@ -1,8 +1,0 @@
-[instrument]
-preset = "BTCUSDT"
-[instrument.override]
-symbol = "ETHUSDT"
-"class.base" = "ETH"
-[provenance]
-"symbol" = { kind = "fitted", corpus = "Binance trades", window = "30 days" }
-"class.base" = { kind = "declared", rationale = "base asset" }

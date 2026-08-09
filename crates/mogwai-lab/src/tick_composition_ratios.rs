@@ -220,6 +220,17 @@ pub struct PresetCalendars {
     pub calendar_bearing: Vec<String>,
 }
 
+/// Presets that committed historical fixtures name but the tree no longer
+/// ships, with whether each carried a calendar. Committed DATA in the same
+/// spirit as the per-mode baseline tables: history does not re-derive.
+///
+/// ETHUSDT and SOLUSDT were retired 2026-08-09 by owner ruling - both were
+/// `preset = "BTCUSDT"` aliases overriding only identity fields, so their
+/// generator paths were identical and their tapes differed from BTCUSDT's
+/// only in the symbol identity - and, like BTCUSDT, neither carried a
+/// calendar.
+pub const RETIRED_PRESETS: [(&str, bool); 2] = [("ETHUSDT", false), ("SOLUSDT", false)];
+
 impl PresetCalendars {
     /// Classifies by presence of a calendar.
     #[must_use]
@@ -239,17 +250,34 @@ impl PresetCalendars {
     /// check NOTHING for it while still passing. Derivation cannot have that
     /// gap - a preset either carries a calendar or it does not.
     ///
+    /// A RETIRED preset - one a committed historical fixture names but the
+    /// tree no longer ships - classifies through [`RETIRED_PRESETS`], the same
+    /// remember-the-history principle as [`MODES`]' baseline tables: a
+    /// comparison tool that cannot classify a historical fixture cannot audit
+    /// history.
+    ///
     /// # Errors
-    /// [`LabError::Refusal`] if a named preset cannot be loaded. A preset that
-    /// does not resolve is not silently dropped: dropping it is exactly the
-    /// failure mode this replaces.
+    /// [`LabError::Refusal`] if a named preset neither loads nor appears in
+    /// the retired table. An unknown preset is not silently dropped: dropping
+    /// it is exactly the failure mode this replaces.
     pub fn derive(presets: &[String]) -> LabResult<Self> {
         let mut calendar_free = Vec::new();
         let mut calendar_bearing = Vec::new();
         for name in presets {
-            let profile = mogwai_server::config::profile_from_preset(name)
-                .map_err(|e| LabError::refusal(format!("loading preset {name}: {e}")))?;
-            if profile.calendar.is_some() {
+            let has_calendar = match mogwai_server::config::profile_from_preset(name) {
+                Ok(profile) => profile.calendar.is_some(),
+                Err(load_error) => *RETIRED_PRESETS
+                    .iter()
+                    .find(|(retired, _)| retired == name)
+                    .map(|(_, bearing)| bearing)
+                    .ok_or_else(|| {
+                        LabError::refusal(format!(
+                            "loading preset {name}: {load_error}; not in the retired-preset \
+                             table either"
+                        ))
+                    })?,
+            };
+            if has_calendar {
                 calendar_bearing.push(name.clone());
             } else {
                 calendar_free.push(name.clone());

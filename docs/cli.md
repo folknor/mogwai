@@ -148,7 +148,7 @@ offline path dropped the calendar and printed straight through both, so a chart
 taken from it disagreed with the served tape it was supposed to illustrate.
 
 `tick-composition` is the offline measurement the tape budget constants are
-derived from. It walks all five presets across eight seeds and four arrival
+derived from. It walks all three presets across eight seeds and four arrival
 configurations and writes ONE fixture, named by `--out` and stamped with the
 live `TAPE_PROTOCOL_VERSION`. Each preset is resolved the way `serve` resolves
 it, so the futures are measured on their own size grid and session calendar. It
@@ -272,12 +272,15 @@ automatically, exposed for manual use.
 ### `mogwai arrival-control`
 
 Runs protocol 12b brick N's deterministic hourly re-centring negative control.
-It checks five pre-landing legacy tapes and the standing build gate's
+It checks the per-symbol pre-landing legacy tapes (three since the 2026-08-09
+preset retirement) and the standing build gate's
 transcript before walking fit seeds 301 through 304 and test seeds 305 through
 308. The command reads `analysis/mnq-measure-12a.json` and
 `analysis/mnq-minute-range-envelope.json`, and writes the hash-bound result to
 `analysis/mnq-arrival-control.json`. It refuses a dirty tree and requires the
-five parent-build baselines under `analysis/out/arrival-control-b1-baseline/`.
+per-symbol parent-build baselines under
+`analysis/out/arrival-control-b1-baseline/` (three since the 2026-08-09
+preset retirement; the committed brick N artifact recorded five).
 
 Gate B5 is EVIDENCE THIS COMMAND READS, never a check it runs. Run
 `brokkr check --gate --json` yourself first and capture its output to
@@ -292,12 +295,13 @@ spawned gate would block forever on the workspace lock its own parent holds. A
 workspace textlint rule forbids the tool's name in Rust source so this cannot
 come back.
 
-Alongside the five byte comparisons, and never in place of them, it reads the
-diff from the baseline commit (`--b1-baseline-commit`, default `HEAD~1`) to
-HEAD and records whether it touched `crates/mogwai-data/`,
+Alongside the per-symbol byte comparisons, and never in place of them, it
+reads the diff from the baseline commit (`--b1-baseline-commit`, default
+`HEAD~1`) to HEAD and records whether it touched `crates/mogwai-data/`,
 `crates/mogwai-protocol/`, `crates/mogwai-server/presets/` or
 `analysis/fingerprint.json`; touching any of them, or a tape protocol version
-other than 11, fails the tape-identity gate. Test-only files inside those paths
+other than the pre-mechanism identity (12 since the 2026-08-09 calibration
+amendment), fails the tape-identity gate. Test-only files inside those paths
 are reported separately and do not fail it, since a `cfg(test)` module
 contributes no byte to a shipped tape.
 
@@ -333,6 +337,6 @@ crossed.
 
 A full run requires a clean tree before reading any input and re-attests
 it immediately before serializing, exactly as `arrival-control` does. The
-command lands no generator change and moves no tape byte:
-`TAPE_PROTOCOL_VERSION` stays 11, and the artifact's binding block asserts
-that it does.
+command lands no generator change and moves no tape byte: the run records
+the live `TAPE_PROTOCOL_VERSION` (12 since the 2026-08-09 calibration
+amendment) in the artifact's binding block.

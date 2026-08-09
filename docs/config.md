@@ -134,7 +134,7 @@ open, which is the crypto case and the default.
 ## Presets
 
 `preset = "MNQ"` inside `[instrument]` merges a committed, embedded preset -
-`MNQ`, `MES`, `BTCUSDT`, `ETHUSDT`, `SOLUSDT`. Every other key must then be
+`MNQ`, `MES`, `BTCUSDT`. Every other key must then be
 stated under `[instrument.override]` as a dotted path
 (`"class.multiplier" = "3"`); restating one at the top level refuses boot, and
 so does overriding a path the preset does not set. Each override is logged at

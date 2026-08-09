@@ -14,11 +14,14 @@ depends on the published nautilus crates to ship the
 `ExecutionClient`/`DataClient` pair a host constructs to drive the `MOGWAI`
 venue over this workspace's native JSON-over-WS protocol.
 
-The INSTRUMENT SET IS OPEN. The five shipped presets - MNQ and MES plus
-BTCUSDT, ETHUSDT and SOLUSDT - are the
+The INSTRUMENT SET IS OPEN. The three shipped presets - MNQ, MES and
+BTCUSDT - are the
 current state, not the end state - whatever gets traded next, the venue owes
 it a realistic tape, which means a corpus, a measurement, a fit and a preset
-for that symbol. The offline toolbox (`mogwai-lab` and what survives in
+for that symbol. (ETHUSDT and SOLUSDT shipped for a while as BTCUSDT aliases -
+identical generator paths, tapes differing only in the symbol identity - and
+were retired 2026-08-09 by owner ruling; MES remains a stated stopgap
+borrowing the MNQ fit.) The offline toolbox (`mogwai-lab` and what survives in
 `analysis/`) is therefore reusable intake machinery, not one instrument's
 history: treat a component as spent only when its QUESTION cannot recur, and
 keep per-instrument knowledge in config or a preset rather than hardcoded in

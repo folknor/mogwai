@@ -73,7 +73,7 @@ pub(crate) struct GenArgs {
     #[arg(long)]
     interval: Option<String>,
     /// Instrument to generate. A built-in venue symbol first, then an embedded
-    /// preset name (MNQ, MES, BTCUSDT, ETHUSDT, SOLUSDT). A preset brings its
+    /// preset name (MNQ, MES, BTCUSDT). A preset brings its
     /// own session calendar, so a futures tape shows its closed weekend.
     #[arg(long, default_value = "BTCUSDT")]
     symbol: String,
@@ -1371,13 +1371,15 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../analysis/protocol9-tape-hashes.json"
         );
+        // The ETHUSDT and SOLUSDT rows were removed with their presets
+        // (owner ruling, 2026-08-09). Their generator paths were identical
+        // to BTCUSDT's, but the canonical lines embed the symbol, so their
+        // ORACLE hashes were distinct identity-only rows: the fixture loses
+        // those four entries while retaining every distinct-dynamics stream
+        // (BTCUSDT at both seeds plus the surge case).
         let matrix: &[(&str, u64, bool)] = &[
             ("BTCUSDT", 42, false),
             ("BTCUSDT", 7, false),
-            ("ETHUSDT", 42, false),
-            ("ETHUSDT", 7, false),
-            ("SOLUSDT", 42, false),
-            ("SOLUSDT", 7, false),
             ("BTCUSDT", 42, true),
         ];
         let mut hashes = serde_json::Map::new();

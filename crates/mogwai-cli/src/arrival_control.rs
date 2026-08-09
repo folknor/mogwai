@@ -36,7 +36,12 @@ const DEFAULT_BASELINE: &str = "analysis/out/arrival-control-b1-baseline";
 const DEFAULT_AFTER: &str = "analysis/out/arrival-control-b1-after";
 const DEFAULT_OUT: &str = "analysis/mnq-arrival-control.json";
 const DEFAULT_B5_LOG: &str = "analysis/out/arrival-control-b5-gate.log";
-const B1_SYMBOLS: [&str; 5] = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "MES", "MNQ"];
+// ETHUSDT and SOLUSDT left this list with their presets (owner ruling
+// 2026-08-09, amended into the 12b spec): both were BTCUSDT aliases with
+// identical generator paths, and at THIS gate's CSV layer their digests
+// grouped with BTCUSDT's, so B1 exercised three distinct tapes then and
+// exercises the same three now.
+const B1_SYMBOLS: [&str; 3] = ["BTCUSDT", "MES", "MNQ"];
 
 #[derive(Args)]
 pub struct ArrivalControlArgs {
@@ -47,11 +52,12 @@ pub struct ArrivalControlArgs {
     /// Brick B4's committed minute-range bound.
     #[arg(long, value_name = "PATH")]
     pub envelope: Option<PathBuf>,
-    /// The directory holding the five PRE-LANDING legacy tapes gate B1
+    /// The directory holding the per-symbol PRE-LANDING legacy tapes gate B1
     /// compares against, produced by the shipped binary at the parent commit.
     #[arg(long, value_name = "DIR")]
     pub b1_baseline: Option<PathBuf>,
-    /// Where to write the five AFTER tapes B1 generates before comparing them
+    /// Where to write the per-symbol AFTER tapes B1 generates before comparing
+    /// them
     /// byte for byte against the baseline.
     #[arg(long, value_name = "DIR")]
     pub b1_after: Option<PathBuf>,
@@ -146,8 +152,8 @@ fn require_baseline(path: &Path) -> anyhow::Result<()> {
 
 /// The four paths section 1 freezes for this brick, plus the fingerprint. A
 /// brick that moved any of them could not claim a byte-identical tape however
-/// the five comparisons came out, so the supporting check below reads the
-/// commit's own diff rather than trusting the claim.
+/// the per-symbol comparisons came out, so the supporting check below reads
+/// the commit's own diff rather than trusting the claim.
 const FROZEN_PATHS: [&str; 4] = [
     "crates/mogwai-data/",
     "crates/mogwai-protocol/",
@@ -158,7 +164,7 @@ const FROZEN_PATHS: [&str; 4] = [
 /// B1's supporting check: `git diff --name-only <parent>..HEAD` touches none of
 /// the frozen paths, and `TAPE_PROTOCOL_VERSION` is still the pre-mechanism
 /// identity (12 since the 2026-08-09 calibration amendment). Recorded ALONGSIDE
-/// the five byte comparisons and never substituted for them - it is a much
+/// the per-symbol byte comparisons and never substituted for them - it is a much
 /// weaker statement than tape identity, since a generator change outside those
 /// paths would pass it - but it is ANDed into B1's verdict rather than merely
 /// reported, because a decorative check nobody can fail is not evidence.
@@ -212,7 +218,7 @@ fn b1_supporting_check(baseline_commit: &str) -> anyhow::Result<Value> {
 ///
 /// The `examples/` arm is not hypothetical tidiness. The first artifact run
 /// failed B1 on `crates/mogwai-data/examples/fill_walk_bench.rs`, a criterion
-/// bench target whose only change was a comment, while all five tape
+/// bench target whose only change was a comment, while every tape
 /// comparisons reported byte identity. A supporting check that contradicts the
 /// evidence it supports is worse than no supporting check.
 fn is_non_shipping(path: &str) -> bool {
@@ -301,7 +307,8 @@ struct Seams {
     /// Whether B5's transcript is read at all. False only in the
     /// re-attestation pin, which is about step ordering rather than B5.
     read_b5: bool,
-    /// Whether B1 execs the five `gen --type trades` subprocesses. False only
+    /// Whether B1 execs the per-symbol `gen --type trades` subprocesses. False
+    /// only
     /// in the re-attestation pin, which is about step 10, not about B1.
     run_b1: bool,
     /// Replaces the 12a binding's measured window and warmup, so a pin about

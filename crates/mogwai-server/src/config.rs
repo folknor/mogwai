@@ -483,8 +483,6 @@ fn preset_text(name: &str) -> Option<&'static str> {
         "MNQ" => Some(include_str!("../presets/mnq.toml")),
         "MES" => Some(include_str!("../presets/mes.toml")),
         "BTCUSDT" => Some(include_str!("../presets/btcusdt.toml")),
-        "ETHUSDT" => Some(include_str!("../presets/ethusdt.toml")),
-        "SOLUSDT" => Some(include_str!("../presets/solusdt.toml")),
         _ => None,
     }
 }
@@ -1453,7 +1451,7 @@ mod tests {
     #[test]
     fn every_shipped_preset_parses_and_validates() {
         let fp = mogwai_data::Fingerprint::from_repo_json();
-        for name in ["MNQ", "MES", "BTCUSDT", "ETHUSDT", "SOLUSDT"] {
+        for name in ["MNQ", "MES", "BTCUSDT"] {
             let (_, provenance) = effective_preset(name).unwrap();
             let table =
                 toml::Table::from_iter([("preset".into(), toml::Value::String(name.into()))]);
@@ -1468,7 +1466,7 @@ mod tests {
 
     #[test]
     fn every_shipped_preset_quotes_a_positive_integral_width() {
-        for name in ["MNQ", "MES", "BTCUSDT", "ETHUSDT", "SOLUSDT"] {
+        for name in ["MNQ", "MES", "BTCUSDT"] {
             let profile = profile_from_preset(name).unwrap();
             assert!(profile.scalars.quoted_width.ticks().get() > 0, "{name}");
         }
@@ -1478,28 +1476,27 @@ mod tests {
     fn quote_seam_provenance_matches_the_protocol_10_landing() {
         // The placeholder era is over for the futures: MNQ's quote seams
         // are FITTED from the July TBBO month and MES inherits them loudly
-        // as the standing stopgap; the crypto presets remain uncalibrated,
+        // as the standing stopgap; the crypto preset remains uncalibrated,
         // since no quote evidence covers spot. The fitted corpus strings
         // must name the MNQ evidence, so an MES reader can see the borrow.
         use mogwai_data::CalibrationProvenance;
-        for name in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] {
-            let profile = profile_from_preset(name).unwrap();
-            assert_eq!(
-                profile.scalars.quoted_width.provenance(),
-                &CalibrationProvenance::Uncalibrated,
-                "{name} quoted width"
-            );
-            assert_eq!(
-                profile.scalars.top_sizes.provenance,
-                CalibrationProvenance::Uncalibrated,
-                "{name} top sizes"
-            );
-            assert_eq!(
-                profile.scalars.trade_displacement_ticks.provenance(),
-                &CalibrationProvenance::Uncalibrated,
-                "{name} trade displacement"
-            );
-        }
+        let name = "BTCUSDT";
+        let profile = profile_from_preset(name).unwrap();
+        assert_eq!(
+            profile.scalars.quoted_width.provenance(),
+            &CalibrationProvenance::Uncalibrated,
+            "{name} quoted width"
+        );
+        assert_eq!(
+            profile.scalars.top_sizes.provenance,
+            CalibrationProvenance::Uncalibrated,
+            "{name} top sizes"
+        );
+        assert_eq!(
+            profile.scalars.trade_displacement_ticks.provenance(),
+            &CalibrationProvenance::Uncalibrated,
+            "{name} trade displacement"
+        );
         for name in ["MNQ", "MES"] {
             let profile = profile_from_preset(name).unwrap();
             for (seam, provenance) in [
@@ -1527,7 +1524,7 @@ mod tests {
 
     #[test]
     fn quote_sizes_are_on_the_instrument_grid() {
-        for name in ["MNQ", "MES", "BTCUSDT", "ETHUSDT", "SOLUSDT"] {
+        for name in ["MNQ", "MES", "BTCUSDT"] {
             let profile = profile_from_preset(name).unwrap();
             for size in [profile.scalars.top_sizes.bid, profile.scalars.top_sizes.ask] {
                 assert!(size >= profile.def.size_increment, "{name}: {size}");
@@ -1615,7 +1612,7 @@ mod tests {
 
     #[test]
     fn every_shipped_preset_declares_provenance_for_every_knob_it_sets() {
-        for name in ["MNQ", "MES", "BTCUSDT", "ETHUSDT", "SOLUSDT"] {
+        for name in ["MNQ", "MES", "BTCUSDT"] {
             let (instrument, provenance) = effective_preset(name).unwrap();
             validate_provenance(name, &instrument, &provenance).unwrap();
         }

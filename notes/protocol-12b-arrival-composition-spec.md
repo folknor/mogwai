@@ -177,6 +177,32 @@ Brick A resumes only after this amendment's code change lands with its
 gates green; the A0 probe re-runs on the amended tree as brick A's
 first act.
 
+UPDATE 2026-08-09, the PRESET-RETIREMENT AMENDMENT (section 17, narrow,
+formally restarting Brick F; reviewed and signed by codex session
+019fe781-e6dd-7172-b700-22df68b83271). Owner ruling: the ETHUSDT and
+SOLUSDT presets are retired - both were `preset = "BTCUSDT"` aliases
+overriding only identity fields, so their GENERATOR PATHS were identical
+to BTCUSDT's and their tapes differed only in the symbol identity. Layer
+precision, because the two artifact layers differ: B1's CSV digests
+grouped the three as one digest group (the brick N evidence in
+`analysis/mnq-arrival-control.json`, which is the citable record - the
+todo entry that measured the aliasing is deleted by this same ruling and
+survives at the pre-retirement commit in git history); the protocol-9
+canonical TickEvent hashes DIFFERED, because that serialization embeds
+the symbol, so the oracle loses four identity-only rows while retaining
+every distinct-dynamics stream (BTCUSDT at two seeds plus the surge
+case). Consequences for this document: the B1 legacy walks in section 16
+and brick S shrink from five symbols to BTCUSDT, MES and MNQ with no
+loss of distinct-tape coverage at the CSV layer B1 compares;
+`B1_SYMBOLS` in `arrival-control` follows; and section 17's out-of-scope
+line "the crypto presets and any re-bless of their tapes" now reads over
+the RETAINED crypto preset, BTCUSDT. Nothing else changes - the B1
+gate's definition, the seam, the families and every constant are
+untouched. Committed historical artifacts naming the retired presets
+(the brick N artifact, the tick-composition fixtures) are records and
+stay; the ratios tool classifies retired presets through a committed
+table so historical fixtures remain auditable.
+
 ### Item 2: bricks A0 and A, the Stage A screen
 
 The screen driver, the `arrival-screen` CLI with its `--cost-probe`
@@ -2194,26 +2220,31 @@ tick streams can produce identical bars. Corrected on both counts:
 `--type trades` is the raw tape and is byte-complete.
 
 BEFORE the branch lands, from the pre-landing release binary, for each
-of the four crypto and MES presets - the ones that must not move:
+of the BTCUSDT and MES presets - the ones that must not move (AMENDED
+2026-08-09: was "the four crypto and MES presets" before the preset
+retirement):
 
 ```text
 brokkr run --release mogwai -- gen --type trades --symbol BTCUSDT --seed 7 --length 2d --out analysis/out/legacy-BTCUSDT-before.csv
-brokkr run --release mogwai -- gen --type trades --symbol ETHUSDT --seed 7 --length 2d --out analysis/out/legacy-ETHUSDT-before.csv
-brokkr run --release mogwai -- gen --type trades --symbol SOLUSDT --seed 7 --length 2d --out analysis/out/legacy-SOLUSDT-before.csv
 brokkr run --release mogwai -- gen --type trades --symbol MES --seed 7 --length 2d --out analysis/out/legacy-MES-before.csv
 brokkr run --release mogwai -- gen --type trades --symbol MNQ --seed 7 --length 2d --out analysis/out/legacy-MNQ-before.csv
 ```
+
+(AMENDED 2026-08-09, the preset-retirement amendment recorded in section 0:
+the ETHUSDT and SOLUSDT rows are removed with their presets. Both were
+BTCUSDT aliases with identical generator paths, and at THIS gate's CSV
+layer their digests grouped with BTCUSDT's - the brick N artifact is the
+evidence - so B1 exercised three distinct tapes before the retirement and
+exercises the same three after it.)
 
 AFTER, re-run each with `-after.csv` and compare:
 
 ```text
 cmp analysis/out/legacy-BTCUSDT-before.csv analysis/out/legacy-BTCUSDT-after.csv
-cmp analysis/out/legacy-ETHUSDT-before.csv analysis/out/legacy-ETHUSDT-after.csv
-cmp analysis/out/legacy-SOLUSDT-before.csv analysis/out/legacy-SOLUSDT-after.csv
 cmp analysis/out/legacy-MES-before.csv analysis/out/legacy-MES-after.csv
 ```
 
-Those four must be byte-identical. MNQ is EXPECTED to differ once its
+Those two must be byte-identical. MNQ is EXPECTED to differ once its
 preset declares the seam, so its identity check needs a seam-absent
 config - and revision 3 specified that as "copy the file and delete the
 table", a manual edit inside a gate advertised as exact, and a fragile
@@ -2427,7 +2458,10 @@ Transcript contract (layer 2), per family
     the raw u64 bit pattern of its f64 value, never decimal
 
 Legacy byte-identity walks (B1): symbol in
-  BTCUSDT, ETHUSDT, SOLUSDT, MES, MNQ; seed 7; length 2d;
+  BTCUSDT, MES, MNQ; seed 7; length 2d;
+  (AMENDED 2026-08-09: ETHUSDT and SOLUSDT retired with their presets;
+  they were BTCUSDT aliases with identical generator paths, and B1's
+  distinct-tape coverage at its CSV layer is unchanged);
   gen --type trades (the raw tape, byte-complete - bars cannot prove
   tape identity); the committed anchor. Exact commands in brick S.
 ```
@@ -2438,7 +2472,9 @@ Out of scope, named and excluded rather than deferred: any change to
 `notes/protocol-12a-measurement-spec.md`, its ladder, bins, floors,
 estimators or refusal semantics; any change to the price path, GARCH,
 size, level, bounce or quote machinery; `vol_scalar` and the volatility
-refit; the crypto presets and any re-bless of their tapes; the ES/MES
+refit; the retained BTCUSDT preset and any re-bless of its tape (AMENDED
+2026-08-09 from "the crypto presets", per the preset-retirement
+amendment in section 0); the ES/MES
 corpus and any purchase decision; the reopen-gap limitation and the
 fanout-capacity investigation; the `--fit` and `--fit-markov` modes of
 `cadence-feasible`; and multi-instrument generalization - this landing

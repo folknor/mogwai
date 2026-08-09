@@ -45,7 +45,7 @@ const VOL_WINDOW_SECS: u64 = 300;
 const WARMUP_SECS: u64 = 86_400;
 const WALL_HORIZON_SECS: u64 = 600;
 const MAX_MEASURED_SPEED: u64 = 10;
-const PRESETS: [&str; 5] = ["MNQ", "MES", "BTCUSDT", "ETHUSDT", "SOLUSDT"];
+const PRESETS: [&str; 3] = ["MNQ", "MES", "BTCUSDT"];
 
 /// `mogwai tick-composition` arguments. Writes the paired BBO composition
 /// fixtures the budget constants are derived from.
@@ -763,18 +763,18 @@ mod tests {
     #[test]
     fn task_order_is_seed_then_mode_then_preset() {
         let tasks = tasks();
-        assert_eq!(tasks.len(), 160);
+        assert_eq!(tasks.len(), 96);
         assert_eq!(
             (tasks[0].seed, tasks[0].mode.label(), tasks[0].preset),
             (1, "quiet", "MNQ")
         );
-        assert_eq!(tasks[4].preset, "SOLUSDT");
+        assert_eq!(tasks[2].preset, "BTCUSDT");
         assert_eq!(
-            (tasks[5].seed, tasks[5].mode.label(), tasks[5].preset),
+            (tasks[3].seed, tasks[3].mode.label(), tasks[3].preset),
             (1, "active", "MNQ")
         );
         assert_eq!(
-            (tasks[20].seed, tasks[20].mode.label(), tasks[20].preset),
+            (tasks[12].seed, tasks[12].mode.label(), tasks[12].preset),
             (2, "quiet", "MNQ")
         );
     }
@@ -785,7 +785,7 @@ mod tests {
         let order = work_order(&tasks);
         assert_eq!(order.len(), tasks.len());
         assert!(
-            order[..40]
+            order[..24]
                 .iter()
                 .all(|&index| matches!(tasks[index].mode, Mode::Surged))
         );
@@ -875,9 +875,9 @@ mod tests {
         }
     }
 
-    /// Every preset, not the two self-contained documents. MES, ETHUSDT and
-    /// SOLUSDT inherit from a parent preset, and a loader that cannot follow
-    /// that inheritance kills an hours-long run at its first second.
+    /// Every preset, not only the self-contained documents. MES inherits from
+    /// a parent preset, and a loader that cannot follow that inheritance
+    /// kills an hours-long run at its first second.
     #[test]
     fn every_measured_preset_resolves_through_the_boot_path() {
         let profiles = resolve_profiles().expect("every measured preset resolves");
@@ -907,14 +907,13 @@ mod tests {
             assert_eq!(profile.scalars.top_sizes.ask, Decimal::from(3));
             assert!(profile.calendar.is_some(), "{preset} carries CME hours");
         }
-        for preset in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] {
-            let profile = &profiles[preset];
-            assert!(
-                !SizeGrid::from_def(&profile.def).integral,
-                "{preset} trades fractional size"
-            );
-            assert!(profile.calendar.is_none(), "{preset} never closes");
-        }
+        let preset = "BTCUSDT";
+        let profile = &profiles[preset];
+        assert!(
+            !SizeGrid::from_def(&profile.def).integral,
+            "{preset} trades fractional size"
+        );
+        assert!(profile.calendar.is_none(), "{preset} never closes");
     }
 
     /// The fanout arm of every preset must actually receive frames. For the two

@@ -1,15 +1,11 @@
 {
-  "entries": {
-    "BTCUSDT-42": "56a18a3c5116c80e",
-    "BTCUSDT-42-surged": "86384e27b5e59643",
-    "BTCUSDT-7": "0ef7762049b28dfd",
-    "ETHUSDT-42": "db99a9ac73a913d6",
-    "ETHUSDT-7": "3068b551defcffd1",
-    "SOLUSDT-42": "c8d967deb91ac10e",
-    "SOLUSDT-7": "0e688f98982c2a8a"
-  },
-  "hash": "fnv1a64 over canonical TickEvent lines",
-  "surge": "start 1h, 30m, rate 2.0, children 1.5",
-  "tape_protocol_version": 9,
-  "window_ns": 21600000000000
+ "entries": {
+  "BTCUSDT-42": "56a18a3c5116c80e",
+  "BTCUSDT-42-surged": "86384e27b5e59643",
+  "BTCUSDT-7": "0ef7762049b28dfd"
+ },
+ "hash": "fnv1a64 over canonical TickEvent lines",
+ "surge": "start 1h, 30m, rate 2.0, children 1.5",
+ "tape_protocol_version": 9,
+ "window_ns": 21600000000000
 }

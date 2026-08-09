@@ -92,7 +92,7 @@ trades are displaced from the published midpoint, so the default one-tick width
 and half-tick displacement print at the touch. Width, top sizes, and trade
 displacement are separate per-instrument calibration seams; a measured TBBO
 corpus supplies them for MNQ (and, by stated inheritance, MES) as of protocol
-10, while the crypto presets remain explicitly uncalibrated because no quote
+10, while the BTCUSDT preset remains explicitly uncalibrated because no quote
 evidence covers spot. Displacement is not
 capped by width: the published BBO is only the top level, so an aggressive
 parent may print beyond the touch without making the book malformed. A connecting WebSocket
@@ -269,9 +269,8 @@ depends on `mogwai-lab` for the pieces that need no server preset resolution
 `mogwai-server` for the generated side of measurement.
 
 THE INSTRUMENT SET IS OPEN, and that is why `mogwai-lab` is a library rather
-than a folder of scripts. The five shipped presets - MNQ and MES plus BTCUSDT,
-ETHUSDT and SOLUSDT - are the
-current state, not the end state: whatever a strategy needs to trade next -
+than a folder of scripts. The three shipped presets - MNQ, MES and BTCUSDT -
+are the current state, not the end state: whatever a strategy needs to trade next -
 another future, a basket of individual equities - the venue owes it a
 realistic tape, and a realistic tape means a corpus, a measurement, a fit and
 a preset for that symbol. So every instrument walks the same intake sequence:
@@ -283,7 +282,7 @@ SPENT only when its QUESTION cannot recur, never merely because the MNQ pass
 answered it - an archive inspector or a corpus driver is idle between
 instruments, not dead. And per-instrument knowledge belongs in config or a
 preset rather than a hardcoded list in the method: a preset tuple naming
-today's five symbols is a defect the sixth exposes. The corollary for
+today's three symbols is a defect the fourth exposes. The corollary for
 evidence is that a finding measured on one instrument is one observation, not
 a law, until a second instrument either reproduces it or does not - which is
 why methods a preregistered test rejected are kept runnable rather than

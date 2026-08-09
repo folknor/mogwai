@@ -1,7 +1,7 @@
 # Choosing an instrument preset
 
-An operator who wants MNQ, MES, BTCUSDT, ETHUSDT or SOLUSDT does not have to
-hand-write an `[instrument]` table. Five presets ship inside the `mogwai`
+An operator who wants MNQ, MES or BTCUSDT does not have to
+hand-write an `[instrument]` table. Three presets ship inside the `mogwai`
 binary - no data directory, no network fetch, nothing outside the executable
 itself - and a config selects one by name.
 
@@ -11,7 +11,7 @@ itself - and a config selects one by name.
 mogwai presets
 ```
 
-prints the five names. To see what a given preset actually sets, name it:
+prints the three names. To see what a given preset actually sets, name it:
 
 ```sh
 mogwai presets MNQ
@@ -20,7 +20,8 @@ mogwai presets MNQ
 This prints the preset's full TOML, including its `[provenance]` map - one
 entry per knob, saying whether the number was measured (`fitted`), computed
 from another fitted number (`derived`), or picked by hand (`declared`, with a
-one-line reason). Read this before you run with a preset: the crypto presets'
+one-line reason). Read this before you run with a preset: the BTCUSDT
+preset's
 cadence numbers are fitted against Binance trade-level archives, while the
 index-future presets' cadence is `derived` from 15-second OHLCV bars and their
 clustering constants are `declared` with a rationale that says, plainly, that
@@ -96,18 +97,19 @@ visible without you having to diff two TOML files.
   a stated stopgap product approximation, not a claim that MNQ evidence
   validates MES; a small ES/MES purchase is the recorded route to ending
   the borrow.
-- **BTCUSDT**, **ETHUSDT**, **SOLUSDT** - spot pairs against USDT, always
-  open (no calendar table), cadence and size distribution fitted against 30
-  days of Binance trade-level archives. ETHUSDT and SOLUSDT are built as
-  overrides of the BTCUSDT preset, restating only the symbol and base
-  currency; their cadence provenance is therefore the same fitted BTC
-  numbers, not an independently fitted ETH or SOL corpus - which is exactly
-  the kind of thing the provenance map exists to surface rather than hide.
+- **BTCUSDT** - a spot pair against USDT, always open (no calendar table),
+  cadence and size distribution fitted against 30 days of Binance
+  trade-level archives. (ETHUSDT and SOLUSDT presets shipped for a while as
+  thin overrides of this one, restating only the symbol and base currency -
+  identical generator paths, so a tape differing from BTCUSDT's only in the
+  symbol identity, at a BTC price level; they were retired 2026-08-09 - an
+  instrument that owes a realistic tape owes a corpus, a measurement and a
+  fit, and these had a preset only.)
 
-A preset can itself be built as an override of another preset (MES over MNQ,
-ETHUSDT and SOLUSDT over BTCUSDT); that nesting is internal to how the
-presets are authored; from the operator's config, `preset = "MES"` behaves
-identically to any other preset name.
+A preset can itself be built as an override of another preset (MES over
+MNQ); that nesting is internal to how the presets are authored; from the
+operator's config, `preset = "MES"` behaves identically to any other preset
+name.
 
 ## Inventing your own instrument
 
