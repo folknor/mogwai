@@ -14,11 +14,40 @@ grew to 2,687 lines, and was consolidated back to one page on 2026-08-09.
 This file is a map. If it starts explaining things instead of pointing at
 them, it has failed.
 
-## The arc
+## The arc, and the end goal
 
 One continuous piece of work, not a set of projects: make mogwai generate a
 REALISTIC tape for whatever instrument gets traded next, and serve it over the
 live path so a strategy can be forward-tested against it.
+
+THE END STATE, stated here because `reference/` documents what IS while this
+is what is INTENDED: on the order of 200 agents running concurrently, each
+developing a strategy through broadarrow - backtest, optimize, Monte Carlo -
+and then FORWARD-TESTING it against mogwai, accelerated, fire-and-forget,
+one venue instance per run, reproducible by seed. Resource cost is
+explicitly not a design input. The settled premises behind that (always
+accelerated, no restart or resume, single-instrument strategies, one MOGWAI
+venue) are recorded in `todo.md`'s PROBLEM STATEMENTS block.
+
+WHY THE TAPES: a backtest optimizes against the one path that actually
+happened, so its edge is always suspect of being memorized. A fitted
+generative tape supplies unlimited counterfactual months drawn from the same
+measured process - a DISTRIBUTION of realistic worlds, a fresh path per
+seed, each reproducible and bindable to a claim. Every un-fitted quantity is
+a direction in which the sampled worlds silently stop resembling the real
+one, which is why realism is a measured, gated property and why fake tapes
+(the ETH/SOL aliases) get cut rather than kept.
+
+WHY THE PRESET KNOBS: the generator's end state is pure instrument-agnostic
+method, with every instrument-specific fact living in a preset as a named,
+provenance-carrying value. Three jobs, per the settled parameterization
+ruling (recorded in `todo.md`): COMPLETE PARAMETERIZATION - everything is
+per-instrument in principle, so onboarding instrument N is the intake
+sequence terminating in a TOML file, zero method edits; LANDING SITES -
+each knob is where a measurement lands, and evidence is only bought when a
+knob exists to receive it; AUDITABLE HONESTY - every knob carries
+fitted/derived/declared provenance, so a preset is a claim ledger stating
+which parts of its tape rest on measurement and which on assertion.
 
 Everything below is a phase of that. The current instrument set - MNQ, MES,
 BTCUSDT - is where the work has reached, not where it stops.
