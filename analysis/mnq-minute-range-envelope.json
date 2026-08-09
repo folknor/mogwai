@@ -1,0 +1,29 @@
+{
+  "binding": {
+    "clean_tree": true,
+    "corpus_job": "GLBX-20260805-HAPEWPABKG",
+    "harness_tree_commit": "f1a88ecc1911b1798e911c5618fc9df9c818d0bd",
+    "inputs": {
+      "corpus": "research/market-data/databento/mnqv/2026-07.full.tbbo",
+      "file_hashes": {
+        "glbx-mdp3-20260630.tbbo.csv.zst": "18c218aa2dc4df44678222912d4811d5aeee4fd29df40577c0e432fc8a02dc01",
+        "glbx-mdp3-20260701-20260731.tbbo.csv.zst": "b5ede9b3c0a544367196cad91c60bd35ec01a11f8e536a6a04525aa34fc0d6fd"
+      },
+      "preflight": "analysis/out/mnq-fit-preflight.json"
+    },
+    "method": {
+      "name": "protocol-11 minute_range_envelope",
+      "replicates": 1000,
+      "resample_seed": 1,
+      "upper_quantile": 0.99
+    },
+    "preflight_artifact_hash": "96013588a6031121217f015adbeda6f9c127ca54458954d38a92634a7be55726"
+  },
+  "envelope": {
+    "max": 968,
+    "p99": 250,
+    "p99.9": 399,
+    "p99.99": 968,
+    "p99_lower": 210
+  }
+}
