@@ -52,6 +52,93 @@ than appended.
 
 ---
 
+## 0. Work items for the orchestration loop
+
+ADDED 2026-08-09, after bricks F, K and B4 landed at `f75156f`. This
+section is an INDEX, not an amendment: it changes no constant, gate,
+family, verdict or brick, and partitions the REMAINING bricks into
+three work items for the spec-loop. Each item is the X a step-1 spec
+writer reads; the sections it names are that item's binding contract.
+A completed item is removed from this index; the sections it pointed
+at stay, because later items and the artifacts' binding blocks still
+cite them.
+
+Standing constraints on every sub-spec written from an item:
+
+- This document remains the contract of record. A sub-spec LIFTS its
+  constants, seed sets, gate definitions and gate commands VERBATIM
+  from the sections its item names - it never paraphrases them, never
+  tightens or loosens them, and never sends the implementer back here
+  to cross-reference mid-build.
+- A sub-spec may not amend frozen content. If writing it exposes a
+  contradiction or an unmeasurable requirement, that is a section 17
+  stop: the brick fails and the amendment goes through review, dated,
+  in THIS document, before implementation resumes.
+- The stop points below are owner decisions. A sub-spec states its
+  item's stop point and the implementer halts there; no sub-spec may
+  define work past its own item's verdict.
+
+State when this index was added: bricks F (freeze), K (kernel,
+dormant) and B4 (the two-sided bound instrument) are DONE. The Stage A
+screen core (`mogwai_lab::arrival_screen`: observed projections, grid
+rules, loss) exists without its driver or CLI. `TAPE_PROTOCOL_VERSION`
+is 11. Not yet run: the B4 artifact command (an orchestrator run
+against landed code, precondition of item 1, no spec needed).
+
+### Item 1: brick N, the negative control
+
+The `arrival-control` command and its committed artifact.
+
+- Binding sections: 5.5 (the mechanism, the fit/test seed split, the
+  predicted failure), brick N (schema and gate commands), 10.2 gates
+  B1 to B7 with B8 inapplicable, 7 (seed sets), 8 (exposure), 13
+  (artifact binding blocks), 16 (constants).
+- Precondition: `analysis/mnq-minute-range-envelope.json` committed,
+  produced by the brick B4 command from a clean tree - B4 is one of
+  the gates this item judges against.
+- Stop point: a PASS ends the whole landing with
+  `negative-control-passed` and stops for an owner ruling; items 2
+  and 3 are then never specced. A failure is recorded and the loop
+  proceeds to item 2.
+
+### Item 2: bricks A0 and A, the Stage A screen
+
+The screen driver, the `arrival-screen` CLI with its `--cost-probe`
+mode, the fidelity layers, and `analysis/mnq-arrival-screen.json`.
+One item because A0 is a mode of A's binary and its whole job is to
+fail brick A before the grid runs.
+
+- Binding sections: 9 (projections, admissibility A1 to A4, loss,
+  output), 6 (fidelity layers; the layer-1 oracle test is BLOCKING),
+  3 (the stage boundary and what Stage A may not evaluate), 12
+  (procedure, budgets, the two-tier cost probe), 16 (grids and
+  constants), 7 and 8, bricks A0 and A (gate commands), 13.
+- Stage A is corpus-free and consumes neither the corpus nor the B4
+  artifact (brick B4 amendment 2).
+- Stop points: a cost-probe miss fails brick A and stops for a grid
+  re-freeze; an empty admissible region closes the landing with
+  `no-arrival-admissible-candidate-in-frozen-search-space` and goes
+  to the owner.
+
+### Item 3: bricks S0 and S, the Stage B landing
+
+`arrival-solve` with its `--cost-probe` mode, the seam declaration in
+`presets/mnq.toml`, `presets emit --omit`, the legacy byte-identity
+procedure, confirmation, `TAPE_PROTOCOL_VERSION = 12`, and
+`analysis/mnq-arrival-selection.json`.
+
+- Binding sections: 10 (gates, ordered selection, confirmation), 9.4
+  (grid sensitivity), 12 (Stage B budgets and the cap's consequence),
+  11 (anti-gaming), 15 (brick S is kept or reverted WHOLE), 16, 7 and
+  8, bricks S0 and S (procedures and exact commands), 13, and 1.2
+  (the inherited hard gates).
+- Stop points: every closing verdict of 1.1 that Stage B can reach,
+  each an owner report; `confirmation-failed` reverts the whole
+  brick.
+- Brick R follows a `mechanism-landed` close and is orchestrator runs
+  against existing code (`mogwai measure`, `parity12a_i`), not an
+  item.
+
 ## 1. The goal
 
 Repair the generated parent-count COMPOSITION until the frozen
