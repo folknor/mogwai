@@ -268,3 +268,28 @@ gates.
 `mogwai cache clean --stale` removes only the ones that do not match the
 CURRENT provenance token - the same pruning a cache write already does
 automatically, exposed for manual use.
+
+### `mogwai arrival-control`
+
+Runs protocol 12b brick N's deterministic hourly re-centring negative control.
+It verifies the standing build gate and five pre-landing legacy tapes before
+walking fit seeds 301 through 304 and test seeds 305 through 308. The command
+reads `analysis/mnq-measure-12a.json` and
+`analysis/mnq-minute-range-envelope.json`, and writes the hash-bound result to
+`analysis/mnq-arrival-control.json`. It refuses a dirty tree and requires the
+five parent-build baselines under
+`analysis/out/arrival-control-b1-baseline/`. Alongside the five byte
+comparisons, and never in place of them, it reads its own commit's diff against
+its parent and records whether it touched `crates/mogwai-data/`,
+`crates/mogwai-protocol/`, `crates/mogwai-server/presets/` or
+`analysis/fingerprint.json`; touching any of them, or a tape protocol version
+other than 11, fails the tape-identity gate.
+
+The artifact records a verdict of `negative-control-passed` or
+`negative-control-failed` together with the failing gate names, the per-hour
+ratios each of the four fit seeds contributed, the corrected curve and the
+normalizer drift the correction leaves behind. Like `measure12a`, it re-reads
+git immediately before the atomic write, so a HEAD move or an edit during the
+several minutes of walking unbinds the artifact rather than being recorded as
+a clean run. The corrected curve reaches the generator through an in-memory
+scratch override and is written to no preset; no tape byte moves.

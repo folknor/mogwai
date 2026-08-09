@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-use mogwai_cli::{fit, measure, minute_range_envelope};
+use mogwai_cli::{arrival_control, fit, measure, minute_range_envelope};
 use mogwai_server::{config, long_version};
 
 #[derive(Parser)]
@@ -60,6 +60,8 @@ enum Command {
     Fit(fit::FitArgs),
     /// Build Brick B4's bound minute-range-envelope artifact.
     MinuteRangeEnvelope(minute_range_envelope::MinuteRangeEnvelopeArgs),
+    /// Protocol 12b brick N: the deterministic hourly re-centring negative control.
+    ArrivalControl(arrival_control::ArrivalControlArgs),
     /// The cache-storage-class manual controls (stats / clean / clean
     /// --stale).
     Cache(cache::CacheArgs),
@@ -145,6 +147,10 @@ fn main() -> anyhow::Result<()> {
         Command::Fit(args) => fit::run(&args),
         Command::MinuteRangeEnvelope(args) => {
             minute_range_envelope::run(args)?;
+            Ok(())
+        }
+        Command::ArrivalControl(args) => {
+            arrival_control::run(args)?;
             Ok(())
         }
         Command::Cache(args) => cache::run(args),

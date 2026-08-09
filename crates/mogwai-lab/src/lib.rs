@@ -51,6 +51,7 @@
 //! that no deviation remains there.
 
 pub mod aggregate;
+pub mod arrival_control;
 pub mod arrival_screen;
 pub mod cadence;
 pub mod cadence_feasible;

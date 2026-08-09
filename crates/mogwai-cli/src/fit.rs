@@ -13,9 +13,10 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::{Context, anyhow};
 use clap::Args;
 use mogwai_lab::fit::driver::{FitConfig, run_fit};
+use mogwai_lab::ledger::require_clean_tree;
 use mogwai_lab::storage::artifact_path;
 
 const DEFAULT_CORPUS: &str = "research/market-data/databento/mnqv/2026-07.full.tbbo";
@@ -61,7 +62,7 @@ pub struct FitArgs {
 /// verdict line the Python printed.
 pub fn run(args: &FitArgs) -> anyhow::Result<()> {
     // Identity first, before a byte of CSV or a generator walk.
-    let harness_commit = require_clean_tree()?;
+    let harness_commit = require_clean_tree().map_err(|e| anyhow!("{e}"))?;
     let out = artifact_path(args.out.as_deref(), DEFAULT_OUT);
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)
@@ -123,29 +124,29 @@ pub fn resolve(args: &FitArgs, harness_commit: &str, default_cache_commit: &str)
     }
 }
 
-/// `require_clean_tree`: the commit that binds a real fit artifact. A dirty
-/// tree refuses - `harness_tree_commit` must name exactly the code that ran,
-/// and the walk cache also keys on it.
-fn require_clean_tree() -> anyhow::Result<String> {
-    let status = std::process::Command::new("git")
-        .args(["status", "--porcelain"])
-        .output()
-        .context("running git status")?;
-    if !status.status.success() {
-        bail!("git status failed; the harness tree is unidentifiable");
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The N1 fit-side gate: `fit` is now a call site of the SHARED
+    /// `mogwai_lab::ledger::require_clean_tree`, and moving it must not change
+    /// what an operator sees. Depends on the development tree being dirty, as
+    /// its `minute_range_envelope` sibling does; on a clean tree calling `run`
+    /// would launch a real fit, so the check is skipped rather than risked.
+    #[test]
+    fn fit_refuses_a_dirty_tree() {
+        if require_clean_tree().is_ok() {
+            return;
+        }
+        let err = run(&FitArgs {
+            corpus: None,
+            ledger: None,
+            preflight: None,
+            cache_dir: None,
+            cache_commit: None,
+            out: Some("target/fit-dirty-tree-test.json".into()),
+        })
+        .expect_err("this development tree is deliberately dirty");
+        assert!(err.to_string().contains("working tree is dirty"));
     }
-    if !String::from_utf8_lossy(&status.stdout).trim().is_empty() {
-        bail!(
-            "the working tree is dirty; an artifact may only bind a commit that is exactly the \
-             code that ran - commit first"
-        );
-    }
-    let head = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .context("running git rev-parse")?;
-    if !head.status.success() {
-        bail!("git rev-parse failed; the harness tree is unidentifiable");
-    }
-    Ok(String::from_utf8_lossy(&head.stdout).trim().to_string())
 }

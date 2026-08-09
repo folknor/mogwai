@@ -7,11 +7,11 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::{anyhow, bail};
 use clap::Args;
 use mogwai_lab::{
     fit::observe::observe,
-    ledger::verify_input,
+    ledger::{require_clean_tree, verify_input},
     preflight::require_preflight,
     stream::{data_files, parse_stream},
     subcontract::{RESAMPLE_ENVELOPE_LEVEL, RESAMPLE_REPLICATES, RESAMPLE_SEED},
@@ -39,7 +39,7 @@ pub struct MinuteRangeEnvelopeArgs {
 /// Kept public for the scratch-path regression test; it is intentionally not
 /// given a test-only clean-tree escape hatch.
 pub fn run(args: MinuteRangeEnvelopeArgs) -> anyhow::Result<Value> {
-    let commit = require_clean_tree()?;
+    let commit = require_clean_tree().map_err(|e| anyhow!("{e}"))?;
     let corpus = args.corpus.unwrap_or_else(|| DEFAULT_CORPUS.into());
     let ledger = args.ledger.unwrap_or_else(|| DEFAULT_LEDGER.into());
     let preflight = args.preflight.unwrap_or_else(|| DEFAULT_PREFLIGHT.into());
@@ -96,29 +96,6 @@ fn write_atomic(path: &std::path::Path, value: &Value) -> anyhow::Result<()> {
     std::fs::write(&tmp, serde_json::to_vec_pretty(value)?)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
-}
-
-fn require_clean_tree() -> anyhow::Result<String> {
-    let status = std::process::Command::new("git")
-        .args(["status", "--porcelain"])
-        .output()
-        .context("running git status")?;
-    if !status.status.success() {
-        bail!("git status failed; the harness tree is unidentifiable");
-    }
-    if !String::from_utf8_lossy(&status.stdout).trim().is_empty() {
-        bail!(
-            "the working tree is dirty; an artifact may only bind a commit that is exactly the code that ran - commit first"
-        );
-    }
-    let head = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .context("running git rev-parse")?;
-    if !head.status.success() {
-        bail!("git rev-parse failed; the harness tree is unidentifiable");
-    }
-    Ok(String::from_utf8_lossy(&head.stdout).trim().to_owned())
 }
 
 #[cfg(test)]

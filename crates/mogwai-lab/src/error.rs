@@ -15,6 +15,9 @@ pub enum LabError {
     Refusal(String),
     Io(std::io::Error),
     Json(serde_json::Error),
+    /// A harness/environment failure whose historical CLI text is part of
+    /// the artifact-writing contract.
+    Harness(String),
 }
 
 impl LabError {
@@ -29,6 +32,7 @@ impl fmt::Display for LabError {
             LabError::Refusal(msg) => write!(f, "refusal: {msg}"),
             LabError::Io(e) => write!(f, "io error: {e}"),
             LabError::Json(e) => write!(f, "json error: {e}"),
+            LabError::Harness(msg) => f.write_str(msg),
         }
     }
 }

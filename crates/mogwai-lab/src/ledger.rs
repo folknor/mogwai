@@ -15,6 +15,50 @@ use sha2::{Digest, Sha256};
 use crate::error::{LabError, LabResult};
 use crate::subcontract::{JOB_ID, LEDGER_KEY};
 
+/// Return the commit that exactly identifies the code about to produce an
+/// artifact. Dirty or unidentifiable trees fail closed.
+pub fn require_clean_tree() -> LabResult<String> {
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()?;
+    if !status.status.success() {
+        return Err(LabError::Harness(
+            "git status failed; the harness tree is unidentifiable".to_string(),
+        ));
+    }
+    if !String::from_utf8_lossy(&status.stdout).trim().is_empty() {
+        return Err(LabError::Harness(
+            "the working tree is dirty; an artifact may only bind a commit that is exactly the code that ran - commit first".to_string(),
+        ));
+    }
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !head.status.success() {
+        return Err(LabError::Harness(
+            "git rev-parse failed; the harness tree is unidentifiable".to_string(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&head.stdout).trim().to_string())
+}
+
+/// Read HEAD and cleanliness afresh immediately before an artifact write.
+pub fn fresh_tree_state() -> LabResult<(String, bool)> {
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()?;
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    let clean = status.status.success()
+        && String::from_utf8_lossy(&status.stdout).trim().is_empty()
+        && head.status.success();
+    Ok((
+        String::from_utf8_lossy(&head.stdout).trim().to_string(),
+        clean,
+    ))
+}
+
 /// Lowercase hex of a digest. sha2 0.11 finalizes to a `hybrid_array::Array`,
 /// which - unlike the 0.10 `GenericArray` - implements no `LowerHex`, so the
 /// `{:x}` formatting every hash site used has to be spelled out once here.

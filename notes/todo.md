@@ -19,6 +19,26 @@ Or both. There are no exceptions.
 
 ## Open issues
 
+- RECONCILE the protocol-12b section 5.5 rescale with the shipped preset
+  convention. That section freezes the negative control's re-centring as
+  "rescale the 24 values to sum to 1, which the `SessionProfile` schema
+  requires", and the schema requires no such thing: nothing in `config.rs`
+  or `session.rs` enforces sum-to-one, and the shipped MNQ
+  `intensity_hour` sums to 23.862306 - a mean-one curve, not a
+  sum-to-one one. Found 2026-08-09 while writing the brick N spec, and
+  the brick was implemented against the frozen text rather than around
+  it. It moves no generated rate either way: `SessionModulator::new`
+  divides by an exposure-weighted normalizer, so a common factor on
+  every hour cancels at every instant, and the control's committed
+  `new_curve` is therefore a correct re-centring on a different scale
+  from its own `old_curve`. What it cost is readability - the drift
+  figure the spec introduced so a uniform B6 offset would be
+  interpretable had to be redefined scale-invariantly before it measured
+  anything - and it will cost the same again at any later reader who
+  compares the two curves elementwise. Fixing the frozen sentence is a
+  section 17 amendment through review, not an edit, so it is recorded
+  here rather than taken.
+
 - INVESTIGATE the fanout-capacity accept-before-fill failure. A CORRECTNESS
   investigation, not capacity tuning: with `fanout_depth = 16_777_216`,
   `a_banded_limit_fills_from_the_run_sweep` fails DETERMINISTICALLY - the

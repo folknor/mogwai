@@ -9,6 +9,7 @@
 //! resolution (phase 3b's cache-replay parity gate) - every other
 //! subcommand still lives module-private under `src/main.rs`.
 
+pub mod arrival_control;
 pub mod fit;
 pub mod measure;
 pub mod minute_range_envelope;

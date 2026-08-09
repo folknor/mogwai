@@ -25,7 +25,7 @@ use mogwai_lab::aggregate::artifact::{
 };
 use mogwai_lab::aggregate::bootstrap::bootstrap_multiplicities;
 use mogwai_lab::kernel::typed_canon;
-use mogwai_lab::ledger::verify_input;
+use mogwai_lab::ledger::{fresh_tree_state, require_clean_tree, verify_input};
 use mogwai_lab::measure12a::generated::GeneratedAcc;
 use mogwai_lab::measure12a::observed;
 use mogwai_lab::preflight::require_preflight;
@@ -165,7 +165,7 @@ pub fn run_measure_with(
     cfg: &MeasureConfig,
     walk_source: WalkSource,
 ) -> anyhow::Result<MeasureOutcome> {
-    let harness_commit = require_clean_tree()?;
+    let harness_commit = require_clean_tree().map_err(|e| anyhow!("{e}"))?;
 
     // The Brick G references load READ-ONLY before anything runs.
     let brick_g = load_brick_g_walks(&cfg.walk_cache_dir)
@@ -353,7 +353,7 @@ pub fn run_measure_with(
         );
     }
 
-    let (head, clean) = fresh_tree_state()?;
+    let (head, clean) = fresh_tree_state().map_err(|e| anyhow!("{e}"))?;
     if !clean || head != harness_commit {
         bail!("the tree changed during the measure12a run; the artifact is unbound");
     }
@@ -362,53 +362,6 @@ pub fn run_measure_with(
         .map_err(|e| anyhow!("writing {}: {e}", cfg.out.display()))?;
 
     Ok(MeasureOutcome { artifact, cost })
-}
-
-/// `require_clean_tree`: the commit that binds a real artifact. A dirty
-/// tree refuses - `harness_tree_commit` must name exactly the code that
-/// ran.
-fn require_clean_tree() -> anyhow::Result<String> {
-    let status = std::process::Command::new("git")
-        .args(["status", "--porcelain"])
-        .output()
-        .context("running git status")?;
-    if !status.status.success() {
-        bail!("git status failed; the harness tree is unidentifiable");
-    }
-    if !String::from_utf8_lossy(&status.stdout).trim().is_empty() {
-        bail!(
-            "the working tree is dirty; an artifact may only bind a commit that is exactly the \
-             code that ran - commit first"
-        );
-    }
-    let head = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .context("running git rev-parse")?;
-    if !head.status.success() {
-        bail!("git rev-parse failed; the harness tree is unidentifiable");
-    }
-    Ok(String::from_utf8_lossy(&head.stdout).trim().to_string())
-}
-
-/// `_fresh_tree_state`: (HEAD, clean) read FRESH from git immediately
-/// before the atomic write - never the value `require_clean_tree` returned
-/// at the top of the run - so a HEAD move or a new dirty file DURING the
-/// run is caught before the artifact writes.
-fn fresh_tree_state() -> anyhow::Result<(String, bool)> {
-    let status = std::process::Command::new("git")
-        .args(["status", "--porcelain"])
-        .output()?;
-    let head = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()?;
-    let clean = status.status.success()
-        && String::from_utf8_lossy(&status.stdout).trim().is_empty()
-        && head.status.success();
-    Ok((
-        String::from_utf8_lossy(&head.stdout).trim().to_string(),
-        clean,
-    ))
 }
 
 /// `run_measure12a_observed`: the observed half - per-session sufficient
