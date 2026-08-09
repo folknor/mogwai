@@ -47,7 +47,7 @@
       22,
       23
     ],
-    "harness_tree_commit": "2ecc4e8d2d01e9665ee204d30f7236268d8dbadc",
+    "harness_tree_commit": "671d193ba12206c18e5cd408ff14a10eb5b78edc",
     "input_hashes": {
       "analysis/mnq-measure-12a.json": "60d755e8b76794f6c9e4f2092eca45662d24b17d168cfbe95443e505f773d253",
       "analysis/mnq-minute-range-envelope.json": "32d74b5adc527676cecef6bb14a205db34ed78a073f9607b648ffb780b081322"
@@ -59,15 +59,14 @@
     ]
   },
   "cost": {
-    "b1_s": 22.445535795,
-    "b5_s": 0.000295127,
-    "fit_walk_s": 305.075133709,
-    "peak_rss_bytes": 1351483392,
-    "test_walk_s": 304.901082257,
-    "total_s": 633.135432248
+    "b1_s": 23.037314027,
+    "b5_s": 0.00004137,
+    "fit_walk_s": 303.765870956,
+    "peak_rss_bytes": 1351434240,
+    "test_walk_s": 303.469537822,
+    "total_s": 631.104725015
   },
   "failing_gates": [
-    "B1",
     "B2",
     "B3",
     "B4",
@@ -86,14 +85,13 @@
             "crates/mogwai-server/presets/",
             "analysis/fingerprint.json"
           ],
-          "passed": false,
+          "passed": true,
           "tape_protocol_version": 11,
-          "touched_frozen_shipping_paths": [
-            "crates/mogwai-data/examples/fill_walk_bench.rs"
-          ],
-          "touched_frozen_test_only_paths": [
+          "touched_frozen_non_shipping_paths": [
+            "crates/mogwai-data/examples/fill_walk_bench.rs",
             "crates/mogwai-data/src/generated/tests.rs"
-          ]
+          ],
+          "touched_frozen_shipping_paths": []
         },
         "tapes": [
           {
@@ -203,7 +201,7 @@
           }
         ]
       },
-      "passed": false,
+      "passed": true,
       "refusals": []
     },
     "B2": {
@@ -5020,7 +5018,7 @@
             "quarantined": 0,
             "run": 763
           },
-          "elapsed_ms": 155577,
+          "elapsed_ms": 156636,
           "failed_phase": null,
           "package": null,
           "profile": "gate",
@@ -5032,7 +5030,7 @@
         },
         "transcript": "analysis/out/arrival-control-b5-gate.log",
         "transcript_bytes": 705,
-        "transcript_sha256": "21fb6a4c9532e51975e01cf38c13b0dc5907dd1d3fea903bf3b375147c0d67ae"
+        "transcript_sha256": "c7100634aefbdacc22bea2d3796c3405be99ef30bb07267f651cfe8b6d4b9087"
       },
       "passed": true,
       "refusals": []

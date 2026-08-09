@@ -85,21 +85,21 @@ rules, loss) exists without its driver or CLI. `TAPE_PROTOCOL_VERSION`
 is 11. Not yet run: the B4 artifact command (an orchestrator run
 against landed code, precondition of item 1, no spec needed).
 
-### Item 1: brick N, the negative control
+UPDATE 2026-08-09: brick N is DONE and item 1 is removed above. The
+control ran on `CONTROL_TEST_SEEDS` against gates B1 to B7 and returned
+`negative-control-failed`: B1 and B5 pass, B2, B3, B4, B6 and B7 fail.
+The landing therefore does NOT stop, and the loop proceeds to item 2 as
+5.5 provides for. The evidence is `analysis/mnq-arrival-control.json`,
+bound to commit `671d193`.
 
-The `arrival-control` command and its committed artifact.
-
-- Binding sections: 5.5 (the mechanism, the fit/test seed split, the
-  predicted failure), brick N (schema and gate commands), 10.2 gates
-  B1 to B7 with B8 inapplicable, 7 (seed sets), 8 (exposure), 13
-  (artifact binding blocks), 16 (constants).
-- Precondition: `analysis/mnq-minute-range-envelope.json` committed,
-  produced by the brick B4 command from a clean tree - B4 is one of
-  the gates this item judges against.
-- Stop point: a PASS ends the whole landing with
-  `negative-control-passed` and stops for an owner ruling; items 2
-  and 3 are then never specced. A failure is recorded and the loop
-  proceeds to item 2.
+This is the outcome 5.5 predicted, and the prediction's REASONING is
+confirmed rather than merely its verdict: the hourly means were never
+what was wrong, so re-centring them cannot buy the within-hour mixture
+the observed tape carries. The measured `normalizer_drift` is
+1.0026855, so the corrected curve moves the overall level by about a
+quarter of a percent - the correction really is a reshaping of the hour
+axis and not a level change in disguise. The premise that a new
+stochastic shape is required survives.
 
 ### Item 2: bricks A0 and A, the Stage A screen
 
