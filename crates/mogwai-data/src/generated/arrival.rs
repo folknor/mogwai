@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use super::{
     calendar::SessionCalendar,
-    consts::{ARRIVAL_MEAN_CAL, INTRA_EVENT_STEP_NS, MAX_SESSION_GAP_NS},
+    consts::{INTRA_EVENT_STEP_NS, MAX_SESSION_GAP_NS},
     dynamics::SweepShape,
     fingerprint::{GeneratorScalars, SessionProfile},
     session::SessionModulator,
@@ -24,15 +24,25 @@ const CADENCE_STREAM_TAG: u64 = 0x6D6F6777_61693132;
 /// The mean gap `next_parent` is driven with. One definition, called by both
 /// `CadenceWalk::assemble` and `GeneratedSource::begin_integrated_event`: the
 /// point of the shared assembly is that no cadence input is derived twice.
+/// The mean is BARE, deliberately: `ARRIVAL_MEAN_CAL` is an empirically
+/// bisected correction for the SHIPPED sampling scheme's realized-mean
+/// inflation, and the integrated frame's exact time change has no such
+/// inflation to correct - applying it here double-counts, a uniform
+/// 1/0.944 = 1.0593 rate excess (the 2026-08-09 calibration amendment,
+/// `notes/protocol-12b-arrival-composition-spec.md` section 0). The
+/// shipped path keeps the calibration in `begin_event`, which is what it
+/// corrects. Both the intensity denominator and the self-exciting
+/// family's baseline expectation flow from this one definition; removing
+/// the calibration from both is what preserves the feedback identity.
 pub(super) fn cadence_base_mean_s(scalars: &GeneratorScalars) -> f64 {
-    scalars.mean_event_duration_s * ARRIVAL_MEAN_CAL
+    scalars.mean_event_duration_s
 }
 
 /// Identity of the cadence draw used by Stage A cache entries.
 ///
 /// Changes to `ArrivalKernel::next_parent`, a family's parameterization,
 /// `CADENCE_STREAM_TAG`, or cadence seed derivation must bump this value.
-pub const ARRIVAL_KERNEL_VERSION: u32 = 1;
+pub const ARRIVAL_KERNEL_VERSION: u32 = 2;
 
 /// The cadence half of a generated walk, assembled exactly as the generator
 /// assembles it and driven independently under neutral runtime modifiers.
@@ -671,7 +681,7 @@ mod tests {
     use rand::SeedableRng;
     use rand_distr::Poisson;
     use serde::Deserialize;
-    use serde_json::Value;
+    use serde_json::{Value, json};
 
     use super::super::{Fingerprint, GeneratedSource, GeneratorScalars};
     use super::*;
@@ -1228,8 +1238,10 @@ mod tests {
                 scalars.children_single_frac,
                 scalars.levels_mean,
             );
-            let base_mean_s =
-                scalars.mean_event_duration_s * super::super::consts::ARRIVAL_MEAN_CAL;
+            // Bare, matching `cadence_base_mean_s` (the 2026-08-09 calibration
+            // amendment): the integrated frame carries no shipped-path
+            // correction.
+            let base_mean_s = scalars.mean_event_duration_s;
             let mut generator =
                 GeneratedSource::new(scalars, transcript.seed, transcript.origin_ns, &fp, None);
 
@@ -1280,6 +1292,98 @@ mod tests {
                     transcript.family
                 );
             }
+        }
+    }
+
+    /// AMENDMENT-ONLY regeneration of the three layer-2 transcript fixtures.
+    ///
+    /// The transcripts are committed regression pins and are NEVER regenerated
+    /// to match a later change - except under a signed section 17 amendment
+    /// that explicitly authorizes a one-time replacement, which must be cited
+    /// in the commit that carries the new fixtures. Last sanctioned use: the
+    /// 2026-08-09 arrival-frame calibration amendment (bare `base_mean_s`,
+    /// `ARRIVAL_KERNEL_VERSION` 2). Running this outside an amendment defeats
+    /// the pin's whole purpose; that is why it is `#[ignore]`d and named the
+    /// way it is.
+    #[test]
+    #[ignore = "regenerates committed regression pins; sanctioned only by a signed amendment"]
+    fn regenerate_arrival_transcripts_amendment_only() {
+        let fp = Fingerprint::from_repo_json();
+        let families: [(&str, &str, Value); 3] = [
+            (
+                "wall-mmpp",
+                "wall_mmpp",
+                json!({"occupancy": 0.4, "rate_ratio": 20.0, "tau_s": 100.0}),
+            ),
+            (
+                "log-ou-cox",
+                "log_ou_cox",
+                json!({"sigma_y": 1.0, "tau_s": 100.0}),
+            ),
+            (
+                "self-exciting",
+                "self_exciting",
+                json!({"phi": 0.45, "tau_s": 34.42651863295482}),
+            ),
+        ];
+        for (file_stem, family, params) in families {
+            let seed = 201_u64;
+            let origin_ns = 0_u64;
+            let kernel = transcript_kernel(family, &params);
+            let mut cadence_rng = ChaCha12Rng::seed_from_u64(mogwai_protocol::seeds::splitmix64(
+                seed ^ 0x6D6F6777_61693132,
+            ));
+            let mut state = ArrivalState::new(&kernel, origin_ns, &mut cadence_rng);
+            let environment = ArrivalEnv::for_profile(&fp.session_profile, None, 1.0, origin_ns);
+            let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
+            scalars.arrival = Some(transcript_config(family, &params));
+            let shape = SweepShape::new(
+                scalars.children_mean,
+                scalars.children_single_frac,
+                scalars.levels_mean,
+            );
+            let base_mean_s = scalars.mean_event_duration_s;
+            let mut from_ns = origin_ns;
+            let mut records = Vec::with_capacity(10_000);
+            for _ in 0..10_000 {
+                let draw = kernel
+                    .next_parent(
+                        &mut state,
+                        from_ns,
+                        base_mean_s,
+                        &shape,
+                        &environment,
+                        RuntimeModifiers::NEUTRAL,
+                        &mut cadence_rng,
+                    )
+                    .expect("open test exposure");
+                from_ns = draw.next_from_ns;
+                records.push(json!({
+                    "child_count": draw.child_count,
+                    "latent_x_bits": draw.latent_x.to_bits(),
+                    "parent_ts_ns": draw.parent_ts_ns,
+                }));
+            }
+            let transcript = json!({
+                "correctness_claim": "none",
+                "exposure": "fixed fully-open fingerprint session profile used by the kernel/GeneratedSource parity harness",
+                "family": family,
+                "kind": "regression-transcript",
+                "origin_ns": origin_ns,
+                "parameter_point": "frozen coarse-grid point nearest the family domain centre",
+                "params": params,
+                "records": records,
+                "seed": seed,
+            });
+            let path = format!(
+                "{}/tests/fixtures/arrival-transcript-{file_stem}.json",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            std::fs::write(
+                &path,
+                serde_json::to_string_pretty(&transcript).expect("serializable transcript") + "\n",
+            )
+            .expect("fixture written");
         }
     }
 

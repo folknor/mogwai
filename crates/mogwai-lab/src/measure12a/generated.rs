@@ -9,7 +9,8 @@
 //!
 //! The consumer only READS events and `VolTrace` records: it neither adds nor
 //! changes any field, branch, callback, buffer or draw in `GeneratedSource`,
-//! so `TAPE_PROTOCOL_VERSION` stays 11 (spec 2.3).
+//! so the 12a landing owed no `TAPE_PROTOCOL_VERSION` bump (spec 2.3; the
+//! constant has since moved for unrelated generator changes).
 //!
 //! Parent inference on this side is event-shaped, not row-shaped: a QUOTE
 //! closes the parent that ran under the previous book and becomes the pending

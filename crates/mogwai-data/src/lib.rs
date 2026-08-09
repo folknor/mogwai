@@ -66,7 +66,12 @@ pub use trigger::{
 /// Identity of the tape generation process, not of any one path. Two runs are
 /// comparable only if their venues report the same value. `AGENTS.md` carries
 /// the obligation to bump this for every tape-determinism change.
-pub const TAPE_PROTOCOL_VERSION: u32 = 11;
+///
+/// 12 is the protocol-12b arrival-frame calibration repair (integrated
+/// families take the bare mean): it changes outputs for `(config, seed)`
+/// pairs already expressible under 11, even though no shipped preset declares
+/// the arrival seam. The eventual 12b mechanism landing takes 13.
+pub const TAPE_PROTOCOL_VERSION: u32 = 12;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.

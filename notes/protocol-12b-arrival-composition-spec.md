@@ -111,6 +111,72 @@ artifact, `analysis/mnq-arrival-screen.json`, cannot be produced until
 this landing is committed and the tree is clean, so the full run and
 its verdict remain outstanding.
 
+UPDATE 2026-08-09, the ARRIVAL-FRAME CALIBRATION AMENDMENT (section 17,
+restarting Brick F; reviewed and SIGNED by codex session
+019fe781-e6dd-7172-b700-22df68b83271 over two rounds). The A0 probe
+found a uniform generated/observed mean-rate excess of 1.0615 to 1.0676
+at every traded hour and both seeds in all three kernel families, which
+fails A2 for every kernel cell as arithmetic. A Jensen-gap hypothesis
+was REFUTED by closed-form derivation (`scripts/arrival_frame_jensen.py`:
+per-hour factor 1.002577 for hours 0-20, 1.032201 for 22-23 - wrong
+magnitude and, decisively, wrong shape against the flat measurement).
+The confirmed mechanism: `ARRIVAL_MEAN_CAL = 0.944` is an EMPIRICALLY
+BISECTED correction for the SHIPPED sampling scheme's realized-mean
+inflation; the integrated frame's exact time change has no such
+inflation, so applying it there double-counts: 1/0.944 = 1.05932,
+uniform. Empirically confirmed by re-running the probe with the bare
+mean (`analysis/out/cost-probe-bare-mean.json`): self_exciting - whose
+latent mean is an expectation established by induction, not a
+deterministic sample-path latent mean - passes A2 outright at
+0.9961-1.0077, the clean confirmation. The amendment: families 2 to 4
+take `base_mean_s = mean_event_duration_s` BARE (section 4.2 as
+amended); `ARRIVAL_MEAN_CAL` stays on the shipped path (Legacy and
+family 1), which is what it corrects. DERIVED, NOT FITTED: an
+inapplicable empirical correction is removed; no replacement constant
+was selected, so the probe is confirmation of the closed form, not the
+source of a value.
+
+Consequences, all binding: the code surface is one production
+definition (`cadence_base_mean_s`) plus its layer-2 test duplicate and
+consequent import cleanup - both the intensity denominator and the
+self-exciting family's `E_k` baseline expectation flow from it, and
+removing the calibration from BOTH is what preserves the feedback
+identity (removing it from only the intensity would be wrong).
+`ARRIVAL_KERNEL_VERSION` bumps 1 to 2, and the three layer-2 regression
+transcripts receive a ONE-TIME, AMENDMENT-AUTHORIZED replacement at
+that version (the only sanctioned exception to never-regenerated). V6
+and V7 were manually re-audited: both use an abstract
+`base_mean_s = 1.0` and remain UNCHANGED, no regeneration. The layer-3
+realized-mean-rate conformance and the self-exciting baseline
+expectation are stated against bare `mean_event_duration_s`.
+`TAPE_PROTOCOL_VERSION` bumps 11 to 12 WITH this repair's landing:
+unlike brick K, which only ENLARGED the expressible domain, this change
+moves outputs for `(config, seed)` pairs already expressible under
+version 11 (an operator config can declare the arrival seam), so it
+consumes a process identity even though no committed preset selects the
+path. Brick S therefore lands 13, and every version reference below is
+renumbered accordingly. PREREQUISITE: the coordinated narrow amendment
+to `notes/protocol-12a-measurement-spec.md` sections 8 and 11 (12 to
+13), reviewed under that document's own stopping rule and co-signed in
+the same sessions - this document does not and cannot amend 12a through
+its own log.
+
+Recorded findings that are NOT defects: wall_mmpp (0.925-1.063) and
+log_ou_cox (0.851-1.174) retain per-seed, per-hour A2 dispersion under
+the bare mean - a latent multiplier with a long correlation time makes
+finite hourly realizations wander even at exact ensemble mean one. Loss
+of such cells through A2 is INTENDED SCREENING BEHAVIOR, not evidence
+for another global calibration. The residual against the exact 1.05932
+(measured center a few tenths of a percent above) is small, nonuniform,
+inside the existing conformance band, and supplies no evidence for
+another fitted correction; finite sampling, the nanosecond ceiling,
+child dead time and the fitted-target-versus-ideal-baseline gap are
+sufficient candidate mechanisms, none claimed as THE explanation.
+
+Brick A resumes only after this amendment's code change lands with its
+gates green; the A0 probe re-runs on the amended tree as brick A's
+first act.
+
 ### Item 2: bricks A0 and A, the Stage A screen
 
 The screen driver, the `arrival-screen` CLI with its `--cost-probe`
@@ -136,7 +202,9 @@ fail brick A before the grid runs.
 
 `arrival-solve` with its `--cost-probe` mode, the seam declaration in
 `presets/mnq.toml`, `presets emit --omit`, the legacy byte-identity
-procedure, confirmation, `TAPE_PROTOCOL_VERSION = 12`, and
+procedure, confirmation, `TAPE_PROTOCOL_VERSION = 13` (renumbered by
+the 2026-08-09 calibration amendment; 12 is consumed by the frame
+repair), and
 `analysis/mnq-arrival-selection.json`.
 
 - Binding sections: 10 (gates, ordered selection, confirmation), 9.4
@@ -173,7 +241,8 @@ The landing closes with exactly one of:
 
 - `mechanism-landed` - a candidate family and parameter point passes
   every hard gate of section 10, the generator change lands
-  instrument-resolved with `TAPE_PROTOCOL_VERSION` at 12, and the
+  instrument-resolved with `TAPE_PROTOCOL_VERSION` at 13 (renumbered
+  2026-08-09; identity 12 is the frame repair's), and the
   unamended 12a ladder re-runs against the repaired tape. The ladder
   verdict is recorded, not required to be any particular value.
 - `negative-control-passed` - the deterministic hourly re-centring of
@@ -224,8 +293,10 @@ closes the frozen run rather than returning to tuning.
    preserved BYTE for BYTE with no re-bless of the crypto tapes, and a
    mechanism that cannot preserve the legacy branch exactly is
    ineligible.
-4. `TAPE_PROTOCOL_VERSION` moves 11 to 12 at the landing that changes
-   the generator, and at no earlier commit.
+4. `TAPE_PROTOCOL_VERSION` moves in TWO steps (renumbered 2026-08-09):
+   11 to 12 at the calibration-repair landing, which changes outputs
+   for already-expressible integrated configurations, and 12 to 13 at
+   the Brick S mechanism landing. No other commit moves it.
 
 12a section 1.2 also inherits a two-sided minute-range body gate here:
 the p99 minute-range statistic gets a LOWER acceptance bound from the
@@ -914,8 +985,15 @@ multiplier on the open-market path, `low_intensity_gap_ns` otherwise).
   the cell. That is the same failure the shipped low-intensity path
   handles by capping; here it fails loudly instead, because a silently
   capped gap in a candidate search would look like a feasible cell.
-- `base_mean_s = mean_event_duration_s * ARRIVAL_MEAN_CAL`, the shipped
-  calibration, unchanged.
+- `base_mean_s = mean_event_duration_s` BARE for the three integrated
+  families. (AMENDED 2026-08-09, the arrival-frame calibration
+  amendment recorded in section 0; the original frozen text carried the
+  shipped `ARRIVAL_MEAN_CAL`, which is an empirically bisected
+  correction for the SHIPPED sampling scheme's realized-mean inflation
+  and double-applies in a frame whose exact time change has no such
+  inflation - a uniform 1/0.944 = 1.0593 rate excess, measured and then
+  eliminated. `ARRIVAL_MEAN_CAL` remains on the shipped path, Legacy
+  and family 1, unchanged.)
 - Child counts: the kernel draws them on the cadence stream (4.1) with
   a state multiplier of exactly 1.0 for these three, so the parent
   draws `children_mean` unconditionally and the declared mean is
@@ -2104,7 +2182,8 @@ byte-identical branch; the capped joint solve over every Stage A
 survivor in loss order; the
 confirmation run; the grid-sensitivity re-run; the selected mechanism
 and parameters in `presets/mnq.toml` with full provenance;
-`TAPE_PROTOCOL_VERSION = 12`; and
+`TAPE_PROTOCOL_VERSION = 13` (renumbered 2026-08-09; identity 12 is
+the frame repair's); and
 `analysis/mnq-arrival-selection.json`.
 
 Legacy byte identity, exact procedure. Revision 2's command was
