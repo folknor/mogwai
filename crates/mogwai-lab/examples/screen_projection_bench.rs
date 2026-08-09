@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! LAYER-2 INSTRUMENT: one Stage A screen cell, profiled.
+//! HARNESS SURFACE: one Stage A screen cell, profiled.
 //!
 //! This is the harness the Stage A optimization round stares at. It runs
 //! exactly what `arrival-screen` runs per cell - `project_seed` over the frozen
@@ -18,9 +18,12 @@
 //! Reads the committed `analysis/mnq-measure-12a.json`, so it runs anywhere the
 //! repository is checked out and needs no market data on disk.
 //!
-//! These names may churn. Layer 1's may not - `screen-probe` is the frozen
-//! workload whose rows survive across months, and this harness is the
-//! instrument you reach for once a row has moved and you want to know where.
+//! Its counterpart in `mogwai-data` is `arrival_walk_bench`, and the two are
+//! read by SUBTRACTION on cost per parent: this harness cannot attribute
+//! anything finer by annotation, because `project_stream` is one loop over tens
+//! of millions of children per cell and an annotation inside it would price the
+//! profiler rather than the code. See the reading rules in
+//! `reference/performance.md`.
 //!
 //! Run it as a release example with the `hotpath` feature on
 //! (`required-features` enforces it); the invocation is in

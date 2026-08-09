@@ -1,10 +1,14 @@
 # Performance record
 
-Measured numbers for the fill path. Every later change that moves one APPENDS a
-row; rows are never edited in place, so this file is a history and not a
-snapshot.
+Measured numbers across every operational surface, plus how to obtain and read
+them. Every later change that moves a number APPENDS a row; rows are never
+edited in place, so this file is a history and not a snapshot.
 
-## How to run
+Numbers measured through `brokkr mogwai` carry their result UUID, so any claim
+here can be re-derived - `brokkr results <uuid>` and `brokkr sidecar <uuid>`.
+Numbers from the criterion harnesses do not, and are pinned by commit instead.
+
+## The criterion harnesses
 
 ```
 brokkr run fill_bench -- --bench
@@ -36,46 +40,61 @@ Fill BEHAVIOUR is gated automatically, by
 `crates/mogwai-server/tests/golden/fill_distribution.json`, which runs in
 `brokkr check`.
 
-## The two-layer benchmarking setup
+## The invocation surface
 
-The criterion examples above are one instrument among several. The standing
-shape, settled 2026-08-09, is two layers with different lifetimes.
+Settled 2026-08-10, replacing the two-layer setup that preceded it. There are no
+layers and no frozen workloads: the argv is composed at the call site and
+captured verbatim in the row, so pairing rows is a query rather than a name
+lookup. The design and what it deliberately defers are in
+`notes/benchmarking-design.md`.
 
-**Layer 1 - frozen CLI workloads, durable rows.** A named workload states its
-invocation in full; its rows are comparable across months and its name is the
-pairing identity, so a changed invocation - or a changed clock - gets a NEW name
-with a `successor` pointer on the old one, rather than a quiet edit. Four are
-defined in `brokkr.toml` under `[mogwai.workloads.*]`: `screen-probe`,
-`walk-month-mnq`, `screen-full`, `measure12a`. Only counters a mismatch must be
-FATAL on are declared; everything else is captured and diffed automatically.
+Two kinds of surface, the same three modes over both. Recording a row needs a
+clean tree.
 
-`measure12a` reads the delivered July corpus, registered per host under
-`[bygg.corpus.mnq-tbbo-july]` and pinned by an XXH128 digest over the whole
+**CLI surfaces, through the shipped bin.** No registration beyond the bin
+itself, so benching measures what ships, startup and argument parsing included.
+
+```
+brokkr mogwai -- gen --type summary --symbol MNQ --seed 1
+brokkr mogwai -- arrival-screen --cost-probe
+```
+
+**Harness surfaces, through an example target.** These are the loops with no
+command line. They resolve by name against `[mogwai.targets.*]` in
+`brokkr.toml`, which carries the feature shape each one needs.
+
+```
+brokkr mogwai arrival_walk --hotpath
+brokkr mogwai screen_projection --alloc
+```
+
+`arrival_walk` (`mogwai-data`) runs the kernel draw with no projection attached;
+`screen_projection` (`mogwai-lab`) runs one Stage A cell with the projection.
+The gap between them is the measurement cost the Stage A round is spending
+against, and it is read by SUBTRACTION rather than by annotation - see the
+reading rules below.
+
+Both need their crate's `hotpath` feature, which `required-features` enforces:
+a plain `--examples` build skips them rather than producing an uninstrumented
+binary that reports an empty profile. `hotpath-alloc` additionally arms the
+allocation counting, and both harnesses declare the `#[global_allocator]`
+themselves under it, because hotpath ships the allocator without installing it
+and an alloc run without that line reports zero bytes everywhere. Registering
+the feature shape is what makes `--hotpath` produce a profile at all; a target
+registered without it records a row with an empty table.
+
+`fill_walk_bench` and `fill_bench` are NOT registered targets. They are criterion
+harnesses that parse `--bench` out of their own argv, which is what lets them
+live in example targets, and which would collide with the mode flag. Run them as
+in the section above.
+
+The delivered July corpus is registered per host under
+`[bygg.datasets.mnq-tbbo-july]` and pinned by an XXH128 digest over the whole
 delivery DIRECTORY, not over its manifest. The two hashes on that corpus answer
 different questions and neither replaces the other: this digest is a DRIFT check
 - the delivery under that path not being the one it was last time - while
 `measure`'s own SHA-256 verification against the ledger and the committed
 preflight is about the CONTENTS being the ones the method was fitted to.
-
-**Layer 2 - optimization instruments, allowed to churn.** Harness examples
-registered in `Cargo.toml`, exercising one primitive with a designed workload:
-
-```
-brokkr run --release arrival_walk_bench
-brokkr run --release screen_projection_bench
-```
-
-Both need the `hotpath` feature of their crate (`mogwai-data` and `mogwai-lab`
-respectively), which `required-features` enforces - a plain `--examples` build
-skips them rather than producing an uninstrumented binary that reports an empty
-profile. `hotpath-alloc` additionally arms the allocation counting, and both
-harnesses declare the `#[global_allocator]` themselves under it, because hotpath
-ships the allocator without installing it and an alloc run without that line
-reports zero bytes everywhere.
-
-`arrival_walk_bench` runs the kernel draw with no projection attached;
-`screen_projection_bench` runs one Stage A cell with the projection. The gap
-between them is the measurement cost the Stage A round is spending against.
 
 **The two output channels.** Every benched command emits its work size beside
 its timing, unconditionally, on both channels
@@ -91,17 +110,113 @@ marker path is a load and a branch, so a plain interactive run pays nothing.
 | `gen --type summary` | `walk` | `parents`, `rows` |
 | `measure` | `observed`, `walks`, `bootstrap` | `elapsed_ms`, per-phase ms, `seeds`, `sessions`, `usable_sessions`, `peak_rss_bytes`, `scratch_bytes` |
 
-`measure` is the one SELF-REPORTING workload: it verifies a multi-gigabyte
-corpus before any measured work, so an external wall would fold that hash pass
-into every reading. Everything else is timed externally and therefore needed no
-change to be benchmarkable at all - which is what lets their history be
-back-filled to any commit whose CLI still parses the frozen invocation.
+Every surface is timed EXTERNALLY. `measure` briefly carried a self-reported
+clock, on the reasoning that it verifies a multi-gigabyte corpus before any
+measured work and an external wall folds that hash pass into every reading; that
+was withdrawn 2026-08-10 because it redefined what the recorded elapsed MEANS
+for one surface while the column said the same thing everywhere else. The
+corpus pass is excluded the way every other phase boundary is - with a marker,
+so `brokkr sidecar --durations` reports the measured phases alone and the
+verification stays VISIBLE as its own phase rather than deleted from the record.
+Timing everything externally is also what lets a history be back-filled to any
+commit whose CLI still parses the invocation.
 
 **Annotation discipline.** A small, stable set at phase boundaries, never a
 function called millions of times per run - annotate its caller instead. Today:
 `arrival_screen::project_stream` (once per seed walk) and
 `SessionAcc::close_reduced` (once per session rotation). The value of a profile
 is the same names appearing run after run.
+
+This is a HARD limit, not a preference, and it decides how attribution is done.
+`hotpath` queues one event per instrumented call and drains at roughly 1.3M
+events per second. `project_stream` is a single loop over ~147M children per
+cell, so annotating anything inside it - `session_segment_at`, `push_print`,
+`close_parent` - would backlog tens of gigabytes and price the instrument rather
+than the code. Attribution inside such a loop therefore comes from HARNESS
+SUBTRACTION (run the same loop with one layer absent and difference the
+per-parent cost) or from the allocation profile, never from a finer annotation.
+
+## Reading rules
+
+How a verdict is read off this file and `.brokkr/results.db`. Seeded 2026-08-10
+from the first stored rows; this section grows as the ground is learned, and
+every rule here should be traceable to a run.
+
+- **This workload is CPU and RNG bound, not I/O bound.** The screen cell reads
+  one committed JSON artifact and touches no disk thereafter (0 kB read and
+  written across a 15 s cell, `d3fa0b0a`). So the error model of an I/O-bound
+  project - drive state, trim debt, page-cache warmth, header-walk cache swings
+  - does not apply here, and neither do its remedies. What moves a reading
+  instead is host quiet, CPU frequency and thermal state, core count, and
+  allocator behaviour.
+- **The Stage A cell is single-threaded.** Avg cores 1.0, peak threads 9 but
+  only one running (`d3fa0b0a`). A hotpath percentage over 100% would therefore
+  be a finding here, not the routine cross-thread artifact it is in a pooled
+  workload.
+- **First noise reading: two runs of an identical cell measured 15.2 s and
+  15.1 s** (`d3fa0b0a`, `3f82ed37`), with byte-identical counters. That is a
+  ~0.7% spread on a single sample and the only variance datum on file. It is NOT
+  yet an error bar: two runs minutes apart on a quiet host is the best case, and
+  nothing has yet tested the same cell across a day, a thermal state, or a
+  loaded host.
+- **A wall-clock contract on this host is not yet trustworthy.**
+  `tape_lateness_under_acceleration` asserts a 50 ms p99 pacing bound and failed
+  at 311 ms p99 on 2026-08-08 with a load average of 1.46 across 32 visible
+  CPUs, so load average alone is not a sufficient admission test. The bound is
+  unchanged and authoritative; what is unresolved is the environment under which
+  it can be evaluated. Open work in `notes/todo.md`.
+- **Read counters before crediting a wall.** Every surface emits its work size
+  beside its timing. A cell whose wall moved while `parents` or `prints` moved
+  did different work, and the wall comparison is void rather than interesting.
+- **`--hotpath` costs nothing at the current annotation density, and that is a
+  property of the density.** The screen cell measured 15.04 s under hotpath
+  against a 15.1 s clean wall; the alloc run measured 14.66 s against 14.61 s.
+  Both are inside the noise above. That holds only while the annotation set
+  stays at phase boundaries - see the discipline above.
+- **Neither `--hotpath` nor `--alloc` reports peak RSS.** It comes from the
+  sidecar timeline on a `--bench` or plain run. Peak anon is a headline quantity
+  here rather than a footnote: the end state runs on the order of 200 venue
+  instances on one host, so every instance-level cost is multiplied.
+
+## Stage A baseline, 2026-08-09
+
+Host `bygg` (AMD Ryzen 9 9950X3D2, 16c/32t, governor performance, kernel
+7.1.4-x64v3-xanmod1), release, at commit `93c4a9d`. The harness pair, both modes.
+
+| surface | uuid | mode | parents | measured | ns/parent | exclusive alloc |
+|---|---|---|---:|---:|---:|---:|
+| `arrival_walk` | `835d8c15` | hotpath | 6,000,000 | 214.7 ms | **35.8** | - |
+| `arrival_walk` | `931336d5` | alloc | 6,000,000 | 216.0 ms | 36.0 | **3.8 KB** |
+| `screen_projection` | `3f82ed37` | hotpath | 126,143,060 | 14.61 s | **115.8** | - |
+| `screen_projection` | `3161fd34` | alloc | 126,143,060 | 14.66 s | 116.2 | **5.9 GB** |
+
+`screen_projection` peak anon RSS 560 MB, avg cores 1.0 (`d3fa0b0a`).
+
+**The draw is roughly a third of the screen's per-parent cost, and allocates
+essentially nothing** - 3.8 KB total across 6M parents and 50.9M children. The
+remaining two thirds, and all 5.9 GB, are the projection layer: about 47 bytes
+allocated per parent, on a path whose per-child work is a `BTreeMap` traversal.
+
+`close_reduced` is 3.03% of wall, so the session-CLOSE path is not where the
+time is. This CORRECTS the round's entering hypothesis, which named `SessionAcc`
+bookkeeping generally: the cost is the per-child and per-parent accumulation,
+not the rotation.
+
+What the accumulator is doing for the screen, stated because it is the shape of
+the opportunity rather than a claim about a fix: `project_stream` drives the
+full protocol-12a `SessionAcc`, calling `push_print(ts, 0)` per child and
+`push_parent(index, ts, 0, 0, false)` per parent. With a literal zero price the
+per-minute trade range it maintains is constant by construction, and with
+`book_normal: false` the quote-mid arrays are never touched at all. What the
+screen reads back is `block1.hist` marginalized to the parent-count axis, and
+the same counts again for gate A1.
+
+**Negative result, recorded so it is not re-derived.** The 5.9 GB was first
+attributed to `walk.next()`: it is a `dyn ParentSource` call and nothing under
+it is annotated, so its allocations land in `project_stream`'s exclusive bucket
+and the arithmetic was consistent with the draw allocating ~30 bytes per parent.
+`931336d5` refutes it outright at 3.8 KB. The generator's walk allocates
+nothing; do not re-open that line.
 
 ## What each id measures
 

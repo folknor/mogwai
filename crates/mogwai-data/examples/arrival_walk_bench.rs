@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! LAYER-2 INSTRUMENT: the parent draw with no projection attached.
+//! HARNESS SURFACE: the parent draw with no projection attached.
 //!
 //! Stage A's cost probe found that a screen cell is dominated by MEASUREMENT
 //! rather than by simulation - the cadence-only walk was assumed ~10x cheaper
@@ -16,9 +16,10 @@
 //! resolution lives in `mogwai-server` and depending on it here would invert
 //! the layering - so the walk runs on fingerprint medians, an all-ones session
 //! profile and no calendar. That makes the numbers a property of the KERNEL,
-//! which is what a layer-2 instrument is for, and means they are not comparable
-//! with a screen cell's per-seed cost. Layer 1 is where cross-month comparable
-//! numbers live; these names are allowed to churn as a round demands.
+//! and means they are NOT comparable with a screen cell's per-seed cost in
+//! absolute terms. What they are comparable in is cost PER PARENT, which is how
+//! the subtraction against `screen_projection_bench` is read; see the reading
+//! rules in `reference/performance.md`.
 //!
 //! Every family is walked for the same number of parents rather than for the
 //! same span: the four differ in realized rate by construction, so equal spans
@@ -64,7 +65,7 @@ const ORIGIN_NS: u64 = 1_700_438_400_000_000_000;
 /// One representative cell per kernel family. These are the Stage A probe cells
 /// (`mogwai_lab::arrival_screen::probe_cell`), transcribed rather than imported
 /// because this crate sits BELOW the lab and must not learn about the screen.
-/// A transcription can drift from its source; that is acceptable for a layer-2
+/// A transcription can drift from its source; that is acceptable for an
 /// instrument whose job is relative cost, and would not be for anything a
 /// verdict reads.
 const CELLS: [(&str, ArrivalConfig); 3] = [

@@ -82,8 +82,9 @@ Recording needs a clean tree.
 
 Two kinds of surface, same three modes over both:
 
-- CLI surfaces run through the shipped bin and need no registration -
-  `brokkr mogwai gen --type summary --symbol MNQ ...`
+- CLI surfaces run through the shipped bin and need no registration. The argv
+  goes after `--`, raw - `brokkr mogwai --bench 3 -- gen --type summary
+  --symbol MNQ`
 - harness surfaces resolve by name against `[mogwai.targets.*]` in
   `brokkr.toml`, which carries the feature shape each one needs -
   `arrival_walk` (the draw alone), `screen_projection` (one Stage A cell)
