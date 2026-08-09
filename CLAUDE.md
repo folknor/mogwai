@@ -67,7 +67,34 @@ Do not use your Memory functionality. Do not read, write, or update memories. Do
 - Never `find /`.
 - Never run `git` with `-C <path>`
 - One Bash() invocation === one command
+- A long command that is still running is not a problem to solve. Never start a
+  second one to find out how the first is going, and never poll its output file.
+  This applies to commands the user backgrounds too: the completion
+  notification arrives on its own. `brokkr` takes a workspace lock, so a second
+  invocation just waits on the first anyway.
 - Keep `git commit -m` messages free of zsh metacharacters - braces `{}`, brackets `[]`, parens `()`, angle brackets `<>`, `#`. They trip the permission matcher and block the commit. Spell lists out (`syntax, vm, data and runner`, not `{syntax,vm,data,runner}`), write `5.1 per bar` not `5.1/bar`, name attributes in prose not `#[attr]`.
+
+### Benchmarking
+
+`brokkr man mogwai`. There are no layers and no frozen workloads: the argv is
+composed at the call site and captured in the row, and pairing rows is a query.
+Recording needs a clean tree.
+
+Two kinds of surface, same three modes over both:
+
+- CLI surfaces run through the shipped bin and need no registration -
+  `brokkr mogwai gen --type summary --symbol MNQ ...`
+- harness surfaces resolve by name against `[mogwai.targets.*]` in
+  `brokkr.toml`, which carries the feature shape each one needs -
+  `arrival_walk` (the draw alone), `screen_projection` (one Stage A cell)
+
+- `--bench [N]` records a row; a plain run stores nothing
+- `--hotpath` / `--alloc` - the mode axis, independent of the surface
+- `brokkr results [uuid]`, `brokkr sidecar <uuid> --markers|--counters`
+
+Adding a surface to the measurable set is registering a target. The design and
+what is deliberately deferred: `notes/benchmarking-design.md`. What each surface
+emits, and the annotation discipline: `reference/performance.md`.
 
 ### git commit rules
 

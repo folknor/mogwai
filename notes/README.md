@@ -81,12 +81,14 @@ investigations, the hardcoded-value inventory.
 - **`stage-a-optimization.md`** - the performance round preceding brick A:
   baseline, call chain, the free-lane/amendment-lane constraints, gates,
   exit criterion.
-  (The two-layer benchmarking design that governed this round was a document
-  here and is gone, executed the day it was written: layer 1 lives in
-  `brokkr.toml` under `[mogwai.workloads.*]`, with each ruling dated beside the
-  value it rules; layer 2 and the two output channels are in
-  `reference/performance.md`. Its one surviving obligation is the ordering
-  rule in item 2 below.)
+  (Its one surviving benchmarking obligation is the ordering rule in item 2
+  below. The two-layer design that governed this round was RETIRED 2026-08-10 -
+  see `benchmarking-design.md`.)
+- **`benchmarking-design.md`** - the addressing scheme for measuring mogwai,
+  replacing the two-layer design and the frozen `[mogwai.workloads.*]` registry.
+  Written for every operational surface rather than for Stage A, because the
+  200-instance end state makes every instance-level cost a multiplier. Dies when
+  the registry, the reading rules and the document split have landed.
 - **`protocol-landings.md`** - the consolidated record of protocols 8, 10 and
   11: what landed, the verdicts, and the obligations later work inherited.
   Replaces five retired per-protocol documents whose full text is in git
@@ -114,12 +116,9 @@ investigations, the hardcoded-value inventory.
    2026-08-09): the screen is priced at ~9.9 h and the measured hotspot is
    the `SessionAcc` projection, not the draw. `stage-a-optimization.md` is
    the work item - entry points, the free-lane/amendment-lane constraint
-   split, gates and exit criterion. BEFORE any optimization work: the
-   benchmarking of `benchmarking-design.md` is WIRED on the mogwai side, so
-   what remains is landing a baseline row set (by hand until the harness
-   module lands - the counters are emitted today),
-   then profile one kernel screen cell (the cost probe needs no clean
-   tree, so it is the benchmark loop as-is, and
+   split, gates and exit criterion. The round needs almost none of the
+   benchmarking scheme: profile one kernel screen cell (the cost probe needs
+   no clean tree, so it is the benchmark loop as-is, and
    `screen_projection_bench` is the instrument) and CONFIRM the hypothesis
    that `SessionAcc` bookkeeping dominates `project_stream`. Only then
    optimize, in the free lane - a lean screen-side accumulator producing
