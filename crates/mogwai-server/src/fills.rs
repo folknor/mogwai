@@ -500,17 +500,18 @@ mod tests {
     /// band approaches the move the tape makes over a whole `VOL_WINDOW_NS`, at
     /// which point a fill is decided by the draw rather than by the tape.
     // MEASUREMENT INSTRUMENT. Its name is in the gate profile's `skip` list in
-    // `brokkr.toml`, and has to be: the gate sets `include_ignored` deliberately
-    // - that is how the socket-backed suites get covered - so `#[ignore]` does
-    // not keep this out of it. Every instrument of this shape MUST be added to
-    // that list as well. Nothing detects the omission; the symptom is
-    // `brokkr check --gate` dying on the 20-second per-test hang watchdog,
-    // blaming a test that was never meant to run there.
+    // the workspace runner config, and has to be: the gate sets
+    // `include_ignored` deliberately - that is how the socket-backed suites get
+    // covered - so `#[ignore]` does not keep this out of it. Every instrument of
+    // this shape MUST be added to that list as well. Nothing detects the
+    // omission; the symptom is the full gate dying on the 20-second per-test
+    // hang watchdog, blaming a test that was never meant to run there.
     //
     // Run it deliberately by name, raising the watchdog for that one run:
-    //   brokkr test -p mogwai-server vol_probe --timeout 280
-    // `--timeout` applies to `brokkr test` only, takes 1 to 280 seconds, and is
-    // refused when the name matches more than one test. 280 is a hard cap.
+    //   test -p mogwai-server vol_probe --timeout 280
+    // `--timeout` applies to the focused runner only, takes 1 to 280 seconds,
+    // and is refused when the name matches more than one test. 280 is a hard
+    // cap. See AGENTS.md for the runner these arguments belong to.
     #[test]
     #[ignore = "calibration instrument"]
     fn vol_probe() {
@@ -652,17 +653,18 @@ mod tests {
     /// and serving submits from it, which is sound because the band is a coarse
     /// scale rather than a per-microsecond quantity.
     // MEASUREMENT INSTRUMENT. Its name is in the gate profile's `skip` list in
-    // `brokkr.toml`, and has to be: the gate sets `include_ignored` deliberately
-    // - that is how the socket-backed suites get covered - so `#[ignore]` does
-    // not keep this out of it. Every instrument of this shape MUST be added to
-    // that list as well. Nothing detects the omission; the symptom is
-    // `brokkr check --gate` dying on the 20-second per-test hang watchdog,
-    // blaming a test that was never meant to run there.
+    // the workspace runner config, and has to be: the gate sets
+    // `include_ignored` deliberately - that is how the socket-backed suites get
+    // covered - so `#[ignore]` does not keep this out of it. Every instrument of
+    // this shape MUST be added to that list as well. Nothing detects the
+    // omission; the symptom is the full gate dying on the 20-second per-test
+    // hang watchdog, blaming a test that was never meant to run there.
     //
     // Run it deliberately by name, raising the watchdog for that one run:
-    //   brokkr test -p mogwai-server read_market_latency_stays_within_submit_budget --timeout 280
-    // `--timeout` applies to `brokkr test` only, takes 1 to 280 seconds, and is
-    // refused when the name matches more than one test. 280 is a hard cap.
+    //   test -p mogwai-server read_market_latency_stays_within_submit_budget --timeout 280
+    // `--timeout` applies to the focused runner only, takes 1 to 280 seconds,
+    // and is refused when the name matches more than one test. 280 is a hard
+    // cap. See AGENTS.md for the runner these arguments belong to.
     #[test]
     #[ignore = "latency instrument"]
     fn read_market_latency_stays_within_submit_budget() {

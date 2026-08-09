@@ -15,8 +15,9 @@
 //!
 //! `#[ignore]`d for cost, like the `parity12a` gates: each side is a month-long
 //! in-process walk, so the pin is roughly ten minutes of CPU and belongs to an
-//! explicit run rather than to `brokkr check`. Run it with
-//! `brokkr test -p mogwai-cli the_lab_walk_matches_the_measure_exposure_contract`.
+//! explicit run rather than to the general check lane. Run it with
+//! `test -p mogwai-cli the_lab_walk_matches_the_measure_exposure_contract
+//! --timeout 279` in the focused runner.
 
 use std::path::PathBuf;
 

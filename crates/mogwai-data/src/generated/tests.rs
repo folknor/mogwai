@@ -1668,17 +1668,18 @@ fn run_seeded_tape_dwell_is_bounded() {
 }
 
 // MEASUREMENT INSTRUMENT. Its name is in the gate profile's `skip` list in
-// `brokkr.toml`, and has to be: the gate sets `include_ignored` deliberately -
-// that is how the socket-backed suites get covered - so `#[ignore]` does not
-// keep this out of it. Every instrument of this shape MUST be added to that
-// list as well. Nothing detects the omission; the symptom is
-// `brokkr check --gate` dying on the 20-second per-test hang watchdog, blaming
-// a test that was never meant to run there.
+// the workspace runner config, and has to be: the gate sets `include_ignored`
+// deliberately - that is how the socket-backed suites get covered - so
+// `#[ignore]` does not keep this out of it. Every instrument of this shape MUST
+// be added to that list as well. Nothing detects the omission; the symptom is
+// the full gate dying on the 20-second per-test hang watchdog, blaming a test
+// that was never meant to run there.
 //
 // Run it deliberately by name, raising the watchdog for that one run:
-//   brokkr test -p mogwai-data dwell_is_bounded_across_run_seeds --timeout 280
-// `--timeout` applies to `brokkr test` only, takes 1 to 280 seconds, and is
-// refused when the name matches more than one test. 280 is a hard cap.
+//   test -p mogwai-data dwell_is_bounded_across_run_seeds --timeout 280
+// `--timeout` applies to the focused runner only, takes 1 to 280 seconds, and
+// is refused when the name matches more than one test. 280 is a hard cap. See
+// AGENTS.md for the runner these arguments belong to.
 #[test]
 #[ignore = "walks eight two-million-tick run realizations"]
 fn dwell_is_bounded_across_run_seeds() {
@@ -2333,17 +2334,18 @@ fn measure_uncapped_tail(over: GarchOverride, seeds: u64, horizon: u64) -> (TopK
 }
 
 // MEASUREMENT INSTRUMENT. Its name is in the gate profile's `skip` list in
-// `brokkr.toml`, and has to be: the gate sets `include_ignored` deliberately -
-// that is how the socket-backed suites get covered - so `#[ignore]` does not
-// keep this out of it. Every instrument of this shape MUST be added to that
-// list as well. Nothing detects the omission; the symptom is
-// `brokkr check --gate` dying on the 20-second per-test hang watchdog, blaming
-// a test that was never meant to run there.
+// the workspace runner config, and has to be: the gate sets `include_ignored`
+// deliberately - that is how the socket-backed suites get covered - so
+// `#[ignore]` does not keep this out of it. Every instrument of this shape MUST
+// be added to that list as well. Nothing detects the omission; the symptom is
+// the full gate dying on the 20-second per-test hang watchdog, blaming a test
+// that was never meant to run there.
 //
 // Run it deliberately by name, raising the watchdog for that one run:
-//   brokkr test -p mogwai-data standardized_candidate_rail_sizing --timeout 280
-// `--timeout` applies to `brokkr test` only, takes 1 to 280 seconds, and is
-// refused when the name matches more than one test. 280 is a hard cap.
+//   test -p mogwai-data standardized_candidate_rail_sizing --timeout 280
+// `--timeout` applies to the focused runner only, takes 1 to 280 seconds, and
+// is refused when the name matches more than one test. 280 is a hard cap. See
+// AGENTS.md for the runner these arguments belong to.
 #[test]
 #[ignore = "long multi-seed tail measurement; run deliberately with an extended timeout"]
 fn standardized_candidate_rail_sizing() {
@@ -2463,17 +2465,18 @@ fn standardized_candidate_rail_sizing() {
 // ---------------------------------------------------------------------------
 
 // MEASUREMENT INSTRUMENT. Its name is in the gate profile's `skip` list in
-// `brokkr.toml`, and has to be: the gate sets `include_ignored` deliberately -
-// that is how the socket-backed suites get covered - so `#[ignore]` does not
-// keep this out of it. Every instrument of this shape MUST be added to that
-// list as well. Nothing detects the omission; the symptom is
-// `brokkr check --gate` dying on the 20-second per-test hang watchdog, blaming
-// a test that was never meant to run there.
+// the workspace runner config, and has to be: the gate sets `include_ignored`
+// deliberately - that is how the socket-backed suites get covered - so
+// `#[ignore]` does not keep this out of it. Every instrument of this shape MUST
+// be added to that list as well. Nothing detects the omission; the symptom is
+// the full gate dying on the 20-second per-test hang watchdog, blaming a test
+// that was never meant to run there.
 //
 // Run it deliberately by name, raising the watchdog for that one run:
-//   brokkr test -p mogwai-data realized_return_envelope_under_regime_scaling --timeout 280
-// `--timeout` applies to `brokkr test` only, takes 1 to 280 seconds, and is
-// refused when the name matches more than one test. 280 is a hard cap.
+//   test -p mogwai-data realized_return_envelope_under_regime_scaling --timeout 280
+// `--timeout` applies to the focused runner only, takes 1 to 280 seconds, and
+// is refused when the name matches more than one test. 280 is a hard cap. See
+// AGENTS.md for the runner these arguments belong to.
 #[test]
 #[ignore = "regime envelope sweep; run deliberately with an extended timeout"]
 fn realized_return_envelope_under_regime_scaling() {
@@ -3223,17 +3226,18 @@ fn mnq_shaped_grid(fp: &Fingerprint) -> GeneratorScalars {
 }
 
 // MEASUREMENT INSTRUMENT. Its name is in the gate profile's `skip` list in
-// `brokkr.toml`, and has to be: the gate sets `include_ignored` deliberately -
-// that is how the socket-backed suites get covered - so `#[ignore]` does not
-// keep this out of it. Every instrument of this shape MUST be added to that
-// list as well. Nothing detects the omission; the symptom is
-// `brokkr check --gate` dying on the 20-second per-test hang watchdog, blaming
-// a test that was never meant to run there.
+// the workspace runner config, and has to be: the gate sets `include_ignored`
+// deliberately - that is how the socket-backed suites get covered - so
+// `#[ignore]` does not keep this out of it. Every instrument of this shape MUST
+// be added to that list as well. Nothing detects the omission; the symptom is
+// the full gate dying on the 20-second per-test hang watchdog, blaming a test
+// that was never meant to run there.
 //
 // Run it deliberately by name, raising the watchdog for that one run:
-//   brokkr test -p mogwai-data synthetic_spread_decomposition_at_protocol_seven --timeout 280
-// `--timeout` applies to `brokkr test` only, takes 1 to 280 seconds, and is
-// refused when the name matches more than one test. 280 is a hard cap.
+//   test -p mogwai-data synthetic_spread_decomposition_at_protocol_seven --timeout 280
+// `--timeout` applies to the focused runner only, takes 1 to 280 seconds, and
+// is refused when the name matches more than one test. 280 is a hard cap. See
+// AGENTS.md for the runner these arguments belong to.
 #[test]
 #[ignore = "spread decomposition report; run deliberately with an extended timeout"]
 fn synthetic_spread_decomposition_at_protocol_seven() {

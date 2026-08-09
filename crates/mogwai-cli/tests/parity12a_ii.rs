@@ -12,7 +12,7 @@
 //! Two tests, split on the OBLIGATION the 2c-ii golden-gate run recorded
 //! (notes/rust-rewrite-phases.md): the monolithic single-test run (observed
 //! pass plus eight in-process FINAL walks plus bootstrap) measured 288.1 s
-//! total against `brokkr`'s hard 280 s per-test ceiling.
+//! total against the runner's hard 280 s per-test ceiling.
 //!
 //! - `parity12a_ii_fast_matches_the_committed_artifact_over_cached_walks`
 //!   runs [`mogwai_cli::measure::WalkSource::PreAttestedCacheOnly`]: the
@@ -30,8 +30,8 @@
 //! - `parity12a_ii_live_full_run_matches_the_committed_artifact` is the
 //!   real, full [`mogwai_cli::measure::WalkSource::LiveAttested`] path -
 //!   `#[ignore]`d for cost, same as before, but ALSO documented as exceeding
-//!   the per-test ceiling: run it directly via the release BINARY, not
-//!   `brokkr test`, exactly as the 2c-ii golden-gate demonstration did (see
+//!   the per-test ceiling: run it directly via the release BINARY, not the
+//!   focused runner, exactly as the 2c-ii golden-gate demonstration did (see
 //!   the doc comment on that test for the invocation).
 //!
 //! Both call the driver directly (`mogwai_cli::measure::run_measure_with`),
@@ -162,8 +162,8 @@ fn parity12a_ii_fast_matches_the_committed_artifact_over_cached_walks() {
 
 #[test]
 #[ignore = "reads the full delivered corpus and runs eight in-process walks (measured ~288 s \
-            total, over brokkr's hard 280 s per-test ceiling): run the release BINARY directly, \
-            not `brokkr test`, from a CLEAN git tree - e.g. `cargo build --release -p mogwai-cli` \
+            total, over the runner's hard 280 s per-test ceiling): run the release BINARY \
+            directly, not the focused runner, from a CLEAN git tree - build the release binary \
             then drive `mogwai_cli::measure::run_measure_with(&cfg, WalkSource::LiveAttested)` \
             (or the equivalent `target/release/mogwai measure --cache-dir <scratch> --out \
             <scratch>` invocation) exactly as the 2c-ii golden-gate demonstration did - see the \

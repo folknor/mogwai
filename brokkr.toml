@@ -150,6 +150,28 @@ certifies = "complete"
 # an undeclared `doctests = false` would be an unaudited hole rather than a
 # decision. This workspace has no doctests today, so the entry justifies zero
 # pairs; it is the declaration that is load-bearing, not the count.
+# `brokkr` is local development tooling; `mogwai` is the shipped venue binary.
+# Naming one from the other inverts the layering: a clone without `brokkr` on
+# PATH cannot run the command at all, and under this repository's own
+# convention - every command runs through `brokkr run` - a spawned child blocks
+# forever on the workspace lock its own parent already holds.
+#
+# That is not hypothetical. Protocol 12b brick N shipped a gate that ran
+# `brokkr check --gate` as a subprocess to prove the suite was green; invoked
+# the documented way it deadlocked instantly and sat for 23 minutes before
+# anyone looked at `brokkr lock`. The code even carried a comment describing
+# the deadlock, written to defend the TESTS against it while leaving the
+# production path live.
+#
+# So the rule is the string, not the call: a source file has no business
+# mentioning the build tool at all. Prose about it belongs in markdown, where
+# it cannot become an invocation.
+[[textlint]]
+name = "no-brokkr-in-rust-source"
+pattern = 'brokkr'
+paths = ["crates/**/*.rs"]
+message = "brokkr is local dev tooling and must never be named from shipped Rust; put the prose in markdown and run the gate outside the binary"
+
 [[quarantine]]
 category = "doctests"
 issue = "n/a"

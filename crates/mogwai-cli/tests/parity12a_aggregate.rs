@@ -35,7 +35,7 @@
 //! 10,000 bootstrap replicates. Run it by name, in release:
 //!
 //! ```text
-//! brokkr test -p mogwai-cli parity12a_aggregate
+//! test -p mogwai-cli parity12a_aggregate
 //! ```
 
 use std::path::{Path, PathBuf};

@@ -3,7 +3,7 @@
 
 //! Criterion benchmarks for the engine's fill path: the immediate submit, both
 //! banded submit branches, and the batch scan application. Run as
-//! `brokkr run fill_bench -- --bench`; `criterion_main` parses the `--bench`
+//! the `fill_bench` target with `-- --bench`; `criterion_main` parses `--bench`
 //! flag itself, which is what lets these live in an example target instead of a
 //! `cargo bench` harness.
 //!

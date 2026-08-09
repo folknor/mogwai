@@ -272,18 +272,31 @@ automatically, exposed for manual use.
 ### `mogwai arrival-control`
 
 Runs protocol 12b brick N's deterministic hourly re-centring negative control.
-It verifies the standing build gate and five pre-landing legacy tapes before
-walking fit seeds 301 through 304 and test seeds 305 through 308. The command
-reads `analysis/mnq-measure-12a.json` and
+It checks five pre-landing legacy tapes and the standing build gate's
+transcript before walking fit seeds 301 through 304 and test seeds 305 through
+308. The command reads `analysis/mnq-measure-12a.json` and
 `analysis/mnq-minute-range-envelope.json`, and writes the hash-bound result to
 `analysis/mnq-arrival-control.json`. It refuses a dirty tree and requires the
-five parent-build baselines under
-`analysis/out/arrival-control-b1-baseline/`. Alongside the five byte
-comparisons, and never in place of them, it reads its own commit's diff against
-its parent and records whether it touched `crates/mogwai-data/`,
+five parent-build baselines under `analysis/out/arrival-control-b1-baseline/`.
+
+Gate B5 is EVIDENCE THIS COMMAND READS, never a check it runs. Run
+`brokkr check --gate` yourself first and capture its output to
+`analysis/out/arrival-control-b5-gate.log` (or pass `--b5-log`); the command
+records that transcript's digest and whether it completed without error. The
+venue binary never invokes the build tool: a clone without it could not produce
+an artifact at all, and because everything here runs through `brokkr run`, a
+spawned gate would block forever on the workspace lock its own parent holds. A
+workspace textlint rule forbids the tool's name in Rust source so this cannot
+come back.
+
+Alongside the five byte comparisons, and never in place of them, it reads the
+diff from the baseline commit (`--b1-baseline-commit`, default `HEAD~1`) to
+HEAD and records whether it touched `crates/mogwai-data/`,
 `crates/mogwai-protocol/`, `crates/mogwai-server/presets/` or
 `analysis/fingerprint.json`; touching any of them, or a tape protocol version
-other than 11, fails the tape-identity gate.
+other than 11, fails the tape-identity gate. Test-only files inside those paths
+are reported separately and do not fail it, since a `cfg(test)` module
+contributes no byte to a shipped tape.
 
 The artifact records a verdict of `negative-control-passed` or
 `negative-control-failed` together with the failing gate names, the per-hour

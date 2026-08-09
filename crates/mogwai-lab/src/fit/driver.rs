@@ -8,7 +8,7 @@
 //! the shipped MNQ preset byte-for-byte through the scratch config's
 //! `preset = "MNQ"` inheritance.
 //!
-//! The Python fanned its walks out as `brokkr run` subprocesses under a
+//! The Python fanned its walks out as generator subprocesses under a
 //! thread pool and replayed the SOLVE serially from the cache, so evaluation
 //! order, tie-breaks and determinism were untouched by the parallelism - the
 //! cache was the synchronization point. This port drops the pool and walks

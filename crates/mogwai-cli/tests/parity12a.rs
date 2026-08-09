@@ -24,8 +24,8 @@
 //! generated gate runs eight month-long walks. Run them by name, in release:
 //!
 //! ```text
-//! brokkr test -p mogwai-cli parity12a_observed
-//! brokkr test -p mogwai-cli parity12a_generated
+//! test -p mogwai-cli parity12a_observed
+//! test -p mogwai-cli parity12a_generated
 //! ```
 
 use std::path::{Path, PathBuf};

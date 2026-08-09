@@ -6,6 +6,12 @@
 //! module owns the two gates that are not statistics - B1's legacy byte
 //! identity and B5's standing build check - the artifact's binding block, and
 //! the atomic write.
+//!
+//! This binary runs no build tooling. B1 execs the shipped `mogwai gen`, which
+//! is this same binary and the only thing that can produce the bytes B1
+//! compares; B5 reads a transcript the operator captured from the standing
+//! build gate and never runs that gate itself. See [`read_b5_log`] for why the
+//! asymmetry is deliberate rather than an inconsistency.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -29,6 +35,7 @@ const DEFAULT_ENVELOPE: &str = "analysis/mnq-minute-range-envelope.json";
 const DEFAULT_BASELINE: &str = "analysis/out/arrival-control-b1-baseline";
 const DEFAULT_AFTER: &str = "analysis/out/arrival-control-b1-after";
 const DEFAULT_OUT: &str = "analysis/mnq-arrival-control.json";
+const DEFAULT_B5_LOG: &str = "analysis/out/arrival-control-b5-gate.log";
 const B1_SYMBOLS: [&str; 5] = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "MES", "MNQ"];
 
 #[derive(Args)]
@@ -48,6 +55,15 @@ pub struct ArrivalControlArgs {
     /// byte for byte against the baseline.
     #[arg(long, value_name = "DIR")]
     pub b1_after: Option<PathBuf>,
+    /// The commit the baseline tapes were generated from, which bounds B1's
+    /// supporting frozen-path diff. Defaults to `HEAD~1`.
+    #[arg(long, value_name = "COMMIT")]
+    pub b1_baseline_commit: Option<String>,
+    /// The captured output of an externally-run standing build gate, which is
+    /// gate B5's evidence. This binary never runs that gate itself: see
+    /// [`read_b5_log`].
+    #[arg(long, value_name = "PATH")]
+    pub b5_log: Option<PathBuf>,
     /// Where to write the artifact.
     #[arg(long, value_name = "PATH")]
     pub out: Option<PathBuf>,
@@ -57,25 +73,40 @@ fn gate_json(g: &GateRec) -> Value {
     json!({"passed":g.passed,"evidence":g.evidence,"refusals":g.refusals.iter().map(mogwai_lab::aggregate::RefusalRec::to_json).collect::<Vec<_>>()})
 }
 
-/// B5: the driver runs the standing build gate ITSELF and records the exit
-/// status and output digests. An operator-typed attestation would let a red
-/// check reach `negative-control-passed`, which is the verdict that ends the
-/// whole 12b landing; a hard gate a typo satisfies is not a gate. It runs
-/// FIRST, before the six minutes of walking, so a red check costs seconds.
-/// The program name is a parameter for exactly one reason: the refusal path is
-/// testable without a test that mutates `PATH` for the whole process, and
-/// without any test ever running the real check - which BUILDS, and so would
-/// deadlock on the target-directory lock the test runner already holds.
-fn run_b5_with(program: &str) -> anyhow::Result<(Value, f64)> {
+/// B5: the driver READS the standing build gate's output; it never runs it.
+///
+/// The gate is local development tooling; `mogwai` is the shipped venue
+/// binary. A shipped binary that shells out to the developer's build tool is a
+/// layering inversion twice over: on a clone without that tool installed the
+/// command cannot produce an artifact at all, and under this repository's own
+/// convention - every command runs through the tool - the spawned child blocks
+/// forever on the workspace lock its own parent is holding. That is not a
+/// hazard to detect and route around; it is a design that must not exist, so
+/// the subprocess is gone. The workspace lint forbidding the tool's name in
+/// Rust source is what keeps it gone.
+///
+/// What replaces it is the gate's own transcript. The operator runs the gate
+/// and captures its output; this function refuses unless that capture exists,
+/// and reads the completion and error markers out of it. That catches what
+/// actually goes wrong - running this command against a stale transcript, or
+/// one from a run that died partway - which the first draft's
+/// `--b5-green-at <commit>` flag could not, since a commit string matches
+/// whether or not the gate was ever run.
+fn read_b5_log(path: &Path) -> anyhow::Result<(Value, f64)> {
     let started = Instant::now();
-    let output = Command::new(program)
-        .args(["check", "--gate"])
-        .output()
-        .map_err(|e| anyhow!("B5 refused: cannot spawn brokkr check --gate: {e}"))?;
-    let elapsed = started.elapsed().as_secs_f64();
+    let bytes = std::fs::read(path).map_err(|e| {
+        anyhow!(
+            "B5 refused: no gate transcript at {}: {e}. Run the standing build gate and capture \
+             its output there before running this command; see AGENTS.md for the command.",
+            path.display()
+        )
+    })?;
+    let text = String::from_utf8_lossy(&bytes);
+    let completed = text.contains("[result]");
+    let errored = text.contains("[error]");
     Ok((
-        json!({"command":"brokkr check --gate","exit_status":output.status.code(),"stdout_sha256":sha256_bytes(&output.stdout),"stderr_sha256":sha256_bytes(&output.stderr),"duration_s":elapsed}),
-        elapsed,
+        json!({"gate":"the standing build gate","transcript":path.to_string_lossy(),"transcript_sha256":sha256_bytes(&bytes),"transcript_bytes":bytes.len(),"completed":completed,"errored":errored,"run_by":"the operator, before this command - never spawned from the venue binary"}),
+        started.elapsed().as_secs_f64(),
     ))
 }
 
@@ -113,32 +144,53 @@ const FROZEN_PATHS: [&str; 4] = [
 /// paths would pass it - but it is ANDed into B1's verdict rather than merely
 /// reported, because a decorative check nobody can fail is not evidence.
 ///
-/// The parent is `HEAD~1`: the artifact runs at the brick's own commit, and the
-/// pre-landing binary the baseline tapes came from is that commit's parent. A
-/// repository with no parent commit REFUSES rather than passing vacuously.
-fn b1_supporting_check() -> anyhow::Result<Value> {
+/// The baseline commit is an ARGUMENT rather than a hardcoded `HEAD~1`. It has
+/// to be: `HEAD~1` is only the pre-landing boundary while the brick's landing
+/// is the tip, and any follow-up commit - a repair, a lint sweep - silently
+/// moves the range off the commit the baseline tapes actually came from. It
+/// defaults to `HEAD~1` for the ordinary case and is stated explicitly in the
+/// artifact, so the range is auditable rather than assumed. An unreachable
+/// commit REFUSES rather than passing vacuously.
+fn b1_supporting_check(baseline_commit: &str) -> anyhow::Result<Value> {
+    let range = format!("{baseline_commit}..HEAD");
     let out = Command::new("git")
-        .args(["diff", "--name-only", "HEAD~1..HEAD"])
+        .args(["diff", "--name-only", &range])
         .output()
         .map_err(|e| anyhow!("B1 refused: cannot spawn git diff: {e}"))?;
     if !out.status.success() {
-        bail!("B1 refused: git diff HEAD~1..HEAD failed; the parent commit is unreachable");
+        bail!("B1 refused: git diff {range} failed; {baseline_commit} is unreachable");
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    let touched: Vec<&str> = text
+    let frozen: Vec<&str> = text
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .filter(|line| FROZEN_PATHS.iter().any(|frozen| line.starts_with(frozen)))
         .collect();
+    // A test module inside a frozen crate cannot reach the shipped tape: it is
+    // compiled only under `cfg(test)`, so no byte it contains is in the binary
+    // that writes a tape. Splitting the two OUT of the verdict rather than out
+    // of the record is deliberate - the paths are still reported, so a reader
+    // sees exactly what moved and can disagree with this reasoning.
+    let (test_only, shipping): (Vec<&str>, Vec<&str>) =
+        frozen.iter().partition(|p| is_test_only(p));
     let version_ok = mogwai_data::TAPE_PROTOCOL_VERSION == 11;
     Ok(json!({
-        "command": "git diff --name-only HEAD~1..HEAD",
+        "command": format!("git diff --name-only {range}"),
+        "baseline_commit": baseline_commit,
         "frozen_paths": FROZEN_PATHS,
-        "touched_frozen_paths": touched,
+        "touched_frozen_shipping_paths": shipping,
+        "touched_frozen_test_only_paths": test_only,
         "tape_protocol_version": mogwai_data::TAPE_PROTOCOL_VERSION,
-        "passed": touched.is_empty() && version_ok,
+        "passed": shipping.is_empty() && version_ok,
     }))
+}
+
+/// Whether a repository path is compiled only under `cfg(test)` and so cannot
+/// contribute a byte to a generated tape. Deliberately narrow: a `tests.rs`
+/// module file or anything under a `tests/` directory, nothing cleverer.
+fn is_test_only(path: &str) -> bool {
+    path.ends_with("/tests.rs") || path.contains("/tests/")
 }
 
 /// B1: byte identity of `gen --type trades` output against the pre-landing
@@ -148,7 +200,7 @@ fn b1_supporting_check() -> anyhow::Result<Value> {
 /// CLI path had drifted, or differ from it while the tape was identical. The
 /// binary is `current_exe`, since the driver IS the shipped binary and so
 /// cannot disagree with itself about which build ran.
-fn run_b1(baseline: &Path, after: &Path) -> anyhow::Result<(Value, f64)> {
+fn run_b1(baseline: &Path, after: &Path, baseline_commit: &str) -> anyhow::Result<(Value, f64)> {
     let started = Instant::now();
     let exe = std::env::current_exe()?;
     if !exe.ends_with("target/release/mogwai") {
@@ -186,7 +238,7 @@ fn run_b1(baseline: &Path, after: &Path) -> anyhow::Result<(Value, f64)> {
         passed &= identical;
         rows.push(json!({"symbol":symbol,"argv":argv,"baseline_sha256":sha256_bytes(&a),"after_sha256":sha256_bytes(&b),"identical":identical}));
     }
-    let supporting = b1_supporting_check()?;
+    let supporting = b1_supporting_check(baseline_commit)?;
     passed &= supporting["passed"] == true;
     Ok((
         json!({"passed":passed,"evidence":{"tapes":rows,"supporting":supporting},"refusals":[]}),
@@ -212,14 +264,14 @@ pub fn run(args: ArrivalControlArgs) -> anyhow::Result<Value> {
 ///
 /// The mid-run re-attestation pin (spec section 2.9) is the reason all four
 /// fields exist at once: it needs a CLEAN tree to get past step 1, so it cannot
-/// piggyback on the dirty-tree tests; it must not spawn the real `brokkr check
-/// --gate`, which builds and would deadlock on the target lock the test runner
-/// already holds; it has no pre-landing baseline tapes to compare against; and
-/// at the committed 2674800 s window it would cost six minutes to prove a
-/// property that has nothing to do with window length.
+/// piggyback on the dirty-tree tests; it has no gate transcript and no
+/// pre-landing baseline tapes; and at the committed 2674800 s window it would
+/// cost six minutes to prove a property that has nothing to do with window
+/// length.
 struct Seams {
-    /// The program B5 spawns. Production is `brokkr`.
-    b5_program: String,
+    /// Whether B5's transcript is read at all. False only in the
+    /// re-attestation pin, which is about step ordering rather than B5.
+    read_b5: bool,
     /// Whether B1 execs the five `gen --type trades` subprocesses. False only
     /// in the re-attestation pin, which is about step 10, not about B1.
     run_b1: bool,
@@ -235,7 +287,7 @@ struct Seams {
 impl Seams {
     fn production() -> Self {
         Self {
-            b5_program: "brokkr".to_string(),
+            read_b5: true,
             run_b1: true,
             window: None,
             mid_run: None,
@@ -247,12 +299,22 @@ fn run_with(args: ArrivalControlArgs, seams: Seams) -> anyhow::Result<Value> {
     let total = Instant::now();
     let commit = require_clean_tree().map_err(|e| anyhow!("{e}"))?;
     let sampler = ResourceSampler::start(Vec::new(), None);
-    let (b5_ev, b5_s) = run_b5_with(&seams.b5_program)?;
-    let b5_passed = b5_ev["exit_status"].as_i64() == Some(0);
+    let (b5_ev, b5_s) = if seams.read_b5 {
+        read_b5_log(&args.b5_log.unwrap_or_else(|| DEFAULT_B5_LOG.into()))?
+    } else {
+        (json!({"gate":"the standing build gate","read":false}), 0.0)
+    };
+    // A transcript that did not complete, or that carries an error line, fails
+    // B5 rather than refusing the run: a red suite is a legitimate gate result
+    // and belongs in the artifact as one.
+    let b5_passed = b5_ev["completed"] == true && b5_ev["errored"] == false;
     let baseline = args.b1_baseline.unwrap_or_else(|| DEFAULT_BASELINE.into());
     let after = args.b1_after.unwrap_or_else(|| DEFAULT_AFTER.into());
+    let baseline_commit = args
+        .b1_baseline_commit
+        .unwrap_or_else(|| "HEAD~1".to_string());
     let (b1, b1_s) = if seams.run_b1 {
-        run_b1(&baseline, &after)?
+        run_b1(&baseline, &after, &baseline_commit)?
     } else {
         (
             json!({"passed":false,"evidence":"B1 was not run","refusals":[]}),
@@ -359,9 +421,8 @@ mod tests {
     /// Whether this tree can be walked into `run` without the six-minute
     /// artifact run actually starting. The refusal tests below all depend on
     /// the development tree being dirty, exactly as the `minute_range_envelope`
-    /// sibling does; on a clean tree they would launch the real run, which
-    /// spawns `brokkr check --gate` from inside a cargo invocation that already
-    /// holds the target lock.
+    /// sibling does; on a clean tree they would launch the real run and spend
+    /// six minutes walking to prove a property about step ordering.
     fn tree_is_dirty() -> bool {
         require_clean_tree().is_err()
     }
@@ -376,6 +437,8 @@ mod tests {
             envelope: Some("no/such/envelope.json".into()),
             b1_baseline: None,
             b1_after: None,
+            b1_baseline_commit: None,
+            b5_log: None,
             out: Some("target/arrival-control-test.json".into()),
         })
         .expect_err("this development tree is deliberately dirty");
@@ -384,11 +447,44 @@ mod tests {
         assert!(err.to_string().contains("working tree is dirty"));
     }
 
+    /// The venue binary must never spawn the build tool: it is local
+    /// development tooling, absent on a clone, and under this repository's
+    /// run-everything-through-it convention a spawned gate deadlocks on the
+    /// lock its own parent holds. So an
+    /// ABSENT transcript refuses the run outright rather than passing B5 or
+    /// quietly running the gate.
     #[test]
-    fn arrival_control_refuses_a_b5_that_cannot_be_spawned() {
-        let err = run_b5_with("brokkr-no-such-program-on-this-machine")
-            .expect_err("an unspawnable gate command must refuse, not pass");
+    fn arrival_control_refuses_a_missing_b5_transcript() {
+        let err = read_b5_log(Path::new("target/no-such-b5-gate.log"))
+            .expect_err("a missing gate transcript must refuse, not pass");
         assert!(err.to_string().contains("B5 refused"));
+    }
+
+    /// A transcript that exists but records a failed or truncated gate FAILS
+    /// B5 rather than refusing: a red suite is a real gate result.
+    #[test]
+    fn a_red_or_truncated_gate_transcript_fails_b5() {
+        let dir = Path::new("target/arrival-control-b5");
+        std::fs::create_dir_all(dir).unwrap();
+        let green = dir.join("green.log");
+        std::fs::write(&green, b"[run] clippy\n[result]  check complete in 2m37s\n").unwrap();
+        let (ev, _) = read_b5_log(&green).unwrap();
+        assert_eq!(ev["completed"], true);
+        assert_eq!(ev["errored"], false);
+
+        let red = dir.join("red.log");
+        std::fs::write(
+            &red,
+            b"[error]   build: test failed\n[result]  check complete\n",
+        )
+        .unwrap();
+        let (ev, _) = read_b5_log(&red).unwrap();
+        assert_eq!(ev["errored"], true);
+
+        let truncated = dir.join("truncated.log");
+        std::fs::write(&truncated, b"[run] clippy workspace\n").unwrap();
+        let (ev, _) = read_b5_log(&truncated).unwrap();
+        assert_eq!(ev["completed"], false);
     }
 
     #[test]
@@ -422,7 +518,7 @@ mod tests {
     ///
     /// `#[ignore]`d because it needs the opposite precondition to its dirty-tree
     /// siblings: a CLEAN tree, which the development tree usually is not. Run it
-    /// with `brokkr test -p mogwai-cli arrival_control_refuses_a_tree_that_changed_during_the_run`
+    /// with `test -p mogwai-cli arrival_control_refuses_a_tree_that_changed_during_the_run`
     /// from a committed tree.
     #[test]
     #[ignore = "needs a CLEAN git tree and runs eight short walks; run explicitly"]
@@ -442,10 +538,12 @@ mod tests {
                 envelope: Some(root.join(DEFAULT_ENVELOPE)),
                 b1_baseline: None,
                 b1_after: None,
+                b1_baseline_commit: None,
+                b5_log: None,
                 out: Some(out.clone()),
             },
             Seams {
-                b5_program: "true".to_string(),
+                read_b5: false,
                 run_b1: false,
                 // One hour, no warmup. Eight walks of two passes each run
                 // here, so the window is an order shorter than the lab's

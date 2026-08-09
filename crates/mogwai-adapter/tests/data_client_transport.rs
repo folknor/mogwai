@@ -25,7 +25,7 @@
 //! `HttpPolling` was deleted with the profile rather than ported.
 //!
 //! Marked `#[ignore]` because it binds a real TCP listener, which the sandbox
-//! may refuse; `brokkr check --gate` and the focused runner both include it.
+//! may refuse; the full gate and the focused runner both include it.
 
 mod common;
 

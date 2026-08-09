@@ -10,7 +10,7 @@
 //! They share the stub harness in `tests/common`.
 //!
 //! Run a focused case in a socket-capable environment with e.g.
-//! `brokkr test -p mogwai-adapter ships_server_havoc --debug`.
+//! `test -p mogwai-adapter ships_server_havoc --debug` in the focused runner.
 
 mod common;
 

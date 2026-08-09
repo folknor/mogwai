@@ -114,7 +114,7 @@ pub struct MeasureOutcome {
 /// always uses [`WalkSource::LiveAttested`]; [`WalkSource::PreAttestedCacheOnly`]
 /// exists ONLY for the parity gate, which cannot fit the full live walk set
 /// (eight in-process month-long walks, ~26 s apiece per the phase-2a gate
-/// timings) inside `brokkr`'s hard per-test ceiling alongside the ~85 s
+/// timings) inside the runner's hard per-test ceiling alongside the ~85 s
 /// observed pass. It proves nothing about walk determinism itself - that is
 /// what the nine per-seed 2a parity gates (`parity12a_generated_seed_1..8`,
 /// `parity12a_observed_*`) each prove independently, well under the

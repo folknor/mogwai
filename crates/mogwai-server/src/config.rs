@@ -66,9 +66,10 @@ pub struct Config {
     /// what the tape is doing, which is the mirror image of the inert `u = 0`
     /// band: in neither case does the tape decide the fill.
     ///
-    /// The probe is the provenance. Re-run it (`brokkr test -p mogwai-server
-    /// vol_probe`) and read the selection off its table rather than trusting this
-    /// comment if the fingerprint or the cadence moves again; the golden
+    /// The probe is the provenance. Re-run it (`test -p mogwai-server vol_probe`
+    /// in the focused runner) and read the selection off its table rather than
+    /// trusting this comment if the fingerprint or the cadence moves again; the
+    /// golden
     /// `tests/golden/fill_distribution.json` is blessed against whatever this
     /// default is and has to be re-blessed with it.
     ///

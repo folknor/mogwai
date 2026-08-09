@@ -7,7 +7,7 @@
 //! Every test here spawns a real venue and binds a real loopback port, so all
 //! of them are `#[ignore]`d like their siblings in `mogwai-adapter/tests` - an
 //! environment without sockets would fail them for reasons unrelated to the
-//! code. `brokkr check --gate` and the focused runner both include them.
+//! code. The full gate and the focused runner both include them.
 
 mod common;
 

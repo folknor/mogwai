@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Criterion benchmarks for the shared trigger walk and the fixed per-pass
-//! cost the sweeper pays around it. Run as `brokkr run fill_walk_bench --
-//! --bench`; `criterion_main` parses the `--bench` flag itself, which is what
+//! cost the sweeper pays around it. Run the `fill_walk_bench` target with
+//! `-- --bench`; `criterion_main` parses that flag itself, which is what
 //! lets these live in an example target instead of a `cargo bench` harness.
 //!
 //! `criterion_group!` expands to `pub fn` items in a crate where nothing is

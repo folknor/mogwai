@@ -10,7 +10,7 @@
 //! it reads ~65 MB of committed JSON, same convention as the 2a/2b gates.
 //!
 //! ```text
-//! brokkr test -p mogwai-lab parity12a_i
+//! test -p mogwai-lab parity12a_i
 //! ```
 
 use std::path::{Path, PathBuf};
