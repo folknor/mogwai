@@ -95,6 +95,17 @@ into `crates/mogwai-lab/src/arrival_screen.rs`:
   parent-count marginal and the count/run-length/lag-1 statistics
   (12b spec sections 3 and 9.1 say exactly that).
 
+The profile is now instrumented rather than hypothetical.
+`crates/mogwai-lab/examples/screen_projection_bench.rs` runs one probe cell
+per family, cache bypassed, under `hotpath`;
+`crates/mogwai-data/examples/arrival_walk_bench.rs` runs the kernel draw with
+nothing attached. The gap between them is the measurement cost this round is
+attacking. The probe itself now reports its work size on both output channels
+- the first post-amendment reading is `cells_evaluated=4 parents=252704639
+prints=295958882 peak_rss_bytes=487493632` - so a later claim of a speedup can
+be checked against whether the work changed. `reference/performance.md` has
+the invocations.
+
 So the first-order hypothesis, to be confirmed by a profile before
 anything is rewritten: most of a screen cell is `SessionAcc` doing
 bookkeeping whose outputs the screen discards, plus per-child segment

@@ -299,6 +299,12 @@ impl SessionAcc {
     /// Close only the Stage A projection shared surface. This uses the same
     /// block implementations as `close` and deliberately avoids blocks 3 and
     /// 4 and permutation work.
+    ///
+    /// A STABLE PROFILE FRAME: once per session rotation, roughly 23 times per
+    /// seed-month, so the annotation is free and the frame separates the
+    /// per-print accumulation from the per-session reduction - the split the
+    /// Stage A round's lean-accumulator hypothesis turns on.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn close_reduced(mut self, _scope: Scope) -> LabResult<serde_json::Value> {
         self.seg(0);
         self.seg(1);

@@ -56,6 +56,13 @@ anyhow = "1"
 criterion = { version = "0.8", default-features = false, features = [
     "cargo_bench_support",
 ] }
+# Function-level profiling for the layer-2 optimization harnesses. An OPTIONAL
+# dependency of the two crates that use it, never a plain one: with neither
+# crate feature on it must not appear in a consumer's dependency graph at all,
+# which "inert when off" does not achieve. Its own `hotpath` feature is what
+# arms the macros - without it every annotation compiles to nothing - so the
+# entry here turns the default off and the crate features forward it.
+hotpath = { version = "0.23", default-features = false }
 
 [profile.release]
 opt-level = 3

@@ -36,6 +36,73 @@ Fill BEHAVIOUR is gated automatically, by
 `crates/mogwai-server/tests/golden/fill_distribution.json`, which runs in
 `brokkr check`.
 
+## The two-layer benchmarking setup
+
+The criterion examples above are one instrument among several. The standing
+shape, settled 2026-08-09, is two layers with different lifetimes.
+
+**Layer 1 - frozen CLI workloads, durable rows.** A named workload states its
+invocation in full; its rows are comparable across months and its name is the
+pairing identity, so a changed invocation - or a changed clock - gets a NEW name
+with a `successor` pointer on the old one, rather than a quiet edit. Four are
+defined in `brokkr.toml` under `[mogwai.workloads.*]`: `screen-probe`,
+`walk-month-mnq`, `screen-full`, `measure12a`. Only counters a mismatch must be
+FATAL on are declared; everything else is captured and diffed automatically.
+
+`measure12a` reads the delivered July corpus, registered per host under
+`[bygg.corpus.mnq-tbbo-july]` and pinned by an XXH128 digest over the whole
+delivery DIRECTORY, not over its manifest. The two hashes on that corpus answer
+different questions and neither replaces the other: this digest is a DRIFT check
+- the delivery under that path not being the one it was last time - while
+`measure`'s own SHA-256 verification against the ledger and the committed
+preflight is about the CONTENTS being the ones the method was fitted to.
+
+**Layer 2 - optimization instruments, allowed to churn.** Harness examples
+registered in `Cargo.toml`, exercising one primitive with a designed workload:
+
+```
+brokkr run --release arrival_walk_bench
+brokkr run --release screen_projection_bench
+```
+
+Both need the `hotpath` feature of their crate (`mogwai-data` and `mogwai-lab`
+respectively), which `required-features` enforces - a plain `--examples` build
+skips them rather than producing an uninstrumented binary that reports an empty
+profile. `hotpath-alloc` additionally arms the allocation counting, and both
+harnesses declare the `#[global_allocator]` themselves under it, because hotpath
+ships the allocator without installing it and an alloc run without that line
+reports zero bytes everywhere.
+
+`arrival_walk_bench` runs the kernel draw with no projection attached;
+`screen_projection_bench` runs one Stage A cell with the projection. The gap
+between them is the measurement cost the Stage A round is spending against.
+
+**The two output channels.** Every benched command emits its work size beside
+its timing, unconditionally, on both channels
+(`mogwai_lab::sidecar`): `key=value` scalars on stderr for the tracked
+regression row, and timestamped phase markers plus counters on the marker FIFO
+for the sampled `/proc` timeline. Absent the FIFO environment variable the
+marker path is a load and a branch, so a plain interactive run pays nothing.
+
+| command | markers | counters |
+|---|---|---|
+| `arrival-screen --cost-probe` | `probe` | `cells_evaluated`, `parents`, `prints`, `peak_rss_bytes` |
+| `arrival-screen` | `coarse`, `refine`, per-family boundaries | as above, plus `coarse_s` / `refine_s` |
+| `gen --type summary` | `walk` | `parents`, `rows` |
+| `measure` | `observed`, `walks`, `bootstrap` | `elapsed_ms`, per-phase ms, `seeds`, `sessions`, `usable_sessions`, `peak_rss_bytes`, `scratch_bytes` |
+
+`measure` is the one SELF-REPORTING workload: it verifies a multi-gigabyte
+corpus before any measured work, so an external wall would fold that hash pass
+into every reading. Everything else is timed externally and therefore needed no
+change to be benchmarkable at all - which is what lets their history be
+back-filled to any commit whose CLI still parses the frozen invocation.
+
+**Annotation discipline.** A small, stable set at phase boundaries, never a
+function called millions of times per run - annotate its caller instead. Today:
+`arrival_screen::project_stream` (once per seed walk) and
+`SessionAcc::close_reduced` (once per session rotation). The value of a profile
+is the same names appearing run after run.
+
 ## What each id measures
 
 `fill_bench` (`crates/mogwai-engine/examples/fill_bench.rs`):

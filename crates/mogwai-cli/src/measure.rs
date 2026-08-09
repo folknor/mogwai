@@ -108,6 +108,23 @@ impl MeasureConfig {
 pub struct MeasureOutcome {
     pub artifact: Value,
     pub cost: Value,
+    pub work: MeasureWork,
+}
+
+/// The run's work size, in the units the measured phases actually scale with.
+///
+/// Carried out of the run rather than recovered from the artifact because the
+/// artifact does not keep it: `generated.per_seed` records reduced BLOCKS, and
+/// the session count that produced them - the thing a walk's wall is
+/// proportional to - is gone by the time the artifact exists.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MeasureWork {
+    /// Sessions the observed pass measured, from the preflight artifact.
+    pub usable_sessions: usize,
+    /// Generated seeds walked (or served pre-attested).
+    pub seeds: usize,
+    /// Generated sessions summed across those seeds.
+    pub sessions: usize,
 }
 
 /// Where a run's eight `generated_seeds` come from. The production CLI
@@ -148,7 +165,45 @@ pub fn run(args: MeasureArgs) -> anyhow::Result<()> {
     println!("eligible: {}", ladder["eligible"]);
     println!("selected: {}", ladder["selected"]);
     println!("verdict: {}", ladder["verdict"]);
+    report_cost(&outcome);
     Ok(())
+}
+
+/// The benchmark row for a measure run.
+///
+/// THE ONE SELF-REPORTING WORKLOAD, and the reason is this run's shape rather
+/// than a preference: everything before the observed marker is corpus
+/// verification and cache loading - real work, but not the work being
+/// optimized - and an externally timed wall would fold a multi-gigabyte hash
+/// pass into every reading of the measurement engine. `cost.total_s` is the
+/// three measured phases and nothing else, so that is what goes out as
+/// `elapsed_ms`.
+///
+/// Work sizes beside it: the session and seed counts a wall must be read
+/// against. Both are contract-fixed today (23 sessions, eight seeds), which is
+/// exactly why they are worth recording - a wall that halves while `sessions`
+/// changes is not a speedup, and the counter is what makes that visible
+/// instead of plausible.
+fn report_cost(outcome: &MeasureOutcome) {
+    let seconds = |key: &str| outcome.cost[key].as_f64().unwrap_or(f64::NAN);
+    let integer = |value: &Value| value.as_i64().unwrap_or(0);
+    // Fractional milliseconds: the scrape keeps the exact microseconds, and
+    // rounding here would throw away the resolution a comparison uses.
+    mogwai_lab::sidecar::kv("elapsed_ms", format!("{:.3}", seconds("total_s") * 1e3));
+    for (key, phase) in [
+        ("observed_ms", "observed_s"),
+        ("generated_ms", "generated_s"),
+        ("bootstrap_ms", "bootstrap_s"),
+    ] {
+        mogwai_lab::sidecar::kv(key, format!("{:.3}", seconds(phase) * 1e3));
+    }
+    mogwai_lab::sidecar::report("peak_rss_bytes", integer(&outcome.cost["peak_rss_bytes"]));
+    mogwai_lab::sidecar::report("scratch_bytes", integer(&outcome.cost["scratch_bytes"]));
+
+    let count = |value: usize| i64::try_from(value).unwrap_or(i64::MAX);
+    mogwai_lab::sidecar::report("seeds", count(outcome.work.seeds));
+    mogwai_lab::sidecar::report("sessions", count(outcome.work.sessions));
+    mogwai_lab::sidecar::report("usable_sessions", count(outcome.work.usable_sessions));
 }
 
 /// The driver: `mode_measure12a`, callable directly (with `cfg.out`
@@ -187,6 +242,7 @@ pub fn run_measure_with(
     // -- Observed pass, LIVE (the authoritative input). The pre-existing
     // observed cache is a MANDATORY structural cross-check: absence or
     // divergence refuses.
+    mogwai_lab::sidecar::marker("observed");
     let t0 = std::time::Instant::now();
     let observed = run_measure12a_observed(&cfg.corpus, &cfg.ledger, &cfg.preflight_path)?;
     let observed_s = t0.elapsed().as_secs_f64();
@@ -210,6 +266,7 @@ pub fn run_measure_with(
     // the read-only Brick G record. Under `PreAttestedCacheOnly` (test-only
     // seam, see `WalkSource`) the walk and the attestation are both
     // SKIPPED and the cached record is used as-is.
+    mogwai_lab::sidecar::marker("walks");
     let t1 = std::time::Instant::now();
     let mut generated_seeds: Vec<GeneratedSeed> = Vec::with_capacity(FINAL_SEEDS.len());
     for &seed in FINAL_SEEDS {
@@ -298,6 +355,7 @@ pub fn run_measure_with(
     // -- Assembly with a provisional MUTABLE cost record (two-phase: the
     // bootstrap clock stops after assembly, then the fields finalize in
     // place before validation).
+    mogwai_lab::sidecar::marker("bootstrap");
     let t2 = std::time::Instant::now();
     let n_usable = usable.len();
     let mults = bootstrap_multiplicities(n_usable);
@@ -361,7 +419,15 @@ pub fn run_measure_with(
     write_json_atomic(&cfg.out, &artifact)
         .map_err(|e| anyhow!("writing {}: {e}", cfg.out.display()))?;
 
-    Ok(MeasureOutcome { artifact, cost })
+    Ok(MeasureOutcome {
+        artifact,
+        cost,
+        work: MeasureWork {
+            usable_sessions: n_usable,
+            seeds: generated_seeds.len(),
+            sessions: generated_seeds.iter().map(|g| g.per_session.len()).sum(),
+        },
+    })
 }
 
 /// `run_measure12a_observed`: the observed half - per-session sufficient

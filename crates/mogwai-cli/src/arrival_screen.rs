@@ -11,9 +11,10 @@ use mogwai_lab::arrival_screen::{
     BudgetGuard, EvaluatedCell, Family, REFINEMENT_CELL_CAP, REFINEMENT_DEPTH, STAGE_A_BUDGET_S,
     STAGE_A_CELL_BUDGET_S, STAGE_A_GEN_CELL_BUDGET_S, STAGE_A_GEN_REFINE_CAP, STAGE_A_RSS_BYTES,
     STAGE_A_SEEDS, ScreenContext, admissible_regions, budget_verdict, budgeted, coarse_grid,
-    coarse_lattice, evaluate_cell, probe_cell, refinement_round, write_artifact,
+    coarse_lattice, evaluate_cell, probe_cell, refinement_round, screen_work, write_artifact,
 };
 use mogwai_lab::ledger::{fresh_tree_state, require_clean_tree, sha256_file};
+use mogwai_lab::sidecar;
 use serde_json::{Map, Value, json};
 
 const DEFAULT_MEASURE: &str = "analysis/mnq-measure-12a.json";
@@ -56,6 +57,34 @@ fn cell_ref(cell: &EvaluatedCell) -> Value {
            "lattice":cell.lattice,"level":cell.level,"loss":cell.verdict.loss})
 }
 
+/// The benchmark channels' view of a screen run: the work it did, and the peak
+/// footprint it did it in.
+///
+/// EVERY TIMING GETS ITS WORK SIZE BESIDE IT. A screen wall that moves is
+/// ambiguous on its own - fewer cells evaluated, a cheaper refinement, a
+/// shorter walk and genuinely faster code all read the same. `cells_evaluated`
+/// and `parents` are the identity-bearing pair under the Stage A free-lane
+/// rules (nothing on the measurement side of the draw may change either), and
+/// `prints` follows the parents. They are reported on the FIFO for the phase
+/// timeline and on stderr for the tracked regression row.
+///
+/// This is the LAST thing a successful run does, and it is unconditional: a
+/// run that emitted its counters only under a flag would be a run whose
+/// baseline nobody has.
+fn report_work(peak_rss_bytes: u64) {
+    let work = screen_work();
+    sidecar::report(
+        "cells_evaluated",
+        i64::try_from(work.cells_evaluated).unwrap_or(i64::MAX),
+    );
+    sidecar::report("parents", i64::try_from(work.parents).unwrap_or(i64::MAX));
+    sidecar::report("prints", i64::try_from(work.prints).unwrap_or(i64::MAX));
+    sidecar::report(
+        "peak_rss_bytes",
+        i64::try_from(peak_rss_bytes).unwrap_or(i64::MAX),
+    );
+}
+
 pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
     let measure = args.measure.unwrap_or_else(|| DEFAULT_MEASURE.into());
     let out = args.out.unwrap_or_else(|| DEFAULT_OUT.into());
@@ -76,6 +105,7 @@ pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
     let total = Instant::now();
 
     if args.cost_probe {
+        sidecar::marker("probe");
         let cells = budgeted(&mut guard, Family::ALL, |family| {
             let verdict = evaluate_cell(&context, &probe_cell(family), &STAGE_A_SEEDS[..2])?;
             let limit = if family == Family::EventMarkov {
@@ -101,12 +131,19 @@ pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
             "generator_cell_s":STAGE_A_GEN_CELL_BUDGET_S,"total_s":STAGE_A_BUDGET_S,
             "rss_bytes":STAGE_A_RSS_BYTES}});
         println!("{}", serde_json::to_string_pretty(&result)?);
+        report_work(peak_rss);
         return Ok(result);
     }
 
+    sidecar::marker("coarse");
     let coarse_started = Instant::now();
     let mut by_family: BTreeMap<Family, Vec<EvaluatedCell>> = BTreeMap::new();
     for family in Family::ALL {
+        // Four per-pass family boundaries, which is the whole reason markers
+        // are affordable here: a screen's coarse pass is hours long and the
+        // families are priced very differently, so a phase decomposition that
+        // stopped at "coarse" would hide the only split that explains it.
+        sidecar::marker(&format!("coarse_{}", family.as_str()));
         let evaluated = budgeted(&mut guard, coarse_lattice(family), |point| {
             Ok(EvaluatedCell {
                 verdict: evaluate_cell(&context, &point.cell, &STAGE_A_SEEDS[..2])?,
@@ -119,9 +156,11 @@ pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
         by_family.insert(family, evaluated);
     }
     let coarse_s = coarse_started.elapsed().as_secs_f64();
+    sidecar::marker("refine");
     let refine_started = Instant::now();
     let mut unevaluated: BTreeMap<Family, BTreeMap<String, usize>> = BTreeMap::new();
     for family in Family::ALL {
+        sidecar::marker(&format!("refine_{}", family.as_str()));
         let cap = if family == Family::EventMarkov {
             STAGE_A_GEN_REFINE_CAP
         } else {
@@ -260,6 +299,9 @@ pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
     });
     write_artifact(&out, &artifact, total.elapsed().as_secs_f64(), peak_rss)
         .map_err(|e| anyhow!(e.to_string()))?;
+    sidecar::kv("coarse_s", format!("{coarse_s:.3}"));
+    sidecar::kv("refine_s", format!("{refine_s:.3}"));
+    report_work(peak_rss);
     Ok(artifact)
 }
 

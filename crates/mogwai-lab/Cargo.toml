@@ -33,6 +33,27 @@ zrip.workspace = true
 sha2.workspace = true
 rust_decimal.workspace = true
 zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# `sidecar` opens the benchmark marker FIFO non-blocking, and needs exactly one
+# thing from here: the `O_NONBLOCK` flag value. Same pin mogwai-server carries;
+# no feature is enabled because `nix::libc` is unconditional.
+nix = { version = "0.31.3", default-features = false }
+hotpath = { workspace = true, optional = true }
+
+# Mirrors mogwai-data's two-level indirection; see the note there. `hotpath`
+# also forwards to mogwai-data's own feature, because a projection profile that
+# stopped at the crate boundary would attribute the whole parent walk to one
+# frame - the walk is the other half of what a screen cell spends.
+[features]
+hotpath = ["dep:hotpath", "hotpath/hotpath", "mogwai-data/hotpath"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "mogwai-data/hotpath-alloc"]
+
+# The layer-2 projection instrument. `required-features` is what stops a plain
+# `--examples` build from producing a binary named for profiling that measures
+# nothing: without the feature the annotations compile away and the harness
+# would run, report an empty table, and look like a finding.
+[[example]]
+name = "screen_projection_bench"
+required-features = ["hotpath"]
 
 [lints]
 workspace = true

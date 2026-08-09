@@ -75,7 +75,10 @@ A Cargo workspace, seven crates under `crates/`:
   `mogwai-data`, `mogwai-protocol` and `mogwai-server` (session-summary work
   resolves an `InstrumentProfile` through `Config::load`); `mogwai-server`
   depends on none of it, so there is no cycle. `mogwai-cli` calls it for
-  `preflight`, `measure`, `fit`, `cache` and `synth`.
+  `preflight`, `measure`, `fit`, `cache` and `synth`. It also carries
+  `sidecar`, the observation-only benchmarking channels (stderr `key=value`
+  scalars and the marker/counter FIFO) the benched commands report through;
+  see `reference/performance.md`.
 - `mogwai-adapter` - the nautilus venue adapter: the `MogwaiDataClientFactory` /
   `MogwaiExecutionClientFactory`, their configs, and the client pair a host
   registers for the `MOGWAI` venue. The only crate that depends on nautilus -
@@ -99,7 +102,6 @@ Document folders section below for what each folder may and may not contain.
 - Don't use gremlins! Em-dash, en-dash, strange quotes, whatever - they're all verboten.
 - Don't remind the user of the rules. They wrote them, so they know them.
 - The user can exempt you from any rule at any time.
-- When asked to write a plan or a specification, read `reference/technical-implementation-spec.md` first; it defines what such a document must contain.
 
 ### Tape protocol version
 

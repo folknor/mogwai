@@ -122,6 +122,10 @@ struct ServeArgs {
 }
 
 fn main() -> anyhow::Result<()> {
+    // FIRST, before the argv parse: the benchmark marker timeline is measured
+    // from here, so anything ahead of this line is invisible to a phase
+    // decomposition. A no-op outside a benchmark harness.
+    mogwai_lab::sidecar::init();
     match Cli::parse().command {
         Command::Serve(args) => mogwai_server::serve(
             args.config,

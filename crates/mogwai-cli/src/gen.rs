@@ -222,8 +222,18 @@ fn run_into(args: &GenArgs, sink: &mut impl Write) -> anyhow::Result<()> {
             writeln!(sink)?;
             return Ok(());
         }
+        mogwai_lab::sidecar::marker("walk");
         let mut source = build_source(args, &profile, walk_start)?;
         let acc = summarize(&mut source, &profile, seed, args.start, end);
+        // The generated-walk benchmark's work size. Both counters are
+        // IDENTITY-BEARING: a summary walk is a pure function of (preset,
+        // window, warmup, seed), so a run that reports a different parent or
+        // row count than its baseline changed the tape, and any wall
+        // comparison against that baseline is meaningless rather than
+        // interesting. Emitted before the JSON is written so a run whose sink
+        // fails still leaves the reading.
+        mogwai_lab::sidecar::report("parents", i64::try_from(acc.parents()).unwrap_or(i64::MAX));
+        mogwai_lab::sidecar::report("rows", i64::try_from(acc.sided_rows()).unwrap_or(i64::MAX));
         return write_summary(&acc, sink);
     }
 

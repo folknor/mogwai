@@ -260,6 +260,26 @@ pub struct SummaryAcc {
     measured_until_ns: u64,
 }
 
+/// The two work-size readings a benchmark row needs from a summary walk.
+///
+/// Accessors rather than public fields: every field here is a serialized leaf
+/// of the fit's input record, and opening the struct up so a benchmark could
+/// read two counts would make the whole accumulator writable from outside the
+/// walk that owns it.
+impl SummaryAcc {
+    /// Parents the walk inferred over the measured window.
+    #[must_use]
+    pub fn parents(&self) -> u64 {
+        self.parents
+    }
+
+    /// Sided trade rows the walk consumed over the measured window.
+    #[must_use]
+    pub fn sided_rows(&self) -> u64 {
+        self.sided_rows
+    }
+}
+
 /// Fixed capacity of the worst-minute collection (spec 4.7).
 pub const TOP_MINUTE_RECORDS: usize = 32;
 

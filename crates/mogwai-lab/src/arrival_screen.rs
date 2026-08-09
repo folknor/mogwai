@@ -15,6 +15,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use mogwai_data::{
@@ -245,6 +246,16 @@ pub struct SeedWalk {
     pub seed: u64,
     pub sessions: Vec<Value>,
     pub parents: u64,
+    /// Child prints pushed into the accumulator - the screen's work-size
+    /// reading, not an input to any verdict.
+    ///
+    /// `serde(default)` because it postdates the cache format: a walk cached
+    /// before the field existed reads back as zero rather than refusing. That
+    /// is the right failure for a WORK-SIZE counter, whose consumer is a
+    /// benchmark comparison, and it would be the wrong one for anything the
+    /// A1-A4 verdicts read - so nothing reads it.
+    #[serde(default)]
+    pub prints: u64,
     pub realized_mean_gap_s: f64,
     pub refusal: Option<ScreenRefusal>,
     pub cost_s: f64,
@@ -747,7 +758,40 @@ fn projection_refusal(clock_ns: u64, detail: &str) -> ProjectStop {
 struct Projected {
     sessions: Vec<Value>,
     parents: u64,
+    prints: u64,
     realized_mean_gap_s: f64,
+}
+
+/// The screen's cumulative work size for one process, in the two units a
+/// benchmark comparison needs: how many parameter cells were evaluated, and
+/// how much walking that cost in parents and child prints.
+///
+/// Kept here rather than derived by the caller because the only place the
+/// numbers exist is inside the projection, and the only place they can be
+/// totalled correctly is where a CACHED seed is served too - a cache hit did
+/// less work this run, but the run still stands for that much work, and a
+/// comparison whose counters swung on cache state would answer nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScreenWork {
+    pub cells_evaluated: u64,
+    pub parents: u64,
+    pub prints: u64,
+}
+
+static CELLS_EVALUATED: AtomicU64 = AtomicU64::new(0);
+static PARENTS_WALKED: AtomicU64 = AtomicU64::new(0);
+static PRINTS_PROJECTED: AtomicU64 = AtomicU64::new(0);
+
+/// This process's [`ScreenWork`] so far. `Relaxed` throughout: these are
+/// observation-only totals read once at the end of a run, and nothing orders
+/// anything against them.
+#[must_use]
+pub fn screen_work() -> ScreenWork {
+    ScreenWork {
+        cells_evaluated: CELLS_EVALUATED.load(Ordering::Relaxed),
+        parents: PARENTS_WALKED.load(Ordering::Relaxed),
+        prints: PRINTS_PROJECTED.load(Ordering::Relaxed),
+    }
 }
 
 pub fn project_seed(ctx: &ScreenContext, cell: &Cell, seed: u64) -> LabResult<SeedWalk> {
@@ -755,7 +799,9 @@ pub fn project_seed(ctx: &ScreenContext, cell: &Cell, seed: u64) -> LabResult<Se
     if !ctx.bypass_cache
         && let Some(bytes) = ctx.cache.read(&key)?
     {
-        return Ok(serde_json::from_slice(&bytes)?);
+        let cached: SeedWalk = serde_json::from_slice(&bytes)?;
+        tally_walk(&cached);
+        return Ok(cached);
     }
     let started = Instant::now();
     let product = match project_walk(ctx, cell, seed) {
@@ -763,6 +809,7 @@ pub fn project_seed(ctx: &ScreenContext, cell: &Cell, seed: u64) -> LabResult<Se
             seed,
             sessions: done.sessions,
             parents: done.parents,
+            prints: done.prints,
             realized_mean_gap_s: done.realized_mean_gap_s,
             refusal: None,
             cost_s: started.elapsed().as_secs_f64(),
@@ -774,6 +821,7 @@ pub fn project_seed(ctx: &ScreenContext, cell: &Cell, seed: u64) -> LabResult<Se
             seed,
             sessions: Vec::new(),
             parents: 0,
+            prints: 0,
             realized_mean_gap_s: f64::NAN,
             refusal: Some(refusal),
             cost_s: started.elapsed().as_secs_f64(),
@@ -783,7 +831,13 @@ pub fn project_seed(ctx: &ScreenContext, cell: &Cell, seed: u64) -> LabResult<Se
     if !ctx.bypass_cache {
         ctx.cache.write(&key, &serde_json::to_vec(&product)?)?;
     }
+    tally_walk(&product);
     Ok(product)
+}
+
+fn tally_walk(walk: &SeedWalk) {
+    PARENTS_WALKED.fetch_add(walk.parents, Ordering::Relaxed);
+    PRINTS_PROJECTED.fetch_add(walk.prints, Ordering::Relaxed);
 }
 
 fn project_walk(ctx: &ScreenContext, cell: &Cell, seed: u64) -> Result<Projected, ProjectStop> {
@@ -845,6 +899,12 @@ fn project_walk(ctx: &ScreenContext, cell: &Cell, seed: u64) -> Result<Projected
 /// the child enumeration, the session rotation, the termination guard and the
 /// measured mean gap. Everything family-specific is behind [`ParentSource`], so
 /// this is the whole of what the layer-1 oracle validates.
+///
+/// A STABLE PROFILE FRAME. One call per seed walk, so the annotation costs
+/// nothing and the name shows up run after run - which is the whole value of a
+/// small fixed annotation set. Nothing inside this function is annotated: the
+/// loop body runs tens of millions of times per call.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn project_stream(
     walk: &mut dyn ParentSource,
     start: u64,
@@ -858,6 +918,10 @@ fn project_stream(
     let mut first = None;
     let mut last = None;
     let mut parents = 0_u64;
+    // A plain local increment on the hottest line in the screen, totalled into
+    // the process tally once per walk rather than per print - an atomic here
+    // would be 35 M contended operations to answer a question asked once.
+    let mut prints = 0_u64;
     let mut previous = None;
     // `GeneratedAcc::close_open_parent`, transcribed: a parent outside the
     // measured window is dropped, a parent with no open session is skipped
@@ -926,6 +990,7 @@ fn project_stream(
             }
             if let Some(active) = acc.as_mut() {
                 active.push_print(ts, 0);
+                prints += 1;
             }
             // THE PARENT OPENS ON ITS FIRST CHILD, not after its last.
             // `GeneratedAcc::push_trade` rotates at the top and sets
@@ -968,6 +1033,7 @@ fn project_stream(
     Ok(Projected {
         sessions,
         parents,
+        prints,
         realized_mean_gap_s,
     })
 }
@@ -1019,6 +1085,7 @@ fn gap_within_tolerance(ctx: &ScreenContext, realized_s: f64) -> bool {
 }
 
 pub fn evaluate_cell(ctx: &ScreenContext, cell: &Cell, seeds: &[u64]) -> LabResult<CellVerdict> {
+    CELLS_EVALUATED.fetch_add(1, Ordering::Relaxed);
     let started = Instant::now();
     let mut walks = Vec::new();
     for &seed in seeds {
@@ -2270,6 +2337,7 @@ mod tests {
             seed,
             sessions,
             parents: 2,
+            prints: 0,
             realized_mean_gap_s: ctx.profile.scalars.mean_event_duration_s,
             refusal: None,
             cost_s: 0.0,
@@ -2468,6 +2536,7 @@ mod tests {
             seed: 202,
             sessions: Vec::new(),
             parents: 0,
+            prints: 0,
             realized_mean_gap_s: f64::NAN,
             refusal: Some(ScreenRefusal {
                 variant: "intensity_ceiling".into(),

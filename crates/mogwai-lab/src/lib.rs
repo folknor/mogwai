@@ -68,6 +68,7 @@ pub mod sampler;
 pub mod select_windows;
 pub mod session;
 pub mod session_profile;
+pub mod sidecar;
 pub mod storage;
 pub mod stream;
 pub mod subcontract;

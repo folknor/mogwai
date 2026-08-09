@@ -12,9 +12,36 @@ rand_distr.workspace = true
 rand_chacha.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+hotpath = { workspace = true, optional = true }
+
+# The two-level feature indirection: a crate feature that forwards to the
+# dependency's own. Consumers name `mogwai-data/hotpath` and never have to know
+# that arming the macros is a feature on a third crate.
+#
+# `hotpath-alloc` enables BOTH sides deliberately. hotpath's alloc tracking
+# only reports through the timing machinery, so alloc alone measures nothing;
+# a feature that silently does nothing is worse than one that costs a little
+# more than asked.
+[features]
+hotpath = ["dep:hotpath", "hotpath/hotpath"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 
 [dev-dependencies]
 criterion.workspace = true
+
+# Examples are declared rather than auto-discovered, so the instrumented one
+# can carry `required-features`. Declaring one target turns auto-discovery off
+# for the rest, which is why the two pre-existing examples are listed too.
+[[example]]
+name = "peek"
+
+[[example]]
+name = "fill_walk_bench"
+
+# The layer-2 walk instrument: the parent draw with no projection attached.
+[[example]]
+name = "arrival_walk_bench"
+required-features = ["hotpath"]
 
 [lints]
 workspace = true

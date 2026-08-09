@@ -1,11 +1,31 @@
 project = "mogwai"
 
-# One sweep, the whole workspace. No `features` list because no crate in this
-# workspace declares any cargo feature, so this is exactly the legacy
-# `--all-features` default it replaces - declared explicitly only so the
-# profiles below have an entry to reference.
+# The default shape: every crate with no feature on. That is the SHIPPED shape
+# and the one every consumer builds - `mogwai-data` and `mogwai-lab` each carry
+# `hotpath`/`hotpath-alloc`, and both are optional dependencies precisely so
+# that with neither feature named the profiler is absent from the dependency
+# graph rather than merely inert.
 [[check]]
 name = "workspace"
+
+# The instrumented shape. It exists because a feature nothing compiles is a
+# feature that is broken and nobody knows: with `hotpath` off, every
+# `cfg_attr(feature = "hotpath", hotpath::measure)` annotation and both
+# `required-features` harness examples vanish from the build, so a rename, a
+# moved function or a macro-argument change breaks nothing that any lane runs.
+#
+# `hotpath-alloc` rather than `hotpath` because it is the strict superset - it
+# enables `hotpath` too, and additionally compiles the harnesses'
+# `#[global_allocator]` declarations, which the timing-only feature does not.
+# One sweep therefore covers both feature shapes' code.
+#
+# Scoped with `packages` because this is a virtual workspace: cargo rejects
+# `--features` at the root, so the features have to be attributed to the crates
+# that declare them.
+[[check]]
+name = "instrumented"
+packages = ["mogwai-data", "mogwai-lab"]
+features = ["hotpath-alloc"]
 
 [test]
 gate_profile = "gate"
@@ -55,7 +75,7 @@ gate_profile = "gate"
 # is a property of files this file cannot see.
 [test.profiles.gate]
 description = "Everything, including the socket-backed adapter tests"
-sweeps = ["workspace"]
+sweeps = ["workspace", "instrumented"]
 include_ignored = true
 skip = [
     "vol_probe",
@@ -175,6 +195,147 @@ name = "no-brokkr-in-rust-source"
 pattern = 'brokkr'
 paths = ["crates/**/*.rs"]
 message = "brokkr is local dev tooling and must never be named from shipped Rust; put the prose in markdown and run the gate outside the binary"
+
+# ---------------------------------------------------------------------------
+# THE LAYER-1 BENCHMARK REGISTRY: named frozen workloads.
+#
+# NOT a mirror of the subcommand set. Every command below takes a config-shaped
+# invocation - preset, window, seed set, probe mode - so the unit that can carry
+# a row across months is a NAMED WORKLOAD whose argv is stated in full here, not
+# a subcommand name. Nothing is defaulted and nothing is auto-detected.
+#
+# A NAME IS A PROMISE that its rows are comparable. A changed invocation, or a
+# changed clock, is a NEW NAME with a `successor` pointer on the old one - never
+# a quiet edit. That promise is what makes it safe to pair rows on the name
+# rather than on the expanded argv, which is what keeps an unrelated edit to
+# this file from severing a workload's history into two one-sided halves that
+# render as absence rather than as an error.
+#
+# DELIBERATELY NARROW: four workloads, all on the Stage A optimization round's
+# critical path. Grow one entry the day a command is actually being optimized.
+# Rows for a command nobody is watching are noise on the day its invocation
+# needs to change. The SERVING path is out of scope for this cut - sockets and
+# pacing are a different, environment-sensitive measurement class, and this
+# repository already carries one uncertified wall-clock benchmark there.
+#
+# Every counter named below is emitted by the shipped binary today, on both
+# channels, unconditionally - see `mogwai_lab::sidecar` and
+# `reference/performance.md`. Undeclared counters are captured and diffed
+# automatically, so only the ones a mismatch must be FATAL on are listed.
+[mogwai]
+package = "mogwai-cli"
+# The bin target name differs from the package name, and that is load-bearing
+# rather than incidental: the shipped launcher and every doc exec
+# `target/release/mogwai`.
+bin = "mogwai"
+
+[mogwai.workloads.screen-probe]
+description = "Stage A cost probe: one cell per arrival family, two seeds, cache bypassed"
+args = ["arrival-screen", "--cost-probe"]
+runs = 3
+expect_seconds = 40
+identity_counters = ["cells_evaluated", "parents", "prints"]
+timing = "external"
+timing_reason = "the probe's only setup is opening one committed JSON artifact; there is nothing worth excluding from the window"
+# 2026-08-09: the identity set is the Stage A free-lane rules made checkable.
+# The probe is four fixed cells at two fixed seeds and every sanctioned change
+# in that round is on the MEASUREMENT side of the draw, so a moved parent or
+# print count is a moved tape, not a faster screen, and the wall comparison is
+# void rather than interesting. `peak_rss_bytes` is deliberately NOT here: it is
+# a legitimate optimization target and moves for reasons that are not work-size
+# changes, so it belongs in the automatic diff.
+
+[mogwai.workloads.walk-month-mnq]
+description = "one month-long MNQ generator walk reduced to summary statistics"
+args = [
+    "gen",
+    "--type", "summary",
+    "--symbol", "MNQ",
+    "--start", "1782856800000000000",
+    "--length", "2674800s",
+    "--warmup", "3d",
+    "--seed", "1",
+]
+runs = 3
+expect_seconds = 30
+identity_counters = ["parents", "rows"]
+timing = "external"
+timing_reason = "a summary walk is setup-free; the process builds one source and walks"
+# 2026-08-09: the window, warmup and seed are the protocol-11 final-walk
+# constants (`FINAL_START_NS`, `FINAL_LENGTH`, `SUMMARY_WARMUP`), written as
+# literals rather than resolved from the code - a frozen workload whose extent
+# moves when a constant is edited is not frozen. If those constants change, this
+# becomes a new name. The walk is a pure function of (preset, window, warmup,
+# seed), so both counters are identity-bearing without qualification.
+# No `--out`: the summary goes to stdout, which every captured path swallows, so
+# the workload writes no file anywhere.
+
+[mogwai.workloads.screen-full]
+description = "the full Stage A grid: coarse pass plus two refinement rounds, all four families"
+args = ["arrival-screen"]
+runs = 1
+expect_seconds = 35600
+identity_counters = ["cells_evaluated", "parents", "prints"]
+timing = "external"
+timing_reason = "as screen-probe; the grid run's setup is the same single artifact open"
+# 2026-08-09: `runs = 1` and roughly TEN HOURS at the pre-optimization cost
+# model. Registered so the invocation is frozen and the row exists, not because
+# a baseline refresh here is something to run casually - and it is not
+# repeatable in place either, since it refuses a dirty tree and writes a
+# committed artifact. The probe is the workload to iterate on; this is the
+# confirmation.
+
+[mogwai.workloads.measure12a]
+description = "the protocol-12a measurement gate: live observed corpus pass plus eight attestation walks"
+args = [
+    "measure",
+    "--corpus", "{corpus}",
+    "--ledger", "analysis/databento-jobs.json",
+    "--preflight", "analysis/out/mnq-fit-preflight.json",
+]
+corpus = "mnq-tbbo-july"
+runs = 1
+expect_seconds = 400
+identity_counters = ["seeds", "sessions", "usable_sessions"]
+timing = "self_reported"
+timing_reason = "the run verifies a multi-gigabyte delivered corpus and loads the walk cache before any measured work; an external wall would fold that hash pass into every reading of the measurement engine. cost.total_s is the three measured phases and nothing else"
+# 2026-08-09, TWO rulings worth keeping apart.
+#
+# The counters: all three counts are contract-fixed (eight seeds, 23 sessions
+# apiece, the preflight's usable set), which is precisely why they are worth
+# recording. A wall that halves while `sessions` changes is not a speedup, and
+# without the counter that is plausible rather than visible.
+#
+# `--ledger` and `--preflight` are passed EXPLICITLY though both match the
+# CLI's defaults. They are not decoration: `measure` resolves the corpus against
+# the ledger and the committed preflight, so a change to either default would
+# silently move what a row was measured against while this file kept saying
+# "measure". Stating them in the argv is the registry's own nothing-defaulted
+# rule applied to the CLI's defaults, and it needs no pinning mechanism of its
+# own - a changed path is a changed argv, which is a new name.
+
+# The delivered corpus, per host. This records WHICH delivery a row was measured
+# against so a cross-month comparison can tell two corpora apart. It does NOT
+# replace the run's own verification: `measure` refuses a corpus whose SHA-256
+# hashes disagree with the ledger and the committed preflight artifact, and that
+# check is about the CONTENTS being the ones the method was fitted to. This
+# digest is about DRIFT - the file under this path not being the file it was
+# last time - which is a different question and is why the two hashes are
+# allowed to be different algorithms over different scopes.
+#
+# The digest is over the DIRECTORY - two `.csv.zst` archives beside
+# `manifest.json`, `metadata.json` and `condition.json` - because that is what
+# `measure --corpus` takes and therefore what the `{corpus}` token expands to.
+# It is deliberately not the manifest's digest: pinning a 4 KB descriptor while
+# the multi-gigabyte archives it describes go unpinned would read as a verified
+# corpus and verify nothing.
+#
+# XXH128, which is not the SHA-256 the delivery manifest carries. There is
+# nothing to transcribe from the manifest here; this value came from
+# `brokkr env` and is the only place it can come from.
+[bygg.corpus.mnq-tbbo-july]
+path = "research/market-data/databento/mnqv/2026-07.full.tbbo"
+xxh128 = "280ade40376bd49f50c579bb127f3fbd"
 
 [[quarantine]]
 category = "doctests"
