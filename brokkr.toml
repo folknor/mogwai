@@ -233,7 +233,8 @@ bin = "mogwai"
 description = "Stage A cost probe: one cell per arrival family, two seeds, cache bypassed"
 args = ["arrival-screen", "--cost-probe"]
 runs = 3
-expect_seconds = 40
+# Measured, not estimated: 31.4 s best of three at the baseline commit.
+expect_seconds = 32
 identity_counters = ["cells_evaluated", "parents", "prints"]
 timing = "external"
 timing_reason = "the probe's only setup is opening one committed JSON artifact; there is nothing worth excluding from the window"
@@ -257,7 +258,8 @@ args = [
     "--seed", "1",
 ]
 runs = 3
-expect_seconds = 30
+# Measured, not estimated: 40.4 s best of three at the baseline commit.
+expect_seconds = 40
 identity_counters = ["parents", "rows"]
 timing = "external"
 timing_reason = "a summary walk is setup-free; the process builds one source and walks"
