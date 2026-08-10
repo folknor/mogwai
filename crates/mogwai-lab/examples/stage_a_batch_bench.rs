@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use mogwai_lab::arrival_screen::{
-    Family, STAGE_A_BUDGET_S, ScheduledCell, ScreenContext, evaluate_cell_with_work,
-    evaluate_cells_parallel,
+    Family, STAGE_A_BUDGET_S, STAGE_A_SEEDS, ScheduledCell, ScreenContext,
+    evaluate_cell_with_work, evaluate_cells_parallel,
 };
 use mogwai_lab::ledger::sha256_file;
 use mogwai_lab::sampler::ResourceSampler;
@@ -229,7 +229,9 @@ fn run_panel(args: &Args, manifest: &BatchManifest) -> Result<Vec<CellRun>, Stri
         Mode::Full => manifest.full.clone(),
         Mode::Pilot | Mode::Manifest => unreachable!(),
     };
-    let jobs = args.jobs.min(panel.len());
+    let jobs = args
+        .jobs
+        .min(panel.iter().map(|cell| cell.seeds.len()).sum());
     let context = ScreenContext::open(&args.measure, None)
         .map_err(|error| error.to_string())?
         .measured();
@@ -274,6 +276,11 @@ fn synthetic_level_tasks(
     statistic: CostStatistic,
 ) -> Vec<f64> {
     let mut tasks = Vec::new();
+    let push_cell = |tasks: &mut Vec<f64>, run: &CellRun| {
+        let seed_count = run.panel.seeds.len();
+        let seed_cost = run.cost_s / seed_count as f64;
+        tasks.extend(std::iter::repeat_n(seed_cost, seed_count));
+    };
     for stratum in manifest
         .strata
         .iter()
@@ -284,7 +291,9 @@ fn synthetic_level_tasks(
             .filter(|run| run.panel.stratum == stratum.id && run.panel.kind == SampleKind::Anchor)
             .collect();
         anchors.sort_by(|left, right| left.panel.lattice.cmp(&right.panel.lattice));
-        tasks.extend(anchors.into_iter().map(|run| run.cost_s));
+        for run in anchors {
+            push_cell(&mut tasks, run);
+        }
 
         let mut samples: Vec<_> = results
             .iter()
@@ -293,17 +302,27 @@ fn synthetic_level_tasks(
             })
             .collect();
         samples.sort_by(|left, right| left.panel.lattice.cmp(&right.panel.lattice));
-        let sample_costs: Vec<_> = samples.iter().map(|run| run.cost_s).collect();
+        let seed_count = samples[0].panel.seeds.len();
+        let sample_costs: Vec<_> = samples
+            .iter()
+            .map(|run| run.cost_s / seed_count as f64)
+            .collect();
         let count = usize::try_from(stratum.probability_population_size)
             .expect("probability population fits usize");
         match statistic {
             CostStatistic::Mean => {
                 for index in 0..count {
-                    tasks.push(sample_costs[index % sample_costs.len()]);
+                    tasks.extend(std::iter::repeat_n(
+                        sample_costs[index % sample_costs.len()],
+                        seed_count,
+                    ));
                 }
             }
             CostStatistic::P90 => {
-                tasks.extend(std::iter::repeat_n(p90(&sample_costs), count));
+                tasks.extend(std::iter::repeat_n(
+                    p90(&sample_costs),
+                    count * seed_count,
+                ));
             }
         }
     }
@@ -366,14 +385,21 @@ fn estimate_statistic(
         .expect("refinement cap fits usize");
         let level_1 = synthetic_level_tasks(results, manifest, family, 1, statistic);
         let level_2 = synthetic_level_tasks(results, manifest, family, 2, statistic);
+        let refinement_seeds = STAGE_A_SEEDS.len();
+        let level_1_cells = level_1.len() / refinement_seeds;
+        let level_2_cells = level_2.len() / refinement_seeds;
         let mut worst_serial = 0.0f64;
         let mut worst_wall = 0.0f64;
         let mut worst_wall_work = 0.0f64;
-        let minimum_round_1 = cap.saturating_sub(level_2.len());
-        let maximum_round_1 = cap.min(level_1.len());
+        let minimum_round_1 = cap.saturating_sub(level_2_cells);
+        let maximum_round_1 = cap.min(level_1_cells);
         for round_1_count in minimum_round_1..=maximum_round_1 {
-            let round_1 = representative_tasks(&level_1, round_1_count);
-            let round_2 = representative_tasks(&level_2, cap - round_1_count);
+            let round_1 =
+                representative_tasks(&level_1, round_1_count * refinement_seeds);
+            let round_2 = representative_tasks(
+                &level_2,
+                (cap - round_1_count) * refinement_seeds,
+            );
             let work = round_1.iter().chain(&round_2).sum::<f64>();
             let wall = scheduled_wall(&round_1, jobs) + scheduled_wall(&round_2, jobs);
             worst_serial = worst_serial.max(work);
@@ -462,7 +488,7 @@ fn report_panel(
     sidecar::kv("arrival_kernel_version", manifest.arrival_kernel_version);
     sidecar::kv("instrument_set", instrument_set());
     sidecar::kv("panel_mode", mode);
-    sidecar::kv("jobs", args.jobs.min(results.len()));
+    sidecar::kv("jobs", args.jobs.min(seed_walks));
     sidecar::kv("cells", results.len());
     sidecar::kv("seed_walks", seed_walks);
     sidecar::report("parents", i64::try_from(parents).expect("parents fit"));
@@ -514,7 +540,7 @@ fn report_panel(
     }
 
     if args.mode == Mode::Full {
-        let jobs = args.jobs.min(results.len());
+        let jobs = args.jobs.min(seed_walks);
         let estimate = estimate(results, manifest, jobs);
         sidecar::kv(
             "maximum_cap_mean_serial_cpu_s",
