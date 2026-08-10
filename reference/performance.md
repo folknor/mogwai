@@ -218,12 +218,13 @@ and the arithmetic was consistent with the draw allocating ~30 bytes per parent.
 `931336d5` refutes it outright at 3.8 KB. The generator's walk allocates
 nothing; do not re-open that line.
 
-## Stage A batch instrument and Step 1, 2026-08-10
+## Stage A batch instrument and Steps 1-2, 2026-08-10
 
 Host `bygg`, release without profiling features, one worker. The committed
 panel hash is
 `81b5325fc18758c77b033b68ffe086a0f807b7d9b3d81321cb751d2609ae932d`.
-Each row is the best of three runs.
+The stored Step 0 and Step 1 rows and the Step 2 quick reading are the best
+of three runs. The Step 2 full reading is one verification run.
 
 | state | tier | uuid | wall | task CPU | maximum-cap p90 serial CPU |
 |---|---|---|---:|---:|---:|
@@ -231,6 +232,8 @@ Each row is the best of three runs.
 | Step 1 | quick | `a0921513` | 85.101 s | 83.740 s | - |
 | Step 0 | full | `66d4797d` | 790.200 s | 787.144 s | 27,448.707 s |
 | Step 1 | full | `5c012131` | 780.201 s | 777.564 s | 27,121.840 s |
+| Step 2 | quick | not stored | 70.100 s | 68.919 s | - |
+| Step 2 | full | not stored | 620.200 s | 617.991 s | 21,218.767 s |
 
 The full-panel wall improves 1.27%, task CPU 1.22%, and the maximum-cap p90
 estimate 1.19%, or 326.9 seconds. Work is identical across the full rows:
@@ -252,6 +255,37 @@ The full rows report 10 comparable strata, 44 singleton strata and
 `design_based_interval_available=0`. They are a paired optimization
 measurement, not a design-based confidence interval for the unsampled Stage A
 population.
+
+Step 2, commit `ddd5284`, replaces the Stage A use of the generic
+`SessionAcc` with dense populated-minute, parent-minute and segment-second
+state. A complete differential fixture pins its reduced JSON against the
+generic accumulator, and the eight-seed layer-1 oracle remains exact. Its
+batch readings above are pre-commit dirty-tree verification runs, so
+brokkr correctly stored no `results.db` row. The values are retained here
+without a fabricated UUID.
+
+Against Step 1, the full-panel wall improves 20.51%, task CPU 20.52%, and
+the maximum-cap p90 estimate 21.77%, or 5,903.1 seconds. Cumulatively from
+Step 0, task CPU improves 21.49% and the maximum-cap p90 estimate 22.70%.
+All batch work counters remain exactly 72 cells, 242 seed walks,
+7,571,686,367 parents and 8,868,542,328 prints.
+
+The committed focused rows are:
+
+| state | uuid | mode | `project_stream` | accumulator-path allocation |
+|---|---|---|---:|---:|
+| Step 0 | `3f82ed37` | hotpath | 14.61 s | - |
+| Step 0 | `3161fd34` | alloc | 14.66 s wall | about 7.1 GB |
+| Step 2 | `c9927a73` | hotpath | 11.65 s | - |
+| Step 2 | `0d874ef3` | alloc | 11.74 s | 3.4 GB |
+
+The allocation comparison combines Step 0's 5.9 GB `project_stream` and
+1.2 GB `close_reduced` frames because Step 2 folds closure into the new
+screen-specific frame. The roughly 52% reduction removes the retained
+parent timestamps and tree nodes needed before wide parallelism. One full
+Step 2 run reported 486,887,424 peak RSS bytes against Step 1's
+610,578,432; treat that as directional sizing evidence rather than a
+repeated memory bound.
 
 ## What each id measures
 

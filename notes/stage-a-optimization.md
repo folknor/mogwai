@@ -335,9 +335,11 @@ Each step gets its own cost-probe and allocation reading, so every
 semantic change is separately falsifiable, followed by a separately
 attributable scheduler result.
 
-STATUS 2026-08-10: steps 0 and 1 are complete. Step 0 rows are
+STATUS 2026-08-10: steps 0, 1 and 2 are complete. Step 0 rows are
 `fbd03346` quick and `66d4797d` full. Step 1 rows are `a0921513` quick
-and `5c012131` full. Step 2 is next.
+and `5c012131` full. Step 2 is implemented in `ddd5284`; its decisive
+pre-commit quick and full verification runs were deliberately not stored
+in `results.db`. Step 3 is next.
 
 ### Step 0 - freeze the instrument before any optimization
 
@@ -801,6 +803,31 @@ This is the step that establishes whether 32 workers fit beneath the RSS
 ceiling. Replacing only the two maps may not be enough: `parent_ts` must
 also leave the retained path before wide parallelism is safe.
 
+#### Step 2 measured result
+
+Implemented in `ddd5284`. `ScreenSessionAcc` keeps dense populated-minute
+and parent-count slots plus dense per-segment second counts. It emits the
+same reduced session JSON while removing `trade_min`, `n_min` and
+`parent_ts` from the Stage A path. A direct differential fixture compares
+its complete block-1 and block-2 output against `SessionAcc` exactly. The
+complete check, eight-seed layer-1 oracle and both draw-identity gates pass.
+
+The three-run quick verification moved from the step-1 best of 85.101 s
+to 70.100 s, with task CPU moving from 83.740 s to 68.919 s. The one-run
+full verification moved from the step-1 best of 780.201 s to 620.200 s,
+20.51%, while task CPU moved from 777.564 s to 617.991 s, 20.52%. The
+maximum-cap p90 estimate moved from 27,121.840 s to 21,218.767 s, a
+5,903.1 s or 1 h 38 min reduction. All work counters are exact.
+
+Those batch readings were intentionally dirty-tree verification runs and
+have no `results.db` UUID. Do not invent one. The committed focused rows
+are `c9927a73` hotpath and `0d874ef3` allocation: `project_stream` moved
+from the step-0 14.61 s to 11.65 s, and exclusive accumulator-path
+allocation moved from roughly 7.1 GB across `project_stream` plus
+`close_reduced` to 3.4 GB in the replacement path. The one-run full peak
+RSS reading moved from 610,578,432 bytes at step 1 to 486,887,424 bytes;
+it is directional evidence for scheduler sizing, not a repeated bound.
+
 ### Step 3 - the scheduler
 
 The full run is roughly 9,000 independent month-scale seed walks. The
@@ -909,15 +936,14 @@ resets from the precomputed schedule.
 The whole of steps 1 to 4 alters no random draw and no parent timestamp.
 It stays entirely in the free lane.
 
-### The combined expectation, revised after step 1
+### The combined expectation, revised after step 2
 
-The entering 2x to 3x single-core estimate bundled the child collapse,
-tree removal and retained-state removal together. Step 1 contributed
-only 1.22% task CPU, so the 20x to 40x combined estimate and its 9 to 18
-minute result are superseded. Step 2 must establish the remaining
-single-core opportunity before a combined number is quoted again. The
-10x to 20x parallelism estimate also remains only a hypothesis until the
-step-3 scheduler is measured on the real task shape.
+Steps 1 and 2 together move full-panel task CPU from 787.144 s to
+617.991 s, 21.49%, and the maximum-cap p90 estimate from 27,448.707 s to
+21,218.767 s, 22.70%. That is the measured single-core result; the
+entering 2x to 3x estimate is retired. The 10x to 20x parallelism
+estimate remains only a hypothesis until the step-3 scheduler is measured
+on the real task shape, so no combined end-to-end number is quoted yet.
 
 ### Boundary risks to carry through all four steps
 
@@ -942,7 +968,7 @@ two DISTINCT instruments. Step 0 supplied the second.
   committed `stage_a_batch` target now supplies it.
 
 The permanent `stage_a_batch` target measures 790.2 s at the step-0
-baseline and 780.2 s after step 1 on one worker.
+baseline, 780.2 s after step 1 and 620.2 s after step 2 on one worker.
 
 ### The workload
 
