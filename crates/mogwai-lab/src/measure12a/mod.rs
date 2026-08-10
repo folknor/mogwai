@@ -53,6 +53,9 @@ use crate::subcontract::{
 pub mod forensic;
 pub mod generated;
 pub mod observed;
+mod screen;
+
+pub use screen::ScreenSessionAcc;
 
 /// Derived beside the sub-contract in `analysis/mnq_fit.py` (they sit after
 /// the `SUBCONTRACT_KEYS` block, so they are not hash inputs).

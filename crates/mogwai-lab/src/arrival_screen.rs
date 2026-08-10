@@ -35,7 +35,7 @@ use crate::arrival_control::{
 };
 use crate::error::{LabError, LabResult};
 use crate::fit::walk::parse_duration;
-use crate::measure12a::{Scope, SessionAcc};
+use crate::measure12a::ScreenSessionAcc;
 use crate::sampler::ResourceSampler;
 use crate::session::{format_trade_date, session_segment_at};
 use crate::storage::{CacheStore, ProvenanceInputs, ProvenanceToken, cache_root};
@@ -1012,10 +1012,10 @@ fn project_stream(
     start: u64,
     end: u64,
     offset: i32,
-    seed: u64,
+    _seed: u64,
 ) -> Result<Projected, ProjectStop> {
     let mut sessions = Vec::new();
-    let mut acc: Option<SessionAcc> = None;
+    let mut acc: Option<ScreenSessionAcc> = None;
     let mut open_parent: Option<(u64, u8, u64)> = None;
     let mut first = None;
     let mut last = None;
@@ -1029,7 +1029,7 @@ fn project_stream(
     // measured window is dropped, a parent with no open session is skipped
     // exactly as the shipped accumulator skips it, and a parent whose segment
     // disagrees with the open session trips the rotation invariant.
-    let close_parent = |acc: &mut Option<SessionAcc>,
+    let close_parent = |acc: &mut Option<ScreenSessionAcc>,
                         open: &mut Option<(u64, u8, u64)>|
      -> Result<(), ProjectStop> {
         if let Some((ts, index, session_start)) = open.take()
@@ -1044,7 +1044,7 @@ fn project_stream(
                      is broken",
                 ));
             }
-            target.push_parent(index, ts, 0, 0, false)?;
+            target.push_parent(index, ts)?;
         }
         Ok(())
     };
@@ -1078,16 +1078,16 @@ fn project_stream(
             {
                 close_parent(&mut acc, &mut open_parent)?;
                 if let Some(old) = acc.take() {
-                    sessions.push(old.close_reduced(Scope::Generated { seed })?);
+                    sessions.push(old.close()?);
                 }
-                acc = Some(SessionAcc::new(
+                acc = Some(ScreenSessionAcc::new(
                     format_trade_date(seg.trade_day),
                     &seg,
                     offset,
                 ));
             }
             if let Some(active) = acc.as_mut() {
-                active.push_print(ts, 0);
+                active.push_print(ts);
                 prints += child_count_in_minute;
             }
             // THE PARENT OPENS ON ITS FIRST CHILD, not after its last.
@@ -1120,7 +1120,7 @@ fn project_stream(
     }
     close_parent(&mut acc, &mut open_parent)?;
     if let Some(old) = acc.take() {
-        sessions.push(old.close_reduced(Scope::Generated { seed })?);
+        sessions.push(old.close()?);
     }
     let realized_mean_gap_s = first
         .zip(last)

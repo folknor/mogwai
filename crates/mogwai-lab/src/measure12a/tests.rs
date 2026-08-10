@@ -689,3 +689,47 @@ fn close_reduced_agrees_with_close_on_block1_and_block2() {
     assert!(reduced.get("block3").is_none(), "block 3 is not computed");
     assert!(reduced.get("block4").is_none(), "block 4 is not computed");
 }
+
+#[test]
+fn screen_accumulator_matches_the_generic_reduced_surface_exactly() {
+    let seg = SessionSegment {
+        session_start_ns: OPEN_NS,
+        session_end_ns: CLOSE_NS,
+        segment_origin_ns: OPEN_NS,
+        segment_end_ns: CLOSE_NS,
+        trade_day: 0,
+        segment: "overnight",
+    };
+    let date = "2026-07-07".to_string();
+    let mut generic = SessionAcc::new(date.clone(), &seg, OFFSET);
+    let mut screen = ScreenSessionAcc::new(date, &seg, OFFSET);
+    let parents = [
+        H23_NS + 100_000_000,
+        H23_NS + 800_000_000,
+        H23_NS + 2_100_000_000,
+        H23_NS + 61_000_000_000,
+        CLOSE_NS - 20 * NS_PER_MIN + 500_000_000,
+        CLOSE_NS - 19 * NS_PER_MIN + 500_000_000,
+    ];
+    for ts in parents {
+        let resolved = session_segment_at(ts, OFFSET).expect("a parent inside a segment");
+        let index = u8::from(resolved.segment_origin_ns != resolved.session_start_ns);
+        generic
+            .push_parent(index, ts, 0, 0, false)
+            .expect("generic parent");
+        screen
+            .push_parent(index, ts)
+            .expect("screen parent");
+        generic.push_print(ts, 0);
+        screen.push_print(ts);
+    }
+    for ts in [H23_NS + 3 * NS_PER_MIN, CLOSE_NS - 18 * NS_PER_MIN] {
+        generic.push_print(ts, 0);
+        screen.push_print(ts);
+    }
+    let generic = generic
+        .close_reduced(Scope::Generated { seed: 1 })
+        .expect("generic close");
+    let screen = screen.close().expect("screen close");
+    assert_eq!(screen, generic);
+}
