@@ -335,14 +335,14 @@ Each step gets its own cost-probe and allocation reading, so every
 semantic change is separately falsifiable, followed by a separately
 attributable scheduler result.
 
-STATUS 2026-08-10: steps 0, 1, 2 and 3 are complete. Step 0 rows are
+STATUS 2026-08-10: steps 0 through 4 are complete. Step 0 rows are
 `fbd03346` quick and `66d4797d` full. Step 1 rows are `a0921513` quick
 and `5c012131` full. Step 2 is implemented in `ddd5284`; its decisive
 pre-commit quick and full verification runs were deliberately not stored
 in `results.db`. Step 3 is implemented in `8564bc6`, with the seed-task
 estimator correction in `c87fe2f` and the measured default-worker cap in
-`211d096`. Its final full row is `0b861338`. Step 4 is next, but is no
-longer performance-critical.
+`211d096`. Its final full row is `0b861338`. Step 4 is implemented in
+`924c000`; its focused allocation row is `29c19b0e`.
 
 ### Step 0 - freeze the instrument before any optimization
 
@@ -902,70 +902,35 @@ prints.
 
 ### Step 4 - replace the JSON verdict seam with typed values
 
-A projected seed currently becomes `Vec<serde_json::Value>`, and
-`verdict_from_walks` then clones the whole session vector into a new
-`ObsContext`, flattens and clones block-1 rows, reconstructs parent-count
-marginals, pools session histograms, reads block-2 fields repeatedly
-through string keys, and builds further JSON for the A1-A4 output. Not
-the dominant runtime, but a structural ownership problem and a large
-share of the allocation volume.
+Implemented in `924c000`. A projected seed now carries `ScreenReduced`,
+the exact sufficient statistics Stage A reads: per-hour parent-count
+histograms and per-hour/window scheduled counts, zero counts and count
+histograms. `ScreenSessionAcc` closes directly into that type and merges
+sessions without constructing generic session JSON. The observed artifact
+is parsed into the same representation once when `ScreenContext` opens.
+Production verdict evaluation no longer constructs an `ObsContext`, and
+the cache stores the typed projection rather than `Vec<Value>`.
 
-The projector returns exactly what the verdict needs, and the gates are
-implemented directly over typed values: A1 from the exact and six-bin
-minute histograms, A2 from parent totals and scheduled 60 s windows, A3
-from zero and scheduled 1 s windows, A4 from the refusal and mean-gap
-fields, the loss from the exact per-hour count histogram, and the
-reported Fano, p99, TV and lag statistics from the window statistics.
-Precompute the OBSERVED side into the same typed representation when the
-context opens, so both sides share typed gate functions without sharing
-`ObsContext`. Cache the typed seed projection rather than generic session
-JSON.
+The implementation deliberately stopped short of the larger
+`ProjectionPlan` sketch. Step 2 had already removed retained timestamps
+and tree-shaped hot state; a second scheduling rewrite had no measured
+justification. `ScreenReduced` is therefore a compact close-time boundary
+over the existing dense accumulator, not another projector.
 
-The risk is duplicating gate semantics that currently flow through
-generic aggregate functions; close it with differential tests against the
-existing functions before deleting the old route, then remove the
-compatibility path rather than maintaining two production
-implementations. By this point the step is cleanup and allocation
-reduction, judged on smaller cache entries, less serialization, simpler
-ownership and `ObsContext` leaving Stage A. If it shows no meaningful
-runtime benefit it need not block the screen.
+The old JSON and `ObsContext` route remains compiled only under
+`cfg(test)` as a differential oracle. Exact verdict JSON matches it for a
+passing walk and deliberate A1, A2/A3 and A4 failures. Direct typed close
+matches the generic reduced session JSON exactly, including a two-session
+rotation, and the eight-seed layer-1 oracle reproduces the committed 12a
+generated blocks in both normal and instrumented builds. `brokkr check`
+passes 727 normal and 385 instrumented tests.
 
-The proposed typed shapes, recorded as sketches rather than contract:
-
-    struct ProjectionPlan {
-        segments: Vec<PlannedSegment>,
-        // Precomputed session, hour, minute and window boundary metadata.
-    }
-
-    struct SeedProjection {
-        minute_count_hist: [ExactCountHist; 24],
-        windows: [[WindowStats; 3]; 24],
-        parents: u64,
-        prints: u64,
-        realized_mean_gap_s: f64,
-        refusal: Option<ScreenRefusal>,
-    }
-
-    struct WindowStats {
-        scheduled: u64,
-        zeros: u64,
-        count_hist: ExactCountHist,
-        run_hist: ExactCountHist,
-        paired: u64,
-        sum_x: u64,
-        sum_y: u64,
-        sumsq_x: u64,
-        sumsq_y: u64,
-        sum_xy: u64,
-    }
-
-The projector precomputes the exposure and segment schedule once for the
-fixed Stage A window, maintains a monotonic cursor through it, counts a
-parent directly into its current minute and its current 1 s, 5 s and 60 s
-windows, closes windows online as timestamps advance, emits scheduled
-zero windows without storing parent timestamps, updates exact
-minute-count histograms as minutes close, and handles hour and segment
-resets from the precomputed schedule.
+The single focused allocation comparison is `0d874ef3` against
+`29c19b0e`, with identical 126,143,060-parent and 147,738,385-print work.
+Exclusive `project_stream` allocation moves from 3.4 GB to 3.0 GB, down
+11.8%. Instrumented `project_stream` time moves from 11.74 s to 11.41 s,
+down 2.8%; one reading is not used as a broader runtime claim. This is the
+expected cleanup-scale result, and no further batch run is owed.
 
 The whole of steps 1 to 4 alters no random draw and no parent timestamp.
 It stays entirely in the free lane.

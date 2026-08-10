@@ -218,10 +218,11 @@ and the arithmetic was consistent with the draw allocating ~30 bytes per parent.
 `931336d5` refutes it outright at 3.8 KB. The generator's walk allocates
 nothing; do not re-open that line.
 
-## Stage A batch instrument and Steps 1-3, 2026-08-10
+## Stage A batch instrument and Steps 1-4, 2026-08-10
 
-Host `bygg`, release without profiling features, one worker. The committed
-panel hash is
+Host `bygg`. Batch rows through Step 2 use release without profiling features
+and one worker; Step 3 records its worker count explicitly, and the focused
+rows name their instrumentation mode. The committed panel hash is
 `81b5325fc18758c77b033b68ffe086a0f807b7d9b3d81321cb751d2609ae932d`.
 The stored Step 0 and Step 1 rows and the Step 2 quick reading are the best
 of three runs. The Step 2 full reading is one verification run.
@@ -278,6 +279,7 @@ The committed focused rows are:
 | Step 0 | `3161fd34` | alloc | 14.66 s wall | about 7.1 GB |
 | Step 2 | `c9927a73` | hotpath | 11.65 s | - |
 | Step 2 | `0d874ef3` | alloc | 11.74 s | 3.4 GB |
+| Step 4 | `29c19b0e` | alloc | 11.41 s | 3.0 GB |
 
 The allocation comparison combines Step 0's 5.9 GB `project_stream` and
 1.2 GB `close_reduced` frames because Step 2 folds closure into the new
@@ -336,6 +338,16 @@ maximum-cap p90 estimate improves 18.73x. Serial, one-worker and four-worker
 real-projection verdicts are exactly equal after excluding timing fields; the
 month-scale eight-seed layer-1 oracle also passes in both normal and
 instrumented builds.
+
+Step 4, commit `924c000`, removes generic session JSON and `ObsContext` from
+the production verdict path. Generated and observed inputs meet at the same
+typed sufficient-statistics boundary, and cached seed walks store that compact
+projection. Against the Step 2 allocation row, exclusive `project_stream`
+allocation falls 11.8% with identical 126,143,060-parent and
+147,738,385-print work. Its instrumented time falls 2.8%; this single focused
+reading supports the structural result but is not a general wall-time claim.
+The legacy JSON path remains test-only as an exact differential oracle, and
+the committed eight-seed layer-1 output oracle remains exact.
 
 ## What each id measures
 
