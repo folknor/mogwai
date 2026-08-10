@@ -335,11 +335,14 @@ Each step gets its own cost-probe and allocation reading, so every
 semantic change is separately falsifiable, followed by a separately
 attributable scheduler result.
 
-STATUS 2026-08-10: steps 0, 1 and 2 are complete. Step 0 rows are
+STATUS 2026-08-10: steps 0, 1, 2 and 3 are complete. Step 0 rows are
 `fbd03346` quick and `66d4797d` full. Step 1 rows are `a0921513` quick
 and `5c012131` full. Step 2 is implemented in `ddd5284`; its decisive
 pre-commit quick and full verification runs were deliberately not stored
-in `results.db`. Step 3 is next.
+in `results.db`. Step 3 is implemented in `8564bc6`, with the seed-task
+estimator correction in `c87fe2f` and the measured default-worker cap in
+`211d096`. Its final full row is `0b861338`. Step 4 is next, but is no
+longer performance-critical.
 
 ### Step 0 - freeze the instrument before any optimization
 
@@ -836,35 +839,66 @@ its verdict is reduced, and a family's previous refinement round must
 finish before the next proposal is generated. Nothing requires cells
 within a pass to be serial.
 
-The task unit is `(cell, seed)`, not a whole family and preferably not a
-whole cell. A coordinator generates coarse seed tasks for all families,
-places results in deterministic slots keyed by family, lattice coordinate
-and seed, reduces a cell as soon as its seeds complete, generates each
-family's next refinement round when that family's dependency is
-satisfied, keeps scheduling other families while one is between rounds,
-and sorts into canonical artifact order at the end.
+The landed task unit is `(cell, seed)`, not a whole family or whole cell.
+The coordinator generates coarse tasks for all families, places results
+in deterministic cell and seed slots, reduces each cell as its seeds
+complete, and schedules every family's candidates together within each
+refinement round. The implementation retains one global barrier between
+coarse, refinement round 1 and refinement round 2. That is more
+conservative than the sketched per-family dependency scheduler, but the
+measured 14x full-panel result leaves no performance reason to add its
+coordination complexity now.
 
-Workers should receive an `Arc` of the immutable plan, the immutable
-profile and binding data, one cell, one seed and a cloneable cache
-handle - NOT the current `ScreenContext` forced through a mutex, whose
-`ObsContext` uses `Rc<RefCell<...>>` for lazy generic metric access.
-Verdict reduction happens on typed values outside the workers. Expose an
-explicit `--jobs` defaulting to `available_parallelism()`: an operational
-control, not hidden scaffolding.
+Workers receive a cloneable immutable `ProjectionContext` carrying the
+profile, binding and cache handle, not `ScreenContext`; the latter keeps
+its `Rc<RefCell<...>>`-backed `ObsContext` on the coordinator. Verdict
+reduction, budget sampling and cancellation remain central. Per-cell
+`cost_s` is worker execution plus verdict reduction and excludes queue
+wait. The artifact is assembled in canonical family/lattice order rather
+than completion order.
 
-Risks: artifact ordering must stay deterministic; concurrent cache writes
-must be atomic and collision-safe; `CacheStore::write` currently calls
-`clean_stale` on EVERY entry (`crates/mogwai-lab/src/storage.rs`) and
-that must be hoisted to once before workers start; budget monitoring
-needs a central cancellation flag so workers stop claiming tasks after a
-ceiling is crossed; per-cell `cost_s` must measure worker execution and
-not queue wait; the worker count stays bounded to respect peak RSS; and a
-few expensive `EventMarkov` tasks could become tail latency, which
-seed-level scheduling plus longest-estimated-first ordering handles
-better than family-level threads.
+Cache pruning is hoisted to one preparation before any worker starts.
+Each prepared write uses a process-and-sequence-unique staging file and
+an atomic rename, so concurrent writers cannot expose partial JSON.
+Budget crossing flips a central cancellation flag; workers already in a
+walk may finish and report, but no new task begins after observing it.
+
+`--jobs` is explicit. It initially defaulted to
+`available_parallelism()`, but the measured curve found a knee at 16 on
+the 16-core/32-thread host: 24 workers regressed wall and increased summed
+task time. The shipped default is therefore reported parallelism capped
+at 16, with the flag retaining full override control.
 
 Do NOT parallelize inside one stochastic walk. The arrival state is
 recursive. Cells and seeds are the clean concurrency boundary.
+
+The one-run quick scaling rows, all at exact 8 cells, 24 seed walks,
+752,083,142 parents and 880,798,950 prints, are:
+
+| jobs | uuid | external wall | measured wall | summed task time | peak RSS |
+|---:|---|---:|---:|---:|---:|
+| 1 | `de39aad9` | 69.200 s | 68.706 s | 69.077 s | 699,817,984 B |
+| 2 | `edcf03a2` | 36.100 s | 35.220 s | 70.137 s | 696,905,728 B |
+| 4 | `b3f89ff9` | 20.107 s | 19.082 s | 71.527 s | 819,929,088 B |
+| 6 | `6b2a99d3` | 14.100 s | 13.087 s | 72.250 s | 844,824,576 B |
+| 8 | `b5a1e13b` | 11.108 s | 10.225 s | 72.859 s | 1,033,072,640 B |
+| 12 | `b43f10a2` | 8.100 s | 7.795 s | 73.350 s | 1,068,077,056 B |
+| 16 | `4c87556a` | 6.100 s | 5.868 s | 74.027 s | 1,303,625,728 B |
+| 24 | `f3d9809c` | 7.100 s | 6.257 s | 87.691 s | 1,219,899,392 B |
+
+`4a6d17ed` is excluded: an initial harness cap converted its requested 12
+workers to 8 because it counted cells rather than seed tasks. The row's
+captured `jobs=8` exposes the mistake; `b43f10a2` is the corrected 12-worker
+point.
+
+The full row `0b861338`, one run at 16 workers, measures 44.200 seconds
+external wall, 43.040 seconds internal wall, 676.239 seconds summed task
+time, 15.712 effective concurrency and 1,765,822,464 bytes peak RSS. The
+maximum-cap p90 scheduled-wall estimate is 1,465.749 seconds, or 24
+minutes 26 seconds. Against Step 2 this is 14.03x faster externally and
+14.48x lower on the maximum-cap p90 estimate. The full work remains exact
+at 72 cells, 242 seed walks, 7,571,686,367 parents and 8,868,542,328
+prints.
 
 ### Step 4 - replace the JSON verdict seam with typed values
 
@@ -936,14 +970,15 @@ resets from the precomputed schedule.
 The whole of steps 1 to 4 alters no random draw and no parent timestamp.
 It stays entirely in the free lane.
 
-### The combined expectation, revised after step 2
+### The combined result after step 3
 
-Steps 1 and 2 together move full-panel task CPU from 787.144 s to
-617.991 s, 21.49%, and the maximum-cap p90 estimate from 27,448.707 s to
-21,218.767 s, 22.70%. That is the measured single-core result; the
-entering 2x to 3x estimate is retired. The 10x to 20x parallelism
-estimate remains only a hypothesis until the step-3 scheduler is measured
-on the real task shape, so no combined end-to-end number is quoted yet.
+Steps 1 and 2 moved full-panel single-core task time from 787.144 seconds
+to 617.991 seconds, 21.49%. Step 3 then moves external full-panel wall
+from 620.200 seconds to 44.200 seconds, 14.03x, while summed task time
+rises 9.43% under contention. From Step 0 to Step 3, external wall improves
+17.88x and the maximum-cap p90 estimate improves 18.73x, from 27,448.707
+seconds to 1,465.749 seconds. The entering 10x to 20x scheduler hypothesis
+is confirmed on the real task shape.
 
 ### Boundary risks to carry through all four steps
 
@@ -968,7 +1003,8 @@ two DISTINCT instruments. Step 0 supplied the second.
   committed `stage_a_batch` target now supplies it.
 
 The permanent `stage_a_batch` target measures 790.2 s at the step-0
-baseline, 780.2 s after step 1 and 620.2 s after step 2 on one worker.
+baseline, 780.2 s after step 1 and 620.2 s after step 2 on one worker. The
+landed step-3 scheduler measures 44.2 s on the full panel at 16 workers.
 
 ### The workload
 
@@ -1016,8 +1052,9 @@ sampled MEAN or sampled P90. The concrete readings are therefore
 
 ### Parallel scaling, measured separately
 
-The target takes a normal `--jobs`, defaulting to available parallelism.
-No environment variables. It reports both the sum of individual task
+The target takes a normal `--jobs`; the shipped command defaults to
+available parallelism capped at 16 after the measured SMT knee. No
+environment variables. It reports both the sum of individual task
 execution times and the overall batch wall time, hence:
 
     effective_concurrency = task_cpu_seconds / batch_wall_seconds
@@ -1032,8 +1069,9 @@ barriers, and populate both refinement rounds while spending each
 family's cap ONCE across the two rounds. It evaluates every feasible
 per-family round split and retains the greatest modeled wall. The current
 budget-facing replay preserves the driver's family serialization, making
-it conservative relative to the later cross-family scheduler, and reports
-tail utilization.
+it conservative relative to the landed cross-family pass scheduler, and
+reports tail utilization. Step 3 changes its replay unit from whole cells
+to seed walks, matching the production scheduler boundary.
 
 ### Required output
 
@@ -1051,8 +1089,8 @@ accidentally does less work must be visibly invalid.
 
 - `screen_projection --hotpath` - locate hot functions, about 15 s.
 - `screen_projection --alloc` - locate allocation volume, about 15 s.
-- `stage_a_batch --jobs 1` - real per-core throughput, 12 to 18 minutes
-  initially.
+- `stage_a_batch --jobs 1` - real per-core throughput, about 69 seconds
+  after step 2.
 - `stage_a_batch --jobs N` - scheduler scaling and full-run wall-time
   projection.
 - `arrival-screen --cost-probe` - the final contract and budget sanity
@@ -1200,7 +1238,7 @@ workload; the `full` tier stays the uninstrumented number of record.
   probe.
 - the correctness tests - entirely separate.
 
-One job each, so the 72-cell sample cannot slowly become an accidental
+One role each, so the 72-cell sample cannot slowly become an accidental
 substitute for either correctness or the budget contract.
 
 ## Medium-value local changes
@@ -1229,8 +1267,8 @@ the structural work is benchmarked.
 6. Move invariant setup out of each seed: warmup parsing, profile scalar
    cloning, size-grid construction, offset resolution and configuration
    validation are per-cell or per-context work.
-7. Clean stale caches once per run rather than per cache write. Needed by
-   step 3 regardless.
+7. Clean stale caches once per run rather than per cache write. Completed
+   in step 3.
 8. Use a compact typed cache encoding. Matters for cold-cache write
    volume and warm-cache startup, but only after the JSON session payload
    is gone.

@@ -218,7 +218,7 @@ and the arithmetic was consistent with the draw allocating ~30 bytes per parent.
 `931336d5` refutes it outright at 3.8 KB. The generator's walk allocates
 nothing; do not re-open that line.
 
-## Stage A batch instrument and Steps 1-2, 2026-08-10
+## Stage A batch instrument and Steps 1-3, 2026-08-10
 
 Host `bygg`, release without profiling features, one worker. The committed
 panel hash is
@@ -286,6 +286,56 @@ parent timestamps and tree nodes needed before wide parallelism. One full
 Step 2 run reported 486,887,424 peak RSS bytes against Step 1's
 610,578,432; treat that as directional sizing evidence rather than a
 repeated memory bound.
+
+Step 3 lands the production `(cell, seed)` scheduler in commits `8564bc6`,
+`c87fe2f` and `211d096`. Workers receive a cloneable immutable projection
+context; the non-`Send` observed context, verdict reduction, budget checks and
+deterministic result slots remain on the coordinator. Cache pruning runs once
+before the worker pool, and prepared entries publish through unique staging
+files and atomic renames. The batch harness calls the same scheduler as the
+shipped `arrival-screen` command.
+
+The quick panel's one-run scaling curve is below. Every row retains exactly 8
+cells, 24 seed walks, 752,083,142 parents and 880,798,950 prints.
+
+| jobs | uuid | external wall | measured wall | summed task time | effective concurrency | peak RSS |
+|---:|---|---:|---:|---:|---:|---:|
+| 1 | `de39aad9` | 69.200 s | 68.706 s | 69.077 s | 1.005 | 699,817,984 B |
+| 2 | `edcf03a2` | 36.100 s | 35.220 s | 70.137 s | 1.991 | 696,905,728 B |
+| 4 | `b3f89ff9` | 20.107 s | 19.082 s | 71.527 s | 3.748 | 819,929,088 B |
+| 6 | `6b2a99d3` | 14.100 s | 13.087 s | 72.250 s | 5.521 | 844,824,576 B |
+| 8 | `b5a1e13b` | 11.108 s | 10.225 s | 72.859 s | 7.126 | 1,033,072,640 B |
+| 12 | `b43f10a2` | 8.100 s | 7.795 s | 73.350 s | 9.409 | 1,068,077,056 B |
+| 16 | `4c87556a` | 6.100 s | 5.868 s | 74.027 s | 12.615 | 1,303,625,728 B |
+| 24 | `f3d9809c` | 7.100 s | 6.257 s | 87.691 s | 14.014 | 1,219,899,392 B |
+
+The knee on this 16-core, 32-thread Ryzen 9 9950X3D2 is 16 workers. Moving to
+24 makes external wall 16.4% worse and summed task time 18.5% higher. The
+shipped default is therefore machine parallelism capped at 16, with explicit
+`--jobs` left as the host-specific override. Row `4a6d17ed` is deliberately
+excluded: the first harness revision incorrectly capped its requested 12
+workers at the quick panel's 8 cells instead of its 24 seed walks, and its own
+captured `jobs=8` metadata exposes the mistake.
+
+The final full-panel row is `0b861338`, one run at 16 workers:
+
+| wall | measured wall | summed task time | effective concurrency | maximum-cap p90 scheduled wall | peak RSS |
+|---:|---:|---:|---:|---:|---:|
+| 44.200 s | 43.040 s | 676.239 s | 15.712 | 1,465.749 s | 1,765,822,464 B |
+
+Against Step 2, full external wall improves 14.03x and measured wall 14.40x.
+The maximum-cap p90 estimate moves from 21,218.767 seconds to 1,465.749
+seconds, or 24 minutes 26 seconds, a 14.48x reduction. Summed task time rises
+9.43% under contention, which is why wall scaling is measured rather than
+inferred by dividing the one-worker row by a hardware-thread count. Exact full
+work remains 72 cells, 242 seed walks, 7,571,686,367 parents and 8,868,542,328
+prints. Peak RSS remains far below the 8 GiB ceiling.
+
+Cumulatively from Step 0, full external wall improves 17.88x and the
+maximum-cap p90 estimate improves 18.73x. Serial, one-worker and four-worker
+real-projection verdicts are exactly equal after excluding timing fields; the
+month-scale eight-seed layer-1 oracle also passes in both normal and
+instrumented builds.
 
 ## What each id measures
 
