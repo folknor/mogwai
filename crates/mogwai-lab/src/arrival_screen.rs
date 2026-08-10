@@ -77,6 +77,7 @@ pub const STAGE_A_GEN_CELL_BUDGET_S: f64 = 50.0;
 /// separate question.
 pub const STAGE_A_BUDGET_S: f64 = 39_600.0;
 pub const STAGE_A_RSS_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const NS_PER_MINUTE: u64 = 60_000_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -908,6 +909,94 @@ fn project_walk(ctx: &ScreenContext, cell: &Cell, seed: u64) -> Result<Projected
     project_stream(&mut walk, start, end, offset, seed)
 }
 
+#[derive(Debug, Clone)]
+struct PopulatedChildMinutes {
+    parent_ts_ns: u64,
+    child_stride_ns: u64,
+    next_index: u64,
+    end_index: u64,
+}
+
+impl PopulatedChildMinutes {
+    fn in_window(parent: &ParentSummary, start: u64, end: u64) -> Self {
+        let count = u64::from(parent.child_count);
+        let (next_index, end_index) = if count == 0
+            || start >= end
+            || parent.parent_ts_ns >= end
+        {
+            (0, 0)
+        } else if parent.child_stride_ns == 0 {
+            if parent.parent_ts_ns >= start {
+                (0, count)
+            } else {
+                (0, 0)
+            }
+        } else {
+            let first = if parent.parent_ts_ns >= start {
+                0
+            } else {
+                (start - parent.parent_ts_ns)
+                    .div_ceil(parent.child_stride_ns)
+                    .min(count)
+            };
+            let last_ts = parent.parent_ts_ns.saturating_add(
+                (count - 1).saturating_mul(parent.child_stride_ns),
+            );
+            let past_end = if last_ts < end {
+                count
+            } else {
+                (end - parent.parent_ts_ns)
+                    .div_ceil(parent.child_stride_ns)
+                    .min(count)
+            };
+            (first.min(past_end), past_end)
+        };
+        Self {
+            parent_ts_ns: parent.parent_ts_ns,
+            child_stride_ns: parent.child_stride_ns,
+            next_index,
+            end_index,
+        }
+    }
+
+    fn child_ts(&self, index: u64) -> u64 {
+        self.parent_ts_ns
+            .saturating_add(index.saturating_mul(self.child_stride_ns))
+    }
+}
+
+impl Iterator for PopulatedChildMinutes {
+    type Item = (u64, u64, u64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.next_index >= self.end_index {
+            return None;
+        }
+        let index = self.next_index;
+        let representative_ts = self.child_ts(index);
+        let minute = representative_ts / NS_PER_MINUTE;
+        let next_index = if self.child_stride_ns == 0 {
+            self.end_index
+        } else if let Some(boundary) = minute
+            .checked_add(1)
+            .and_then(|next| next.checked_mul(NS_PER_MINUTE))
+        {
+            if self.child_ts(self.end_index - 1) < boundary {
+                self.end_index
+            } else {
+                (boundary - self.parent_ts_ns)
+                    .div_ceil(self.child_stride_ns)
+                    .max(index + 1)
+                    .min(self.end_index)
+            }
+        } else {
+            self.end_index
+        };
+        self.next_index = next_index;
+        Some((minute, representative_ts, next_index - index))
+    }
+}
+
 /// Spec 3.3 steps 3 to 6, over any parent stream: the open-parent lifecycle,
 /// the child enumeration, the session rotation, the termination guard and the
 /// measured mean gap. Everything family-specific is behind [`ParentSource`], so
@@ -979,13 +1068,9 @@ fn project_stream(
         // burst's first child rotates.
         close_parent(&mut acc, &mut open_parent)?;
         let mut opened = false;
-        for i in 0..parent.child_count {
-            let ts = parent
-                .parent_ts_ns
-                .saturating_add(u64::from(i).saturating_mul(parent.child_stride_ns));
-            if !(start..end).contains(&ts) {
-                continue;
-            }
+        for (_minute, ts, child_count_in_minute) in
+            PopulatedChildMinutes::in_window(&parent, start, end)
+        {
             if let Some(seg) = session_segment_at(ts, offset)
                 && acc
                     .as_ref()
@@ -1003,7 +1088,7 @@ fn project_stream(
             }
             if let Some(active) = acc.as_mut() {
                 active.push_print(ts, 0);
-                prints += 1;
+                prints += child_count_in_minute;
             }
             // THE PARENT OPENS ON ITS FIRST CHILD, not after its last.
             // `GeneratedAcc::push_trade` rotates at the top and sets
@@ -2123,6 +2208,7 @@ mod tests {
             "the burst populates two minutes and the parent only counts in the first"
         );
         assert_eq!(projected.parents, 1);
+        assert_eq!(projected.prints, 400, "child multiplicity stays exact");
     }
 
     /// One parent with an arbitrary child stride. The shipped stride is
@@ -2142,6 +2228,77 @@ mod tests {
             repeat_last: false,
             last: None,
         }
+    }
+
+    #[test]
+    fn child_bounds_clip_start_and_exclude_end_exactly() {
+        let day = 20_000_u64;
+        let open = day * DAY_NS + OPEN_NS;
+        let start = open + 2 * MINUTE_NS;
+        let end = start + 3 * MINUTE_NS;
+        // Children at open and open + 1 minute are before the window. The
+        // next three are measured. The sixth is exactly at `end` and is not.
+        let mut source = one_parent(open, 6, MINUTE_NS);
+        let projected = project_stream(&mut source, start, end, 0, 1).expect("a clean projection");
+        assert_eq!(projected.parents, 1, "the surviving child opens its parent");
+        assert_eq!(projected.prints, 3);
+        assert_eq!(
+            minute_counts(&projected.sessions[0], 17),
+            BTreeMap::from([(0, 3)]),
+            "the original parent is before start, so only three populated minutes remain"
+        );
+    }
+
+    #[test]
+    fn a_parent_with_no_in_window_child_is_not_projected() {
+        let day = 20_000_u64;
+        let open = day * DAY_NS + OPEN_NS;
+        let start = open + 2 * MINUTE_NS;
+        let end = start + 3 * MINUTE_NS;
+        let mut source = one_parent(open, 2, MINUTE_NS);
+        let projected = project_stream(&mut source, start, end, 0, 1).expect("a clean projection");
+        assert_eq!(projected.parents, 0);
+        assert_eq!(projected.prints, 0);
+        assert!(projected.sessions.is_empty());
+        assert!(projected.realized_mean_gap_s.is_nan());
+    }
+
+    #[test]
+    fn arbitrary_strides_preserve_non_contiguous_populated_minutes() {
+        let day = 20_000_u64;
+        let start = day * DAY_NS + OPEN_NS;
+        let end = start + 10 * MINUTE_NS;
+        let mut source = one_parent(start, 4, 3 * MINUTE_NS);
+        let projected = project_stream(&mut source, start, end, 0, 1).expect("a clean projection");
+        assert_eq!(projected.parents, 1);
+        assert_eq!(projected.prints, 4);
+        assert_eq!(
+            minute_counts(&projected.sessions[0], 17),
+            BTreeMap::from([(0, 3), (1, 1)]),
+            "minutes 0, 3, 6 and 9 are populated without filling the gaps"
+        );
+    }
+
+    #[test]
+    fn a_surviving_child_does_not_redefine_a_segmentless_parent_timestamp() {
+        let day = 20_000_u64;
+        let halt = (day + 1) * DAY_NS + (15 * 60 + 20) * MINUTE_NS;
+        let reopen = halt + 10 * MINUTE_NS;
+        assert!(session_segment_at(halt, 0).is_none());
+        assert!(session_segment_at(reopen, 0).is_some());
+        let mut source = one_parent(halt, 2, 10 * MINUTE_NS);
+        let stop = project_stream(&mut source, reopen, reopen + MINUTE_NS, 0, 1)
+            .err()
+            .expect("the original parent instant is segmentless");
+        let ProjectStop::Refused(refusal) = stop else {
+            panic!("a segmentless original parent is a projection refusal");
+        };
+        assert_eq!(refusal.variant, "projection");
+        assert!(
+            refusal.detail.contains("no open segment"),
+            "{}",
+            refusal.detail
+        );
     }
 
     #[test]
