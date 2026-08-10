@@ -226,6 +226,144 @@ Use `brokkr` (not `cargo`) for check/test. By default output is filtered to chan
   - Example: `brokkr test -p mogwai-data memory_source_replays_in_time_order` or `brokkr test -p mogwai-data parses_integer_and_fractional_timestamps -N 5`.
 - `brokkr run [NAME] [ARGS]...` - runs a bin or example by TARGET NAME, discovered from cargo metadata across the whole workspace. This server is `brokkr run mogwai -- serve` (`mogwai` is the bin target, not the package). A bare `brokkr run` lists what is runnable, or runs `[bin] default` if set. Arguments after `--` are forwarded raw to the program; brokkr's own `--debug`/`--release` go before the name. Use instead of `cargo run` for the same reason as `brokkr check`/`brokkr test`.
 
+## Benchmarking
+
+`brokkr mogwai` measures, `brokkr results` queries the durable record, and
+`brokkr sidecar` queries the profiler store. In depth: `brokkr man mogwai`
+and `brokkr man results`. The design and what is deliberately deferred:
+`notes/benchmarking-design.md`. What each surface emits and the annotation
+discipline: `reference/performance.md`.
+
+There are no layers and no frozen workloads. The argv is composed at the
+CALL SITE and captured verbatim in the row, so selecting an arm is a
+query rather than a name lookup. Recording needs a clean tree: `--force`
+runs a dirty tree but stores no `results.db` row (its sidecar data
+survives, reachable as the `dirty` pseudo-UUID).
+
+### The two surfaces
+
+**Argv-shaped**, through the shipped `target/release/mogwai`, needing no
+registration - `gen` and its `--type` variants, `tick-composition`,
+`preflight`, `measure`, `fit`, `cache`, `synth`, `arrival-screen`. The
+argv goes after `--`, raw:
+
+    brokkr mogwai --bench 3 -- gen --type summary --symbol MNQ
+
+Benching the release binary measures what ships, startup and argument
+parsing included, which is the honest end-to-end number.
+
+**Harness-shaped**, through a cargo example, for the loops that have no
+command line - the engine's matching loop and divergence seam, the
+`TickSource` implementations, the arrival draw, the screen's projection,
+and eventually the serving path and the adapter. These resolve by NAME
+against `[mogwai.targets.*]` in `brokkr.toml`:
+
+    brokkr mogwai screen_projection --hotpath
+    brokkr mogwai arrival_walk --alloc
+
+Harnesses take an argv too, after `--`, because every surface here is
+config-shaped (preset, window, seed, cell). Bare `brokkr mogwai` lists
+both kinds. Adding a surface to the measurable set is registering a
+target.
+
+Currently registered:
+
+| target | example | features |
+|---|---|---|
+| `arrival_walk` | `mogwai-data/arrival_walk_bench` | `hotpath` |
+| `screen_projection` | `mogwai-lab/screen_projection_bench` | `hotpath` |
+
+### The three modes, uniform over both surfaces
+
+- `--bench [N]` - N runs (default 3), lockfile, stores a row. A plain run
+  stores nothing.
+- `--hotpath [N]` - function-level timing.
+- `--alloc [N]` - per-function allocation bytes, exclusive of nested
+  calls.
+
+`--hotpath` and `--alloc` are INERT without the feature that compiles the
+instrumentation in, which is what the registry's `features` field exists
+for. The registered features are a UNION with what the mode and call site
+add, never a replacement: `--hotpath` contributes `hotpath`, `--alloc`
+contributes `hotpath-alloc`, and a call-site `--features` adds an arm.
+
+The consequence worth knowing, and it bites: **a target registering
+`hotpath` has its `--bench` walls measured on an instrumented build.**
+Register the feature on the target that needs it, not on every target. A
+harness whose canonical output is a wall rather than a profile should
+carry no registered features and no cargo `required-features`.
+
+Other flags that matter: `--commit <REF>` builds and benches an old
+commit, `--dry-run` validates argv and path resolution without building,
+and `--stop <MARKER>` kills the child when a sidecar marker fires, for
+benching one phase.
+
+### Reading the record
+
+`brokkr results` prints the last `-n` rows (default 20), newest first.
+Filters AND together: `--commit`, `--command`, `--mode` (`bench`,
+`hotpath`, `alloc`), `--dataset`, and repeatable `--meta KEY=VALUE` /
+`--env NAME=VALUE`. Both `--meta` and `--env` EXCLUDE rows missing the
+key, so an arm defined by an unset variable needs an explicit baseline
+value recorded on the off runs.
+
+`--grep` / `--grep-v` match against the whole INVOCATION - subprocess
+argv, brokkr argv, and each captured env var rendered as `NAME=VALUE`.
+Repeatable, `git log --grep` style: every `--grep` must match, any
+`--grep-v` hit excludes. That composition is the only way to select an
+arm defined by an ABSENT flag.
+
+`brokkr results <uuid-prefix>` resolves to one row and prints a labelled
+block: full `cli_args`, the brokkr invocation, per-iteration walls for a
+`--bench N` row, the scraped counters, the `prev.*` provenance of what
+ran immediately before (often the explanation for an outlier), and the
+hotpath and alloc tables when the mode captured them. `--top N` caps the
+functions shown.
+
+`brokkr results --compare A B` pairs rows on
+`(command, mode, input_file, brokkr_args, env_fingerprint)`, with
+`--commit` and `--verbose` stripped from `brokkr_args` first. Pairs whose
+host conditions or captured env differed are ANNOTATED rather than
+rendered as a clean delta.
+
+### Counters, and why they are not optional
+
+Every external run scrapes the winning run's stderr for `key=value`
+counters. `--compare` reports the ones that moved:
+
+    counters: cells_evaluated 5000 -> 4000, prints 1240 -> 1180
+
+A wall alone cannot distinguish "the code got faster" from "the code did
+less". This is what turns "12 % faster" into "12 % faster on 8 % fewer
+cells", and it is why a benched surface should emit its WORK SIZE. It is
+reported, never fatal. Where a moved count really does invalidate a
+series - a seeded tape whose draw moved - that owes a
+`TAPE_PROTOCOL_VERSION` bump, which is unconditional and cannot be waived
+per comparison.
+
+### The sidecar
+
+`brokkr sidecar <uuid>` queries `.brokkr/sidecar.db` - the observation-only
+channels the benched commands report through (`mogwai-lab`'s `sidecar`
+module). A UUID prefix is required; find one with `brokkr results`. Views:
+`--markers` and `--durations` (START/END pair timings), `--counters`
+(with `--grep` to filter a noisy dump), `--samples` (the raw 100 ms /proc
+stream, with `--phase`, `--range`, `--where`, `--fields`, `--every`,
+`--head`, `--tail`), `--stat <FIELD>` for min/max/avg/p50/p95, `--stalls`
+for `*_wait_ns` rollups, and `--compare A B` phase-aligned. `--human`
+renders a table instead of JSONL.
+
+### Datasets
+
+`[<host>.datasets.<name>]` in `brokkr.toml` records an out-of-git input
+by path and XXH128 digest - whether the bytes moved under a recorded row.
+This is NOT a substitute for the run's own content verification, which
+asks whether the data is what the ledger says. Register the path, run
+`brokkr env`, and paste back the digest it computed from disk. A `path`
+may name a directory, which digests as the sorted fold of
+`<relative path>\0<file digest>`, so a rename or a layout change moves
+it.
+
 ## Document folders
 
 The standing layout, across every project. Three live folders plus one retired,
