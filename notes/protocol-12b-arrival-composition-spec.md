@@ -177,6 +177,16 @@ Brick A resumes only after this amendment's code change lands with its
 gates green; the A0 probe re-runs on the amended tree as brick A's
 first act.
 
+UPDATE 2026-08-10: Brick A is DONE and item 2 is removed below. The clean-tree
+run at `2f512a6` evaluated all 787 frozen coarse cells and admitted none, so no
+refinement candidates existed. The artifact
+`analysis/mnq-arrival-screen.json` closes the frozen run with
+`no-arrival-admissible-candidate-in-frozen-search-space`. Per sections 1.1 and
+9.4, no generator change lands, Stage B does not run, and the result goes to
+the owner. Item 3 remains described below but is not active under this closed
+run; resuming it requires an owner-directed, reviewed amendment that restarts
+Brick F.
+
 UPDATE 2026-08-09, the PRESET-RETIREMENT AMENDMENT (section 17, narrow,
 formally restarting Brick F; reviewed and signed by codex session
 019fe781-e6dd-7172-b700-22df68b83271). Owner ruling: the ETHUSDT and
@@ -202,27 +212,6 @@ untouched. Committed historical artifacts naming the retired presets
 (the brick N artifact, the tick-composition fixtures) are records and
 stay; the ratios tool classifies retired presets through a committed
 table so historical fixtures remain auditable.
-
-### Item 2: bricks A0 and A, the Stage A screen
-
-The screen driver, the `arrival-screen` CLI with its `--cost-probe`
-mode, the fidelity layers, and `analysis/mnq-arrival-screen.json`.
-One item because A0 is a mode of A's binary and its whole job is to
-fail brick A before the grid runs.
-
-- Binding sections: 9 (projections, admissibility A1 to A4, loss,
-  output), 6 (fidelity layers; the layer-1 oracle test is BLOCKING),
-  3 (the stage boundary and what Stage A may not evaluate), 12
-  (procedure, budgets, the two-tier cost probe), 16 (grids and
-  constants), 7 and 8, bricks A0 and A (gate commands), 13.
-- Stage A is corpus-free and consumes neither the corpus nor the B4
-  artifact (brick B4 amendment 2).
-- Stop points: a PER-CELL cost-probe miss fails brick A and stops for
-  an owner ruling on the per-cell price, which a grid re-freeze cannot
-  fix; a TOTAL-budget miss stops for a grid re-freeze. An empty
-  admissible region closes the landing with
-  `no-arrival-admissible-candidate-in-frozen-search-space` and goes
-  to the owner.
 
 ### Item 3: bricks S0 and S, the Stage B landing
 

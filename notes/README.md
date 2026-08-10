@@ -63,7 +63,7 @@ this file is for.
 | Track | Driven from | State |
 |---|---|---|
 | Evidence and purchase | `DATA-PURCHASE-REPORT.md` (root) | Idle. The ~30 dollar ES/MES purchase is the named next marginal dollar, owner-gated. Nothing to buy for 12b. |
-| Generator fidelity, protocol 12b | `protocol-12b-arrival-composition-spec.md` (frozen contract of record) plus `protocol-12a-measurement-spec.md` (the binding ladder it re-runs) | Bricks F, K, B4, N, A0 and A are landed (through `9e074d4`). The negative control FAILED as predicted, so the loop proceeds. Item 2's full Stage A run is outstanding, currently STOPPED on the A0/A probe's finding that the integrated frame runs ~6 percent hot on mean parent rate (a structural gap-vs-rate convention mismatch), which voids the kernel families against gate A2 - a section 17 amendment awaiting the owner's ruling. |
+| Generator fidelity, protocol 12b | `protocol-12b-arrival-composition-spec.md` (frozen contract of record) plus `protocol-12a-measurement-spec.md` (the binding ladder it re-runs) | Brick A is complete. The frozen screen evaluated all 787 coarse cells and returned `no-arrival-admissible-candidate-in-frozen-search-space`; no refinement was possible. The landing is stopped for the owner as section 1.1 requires, with no generator change and no Stage B run. |
 | Python-to-Rust rewrite | git history (its phase records, dossier and script triage are retired) | **DONE.** Signature renewed 2026-08-08 at `c783d5f`; the Python retired to the gitignored `research/dead/`; the Rust is the reference. Nine review passes, eight refusals. What survives durably: the parity contract in `reference/architecture.md`, the version exemption in `AGENTS.md`, the two approved numerical deviations pinned by discriminating tests in the code. |
 
 `todo.md` is the catch-all beneath the tracks: open work items, parked
@@ -78,12 +78,6 @@ investigations, the hardcoded-value inventory.
 - **`protocol-12a-measurement-spec.md`** - 12b's judge. The ladder re-runs
   unamended against it. Binding. (It cites the retired protocol-11 spec as its
   spawn point; that citation resolves to git history.)
-- **`stage-a-optimization.md`** - the performance round preceding brick A:
-  baseline, call chain, the free-lane/amendment-lane constraints, gates,
-  exit criterion.
-  (Its one surviving benchmarking obligation is the ordering rule in item 2
-  below. The two-layer design that governed this round was RETIRED 2026-08-10 -
-  see `benchmarking-design.md`.)
 - **`benchmarking-design.md`** - the addressing scheme for measuring mogwai,
   replacing the two-layer design and the frozen `[mogwai.workloads.*]` registry.
   Written for every operational surface rather than for Stage A, because the
@@ -103,31 +97,13 @@ investigations, the hardcoded-value inventory.
 
 ## What blocks what, right now
 
-1. **12b item 2 (the Stage A screen run) is UNBLOCKED, 2026-08-09.** The
-   frame-calibration finding was diagnosed (`ARRIVAL_MEAN_CAL`
-   double-application in the integrated frame), amended through the freeze
-   protocol (signed, codex session 019fe781), and landed: bare mean for the
-   kernel families, `ARRIVAL_KERNEL_VERSION` 2, `TAPE_PROTOCOL_VERSION` 12
-   (Brick S renumbered to 13, with the coordinated 12a sections 8/11
-   amendment). The A0 probe on the amended tree passes its budgets with the
-   excess eliminated. Before the full screen run: the owner-defined
-   OPTIMIZATION ROUND below.
-2. **A Stage A performance round precedes brick A** (owner step,
-   2026-08-09): the screen is priced at ~9.9 h and the measured hotspot is
-   the `SessionAcc` projection, not the draw. `stage-a-optimization.md` is
-   the work item - entry points, the free-lane/amendment-lane constraint
-   split, gates and exit criterion. The round needs almost none of the
-   benchmarking scheme: profile one kernel screen cell (the cost probe needs
-   no clean tree, so it is the benchmark loop as-is, and
-   `screen_projection_bench` is the instrument) and CONFIRM the hypothesis
-   that `SessionAcc` bookkeeping dominates `project_stream`. Only then
-   optimize, in the free lane - a lean screen-side accumulator producing
-   exactly the fields the screen reads, held honest by the layer-1 oracle
-   test's exact integer reproduction - staying out of `arrival.rs`'s draw
-   path unless the profile forces it. Targets: kernel cells at ~6.0-6.4 s,
-   family 1 at ~11.8 s, ~9.9 h implied total; anything that gets cells
-   under ~2 s makes the refinement-budget debate in `todo.md` moot. Brick
-   A runs when the owner is satisfied with a fresh cost probe.
+1. **12b is stopped at Brick A for the owner, 2026-08-10.** The optimized
+   screen ran from clean commit `2f512a6`, evaluated every frozen coarse cell
+   and admitted none. Its committed verdict is
+   `no-arrival-admissible-candidate-in-frozen-search-space`. The current freeze
+   supplies no Stage B input and permits no best-of-failures selection. The
+   performance round is retired to git history; its durable measurements are
+   in `reference/performance.md`.
 3. **12b item 3 (Stage B, the landing, protocol 13) waits on item 2's
    verdict.**
 3. **Standing owner rulings that reshape the ground, 2026-08-09**: the

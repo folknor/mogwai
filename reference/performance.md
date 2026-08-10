@@ -349,6 +349,19 @@ reading supports the structural result but is not a general wall-time claim.
 The legacy JSON path remains test-only as an exact differential oracle, and
 the committed eight-seed layer-1 output oracle remains exact.
 
+Brick A then ran from clean commit `2f512a6` with the shipped 16-worker
+default. The frozen coarse grid evaluated all 787 cells in 241.105 seconds;
+the complete command took 242.110 seconds and peaked at 547,155,968 bytes RSS.
+It walked 48,987,759,956 parents and projected 57,368,361,183 prints. Summed
+cell time was 3,835.378 seconds, about 15.9 effective workers. No coarse cell
+was admissible, so the frozen refinement rule proposed no candidates and
+`refine_s` was effectively zero. The resulting artifact verdict is
+`no-arrival-admissible-candidate-in-frozen-search-space`. This is why the
+actual run was about four minutes rather than the 24 minute 26 second
+maximum-cap estimate: the estimate deliberately prices all available
+refinement capacity. The post-artifact gate passed 805 normal and 387
+instrumented tests.
+
 ## What each id measures
 
 `fill_bench` (`crates/mogwai-engine/examples/fill_bench.rs`):
