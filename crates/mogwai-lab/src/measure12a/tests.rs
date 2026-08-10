@@ -730,6 +730,12 @@ fn screen_accumulator_matches_the_generic_reduced_surface_exactly() {
     let generic = generic
         .close_reduced(Scope::Generated { seed: 1 })
         .expect("generic close");
+    let typed = screen.reduced().expect("typed screen close");
     let screen = screen.close().expect("screen close");
     assert_eq!(screen, generic);
+    assert_eq!(
+        typed,
+        ScreenReduced::from_sessions(&[generic]).expect("typed JSON projection"),
+        "the direct typed close matches the exact reduced JSON surface"
+    );
 }

@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{
@@ -26,6 +27,128 @@ struct SegmentAcc {
     origin_ns: u64,
     end_ns: u64,
     second_counts: Vec<u64>,
+}
+
+/// The pooled sufficient statistics Stage A reads for one hour and window.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenWindow {
+    pub scheduled: u64,
+    pub zeros: u64,
+    pub count_hist: BTreeMap<u64, u64>,
+    /// Sessions that serialized this cell. A3 refuses if any session omitted
+    /// the one-second cell, so pooling must retain presence as well as sums.
+    pub present_sessions: u64,
+}
+
+/// The complete typed projection consumed by the Stage A gates.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenReduced {
+    pub sessions: u64,
+    pub parent_counts: BTreeMap<u32, BTreeMap<u32, u64>>,
+    pub windows: BTreeMap<u32, BTreeMap<u32, ScreenWindow>>,
+}
+
+impl ScreenReduced {
+    pub fn merge(&mut self, other: Self) {
+        self.sessions += other.sessions;
+        for (hour, counts) in other.parent_counts {
+            let target = self.parent_counts.entry(hour).or_default();
+            for (n, count) in counts {
+                *target.entry(n).or_default() += count;
+            }
+        }
+        for (hour, windows) in other.windows {
+            let target = self.windows.entry(hour).or_default();
+            for (window, cell) in windows {
+                let merged = target.entry(window).or_default();
+                merged.scheduled += cell.scheduled;
+                merged.zeros += cell.zeros;
+                merged.present_sessions += cell.present_sessions;
+                for (count, occurrences) in cell.count_hist {
+                    *merged.count_hist.entry(count).or_default() += occurrences;
+                }
+            }
+        }
+    }
+
+    /// Parses the reduced portion of protocol-12a session JSON once, when a
+    /// screen context opens. Generated walks never use this compatibility
+    /// boundary; their dense accumulator returns `ScreenReduced` directly.
+    pub fn from_sessions(sessions: &[Value]) -> LabResult<Self> {
+        let mut out = Self {
+            sessions: sessions.len() as u64,
+            ..Self::default()
+        };
+        for session in sessions {
+            let hist = session["block1_hist"]
+                .as_array()
+                .ok_or_else(|| LabError::refusal("session block1_hist is not an array"))?;
+            for row in hist {
+                let hour = u32::try_from(
+                    row["hour"]
+                        .as_u64()
+                        .ok_or_else(|| LabError::refusal("block1 row has no integer hour"))?,
+                )
+                .map_err(|_| LabError::refusal("block1 hour is out of range"))?;
+                let n = u32::try_from(
+                    row["n"]
+                        .as_u64()
+                        .ok_or_else(|| LabError::refusal("block1 row has no integer n"))?,
+                )
+                .map_err(|_| LabError::refusal("block1 n is out of range"))?;
+                let count = row["count"]
+                    .as_u64()
+                    .ok_or_else(|| LabError::refusal("block1 row has no integer count"))?;
+                *out.parent_counts
+                    .entry(hour)
+                    .or_default()
+                    .entry(n)
+                    .or_default() += count;
+            }
+            let block2 = session["block2"]
+                .as_object()
+                .ok_or_else(|| LabError::refusal("session block2 is not an object"))?;
+            for (hour, windows) in block2 {
+                let hour: u32 = hour
+                    .parse()
+                    .map_err(|_| LabError::refusal("block2 hour key is not an integer"))?;
+                let windows = windows
+                    .as_object()
+                    .ok_or_else(|| LabError::refusal("block2 hour is not an object"))?;
+                for (window, value) in windows {
+                    let window: u32 = window
+                        .parse()
+                        .map_err(|_| LabError::refusal("block2 window key is not an integer"))?;
+                    let hist = value["count_hist"]
+                        .as_object()
+                        .ok_or_else(|| LabError::refusal("block2 count_hist is not an object"))?;
+                    let cell = out
+                        .windows
+                        .entry(hour)
+                        .or_default()
+                        .entry(window)
+                        .or_default();
+                    cell.scheduled += value["scheduled_windows"]
+                        .as_u64()
+                        .ok_or_else(|| LabError::refusal("block2 scheduled_windows is missing"))?;
+                    cell.zeros += value["zero_windows"]
+                        .as_u64()
+                        .ok_or_else(|| LabError::refusal("block2 zero_windows is missing"))?;
+                    cell.present_sessions += 1;
+                    for (count, occurrences) in hist {
+                        let count: u64 = count.parse().map_err(|_| {
+                            LabError::refusal("block2 count_hist key is not an integer")
+                        })?;
+                        let occurrences = occurrences.as_u64().ok_or_else(|| {
+                            LabError::refusal("block2 count_hist value is not an integer")
+                        })?;
+                        *cell.count_hist.entry(count).or_default() += occurrences;
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
 }
 
 impl SegmentAcc {
@@ -122,6 +245,85 @@ impl ScreenSessionAcc {
             .ok_or_else(|| LabError::refusal("screen parent has an invalid segment index"))?;
         segment.push_parent(first_ts);
         Ok(())
+    }
+
+    /// Closes directly into the typed sufficient statistics Stage A consumes.
+    pub fn reduced(&self) -> LabResult<ScreenReduced> {
+        if let Some(minute) = self.invalid_minute {
+            return Err(LabError::refusal(format!(
+                "minute {minute} carries rows but maps to no open segment of {}",
+                self.date
+            )));
+        }
+        let mut out = ScreenReduced {
+            sessions: 1,
+            ..ScreenReduced::default()
+        };
+        let first = self.session_start_ns / NS_PER_MIN;
+        for (index, slot) in self.minutes.iter().enumerate() {
+            if !slot.populated && slot.parents == 0 {
+                continue;
+            }
+            let minute = first + index as u64;
+            let start_ns = minute * NS_PER_MIN;
+            self.segment_for_minute(minute).ok_or_else(|| {
+                LabError::refusal(format!(
+                    "minute {minute} carries rows but maps to no open segment of {}",
+                    self.date
+                ))
+            })?;
+            let hour = u32::try_from((start_ns / NS_PER_HOUR) % 24)
+                .map_err(|_| LabError::refusal("a session hour exceeds u32"))?;
+            let parents = u32::try_from(slot.parents)
+                .map_err(|_| LabError::refusal("a minute parent count exceeds u32"))?;
+            *out.parent_counts
+                .entry(hour)
+                .or_default()
+                .entry(parents)
+                .or_default() += 1;
+        }
+        for seg in &self.segments {
+            for &window_s in COUNT_WINDOWS_S {
+                #[expect(clippy::cast_sign_loss, reason = "the windows are 1, 5 and 60 seconds")]
+                let window_s = window_s as u64;
+                let width = usize::try_from(window_s)
+                    .map_err(|_| LabError::refusal("a window width exceeds usize"))?;
+                for (index, counts) in seg.second_counts.chunks_exact(width).enumerate() {
+                    let start = seg.origin_ns
+                        + u64::try_from(index * width)
+                            .map_err(|_| LabError::refusal("a window offset exceeds u64"))?
+                            * NS_PER_SECOND;
+                    let stop = start + window_s * NS_PER_SECOND;
+                    let start_hour = (start / NS_PER_HOUR) % 24;
+                    let end_hour = (stop / NS_PER_HOUR) % 24;
+                    if start_hour != end_hour {
+                        continue;
+                    }
+                    let count = counts.iter().sum::<u64>();
+                    let cell = out
+                        .windows
+                        .entry(
+                            u32::try_from(end_hour)
+                                .map_err(|_| LabError::refusal("a session hour exceeds u32"))?,
+                        )
+                        .or_default()
+                        .entry(
+                            u32::try_from(window_s)
+                                .map_err(|_| LabError::refusal("a window exceeds u32"))?,
+                        )
+                        .or_insert_with(|| ScreenWindow {
+                            present_sessions: 1,
+                            ..ScreenWindow::default()
+                        });
+                    cell.scheduled += 1;
+                    if count == 0 {
+                        cell.zeros += 1;
+                    }
+                    *cell.count_hist.entry(count).or_default() += 1;
+                }
+            }
+        }
+        Ok(out)
     }
 
     pub fn close(self) -> LabResult<Value> {

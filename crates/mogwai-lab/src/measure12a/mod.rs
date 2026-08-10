@@ -55,7 +55,7 @@ pub mod generated;
 pub mod observed;
 mod screen;
 
-pub use screen::ScreenSessionAcc;
+pub use screen::{ScreenReduced, ScreenSessionAcc, ScreenWindow};
 
 /// Derived beside the sub-contract in `analysis/mnq_fit.py` (they sit after
 /// the `SUBCONTRACT_KEYS` block, so they are not hash inputs).

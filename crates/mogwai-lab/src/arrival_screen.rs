@@ -13,7 +13,9 @@
 //! The spec is `notes/protocol-12b-arrival-composition-spec.md`; sections 9
 //! and 16 own everything in this module.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+#[cfg(test)]
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -26,20 +28,26 @@ use mogwai_server::source::InstrumentProfile;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+#[cfg(test)]
 use crate::aggregate::context::ObsContext;
+#[cfg(test)]
 use crate::aggregate::countsub::{count_substitution, obs_shares_under, support_refusals_of};
+#[cfg(test)]
 use crate::aggregate::family::conditional_adequacy_bins;
+#[cfg(test)]
 use crate::aggregate::monthly::pool_session_hists;
-use crate::arrival_control::{
-    GeneratedBinding, HourRate, MEAN_RATE_BAND, ZERO_COUNT_BAND, gate_hours, hourly_mean_parents,
-    hourly_zero_second_fraction, seed_median,
-};
+use crate::aggregate::RefusalRec;
+use crate::arrival_control::{GeneratedBinding, MEAN_RATE_BAND, ZERO_COUNT_BAND, gate_hours, seed_median};
+#[cfg(test)]
+use crate::arrival_control::{HourRate, hourly_mean_parents, hourly_zero_second_fraction};
 use crate::error::{LabError, LabResult};
 use crate::fit::walk::parse_duration;
-use crate::measure12a::ScreenSessionAcc;
+use crate::kernel::weighted_nearest_rank;
+use crate::measure12a::{ScreenReduced, ScreenSessionAcc, ScreenWindow};
 use crate::sampler::ResourceSampler;
 use crate::session::{format_trade_date, session_segment_at};
 use crate::storage::{CacheStore, ProvenanceInputs, ProvenanceToken, cache_root};
+use crate::subcontract::PARENT_COUNT_BIN_NAMES;
 
 pub const STAGE_A_SEEDS: [u64; 4] = [201, 202, 203, 204];
 pub const MEAN_GAP_REL_TOL_12B: f64 = 0.05;
@@ -250,6 +258,8 @@ pub struct ScreenRefusal {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SeedWalk {
     pub seed: u64,
+    pub projection: ScreenReduced,
+    #[cfg(test)]
     pub sessions: Vec<Value>,
     pub parents: u64,
     /// Child prints pushed into the accumulator - the screen's work-size
@@ -532,14 +542,19 @@ pub fn admissible_regions(cells: &[EvaluatedCell]) -> Vec<Vec<usize>> {
 pub struct ScreenContext {
     pub profile: InstrumentProfile,
     pub binding: GeneratedBinding,
+    observed_projection: ScreenReduced,
+    #[cfg(test)]
     observed: ObsContext,
     observed_marginal: CountMarginal,
     /// The observed sides of A1(a), A2 and A3, resolved ONCE. They depend on
     /// the committed 12a artifact alone, so recomputing them per cell would
     /// re-walk 22 session records for every one of roughly 1,400 cells and
     /// bill it to `STAGE_A_CELL_BUDGET_S`.
+    #[cfg(test)]
     observed_shares: HashMap<i64, HashMap<String, f64>>,
+    #[cfg(test)]
     observed_rates: BTreeMap<i64, HourRate>,
+    #[cfg(test)]
     observed_zero: BTreeMap<i64, Option<f64>>,
     hours: Vec<i64>,
     cache: CacheStore,
@@ -568,6 +583,7 @@ impl ScreenContext {
             .clone();
         let hist = &measure["observed"]["monthly"]["block1"]["hist"];
         let observed_marginal = parent_count_marginal(hist)?;
+        let observed_projection = ScreenReduced::from_sessions(&sessions)?;
         let profile = mogwai_server::config::profile_from_preset("MNQ")
             .map_err(|e| LabError::refusal(e.to_string()))?;
         let hours = gate_hours(&profile)?;
@@ -589,17 +605,26 @@ impl ScreenContext {
             full_command: &command,
             subcontract_hash: &measure_hash,
         });
+        #[cfg(test)]
         let observed = ObsContext::new(sessions);
+        #[cfg(test)]
         let observed_shares = obs_shares_under(&observed, &observed.ones());
+        #[cfg(test)]
         let observed_rates = hourly_mean_parents(&observed);
+        #[cfg(test)]
         let observed_zero = hourly_zero_second_fraction(&observed);
         Ok(Self {
             profile,
             binding,
+            observed_projection,
+            #[cfg(test)]
             observed,
             observed_marginal,
+            #[cfg(test)]
             observed_shares,
+            #[cfg(test)]
             observed_rates,
+            #[cfg(test)]
             observed_zero,
             hours,
             cache: CacheStore::open(cache_root(cache), token),
@@ -632,6 +657,7 @@ impl ScreenContext {
             hist.extend(s["block1_hist"].as_array().into_iter().flatten().cloned());
         }
         let observed_marginal = parent_count_marginal(&Value::Array(hist))?;
+        let observed_projection = ScreenReduced::from_sessions(&sessions)?;
         let observed = ObsContext::new(sessions);
         let observed_shares = obs_shares_under(&observed, &observed.ones());
         let observed_rates = hourly_mean_parents(&observed);
@@ -643,6 +669,7 @@ impl ScreenContext {
                 window_length_ns: 0,
                 warmup: "0s".into(),
             },
+            observed_projection,
             observed,
             observed_marginal,
             observed_shares,
@@ -787,6 +814,8 @@ fn projection_refusal(clock_ns: u64, detail: &str) -> ProjectStop {
 }
 
 struct Projected {
+    projection: ScreenReduced,
+    #[cfg(test)]
     sessions: Vec<Value>,
     parents: u64,
     prints: u64,
@@ -905,6 +934,8 @@ fn project_seed_under(
     let product = match project_walk(profile, binding, cell, seed) {
         Ok(done) => SeedWalk {
             seed,
+            projection: done.projection,
+            #[cfg(test)]
             sessions: done.sessions,
             parents: done.parents,
             prints: done.prints,
@@ -917,6 +948,8 @@ fn project_seed_under(
         // cost the budget already booked.
         Err(ProjectStop::Refused(refusal)) => SeedWalk {
             seed,
+            projection: ScreenReduced::default(),
+            #[cfg(test)]
             sessions: Vec::new(),
             parents: 0,
             prints: 0,
@@ -1108,6 +1141,8 @@ fn project_stream(
     offset: i32,
     _seed: u64,
 ) -> Result<Projected, ProjectStop> {
+    let mut projection = ScreenReduced::default();
+    #[cfg(test)]
     let mut sessions = Vec::new();
     let mut acc: Option<ScreenSessionAcc> = None;
     let mut open_parent: Option<(u64, u8, u64)> = None;
@@ -1172,6 +1207,8 @@ fn project_stream(
             {
                 close_parent(&mut acc, &mut open_parent)?;
                 if let Some(old) = acc.take() {
+                    projection.merge(old.reduced()?);
+                    #[cfg(test)]
                     sessions.push(old.close()?);
                 }
                 acc = Some(ScreenSessionAcc::new(
@@ -1214,6 +1251,8 @@ fn project_stream(
     }
     close_parent(&mut acc, &mut open_parent)?;
     if let Some(old) = acc.take() {
+        projection.merge(old.reduced()?);
+        #[cfg(test)]
         sessions.push(old.close()?);
     }
     let realized_mean_gap_s = first
@@ -1223,6 +1262,8 @@ fn project_stream(
             (b - a) as f64 / ((parents - 1) as f64 * 1e9)
         });
     Ok(Projected {
+        projection,
+        #[cfg(test)]
         sessions,
         parents,
         prints,
@@ -1274,6 +1315,146 @@ fn gap_within_tolerance(ctx: &ScreenContext, realized_s: f64) -> bool {
     realized_s.is_finite()
         && ((realized_s / ctx.profile.scalars.mean_event_duration_s) - 1.0).abs()
             <= MEAN_GAP_REL_TOL_12B
+}
+
+fn projection_marginal(projection: &ScreenReduced) -> CountMarginal {
+    projection
+        .parent_counts
+        .iter()
+        .map(|(&hour, counts)| (hour, counts.iter().map(|(&n, &count)| (n, count)).collect()))
+        .collect()
+}
+
+fn projection_bin_count(projection: &ScreenReduced, hour: u32, target: &str) -> u64 {
+    projection
+        .parent_counts
+        .get(&hour)
+        .into_iter()
+        .flatten()
+        .filter(|(n, _)| bin_name(**n) == target)
+        .map(|(_, count)| *count)
+        .sum()
+}
+
+fn projection_bins(projection: &ScreenReduced) -> BTreeMap<&'static str, u64> {
+    let mut bins = BTreeMap::new();
+    for counts in projection.parent_counts.values() {
+        for (&n, &count) in counts {
+            *bins.entry(bin_name(n)).or_default() += count;
+        }
+    }
+    bins
+}
+
+fn projection_window(
+    projection: &ScreenReduced,
+    hour: i64,
+    window: i64,
+) -> Option<&ScreenWindow> {
+    let hour = u32::try_from(hour).ok()?;
+    let window = u32::try_from(window).ok()?;
+    projection.windows.get(&hour)?.get(&window)
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Stage A window counts stay far below 2^53"
+)]
+fn projection_fano(projection: &ScreenReduced, hour: i64, window: i64) -> Option<f64> {
+    let cell = projection_window(projection, hour, window)?;
+    let total: u64 = cell.count_hist.values().sum();
+    if total == 0 {
+        return None;
+    }
+    let sum: u64 = cell.count_hist.iter().map(|(&n, &count)| n * count).sum();
+    let sumsq: u64 = cell
+        .count_hist
+        .iter()
+        .map(|(&n, &count)| n * n * count)
+        .sum();
+    let mean = sum as f64 / total as f64;
+    if mean <= 0.0 {
+        return None;
+    }
+    let variance = sumsq as f64 / total as f64 - mean * mean;
+    Some(variance / mean)
+}
+
+fn projection_count_quantile(
+    projection: &ScreenReduced,
+    hour: i64,
+    window: i64,
+    q: f64,
+) -> Option<f64> {
+    let cell = projection_window(projection, hour, window)?;
+    let pairs: Vec<_> = cell
+        .count_hist
+        .iter()
+        .map(|(&value, &weight)| {
+            Some((i64::try_from(value).ok()?, i64::try_from(weight).ok()?))
+        })
+        .collect::<Option<_>>()?;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "Stage A window counts stay far below 2^53"
+    )]
+    weighted_nearest_rank(&pairs, q).map(|value| value as f64)
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Stage A parent and window counts stay far below 2^53"
+)]
+fn projection_mean_parents(projection: &ScreenReduced, hour: i64) -> Option<f64> {
+    let hour = u32::try_from(hour).ok()?;
+    let parents: u64 = projection
+        .parent_counts
+        .get(&hour)
+        .into_iter()
+        .flatten()
+        .map(|(&n, &count)| u64::from(n) * count)
+        .sum();
+    let scheduled = projection.windows.get(&hour)?.get(&60)?.scheduled;
+    (scheduled > 0).then_some(parents as f64 / scheduled as f64)
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Stage A second counts stay far below 2^53"
+)]
+fn projection_zero_fraction(projection: &ScreenReduced, hour: i64) -> Option<f64> {
+    let cell = projection_window(projection, hour, 1)?;
+    (cell.present_sessions == projection.sessions && cell.scheduled > 0)
+        .then_some(cell.zeros as f64 / cell.scheduled as f64)
+}
+
+fn projection_support_refusals(
+    observed: &ScreenReduced,
+    generated: &ScreenReduced,
+) -> Vec<RefusalRec> {
+    let mut hours: Vec<u32> = observed
+        .parent_counts
+        .keys()
+        .chain(generated.parent_counts.keys())
+        .copied()
+        .collect();
+    hours.sort_unstable();
+    hours.dedup();
+    let mut refusals = Vec::new();
+    for hour in hours {
+        for &bin in PARENT_COUNT_BIN_NAMES {
+            if projection_bin_count(observed, hour, bin) > 0
+                && projection_bin_count(generated, hour, bin) == 0
+            {
+                refusals.push(RefusalRec::new(
+                    "count_substitution",
+                    format!("hour {hour} bin {bin}"),
+                    "observed support with zero generated support",
+                ));
+            }
+        }
+    }
+    refusals
 }
 
 pub fn evaluate_cell(ctx: &ScreenContext, cell: &Cell, seeds: &[u64]) -> LabResult<CellVerdict> {
@@ -1475,6 +1656,187 @@ pub fn evaluate_cells_parallel(
 /// # Errors
 /// A malformed session record, or the section 3.5 unreachability refusal.
 pub fn verdict_from_walks(
+    ctx: &ScreenContext,
+    cell: &Cell,
+    walks: &[SeedWalk],
+) -> LabResult<CellVerdict> {
+    let observed = &ctx.observed_projection;
+    let obs_bins = projection_bins(observed);
+    let obs_total: u64 = obs_bins.values().sum();
+    let mut a1_rows = Vec::new();
+    let mut a2_rows = Vec::new();
+    let mut a3_rows = Vec::new();
+    let mut refusals = Vec::new();
+    let mut a4_refusals = Vec::new();
+    let mut losses = Vec::new();
+    let mut tv_readings = Vec::new();
+    let mut fano_60_readings = Vec::new();
+    let mut p99_60_readings = Vec::new();
+    let mut fano_tiebreak_readings = Vec::new();
+
+    for walk in walks {
+        let seed = walk.seed;
+        if let Some(r) = &walk.refusal {
+            refusals.push(json!({"seed":seed,"refusal":r}));
+            a4_refusals.push(json!({"seed":seed,"refusal":r}));
+            continue;
+        }
+        let generated = &walk.projection;
+        let generated_marginal = projection_marginal(generated);
+        let gen_bins = projection_bins(generated);
+        let gen_total: u64 = gen_bins.values().sum();
+        let tv = (obs_total > 0 && gen_total > 0).then(|| {
+            PARENT_COUNT_BINS
+                .iter()
+                .map(|&(lo, _)| {
+                    let bin = bin_name(lo);
+                    (obs_bins.get(bin).copied().unwrap_or(0) as f64 / obs_total as f64
+                        - gen_bins.get(bin).copied().unwrap_or(0) as f64 / gen_total as f64)
+                        .abs()
+                })
+                .sum::<f64>()
+                / 2.0
+        });
+        tv_readings.push(tv);
+
+        let mut all_fano = Vec::new();
+        let mut fano_60 = Vec::new();
+        let mut p99_60 = Vec::new();
+        for &hour in &ctx.hours {
+            for window in [1_i64, 5, 60] {
+                if let (Some(g), Some(o)) = (
+                    projection_fano(generated, hour, window),
+                    projection_fano(observed, hour, window),
+                ) && g > 0.0
+                    && o > 0.0
+                {
+                    let reading = (g / o).ln().abs();
+                    all_fano.push(reading);
+                    if window == 60 {
+                        fano_60.push(reading);
+                    }
+                }
+            }
+            if let (Some(g), Some(o)) = (
+                projection_count_quantile(generated, hour, 60, 0.99),
+                projection_count_quantile(observed, hour, 60, 0.99),
+            ) && g > 0.0
+                && o > 0.0
+            {
+                p99_60.push((g / o).ln().abs());
+            }
+        }
+        let mean = |xs: &[f64]| (!xs.is_empty()).then(|| xs.iter().sum::<f64>() / xs.len() as f64);
+        fano_tiebreak_readings.push(mean(&all_fano));
+        fano_60_readings.push(mean(&fano_60));
+        p99_60_readings.push(mean(&p99_60));
+
+        let support_refusals = projection_support_refusals(observed, generated);
+        let mut failing_cells = Vec::new();
+        let mut required = serde_json::Map::new();
+        for hour in FAIL_HOURS_300 {
+            let hour_u32 = hour;
+            for &bin in PARENT_COUNT_BIN_NAMES {
+                if bin == "0" {
+                    continue;
+                }
+                let required_here =
+                    projection_bin_count(observed, hour_u32, bin) >= MIN_MINUTES_CELL;
+                if !required_here {
+                    continue;
+                }
+                let generated_count = projection_bin_count(generated, hour_u32, bin);
+                required.insert(format!("{hour}:{bin}"), json!(generated_count));
+                if generated_count < MIN_MINUTES_CELL {
+                    failing_cells.push(format!("{hour}:{bin}"));
+                }
+            }
+        }
+        let support = support_refusals.is_empty() && failing_cells.is_empty();
+        for refusal in &support_refusals {
+            refusals.push(json!({"seed":seed,"scope":refusal.scope,
+                "cell":refusal.cell,"reason":refusal.reason}));
+        }
+        a1_rows.push(json!({"seed":seed,"passed":support,
+            "failing_cells":failing_cells,"required_bin_counts":required}));
+
+        let mut rate_ok = true;
+        let mut zero_ok = true;
+        for &hour in &ctx.hours {
+            let ratio = projection_mean_parents(generated, hour)
+                .zip(projection_mean_parents(observed, hour))
+                .and_then(|(g, o)| (o > 0.0).then_some(g / o));
+            let pass = ratio.is_some_and(|r| (MEAN_RATE_BAND.0..=MEAN_RATE_BAND.1).contains(&r));
+            rate_ok &= pass;
+            a2_rows.push(json!({"seed":seed,"hour":hour,"ratio":ratio,"passed":pass}));
+            let zero_ratio = projection_zero_fraction(generated, hour)
+                .zip(projection_zero_fraction(observed, hour))
+                .and_then(|(g, o)| (o > 0.0).then_some(g / o));
+            let zero_pass =
+                zero_ratio.is_some_and(|r| (ZERO_COUNT_BAND.0..=ZERO_COUNT_BAND.1).contains(&r));
+            zero_ok &= zero_pass;
+            a3_rows.push(
+                json!({"seed":seed,"hour":hour,"ratio":zero_ratio,"passed":zero_pass}),
+            );
+        }
+
+        let gap_ok = gap_within_tolerance(ctx, walk.realized_mean_gap_s);
+        if !gap_ok {
+            let mean_gap = ScreenRefusal {
+                variant: "mean_gap".into(),
+                clock_ns: 0,
+                detail: format!(
+                    "realized {} against declared {}",
+                    walk.realized_mean_gap_s, ctx.profile.scalars.mean_event_duration_s
+                ),
+            };
+            refusals.push(json!({"seed":seed,"refusal":mean_gap}));
+            a4_refusals.push(json!({"seed":seed,"refusal":mean_gap}));
+        }
+        if support && rate_ok && zero_ok && gap_ok {
+            losses.push(composition_loss(
+                &ctx.observed_marginal,
+                &generated_marginal,
+            )?);
+        }
+    }
+
+    let a1_pass = a1_rows.len() == walks.len() && a1_rows.iter().all(|v| v["passed"] == true);
+    let a2_pass = a2_rows.len() == walks.len() * ctx.hours.len()
+        && a2_rows.iter().all(|v| v["passed"] == true);
+    let a3_pass = a3_rows.len() == walks.len() * ctx.hours.len()
+        && a3_rows.iter().all(|v| v["passed"] == true);
+    let a4_pass = !walks.is_empty()
+        && a4_refusals.is_empty()
+        && walks
+            .iter()
+            .all(|walk| gap_within_tolerance(ctx, walk.realized_mean_gap_s));
+    let admissible = a1_pass && a2_pass && a3_pass && a4_pass;
+    Ok(CellVerdict {
+        cell: cell.clone(),
+        fitted_params: cell.fitted_params(),
+        a1: json!({"passed":a1_pass,"per_seed":a1_rows}),
+        a2: json!({"passed":a2_pass,"per_seed_hour":a2_rows}),
+        a3: json!({"passed":a3_pass,"per_seed_hour":a3_rows}),
+        a4: json!({"passed":a4_pass,"refusal":a4_refusals.first().cloned(),
+                   "per_seed":a4_refusals}),
+        admissible,
+        loss: admissible.then(|| seed_median(&losses)).flatten(),
+        reported: json!({
+            "tv_six_bin":seed_median(&tv_readings),
+            "fano_60_log_ratio":seed_median(&fano_60_readings),
+            "count_p99_60_log_ratio":seed_median(&p99_60_readings),
+            "fano_tiebreak":seed_median(&fano_tiebreak_readings)
+        }),
+        refusals,
+        cost_s: walks.iter().map(|walk| walk.cost_s).sum(),
+    })
+}
+
+/// The pre-Step-4 JSON/`ObsContext` path, retained only as a differential
+/// oracle until the typed verdict has been proven against all condition tests.
+#[cfg(test)]
+fn verdict_from_walks_legacy(
     ctx: &ScreenContext,
     cell: &Cell,
     walks: &[SeedWalk],
@@ -2584,6 +2946,12 @@ mod tests {
         let mut source = one_parent(first_child, 2, 62 * MINUTE_NS);
         let projected = project_stream(&mut source, start, end, 0, 1).expect("no rotation refusal");
         assert_eq!(projected.sessions.len(), 2, "the walk crossed one open");
+        assert_eq!(
+            projected.projection,
+            ScreenReduced::from_sessions(&projected.sessions)
+                .expect("the legacy sessions reduce cleanly"),
+            "the direct projection must merge sessions exactly like the legacy JSON path"
+        );
         assert_ne!(
             session_segment_at(first_child, 0)
                 .expect("a segment")
@@ -2854,8 +3222,10 @@ mod tests {
     /// exactly 1 and every distance exactly 0, so it is admissible by
     /// construction and each test can break one condition on purpose.
     fn perfect_walk(ctx: &ScreenContext, seed: u64, sessions: Vec<Value>) -> SeedWalk {
+        let projection = ScreenReduced::from_sessions(&sessions).expect("typed projection");
         SeedWalk {
             seed,
+            projection,
             sessions,
             parents: 2,
             prints: 0,
@@ -2863,6 +3233,63 @@ mod tests {
             refusal: None,
             cost_s: 0.0,
         }
+    }
+
+    fn assert_typed_verdict_matches_legacy(
+        ctx: &ScreenContext,
+        cell: &Cell,
+        walks: &[SeedWalk],
+    ) {
+        let typed = verdict_from_walks(ctx, cell, walks).expect("typed verdict");
+        let legacy = verdict_from_walks_legacy(ctx, cell, walks).expect("legacy verdict");
+        assert_eq!(
+            serde_json::to_value(typed).expect("typed JSON"),
+            serde_json::to_value(legacy).expect("legacy JSON")
+        );
+    }
+
+    #[test]
+    fn typed_verdict_matches_the_json_oracle_across_gate_outcomes() {
+        let observed = observed_sessions();
+        let ctx = ScreenContext::over(observed.clone()).expect("a screen context");
+        let cell = Cell::WallMmpp {
+            occupancy: 0.3,
+            rate_ratio: 20.0,
+            tau_s: 60.0,
+        };
+        let perfect = perfect_walk(&ctx, 201, observed.clone());
+        assert_typed_verdict_matches_legacy(&ctx, &cell, std::slice::from_ref(&perfect));
+
+        let mut holed = observed.clone();
+        for session in &mut holed {
+            let rows = session["block1_hist"].as_array_mut().expect("block1 rows");
+            rows.retain(|row| row["hour"].as_u64() != Some(19));
+        }
+        let holed = perfect_walk(&ctx, 202, holed);
+        assert_typed_verdict_matches_legacy(&ctx, &cell, &[holed]);
+
+        let mut distorted = observed;
+        for session in &mut distorted {
+            if let Some(cell) = session["block2"]
+                .get_mut("20")
+                .and_then(|hour| hour.get_mut("1"))
+            {
+                cell["zero_windows"] = json!(0);
+            }
+            if let Some(cell) = session["block2"]
+                .get_mut("20")
+                .and_then(|hour| hour.get_mut("60"))
+            {
+                let scheduled = cell["scheduled_windows"].as_u64().expect("scheduled");
+                cell["scheduled_windows"] = json!(scheduled * 2);
+            }
+        }
+        let distorted = perfect_walk(&ctx, 203, distorted);
+        assert_typed_verdict_matches_legacy(&ctx, &cell, &[distorted]);
+
+        let mut gap = perfect;
+        gap.realized_mean_gap_s *= 2.0;
+        assert_typed_verdict_matches_legacy(&ctx, &cell, &[gap]);
     }
 
     #[test]
@@ -3055,6 +3482,7 @@ mod tests {
         };
         let refused = SeedWalk {
             seed: 202,
+            projection: ScreenReduced::default(),
             sessions: Vec::new(),
             parents: 0,
             prints: 0,
