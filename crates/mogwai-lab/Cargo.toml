@@ -55,5 +55,8 @@ hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "mogwai-data/hotpath-alloc"
 name = "screen_projection_bench"
 required-features = ["hotpath"]
 
+[[example]]
+name = "stage_a_batch_bench"
+
 [lints]
 workspace = true

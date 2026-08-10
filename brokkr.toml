@@ -267,6 +267,10 @@ package = "mogwai-lab"
 example = "screen_projection_bench"
 features = ["hotpath"]
 
+[mogwai.targets.stage_a_batch]
+package = "mogwai-lab"
+example = "stage_a_batch_bench"
+
 # NOT REGISTERED: `fill_walk_bench`, also an example target in `mogwai-data`.
 # It is a criterion harness that parses `--bench` itself - that is what lets it
 # live in an example target at all - so it would collide with the mode flag.

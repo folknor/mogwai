@@ -62,15 +62,19 @@ pub const STAGE_A_GEN_CELL_BUDGET_S: f64 = 50.0;
 /// AMENDED 2026-08-09 with the above, from the frozen 28_800 (8 h). The total
 /// is cells times per-cell price, so raising the per-cell price without raising
 /// the total would have failed the run at the ceiling instead of at the probe.
-/// At 7.0 the model reads 5,376 s of kernel coarse, 950 s of family-1 coarse,
-/// 25,200 s of kernel refinement and 4,000 s of family-1 refinement, so about
-/// 35,526 s; 39,600 (11 h) carries the same tenth of margin.
+/// At 7.0 the model reads 5,376 s of kernel coarse and 950 s of family-1
+/// coarse. The refinement caps are totals shared by both rounds, not per-round
+/// allowances: kernel refinement is therefore 3 x 600 x 7 = 12,600 s and
+/// family-1 refinement is 40 x 50 = 2,000 s. The complete serial ceiling model
+/// is about 20,926 s.
 ///
-/// The refinement pass is 82 percent of that and its product is a finer loss
-/// ORDERING over cells Stage B then truncates to 24 per family, so whether it
-/// should run at all is a live question recorded in `notes/todo.md`. It is not
-/// settled here: this constant funds the pass as frozen rather than quietly
-/// deleting it.
+/// The earlier comment double-counted refinement by spending each family's cap
+/// in both rounds, contrary to the driver's `cap - used` accounting. The
+/// 39,600 s ceiling remains deliberately unchanged: correcting an overestimate
+/// does not require tightening a frozen ceiling during the optimization round.
+/// The refinement product is a finer loss ordering over cells Stage B then
+/// truncates to 24 per family, so whether it should run at all remains a
+/// separate question.
 pub const STAGE_A_BUDGET_S: f64 = 39_600.0;
 pub const STAGE_A_RSS_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
@@ -301,9 +305,9 @@ pub struct RefinementRound {
     pub unevaluated: usize,
 }
 
-const LATTICE_SCALE: u32 = 1 << REFINEMENT_DEPTH;
+pub(crate) const LATTICE_SCALE: u32 = 1 << REFINEMENT_DEPTH;
 
-fn axis_grids(family: Family) -> Vec<(Vec<f64>, bool)> {
+pub(crate) fn axis_grids(family: Family) -> Vec<(Vec<f64>, bool)> {
     match family {
         Family::EventMarkov => vec![(log_grid(1e-6, 0.5, 3), true)],
         Family::WallMmpp => vec![
@@ -322,7 +326,7 @@ fn axis_grids(family: Family) -> Vec<(Vec<f64>, bool)> {
     }
 }
 
-fn cell_from_coordinates(family: Family, coordinates: &[u32]) -> Cell {
+pub(crate) fn cell_from_coordinates(family: Family, coordinates: &[u32]) -> Cell {
     let axes = axis_grids(family);
     let value = |axis: usize| {
         let index = coordinates[axis];
@@ -778,6 +782,15 @@ pub struct ScreenWork {
     pub prints: u64,
 }
 
+/// One uncached cell evaluation plus the work represented by its seed walks.
+/// Batch instruments use the local counters instead of differencing the
+/// process totals, which remains correct when cells run concurrently.
+pub struct CellEvaluation {
+    pub verdict: CellVerdict,
+    pub parents: u64,
+    pub prints: u64,
+}
+
 static CELLS_EVALUATED: AtomicU64 = AtomicU64::new(0);
 static PARENTS_WALKED: AtomicU64 = AtomicU64::new(0);
 static PRINTS_PROJECTED: AtomicU64 = AtomicU64::new(0);
@@ -1085,6 +1098,14 @@ fn gap_within_tolerance(ctx: &ScreenContext, realized_s: f64) -> bool {
 }
 
 pub fn evaluate_cell(ctx: &ScreenContext, cell: &Cell, seeds: &[u64]) -> LabResult<CellVerdict> {
+    Ok(evaluate_cell_with_work(ctx, cell, seeds)?.verdict)
+}
+
+pub fn evaluate_cell_with_work(
+    ctx: &ScreenContext,
+    cell: &Cell,
+    seeds: &[u64],
+) -> LabResult<CellEvaluation> {
     CELLS_EVALUATED.fetch_add(1, Ordering::Relaxed);
     let started = Instant::now();
     let mut walks = Vec::new();
@@ -1096,7 +1117,11 @@ pub fn evaluate_cell(ctx: &ScreenContext, cell: &Cell, seeds: &[u64]) -> LabResu
     // records is not, but it is billed here anyway so the artifact's per-cell
     // price is the whole price.
     verdict.cost_s = started.elapsed().as_secs_f64();
-    Ok(verdict)
+    Ok(CellEvaluation {
+        verdict,
+        parents: walks.iter().map(|walk| walk.parents).sum(),
+        prints: walks.iter().map(|walk| walk.prints).sum(),
+    })
 }
 
 /// A1 to A4, the loss and the reported diagnostics over walks that have already

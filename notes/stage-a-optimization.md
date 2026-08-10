@@ -4,7 +4,9 @@ Owner-defined step, 2026-08-09: the full Stage A screen run does not start
 until this optimization round has run and the owner is satisfied with the
 cost. Grounds: the standing runtime-cost ruling in `AGENTS.md` (a
 multi-hour computation is presumptively a defect to optimize before it is
-run), against a screen priced at ~9.9 h.
+run), against a screen priced at ~9.9 h when the round opened and at
+~5.8 h once step 0 corrected the refinement double-count (see the
+baseline table).
 
 This is a `notes/`-class document: transient, no truth guarantee, nothing
 durable may cite it. It dies when the round ends and brick A runs.
@@ -66,7 +68,24 @@ Two pieces of frozen-contract vocabulary used below:
 |---|---:|---:|
 | kernel family cell, 2 seeds (wall_mmpp / log_ou_cox / self_exciting) | 5.96-6.40 s | 7.0 s |
 | family 1 cell (real generator), 2 seeds | 11.8 s | 50 s |
-| Stage A total, cost model (coarse 6,326 s + refinement 29,200 s) | ~35,526 s = 9.9 h | 39,600 s |
+| Stage A total, cost model (coarse 6,326 s + refinement 14,600 s) | ~20,926 s = 5.8 h | 39,600 s |
+
+CORRECTED 2026-08-10, during step 0. The model above read 35,526 s
+(9.9 h) until the batch estimator forced the question of what the
+refinement caps mean. They are TOTALS shared by both rounds, not
+per-round allowances: the driver accumulates `used` and passes
+`cap - used` to round 2, so a family spends its cap once. The old model
+spent it in both rounds, double-counting refinement - 29,200 s where the
+driver permits 14,600 s. The `STAGE_A_BUDGET_S` doc comment carried the
+same error and is corrected with it. The 39,600 s ceiling is deliberately
+UNCHANGED: correcting an overestimate is not grounds for tightening a
+frozen ceiling mid-round.
+
+Every "9.9 h" below is the superseded figure, kept where it records what
+was believed at the time. The round's premise is unaffected in kind -
+5.8 h is still a multi-hour computation and still presumptively a defect
+to optimize - but any ratio computed against 9.9 h now overstates the
+win by about 1.7x.
 
 The A0 finding that names the target: **the projection through
 `SessionAcc` dominates a screen cell, not the draw**. The cadence-only
@@ -546,8 +565,20 @@ stratum estimate toward its family-and-level pooled variance, or at
 minimum apply a variance floor. Otherwise one noisy three-cell stratum
 consumes the entire ten-cell adaptive allocation.
 
+The implemented version makes that rule exact: variance is the equal
+weight mean of the stratum sample variance and the family-and-level
+pooled variance, with a floating-point variance floor. The ten integer
+allocations use Hamilton largest remainders over the resulting scores.
+The measured pilot assigned one extra cell to ten distinct strata, so no
+stratum captured more than one adaptive slot.
+
 The pilot exists only to freeze panel version 1: its results select the
 manifest and never become benchmark rows of record.
+
+The exact pilot artifact is committed beside the manifest. The manifest
+hash includes the canonical pilot hash, and a test rebuilds the complete
+manifest from that committed pilot. A pilot retained only under `target/`
+would make the adaptive selection self-consistent but unreproducible.
 
 #### Step 0 decisions, as recorded
 
@@ -635,9 +666,20 @@ freezes the measuring instrument before step 1 goes near
 #### Step 0 exit
 
 Step 0 ends only when there is a quick baseline row, a full baseline row,
-a reproducible plan hash, a maximum-cap estimate against 39,600 s, and
-agreement between the two validation halves within an explicitly reported
-uncertainty.
+a reproducible plan hash, a maximum-cap estimate against 39,600 s, and a
+defensible validation reading.
+
+IMPLEMENTATION REVIEW CORRECTION: the 72-cell design has only one
+probability sample in 44 of its 54 strata. It therefore cannot produce
+two independent estimates of every stratum, and an ordinary within-stratum
+bootstrap gives those 44 strata exactly zero variance. The batch target
+must not print such an interval or describe a family-level split as two
+stratified halves. It reports the 10 comparable strata, the 44 singleton
+strata and `design_based_interval_available=0`. Mapping validation remains
+open until a separate validation expansion or a larger panel supplies at
+least two independent probability samples per stratum. This does not
+invalidate the panel as a fixed optimization stopwatch; it prevents the
+panel from overstating its extrapolation certainty.
 
 ### Step 1 - collapse the child loop
 
@@ -840,9 +882,10 @@ It stays entirely in the free lane.
 Roughly 2x to 3x single core from the projector work, and roughly 10x to
 20x wall clock from parallelism on a 32-CPU host, allowing for physical
 core limits, memory bandwidth and frequency reduction under load. Taken
-together that is a plausible 20x to 40x end to end, which would put the
-9.9-hour estimate somewhere in the 15 to 30 minute region. This is a
-hypothesis to validate against the cost probe, not a promised result.
+together that is a plausible 20x to 40x end to end, which against the
+CORRECTED 5.8-hour model puts the screen somewhere in the 9 to 18 minute
+region. This is a hypothesis to validate against the cost probe, not a
+promised result.
 
 ### Boundary risks to carry through all four steps
 
@@ -858,7 +901,7 @@ The risk is semantic boundary behavior, not numerical arithmetic:
 
 ## The measurement instrument this round needs
 
-A 9.9-hour edit-measure loop is not an optimization loop. The round needs
+A multi-hour edit-measure loop is not an optimization loop. The round needs
 two DISTINCT instruments, and today it has only one.
 
 - A short profiler that says WHERE the time goes. The existing
@@ -904,11 +947,14 @@ time, parents and prints of each sample. So the benchmark reports:
     estimated_full_serial_seconds =
         sum(stratum_population * mean_sample_task_seconds)
 
-Refinement survivors are not known before the screen runs, so refinement
-is reported as an ENVELOPE: a central estimate from the sampled mean, a
-conservative estimate from the sampled p90, and a maximum-cap estimate
-from the frozen refinement cell caps. That is more honest than pretending
-one probe cell predicts every parameter point.
+Refinement survivors are not known before the screen runs, so the two
+uncertainties are named separately. Population uncertainty is represented
+by the MAXIMUM-CAP assumption. Cost uncertainty is represented by the
+sampled MEAN or sampled P90. The concrete readings are therefore
+`maximum_cap_mean_serial_cpu_s`, `maximum_cap_p90_serial_cpu_s`,
+`maximum_cap_mean_scheduled_wall_s` and
+`maximum_cap_p90_scheduled_wall_s`. Calling one scalar merely
+`maximum_cap_s` would hide which cost statistic it used.
 
 ### Parallel scaling, measured separately
 
@@ -921,12 +967,15 @@ execution times and the overall batch wall time, hence:
                             / effective_concurrency
 
 Because refinement has barriers, dividing by 32 is not good enough. The
-estimator should also REPLAY the sampled task durations through the
-actual Stage A task graph - a cheap scheduling simulation: populate the
-full coarse task counts with sampled durations, simulate the configured
-worker count, apply the family refinement barriers, populate both
-refinement rounds up to their frozen caps, and report predicted wall time
-and tail utilization. That models slow `EventMarkov` stragglers properly.
+estimator also REPLAYS the sampled task durations through the Stage A task
+graph: populate the full coarse task counts with sampled durations,
+simulate the configured worker count, apply the family refinement
+barriers, and populate both refinement rounds while spending each
+family's cap ONCE across the two rounds. It evaluates every feasible
+per-family round split and retains the greatest modeled wall. The current
+budget-facing replay preserves the driver's family serialization, making
+it conservative relative to the later cross-family scheduler, and reports
+tail utilization.
 
 ### Required output
 
@@ -962,17 +1011,19 @@ demand.
 
 ### Validating that the estimate maps
 
-Before the number is trusted:
+Before the estimate is trusted as a mapping rather than a stopwatch:
 
-1. split the fixed panel into two independently selected halves and
-   compare their per-stratum estimates,
-2. bootstrap cells within each stratum and report a confidence interval,
+1. run a separate validation expansion with at least two independent
+   probability samples in every stratum,
+2. compare its two per-stratum estimates and bootstrap within strata,
 3. require parent and print counts to stay exact across implementation
    changes,
 4. eventually compare the estimate against the first real Stage A run and
-   RETAIN that calibration.
+   retain that calibration.
 
-If the halves disagree substantially, increase sampling only in the
+The fixed 72-cell panel alone cannot perform items 1 and 2 because 44
+strata are singletons. Its full row reports that fact explicitly. If the
+expanded halves disagree substantially, increase sampling only in the
 unstable family or parameter region. Do not lengthen every benchmark
 equally.
 

@@ -1,0 +1,4067 @@
+{
+  "schema_version": 2,
+  "estimator_version": 2,
+  "selection_algorithm_version": 1,
+  "anchor_rule_version": 1,
+  "measurement_sha256": "60d755e8b76794f6c9e4f2092eca45662d24b17d168cfbe95443e505f773d253",
+  "tape_protocol_version": 12,
+  "arrival_kernel_version": 2,
+  "selection_seeds": {
+    "anchor": 4705772638496239665,
+    "pilot": 5785239099935764529,
+    "final_selection": 5064665298315980849,
+    "pilot_walk": 201
+  },
+  "refinement_caps": [
+    {
+      "family": "event_markov",
+      "cap": 40
+    },
+    {
+      "family": "wall_mmpp",
+      "cap": 600
+    },
+    {
+      "family": "log_ou_cox",
+      "cap": 600
+    },
+    {
+      "family": "self_exciting",
+      "cap": 600
+    }
+  ],
+  "pilot_readings_sha256": "cc94be5fb89337f41c31a483dc90d85996193e62540bd91911c0ce6b4ba25fdc",
+  "quantile_boundaries": {
+    "event_markov:0": [
+      36
+    ],
+    "event_markov:1": [
+      34
+    ],
+    "event_markov:2": [
+      35
+    ],
+    "log_ou_cox:0": [
+      16,
+      20
+    ],
+    "log_ou_cox:1": [
+      18,
+      22
+    ],
+    "log_ou_cox:2": [
+      18,
+      22
+    ],
+    "self_exciting:0": [
+      28,
+      16
+    ],
+    "self_exciting:1": [
+      30,
+      16
+    ],
+    "self_exciting:2": [
+      30,
+      16
+    ],
+    "wall_mmpp:0": [
+      8,
+      12,
+      20
+    ],
+    "wall_mmpp:1": [
+      10,
+      12,
+      22
+    ],
+    "wall_mmpp:2": [
+      10,
+      12,
+      22
+    ]
+  },
+  "strata": [
+    {
+      "id": {
+        "family": "event_markov",
+        "level": 0,
+        "region": 0
+      },
+      "population_size": 10,
+      "anchor_count": 1,
+      "probability_population_size": 9,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 5.021550563333333,
+      "pilot_sample_variance_s2": 0.2319846518046959,
+      "pooled_variance_s2": 0.12620974403047278,
+      "shrunk_variance_s2": 0.17909719791758433,
+      "allocation_score": 1.6996832124111652
+    },
+    {
+      "id": {
+        "family": "event_markov",
+        "level": 0,
+        "region": 1
+      },
+      "population_size": 9,
+      "anchor_count": 0,
+      "probability_population_size": 9,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 5.342676476,
+      "pilot_sample_variance_s2": 0.006198319431986448,
+      "pooled_variance_s2": 0.12620974403047278,
+      "shrunk_variance_s2": 0.06620403173122962,
+      "allocation_score": 1.00185596964468
+    },
+    {
+      "id": {
+        "family": "event_markov",
+        "level": 1,
+        "region": 0
+      },
+      "population_size": 9,
+      "anchor_count": 0,
+      "probability_population_size": 9,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 5.052713727666667,
+      "pilot_sample_variance_s2": 0.10151315471211066,
+      "pooled_variance_s2": 0.0642168289434148,
+      "shrunk_variance_s2": 0.08286499182776272,
+      "allocation_score": 1.1525657474464552
+    },
+    {
+      "id": {
+        "family": "event_markov",
+        "level": 1,
+        "region": 1
+      },
+      "population_size": 9,
+      "anchor_count": 0,
+      "probability_population_size": 9,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 5.333008414999999,
+      "pilot_sample_variance_s2": 0.00010508383595817207,
+      "pooled_variance_s2": 0.0642168289434148,
+      "shrunk_variance_s2": 0.03216095638968648,
+      "allocation_score": 0.6989093532714294
+    },
+    {
+      "id": {
+        "family": "event_markov",
+        "level": 2,
+        "region": 0
+      },
+      "population_size": 18,
+      "anchor_count": 0,
+      "probability_population_size": 18,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 5.091439895666666,
+      "pilot_sample_variance_s2": 0.015331969414895615,
+      "pooled_variance_s2": 0.021118721407102914,
+      "shrunk_variance_s2": 0.018225345410999266,
+      "allocation_score": 1.0769364551308291
+    },
+    {
+      "id": {
+        "family": "event_markov",
+        "level": 2,
+        "region": 1
+      },
+      "population_size": 18,
+      "anchor_count": 1,
+      "probability_population_size": 17,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 5.311326342,
+      "pilot_sample_variance_s2": 0.001202297142035153,
+      "pooled_variance_s2": 0.021118721407102914,
+      "shrunk_variance_s2": 0.011160509274569033,
+      "allocation_score": 0.7792726506522439
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 0,
+        "region": 0
+      },
+      "population_size": 72,
+      "anchor_count": 0,
+      "probability_population_size": 72,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.924967390666667,
+      "pilot_sample_variance_s2": 0.00025037229238349194,
+      "pooled_variance_s2": 0.00305342085223459,
+      "shrunk_variance_s2": 0.001651896572309041,
+      "allocation_score": 1.7110527874535546
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 0,
+        "region": 1
+      },
+      "population_size": 72,
+      "anchor_count": 0,
+      "probability_population_size": 72,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.924842149,
+      "pilot_sample_variance_s2": 0.00008845542927599525,
+      "pooled_variance_s2": 0.00305342085223459,
+      "shrunk_variance_s2": 0.0015709381407552926,
+      "allocation_score": 1.6686329766925
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 0,
+        "region": 2
+      },
+      "population_size": 54,
+      "anchor_count": 0,
+      "probability_population_size": 54,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.917864550333333,
+      "pilot_sample_variance_s2": 0.000021775534513401003,
+      "pooled_variance_s2": 0.00305342085223459,
+      "shrunk_variance_s2": 0.0015375981933739955,
+      "allocation_score": 1.2396030210293427
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 0,
+        "region": 3
+      },
+      "population_size": 54,
+      "anchor_count": 0,
+      "probability_population_size": 54,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.930818031333333,
+      "pilot_sample_variance_s2": 0.0005928885606806399,
+      "pooled_variance_s2": 0.00305342085223459,
+      "shrunk_variance_s2": 0.001823154706457615,
+      "allocation_score": 1.346824766298592
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 0,
+        "region": 4
+      },
+      "population_size": 72,
+      "anchor_count": 0,
+      "probability_population_size": 72,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.8633156136666664,
+      "pilot_sample_variance_s2": 0.006503408259084027,
+      "pooled_variance_s2": 0.00305342085223459,
+      "shrunk_variance_s2": 0.004778414555659308,
+      "allocation_score": 2.9413032174958396
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 0,
+        "region": 5
+      },
+      "population_size": 72,
+      "anchor_count": 1,
+      "probability_population_size": 71,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.903372788,
+      "pilot_sample_variance_s2": 0.0056553951610789285,
+      "pooled_variance_s2": 0.00305342085223459,
+      "shrunk_variance_s2": 0.004354408006656759,
+      "allocation_score": 2.7496125895386863
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 0,
+        "region": 6
+      },
+      "population_size": 54,
+      "anchor_count": 0,
+      "probability_population_size": 54,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.843187773666667,
+      "pilot_sample_variance_s2": 0.007503455616706548,
+      "pooled_variance_s2": 0.00305342085223459,
+      "shrunk_variance_s2": 0.005278438234470569,
+      "allocation_score": 2.326717789637894
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 0,
+        "region": 7
+      },
+      "population_size": 54,
+      "anchor_count": 0,
+      "probability_population_size": 54,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.917784154,
+      "pilot_sample_variance_s2": 0.003511197791441132,
+      "pooled_variance_s2": 0.00305342085223459,
+      "shrunk_variance_s2": 0.003282309321837861,
+      "allocation_score": 1.811160475929503
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 1,
+        "region": 0
+      },
+      "population_size": 198,
+      "anchor_count": 0,
+      "probability_population_size": 198,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.914732295,
+      "pilot_sample_variance_s2": 0.00013391113470478903,
+      "pooled_variance_s2": 0.003919236146051396,
+      "shrunk_variance_s2": 0.002026573640378093,
+      "allocation_score": 5.220920119681555
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 1,
+        "region": 1
+      },
+      "population_size": 174,
+      "anchor_count": 0,
+      "probability_population_size": 174,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.926386352666667,
+      "pilot_sample_variance_s2": 0.00023481571713133303,
+      "pooled_variance_s2": 0.003919236146051396,
+      "shrunk_variance_s2": 0.0020770259315913645,
+      "allocation_score": 4.635583157284134
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 1,
+        "region": 2
+      },
+      "population_size": 162,
+      "anchor_count": 0,
+      "probability_population_size": 162,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.904738094666667,
+      "pilot_sample_variance_s2": 0.00018046144043163537,
+      "pooled_variance_s2": 0.003919236146051396,
+      "shrunk_variance_s2": 0.002049848793241516,
+      "allocation_score": 4.303506246115542
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 1,
+        "region": 3
+      },
+      "population_size": 144,
+      "anchor_count": 0,
+      "probability_population_size": 144,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.882860565666667,
+      "pilot_sample_variance_s2": 0.0012211429630973277,
+      "pooled_variance_s2": 0.003919236146051396,
+      "shrunk_variance_s2": 0.0025701895545743618,
+      "allocation_score": 4.299651444162234
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 1,
+        "region": 4
+      },
+      "population_size": 186,
+      "anchor_count": 0,
+      "probability_population_size": 186,
+      "probability_sample_count": 2,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.876358605666667,
+      "pilot_sample_variance_s2": 0.006600119344347408,
+      "pooled_variance_s2": 0.003919236146051396,
+      "shrunk_variance_s2": 0.005259677745199402,
+      "allocation_score": 7.9537328035922625
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 1,
+        "region": 5
+      },
+      "population_size": 162,
+      "anchor_count": 0,
+      "probability_population_size": 162,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.847670732333333,
+      "pilot_sample_variance_s2": 0.006461600166239383,
+      "pooled_variance_s2": 0.003919236146051396,
+      "shrunk_variance_s2": 0.00519041815614539,
+      "allocation_score": 6.916259860229421
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 1,
+        "region": 6
+      },
+      "population_size": 153,
+      "anchor_count": 0,
+      "probability_population_size": 153,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.827896718666667,
+      "pilot_sample_variance_s2": 0.003830656837895985,
+      "pooled_variance_s2": 0.003919236146051396,
+      "shrunk_variance_s2": 0.0038749464919736907,
+      "allocation_score": 5.663599226198469
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 1,
+        "region": 7
+      },
+      "population_size": 135,
+      "anchor_count": 0,
+      "probability_population_size": 135,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.8609963776666665,
+      "pilot_sample_variance_s2": 0.014240242595196753,
+      "pooled_variance_s2": 0.003919236146051396,
+      "shrunk_variance_s2": 0.009079739370624075,
+      "allocation_score": 7.605220422856068
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 2,
+        "region": 0
+      },
+      "population_size": 540,
+      "anchor_count": 0,
+      "probability_population_size": 540,
+      "probability_sample_count": 2,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.913610732,
+      "pilot_sample_variance_s2": 0.00005332721065886547,
+      "pooled_variance_s2": 0.0011275107011442847,
+      "shrunk_variance_s2": 0.0005904189559015751,
+      "allocation_score": 7.687022317962614
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 2,
+        "region": 1
+      },
+      "population_size": 498,
+      "anchor_count": 0,
+      "probability_population_size": 498,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.921767426,
+      "pilot_sample_variance_s2": 0.00013327855083724102,
+      "pooled_variance_s2": 0.0011275107011442847,
+      "shrunk_variance_s2": 0.0006303946259907629,
+      "allocation_score": 7.3149737569002395
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 2,
+        "region": 2
+      },
+      "population_size": 459,
+      "anchor_count": 0,
+      "probability_population_size": 459,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.9187753786666666,
+      "pilot_sample_variance_s2": 0.00006557329653743461,
+      "pooled_variance_s2": 0.0011275107011442847,
+      "shrunk_variance_s2": 0.0005965419988408597,
+      "allocation_score": 6.561949156117279
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 2,
+        "region": 3
+      },
+      "population_size": 423,
+      "anchor_count": 1,
+      "probability_population_size": 422,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.939917624,
+      "pilot_sample_variance_s2": 0.00008690291564054425,
+      "pooled_variance_s2": 0.0011275107011442847,
+      "shrunk_variance_s2": 0.0006072068083924145,
+      "allocation_score": 6.064753954586141
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 2,
+        "region": 4
+      },
+      "population_size": 519,
+      "anchor_count": 0,
+      "probability_population_size": 519,
+      "probability_sample_count": 2,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.917989924333334,
+      "pilot_sample_variance_s2": 0.00340694004524022,
+      "pooled_variance_s2": 0.0011275107011442847,
+      "shrunk_variance_s2": 0.002267225373192252,
+      "allocation_score": 14.46681109266414
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 2,
+        "region": 5
+      },
+      "population_size": 481,
+      "anchor_count": 0,
+      "probability_population_size": 481,
+      "probability_sample_count": 2,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.9175644320000003,
+      "pilot_sample_variance_s2": 0.0010300842394722722,
+      "pooled_variance_s2": 0.0011275107011442847,
+      "shrunk_variance_s2": 0.0010787974703082785,
+      "allocation_score": 9.249213579712592
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 2,
+        "region": 6
+      },
+      "population_size": 441,
+      "anchor_count": 0,
+      "probability_population_size": 441,
+      "probability_sample_count": 2,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.86651391,
+      "pilot_sample_variance_s2": 0.0012749144524382846,
+      "pooled_variance_s2": 0.0011275107011442847,
+      "shrunk_variance_s2": 0.0012012125767912846,
+      "allocation_score": 9.027583165648199
+    },
+    {
+      "id": {
+        "family": "wall_mmpp",
+        "level": 2,
+        "region": 7
+      },
+      "population_size": 408,
+      "anchor_count": 0,
+      "probability_population_size": 408,
+      "probability_sample_count": 2,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.930554396666667,
+      "pilot_sample_variance_s2": 0.0019869151240337235,
+      "pooled_variance_s2": 0.0011275107011442847,
+      "shrunk_variance_s2": 0.001557212912589004,
+      "allocation_score": 9.405010130198376
+    },
+    {
+      "id": {
+        "family": "log_ou_cox",
+        "level": 0,
+        "region": 0
+      },
+      "population_size": 30,
+      "anchor_count": 0,
+      "probability_population_size": 30,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 3.0860749149999998,
+      "pilot_sample_variance_s2": 5.530434746827356e-6,
+      "pooled_variance_s2": 0.13631473689393894,
+      "shrunk_variance_s2": 0.06816013366434288,
+      "allocation_score": 4.458443210899605
+    },
+    {
+      "id": {
+        "family": "log_ou_cox",
+        "level": 0,
+        "region": 1
+      },
+      "population_size": 30,
+      "anchor_count": 0,
+      "probability_population_size": 30,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 3.101080244666667,
+      "pilot_sample_variance_s2": 0.00003085384842898616,
+      "pooled_variance_s2": 0.13631473689393894,
+      "shrunk_variance_s2": 0.06817279537118397,
+      "allocation_score": 4.448056587932084
+    },
+    {
+      "id": {
+        "family": "log_ou_cox",
+        "level": 0,
+        "region": 2
+      },
+      "population_size": 30,
+      "anchor_count": 0,
+      "probability_population_size": 30,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 3.0486115490000003,
+      "pilot_sample_variance_s2": 0.010573265517908893,
+      "pooled_variance_s2": 0.13631473689393894,
+      "shrunk_variance_s2": 0.07344400120592391,
+      "allocation_score": 4.656379558223405
+    },
+    {
+      "id": {
+        "family": "log_ou_cox",
+        "level": 0,
+        "region": 3
+      },
+      "population_size": 30,
+      "anchor_count": 1,
+      "probability_population_size": 29,
+      "probability_sample_count": 2,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 3.1370047756666666,
+      "pilot_sample_variance_s2": 0.7330916232814328,
+      "pooled_variance_s2": 0.13631473689393894,
+      "shrunk_variance_s2": 0.4347031800876859,
+      "allocation_score": 10.795352219835587
+    },
+    {
+      "id": {
+        "family": "log_ou_cox",
+        "level": 1,
+        "region": 0
+      },
+      "population_size": 60,
+      "anchor_count": 0,
+      "probability_population_size": 60,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 3.056104199,
+      "pilot_sample_variance_s2": 0.00028304063896831443,
+      "pooled_variance_s2": 0.0041083272479274825,
+      "shrunk_variance_s2": 0.0021956839434478983,
+      "allocation_score": 1.608244536084678
+    },
+    {
+      "id": {
+        "family": "log_ou_cox",
+        "level": 1,
+        "region": 1
+      },
+      "population_size": 54,
+      "anchor_count": 0,
+      "probability_population_size": 54,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 3.094950491666667,
+      "pilot_sample_variance_s2": 0.0008681257683317723,
+      "pooled_variance_s2": 0.0041083272479274825,
+      "shrunk_variance_s2": 0.0024882265081296274,
+      "allocation_score": 1.5311292846257314
+    },
+    {
+      "id": {
+        "family": "log_ou_cox",
+        "level": 1,
+        "region": 2
+      },
+      "population_size": 55,
+      "anchor_count": 0,
+      "probability_population_size": 55,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 3.0667749796666666,
+      "pilot_sample_variance_s2": 0.0016163590388528013,
+      "pooled_variance_s2": 0.0041083272479274825,
+      "shrunk_variance_s2": 0.002862343143390142,
+      "allocation_score": 1.6802835749542036
+    },
+    {
+      "id": {
+        "family": "log_ou_cox",
+        "level": 1,
+        "region": 3
+      },
+      "population_size": 49,
+      "anchor_count": 0,
+      "probability_population_size": 49,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 3.0526147713333334,
+      "pilot_sample_variance_s2": 0.018170114300422358,
+      "pooled_variance_s2": 0.0041083272479274825,
+      "shrunk_variance_s2": 0.01113922077417492,
+      "allocation_score": 2.9599711974742244
+    },
+    {
+      "id": {
+        "family": "log_ou_cox",
+        "level": 2,
+        "region": 0
+      },
+      "population_size": 139,
+      "anchor_count": 0,
+      "probability_population_size": 139,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 3.069880412,
+      "pilot_sample_variance_s2": 0.0002763798807060223,
+      "pooled_variance_s2": 0.014033139221825197,
+      "shrunk_variance_s2": 0.00715475955126561,
+      "allocation_score": 6.710449199103391
+    },
+    {
+      "id": {
+        "family": "log_ou_cox",
+        "level": 2,
+        "region": 1
+      },
+      "population_size": 133,
+      "anchor_count": 0,
+      "probability_population_size": 133,
+      "probability_sample_count": 2,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 3.087934807,
+      "pilot_sample_variance_s2": 0.011199293614882847,
+      "pooled_variance_s2": 0.014033139221825197,
+      "shrunk_variance_s2": 0.012616216418354021,
+      "allocation_score": 8.501237409740154
+    },
+    {
+      "id": {
+        "family": "log_ou_cox",
+        "level": 2,
+        "region": 2
+      },
+      "population_size": 134,
+      "anchor_count": 0,
+      "probability_population_size": 134,
+      "probability_sample_count": 2,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 3.0932722973333333,
+      "pilot_sample_variance_s2": 0.030807159205300798,
+      "pooled_variance_s2": 0.014033139221825197,
+      "shrunk_variance_s2": 0.022420149213562997,
+      "allocation_score": 11.408143400062093
+    },
+    {
+      "id": {
+        "family": "log_ou_cox",
+        "level": 2,
+        "region": 3
+      },
+      "population_size": 129,
+      "anchor_count": 1,
+      "probability_population_size": 128,
+      "probability_sample_count": 2,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 3.1825378393333335,
+      "pilot_sample_variance_s2": 0.023457659170435248,
+      "pooled_variance_s2": 0.014033139221825197,
+      "shrunk_variance_s2": 0.018745399196130223,
+      "allocation_score": 9.823596786886156
+    },
+    {
+      "id": {
+        "family": "self_exciting",
+        "level": 0,
+        "region": 0
+      },
+      "population_size": 40,
+      "anchor_count": 0,
+      "probability_population_size": 40,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.979088879666667,
+      "pilot_sample_variance_s2": 4.810901760977829e-6,
+      "pooled_variance_s2": 0.00003824984274720107,
+      "shrunk_variance_s2": 0.00002153037225408945,
+      "allocation_score": 0.10753356166648495
+    },
+    {
+      "id": {
+        "family": "self_exciting",
+        "level": 0,
+        "region": 1
+      },
+      "population_size": 40,
+      "anchor_count": 1,
+      "probability_population_size": 39,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.9859440836666664,
+      "pilot_sample_variance_s2": 1.8460284646958847e-6,
+      "pooled_variance_s2": 0.00003824984274720107,
+      "shrunk_variance_s2": 0.00002004793560594848,
+      "allocation_score": 0.10105518490441771
+    },
+    {
+      "id": {
+        "family": "self_exciting",
+        "level": 0,
+        "region": 2
+      },
+      "population_size": 32,
+      "anchor_count": 0,
+      "probability_population_size": 32,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.9796137403333334,
+      "pilot_sample_variance_s2": 1.9965308459890425e-6,
+      "pooled_variance_s2": 0.00003824984274720107,
+      "shrunk_variance_s2": 0.000020123186796595055,
+      "allocation_score": 0.08316074540897452
+    },
+    {
+      "id": {
+        "family": "self_exciting",
+        "level": 0,
+        "region": 3
+      },
+      "population_size": 32,
+      "anchor_count": 0,
+      "probability_population_size": 32,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.9824278853333333,
+      "pilot_sample_variance_s2": 0.00015718021067745441,
+      "pooled_variance_s2": 0.00003824984274720107,
+      "shrunk_variance_s2": 0.00009771502671232774,
+      "allocation_score": 0.18316634536243304
+    },
+    {
+      "id": {
+        "family": "self_exciting",
+        "level": 1,
+        "region": 0
+      },
+      "population_size": 72,
+      "anchor_count": 0,
+      "probability_population_size": 72,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.984257101666666,
+      "pilot_sample_variance_s2": 3.735644616664638e-6,
+      "pooled_variance_s2": 0.00006927347602231042,
+      "shrunk_variance_s2": 0.00003650456031948753,
+      "allocation_score": 0.25181867785064976
+    },
+    {
+      "id": {
+        "family": "self_exciting",
+        "level": 1,
+        "region": 1
+      },
+      "population_size": 67,
+      "anchor_count": 0,
+      "probability_population_size": 67,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.991436678,
+      "pilot_sample_variance_s2": 0.000172121670860374,
+      "pooled_variance_s2": 0.00006927347602231042,
+      "shrunk_variance_s2": 0.00012069757344134221,
+      "allocation_score": 0.4255828955357626
+    },
+    {
+      "id": {
+        "family": "self_exciting",
+        "level": 1,
+        "region": 2
+      },
+      "population_size": 64,
+      "anchor_count": 0,
+      "probability_population_size": 64,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.9755375560000004,
+      "pilot_sample_variance_s2": 2.6481354677079227e-6,
+      "pooled_variance_s2": 0.00006927347602231042,
+      "shrunk_variance_s2": 0.000035960805745009174,
+      "allocation_score": 0.22249075151179273
+    },
+    {
+      "id": {
+        "family": "self_exciting",
+        "level": 1,
+        "region": 3
+      },
+      "population_size": 60,
+      "anchor_count": 0,
+      "probability_population_size": 60,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.981574035,
+      "pilot_sample_variance_s2": 7.0229700289127615e-6,
+      "pooled_variance_s2": 0.00006927347602231042,
+      "shrunk_variance_s2": 0.00003814822302561159,
+      "allocation_score": 0.21461773542085474
+    },
+    {
+      "id": {
+        "family": "self_exciting",
+        "level": 2,
+        "region": 0
+      },
+      "population_size": 171,
+      "anchor_count": 0,
+      "probability_population_size": 171,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.980401515333334,
+      "pilot_sample_variance_s2": 5.062407375845004e-7,
+      "pooled_variance_s2": 0.000016068516437574375,
+      "shrunk_variance_s2": 8.287378587579438e-6,
+      "allocation_score": 0.2851460186221866
+    },
+    {
+      "id": {
+        "family": "self_exciting",
+        "level": 2,
+        "region": 1
+      },
+      "population_size": 167,
+      "anchor_count": 0,
+      "probability_population_size": 167,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.982373132333333,
+      "pilot_sample_variance_s2": 0.00003248111873261543,
+      "pooled_variance_s2": 0.000016068516437574375,
+      "shrunk_variance_s2": 0.000024274817585094903,
+      "allocation_score": 0.4764457634608539
+    },
+    {
+      "id": {
+        "family": "self_exciting",
+        "level": 2,
+        "region": 2
+      },
+      "population_size": 156,
+      "anchor_count": 0,
+      "probability_population_size": 156,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.9770552313333334,
+      "pilot_sample_variance_s2": 0.0000195028653178839,
+      "pooled_variance_s2": 0.000016068516437574375,
+      "shrunk_variance_s2": 0.000017785690877729137,
+      "allocation_score": 0.3812997515766097
+    },
+    {
+      "id": {
+        "family": "self_exciting",
+        "level": 2,
+        "region": 3
+      },
+      "population_size": 152,
+      "anchor_count": 1,
+      "probability_population_size": 151,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.980003706,
+      "pilot_sample_variance_s2": 0.000014200029047112912,
+      "pooled_variance_s2": 0.000016068516437574375,
+      "shrunk_variance_s2": 0.000015134272742343644,
+      "allocation_score": 0.3402901070125237
+    }
+  ],
+  "quick": [
+    {
+      "family": "event_markov",
+      "level": 0,
+      "lattice": [
+        36
+      ],
+      "parameter_bits": [
+        4562254508917369340
+      ],
+      "cell": {
+        "family": "event_markov",
+        "switch_rate": 0.001
+      },
+      "stratum": {
+        "family": "event_markov",
+        "level": 0,
+        "region": 0
+      },
+      "kind": "anchor",
+      "quick": true,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 1
+      },
+      "extrapolation_weight": {
+        "numerator": 1,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "event_markov",
+      "level": 2,
+      "lattice": [
+        71
+      ],
+      "parameter_bits": [
+        4602512875306256027
+      ],
+      "cell": {
+        "family": "event_markov",
+        "switch_rate": 0.49078826493687594
+      },
+      "stratum": {
+        "family": "event_markov",
+        "level": 2,
+        "region": 1
+      },
+      "kind": "anchor",
+      "quick": true,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 1
+      },
+      "extrapolation_weight": {
+        "numerator": 1,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 0,
+      "lattice": [
+        12,
+        12,
+        24
+      ],
+      "parameter_bits": [
+        4600877379321698714,
+        4626322717216342016,
+        4636737291354636288
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.4,
+        "rate_ratio": 20.0,
+        "tau_s": 100.0
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 0,
+        "region": 5
+      },
+      "kind": "anchor",
+      "quick": true,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 1
+      },
+      "extrapolation_weight": {
+        "numerator": 1,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 2,
+      "lattice": [
+        20,
+        24,
+        1
+      ],
+      "parameter_bits": [
+        4603579539098121012,
+        4641240890982006784,
+        4608135054684595672
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.6000000000000001,
+        "rate_ratio": 200.0,
+        "tau_s": 1.2115276586285884
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 2,
+        "region": 3
+      },
+      "kind": "anchor",
+      "quick": true,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 1
+      },
+      "extrapolation_weight": {
+        "numerator": 1,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "log_ou_cox",
+      "level": 0,
+      "lattice": [
+        20,
+        24
+      ],
+      "parameter_bits": [
+        4608083138725491508,
+        4636737291354636288
+      ],
+      "cell": {
+        "family": "log_ou_cox",
+        "sigma_y": 1.2000000000000002,
+        "tau_s": 100.0
+      },
+      "stratum": {
+        "family": "log_ou_cox",
+        "level": 0,
+        "region": 3
+      },
+      "kind": "anchor",
+      "quick": true,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 1
+      },
+      "extrapolation_weight": {
+        "numerator": 1,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "log_ou_cox",
+      "level": 2,
+      "lattice": [
+        35,
+        44
+      ],
+      "parameter_bits": [
+        4611460838446019379,
+        4660134898793709568
+      ],
+      "cell": {
+        "family": "log_ou_cox",
+        "sigma_y": 1.95,
+        "tau_s": 3600.0
+      },
+      "stratum": {
+        "family": "log_ou_cox",
+        "level": 2,
+        "region": 3
+      },
+      "kind": "anchor",
+      "quick": true,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 1
+      },
+      "extrapolation_weight": {
+        "numerator": 1,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "self_exciting",
+      "level": 0,
+      "lattice": [
+        32,
+        16
+      ],
+      "parameter_bits": [
+        4602678819172646912,
+        4631261011851512929
+      ],
+      "cell": {
+        "family": "self_exciting",
+        "phi": 0.5,
+        "tau_s": 43.088693800637664
+      },
+      "stratum": {
+        "family": "self_exciting",
+        "level": 0,
+        "region": 1
+      },
+      "kind": "anchor",
+      "quick": true,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 1
+      },
+      "extrapolation_weight": {
+        "numerator": 1,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "self_exciting",
+      "level": 2,
+      "lattice": [
+        60,
+        31
+      ],
+      "parameter_bits": [
+        4605831338911806260,
+        4648069624941596401
+      ],
+      "cell": {
+        "family": "self_exciting",
+        "phi": 0.8500000000000001,
+        "tau_s": 552.3371695079533
+      },
+      "stratum": {
+        "family": "self_exciting",
+        "level": 2,
+        "region": 3
+      },
+      "kind": "anchor",
+      "quick": true,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 1
+      },
+      "extrapolation_weight": {
+        "numerator": 1,
+        "denominator": 1
+      }
+    }
+  ],
+  "full": [
+    {
+      "family": "event_markov",
+      "level": 0,
+      "lattice": [
+        36
+      ],
+      "parameter_bits": [
+        4562254508917369340
+      ],
+      "cell": {
+        "family": "event_markov",
+        "switch_rate": 0.001
+      },
+      "stratum": {
+        "family": "event_markov",
+        "level": 0,
+        "region": 0
+      },
+      "kind": "anchor",
+      "quick": true,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 1
+      },
+      "extrapolation_weight": {
+        "numerator": 1,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "event_markov",
+      "level": 0,
+      "lattice": [
+        4
+      ],
+      "parameter_bits": [
+        4522197441337476598
+      ],
+      "cell": {
+        "family": "event_markov",
+        "switch_rate": 2.1544346900318835e-6
+      },
+      "stratum": {
+        "family": "event_markov",
+        "level": 0,
+        "region": 0
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 9
+      },
+      "extrapolation_weight": {
+        "numerator": 9,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "event_markov",
+      "level": 0,
+      "lattice": [
+        48
+      ],
+      "parameter_bits": [
+        4576918229304087675
+      ],
+      "cell": {
+        "family": "event_markov",
+        "switch_rate": 0.01
+      },
+      "stratum": {
+        "family": "event_markov",
+        "level": 0,
+        "region": 1
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 9
+      },
+      "extrapolation_weight": {
+        "numerator": 9,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "event_markov",
+      "level": 1,
+      "lattice": [
+        30
+      ],
+      "parameter_bits": [
+        4554468996312914476
+      ],
+      "cell": {
+        "family": "event_markov",
+        "switch_rate": 0.00031622776601683794
+      },
+      "stratum": {
+        "family": "event_markov",
+        "level": 1,
+        "region": 0
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 9
+      },
+      "extrapolation_weight": {
+        "numerator": 9,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "event_markov",
+      "level": 1,
+      "lattice": [
+        54
+      ],
+      "parameter_bits": [
+        4584718143433226866
+      ],
+      "cell": {
+        "family": "event_markov",
+        "switch_rate": 0.03162277660168379
+      },
+      "stratum": {
+        "family": "event_markov",
+        "level": 1,
+        "region": 1
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 9
+      },
+      "extrapolation_weight": {
+        "numerator": 9,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "event_markov",
+      "level": 2,
+      "lattice": [
+        71
+      ],
+      "parameter_bits": [
+        4602512875306256027
+      ],
+      "cell": {
+        "family": "event_markov",
+        "switch_rate": 0.49078826493687594
+      },
+      "stratum": {
+        "family": "event_markov",
+        "level": 2,
+        "region": 1
+      },
+      "kind": "anchor",
+      "quick": true,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 1
+      },
+      "extrapolation_weight": {
+        "numerator": 1,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "event_markov",
+      "level": 2,
+      "lattice": [
+        23
+      ],
+      "parameter_bits": [
+        4545718832294663119
+      ],
+      "cell": {
+        "family": "event_markov",
+        "switch_rate": 0.00008254041852680183
+      },
+      "stratum": {
+        "family": "event_markov",
+        "level": 2,
+        "region": 0
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 18
+      },
+      "extrapolation_weight": {
+        "numerator": 18,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "event_markov",
+      "level": 2,
+      "lattice": [
+        47
+      ],
+      "parameter_bits": [
+        4575911752956993402
+      ],
+      "cell": {
+        "family": "event_markov",
+        "switch_rate": 0.008254041852680184
+      },
+      "stratum": {
+        "family": "event_markov",
+        "level": 2,
+        "region": 1
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 17
+      },
+      "extrapolation_weight": {
+        "numerator": 17,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 0,
+      "lattice": [
+        12,
+        12,
+        24
+      ],
+      "parameter_bits": [
+        4600877379321698714,
+        4626322717216342016,
+        4636737291354636288
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.4,
+        "rate_ratio": 20.0,
+        "tau_s": 100.0
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 0,
+        "region": 5
+      },
+      "kind": "anchor",
+      "quick": true,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 1
+      },
+      "extrapolation_weight": {
+        "numerator": 1,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 0,
+      "lattice": [
+        4,
+        12,
+        20
+      ],
+      "parameter_bits": [
+        4596373779694328218,
+        4626322717216342016,
+        4631729272853707383
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.2,
+        "rate_ratio": 20.0,
+        "tau_s": 46.4158883361278
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 0,
+        "region": 0
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 72
+      },
+      "extrapolation_weight": {
+        "numerator": 72,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 0,
+      "lattice": [
+        4,
+        12,
+        44
+      ],
+      "parameter_bits": [
+        4596373779694328218,
+        4626322717216342016,
+        4660134898793709568
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.2,
+        "rate_ratio": 20.0,
+        "tau_s": 3600.0
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 0,
+        "region": 4
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 72
+      },
+      "extrapolation_weight": {
+        "numerator": 72,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 0,
+      "lattice": [
+        8,
+        24,
+        16
+      ],
+      "parameter_bits": [
+        4599075939470750516,
+        4641240890982006784,
+        4626757412224142433
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.30000000000000004,
+        "rate_ratio": 200.0,
+        "tau_s": 21.544346900318832
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 0,
+        "region": 2
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 54
+      },
+      "extrapolation_weight": {
+        "numerator": 54,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 0,
+      "lattice": [
+        8,
+        24,
+        24
+      ],
+      "parameter_bits": [
+        4599075939470750516,
+        4641240890982006784,
+        4636737291354636288
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.30000000000000004,
+        "rate_ratio": 200.0,
+        "tau_s": 100.0
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 0,
+        "region": 6
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 54
+      },
+      "extrapolation_weight": {
+        "numerator": 54,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 0,
+      "lattice": [
+        16,
+        16,
+        12
+      ],
+      "parameter_bits": [
+        4602678819172646912,
+        4631261011851512929,
+        4621819117588971520
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.5,
+        "rate_ratio": 43.088693800637664,
+        "tau_s": 10.0
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 0,
+        "region": 3
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 54
+      },
+      "extrapolation_weight": {
+        "numerator": 54,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 0,
+      "lattice": [
+        20,
+        4,
+        40
+      ],
+      "parameter_bits": [
+        4603579539098121012,
+        4616537374060998735,
+        4656956067059670447
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.6000000000000001,
+        "rate_ratio": 4.308869380063768,
+        "tau_s": 2154.4346900318847
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 0,
+        "region": 5
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 71
+      },
+      "extrapolation_weight": {
+        "numerator": 71,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 0,
+      "lattice": [
+        20,
+        8,
+        16
+      ],
+      "parameter_bits": [
+        4603579539098121012,
+        4621415582490124791,
+        4626757412224142433
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.6000000000000001,
+        "rate_ratio": 9.283177667225557,
+        "tau_s": 21.544346900318832
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 0,
+        "region": 1
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 72
+      },
+      "extrapolation_weight": {
+        "numerator": 72,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 0,
+      "lattice": [
+        20,
+        20,
+        44
+      ],
+      "parameter_bits": [
+        4603579539098121012,
+        4636232872481077879,
+        4660134898793709568
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.6000000000000001,
+        "rate_ratio": 92.8317766722556,
+        "tau_s": 3600.0
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 0,
+        "region": 7
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 54
+      },
+      "extrapolation_weight": {
+        "numerator": 54,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 1,
+      "lattice": [
+        0,
+        6,
+        36
+      ],
+      "parameter_bits": [
+        4591870180066957722,
+        4618806834673376083,
+        4652007308841189376
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.1,
+        "rate_ratio": 6.324555320336759,
+        "tau_s": 1000.0
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 1,
+        "region": 4
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 186
+      },
+      "extrapolation_weight": {
+        "numerator": 186,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 1,
+      "lattice": [
+        2,
+        8,
+        16
+      ],
+      "parameter_bits": [
+        4594572339843380020,
+        4621415582490124791,
+        4626757412224142433
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.15000000000000002,
+        "rate_ratio": 9.283177667225557,
+        "tau_s": 21.544346900318832
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 1,
+        "region": 0
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 198
+      },
+      "extrapolation_weight": {
+        "numerator": 198,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 1,
+      "lattice": [
+        8,
+        0,
+        34
+      ],
+      "parameter_bits": [
+        4599075939470750516,
+        4611686018427387904,
+        4649203924233707759
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.30000000000000004,
+        "rate_ratio": 2.0,
+        "tau_s": 681.2920690579612
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 1,
+        "region": 4
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 186
+      },
+      "extrapolation_weight": {
+        "numerator": 186,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 1,
+      "lattice": [
+        8,
+        18,
+        24
+      ],
+      "parameter_bits": [
+        4599075939470750516,
+        4634097837616984615,
+        4636737291354636288
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.30000000000000004,
+        "rate_ratio": 63.245553203367585,
+        "tau_s": 100.0
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 1,
+        "region": 6
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 153
+      },
+      "extrapolation_weight": {
+        "numerator": 153,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 1,
+      "lattice": [
+        10,
+        20,
+        16
+      ],
+      "parameter_bits": [
+        4599976659396224615,
+        4636232872481077879,
+        4626757412224142433
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.35000000000000003,
+        "rate_ratio": 92.8317766722556,
+        "tau_s": 21.544346900318832
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 1,
+        "region": 2
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 162
+      },
+      "extrapolation_weight": {
+        "numerator": 162,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 1,
+      "lattice": [
+        12,
+        16,
+        2
+      ],
+      "parameter_bits": [
+        4600877379321698714,
+        4631261011851512929,
+        4609289199407364351
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.4,
+        "rate_ratio": 43.088693800637664,
+        "tau_s": 1.4677992676220695
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 1,
+        "region": 3
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 144
+      },
+      "extrapolation_weight": {
+        "numerator": 144,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 1,
+      "lattice": [
+        14,
+        16,
+        36
+      ],
+      "parameter_bits": [
+        4601778099247172813,
+        4631261011851512929,
+        4652007308841189376
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.45,
+        "rate_ratio": 43.088693800637664,
+        "tau_s": 1000.0
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 1,
+        "region": 7
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 135
+      },
+      "extrapolation_weight": {
+        "numerator": 135,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 1,
+      "lattice": [
+        16,
+        4,
+        14
+      ],
+      "parameter_bits": [
+        4602678819172646912,
+        4616537374060998735,
+        4624452593348155199
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.5,
+        "rate_ratio": 4.308869380063768,
+        "tau_s": 14.677992676220695
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 1,
+        "region": 1
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 174
+      },
+      "extrapolation_weight": {
+        "numerator": 174,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 1,
+      "lattice": [
+        16,
+        4,
+        42
+      ],
+      "parameter_bits": [
+        4602678819172646912,
+        4616537374060998735,
+        4658342592146417360
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.5,
+        "rate_ratio": 4.308869380063768,
+        "tau_s": 2784.953300167668
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 1,
+        "region": 5
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 162
+      },
+      "extrapolation_weight": {
+        "numerator": 162,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 2,
+      "lattice": [
+        20,
+        24,
+        1
+      ],
+      "parameter_bits": [
+        4603579539098121012,
+        4641240890982006784,
+        4608135054684595672
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.6000000000000001,
+        "rate_ratio": 200.0,
+        "tau_s": 1.2115276586285884
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 2,
+        "region": 3
+      },
+      "kind": "anchor",
+      "quick": true,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 1
+      },
+      "extrapolation_weight": {
+        "numerator": 1,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 2,
+      "lattice": [
+        0,
+        2,
+        18
+      ],
+      "parameter_bits": [
+        4591870180066957722,
+        4613792799034734847,
+        4629594237989614119
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.1,
+        "rate_ratio": 2.935598535244139,
+        "tau_s": 31.622776601683793
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 2,
+        "region": 0
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 540
+      },
+      "extrapolation_weight": {
+        "numerator": 540,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 2,
+      "lattice": [
+        0,
+        24,
+        35
+      ],
+      "parameter_bits": [
+        4591870180066957722,
+        4641240890982006784,
+        4650471547813518671
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.1,
+        "rate_ratio": 200.0,
+        "tau_s": 825.4041852680183
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 2,
+        "region": 6
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 441
+      },
+      "extrapolation_weight": {
+        "numerator": 441,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 2,
+      "lattice": [
+        3,
+        8,
+        12
+      ],
+      "parameter_bits": [
+        4595473059768854119,
+        4621415582490124791,
+        4621819117588971520
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.17500000000000002,
+        "rate_ratio": 9.283177667225557,
+        "tau_s": 10.0
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 2,
+        "region": 0
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 540
+      },
+      "extrapolation_weight": {
+        "numerator": 540,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 2,
+      "lattice": [
+        4,
+        9,
+        32
+      ],
+      "parameter_bits": [
+        4596373779694328218,
+        4622521018511214116,
+        4646873185621870864
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.2,
+        "rate_ratio": 11.246826503806979,
+        "tau_s": 464.15888336127773
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 2,
+        "region": 4
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 519
+      },
+      "extrapolation_weight": {
+        "numerator": 519,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 2,
+      "lattice": [
+        8,
+        11,
+        24
+      ],
+      "parameter_bits": [
+        4599075939470750516,
+        4625339830158632765,
+        4636737291354636288
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.30000000000000004,
+        "rate_ratio": 16.508083705360367,
+        "tau_s": 100.0
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 2,
+        "region": 4
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 519
+      },
+      "extrapolation_weight": {
+        "numerator": 519,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 2,
+      "lattice": [
+        8,
+        20,
+        39
+      ],
+      "parameter_bits": [
+        4599075939470750516,
+        4636232872481077879,
+        4655535771001441639
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.30000000000000004,
+        "rate_ratio": 92.8317766722556,
+        "tau_s": 1778.2794100389235
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 2,
+        "region": 6
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 441
+      },
+      "extrapolation_weight": {
+        "numerator": 441,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 2,
+      "lattice": [
+        10,
+        14,
+        8
+      ],
+      "parameter_bits": [
+        4599976659396224615,
+        4628956192975525695,
+        4616911982862754295
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.35000000000000003,
+        "rate_ratio": 29.35598535244139,
+        "tau_s": 4.641588833612778
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 2,
+        "region": 2
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 459
+      },
+      "extrapolation_weight": {
+        "numerator": 459,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 2,
+      "lattice": [
+        12,
+        6,
+        38
+      ],
+      "parameter_bits": [
+        4600877379321698714,
+        4618806834673376083,
+        4654170264894318123
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.4,
+        "rate_ratio": 6.324555320336759,
+        "tau_s": 1467.79926762207
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 2,
+        "region": 5
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 481
+      },
+      "extrapolation_weight": {
+        "numerator": 481,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 2,
+      "lattice": [
+        12,
+        20,
+        41
+      ],
+      "parameter_bits": [
+        4600877379321698714,
+        4636232872481077879,
+        4657604899982338665
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.4,
+        "rate_ratio": 92.8317766722556,
+        "tau_s": 2449.489742783179
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 2,
+        "region": 7
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 408
+      },
+      "extrapolation_weight": {
+        "numerator": 408,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 2,
+      "lattice": [
+        12,
+        24,
+        31
+      ],
+      "parameter_bits": [
+        4600877379321698714,
+        4641240890982006784,
+        4645447511374444060
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.4,
+        "rate_ratio": 200.0,
+        "tau_s": 383.11868495572867
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 2,
+        "region": 7
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 408
+      },
+      "extrapolation_weight": {
+        "numerator": 408,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 2,
+      "lattice": [
+        16,
+        9,
+        24
+      ],
+      "parameter_bits": [
+        4602678819172646912,
+        4622521018511214116,
+        4636737291354636288
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.5,
+        "rate_ratio": 11.246826503806979,
+        "tau_s": 100.0
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 2,
+        "region": 5
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 481
+      },
+      "extrapolation_weight": {
+        "numerator": 481,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 2,
+      "lattice": [
+        18,
+        8,
+        14
+      ],
+      "parameter_bits": [
+        4603129179135383962,
+        4621415582490124791,
+        4624452593348155199
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.55,
+        "rate_ratio": 9.283177667225557,
+        "tau_s": 14.677992676220695
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 2,
+        "region": 1
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 498
+      },
+      "extrapolation_weight": {
+        "numerator": 498,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "wall_mmpp",
+      "level": 2,
+      "lattice": [
+        20,
+        22,
+        2
+      ],
+      "parameter_bits": [
+        4603579539098121012,
+        4638998183296021492,
+        4609289199407364351
+      ],
+      "cell": {
+        "family": "wall_mmpp",
+        "occupancy": 0.6000000000000001,
+        "rate_ratio": 136.25841381159228,
+        "tau_s": 1.4677992676220695
+      },
+      "stratum": {
+        "family": "wall_mmpp",
+        "level": 2,
+        "region": 3
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 422
+      },
+      "extrapolation_weight": {
+        "numerator": 422,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "log_ou_cox",
+      "level": 0,
+      "lattice": [
+        20,
+        24
+      ],
+      "parameter_bits": [
+        4608083138725491508,
+        4636737291354636288
+      ],
+      "cell": {
+        "family": "log_ou_cox",
+        "sigma_y": 1.2000000000000002,
+        "tau_s": 100.0
+      },
+      "stratum": {
+        "family": "log_ou_cox",
+        "level": 0,
+        "region": 3
+      },
+      "kind": "anchor",
+      "quick": true,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 1
+      },
+      "extrapolation_weight": {
+        "numerator": 1,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "log_ou_cox",
+      "level": 0,
+      "lattice": [
+        0,
+        0
+      ],
+      "parameter_bits": [
+        4596373779694328218,
+        4607182418800017408
+      ],
+      "cell": {
+        "family": "log_ou_cox",
+        "sigma_y": 0.2,
+        "tau_s": 1.0
+      },
+      "stratum": {
+        "family": "log_ou_cox",
+        "level": 0,
+        "region": 0
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 30
+      },
+      "extrapolation_weight": {
+        "numerator": 30,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "log_ou_cox",
+      "level": 0,
+      "lattice": [
+        4,
+        36
+      ],
+      "parameter_bits": [
+        4600877379321698714,
+        4652007308841189376
+      ],
+      "cell": {
+        "family": "log_ou_cox",
+        "sigma_y": 0.4,
+        "tau_s": 1000.0
+      },
+      "stratum": {
+        "family": "log_ou_cox",
+        "level": 0,
+        "region": 2
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 30
+      },
+      "extrapolation_weight": {
+        "numerator": 30,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "log_ou_cox",
+      "level": 0,
+      "lattice": [
+        24,
+        4
+      ],
+      "parameter_bits": [
+        4608983858650965607,
+        4612033774433628239
+      ],
+      "cell": {
+        "family": "log_ou_cox",
+        "sigma_y": 1.4000000000000001,
+        "tau_s": 2.154434690031884
+      },
+      "stratum": {
+        "family": "log_ou_cox",
+        "level": 0,
+        "region": 1
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 30
+      },
+      "extrapolation_weight": {
+        "numerator": 30,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "log_ou_cox",
+      "level": 0,
+      "lattice": [
+        28,
+        36
+      ],
+      "parameter_bits": [
+        4609884578576439706,
+        4652007308841189376
+      ],
+      "cell": {
+        "family": "log_ou_cox",
+        "sigma_y": 1.6,
+        "tau_s": 1000.0
+      },
+      "stratum": {
+        "family": "log_ou_cox",
+        "level": 0,
+        "region": 3
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 29
+      },
+      "extrapolation_weight": {
+        "numerator": 29,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "log_ou_cox",
+      "level": 0,
+      "lattice": [
+        36,
+        24
+      ],
+      "parameter_bits": [
+        4611686018427387904,
+        4636737291354636288
+      ],
+      "cell": {
+        "family": "log_ou_cox",
+        "sigma_y": 2.0,
+        "tau_s": 100.0
+      },
+      "stratum": {
+        "family": "log_ou_cox",
+        "level": 0,
+        "region": 3
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 29
+      },
+      "extrapolation_weight": {
+        "numerator": 29,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "log_ou_cox",
+      "level": 1,
+      "lattice": [
+        10,
+        40
+      ],
+      "parameter_bits": [
+        4604480259023595111,
+        4656956067059670447
+      ],
+      "cell": {
+        "family": "log_ou_cox",
+        "sigma_y": 0.7000000000000001,
+        "tau_s": 2154.4346900318847
+      },
+      "stratum": {
+        "family": "log_ou_cox",
+        "level": 1,
+        "region": 2
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 55
+      },
+      "extrapolation_weight": {
+        "numerator": 55,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "log_ou_cox",
+      "level": 1,
+      "lattice": [
+        14,
+        20
+      ],
+      "parameter_bits": [
+        4606281698874543309,
+        4631729272853707383
+      ],
+      "cell": {
+        "family": "log_ou_cox",
+        "sigma_y": 0.9,
+        "tau_s": 46.4158883361278
+      },
+      "stratum": {
+        "family": "log_ou_cox",
+        "level": 1,
+        "region": 0
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 60
+      },
+      "extrapolation_weight": {
+        "numerator": 60,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "log_ou_cox",
+      "level": 1,
+      "lattice": [
+        24,
+        10
+      ],
+      "parameter_bits": [
+        4608983858650965607,
+        4619356685198237675
+      ],
+      "cell": {
+        "family": "log_ou_cox",
+        "sigma_y": 1.4000000000000001,
+        "tau_s": 6.812920690579612
+      },
+      "stratum": {
+        "family": "log_ou_cox",
+        "level": 1,
+        "region": 1
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 54
+      },
+      "extrapolation_weight": {
+        "numerator": 54,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "log_ou_cox",
+      "level": 1,
+      "lattice": [
+        24,
+        26
+      ],
+      "parameter_bits": [
+        4608983858650965607,
+        4639368376122613385
+      ],
+      "cell": {
+        "family": "log_ou_cox",
+        "sigma_y": 1.4000000000000001,
+        "tau_s": 146.779926762207
+      },
+      "stratum": {
+        "family": "log_ou_cox",
+        "level": 1,
+        "region": 3
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 49
+      },
+      "extrapolation_weight": {
+        "numerator": 49,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "log_ou_cox",
+      "level": 2,
+      "lattice": [
+        35,
+        44
+      ],
+      "parameter_bits": [
+        4611460838446019379,
+        4660134898793709568
+      ],
+      "cell": {
+        "family": "log_ou_cox",
+        "sigma_y": 1.95,
+        "tau_s": 3600.0
+      },
+      "stratum": {
+        "family": "log_ou_cox",
+        "level": 2,
+        "region": 3
+      },
+      "kind": "anchor",
+      "quick": true,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 1
+      },
+      "extrapolation_weight": {
+        "numerator": 1,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "log_ou_cox",
+      "level": 2,
+      "lattice": [
+        2,
+        34
+      ],
+      "parameter_bits": [
+        4599075939470750516,
+        4649203924233707759
+      ],
+      "cell": {
+        "family": "log_ou_cox",
+        "sigma_y": 0.30000000000000004,
+        "tau_s": 681.2920690579612
+      },
+      "stratum": {
+        "family": "log_ou_cox",
+        "level": 2,
+        "region": 2
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 134
+      },
+      "extrapolation_weight": {
+        "numerator": 134,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "log_ou_cox",
+      "level": 2,
+      "lattice": [
+        4,
+        15
+      ],
+      "parameter_bits": [
+        4600877379321698714,
+        4625698629237386344
+      ],
+      "cell": {
+        "family": "log_ou_cox",
+        "sigma_y": 0.4,
+        "tau_s": 17.782794100389225
+      },
+      "stratum": {
+        "family": "log_ou_cox",
+        "level": 2,
+        "region": 0
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 139
+      },
+      "extrapolation_weight": {
+        "numerator": 139,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "log_ou_cox",
+      "level": 2,
+      "lattice": [
+        14,
+        42
+      ],
+      "parameter_bits": [
+        4606281698874543309,
+        4658342592146417360
+      ],
+      "cell": {
+        "family": "log_ou_cox",
+        "sigma_y": 0.9,
+        "tau_s": 2784.953300167668
+      },
+      "stratum": {
+        "family": "log_ou_cox",
+        "level": 2,
+        "region": 2
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 134
+      },
+      "extrapolation_weight": {
+        "numerator": 134,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "log_ou_cox",
+      "level": 2,
+      "lattice": [
+        30,
+        22
+      ],
+      "parameter_bits": [
+        4610334938539176756,
+        4634494583668650996
+      ],
+      "cell": {
+        "family": "log_ou_cox",
+        "sigma_y": 1.7000000000000002,
+        "tau_s": 68.12920690579614
+      },
+      "stratum": {
+        "family": "log_ou_cox",
+        "level": 2,
+        "region": 1
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 133
+      },
+      "extrapolation_weight": {
+        "numerator": 133,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "log_ou_cox",
+      "level": 2,
+      "lattice": [
+        30,
+        42
+      ],
+      "parameter_bits": [
+        4610334938539176756,
+        4658342592146417360
+      ],
+      "cell": {
+        "family": "log_ou_cox",
+        "sigma_y": 1.7000000000000002,
+        "tau_s": 2784.953300167668
+      },
+      "stratum": {
+        "family": "log_ou_cox",
+        "level": 2,
+        "region": 3
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 128
+      },
+      "extrapolation_weight": {
+        "numerator": 128,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "log_ou_cox",
+      "level": 2,
+      "lattice": [
+        35,
+        32
+      ],
+      "parameter_bits": [
+        4611460838446019379,
+        4646873185621870864
+      ],
+      "cell": {
+        "family": "log_ou_cox",
+        "sigma_y": 1.95,
+        "tau_s": 464.15888336127773
+      },
+      "stratum": {
+        "family": "log_ou_cox",
+        "level": 2,
+        "region": 3
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 128
+      },
+      "extrapolation_weight": {
+        "numerator": 128,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "log_ou_cox",
+      "level": 2,
+      "lattice": [
+        36,
+        3
+      ],
+      "parameter_bits": [
+        4611686018427387904,
+        4610687477661058830
+      ],
+      "cell": {
+        "family": "log_ou_cox",
+        "sigma_y": 2.0,
+        "tau_s": 1.7782794100389228
+      },
+      "stratum": {
+        "family": "log_ou_cox",
+        "level": 2,
+        "region": 1
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 133
+      },
+      "extrapolation_weight": {
+        "numerator": 133,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "self_exciting",
+      "level": 0,
+      "lattice": [
+        32,
+        16
+      ],
+      "parameter_bits": [
+        4602678819172646912,
+        4631261011851512929
+      ],
+      "cell": {
+        "family": "self_exciting",
+        "phi": 0.5,
+        "tau_s": 43.088693800637664
+      },
+      "stratum": {
+        "family": "self_exciting",
+        "level": 0,
+        "region": 1
+      },
+      "kind": "anchor",
+      "quick": true,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 1
+      },
+      "extrapolation_weight": {
+        "numerator": 1,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "self_exciting",
+      "level": 0,
+      "lattice": [
+        24,
+        4
+      ],
+      "parameter_bits": [
+        4600877379321698714,
+        4616537374060998735
+      ],
+      "cell": {
+        "family": "self_exciting",
+        "phi": 0.4,
+        "tau_s": 4.308869380063768
+      },
+      "stratum": {
+        "family": "self_exciting",
+        "level": 0,
+        "region": 0
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 40
+      },
+      "extrapolation_weight": {
+        "numerator": 40,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "self_exciting",
+      "level": 0,
+      "lattice": [
+        24,
+        32
+      ],
+      "parameter_bits": [
+        4600877379321698714,
+        4648488871632306176
+      ],
+      "cell": {
+        "family": "self_exciting",
+        "phi": 0.4,
+        "tau_s": 600.0
+      },
+      "stratum": {
+        "family": "self_exciting",
+        "level": 0,
+        "region": 2
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 32
+      },
+      "extrapolation_weight": {
+        "numerator": 32,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "self_exciting",
+      "level": 0,
+      "lattice": [
+        36,
+        24
+      ],
+      "parameter_bits": [
+        4603129179135383962,
+        4641240890982006784
+      ],
+      "cell": {
+        "family": "self_exciting",
+        "phi": 0.55,
+        "tau_s": 200.0
+      },
+      "stratum": {
+        "family": "self_exciting",
+        "level": 0,
+        "region": 3
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 32
+      },
+      "extrapolation_weight": {
+        "numerator": 32,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "self_exciting",
+      "level": 0,
+      "lattice": [
+        44,
+        4
+      ],
+      "parameter_bits": [
+        4604029899060858061,
+        4616537374060998735
+      ],
+      "cell": {
+        "family": "self_exciting",
+        "phi": 0.65,
+        "tau_s": 4.308869380063768
+      },
+      "stratum": {
+        "family": "self_exciting",
+        "level": 0,
+        "region": 1
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 39
+      },
+      "extrapolation_weight": {
+        "numerator": 39,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "self_exciting",
+      "level": 1,
+      "lattice": [
+        4,
+        10
+      ],
+      "parameter_bits": [
+        4594572339843380020,
+        4623860284825608171
+      ],
+      "cell": {
+        "family": "self_exciting",
+        "phi": 0.15000000000000002,
+        "tau_s": 13.625841381159224
+      },
+      "stratum": {
+        "family": "self_exciting",
+        "level": 1,
+        "region": 0
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 72
+      },
+      "extrapolation_weight": {
+        "numerator": 72,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "self_exciting",
+      "level": 1,
+      "lattice": [
+        22,
+        24
+      ],
+      "parameter_bits": [
+        4600427019358961664,
+        4641240890982006784
+      ],
+      "cell": {
+        "family": "self_exciting",
+        "phi": 0.375,
+        "tau_s": 200.0
+      },
+      "stratum": {
+        "family": "self_exciting",
+        "level": 1,
+        "region": 2
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 64
+      },
+      "extrapolation_weight": {
+        "numerator": 64,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "self_exciting",
+      "level": 1,
+      "lattice": [
+        50,
+        0
+      ],
+      "parameter_bits": [
+        4604705439004963636,
+        4611686018427387904
+      ],
+      "cell": {
+        "family": "self_exciting",
+        "phi": 0.7250000000000001,
+        "tau_s": 2.0
+      },
+      "stratum": {
+        "family": "self_exciting",
+        "level": 1,
+        "region": 1
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 67
+      },
+      "extrapolation_weight": {
+        "numerator": 67,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "self_exciting",
+      "level": 1,
+      "lattice": [
+        60,
+        26
+      ],
+      "parameter_bits": [
+        4605831338911806260,
+        4643871975749983881
+      ],
+      "cell": {
+        "family": "self_exciting",
+        "phi": 0.8500000000000001,
+        "tau_s": 293.559853524414
+      },
+      "stratum": {
+        "family": "self_exciting",
+        "level": 1,
+        "region": 3
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 60
+      },
+      "extrapolation_weight": {
+        "numerator": 60,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "self_exciting",
+      "level": 2,
+      "lattice": [
+        60,
+        31
+      ],
+      "parameter_bits": [
+        4605831338911806260,
+        4648069624941596401
+      ],
+      "cell": {
+        "family": "self_exciting",
+        "phi": 0.8500000000000001,
+        "tau_s": 552.3371695079533
+      },
+      "stratum": {
+        "family": "self_exciting",
+        "level": 2,
+        "region": 3
+      },
+      "kind": "anchor",
+      "quick": true,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 1
+      },
+      "extrapolation_weight": {
+        "numerator": 1,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "self_exciting",
+      "level": 2,
+      "lattice": [
+        4,
+        31
+      ],
+      "parameter_bits": [
+        4594572339843380020,
+        4648069624941596401
+      ],
+      "cell": {
+        "family": "self_exciting",
+        "phi": 0.15000000000000002,
+        "tau_s": 552.3371695079533
+      },
+      "stratum": {
+        "family": "self_exciting",
+        "level": 2,
+        "region": 2
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 156
+      },
+      "extrapolation_weight": {
+        "numerator": 156,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "self_exciting",
+      "level": 2,
+      "lattice": [
+        7,
+        12
+      ],
+      "parameter_bits": [
+        4595923419731591168,
+        4626322717216342016
+      ],
+      "cell": {
+        "family": "self_exciting",
+        "phi": 0.1875,
+        "tau_s": 20.0
+      },
+      "stratum": {
+        "family": "self_exciting",
+        "level": 2,
+        "region": 0
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 171
+      },
+      "extrapolation_weight": {
+        "numerator": 171,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "self_exciting",
+      "level": 2,
+      "lattice": [
+        43,
+        32
+      ],
+      "parameter_bits": [
+        4603917309070173799,
+        4648488871632306176
+      ],
+      "cell": {
+        "family": "self_exciting",
+        "phi": 0.6375000000000001,
+        "tau_s": 600.0
+      },
+      "stratum": {
+        "family": "self_exciting",
+        "level": 2,
+        "region": 3
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 151
+      },
+      "extrapolation_weight": {
+        "numerator": 151,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "self_exciting",
+      "level": 2,
+      "lattice": [
+        44,
+        9
+      ],
+      "parameter_bits": [
+        4604029899060858061,
+        4622521018511214116
+      ],
+      "cell": {
+        "family": "self_exciting",
+        "phi": 0.65,
+        "tau_s": 11.246826503806979
+      },
+      "stratum": {
+        "family": "self_exciting",
+        "level": 2,
+        "region": 1
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 167
+      },
+      "extrapolation_weight": {
+        "numerator": 167,
+        "denominator": 1
+      }
+    }
+  ],
+  "plan_sha256": "81b5325fc18758c77b033b68ffe086a0f807b7d9b3d81321cb751d2609ae932d"
+}
