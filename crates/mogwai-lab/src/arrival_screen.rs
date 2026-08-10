@@ -15,7 +15,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::time::Instant;
 
 use mogwai_data::{
@@ -545,6 +546,17 @@ pub struct ScreenContext {
     bypass_cache: bool,
 }
 
+/// The immutable, thread-safe subset of [`ScreenContext`] needed to project
+/// one `(cell, seed)` task. The observed-side context deliberately stays on
+/// the coordinator because its lazy metric store is not `Send`.
+#[derive(Clone)]
+pub struct ProjectionContext {
+    profile: InstrumentProfile,
+    binding: GeneratedBinding,
+    cache: CacheStore,
+    bypass_cache: bool,
+}
+
 impl ScreenContext {
     pub fn open(measure_path: &Path, cache: Option<&Path>) -> LabResult<Self> {
         let measure_bytes = std::fs::read(measure_path)?;
@@ -658,6 +670,20 @@ impl ScreenContext {
     #[must_use]
     pub fn gate_hours(&self) -> &[i64] {
         &self.hours
+    }
+
+    /// Builds the worker-safe projection state and prepares its cache once.
+    /// Every scheduler pass in one run reuses the returned value.
+    pub fn parallel_projection(&self) -> LabResult<ProjectionContext> {
+        if !self.bypass_cache {
+            self.cache.prepare_for_writes()?;
+        }
+        Ok(ProjectionContext {
+            profile: self.profile.clone(),
+            binding: self.binding.clone(),
+            cache: self.cache.clone(),
+            bypass_cache: self.bypass_cache,
+        })
     }
 }
 
@@ -792,6 +818,28 @@ pub struct CellEvaluation {
     pub prints: u64,
 }
 
+/// One scheduler cell and its exact ordered seed set.
+#[derive(Debug, Clone)]
+pub struct ScheduledCell {
+    pub cell: Cell,
+    pub seeds: Vec<u64>,
+}
+
+struct ScheduledWalk {
+    walk: SeedWalk,
+    execution_s: f64,
+}
+
+struct SeedTask {
+    cell_index: usize,
+    seed_index: usize,
+}
+
+struct SeedResult {
+    task_index: usize,
+    product: LabResult<ScheduledWalk>,
+}
+
 static CELLS_EVALUATED: AtomicU64 = AtomicU64::new(0);
 static PARENTS_WALKED: AtomicU64 = AtomicU64::new(0);
 static PRINTS_PROJECTED: AtomicU64 = AtomicU64::new(0);
@@ -809,16 +857,52 @@ pub fn screen_work() -> ScreenWork {
 }
 
 pub fn project_seed(ctx: &ScreenContext, cell: &Cell, seed: u64) -> LabResult<SeedWalk> {
+    project_seed_under(
+        &ctx.profile,
+        &ctx.binding,
+        &ctx.cache,
+        ctx.bypass_cache,
+        false,
+        cell,
+        seed,
+    )
+}
+
+fn project_seed_parallel(
+    ctx: &ProjectionContext,
+    cell: &Cell,
+    seed: u64,
+) -> LabResult<SeedWalk> {
+    project_seed_under(
+        &ctx.profile,
+        &ctx.binding,
+        &ctx.cache,
+        ctx.bypass_cache,
+        true,
+        cell,
+        seed,
+    )
+}
+
+fn project_seed_under(
+    profile: &InstrumentProfile,
+    binding: &GeneratedBinding,
+    cache: &CacheStore,
+    bypass_cache: bool,
+    cache_prepared: bool,
+    cell: &Cell,
+    seed: u64,
+) -> LabResult<SeedWalk> {
     let key = cache_key(cell, seed);
-    if !ctx.bypass_cache
-        && let Some(bytes) = ctx.cache.read(&key)?
+    if !bypass_cache
+        && let Some(bytes) = cache.read(&key)?
     {
         let cached: SeedWalk = serde_json::from_slice(&bytes)?;
         tally_walk(&cached);
         return Ok(cached);
     }
     let started = Instant::now();
-    let product = match project_walk(ctx, cell, seed) {
+    let product = match project_walk(profile, binding, cell, seed) {
         Ok(done) => SeedWalk {
             seed,
             sessions: done.sessions,
@@ -842,8 +926,13 @@ pub fn project_seed(ctx: &ScreenContext, cell: &Cell, seed: u64) -> LabResult<Se
         },
         Err(ProjectStop::Lab(e)) => return Err(e),
     };
-    if !ctx.bypass_cache {
-        ctx.cache.write(&key, &serde_json::to_vec(&product)?)?;
+    if !bypass_cache {
+        let bytes = serde_json::to_vec(&product)?;
+        if cache_prepared {
+            cache.write_prepared(&key, &bytes)?;
+        } else {
+            cache.write(&key, &bytes)?;
+        }
     }
     tally_walk(&product);
     Ok(product)
@@ -854,15 +943,20 @@ fn tally_walk(walk: &SeedWalk) {
     PRINTS_PROJECTED.fetch_add(walk.prints, Ordering::Relaxed);
 }
 
-fn project_walk(ctx: &ScreenContext, cell: &Cell, seed: u64) -> Result<Projected, ProjectStop> {
-    let start = ctx.binding.window_start_ns;
-    let end = start.saturating_add(ctx.binding.window_length_ns);
-    let warmup_ns = u64::try_from(parse_duration(&ctx.binding.warmup).map_err(ProjectStop::Lab)?)
+fn project_walk(
+    profile: &InstrumentProfile,
+    binding: &GeneratedBinding,
+    cell: &Cell,
+    seed: u64,
+) -> Result<Projected, ProjectStop> {
+    let start = binding.window_start_ns;
+    let end = start.saturating_add(binding.window_length_ns);
+    let warmup_ns = u64::try_from(parse_duration(&binding.warmup).map_err(ProjectStop::Lab)?)
         .map_err(|_| LabError::refusal("warmup duration is negative"))?;
     let walk_start = start
         .checked_sub(warmup_ns)
         .ok_or_else(|| LabError::refusal("the warmup underflows the window start"))?;
-    let mut scalars = ctx.profile.scalars.clone();
+    let mut scalars = profile.scalars.clone();
     let config = cell.config();
     // A refinement midpoint that leaves the section 16 domain is a refusal,
     // not a silent walk at an out-of-domain parameterization.
@@ -874,7 +968,7 @@ fn project_walk(ctx: &ScreenContext, cell: &Cell, seed: u64) -> Result<Projected
     }
     scalars.arrival = Some(config);
     let offset = i32::from(
-        ctx.profile
+        profile
             .calendar
             .as_ref()
             .ok_or_else(|| LabError::refusal("MNQ calendar missing"))?
@@ -887,18 +981,18 @@ fn project_walk(ctx: &ScreenContext, cell: &Cell, seed: u64) -> Result<Projected
                 seed,
                 walk_start,
                 mogwai_server::source::fingerprint(),
-                &ctx.profile.session,
+                &profile.session,
                 None,
-                SizeGrid::from_def(&ctx.profile.def),
-                ctx.profile.calendar.clone(),
+                SizeGrid::from_def(&profile.def),
+                profile.calendar.clone(),
             )
             .map_err(|e| LabError::refusal(format!("building the generator: {e:?}")))?,
         )),
         _ => ParentWalk::Kernel(Box::new(
             CadenceWalk::new(
                 &scalars,
-                &ctx.profile.session,
-                ctx.profile.calendar.as_ref(),
+                &profile.session,
+                profile.calendar.as_ref(),
                 1.0,
                 seed,
                 walk_start,
@@ -1207,6 +1301,169 @@ pub fn evaluate_cell_with_work(
         parents: walks.iter().map(|walk| walk.parents).sum(),
         prints: walks.iter().map(|walk| walk.prints).sum(),
     })
+}
+
+/// Projects cells across a bounded worker pool and reduces their verdicts on
+/// the calling thread. Results are returned in input order regardless of task
+/// completion order. Queue wait is excluded from `cost_s`; it contains worker
+/// execution plus verdict reduction only.
+///
+/// `projection` must come from [`ScreenContext::parallel_projection`] and may
+/// be reused across every coarse and refinement pass in one run.
+pub fn evaluate_cells_parallel(
+    ctx: &ScreenContext,
+    projection: &ProjectionContext,
+    cells: &[ScheduledCell],
+    jobs: usize,
+    mut guard: Option<&mut BudgetGuard>,
+) -> LabResult<Vec<CellEvaluation>> {
+    if jobs == 0 {
+        return Err(LabError::refusal("--jobs must be at least 1"));
+    }
+    if cells.is_empty() {
+        return Ok(Vec::new());
+    }
+    if cells.iter().any(|cell| cell.seeds.is_empty()) {
+        return Err(LabError::refusal(
+            "a scheduled Stage A cell carries no seeds",
+        ));
+    }
+
+    // Put the historically expensive generator family at the front. Within a
+    // cell, seeds retain their declared order in the result slots even though
+    // workers may finish them in any order.
+    let mut cell_order: Vec<usize> = (0..cells.len()).collect();
+    cell_order.sort_by_key(|&index| match cells[index].cell.family() {
+        Family::EventMarkov => 0,
+        Family::WallMmpp => 1,
+        Family::LogOuCox => 2,
+        Family::SelfExciting => 3,
+    });
+    let tasks: Vec<_> = cell_order
+        .into_iter()
+        .flat_map(|cell_index| {
+            (0..cells[cell_index].seeds.len()).map(move |seed_index| SeedTask {
+                cell_index,
+                seed_index,
+            })
+        })
+        .collect();
+    let next = AtomicUsize::new(0);
+    let cancelled = AtomicBool::new(false);
+    let worker_count = jobs.min(tasks.len());
+    let (sender, receiver) = mpsc::sync_channel(worker_count);
+    let mut walk_slots: Vec<Vec<Option<ScheduledWalk>>> = cells
+        .iter()
+        .map(|cell| std::iter::repeat_with(|| None).take(cell.seeds.len()).collect())
+        .collect();
+    let mut remaining: Vec<usize> = cells.iter().map(|cell| cell.seeds.len()).collect();
+    let mut evaluations: Vec<Option<CellEvaluation>> =
+        std::iter::repeat_with(|| None).take(cells.len()).collect();
+    let mut first_error = None;
+
+    std::thread::scope(|scope| {
+        for _ in 0..worker_count {
+            let sender = sender.clone();
+            let next = &next;
+            let cancelled = &cancelled;
+            let tasks = &tasks;
+            scope.spawn(move || {
+                loop {
+                    if cancelled.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let task_index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(task) = tasks.get(task_index) else {
+                        break;
+                    };
+                    if cancelled.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let started = Instant::now();
+                    let product = project_seed_parallel(
+                        projection,
+                        &cells[task.cell_index].cell,
+                        cells[task.cell_index].seeds[task.seed_index],
+                    )
+                    .map(|walk| ScheduledWalk {
+                        walk,
+                        execution_s: started.elapsed().as_secs_f64(),
+                    });
+                    let failed = product.is_err();
+                    if sender.send(SeedResult { task_index, product }).is_err() {
+                        break;
+                    }
+                    if failed {
+                        cancelled.store(true, Ordering::Release);
+                        break;
+                    }
+                }
+            });
+        }
+        drop(sender);
+
+        for message in receiver {
+            if first_error.is_some() {
+                continue;
+            }
+            let task = &tasks[message.task_index];
+            match message.product {
+                Ok(product) => {
+                    walk_slots[task.cell_index][task.seed_index] = Some(product);
+                    remaining[task.cell_index] -= 1;
+                    if remaining[task.cell_index] != 0 {
+                        continue;
+                    }
+                    let reduction_started = Instant::now();
+                    let scheduled: Vec<_> = walk_slots[task.cell_index]
+                        .iter_mut()
+                        .map(|slot| slot.take().expect("completed cell has every seed"))
+                        .collect();
+                    let execution_s = scheduled.iter().map(|item| item.execution_s).sum::<f64>();
+                    let walks: Vec<_> = scheduled.into_iter().map(|item| item.walk).collect();
+                    let mut verdict = match verdict_from_walks(
+                        ctx,
+                        &cells[task.cell_index].cell,
+                        &walks,
+                    ) {
+                        Ok(verdict) => verdict,
+                        Err(error) => {
+                            cancelled.store(true, Ordering::Release);
+                            first_error = Some(error);
+                            continue;
+                        }
+                    };
+                    verdict.cost_s = execution_s + reduction_started.elapsed().as_secs_f64();
+                    CELLS_EVALUATED.fetch_add(1, Ordering::Relaxed);
+                    evaluations[task.cell_index] = Some(CellEvaluation {
+                        parents: walks.iter().map(|walk| walk.parents).sum(),
+                        prints: walks.iter().map(|walk| walk.prints).sum(),
+                        verdict,
+                    });
+                    if let Some(guard) = guard.as_deref_mut()
+                        && let Err(stop) = guard.check()
+                    {
+                        cancelled.store(true, Ordering::Release);
+                        first_error = Some(stop.into());
+                    }
+                }
+                Err(error) => {
+                    cancelled.store(true, Ordering::Release);
+                    first_error = Some(error);
+                }
+            }
+        }
+    });
+
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    evaluations
+        .into_iter()
+        .map(|evaluation| {
+            evaluation.ok_or_else(|| LabError::refusal("Stage A scheduler left a cell unfinished"))
+        })
+        .collect()
 }
 
 /// A1 to A4, the loss and the reported diagnostics over walks that have already
@@ -2486,6 +2743,88 @@ mod tests {
             refusal.detail.contains("no open segment"),
             "{}",
             refusal.detail
+        );
+    }
+
+    #[test]
+    fn parallel_seed_scheduling_matches_serial_cell_reduction() {
+        let mut ctx = ScreenContext::over(observed_sessions()).expect("a screen context");
+        let calendar = ctx.profile.calendar.as_ref().expect("the MNQ calendar");
+        let mut start = 20_000 * DAY_NS + OPEN_NS + MINUTE_NS;
+        while !calendar.is_open(start) {
+            start += DAY_NS;
+        }
+        ctx.binding = GeneratedBinding {
+            window_start_ns: start,
+            window_length_ns: 30 * MINUTE_NS,
+            warmup: "0s".into(),
+        };
+        let cell = Cell::WallMmpp {
+            occupancy: 0.3,
+            rate_ratio: 10.0,
+            tau_s: 60.0,
+        };
+        let serial = evaluate_cell_with_work(&ctx, &cell, &[201, 202])
+            .expect("serial cell evaluation");
+        let projection = ctx.parallel_projection().expect("worker-safe context");
+        let scheduled = [ScheduledCell {
+            cell,
+            seeds: vec![201, 202],
+        }];
+        let one_worker = evaluate_cells_parallel(&ctx, &projection, &scheduled, 1, None)
+            .expect("one-worker evaluation")
+            .pop()
+            .expect("one result");
+        let four_workers = evaluate_cells_parallel(&ctx, &projection, &scheduled, 4, None)
+            .expect("four-worker evaluation")
+            .pop()
+            .expect("one result");
+
+        let normalize = |mut verdict: CellVerdict| {
+            verdict.cost_s = 0.0;
+            serde_json::to_value(verdict).expect("serialized verdict")
+        };
+        assert_eq!(
+            normalize(serial.verdict.clone()),
+            normalize(one_worker.verdict.clone())
+        );
+        assert_eq!(
+            normalize(one_worker.verdict.clone()),
+            normalize(four_workers.verdict.clone())
+        );
+        assert_eq!(serial.parents, one_worker.parents);
+        assert_eq!(one_worker.parents, four_workers.parents);
+        assert_eq!(serial.prints, one_worker.prints);
+        assert_eq!(one_worker.prints, four_workers.prints);
+
+        let ordered = [
+            ScheduledCell {
+                cell: scheduled[0].cell.clone(),
+                seeds: vec![201],
+            },
+            ScheduledCell {
+                cell: Cell::EventMarkov { switch_rate: 0.1 },
+                seeds: vec![201],
+            },
+        ];
+        let ordered_results = evaluate_cells_parallel(&ctx, &projection, &ordered, 4, None)
+            .expect("ordered parallel evaluation");
+        assert_eq!(ordered_results[0].verdict.cell, ordered[0].cell);
+        assert_eq!(ordered_results[1].verdict.cell, ordered[1].cell);
+
+        let mut guard = BudgetGuard::scripted(vec![(STAGE_A_BUDGET_S, 0)]);
+        let Err(error) = evaluate_cells_parallel(
+            &ctx,
+            &projection,
+            &scheduled,
+            1,
+            Some(&mut guard),
+        ) else {
+            panic!("a crossed scheduler budget must stop the batch");
+        };
+        assert!(
+            error.to_string().contains("stage-a-budget-exceeded"),
+            "{error}"
         );
     }
 

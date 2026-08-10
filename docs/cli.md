@@ -324,7 +324,10 @@ and selects none. It reads `analysis/mnq-measure-12a.json` (`--measure`)
 for the observed parent-count marginal and the exposure binding, and
 writes the hash-bound result to `analysis/mnq-arrival-screen.json`
 (`--out`). `--cache` points at the walk cache root, defaulting to the
-standing storage policy.
+standing storage policy. `--jobs N` bounds concurrent `(cell, seed)`
+projection workers and defaults to the machine's reported parallelism.
+Verdict reduction and budget enforcement stay on the coordinator, and
+the final artifact order is independent of worker completion order.
 
 `--cost-probe` runs brick A0: one grid cell per family, at two seeds,
 measured against that family's own wall-time and peak-RSS budget. It
@@ -333,7 +336,8 @@ to be run before the grid that produces one. A per-cell budget miss fails
 the command and stops for an owner ruling on the per-cell price; the full
 run additionally enforces a total wall-time and peak-RSS ceiling across
 the whole grid, stopping without writing an artifact if either is
-crossed.
+crossed. The cost probe remains serial because it prices each cell rather
+than scheduler throughput.
 
 A full run requires a clean tree before reading any input and re-attests
 it immediately before serializing, exactly as `arrival-control` does. The

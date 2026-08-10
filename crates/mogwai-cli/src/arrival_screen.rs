@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::thread;
 use std::time::Instant;
 
 use anyhow::{anyhow, bail};
@@ -10,8 +12,9 @@ use clap::Args;
 use mogwai_lab::arrival_screen::{
     BudgetGuard, EvaluatedCell, Family, REFINEMENT_CELL_CAP, REFINEMENT_DEPTH, STAGE_A_BUDGET_S,
     STAGE_A_CELL_BUDGET_S, STAGE_A_GEN_CELL_BUDGET_S, STAGE_A_GEN_REFINE_CAP, STAGE_A_RSS_BYTES,
-    STAGE_A_SEEDS, ScreenContext, admissible_regions, budget_verdict, budgeted, coarse_grid,
-    coarse_lattice, evaluate_cell, probe_cell, refinement_round, screen_work, write_artifact,
+    STAGE_A_SEEDS, ScheduledCell, ScreenContext, admissible_regions, budget_verdict, budgeted,
+    coarse_grid, coarse_lattice, evaluate_cell, evaluate_cells_parallel, probe_cell,
+    refinement_round, screen_work, write_artifact,
 };
 use mogwai_lab::ledger::{fresh_tree_state, require_clean_tree, sha256_file};
 use mogwai_lab::sidecar;
@@ -30,6 +33,9 @@ pub struct ArrivalScreenArgs {
     pub cost_probe: bool,
     #[arg(long, value_name = "DIR")]
     pub cache: Option<PathBuf>,
+    /// Concurrent projection workers. Defaults to the machine's parallelism.
+    #[arg(long)]
+    pub jobs: Option<usize>,
 }
 
 fn artifact_cell(cell: &EvaluatedCell) -> anyhow::Result<Value> {
@@ -86,6 +92,12 @@ fn report_work(peak_rss_bytes: u64) {
 }
 
 pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
+    if args.jobs == Some(0) {
+        bail!("--jobs must be at least 1");
+    }
+    let jobs = args
+        .jobs
+        .unwrap_or_else(|| thread::available_parallelism().map_or(1, NonZeroUsize::get));
     let measure = args.measure.unwrap_or_else(|| DEFAULT_MEASURE.into());
     let out = args.out.unwrap_or_else(|| DEFAULT_OUT.into());
     let commit = if args.cost_probe {
@@ -135,58 +147,105 @@ pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
         return Ok(result);
     }
 
+    let projection = context
+        .parallel_projection()
+        .map_err(|e| anyhow!(e.to_string()))?;
+    sidecar::kv("jobs", jobs);
     sidecar::marker("coarse");
     let coarse_started = Instant::now();
-    let mut by_family: BTreeMap<Family, Vec<EvaluatedCell>> = BTreeMap::new();
+    let mut coarse_points = Vec::new();
     for family in Family::ALL {
-        // Four per-pass family boundaries, which is the whole reason markers
-        // are affordable here: a screen's coarse pass is hours long and the
-        // families are priced very differently, so a phase decomposition that
-        // stopped at "coarse" would hide the only split that explains it.
-        sidecar::marker(&format!("coarse_{}", family.as_str()));
-        let evaluated = budgeted(&mut guard, coarse_lattice(family), |point| {
-            Ok(EvaluatedCell {
-                verdict: evaluate_cell(&context, &point.cell, &STAGE_A_SEEDS[..2])?,
+        coarse_points.extend(
+            coarse_lattice(family)
+                .into_iter()
+                .map(|point| (family, point)),
+        );
+    }
+    let scheduled: Vec<_> = coarse_points
+        .iter()
+        .map(|(_, point)| ScheduledCell {
+            cell: point.cell.clone(),
+            seeds: STAGE_A_SEEDS[..2].to_vec(),
+        })
+        .collect();
+    let evaluations = evaluate_cells_parallel(
+        &context,
+        &projection,
+        &scheduled,
+        jobs,
+        Some(&mut guard),
+    )
+    .map_err(|e| anyhow!(e.to_string()))?;
+    let mut by_family: BTreeMap<Family, Vec<EvaluatedCell>> =
+        Family::ALL.into_iter().map(|family| (family, Vec::new())).collect();
+    for ((family, point), evaluation) in coarse_points.into_iter().zip(evaluations) {
+        by_family
+            .get_mut(&family)
+            .expect("family initialized")
+            .push(EvaluatedCell {
+                verdict: evaluation.verdict,
                 lattice: point.lattice,
                 level: 0,
                 pass: "coarse",
-            })
-        })
-        .map_err(|e| anyhow!(e.to_string()))?;
-        by_family.insert(family, evaluated);
+            });
     }
     let coarse_s = coarse_started.elapsed().as_secs_f64();
     sidecar::marker("refine");
     let refine_started = Instant::now();
     let mut unevaluated: BTreeMap<Family, BTreeMap<String, usize>> = BTreeMap::new();
-    for family in Family::ALL {
-        sidecar::marker(&format!("refine_{}", family.as_str()));
-        let cap = if family == Family::EventMarkov {
-            STAGE_A_GEN_REFINE_CAP
-        } else {
-            REFINEMENT_CELL_CAP
-        };
-        let mut used = 0_usize;
-        for round in 1..=REFINEMENT_DEPTH {
-            let proposal = refinement_round(family, &by_family[&family], round, cap - used);
+    let mut used: BTreeMap<Family, usize> =
+        Family::ALL.into_iter().map(|family| (family, 0)).collect();
+    for round in 1..=REFINEMENT_DEPTH {
+        let mut round_points = Vec::new();
+        for family in Family::ALL {
+            let cap = if family == Family::EventMarkov {
+                STAGE_A_GEN_REFINE_CAP
+            } else {
+                REFINEMENT_CELL_CAP
+            };
+            let proposal = refinement_round(
+                family,
+                &by_family[&family],
+                round,
+                cap - used[&family],
+            );
             unevaluated
                 .entry(family)
                 .or_default()
                 .insert(format!("round_{round}"), proposal.unevaluated);
-            used += proposal.candidates.len();
-            let refined = budgeted(&mut guard, proposal.candidates, |point| {
-                Ok(EvaluatedCell {
-                    verdict: evaluate_cell(&context, &point.cell, &STAGE_A_SEEDS)?,
-                    lattice: point.lattice,
-                    level: point.level,
-                    pass: "refine",
-                })
+            *used.get_mut(&family).expect("family initialized") += proposal.candidates.len();
+            round_points.extend(
+                proposal
+                    .candidates
+                    .into_iter()
+                    .map(|point| (family, point)),
+            );
+        }
+        let scheduled: Vec<_> = round_points
+            .iter()
+            .map(|(_, point)| ScheduledCell {
+                cell: point.cell.clone(),
+                seeds: STAGE_A_SEEDS.to_vec(),
             })
-            .map_err(|e| anyhow!(e.to_string()))?;
+            .collect();
+        let evaluations = evaluate_cells_parallel(
+            &context,
+            &projection,
+            &scheduled,
+            jobs,
+            Some(&mut guard),
+        )
+        .map_err(|e| anyhow!(e.to_string()))?;
+        for ((family, point), evaluation) in round_points.into_iter().zip(evaluations) {
             by_family
                 .get_mut(&family)
                 .expect("family initialized")
-                .extend(refined);
+                .push(EvaluatedCell {
+                    verdict: evaluation.verdict,
+                    lattice: point.lattice,
+                    level: point.level,
+                    pass: "refine",
+                });
         }
     }
     let refine_s = refine_started.elapsed().as_secs_f64();
@@ -290,7 +349,7 @@ pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
             "kernel_version":mogwai_data::ARRIVAL_KERNEL_VERSION,
             "spec":"notes/protocol-12b-arrival-composition-spec.md section 9, bricks A0 and A"},
         "search_space":search_space,"cells":cells_json,"admissible_region":regions_json,"refusals":refusals,
-        "cost":{"coarse_s":coarse_s,"refine_s":refine_s,"total_s":total.elapsed().as_secs_f64(),
+        "cost":{"jobs":jobs,"coarse_s":coarse_s,"refine_s":refine_s,"total_s":total.elapsed().as_secs_f64(),
             "peak_rss_bytes":peak_rss,"per_family_cell_s":per_family_cost,
             "budgets":{"STAGE_A_CELL_BUDGET_S":STAGE_A_CELL_BUDGET_S,
                 "STAGE_A_GEN_CELL_BUDGET_S":STAGE_A_GEN_CELL_BUDGET_S,
@@ -317,6 +376,7 @@ mod tests {
             out: Some(out.into()),
             cost_probe,
             cache: None,
+            jobs: Some(1),
         }
     }
 
@@ -350,6 +410,23 @@ mod tests {
                 "a dirty tree must be refused before the input is read: {error}"
             );
         }
+        assert!(!Path::new(out).exists());
+    }
+
+    #[test]
+    fn arrival_screen_refuses_zero_workers_before_touching_inputs() {
+        let out = "target/stage-a-zero-jobs-test.json";
+        drop(std::fs::remove_file(out));
+        let mut args = args(
+            "analysis/this-12a-artifact-does-not-exist.json",
+            out,
+            false,
+        );
+        args.jobs = Some(0);
+        let error = run(args)
+            .expect_err("zero workers cannot run the screen")
+            .to_string();
+        assert!(error.contains("--jobs must be at least 1"), "{error}");
         assert!(!Path::new(out).exists());
     }
 

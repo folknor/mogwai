@@ -11,8 +11,9 @@
 //!   `$XDG_CACHE_HOME/mogwai/` (falling back to `~/.cache/mogwai/`),
 //!   overridable by `MOGWAI_CACHE_DIR` or `--cache-dir`. Stale-provenance
 //!   entries - directories under the cache root that do not name the
-//!   CURRENT token - are unreachable by construction and pruned on every
-//!   write; [`CacheStore::clean_stale`] covers the manual case.
+//!   CURRENT token - are unreachable by construction and pruned before a
+//!   normal write or once before a prepared parallel batch;
+//!   [`CacheStore::clean_stale`] covers the manual case.
 //! - SCRATCH: a run-scoped [`ScratchDir`] under the cache root, deleted on
 //!   `Drop` (clean exit), ignorable on crash - the filesystem will not mind
 //!   an orphaned scratch directory the way the 14,288-file
@@ -22,8 +23,9 @@
 //! phases), so this module's own tests are synthetic - it proves the policy
 //! mechanism, not any particular cache's contents.
 
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
 
@@ -121,6 +123,8 @@ pub struct CacheStore {
     token: ProvenanceToken,
 }
 
+static CACHE_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
 impl CacheStore {
     pub fn open(root: PathBuf, token: ProvenanceToken) -> Self {
         Self { root, token }
@@ -135,14 +139,46 @@ impl CacheStore {
     }
 
     /// Writes `key` under the current provenance directory, pruning every
-    /// sibling (stale-provenance) directory first - "stale-provenance
-    /// entries are unreachable by construction and are pruned automatically
-    /// on write" (phase-1 policy).
+    /// sibling (stale-provenance) directory first.
     pub fn write(&self, key: &str, bytes: &[u8]) -> io::Result<()> {
+        self.prepare_for_writes()?;
+        self.write_prepared(key, bytes)
+    }
+
+    /// Prunes stale provenance and creates the current directory before a
+    /// batch of writes. Parallel producers call this once on the coordinator,
+    /// rather than racing a recursive stale-directory scan on every entry.
+    pub fn prepare_for_writes(&self) -> io::Result<()> {
         self.clean_stale()?;
         let dir = self.provenance_dir();
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join(key), bytes)
+        std::fs::create_dir_all(dir)
+    }
+
+    /// Atomically publishes one entry after [`Self::prepare_for_writes`].
+    /// Unique staging names make distinct concurrent writes independent; if
+    /// two processes compute the same key, either complete identical entry is
+    /// visible and a reader can never observe a partial JSON document.
+    pub fn write_prepared(&self, key: &str, bytes: &[u8]) -> io::Result<()> {
+        let dir = self.provenance_dir();
+        let sequence = CACHE_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let staged = dir.join(format!(
+            ".{key}.{}.{}.tmp",
+            std::process::id(),
+            sequence
+        ));
+        let result = (|| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staged)?;
+            file.write_all(bytes)?;
+            drop(file);
+            std::fs::rename(&staged, dir.join(key))
+        })();
+        if result.is_err() {
+            drop(std::fs::remove_file(staged));
+        }
+        result
     }
 
     pub fn read(&self, key: &str) -> io::Result<Option<Vec<u8>>> {
@@ -353,6 +389,44 @@ mod tests {
         assert_eq!(stats.provenance_dirs, 1);
         assert_eq!(stats.files, 1);
 
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn prepared_cache_writes_publish_complete_entries_concurrently() {
+        let root = scratch_test_root("parallel-writes");
+        let token = ProvenanceToken::compute(&ProvenanceInputs {
+            crate_version: "0.1.0",
+            tape_protocol_version: 12,
+            fingerprint_hash: "parallel",
+            full_command: "arrival-screen",
+            subcontract_hash: "measure",
+        });
+        let store = CacheStore::open(root.clone(), token);
+        store.prepare_for_writes().expect("prepared cache");
+        std::thread::scope(|scope| {
+            for index in 0..8 {
+                let store = store.clone();
+                scope.spawn(move || {
+                    let key = format!("seed-{index}.json");
+                    let bytes = format!("{{\"seed\":{index}}}");
+                    store
+                        .write_prepared(&key, bytes.as_bytes())
+                        .expect("atomic cache write");
+                });
+            }
+        });
+        for index in 0..8 {
+            let key = format!("seed-{index}.json");
+            let bytes = store.read(&key).expect("cache read").expect("entry");
+            assert_eq!(bytes, format!("{{\"seed\":{index}}}").as_bytes());
+        }
+        let staged: Vec<_> = std::fs::read_dir(store.provenance_dir())
+            .expect("cache directory")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(staged.is_empty(), "staged cache files remain: {staged:?}");
         std::fs::remove_dir_all(&root).ok();
     }
 

@@ -4,13 +4,11 @@
 //! Reproducible quick and full panels for Stage A throughput work.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc;
 use std::time::Instant;
 
 use mogwai_lab::arrival_screen::{
-    CellEvaluation, Family, STAGE_A_BUDGET_S, ScreenContext, evaluate_cell_with_work,
+    Family, STAGE_A_BUDGET_S, ScheduledCell, ScreenContext, evaluate_cell_with_work,
+    evaluate_cells_parallel,
 };
 use mogwai_lab::ledger::sha256_file;
 use mogwai_lab::sampler::ResourceSampler;
@@ -130,11 +128,6 @@ fn parse_args() -> Result<Args, String> {
     Ok(args)
 }
 
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
-fn evaluate(ctx: &ScreenContext, panel: &PanelCell) -> Result<CellEvaluation, String> {
-    evaluate_cell_with_work(ctx, &panel.cell, &panel.seeds).map_err(|error| error.to_string())
-}
-
 fn run_pilot(args: &Args) -> Result<(), String> {
     let measurement_sha256 = sha256_file(&args.measure).map_err(|error| error.to_string())?;
     let context = ScreenContext::open(&args.measure, None)
@@ -231,61 +224,39 @@ fn load_manifest(path: &Path, measure: &Path) -> Result<BatchManifest, String> {
 }
 
 fn run_panel(args: &Args, manifest: &BatchManifest) -> Result<Vec<CellRun>, String> {
-    let panel = Arc::new(match args.mode {
+    let panel = match args.mode {
         Mode::Quick => manifest.quick.clone(),
         Mode::Full => manifest.full.clone(),
         Mode::Pilot | Mode::Manifest => unreachable!(),
-    });
+    };
     let jobs = args.jobs.min(panel.len());
-    let next = Arc::new(AtomicUsize::new(0));
-    let (sender, receiver) = mpsc::channel();
-    std::thread::scope(|scope| {
-        for _ in 0..jobs {
-            let panel = Arc::clone(&panel);
-            let next = Arc::clone(&next);
-            let sender = sender.clone();
-            let measure = args.measure.clone();
-            scope.spawn(move || {
-                let context = match ScreenContext::open(&measure, None) {
-                    Ok(context) => context.measured(),
-                    Err(error) => {
-                        let _ignored = sender.send(Err(error.to_string()));
-                        return;
-                    }
-                };
-                loop {
-                    let index = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(cell) = panel.get(index) else {
-                        break;
-                    };
-                    let result = evaluate(&context, cell).map(|evaluation| CellRun {
-                        panel: cell.clone(),
-                        cost_s: evaluation.verdict.cost_s,
-                        parents: evaluation.parents,
-                        prints: evaluation.prints,
-                        admissible: evaluation.verdict.admissible,
-                        refused: !evaluation.verdict.refusals.is_empty(),
-                    });
-                    if sender.send(result).is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-        drop(sender);
-        let mut results = Vec::with_capacity(panel.len());
-        for result in receiver {
-            results.push(result?);
-        }
-        if results.len() != panel.len() {
-            return Err(format!(
-                "panel returned {} cells, expected {}",
-                results.len(),
-                panel.len()
-            ));
-        }
-        Ok(results)
-    })
+    let context = ScreenContext::open(&args.measure, None)
+        .map_err(|error| error.to_string())?
+        .measured();
+    let projection = context
+        .parallel_projection()
+        .map_err(|error| error.to_string())?;
+    let scheduled: Vec<_> = panel
+        .iter()
+        .map(|cell| ScheduledCell {
+            cell: cell.cell.clone(),
+            seeds: cell.seeds.clone(),
+        })
+        .collect();
+    let evaluations = evaluate_cells_parallel(&context, &projection, &scheduled, jobs, None)
+        .map_err(|error| error.to_string())?;
+    Ok(panel
+        .into_iter()
+        .zip(evaluations)
+        .map(|(panel, evaluation)| CellRun {
+            panel,
+            cost_s: evaluation.verdict.cost_s,
+            parents: evaluation.parents,
+            prints: evaluation.prints,
+            admissible: evaluation.verdict.admissible,
+            refused: !evaluation.verdict.refusals.is_empty(),
+        })
+        .collect())
 }
 
 fn p90(costs: &[f64]) -> f64 {
