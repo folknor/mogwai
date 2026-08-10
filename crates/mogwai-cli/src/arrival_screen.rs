@@ -22,6 +22,7 @@ use serde_json::{Map, Value, json};
 
 const DEFAULT_MEASURE: &str = "analysis/mnq-measure-12a.json";
 const DEFAULT_OUT: &str = "analysis/mnq-arrival-screen.json";
+const DEFAULT_MAX_JOBS: usize = 16;
 
 #[derive(Args, Debug)]
 pub struct ArrivalScreenArgs {
@@ -33,7 +34,7 @@ pub struct ArrivalScreenArgs {
     pub cost_probe: bool,
     #[arg(long, value_name = "DIR")]
     pub cache: Option<PathBuf>,
-    /// Concurrent projection workers. Defaults to the machine's parallelism.
+    /// Concurrent projection workers. Defaults to machine parallelism, capped at 16.
     #[arg(long)]
     pub jobs: Option<usize>,
 }
@@ -97,7 +98,11 @@ pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
     }
     let jobs = args
         .jobs
-        .unwrap_or_else(|| thread::available_parallelism().map_or(1, NonZeroUsize::get));
+        .unwrap_or_else(|| {
+            thread::available_parallelism()
+                .map_or(1, NonZeroUsize::get)
+                .min(DEFAULT_MAX_JOBS)
+        });
     let measure = args.measure.unwrap_or_else(|| DEFAULT_MEASURE.into());
     let out = args.out.unwrap_or_else(|| DEFAULT_OUT.into());
     let commit = if args.cost_probe {

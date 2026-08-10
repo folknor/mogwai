@@ -325,7 +325,8 @@ for the observed parent-count marginal and the exposure binding, and
 writes the hash-bound result to `analysis/mnq-arrival-screen.json`
 (`--out`). `--cache` points at the walk cache root, defaulting to the
 standing storage policy. `--jobs N` bounds concurrent `(cell, seed)`
-projection workers and defaults to the machine's reported parallelism.
+projection workers and defaults to the machine's reported parallelism,
+capped at 16 workers to avoid the measured SMT-contention regression.
 Verdict reduction and budget enforcement stay on the coordinator, and
 the final artifact order is independent of worker completion order.
 
