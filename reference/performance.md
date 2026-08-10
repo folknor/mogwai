@@ -218,6 +218,41 @@ and the arithmetic was consistent with the draw allocating ~30 bytes per parent.
 `931336d5` refutes it outright at 3.8 KB. The generator's walk allocates
 nothing; do not re-open that line.
 
+## Stage A batch instrument and Step 1, 2026-08-10
+
+Host `bygg`, release without profiling features, one worker. The committed
+panel hash is
+`81b5325fc18758c77b033b68ffe086a0f807b7d9b3d81321cb751d2609ae932d`.
+Each row is the best of three runs.
+
+| state | tier | uuid | wall | task CPU | maximum-cap p90 serial CPU |
+|---|---|---|---:|---:|---:|
+| Step 0 | quick | `fbd03346` | 87.100 s | 86.217 s | - |
+| Step 1 | quick | `a0921513` | 85.101 s | 83.740 s | - |
+| Step 0 | full | `66d4797d` | 790.200 s | 787.144 s | 27,448.707 s |
+| Step 1 | full | `5c012131` | 780.201 s | 777.564 s | 27,121.840 s |
+
+The full-panel wall improves 1.27%, task CPU 1.22%, and the maximum-cap p90
+estimate 1.19%, or 326.9 seconds. Work is identical across the full rows:
+72 cells, 242 seed walks, 7,571,686,367 parents and 8,868,542,328 prints.
+The quick rows likewise retain exactly 8 cells, 24 seed walks, 752,083,142
+parents and 880,798,950 prints.
+
+**Step 1's entering 2x to 3x single-core hypothesis is false.** The full panel
+has only 1.171 prints per parent. Collapsing each burst to its distinct
+populated minutes therefore removes at most the roughly 14.6% of child-loop
+iterations in excess of one per parent, while one session assignment and one
+minute insertion generally remain. The implementation still earns a small
+measured reduction and supplies the exact populated-minute primitive needed by
+the lean accumulator, but it is not the structural CPU win originally priced.
+Do not attribute any RSS movement to Step 1: retained parent timestamps and the
+session accumulator are unchanged.
+
+The full rows report 10 comparable strata, 44 singleton strata and
+`design_based_interval_available=0`. They are a paired optimization
+measurement, not a design-based confidence interval for the unsampled Stage A
+population.
+
 ## What each id measures
 
 `fill_bench` (`crates/mogwai-engine/examples/fill_bench.rs`):

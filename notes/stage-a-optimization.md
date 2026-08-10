@@ -157,7 +157,7 @@ NOT the problem. The hot loop is.
 
 ## Where the cost actually sits in the hot loop
 
-Per `ParentSummary`, `project_stream` currently performs:
+Before step 1, each `ParentSummary` made `project_stream` perform:
 
 - a loop over all children,
 - a `session_segment_at` call for every in-window child,
@@ -334,6 +334,10 @@ attribute it. The agreed order is:
 Each step gets its own cost-probe and allocation reading, so every
 semantic change is separately falsifiable, followed by a separately
 attributable scheduler result.
+
+STATUS 2026-08-10: steps 0 and 1 are complete. Step 0 rows are
+`fbd03346` quick and `66d4797d` full. Step 1 rows are `a0921513` quick
+and `5c012131` full. Step 2 is next.
 
 ### Step 0 - freeze the instrument before any optimization
 
@@ -681,6 +685,12 @@ least two independent probability samples per stratum. This does not
 invalidate the panel as a fixed optimization stopwatch; it prevents the
 panel from overstating its extrapolation certainty.
 
+Step 0 is complete. The one-worker full baseline is 790.2 s, with
+787.1 task CPU seconds over 72 cells and 242 seed walks. Its maximum-cap
+p90 serial estimate is 27,448.7 s, higher than the rough 20,926 s model
+but below the frozen 39,600 s ceiling. The exact work is 7,571,686,367
+parents and 8,868,542,328 prints.
+
 ### Step 1 - collapse the child loop
 
 `SessionAcc`, the reduced session JSON and the verdict path stay
@@ -750,6 +760,28 @@ Step 1 acceptance surface:
 
 That collapses the per-child loop to O(distinct populated minutes)
 without narrowing the existing projection contract.
+
+#### Step 1 measured result
+
+Implemented in `e4c8c24`. All focused boundary fixtures, the complete
+check, the eight-seed layer-1 oracle and both draw-identity gates pass.
+The tape and kernel versions are unchanged because the edit is entirely
+on the measurement side of the draw.
+
+The result is real but small. The quick row moved from 87.100 s to
+85.101 s best wall. The full row moved from 790.200 s to 780.201 s,
+1.27%, while task CPU moved from 787.144 s to 777.564 s, 1.22%.
+The maximum-cap p90 estimate moved from 27,448.707 s to 27,121.840 s,
+a 326.9 s reduction. Parent, print, cell and seed-walk counters are exact
+across both full rows.
+
+The reason the entering hypothesis missed is now measured rather than
+speculative: the full panel has 8,868,542,328 prints over 7,571,686,367
+parents, only 1.171 prints per parent. The collapsed path still performs
+roughly one populated-minute operation per parent, so it removes at most
+the roughly 14.6% of print-loop iterations in excess of one per parent.
+The distinct-minute primitive remains useful substrate for step 2, but
+step 1 is not the projected 2x to 3x single-core win.
 
 ### Step 2 - a lean screen accumulator keeping its current output
 
@@ -877,15 +909,15 @@ resets from the precomputed schedule.
 The whole of steps 1 to 4 alters no random draw and no parent timestamp.
 It stays entirely in the free lane.
 
-### The combined expectation, as a hypothesis
+### The combined expectation, revised after step 1
 
-Roughly 2x to 3x single core from the projector work, and roughly 10x to
-20x wall clock from parallelism on a 32-CPU host, allowing for physical
-core limits, memory bandwidth and frequency reduction under load. Taken
-together that is a plausible 20x to 40x end to end, which against the
-CORRECTED 5.8-hour model puts the screen somewhere in the 9 to 18 minute
-region. This is a hypothesis to validate against the cost probe, not a
-promised result.
+The entering 2x to 3x single-core estimate bundled the child collapse,
+tree removal and retained-state removal together. Step 1 contributed
+only 1.22% task CPU, so the 20x to 40x combined estimate and its 9 to 18
+minute result are superseded. Step 2 must establish the remaining
+single-core opportunity before a combined number is quoted again. The
+10x to 20x parallelism estimate also remains only a hypothesis until the
+step-3 scheduler is measured on the real task shape.
 
 ### Boundary risks to carry through all four steps
 
@@ -902,15 +934,15 @@ The risk is semantic boundary behavior, not numerical arithmetic:
 ## The measurement instrument this round needs
 
 A multi-hour edit-measure loop is not an optimization loop. The round needs
-two DISTINCT instruments, and today it has only one.
+two DISTINCT instruments. Step 0 supplied the second.
 
 - A short profiler that says WHERE the time goes. The existing
   `screen_projection` target already does this, at about 15 s.
-- A representative batch benchmark that PREDICTS full Stage A cost. This
-  is the missing piece.
+- A representative batch benchmark that predicts full Stage A cost. The
+  committed `stage_a_batch` target now supplies it.
 
-The proposal is a permanent `stage_a_batch` target with a current
-baseline around 12 to 18 minutes on one worker.
+The permanent `stage_a_batch` target measures 790.2 s at the step-0
+baseline and 780.2 s after step 1 on one worker.
 
 ### The workload
 
