@@ -20,8 +20,8 @@ use serde_json::Value;
 #[cfg(test)]
 use crate::arrival_screen::CADENCE_STEP_NS;
 use crate::arrival_screen::{
-    A3_GATED_HOURS, Cell, ENVELOPE_CELL_BUDGET_S, ENVELOPE_ORDER, ENVELOPE_REPLICATES,
-    ENVELOPE_STREAM_TAG, EnvelopeDemand, Family,
+    A3_GATED_HOURS, Cell, ENVELOPE_CELL_BUDGET_S, ENVELOPE_ORDER, ENVELOPE_PROBE_MONTHS,
+    ENVELOPE_REPLICATES, ENVELOPE_STREAM_TAG, EnvelopeDemand, Family,
 };
 use crate::error::{LabError, LabResult};
 use crate::kernel::tuple_mix;
@@ -173,9 +173,19 @@ pub struct EnvelopeStreamIdentity {
 pub struct EnvelopeProbeCost {
     pub family: Family,
     pub k: usize,
+    /// DERIVED, not measured: `per_month_s * ENVELOPE_REPLICATES * (1 + k)`.
     pub cost_s: f64,
     pub budget_s: f64,
     pub passed: bool,
+    /// The measured unit behind `cost_s`, recorded so a later run can tell a
+    /// pricing regression from a derivation error, and so an optimization round
+    /// has a number to move.
+    pub measured_months: usize,
+    pub measured_s: f64,
+    pub per_month_s: f64,
+    /// Work size beside the timing, as everywhere else.
+    pub grid_cells: usize,
+    pub work_sink: f64,
 }
 
 impl EnvelopeRecord {
@@ -815,10 +825,31 @@ pub fn probe_envelope_costs(
     let mut costs = Vec::with_capacity(Family::ALL.len() * ENVELOPE_CELL_BUDGET_S.len());
     for family in Family::ALL {
         let cell = envelope_probe_cell(family);
+        // UNIT AND DERIVE, per the 2026-08-11 pricing amendment. The old probe
+        // ran a FULL evaluation per tier - 8,500 months per family, about 2.5
+        // hours in total - to learn a price that is nothing but a month count
+        // times a unit. Measuring the unit once and multiplying costs about 34
+        // seconds for the whole probe and is strictly more informative, because
+        // the artifact then carries the unit a later optimization moves.
+        //
+        // The linearity is exact in WORK and estimated in WALL: the evidence is
+        // a real 1,500-month evaluation that measured 584.287 s against a
+        // 558.8 s derivation, 4.5 percent apart on a fifty-fold extrapolation,
+        // which the 15 percent headroom absorbs.
+        let started = Instant::now();
+        let mut sink = 0.0;
+        for replicate in 1..=ENVELOPE_PROBE_MONTHS {
+            let month = simulate_month(
+                &cell,
+                &grid,
+                envelope_seed(&cell, 2, &grid, replicate, 1, 1),
+            )?;
+            sink += month.hourly_rate.iter().sum::<f64>();
+        }
+        let measured_s = started.elapsed().as_secs_f64();
+        let per_month_s = measured_s / ENVELOPE_PROBE_MONTHS as f64;
         for &(k, budget_s) in &ENVELOPE_CELL_BUDGET_S {
-            let started = Instant::now();
-            let _ = predictive_envelopes(&cell, &grid, k, true, true)?;
-            let cost_s = started.elapsed().as_secs_f64();
+            let cost_s = per_month_s * ENVELOPE_REPLICATES as f64 * (1 + k) as f64;
             let passed = cost_s <= budget_s;
             costs.push(EnvelopeProbeCost {
                 family,
@@ -826,10 +857,16 @@ pub fn probe_envelope_costs(
                 cost_s,
                 budget_s,
                 passed,
+                measured_months: ENVELOPE_PROBE_MONTHS,
+                measured_s,
+                per_month_s,
+                grid_cells: grid.len(),
+                work_sink: sink,
             });
             if !passed {
                 return Err(LabError::refusal(format!(
-                    "envelope-cell-budget-exceeded: {} K={k} cost {cost_s:.3}s exceeds {budget_s:.3}s",
+                    "envelope-cell-budget-exceeded: {} K={k} derives {cost_s:.3}s from a \
+                     measured {per_month_s:.4}s per month, exceeding {budget_s:.3}s",
                     family.as_str()
                 )));
             }

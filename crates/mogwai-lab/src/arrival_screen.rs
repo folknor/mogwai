@@ -69,7 +69,18 @@ pub const ENVELOPE_ORDER: usize = 484;
 pub const ENVELOPE_STREAM_TAG: u64 = 0x6D6F6777_61693145;
 pub const CADENCE_STEP_NS: u64 = 1_000_000_000;
 pub const GRID_SENSITIVITY_STEP_NS: u64 = 250_000_000;
-pub const ENVELOPE_CELL_BUDGET_S: [(usize, f64); 3] = [(2, 60.0), (4, 120.0), (8, 180.0)];
+/// Per-evaluation envelope budgets by K, priced from measurement by the
+/// 2026-08-11 envelope pricing amendment: the optimized worst family
+/// (`shot_noise` at 0.4346 s per replicate month) plus about 15 percent
+/// headroom. The pre-amendment 60/120/180 were estimates set before any
+/// envelope existed, and the shipped probe refused a real evaluation against
+/// them at 584.287 s.
+pub const ENVELOPE_CELL_BUDGET_S: [(usize, f64); 3] = [(2, 750.0), (4, 1250.0), (8, 2250.0)];
+
+/// Replicate months the cost probe measures per family before deriving each
+/// tier. The tier price is `per_month_s * ENVELOPE_REPLICATES * (1 + K)`,
+/// because an evaluation is exactly that many months and nothing else.
+pub const ENVELOPE_PROBE_MONTHS: usize = 32;
 pub const STAGE_A_ENVELOPE_BUDGET_S: f64 = 21_600.0;
 pub const STAGE_B_ENVELOPE_BUDGET_S: f64 = 10_800.0;
 pub const STAGE_B_BUDGET_S: f64 = 61_200.0;

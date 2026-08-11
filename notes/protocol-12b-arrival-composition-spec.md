@@ -513,6 +513,51 @@ four thin hours (13, 17, 18, 19) recovers no admissible cell. A3 is
 therefore producing a structured mechanism finding, not a gate defect,
 and it is the owner's to rule on after the official run reports it.
 
+UPDATE 2026-08-11, the ENVELOPE PRICING AMENDMENT (section 17, narrow,
+formally restarting Brick F; reviewed and SIGNED by codex session
+019fefe4-b680-7e70-8a8e-9df36e0beecf). The official screen run stopped
+at its own envelope cost probe - `event_markov` K=2 measured 584.287 s
+against a frozen 60 s - which is the probe doing its job: the frozen
+per-cell budgets were estimates set before any envelope existed, and
+the amendment prices them from measurement.
+
+- `ENVELOPE_CELL_BUDGET_S` becomes 750 s at K=2, 1250 at K=4 and 2250
+  at K=8: the optimized worst family (`shot_noise`, 0.4346 s per month)
+  plus about 15 percent headroom. Every family clears every tier -
+  `shot_noise` derives 652, 1087 and 1956; `event_markov` 559, 931 and
+  1676, and its MEASURED 584 at K=2 also sits inside 750.
+- THE PROBE BECOMES UNIT-AND-DERIVE. It measures 32 months per family
+  at the existing worst-cost probe cell over the section 8 exposure and
+  derives each tier as `per_month_s * 500 * (1 + K)`, recording the
+  measured unit, months, grid cells, work sink, derived price, budget
+  and verdict per family per tier. The full 1,500 to 4,500-month timing
+  run is RETIRED, not kept elsewhere. Probe wall drops from about 2.5
+  hours to about 34 s.
+  THE LINEARITY IS AN ESTIMATE, stated as one: the work count is exactly
+  `500 * (1 + K)` months, but wall time carries fixed overhead, host
+  noise and stochastic draw counts. The measured evidence is the failed
+  probe itself - a real 1,500-month evaluation cost 584.287 s against a
+  558.8 s derivation from the 32-month unit, 4.5 percent apart on a
+  fifty-fold extrapolation under load, comfortably inside the headroom.
+  A later disagreement between measured unit and realized price is
+  visible in the artifact and stops the probe rather than hiding.
+- `STAGE_A_ENVELOPE_BUDGET_S` stays 21,600 and
+  `STAGE_B_ENVELOPE_BUDGET_S` stays 10,800. Under the decision-relevant
+  envelope rule the census measures coarse demand at ZERO, so this run
+  funds nothing it needs and there is no evidence to reprice an
+  aggregate from. If A3 is later amended, demand and aggregate are
+  measured again under that contract rather than inherited from here.
+- THE PROBE STAYS UNCONDITIONAL even when decision-relevant demand is
+  zero, ruled explicitly because the alternative was raised and
+  rejected: at about 34 s it is a cheap preflight on machinery
+  performance, and it stops a future nonzero-demand run from
+  discovering a pricing regression mid-flight. It is not ceremony.
+- The permanent instrument is
+  `crates/mogwai-lab/examples/envelope_evaluation_bench.rs`, registered
+  in `brokkr.toml` so its invocations enter the benchmark record;
+  `reference/performance.md` carries the optimization series, the
+  structural floor argument and the recorded pessimization.
+
 UPDATE 2026-08-09, the PRESET-RETIREMENT AMENDMENT (section 17, narrow,
 formally restarting Brick F; reviewed and signed by codex session
 019fe781-e6dd-7172-b700-22df68b83271). Owner ruling: the ETHUSDT and
@@ -2519,9 +2564,13 @@ self_exciting (phi 0.98, tau 2)            (heaviest feedback)
 shot_noise    (m 0.8, k 10, tau 1)         (maximum jump rate,
                                             lambda = 10 per second)
 
-ENVELOPE_CELL_BUDGET_S = 60.0  at K = 2
-                         120.0 at K = 4
-                         180.0 at K = 8
+ENVELOPE_CELL_BUDGET_S = 750.0  at K = 2   AMENDED 2026-08-11, was 60
+                         1250.0 at K = 4   was 120
+                         2250.0 at K = 8   was 180
+  Priced from the optimized worst family plus about 15 percent
+  headroom, and measured against a UNIT-AND-DERIVE probe: 32 months
+  per family at the cell below, each tier derived as
+  per_month_s * 500 * (1 + K). See the section 0 pricing amendment.
 STAGE_A_ENVELOPE_BUDGET_S = 21_600   (6 h, the marginal-shell demand)
 STAGE_B_ENVELOPE_BUDGET_S = 10_800   (3 h)
 ```
