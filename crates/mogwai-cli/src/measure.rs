@@ -517,6 +517,33 @@ pub(crate) fn run_observed_with_count_windows(
     }))
 }
 
+pub(crate) fn run_observed_ordered(
+    corpus: &Path,
+    ledger: &Path,
+    preflight_path: &Path,
+) -> anyhow::Result<(Value, Vec<mogwai_lab::measure12a::OrderedCount>)> {
+    let hashes: BTreeMap<String, String> =
+        verify_input(corpus, ledger).map_err(|e| anyhow!("verifying the delivered corpus: {e}"))?;
+    let (preflight, preflight_hash) = require_preflight(&hashes, preflight_path)
+        .map_err(|e| anyhow!("checking the preflight artifact: {e}"))?;
+    let usable = preflight["usable_sessions"]
+        .as_array()
+        .ok_or_else(|| anyhow!("preflight artifact carries no usable_sessions array"))?
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect::<Vec<_>>();
+    let files = data_files(corpus).map_err(|e| anyhow!("listing the corpus: {e}"))?;
+    let (per_session, ordered) = observed::observe_ordered(parse_stream(files), &usable)
+        .map_err(|e| anyhow!("the ordered-count observed pass refused: {e}"))?;
+    Ok((
+        serde_json::json!({
+            "binding": {"preflight_artifact_hash": preflight_hash, "file_hashes": hashes},
+            "per_session": per_session,
+        }),
+        ordered,
+    ))
+}
+
 /// One FINAL walk, constructed exactly the way `gen.rs`'s `build_source`
 /// does and exactly as `crates/mogwai-cli/tests/parity12a.rs`'s
 /// `run_final_walk` does: the committed MNQ preset, no overrides, the walk

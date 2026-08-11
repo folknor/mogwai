@@ -158,7 +158,47 @@ pub struct SessionAcc {
     count_windows_s: &'static [i64],
 }
 
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct OrderedCount {
+    pub session_date: String,
+    pub segment_index: u8,
+    pub window_start_ns: u64,
+    pub window_end_ns: u64,
+    pub endpoint_hour: u64,
+    pub parent_count: u32,
+}
+
 impl SessionAcc {
+    /// Every segment-origin-aligned one-second window, including the windows
+    /// that Block 2 later excludes for crossing an hour boundary.
+    pub fn ordered_counts(&mut self) -> LabResult<Vec<OrderedCount>> {
+        self.seg(0);
+        self.seg(1);
+        let mut out = Vec::new();
+        for seg in self.ordered() {
+            let mut i = 0usize;
+            for (start, stop, _) in window_schedule(seg.origin_ns, seg.end_ns, 1_000_000_000) {
+                while i < seg.parent_ts.len() && seg.parent_ts[i] < start {
+                    i += 1;
+                }
+                let mut j = i;
+                while j < seg.parent_ts.len() && seg.parent_ts[j] < stop {
+                    j += 1;
+                }
+                out.push(OrderedCount {
+                    session_date: self.date.clone(),
+                    segment_index: seg.index,
+                    window_start_ns: start,
+                    window_end_ns: stop,
+                    endpoint_hour: (stop / NS_PER_HOUR) % 24,
+                    parent_count: u32::try_from(j - i)
+                        .map_err(|_| LabError::refusal("one-second parent count exceeds u32"))?,
+                });
+                i = j;
+            }
+        }
+        Ok(out)
+    }
     /// The two segment windows of one session, derived from the calendar
     /// exactly once. `seg` is any resolution inside the session.
     #[must_use]

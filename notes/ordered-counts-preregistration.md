@@ -373,6 +373,36 @@ insufficient_support  a frozen statistic could not be computed and no
                       refusal rule covers the case
 ```
 
+### Amendment, 2026-08-11: the structural-inapplicability refusal
+
+Signed by codex session 019fefe4-b680-7e70-8a8e-9df36e0beecf.
+
+The first run returned `insufficient_support` for Panel A, mechanically
+correctly under the text as signed: hour 20 has ZERO eligible aligned
+1,800 s blocks, and no refusal rule covered that. The cause is
+deterministic schedule geometry - hour 20 is the partial-session hour
+AND contains the halt, so it has no contiguous run that long - and the
+outcome overstated the loss, since 22 of 23 hours computed.
+
+```text
+If the frozen schedule produces ZERO eligible complete blocks for a
+(hour, B) pair, the block statistic is null, count 0, reason
+structurally_inapplicable. Every downstream statistic requiring a
+structurally null input is null with the reason PROPAGATED. A
+structural null is an explicit refusal covered by `completed`; it is
+NOT `insufficient_support`.
+```
+
+The existing fewer-than-30-pairs rule already covers the zero-pair lag
+and does not change. NO grid, estimate, tolerance or computed value
+changes: only the summary is regenerated FROM THE RETAINED SEQUENCE,
+with no corpus rerun - which is what retaining the sequence was for.
+
+The original `insufficient_support` outcome is preserved here in
+amendment history rather than erased; the amended artifact records
+`completed` with hour 20's 1,800 s block and its dependents structurally
+null.
+
 NO SUCCESSOR PARAMETERIZATION until both panels are read. The
 slow-or-session component is NOT frozen as a scalar day factor here. The
 current defensible statement, which this measurement exists to improve:
@@ -384,6 +414,45 @@ latent state is UNRESOLVED.
 ANY LATER LAG GRID OR STATISTIC requires a new dated preregistration.
 The retained sequence makes that cheap; it does not make it free of
 preregistration.
+
+## How the results must and must not be read
+
+Recorded with the measurement because two over-readings were made and
+corrected on the day, and the corrections are easy to lose.
+
+THE FITTED TAUS - 278 to 3,277 s across the hours that computed, median
+near 1,000 s - are ASSUMPTION-CONDITIONED single-exponential tail times.
+They do NOT prove the observed law has one correlation time. What they
+do establish, decisively, is that the missing covariance lives in the
+MINUTES-TO-HOUR range rather than the incumbent's sub-second range.
+
+HOUR 20's 39.9 PERCENT block-variance share does NOT mean one hour
+generates 39.9 percent of all session variation. Hour 20 is a
+SINGLE-HOUR residual while Asia, London, cash and post-close are
+AVERAGES over several hours, and averaging reduces variance - they are
+different filters. The statistic says hour 20 varies much more than the
+other block averages, and nothing stronger.
+
+PANEL B ESTABLISHES TWO SEPARATE FACTS, not one: a stable common mode
+exceeds the hourwise permutation null, and the residual field has
+positive one-day dependence. It does NOT establish that the leading
+common-factor SCORE is what persists across days. Claiming the common
+factor is autocorrelated would need a preregistered lag statistic on its
+scores, which this measurement does not contain.
+
+HOUR 20 IS A REAL STRATUM because it is structurally different, and its
+recurrence across the 12b close, the A3 incompatibility and this
+measurement is not pattern-matching - but neither does recurrence prove
+one shared mechanism defect. Three effects are mixed in it:
+deterministic support geometry from the halt and partial exposure,
+greater estimation uncertainty from fewer scheduled seconds, and
+possibly genuine pre-halt, post-halt, settlement or close
+microstructure. The durable reading:
+
+> The partial-session, halt-containing stratum repeatedly exposes
+> failures in support, conditioning and observed behavior, so successors
+> must preserve it explicitly. The relevant structure is CALENDAR PHASE
+> AND SEGMENT POSITION, not a special free parameter for UTC hour 20.
 
 ## What this feeds
 

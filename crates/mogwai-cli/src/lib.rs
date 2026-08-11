@@ -16,3 +16,4 @@ pub mod count_curve;
 pub mod fit;
 pub mod measure;
 pub mod minute_range_envelope;
+pub mod ordered_counts;

@@ -128,6 +128,102 @@ where
     Ok(records)
 }
 
+/// The frozen observed pass with the ordered one-second sufficient evidence
+/// extracted before each session accumulator is reduced.
+pub fn observe_ordered<I>(
+    rows: I,
+    usable: &[String],
+) -> LabResult<(Vec<serde_json::Value>, Vec<crate::measure12a::OrderedCount>)>
+where
+    I: IntoIterator<Item = LabResult<Row>>,
+{
+    observe_impl(rows, usable, Some(Vec::new()))
+}
+
+fn observe_impl<I>(
+    rows: I,
+    usable: &[String],
+    mut ordered: Option<Vec<crate::measure12a::OrderedCount>>,
+) -> LabResult<(Vec<serde_json::Value>, Vec<crate::measure12a::OrderedCount>)>
+where
+    I: IntoIterator<Item = LabResult<Row>>,
+{
+    let usable_set: std::collections::BTreeSet<&str> = usable.iter().map(String::as_str).collect();
+    let mut minutes = MinuteFieldsCache::new();
+    let mut records = Vec::new();
+    let mut state: Option<SessionAcc> = None;
+    let mut current: Option<OpenParent> = None;
+    for row in rows {
+        let row = row?;
+        let ts = u64::try_from(row.ts)
+            .map_err(|_| LabError::refusal(format!("negative ts_event {}", row.ts)))?;
+        let (session, segment, _) = minutes.minute_fields(ts);
+        let in_usable = session.as_deref().is_some_and(|s| usable_set.contains(s));
+        if !in_usable {
+            close_parent(&mut state, current.take())?;
+            continue;
+        }
+        let session = session.expect("usable session");
+        let segment = segment.expect("resolved segment");
+        let segment_index = u8::from(segment == "post_halt");
+        if state.as_ref().is_none_or(|s| s.date != session) {
+            close_parent(&mut state, current.take())?;
+            if let Some(mut done) = state.take() {
+                ordered
+                    .as_mut()
+                    .expect("ordered enabled")
+                    .extend(done.ordered_counts()?);
+                records.push(done.close(Scope::Observed)?);
+            }
+            let seg = session_segment_at(ts, UTC_OFFSET_MINUTES)
+                .ok_or_else(|| LabError::refusal(format!("row at {ts} maps to no open segment")))?;
+            state = Some(SessionAcc::new(session, &seg, UTC_OFFSET_MINUTES));
+        }
+        if let Some(acc) = state.as_mut() {
+            acc.push_print(ts, row.price);
+        }
+        if row.side == 'N' {
+            close_parent(&mut state, current.take())?;
+            continue;
+        }
+        match &mut current {
+            Some(open) if open.ts == row.ts && open.side == row.side => {}
+            _ => {
+                close_parent(&mut state, current.take())?;
+                current = Some(OpenParent {
+                    ts: row.ts,
+                    side: row.side,
+                    segment_index,
+                    first_ts: ts,
+                    bid_px: row.bid_px,
+                    ask_px: row.ask_px,
+                    book_normal: row.book == "normal",
+                });
+            }
+        }
+    }
+    close_parent(&mut state, current.take())?;
+    if let Some(mut done) = state.take() {
+        ordered
+            .as_mut()
+            .expect("ordered enabled")
+            .extend(done.ordered_counts()?);
+        records.push(done.close(Scope::Observed)?);
+    }
+    let got = records
+        .iter()
+        .map(|r| r["session_date"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    let mut want = usable.iter().map(String::as_str).collect::<Vec<_>>();
+    want.sort_unstable();
+    if got != want {
+        return Err(LabError::refusal(format!(
+            "measure12a session records do not match the usable set: {got:?} vs {want:?}"
+        )));
+    }
+    Ok((records, ordered.unwrap_or_default()))
+}
+
 fn close_parent(state: &mut Option<SessionAcc>, parent: Option<OpenParent>) -> LabResult<()> {
     let (Some(acc), Some(parent)) = (state.as_mut(), parent) else {
         return Ok(());
