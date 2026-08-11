@@ -12,6 +12,7 @@
 pub mod arrival_control;
 pub mod arrival_envelope_diagnostic;
 pub mod arrival_screen;
+pub mod count_curve;
 pub mod fit;
 pub mod measure;
 pub mod minute_range_envelope;

@@ -93,7 +93,6 @@ investigations, the hardcoded-value inventory.
   was never on trial.
 - **`pair-test-preregistration.md`** - `pair_harness.py` loads its frozen JSON
   twin and is still the live judge for delivered pair data.
-- **`bugs-*.md`** - six per-crate bug inventories.
 
 ## What blocks what, right now
 
