@@ -1107,6 +1107,35 @@ fn envelope_demand_from_walks(
     }
 }
 
+/// A2's level limb, per spec 9.2: total PARENTS over total SCHEDULED EXPOSURE,
+/// each side using its own exposure.
+///
+/// Both halves were wrong before and the pair of errors is worth stating,
+/// because either alone would have been invisible. The numerator summed the
+/// histogram OCCURRENCES - how many minutes carried each parent count - rather
+/// than weighting each occurrence by its parent-count key, so it counted
+/// populated minutes and called them parents. The denominator did not exist at
+/// all: the ratio was raw total over raw total. Since the observed month
+/// carries 22 usable sessions and the generated window 23 complete ones, the
+/// gate returned exactly 23/22 for every mechanism at every parameter point -
+/// session arithmetic wearing a rate's clothes, and a gate whose value cannot
+/// move with the thing it grades.
+fn level_parents_and_exposure(projection: &ScreenReduced) -> (f64, u64) {
+    let parents = projection
+        .parent_counts
+        .values()
+        .flat_map(|counts| counts.iter())
+        .map(|(&n, &minutes)| f64::from(n) * minutes as f64)
+        .sum();
+    let exposure = projection
+        .windows
+        .values()
+        .filter_map(|windows| windows.get(&60))
+        .map(|window| window.scheduled)
+        .sum();
+    (parents, exposure)
+}
+
 fn amended_rate_and_zero_gates(
     ctx: &ScreenContext,
     cell: &Cell,
@@ -1118,29 +1147,28 @@ fn amended_rate_and_zero_gates(
     others_admit: bool,
 ) -> LabResult<(Value, Value, bool, bool)> {
     let observed = &ctx.observed_projection;
-    let observed_total: u64 = observed
-        .parent_counts
-        .values()
-        .flat_map(|counts| counts.iter())
-        .map(|(_, count)| *count)
-        .sum();
+    let (observed_parents, observed_exposure) = level_parents_and_exposure(observed);
+    let observed_rate =
+        (observed_exposure > 0).then(|| observed_parents / observed_exposure as f64);
     let mut level = Vec::with_capacity(walks.len());
     for walk in walks {
-        let generated_total: u64 = walk
-            .projection
-            .parent_counts
-            .values()
-            .flat_map(|counts| counts.iter())
-            .map(|(_, count)| *count)
-            .sum();
-        let ratio = if observed_total > 0 {
-            generated_total as f64 / observed_total as f64
-        } else {
-            f64::INFINITY
+        let (generated_parents, generated_exposure) = level_parents_and_exposure(&walk.projection);
+        let generated_rate =
+            (generated_exposure > 0).then(|| generated_parents / generated_exposure as f64);
+        let ratio = match (generated_rate, observed_rate) {
+            (Some(generated), Some(obs)) if obs > 0.0 => generated / obs,
+            _ => f64::INFINITY,
         };
         level.push(json!({
             "seed": walk.seed,
             "ratio": ratio.is_finite().then_some(ratio),
+            // Recorded beside the ratio so the gate is auditable from the
+            // artifact alone: the defect this replaced reported a bare 23/22
+            // and nothing said where it came from.
+            "generated_parents": generated_parents,
+            "generated_scheduled_s": generated_exposure,
+            "observed_parents": observed_parents,
+            "observed_scheduled_s": observed_exposure,
             "passed": walk.refusal.is_none()
                 && (MEAN_RATE_BAND.0..=MEAN_RATE_BAND.1).contains(&ratio)
         }));
@@ -4173,6 +4201,72 @@ mod tests {
                 "seed {seed} block2"
             );
         }
+    }
+
+    /// A2's level limb is a rate ratio, not a total ratio, and each side uses
+    /// its OWN scheduled exposure. The defect this pins: the numerator summed
+    /// histogram occurrences instead of weighting them by parent count, and
+    /// there was no denominator at all, so with 22 observed and 23 generated
+    /// sessions the gate returned exactly 23/22 for every mechanism at every
+    /// parameter point - constant, and therefore measuring nothing.
+    #[test]
+    fn the_a2_level_limb_is_a_rate_and_not_a_session_count() {
+        // Equal RATES over unequal session counts must give exactly 1.0.
+        let mut observed = ScreenReduced::default();
+        let mut generated = ScreenReduced::default();
+        for (projection, sessions) in [(&mut observed, 22_u64), (&mut generated, 23_u64)] {
+            projection
+                .parent_counts
+                .entry(9)
+                .or_default()
+                .insert(100, 60 * sessions);
+            projection.windows.entry(9).or_default().insert(
+                60,
+                ScreenWindow {
+                    scheduled: 60 * sessions,
+                    zeros: 0,
+                    count_hist: BTreeMap::new(),
+                    present_sessions: sessions,
+                },
+            );
+        }
+        let (observed_parents, observed_exposure) = level_parents_and_exposure(&observed);
+        let (generated_parents, generated_exposure) = level_parents_and_exposure(&generated);
+        assert!(
+            (observed_parents - 132_000.0).abs() < 1e-9,
+            "occurrences must be weighted by their parent-count key, got {observed_parents}"
+        );
+        assert_eq!(observed_exposure, 1_320);
+        let ratio = (generated_parents / generated_exposure as f64)
+            / (observed_parents / observed_exposure as f64);
+        assert!(
+            (ratio - 1.0).abs() < 1e-12,
+            "equal rates over 22 and 23 sessions must give 1.0, got {ratio}"
+        );
+
+        // A genuinely different parent rate must show as one.
+        let mut hotter = ScreenReduced::default();
+        hotter
+            .parent_counts
+            .entry(9)
+            .or_default()
+            .insert(110, 60 * 23);
+        hotter.windows.entry(9).or_default().insert(
+            60,
+            ScreenWindow {
+                scheduled: 60 * 23,
+                zeros: 0,
+                count_hist: BTreeMap::new(),
+                present_sessions: 23,
+            },
+        );
+        let (hot_parents, hot_exposure) = level_parents_and_exposure(&hotter);
+        let hot_ratio =
+            (hot_parents / hot_exposure as f64) / (observed_parents / observed_exposure as f64);
+        assert!(
+            (hot_ratio - 1.1).abs() < 1e-12,
+            "a 10 percent hotter rate must read 1.1, got {hot_ratio}"
+        );
     }
 
     /// A REFUSED walk is cached like any other product, so it has to survive
