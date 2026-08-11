@@ -101,6 +101,18 @@ fn selected_cells(screen: &Value) -> anyhow::Result<Vec<SelectedCell>> {
             if record["a3"]["passed"] != false || record["a3"].get("verdict").is_some() {
                 bail!("a selected cell does not have A3 as its resolved hard failure");
             }
+            let level = record["a2"]["level"]["per_seed"]
+                .as_array()
+                .ok_or_else(|| anyhow!("selected cell is missing A2 level ratios"))?
+                .iter()
+                .map(|row| json!({"seed":row["seed"],"ratio":row["ratio"]}))
+                .collect();
+            let shape = record["a2"]["shape"]["per_hour"]
+                .as_array()
+                .ok_or_else(|| anyhow!("selected cell is missing A2 shape deviations"))?
+                .iter()
+                .map(|row| json!({"hour":row["hour"],"deviation":row["deviation"]}))
+                .collect();
             Ok(SelectedCell {
                 family: record["family"]
                     .as_str()
@@ -108,8 +120,8 @@ fn selected_cells(screen: &Value) -> anyhow::Result<Vec<SelectedCell>> {
                     .to_string(),
                 params: record["params"].clone(),
                 cell: cell_from_artifact(record)?,
-                level: record["a2"]["level"]["per_seed"].clone(),
-                shape: record["a2"]["shape"]["per_hour"].clone(),
+                level: Value::Array(level),
+                shape: Value::Array(shape),
             })
         })
         .collect()
@@ -214,5 +226,17 @@ mod tests {
             jobs: Some(1),
         }).expect_err("the official artifact is never a diagnostic output").to_string();
         assert!(error.contains("may not write the official screen artifact"), "{error}");
+    }
+
+    #[test]
+    fn committed_screen_selects_the_twenty_a3_only_failures() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../analysis/mnq-arrival-screen.json");
+        let screen: Value = serde_json::from_slice(&std::fs::read(path).expect("screen artifact"))
+            .expect("valid screen artifact");
+        let selected = selected_cells(&screen).expect("selection");
+        assert_eq!(selected.len(), 20);
+        assert_eq!(selected.iter().filter(|cell| cell.family == "log_ou_cox").count(), 17);
+        assert_eq!(selected.iter().filter(|cell| cell.family == "shot_noise").count(), 3);
     }
 }
