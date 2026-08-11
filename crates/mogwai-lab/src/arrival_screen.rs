@@ -1307,13 +1307,12 @@ fn amended_rate_and_zero_gates(
         record.order_statistic_value = value;
         record
     };
-    let skipped_unresolved = |needed: bool| needed && !cell_could_be_admissible && evaluate_envelopes;
+    let skipped_unresolved =
+        |needed: bool| needed && !cell_could_be_admissible && evaluate_envelopes;
     // A resolved failure always wins over an unevaluated limb. In particular,
     // A2's failed level limb makes the whole gate failed even when its
     // marginal shape envelope was skipped.
-    let a2_unresolved = level_pass
-        && !a2_class.over_cap()
-        && skipped_unresolved(a2_needs_envelope);
+    let a2_unresolved = level_pass && !a2_class.over_cap() && skipped_unresolved(a2_needs_envelope);
     let a3_unresolved = !a3_class.over_cap() && skipped_unresolved(a3_needs_envelope);
     let mut a2 = json!({
         "passed":level_pass && shape_pass,
@@ -1334,12 +1333,7 @@ fn amended_rate_and_zero_gates(
             gate["verdict"] = json!("unresolved");
         }
     }
-    Ok((
-        a2,
-        a3,
-        level_pass && shape_pass,
-        a3_pass,
-    ))
+    Ok((a2, a3, level_pass && shape_pass, a3_pass))
 }
 
 struct ScheduledWalk {
@@ -4411,7 +4405,10 @@ mod tests {
             "and must still record where it stood"
         );
         assert_eq!(a2["passed"], false);
-        assert!(a2.get("verdict").is_none(), "a resolved failure is not unresolved");
+        assert!(
+            a2.get("verdict").is_none(),
+            "a resolved failure is not unresolved"
+        );
         assert_eq!(a3["envelope"]["evaluated"], false);
     }
 

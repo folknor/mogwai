@@ -127,13 +127,21 @@ fn selected_cells(screen: &Value) -> anyhow::Result<Vec<SelectedCell>> {
         .collect()
 }
 
-fn evaluate(cell: &SelectedCell, grid: &mogwai_lab::arrival_envelope::ExposureGrid) -> anyhow::Result<Value> {
+fn evaluate(
+    cell: &SelectedCell,
+    grid: &mogwai_lab::arrival_envelope::ExposureGrid,
+) -> anyhow::Result<Value> {
     let started = Instant::now();
     let outcome = predictive_envelopes(&cell.cell, grid, 2, true, false)
         .map_err(|error| anyhow!(error.to_string()))?;
-    let envelope = outcome.a2.ok_or_else(|| anyhow!("A2 envelope was not returned"))?;
+    let envelope = outcome
+        .a2
+        .ok_or_else(|| anyhow!("A2 envelope was not returned"))?;
     let threshold = A2_SHAPE_CAP.min(A2_SHAPE_BASE + envelope);
-    let deviations = cell.shape.as_array().ok_or_else(|| anyhow!("A2 shape rows are missing"))?;
+    let deviations = cell
+        .shape
+        .as_array()
+        .ok_or_else(|| anyhow!("A2 shape rows are missing"))?;
     let passed = deviations.iter().all(|row| {
         row["deviation"]
             .as_f64()
@@ -157,7 +165,9 @@ pub fn run(args: ArrivalEnvelopeDiagnosticArgs) -> anyhow::Result<Value> {
     if args.jobs == Some(0) {
         bail!("--jobs must be at least 1");
     }
-    let jobs = args.jobs.unwrap_or_else(|| thread::available_parallelism().map_or(1, NonZeroUsize::get));
+    let jobs = args
+        .jobs
+        .unwrap_or_else(|| thread::available_parallelism().map_or(1, NonZeroUsize::get));
     let screen_path = args.screen.unwrap_or_else(|| DEFAULT_SCREEN.into());
     let measure_path = args.measure.unwrap_or_else(|| DEFAULT_MEASURE.into());
     let out = args.out.unwrap_or_else(|| DEFAULT_OUT.into());
@@ -170,8 +180,11 @@ pub fn run(args: ArrivalEnvelopeDiagnosticArgs) -> anyhow::Result<Value> {
         bail!("arrival-envelope-diagnostic requires screen artifact schema version 2");
     }
     let selected = selected_cells(&screen)?;
-    let context = ScreenContext::open(&measure_path, None).map_err(|error| anyhow!(error.to_string()))?;
-    let grid = context.envelope_grid().map_err(|error| anyhow!(error.to_string()))?;
+    let context =
+        ScreenContext::open(&measure_path, None).map_err(|error| anyhow!(error.to_string()))?;
+    let grid = context
+        .envelope_grid()
+        .map_err(|error| anyhow!(error.to_string()))?;
     let next = Arc::new(AtomicUsize::new(0));
     let (send, receive) = mpsc::channel();
     thread::scope(|scope| {
@@ -179,10 +192,16 @@ pub fn run(args: ArrivalEnvelopeDiagnosticArgs) -> anyhow::Result<Value> {
             let send = send.clone();
             let next = Arc::clone(&next);
             let selected = &selected;
-            scope.spawn(move || loop {
-                let index = next.fetch_add(1, Ordering::Relaxed);
-                let Some(cell) = selected.get(index) else { break };
-                if send.send((index, evaluate(cell, grid))).is_err() { break; }
+            scope.spawn(move || {
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(cell) = selected.get(index) else {
+                        break;
+                    };
+                    if send.send((index, evaluate(cell, grid))).is_err() {
+                        break;
+                    }
+                }
             });
         }
     });
@@ -191,12 +210,24 @@ pub fn run(args: ArrivalEnvelopeDiagnosticArgs) -> anyhow::Result<Value> {
     for (index, result) in receive {
         evaluated[index] = Some(result?);
     }
-    let cells: Vec<Value> = evaluated.into_iter().map(|value| value.expect("worker returned every selected cell")).collect();
-    let passing = cells.iter().filter(|cell| cell["counterfactual_verdict"] == "passed").count();
+    let cells: Vec<Value> = evaluated
+        .into_iter()
+        .map(|value| value.expect("worker returned every selected cell"))
+        .collect();
+    let passing = cells
+        .iter()
+        .filter(|cell| cell["counterfactual_verdict"] == "passed")
+        .count();
     let (head, clean) = fresh_tree_state().map_err(|error| anyhow!(error.to_string()))?;
     let mut hashes = Map::new();
-    hashes.insert(screen_path.to_string_lossy().into_owned(), json!(sha256_file(&screen_path).map_err(|error| anyhow!(error.to_string()))?));
-    hashes.insert(measure_path.to_string_lossy().into_owned(), json!(sha256_file(&measure_path).map_err(|error| anyhow!(error.to_string()))?));
+    hashes.insert(
+        screen_path.to_string_lossy().into_owned(),
+        json!(sha256_file(&screen_path).map_err(|error| anyhow!(error.to_string()))?),
+    );
+    hashes.insert(
+        measure_path.to_string_lossy().into_owned(),
+        json!(sha256_file(&measure_path).map_err(|error| anyhow!(error.to_string()))?),
+    );
     let artifact = json!({
         "binding":{"commit":head,"clean_tree":clean,"input_hashes":hashes,
             "screen_binding_commit":screen["binding"]["harness_tree_commit"],
@@ -205,7 +236,9 @@ pub fn run(args: ArrivalEnvelopeDiagnosticArgs) -> anyhow::Result<Value> {
         "counts":{"selected":cells.len(),"counterfactual_a2_passed":passing,"counterfactual_a2_failed":cells.len()-passing},
         "cells":cells,"cost":{"jobs":jobs,"total_wall_s":total.elapsed().as_secs_f64()}
     });
-    if let Some(parent) = out.parent() { std::fs::create_dir_all(parent)?; }
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let tmp = out.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_vec_pretty(&artifact)?)?;
     std::fs::rename(tmp, &out)?;
@@ -224,19 +257,36 @@ mod tests {
             measure: Some("does-not-exist.json".into()),
             out: Some(DEFAULT_SCREEN.into()),
             jobs: Some(1),
-        }).expect_err("the official artifact is never a diagnostic output").to_string();
-        assert!(error.contains("may not write the official screen artifact"), "{error}");
+        })
+        .expect_err("the official artifact is never a diagnostic output")
+        .to_string();
+        assert!(
+            error.contains("may not write the official screen artifact"),
+            "{error}"
+        );
     }
 
     #[test]
     fn committed_screen_selects_the_twenty_a3_only_failures() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../analysis/mnq-arrival-screen.json");
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../analysis/mnq-arrival-screen.json");
         let screen: Value = serde_json::from_slice(&std::fs::read(path).expect("screen artifact"))
             .expect("valid screen artifact");
         let selected = selected_cells(&screen).expect("selection");
         assert_eq!(selected.len(), 20);
-        assert_eq!(selected.iter().filter(|cell| cell.family == "log_ou_cox").count(), 17);
-        assert_eq!(selected.iter().filter(|cell| cell.family == "shot_noise").count(), 3);
+        assert_eq!(
+            selected
+                .iter()
+                .filter(|cell| cell.family == "log_ou_cox")
+                .count(),
+            17
+        );
+        assert_eq!(
+            selected
+                .iter()
+                .filter(|cell| cell.family == "shot_noise")
+                .count(),
+            3
+        );
     }
 }

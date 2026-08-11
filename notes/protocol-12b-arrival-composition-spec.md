@@ -3487,6 +3487,154 @@ Legacy byte-identity walks (B1): symbol in
   tape identity); the committed anchor. Exact commands in brick S.
 ```
 
+## 16.1 RESULT (Brick A, rerun under the amended contract, 2026-08-11)
+
+The landing CLOSES with
+`no-arrival-admissible-candidate-in-frozen-search-space`, per section
+1.1. No generator change lands, Stage B does not run, and
+`TAPE_PROTOCOL_VERSION` stays 12.
+
+The run: clean tree `a76047b`, 1,402 coarse cells over five families,
+coarse 3.03 s on cached walks, refinement empty because no coarse
+admissible region existed to subdivide around, peak RSS 608 MB, and
+ZERO envelopes evaluated under the decision-relevant rule. Artifact
+`analysis/mnq-arrival-screen.json` at schema 2.
+
+WHAT DISTINGUISHES THIS FROM THE CLOSED 2026-08-10 RUN, which returned
+the same verdict string for reasons that were not measurements. Three
+gate defects were found and repaired, each demonstrably:
+
+```text
+             closed run        this run
+A4           0 of 787 pass     1,626 of 1,627 seed cells pass
+A2 level     constant 23/22    spans 0.587 to 2.138, median 1.004
+A2 overall   0 pass            618 of 1,402 pass
+A1           49 pass           57 pass - 49 log-OU, 8 shot noise
+A3           0 pass            0 of 1,402 pass
+```
+
+A4 had compared a raw wall-clock span including closures against a
+cadence that cannot spend them. A2's level limb had summed histogram
+OCCURRENCES with no exposure normalization, so it returned the ratio of
+generated to observed SESSION COUNTS for every mechanism at every
+parameter point. Both were defects against already-correct frozen text
+and neither needed an amendment.
+
+THE FINDING, which is the informative part and is larger than the
+verdict. A3 fails on all 1,402 cells of all five families, including
+every cell of the gamma-OU shot-noise family added by this amendment
+precisely because the closed run's A3 evidence pointed at a right-skewed
+mechanism. An independent demand census
+(`analysis/out/envelope-demand-census.json`, 1,402 cells, 439 s) reached
+the same 1,402 by a different code path.
+
+TWENTY CELLS FAIL A3 AND NOTHING ELSE. The counterfactual artifact
+`analysis/mnq-a2-envelope-counterfactual.json` - run on a second host
+from clean tree `9e4c85b`, 230 s at 24 jobs - evaluated the frozen K=2
+A2 envelopes that the decision-relevant rule had skipped on those cells,
+and ALL TWENTY PASS A2: 17 `log_ou_cox` and 3 `shot_noise`, each also
+passing A1 and A4. Margins are not borderline (tightest 0.024 in log
+space, median about 0.11), all twenty needed their allowance, eleven
+took the materiality cap as their threshold, and two carried infinite
+envelopes from ceiling-breached replicates and passed within the cap
+rather than beyond it.
+
+SECTION 11 BINDS, AND THIS IS WHERE IT BITES. Amending A3 - its cap,
+floor, statistic or twenty-hour simultaneity - having learned that
+exactly those twenty cells are blocked by it and nothing else, is the
+result-driven threshold change section 11 forbids. The reviewing session
+ruled A3 SOUND rather than defective: unlike A4 it measures the intended
+quantity, its observed-count floor controls conditioning directly, and
+the well-supported hours reject every family independently, so dropping
+the four thin hours recovers nothing. The A4 and A2-level repairs were
+exempt because those gates measured the wrong quantity; A3 has no
+analogous defect, so no exemption is available.
+
+WHAT THE OWNER MAY STILL DO, recorded so a later reader does not mistake
+the closure for a prohibition. The owner may act on the twenty cells,
+but not as a confirmatory 12b result: the honest route is to close this
+landing on its frozen verdict, treat the A3 analysis as EXPLORATORY
+evidence for a successor protocol, state explicitly that the successor
+criterion was designed after observing 12b, and confirm it on an
+evaluation population not used to design it. Rerunning these same cells
+under a new criterion does not restore preregistration, and the
+untouched Stage B and confirmation seeds cannot buy it back either -
+they supply out-of-sample evidence about generated variability, not
+about a criterion designed against the same observed month.
+
+WHAT A SUCCESSOR SHOULD ANSWER FIRST. Not "which family next": there are
+already twenty mechanisms passing A1, A2 and A4 under the frozen
+allowances, so the search does not lack candidates. It lacks agreement
+about what the sub-second criterion should be, and about why parent-
+second occupancy misses across every family at their fitted hourly
+rates. Adding a family before answering that mixes a mechanism decision
+with a criterion decision.
+
+### 16.2 The closing adjudication, 2026-08-11
+
+One exploratory pass, its outputs and STOP CONDITION fixed with the
+reviewing session BEFORE it ran, precisely so its answer could not be
+negotiated afterwards. Both panels returned negative, so under that
+condition the postmortem closes and proposes no successor mechanism.
+Scripts: `scripts/a3_residual_geometry.py`, `scripts/a3_crossing_point.py`,
+`scripts/a3_adjudication.py`, `scripts/a3_multiscale_frontier.py`.
+
+PANEL 1, does the A3 rejection survive uncertainty. Observed uncertainty
+by resampling whole SESSIONS (2,000 replicates; never individual
+seconds, which would destroy the within-session dependence), generated
+uncertainty from the per-seed spread, bands widened by twice the
+combined standard error, then the simultaneous test. NO `sigma_y` is
+admitted by every gated hour, and none by every WELL-SUPPORTED hour
+either, so the overlap with the A1 support region is empty on both cuts.
+The rejection is not an estimator artifact.
+
+THE DURABLE RESIDUE IS NARROWER AND MORE USEFUL than "every hour
+disagrees": the binding incompatibility is HOUR 1 against HOUR 20. Hour
+1 admits `sigma_y` 0.6 to 0.8, hour 20 admits 1.0 to 2.0, and those are
+disjoint. Hour 20 is the PARTIAL-SESSION hour, carrying 59,378 scheduled
+one-second windows against 79,178 elsewhere - the same structural
+distinctness that made it the lone outlier in the crossing analysis,
+where every other well-supported hour crossed between 0.70 and 0.90
+invariant of activity and of tau, and hour 20 crossed at 1.30.
+
+An earlier hypothesis is REFUTED by that invariance and is recorded as
+refuted: activity-conditioned clustering. The crossing does not move
+with hour activity. The apparent activity gradient in the pooled signed
+residuals is confounded, because the four hours whose sign is positive
+are simultaneously the four highest-activity hours AND the four with the
+fewest observed zero windows, 44 to 260 against 576 to 8,714.
+
+PANEL 2, does a two-component log-OU have moment-level room. The
+successor hypothesis was that splitting the latent Gaussian variance
+between a fast and a slow OU component decouples minute-scale dispersion
+(which A1 needs) from hourly dispersion (which A2 constrains), at a
+total sigma A3 admits. Tested by matching each mixture to a single
+correlation time on 60 s Fano and comparing 3,600 s Fano. RESULT: every
+tested mixture was moment-DOMINATED by the interpolated single-tau
+alternative at total sigma 0.8 and the tested baseline - the same
+minute-scale dispersion at strictly higher hourly cost.
+
+Stated at its measured scope and no wider, per the reviewing session:
+this rejects the tested mixtures, NOT the two-component class
+universally. Untested tau pairs, total variances, baselines and
+histogram behavior are outside it, and moment domination cannot prove
+the class offers nothing to A1, which is a histogram-SUPPORT gate
+depending on higher-order structure. The construction is an unpromoted
+hypothesis rejected by this frozen screen, not a disproved class.
+
+A METHOD NOTE worth keeping, because the first attempt was wrong in the
+flattering direction: the count variance was initially evaluated with a
+double sum on a 200-step grid, giving `dt` of 18 s against a fast tau of
+5 s, so the diagonal band carrying the integral was unresolved and
+short-tau rows were biased. The exact one-dimensional reduction -
+`Var(N_T) = E[N_T] + 2 rate^2 * integral of (T - u) * Cov_X(u)` - is
+what the recorded numbers use.
+
+WHAT A SUCCESSOR STARTS FROM, if one is ever drafted: a preregistered
+investigation of hour 20's partial-session structure, not another
+mechanism family. And its criterion is preregistered BEFORE its cells
+are looked at, per section 11.
+
 ## 17. Stopping rule
 
 Out of scope, named and excluded rather than deferred: any change to

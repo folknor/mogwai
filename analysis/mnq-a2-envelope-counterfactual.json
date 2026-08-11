@@ -1,0 +1,2468 @@
+{
+  "binding": {
+    "clean_tree": true,
+    "commit": "9e4c85b68d31a05fde47fa3249e51a32a1e1b822",
+    "host_name": "plantasjen",
+    "input_hashes": {
+      "analysis/mnq-arrival-screen.json": "a07eeb2b284026e95ce81ae2f744556ccd5a63cef466c5b01ea7f403476f7034",
+      "analysis/mnq-measure-12a.json": "60d755e8b76794f6c9e4f2092eca45662d24b17d168cfbe95443e505f773d253"
+    },
+    "rustc_version": "rustc 1.99.0-nightly (12c36e253 2026-08-10)",
+    "screen_binding_commit": "42646ffd03baed748e9e1cd81afe8be44866834a"
+  },
+  "cells": [
+    {
+      "a2_level_per_seed_ratios": [
+        {
+          "ratio": 1.0058201609731583,
+          "seed": 201
+        },
+        {
+          "ratio": 1.011093246417344,
+          "seed": 202
+        }
+      ],
+      "a2_shape_raw_per_hour": [
+        {
+          "deviation": 0.0005029689753462825,
+          "hour": 0
+        },
+        {
+          "deviation": 0.020964000369392256,
+          "hour": 1
+        },
+        {
+          "deviation": 0.037191807539045385,
+          "hour": 2
+        },
+        {
+          "deviation": 0.024684836404983673,
+          "hour": 3
+        },
+        {
+          "deviation": 0.006541230490563313,
+          "hour": 4
+        },
+        {
+          "deviation": 0.016344849548194047,
+          "hour": 5
+        },
+        {
+          "deviation": 0.011020894234583637,
+          "hour": 6
+        },
+        {
+          "deviation": 0.0031828852106135876,
+          "hour": 7
+        },
+        {
+          "deviation": 0.03607547452203223,
+          "hour": 8
+        },
+        {
+          "deviation": 0.02476774656681096,
+          "hour": 9
+        },
+        {
+          "deviation": 0.0216775884490753,
+          "hour": 10
+        },
+        {
+          "deviation": 0.01935011599895761,
+          "hour": 11
+        },
+        {
+          "deviation": 0.012211719384148386,
+          "hour": 12
+        },
+        {
+          "deviation": 0.004970088710511847,
+          "hour": 13
+        },
+        {
+          "deviation": 0.031557180129288084,
+          "hour": 14
+        },
+        {
+          "deviation": 0.015002647451618247,
+          "hour": 15
+        },
+        {
+          "deviation": 0.01653434593033,
+          "hour": 16
+        },
+        {
+          "deviation": 0.007209875729476501,
+          "hour": 17
+        },
+        {
+          "deviation": 0.018764715068619594,
+          "hour": 18
+        },
+        {
+          "deviation": 0.0013003863155328927,
+          "hour": 19
+        },
+        {
+          "deviation": 0.009309082218442405,
+          "hour": 20
+        },
+        {
+          "deviation": 0.009014838356380657,
+          "hour": 22
+        },
+        {
+          "deviation": 0.003740527472908077,
+          "hour": 23
+        }
+      ],
+      "ceiling_breached_replicates": [],
+      "counterfactual_verdict": "passed",
+      "envelope_value": 0.11463117580899762,
+      "envelope_value_is_infinite": false,
+      "family": "log_ou_cox",
+      "final_threshold": 0.13443380310517736,
+      "params": {
+        "sigma_y": 0.8,
+        "tau_s": 46.4158883361278
+      },
+      "wall_s": 228.750558375
+    },
+    {
+      "a2_level_per_seed_ratios": [
+        {
+          "ratio": 0.9988119425482728,
+          "seed": 201
+        },
+        {
+          "ratio": 1.0035463468233456,
+          "seed": 202
+        }
+      ],
+      "a2_shape_raw_per_hour": [
+        {
+          "deviation": 0.009841988528811865,
+          "hour": 0
+        },
+        {
+          "deviation": 0.05104318259704664,
+          "hour": 1
+        },
+        {
+          "deviation": 0.08162771781785079,
+          "hour": 2
+        },
+        {
+          "deviation": 0.0853800297889368,
+          "hour": 3
+        },
+        {
+          "deviation": 0.06866309129056984,
+          "hour": 4
+        },
+        {
+          "deviation": 0.042486938558339675,
+          "hour": 5
+        },
+        {
+          "deviation": 0.19940333225686474,
+          "hour": 6
+        },
+        {
+          "deviation": 0.01717627904950779,
+          "hour": 7
+        },
+        {
+          "deviation": 0.10708782206508423,
+          "hour": 8
+        },
+        {
+          "deviation": 0.125420732530645,
+          "hour": 9
+        },
+        {
+          "deviation": 0.011394116085991848,
+          "hour": 10
+        },
+        {
+          "deviation": 0.01512254139140206,
+          "hour": 11
+        },
+        {
+          "deviation": 0.10753342029587436,
+          "hour": 12
+        },
+        {
+          "deviation": 0.06556198393985274,
+          "hour": 13
+        },
+        {
+          "deviation": 0.031904222561985496,
+          "hour": 14
+        },
+        {
+          "deviation": 0.07324120725861986,
+          "hour": 15
+        },
+        {
+          "deviation": 0.04767716359339705,
+          "hour": 16
+        },
+        {
+          "deviation": 0.03707244026986628,
+          "hour": 17
+        },
+        {
+          "deviation": 0.09421701257082868,
+          "hour": 18
+        },
+        {
+          "deviation": 0.07211041274874613,
+          "hour": 19
+        },
+        {
+          "deviation": 0.017312260924708812,
+          "hour": 20
+        },
+        {
+          "deviation": 0.1939910899171293,
+          "hour": 22
+        },
+        {
+          "deviation": 0.050938356911484656,
+          "hour": 23
+        }
+      ],
+      "ceiling_breached_replicates": [],
+      "counterfactual_verdict": "passed",
+      "envelope_value": 0.45725493663229755,
+      "envelope_value_is_infinite": false,
+      "family": "log_ou_cox",
+      "final_threshold": 0.22314355131420976,
+      "params": {
+        "sigma_y": 0.8,
+        "tau_s": 1000.0
+      },
+      "wall_s": 223.552176193
+    },
+    {
+      "a2_level_per_seed_ratios": [
+        {
+          "ratio": 0.9948775636501308,
+          "seed": 201
+        },
+        {
+          "ratio": 1.0101761023912177,
+          "seed": 202
+        }
+      ],
+      "a2_shape_raw_per_hour": [
+        {
+          "deviation": 0.05050164513565812,
+          "hour": 0
+        },
+        {
+          "deviation": 0.02450158769497291,
+          "hour": 1
+        },
+        {
+          "deviation": 0.04339199039265105,
+          "hour": 2
+        },
+        {
+          "deviation": 0.0031540227129700804,
+          "hour": 3
+        },
+        {
+          "deviation": 0.01667436658687733,
+          "hour": 4
+        },
+        {
+          "deviation": 0.011460153620657006,
+          "hour": 5
+        },
+        {
+          "deviation": 0.08508718476989453,
+          "hour": 6
+        },
+        {
+          "deviation": 0.021548096438654442,
+          "hour": 7
+        },
+        {
+          "deviation": 0.0076371301057458355,
+          "hour": 8
+        },
+        {
+          "deviation": 0.1057126652141596,
+          "hour": 9
+        },
+        {
+          "deviation": 0.035058449395426385,
+          "hour": 10
+        },
+        {
+          "deviation": 0.008332969135880943,
+          "hour": 11
+        },
+        {
+          "deviation": 0.020279359118480826,
+          "hour": 12
+        },
+        {
+          "deviation": 0.02755886151736652,
+          "hour": 13
+        },
+        {
+          "deviation": 0.02474551962442141,
+          "hour": 14
+        },
+        {
+          "deviation": 0.06434909628720803,
+          "hour": 15
+        },
+        {
+          "deviation": 0.04848800214484723,
+          "hour": 16
+        },
+        {
+          "deviation": 0.04422541837854771,
+          "hour": 17
+        },
+        {
+          "deviation": 0.011246623069061837,
+          "hour": 18
+        },
+        {
+          "deviation": 0.056886022795437696,
+          "hour": 19
+        },
+        {
+          "deviation": 0.02231902568807794,
+          "hour": 20
+        },
+        {
+          "deviation": 0.02571941759278968,
+          "hour": 22
+        },
+        {
+          "deviation": 0.038482653270002956,
+          "hour": 23
+        }
+      ],
+      "ceiling_breached_replicates": [],
+      "counterfactual_verdict": "passed",
+      "envelope_value": 0.21009045799092393,
+      "envelope_value_is_infinite": false,
+      "family": "log_ou_cox",
+      "final_threshold": 0.22314355131420976,
+      "params": {
+        "sigma_y": 1.0,
+        "tau_s": 100.0
+      },
+      "wall_s": 196.3808119
+    },
+    {
+      "a2_level_per_seed_ratios": [
+        {
+          "ratio": 0.992555803548482,
+          "seed": 201
+        },
+        {
+          "ratio": 0.998296652800406,
+          "seed": 202
+        }
+      ],
+      "a2_shape_raw_per_hour": [
+        {
+          "deviation": 0.035348640470516786,
+          "hour": 0
+        },
+        {
+          "deviation": 0.02989796322962548,
+          "hour": 1
+        },
+        {
+          "deviation": 0.10569578918300622,
+          "hour": 2
+        },
+        {
+          "deviation": 0.0883647725812179,
+          "hour": 3
+        },
+        {
+          "deviation": 0.08500839241269949,
+          "hour": 4
+        },
+        {
+          "deviation": 0.01404423038804432,
+          "hour": 5
+        },
+        {
+          "deviation": 0.05132816814896123,
+          "hour": 6
+        },
+        {
+          "deviation": 0.031438240718236594,
+          "hour": 7
+        },
+        {
+          "deviation": 0.02851465924320254,
+          "hour": 8
+        },
+        {
+          "deviation": 0.03458913273914926,
+          "hour": 9
+        },
+        {
+          "deviation": 0.07004944741113474,
+          "hour": 10
+        },
+        {
+          "deviation": 0.022864818309369563,
+          "hour": 11
+        },
+        {
+          "deviation": 0.1316284800589285,
+          "hour": 12
+        },
+        {
+          "deviation": 0.05948313673152212,
+          "hour": 13
+        },
+        {
+          "deviation": 0.10847808255765812,
+          "hour": 14
+        },
+        {
+          "deviation": 0.1473728675490812,
+          "hour": 15
+        },
+        {
+          "deviation": 0.045752523245102684,
+          "hour": 16
+        },
+        {
+          "deviation": 0.11297014700646232,
+          "hour": 17
+        },
+        {
+          "deviation": 0.013639231022079687,
+          "hour": 18
+        },
+        {
+          "deviation": 0.07571314451947989,
+          "hour": 19
+        },
+        {
+          "deviation": 0.017149043405200216,
+          "hour": 20
+        },
+        {
+          "deviation": 0.056712036889489434,
+          "hour": 22
+        },
+        {
+          "deviation": 0.001434700632285174,
+          "hour": 23
+        }
+      ],
+      "ceiling_breached_replicates": [],
+      "counterfactual_verdict": "passed",
+      "envelope_value": 0.31977580986483445,
+      "envelope_value_is_infinite": false,
+      "family": "log_ou_cox",
+      "final_threshold": 0.22314355131420976,
+      "params": {
+        "sigma_y": 1.0,
+        "tau_s": 215.44346900318845
+      },
+      "wall_s": 223.722472013
+    },
+    {
+      "a2_level_per_seed_ratios": [
+        {
+          "ratio": 0.9998733767502078,
+          "seed": 201
+        },
+        {
+          "ratio": 1.0057539606663441,
+          "seed": 202
+        }
+      ],
+      "a2_shape_raw_per_hour": [
+        {
+          "deviation": 0.019824017221009287,
+          "hour": 0
+        },
+        {
+          "deviation": 0.0366196007659484,
+          "hour": 1
+        },
+        {
+          "deviation": 0.02532752718071757,
+          "hour": 2
+        },
+        {
+          "deviation": 0.0032430799278173107,
+          "hour": 3
+        },
+        {
+          "deviation": 0.00527188481560062,
+          "hour": 4
+        },
+        {
+          "deviation": 0.04870808122016951,
+          "hour": 5
+        },
+        {
+          "deviation": 0.02383389148493435,
+          "hour": 6
+        },
+        {
+          "deviation": 0.04795691354354805,
+          "hour": 7
+        },
+        {
+          "deviation": 0.023557346701681494,
+          "hour": 8
+        },
+        {
+          "deviation": 0.005229209066192579,
+          "hour": 9
+        },
+        {
+          "deviation": 0.010932145676414493,
+          "hour": 10
+        },
+        {
+          "deviation": 0.04503222250479403,
+          "hour": 11
+        },
+        {
+          "deviation": 0.047328666913411796,
+          "hour": 12
+        },
+        {
+          "deviation": 0.019195913679091788,
+          "hour": 13
+        },
+        {
+          "deviation": 0.0034993195531691505,
+          "hour": 14
+        },
+        {
+          "deviation": 0.011239031565454432,
+          "hour": 15
+        },
+        {
+          "deviation": 0.06575873746088946,
+          "hour": 16
+        },
+        {
+          "deviation": 0.020823545092413114,
+          "hour": 17
+        },
+        {
+          "deviation": 0.009788018941832677,
+          "hour": 18
+        },
+        {
+          "deviation": 0.012703523727342594,
+          "hour": 19
+        },
+        {
+          "deviation": 0.008599028701700255,
+          "hour": 20
+        },
+        {
+          "deviation": 0.004039369610733059,
+          "hour": 22
+        },
+        {
+          "deviation": 0.007146294583838312,
+          "hour": 23
+        }
+      ],
+      "ceiling_breached_replicates": [],
+      "counterfactual_verdict": "passed",
+      "envelope_value": 0.13346052343008868,
+      "envelope_value_is_infinite": false,
+      "family": "log_ou_cox",
+      "final_threshold": 0.15326315072626842,
+      "params": {
+        "sigma_y": 1.2000000000000002,
+        "tau_s": 21.544346900318832
+      },
+      "wall_s": 214.674256866
+    },
+    {
+      "a2_level_per_seed_ratios": [
+        {
+          "ratio": 1.0098980223322869,
+          "seed": 201
+        },
+        {
+          "ratio": 1.002343045590068,
+          "seed": 202
+        }
+      ],
+      "a2_shape_raw_per_hour": [
+        {
+          "deviation": 0.014213725402051697,
+          "hour": 0
+        },
+        {
+          "deviation": 0.0027432558067869094,
+          "hour": 1
+        },
+        {
+          "deviation": 0.01186253796464382,
+          "hour": 2
+        },
+        {
+          "deviation": 0.019515291213889913,
+          "hour": 3
+        },
+        {
+          "deviation": 0.05173247406419563,
+          "hour": 4
+        },
+        {
+          "deviation": 0.0024818446966722793,
+          "hour": 5
+        },
+        {
+          "deviation": 0.04966365144674413,
+          "hour": 6
+        },
+        {
+          "deviation": 0.010321581080632655,
+          "hour": 7
+        },
+        {
+          "deviation": 0.0031096675130845366,
+          "hour": 8
+        },
+        {
+          "deviation": 0.00862020434242052,
+          "hour": 9
+        },
+        {
+          "deviation": 0.09374825169158962,
+          "hour": 10
+        },
+        {
+          "deviation": 0.009263817457092578,
+          "hour": 11
+        },
+        {
+          "deviation": 0.004461798654760824,
+          "hour": 12
+        },
+        {
+          "deviation": 0.05567796420651418,
+          "hour": 13
+        },
+        {
+          "deviation": 0.029100640830637695,
+          "hour": 14
+        },
+        {
+          "deviation": 0.0076488820194649774,
+          "hour": 15
+        },
+        {
+          "deviation": 0.007872435512947383,
+          "hour": 16
+        },
+        {
+          "deviation": 0.03363349848117075,
+          "hour": 17
+        },
+        {
+          "deviation": 0.015075769818206651,
+          "hour": 18
+        },
+        {
+          "deviation": 0.056146656458058816,
+          "hour": 19
+        },
+        {
+          "deviation": 0.019223261739776093,
+          "hour": 20
+        },
+        {
+          "deviation": 0.057658633500535524,
+          "hour": 22
+        },
+        {
+          "deviation": 0.013059598863162122,
+          "hour": 23
+        }
+      ],
+      "ceiling_breached_replicates": [],
+      "counterfactual_verdict": "passed",
+      "envelope_value": 0.19363685036248643,
+      "envelope_value_is_infinite": false,
+      "family": "log_ou_cox",
+      "final_threshold": 0.21343947765866617,
+      "params": {
+        "sigma_y": 1.2000000000000002,
+        "tau_s": 46.4158883361278
+      },
+      "wall_s": 222.3866395
+    },
+    {
+      "a2_level_per_seed_ratios": [
+        {
+          "ratio": 1.016194094752879,
+          "seed": 201
+        },
+        {
+          "ratio": 1.009032507437585,
+          "seed": 202
+        }
+      ],
+      "a2_shape_raw_per_hour": [
+        {
+          "deviation": 0.009377673059736321,
+          "hour": 0
+        },
+        {
+          "deviation": 0.05931520014175088,
+          "hour": 1
+        },
+        {
+          "deviation": 0.05270086351784363,
+          "hour": 2
+        },
+        {
+          "deviation": 0.011919100975061988,
+          "hour": 3
+        },
+        {
+          "deviation": 0.04889946213826917,
+          "hour": 4
+        },
+        {
+          "deviation": 0.06532333348408066,
+          "hour": 5
+        },
+        {
+          "deviation": 0.022697494724326323,
+          "hour": 6
+        },
+        {
+          "deviation": 0.12306871288740788,
+          "hour": 7
+        },
+        {
+          "deviation": 0.005112294349566649,
+          "hour": 8
+        },
+        {
+          "deviation": 0.016732120978011217,
+          "hour": 9
+        },
+        {
+          "deviation": 0.026444260362200808,
+          "hour": 10
+        },
+        {
+          "deviation": 0.033772119974126526,
+          "hour": 11
+        },
+        {
+          "deviation": 0.033493866064836175,
+          "hour": 12
+        },
+        {
+          "deviation": 0.010003910938910291,
+          "hour": 13
+        },
+        {
+          "deviation": 0.08431836373024401,
+          "hour": 14
+        },
+        {
+          "deviation": 0.06279312192188023,
+          "hour": 15
+        },
+        {
+          "deviation": 0.04750413828353149,
+          "hour": 16
+        },
+        {
+          "deviation": 0.11020732802857437,
+          "hour": 17
+        },
+        {
+          "deviation": 0.0030749009035183107,
+          "hour": 18
+        },
+        {
+          "deviation": 0.026463907019851712,
+          "hour": 19
+        },
+        {
+          "deviation": 0.04155175372989475,
+          "hour": 20
+        },
+        {
+          "deviation": 0.03672016136672735,
+          "hour": 22
+        },
+        {
+          "deviation": 0.06654158717483552,
+          "hour": 23
+        }
+      ],
+      "ceiling_breached_replicates": [],
+      "counterfactual_verdict": "passed",
+      "envelope_value": 0.26984414414373264,
+      "envelope_value_is_infinite": false,
+      "family": "log_ou_cox",
+      "final_threshold": 0.22314355131420976,
+      "params": {
+        "sigma_y": 1.2000000000000002,
+        "tau_s": 100.0
+      },
+      "wall_s": 182.144731353
+    },
+    {
+      "a2_level_per_seed_ratios": [
+        {
+          "ratio": 1.0028087739564544,
+          "seed": 201
+        },
+        {
+          "ratio": 0.9964128033666728,
+          "seed": 202
+        }
+      ],
+      "a2_shape_raw_per_hour": [
+        {
+          "deviation": 0.011036320269012941,
+          "hour": 0
+        },
+        {
+          "deviation": 0.03024503461481196,
+          "hour": 1
+        },
+        {
+          "deviation": 0.02142217841183367,
+          "hour": 2
+        },
+        {
+          "deviation": 0.03544439656842617,
+          "hour": 3
+        },
+        {
+          "deviation": 0.009596244450348873,
+          "hour": 4
+        },
+        {
+          "deviation": 0.03418021821040218,
+          "hour": 5
+        },
+        {
+          "deviation": 0.02218144573749511,
+          "hour": 6
+        },
+        {
+          "deviation": 0.001386190663507958,
+          "hour": 7
+        },
+        {
+          "deviation": 0.0014487780355025759,
+          "hour": 8
+        },
+        {
+          "deviation": 0.003445324582651185,
+          "hour": 9
+        },
+        {
+          "deviation": 0.004731173524221531,
+          "hour": 10
+        },
+        {
+          "deviation": 0.028953165646315508,
+          "hour": 11
+        },
+        {
+          "deviation": 0.0040726132408911335,
+          "hour": 12
+        },
+        {
+          "deviation": 0.035140763093486065,
+          "hour": 13
+        },
+        {
+          "deviation": 0.0036833812724659013,
+          "hour": 14
+        },
+        {
+          "deviation": 0.030206421003799618,
+          "hour": 15
+        },
+        {
+          "deviation": 0.0025717824295352267,
+          "hour": 16
+        },
+        {
+          "deviation": 0.0076204615061603006,
+          "hour": 17
+        },
+        {
+          "deviation": 0.014437000906947918,
+          "hour": 18
+        },
+        {
+          "deviation": 0.001928145634194355,
+          "hour": 19
+        },
+        {
+          "deviation": 0.012134443171552881,
+          "hour": 20
+        },
+        {
+          "deviation": 0.003540860148760021,
+          "hour": 22
+        },
+        {
+          "deviation": 0.01881516934384575,
+          "hour": 23
+        }
+      ],
+      "ceiling_breached_replicates": [],
+      "counterfactual_verdict": "passed",
+      "envelope_value": 0.11075290523972846,
+      "envelope_value_is_infinite": false,
+      "family": "log_ou_cox",
+      "final_threshold": 0.13055553253590818,
+      "params": {
+        "sigma_y": 1.4000000000000001,
+        "tau_s": 10.0
+      },
+      "wall_s": 214.744404398
+    },
+    {
+      "a2_level_per_seed_ratios": [
+        {
+          "ratio": 1.0012128263938882,
+          "seed": 201
+        },
+        {
+          "ratio": 1.0126995650382256,
+          "seed": 202
+        }
+      ],
+      "a2_shape_raw_per_hour": [
+        {
+          "deviation": 0.03455086713170405,
+          "hour": 0
+        },
+        {
+          "deviation": 0.03814882060865683,
+          "hour": 1
+        },
+        {
+          "deviation": 0.013829082897228723,
+          "hour": 2
+        },
+        {
+          "deviation": 0.00880344616505514,
+          "hour": 3
+        },
+        {
+          "deviation": 0.0177540648125123,
+          "hour": 4
+        },
+        {
+          "deviation": 0.022574107831252785,
+          "hour": 5
+        },
+        {
+          "deviation": 0.03573674929943581,
+          "hour": 6
+        },
+        {
+          "deviation": 0.01178691389961466,
+          "hour": 7
+        },
+        {
+          "deviation": 0.0012239981032039786,
+          "hour": 8
+        },
+        {
+          "deviation": 0.033907446122436485,
+          "hour": 9
+        },
+        {
+          "deviation": 0.027813080093349343,
+          "hour": 10
+        },
+        {
+          "deviation": 0.003641423255933757,
+          "hour": 11
+        },
+        {
+          "deviation": 0.005173673512739308,
+          "hour": 12
+        },
+        {
+          "deviation": 0.023251716937001805,
+          "hour": 13
+        },
+        {
+          "deviation": 0.013982789607191452,
+          "hour": 14
+        },
+        {
+          "deviation": 0.0171539307796771,
+          "hour": 15
+        },
+        {
+          "deviation": 0.010505288856478969,
+          "hour": 16
+        },
+        {
+          "deviation": 0.003383505602339079,
+          "hour": 17
+        },
+        {
+          "deviation": 0.02403462426901916,
+          "hour": 18
+        },
+        {
+          "deviation": 0.02052899792679252,
+          "hour": 19
+        },
+        {
+          "deviation": 0.02979553812468182,
+          "hour": 20
+        },
+        {
+          "deviation": 0.0014648848712103593,
+          "hour": 22
+        },
+        {
+          "deviation": 0.0222931496842678,
+          "hour": 23
+        }
+      ],
+      "ceiling_breached_replicates": [],
+      "counterfactual_verdict": "passed",
+      "envelope_value": 0.17253575825982867,
+      "envelope_value_is_infinite": false,
+      "family": "log_ou_cox",
+      "final_threshold": 0.1923383855560084,
+      "params": {
+        "sigma_y": 1.4000000000000001,
+        "tau_s": 21.544346900318832
+      },
+      "wall_s": 208.189204599
+    },
+    {
+      "a2_level_per_seed_ratios": [
+        {
+          "ratio": 0.9881653242446324,
+          "seed": 201
+        },
+        {
+          "ratio": 1.019915236938003,
+          "seed": 202
+        }
+      ],
+      "a2_shape_raw_per_hour": [
+        {
+          "deviation": 0.07324622195067333,
+          "hour": 0
+        },
+        {
+          "deviation": 0.007577477236878575,
+          "hour": 1
+        },
+        {
+          "deviation": 0.04309109139905948,
+          "hour": 2
+        },
+        {
+          "deviation": 0.06530937553932867,
+          "hour": 3
+        },
+        {
+          "deviation": 0.10313725390635417,
+          "hour": 4
+        },
+        {
+          "deviation": 0.03953134757678136,
+          "hour": 5
+        },
+        {
+          "deviation": 0.007614487276823925,
+          "hour": 6
+        },
+        {
+          "deviation": 0.004009088355969107,
+          "hour": 7
+        },
+        {
+          "deviation": 0.0468571830287254,
+          "hour": 8
+        },
+        {
+          "deviation": 0.08544190792743726,
+          "hour": 9
+        },
+        {
+          "deviation": 0.001620388015522066,
+          "hour": 10
+        },
+        {
+          "deviation": 0.0017343680853953026,
+          "hour": 11
+        },
+        {
+          "deviation": 0.04840135691590041,
+          "hour": 12
+        },
+        {
+          "deviation": 0.02034042484363763,
+          "hour": 13
+        },
+        {
+          "deviation": 0.04612971673454035,
+          "hour": 14
+        },
+        {
+          "deviation": 0.033025824677449446,
+          "hour": 15
+        },
+        {
+          "deviation": 0.04393355400620503,
+          "hour": 16
+        },
+        {
+          "deviation": 0.07531896080124524,
+          "hour": 17
+        },
+        {
+          "deviation": 0.09392474908972238,
+          "hour": 18
+        },
+        {
+          "deviation": 0.02076675187746102,
+          "hour": 19
+        },
+        {
+          "deviation": 0.04246183661024582,
+          "hour": 20
+        },
+        {
+          "deviation": 0.07520935381241844,
+          "hour": 22
+        },
+        {
+          "deviation": 0.020520408629818538,
+          "hour": 23
+        }
+      ],
+      "ceiling_breached_replicates": [],
+      "counterfactual_verdict": "passed",
+      "envelope_value": 0.3770821449403229,
+      "envelope_value_is_infinite": false,
+      "family": "log_ou_cox",
+      "final_threshold": 0.22314355131420976,
+      "params": {
+        "sigma_y": 1.4000000000000001,
+        "tau_s": 100.0
+      },
+      "wall_s": 215.026089522
+    },
+    {
+      "a2_level_per_seed_ratios": [
+        {
+          "ratio": 0.9913379311398148,
+          "seed": 201
+        },
+        {
+          "ratio": 1.005668116735058,
+          "seed": 202
+        }
+      ],
+      "a2_shape_raw_per_hour": [
+        {
+          "deviation": 0.021111115990399467,
+          "hour": 0
+        },
+        {
+          "deviation": 0.044038421296644516,
+          "hour": 1
+        },
+        {
+          "deviation": 0.009937160186333591,
+          "hour": 2
+        },
+        {
+          "deviation": 0.000048279980169076644,
+          "hour": 3
+        },
+        {
+          "deviation": 0.028087517815377296,
+          "hour": 4
+        },
+        {
+          "deviation": 0.009066732374524137,
+          "hour": 5
+        },
+        {
+          "deviation": 0.008704003723154165,
+          "hour": 6
+        },
+        {
+          "deviation": 0.01546485329016281,
+          "hour": 7
+        },
+        {
+          "deviation": 0.01441612117268604,
+          "hour": 8
+        },
+        {
+          "deviation": 0.023993528965558755,
+          "hour": 9
+        },
+        {
+          "deviation": 0.006888282454038988,
+          "hour": 10
+        },
+        {
+          "deviation": 0.019559916462988155,
+          "hour": 11
+        },
+        {
+          "deviation": 0.004899953799468617,
+          "hour": 12
+        },
+        {
+          "deviation": 0.00903772319105882,
+          "hour": 13
+        },
+        {
+          "deviation": 0.01985355930968156,
+          "hour": 14
+        },
+        {
+          "deviation": 0.01400725694832209,
+          "hour": 15
+        },
+        {
+          "deviation": 0.026754038081933853,
+          "hour": 16
+        },
+        {
+          "deviation": 0.002120239359108898,
+          "hour": 17
+        },
+        {
+          "deviation": 0.01466218643586933,
+          "hour": 18
+        },
+        {
+          "deviation": 0.03020565847146671,
+          "hour": 19
+        },
+        {
+          "deviation": 0.006156686256650006,
+          "hour": 20
+        },
+        {
+          "deviation": 0.024013924605537702,
+          "hour": 22
+        },
+        {
+          "deviation": 0.001131726826781183,
+          "hour": 23
+        }
+      ],
+      "ceiling_breached_replicates": [],
+      "counterfactual_verdict": "passed",
+      "envelope_value": 0.1038193898624118,
+      "envelope_value_is_infinite": false,
+      "family": "log_ou_cox",
+      "final_threshold": 0.12362201715859153,
+      "params": {
+        "sigma_y": 1.6,
+        "tau_s": 4.641588833612778
+      },
+      "wall_s": 218.955857186
+    },
+    {
+      "a2_level_per_seed_ratios": [
+        {
+          "ratio": 0.9943655370701451,
+          "seed": 201
+        },
+        {
+          "ratio": 1.010003445270859,
+          "seed": 202
+        }
+      ],
+      "a2_shape_raw_per_hour": [
+        {
+          "deviation": 0.01735564890741862,
+          "hour": 0
+        },
+        {
+          "deviation": 0.015810721246121037,
+          "hour": 1
+        },
+        {
+          "deviation": 0.009563620542244857,
+          "hour": 2
+        },
+        {
+          "deviation": 0.00965274910630866,
+          "hour": 3
+        },
+        {
+          "deviation": 0.031494131607495535,
+          "hour": 4
+        },
+        {
+          "deviation": 0.05756432308077453,
+          "hour": 5
+        },
+        {
+          "deviation": 0.0006351868894753487,
+          "hour": 6
+        },
+        {
+          "deviation": 0.026563865432741515,
+          "hour": 7
+        },
+        {
+          "deviation": 0.011130357929536112,
+          "hour": 8
+        },
+        {
+          "deviation": 0.03147483151744153,
+          "hour": 9
+        },
+        {
+          "deviation": 0.014633834470447499,
+          "hour": 10
+        },
+        {
+          "deviation": 0.018758470661044354,
+          "hour": 11
+        },
+        {
+          "deviation": 0.0027068306712313295,
+          "hour": 12
+        },
+        {
+          "deviation": 0.002065031528572362,
+          "hour": 13
+        },
+        {
+          "deviation": 0.013547971639970948,
+          "hour": 14
+        },
+        {
+          "deviation": 0.0015377730130980165,
+          "hour": 15
+        },
+        {
+          "deviation": 0.015799829901396546,
+          "hour": 16
+        },
+        {
+          "deviation": 0.0018810860199612966,
+          "hour": 17
+        },
+        {
+          "deviation": 0.06069170459037814,
+          "hour": 18
+        },
+        {
+          "deviation": 0.040246365095015356,
+          "hour": 19
+        },
+        {
+          "deviation": 0.027691629004428862,
+          "hour": 20
+        },
+        {
+          "deviation": 0.024677507154340285,
+          "hour": 22
+        },
+        {
+          "deviation": 0.02768209417066133,
+          "hour": 23
+        }
+      ],
+      "ceiling_breached_replicates": [
+        473
+      ],
+      "counterfactual_verdict": "passed",
+      "envelope_value": 0.15911942833639353,
+      "envelope_value_is_infinite": false,
+      "family": "log_ou_cox",
+      "final_threshold": 0.17892205563257327,
+      "params": {
+        "sigma_y": 1.6,
+        "tau_s": 10.0
+      },
+      "wall_s": 218.071490234
+    },
+    {
+      "a2_level_per_seed_ratios": [
+        {
+          "ratio": 0.9932551876585874,
+          "seed": 201
+        },
+        {
+          "ratio": 0.9953852285700774,
+          "seed": 202
+        }
+      ],
+      "a2_shape_raw_per_hour": [
+        {
+          "deviation": 0.05058110652068551,
+          "hour": 0
+        },
+        {
+          "deviation": 0.013965180997435045,
+          "hour": 1
+        },
+        {
+          "deviation": 0.08914090138136198,
+          "hour": 2
+        },
+        {
+          "deviation": 0.04482323890777708,
+          "hour": 3
+        },
+        {
+          "deviation": 0.05859772768799613,
+          "hour": 4
+        },
+        {
+          "deviation": 0.07178257208305355,
+          "hour": 5
+        },
+        {
+          "deviation": 0.08193242629037364,
+          "hour": 6
+        },
+        {
+          "deviation": 0.10282325593173365,
+          "hour": 7
+        },
+        {
+          "deviation": 0.01097382406127789,
+          "hour": 8
+        },
+        {
+          "deviation": 0.1212332873803403,
+          "hour": 9
+        },
+        {
+          "deviation": 0.045260659130695616,
+          "hour": 10
+        },
+        {
+          "deviation": 0.026835557132532,
+          "hour": 11
+        },
+        {
+          "deviation": 0.03544334822099592,
+          "hour": 12
+        },
+        {
+          "deviation": 0.031549646158925686,
+          "hour": 13
+        },
+        {
+          "deviation": 0.008037567612589872,
+          "hour": 14
+        },
+        {
+          "deviation": 0.04341754418060333,
+          "hour": 15
+        },
+        {
+          "deviation": 0.07615714646510054,
+          "hour": 16
+        },
+        {
+          "deviation": 0.07951083823076868,
+          "hour": 17
+        },
+        {
+          "deviation": 0.00960638260520016,
+          "hour": 18
+        },
+        {
+          "deviation": 0.011510758926205405,
+          "hour": 19
+        },
+        {
+          "deviation": 0.031270497471576494,
+          "hour": 20
+        },
+        {
+          "deviation": 0.07218067690314592,
+          "hour": 22
+        },
+        {
+          "deviation": 0.030468901881057067,
+          "hour": 23
+        }
+      ],
+      "ceiling_breached_replicates": [],
+      "counterfactual_verdict": "passed",
+      "envelope_value": 0.33005353934600234,
+      "envelope_value_is_infinite": false,
+      "family": "log_ou_cox",
+      "final_threshold": 0.22314355131420976,
+      "params": {
+        "sigma_y": 1.6,
+        "tau_s": 46.4158883361278
+      },
+      "wall_s": 190.782142841
+    },
+    {
+      "a2_level_per_seed_ratios": [
+        {
+          "ratio": 1.0097132817981904,
+          "seed": 201
+        },
+        {
+          "ratio": 0.9966167028963479,
+          "seed": 202
+        }
+      ],
+      "a2_shape_raw_per_hour": [
+        {
+          "deviation": 0.017346040954460053,
+          "hour": 0
+        },
+        {
+          "deviation": 0.02238683022246378,
+          "hour": 1
+        },
+        {
+          "deviation": 0.008923925949203937,
+          "hour": 2
+        },
+        {
+          "deviation": 0.021864380139405334,
+          "hour": 3
+        },
+        {
+          "deviation": 0.0038431934124315294,
+          "hour": 4
+        },
+        {
+          "deviation": 0.027177087796930424,
+          "hour": 5
+        },
+        {
+          "deviation": 0.03564082787819056,
+          "hour": 6
+        },
+        {
+          "deviation": 0.01630675903003462,
+          "hour": 7
+        },
+        {
+          "deviation": 0.027284999147011987,
+          "hour": 8
+        },
+        {
+          "deviation": 0.019612760361182764,
+          "hour": 9
+        },
+        {
+          "deviation": 0.04140383146938849,
+          "hour": 10
+        },
+        {
+          "deviation": 0.09821005847303389,
+          "hour": 11
+        },
+        {
+          "deviation": 0.01036917369954658,
+          "hour": 12
+        },
+        {
+          "deviation": 0.012937702870617419,
+          "hour": 13
+        },
+        {
+          "deviation": 0.02599835358638285,
+          "hour": 14
+        },
+        {
+          "deviation": 0.004277667275417989,
+          "hour": 15
+        },
+        {
+          "deviation": 0.031967296278950875,
+          "hour": 16
+        },
+        {
+          "deviation": 0.011859493440936515,
+          "hour": 17
+        },
+        {
+          "deviation": 0.019495506141191995,
+          "hour": 18
+        },
+        {
+          "deviation": 0.00875253535871494,
+          "hour": 19
+        },
+        {
+          "deviation": 0.09427185933299405,
+          "hour": 20
+        },
+        {
+          "deviation": 0.0176148554476994,
+          "hour": 22
+        },
+        {
+          "deviation": 0.03528101456945882,
+          "hour": 23
+        }
+      ],
+      "ceiling_breached_replicates": [],
+      "counterfactual_verdict": "passed",
+      "envelope_value": 0.20010057815246787,
+      "envelope_value_is_infinite": false,
+      "family": "log_ou_cox",
+      "final_threshold": 0.2199032054486476,
+      "params": {
+        "sigma_y": 1.8,
+        "tau_s": 10.0
+      },
+      "wall_s": 204.614261859
+    },
+    {
+      "a2_level_per_seed_ratios": [
+        {
+          "ratio": 1.0113172095831986,
+          "seed": 201
+        },
+        {
+          "ratio": 0.9978990309478136,
+          "seed": 202
+        }
+      ],
+      "a2_shape_raw_per_hour": [
+        {
+          "deviation": 0.01586866345512647,
+          "hour": 0
+        },
+        {
+          "deviation": 0.1702016912412772,
+          "hour": 1
+        },
+        {
+          "deviation": 0.009112120821253896,
+          "hour": 2
+        },
+        {
+          "deviation": 0.03465004341499996,
+          "hour": 3
+        },
+        {
+          "deviation": 0.005006368109841067,
+          "hour": 4
+        },
+        {
+          "deviation": 0.045180249957832694,
+          "hour": 5
+        },
+        {
+          "deviation": 0.02146172472106536,
+          "hour": 6
+        },
+        {
+          "deviation": 0.02854946579025662,
+          "hour": 7
+        },
+        {
+          "deviation": 0.026434468040094142,
+          "hour": 8
+        },
+        {
+          "deviation": 0.04276782675741513,
+          "hour": 9
+        },
+        {
+          "deviation": 0.012770881790282303,
+          "hour": 10
+        },
+        {
+          "deviation": 0.08042821440792583,
+          "hour": 11
+        },
+        {
+          "deviation": 0.013571562165355789,
+          "hour": 12
+        },
+        {
+          "deviation": 0.022530303475353956,
+          "hour": 13
+        },
+        {
+          "deviation": 0.02562198661391502,
+          "hour": 14
+        },
+        {
+          "deviation": 0.0012310395631160043,
+          "hour": 15
+        },
+        {
+          "deviation": 0.054313638947225566,
+          "hour": 16
+        },
+        {
+          "deviation": 0.02856727571636004,
+          "hour": 17
+        },
+        {
+          "deviation": 0.09100669147223514,
+          "hour": 18
+        },
+        {
+          "deviation": 0.010393844323023801,
+          "hour": 19
+        },
+        {
+          "deviation": 0.04746049838976377,
+          "hour": 20
+        },
+        {
+          "deviation": 0.07662416638548514,
+          "hour": 22
+        },
+        {
+          "deviation": 0.06415819836992902,
+          "hour": 23
+        }
+      ],
+      "ceiling_breached_replicates": [
+        46,
+        69,
+        329
+      ],
+      "counterfactual_verdict": "passed",
+      "envelope_value": 0.332190925201161,
+      "envelope_value_is_infinite": false,
+      "family": "log_ou_cox",
+      "final_threshold": 0.22314355131420976,
+      "params": {
+        "sigma_y": 1.8,
+        "tau_s": 21.544346900318832
+      },
+      "wall_s": 205.137684217
+    },
+    {
+      "a2_level_per_seed_ratios": [
+        {
+          "ratio": 1.0169837167629023,
+          "seed": 201
+        },
+        {
+          "ratio": 1.0106051281960908,
+          "seed": 202
+        }
+      ],
+      "a2_shape_raw_per_hour": [
+        {
+          "deviation": 0.016276790531132596,
+          "hour": 0
+        },
+        {
+          "deviation": 0.020921789532199312,
+          "hour": 1
+        },
+        {
+          "deviation": 0.007298023504032795,
+          "hour": 2
+        },
+        {
+          "deviation": 0.023148200547365574,
+          "hour": 3
+        },
+        {
+          "deviation": 0.0009664785687223986,
+          "hour": 4
+        },
+        {
+          "deviation": 0.018297199082307328,
+          "hour": 5
+        },
+        {
+          "deviation": 0.011425069736815483,
+          "hour": 6
+        },
+        {
+          "deviation": 0.018458611572911655,
+          "hour": 7
+        },
+        {
+          "deviation": 0.0033552207661852167,
+          "hour": 8
+        },
+        {
+          "deviation": 0.022396052786728557,
+          "hour": 9
+        },
+        {
+          "deviation": 0.00801360677409795,
+          "hour": 10
+        },
+        {
+          "deviation": 0.015691768097066284,
+          "hour": 11
+        },
+        {
+          "deviation": 0.021369075680615097,
+          "hour": 12
+        },
+        {
+          "deviation": 0.004690490452783251,
+          "hour": 13
+        },
+        {
+          "deviation": 0.030157767002372205,
+          "hour": 14
+        },
+        {
+          "deviation": 0.1123423462890207,
+          "hour": 15
+        },
+        {
+          "deviation": 0.029001347967262957,
+          "hour": 16
+        },
+        {
+          "deviation": 0.04147314683763806,
+          "hour": 17
+        },
+        {
+          "deviation": 0.01377620219088066,
+          "hour": 18
+        },
+        {
+          "deviation": 0.00597488461586968,
+          "hour": 19
+        },
+        {
+          "deviation": 0.033283187074466536,
+          "hour": 20
+        },
+        {
+          "deviation": 0.03007290425720039,
+          "hour": 22
+        },
+        {
+          "deviation": 0.003867104311097355,
+          "hour": 23
+        }
+      ],
+      "ceiling_breached_replicates": [
+        12,
+        28,
+        32,
+        38,
+        39,
+        40,
+        57,
+        60,
+        77,
+        88,
+        95,
+        164,
+        175,
+        183,
+        185,
+        186,
+        188,
+        200,
+        211,
+        220,
+        227,
+        232,
+        233,
+        244,
+        254,
+        260,
+        263,
+        267,
+        272,
+        319,
+        323,
+        326,
+        328,
+        340,
+        363,
+        368,
+        370,
+        406,
+        427,
+        454,
+        455,
+        464,
+        467,
+        472,
+        473,
+        474,
+        482,
+        483,
+        486
+      ],
+      "counterfactual_verdict": "passed",
+      "envelope_value": null,
+      "envelope_value_is_infinite": true,
+      "family": "log_ou_cox",
+      "final_threshold": 0.22314355131420976,
+      "params": {
+        "sigma_y": 2.0,
+        "tau_s": 2.154434690031884
+      },
+      "wall_s": 204.782249804
+    },
+    {
+      "a2_level_per_seed_ratios": [
+        {
+          "ratio": 1.0056725430122828,
+          "seed": 201
+        },
+        {
+          "ratio": 1.0080771746546726,
+          "seed": 202
+        }
+      ],
+      "a2_shape_raw_per_hour": [
+        {
+          "deviation": 0.013662544920238865,
+          "hour": 0
+        },
+        {
+          "deviation": 0.00944714972813959,
+          "hour": 1
+        },
+        {
+          "deviation": 0.026428359392412674,
+          "hour": 2
+        },
+        {
+          "deviation": 0.00964105722826329,
+          "hour": 3
+        },
+        {
+          "deviation": 0.01001326724880225,
+          "hour": 4
+        },
+        {
+          "deviation": 0.01195447421294803,
+          "hour": 5
+        },
+        {
+          "deviation": 0.06143201033128987,
+          "hour": 6
+        },
+        {
+          "deviation": 0.03500532722815331,
+          "hour": 7
+        },
+        {
+          "deviation": 0.03732771007590721,
+          "hour": 8
+        },
+        {
+          "deviation": 0.02074496654584834,
+          "hour": 9
+        },
+        {
+          "deviation": 0.031776942122955766,
+          "hour": 10
+        },
+        {
+          "deviation": 0.022886548643313624,
+          "hour": 11
+        },
+        {
+          "deviation": 0.03673722258165007,
+          "hour": 12
+        },
+        {
+          "deviation": 0.06895197071508558,
+          "hour": 13
+        },
+        {
+          "deviation": 0.005445376182338124,
+          "hour": 14
+        },
+        {
+          "deviation": 0.0007915801295449524,
+          "hour": 15
+        },
+        {
+          "deviation": 0.02294447350809145,
+          "hour": 16
+        },
+        {
+          "deviation": 0.013439273239209598,
+          "hour": 17
+        },
+        {
+          "deviation": 0.014524205826698932,
+          "hour": 18
+        },
+        {
+          "deviation": 0.019770251549208577,
+          "hour": 19
+        },
+        {
+          "deviation": 0.03940728637792839,
+          "hour": 20
+        },
+        {
+          "deviation": 0.019487704571646513,
+          "hour": 22
+        },
+        {
+          "deviation": 0.01791679565955598,
+          "hour": 23
+        }
+      ],
+      "ceiling_breached_replicates": [
+        9,
+        11,
+        20,
+        26,
+        37,
+        61,
+        66,
+        75,
+        77,
+        82,
+        84,
+        102,
+        105,
+        106,
+        112,
+        142,
+        150,
+        181,
+        194,
+        215,
+        224,
+        235,
+        251,
+        263,
+        267,
+        281,
+        283,
+        290,
+        311,
+        318,
+        330,
+        393,
+        408,
+        444,
+        447,
+        459
+      ],
+      "counterfactual_verdict": "passed",
+      "envelope_value": null,
+      "envelope_value_is_infinite": true,
+      "family": "log_ou_cox",
+      "final_threshold": 0.22314355131420976,
+      "params": {
+        "sigma_y": 2.0,
+        "tau_s": 10.0
+      },
+      "wall_s": 196.383702027
+    },
+    {
+      "a2_level_per_seed_ratios": [
+        {
+          "ratio": 0.9804829547206819,
+          "seed": 201
+        },
+        {
+          "ratio": 0.993186338047157,
+          "seed": 202
+        }
+      ],
+      "a2_shape_raw_per_hour": [
+        {
+          "deviation": 0.005441303322984332,
+          "hour": 0
+        },
+        {
+          "deviation": 0.062569839613611,
+          "hour": 1
+        },
+        {
+          "deviation": 0.05972961558636579,
+          "hour": 2
+        },
+        {
+          "deviation": 0.01228052887735789,
+          "hour": 3
+        },
+        {
+          "deviation": 0.003872035673001088,
+          "hour": 4
+        },
+        {
+          "deviation": 0.00023062410091352533,
+          "hour": 5
+        },
+        {
+          "deviation": 0.05562772552186677,
+          "hour": 6
+        },
+        {
+          "deviation": 0.05732531831361434,
+          "hour": 7
+        },
+        {
+          "deviation": 0.038390296157080055,
+          "hour": 8
+        },
+        {
+          "deviation": 0.04067089065239808,
+          "hour": 9
+        },
+        {
+          "deviation": 0.022141919482030887,
+          "hour": 10
+        },
+        {
+          "deviation": 0.06000534177760666,
+          "hour": 11
+        },
+        {
+          "deviation": 0.008859498897352922,
+          "hour": 12
+        },
+        {
+          "deviation": 0.015401491664085833,
+          "hour": 13
+        },
+        {
+          "deviation": 0.05794787328079872,
+          "hour": 14
+        },
+        {
+          "deviation": 0.007053056029227527,
+          "hour": 15
+        },
+        {
+          "deviation": 0.03794762277168615,
+          "hour": 16
+        },
+        {
+          "deviation": 0.0003828894354761185,
+          "hour": 17
+        },
+        {
+          "deviation": 0.00988647904887093,
+          "hour": 18
+        },
+        {
+          "deviation": 0.0031358438815393707,
+          "hour": 19
+        },
+        {
+          "deviation": 0.02257965510629391,
+          "hour": 20
+        },
+        {
+          "deviation": 0.01710249849110644,
+          "hour": 22
+        },
+        {
+          "deviation": 0.02328816979097187,
+          "hour": 23
+        }
+      ],
+      "ceiling_breached_replicates": [],
+      "counterfactual_verdict": "passed",
+      "envelope_value": 0.2223089494820452,
+      "envelope_value_is_infinite": false,
+      "family": "shot_noise",
+      "final_threshold": 0.22314355131420976,
+      "params": {
+        "k": 0.1,
+        "m": 0.8,
+        "tau_s": 21.544346900318832
+      },
+      "wall_s": 175.801304619
+    },
+    {
+      "a2_level_per_seed_ratios": [
+        {
+          "ratio": 0.9903749412203895,
+          "seed": 201
+        },
+        {
+          "ratio": 0.9900644556427985,
+          "seed": 202
+        }
+      ],
+      "a2_shape_raw_per_hour": [
+        {
+          "deviation": 0.05060628805920781,
+          "hour": 0
+        },
+        {
+          "deviation": 0.01650298354615175,
+          "hour": 1
+        },
+        {
+          "deviation": 0.07395708753751729,
+          "hour": 2
+        },
+        {
+          "deviation": 0.10022398998608982,
+          "hour": 3
+        },
+        {
+          "deviation": 0.010021911640845396,
+          "hour": 4
+        },
+        {
+          "deviation": 0.004844052005138896,
+          "hour": 5
+        },
+        {
+          "deviation": 0.00543188676630997,
+          "hour": 6
+        },
+        {
+          "deviation": 0.032610726971810486,
+          "hour": 7
+        },
+        {
+          "deviation": 0.08920914714611375,
+          "hour": 8
+        },
+        {
+          "deviation": 0.032822907332407274,
+          "hour": 9
+        },
+        {
+          "deviation": 0.014330987244234575,
+          "hour": 10
+        },
+        {
+          "deviation": 0.021083029666634685,
+          "hour": 11
+        },
+        {
+          "deviation": 0.08938350143732504,
+          "hour": 12
+        },
+        {
+          "deviation": 0.062194656829726025,
+          "hour": 13
+        },
+        {
+          "deviation": 0.03260733863108735,
+          "hour": 14
+        },
+        {
+          "deviation": 0.02090340273475426,
+          "hour": 15
+        },
+        {
+          "deviation": 0.07814569048812028,
+          "hour": 16
+        },
+        {
+          "deviation": 0.10327561402179125,
+          "hour": 17
+        },
+        {
+          "deviation": 0.07317178756614057,
+          "hour": 18
+        },
+        {
+          "deviation": 0.0016933997682396745,
+          "hour": 19
+        },
+        {
+          "deviation": 0.028468348615284477,
+          "hour": 20
+        },
+        {
+          "deviation": 0.05924853324066245,
+          "hour": 22
+        },
+        {
+          "deviation": 0.011578951058693627,
+          "hour": 23
+        }
+      ],
+      "ceiling_breached_replicates": [],
+      "counterfactual_verdict": "passed",
+      "envelope_value": 0.3250149941835191,
+      "envelope_value_is_infinite": false,
+      "family": "shot_noise",
+      "final_threshold": 0.22314355131420976,
+      "params": {
+        "k": 0.1,
+        "m": 0.8,
+        "tau_s": 46.4158883361278
+      },
+      "wall_s": 172.194871439
+    },
+    {
+      "a2_level_per_seed_ratios": [
+        {
+          "ratio": 1.0077710830457134,
+          "seed": 201
+        },
+        {
+          "ratio": 1.0001520706724034,
+          "seed": 202
+        }
+      ],
+      "a2_shape_raw_per_hour": [
+        {
+          "deviation": 0.015825461987372648,
+          "hour": 0
+        },
+        {
+          "deviation": 0.007004318238276963,
+          "hour": 1
+        },
+        {
+          "deviation": 0.013004430006434895,
+          "hour": 2
+        },
+        {
+          "deviation": 0.04051915851893991,
+          "hour": 3
+        },
+        {
+          "deviation": 0.03586918403030533,
+          "hour": 4
+        },
+        {
+          "deviation": 0.010232116119824454,
+          "hour": 5
+        },
+        {
+          "deviation": 0.005304279281491074,
+          "hour": 6
+        },
+        {
+          "deviation": 0.07055634540293379,
+          "hour": 7
+        },
+        {
+          "deviation": 0.04740337459382614,
+          "hour": 8
+        },
+        {
+          "deviation": 0.00613025340394487,
+          "hour": 9
+        },
+        {
+          "deviation": 0.02473823155403089,
+          "hour": 10
+        },
+        {
+          "deviation": 0.04837600570090634,
+          "hour": 11
+        },
+        {
+          "deviation": 0.023467637596888382,
+          "hour": 12
+        },
+        {
+          "deviation": 0.017195202104945902,
+          "hour": 13
+        },
+        {
+          "deviation": 0.017959359982181174,
+          "hour": 14
+        },
+        {
+          "deviation": 0.01222068451356091,
+          "hour": 15
+        },
+        {
+          "deviation": 0.005262217501838952,
+          "hour": 16
+        },
+        {
+          "deviation": 0.049874017046500484,
+          "hour": 17
+        },
+        {
+          "deviation": 0.00477048527633711,
+          "hour": 18
+        },
+        {
+          "deviation": 0.023620663227050333,
+          "hour": 19
+        },
+        {
+          "deviation": 0.00976167712845805,
+          "hour": 20
+        },
+        {
+          "deviation": 0.00012620210080804088,
+          "hour": 22
+        },
+        {
+          "deviation": 0.008159984054971368,
+          "hour": 23
+        }
+      ],
+      "ceiling_breached_replicates": [],
+      "counterfactual_verdict": "passed",
+      "envelope_value": 0.15650530676568797,
+      "envelope_value_is_infinite": false,
+      "family": "shot_noise",
+      "final_threshold": 0.1763079340618677,
+      "params": {
+        "k": 0.2154434690031884,
+        "m": 0.8,
+        "tau_s": 21.544346900318832
+      },
+      "wall_s": 197.818903431
+    }
+  ],
+  "cost": {
+    "jobs": 24,
+    "total_wall_s": 229.640042837
+  },
+  "counts": {
+    "counterfactual_a2_failed": 0,
+    "counterfactual_a2_passed": 20,
+    "selected": 20
+  },
+  "selection": {
+    "criteria": {
+      "a1": "passed",
+      "a2": "unresolved",
+      "a4": "passed"
+    },
+    "selected": 20
+  }
+}

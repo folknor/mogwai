@@ -63,7 +63,7 @@ this file is for.
 | Track | Driven from | State |
 |---|---|---|
 | Evidence and purchase | `DATA-PURCHASE-REPORT.md` (root) | Idle. The ~30 dollar ES/MES purchase is the named next marginal dollar, owner-gated. Nothing to buy for 12b. |
-| Generator fidelity, protocol 12b | `protocol-12b-arrival-composition-spec.md` (frozen contract of record) plus `protocol-12a-measurement-spec.md` (the binding ladder it re-runs) | Live under the 2026-08-10 screen-recalibration and family-extension amendment (signed, Brick F re-frozen). The closed Brick A run stands as its own record; its post-mortem showed A4 structurally unsatisfiable, A2/A3 noise-miscalibrated for the mixture regime A1 requires, and a right-skew family gap. Brick E (amended screen machinery, shot-noise family, predictive envelope) is in implementation, then the Brick A rerun. |
+| Generator fidelity, protocol 12b | `protocol-12b-arrival-composition-spec.md` (its section 16.1 carries the RESULT) | **CLOSED 2026-08-11** with `no-arrival-admissible-candidate-in-frozen-search-space`. Unlike the 2026-08-10 run of the same verdict string, this one is a measurement: A4 and the A2 level limb were defective and are repaired, A2 now admits 618 cells and A1 57. A3 fails all 1,402 cells of all five families, including the right-skewed shot-noise family added for exactly that reason. TWENTY cells fail A3 and nothing else. Section 11 forbids amending A3 having seen that, so the finding is exploratory evidence for a successor, not a 12b repair. |
 | Python-to-Rust rewrite | git history (its phase records, dossier and script triage are retired) | **DONE.** Signature renewed 2026-08-08 at `c783d5f`; the Python retired to the gitignored `research/dead/`; the Rust is the reference. Nine review passes, eight refusals. What survives durably: the parity contract in `reference/architecture.md`, the version exemption in `AGENTS.md`, the two approved numerical deviations pinned by discriminating tests in the code. |
 
 `todo.md` is the catch-all beneath the tracks: open work items, parked
@@ -97,17 +97,21 @@ investigations, the hardcoded-value inventory.
 
 ## What blocks what, right now
 
-1. **12b proceeds under the 2026-08-10 amendment.** The Brick A run at
-   `2f512a6` closed with `no-arrival-admissible-candidate-in-frozen-search-space`
-   and that verdict stands as the record of its own frozen contract. The
-   owner then authorized the screen-recalibration and family-extension
-   amendment (argued to consensus and signed by codex session
-   019feb7a-1abe-75c2-bafe-476f5fe4f02c), which restarted Brick F. Next:
-   Brick E implementation, then the Brick A rerun under the amended
-   contract. The performance round is retired to git history; its durable
+1. **12b is CLOSED, and what blocks the next step is a CRITERION question
+   rather than a mechanism one.** The amended screen returned
+   `no-arrival-admissible-candidate-in-frozen-search-space` on A3, with
+   TWENTY cells failing A3 and nothing else - so the search does not lack
+   candidate mechanisms, it lacks agreement about what the sub-second
+   criterion should be, and about why parent-second occupancy misses
+   across every family at its fitted hourly rate. Section 11 forbids
+   amending A3 after seeing that, so a successor preregisters its
+   criterion BEFORE looking at which cells pass it and says openly that
+   it was designed after observing 12b. Full result: that spec's section
+   16.1. The performance round is retired to git history; its durable
    measurements are in `reference/performance.md`.
-3. **12b item 3 (Stage B, the landing, protocol 13) waits on item 2's
-   verdict.**
+2. **Stage B and the protocol-13 landing do not run.** They were
+   conditional on a Stage A survivor and there is none under the frozen
+   contract.
 3. **Standing owner rulings that reshape the ground, 2026-08-09**: the
    bit-exactness era toward Python-era artifacts is CLOSED (re-bless instead
    of preserving CPython arithmetic; determinism per binary plus green

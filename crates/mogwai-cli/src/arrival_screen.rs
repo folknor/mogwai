@@ -706,9 +706,9 @@ mod tests {
                     assert!(cell[gate]["passed"].is_null());
                     assert!(!cell["admissible"].as_bool().expect("cell verdict"));
                     assert!(
-                        ["a1", "a2", "a3", "a4"].into_iter().any(|other| {
-                            other != gate && cell[other]["passed"] == false
-                        }),
+                        ["a1", "a2", "a3", "a4"]
+                            .into_iter()
+                            .any(|other| { other != gate && cell[other]["passed"] == false }),
                         "an unresolved gate cannot decide admissibility: {cell}"
                     );
                 } else {
