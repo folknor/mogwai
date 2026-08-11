@@ -39,6 +39,19 @@ pub fn observe<I>(rows: I, usable: &[String]) -> LabResult<Vec<serde_json::Value
 where
     I: IntoIterator<Item = LabResult<Row>>,
 {
+    observe_with_count_windows(rows, usable, crate::subcontract::COUNT_WINDOWS_S)
+}
+
+/// The protocol-12a observed path, parameterized only at its Block 2 window
+/// set so extensions reuse the frozen parent inference and window scheduler.
+pub fn observe_with_count_windows<I>(
+    rows: I,
+    usable: &[String],
+    count_windows_s: &'static [i64],
+) -> LabResult<Vec<serde_json::Value>>
+where
+    I: IntoIterator<Item = LabResult<Row>>,
+{
     let usable_set: std::collections::BTreeSet<&str> = usable.iter().map(String::as_str).collect();
     let mut minutes = MinuteFieldsCache::new();
     let mut records: Vec<serde_json::Value> = Vec::new();
@@ -65,7 +78,12 @@ where
             }
             let seg = session_segment_at(ts, UTC_OFFSET_MINUTES)
                 .ok_or_else(|| LabError::refusal(format!("row at {ts} maps to no open segment")))?;
-            state = Some(SessionAcc::new(session, &seg, UTC_OFFSET_MINUTES));
+            state = Some(SessionAcc::new_with_count_windows(
+                session,
+                &seg,
+                UTC_OFFSET_MINUTES,
+                count_windows_s,
+            ));
         }
         // The trade range covers ALL structurally valid prints - unsided rows
         // and invalid books included - by the print's own timestamp.

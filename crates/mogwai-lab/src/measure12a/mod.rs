@@ -155,6 +155,7 @@ pub struct SessionAcc {
     quote_min: BTreeMap<u64, (i64, i64)>,
     /// minute -> sided parent count by first-child timestamp.
     n_min: BTreeMap<u64, u64>,
+    count_windows_s: &'static [i64],
 }
 
 impl SessionAcc {
@@ -162,6 +163,18 @@ impl SessionAcc {
     /// exactly once. `seg` is any resolution inside the session.
     #[must_use]
     pub fn new(date: String, seg: &SessionSegment, offset_minutes: i32) -> Self {
+        Self::new_with_count_windows(date, seg, offset_minutes, COUNT_WINDOWS_S)
+    }
+
+    /// Construct the same protocol-12a accumulator with a caller-supplied
+    /// Block 2 window set. All windowing and accumulation code remains shared.
+    #[must_use]
+    pub fn new_with_count_windows(
+        date: String,
+        seg: &SessionSegment,
+        offset_minutes: i32,
+        count_windows_s: &'static [i64],
+    ) -> Self {
         let overnight = session_segment_at(seg.session_start_ns, offset_minutes)
             .expect("the open instant is inside the overnight segment");
         let post = session_segment_at(seg.session_end_ns - NS_PER_MIN, offset_minutes)
@@ -179,6 +192,7 @@ impl SessionAcc {
             trade_min: BTreeMap::new(),
             quote_min: BTreeMap::new(),
             n_min: BTreeMap::new(),
+            count_windows_s,
         }
     }
 
@@ -387,7 +401,7 @@ impl SessionAcc {
     fn block2(&self) -> serde_json::Value {
         let mut cells: BTreeMap<(u64, u64), Block2Cell> = BTreeMap::new();
         for seg in self.ordered() {
-            for &w in COUNT_WINDOWS_S {
+            for &w in self.count_windows_s {
                 #[expect(clippy::cast_sign_loss, reason = "the window lengths are 1, 5 and 60")]
                 let w = w as u64;
                 let w_ns = w * 1_000_000_000;

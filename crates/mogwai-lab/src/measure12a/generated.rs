@@ -87,6 +87,7 @@ pub struct GeneratedAcc {
     open_minute: Option<u64>,
     prev_parent: Option<PrevParent>,
     parent_seq: u64,
+    count_windows_s: &'static [i64],
 }
 
 impl GeneratedAcc {
@@ -94,6 +95,25 @@ impl GeneratedAcc {
     /// window (the walk itself begins earlier, at `start - warmup`).
     #[must_use]
     pub fn new(seed: u64, start: u64, end: u64, offset: i32, tick: Decimal) -> Self {
+        Self::new_with_count_windows(
+            seed,
+            start,
+            end,
+            offset,
+            tick,
+            crate::subcontract::COUNT_WINDOWS_S,
+        )
+    }
+
+    #[must_use]
+    pub fn new_with_count_windows(
+        seed: u64,
+        start: u64,
+        end: u64,
+        offset: i32,
+        tick: Decimal,
+        count_windows_s: &'static [i64],
+    ) -> Self {
         let tick_nanos = price_nanos(tick).unwrap_or(TICK_UNITS);
         #[expect(
             clippy::cast_precision_loss,
@@ -115,6 +135,7 @@ impl GeneratedAcc {
             open_minute: None,
             prev_parent: None,
             parent_seq: 0,
+            count_windows_s,
         }
     }
 
@@ -184,10 +205,11 @@ impl GeneratedAcc {
     }
 
     fn new_session(&self, seg: &SessionSegment) -> SessionAcc {
-        SessionAcc::new(
+        SessionAcc::new_with_count_windows(
             crate::session::format_trade_date(seg.trade_day),
             seg,
             self.offset,
+            self.count_windows_s,
         )
     }
 

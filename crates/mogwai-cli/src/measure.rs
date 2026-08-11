@@ -433,7 +433,7 @@ pub fn run_measure_with(
 /// `run_measure12a_observed`: the observed half - per-session sufficient
 /// records plus the monthly aggregates, bound to the input and
 /// sub-contract hashes.
-fn run_measure12a_observed(
+pub(crate) fn run_measure12a_observed(
     corpus: &Path,
     ledger: &Path,
     preflight_path: &Path,
@@ -492,12 +492,44 @@ fn run_measure12a_observed(
     }))
 }
 
+pub(crate) fn run_observed_with_count_windows(
+    corpus: &Path,
+    ledger: &Path,
+    preflight_path: &Path,
+    windows: &'static [i64],
+) -> anyhow::Result<Value> {
+    let hashes: BTreeMap<String, String> =
+        verify_input(corpus, ledger).map_err(|e| anyhow!("verifying the delivered corpus: {e}"))?;
+    let (preflight, preflight_hash) = require_preflight(&hashes, preflight_path)
+        .map_err(|e| anyhow!("checking the preflight artifact: {e}"))?;
+    let usable = preflight["usable_sessions"]
+        .as_array()
+        .ok_or_else(|| anyhow!("preflight artifact carries no usable_sessions array"))?
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect::<Vec<_>>();
+    let files = data_files(corpus).map_err(|e| anyhow!("listing the corpus: {e}"))?;
+    let per_session = observed::observe_with_count_windows(parse_stream(files), &usable, windows)
+        .map_err(|e| anyhow!("the observed count-curve pass refused: {e}"))?;
+    Ok(serde_json::json!({
+        "binding": {"preflight_artifact_hash": preflight_hash, "file_hashes": hashes},
+        "per_session": per_session,
+    }))
+}
+
 /// One FINAL walk, constructed exactly the way `gen.rs`'s `build_source`
 /// does and exactly as `crates/mogwai-cli/tests/parity12a.rs`'s
 /// `run_final_walk` does: the committed MNQ preset, no overrides, the walk
 /// starting at `FINAL_START_NS - SUMMARY_WARMUP` with the vol trace
 /// enabled, measuring `[FINAL_START_NS, FINAL_START_NS + FINAL_LENGTH)`.
 pub fn run_final_walk(seed: u64) -> anyhow::Result<Value> {
+    run_final_walk_with_count_windows(seed, mogwai_lab::subcontract::COUNT_WINDOWS_S)
+}
+
+pub(crate) fn run_final_walk_with_count_windows(
+    seed: u64,
+    windows: &'static [i64],
+) -> anyhow::Result<Value> {
     let profile = mogwai_server::source::InstrumentProfiles::defaults()
         .get("MNQ")
         .cloned()
@@ -537,7 +569,14 @@ pub fn run_final_walk(seed: u64) -> anyhow::Result<Value> {
     .map_err(|e| anyhow!("building the generator: {e:?}"))?;
     source.enable_vol_trace();
 
-    let mut acc = GeneratedAcc::new(seed, start, end, offset, profile.scalars.modal_tick);
+    let mut acc = GeneratedAcc::new_with_count_windows(
+        seed,
+        start,
+        end,
+        offset,
+        profile.scalars.modal_tick,
+        windows,
+    );
     while let Some(event) = source.next_tick() {
         if event.ts_event() >= end {
             break;
