@@ -35,7 +35,7 @@ const FIELDS: [&str; 3] = ["scheduled_windows", "zero_windows", "count_hist"];
 const BOOTSTRAP_REPLICATES: usize = 2_000;
 
 #[derive(Args)]
-#[command(group(ArgGroup::new("mode").required(true).args(["stage0", "full", "ordered_counts"])))]
+#[command(group(ArgGroup::new("mode").required(true).args(["stage0", "full", "ordered_counts", "slow_geometry"])))]
 pub struct CountCurveArgs {
     /// Run the generated-only signed Stage 0 backcheck.
     #[arg(long)]
@@ -46,6 +46,9 @@ pub struct CountCurveArgs {
     /// Run the signed ordered-count extraction and both frozen panels.
     #[arg(long)]
     ordered_counts: bool,
+    /// Reduce the retained ordered sequence into the signed slow-geometry artifact.
+    #[arg(long)]
+    slow_geometry: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +78,8 @@ struct Estimates {
 pub fn run(args: &CountCurveArgs) -> anyhow::Result<()> {
     if args.stage0 {
         run_stage0()
+    } else if args.slow_geometry {
+        crate::slow_geometry::run()
     } else if args.ordered_counts {
         crate::ordered_counts::run()
     } else {
