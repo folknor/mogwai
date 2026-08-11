@@ -328,6 +328,82 @@ three advance regardless of what it finds. What it produces is their
 PARAMETER GEOMETRY: the timescales, the magnitudes, and the hour-20
 stratum's behavior, measured rather than assumed.
 
+## RESULT, 2026-08-11
+
+Ran artifact-only at commit `69aa132`, outcome `completed`, sequence
+hash matched, 506 cells included and none excluded, 22 cross-fitted
+scores with zero refusals. All three classes advanced, as the fixed rule
+requires.
+
+```text
+gap        S(g)       pairs
+1 day    + 0.8624       17
+2 days   - 4.9303       12
+3 days   - 1.0383       11
+4+ days  - 0.0851      191
+
+shared-permutation max statistic  4.9303
+null exceedances                  42 of 2,000
+p-value                           0.0215
+```
+
+Descriptive contrasts, carrying no inference by construction:
+`D_ordinary` is -0.0167, -0.0074 and +0.0001 at its three supported
+bins; `D_hour20` is -0.0383, -0.0093, -0.0013, -0.0163 and +0.0050
+across five.
+
+THE CORRECT READING, which is narrower than the p-value invites and is
+stated here because the first attempt to describe it overreached:
+
+> Cross-fitted common-mode scores reject exchangeability over the fixed
+> July dates under the preregistered shared-max permutation,
+> `p = 0.0215`. The maximum is the negative two-day covariance estimate
+> from 12 pairs. The result establishes CALENDAR-ORGANIZED SCORE
+> STRUCTURE, but does not identify persistence, oscillation, mean
+> reversion, or a weekday effect.
+
+The permutation is VALID; what was too broad was the label on it. It
+tests exactly one null - that the scores are exchangeable among the
+fixed July session dates - preserving the dates, the gap graph, the pair
+counts and the unequal bin sizes while destroying every association
+between score and calendar position. Rejection therefore cannot separate
+stochastic serial dependence from weekday or holiday structure, a local
+regime pattern, oscillation, or another calendar-linked effect.
+
+Three candidate worries, resolved:
+
+- OSCILLATION IS NOT ESTABLISHED. The negative two-day estimate is
+  descriptive evidence only; twelve pairs cannot license an oscillatory
+  successor component, and that bin carried no independent inferential
+  claim under the frozen max test.
+- LOW SUPPORT DOES NOT INVALIDATE THE P-VALUE. The permutation
+  reproduces the same pair counts in every replicate, so the two-day
+  bin's greater sampling variability is represented in the null maximum
+  distribution. Power concentrates in sparse bins and the effect
+  estimate is unstable, but the exchangeability p-value is not
+  anti-conservative for that reason.
+- CALENDAR CONFOUNDING IS THE REAL LIMIT, though not by the route first
+  guessed: the retained dates are all weekdays and Friday-to-Monday
+  pairs fall mainly in the THREE-day bin, so the two-day result is not a
+  weekend contrast. The gap bins nonetheless carry different weekday
+  compositions, and the permutation shuffles scores away from the
+  calendar positions a persistence test would want preserved.
+
+CONSEQUENCES FOR THE SUCCESSOR, binding: all three classes continue to
+advance; NO two-day oscillation is encoded and NO iid or session
+component is excluded on this result; the score-gap curve is reported as
+a DIAGNOSTIC for every class; and the final multi-horizon tape gates
+judge the joint arm rather than this July lag pattern becoming a
+mechanism requirement.
+
+A calendar-adjusted persistence test - weekday-preserving randomization,
+or a frozen calendar-effect model followed by a residual dependence test
+- would need its own preregistration and more design data, and at 22
+sessions would be weak. IT MAY NOT BE PAID FOR WITH JUNE: June cannot
+both resolve this geometry and remain the untouched acceptance holdout.
+Resolving it would need separate design data or a separately authorized
+split.
+
 ## The June corpus, stated at its true weight
 
 The successor's final acceptance needs an OBSERVED holdout not used to
