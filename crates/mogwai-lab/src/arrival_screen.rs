@@ -808,7 +808,7 @@ impl ScreenContext {
         })
     }
 
-    fn envelope_grid(&self) -> LabResult<&ExposureGrid> {
+    pub fn envelope_grid(&self) -> LabResult<&ExposureGrid> {
         if let Some(grid) = self.envelope_grid.get() {
             return Ok(grid);
         }
@@ -1307,20 +1307,36 @@ fn amended_rate_and_zero_gates(
         record.order_statistic_value = value;
         record
     };
+    let skipped_unresolved = |needed: bool| needed && !cell_could_be_admissible && evaluate_envelopes;
+    // A resolved failure always wins over an unevaluated limb. In particular,
+    // A2's failed level limb makes the whole gate failed even when its
+    // marginal shape envelope was skipped.
+    let a2_unresolved = level_pass
+        && !a2_class.over_cap()
+        && skipped_unresolved(a2_needs_envelope);
+    let a3_unresolved = !a3_class.over_cap() && skipped_unresolved(a3_needs_envelope);
+    let mut a2 = json!({
+        "passed":level_pass && shape_pass,
+        "level":{"per_seed":level},
+        "shape":{"per_hour":shape_rows},
+        "envelope":envelope_record(a2_needs_envelope,a2_class,"a2.shape.max_hourly_log_deviation",&shape_deviations,a2_allowance)
+    });
+    let mut a3 = json!({
+        "passed":a3_pass,
+        "gated":gated_rows,
+        "not_gated":not_gated,
+        "per_seed_raw":raw_rows,
+        "envelope":envelope_record(a3_needs_envelope,a3_class,"a3.max_hourly_zero_fraction_log_deviation",&a3_deviations,a3_allowance)
+    });
+    for (gate, unresolved) in [(&mut a2, a2_unresolved), (&mut a3, a3_unresolved)] {
+        if unresolved {
+            gate["passed"] = Value::Null;
+            gate["verdict"] = json!("unresolved");
+        }
+    }
     Ok((
-        json!({
-            "passed":level_pass && shape_pass,
-            "level":{"per_seed":level},
-            "shape":{"per_hour":shape_rows},
-            "envelope":envelope_record(a2_needs_envelope,a2_class,"a2.shape.max_hourly_log_deviation",&shape_deviations,a2_allowance)
-        }),
-        json!({
-            "passed":a3_pass,
-            "gated":gated_rows,
-            "not_gated":not_gated,
-            "per_seed_raw":raw_rows,
-            "envelope":envelope_record(a3_needs_envelope,a3_class,"a3.max_hourly_zero_fraction_log_deviation",&a3_deviations,a3_allowance)
-        }),
+        a2,
+        a3,
         level_pass && shape_pass,
         a3_pass,
     ))
@@ -4394,6 +4410,8 @@ mod tests {
             a2["envelope"]["classification"], "marginal_shell",
             "and must still record where it stood"
         );
+        assert_eq!(a2["passed"], false);
+        assert!(a2.get("verdict").is_none(), "a resolved failure is not unresolved");
         assert_eq!(a3["envelope"]["evaluated"], false);
     }
 

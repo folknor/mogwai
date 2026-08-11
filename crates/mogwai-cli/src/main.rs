@@ -26,7 +26,10 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-use mogwai_cli::{arrival_control, arrival_screen, fit, measure, minute_range_envelope};
+use mogwai_cli::{
+    arrival_control, arrival_envelope_diagnostic, arrival_screen, fit, measure,
+    minute_range_envelope,
+};
 use mogwai_server::{config, long_version};
 
 #[derive(Parser)]
@@ -64,6 +67,8 @@ enum Command {
     ArrivalControl(arrival_control::ArrivalControlArgs),
     /// Protocol 12b Stage A necessary-condition screen.
     ArrivalScreen(arrival_screen::ArrivalScreenArgs),
+    /// Evaluate skipped coarse A2 envelopes without changing the official screen.
+    ArrivalEnvelopeDiagnostic(arrival_envelope_diagnostic::ArrivalEnvelopeDiagnosticArgs),
     /// The cache-storage-class manual controls (stats / clean / clean
     /// --stale).
     Cache(cache::CacheArgs),
@@ -161,6 +166,10 @@ fn main() -> anyhow::Result<()> {
         }
         Command::ArrivalScreen(args) => {
             arrival_screen::run(args)?;
+            Ok(())
+        }
+        Command::ArrivalEnvelopeDiagnostic(args) => {
+            arrival_envelope_diagnostic::run(args)?;
             Ok(())
         }
         Command::Cache(args) => cache::run(args),

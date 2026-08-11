@@ -458,7 +458,7 @@ pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
         bail!("the artifact is unbound");
     }
     let artifact = json!({
-        "binding":{"harness_tree_commit":commit,"clean_tree":true,"schema_version":1,
+        "binding":{"harness_tree_commit":commit,"clean_tree":true,"schema_version":2,
             "input_hashes":{measure.to_string_lossy().to_string():sha256_file(&measure).map_err(|e|anyhow!(e.to_string()))?},
             "exposure":{"instrument":"MNQ","preset":"crates/mogwai-server/presets/mnq.toml",
                 "window_start_ns":context.binding.window_start_ns,"window_length_ns":context.binding.window_length_ns,
@@ -700,6 +700,21 @@ mod tests {
             );
             if cell["admissible"] == json!(false) {
                 assert!(cell["loss"].is_null(), "an inadmissible cell is not ranked");
+            }
+            for gate in ["a1", "a2", "a3", "a4"] {
+                if cell[gate]["verdict"] == "unresolved" {
+                    assert!(cell[gate]["passed"].is_null());
+                    assert!(!cell["admissible"].as_bool().expect("cell verdict"));
+                    assert!(
+                        ["a1", "a2", "a3", "a4"].into_iter().any(|other| {
+                            other != gate && cell[other]["passed"] == false
+                        }),
+                        "an unresolved gate cannot decide admissibility: {cell}"
+                    );
+                } else {
+                    assert!(cell[gate]["passed"].is_boolean());
+                    assert!(cell[gate].get("verdict").is_none());
+                }
             }
             if cell["pass"] == json!("coarse") {
                 *coarse

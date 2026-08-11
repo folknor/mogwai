@@ -10,6 +10,7 @@
 //! subcommand still lives module-private under `src/main.rs`.
 
 pub mod arrival_control;
+pub mod arrival_envelope_diagnostic;
 pub mod arrival_screen;
 pub mod fit;
 pub mod measure;
