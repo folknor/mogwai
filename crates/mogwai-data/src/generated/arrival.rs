@@ -7,7 +7,7 @@
 
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha12Rng;
-use rand_distr::{Distribution, StandardNormal};
+use rand_distr::{Distribution, Exp, Gamma, Poisson, StandardNormal};
 use serde::Deserialize;
 
 use super::{
@@ -42,7 +42,7 @@ pub(super) fn cadence_base_mean_s(scalars: &GeneratorScalars) -> f64 {
 ///
 /// Changes to `ArrivalKernel::next_parent`, a family's parameterization,
 /// `CADENCE_STREAM_TAG`, or cadence seed derivation must bump this value.
-pub const ARRIVAL_KERNEL_VERSION: u32 = 2;
+pub const ARRIVAL_KERNEL_VERSION: u32 = 3;
 
 /// The cadence half of a generated walk, assembled exactly as the generator
 /// assembles it and driven independently under neutral runtime modifiers.
@@ -75,6 +75,33 @@ impl CadenceWalk {
         seed: u64,
         start_ts_ns: u64,
     ) -> CadenceParts {
+        Self::assemble_with_step(
+            scalars,
+            session,
+            calendar,
+            thin,
+            seed,
+            start_ts_ns,
+            CADENCE_STEP_NS,
+        )
+    }
+
+    /// Assembles a cadence walk at an explicit nonzero integration step.
+    ///
+    /// The serving and generator paths use [`Self::assemble`], whose frozen
+    /// one-second default is unchanged. This constructor exists for the lab's
+    /// protocol-12b grid-sensitivity and envelope-fidelity gates.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn assemble_with_step(
+        scalars: &GeneratorScalars,
+        session: &SessionProfile,
+        calendar: Option<&SessionCalendar>,
+        thin: f64,
+        seed: u64,
+        start_ts_ns: u64,
+        step_ns: u64,
+    ) -> CadenceParts {
         let kernel = scalars.arrival.and_then(ArrivalConfig::kernel);
         let mut rng =
             kernel.map(|_| ChaCha12Rng::seed_from_u64(splitmix64(seed ^ CADENCE_STREAM_TAG)));
@@ -85,9 +112,9 @@ impl CadenceWalk {
                 rng.as_mut().expect("kernel has cadence rng"),
             )
         });
-        let env = kernel
-            .as_ref()
-            .map(|_| ArrivalEnv::for_profile(session, calendar, thin, start_ts_ns));
+        let env = kernel.as_ref().map(|_| {
+            ArrivalEnv::for_profile_with_step(session, calendar, thin, start_ts_ns, step_ns)
+        });
         CadenceParts {
             kernel,
             state,
@@ -106,7 +133,31 @@ impl CadenceWalk {
         seed: u64,
         start_ts_ns: u64,
     ) -> Option<Self> {
-        let parts = Self::assemble(scalars, session, calendar, thin, seed, start_ts_ns);
+        Self::new_with_step(
+            scalars,
+            session,
+            calendar,
+            thin,
+            seed,
+            start_ts_ns,
+            CADENCE_STEP_NS,
+        )
+    }
+
+    /// Builds a lab cadence walk at an explicit nonzero integration step.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_step(
+        scalars: &GeneratorScalars,
+        session: &SessionProfile,
+        calendar: Option<&SessionCalendar>,
+        thin: f64,
+        seed: u64,
+        start_ts_ns: u64,
+        step_ns: u64,
+    ) -> Option<Self> {
+        let parts =
+            Self::assemble_with_step(scalars, session, calendar, thin, seed, start_ts_ns, step_ns);
         Some(Self {
             kernel: parts.kernel?,
             state: parts.state?,
@@ -148,7 +199,12 @@ impl CadenceWalk {
 
 const CADENCE_STEP_NS: u64 = 1_000_000_000;
 const EXPECTED_COUNT_FLOOR: f64 = 0.01;
-const SELF_EXCITING_X_CEILING: f64 = 1e4;
+/// The representable latent-intensity ceiling, uniform across kernel families.
+/// Public because `mogwai-lab`'s envelope simulator judges its replicate months
+/// against the SAME bound the kernel refuses on (spec 9.7's replicate ceiling
+/// rule); a second copy of the literal is exactly the twin-value defect this
+/// workspace keeps finding.
+pub const ARRIVAL_X_CEILING: f64 = 1e4;
 const NS_PER_HOUR: u64 = 3_600_000_000_000;
 const NS_PER_MINUTE: u64 = 60_000_000_000;
 const NS_PER_WEEK: u64 = 7 * 24 * NS_PER_HOUR;
@@ -173,6 +229,11 @@ pub enum ArrivalConfig {
     },
     SelfExciting {
         phi: f64,
+        tau_s: f64,
+    },
+    ShotNoise {
+        m: f64,
+        k: f64,
         tau_s: f64,
     },
 }
@@ -208,7 +269,16 @@ impl ArrivalConfig {
                 sigma_y.is_finite() && sigma_y >= 0.0 && tau_s.is_finite() && tau_s >= 1.0
             }
             Self::SelfExciting { phi, tau_s } => {
-                phi.is_finite() && (0.0..0.9).contains(&phi) && tau_s.is_finite() && tau_s >= 2.0
+                phi.is_finite() && phi > 0.0 && phi <= 0.98 && tau_s.is_finite() && tau_s >= 2.0
+            }
+            Self::ShotNoise { m, k, tau_s } => {
+                m.is_finite()
+                    && (0.2..=0.8).contains(&m)
+                    && m < 1.0
+                    && k.is_finite()
+                    && (0.1..=10.0).contains(&k)
+                    && tau_s.is_finite()
+                    && (1.0..=3600.0).contains(&tau_s)
             }
         }
     }
@@ -234,6 +304,9 @@ impl ArrivalConfig {
                     tau_s,
                 }))
             }
+            Self::ShotNoise { m, k, tau_s } => {
+                Some(ArrivalKernel::ShotNoise(ShotNoiseParams { m, k, tau_s }))
+            }
         }
     }
 }
@@ -245,6 +318,7 @@ pub struct ArrivalEnv {
     calendar: Option<SessionCalendar>,
     thin: f64,
     origin_ns: u64,
+    step_ns: u64,
     weekly_calendar_transitions_ns: Vec<u64>,
 }
 
@@ -257,11 +331,25 @@ impl ArrivalEnv {
         thin: f64,
         origin_ns: u64,
     ) -> Self {
+        Self::for_profile_with_step(profile, calendar, thin, origin_ns, CADENCE_STEP_NS)
+    }
+
+    /// Builds the complete environment at an explicit nonzero cadence step.
+    #[must_use]
+    pub fn for_profile_with_step(
+        profile: &SessionProfile,
+        calendar: Option<&SessionCalendar>,
+        thin: f64,
+        origin_ns: u64,
+        step_ns: u64,
+    ) -> Self {
+        assert!(step_ns > 0, "the cadence step must be nonzero");
         Self {
             session: SessionModulator::new(profile, calendar),
             calendar: calendar.cloned(),
             thin,
             origin_ns,
+            step_ns,
             weekly_calendar_transitions_ns: calendar
                 .map(calendar_transition_offsets)
                 .unwrap_or_default(),
@@ -282,12 +370,12 @@ impl ArrivalEnv {
     }
 
     fn cell_index(&self, clock_ns: u64) -> u64 {
-        clock_ns.saturating_sub(self.origin_ns) / CADENCE_STEP_NS
+        clock_ns.saturating_sub(self.origin_ns) / self.step_ns
     }
 
     fn cell_start(&self, cell: u64) -> u64 {
         self.origin_ns
-            .saturating_add(cell.saturating_mul(CADENCE_STEP_NS))
+            .saturating_add(cell.saturating_mul(self.step_ns))
     }
 
     fn next_calendar_boundary(&self, from_ns: u64) -> u64 {
@@ -356,6 +444,7 @@ pub enum ArrivalKernel {
     WallMmpp(WallMmppParams),
     LogOuCox(LogOuParams),
     SelfExciting(SelfExcitingParams),
+    ShotNoise(ShotNoiseParams),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -374,6 +463,13 @@ pub struct LogOuParams {
 #[derive(Debug, Clone, Copy)]
 pub struct SelfExcitingParams {
     pub phi: f64,
+    pub tau_s: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ShotNoiseParams {
+    pub m: f64,
+    pub k: f64,
     pub tau_s: f64,
 }
 
@@ -436,6 +532,44 @@ impl SelfExcitingParams {
     }
 }
 
+impl ShotNoiseParams {
+    fn stationary(self, rng: &mut ChaCha12Rng) -> f64 {
+        Gamma::new(self.k, self.m / self.k)
+            .expect("validated shot-noise Gamma parameters")
+            .sample(rng)
+    }
+
+    fn transition(self, s: f64, dt_s: f64, rng: &mut ChaCha12Rng) -> f64 {
+        let decay = (-dt_s / self.tau_s).exp();
+        let lambda = self.k / self.tau_s;
+        let jumps = Poisson::new(lambda * dt_s)
+            .expect("validated shot-noise Poisson rate")
+            .sample(rng) as u64;
+        let exponential = Exp::new(self.k / self.m).expect("validated shot-noise exponential rate");
+        let mut next = decay * s;
+        for _ in 0..jumps {
+            let arrival_s = rng.random::<f64>() * dt_s;
+            let size = exponential.sample(rng);
+            next += size * (-(dt_s - arrival_s) / self.tau_s).exp();
+        }
+        next
+    }
+
+    #[cfg(test)]
+    fn transition_from_jumps(self, s: f64, dt_s: f64, jumps: &[(f64, f64)]) -> f64 {
+        let decay = (-dt_s / self.tau_s).exp();
+        decay * s
+            + jumps
+                .iter()
+                .map(|&(arrival_s, size)| size * (-(dt_s - arrival_s) / self.tau_s).exp())
+                .sum::<f64>()
+    }
+
+    fn level(self, s: f64) -> f64 {
+        1.0 - self.m + s
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ArrivalState {
     WallMmpp {
@@ -450,6 +584,10 @@ pub enum ArrivalState {
         a: f64,
         cell_index: u64,
         cell_count: u32,
+    },
+    ShotNoise {
+        s: f64,
+        cell_index: u64,
     },
 }
 
@@ -473,6 +611,10 @@ impl ArrivalState {
                 a: 1.0,
                 cell_index,
                 cell_count: 0,
+            },
+            ArrivalKernel::ShotNoise(params) => Self::ShotNoise {
+                s: params.stationary(rng),
+                cell_index,
             },
         }
     }
@@ -537,7 +679,7 @@ impl ArrivalKernel {
             if !x.is_finite() {
                 return Err(ArrivalRefusal::NonFiniteState { clock_ns: cursor });
             }
-            if x > SELF_EXCITING_X_CEILING {
+            if x > ARRIVAL_X_CEILING {
                 return Err(ArrivalRefusal::IntensityCeiling {
                     clock_ns: cursor,
                     x,
@@ -588,7 +730,7 @@ impl ArrivalKernel {
                     clock_ns: parent_ts_ns,
                 });
             }
-            if latent_x > SELF_EXCITING_X_CEILING {
+            if latent_x > ARRIVAL_X_CEILING {
                 return Err(ArrivalRefusal::IntensityCeiling {
                     clock_ns: parent_ts_ns,
                     x: latent_x,
@@ -620,6 +762,9 @@ impl ArrivalKernel {
             (ArrivalKernel::SelfExciting(params), ArrivalState::SelfExciting { a, .. }) => {
                 params.level(*a)
             }
+            (ArrivalKernel::ShotNoise(params), ArrivalState::ShotNoise { s, .. }) => {
+                params.level(*s)
+            }
             _ => f64::NAN,
         }
     }
@@ -633,10 +778,12 @@ impl ArrivalKernel {
         rng: &mut ChaCha12Rng,
         clock_ns: u64,
     ) -> Result<(), ArrivalRefusal> {
+        let step_ns = env.step_ns;
+        let step_s = step_ns as f64 / 1e9;
         match (*self, state) {
             (ArrivalKernel::WallMmpp(params), ArrivalState::WallMmpp { quiet, cell_index }) => {
                 while *cell_index < target {
-                    *quiet = params.transition(*quiet, rng.random(), CADENCE_STEP_NS as f64 / 1e9);
+                    *quiet = params.transition(*quiet, rng.random(), step_s);
                     *cell_index += 1;
                 }
             }
@@ -645,7 +792,7 @@ impl ArrivalKernel {
                     *y = params.transition(
                         *y,
                         <StandardNormal as Distribution<f64>>::sample(&StandardNormal, rng),
-                        CADENCE_STEP_NS as f64 / 1e9,
+                        step_s,
                     );
                     *cell_index += 1;
                 }
@@ -660,14 +807,23 @@ impl ArrivalKernel {
             ) => {
                 while *cell_index < target {
                     let start = env.cell_start(*cell_index);
-                    let end = start.saturating_add(CADENCE_STEP_NS);
+                    let end = start.saturating_add(step_ns);
                     let expected = env.baseline_integral(start, end, base_mean_s);
-                    *a = params.transition(*a, expected, *cell_count, CADENCE_STEP_NS as f64 / 1e9);
+                    *a = params.transition(*a, expected, *cell_count, step_s);
                     if !a.is_finite() {
                         return Err(ArrivalRefusal::NonFiniteState { clock_ns });
                     }
                     *cell_index += 1;
                     *cell_count = 0;
+                }
+            }
+            (ArrivalKernel::ShotNoise(params), ArrivalState::ShotNoise { s, cell_index }) => {
+                while *cell_index < target {
+                    *s = params.transition(*s, step_s, rng);
+                    if !s.is_finite() {
+                        return Err(ArrivalRefusal::NonFiniteState { clock_ns });
+                    }
+                    *cell_index += 1;
                 }
             }
             _ => return Err(ArrivalRefusal::NonFiniteState { clock_ns }),
@@ -693,6 +849,65 @@ mod tests {
             dow_weight: [1.0 / 7.0; 7],
         };
         ArrivalEnv::for_profile(&profile, calendar, 1.0, 0)
+    }
+
+    #[test]
+    fn the_default_cadence_constructor_is_the_explicit_one_second_constructor() {
+        let fp = Fingerprint::from_repo_json();
+        for arrival in [
+            ArrivalConfig::WallMmpp {
+                occupancy: 0.35,
+                rate_ratio: 20.0,
+                tau_s: 60.0,
+            },
+            ArrivalConfig::LogOuCox {
+                sigma_y: 1.0,
+                tau_s: 60.0,
+            },
+            ArrivalConfig::SelfExciting {
+                phi: 0.85,
+                tau_s: 60.0,
+            },
+            ArrivalConfig::ShotNoise {
+                m: 0.5,
+                k: 1.0,
+                tau_s: 60.0,
+            },
+        ] {
+            let mut scalars = GeneratorScalars::from_fingerprint_medians("STEP", &fp);
+            scalars.arrival = Some(arrival);
+            let mut default = CadenceWalk::new(&scalars, &fp.session_profile, None, 1.0, 91, 0)
+                .expect("integrated cadence");
+            let mut explicit = CadenceWalk::new_with_step(
+                &scalars,
+                &fp.session_profile,
+                None,
+                1.0,
+                91,
+                0,
+                1_000_000_000,
+            )
+            .expect("integrated cadence");
+            for _ in 0..100 {
+                let left = default.next().expect("default draw");
+                let right = explicit.next().expect("explicit draw");
+                assert_eq!(left.parent_ts_ns, right.parent_ts_ns);
+                assert_eq!(left.child_count, right.child_count);
+                assert_eq!(left.next_from_ns, right.next_from_ns);
+                assert_eq!(left.latent_x.to_bits(), right.latent_x.to_bits());
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "the cadence step must be nonzero")]
+    fn an_explicit_zero_cadence_step_is_rejected() {
+        let profile = SessionProfile {
+            intensity_hour: [1.0 / 24.0; 24],
+            vol_hour: [1.0; 24],
+            dow_weight: [1.0 / 7.0; 7],
+        };
+        let _env = ArrivalEnv::for_profile_with_step(&profile, None, 1.0, 0, 0);
     }
 
     #[test]
@@ -835,6 +1050,121 @@ mod tests {
         assert!((sum / 500_000.0 - 1.0).abs() < 0.005);
     }
 
+    fn sample_moments(values: &[f64]) -> (f64, f64) {
+        let n = values.len() as f64;
+        let mean = values.iter().sum::<f64>() / n;
+        let variance = values
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / (n - 1.0);
+        (mean, variance)
+    }
+
+    fn assert_gamma_moments(values: &[f64], params: ShotNoiseParams, label: &str) {
+        let n = values.len() as f64;
+        let variance = params.m.powi(2) / params.k;
+        let mu4 = 3.0 * (params.k + 2.0) * params.m.powi(4) / params.k.powi(3);
+        let mean_tolerance = 5.0 * (variance / n).sqrt();
+        let variance_tolerance =
+            5.0 * ((mu4 - variance.powi(2) * (n - 3.0) / (n - 1.0)) / n).sqrt();
+        let (mean, sample_variance) = sample_moments(values);
+        assert!((mean - params.m).abs() <= mean_tolerance, "{label} mean");
+        assert!(
+            (sample_variance - variance).abs() <= variance_tolerance,
+            "{label} variance"
+        );
+    }
+
+    #[test]
+    fn arrival_families_match_their_stationary_derivations() {
+        // For compound-Poisson OU shot noise,
+        // log E[exp(-theta S)] = -integral_0^infinity
+        // lambda * (1 - 1 / (1 + theta exp(-v/tau) m/k)) dv.
+        // Substituting y = theta exp(-v/tau) gives
+        // -k log(1 + theta m/k), the Gamma(k, m/k) cumulant function.
+        const N: usize = 100_000;
+        const DAY_SECONDS: usize = 86_400;
+        let cells = [
+            ShotNoiseParams {
+                m: 0.5,
+                k: 1.0,
+                tau_s: 46.4158883361278,
+            },
+            ShotNoiseParams {
+                m: 0.2,
+                k: 10.0,
+                tau_s: 1.0,
+            },
+            ShotNoiseParams {
+                m: 0.8,
+                k: 0.1,
+                tau_s: 3600.0,
+            },
+        ];
+        for (cell_index, params) in cells.into_iter().enumerate() {
+            let mut rng = ChaCha12Rng::seed_from_u64(0x51A7_0000 + cell_index as u64);
+            let stationary: Vec<f64> = (0..N).map(|_| params.stationary(&mut rng)).collect();
+            assert_gamma_moments(&stationary, params, "stationary law");
+
+            let transitioned: Vec<f64> = stationary
+                .iter()
+                .map(|&s| params.transition(s, 1.0, &mut rng))
+                .collect();
+            assert_gamma_moments(&transitioned, params, "transition preservation");
+
+            for dt_s in [1.0, 0.25] {
+                let mut pair_rng = ChaCha12Rng::seed_from_u64(
+                    0x510F_0000 + cell_index as u64 * 2 + u64::from(dt_s == 0.25),
+                );
+                let pre: Vec<f64> = (0..N).map(|_| params.stationary(&mut pair_rng)).collect();
+                let post: Vec<f64> = pre
+                    .iter()
+                    .map(|&s| params.transition(s, dt_s, &mut pair_rng))
+                    .collect();
+                let (pre_mean, _) = sample_moments(&pre);
+                let (post_mean, _) = sample_moments(&post);
+                let centered_sum = pre.iter().map(|s| (s - pre_mean).powi(2)).sum::<f64>();
+                let covariance = pre
+                    .iter()
+                    .zip(&post)
+                    .map(|(before, after)| (before - pre_mean) * (after - post_mean))
+                    .sum::<f64>();
+                let slope = covariance / centered_sum;
+                let d = (-dt_s / params.tau_s).exp();
+                let variance = params.m.powi(2) / params.k;
+                let realized_se = (variance * (1.0 - d * d) / centered_sum).sqrt();
+                assert!(
+                    (slope - d).abs() <= 5.0 * realized_se,
+                    "persistence slope at cell {cell_index}, dt {dt_s}"
+                );
+            }
+
+            let path_len = 30 * DAY_SECONDS;
+            let mut path_rng = ChaCha12Rng::seed_from_u64(0x30DA_0000 + cell_index as u64);
+            let mut s = params.stationary(&mut path_rng);
+            let mut x_sum = params.level(s);
+            assert!(params.level(s) >= 1.0 - params.m);
+            for _ in 1..path_len {
+                s = params.transition(s, 1.0, &mut path_rng);
+                let x = params.level(s);
+                assert!(x >= 1.0 - params.m);
+                x_sum += x;
+            }
+            let duration = path_len as f64;
+            let variance = params.m.powi(2) / params.k;
+            let mean_variance = 2.0
+                * variance
+                * (duration * params.tau_s
+                    - params.tau_s.powi(2) * (1.0 - (-duration / params.tau_s).exp()))
+                / duration.powi(2);
+            assert!(
+                (x_sum / duration - 1.0).abs() <= 5.0 * mean_variance.sqrt(),
+                "30-day X mean at cell {cell_index}"
+            );
+        }
+    }
+
     #[test]
     fn neutral_exposure_has_zero_calendar_snaps() {
         let calendar = SessionCalendar {
@@ -874,11 +1204,11 @@ mod tests {
     }
 
     #[test]
-    fn arrival_conformance_vectors_v1_through_v8() {
+    fn arrival_conformance_vectors_v1_through_v9() {
         // These are committed, independently-derived inputs.  This test is a
         // schema and bit-pattern guard: generation tooling must never be able
         // to replace the reviewable arithmetic in their derivation fields.
-        const VECTORS: [&str; 8] = [
+        const VECTORS: [&str; 9] = [
             include_str!("../../tests/fixtures/arrival-vector-v1-mmpp-transition.json"),
             include_str!("../../tests/fixtures/arrival-vector-v2-logou-transition.json"),
             include_str!("../../tests/fixtures/arrival-vector-v3-selfexciting-feedback.json"),
@@ -887,6 +1217,7 @@ mod tests {
             include_str!("../../tests/fixtures/arrival-vector-v6-triple-boundary.json"),
             include_str!("../../tests/fixtures/arrival-vector-v7-degenerate-budget.json"),
             include_str!("../../tests/fixtures/arrival-vector-v8-reopen-seam.json"),
+            include_str!("../../tests/fixtures/arrival-vector-v9-shotnoise-transition.json"),
         ];
 
         for (index, source) in VECTORS.into_iter().enumerate() {
@@ -928,6 +1259,7 @@ mod tests {
                 5 => execute_v6_budget_traversal(&vector),
                 6 => execute_v7_degenerate_budget(&vector),
                 7 => execute_v8_reopen_seam(&vector),
+                8 => execute_v9_shot_noise(&vector),
                 _ => unreachable!("vector list is fixed"),
             }
         }
@@ -1147,6 +1479,33 @@ mod tests {
         }
     }
 
+    fn execute_v9_shot_noise(vector: &Value) {
+        let params = ShotNoiseParams {
+            m: hex(&vector["params"]["m"]),
+            k: hex(&vector["params"]["k"]),
+            tau_s: hex(&vector["params"]["tau_s"]),
+        };
+        let input = &vector["inputs"][0];
+        let expected = vector["expected"][0]["s"].as_array().expect("V9 states");
+        let mut s = -params.m * hex(&input["stationary_uniform"]).ln();
+        assert_bits(s, &expected[0], "V9 stationary initialization");
+        for (index, step) in input["steps"]
+            .as_array()
+            .expect("V9 steps")
+            .iter()
+            .enumerate()
+        {
+            let jumps: Vec<(f64, f64)> = step["jumps"]
+                .as_array()
+                .expect("V9 jumps")
+                .iter()
+                .map(|jump| (hex(&jump[0]), hex(&jump[1])))
+                .collect();
+            s = params.transition_from_jumps(s, hex(&step["dt_s"]), &jumps);
+            assert_bits(s, &expected[index + 1], "V9 post-transition state");
+        }
+    }
+
     #[derive(Debug, Deserialize)]
     struct Transcript {
         kind: String,
@@ -1180,6 +1539,11 @@ mod tests {
                 phi: params["phi"].as_f64().expect("phi"),
                 tau_s: params["tau_s"].as_f64().expect("tau"),
             }),
+            "shot_noise" => ArrivalKernel::ShotNoise(ShotNoiseParams {
+                m: params["m"].as_f64().expect("m"),
+                k: params["k"].as_f64().expect("k"),
+                tau_s: params["tau_s"].as_f64().expect("tau"),
+            }),
             other => panic!("unknown transcript family {other}"),
         }
     }
@@ -1199,6 +1563,11 @@ mod tests {
                 phi: params.phi,
                 tau_s: params.tau_s,
             },
+            ArrivalKernel::ShotNoise(params) => ArrivalConfig::ShotNoise {
+                m: params.m,
+                k: params.k,
+                tau_s: params.tau_s,
+            },
         }
     }
 
@@ -1209,10 +1578,11 @@ mod tests {
         // kernel walk and Stage B generator integration do not drift. The
         // conformance vectors above, not these transcripts, carry correctness
         // evidence for the family arithmetic.
-        const TRANSCRIPTS: [&str; 3] = [
+        const TRANSCRIPTS: [&str; 4] = [
             include_str!("../../tests/fixtures/arrival-transcript-wall-mmpp.json"),
             include_str!("../../tests/fixtures/arrival-transcript-log-ou-cox.json"),
             include_str!("../../tests/fixtures/arrival-transcript-self-exciting.json"),
+            include_str!("../../tests/fixtures/arrival-transcript-shot_noise.json"),
         ];
 
         let fp = Fingerprint::from_repo_json();
@@ -1295,37 +1665,137 @@ mod tests {
         }
     }
 
-    /// AMENDMENT-ONLY regeneration of the three layer-2 transcript fixtures.
+    #[test]
+    fn a_previously_valid_self_exciting_config_is_byte_identical() {
+        let raw =
+            include_str!("../../tests/fixtures/arrival-transcript-self-exciting-v2-phi085.json");
+        let transcript: Transcript = serde_json::from_str(raw).expect("valid pinned V2 walk");
+        assert_eq!(transcript.family, "self_exciting");
+        assert_eq!(transcript.params["phi"], 0.85);
+        let fp = Fingerprint::from_repo_json();
+        let kernel = transcript_kernel(&transcript.family, &transcript.params);
+        let mut rng = ChaCha12Rng::seed_from_u64(splitmix64(transcript.seed ^ CADENCE_STREAM_TAG));
+        let mut state = ArrivalState::new(&kernel, transcript.origin_ns, &mut rng);
+        let environment =
+            ArrivalEnv::for_profile(&fp.session_profile, None, 1.0, transcript.origin_ns);
+        let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+        let shape = SweepShape::new(
+            scalars.children_mean,
+            scalars.children_single_frac,
+            scalars.levels_mean,
+        );
+        let mut from_ns = transcript.origin_ns;
+        for expected in transcript.records {
+            let actual = kernel
+                .next_parent(
+                    &mut state,
+                    from_ns,
+                    scalars.mean_event_duration_s,
+                    &shape,
+                    &environment,
+                    RuntimeModifiers::NEUTRAL,
+                    &mut rng,
+                )
+                .expect("pinned V2 self-exciting walk remains valid");
+            from_ns = actual.next_from_ns;
+            assert_eq!(actual.parent_ts_ns, expected.parent_ts_ns);
+            assert_eq!(actual.child_count, expected.child_count);
+            assert_eq!(actual.latent_x.to_bits(), expected.latent_x_bits);
+        }
+    }
+
+    #[test]
+    fn the_old_refusal_boundary_admits_only_the_new_cells() {
+        for phi in [0.9, 0.94, 0.98] {
+            assert!(ArrivalConfig::SelfExciting { phi, tau_s: 2.0 }.is_valid());
+        }
+        for phi in [-f64::EPSILON, 0.0, 0.980_000_000_000_000_1, 1.0, f64::NAN] {
+            assert!(!ArrivalConfig::SelfExciting { phi, tau_s: 2.0 }.is_valid());
+        }
+        assert!(
+            !ArrivalConfig::SelfExciting {
+                phi: 0.85,
+                tau_s: 1.999
+            }
+            .is_valid()
+        );
+
+        assert!(
+            ArrivalConfig::ShotNoise {
+                m: 0.2,
+                k: 0.1,
+                tau_s: 1.0
+            }
+            .is_valid()
+        );
+        assert!(
+            ArrivalConfig::ShotNoise {
+                m: 0.8,
+                k: 10.0,
+                tau_s: 3600.0
+            }
+            .is_valid()
+        );
+        for config in [
+            ArrivalConfig::ShotNoise {
+                m: 0.199,
+                k: 1.0,
+                tau_s: 10.0,
+            },
+            ArrivalConfig::ShotNoise {
+                m: 0.801,
+                k: 1.0,
+                tau_s: 10.0,
+            },
+            ArrivalConfig::ShotNoise {
+                m: 1.0,
+                k: 1.0,
+                tau_s: 10.0,
+            },
+            ArrivalConfig::ShotNoise {
+                m: 0.5,
+                k: 0.099,
+                tau_s: 10.0,
+            },
+            ArrivalConfig::ShotNoise {
+                m: 0.5,
+                k: 10.001,
+                tau_s: 10.0,
+            },
+            ArrivalConfig::ShotNoise {
+                m: 0.5,
+                k: 1.0,
+                tau_s: 0.999,
+            },
+            ArrivalConfig::ShotNoise {
+                m: 0.5,
+                k: 1.0,
+                tau_s: 3600.001,
+            },
+        ] {
+            assert!(!config.is_valid());
+        }
+    }
+
+    /// AMENDMENT-ONLY generation of the shot-noise layer-2 transcript fixture.
     ///
     /// The transcripts are committed regression pins and are NEVER regenerated
     /// to match a later change - except under a signed section 17 amendment
     /// that explicitly authorizes a one-time replacement, which must be cited
     /// in the commit that carries the new fixtures. Last sanctioned use: the
-    /// 2026-08-09 arrival-frame calibration amendment (bare `base_mean_s`,
-    /// `ARRIVAL_KERNEL_VERSION` 2). Running this outside an amendment defeats
+    /// 2026-08-10 screen-recalibration and family-extension amendment
+    /// (`ARRIVAL_KERNEL_VERSION` 3). Running this outside an amendment defeats
     /// the pin's whole purpose; that is why it is `#[ignore]`d and named the
     /// way it is.
     #[test]
     #[ignore = "regenerates committed regression pins; sanctioned only by a signed amendment"]
     fn regenerate_arrival_transcripts_amendment_only() {
         let fp = Fingerprint::from_repo_json();
-        let families: [(&str, &str, Value); 3] = [
-            (
-                "wall-mmpp",
-                "wall_mmpp",
-                json!({"occupancy": 0.4, "rate_ratio": 20.0, "tau_s": 100.0}),
-            ),
-            (
-                "log-ou-cox",
-                "log_ou_cox",
-                json!({"sigma_y": 1.0, "tau_s": 100.0}),
-            ),
-            (
-                "self-exciting",
-                "self_exciting",
-                json!({"phi": 0.45, "tau_s": 34.42651863295482}),
-            ),
-        ];
+        let families: [(&str, &str, Value); 1] = [(
+            "shot_noise",
+            "shot_noise",
+            json!({"m": 0.5, "k": 1.0, "tau_s": 46.4158883361278}),
+        )];
         for (file_stem, family, params) in families {
             let seed = 201_u64;
             let origin_ns = 0_u64;

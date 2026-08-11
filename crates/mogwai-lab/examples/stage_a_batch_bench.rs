@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use mogwai_lab::arrival_screen::{
-    Family, STAGE_A_BUDGET_S, STAGE_A_SEEDS, ScheduledCell, ScreenContext,
-    evaluate_cell_with_work, evaluate_cells_parallel,
+    Family, STAGE_A_BUDGET_S, STAGE_A_SEEDS, ScheduledCell, ScreenContext, evaluate_cells_parallel,
+    measure_cell_walks,
 };
 use mogwai_lab::ledger::sha256_file;
 use mogwai_lab::sampler::ResourceSampler;
@@ -139,16 +139,16 @@ fn run_pilot(args: &Args) -> Result<(), String> {
     for (index, planned) in plan.iter().enumerate() {
         let cell = resolve_cell(planned.family, planned.level, &planned.lattice)
             .map_err(|error| error.to_string())?;
-        let evaluation = evaluate_cell_with_work(&context, &cell, &[PILOT_WALK_SEED])
+        let measurement = measure_cell_walks(&context, &cell, &[PILOT_WALK_SEED])
             .map_err(|error| error.to_string())?;
         readings.push(PilotReading {
             family: planned.family,
             level: planned.level,
             lattice: planned.lattice.clone(),
             stratum: planned.stratum.clone(),
-            cost_s: evaluation.verdict.cost_s,
-            parents: evaluation.parents,
-            prints: evaluation.prints,
+            cost_s: measurement.cost_s,
+            parents: measurement.parents,
+            prints: measurement.prints,
         });
         eprintln!(
             "pilot_cell={}/{} family={} level={} cost_s={:.6}",
@@ -156,7 +156,7 @@ fn run_pilot(args: &Args) -> Result<(), String> {
             plan.len(),
             planned.family.as_str(),
             planned.level,
-            evaluation.verdict.cost_s
+            measurement.cost_s
         );
     }
     let artifact = PilotArtifact {
@@ -319,10 +319,7 @@ fn synthetic_level_tasks(
                 }
             }
             CostStatistic::P90 => {
-                tasks.extend(std::iter::repeat_n(
-                    p90(&sample_costs),
-                    count * seed_count,
-                ));
+                tasks.extend(std::iter::repeat_n(p90(&sample_costs), count * seed_count));
             }
         }
     }
@@ -394,12 +391,8 @@ fn estimate_statistic(
         let minimum_round_1 = cap.saturating_sub(level_2_cells);
         let maximum_round_1 = cap.min(level_1_cells);
         for round_1_count in minimum_round_1..=maximum_round_1 {
-            let round_1 =
-                representative_tasks(&level_1, round_1_count * refinement_seeds);
-            let round_2 = representative_tasks(
-                &level_2,
-                (cap - round_1_count) * refinement_seeds,
-            );
+            let round_1 = representative_tasks(&level_1, round_1_count * refinement_seeds);
+            let round_2 = representative_tasks(&level_2, (cap - round_1_count) * refinement_seeds);
             let work = round_1.iter().chain(&round_2).sum::<f64>();
             let wall = scheduled_wall(&round_1, jobs) + scheduled_wall(&round_2, jobs);
             worst_serial = worst_serial.max(work);

@@ -161,11 +161,7 @@ impl CacheStore {
     pub fn write_prepared(&self, key: &str, bytes: &[u8]) -> io::Result<()> {
         let dir = self.provenance_dir();
         let sequence = CACHE_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let staged = dir.join(format!(
-            ".{key}.{}.{}.tmp",
-            std::process::id(),
-            sequence
-        ));
+        let staged = dir.join(format!(".{key}.{}.{}.tmp", std::process::id(), sequence));
         let result = (|| {
             let mut file = std::fs::OpenOptions::new()
                 .write(true)

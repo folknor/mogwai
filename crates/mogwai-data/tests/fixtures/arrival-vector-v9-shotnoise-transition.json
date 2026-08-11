@@ -1,0 +1,25 @@
+{
+  "vector": "V9",
+  "what_it_checks": "Shot-noise stationary initialization, exact OU decay, post-transition intervals, and one multi-jump grid step",
+  "derivation": "Section 5.6. With m=0.5, k=1, tau=2, dt=1 and stationary Gamma(1,0.5), U=0.25 gives S0=-0.5 ln(0.25)=0.6931471805599453 (0x3fe62e42fefa39ef), which supplies interval 0 directly. Let d=exp(-1/2). Step 1: S1=d*S0=0.42041501670297543 (0x3fdae81462df2404). Step 2, U1=0.25 and E1=0.4: S2=d*S1+0.4*exp(-(1-0.25)/2)=0.5299103089503423 (0x3fe0f50676d828c4). Step 3 has two jumps, (U1,E1)=(0.2,0.3), (U2,E2)=(0.8,0.1): S3=d*S2+0.3*exp(-(1-0.2)/2)+0.1*exp(-(1-0.8)/2)=0.6129866048904642 (0x3fe39d96159c7ff0). Each interval uses the newly listed post-transition S; X=1-m+S.",
+  "params": {
+    "m": "0x3fe0000000000000",
+    "k": "0x3ff0000000000000",
+    "tau_s": "0x4000000000000000"
+  },
+  "inputs": [
+    {
+      "stationary_uniform": "0x3fd0000000000000",
+      "steps": [
+        { "dt_s": "0x3ff0000000000000", "jumps": [] },
+        { "dt_s": "0x3ff0000000000000", "jumps": [["0x3fd0000000000000", "0x3fd999999999999a"]] },
+        { "dt_s": "0x3ff0000000000000", "jumps": [["0x3fc999999999999a", "0x3fd3333333333333"], ["0x3fe999999999999a", "0x3fb999999999999a"]] }
+      ]
+    }
+  ],
+  "expected": [
+    {
+      "s": ["0x3fe62e42fefa39ef", "0x3fdae81462df2404", "0x3fe0f50676d828c4", "0x3fe39d96159c7ff0"]
+    }
+  ]
+}

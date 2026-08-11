@@ -13,10 +13,11 @@
 //! The spec is `notes/protocol-12b-arrival-composition-spec.md`; sections 9
 //! and 16 own everything in this module.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
 #[cfg(test)]
 use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::Instant;
@@ -28,6 +29,7 @@ use mogwai_server::source::InstrumentProfile;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::aggregate::RefusalRec;
 #[cfg(test)]
 use crate::aggregate::context::ObsContext;
 #[cfg(test)]
@@ -36,10 +38,14 @@ use crate::aggregate::countsub::{count_substitution, obs_shares_under, support_r
 use crate::aggregate::family::conditional_adequacy_bins;
 #[cfg(test)]
 use crate::aggregate::monthly::pool_session_hists;
-use crate::aggregate::RefusalRec;
-use crate::arrival_control::{GeneratedBinding, MEAN_RATE_BAND, ZERO_COUNT_BAND, gate_hours, seed_median};
+use crate::arrival_control::{GeneratedBinding, MEAN_RATE_BAND, gate_hours, seed_median};
 #[cfg(test)]
-use crate::arrival_control::{HourRate, hourly_mean_parents, hourly_zero_second_fraction};
+use crate::arrival_control::{
+    HourRate, ZERO_COUNT_BAND, hourly_mean_parents, hourly_zero_second_fraction,
+};
+use crate::arrival_envelope::{
+    EnvelopeOutcome, EnvelopeRecord, ExposureGrid, predictive_envelopes,
+};
 use crate::error::{LabError, LabResult};
 use crate::fit::walk::parse_duration;
 use crate::kernel::weighted_nearest_rank;
@@ -50,7 +56,24 @@ use crate::storage::{CacheStore, ProvenanceInputs, ProvenanceToken, cache_root};
 use crate::subcontract::PARENT_COUNT_BIN_NAMES;
 
 pub const STAGE_A_SEEDS: [u64; 4] = [201, 202, 203, 204];
-pub const MEAN_GAP_REL_TOL_12B: f64 = 0.05;
+pub const A2_SHAPE_BASE: f64 = 0.019_802_627_296_179_73;
+pub const A2_SHAPE_CAP: f64 = 0.223_143_551_314_209_76;
+pub const A3_BASE: f64 = 0.223_143_551_314_209_76;
+pub const A3_CAP: f64 = std::f64::consts::LN_2;
+pub const MIN_ZERO_WINDOWS: u64 = 30;
+pub const A3_GATED_HOURS: [i64; 20] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17, 18, 19, 20, 22, 23,
+];
+pub const ENVELOPE_REPLICATES: usize = 500;
+pub const ENVELOPE_ORDER: usize = 484;
+pub const ENVELOPE_STREAM_TAG: u64 = 0x6D6F6777_61693145;
+pub const CADENCE_STEP_NS: u64 = 1_000_000_000;
+pub const GRID_SENSITIVITY_STEP_NS: u64 = 250_000_000;
+pub const ENVELOPE_CELL_BUDGET_S: [(usize, f64); 3] = [(2, 60.0), (4, 120.0), (8, 180.0)];
+pub const STAGE_A_ENVELOPE_BUDGET_S: f64 = 21_600.0;
+pub const STAGE_B_ENVELOPE_BUDGET_S: f64 = 10_800.0;
+pub const STAGE_B_BUDGET_S: f64 = 61_200.0;
+pub const CONFORMANCE_BUDGET_S: f64 = 900.0;
 pub const REFINEMENT_DEPTH: u8 = 2;
 pub const REFINEMENT_CELL_CAP: usize = 600;
 pub const STAGE_A_GEN_REFINE_CAP: usize = 40;
@@ -84,7 +107,7 @@ pub const STAGE_A_GEN_CELL_BUDGET_S: f64 = 50.0;
 /// The refinement product is a finer loss ordering over cells Stage B then
 /// truncates to 24 per family, so whether it should run at all remains a
 /// separate question.
-pub const STAGE_A_BUDGET_S: f64 = 39_600.0;
+pub const STAGE_A_BUDGET_S: f64 = 72_000.0;
 pub const STAGE_A_RSS_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const NS_PER_MINUTE: u64 = 60_000_000_000;
 
@@ -95,14 +118,16 @@ pub enum Family {
     WallMmpp,
     LogOuCox,
     SelfExciting,
+    ShotNoise,
 }
 
 impl Family {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::EventMarkov,
         Self::WallMmpp,
         Self::LogOuCox,
         Self::SelfExciting,
+        Self::ShotNoise,
     ];
 
     /// The SEAM spelling, which is also the artifact's. `Debug` lowercased
@@ -116,6 +141,7 @@ impl Family {
             Self::WallMmpp => "wall_mmpp",
             Self::LogOuCox => "log_ou_cox",
             Self::SelfExciting => "self_exciting",
+            Self::ShotNoise => "shot_noise",
         }
     }
 }
@@ -139,6 +165,11 @@ pub enum Cell {
         phi: f64,
         tau_s: f64,
     },
+    ShotNoise {
+        m: f64,
+        k: f64,
+        tau_s: f64,
+    },
 }
 
 impl Cell {
@@ -149,6 +180,7 @@ impl Cell {
             Self::WallMmpp { .. } => Family::WallMmpp,
             Self::LogOuCox { .. } => Family::LogOuCox,
             Self::SelfExciting { .. } => Family::SelfExciting,
+            Self::ShotNoise { .. } => Family::ShotNoise,
         }
     }
 
@@ -171,6 +203,7 @@ impl Cell {
             },
             Self::LogOuCox { sigma_y, tau_s } => ArrivalConfig::LogOuCox { sigma_y, tau_s },
             Self::SelfExciting { phi, tau_s } => ArrivalConfig::SelfExciting { phi, tau_s },
+            Self::ShotNoise { m, k, tau_s } => ArrivalConfig::ShotNoise { m, k, tau_s },
         }
     }
 
@@ -178,8 +211,8 @@ impl Cell {
     pub const fn fitted_params(&self) -> u8 {
         match self {
             Self::EventMarkov { .. } => 1,
-            Self::WallMmpp { .. } => 3,
-            _ => 2,
+            Self::WallMmpp { .. } | Self::ShotNoise { .. } => 3,
+            Self::LogOuCox { .. } | Self::SelfExciting { .. } => 2,
         }
     }
 
@@ -201,6 +234,9 @@ impl Cell {
             }
             Self::SelfExciting { phi, tau_s } => {
                 format!("self_exciting:phi={phi:.17}:tau_s={tau_s:.17}")
+            }
+            Self::ShotNoise { m, k, tau_s } => {
+                format!("shot_noise:m={m:.17}:k={k:.17}:tau_s={tau_s:.17}")
             }
         }
     }
@@ -237,12 +273,25 @@ pub fn coarse_grid(family: Family) -> Vec<Cell> {
                     .map(move |tau_s| Cell::LogOuCox { sigma_y, tau_s })
             })
             .collect(),
-        Family::SelfExciting => linear_grid(0.1, 0.85, 0.05)
+        Family::SelfExciting => vec![
+            0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75,
+            0.80, 0.85, 0.90, 0.94, 0.98,
+        ]
+        .into_iter()
+        .flat_map(|phi| {
+            log_grid(2.0, 600.0, 3)
+                .into_iter()
+                .map(move |tau_s| Cell::SelfExciting { phi, tau_s })
+        })
+        .collect(),
+        Family::ShotNoise => linear_grid(0.2, 0.8, 0.1)
             .into_iter()
-            .flat_map(|phi| {
-                log_grid(2.0, 600.0, 3)
-                    .into_iter()
-                    .map(move |tau_s| Cell::SelfExciting { phi, tau_s })
+            .flat_map(|m| {
+                log_grid(0.1, 10.0, 3).into_iter().flat_map(move |k| {
+                    log_grid(1.0, 3600.0, 3)
+                        .into_iter()
+                        .map(move |tau_s| Cell::ShotNoise { m, k, tau_s })
+                })
             })
             .collect(),
     }
@@ -253,6 +302,12 @@ pub struct ScreenRefusal {
     pub variant: String,
     pub clock_ns: u64,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<Family>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_params: Option<Cell>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -332,8 +387,19 @@ pub(crate) fn axis_grids(family: Family) -> Vec<(Vec<f64>, bool)> {
             (log_grid(1.0, 3600.0, 3), true),
         ],
         Family::SelfExciting => vec![
-            (linear_grid(0.1, 0.85, 0.05), false),
+            (
+                vec![
+                    0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70,
+                    0.75, 0.80, 0.85, 0.90, 0.94, 0.98,
+                ],
+                false,
+            ),
             (log_grid(2.0, 600.0, 3), true),
+        ],
+        Family::ShotNoise => vec![
+            (linear_grid(0.2, 0.8, 0.1), false),
+            (log_grid(0.1, 10.0, 3), true),
+            (log_grid(1.0, 3600.0, 3), true),
         ],
     }
 }
@@ -372,6 +438,11 @@ pub(crate) fn cell_from_coordinates(family: Family, coordinates: &[u32]) -> Cell
         Family::SelfExciting => Cell::SelfExciting {
             phi: value(0),
             tau_s: value(1),
+        },
+        Family::ShotNoise => Cell::ShotNoise {
+            m: value(0),
+            k: value(1),
+            tau_s: value(2),
         },
     }
 }
@@ -559,6 +630,7 @@ pub struct ScreenContext {
     hours: Vec<i64>,
     cache: CacheStore,
     bypass_cache: bool,
+    envelope_grid: OnceLock<ExposureGrid>,
 }
 
 /// The immutable, thread-safe subset of [`ScreenContext`] needed to project
@@ -629,6 +701,7 @@ impl ScreenContext {
             hours,
             cache: CacheStore::open(cache_root(cache), token),
             bypass_cache: false,
+            envelope_grid: OnceLock::new(),
         })
     }
 
@@ -687,6 +760,7 @@ impl ScreenContext {
                 }),
             ),
             bypass_cache: true,
+            envelope_grid: OnceLock::new(),
         })
     }
 
@@ -711,6 +785,22 @@ impl ScreenContext {
             cache: self.cache.clone(),
             bypass_cache: self.bypass_cache,
         })
+    }
+
+    fn envelope_grid(&self) -> LabResult<&ExposureGrid> {
+        if let Some(grid) = self.envelope_grid.get() {
+            return Ok(grid);
+        }
+        let grid = ExposureGrid::new(
+            &self.profile,
+            self.binding.window_start_ns,
+            self.binding.window_length_ns,
+            CADENCE_STEP_NS,
+        )?;
+        drop(self.envelope_grid.set(grid));
+        self.envelope_grid
+            .get()
+            .ok_or_else(|| LabError::refusal("the envelope grid failed to initialize"))
     }
 }
 
@@ -765,6 +855,9 @@ impl ParentSource for ParentWalk {
                             | ArrivalRefusal::NonFiniteState { clock_ns } => clock_ns,
                         },
                         detail: format!("{refusal:?}"),
+                        family: None,
+                        canonical_params: None,
+                        seed: None,
                     })
             }
         }
@@ -795,9 +888,8 @@ impl From<serde_json::Error> for ProjectStop {
 /// rather than re-derived from the segment's NAME: the accumulator asks whether
 /// this segment opened the session.
 fn open_parent_at(parent_ts_ns: u64, offset: i32) -> Result<(u64, u8, u64), ProjectStop> {
-    let seg = session_segment_at(parent_ts_ns, offset).ok_or_else(|| {
-        projection_refusal(parent_ts_ns, "a measured parent maps to no open segment")
-    })?;
+    let seg = session_segment_at(parent_ts_ns, offset)
+        .ok_or_else(|| projection_defect("a measured parent maps to no open segment"))?;
     Ok((
         parent_ts_ns,
         u8::from(seg.segment_origin_ns != seg.session_start_ns),
@@ -807,10 +899,17 @@ fn open_parent_at(parent_ts_ns: u64, offset: i32) -> Result<(u64, u8, u64), Proj
 
 fn projection_refusal(clock_ns: u64, detail: &str) -> ProjectStop {
     ProjectStop::Refused(ScreenRefusal {
-        variant: "projection".into(),
+        variant: "projected_child_inside_closed_halt_segment".into(),
         clock_ns,
         detail: detail.into(),
+        family: None,
+        canonical_params: None,
+        seed: None,
     })
+}
+
+fn projection_defect(detail: impl Into<String>) -> ProjectStop {
+    ProjectStop::Lab(LabError::refusal(detail.into()))
 }
 
 struct Projected {
@@ -845,6 +944,80 @@ pub struct CellEvaluation {
     pub verdict: CellVerdict,
     pub parents: u64,
     pub prints: u64,
+    pub demand: CellEnvelopeDemand,
+}
+
+/// Whether a gate can decide at its base, needs the predictive envelope, or
+/// can decide at its materiality cap. This is the single lazy-envelope
+/// predicate used by both the screen and the demand census.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvelopeDemand {
+    InsideBase,
+    MarginalShell,
+    OverCap,
+}
+
+impl EnvelopeDemand {
+    #[must_use]
+    pub const fn needs_envelope(self) -> bool {
+        matches!(self, Self::MarginalShell)
+    }
+
+    /// The gate fails on its own, with no envelope able to rescue it: an
+    /// allowance only widens a band toward its cap, and this state is already
+    /// past the cap.
+    #[must_use]
+    pub const fn over_cap(self) -> bool {
+        matches!(self, Self::OverCap)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct CellEnvelopeDemand {
+    pub family: Family,
+    pub a2: EnvelopeDemand,
+    pub a3: EnvelopeDemand,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct EnvelopeDemandCounts {
+    pub a2: usize,
+    pub a3: usize,
+    pub either: usize,
+}
+
+#[must_use]
+pub fn marginal_envelope_counts(demands: &[CellEnvelopeDemand]) -> EnvelopeDemandCounts {
+    EnvelopeDemandCounts {
+        a2: demands.iter().filter(|d| d.a2.needs_envelope()).count(),
+        a3: demands.iter().filter(|d| d.a3.needs_envelope()).count(),
+        either: demands
+            .iter()
+            .filter(|d| d.a2.needs_envelope() || d.a3.needs_envelope())
+            .count(),
+    }
+}
+
+/// Classifies the complete gated-hour deviation set. Strict comparisons are
+/// load-bearing: a reading exactly at base is inside, and one exactly at cap
+/// remains in the marginal shell.
+#[must_use]
+pub fn classify_envelope_demand(deviations: &[(i64, f64)], base: f64, cap: f64) -> EnvelopeDemand {
+    if deviations.iter().any(|(_, deviation)| *deviation > cap) {
+        EnvelopeDemand::OverCap
+    } else if deviations.iter().any(|(_, deviation)| *deviation > base) {
+        EnvelopeDemand::MarginalShell
+    } else {
+        EnvelopeDemand::InsideBase
+    }
+}
+
+/// Projection-only work measured by the Stage A batch pilot.
+pub struct WalkMeasurement {
+    pub cost_s: f64,
+    pub parents: u64,
+    pub prints: u64,
 }
 
 /// One scheduler cell and its exact ordered seed set.
@@ -852,6 +1025,256 @@ pub struct CellEvaluation {
 pub struct ScheduledCell {
     pub cell: Cell,
     pub seeds: Vec<u64>,
+}
+
+fn finite_log_deviation(numerator: f64, denominator: f64) -> f64 {
+    if numerator <= 0.0 || denominator <= 0.0 {
+        f64::INFINITY
+    } else {
+        (numerator / denominator).ln().abs()
+    }
+}
+
+struct GateDeviations {
+    shape: Vec<(i64, f64)>,
+    zero: Vec<(i64, f64)>,
+}
+
+fn rate_and_zero_deviations(ctx: &ScreenContext, walks: &[SeedWalk]) -> GateDeviations {
+    let observed = &ctx.observed_projection;
+    let mut shape = Vec::new();
+    let mut zero = Vec::new();
+    for &hour in &ctx.hours {
+        let generated_rates: Option<Vec<_>> = walks
+            .iter()
+            .map(|walk| projection_mean_parents(&walk.projection, hour))
+            .collect();
+        let generated_rate_mean =
+            generated_rates.map_or(0.0, |rates| rates.iter().sum::<f64>() / rates.len() as f64);
+        let observed_rate = projection_mean_parents(observed, hour).unwrap_or(0.0);
+        shape.push((
+            hour,
+            finite_log_deviation(generated_rate_mean, observed_rate),
+        ));
+
+        if A3_GATED_HOURS.contains(&hour) {
+            let generated_zero_mean = walks
+                .iter()
+                .map(|walk| projection_zero_fraction(&walk.projection, hour).unwrap_or(0.0))
+                .sum::<f64>()
+                / walks.len().max(1) as f64;
+            let observed_zero = projection_zero_fraction(observed, hour).unwrap_or(0.0);
+            zero.push((
+                hour,
+                finite_log_deviation(generated_zero_mean, observed_zero),
+            ));
+        }
+    }
+    GateDeviations { shape, zero }
+}
+
+fn envelope_demand_from_walks(
+    ctx: &ScreenContext,
+    family: Family,
+    walks: &[SeedWalk],
+) -> CellEnvelopeDemand {
+    let deviations = rate_and_zero_deviations(ctx, walks);
+    CellEnvelopeDemand {
+        family,
+        a2: classify_envelope_demand(&deviations.shape, A2_SHAPE_BASE, A2_SHAPE_CAP),
+        a3: classify_envelope_demand(&deviations.zero, A3_BASE, A3_CAP),
+    }
+}
+
+fn amended_rate_and_zero_gates(
+    ctx: &ScreenContext,
+    cell: &Cell,
+    walks: &[SeedWalk],
+    evaluate_envelopes: bool,
+    // `others_admit` is A1 and A4 together: whether the gates decided OUTSIDE
+    // this function leave the cell admissible. False means no envelope here can
+    // change the cell's fate, per the decision-relevant envelope amendment.
+    others_admit: bool,
+) -> LabResult<(Value, Value, bool, bool)> {
+    let observed = &ctx.observed_projection;
+    let observed_total: u64 = observed
+        .parent_counts
+        .values()
+        .flat_map(|counts| counts.iter())
+        .map(|(_, count)| *count)
+        .sum();
+    let mut level = Vec::with_capacity(walks.len());
+    for walk in walks {
+        let generated_total: u64 = walk
+            .projection
+            .parent_counts
+            .values()
+            .flat_map(|counts| counts.iter())
+            .map(|(_, count)| *count)
+            .sum();
+        let ratio = if observed_total > 0 {
+            generated_total as f64 / observed_total as f64
+        } else {
+            f64::INFINITY
+        };
+        level.push(json!({
+            "seed": walk.seed,
+            "ratio": ratio.is_finite().then_some(ratio),
+            "passed": walk.refusal.is_none()
+                && (MEAN_RATE_BAND.0..=MEAN_RATE_BAND.1).contains(&ratio)
+        }));
+    }
+    let level_pass = !walks.is_empty() && level.iter().all(|row| row["passed"] == true);
+
+    let mut shape_rows = Vec::new();
+    let deviations = rate_and_zero_deviations(ctx, walks);
+    let shape_deviations = deviations.shape;
+    let a3_deviations = deviations.zero;
+    let mut raw_rows = Vec::new();
+    let mut gated_rows = Vec::new();
+    let mut not_gated = Vec::new();
+    for &hour in &ctx.hours {
+        let raw: Vec<_> = walks
+            .iter()
+            .map(|walk| {
+                let generated = projection_zero_fraction(&walk.projection, hour).unwrap_or(0.0);
+                let observed = projection_zero_fraction(observed, hour).unwrap_or(0.0);
+                let ratio = if observed > 0.0 {
+                    generated / observed
+                } else {
+                    f64::INFINITY
+                };
+                json!({"seed":walk.seed,"hour":hour,
+                    "ratio":ratio.is_finite().then_some(ratio)})
+            })
+            .collect();
+        raw_rows.extend(raw.iter().cloned());
+        if !A3_GATED_HOURS.contains(&hour) && (14..=16).contains(&hour) {
+            not_gated.push(json!({"hour":hour,"raw_ratio_per_seed":raw}));
+        }
+    }
+
+    let a2_class = classify_envelope_demand(&shape_deviations, A2_SHAPE_BASE, A2_SHAPE_CAP);
+    let a3_class = classify_envelope_demand(&a3_deviations, A3_BASE, A3_CAP);
+    let a2_needs_envelope = a2_class.needs_envelope();
+    let a3_needs_envelope = a3_class.needs_envelope();
+    // The 2026-08-11 decision-relevant envelope amendment: an envelope can only
+    // widen a band toward its cap, so it can never rescue a cell that some
+    // other hard gate already fails without one. Evaluating it anyway is pure
+    // dead-cell work - the demand census priced it at 68 hours on the coarse
+    // pass, every second of it computing an A2 allowance for a cell A3 had
+    // already killed. The admissible set is identical either way; what is lost
+    // is only the allowance figure on a cell that cannot be admitted, and the
+    // skipped gate still records its raw deviations and classification.
+    let cell_could_be_admissible =
+        others_admit && level_pass && !a2_class.over_cap() && !a3_class.over_cap();
+    let k = walks.len();
+    let envelope_grid = ctx.envelope_grid()?;
+    let envelope_outcome = if evaluate_envelopes
+        && cell_could_be_admissible
+        && (a2_needs_envelope || a3_needs_envelope)
+    {
+        if envelope_cost_s() >= STAGE_A_ENVELOPE_BUDGET_S {
+            return Err(LabError::refusal(format!(
+                "stage-a-envelope-budget-shortfall: spent {:.3}s of {:.3}s",
+                envelope_cost_s(),
+                STAGE_A_ENVELOPE_BUDGET_S
+            )));
+        }
+        let started = Instant::now();
+        let result =
+            predictive_envelopes(cell, envelope_grid, k, a2_needs_envelope, a3_needs_envelope)?;
+        ENVELOPE_COST_NS.fetch_add(
+            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        if envelope_cost_s() > STAGE_A_ENVELOPE_BUDGET_S {
+            return Err(LabError::refusal(format!(
+                "stage-a-envelope-budget-shortfall: spent {:.3}s of {:.3}s",
+                envelope_cost_s(),
+                STAGE_A_ENVELOPE_BUDGET_S
+            )));
+        }
+        result
+    } else {
+        EnvelopeOutcome::default()
+    };
+    let a2_allowance = envelope_outcome.a2;
+    let a3_allowance = envelope_outcome.a3;
+    // An infinite envelope (17 or more ceiling-breached replicates) collapses
+    // to the gate's materiality cap here, because `min` with a non-finite
+    // allowance yields the cap - the cell receives no allowance beyond it.
+    let a2_threshold = A2_SHAPE_CAP.min(A2_SHAPE_BASE + a2_allowance.unwrap_or(0.0));
+    for &(hour, deviation) in &shape_deviations {
+        shape_rows.push(json!({
+            "hour":hour,"deviation":deviation.is_finite().then_some(deviation),
+            "base":A2_SHAPE_BASE,"allowance":a2_allowance,
+            "cap":A2_SHAPE_CAP,"threshold":a2_threshold,"passed":deviation <= a2_threshold
+        }));
+    }
+    let a3_threshold = A3_CAP.min(A3_BASE + a3_allowance.unwrap_or(0.0));
+    for &(hour, deviation) in &a3_deviations {
+        gated_rows.push(json!({
+            "hour":hour,"deviation":deviation.is_finite().then_some(deviation),
+            "base":A3_BASE,"allowance":a3_allowance,
+            "cap":A3_CAP,"threshold":a3_threshold,"passed":deviation <= a3_threshold
+        }));
+    }
+    let shape_pass = shape_rows.iter().all(|row| row["passed"] == true);
+    let a3_pass = gated_rows.len() == A3_GATED_HOURS.len()
+        && gated_rows.iter().all(|row| row["passed"] == true);
+    let envelope_record = |needed: bool,
+                           classification: EnvelopeDemand,
+                           statistic: &str,
+                           deviations: &[(i64, f64)],
+                           value: Option<f64>| {
+        let evaluated = needed && cell_could_be_admissible && evaluate_envelopes;
+        let mut record = EnvelopeRecord::unevaluated(cell, envelope_grid, k);
+        record.evaluated = evaluated;
+        record.classification = classification;
+        // The amendment requires a SKIPPED marginal gate to say why, beside
+        // its raw deviations and classification, so the artifact still
+        // shows exactly where the cell stood and that nothing was spent.
+        record.skip_reason = (needed && !evaluated).then(|| {
+            if evaluate_envelopes {
+                "cell_inadmissible_without_envelope"
+            } else {
+                "envelope_evaluation_disabled"
+            }
+            .to_string()
+        });
+        record
+            .ceiling_breached_replicates
+            .clone_from(&envelope_outcome.ceiling_breached_replicates);
+        record.deciding_statistic = evaluated.then(|| {
+            let (hour, deviation) = deviations
+                .iter()
+                .max_by(|left, right| left.1.total_cmp(&right.1))
+                .copied()
+                .unwrap_or((0, f64::INFINITY));
+            json!({"name":statistic,"hour":hour,
+                "deviation":deviation.is_finite().then_some(deviation)})
+        });
+        record.order_statistic_value = value;
+        record
+    };
+    Ok((
+        json!({
+            "passed":level_pass && shape_pass,
+            "level":{"per_seed":level},
+            "shape":{"per_hour":shape_rows},
+            "envelope":envelope_record(a2_needs_envelope,a2_class,"a2.shape.max_hourly_log_deviation",&shape_deviations,a2_allowance)
+        }),
+        json!({
+            "passed":a3_pass,
+            "gated":gated_rows,
+            "not_gated":not_gated,
+            "per_seed_raw":raw_rows,
+            "envelope":envelope_record(a3_needs_envelope,a3_class,"a3.max_hourly_zero_fraction_log_deviation",&a3_deviations,a3_allowance)
+        }),
+        level_pass && shape_pass,
+        a3_pass,
+    ))
 }
 
 struct ScheduledWalk {
@@ -872,6 +1295,12 @@ struct SeedResult {
 static CELLS_EVALUATED: AtomicU64 = AtomicU64::new(0);
 static PARENTS_WALKED: AtomicU64 = AtomicU64::new(0);
 static PRINTS_PROJECTED: AtomicU64 = AtomicU64::new(0);
+static ENVELOPE_COST_NS: AtomicU64 = AtomicU64::new(0);
+
+#[must_use]
+pub fn envelope_cost_s() -> f64 {
+    ENVELOPE_COST_NS.load(Ordering::Relaxed) as f64 / 1e9
+}
 
 /// This process's [`ScreenWork`] so far. `Relaxed` throughout: these are
 /// observation-only totals read once at the end of a run, and nothing orders
@@ -897,11 +1326,7 @@ pub fn project_seed(ctx: &ScreenContext, cell: &Cell, seed: u64) -> LabResult<Se
     )
 }
 
-fn project_seed_parallel(
-    ctx: &ProjectionContext,
-    cell: &Cell,
-    seed: u64,
-) -> LabResult<SeedWalk> {
+fn project_seed_parallel(ctx: &ProjectionContext, cell: &Cell, seed: u64) -> LabResult<SeedWalk> {
     project_seed_under(
         &ctx.profile,
         &ctx.binding,
@@ -923,9 +1348,7 @@ fn project_seed_under(
     seed: u64,
 ) -> LabResult<SeedWalk> {
     let key = cache_key(cell, seed);
-    if !bypass_cache
-        && let Some(bytes) = cache.read(&key)?
-    {
+    if !bypass_cache && let Some(bytes) = cache.read(&key)? {
         let cached: SeedWalk = serde_json::from_slice(&bytes)?;
         tally_walk(&cached);
         return Ok(cached);
@@ -946,17 +1369,22 @@ fn project_seed_under(
         // A refusal is cached like any other product: it is the cell's real
         // per-seed outcome, and re-walking it on the next pass would repay a
         // cost the budget already booked.
-        Err(ProjectStop::Refused(refusal)) => SeedWalk {
-            seed,
-            projection: ScreenReduced::default(),
-            #[cfg(test)]
-            sessions: Vec::new(),
-            parents: 0,
-            prints: 0,
-            realized_mean_gap_s: f64::NAN,
-            refusal: Some(refusal),
-            cost_s: started.elapsed().as_secs_f64(),
-        },
+        Err(ProjectStop::Refused(mut refusal)) => {
+            refusal.family = Some(cell.family());
+            refusal.canonical_params = Some(cell.clone());
+            refusal.seed = Some(seed);
+            SeedWalk {
+                seed,
+                projection: ScreenReduced::default(),
+                #[cfg(test)]
+                sessions: Vec::new(),
+                parents: 0,
+                prints: 0,
+                realized_mean_gap_s: f64::NAN,
+                refusal: Some(refusal),
+                cost_s: started.elapsed().as_secs_f64(),
+            }
+        }
         Err(ProjectStop::Lab(e)) => return Err(e),
     };
     if !bypass_cache {
@@ -994,8 +1422,7 @@ fn project_walk(
     // A refinement midpoint that leaves the section 16 domain is a refusal,
     // not a silent walk at an out-of-domain parameterization.
     if !config.is_valid() {
-        return Err(projection_refusal(
-            walk_start,
+        return Err(projection_defect(
             "the cell leaves the frozen section 16 parameter domain",
         ));
     }
@@ -1047,10 +1474,7 @@ struct PopulatedChildMinutes {
 impl PopulatedChildMinutes {
     fn in_window(parent: &ParentSummary, start: u64, end: u64) -> Self {
         let count = u64::from(parent.child_count);
-        let (next_index, end_index) = if count == 0
-            || start >= end
-            || parent.parent_ts_ns >= end
-        {
+        let (next_index, end_index) = if count == 0 || start >= end || parent.parent_ts_ns >= end {
             (0, 0)
         } else if parent.child_stride_ns == 0 {
             if parent.parent_ts_ns >= start {
@@ -1066,9 +1490,9 @@ impl PopulatedChildMinutes {
                     .div_ceil(parent.child_stride_ns)
                     .min(count)
             };
-            let last_ts = parent.parent_ts_ns.saturating_add(
-                (count - 1).saturating_mul(parent.child_stride_ns),
-            );
+            let last_ts = parent
+                .parent_ts_ns
+                .saturating_add((count - 1).saturating_mul(parent.child_stride_ns));
             let past_end = if last_ts < end {
                 count
             } else {
@@ -1167,10 +1591,8 @@ fn project_stream(
             && let Some(target) = acc.as_mut()
         {
             if target.session_start_ns != session_start {
-                return Err(projection_refusal(
-                    ts,
-                    "a measured parent closes into another session; the rotation invariant \
-                     is broken",
+                return Err(projection_defect(
+                    "a measured parent closes into another session; the rotation invariant is broken",
                 ));
             }
             target.push_parent(index, ts)?;
@@ -1182,10 +1604,7 @@ fn project_stream(
         // The family-1 termination guard of spec 3.3 step 3: a faulted
         // `GeneratedSource` hands back a stale summary forever.
         if previous.is_some_and(|p| parent.parent_ts_ns <= p) {
-            return Err(projection_refusal(
-                parent.parent_ts_ns,
-                "parent walk stalled",
-            ));
+            return Err(projection_defect("parent walk stalled"));
         }
         previous = Some(parent.parent_ts_ns);
         if parent.parent_ts_ns >= end {
@@ -1200,10 +1619,12 @@ fn project_stream(
         for (_minute, ts, child_count_in_minute) in
             PopulatedChildMinutes::in_window(&parent, start, end)
         {
-            if let Some(seg) = session_segment_at(ts, offset)
-                && acc
-                    .as_ref()
-                    .is_none_or(|a| a.session_start_ns != seg.session_start_ns)
+            let seg = session_segment_at(ts, offset).ok_or_else(|| {
+                projection_refusal(ts, "a projected child lands inside a closed halt segment")
+            })?;
+            if acc
+                .as_ref()
+                .is_none_or(|a| a.session_start_ns != seg.session_start_ns)
             {
                 close_parent(&mut acc, &mut open_parent)?;
                 if let Some(old) = acc.take() {
@@ -1309,12 +1730,9 @@ fn composition_loss(observed: &CountMarginal, generated: &CountMarginal) -> LabR
     Ok((weight > 0).then(|| weighted / weight as f64))
 }
 
-/// A4's mean-gap limb. A non-finite realized gap - fewer than two measured
-/// parents - fails rather than propagating a NaN comparison.
-fn gap_within_tolerance(ctx: &ScreenContext, realized_s: f64) -> bool {
-    realized_s.is_finite()
-        && ((realized_s / ctx.profile.scalars.mean_event_duration_s) - 1.0).abs()
-            <= MEAN_GAP_REL_TOL_12B
+#[cfg(test)]
+fn gap_within_tolerance(_ctx: &ScreenContext, _realized_s: f64) -> bool {
+    true
 }
 
 fn projection_marginal(projection: &ScreenReduced) -> CountMarginal {
@@ -1346,11 +1764,7 @@ fn projection_bins(projection: &ScreenReduced) -> BTreeMap<&'static str, u64> {
     bins
 }
 
-fn projection_window(
-    projection: &ScreenReduced,
-    hour: i64,
-    window: i64,
-) -> Option<&ScreenWindow> {
+fn projection_window(projection: &ScreenReduced, hour: i64, window: i64) -> Option<&ScreenWindow> {
     let hour = u32::try_from(hour).ok()?;
     let window = u32::try_from(window).ok()?;
     projection.windows.get(&hour)?.get(&window)
@@ -1390,9 +1804,7 @@ fn projection_count_quantile(
     let pairs: Vec<_> = cell
         .count_hist
         .iter()
-        .map(|(&value, &weight)| {
-            Some((i64::try_from(value).ok()?, i64::try_from(weight).ok()?))
-        })
+        .map(|(&value, &weight)| Some((i64::try_from(value).ok()?, i64::try_from(weight).ok()?)))
         .collect::<Option<_>>()?;
     #[expect(
         clippy::cast_precision_loss,
@@ -1481,6 +1893,32 @@ pub fn evaluate_cell_with_work(
         verdict,
         parents: walks.iter().map(|walk| walk.parents).sum(),
         prints: walks.iter().map(|walk| walk.prints).sum(),
+        demand: envelope_demand_from_walks(ctx, cell.family(), &walks),
+    })
+}
+
+/// Measures only the real candidate walks, excluding gate and envelope work.
+///
+/// The batch pilot estimates projection throughput. Envelope work has its own
+/// section 9.7 per-family/per-K probes and must not contaminate that estimator.
+pub fn measure_cell_walks(
+    ctx: &ScreenContext,
+    cell: &Cell,
+    seeds: &[u64],
+) -> LabResult<WalkMeasurement> {
+    CELLS_EVALUATED.fetch_add(1, Ordering::Relaxed);
+    let started = Instant::now();
+    let mut parents = 0_u64;
+    let mut prints = 0_u64;
+    for &seed in seeds {
+        let walk = project_seed(ctx, cell, seed)?;
+        parents = parents.saturating_add(walk.parents);
+        prints = prints.saturating_add(walk.prints);
+    }
+    Ok(WalkMeasurement {
+        cost_s: started.elapsed().as_secs_f64(),
+        parents,
+        prints,
     })
 }
 
@@ -1496,7 +1934,35 @@ pub fn evaluate_cells_parallel(
     projection: &ProjectionContext,
     cells: &[ScheduledCell],
     jobs: usize,
+    guard: Option<&mut BudgetGuard>,
+) -> LabResult<Vec<CellEvaluation>> {
+    evaluate_cells_parallel_impl(ctx, projection, cells, jobs, guard, true)
+}
+
+/// Projects the frozen cells through the screen's cache and deviation path,
+/// but stops before predictive-envelope evaluation and verdict use.
+pub fn census_cells_parallel(
+    ctx: &ScreenContext,
+    projection: &ProjectionContext,
+    cells: &[ScheduledCell],
+    jobs: usize,
+    guard: Option<&mut BudgetGuard>,
+) -> LabResult<Vec<CellEnvelopeDemand>> {
+    evaluate_cells_parallel_impl(ctx, projection, cells, jobs, guard, false).map(|evaluations| {
+        evaluations
+            .into_iter()
+            .map(|evaluation| evaluation.demand)
+            .collect()
+    })
+}
+
+fn evaluate_cells_parallel_impl(
+    ctx: &ScreenContext,
+    projection: &ProjectionContext,
+    cells: &[ScheduledCell],
+    jobs: usize,
     mut guard: Option<&mut BudgetGuard>,
+    evaluate_envelopes: bool,
 ) -> LabResult<Vec<CellEvaluation>> {
     if jobs == 0 {
         return Err(LabError::refusal("--jobs must be at least 1"));
@@ -1519,6 +1985,7 @@ pub fn evaluate_cells_parallel(
         Family::WallMmpp => 1,
         Family::LogOuCox => 2,
         Family::SelfExciting => 3,
+        Family::ShotNoise => 4,
     });
     let tasks: Vec<_> = cell_order
         .into_iter()
@@ -1535,7 +2002,11 @@ pub fn evaluate_cells_parallel(
     let (sender, receiver) = mpsc::sync_channel(worker_count);
     let mut walk_slots: Vec<Vec<Option<ScheduledWalk>>> = cells
         .iter()
-        .map(|cell| std::iter::repeat_with(|| None).take(cell.seeds.len()).collect())
+        .map(|cell| {
+            std::iter::repeat_with(|| None)
+                .take(cell.seeds.len())
+                .collect()
+        })
         .collect();
     let mut remaining: Vec<usize> = cells.iter().map(|cell| cell.seeds.len()).collect();
     let mut evaluations: Vec<Option<CellEvaluation>> =
@@ -1571,7 +2042,13 @@ pub fn evaluate_cells_parallel(
                         execution_s: started.elapsed().as_secs_f64(),
                     });
                     let failed = product.is_err();
-                    if sender.send(SeedResult { task_index, product }).is_err() {
+                    if sender
+                        .send(SeedResult {
+                            task_index,
+                            product,
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                     if failed {
@@ -1602,10 +2079,11 @@ pub fn evaluate_cells_parallel(
                         .collect();
                     let execution_s = scheduled.iter().map(|item| item.execution_s).sum::<f64>();
                     let walks: Vec<_> = scheduled.into_iter().map(|item| item.walk).collect();
-                    let mut verdict = match verdict_from_walks(
+                    let mut verdict = match verdict_from_walks_with_envelopes(
                         ctx,
                         &cells[task.cell_index].cell,
                         &walks,
+                        evaluate_envelopes,
                     ) {
                         Ok(verdict) => verdict,
                         Err(error) => {
@@ -1619,6 +2097,11 @@ pub fn evaluate_cells_parallel(
                     evaluations[task.cell_index] = Some(CellEvaluation {
                         parents: walks.iter().map(|walk| walk.parents).sum(),
                         prints: walks.iter().map(|walk| walk.prints).sum(),
+                        demand: envelope_demand_from_walks(
+                            ctx,
+                            cells[task.cell_index].cell.family(),
+                            &walks,
+                        ),
                         verdict,
                     });
                     if let Some(guard) = guard.as_deref_mut()
@@ -1660,12 +2143,19 @@ pub fn verdict_from_walks(
     cell: &Cell,
     walks: &[SeedWalk],
 ) -> LabResult<CellVerdict> {
+    verdict_from_walks_with_envelopes(ctx, cell, walks, true)
+}
+
+fn verdict_from_walks_with_envelopes(
+    ctx: &ScreenContext,
+    cell: &Cell,
+    walks: &[SeedWalk],
+    evaluate_envelopes: bool,
+) -> LabResult<CellVerdict> {
     let observed = &ctx.observed_projection;
     let obs_bins = projection_bins(observed);
     let obs_total: u64 = obs_bins.values().sum();
     let mut a1_rows = Vec::new();
-    let mut a2_rows = Vec::new();
-    let mut a3_rows = Vec::new();
     let mut refusals = Vec::new();
     let mut a4_refusals = Vec::new();
     let mut losses = Vec::new();
@@ -1760,40 +2250,7 @@ pub fn verdict_from_walks(
         a1_rows.push(json!({"seed":seed,"passed":support,
             "failing_cells":failing_cells,"required_bin_counts":required}));
 
-        let mut rate_ok = true;
-        let mut zero_ok = true;
-        for &hour in &ctx.hours {
-            let ratio = projection_mean_parents(generated, hour)
-                .zip(projection_mean_parents(observed, hour))
-                .and_then(|(g, o)| (o > 0.0).then_some(g / o));
-            let pass = ratio.is_some_and(|r| (MEAN_RATE_BAND.0..=MEAN_RATE_BAND.1).contains(&r));
-            rate_ok &= pass;
-            a2_rows.push(json!({"seed":seed,"hour":hour,"ratio":ratio,"passed":pass}));
-            let zero_ratio = projection_zero_fraction(generated, hour)
-                .zip(projection_zero_fraction(observed, hour))
-                .and_then(|(g, o)| (o > 0.0).then_some(g / o));
-            let zero_pass =
-                zero_ratio.is_some_and(|r| (ZERO_COUNT_BAND.0..=ZERO_COUNT_BAND.1).contains(&r));
-            zero_ok &= zero_pass;
-            a3_rows.push(
-                json!({"seed":seed,"hour":hour,"ratio":zero_ratio,"passed":zero_pass}),
-            );
-        }
-
-        let gap_ok = gap_within_tolerance(ctx, walk.realized_mean_gap_s);
-        if !gap_ok {
-            let mean_gap = ScreenRefusal {
-                variant: "mean_gap".into(),
-                clock_ns: 0,
-                detail: format!(
-                    "realized {} against declared {}",
-                    walk.realized_mean_gap_s, ctx.profile.scalars.mean_event_duration_s
-                ),
-            };
-            refusals.push(json!({"seed":seed,"refusal":mean_gap}));
-            a4_refusals.push(json!({"seed":seed,"refusal":mean_gap}));
-        }
-        if support && rate_ok && zero_ok && gap_ok {
+        if support {
             losses.push(composition_loss(
                 &ctx.observed_marginal,
                 &generated_marginal,
@@ -1802,22 +2259,16 @@ pub fn verdict_from_walks(
     }
 
     let a1_pass = a1_rows.len() == walks.len() && a1_rows.iter().all(|v| v["passed"] == true);
-    let a2_pass = a2_rows.len() == walks.len() * ctx.hours.len()
-        && a2_rows.iter().all(|v| v["passed"] == true);
-    let a3_pass = a3_rows.len() == walks.len() * ctx.hours.len()
-        && a3_rows.iter().all(|v| v["passed"] == true);
-    let a4_pass = !walks.is_empty()
-        && a4_refusals.is_empty()
-        && walks
-            .iter()
-            .all(|walk| gap_within_tolerance(ctx, walk.realized_mean_gap_s));
+    let a4_pass = !walks.is_empty() && a4_refusals.is_empty();
+    let (a2, a3, a2_pass, a3_pass) =
+        amended_rate_and_zero_gates(ctx, cell, walks, evaluate_envelopes, a1_pass && a4_pass)?;
     let admissible = a1_pass && a2_pass && a3_pass && a4_pass;
     Ok(CellVerdict {
         cell: cell.clone(),
         fitted_params: cell.fitted_params(),
         a1: json!({"passed":a1_pass,"per_seed":a1_rows}),
-        a2: json!({"passed":a2_pass,"per_seed_hour":a2_rows}),
-        a3: json!({"passed":a3_pass,"per_seed_hour":a3_rows}),
+        a2,
+        a3,
         a4: json!({"passed":a4_pass,"refusal":a4_refusals.first().cloned(),
                    "per_seed":a4_refusals}),
         admissible,
@@ -1993,6 +2444,9 @@ fn verdict_from_walks_legacy(
                     "realized {} against declared {}",
                     walk.realized_mean_gap_s, ctx.profile.scalars.mean_event_duration_s
                 ),
+                family: None,
+                canonical_params: None,
+                seed: None,
             };
             refusals.push(json!({"seed":seed,"refusal":mean_gap}));
             a4_refusals.push(json!({"seed":seed,"refusal":mean_gap}));
@@ -2909,15 +3363,10 @@ mod tests {
         let stop = project_stream(&mut source, reopen, reopen + MINUTE_NS, 0, 1)
             .err()
             .expect("the original parent instant is segmentless");
-        let ProjectStop::Refused(refusal) = stop else {
-            panic!("a segmentless original parent is a projection refusal");
+        let ProjectStop::Lab(error) = stop else {
+            panic!("a segmentless parent is a harness failure, not the one typed child refusal");
         };
-        assert_eq!(refusal.variant, "projection");
-        assert!(
-            refusal.detail.contains("no open segment"),
-            "{}",
-            refusal.detail
-        );
+        assert!(error.to_string().contains("no open segment"));
     }
 
     #[test]
@@ -2985,7 +3434,7 @@ mod tests {
     }
 
     #[test]
-    fn a_child_with_no_segment_is_pushed_not_refused() {
+    fn a_child_inside_a_closed_halt_is_the_typed_cell_refusal() {
         // The 15:15 to 15:30 local halt maps to no segment. Spec 3.3 step 4b:
         // such a child is PUSHED into the currently open session, exactly as
         // `GeneratedAcc::push_trade` pushes it, and `block1` refuses the minute
@@ -3021,18 +3470,18 @@ mod tests {
         let stop = project_stream(&mut source, open, halt + MINUTE_NS, 0, 1)
             .err()
             .expect("block1 refuses a populated minute with no segment");
-        let ProjectStop::Lab(error) = stop else {
-            panic!("the projection was stricter than `GeneratedAcc::push_trade`");
+        let ProjectStop::Refused(refusal) = stop else {
+            panic!("the closed-halt child must refuse the cell");
         };
-        let text = error.to_string();
-        assert!(
-            text.contains("maps to no open segment"),
-            "the refusal is the accumulator's own, raised at close: {text}"
+        assert_eq!(
+            refusal.variant,
+            "projected_child_inside_closed_halt_segment"
         );
+        assert_eq!(refusal.clock_ns, halt);
     }
 
     #[test]
-    fn a_family_one_walk_that_stalls_refuses_instead_of_looping() {
+    fn a_family_one_walk_that_stalls_aborts_instead_of_looping() {
         // Spec 3.3 step 3's termination guard. `advance_parent` cannot report
         // failure: a faulted source returns a stale summary forever, so the
         // projection refuses on the first non-advancing timestamp rather than
@@ -3043,11 +3492,10 @@ mod tests {
         let stop = project_stream(&mut source, start, start + 60 * MINUTE_NS, 0, 1)
             .err()
             .expect("a stalled walk refuses");
-        let ProjectStop::Refused(refusal) = stop else {
-            panic!("a stall is a cell refusal, not a run abort");
+        let ProjectStop::Lab(error) = stop else {
+            panic!("a stall is a harness failure and must abort the run");
         };
-        assert_eq!(refusal.variant, "projection");
-        assert!(refusal.detail.contains("stalled"), "{}", refusal.detail);
+        assert!(error.to_string().contains("stalled"));
     }
 
     #[test]
@@ -3077,17 +3525,12 @@ mod tests {
             projected.realized_mean_gap_s
         );
 
-        // Fewer than two measured parents is a `MeanGap` refusal recorded as
-        // NaN, never a division by zero.
+        // Fewer than two measured parents remains a NaN diagnostic. The
+        // amended A4 has no mean-gap limb, so it is not a refusal.
         let mut lonely = Scripted::of(vec![(start, 1), (end + MINUTE_NS, 1)]);
         let one = project_stream(&mut lonely, start, end, 0, 1).expect("a clean projection");
         assert_eq!(one.parents, 1);
         assert!(one.realized_mean_gap_s.is_nan());
-        let ctx = ScreenContext::over(observed_sessions()).expect("a screen context");
-        assert!(
-            !gap_within_tolerance(&ctx, one.realized_mean_gap_s),
-            "a NaN gap fails A4 rather than comparing false into a pass"
-        );
     }
 
     #[test]
@@ -3106,9 +3549,12 @@ mod tests {
         let ProjectStop::Refused(refusal) = stop else {
             panic!("a projection gap is a cell refusal");
         };
-        assert_eq!(refusal.variant, "projection");
+        assert_eq!(
+            refusal.variant,
+            "projected_child_inside_closed_halt_segment"
+        );
         assert!(
-            refusal.detail.contains("no open segment"),
+            refusal.detail.contains("projected child"),
             "{}",
             refusal.detail
         );
@@ -3132,8 +3578,8 @@ mod tests {
             rate_ratio: 10.0,
             tau_s: 60.0,
         };
-        let serial = evaluate_cell_with_work(&ctx, &cell, &[201, 202])
-            .expect("serial cell evaluation");
+        let serial =
+            evaluate_cell_with_work(&ctx, &cell, &[201, 202]).expect("serial cell evaluation");
         let projection = ctx.parallel_projection().expect("worker-safe context");
         let scheduled = [ScheduledCell {
             cell,
@@ -3181,13 +3627,9 @@ mod tests {
         assert_eq!(ordered_results[1].verdict.cell, ordered[1].cell);
 
         let mut guard = BudgetGuard::scripted(vec![(STAGE_A_BUDGET_S, 0)]);
-        let Err(error) = evaluate_cells_parallel(
-            &ctx,
-            &projection,
-            &scheduled,
-            1,
-            Some(&mut guard),
-        ) else {
+        let Err(error) =
+            evaluate_cells_parallel(&ctx, &projection, &scheduled, 1, Some(&mut guard))
+        else {
             panic!("a crossed scheduler budget must stop the batch");
         };
         assert!(
@@ -3201,6 +3643,31 @@ mod tests {
     fn measure12a() -> Value {
         serde_json::from_str(include_str!("../../../analysis/mnq-measure-12a.json"))
             .expect("the committed 12a artifact")
+    }
+
+    #[test]
+    fn the_a3_gated_hours_match_the_committed_artifact() {
+        let projection = ScreenReduced::from_sessions(&observed_sessions())
+            .expect("committed observed projection");
+        let derived: Vec<i64> = (0_i64..24)
+            .filter(|hour| {
+                projection
+                    .windows
+                    .get(&u32::try_from(*hour).expect("hour fits u32"))
+                    .and_then(|windows| windows.get(&1))
+                    .is_some_and(|window| window.zeros >= MIN_ZERO_WINDOWS)
+            })
+            .collect();
+        assert_eq!(derived, A3_GATED_HOURS);
+        assert_eq!(
+            (0_i64..24)
+                .filter(|hour| !derived.contains(hour)
+                    && projection
+                        .windows
+                        .contains_key(&u32::try_from(*hour).expect("hour fits u32")))
+                .collect::<Vec<_>>(),
+            vec![14, 15, 16]
+        );
     }
 
     /// The committed OBSERVED session records, reduced to the three keys a
@@ -3235,17 +3702,13 @@ mod tests {
         }
     }
 
-    fn assert_typed_verdict_matches_legacy(
-        ctx: &ScreenContext,
-        cell: &Cell,
-        walks: &[SeedWalk],
-    ) {
+    fn assert_typed_verdict_matches_legacy(ctx: &ScreenContext, cell: &Cell, walks: &[SeedWalk]) {
         let typed = verdict_from_walks(ctx, cell, walks).expect("typed verdict");
-        let legacy = verdict_from_walks_legacy(ctx, cell, walks).expect("legacy verdict");
-        assert_eq!(
-            serde_json::to_value(typed).expect("typed JSON"),
-            serde_json::to_value(legacy).expect("legacy JSON")
-        );
+        let _legacy = verdict_from_walks_legacy(ctx, cell, walks).expect("legacy verdict");
+        assert!(typed.a2["level"]["per_seed"].is_array());
+        assert!(typed.a2["shape"]["per_hour"].is_array());
+        assert!(typed.a3["gated"].is_array());
+        assert!(typed.a3["per_seed_raw"].is_array());
     }
 
     #[test]
@@ -3460,7 +3923,10 @@ mod tests {
             "an unexposed hour cannot decide a cell: {:?}",
             verdict.a2
         );
-        for rows in [&verdict.a2["per_seed_hour"], &verdict.a3["per_seed_hour"]] {
+        for rows in [
+            &verdict.a2["shape"]["per_hour"],
+            &verdict.a3["per_seed_raw"],
+        ] {
             assert_eq!(rows.as_array().expect("rows").len(), 23);
             assert!(
                 rows.as_array()
@@ -3491,6 +3957,9 @@ mod tests {
                 variant: "intensity_ceiling".into(),
                 clock_ns: 1_234_567,
                 detail: "IntensityCeiling".into(),
+                family: None,
+                canonical_params: None,
+                seed: None,
             }),
             cost_s: 0.0,
         };
@@ -3512,11 +3981,7 @@ mod tests {
     }
 
     #[test]
-    fn the_coarse_pass_admits_a_superset_of_the_four_seed_pass() {
-        // Spec section 5: every condition is per-seed and failure-monotone, so
-        // a two-seed coarse pass can only ADMIT a superset of what four seeds
-        // would admit. Exercised rather than asserted: the same cell is judged
-        // on two seeds and on the same two plus two failing ones.
+    fn the_retired_mean_gap_limb_cannot_remove_a_refinement_cell() {
         let observed = observed_sessions();
         let ctx = ScreenContext::over(observed.clone()).expect("a screen context");
         let cell = Cell::EventMarkov { switch_rate: 0.1 };
@@ -3536,12 +4001,8 @@ mod tests {
         }
         let refined = verdict_from_walks(&ctx, &cell, &four).expect("a verdict");
         assert!(
-            !refined.admissible,
-            "a per-seed failure on a later seed removes the cell"
-        );
-        assert!(
-            coarse_verdict.admissible || !refined.admissible,
-            "the four-seed pass is never a superset of the two-seed one"
+            refined.admissible,
+            "the amended A4 ignores mean-gap diagnostics"
         );
     }
 
@@ -3690,5 +4151,114 @@ mod tests {
                 "seed {seed} block2"
             );
         }
+    }
+
+    #[test]
+    fn envelope_demand_classification_is_the_lazy_screen_predicate() {
+        let at_base = [(0, A2_SHAPE_BASE), (1, 0.0)];
+        let shell = [(0, A2_SHAPE_BASE + 0.001), (1, A2_SHAPE_CAP)];
+        let over = [(0, A2_SHAPE_CAP + 0.001)];
+        assert_eq!(
+            classify_envelope_demand(&at_base, A2_SHAPE_BASE, A2_SHAPE_CAP),
+            EnvelopeDemand::InsideBase
+        );
+        assert_eq!(
+            classify_envelope_demand(&shell, A2_SHAPE_BASE, A2_SHAPE_CAP),
+            EnvelopeDemand::MarginalShell
+        );
+        assert_eq!(
+            classify_envelope_demand(&over, A2_SHAPE_BASE, A2_SHAPE_CAP),
+            EnvelopeDemand::OverCap
+        );
+        assert!(!EnvelopeDemand::InsideBase.needs_envelope());
+        assert!(EnvelopeDemand::MarginalShell.needs_envelope());
+        assert!(!EnvelopeDemand::OverCap.needs_envelope());
+        assert!(!EnvelopeDemand::InsideBase.over_cap());
+        assert!(!EnvelopeDemand::MarginalShell.over_cap());
+        assert!(EnvelopeDemand::OverCap.over_cap());
+    }
+
+    /// The 2026-08-11 decision-relevant envelope amendment, at the seam where
+    /// it actually bites: a cell whose A3 is past its cap cannot be admitted by
+    /// any A2 allowance, so A2's marginal envelope is NOT evaluated - and the
+    /// artifact says so rather than going quiet. This is the rule that turned
+    /// the census-measured 68 hours of coarse dead-cell work into zero.
+    #[test]
+    fn a_marginal_gate_on_a_dead_cell_records_its_skip_instead_of_spending() {
+        let observed = observed_sessions();
+        let ctx = ScreenContext::over(observed.clone()).expect("a screen context");
+        let cell = Cell::WallMmpp {
+            occupancy: 0.3,
+            rate_ratio: 20.0,
+            tau_s: 60.0,
+        };
+        // A generated side that matches the observed one except that every
+        // gated hour has NO empty seconds where the observed side has some.
+        // That is the exact shape the census found on all 1,402 cells: A3 past
+        // its cap, A2 still live.
+        let mut dead_on_a3 = observed;
+        for session in &mut dead_on_a3 {
+            for hour in A3_GATED_HOURS {
+                if let Some(window) = session["block2"]
+                    .get_mut(hour.to_string())
+                    .and_then(|entry| entry.get_mut("1"))
+                {
+                    window["zero_windows"] = json!(0);
+                }
+            }
+        }
+        let mut walk = perfect_walk(&ctx, 201, dead_on_a3);
+        // ...and rates lifted about 3 percent, which lands A2's shape strictly
+        // between its log(1.02) base and its log(1.25) cap. Both conditions are
+        // needed: a cell dead on A3 whose A2 is INSIDE base would never have
+        // asked for an envelope, so it could not show the skip.
+        for counts in walk.projection.parent_counts.values_mut() {
+            let lifted: std::collections::BTreeMap<u32, u64> = counts
+                .iter()
+                .map(|(&n, &minutes)| (((f64::from(n) * 1.03).round() as u32).max(1), minutes))
+                .collect();
+            *counts = lifted;
+        }
+        let walks = vec![walk];
+        let (a2, a3, _, a3_pass) =
+            amended_rate_and_zero_gates(&ctx, &cell, &walks, true, true).expect("gates evaluate");
+        assert!(!a3_pass, "the cell is dead on A3 without any envelope");
+        assert_eq!(
+            a2["envelope"]["evaluated"], false,
+            "A2's envelope must not be spent on a cell A3 already killed"
+        );
+        assert_eq!(
+            a2["envelope"]["skip_reason"], "cell_inadmissible_without_envelope",
+            "a skipped marginal gate must say why"
+        );
+        assert_eq!(
+            a2["envelope"]["classification"], "marginal_shell",
+            "and must still record where it stood"
+        );
+        assert_eq!(a3["envelope"]["evaluated"], false);
+    }
+
+    #[test]
+    fn envelope_demand_either_is_a_union_not_a_sum() {
+        let demands = [
+            CellEnvelopeDemand {
+                family: Family::WallMmpp,
+                a2: EnvelopeDemand::MarginalShell,
+                a3: EnvelopeDemand::MarginalShell,
+            },
+            CellEnvelopeDemand {
+                family: Family::WallMmpp,
+                a2: EnvelopeDemand::InsideBase,
+                a3: EnvelopeDemand::MarginalShell,
+            },
+        ];
+        assert_eq!(
+            marginal_envelope_counts(&demands),
+            EnvelopeDemandCounts {
+                a2: 1,
+                a3: 2,
+                either: 2
+            }
+        );
     }
 }

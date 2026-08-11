@@ -187,6 +187,332 @@ the owner. Item 3 remains described below but is not active under this closed
 run; resuming it requires an owner-directed, reviewed amendment that restarts
 Brick F.
 
+UPDATE 2026-08-10, the SCREEN-RECALIBRATION AND FAMILY-EXTENSION
+AMENDMENT (section 17, restarting Brick F; reviewed and SIGNED by
+codex session 019feb7a-1abe-75c2-bafe-476f5fe4f02c - Brick F is
+re-frozen. The draft went through five adversarial design rounds, a
+seven-defect review pass, a five-blocker signing pass and a
+two-correction final pass in that session before signature).
+Owner-directed after the closed Brick A run. The closed run's
+verdict STANDS: `analysis/mnq-arrival-screen.json` remains the truth of
+the run it records, under the contract it was produced under. This
+amendment supersedes that contract for future runs; it rewrites
+nothing retroactively.
+
+GROUNDS, measured from the closed artifact:
+
+- A4's mean-gap limb compared a raw wall-clock span (closures included)
+  against the declared cadence - a statistic in the wrong frame, since
+  it accrues closed exposure no mechanism's cadence can spend. The
+  SHIPPED point demonstrates the structural defect (realized 0.0812
+  against declared 0.0609, near 1.33x, every seed); other cells span
+  materially wider ratios, and all 787 cells failed the limb (1,573 of
+  the 40,599 refusals). A validity condition the incumbent cannot pass
+  screens nothing.
+- A2 and A3 as frozen were per-hour, per-seed hard bands calibrated for
+  a near-deterministic hourly rate. A1 support requires a strong latent
+  mixture (every A1-passing cell has sigma_y at or above 0.8, or the
+  equivalent), and at that mixture strength a correct-law candidate
+  fails the 2 percent per-realization band by finite-sample arithmetic
+  (relative sd of an hourly realized mean is 3 to 4.4 percent at the
+  relevant tau). Zero cells passed A1 and A2 jointly; the gate pair,
+  not only the families, produced the empty region.
+- A3's genuine finding survives and sharpens: the high-sigma log-OU
+  cells fail by ratios of 47 to above 15,000 - symmetric log-mixtures
+  buy the observed high-count tail at the price of silence the observed
+  tape does not carry. The admissible mechanism shape is right-skewed.
+  The self-exciting family is the right shape but its frozen caps left
+  it unable to reach the A1 tail bins (144 of 144 A1 failures).
+- Family 1 at the shipped point shows a uniform 1.055 to 1.070 A2
+  excess WITH `ARRIVAL_MEAN_CAL` applied - an absolute-rate calibration
+  conflict of the shipped path against the 12a observed month, not an
+  implementation bug (the integrated families with the bare mean sit at
+  0.99 to 1.01 on the same statistic). Recorded; `ARRIVAL_MEAN_CAL` is
+  NOT retuned inside 12b (that would refit the incumbent mid-search),
+  and if family 1 fails the redesigned level gate that measurement
+  stands.
+
+THE AMENDMENT, by piece. The full binding text lands in the amended
+sections; this block is the record of what moved and why.
+
+1. A4 (9.2 as amended) loses the mean-gap limb entirely;
+   `MEAN_GAP_REL_TOL_12B` retires. A4 is walk validity only: finite
+   latent state and intensity, no `ARRIVAL_X_CEILING` breach, no
+   refused draw, monotone projectable timestamps. One projection
+   condition becomes a typed CELL refusal instead of a run abort: a
+   projected child landing inside a closed halt segment refuses the
+   cell with family, parameters, seed and clock recorded. Every other
+   `ProjectStop::Lab` failure and any generic `LabError` still aborts
+   the run - data-dependent candidate failure refuses, harness defects
+   abort. This settles the todo item recorded 2026-08-09.
+2. A2 and B6 (9.2 and 10.2 as amended) become a two-part gate: a tight
+   per-seed LEVEL gate on the ratio of totals, and a noise-aware
+   per-hour SHAPE gate on the arithmetic seed mean judged against a
+   simulated predictive envelope (9.7) with base tolerance log(1.02)
+   and cap log(1.25).
+3. A3 and B7 (9.2 and 10.2 as amended) gain an observed-support floor
+   (`MIN_ZERO_WINDOWS = 30`, gated hours frozen from the committed
+   artifact), the same seed-mean-with-envelope form, base tolerance
+   log(1.25) and cap log(2.0). The cap is an owner-authorized outer
+   materiality limit, supported by the finite-support calculation at
+   the 30-zero floor and by the observed structural misses sitting
+   orders of magnitude beyond it; it is not claimed as a proof that
+   every possible bunching mechanism must move zero fractions past two.
+4. The SIMULATED PREDICTIVE ENVELOPE (new section 9.7) is the single
+   allowance mechanism for both gates: 500 paired-null replicates under
+   the candidate's own law over the exact frozen exposure, order
+   statistic 484, lazily evaluated per gate only where the decision
+   depends on it, cost-probed and budgeted. Exact closed-form moment
+   formulas (stated in 9.7) are retained as conformance cross-checks on
+   the envelope machinery for the families where they are exact.
+5. The SELF-EXCITING DOMAIN EXTENDS (16 as amended): the phi grid
+   becomes the 19 literal points 0.10 through 0.85 in steps of 0.05,
+   then 0.90, 0.94, 0.98; `SELF_EXCITING_PHI_MAX = 0.98` INCLUSIVE
+   (the strict-inequality wording of 5.4 is corrected accordingly).
+   Motivated by the 144 A1 failures; the amended screen measures
+   whether the cap was the obstacle, the amendment does not assert it.
+6. FAMILY 6, gamma-OU shot-noise (new section 5.6): the deliberately
+   right-skewed candidate the A3 evidence points at. Full stochastic
+   contract, grids, transition, conformance and fixtures in 5.6 and 16.
+   Adding it bumps `ARRIVAL_KERNEL_VERSION` 2 to 3.
+7. SEED AGGREGATION for the amended gates is the ARITHMETIC SEED MEAN,
+   a recorded deviation from the 12a eight-seed-median convention: the
+   estimand is the candidate law's ensemble mean rate, whose right tail
+   is part of the law, not contamination to trim. Ladder statistics
+   keep their 12a conventions untouched.
+8. VERSION RULING, owner-authorized through this amendment's
+   authorization: `TAPE_PROTOCOL_VERSION` stays 12. The decisive ground
+   is the recorded Brick K precedent - domain ENLARGEMENT without a
+   bump (section 0, 2026-08-09 contrast; section 4 ruling by session
+   019fe29f) - not the AGENTS.md artifact-commit sentence alone: every
+   previously valid `(config, seed)` pair produces byte-identical
+   output, and the only new outputs come from configurations previously
+   REFUSED at validation (phi above 0.90; the shot_noise variant).
+   `ARRIVAL_KERNEL_VERSION` bumps 2 to 3 (it does not participate in
+   cadence seed derivation, so the bump invalidates caches without
+   moving any existing kernel stream). GATED, all four: byte identity
+   for every committed preset (the B1 walks); byte identity of the
+   existing kernel-family transcripts at their frozen parameters;
+   unchanged output for a previously valid self-exciting configuration
+   (a pinned walk at phi 0.85); and a validation test asserting the
+   old refusal boundary became validity ONLY for the newly admitted
+   phi values and the new variant. The Stage B selected-preset landing
+   still owes 13.
+9. BUDGETS (16 as amended): pre-envelope Stage A arithmetic corrected
+   to coarse 10,631 s plus refinement 37,600 s = 48,231 s;
+   `STAGE_A_BUDGET_S = 72_000` (20 h) including the envelope term;
+   envelope probes and per-cell budgets in 9.7. The measured actual of
+   the closed run (787 cells in 242 s wall) is recorded alongside: the
+   budgets are ceilings, not forecasts. Refinement remains ENABLED
+   exactly as frozen; a coarse-only execution is a diagnostic
+   checkpoint and cannot produce the amended Stage A verdict; the todo
+   refinement question stays open and is not smuggled in.
+
+NOT AMENDED, named: 12a and its ladder; A1 (both limbs, verbatim); the
+loss (9.3); B1 to B5 and B8; the exposure contract (8); every seed set
+(7); the anti-gaming constraints (11) - the family addition and domain
+extension enter through THIS reviewed amendment restarting Brick F,
+which is the one sanctioned path for such a change, and remain frozen
+against post-hoc adjustment thereafter; the stochastic contracts A and
+B (7), which family 6 joins without modifying.
+
+UPDATE 2026-08-11, the CADENCE-STEP CONSTRUCTION AMENDMENT (section 17,
+narrow, formally restarting Brick F; reviewed and SIGNED by codex session
+019fefb3-9c65-7181-8689-3f0d9480d0d7). Brick E's 9.7 fidelity gate exposed
+that its required real candidate walks at 250 ms could not be constructed:
+`CADENCE_STEP_NS` was private to the kernel module and fixed at one second.
+The defect predates 9.7: B8 in section 9.4 has always required the provisional
+Stage B winner to be re-run through the real generator at 250 ms, so Brick S
+would have stopped on the same contradiction.
+
+The resolution is construction-time parameterization of `ArrivalEnv`.
+`ArrivalEnv` gains a nonzero `step_ns`; the existing `for_profile` signature
+delegates with 1,000,000,000 ns, and `for_profile_with_step` accepts the
+explicit sensitivity step. Cell indexing, cell starts, segment ends, every
+family transition duration and the self-exciting cell integral use that one
+environment value. The envelope module does not retain an independent kernel
+step: its real-walk environment is constructed from the envelope grid's
+`step_ns`. The only frozen values are 1,000,000,000 ns for the screen and
+250,000,000 ns for sensitivity.
+
+At the default this is structural byte identity: the value, arithmetic and
+draw order are unchanged, pinned by `arrival_transcripts_replay_bit_exact`
+and Brick E's existing version gates. The explicit non-default constructor is
+consumed only by lab and screen machinery; no config, preset or serving path
+can select it. This is domain enlargement under the signed Brick K precedent,
+not a change to an already-expressible generated tape, so
+`TAPE_PROTOCOL_VERSION` stays 12. `ARRIVAL_KERNEL_VERSION` stays 3: version 3
+has not shipped in a committed artifact and this repair lands inside the same
+in-progress Brick E change. No family, gate, seed, tolerance or statistic is
+otherwise amended. Brick F is re-frozen by the signature above and Brick E
+may resume under this complete contract.
+
+UPDATE 2026-08-11, the CROSS-PAIRED CONFORMANCE-CELL AMENDMENT
+(section 17, narrow, formally restarting Brick F; reviewed and SIGNED by
+codex session 019fefe4-b680-7e70-8a8e-9df36e0beecf). Brick E's 9.7
+closed-form conformance cross-check failed deterministically at the frozen
+log-OU extreme corner `(sigma_y 2.0, tau 3600)`: sample variance 4.099 over
+`M_conf = 2_000` exposures against closed form 11.031, outside the frozen
+tolerance 3.38.
+
+The failure is an unattainable estimator at that joint heavy-persistence
+corner, not a machinery defect. `scripts/envelope_corner_check.py`
+independently recomputes closed form 11.028, confirming the implementation
+to the Poisson term, and its 15 independent meta-measurements under the
+correct law range from 1.43 to 31.8 with median 5.2; 67 percent fail the
+frozen `0.5 * closed_form` arm. `scripts/envelope_corner_check2.py` then
+checks the proposed well-conditioned long-tau replacements by the same
+independent method. All 15 meta-measurements pass for each simulable cell:
+log-OU `(sigma_y 0.2, tau 3600)`, wall MMPP `(q 0.10, r 2, tau 3600)`, and
+shot noise `(m 0.2, k 10, tau 3600)`. The self-exciting replacement
+`(phi 0.10, tau 600)` is analytically well-conditioned: its stochastic
+feedback contribution to the count variance is second order in `phi`, so
+at 0.10 the two-session statistic is Poisson-dominated and its variance
+estimate concentrates over 2,000 independent exposures.
+
+The two corners are CROSS-PAIRED rather than both moved to minimum tau.
+Machinery defects need not be cell-independent: tau-dependent transition
+arithmetic, covariance decay and lag accumulation could pass at minimum tau
+and fail at maximum tau. Each family therefore retains both tau endpoints
+and every parameter-domain extreme, pairing maximum tau with the mild
+parameter extreme and minimum tau with the heavy one so the estimator can
+discriminate:
+
+```text
+wall_mmpp     centre unchanged; corners (q 0.10, r 2, tau 3600)
+                                        and (q 0.60, r 200, tau 1)
+log_ou_cox    centre unchanged; corners (sigma_y 0.2, tau 3600)
+                                        and (sigma_y 1.4, tau 1)
+self_exciting centre unchanged; corners (phi 0.10, tau 600)
+                                        and (phi 0.98, tau 2)
+shot_noise    centre unchanged; corners (m 0.2, k 10, tau 3600)
+                                        and (m 0.8, k 0.1, tau 1)
+```
+
+CEILING CORRECTIONS, argued and co-signed in the same session as one
+combined amendment after the first cross-paired list aborted the gate
+at its log-OU strong corner with an `ARRIVAL_X_CEILING` breach
+(latent 11,529.88 at a replicate grid cell):
+
+- The log-OU strong corner is `(sigma_y 1.4, tau 1)`, NOT 2.0. A
+  log-OU ceiling breach needs a standard normal excursion of
+  `(ln(1e4) + sigma^2 / 2) / sigma`: at sigma 2.0 that is 5.6 sigma,
+  about 1.07e-8 per effectively independent draw, and the conformance
+  workload draws about 3.3e8 of them, expecting about 3.5 breaches -
+  a near-certain abort. At sigma 1.4 the excursion is 7.3 sigma,
+  expectation about 5e-5 over the whole workload - negligible. 1.4 is
+  the largest grid sigma with that property. Family safety claims are
+  scoped precisely: MMPP is bounded by construction, shot-noise is
+  probabilistically negligible (a gamma tail at exp(-1250)), log-OU
+  is covered by this derivation, and self-exciting carries NO
+  boundedness claim - the conformance gate itself is the empirical
+  evidence, and a breach there surfaces as a loud refusal brought
+  back for review.
+- THE REPLICATE CEILING RULE, closing a production spec hole 9.7 left
+  open (in-grid candidates at heavy sigma and short tau breach the
+  ceiling stochastically during real lazy envelope evaluations, about
+  1.7e-3 per replicate month at sigma 2.0, tau 1): any constituent
+  month in paired replicate r breaching `ARRIVAL_X_CEILING` makes
+  `M_r = +infinity` for every requested gate; simulation of that
+  month may stop immediately and evaluation continues with the next
+  replicate; up to 16 infinite `M_r` values leave rank 484 finite,
+  17 or more make it infinite; an infinite envelope produces the
+  gate's materiality-cap threshold - the cell receives no allowance
+  beyond the cap and any deviation exceeding the cap fails; the
+  artifact records `ceiling_breached_replicates`, counting replicate
+  INDICES with at least one breached constituent month, observed or
+  generated side alike. A4 is unchanged and still refuses actual
+  Stage A or Stage B candidate walks that breach the ceiling.
+
+PROBE-CELL CORRECTION AND THE SEED-DEPENDENT REFUSAL RULING, argued
+and co-signed in the same session after the FIDELITY gate failed at
+the same pathology in a third place: its frozen log-OU probe cell
+`(sigma_y 2.0, tau 1)` breached the ceiling in a REAL candidate walk
+(x = 11,898.37), which A4 correctly refuses, leaving the gate nothing
+to compare.
+
+- The 9.7 fidelity AND cost probe cell for `log_ou_cox` moves to
+  `(sigma_y 1.4, tau 1)`, by the derivation above. Its worst-cost
+  rationale is undamaged: tau stays at minimum, which is what fastest
+  mixing means, and a cell that refuses immediately is not a cost
+  probe at all. The complete two-step fidelity workload expectation -
+  idealized and real batches, both grid steps - is recorded
+  conservatively as BELOW 1e-4 ceiling exceedances, negligible.
+- FINDING B, ruled INTENDED (reading i of three put to the reviewer).
+  The screen grid contains `(sigma_y 2.0, tau 1)` and its high-sigma
+  short-tau neighbours, which breach the ceiling stochastically at
+  roughly 1.7 percent per seed-month, so A4 refuses them
+  seed-dependently. That is CORRECT: A4 is pathwise validity over the
+  frozen seeds, any real candidate walk breaching `ARRIVAL_X_CEILING`
+  refuses the cell, NO probabilistic predicate is added, and the
+  ceiling is NOT raised - it is a representability bound, not a
+  tuning knob, and reading (ii) would have invented a new
+  admissibility predicate mid-search. The ruling is consistent with
+  the already-frozen per-seed, failure-monotone A4 contract. The
+  artifact MUST record family, canonical parameters, seed, clock,
+  the breached `x` and the `IntensityCeiling` refusal type.
+  Correction of a figure this document should not carry wrong: the
+  two-seed coarse refusal probability at that breach rate is about
+  3.4 percent and the four-seed refinement probability about 6.6
+  percent - NOT a coin flip. The roughly 40 percent figure belongs to
+  the 32-month fidelity batch and was conflated when the finding was
+  raised.
+
+Only the section 9.7 cell lists, the probe cells and the replicate
+ceiling rule move. The tolerance formula, `M_conf`, seeds, budgets,
+checked statistic, families and every screen and landing gate remain
+unchanged. Brick F is re-frozen by the signature above and Brick E
+may resume under this complete contract.
+
+UPDATE 2026-08-11, the DECISION-RELEVANT ENVELOPE AMENDMENT (section 17,
+narrow, formally restarting Brick F; reviewed and SIGNED by codex session
+019fefe4-b680-7e70-8a8e-9df36e0beecf). The envelope demand census
+(`analysis/out/envelope-demand-census.json`, 1,402 coarse cells, 439 s,
+no verdict written) measured what the 2026-08-10 per-gate completeness
+rule actually costs, and it is a runtime defect: A2's marginal shell is
+681 of 1,402 cells, which at the optimized prices is about 244,200 s -
+68 HOURS - and every second of it computes an A2 allowance for a cell
+A3 has already made inadmissible. Diagnostic completeness at 68 hours of
+dead-cell work is not completeness worth having.
+
+THE REPLACEMENT RULE, superseding the per-gate clause of 9.7:
+
+- Every envelope-FREE gate statistic and classification is computed and
+  recorded for every cell, exactly as before. Nothing diagnostic is lost
+  at the statistic level.
+- If any hard gate ALREADY makes the cell inadmissible independently of
+  an envelope, NO envelope is evaluated for that cell.
+- Each skipped marginal gate records `evaluated: false` with reason
+  `cell_inadmissible_without_envelope`, its raw deviations, and its
+  base/marginal/cap classification - so the artifact still says exactly
+  where the cell stood on that gate and why nothing was spent.
+- An envelope is evaluated only when its result can change the CELL's
+  admissibility.
+- The same rule binds the Stage B twins B6 and B7.
+
+This changes diagnostic completeness only. The admissible set is
+identical under both rules, because an envelope can only widen a band
+toward its cap and a cell already failing another hard gate cannot be
+rescued by any widening. `STAGE_A_ENVELOPE_BUDGET_S` is UNCHANGED for
+this run: under the rule the decision-relevant coarse demand is zero.
+If A3 is later amended, demand and aggregate pricing are measured again
+under that contract rather than inherited from this census.
+
+WHY A3 IS NOT REPAIRED HERE, ruled explicitly because the census showed
+A3 over_cap on all 1,402 cells and the pattern superficially resembles
+the A4 mean-gap defect. It is NOT the same shape and the distinction is
+the whole point: A4 measured the wrong FRAME - a wall-clock span
+including closures against a cadence that cannot spend them - so no
+mechanism could pass it. A3 measures the intended second-scale
+composition. The floor controls conditioning directly (at 30 observed
+zeros the observed fraction carries about 18 percent relative sampling
+error, and a correct-law log ratio at two generated months has standard
+error near 0.22 against a log(2) cap of about 0.69), and the
+WELL-SUPPORTED hours independently reject every family, so removing the
+four thin hours (13, 17, 18, 19) recovers no admissible cell. A3 is
+therefore producing a structured mechanism finding, not a gate defect,
+and it is the owner's to rule on after the official run reports it.
+
 UPDATE 2026-08-09, the PRESET-RETIREMENT AMENDMENT (section 17, narrow,
 formally restarting Brick F; reviewed and signed by codex session
 019fe781-e6dd-7172-b700-22df68b83271). Owner ruling: the ETHUSDT and
@@ -541,7 +867,10 @@ unscoped as well as true.
 Three consequences are frozen with it:
 
 1. **The child-count draw moves to the cadence stream** for the
-   INTEGRATED families 2 to 4 only. Family 1 is a protocol-12 arrival
+   INTEGRATED families 2 to 4 only (AMENDED 2026-08-10: and family 6,
+   which is integrated in the identical sense; every "families 2 to 4"
+   in this section's frozen consequences reads "the integrated
+   families" and includes 6). Family 1 is a protocol-12 arrival
    seam too, and deliberately keeps that draw on the main stream under
    stochastic contract A (section 7); revision 8 said "for the
    protocol-12 branch", which would have swept family 1 in and undone
@@ -597,7 +926,9 @@ impl ArrivalEnv {
     pub fn rate_at(&self, clock_ns: u64) -> f64;
 }
 
-/// THREE variants, not five. Revision 6 put `Legacy` and
+/// FOUR variants (AMENDED 2026-08-10: three at the original freeze;
+/// family 6 joins by the screen-recalibration amendment), not six.
+/// Revision 6 put `Legacy` and
 /// `EventMarkov` in here too and that was refused, on a fact about the
 /// shipped draw order: `begin_event` draws the gap innovation and the
 /// arrival flip, THEN the latent-mid price and side/book draws, and
@@ -609,13 +940,14 @@ impl ArrivalEnv {
 ///
 /// So the boundary follows the actual structure: `Legacy` and family 1
 /// are PARAMETERIZATIONS OF THE SHIPPED PATH and stay in
-/// `begin_event`; only the three integrated wall-time families, which
+/// `begin_event`; only the integrated wall-time families, which
 /// have no byte-identity obligation and draw children on their own
 /// stream, go through the kernel.
 pub enum ArrivalKernel {
     WallMmpp(WallMmppParams),
     LogOuCox(LogOuParams),
     SelfExciting(SelfExcitingParams),
+    ShotNoise(ShotNoiseParams),   // ADDED 2026-08-10 (5.6)
 }
 
 /// Parameter structs, all `Copy`, all deserialized from the preset's
@@ -627,12 +959,16 @@ pub struct WallMmppParams     { pub occupancy: f64, pub rate_ratio: f64,
                                 pub tau_s: f64 }
 pub struct LogOuParams        { pub sigma_y: f64, pub tau_s: f64 }
 pub struct SelfExcitingParams { pub phi: f64, pub tau_s: f64 }
+pub struct ShotNoiseParams    { pub m: f64, pub k: f64,
+                                pub tau_s: f64 }   // ADDED 2026-08-10
 
 /// Every field pinned, because "per-kernel latent state" is not a
 /// specification. `new` is the only constructor and performs each
-/// family's frozen initialization (5.1 to 5.4), consuming exactly the
+/// family's frozen initialization (5.1 to 5.4, and 5.6 as amended
+/// 2026-08-10), consuming exactly the
 /// draws that initialization owns: none for Legacy, EventMarkov and
-/// SelfExciting, one Bernoulli for WallMmpp, one normal for LogOuCox.
+/// SelfExciting, one Bernoulli for WallMmpp, one normal for LogOuCox,
+/// one stationary Gamma(k, m / k) draw for ShotNoise.
 /// `cell_index` is the grid cell of the last state update, so a gap
 /// spanning many cells advances the latent state deterministically
 /// from wherever it was left.
@@ -640,6 +976,7 @@ pub enum ArrivalState {
     WallMmpp     { quiet: bool, cell_index: u64 },
     LogOuCox     { y: f64, cell_index: u64 },
     SelfExciting { a: f64, cell_index: u64, cell_count: u32 },
+    ShotNoise    { s: f64, cell_index: u64 },   // ADDED 2026-08-10
 }
 
 impl ArrivalState {
@@ -939,7 +1276,10 @@ identical environment and its live modifiers. There is no second
 implementation of the cadence, and under the frozen neutral-regime
 exposure the two stages agree bit for bit.
 
-### 4.2 The common frame for the three new wall-time families
+### 4.2 The common frame for the integrated wall-time families
+    (AMENDED 2026-08-10: originally "the three new wall-time
+    families"; family 6 joins this frame identically, so "the three
+    integrated families" below reads "the integrated families")
 
 `Legacy` and `EventMarkov` keep the SHIPPED frame exactly (once-sampled
 multiplier on the open-market path, `low_intensity_gap_ns` otherwise).
@@ -1000,8 +1340,8 @@ multiplier on the open-market path, `low_intensity_gap_ns` otherwise).
   the cell. That is the same failure the shipped low-intensity path
   handles by capping; here it fails loudly instead, because a silently
   capped gap in a candidate search would look like a feasible cell.
-- `base_mean_s = mean_event_duration_s` BARE for the three integrated
-  families. (AMENDED 2026-08-09, the arrival-frame calibration
+- `base_mean_s = mean_event_duration_s` BARE for the integrated
+  families, family 6 included. (AMENDED 2026-08-09, the arrival-frame calibration
   amendment recorded in section 0; the original frozen text carried the
   shipped `ARRIVAL_MEAN_CAL`, which is an empirically bisected
   correction for the SHIPPED sampling scheme's realized-mean inflation
@@ -1040,6 +1380,11 @@ defined as the grid process, so there is nothing to converge to and no
 discretization error to bound in principle. Three specific hazards the
 review raised are answered concretely:
 
+AMENDED 2026-08-11: the step is a nonzero construction parameter of
+`ArrivalEnv`. One second remains the frozen screen and default production
+value; 250 ms is the frozen 9.4 sensitivity value. The explicit value is the
+single source for cell geometry, transition durations and cell integrals.
+
 - Multiple state transitions inside one cell. Answered exactly for
   `WallMmpp` by using the sampled continuous-time transition matrix
   (5.2), which is exact over any interval however short the dwell.
@@ -1056,7 +1401,9 @@ re-running the selected point at 250 ms with stated equivalence bounds.
 
 ## 5. Candidate families
 
-Four active families and one negative control, frozen. Every active
+FIVE active families (AMENDED 2026-08-10, was four; family 6 added by
+the screen-recalibration amendment) and one negative control, frozen.
+Every active
 family satisfies `E[X] = 1` exactly under its own stationary law -
 DERIVED below, not asserted - so the fitted hourly session arrival curve
 is preserved analytically rather than by fitting. Only the negative
@@ -1335,10 +1682,13 @@ the baseline changes `E_k` and leaves `A` untouched; and the state
 initializes at `A_0 = 1`, `X_0 = 1` at the tape origin.
 
 Stability: `X >= 1 - phi > 0` always, so the intensity is bounded below
-and cannot stall the walk. `phi` is gridded strictly below
-`SELF_EXCITING_PHI_MAX = 0.90`. A run whose `X` exceeds
-`SELF_EXCITING_X_CEILING = 1e4` at any grid step REFUSES that cell,
-recorded, rather than clipping.
+and cannot stall the walk. `phi` is gridded up to and INCLUDING
+`SELF_EXCITING_PHI_MAX = 0.98` (AMENDED 2026-08-10, was strictly below
+0.90; the grid is the 19 literal points of section 16). A run whose
+`X` exceeds `ARRIVAL_X_CEILING = 1e4` (renamed 2026-08-10 from
+`SELF_EXCITING_X_CEILING`, same value, now uniform across kernel
+families) at any grid step REFUSES that cell, recorded, rather than
+clipping.
 
 Fitted: `phi`, `tau`. This family's RECURSION consumes no random draws:
 it is deterministic given the resolved parent times. It still draws the
@@ -1419,6 +1769,139 @@ produce the `1025-4096` mass, and at hour 19 no mean shift explains the
 `4097+` mass. The control runs anyway, because a predicted failure that
 is not run is an assumption.
 
+### 5.6 Family 6: gamma-OU shot-noise Cox intensity (ADDED 2026-08-10)
+
+Added by the screen-recalibration amendment (section 0), through the
+kernel, stochastic contract B, `ArrivalKernel::ShotNoise(ShotNoiseParams)`
+with `ShotNoiseParams { pub m: f64, pub k: f64, pub tau_s: f64 }` and
+`ArrivalState::ShotNoise { s: f64, cell_index: u64 }`.
+
+The shape argument, from the closed run: the observed tape carries a
+heavy HIGH-count tail with essentially no cash-hour silence, and the
+symmetric log-mixture bought the tail only by manufacturing silence
+(A3 ratios 47 to above 15,000). This family is the minimal pure
+right-skew candidate: bursts with a strict intensity floor and no
+low-rate excursions below it.
+
+```text
+X(t) = 1 - m + S(t)
+```
+
+`S` is a stationary gamma-OU shot-noise process: jumps arrive as a
+Poisson process at rate `lambda` in wall time; jump sizes are
+Exponential with mean `m / k`; each contribution decays as
+`exp(-age / tau)`; `k = lambda * tau`. The stationary law is exact:
+
+```text
+S      ~ Gamma(shape k, scale m / k)
+E[S]   = m            Var(S) = m^2 / k
+E[X]   = 1  exactly   X >= 1 - m  strictly
+Corr(S(t), S(t + u)) = exp(-u / tau)
+```
+
+Fitted: `(m, k, tau)`, chosen over `(m, lambda, tau)` because they
+separate burst mass and floor (`m`), stationary skew and jump
+occupancy (`k`), and persistence (`tau`). `m < 1` by domain;
+validation refuses outside every domain of section 16.
+
+GRID TRANSITION, exact, frozen. At each grid boundary with step `dt`,
+with `d = exp(-dt / tau)`:
+
+```text
+S_next = d * S + J,   J = sum over i = 1..N of E_i * exp(-(dt - U_i) / tau)
+N   ~ Poisson(lambda * dt)
+U_i ~ Uniform(0, dt)        drawn per jump, in jump order
+E_i ~ Exponential(mean m / k)  drawn immediately after its U_i
+```
+
+This is the exact compound-Poisson OU transition, so the stationary
+gamma law is preserved exactly at every boundary. The interval
+`[t_k, t_k+1)` uses the POST-transition state, matching family 2's
+frozen convention. Draw order on the cadence stream, contract B: the
+budget draw, then per traversed grid step `N` followed by the
+`(U_i, E_i)` pairs in jump order, then the child count.
+
+INITIALIZATION, unambiguous: one stationary draw `S_0` from
+`Gamma(k, m / k)` at the tape origin, using the named pinned sampler
+(the `rand_distr::Gamma` algorithm at the workspace-locked version,
+named in the fixture header; determinism per binary is the contract).
+The drawn `S_0` supplies the FIRST interval directly; the first
+transition fires at the first grid boundary after the origin; there is
+no extra transition at the origin itself.
+
+Refusals: the shared `ARRIVAL_X_CEILING` (the renamed
+`SELF_EXCITING_X_CEILING`, 1e4, now applied uniformly to every kernel
+family's `latent_x` - a pure rename, the kernel already applied it
+generically) and non-finite state, exactly as the other kernel
+families. No family-specific refusal.
+
+CONFORMANCE (layer 3), redesigned against explicit sample designs
+because single-path moment tolerances are unattainable at the heavy
+corner (`k = 0.1`, `tau = 3600`: coefficient of variation 3.16, about
+74 jumps per month). All frozen, all at the three NAMED cells - the
+domain-centre cell `(m 0.5, k 1.0, tau 46.4158883361278)` (nearest
+grid point to the geometric centre of each domain) and the two extreme
+corners `(m 0.2, k 10, tau 1)` and `(m 0.8, k 0.1, tau 3600)`:
+
+The stationary law itself is DERIVED, not asserted: for an OU-type
+process driven by a compound-Poisson subordinator, the stationary
+cumulant function solves
+`log E[exp(-theta * S)] = -integral from 0 to infinity of
+lambda * (1 - LT_jump(theta * exp(-v / tau))) dv` with
+`LT_jump(x) = 1 / (1 + x * m / k)` for the exponential jump; the
+substitution `y = theta * exp(-v / tau)` evaluates the integral to
+`-k * log(1 + theta * m / k)`, which is the Gamma(k, m / k) cumulant
+function, and the amendment carries this three-line derivation in the
+conformance test's comment.
+
+- Stationary-law test: `n = 100_000` independent stationary draws;
+  sample mean within `5 * sqrt(Var(S) / n)` of `m` with
+  `Var(S) = m^2 / k` exact; sample variance within
+  `5 * sqrt((mu4 - Var(S)^2 * (n - 3) / (n - 1)) / n)` of `Var(S)`
+  with the exact gamma fourth central moment
+  `mu4 = 3 * (k + 2) * m^4 / k^3`. The heavy corner receives the
+  tolerance its own law implies.
+- Transition-preservation test: apply ONE exact transition to each of
+  the `n` stationary draws and re-test the same moments at the same
+  derived tolerances - this is the exactness property itself.
+- Persistence test, replacing a path-autocorrelation estimate whose
+  non-Gaussian sampling variance has no closed form this spec would
+  otherwise owe: over the same `n` independent (pre, post) transition
+  pairs, the least-squares slope (with intercept) of `S_post` on
+  `S_pre` equals `d = exp(-dt / tau)` exactly in expectation (from
+  `E[S_post given S_pre] = d * S_pre + (1 - d) * m`). Its tolerance
+  uses the REALIZED CONDITIONAL standard error, exact given the
+  sampled regressors because the increment variance is
+  `Var(S) * (1 - d^2)` with `Var(S) = m^2 / k` exact:
+
+  ```text
+  se(slope given S_pre) =
+      sqrt(Var(S) * (1 - d^2)
+           / sum over i of (S_pre_i - mean(S_pre))^2)
+  ```
+
+  (the unconditional approximation `sqrt((1 - d^2) / n)` replaces the
+  random denominator with its expectation and is NOT used - at the
+  heavy corner the realized denominator matters). Gate: slope within
+  `5 * se(slope given S_pre)` of `d`, run at BOTH grid steps in use,
+  `dt = 1 s` and the 9.4 sensitivity step `dt = 250 ms`. This tests
+  the same temporal-persistence property the autocorrelation check
+  aimed at, with every term derivable.
+- Path checks kept from the single 30-day walk: realized `X` mean
+  within 5 standard errors of 1.0 (standard error from the exact
+  integrated-variance closed form at that cell), and the floor check
+  `X >= 1 - m` EXACT, never banded.
+- Cost: the conformance suite is a runnable gate with a wall ceiling
+  of 900 s (`CONFORMANCE_BUDGET_S`), so it cannot become an accepted
+  multi-hour computation.
+
+FIXTURES: conformance vector V9 - three hand-tabulated transition
+steps including one multi-jump step with the decay arithmetic written
+out and the stationary initialization, derivation recorded per the
+section 6 vector schema, never regenerated from the implementation -
+and a regression transcript at the domain-centre cell, seed 201,
+section 8 exposure, section 16 serialization contract.
+
 ## 6. Fidelity: what makes Stage A believable
 
 **Layer 1, the exact shipped-generator oracle.** `advance_parent()` on
@@ -1432,14 +1915,16 @@ Failure blocks. Replaying the committed seeds here is an ORACLE test,
 not candidate screening, and does not compromise the seed holdout of
 section 7.
 
-**Layer 2, exact parity, stated per contract.** For families 2, 3 and
-4, Stage A and the Stage B generator execute the same `arrival.rs`
+**Layer 2, exact parity, stated per contract.** For families 2, 3, 4
+and 6 (AMENDED 2026-08-10 to include family 6), Stage A and the Stage
+B generator execute the same `arrival.rs`
 `next_parent`, so a candidate's Stage A timestamps are an exact
 prediction of its Stage B integration. Family 1 and Legacy use no
 kernel at all (stochastic contract A): both stages drive the REAL
 generator through `advance_parent`, so their parity is not a claim
 about two implementations agreeing - there is only one. Transcripts
-therefore exist for the three KERNEL families only, and family 1's
+therefore exist for the KERNEL families only (four under the
+2026-08-10 amendment), and family 1's
 equivalent evidence is the byte-identity gate at the shipped point.
 Guaranteed structurally, and pinned by a bit-exact TRANSCRIPT FIXTURE
 per family, whose contract is frozen in section 16: the first 10,000
@@ -1542,7 +2027,8 @@ oracle is BIT-EXACT rather than distributional, because that family
 keeps the shipped frame (4.2). This is stronger than revision 1's
 equivalence-band bridge and replaces it.
 
-For the three integrated-frame families there is no shipped counterpart
+For the integrated-frame families (four under the 2026-08-10
+amendment) there is no shipped counterpart
 to bridge to, so their frame is validated differently and specifically:
 an ANALYTIC conformance test per family, comparing the realized
 long-run mean rate and the realized latent-multiplier distribution
@@ -1571,7 +2057,8 @@ fitted to.
   median, with the seed-agreement rule as evidence.
 - **TWO STOCHASTIC CONTRACTS, not one.** Revision 7 split the
   architecture in 4.1 - family 1 and Legacy on the shipped path, the
-  three integrated families in the kernel - and left this section
+  integrated families (four since the 2026-08-10 amendment) in the
+  kernel - and left this section
   describing the old single contract, which would have destroyed the
   very byte identity the split existed to protect. The contracts are
   now stated separately and neither borrows from the other.
@@ -1595,14 +2082,19 @@ fitted to.
   BETWEEN the flip and the child draw, which is exactly why this family
   cannot go through a kernel that owns the child count.
 
-  **Contract B - families 2, 3 and 4, the cadence kernel.** The cadence
+  **Contract B - families 2, 3, 4 and 6 (AMENDED 2026-08-10 to add
+  family 6), the cadence kernel.** The cadence
   stream owns the gap budget draw, the latent-state draws and the
   child-count draw, in that order inside `next_parent`:
 
   ```text
   1. the budget draw -ln(U)
   2. latent-state draws in grid-step order, one per traversed step
-     (family 2's transition, family 3's normal; family 4 takes none)
+     (family 2's transition, family 3's normal; family 4 takes none;
+      family 6, per step: N drawn Poisson(lambda * dt), then per jump
+      in order the pair U_i then E_i - a VARIABLE draw count per
+      step, well-defined on the dedicated stream because the grammar
+      is positional per step, not per fixed arity; 5.6)
   3. the child-count draw, unconditioned (children_mult 1.0)
   ```
 
@@ -1688,17 +2180,72 @@ A1 SUPPORT   -> Stage B gate B2
    Nothing stronger. A1 is exactly what B2 will demand.
 
 A2 MEAN-RATE PRESERVATION -> Stage B gate B6
-   Per hour AND per seed, generated / observed MEAN parents per
-   scheduled minute lies in MEAN_RATE_BAND = [0.98, 1.02].
+   (AMENDED 2026-08-10, the screen-recalibration amendment; the
+   original per-hour per-seed band is retired with its grounds
+   recorded in section 0.) Two limbs, both required:
+   (a) LEVEL, per seed s:
+         R_level[s] = (sum over traded hours h of generated
+                       parents[s, h] / total scheduled exposure)
+                      / (the same ratio of totals on the observed
+                         side)
+       inside MEAN_RATE_BAND = [0.98, 1.02] for EVERY seed in the
+       pass's seed set. Ratio of totals, never a mean of hourly
+       ratios. This limb is deliberately tight and PATHWISE: a
+       candidate whose month-scale realization moves materially off
+       the fitted level has refitted the curve per seed, which only
+       the negative control may do. Honest onset, recorded: at
+       sigma_y = 0.8 the all-month relative sd of a CORRECT-law
+       realization is about 0.9 percent at tau = 100 s, 1.6 percent
+       at tau = 300 s, 2.9 percent at tau = 1000 s, so rejection of
+       correct-law long-tau candidates begins around several hundred
+       seconds and is INTENDED screening.
+   (b) SHAPE, per traded hour h (all 23):
+         D[h] = abs(log(mean over seeds of generated rate[s, h]
+                        / observed rate[h]))
+       with the ARITHMETIC seed mean (the recorded deviation from the
+       12a median convention, section 0 item 7), gated as
+         D[h] <= min(log(1.25), log(1.02) + envelope_A2)
+       where envelope_A2 is the section 9.7 predictive envelope for
+       this cell and pass. log(1.02) is the frozen log-space
+       translation of the old band (it tightens the lower edge from
+       0.98 to 0.9804, stated deliberately); log(1.25) is the
+       materiality cap, which no allowance may exceed. A zero
+       numerator or denominator is an infinite log deviation, bounded
+       only by the cap (it fails).
 
 A3 SUB-SECOND COMPOSITION -> Stage B gate B7
-   Per hour AND per seed, the 1 s zero-count-fraction ratio lies in
-   ZERO_COUNT_BAND = [0.8, 1.25].
+   (AMENDED 2026-08-10.) Gated hours are FROZEN from the committed
+   observed artifact at the floor MIN_ZERO_WINDOWS = 30 observed
+   1 s zero windows: hours 0 through 13 inclusive, 17, 18, 19, 20,
+   22 and 23 - twenty hours, enumerated in section 16. Hours below floor (14, 15, 16) are recorded per cell as
+   not_gated diagnostics, never passes and never refusals; the set
+   cannot shrink at runtime because the floor reads only the
+   committed artifact. Per gated hour, with the same arithmetic seed
+   mean on the zero-count fraction:
+         D[h] <= min(A3_CAP, A3_BASE + envelope_A3)
+   with A3_BASE = log(1.25) (the old band 0.8 to 1.25 is already
+   log-symmetric, so this translation is exact) and A3_CAP = log(2.0),
+   an owner-authorized outer materiality limit: at the 30-zero floor
+   under the paired-month comparison a factor-two deviation is within
+   what a persistent correct law can realize, while the structural
+   failures this gate exists to catch sit at ratios of 47 to above
+   15,000 in the closed run - far beyond any cap. This is a supported
+   judgment, not a claim that every possible bunching mechanism must
+   move zero fractions beyond two. Zero conventions as in A2. Every
+   raw per-seed ratio is still computed and REPORTED per cell.
 
 A4 VALIDITY (not a screen predicate; an invalid run is not a candidate)
-   No non-finite intensity, no step exceeding SELF_EXCITING_X_CEILING,
-   no refused draw, and a realized mean gap within
-   MEAN_GAP_REL_TOL_12B = 0.05 of the declared mean_event_duration_s.
+   (AMENDED 2026-08-10; the mean-gap limb is retired with
+   MEAN_GAP_REL_TOL_12B - its statistic was a raw wall-clock span no
+   calendar-respecting mechanism can hold to the declared cadence,
+   section 0.) No non-finite latent state or intensity, no step
+   exceeding ARRIVAL_X_CEILING, no refused draw, monotone projectable
+   timestamps. ONE typed projection condition refuses the CELL rather
+   than aborting the run: a projected child landing inside a closed
+   halt segment, recorded with family, parameters, seed and clock.
+   Every other ProjectStop::Lab failure and any generic LabError
+   still aborts the run: data-dependent candidate failure refuses,
+   harness defects abort.
 ```
 
 Each of A1, A2 and A3 reappears verbatim as a Stage B hard gate, which
@@ -1725,9 +2272,9 @@ and does not rest on the withdrawn claim.
 The 60 s Fano and count-p99 log ratios are computed and REPORTED for
 every cell, and feed the tie-break of 9.3, but gate nothing.
 
-`MEAN_GAP_REL_TOL_12B` is this spec's own constant. The existing
-`MEAN_GAP_REL_TOL = 0.10` in `mogwai-data`'s test module is a different
-gate on a different walk and is untouched.
+`MEAN_GAP_REL_TOL_12B` is RETIRED by the 2026-08-10 amendment. The
+existing `MEAN_GAP_REL_TOL = 0.10` in `mogwai-data`'s test module is a
+different gate on a different walk and remains untouched.
 
 ### 9.3 The loss, which ranks and never selects
 
@@ -1782,6 +2329,304 @@ per family as an explicit cell list. Verdict `arrival-admissible:
 <families>` or
 `no-arrival-admissible-candidate-in-frozen-search-space`.
 
+BINDING FIELDS ADDED 2026-08-10 (the amended gates must be auditable
+from the artifact alone; the Stage B selection artifact carries the
+equivalent fields for B6 and B7):
+
+```text
+per cell:
+  a2.level.per_seed          [{seed, ratio, passed}]
+  a2.shape.per_hour          [{hour, deviation, base, allowance | null,
+                               cap, threshold, passed}]
+  a3.gated                   [{hour, deviation, base, allowance | null,
+                               cap, threshold, passed}]
+  a3.not_gated               [{hour, raw_ratio_per_seed}]  (hours 14-16)
+  a3.per_seed_raw            every raw per-seed ratio, reported
+  envelope                   per gate: {evaluated: bool,
+                               deciding_statistic | null,
+                               order_statistic_value | null,
+                               replicates, order, k,
+                               ceiling_breached_replicates,
+                               stream_identity_fields}
+                             (ceiling_breached_replicates ADDED
+                              2026-08-11: replicate INDICES with at
+                              least one ceiling-breached constituent
+                              month, per the 9.7 replicate ceiling
+                              rule)
+  refusals                   typed; the projection-gap refusal carries
+                             {family, canonical_params, seed, clock_ns}
+top level:
+  a3_gated_hours             the frozen twenty, restated
+  envelope_cost              {probe_costs_per_family_per_k,
+                              aggregate_demand_s, budget_s,
+                              stopped_on_shortfall: bool}
+```
+
+### 9.7 The simulated predictive envelope (ADDED 2026-08-10)
+
+The single sampling-allowance mechanism for the A2 shape gate and A3
+(and their Stage B twins B6 and B7). It replaces every closed-form
+allowance considered during design because the closed-form route could
+not close three cases: the EventMarkov grid reaches `w = 1e-6`, where
+the state correlation length is a million events and asymptotic
+variance claims fail; the zero-indicator correlation for shot-noise
+and self-exciting has no proved bound, and an unproved bound labeled
+conservative is the defect this repository refuses; and normal
+marginal quantiles are uncalibrated for skewed laws at long tau. The
+envelope solves all three empirically, under the candidate's own law.
+
+PAIRED NULL CONSTRUCTION, frozen. For a cell, pass and gate:
+
+```text
+for replicate r in 1..=ENVELOPE_REPLICATES:
+    simulate ONE observed-sized month O_r under the candidate law
+    simulate K generated months G_r_1 .. G_r_K under the same law
+        (K = 2 coarse, 4 refinement, 8 Stage B - the pass's seed count)
+    D_r[h] = abs(log(arithmetic mean over k of stat(G_r_k)[h]
+                     / stat(O_r)[h]))
+    M_r    = max over that gate's gated hours of D_r[h]
+envelope = order statistic ENVELOPE_ORDER of the sorted M_1..M_500
+```
+
+`stat` is the gate's statistic (hourly rate for A2, hourly 1 s
+zero-count fraction for A3), computed over the exact section 8 frozen
+exposure. A zero numerator or denominator inside a replicate is an
+infinite log deviation, which propagates into `M_r` and is bounded
+only by the gate's cap - never dropped.
+
+THE REPLICATE CEILING RULE (ADDED 2026-08-11, the section 0 ceiling
+corrections; a production rule, not a conformance one - in-grid
+candidates at heavy sigma and short tau breach the ceiling
+stochastically during ordinary lazy evaluations, about 1.7e-3 per
+replicate month at sigma 2.0, tau 1, so an abort would kill a screen
+run on one replicate and a silent clamp would corrupt the null):
+
+```text
+any constituent month of paired replicate r breaching
+ARRIVAL_X_CEILING  ->  M_r = +infinity for EVERY requested gate
+```
+
+Simulation of that month may stop immediately; evaluation continues
+with the next replicate. Up to 16 infinite `M_r` values leave rank 484
+finite; 17 or more make the envelope itself infinite, and an infinite
+envelope produces the gate's MATERIALITY-CAP threshold - the cell
+receives no allowance beyond the cap, and any deviation exceeding the
+cap fails. The artifact records `ceiling_breached_replicates`, counting
+replicate INDICES with at least one breached constituent month,
+observed or generated side alike (indices, not months, so several
+breaches inside one replicate are unambiguous). A4 is UNCHANGED and
+still refuses actual Stage A and Stage B candidate walks that breach
+the ceiling: this rule governs simulated replicate months only.
+
+```text
+ENVELOPE_REPLICATES = 500
+ENVELOPE_ORDER      = 484
+```
+
+Rank 484 of 500 is the smallest order statistic whose one-sided
+binomial confidence is at least 95 percent that the threshold covers
+at least 95 percent of the candidate-law distribution (rank 484 gives
+96.57 percent; 483 gives 94.41; the naive p95 rank 475 gives only
+44.7). The text claims exactly this and not distribution-free
+exactness. The conservatism direction (wider allowance) is bounded by
+each gate's cap.
+
+A replicate month is ONE FULL COUNT PATH: per scheduled grid second,
+one latent update and one Poisson COUNT draw `n_i` against the
+baseline expected count `b_i * X_i`. BOTH gate statistics derive from
+that same path - hourly rates as count sums, zero fractions as the
+indicator `n_i == 0` - so there is one simulation per replicate month,
+no separate A2 and A3 simulations, and no gate identifier is needed in
+the seed identity. The count path is what makes `SelfExciting` valid:
+its feedback consumes the drawn `n_k` per cell, exactly its section
+5.4 recursion. No projection, no price, no book. Family 1 replicates
+run the event-indexed chain directly (19 cells only).
+
+THE IDEALIZATION, declared and gated. This count process is the
+candidate law WITHOUT the kernel's arrival-budget traversal, child
+dead time, nanosecond rounding and projection boundaries - a second,
+deliberately idealized implementation, which is exactly the twin-
+implementation hazard section 4 exists to forbid, so it carries its
+own FIDELITY GATE rather than an assumption: at each family's named
+probe cell (below; family 1's is the complete cell
+`(q 0.35, w 0.5, r 150)`), the idealized simulator's ensemble mean
+hourly rate AND ensemble mean zero fraction over 32 dedicated
+replicate months must agree with the same statistics computed from 32
+real candidate walks at 32 dedicated seeds - kernel `next_parent`
+walks for the integrated families, real-generator `advance_parent`
+walks for family 1 - within 5 combined standard
+errors per gated hour (both standard errors estimated from the two
+samples of 32). The gate runs at BOTH grid steps, 1 s and the 9.4
+sensitivity 250 ms, because B8 also consumes the envelope. A miss is
+a blocking defect in the envelope machinery.
+The dedicated seeds and replicate indices derive from the same
+tuple_mix identity with side values 2 (candidate walk) and 3
+(fidelity replicate). The named Brick E test is
+`the_envelope_simulator_is_faithful_to_the_candidate_walks`. The cost
+probe below measures the per-month cost claim rather than trusting
+it.
+
+SEED IDENTITY, collision-free by construction: replicate draws come
+from a dedicated `ChaCha12Rng` seeded by the 12a 3.4a `tuple_mix`
+convention over `ENVELOPE_STREAM_TAG` with fields, in frozen order:
+family id, the f64 bit patterns of the cell's parameters in the
+family's declared field order, K, `CADENCE_STEP_NS` (so the 250 ms
+sensitivity run cannot collide with the one-second envelope),
+`ARRIVAL_KERNEL_VERSION`, the exposure identity hash, the replicate
+number, the side (observed 0, generated 1), and the member index
+within the side. `ENVELOPE_STREAM_TAG` is in section 16.
+
+LAZY EVALUATION, decision-identical (AMENDED 2026-08-11, the
+decision-relevant envelope amendment of section 0, which supersedes the
+original per-gate completeness clause on measured runtime grounds): the
+envelope can only widen a band from its base toward its cap, so an
+envelope is computed if and only if its result can change the CELL's
+admissibility. Concretely:
+
+- every envelope-FREE statistic and classification is computed and
+  recorded for every cell and every gate;
+- a gate whose own deviations are inside base on every gated hour
+  passes with no envelope; beyond the cap on any gated hour it fails
+  with no envelope;
+- a gate in the marginal shell is evaluated ONLY if the cell is not
+  already inadmissible on some other hard gate; otherwise it records
+  `evaluated: false` with reason `cell_inadmissible_without_envelope`,
+  together with its raw deviations and its classification.
+
+The admissible set is IDENTICAL under this rule and the original,
+because a widening cannot rescue a cell that another hard gate has
+already failed. What it removes is dead-cell work, measured by the
+demand census at 68 hours on the coarse pass alone.
+
+COST, probed before the grid runs, A0-style. One envelope evaluation
+per family at the family's WORST-COST probe cell, at each K in use:
+
+```text
+family 1      (q 0.35, w 0.5, r 150)       (most state flips; q and r
+                                            at their held shipped
+                                            values)
+wall_mmpp     (q 0.10, r 200, tau 1)       (fastest switching)
+log_ou_cox    (sigma_y 1.4, tau 1)         (fastest mixing; AMENDED
+                                            2026-08-11 from sigma_y
+                                            2.0, whose REAL candidate
+                                            walk breaches the ceiling
+                                            and refuses under A4,
+                                            leaving the fidelity gate
+                                            nothing to compare - tau
+                                            stays at minimum, which is
+                                            what fastest mixing means)
+self_exciting (phi 0.98, tau 2)            (heaviest feedback)
+shot_noise    (m 0.8, k 10, tau 1)         (maximum jump rate,
+                                            lambda = 10 per second)
+
+ENVELOPE_CELL_BUDGET_S = 60.0  at K = 2
+                         120.0 at K = 4
+                         180.0 at K = 8
+STAGE_A_ENVELOPE_BUDGET_S = 21_600   (6 h, the marginal-shell demand)
+STAGE_B_ENVELOPE_BUDGET_S = 10_800   (3 h)
+```
+
+A probe miss FAILS the brick and stops for an owner ruling on the
+price, exactly as A0's per-cell rule. If lazy demand during a run
+would exceed the stage envelope budget, the run STOPS with the
+shortfall recorded - envelopes are never skipped to fit, and a stopped
+run is the multi-hour-defect escape hatch, not a silent trim.
+
+CONFORMANCE CROSS-CHECKS, the closed forms retained as correctness
+tests with known right answers (layer-3 pattern; a disagreement is a
+blocking defect in the envelope machinery, never a tolerance to
+widen). With `b_i` the complete baseline expected count in grid second
+`i` (every session and day weight included):
+
+```text
+E_h        = sum over i in hour h of b_i
+Var(N_h)   = E_h + sum over pairs (i, j) of b_i * b_j * Cov(X_i, X_j)
+Var(ratio) = Var(N_h) / E_h^2
+```
+
+exact for the exogenous Cox families via their covariance functions -
+log-OU `Cov(X_s, X_t) = exp(sigma_y^2 * exp(-u / tau)) - 1`, MMPP via
+the two-state eigendecomposition, shot-noise
+`Cov = (m^2 / k) * exp(-u / tau)` - and for self-exciting via the
+exact second-moment recursion (with `u_k = A_k - 1`,
+`d = exp(-dt / tau)`, `rho = d + (1 - d) * phi`, innovation variance
+`E_k` from `E[X_k] = 1`, floored cells propagating `u_next = d * u_k`,
+and the augmented count-sum state). The quadratic pair sum reduces to
+a single sum over lags with exposure-overlap weights.
+
+The CHECKED STATISTIC, precisely: the sample variance, over a
+dedicated `M_conf = 2_000` set of SINGLE generated replicate
+EXPOSURES, of the normalized hourly count `N_h / E_h`, against the
+closed form `Var(N_h) / E_h^2` evaluated over the SAME exposure - the
+single-realization building block from which the paired K-mean
+statistic is assembled, so validating it validates the material the
+envelope is made of. Two deliberate reductions close the cost, both
+valid because the closed forms hold over ANY exposure and the check
+validates machinery, not the month: the conformance EXPOSURE is the
+first TWO scheduled sessions of the frozen window (about 165,600
+scheduled grid seconds), and the checked hours are THREE named ones
+spanning the rate range - 0, 14 and 19. Cost arithmetic, closing the
+ceiling: 12 cells * 2,000 exposures * 165,600 grid seconds is about
+4.0e9 latent-update-plus-Poisson steps, which at the 50 to 100
+million steps per second a latent-only loop sustains is 40 to 80 s
+wall, an order of magnitude inside `CONFORMANCE_BUDGET_S = 900`; the
+conformance gate reports its measured wall time in the artifact so
+the claim is checked by running, not asserted.
+
+TOLERANCE, not self-widening: the plug-in variance-of-variance
+formula
+`se = sqrt((mu4 - sigma^4 * (M - 3) / (M - 1)) / M)` (empirical
+`mu4`, `sigma^4` from the replicate set) is used for the FINE
+comparison, and it is CAPPED so a defective set cannot widen its own
+tolerance past detection:
+
+```text
+pass iff  abs(sample_var - closed_form)
+          <= min(5 * se_plugin, 0.5 * closed_form)
+```
+
+The absolute arm means any machinery defect moving the variance by
+more than 50 percent of its exact value fails REGARDLESS of what the
+defective set says about its own spread, while the plug-in arm
+catches small biases when the set is healthy. Both arms and the cap
+constant are frozen.
+
+FROZEN CONFORMANCE CELLS, three per kernel family - the domain-centre
+cell (the coarse grid point nearest the geometric centre of each
+log-gridded domain and the arithmetic centre of each linear one) and
+the two cross-paired extreme corners, all literal. AMENDED 2026-08-11:
+each family retains both tau endpoints and every parameter-domain
+extreme, with maximum tau paired with the mild parameter extreme and
+minimum tau with the heavy one so the sample-variance estimator remains
+discriminating:
+
+```text
+wall_mmpp     centre (q 0.30, r 20, tau 46.4158883361278)
+              corners (q 0.10, r 2, tau 3600) and
+                      (q 0.60, r 200, tau 1)
+log_ou_cox    centre (sigma_y 1.0, tau 46.4158883361278)
+              corners (sigma_y 0.2, tau 3600) and (sigma_y 1.4, tau 1)
+              (1.4, not 2.0: at sigma 2.0 a ceiling breach needs only a
+               5.6 sigma excursion, about 1.07e-8 per effectively
+               independent draw against the workload's 3.3e8 draws, so
+               the gate aborts near-certainly; at 1.4 the excursion is
+               7.3 sigma and the workload expectation is about 5e-5.
+               1.4 is the largest grid sigma with that property - the
+               section 0 ceiling corrections)
+self_exciting centre (phi 0.55, tau 43.088693800637664)
+              (0.55 is the grid point nearest the arithmetic centre
+               0.54 of the amended phi domain)
+              corners (phi 0.10, tau 600) and (phi 0.98, tau 2)
+shot_noise    centre (m 0.5, k 1.0, tau 46.4158883361278)
+              corners (m 0.2, k 10, tau 3600) and (m 0.8, k 0.1, tau 1)
+```
+
+Family 1 has no exact closed form and carries no cross-check; its
+envelope rests on the shared machinery the other families validate,
+plus its own fidelity gate above. The whole conformance suite
+(cross-checks plus the 5.6 family tests) is a runnable gate bounded
+by `CONFORMANCE_BUDGET_S = 900` wall seconds.
+
 ## 10. Stage B: the real generator, and the only selection
 
 ### 10.1 The joint constrained solve
@@ -1828,23 +2673,25 @@ B5 THE STANDING GENERATOR GATES
    Every existing realism, rail, truncation and preset-provenance gate
    stays green and `brokkr check --gate` is green.
 
-B6 MEAN-RATE PRESERVATION  (identical to A2)
-   Per hour AND per seed, generated / observed mean parents per
-   scheduled minute in MEAN_RATE_BAND. The seed aggregation is stated
-   here in the same words as 9.2 deliberately: revision 2 wrote "every
-   seed" in one place and "per hour" in the other, which is a nesting
-   hole a reviewer found and an implementer would have inherited.
-   Defended as a landing requirement rather than a screen: the hourly
-   curve is protocol-11 fitted evidence, and a mechanism that moves it
-   has silently refitted the one thing only the negative control may
-   touch.
+B6 MEAN-RATE PRESERVATION  (identical to A2 as amended 2026-08-10)
+   The 9.2 A2 gate verbatim - the per-seed ratio-of-totals level limb
+   in MEAN_RATE_BAND plus the seed-mean shape limb against the 9.7
+   envelope at K = 8 - restated here in the same words deliberately:
+   the nesting property survives the amendment only if screen and
+   landing gate move together, which is why the amendment moves both
+   in one stroke. Defended as a landing requirement rather than a
+   screen: the hourly curve is protocol-11 fitted evidence, and a
+   mechanism that moves it has silently refitted the one thing only
+   the negative control may touch.
 
-B7 SUB-SECOND COMPOSITION  (identical to A3)
-   Per hour AND per seed, the 1 s zero-count-fraction ratio in
-   ZERO_COUNT_BAND. Defended as a landing requirement: it is the
-   sibling of the existing `zero_second_frac` realism gate (2.3), and
-   without it a mechanism could buy minute-scale dispersion by bunching
-   parents into pathological sub-second bursts.
+B7 SUB-SECOND COMPOSITION  (identical to A3 as amended 2026-08-10)
+   The 9.2 A3 gate verbatim - the frozen twenty gated hours, floor,
+   seed mean, base log(1.25), cap log(2.0), envelope at K = 8.
+   Defended as a landing requirement: it is the sibling of the
+   existing `zero_second_frac` realism gate (2.3), and without it a
+   mechanism could buy minute-scale dispersion by bunching parents
+   into pathological sub-second bursts - the cap keeps that purpose
+   with the section 0 support.
 
 B8 GRID SENSITIVITY
    Section 9.4, at the selected point.
@@ -1898,7 +2745,8 @@ landing FAILS and stops for an amendment, per the 12a stopping rule.
 
 - No seed-specific, hour-specific or result-specific parameters: one
   parameter point per family, every hour, every seed.
-- The four active families keep the fitted session arrival curve FIXED
+- The five active families (AMENDED 2026-08-10, was four) keep the
+  fitted session arrival curve FIXED
   and preserve its mean analytically. Only family 5 re-centres it.
 - Price, GARCH, child-count, size and session-volatility parameters
   stay fixed. `vol_scalar` is NOT free: freeing it would open a
@@ -1921,10 +2769,24 @@ landing FAILS and stops for an amendment, per the 12a stopping rule.
   section 16. Switch rates, correlation times and ratios are gridded
   LOGARITHMICALLY; occupancies and shares linearly.
 - **Coarse pass**: the full tensor grid per family on
-  `STAGE_A_SEEDS[0..2]` (two seeds). Using fewer seeds is deliberately
-  CONSERVATIVE and not a budget dodge: every condition in 9.2 is
-  per-seed and failure-monotone, so a two-seed pass can only ADMIT a
-  superset of what four seeds would admit. It cannot falsely reject.
+  `STAGE_A_SEEDS[0..2]` (two seeds). (AMENDED 2026-08-10: the old
+  argument that a two-seed pass cannot falsely reject was true of the
+  original per-seed failure-monotone conditions and is FALSE under the
+  amended A2 shape and A3 gates, whose K-mean statistics and
+  K-specific envelopes are not nested across K - a K = 2 statistic
+  can fail where K = 4 would pass. The amendment ACCEPTS that risk
+  instead of restating the dead argument, with the quantified part
+  scoped precisely: for the UNCAPPED shape-envelope component alone,
+  a correct-law candidate exceeds the rank-484 predictive threshold
+  with probability 17 / 501, about 3.4 percent, per gate. The
+  COMPLETE coarse gate's false-rejection risk is accepted but
+  UNBOUNDED: the materiality cap can truncate the predictive
+  threshold and deliberately reject a correct but excessively
+  variable law more often, the A2 level limb adds its own intended
+  rejection of long-tau realizations, and the order-statistic
+  coverage is itself a confidence statement. A1 and A4
+  remain per-seed and failure-monotone; the LEVEL limb of A2 remains
+  per-seed, where fewer seeds still only admit a superset.)
 - **Refinement**: one subdivision pass at half spacing around the
   admissible region's boundary cells, on all four `STAGE_A_SEEDS`, to
   `REFINEMENT_DEPTH = 2`, capped at `REFINEMENT_CELL_CAP` cells per
@@ -1943,14 +2805,17 @@ landing FAILS and stops for an amendment, per the 12a stopping rule.
   stopping the run before the reduced grid could ever be used:
   `STAGE_A_GEN_CELL_BUDGET_S = 50.0` for family 1, which runs the real
   generator through `advance_parent`, and
-  `STAGE_A_CELL_BUDGET_S = 7.0` for the kernel families 2 to 4, both at
+  `STAGE_A_CELL_BUDGET_S = 7.0` for the kernel families 2 to 4 and 6
+  (AMENDED 2026-08-10 to include family 6), both at
   two seeds (AMENDED 2026-08-09 from 4.0; see section 16). Above it,
   brick A FAILS and stops; the budget is never met by trimming the grids
   silently. Note that a PER-CELL miss is not a grid question at all - the
   per-cell price does not depend on how many cells the grid holds - so it
   stops for an owner ruling on the price, while a TOTAL miss is what
   stops for a grid re-freeze. Total bounds:
-  `STAGE_A_BUDGET_S = 39600` (11 h, AMENDED 2026-08-09 from 28800) and
+  `STAGE_A_BUDGET_S = 72000` (20 h, AMENDED 2026-08-10 from 39600 for
+  the extended family set and the 9.7 envelope term; the arithmetic is
+  in section 16) and
   `STAGE_A_RSS_BYTES = 8 GiB`, recorded in the artifact and gated like
   12a's cost contract. Grid sizes are in section 16 so the arithmetic
   is checkable rather than asserted.
@@ -1964,8 +2829,16 @@ landing FAILS and stops for an amendment, per the 12a stopping rule.
   ```text
   STAGE_B_CELL_CAP  = 24 cells per surviving family
   STAGE_B_CELL_BUDGET_S = 320   (eight search seeds, one cell)
-  STAGE_B_BUDGET_S  = 50400     (14 h, four families plus confirmation
-                                 and the 250 ms sensitivity re-run)
+  STAGE_B_BUDGET_S  = 61200     AMENDED 2026-08-10 (was 50400, derived
+                                from the old four-family model).
+                                Derivation for five families: at most
+                                5 * 24 = 120 search cells * 320 s
+                                = 38,400 s, plus one confirmation cell
+                                (320 s) and one 250 ms sensitivity
+                                re-run (320 s), plus
+                                STAGE_B_ENVELOPE_BUDGET_S = 10,800 s,
+                                total 49,840 s, plus headroom to
+                                61,200 s (17 h)
   STAGE_B_RSS_BYTES = 8 GiB
   ```
 
@@ -2008,10 +2881,16 @@ crates/mogwai-data/tests/fixtures/arrival-vector-v5-child-law-and-order.json
 crates/mogwai-data/tests/fixtures/arrival-vector-v6-triple-boundary.json
 crates/mogwai-data/tests/fixtures/arrival-vector-v7-degenerate-budget.json
 crates/mogwai-data/tests/fixtures/arrival-vector-v8-reopen-seam.json
+crates/mogwai-data/tests/fixtures/arrival-vector-v9-shotnoise-transition.json
+                                      (V9 ADDED 2026-08-10, 5.6)
                                       the independently tabulated
                                       conformance vectors of section 6,
                                       committed, never regenerated from
                                       the implementation
+crates/mogwai-data/tests/fixtures/arrival-transcript-shot_noise.json
+                                      ADDED 2026-08-10: the family 6
+                                      regression transcript, same
+                                      contract as its siblings
 ```
 
 Each carries a `binding` block in the 12a style: harness tree commit,
@@ -2176,6 +3055,52 @@ The layer-1 test is blocking: it must reproduce the committed
 artifact's generated `block1` parent-count marginal and whole `block2`
 record for all eight committed seeds, exactly.
 
+### Brick E: the amended screen machinery (ADDED 2026-08-10)
+
+The implementation brick of the screen-recalibration amendment,
+following its Brick F re-freeze. Contains: the shot-noise kernel
+variant with its transcript and V9; the self-exciting domain
+extension and the `ARRIVAL_X_CEILING` rename; the amended A2, A3 and
+A4 in `arrival_screen` with the frozen A3 gated-hour set; the 9.7
+envelope machinery with its stream tag, lazy rule, probes and
+conformance cross-checks; `ARRIVAL_KERNEL_VERSION` 2 to 3; and the
+four version-ruling gates. Additive, independently revertible, no
+tape byte moves (gated below), `TAPE_PROTOCOL_VERSION` stays 12.
+
+```text
+brokkr fmt
+brokkr check --gate
+brokkr test -p mogwai-data arrival_transcripts_replay_bit_exact
+brokkr test -p mogwai-data arrival_conformance_vectors_v1_through_v9
+brokkr test -p mogwai-data arrival_families_match_their_stationary_derivations
+brokkr test -p mogwai-data a_previously_valid_self_exciting_config_is_byte_identical
+brokkr test -p mogwai-data the_old_refusal_boundary_admits_only_the_new_cells
+brokkr test -p mogwai-lab the_envelope_matches_the_closed_forms_where_they_are_exact
+brokkr test -p mogwai-lab the_envelope_simulator_is_faithful_to_the_candidate_walks
+brokkr test -p mogwai-lab the_a3_gated_hours_match_the_committed_artifact
+brokkr run mogwai -- arrival-screen --cost-probe
+```
+
+plus the B1 byte-identity captures over every committed preset from
+the pre-landing binary, per the brick S procedure, compared with
+`cmp` before and after this brick - the committed presets must not
+move a byte.
+
+### Brick A2 (rerun): the amended Stage A screen
+
+Brick A re-executes under the amended contract from a clean committed
+Brick E tree - coarse, refinement as frozen, envelopes lazily, the
+verdict written to `analysis/mnq-arrival-screen.json` superseding the
+closed artifact (which survives in git history as the record of its
+own run):
+
+```text
+brokkr run mogwai -- arrival-screen --out analysis/mnq-arrival-screen.json
+```
+
+Stop points unchanged: every 1.1 verdict Stage A can reach goes to
+the owner.
+
 ### Brick S0: the Stage B cost probe
 
 ONE cell, eight search seeds, measured against
@@ -2281,7 +3206,8 @@ applies unchanged.
 
 ## 15. Keep/revert
 
-Bricks K, N, B4, A0 and A are additive and independently revertible;
+Bricks K, N, B4, A0, A and E (ADDED 2026-08-10) are additive and
+independently revertible;
 none changes a tape byte and each is kept or reverted on its own gate.
 Brick S is the one intrusive landing and is kept or reverted WHOLE: if
 any gate of 10.2 fails at confirmation, the entire brick reverts and
@@ -2302,21 +3228,52 @@ CONFIRMATION_SEEDS      = 1..8
 REFINEMENT_DEPTH        = 2
 REFINEMENT_CELL_CAP     = 600 per family
 SELECTION_INDIFFERENCE  = 0.01
-SELF_EXCITING_PHI_MAX   = 0.90
-SELF_EXCITING_X_CEILING = 1e4
+SELF_EXCITING_PHI_MAX   = 0.98 INCLUSIVE
+                          AMENDED 2026-08-10, was 0.90 exclusive
+ARRIVAL_X_CEILING       = 1e4       (RENAMED 2026-08-10 from
+                                     SELF_EXCITING_X_CEILING; applies
+                                     to every kernel family, a pure
+                                     rename of existing behavior)
 EXPECTED_COUNT_FLOOR    = 0.01      (expected parents per grid step)
-MEAN_RATE_BAND          = [0.98, 1.02]
-ZERO_COUNT_BAND         = [0.8, 1.25]
-MEAN_GAP_REL_TOL_12B    = 0.05
+MEAN_RATE_BAND          = [0.98, 1.02]   (the A2/B6 LEVEL limb,
+                                     per seed, ratio of totals;
+                                     AMENDED 2026-08-10)
+A2_SHAPE_BASE           = log(1.02)      ADDED 2026-08-10
+A2_SHAPE_CAP            = log(1.25)      ADDED 2026-08-10
+A3_BASE                 = log(1.25)      ADDED 2026-08-10
+A3_CAP                  = log(2.0)       ADDED 2026-08-10
+MIN_ZERO_WINDOWS        = 30             ADDED 2026-08-10
+A3_GATED_HOURS          = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+                          13, 17, 18, 19, 20, 22, 23
+                          (twenty hours, enumerated to avoid range
+                           ambiguity; frozen from the committed
+                           observed artifact at the floor;
+                           ADDED 2026-08-10)
+ENVELOPE_REPLICATES     = 500            ADDED 2026-08-10 (9.7)
+ENVELOPE_ORDER          = 484            ADDED 2026-08-10 (9.7)
+ENVELOPE_STREAM_TAG     = 0x6D6F6777_61693145   ADDED 2026-08-10
+ENVELOPE_CELL_BUDGET_S  = 60.0 (K=2), 120.0 (K=4), 180.0 (K=8)
+STAGE_A_ENVELOPE_BUDGET_S = 21600        ADDED 2026-08-10
+STAGE_B_ENVELOPE_BUDGET_S = 10800        ADDED 2026-08-10
+CONFORMANCE_BUDGET_S    = 900            ADDED 2026-08-10
+MEAN_GAP_REL_TOL_12B    RETIRED 2026-08-10 (the A4 mean-gap limb is
+                        removed; section 0)
 STAGE_A_CELL_BUDGET_S   = 7.0       (kernel cell, two seeds)
                                     AMENDED 2026-08-09, was 4.0
 STAGE_A_GEN_CELL_BUDGET_S = 50.0    (family 1 real-generator cell)
 STAGE_A_GEN_REFINE_CAP  = 40        (family 1 refinement cells)
-STAGE_A_BUDGET_S        = 39600     AMENDED 2026-08-09, was 28800
+STAGE_A_BUDGET_S        = 72000     AMENDED 2026-08-10 (was 39600):
+                                    pre-envelope 48231 plus the
+                                    envelope term plus headroom;
+                                    ceiling, not forecast - the
+                                    closed run's 787 cells took
+                                    242 s wall
 STAGE_A_RSS_BYTES       = 8 GiB
 STAGE_B_CELL_CAP        = 24 per surviving family
 STAGE_B_CELL_BUDGET_S   = 320       (eight search seeds, one cell)
-STAGE_B_BUDGET_S        = 50400
+STAGE_B_BUDGET_S        = 61200     AMENDED 2026-08-10 (was 50400):
+                                    the prior model plus
+                                    STAGE_B_ENVELOPE_BUDGET_S
 STAGE_B_RSS_BYTES       = 8 GiB
 
 GRID GENERATION, exact, because "3 per decade" does not specify
@@ -2366,9 +3323,21 @@ Family 3, log-OU Cox  (2 fitted)
   cells 120
 
 Family 4, discrete self-exciting  (2 fitted)
-  phi               linear(0.10, 0.85, 0.05)                -> 16
+  phi               AMENDED 2026-08-10: the 19 literal points
+                    0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45,
+                    0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85,
+                    0.90, 0.94, 0.98
+                    (the nonlinear tail near one is deliberate and
+                    the list, not a generator rule, is the grid)
   tau seconds       log3(2, 600)                            ->  9
-  cells 144
+  cells 171 (was 144)
+
+Family 6, gamma-OU shot-noise  (3 fitted; ADDED 2026-08-10, 5.6)
+  m   burst mass    linear(0.2, 0.8, 0.1)                   ->  7
+  k   shape         log3(0.1, 10)                           ->  7
+                    (lands exactly on 10 at j = 6, no append)
+  tau seconds       log3(1, 3600)                           -> 12
+  cells 588
 
   Point counts recomputed against the logk rule above rather than
   estimated: log3(1e-6, 0.5) runs to j = 17 at 0.4641589 and then
@@ -2377,19 +3346,26 @@ Family 4, discrete self-exciting  (2 fitted)
   on their upper endpoints at j = 6, giving 7 with no append; and
   log3(1, 3600) runs to j = 10 at 2154.43 and appends, giving 12.
 
-  COST, under the two-tier model the kernel narrowing forces, RESTATED
-  2026-08-09 at the amended per-cell price:
-    kernel coarse   768 cells * STAGE_A_CELL_BUDGET_S 7.0 s  =  5,376 s
+  COST, RESTATED 2026-08-10 for the extended family set (the
+  2026-08-09 restatement survives in git history):
+    kernel coarse   768 + 27 + 588 = 1,383 cells
+                    * STAGE_A_CELL_BUDGET_S 7.0 s            =  9,681 s
     family 1 coarse  19 cells * STAGE_A_GEN_CELL_BUDGET_S 50 s = 950 s
-    coarse total                                             =  6,326 s
-                                                             =  1.76 h
-    kernel refinement    600/family cap, 1,800 cells at 4 seeds
-                         and so twice the per-cell budget    = 25,200 s
+    coarse total                                             = 10,631 s
+    kernel refinement    600/family cap, FOUR kernel families,
+                         2,400 cells at 4 seeds, twice the
+                         per-cell budget                     = 33,600 s
+                         (the self-exciting coarse extension does
+                          not raise its refinement cap)
     family 1 refinement  capped at STAGE_A_GEN_REFINE_CAP 40
                          cells at 4 seeds                    =  4,000 s
-    refinement total                                         = 29,200 s
-                                                             =  8.11 h
-    TOTAL 35,526 s = 9.87 h against STAGE_A_BUDGET_S = 11 h.
+    refinement total                                         = 37,600 s
+    pre-envelope total   48,231 s = 13.4 h
+    envelope allocation  STAGE_A_ENVELOPE_BUDGET_S           = 21,600 s
+    TOTAL 69,831 s against STAGE_A_BUDGET_S = 72,000 s (20 h).
+    Measured reality check, recorded: the closed run evaluated 787
+    coarse cells in 242 s wall, so these are ceilings that stop
+    runaway defects, not forecasts.
 
   THE PREDICTION THIS MEASUREMENT OVERTURNED, kept because getting it
   backwards is the interesting part. Brick A0 predicted family 1 would
@@ -2409,11 +3385,18 @@ Family 4, discrete self-exciting  (2 fitted)
   region's boundary. Whether the pass earns its cost is an open owner
   question recorded in notes/todo.md; this restatement funds it as
   frozen rather than deleting it.
-  Stage B: at most 4 * 24 = 96 search cells at
-  STAGE_B_CELL_BUDGET_S = 8.5 h, plus one confirmation and one 250 ms
-  sensitivity re-run on CONFIRMATION_SEEDS, against STAGE_B_BUDGET_S.
+  Stage B: at most 5 * 24 = 120 search cells (AMENDED 2026-08-10, was
+  4 * 24 = 96) at STAGE_B_CELL_BUDGET_S = 10.7 h, plus one
+  confirmation and one 250 ms sensitivity re-run on
+  CONFIRMATION_SEEDS, plus the envelope term, against
+  STAGE_B_BUDGET_S = 61,200 (the derivation is in section 12).
 
-Layer-3 analytic conformance, per family, over a frozen 30-day walk
+Layer-3 analytic conformance (AMENDED 2026-08-10: this flat-tolerance
+table applies to families 2 to 4 exactly as landed at brick K,
+unchanged; family 6 uses the 5.6 sample-design tests with DERIVED
+tolerances instead, because single-path flat tolerances are
+unattainable at its heavy corner), per family, over a frozen 30-day
+walk
   realized mean rate vs closed form      within 0.5 percent
   latent X mean vs 1.0                   within 0.5 percent
   latent X variance vs closed form       within 2 percent
@@ -2474,6 +3457,24 @@ If implementation proves a frozen constant, family, gate or statistic
 unmeasurable, that brick FAILS and stops. A reviewed amendment restarts
 Brick F before implementation resumes. No artifact may be produced
 under a partially amended contract.
+
+STOP RESOLVED 2026-08-11: Brick E proved the 250 ms real-kernel walk required
+by 9.7, and latently by 9.4/B8, unconstructible while the cadence step was a
+private one-second module constant. The construction-time `ArrivalEnv`
+parameterization recorded in section 0 and 4.3 is reviewed and SIGNED by
+codex session 019fefb3-9c65-7181-8689-3f0d9480d0d7. Brick F is re-frozen and
+Brick E may resume. The version ruling, default-byte-identity gates and
+production reachability boundary in section 0 are binding on the repair.
+
+STOP RESOLVED 2026-08-11: Brick E's 9.7 closed-form cross-check failed at
+the joint heavy-persistence log-OU corner even though a second implementation
+confirmed the machinery closed form. The meta-measurement evidence proves the
+frozen tolerance statistically unattainable there. The cross-paired cell-list
+amendment recorded in section 0 and 9.7 is reviewed and SIGNED by codex session
+019fefe4-b680-7e70-8a8e-9df36e0beecf. It preserves both tau endpoints and
+every parameter-domain extreme at well-conditioned combinations. Brick F is
+re-frozen and Brick E may resume; no tolerance, replicate count, seed, budget,
+statistic or gate otherwise moves.
 
 ## 18. What the review rounds settled
 

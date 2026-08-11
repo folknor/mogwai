@@ -218,6 +218,49 @@ and the arithmetic was consistent with the draw allocating ~30 bytes per parent.
 `931336d5` refutes it outright at 3.8 KB. The generator's walk allocates
 nothing; do not re-open that line.
 
+## Predictive-envelope month price, 2026-08-11
+
+Host `bygg`, release, one run per family through
+`brokkr run --release envelope_evaluation_bench -- <family> <months>`
+(registered as `[mogwai.targets.envelope_evaluation]`). The measured unit is
+ONE replicate month of the protocol-12b section 9.7 envelope over the frozen
+section 8 exposure, 2,674,800 grid cells. An evaluation is exactly
+`500 * (1 + K)` months, so the unit multiplies out to every K tier; the work
+count is exactly linear, the wall only estimated so, because fixed overhead,
+host noise and stochastic draw counts all intrude.
+
+| family | before | after | gain |
+|---|---:|---:|---:|
+| `shot_noise` | 0.4964 s | 0.4346 s | 12% |
+| `event_markov` | 0.4128 s | 0.3725 s | 10% |
+| `log_ou_cox` | 0.1258 s | 0.1016 s | 19% |
+| `wall_mmpp` | 0.0880 s | 0.0796 s | 9% |
+| `self_exciting` | 0.0838 s | 0.0730 s | 13% |
+
+The optimization hoisted per-walk constants out of a 2.67-million-iteration
+loop: `Poisson` and `Exp` objects whose parameters are fixed for the walk were
+being CONSTRUCTED per grid cell, and `exp(-dt/tau)`, its square and the log-OU
+spread were recomputed per cell. Every row is BIT-IDENTICAL - the harness work
+sink reproduces its pre-optimization value exactly - so no envelope number,
+gate verdict or conformance figure moved and nothing was re-blessed.
+
+**The floor is the count draw.** `wall_mmpp` and `self_exciting` at 0.073 to
+0.080 s are one Poisson draw plus loop overhead per grid cell. `event_markov`
+at 0.372 s draws about sixteen gaps per cell and `shot_noise` at 0.435 s draws
+ten jumps per cell, each jump costing an `Exp`, a uniform and a transcendental
+decay factor. Both are the LAW at their probe cells - which are deliberately
+the worst-cost corners, maximum jump rate and most state flips - and not an
+implementation artifact. Reaching the fast families' price would mean drawing
+fewer variates than the law specifies.
+
+**A recorded pessimization.** Replacing the `event_markov` gap draw with
+inverse CDF (`-ln(U) / rate`) measured 10% SLOWER than `rand_distr`'s ziggurat
+on this toolchain and RNG: the ziggurat takes its rejection branch rarely
+enough to beat an unconditional logarithm. It was measured, reverted, and only
+the construction removal kept, reproducing `Exp`'s own reciprocal-multiply
+arithmetic so the result stays bit-identical. This is a reading on one
+toolchain, not a claim about every future one.
+
 ## Stage A batch instrument and Steps 1-4, 2026-08-10
 
 Host `bygg`. Batch rows through Step 2 use release without profiling features

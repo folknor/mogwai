@@ -8,9 +8,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{
-    Block2Cell, COUNT_WINDOWS_S, NS_PER_HOUR, NS_PER_MIN, close_run,
-};
+use super::{Block2Cell, COUNT_WINDOWS_S, NS_PER_HOUR, NS_PER_MIN, close_run};
 use crate::error::{LabError, LabResult};
 use crate::session::{SessionSegment, segment_labels, session_segment_at};
 
@@ -188,8 +186,9 @@ impl ScreenSessionAcc {
             .expect("the open instant is inside the overnight segment");
         let post = session_segment_at(seg.session_end_ns - NS_PER_MIN, offset_minutes)
             .expect("the pre-close minute is inside the post-halt segment");
-        let minute_count = usize::try_from((seg.session_end_ns - seg.session_start_ns) / NS_PER_MIN)
-            .expect("a session minute count fits usize");
+        let minute_count =
+            usize::try_from((seg.session_end_ns - seg.session_start_ns) / NS_PER_MIN)
+                .expect("a session minute count fits usize");
         Self {
             date,
             session_start_ns: seg.session_start_ns,

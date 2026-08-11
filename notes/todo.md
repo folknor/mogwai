@@ -19,22 +19,6 @@ Or both. There are no exceptions.
 
 ## Open issues
 
-- DECIDE whether a Stage A projection gap should refuse the CELL or abort
-  the RUN. `project_seed` maps `ProjectStop::Lab` to a hard error that
-  ends the whole grid, and `SessionAcc::block1` raises exactly that when a
-  burst's children land in the 15:15 to 15:30 halt. For the shipped
-  family-1 path it is unreachable at a 1 microsecond child stride, but a
-  kernel family could in principle produce it, and one such cell would end
-  an eleven-hour run at whatever hour it reached. This is the same shape
-  as a defect already fixed once during the brick A review, where a parent
-  mapping to no segment aborted the grid instead of refusing its cell; the
-  difference is that the reachable case was clearly a cell refusal while
-  this one is genuinely ambiguous, since children in a halt window may
-  mean the cadence is wrong rather than that the cell is merely bad.
-  Recorded 2026-08-09 rather than decided by the implementer. The cost of
-  being wrong is bounded: per-cell walks are cached, so an aborted run
-  does not repay for cells already evaluated.
-
 - DECIDE whether the protocol-12b Stage A refinement pass should run at
   all. Deferred by the owner on 2026-08-09 rather than settled, so the
   frozen pass stands and the budgets were raised to fund it.

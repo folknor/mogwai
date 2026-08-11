@@ -52,6 +52,7 @@
 
 pub mod aggregate;
 pub mod arrival_control;
+pub mod arrival_envelope;
 pub mod arrival_screen;
 pub mod cadence;
 pub mod cadence_feasible;

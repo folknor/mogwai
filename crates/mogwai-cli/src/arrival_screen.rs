@@ -4,17 +4,22 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::process::Command;
 use std::thread;
 use std::time::Instant;
 
 use anyhow::{anyhow, bail};
 use clap::Args;
+use mogwai_lab::arrival_envelope::probe_envelope_costs;
 use mogwai_lab::arrival_screen::{
-    BudgetGuard, EvaluatedCell, Family, REFINEMENT_CELL_CAP, REFINEMENT_DEPTH, STAGE_A_BUDGET_S,
-    STAGE_A_CELL_BUDGET_S, STAGE_A_GEN_CELL_BUDGET_S, STAGE_A_GEN_REFINE_CAP, STAGE_A_RSS_BYTES,
-    STAGE_A_SEEDS, ScheduledCell, ScreenContext, admissible_regions, budget_verdict, budgeted,
-    coarse_grid, coarse_lattice, evaluate_cell, evaluate_cells_parallel, probe_cell,
-    refinement_round, screen_work, write_artifact,
+    A3_GATED_HOURS, BudgetGuard, CADENCE_STEP_NS, ENVELOPE_CELL_BUDGET_S, EvaluatedCell, Family,
+    REFINEMENT_CELL_CAP, REFINEMENT_DEPTH, STAGE_A_BUDGET_S, STAGE_A_CELL_BUDGET_S,
+    STAGE_A_ENVELOPE_BUDGET_S, STAGE_A_GEN_CELL_BUDGET_S, STAGE_A_GEN_REFINE_CAP,
+    STAGE_A_RSS_BYTES, STAGE_A_SEEDS, STAGE_B_BUDGET_S, STAGE_B_ENVELOPE_BUDGET_S, ScheduledCell,
+    ScreenContext, admissible_regions, budget_verdict, budgeted, census_cells_parallel,
+    coarse_grid, coarse_lattice, envelope_cost_s, evaluate_cells_parallel,
+    marginal_envelope_counts, measure_cell_walks, probe_cell, refinement_round, screen_work,
+    write_artifact,
 };
 use mogwai_lab::ledger::{fresh_tree_state, require_clean_tree, sha256_file};
 use mogwai_lab::sidecar;
@@ -28,10 +33,13 @@ const DEFAULT_MAX_JOBS: usize = 16;
 pub struct ArrivalScreenArgs {
     #[arg(long, value_name = "PATH")]
     pub measure: Option<PathBuf>,
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", conflicts_with = "demand_census")]
     pub out: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "demand_census")]
     pub cost_probe: bool,
+    /// Count lazy predictive-envelope demand over the frozen coarse grid.
+    #[arg(long, value_name = "PATH")]
+    pub demand_census: Option<PathBuf>,
     #[arg(long, value_name = "DIR")]
     pub cache: Option<PathBuf>,
     /// Concurrent projection workers. Defaults to machine parallelism, capped at 16.
@@ -96,16 +104,24 @@ pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
     if args.jobs == Some(0) {
         bail!("--jobs must be at least 1");
     }
-    let jobs = args
-        .jobs
-        .unwrap_or_else(|| {
-            thread::available_parallelism()
-                .map_or(1, NonZeroUsize::get)
-                .min(DEFAULT_MAX_JOBS)
-        });
+    let jobs = args.jobs.unwrap_or_else(|| {
+        thread::available_parallelism()
+            .map_or(1, NonZeroUsize::get)
+            .min(DEFAULT_MAX_JOBS)
+    });
+    if args.demand_census.is_some() && args.out.is_some() {
+        bail!("--demand-census is mutually exclusive with --out");
+    }
+    if args.demand_census.is_some() && args.cost_probe {
+        bail!("--demand-census is mutually exclusive with --cost-probe");
+    }
     let measure = args.measure.unwrap_or_else(|| DEFAULT_MEASURE.into());
+    let demand_census = args.demand_census;
     let out = args.out.unwrap_or_else(|| DEFAULT_OUT.into());
-    let commit = if args.cost_probe {
+    if let Some(path) = demand_census.as_deref() {
+        refuse_committed_census_path(path)?;
+    }
+    let commit = if args.cost_probe || demand_census.is_some() {
         None
     } else {
         Some(require_clean_tree().map_err(|e| anyhow!(e.to_string()))?)
@@ -124,33 +140,148 @@ pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
     if args.cost_probe {
         sidecar::marker("probe");
         let cells = budgeted(&mut guard, Family::ALL, |family| {
-            let verdict = evaluate_cell(&context, &probe_cell(family), &STAGE_A_SEEDS[..2])?;
+            let measurement =
+                measure_cell_walks(&context, &probe_cell(family), &STAGE_A_SEEDS[..2])?;
             let limit = if family == Family::EventMarkov {
                 STAGE_A_GEN_CELL_BUDGET_S
             } else {
                 STAGE_A_CELL_BUDGET_S
             };
-            if verdict.cost_s > limit {
+            if measurement.cost_s > limit {
                 return Err(mogwai_lab::error::LabError::refusal(format!(
                     "stage-a-cell-budget-exceeded: {family:?} cost {:.3}s exceeds {limit:.3}s",
-                    verdict.cost_s
+                    measurement.cost_s
                 )));
             }
-            Ok(verdict)
+            Ok(json!({"family":family,"cost_s":measurement.cost_s,
+                "parents":measurement.parents,"prints":measurement.prints,"budget_s":limit}))
         })
+        .map_err(|e| anyhow!(e.to_string()))?;
+        let envelope_probes = probe_envelope_costs(
+            &context.profile,
+            context.binding.window_start_ns,
+            context.binding.window_length_ns,
+            CADENCE_STEP_NS,
+        )
         .map_err(|e| anyhow!(e.to_string()))?;
         let (elapsed_s, peak_rss) = guard.finish().map_err(|e| anyhow!(e.to_string()))?;
         if let Some(verdict) = budget_verdict(elapsed_s, peak_rss) {
             bail!("{verdict}: total_s={elapsed_s:.3} peak_rss_bytes={peak_rss}");
         }
-        let result = json!({"mode":"cost_probe","cells":cells,"peak_rss_bytes":peak_rss,
+        let result = json!({"mode":"cost_probe","cells":cells,
+            "envelope_probes":envelope_probes,"peak_rss_bytes":peak_rss,
             "budgets":{"kernel_cell_s":STAGE_A_CELL_BUDGET_S,
             "generator_cell_s":STAGE_A_GEN_CELL_BUDGET_S,"total_s":STAGE_A_BUDGET_S,
-            "rss_bytes":STAGE_A_RSS_BYTES}});
+            "rss_bytes":STAGE_A_RSS_BYTES,"envelope_cell_s":ENVELOPE_CELL_BUDGET_S,
+            "stage_a_envelope_s":STAGE_A_ENVELOPE_BUDGET_S,
+            "stage_b_envelope_s":STAGE_B_ENVELOPE_BUDGET_S,
+            "stage_b_total_s":STAGE_B_BUDGET_S}});
         println!("{}", serde_json::to_string_pretty(&result)?);
         report_work(peak_rss);
         return Ok(result);
     }
+
+    if let Some(census_out) = demand_census {
+        let projection = context
+            .parallel_projection()
+            .map_err(|e| anyhow!(e.to_string()))?;
+        let coarse_points: Vec<_> = Family::ALL
+            .into_iter()
+            .flat_map(|family| {
+                coarse_lattice(family)
+                    .into_iter()
+                    .map(move |point| (family, point))
+            })
+            .collect();
+        let scheduled: Vec<_> = coarse_points
+            .iter()
+            .map(|(_, point)| ScheduledCell {
+                cell: point.cell.clone(),
+                seeds: STAGE_A_SEEDS[..2].to_vec(),
+            })
+            .collect();
+        sidecar::kv("jobs", jobs);
+        sidecar::marker("demand_census");
+        let demands =
+            census_cells_parallel(&context, &projection, &scheduled, jobs, Some(&mut guard))
+                .map_err(|e| anyhow!(e.to_string()))?;
+        let (elapsed_s, peak_rss) = guard.finish().map_err(|e| anyhow!(e.to_string()))?;
+        if let Some(verdict) = budget_verdict(elapsed_s, peak_rss) {
+            bail!("{verdict}: total_s={elapsed_s:.3} peak_rss_bytes={peak_rss}");
+        }
+        let mut counts = Map::new();
+        let mut envelope_demand = Map::new();
+        for family in Family::ALL {
+            let family_demands: Vec<_> = demands
+                .iter()
+                .filter(|demand| demand.family == family)
+                .collect();
+            let gate_counts = |gate: fn(
+                &mogwai_lab::arrival_screen::CellEnvelopeDemand,
+            )
+                -> mogwai_lab::arrival_screen::EnvelopeDemand| {
+                let states: Vec<_> = family_demands.iter().map(|demand| gate(demand)).collect();
+                json!({
+                    "inside_base":states.iter().filter(|state| matches!(state, mogwai_lab::arrival_screen::EnvelopeDemand::InsideBase)).count(),
+                    "marginal_shell":states.iter().filter(|state| matches!(state, mogwai_lab::arrival_screen::EnvelopeDemand::MarginalShell)).count(),
+                    "over_cap":states.iter().filter(|state| matches!(state, mogwai_lab::arrival_screen::EnvelopeDemand::OverCap)).count(),
+                    "total_cells_evaluated":states.len()
+                })
+            };
+            let owned_demands: Vec<_> = family_demands.iter().map(|d| **d).collect();
+            let marginal = marginal_envelope_counts(&owned_demands);
+            counts.insert(
+                family.as_str().into(),
+                json!({
+                    "a2_shape":gate_counts(|d| d.a2),
+                    "a3":gate_counts(|d| d.a3),
+                    "total_cells_evaluated":family_demands.len()
+                }),
+            );
+            envelope_demand.insert(family.as_str().into(), json!(marginal));
+        }
+        let search_space: BTreeMap<_, _> = Family::ALL
+            .into_iter()
+            .map(|family| {
+                let grid = coarse_grid(family);
+                (
+                    family.as_str().to_string(),
+                    json!({"point_count":grid.len(),"grid":grid}),
+                )
+            })
+            .collect();
+        let artifact = json!({
+            "mode":"envelope_demand_census",
+            "binding":{
+                "input_hashes":{measure.to_string_lossy().to_string():sha256_file(&measure).map_err(|e|anyhow!(e.to_string()))?},
+                "exposure":{"instrument":"MNQ","preset":"crates/mogwai-server/presets/mnq.toml",
+                    "window_start_ns":context.binding.window_start_ns,
+                    "window_length_ns":context.binding.window_length_ns,"warmup":context.binding.warmup,
+                    "divergence":Value::Null,"regime":"neutral"},
+                "coarse_seeds":&STAGE_A_SEEDS[..2],
+                "tape_protocol_version":mogwai_data::TAPE_PROTOCOL_VERSION,
+                "kernel_version":mogwai_data::ARRIVAL_KERNEL_VERSION,
+                "spec":"notes/protocol-12b-arrival-composition-spec.md section 9.7, Brick E"
+            },
+            "search_space":search_space,
+            "counts":counts,
+            "total_cells_evaluated":demands.len(),
+            "envelope_demand":envelope_demand,
+            "cost":{"wall_s":total.elapsed().as_secs_f64(),"peak_rss_bytes":peak_rss,"jobs":jobs}
+        });
+        write_artifact(&census_out, &artifact, elapsed_s, peak_rss)
+            .map_err(|e| anyhow!(e.to_string()))?;
+        report_work(peak_rss);
+        return Ok(artifact);
+    }
+
+    let envelope_probes = probe_envelope_costs(
+        &context.profile,
+        context.binding.window_start_ns,
+        context.binding.window_length_ns,
+        CADENCE_STEP_NS,
+    )
+    .map_err(|e| anyhow!(e.to_string()))?;
 
     let projection = context
         .parallel_projection()
@@ -173,16 +304,13 @@ pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
             seeds: STAGE_A_SEEDS[..2].to_vec(),
         })
         .collect();
-    let evaluations = evaluate_cells_parallel(
-        &context,
-        &projection,
-        &scheduled,
-        jobs,
-        Some(&mut guard),
-    )
-    .map_err(|e| anyhow!(e.to_string()))?;
-    let mut by_family: BTreeMap<Family, Vec<EvaluatedCell>> =
-        Family::ALL.into_iter().map(|family| (family, Vec::new())).collect();
+    let evaluations =
+        evaluate_cells_parallel(&context, &projection, &scheduled, jobs, Some(&mut guard))
+            .map_err(|e| anyhow!(e.to_string()))?;
+    let mut by_family: BTreeMap<Family, Vec<EvaluatedCell>> = Family::ALL
+        .into_iter()
+        .map(|family| (family, Vec::new()))
+        .collect();
     for ((family, point), evaluation) in coarse_points.into_iter().zip(evaluations) {
         by_family
             .get_mut(&family)
@@ -208,23 +336,14 @@ pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
             } else {
                 REFINEMENT_CELL_CAP
             };
-            let proposal = refinement_round(
-                family,
-                &by_family[&family],
-                round,
-                cap - used[&family],
-            );
+            let proposal =
+                refinement_round(family, &by_family[&family], round, cap - used[&family]);
             unevaluated
                 .entry(family)
                 .or_default()
                 .insert(format!("round_{round}"), proposal.unevaluated);
             *used.get_mut(&family).expect("family initialized") += proposal.candidates.len();
-            round_points.extend(
-                proposal
-                    .candidates
-                    .into_iter()
-                    .map(|point| (family, point)),
-            );
+            round_points.extend(proposal.candidates.into_iter().map(|point| (family, point)));
         }
         let scheduled: Vec<_> = round_points
             .iter()
@@ -233,14 +352,9 @@ pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
                 seeds: STAGE_A_SEEDS.to_vec(),
             })
             .collect();
-        let evaluations = evaluate_cells_parallel(
-            &context,
-            &projection,
-            &scheduled,
-            jobs,
-            Some(&mut guard),
-        )
-        .map_err(|e| anyhow!(e.to_string()))?;
+        let evaluations =
+            evaluate_cells_parallel(&context, &projection, &scheduled, jobs, Some(&mut guard))
+                .map_err(|e| anyhow!(e.to_string()))?;
         for ((family, point), evaluation) in round_points.into_iter().zip(evaluations) {
             by_family
                 .get_mut(&family)
@@ -354,11 +468,19 @@ pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
             "kernel_version":mogwai_data::ARRIVAL_KERNEL_VERSION,
             "spec":"notes/protocol-12b-arrival-composition-spec.md section 9, bricks A0 and A"},
         "search_space":search_space,"cells":cells_json,"admissible_region":regions_json,"refusals":refusals,
+        "a3_gated_hours":A3_GATED_HOURS,
+        "envelope_cost":{"probe_costs_per_family_per_k":envelope_probes,
+            "aggregate_demand_s":envelope_cost_s(),"budget_s":STAGE_A_ENVELOPE_BUDGET_S,
+            "stopped_on_shortfall":false},
         "cost":{"jobs":jobs,"coarse_s":coarse_s,"refine_s":refine_s,"total_s":total.elapsed().as_secs_f64(),
             "peak_rss_bytes":peak_rss,"per_family_cell_s":per_family_cost,
             "budgets":{"STAGE_A_CELL_BUDGET_S":STAGE_A_CELL_BUDGET_S,
                 "STAGE_A_GEN_CELL_BUDGET_S":STAGE_A_GEN_CELL_BUDGET_S,
-                "STAGE_A_BUDGET_S":STAGE_A_BUDGET_S,"STAGE_A_RSS_BYTES":STAGE_A_RSS_BYTES}},
+                "STAGE_A_BUDGET_S":STAGE_A_BUDGET_S,
+                "STAGE_A_ENVELOPE_BUDGET_S":STAGE_A_ENVELOPE_BUDGET_S,
+                "STAGE_B_ENVELOPE_BUDGET_S":STAGE_B_ENVELOPE_BUDGET_S,
+                "STAGE_B_BUDGET_S":STAGE_B_BUDGET_S,
+                "STAGE_A_RSS_BYTES":STAGE_A_RSS_BYTES}},
         "verdict":verdict
     });
     write_artifact(&out, &artifact, total.elapsed().as_secs_f64(), peak_rss)
@@ -367,6 +489,26 @@ pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
     sidecar::kv("refine_s", format!("{refine_s:.3}"));
     report_work(peak_rss);
     Ok(artifact)
+}
+
+fn refuse_committed_census_path(path: &std::path::Path) -> anyhow::Result<()> {
+    let root = std::env::current_dir()?;
+    let candidate = if path.is_absolute() {
+        path.strip_prefix(&root).unwrap_or(path)
+    } else {
+        path
+    };
+    if candidate == std::path::Path::new(DEFAULT_OUT) {
+        bail!("--demand-census may not write the screen artifact");
+    }
+    let output = Command::new("git")
+        .args(["ls-files", "--error-unmatch", "--"])
+        .arg(candidate)
+        .output()?;
+    if output.status.success() {
+        bail!("--demand-census may not overwrite a committed artifact path");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -380,6 +522,7 @@ mod tests {
             measure: Some(measure.into()),
             out: Some(out.into()),
             cost_probe,
+            demand_census: None,
             cache: None,
             jobs: Some(1),
         }
@@ -422,11 +565,7 @@ mod tests {
     fn arrival_screen_refuses_zero_workers_before_touching_inputs() {
         let out = "target/stage-a-zero-jobs-test.json";
         drop(std::fs::remove_file(out));
-        let mut args = args(
-            "analysis/this-12a-artifact-does-not-exist.json",
-            out,
-            false,
-        );
+        let mut args = args("analysis/this-12a-artifact-does-not-exist.json", out, false);
         args.jobs = Some(0);
         let error = run(args)
             .expect_err("zero workers cannot run the screen")
@@ -460,6 +599,56 @@ mod tests {
         assert!(!Path::new(out).exists());
         // And the probe branch returns before any write even when it succeeds:
         // the artifact path is never touched on that path at all.
+        assert!(!Path::new(DEFAULT_OUT).with_extension("json.tmp").exists());
+    }
+
+    #[test]
+    fn demand_census_refuses_screen_output_and_any_out_pairing() {
+        let mut direct = args(
+            "analysis/this-12a-artifact-does-not-exist.json",
+            DEFAULT_OUT,
+            false,
+        );
+        direct.out = None;
+        direct.demand_census = Some(DEFAULT_OUT.into());
+        let error = run(direct)
+            .expect_err("the census may not target the screen artifact")
+            .to_string();
+        assert!(error.contains("screen artifact"), "{error}");
+
+        let mut paired = args(
+            "analysis/this-12a-artifact-does-not-exist.json",
+            "target/ordinary-screen.json",
+            false,
+        );
+        paired.demand_census = Some("target/demand-census.json".into());
+        let error = run(paired)
+            .expect_err("--out and --demand-census must conflict")
+            .to_string();
+        assert!(error.contains("mutually exclusive with --out"), "{error}");
+        assert!(!Path::new("target/ordinary-screen.json").exists());
+        assert!(!Path::new("target/demand-census.json").exists());
+    }
+
+    #[test]
+    fn demand_census_needs_no_clean_tree_and_writes_no_screen_artifact() {
+        let census = "target/demand-census-no-input.json";
+        drop(std::fs::remove_file(census));
+        let mut census_args = args(
+            "analysis/this-12a-artifact-does-not-exist.json",
+            "target/unused-screen-output.json",
+            false,
+        );
+        census_args.out = None;
+        census_args.demand_census = Some(census.into());
+        let error = run(census_args)
+            .expect_err("an unreadable measure path stops the census")
+            .to_string();
+        assert!(
+            !error.contains("clean") && !error.contains("dirty"),
+            "the census consulted tree cleanliness: {error}"
+        );
+        assert!(!Path::new(census).exists());
         assert!(!Path::new(DEFAULT_OUT).with_extension("json.tmp").exists());
     }
 

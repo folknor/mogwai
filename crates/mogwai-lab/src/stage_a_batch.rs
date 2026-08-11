@@ -256,6 +256,7 @@ fn parameter_bits(cell: &Cell) -> Vec<u64> {
         } => vec![occupancy.to_bits(), rate_ratio.to_bits(), tau_s.to_bits()],
         Cell::LogOuCox { sigma_y, tau_s } => vec![sigma_y.to_bits(), tau_s.to_bits()],
         Cell::SelfExciting { phi, tau_s } => vec![phi.to_bits(), tau_s.to_bits()],
+        Cell::ShotNoise { m, k, tau_s } => vec![m.to_bits(), k.to_bits(), tau_s.to_bits()],
     }
 }
 
@@ -265,6 +266,7 @@ fn family_code(family: Family) -> u8 {
         Family::WallMmpp => 1,
         Family::LogOuCox => 2,
         Family::SelfExciting => 3,
+        Family::ShotNoise => 5,
     }
 }
 
@@ -794,7 +796,14 @@ pub fn validate_manifest(manifest: &BatchManifest) -> LabResult<()> {
     {
         return Err(LabError::refusal("manifest selection seeds changed"));
     }
-    if manifest.quick.len() != 8 || manifest.full.len() != 72 {
+    if manifest.tape_protocol_version != mogwai_data::TAPE_PROTOCOL_VERSION
+        || manifest.arrival_kernel_version != mogwai_data::ARRIVAL_KERNEL_VERSION
+    {
+        return Err(LabError::refusal(
+            "manifest tape or arrival-kernel version changed",
+        ));
+    }
+    if manifest.quick.len() != 10 || manifest.full.len() != 98 {
         return Err(LabError::refusal(format!(
             "manifest sizes are quick={} full={}",
             manifest.quick.len(),
@@ -802,7 +811,7 @@ pub fn validate_manifest(manifest: &BatchManifest) -> LabResult<()> {
         )));
     }
     let frame = complete_frame();
-    if manifest.quantile_boundaries != frame.boundaries || manifest.strata.len() != 54 {
+    if manifest.quantile_boundaries != frame.boundaries || manifest.strata.len() != 78 {
         return Err(LabError::refusal(
             "manifest quantile partition does not match the complete frame",
         ));
@@ -1053,7 +1062,8 @@ mod tests {
             (Family::EventMarkov, [19, 18, 36]),
             (Family::WallMmpp, [504, 1_314, 3_769]),
             (Family::LogOuCox, [120, 218, 535]),
-            (Family::SelfExciting, [144, 263, 646]),
+            (Family::SelfExciting, [171, 314, 772]),
+            (Family::ShotNoise, [588, 1_547, 4_450]),
         ];
         for (family, counts) in expected {
             for (level, count) in counts.into_iter().enumerate() {
@@ -1063,9 +1073,9 @@ mod tests {
     }
 
     #[test]
-    fn product_partition_has_fifty_four_nonempty_strata() {
+    fn product_partition_has_seventy_eight_nonempty_strata() {
         let frame = complete_frame();
-        assert_eq!(frame.by_stratum.len(), 54);
+        assert_eq!(frame.by_stratum.len(), 78);
         assert!(frame.by_stratum.values().all(|cells| !cells.is_empty()));
     }
 
@@ -1076,6 +1086,7 @@ mod tests {
             (Family::WallMmpp, 24),
             (Family::LogOuCox, 8),
             (Family::SelfExciting, 8),
+            (Family::ShotNoise, 24),
         ];
         for (family, count) in expected {
             let candidates = refinement_anchor_candidates(family);
@@ -1102,13 +1113,13 @@ mod tests {
             .map(|cell| (cell.cell.family(), cell.level, cell.lattice))
             .collect();
         let pilot = pilot_plan();
-        assert_eq!(pilot.len(), 162);
+        assert_eq!(pilot.len(), 234);
         let mut counts = BTreeMap::new();
         for cell in pilot {
             assert!(!anchors.contains(&(cell.family, cell.level, cell.lattice)));
             *counts.entry(cell.stratum).or_insert(0usize) += 1;
         }
-        assert_eq!(counts.len(), 54);
+        assert_eq!(counts.len(), 78);
         assert!(counts.values().all(|count| *count == 3));
     }
 
@@ -1135,8 +1146,8 @@ mod tests {
             readings,
         };
         let manifest = build_manifest("measurement".into(), &pilot).expect("manifest builds");
-        assert_eq!(manifest.quick.len(), 8);
-        assert_eq!(manifest.full.len(), 72);
+        assert_eq!(manifest.quick.len(), 10);
+        assert_eq!(manifest.full.len(), 98);
         assert_eq!(
             manifest.plan_sha256,
             manifest_hash(&manifest).expect("hashes")
@@ -1154,7 +1165,7 @@ mod tests {
         let manifest = parse_manifest(bytes).expect("committed manifest validates");
         assert_eq!(
             manifest.plan_sha256,
-            "81b5325fc18758c77b033b68ffe086a0f807b7d9b3d81321cb751d2609ae932d"
+            "40f626ba85ef83934cd9ea0d77509bd4b5dad0cb3b27bf2db63488f5f413ee21"
         );
         assert_eq!(
             manifest.plan_sha256,

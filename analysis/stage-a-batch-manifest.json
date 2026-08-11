@@ -5,7 +5,7 @@
   "anchor_rule_version": 1,
   "measurement_sha256": "60d755e8b76794f6c9e4f2092eca45662d24b17d168cfbe95443e505f773d253",
   "tape_protocol_version": 12,
-  "arrival_kernel_version": 2,
+  "arrival_kernel_version": 3,
   "selection_seeds": {
     "anchor": 4705772638496239665,
     "pilot": 5785239099935764529,
@@ -28,9 +28,13 @@
     {
       "family": "self_exciting",
       "cap": 600
+    },
+    {
+      "family": "shot_noise",
+      "cap": 600
     }
   ],
-  "pilot_readings_sha256": "cc94be5fb89337f41c31a483dc90d85996193e62540bd91911c0ce6b4ba25fdc",
+  "pilot_readings_sha256": "f043456594a3d88d83571fc247cb890a887cb0d980da734b0cdcbf04093f73b0",
   "quantile_boundaries": {
     "event_markov:0": [
       36
@@ -54,16 +58,31 @@
       22
     ],
     "self_exciting:0": [
-      28,
+      36,
       16
     ],
     "self_exciting:1": [
-      30,
+      36,
       16
     ],
     "self_exciting:2": [
-      30,
+      36,
       16
+    ],
+    "shot_noise:0": [
+      12,
+      12,
+      20
+    ],
+    "shot_noise:1": [
+      12,
+      12,
+      22
+    ],
+    "shot_noise:2": [
+      12,
+      12,
+      22
     ],
     "wall_mmpp:0": [
       8,
@@ -93,11 +112,11 @@
       "probability_population_size": 9,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 5.021550563333333,
-      "pilot_sample_variance_s2": 0.2319846518046959,
-      "pooled_variance_s2": 0.12620974403047278,
-      "shrunk_variance_s2": 0.17909719791758433,
-      "allocation_score": 1.6996832124111652
+      "pilot_mean_cost_s": 4.587585413,
+      "pilot_sample_variance_s2": 0.1952013989373195,
+      "pooled_variance_s2": 0.10238828460079533,
+      "shrunk_variance_s2": 0.1487948417690574,
+      "allocation_score": 1.620855749256774
     },
     {
       "id": {
@@ -110,11 +129,11 @@
       "probability_population_size": 9,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 5.342676476,
-      "pilot_sample_variance_s2": 0.006198319431986448,
-      "pooled_variance_s2": 0.12620974403047278,
-      "shrunk_variance_s2": 0.06620403173122962,
-      "allocation_score": 1.00185596964468
+      "pilot_mean_cost_s": 4.869674613000001,
+      "pilot_sample_variance_s2": 0.0010885749971888171,
+      "pooled_variance_s2": 0.10238828460079533,
+      "shrunk_variance_s2": 0.05173842979899207,
+      "allocation_score": 0.9276820642244982
     },
     {
       "id": {
@@ -127,11 +146,11 @@
       "probability_population_size": 9,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 5.052713727666667,
-      "pilot_sample_variance_s2": 0.10151315471211066,
-      "pooled_variance_s2": 0.0642168289434148,
-      "shrunk_variance_s2": 0.08286499182776272,
-      "allocation_score": 1.1525657474464552
+      "pilot_mean_cost_s": 4.598573249,
+      "pilot_sample_variance_s2": 0.13230833403351924,
+      "pooled_variance_s2": 0.07860627704459079,
+      "shrunk_variance_s2": 0.10545730553905502,
+      "allocation_score": 1.3629166294159092
     },
     {
       "id": {
@@ -144,11 +163,11 @@
       "probability_population_size": 9,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 5.333008414999999,
-      "pilot_sample_variance_s2": 0.00010508383595817207,
-      "pooled_variance_s2": 0.0642168289434148,
-      "shrunk_variance_s2": 0.03216095638968648,
-      "allocation_score": 0.6989093532714294
+      "pilot_mean_cost_s": 4.889976792,
+      "pilot_sample_variance_s2": 0.000520339923243166,
+      "pooled_variance_s2": 0.07860627704459079,
+      "shrunk_variance_s2": 0.03956330848391698,
+      "allocation_score": 0.8095345928047091
     },
     {
       "id": {
@@ -161,11 +180,11 @@
       "probability_population_size": 18,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 5.091439895666666,
-      "pilot_sample_variance_s2": 0.015331969414895615,
-      "pooled_variance_s2": 0.021118721407102914,
-      "shrunk_variance_s2": 0.018225345410999266,
-      "allocation_score": 1.0769364551308291
+      "pilot_mean_cost_s": 4.672359894,
+      "pilot_sample_variance_s2": 0.01309036067984417,
+      "pooled_variance_s2": 0.016889696756234977,
+      "shrunk_variance_s2": 0.014990028718039573,
+      "allocation_score": 1.0195431094524867
     },
     {
       "id": {
@@ -178,11 +197,11 @@
       "probability_population_size": 17,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 5.311326342,
-      "pilot_sample_variance_s2": 0.001202297142035153,
-      "pooled_variance_s2": 0.021118721407102914,
-      "shrunk_variance_s2": 0.011160509274569033,
-      "allocation_score": 0.7792726506522439
+      "pilot_mean_cost_s": 4.864994402,
+      "pilot_sample_variance_s2": 0.0013028409564418177,
+      "pooled_variance_s2": 0.016889696756234977,
+      "shrunk_variance_s2": 0.009096268856338397,
+      "allocation_score": 0.7350881014080783
     },
     {
       "id": {
@@ -195,11 +214,11 @@
       "probability_population_size": 72,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.924967390666667,
-      "pilot_sample_variance_s2": 0.00025037229238349194,
-      "pooled_variance_s2": 0.00305342085223459,
-      "shrunk_variance_s2": 0.001651896572309041,
-      "allocation_score": 1.7110527874535546
+      "pilot_mean_cost_s": 2.259548736666667,
+      "pilot_sample_variance_s2": 0.000015489708572757625,
+      "pooled_variance_s2": 0.0015215106861566376,
+      "shrunk_variance_s2": 0.0007685001973646976,
+      "allocation_score": 1.3278335313257856
     },
     {
       "id": {
@@ -212,11 +231,11 @@
       "probability_population_size": 72,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.924842149,
-      "pilot_sample_variance_s2": 0.00008845542927599525,
-      "pooled_variance_s2": 0.00305342085223459,
-      "shrunk_variance_s2": 0.0015709381407552926,
-      "allocation_score": 1.6686329766925
+      "pilot_mean_cost_s": 2.2664179153333333,
+      "pilot_sample_variance_s2": 5.552516999984718e-6,
+      "pooled_variance_s2": 0.0015215106861566376,
+      "shrunk_variance_s2": 0.0007635316015783112,
+      "allocation_score": 1.3215268993398508
     },
     {
       "id": {
@@ -229,11 +248,11 @@
       "probability_population_size": 54,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.917864550333333,
-      "pilot_sample_variance_s2": 0.000021775534513401003,
-      "pooled_variance_s2": 0.00305342085223459,
-      "shrunk_variance_s2": 0.0015375981933739955,
-      "allocation_score": 1.2396030210293427
+      "pilot_mean_cost_s": 2.252283652,
+      "pilot_sample_variance_s2": 0.000029826462437837455,
+      "pooled_variance_s2": 0.0015215106861566376,
+      "shrunk_variance_s2": 0.0007756685742972376,
+      "allocation_score": 1.0021213524900923
     },
     {
       "id": {
@@ -246,11 +265,11 @@
       "probability_population_size": 54,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.930818031333333,
-      "pilot_sample_variance_s2": 0.0005928885606806399,
-      "pooled_variance_s2": 0.00305342085223459,
-      "shrunk_variance_s2": 0.001823154706457615,
-      "allocation_score": 1.346824766298592
+      "pilot_mean_cost_s": 2.252558226,
+      "pilot_sample_variance_s2": 0.0004448428824157509,
+      "pooled_variance_s2": 0.0015215106861566376,
+      "shrunk_variance_s2": 0.0009831767842861943,
+      "allocation_score": 1.1281622264773759
     },
     {
       "id": {
@@ -263,11 +282,11 @@
       "probability_population_size": 72,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.8633156136666664,
-      "pilot_sample_variance_s2": 0.006503408259084027,
-      "pooled_variance_s2": 0.00305342085223459,
-      "shrunk_variance_s2": 0.004778414555659308,
-      "allocation_score": 2.9413032174958396
+      "pilot_mean_cost_s": 2.2238927866666667,
+      "pilot_sample_variance_s2": 0.004164459186017744,
+      "pooled_variance_s2": 0.0015215106861566376,
+      "shrunk_variance_s2": 0.002842984936087191,
+      "allocation_score": 2.57432190779411
     },
     {
       "id": {
@@ -280,11 +299,11 @@
       "probability_population_size": 71,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.903372788,
-      "pilot_sample_variance_s2": 0.0056553951610789285,
-      "pooled_variance_s2": 0.00305342085223459,
-      "shrunk_variance_s2": 0.004354408006656759,
-      "allocation_score": 2.7496125895386863
+      "pilot_mean_cost_s": 2.256366974666667,
+      "pilot_sample_variance_s2": 0.0028843666486730673,
+      "pooled_variance_s2": 0.0015215106861566376,
+      "shrunk_variance_s2": 0.0022029386674148523,
+      "allocation_score": 2.2184757429351714
     },
     {
       "id": {
@@ -297,11 +316,11 @@
       "probability_population_size": 54,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.843187773666667,
-      "pilot_sample_variance_s2": 0.007503455616706548,
-      "pooled_variance_s2": 0.00305342085223459,
-      "shrunk_variance_s2": 0.005278438234470569,
-      "allocation_score": 2.326717789637894
+      "pilot_mean_cost_s": 2.2127003646666665,
+      "pilot_sample_variance_s2": 0.004102329530995557,
+      "pooled_variance_s2": 0.0015215106861566376,
+      "shrunk_variance_s2": 0.002811920108576097,
+      "allocation_score": 1.9250142327522255
     },
     {
       "id": {
@@ -314,11 +333,11 @@
       "probability_population_size": 54,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.917784154,
-      "pilot_sample_variance_s2": 0.003511197791441132,
-      "pooled_variance_s2": 0.00305342085223459,
-      "shrunk_variance_s2": 0.003282309321837861,
-      "allocation_score": 1.811160475929503
+      "pilot_mean_cost_s": 2.2704753576666667,
+      "pilot_sample_variance_s2": 0.0014990472013465305,
+      "pooled_variance_s2": 0.0015215106861566376,
+      "shrunk_variance_s2": 0.0015102789437515841,
+      "allocation_score": 1.3927204327899918
     },
     {
       "id": {
@@ -331,11 +350,11 @@
       "probability_population_size": 198,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.914732295,
-      "pilot_sample_variance_s2": 0.00013391113470478903,
-      "pooled_variance_s2": 0.003919236146051396,
-      "shrunk_variance_s2": 0.002026573640378093,
-      "allocation_score": 5.220920119681555
+      "pilot_mean_cost_s": 2.258072354333333,
+      "pilot_sample_variance_s2": 0.000011357943633257689,
+      "pooled_variance_s2": 0.0019162658921604745,
+      "shrunk_variance_s2": 0.0009638119178968661,
+      "allocation_score": 4.090650820287269
     },
     {
       "id": {
@@ -348,11 +367,11 @@
       "probability_population_size": 174,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.926386352666667,
-      "pilot_sample_variance_s2": 0.00023481571713133303,
-      "pooled_variance_s2": 0.003919236146051396,
-      "shrunk_variance_s2": 0.0020770259315913645,
-      "allocation_score": 4.635583157284134
+      "pilot_mean_cost_s": 2.26254683,
+      "pilot_sample_variance_s2": 0.000014704785973003757,
+      "pooled_variance_s2": 0.0019162658921604745,
+      "shrunk_variance_s2": 0.0009654853390667392,
+      "allocation_score": 3.5943743093711826
     },
     {
       "id": {
@@ -365,11 +384,11 @@
       "probability_population_size": 162,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.904738094666667,
-      "pilot_sample_variance_s2": 0.00018046144043163537,
-      "pooled_variance_s2": 0.003919236146051396,
-      "shrunk_variance_s2": 0.002049848793241516,
-      "allocation_score": 4.303506246115542
+      "pilot_mean_cost_s": 2.246453175,
+      "pilot_sample_variance_s2": 0.00009235546704040854,
+      "pooled_variance_s2": 0.0019162658921604745,
+      "shrunk_variance_s2": 0.0010043106796004415,
+      "allocation_score": 3.425313842869634
     },
     {
       "id": {
@@ -382,11 +401,11 @@
       "probability_population_size": 144,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.882860565666667,
-      "pilot_sample_variance_s2": 0.0012211429630973277,
-      "pooled_variance_s2": 0.003919236146051396,
-      "shrunk_variance_s2": 0.0025701895545743618,
-      "allocation_score": 4.299651444162234
+      "pilot_mean_cost_s": 2.2237509456666666,
+      "pilot_sample_variance_s2": 0.0005479910271650333,
+      "pooled_variance_s2": 0.0019162658921604745,
+      "shrunk_variance_s2": 0.001232128459662754,
+      "allocation_score": 3.389591904181306
     },
     {
       "id": {
@@ -397,13 +416,13 @@
       "population_size": 186,
       "anchor_count": 0,
       "probability_population_size": 186,
-      "probability_sample_count": 2,
+      "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.876358605666667,
-      "pilot_sample_variance_s2": 0.006600119344347408,
-      "pooled_variance_s2": 0.003919236146051396,
-      "shrunk_variance_s2": 0.005259677745199402,
-      "allocation_score": 7.9537328035922625
+      "pilot_mean_cost_s": 2.2356925126666667,
+      "pilot_sample_variance_s2": 0.0033919510428398,
+      "pooled_variance_s2": 0.0019162658921604745,
+      "shrunk_variance_s2": 0.002654108467500137,
+      "allocation_score": 6.408645395922142
     },
     {
       "id": {
@@ -416,11 +435,11 @@
       "probability_population_size": 162,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.847670732333333,
-      "pilot_sample_variance_s2": 0.006461600166239383,
-      "pooled_variance_s2": 0.003919236146051396,
-      "shrunk_variance_s2": 0.00519041815614539,
-      "allocation_score": 6.916259860229421
+      "pilot_mean_cost_s": 2.2162947880000003,
+      "pilot_sample_variance_s2": 0.0035630427279826995,
+      "pooled_variance_s2": 0.0019162658921604745,
+      "shrunk_variance_s2": 0.002739654310071587,
+      "allocation_score": 5.6957266110436
     },
     {
       "id": {
@@ -433,11 +452,11 @@
       "probability_population_size": 153,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.827896718666667,
-      "pilot_sample_variance_s2": 0.003830656837895985,
-      "pooled_variance_s2": 0.003919236146051396,
-      "shrunk_variance_s2": 0.0038749464919736907,
-      "allocation_score": 5.663599226198469
+      "pilot_mean_cost_s": 2.2018190966666666,
+      "pilot_sample_variance_s2": 0.001754863192122988,
+      "pooled_variance_s2": 0.0019162658921604745,
+      "shrunk_variance_s2": 0.0018355645421417313,
+      "allocation_score": 4.417590381076234
     },
     {
       "id": {
@@ -450,11 +469,11 @@
       "probability_population_size": 135,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.8609963776666665,
-      "pilot_sample_variance_s2": 0.014240242595196753,
-      "pooled_variance_s2": 0.003919236146051396,
-      "shrunk_variance_s2": 0.009079739370624075,
-      "allocation_score": 7.605220422856068
+      "pilot_mean_cost_s": 2.221589611,
+      "pilot_sample_variance_s2": 0.007926319355407975,
+      "pooled_variance_s2": 0.0019162658921604745,
+      "shrunk_variance_s2": 0.004921292623784225,
+      "allocation_score": 6.353915651109838
     },
     {
       "id": {
@@ -465,13 +484,13 @@
       "population_size": 540,
       "anchor_count": 0,
       "probability_population_size": 540,
-      "probability_sample_count": 2,
+      "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.913610732,
-      "pilot_sample_variance_s2": 0.00005332721065886547,
-      "pooled_variance_s2": 0.0011275107011442847,
-      "shrunk_variance_s2": 0.0005904189559015751,
-      "allocation_score": 7.687022317962614
+      "pilot_mean_cost_s": 2.2582879620000003,
+      "pilot_sample_variance_s2": 7.964555419227543e-6,
+      "pooled_variance_s2": 0.0007263970778594034,
+      "shrunk_variance_s2": 0.00036718081663931546,
+      "allocation_score": 6.885636494780575
     },
     {
       "id": {
@@ -484,11 +503,11 @@
       "probability_population_size": 498,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.921767426,
-      "pilot_sample_variance_s2": 0.00013327855083724102,
-      "pooled_variance_s2": 0.0011275107011442847,
-      "shrunk_variance_s2": 0.0006303946259907629,
-      "allocation_score": 7.3149737569002395
+      "pilot_mean_cost_s": 2.2614079493333334,
+      "pilot_sample_variance_s2": 0.00023435199726125312,
+      "pooled_variance_s2": 0.0007263970778594034,
+      "shrunk_variance_s2": 0.0004803745375603283,
+      "allocation_score": 7.258215779862365
     },
     {
       "id": {
@@ -501,11 +520,11 @@
       "probability_population_size": 459,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.9187753786666666,
-      "pilot_sample_variance_s2": 0.00006557329653743461,
-      "pooled_variance_s2": 0.0011275107011442847,
-      "shrunk_variance_s2": 0.0005965419988408597,
-      "allocation_score": 6.561949156117279
+      "pilot_mean_cost_s": 2.2584744876666667,
+      "pilot_sample_variance_s2": 0.000010329947408956119,
+      "pooled_variance_s2": 0.0007263970778594034,
+      "shrunk_variance_s2": 0.00036836351263417976,
+      "allocation_score": 5.86196733219646
     },
     {
       "id": {
@@ -518,11 +537,11 @@
       "probability_population_size": 422,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.939917624,
-      "pilot_sample_variance_s2": 0.00008690291564054425,
-      "pooled_variance_s2": 0.0011275107011442847,
-      "shrunk_variance_s2": 0.0006072068083924145,
-      "allocation_score": 6.064753954586141
+      "pilot_mean_cost_s": 2.2527813763333335,
+      "pilot_sample_variance_s2": 0.00010458804333323473,
+      "pooled_variance_s2": 0.0007263970778594034,
+      "shrunk_variance_s2": 0.0004154925605963191,
+      "allocation_score": 5.731054697933209
     },
     {
       "id": {
@@ -533,13 +552,13 @@
       "population_size": 519,
       "anchor_count": 0,
       "probability_population_size": 519,
-      "probability_sample_count": 2,
+      "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.917989924333334,
-      "pilot_sample_variance_s2": 0.00340694004524022,
-      "pooled_variance_s2": 0.0011275107011442847,
-      "shrunk_variance_s2": 0.002267225373192252,
-      "allocation_score": 14.46681109266414
+      "pilot_mean_cost_s": 2.2666203956666666,
+      "pilot_sample_variance_s2": 0.0013116157524998824,
+      "pooled_variance_s2": 0.0007263970778594034,
+      "shrunk_variance_s2": 0.0010190064151796429,
+      "allocation_score": 11.004401330794227
     },
     {
       "id": {
@@ -552,11 +571,11 @@
       "probability_population_size": 481,
       "probability_sample_count": 2,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.9175644320000003,
-      "pilot_sample_variance_s2": 0.0010300842394722722,
-      "pooled_variance_s2": 0.0011275107011442847,
-      "shrunk_variance_s2": 0.0010787974703082785,
-      "allocation_score": 9.249213579712592
+      "pilot_mean_cost_s": 2.269238196,
+      "pilot_sample_variance_s2": 0.0018446557796911456,
+      "pooled_variance_s2": 0.0007263970778594034,
+      "shrunk_variance_s2": 0.0012855264287752746,
+      "allocation_score": 11.448419603687968
     },
     {
       "id": {
@@ -567,13 +586,13 @@
       "population_size": 441,
       "anchor_count": 0,
       "probability_population_size": 441,
-      "probability_sample_count": 2,
+      "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.86651391,
-      "pilot_sample_variance_s2": 0.0012749144524382846,
-      "pooled_variance_s2": 0.0011275107011442847,
-      "shrunk_variance_s2": 0.0012012125767912846,
-      "allocation_score": 9.027583165648199
+      "pilot_mean_cost_s": 2.2268173253333337,
+      "pilot_sample_variance_s2": 0.0013900466622129852,
+      "pooled_variance_s2": 0.0007263970778594034,
+      "shrunk_variance_s2": 0.0010582218700361944,
+      "allocation_score": 9.613569272539099
     },
     {
       "id": {
@@ -584,13 +603,13 @@
       "population_size": 408,
       "anchor_count": 0,
       "probability_population_size": 408,
-      "probability_sample_count": 2,
+      "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.930554396666667,
-      "pilot_sample_variance_s2": 0.0019869151240337235,
-      "pooled_variance_s2": 0.0011275107011442847,
-      "shrunk_variance_s2": 0.001557212912589004,
-      "allocation_score": 9.405010130198376
+      "pilot_mean_cost_s": 2.2790115736666667,
+      "pilot_sample_variance_s2": 0.000983593213907443,
+      "pooled_variance_s2": 0.0007263970778594034,
+      "shrunk_variance_s2": 0.0008549951458834233,
+      "allocation_score": 7.90257674776345
     },
     {
       "id": {
@@ -603,11 +622,11 @@
       "probability_population_size": 30,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 3.0860749149999998,
-      "pilot_sample_variance_s2": 5.530434746827356e-6,
-      "pooled_variance_s2": 0.13631473689393894,
-      "shrunk_variance_s2": 0.06816013366434288,
-      "allocation_score": 4.458443210899605
+      "pilot_mean_cost_s": 2.4035636879999998,
+      "pilot_sample_variance_s2": 6.291510143409495e-7,
+      "pooled_variance_s2": 0.08501242647519908,
+      "shrunk_variance_s2": 0.04250652781310671,
+      "allocation_score": 3.989525569831762
     },
     {
       "id": {
@@ -620,11 +639,11 @@
       "probability_population_size": 30,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 3.101080244666667,
-      "pilot_sample_variance_s2": 0.00003085384842898616,
-      "pooled_variance_s2": 0.13631473689393894,
-      "shrunk_variance_s2": 0.06817279537118397,
-      "allocation_score": 4.448056587932084
+      "pilot_mean_cost_s": 2.400804067333333,
+      "pilot_sample_variance_s2": 4.683794051861518e-6,
+      "pooled_variance_s2": 0.08501242647519908,
+      "shrunk_variance_s2": 0.04250855513462547,
+      "allocation_score": 3.9919129975071757
     },
     {
       "id": {
@@ -637,11 +656,11 @@
       "probability_population_size": 30,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 3.0486115490000003,
-      "pilot_sample_variance_s2": 0.010573265517908893,
-      "pooled_variance_s2": 0.13631473689393894,
-      "shrunk_variance_s2": 0.07344400120592391,
-      "allocation_score": 4.656379558223405
+      "pilot_mean_cost_s": 2.3792119150000004,
+      "pilot_sample_variance_s2": 0.004986138039673346,
+      "pooled_variance_s2": 0.08501242647519908,
+      "shrunk_variance_s2": 0.04499928225743621,
+      "allocation_score": 4.125793478559198
     },
     {
       "id": {
@@ -652,13 +671,13 @@
       "population_size": 30,
       "anchor_count": 1,
       "probability_population_size": 29,
-      "probability_sample_count": 2,
+      "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 3.1370047756666666,
-      "pilot_sample_variance_s2": 0.7330916232814328,
-      "pooled_variance_s2": 0.13631473689393894,
-      "shrunk_variance_s2": 0.4347031800876859,
-      "allocation_score": 10.795352219835587
+      "pilot_mean_cost_s": 2.4403776026666666,
+      "pilot_sample_variance_s2": 0.45967836372018556,
+      "pooled_variance_s2": 0.08501242647519908,
+      "shrunk_variance_s2": 0.2723453950976923,
+      "allocation_score": 9.687896734325946
     },
     {
       "id": {
@@ -671,11 +690,11 @@
       "probability_population_size": 60,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 3.056104199,
-      "pilot_sample_variance_s2": 0.00028304063896831443,
-      "pooled_variance_s2": 0.0041083272479274825,
-      "shrunk_variance_s2": 0.0021956839434478983,
-      "allocation_score": 1.608244536084678
+      "pilot_mean_cost_s": 2.3930535699999997,
+      "pilot_sample_variance_s2": 0.00001184907566365803,
+      "pooled_variance_s2": 0.0021472463500709148,
+      "shrunk_variance_s2": 0.0010795477128672864,
+      "allocation_score": 1.2743712374174094
     },
     {
       "id": {
@@ -688,11 +707,11 @@
       "probability_population_size": 54,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 3.094950491666667,
-      "pilot_sample_variance_s2": 0.0008681257683317723,
-      "pooled_variance_s2": 0.0041083272479274825,
-      "shrunk_variance_s2": 0.0024882265081296274,
-      "allocation_score": 1.5311292846257314
+      "pilot_mean_cost_s": 2.3850224213333333,
+      "pilot_sample_variance_s2": 0.0001532583707690124,
+      "pooled_variance_s2": 0.0021472463500709148,
+      "shrunk_variance_s2": 0.0011502523604199637,
+      "allocation_score": 1.1858891437513033
     },
     {
       "id": {
@@ -705,11 +724,11 @@
       "probability_population_size": 55,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 3.0667749796666666,
-      "pilot_sample_variance_s2": 0.0016163590388528013,
-      "pooled_variance_s2": 0.0041083272479274825,
-      "shrunk_variance_s2": 0.002862343143390142,
-      "allocation_score": 1.6802835749542036
+      "pilot_mean_cost_s": 2.388010791333333,
+      "pilot_sample_variance_s2": 0.00016705610963696542,
+      "pooled_variance_s2": 0.0021472463500709148,
+      "shrunk_variance_s2": 0.00115715122985394,
+      "allocation_score": 1.2107085450229556
     },
     {
       "id": {
@@ -722,11 +741,11 @@
       "probability_population_size": 49,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 3.0526147713333334,
-      "pilot_sample_variance_s2": 0.018170114300422358,
-      "pooled_variance_s2": 0.0041083272479274825,
-      "shrunk_variance_s2": 0.01113922077417492,
-      "allocation_score": 2.9599711974742244
+      "pilot_mean_cost_s": 2.369580666,
+      "pilot_sample_variance_s2": 0.011017208667840114,
+      "pooled_variance_s2": 0.0021472463500709148,
+      "shrunk_variance_s2": 0.006582227508955514,
+      "allocation_score": 2.58253832864849
     },
     {
       "id": {
@@ -739,11 +758,11 @@
       "probability_population_size": 139,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 3.069880412,
-      "pilot_sample_variance_s2": 0.0002763798807060223,
-      "pooled_variance_s2": 0.014033139221825197,
-      "shrunk_variance_s2": 0.00715475955126561,
-      "allocation_score": 6.710449199103391
+      "pilot_mean_cost_s": 2.392155502,
+      "pilot_sample_variance_s2": 1.4833060915571404e-6,
+      "pooled_variance_s2": 0.007657956990428002,
+      "shrunk_variance_s2": 0.00382972014825978,
+      "allocation_score": 5.561649506781138
     },
     {
       "id": {
@@ -754,13 +773,13 @@
       "population_size": 133,
       "anchor_count": 0,
       "probability_population_size": 133,
-      "probability_sample_count": 2,
+      "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 3.087934807,
-      "pilot_sample_variance_s2": 0.011199293614882847,
-      "pooled_variance_s2": 0.014033139221825197,
-      "shrunk_variance_s2": 0.012616216418354021,
-      "allocation_score": 8.501237409740154
+      "pilot_mean_cost_s": 2.392765608,
+      "pilot_sample_variance_s2": 0.007972135906593325,
+      "pooled_variance_s2": 0.007657956990428002,
+      "shrunk_variance_s2": 0.007815046448510663,
+      "allocation_score": 7.600940691702829
     },
     {
       "id": {
@@ -771,13 +790,13 @@
       "population_size": 134,
       "anchor_count": 0,
       "probability_population_size": 134,
-      "probability_sample_count": 2,
+      "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 3.0932722973333333,
-      "pilot_sample_variance_s2": 0.030807159205300798,
-      "pooled_variance_s2": 0.014033139221825197,
-      "shrunk_variance_s2": 0.022420149213562997,
-      "allocation_score": 11.408143400062093
+      "pilot_mean_cost_s": 2.4366180473333334,
+      "pilot_sample_variance_s2": 0.012840599660599255,
+      "pooled_variance_s2": 0.007657956990428002,
+      "shrunk_variance_s2": 0.010249278325513629,
+      "allocation_score": 8.690759133003084
     },
     {
       "id": {
@@ -788,64 +807,64 @@
       "population_size": 129,
       "anchor_count": 1,
       "probability_population_size": 128,
-      "probability_sample_count": 2,
+      "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 3.1825378393333335,
-      "pilot_sample_variance_s2": 0.023457659170435248,
-      "pooled_variance_s2": 0.014033139221825197,
-      "shrunk_variance_s2": 0.018745399196130223,
-      "allocation_score": 9.823596786886156
+      "pilot_mean_cost_s": 2.493763985,
+      "pilot_sample_variance_s2": 0.010920441785945461,
+      "pooled_variance_s2": 0.007657956990428002,
+      "shrunk_variance_s2": 0.00928919938818673,
+      "allocation_score": 7.812165547101998
     },
     {
       "id": {
         "family": "self_exciting",
         "level": 0,
         "region": 0
+      },
+      "population_size": 50,
+      "anchor_count": 1,
+      "probability_population_size": 49,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.3089490969999997,
+      "pilot_sample_variance_s2": 6.89606576122805e-6,
+      "pooled_variance_s2": 0.000015363764989823165,
+      "shrunk_variance_s2": 0.000011129915375525607,
+      "allocation_score": 0.10758081545181807
+    },
+    {
+      "id": {
+        "family": "self_exciting",
+        "level": 0,
+        "region": 1
+      },
+      "population_size": 45,
+      "anchor_count": 0,
+      "probability_population_size": 45,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.3088859189999997,
+      "pilot_sample_variance_s2": 0.00003338538064092658,
+      "pooled_variance_s2": 0.000015363764989823165,
+      "shrunk_variance_s2": 0.000024374572815374873,
+      "allocation_score": 0.14621091087944466
+    },
+    {
+      "id": {
+        "family": "self_exciting",
+        "level": 0,
+        "region": 2
       },
       "population_size": 40,
       "anchor_count": 0,
       "probability_population_size": 40,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.979088879666667,
-      "pilot_sample_variance_s2": 4.810901760977829e-6,
-      "pooled_variance_s2": 0.00003824984274720107,
-      "shrunk_variance_s2": 0.00002153037225408945,
-      "allocation_score": 0.10753356166648495
-    },
-    {
-      "id": {
-        "family": "self_exciting",
-        "level": 0,
-        "region": 1
-      },
-      "population_size": 40,
-      "anchor_count": 1,
-      "probability_population_size": 39,
-      "probability_sample_count": 1,
-      "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.9859440836666664,
-      "pilot_sample_variance_s2": 1.8460284646958847e-6,
-      "pooled_variance_s2": 0.00003824984274720107,
-      "shrunk_variance_s2": 0.00002004793560594848,
-      "allocation_score": 0.10105518490441771
-    },
-    {
-      "id": {
-        "family": "self_exciting",
-        "level": 0,
-        "region": 2
-      },
-      "population_size": 32,
-      "anchor_count": 0,
-      "probability_population_size": 32,
-      "probability_sample_count": 1,
-      "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.9796137403333334,
-      "pilot_sample_variance_s2": 1.9965308459890425e-6,
-      "pooled_variance_s2": 0.00003824984274720107,
-      "shrunk_variance_s2": 0.000020123186796595055,
-      "allocation_score": 0.08316074540897452
+      "pilot_mean_cost_s": 2.3032694563333336,
+      "pilot_sample_variance_s2": 7.270507323329753e-8,
+      "pooled_variance_s2": 0.000015363764989823165,
+      "shrunk_variance_s2": 7.71823503152823e-6,
+      "allocation_score": 0.07322284800487557
     },
     {
       "id": {
@@ -853,84 +872,84 @@
         "level": 0,
         "region": 3
       },
-      "population_size": 32,
+      "population_size": 36,
       "anchor_count": 0,
-      "probability_population_size": 32,
+      "probability_population_size": 36,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.9824278853333333,
-      "pilot_sample_variance_s2": 0.00015718021067745441,
-      "pooled_variance_s2": 0.00003824984274720107,
-      "shrunk_variance_s2": 0.00009771502671232774,
-      "allocation_score": 0.18316634536243304
+      "pilot_mean_cost_s": 2.3040571323333334,
+      "pilot_sample_variance_s2": 2.2680953806655207e-6,
+      "pooled_variance_s2": 0.000015363764989823165,
+      "shrunk_variance_s2": 8.815930185244342e-6,
+      "allocation_score": 0.07041901564778023
     },
     {
       "id": {
         "family": "self_exciting",
         "level": 1,
         "region": 0
+      },
+      "population_size": 85,
+      "anchor_count": 0,
+      "probability_population_size": 85,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.3047022,
+      "pilot_sample_variance_s2": 1.8409894012904137e-7,
+      "pooled_variance_s2": 4.403644800220452e-7,
+      "shrunk_variance_s2": 3.1223171007554326e-7,
+      "allocation_score": 0.03128599858722695
+    },
+    {
+      "id": {
+        "family": "self_exciting",
+        "level": 1,
+        "region": 1
+      },
+      "population_size": 81,
+      "anchor_count": 0,
+      "probability_population_size": 81,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.3051524696666665,
+      "pilot_sample_variance_s2": 1.6929909644220876e-7,
+      "pooled_variance_s2": 4.403644800220452e-7,
+      "shrunk_variance_s2": 3.04831788232127e-7,
+      "allocation_score": 0.029455426647988215
+    },
+    {
+      "id": {
+        "family": "self_exciting",
+        "level": 1,
+        "region": 2
+      },
+      "population_size": 76,
+      "anchor_count": 0,
+      "probability_population_size": 76,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.303649018333333,
+      "pilot_sample_variance_s2": 3.125386410533929e-8,
+      "pooled_variance_s2": 4.403644800220452e-7,
+      "shrunk_variance_s2": 2.3580917206369225e-7,
+      "allocation_score": 0.02431564439773929
+    },
+    {
+      "id": {
+        "family": "self_exciting",
+        "level": 1,
+        "region": 3
       },
       "population_size": 72,
       "anchor_count": 0,
       "probability_population_size": 72,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.984257101666666,
-      "pilot_sample_variance_s2": 3.735644616664638e-6,
-      "pooled_variance_s2": 0.00006927347602231042,
-      "shrunk_variance_s2": 0.00003650456031948753,
-      "allocation_score": 0.25181867785064976
-    },
-    {
-      "id": {
-        "family": "self_exciting",
-        "level": 1,
-        "region": 1
-      },
-      "population_size": 67,
-      "anchor_count": 0,
-      "probability_population_size": 67,
-      "probability_sample_count": 1,
-      "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.991436678,
-      "pilot_sample_variance_s2": 0.000172121670860374,
-      "pooled_variance_s2": 0.00006927347602231042,
-      "shrunk_variance_s2": 0.00012069757344134221,
-      "allocation_score": 0.4255828955357626
-    },
-    {
-      "id": {
-        "family": "self_exciting",
-        "level": 1,
-        "region": 2
-      },
-      "population_size": 64,
-      "anchor_count": 0,
-      "probability_population_size": 64,
-      "probability_sample_count": 1,
-      "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.9755375560000004,
-      "pilot_sample_variance_s2": 2.6481354677079227e-6,
-      "pooled_variance_s2": 0.00006927347602231042,
-      "shrunk_variance_s2": 0.000035960805745009174,
-      "allocation_score": 0.22249075151179273
-    },
-    {
-      "id": {
-        "family": "self_exciting",
-        "level": 1,
-        "region": 3
-      },
-      "population_size": 60,
-      "anchor_count": 0,
-      "probability_population_size": 60,
-      "probability_sample_count": 1,
-      "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.981574035,
-      "pilot_sample_variance_s2": 7.0229700289127615e-6,
-      "pooled_variance_s2": 0.00006927347602231042,
-      "shrunk_variance_s2": 0.00003814822302561159,
-      "allocation_score": 0.21461773542085474
+      "pilot_mean_cost_s": 2.3042412769999996,
+      "pilot_sample_variance_s2": 1.7518046817602815e-7,
+      "pooled_variance_s2": 4.403644800220452e-7,
+      "shrunk_variance_s2": 3.0777247409903666e-7,
+      "allocation_score": 0.026313790231144114
     },
     {
       "id": {
@@ -938,16 +957,16 @@
         "level": 2,
         "region": 0
       },
-      "population_size": 171,
-      "anchor_count": 0,
-      "probability_population_size": 171,
+      "population_size": 206,
+      "anchor_count": 1,
+      "probability_population_size": 205,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.980401515333334,
-      "pilot_sample_variance_s2": 5.062407375845004e-7,
-      "pooled_variance_s2": 0.000016068516437574375,
-      "shrunk_variance_s2": 8.287378587579438e-6,
-      "allocation_score": 0.2851460186221866
+      "pilot_mean_cost_s": 2.304587351,
+      "pilot_sample_variance_s2": 5.746775601280987e-7,
+      "pooled_variance_s2": 4.184780238343031e-6,
+      "shrunk_variance_s2": 2.379728899235565e-6,
+      "allocation_score": 0.2083152270844287
     },
     {
       "id": {
@@ -955,16 +974,16 @@
         "level": 2,
         "region": 1
       },
-      "population_size": 167,
+      "population_size": 198,
       "anchor_count": 0,
-      "probability_population_size": 167,
+      "probability_population_size": 198,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.982373132333333,
-      "pilot_sample_variance_s2": 0.00003248111873261543,
-      "pooled_variance_s2": 0.000016068516437574375,
-      "shrunk_variance_s2": 0.000024274817585094903,
-      "allocation_score": 0.4764457634608539
+      "pilot_mean_cost_s": 2.3057744046666664,
+      "pilot_sample_variance_s2": 3.080569234532638e-6,
+      "pooled_variance_s2": 4.184780238343031e-6,
+      "shrunk_variance_s2": 3.6326747364378345e-6,
+      "allocation_score": 0.2485249757423293
     },
     {
       "id": {
@@ -972,16 +991,16 @@
         "level": 2,
         "region": 2
       },
-      "population_size": 156,
+      "population_size": 188,
       "anchor_count": 0,
-      "probability_population_size": 156,
+      "probability_population_size": 188,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.9770552313333334,
-      "pilot_sample_variance_s2": 0.0000195028653178839,
-      "pooled_variance_s2": 0.000016068516437574375,
-      "shrunk_variance_s2": 0.000017785690877729137,
-      "allocation_score": 0.3812997515766097
+      "pilot_mean_cost_s": 2.3050840036666664,
+      "pilot_sample_variance_s2": 2.700273640820195e-6,
+      "pooled_variance_s2": 4.184780238343031e-6,
+      "shrunk_variance_s2": 3.442526939581613e-6,
+      "allocation_score": 0.2297487433253105
     },
     {
       "id": {
@@ -989,16 +1008,424 @@
         "level": 2,
         "region": 3
       },
-      "population_size": 152,
-      "anchor_count": 1,
-      "probability_population_size": 151,
+      "population_size": 180,
+      "anchor_count": 0,
+      "probability_population_size": 180,
       "probability_sample_count": 1,
       "pilot_sample_count": 3,
-      "pilot_mean_cost_s": 2.980003706,
-      "pilot_sample_variance_s2": 0.000014200029047112912,
-      "pooled_variance_s2": 0.000016068516437574375,
-      "shrunk_variance_s2": 0.000015134272742343644,
-      "allocation_score": 0.3402901070125237
+      "pilot_mean_cost_s": 2.302548954666667,
+      "pilot_sample_variance_s2": 7.991717913041794e-6,
+      "pooled_variance_s2": 4.184780238343031e-6,
+      "shrunk_variance_s2": 6.088249075692413e-6,
+      "allocation_score": 0.29269430648761957
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 0,
+        "region": 0
+      },
+      "population_size": 96,
+      "anchor_count": 0,
+      "probability_population_size": 96,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.2995015776666663,
+      "pilot_sample_variance_s2": 0.0021377633926272124,
+      "pooled_variance_s2": 0.005671808602142217,
+      "shrunk_variance_s2": 0.0039047859973847148,
+      "allocation_score": 3.9559700570060206
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 0,
+        "region": 1
+      },
+      "population_size": 72,
+      "anchor_count": 0,
+      "probability_population_size": 72,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.266003884333333,
+      "pilot_sample_variance_s2": 0.00039147876955845587,
+      "pooled_variance_s2": 0.005671808602142217,
+      "shrunk_variance_s2": 0.0030316436858503363,
+      "allocation_score": 2.633548068920647
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 0,
+        "region": 2
+      },
+      "population_size": 72,
+      "anchor_count": 0,
+      "probability_population_size": 72,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.3398154723333335,
+      "pilot_sample_variance_s2": 0.005108341919795973,
+      "pooled_variance_s2": 0.005671808602142217,
+      "shrunk_variance_s2": 0.005390075260969095,
+      "allocation_score": 3.4557244585421767
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 0,
+        "region": 3
+      },
+      "population_size": 54,
+      "anchor_count": 0,
+      "probability_population_size": 54,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.3309727873333332,
+      "pilot_sample_variance_s2": 0.0053511519601152965,
+      "pooled_variance_s2": 0.005671808602142217,
+      "shrunk_variance_s2": 0.005511480281128757,
+      "allocation_score": 2.6257857498446096
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 0,
+        "region": 4
+      },
+      "population_size": 96,
+      "anchor_count": 1,
+      "probability_population_size": 95,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.2076990980000004,
+      "pilot_sample_variance_s2": 0.0008674031581434758,
+      "pooled_variance_s2": 0.005671808602142217,
+      "shrunk_variance_s2": 0.0032696058801428463,
+      "allocation_score": 3.655959432667449
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 0,
+        "region": 5
+      },
+      "population_size": 72,
+      "anchor_count": 0,
+      "probability_population_size": 72,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.1386665763333332,
+      "pilot_sample_variance_s2": 0.005564853047008931,
+      "pooled_variance_s2": 0.005671808602142217,
+      "shrunk_variance_s2": 0.005618330824575574,
+      "allocation_score": 3.690324949755774
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 0,
+        "region": 6
+      },
+      "population_size": 72,
+      "anchor_count": 0,
+      "probability_population_size": 72,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.2651103496666667,
+      "pilot_sample_variance_s2": 0.000014741381307972856,
+      "pooled_variance_s2": 0.005671808602142217,
+      "shrunk_variance_s2": 0.0028432749917250946,
+      "allocation_score": 2.550922396407041
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 0,
+        "region": 7
+      },
+      "population_size": 54,
+      "anchor_count": 0,
+      "probability_population_size": 54,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.265884421,
+      "pilot_sample_variance_s2": 0.0002194380004953361,
+      "pooled_variance_s2": 0.005671808602142217,
+      "shrunk_variance_s2": 0.0029456233013187764,
+      "allocation_score": 1.9469889486788712
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 1,
+        "region": 0
+      },
+      "population_size": 240,
+      "anchor_count": 0,
+      "probability_population_size": 240,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.2716201136666663,
+      "pilot_sample_variance_s2": 0.00003863702849119204,
+      "pooled_variance_s2": 0.008259226912396498,
+      "shrunk_variance_s2": 0.004148931970443845,
+      "allocation_score": 10.256791940226439
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 1,
+        "region": 1
+      },
+      "population_size": 198,
+      "anchor_count": 0,
+      "probability_population_size": 198,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.2700417440000003,
+      "pilot_sample_variance_s2": 0.0002606160382541396,
+      "pooled_variance_s2": 0.008259226912396498,
+      "shrunk_variance_s2": 0.004259921475325319,
+      "allocation_score": 8.577269685395724
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 1,
+        "region": 2
+      },
+      "population_size": 198,
+      "anchor_count": 0,
+      "probability_population_size": 198,
+      "probability_sample_count": 2,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.429823779,
+      "pilot_sample_variance_s2": 0.023455187845632396,
+      "pooled_variance_s2": 0.008259226912396498,
+      "shrunk_variance_s2": 0.015857207379014446,
+      "allocation_score": 15.995254490526248
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 1,
+        "region": 3
+      },
+      "population_size": 162,
+      "anchor_count": 0,
+      "probability_population_size": 162,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.380446108,
+      "pilot_sample_variance_s2": 0.014571838771615277,
+      "pooled_variance_s2": 0.008259226912396498,
+      "shrunk_variance_s2": 0.011415532842005888,
+      "allocation_score": 11.218477767152432
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 1,
+        "region": 4
+      },
+      "population_size": 224,
+      "anchor_count": 0,
+      "probability_population_size": 224,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.251153249666667,
+      "pilot_sample_variance_s2": 0.00003627485036317987,
+      "pooled_variance_s2": 0.008259226912396498,
+      "shrunk_variance_s2": 0.004147750881379839,
+      "allocation_score": 9.615056042977166
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 1,
+        "region": 5
+      },
+      "population_size": 186,
+      "anchor_count": 0,
+      "probability_population_size": 186,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.2790821503333336,
+      "pilot_sample_variance_s2": 0.003482860795598821,
+      "pooled_variance_s2": 0.008259226912396498,
+      "shrunk_variance_s2": 0.00587104385399766,
+      "allocation_score": 9.440404788835028
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 1,
+        "region": 6
+      },
+      "population_size": 186,
+      "anchor_count": 0,
+      "probability_population_size": 186,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.236839824,
+      "pilot_sample_variance_s2": 0.0006266867413533532,
+      "pooled_variance_s2": 0.008259226912396498,
+      "shrunk_variance_s2": 0.004442956826874926,
+      "allocation_score": 8.289561304976372
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 1,
+        "region": 7
+      },
+      "population_size": 153,
+      "anchor_count": 0,
+      "probability_population_size": 153,
+      "probability_sample_count": 1,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.2431263713333336,
+      "pilot_sample_variance_s2": 0.00016373487004993744,
+      "pooled_variance_s2": 0.008259226912396498,
+      "shrunk_variance_s2": 0.004211480891223218,
+      "allocation_score": 6.629518356667296
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 0
+      },
+      "population_size": 662,
+      "anchor_count": 0,
+      "probability_population_size": 662,
+      "probability_sample_count": 2,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.2875838273333335,
+      "pilot_sample_variance_s2": 0.0006209727281243221,
+      "pooled_variance_s2": 0.007628753717610642,
+      "shrunk_variance_s2": 0.004124863222867483,
+      "allocation_score": 28.110868062491186
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 1
+      },
+      "population_size": 564,
+      "anchor_count": 0,
+      "probability_population_size": 564,
+      "probability_sample_count": 2,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.279739963,
+      "pilot_sample_variance_s2": 0.00016057888796877924,
+      "pooled_variance_s2": 0.007628753717610642,
+      "shrunk_variance_s2": 0.0038946663027897106,
+      "allocation_score": 23.311572722812407
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 2
+      },
+      "population_size": 564,
+      "anchor_count": 0,
+      "probability_population_size": 564,
+      "probability_sample_count": 2,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.4410804936666666,
+      "pilot_sample_variance_s2": 0.016473007705780165,
+      "pooled_variance_s2": 0.007628753717610642,
+      "shrunk_variance_s2": 0.012050880711695404,
+      "allocation_score": 39.62757052606292
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 3
+      },
+      "population_size": 477,
+      "anchor_count": 0,
+      "probability_population_size": 477,
+      "probability_sample_count": 2,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.2925163706666667,
+      "pilot_sample_variance_s2": 0.00025045883411021434,
+      "pooled_variance_s2": 0.007628753717610642,
+      "shrunk_variance_s2": 0.003939606275860428,
+      "allocation_score": 19.77372848592631
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 4
+      },
+      "population_size": 638,
+      "anchor_count": 0,
+      "probability_population_size": 638,
+      "probability_sample_count": 2,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.2319844436666667,
+      "pilot_sample_variance_s2": 0.0008535309220976137,
+      "pooled_variance_s2": 0.007628753717610642,
+      "shrunk_variance_s2": 0.004241142319854128,
+      "allocation_score": 27.810994564877213
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 5
+      },
+      "population_size": 543,
+      "anchor_count": 0,
+      "probability_population_size": 543,
+      "probability_sample_count": 2,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.39491916,
+      "pilot_sample_variance_s2": 0.014574508736641848,
+      "pooled_variance_s2": 0.007628753717610642,
+      "shrunk_variance_s2": 0.011101631227126246,
+      "allocation_score": 36.96985938984032
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 6
+      },
+      "population_size": 543,
+      "anchor_count": 1,
+      "probability_population_size": 542,
+      "probability_sample_count": 2,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.254040272,
+      "pilot_sample_variance_s2": 0.00001940379139638793,
+      "pooled_variance_s2": 0.007628753717610642,
+      "shrunk_variance_s2": 0.003824078754503515,
+      "allocation_score": 22.324506374980178
+    },
+    {
+      "id": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 7
+      },
+      "population_size": 459,
+      "anchor_count": 0,
+      "probability_population_size": 459,
+      "probability_sample_count": 2,
+      "pilot_sample_count": 3,
+      "pilot_mean_cost_s": 2.2760227966666666,
+      "pilot_sample_variance_s2": 0.0001355480488248962,
+      "pooled_variance_s2": 0.007628753717610642,
+      "shrunk_variance_s2": 0.0038821508832177693,
+      "allocation_score": 18.9566061466355
     }
   ],
   "quick": [
@@ -1228,22 +1655,22 @@
       "family": "self_exciting",
       "level": 0,
       "lattice": [
-        32,
+        36,
         16
       ],
       "parameter_bits": [
-        4602678819172646912,
+        4603129179135383962,
         4631261011851512929
       ],
       "cell": {
         "family": "self_exciting",
-        "phi": 0.5,
+        "phi": 0.55,
         "tau_s": 43.088693800637664
       },
       "stratum": {
         "family": "self_exciting",
         "level": 0,
-        "region": 1
+        "region": 0
       },
       "kind": "anchor",
       "quick": true,
@@ -1264,22 +1691,102 @@
       "family": "self_exciting",
       "level": 2,
       "lattice": [
-        60,
-        31
+        1,
+        0
       ],
       "parameter_bits": [
-        4605831338911806260,
-        4648069624941596401
+        4592770899992431821,
+        4611686018427387904
       ],
       "cell": {
         "family": "self_exciting",
-        "phi": 0.8500000000000001,
-        "tau_s": 552.3371695079533
+        "phi": 0.1125,
+        "tau_s": 2.0
       },
       "stratum": {
         "family": "self_exciting",
         "level": 2,
-        "region": 3
+        "region": 0
+      },
+      "kind": "anchor",
+      "quick": true,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 1
+      },
+      "extrapolation_weight": {
+        "numerator": 1,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 0,
+      "lattice": [
+        12,
+        12,
+        24
+      ],
+      "parameter_bits": [
+        4602678819172646912,
+        4607182418800017408,
+        4636737291354636288
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.5,
+        "k": 1.0,
+        "tau_s": 100.0
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 0,
+        "region": 4
+      },
+      "kind": "anchor",
+      "quick": true,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 1
+      },
+      "extrapolation_weight": {
+        "numerator": 1,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 2,
+      "lattice": [
+        0,
+        23,
+        44
+      ],
+      "parameter_bits": [
+        4596373779694328218,
+        4620836230531262270,
+        4660134898793709568
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.2,
+        "k": 8.254041852680185,
+        "tau_s": 3600.0
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 6
       },
       "kind": "anchor",
       "quick": true,
@@ -1929,47 +2436,6 @@
       "family": "wall_mmpp",
       "level": 1,
       "lattice": [
-        0,
-        6,
-        36
-      ],
-      "parameter_bits": [
-        4591870180066957722,
-        4618806834673376083,
-        4652007308841189376
-      ],
-      "cell": {
-        "family": "wall_mmpp",
-        "occupancy": 0.1,
-        "rate_ratio": 6.324555320336759,
-        "tau_s": 1000.0
-      },
-      "stratum": {
-        "family": "wall_mmpp",
-        "level": 1,
-        "region": 4
-      },
-      "kind": "probability",
-      "quick": false,
-      "seeds": [
-        201,
-        202,
-        203,
-        204
-      ],
-      "inclusion_probability": {
-        "numerator": 2,
-        "denominator": 186
-      },
-      "extrapolation_weight": {
-        "numerator": 186,
-        "denominator": 2
-      }
-    },
-    {
-      "family": "wall_mmpp",
-      "level": 1,
-      "lattice": [
         2,
         8,
         16
@@ -2040,12 +2506,12 @@
         204
       ],
       "inclusion_probability": {
-        "numerator": 2,
+        "numerator": 1,
         "denominator": 186
       },
       "extrapolation_weight": {
         "numerator": 186,
-        "denominator": 2
+        "denominator": 1
       }
     },
     {
@@ -2340,47 +2806,6 @@
       "level": 2,
       "lattice": [
         0,
-        2,
-        18
-      ],
-      "parameter_bits": [
-        4591870180066957722,
-        4613792799034734847,
-        4629594237989614119
-      ],
-      "cell": {
-        "family": "wall_mmpp",
-        "occupancy": 0.1,
-        "rate_ratio": 2.935598535244139,
-        "tau_s": 31.622776601683793
-      },
-      "stratum": {
-        "family": "wall_mmpp",
-        "level": 2,
-        "region": 0
-      },
-      "kind": "probability",
-      "quick": false,
-      "seeds": [
-        201,
-        202,
-        203,
-        204
-      ],
-      "inclusion_probability": {
-        "numerator": 2,
-        "denominator": 540
-      },
-      "extrapolation_weight": {
-        "numerator": 540,
-        "denominator": 2
-      }
-    },
-    {
-      "family": "wall_mmpp",
-      "level": 2,
-      "lattice": [
-        0,
         24,
         35
       ],
@@ -2409,12 +2834,12 @@
         204
       ],
       "inclusion_probability": {
-        "numerator": 2,
+        "numerator": 1,
         "denominator": 441
       },
       "extrapolation_weight": {
         "numerator": 441,
-        "denominator": 2
+        "denominator": 1
       }
     },
     {
@@ -2450,12 +2875,12 @@
         204
       ],
       "inclusion_probability": {
-        "numerator": 2,
+        "numerator": 1,
         "denominator": 540
       },
       "extrapolation_weight": {
         "numerator": 540,
-        "denominator": 2
+        "denominator": 1
       }
     },
     {
@@ -2491,94 +2916,12 @@
         204
       ],
       "inclusion_probability": {
-        "numerator": 2,
+        "numerator": 1,
         "denominator": 519
       },
       "extrapolation_weight": {
         "numerator": 519,
-        "denominator": 2
-      }
-    },
-    {
-      "family": "wall_mmpp",
-      "level": 2,
-      "lattice": [
-        8,
-        11,
-        24
-      ],
-      "parameter_bits": [
-        4599075939470750516,
-        4625339830158632765,
-        4636737291354636288
-      ],
-      "cell": {
-        "family": "wall_mmpp",
-        "occupancy": 0.30000000000000004,
-        "rate_ratio": 16.508083705360367,
-        "tau_s": 100.0
-      },
-      "stratum": {
-        "family": "wall_mmpp",
-        "level": 2,
-        "region": 4
-      },
-      "kind": "probability",
-      "quick": false,
-      "seeds": [
-        201,
-        202,
-        203,
-        204
-      ],
-      "inclusion_probability": {
-        "numerator": 2,
-        "denominator": 519
-      },
-      "extrapolation_weight": {
-        "numerator": 519,
-        "denominator": 2
-      }
-    },
-    {
-      "family": "wall_mmpp",
-      "level": 2,
-      "lattice": [
-        8,
-        20,
-        39
-      ],
-      "parameter_bits": [
-        4599075939470750516,
-        4636232872481077879,
-        4655535771001441639
-      ],
-      "cell": {
-        "family": "wall_mmpp",
-        "occupancy": 0.30000000000000004,
-        "rate_ratio": 92.8317766722556,
-        "tau_s": 1778.2794100389235
-      },
-      "stratum": {
-        "family": "wall_mmpp",
-        "level": 2,
-        "region": 6
-      },
-      "kind": "probability",
-      "quick": false,
-      "seeds": [
-        201,
-        202,
-        203,
-        204
-      ],
-      "inclusion_probability": {
-        "numerator": 2,
-        "denominator": 441
-      },
-      "extrapolation_weight": {
-        "numerator": 441,
-        "denominator": 2
+        "denominator": 1
       }
     },
     {
@@ -2696,53 +3039,12 @@
         204
       ],
       "inclusion_probability": {
-        "numerator": 2,
+        "numerator": 1,
         "denominator": 408
       },
       "extrapolation_weight": {
         "numerator": 408,
-        "denominator": 2
-      }
-    },
-    {
-      "family": "wall_mmpp",
-      "level": 2,
-      "lattice": [
-        12,
-        24,
-        31
-      ],
-      "parameter_bits": [
-        4600877379321698714,
-        4641240890982006784,
-        4645447511374444060
-      ],
-      "cell": {
-        "family": "wall_mmpp",
-        "occupancy": 0.4,
-        "rate_ratio": 200.0,
-        "tau_s": 383.11868495572867
-      },
-      "stratum": {
-        "family": "wall_mmpp",
-        "level": 2,
-        "region": 7
-      },
-      "kind": "probability",
-      "quick": false,
-      "seeds": [
-        201,
-        202,
-        203,
-        204
-      ],
-      "inclusion_probability": {
-        "numerator": 2,
-        "denominator": 408
-      },
-      "extrapolation_weight": {
-        "numerator": 408,
-        "denominator": 2
+        "denominator": 1
       }
     },
     {
@@ -3016,42 +3318,6 @@
       "family": "log_ou_cox",
       "level": 0,
       "lattice": [
-        28,
-        36
-      ],
-      "parameter_bits": [
-        4609884578576439706,
-        4652007308841189376
-      ],
-      "cell": {
-        "family": "log_ou_cox",
-        "sigma_y": 1.6,
-        "tau_s": 1000.0
-      },
-      "stratum": {
-        "family": "log_ou_cox",
-        "level": 0,
-        "region": 3
-      },
-      "kind": "probability",
-      "quick": false,
-      "seeds": [
-        201,
-        202
-      ],
-      "inclusion_probability": {
-        "numerator": 2,
-        "denominator": 29
-      },
-      "extrapolation_weight": {
-        "numerator": 29,
-        "denominator": 2
-      }
-    },
-    {
-      "family": "log_ou_cox",
-      "level": 0,
-      "lattice": [
         36,
         24
       ],
@@ -3076,12 +3342,12 @@
         202
       ],
       "inclusion_probability": {
-        "numerator": 2,
+        "numerator": 1,
         "denominator": 29
       },
       "extrapolation_weight": {
         "numerator": 29,
-        "denominator": 2
+        "denominator": 1
       }
     },
     {
@@ -3278,44 +3544,6 @@
       "family": "log_ou_cox",
       "level": 2,
       "lattice": [
-        2,
-        34
-      ],
-      "parameter_bits": [
-        4599075939470750516,
-        4649203924233707759
-      ],
-      "cell": {
-        "family": "log_ou_cox",
-        "sigma_y": 0.30000000000000004,
-        "tau_s": 681.2920690579612
-      },
-      "stratum": {
-        "family": "log_ou_cox",
-        "level": 2,
-        "region": 2
-      },
-      "kind": "probability",
-      "quick": false,
-      "seeds": [
-        201,
-        202,
-        203,
-        204
-      ],
-      "inclusion_probability": {
-        "numerator": 2,
-        "denominator": 134
-      },
-      "extrapolation_weight": {
-        "numerator": 134,
-        "denominator": 2
-      }
-    },
-    {
-      "family": "log_ou_cox",
-      "level": 2,
-      "lattice": [
         4,
         15
       ],
@@ -3380,12 +3608,12 @@
         204
       ],
       "inclusion_probability": {
-        "numerator": 2,
+        "numerator": 1,
         "denominator": 134
       },
       "extrapolation_weight": {
         "numerator": 134,
-        "denominator": 2
+        "denominator": 1
       }
     },
     {
@@ -3418,50 +3646,12 @@
         204
       ],
       "inclusion_probability": {
-        "numerator": 2,
+        "numerator": 1,
         "denominator": 133
       },
       "extrapolation_weight": {
         "numerator": 133,
-        "denominator": 2
-      }
-    },
-    {
-      "family": "log_ou_cox",
-      "level": 2,
-      "lattice": [
-        30,
-        42
-      ],
-      "parameter_bits": [
-        4610334938539176756,
-        4658342592146417360
-      ],
-      "cell": {
-        "family": "log_ou_cox",
-        "sigma_y": 1.7000000000000002,
-        "tau_s": 2784.953300167668
-      },
-      "stratum": {
-        "family": "log_ou_cox",
-        "level": 2,
-        "region": 3
-      },
-      "kind": "probability",
-      "quick": false,
-      "seeds": [
-        201,
-        202,
-        203,
-        204
-      ],
-      "inclusion_probability": {
-        "numerator": 2,
-        "denominator": 128
-      },
-      "extrapolation_weight": {
-        "numerator": 128,
-        "denominator": 2
+        "denominator": 1
       }
     },
     {
@@ -3494,72 +3684,34 @@
         204
       ],
       "inclusion_probability": {
-        "numerator": 2,
+        "numerator": 1,
         "denominator": 128
       },
       "extrapolation_weight": {
         "numerator": 128,
-        "denominator": 2
-      }
-    },
-    {
-      "family": "log_ou_cox",
-      "level": 2,
-      "lattice": [
-        36,
-        3
-      ],
-      "parameter_bits": [
-        4611686018427387904,
-        4610687477661058830
-      ],
-      "cell": {
-        "family": "log_ou_cox",
-        "sigma_y": 2.0,
-        "tau_s": 1.7782794100389228
-      },
-      "stratum": {
-        "family": "log_ou_cox",
-        "level": 2,
-        "region": 1
-      },
-      "kind": "probability",
-      "quick": false,
-      "seeds": [
-        201,
-        202,
-        203,
-        204
-      ],
-      "inclusion_probability": {
-        "numerator": 2,
-        "denominator": 133
-      },
-      "extrapolation_weight": {
-        "numerator": 133,
-        "denominator": 2
+        "denominator": 1
       }
     },
     {
       "family": "self_exciting",
       "level": 0,
       "lattice": [
-        32,
+        36,
         16
       ],
       "parameter_bits": [
-        4602678819172646912,
+        4603129179135383962,
         4631261011851512929
       ],
       "cell": {
         "family": "self_exciting",
-        "phi": 0.5,
+        "phi": 0.55,
         "tau_s": 43.088693800637664
       },
       "stratum": {
         "family": "self_exciting",
         "level": 0,
-        "region": 1
+        "region": 0
       },
       "kind": "anchor",
       "quick": true,
@@ -3580,22 +3732,22 @@
       "family": "self_exciting",
       "level": 0,
       "lattice": [
-        24,
-        4
+        20,
+        24
       ],
       "parameter_bits": [
-        4600877379321698714,
-        4616537374060998735
+        4599976659396224614,
+        4641240890982006784
       ],
       "cell": {
         "family": "self_exciting",
-        "phi": 0.4,
-        "tau_s": 4.308869380063768
+        "phi": 0.35,
+        "tau_s": 200.0
       },
       "stratum": {
         "family": "self_exciting",
         "level": 0,
-        "region": 0
+        "region": 2
       },
       "kind": "probability",
       "quick": false,
@@ -3617,21 +3769,21 @@
       "level": 0,
       "lattice": [
         24,
-        32
+        4
       ],
       "parameter_bits": [
         4600877379321698714,
-        4648488871632306176
+        4616537374060998735
       ],
       "cell": {
         "family": "self_exciting",
         "phi": 0.4,
-        "tau_s": 600.0
+        "tau_s": 4.308869380063768
       },
       "stratum": {
         "family": "self_exciting",
         "level": 0,
-        "region": 2
+        "region": 0
       },
       "kind": "probability",
       "quick": false,
@@ -3641,10 +3793,10 @@
       ],
       "inclusion_probability": {
         "numerator": 1,
-        "denominator": 32
+        "denominator": 49
       },
       "extrapolation_weight": {
-        "numerator": 32,
+        "numerator": 49,
         "denominator": 1
       }
     },
@@ -3652,16 +3804,16 @@
       "family": "self_exciting",
       "level": 0,
       "lattice": [
-        36,
+        60,
         24
       ],
       "parameter_bits": [
-        4603129179135383962,
+        4605831338911806259,
         4641240890982006784
       ],
       "cell": {
         "family": "self_exciting",
-        "phi": 0.55,
+        "phi": 0.85,
         "tau_s": 200.0
       },
       "stratum": {
@@ -3677,10 +3829,10 @@
       ],
       "inclusion_probability": {
         "numerator": 1,
-        "denominator": 32
+        "denominator": 36
       },
       "extrapolation_weight": {
-        "numerator": 32,
+        "numerator": 36,
         "denominator": 1
       }
     },
@@ -3688,17 +3840,17 @@
       "family": "self_exciting",
       "level": 0,
       "lattice": [
-        44,
-        4
+        72,
+        0
       ],
       "parameter_bits": [
-        4604029899060858061,
-        4616537374060998735
+        4607002274814922588,
+        4611686018427387904
       ],
       "cell": {
         "family": "self_exciting",
-        "phi": 0.65,
-        "tau_s": 4.308869380063768
+        "phi": 0.98,
+        "tau_s": 2.0
       },
       "stratum": {
         "family": "self_exciting",
@@ -3713,48 +3865,10 @@
       ],
       "inclusion_probability": {
         "numerator": 1,
-        "denominator": 39
+        "denominator": 45
       },
       "extrapolation_weight": {
-        "numerator": 39,
-        "denominator": 1
-      }
-    },
-    {
-      "family": "self_exciting",
-      "level": 1,
-      "lattice": [
-        4,
-        10
-      ],
-      "parameter_bits": [
-        4594572339843380020,
-        4623860284825608171
-      ],
-      "cell": {
-        "family": "self_exciting",
-        "phi": 0.15000000000000002,
-        "tau_s": 13.625841381159224
-      },
-      "stratum": {
-        "family": "self_exciting",
-        "level": 1,
-        "region": 0
-      },
-      "kind": "probability",
-      "quick": false,
-      "seeds": [
-        201,
-        202,
-        203,
-        204
-      ],
-      "inclusion_probability": {
-        "numerator": 1,
-        "denominator": 72
-      },
-      "extrapolation_weight": {
-        "numerator": 72,
+        "numerator": 45,
         "denominator": 1
       }
     },
@@ -3789,10 +3903,48 @@
       ],
       "inclusion_probability": {
         "numerator": 1,
-        "denominator": 64
+        "denominator": 76
       },
       "extrapolation_weight": {
-        "numerator": 64,
+        "numerator": 76,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "self_exciting",
+      "level": 1,
+      "lattice": [
+        30,
+        4
+      ],
+      "parameter_bits": [
+        4602228459209909862,
+        4616537374060998735
+      ],
+      "cell": {
+        "family": "self_exciting",
+        "phi": 0.475,
+        "tau_s": 4.308869380063768
+      },
+      "stratum": {
+        "family": "self_exciting",
+        "level": 1,
+        "region": 0
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 85
+      },
+      "extrapolation_weight": {
+        "numerator": 85,
         "denominator": 1
       }
     },
@@ -3801,16 +3953,16 @@
       "level": 1,
       "lattice": [
         50,
-        0
+        12
       ],
       "parameter_bits": [
-        4604705439004963636,
-        4611686018427387904
+        4604705439004963635,
+        4626322717216342016
       ],
       "cell": {
         "family": "self_exciting",
-        "phi": 0.7250000000000001,
-        "tau_s": 2.0
+        "phi": 0.725,
+        "tau_s": 20.0
       },
       "stratum": {
         "family": "self_exciting",
@@ -3827,10 +3979,10 @@
       ],
       "inclusion_probability": {
         "numerator": 1,
-        "denominator": 67
+        "denominator": 81
       },
       "extrapolation_weight": {
-        "numerator": 67,
+        "numerator": 81,
         "denominator": 1
       }
     },
@@ -3838,17 +3990,17 @@
       "family": "self_exciting",
       "level": 1,
       "lattice": [
-        60,
-        26
+        70,
+        24
       ],
       "parameter_bits": [
-        4605831338911806260,
-        4643871975749983881
+        4606822130829827768,
+        4641240890982006784
       ],
       "cell": {
         "family": "self_exciting",
-        "phi": 0.8500000000000001,
-        "tau_s": 293.559853524414
+        "phi": 0.96,
+        "tau_s": 200.0
       },
       "stratum": {
         "family": "self_exciting",
@@ -3865,10 +4017,10 @@
       ],
       "inclusion_probability": {
         "numerator": 1,
-        "denominator": 60
+        "denominator": 72
       },
       "extrapolation_weight": {
-        "numerator": 60,
+        "numerator": 72,
         "denominator": 1
       }
     },
@@ -3876,22 +4028,22 @@
       "family": "self_exciting",
       "level": 2,
       "lattice": [
-        60,
-        31
+        1,
+        0
       ],
       "parameter_bits": [
-        4605831338911806260,
-        4648069624941596401
+        4592770899992431821,
+        4611686018427387904
       ],
       "cell": {
         "family": "self_exciting",
-        "phi": 0.8500000000000001,
-        "tau_s": 552.3371695079533
+        "phi": 0.1125,
+        "tau_s": 2.0
       },
       "stratum": {
         "family": "self_exciting",
         "level": 2,
-        "region": 3
+        "region": 0
       },
       "kind": "anchor",
       "quick": true,
@@ -3915,16 +4067,16 @@
       "level": 2,
       "lattice": [
         4,
-        31
+        27
       ],
       "parameter_bits": [
-        4594572339843380020,
-        4648069624941596401
+        4594572339843380019,
+        4644964380635682693
       ],
       "cell": {
         "family": "self_exciting",
-        "phi": 0.15000000000000002,
-        "tau_s": 552.3371695079533
+        "phi": 0.15,
+        "tau_s": 355.65588200778467
       },
       "stratum": {
         "family": "self_exciting",
@@ -3941,10 +4093,10 @@
       ],
       "inclusion_probability": {
         "numerator": 1,
-        "denominator": 156
+        "denominator": 188
       },
       "extrapolation_weight": {
-        "numerator": 156,
+        "numerator": 188,
         "denominator": 1
       }
     },
@@ -3979,48 +4131,10 @@
       ],
       "inclusion_probability": {
         "numerator": 1,
-        "denominator": 171
+        "denominator": 205
       },
       "extrapolation_weight": {
-        "numerator": 171,
-        "denominator": 1
-      }
-    },
-    {
-      "family": "self_exciting",
-      "level": 2,
-      "lattice": [
-        43,
-        32
-      ],
-      "parameter_bits": [
-        4603917309070173799,
-        4648488871632306176
-      ],
-      "cell": {
-        "family": "self_exciting",
-        "phi": 0.6375000000000001,
-        "tau_s": 600.0
-      },
-      "stratum": {
-        "family": "self_exciting",
-        "level": 2,
-        "region": 3
-      },
-      "kind": "probability",
-      "quick": false,
-      "seeds": [
-        201,
-        202,
-        203,
-        204
-      ],
-      "inclusion_probability": {
-        "numerator": 1,
-        "denominator": 151
-      },
-      "extrapolation_weight": {
-        "numerator": 151,
+        "numerator": 205,
         "denominator": 1
       }
     },
@@ -4055,13 +4169,1468 @@
       ],
       "inclusion_probability": {
         "numerator": 1,
-        "denominator": 167
+        "denominator": 198
       },
       "extrapolation_weight": {
-        "numerator": 167,
+        "numerator": 198,
         "denominator": 1
+      }
+    },
+    {
+      "family": "self_exciting",
+      "level": 2,
+      "lattice": [
+        65,
+        20
+      ],
+      "parameter_bits": [
+        4606371770867090719,
+        4636232872481077879
+      ],
+      "cell": {
+        "family": "self_exciting",
+        "phi": 0.91,
+        "tau_s": 92.8317766722556
+      },
+      "stratum": {
+        "family": "self_exciting",
+        "level": 2,
+        "region": 3
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 180
+      },
+      "extrapolation_weight": {
+        "numerator": 180,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 0,
+      "lattice": [
+        12,
+        12,
+        24
+      ],
+      "parameter_bits": [
+        4602678819172646912,
+        4607182418800017408,
+        4636737291354636288
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.5,
+        "k": 1.0,
+        "tau_s": 100.0
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 0,
+        "region": 4
+      },
+      "kind": "anchor",
+      "quick": true,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 1
+      },
+      "extrapolation_weight": {
+        "numerator": 1,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 0,
+      "lattice": [
+        0,
+        24,
+        4
+      ],
+      "parameter_bits": [
+        4596373779694328218,
+        4621819117588971520,
+        4612033774433628239
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.2,
+        "k": 10.0,
+        "tau_s": 2.154434690031884
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 0,
+        "region": 2
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 72
+      },
+      "extrapolation_weight": {
+        "numerator": 72,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 0,
+      "lattice": [
+        12,
+        8,
+        8
+      ],
+      "parameter_bits": [
+        4602678819172646912,
+        4602033163014492146,
+        4616911982862754295
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.5,
+        "k": 0.46415888336127786,
+        "tau_s": 4.641588833612778
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 0,
+        "region": 0
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 96
+      },
+      "extrapolation_weight": {
+        "numerator": 96,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 0,
+      "lattice": [
+        12,
+        8,
+        28
+      ],
+      "parameter_bits": [
+        4602678819172646912,
+        4602033163014492146,
+        4641784259741757310
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.5,
+        "k": 0.46415888336127786,
+        "tau_s": 215.44346900318845
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 0,
+        "region": 4
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 95
+      },
+      "extrapolation_weight": {
+        "numerator": 95,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 0,
+      "lattice": [
+        12,
+        16,
+        44
+      ],
+      "parameter_bits": [
+        4602678819172646912,
+        4612033774433628238,
+        4660134898793709568
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.5,
+        "k": 2.1544346900318834,
+        "tau_s": 3600.0
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 0,
+        "region": 6
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 72
+      },
+      "extrapolation_weight": {
+        "numerator": 72,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 0,
+      "lattice": [
+        16,
+        8,
+        0
+      ],
+      "parameter_bits": [
+        4603579539098121012,
+        4602033163014492146,
+        4607182418800017408
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.6000000000000001,
+        "k": 0.46415888336127786,
+        "tau_s": 1.0
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 0,
+        "region": 1
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 72
+      },
+      "extrapolation_weight": {
+        "numerator": 72,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 0,
+      "lattice": [
+        16,
+        20,
+        16
+      ],
+      "parameter_bits": [
+        4603579539098121012,
+        4616911982862754297,
+        4626757412224142433
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.6000000000000001,
+        "k": 4.64158883361278,
+        "tau_s": 21.544346900318832
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 0,
+        "region": 3
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 54
+      },
+      "extrapolation_weight": {
+        "numerator": 54,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 0,
+      "lattice": [
+        24,
+        8,
+        40
+      ],
+      "parameter_bits": [
+        4605380978949069210,
+        4602033163014492146,
+        4656956067059670447
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.8,
+        "k": 0.46415888336127786,
+        "tau_s": 2154.4346900318847
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 0,
+        "region": 5
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 72
+      },
+      "extrapolation_weight": {
+        "numerator": 72,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 0,
+      "lattice": [
+        24,
+        16,
+        36
+      ],
+      "parameter_bits": [
+        4605380978949069210,
+        4612033774433628238,
+        4652007308841189376
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.8,
+        "k": 2.1544346900318834,
+        "tau_s": 1000.0
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 0,
+        "region": 7
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 54
+      },
+      "extrapolation_weight": {
+        "numerator": 54,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 1,
+      "lattice": [
+        0,
+        22,
+        4
+      ],
+      "parameter_bits": [
+        4596373779694328218,
+        4619356685198237676,
+        4612033774433628239
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.2,
+        "k": 6.812920690579613,
+        "tau_s": 2.154434690031884
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 1,
+        "region": 2
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 198
+      },
+      "extrapolation_weight": {
+        "numerator": 198,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 1,
+      "lattice": [
+        4,
+        12,
+        26
+      ],
+      "parameter_bits": [
+        4599075939470750516,
+        4607182418800017408,
+        4639368376122613385
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.30000000000000004,
+        "k": 1.0,
+        "tau_s": 146.779926762207
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 1,
+        "region": 4
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 224
+      },
+      "extrapolation_weight": {
+        "numerator": 224,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 1,
+      "lattice": [
+        4,
+        22,
+        16
+      ],
+      "parameter_bits": [
+        4599075939470750516,
+        4619356685198237676,
+        4626757412224142433
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.30000000000000004,
+        "k": 6.812920690579613,
+        "tau_s": 21.544346900318832
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 1,
+        "region": 2
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 198
+      },
+      "extrapolation_weight": {
+        "numerator": 198,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 1,
+      "lattice": [
+        6,
+        16,
+        24
+      ],
+      "parameter_bits": [
+        4599976659396224615,
+        4612033774433628238,
+        4636737291354636288
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.35000000000000003,
+        "k": 2.1544346900318834,
+        "tau_s": 100.0
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 1,
+        "region": 6
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 186
+      },
+      "extrapolation_weight": {
+        "numerator": 186,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 1,
+      "lattice": [
+        10,
+        8,
+        4
+      ],
+      "parameter_bits": [
+        4601778099247172813,
+        4602033163014492146,
+        4612033774433628239
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.45,
+        "k": 0.46415888336127786,
+        "tau_s": 2.154434690031884
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 1,
+        "region": 0
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 240
+      },
+      "extrapolation_weight": {
+        "numerator": 240,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 1,
+      "lattice": [
+        14,
+        24,
+        0
+      ],
+      "parameter_bits": [
+        4603129179135383962,
+        4621819117588971520,
+        4607182418800017408
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.55,
+        "k": 10.0,
+        "tau_s": 1.0
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 1,
+        "region": 3
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 162
+      },
+      "extrapolation_weight": {
+        "numerator": 162,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 1,
+      "lattice": [
+        16,
+        0,
+        18
+      ],
+      "parameter_bits": [
+        4603579539098121012,
+        4591870180066957722,
+        4629594237989614119
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.6000000000000001,
+        "k": 0.1,
+        "tau_s": 31.622776601683793
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 1,
+        "region": 1
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 198
+      },
+      "extrapolation_weight": {
+        "numerator": 198,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 1,
+      "lattice": [
+        16,
+        14,
+        32
+      ],
+      "parameter_bits": [
+        4603579539098121012,
+        4609289199407364351,
+        4646873185621870864
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.6000000000000001,
+        "k": 1.4677992676220695,
+        "tau_s": 464.15888336127773
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 1,
+        "region": 7
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 153
+      },
+      "extrapolation_weight": {
+        "numerator": 153,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 1,
+      "lattice": [
+        22,
+        4,
+        28
+      ],
+      "parameter_bits": [
+        4604930618986332160,
+        4596930189304312754,
+        4641784259741757310
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.75,
+        "k": 0.2154434690031884,
+        "tau_s": 215.44346900318845
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 1,
+        "region": 5
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 186
+      },
+      "extrapolation_weight": {
+        "numerator": 186,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 2,
+      "lattice": [
+        0,
+        23,
+        44
+      ],
+      "parameter_bits": [
+        4596373779694328218,
+        4620836230531262270,
+        4660134898793709568
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.2,
+        "k": 8.254041852680185,
+        "tau_s": 3600.0
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 6
+      },
+      "kind": "anchor",
+      "quick": true,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 1,
+        "denominator": 1
+      },
+      "extrapolation_weight": {
+        "numerator": 1,
+        "denominator": 1
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 2,
+      "lattice": [
+        0,
+        0,
+        11
+      ],
+      "parameter_bits": [
+        4596373779694328218,
+        4591870180066957722,
+        4620836230531262269
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.2,
+        "k": 0.1,
+        "tau_s": 8.254041852680183
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 0
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 662
+      },
+      "extrapolation_weight": {
+        "numerator": 662,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 2,
+      "lattice": [
+        0,
+        4,
+        39
+      ],
+      "parameter_bits": [
+        4596373779694328218,
+        4596930189304312754,
+        4655535771001441639
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.2,
+        "k": 0.2154434690031884,
+        "tau_s": 1778.2794100389235
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 4
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 638
+      },
+      "extrapolation_weight": {
+        "numerator": 638,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 2,
+      "lattice": [
+        2,
+        20,
+        2
+      ],
+      "parameter_bits": [
+        4598175219545276416,
+        4616911982862754297,
+        4609289199407364351
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.25,
+        "k": 4.64158883361278,
+        "tau_s": 1.4677992676220695
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 2
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 564
+      },
+      "extrapolation_weight": {
+        "numerator": 564,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 2,
+      "lattice": [
+        5,
+        16,
+        40
+      ],
+      "parameter_bits": [
+        4599526299433487566,
+        4612033774433628238,
+        4656956067059670447
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.32500000000000007,
+        "k": 2.1544346900318834,
+        "tau_s": 2154.4346900318847
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 6
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 542
+      },
+      "extrapolation_weight": {
+        "numerator": 542,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 2,
+      "lattice": [
+        6,
+        14,
+        16
+      ],
+      "parameter_bits": [
+        4599976659396224615,
+        4609289199407364351,
+        4626757412224142433
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.35000000000000003,
+        "k": 1.4677992676220695,
+        "tau_s": 21.544346900318832
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 2
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 564
+      },
+      "extrapolation_weight": {
+        "numerator": 564,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 2,
+      "lattice": [
+        8,
+        8,
+        43
+      ],
+      "parameter_bits": [
+        4600877379321698714,
+        4602033163014492146,
+        4659181313040396070
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.4,
+        "k": 0.46415888336127786,
+        "tau_s": 3166.3594048376135
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 4
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 638
+      },
+      "extrapolation_weight": {
+        "numerator": 638,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 2,
+      "lattice": [
+        8,
+        21,
+        36
+      ],
+      "parameter_bits": [
+        4600877379321698714,
+        4618017418883843623,
+        4652007308841189376
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.4,
+        "k": 5.623413251903492,
+        "tau_s": 1000.0
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 6
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 542
+      },
+      "extrapolation_weight": {
+        "numerator": 542,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 2,
+      "lattice": [
+        12,
+        8,
+        13
+      ],
+      "parameter_bits": [
+        4602678819172646912,
+        4602033163014492146,
+        4623009912444694350
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.5,
+        "k": 0.46415888336127786,
+        "tau_s": 12.115276586285884
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 0
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 662
+      },
+      "extrapolation_weight": {
+        "numerator": 662,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 2,
+      "lattice": [
+        13,
+        16,
+        32
+      ],
+      "parameter_bits": [
+        4602903999154015437,
+        4612033774433628238,
+        4646873185621870864
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.525,
+        "k": 2.1544346900318834,
+        "tau_s": 464.15888336127773
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 7
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 459
+      },
+      "extrapolation_weight": {
+        "numerator": 459,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 2,
+      "lattice": [
+        16,
+        1,
+        4
+      ],
+      "parameter_bits": [
+        4603579539098121012,
+        4593394397482282944,
+        4612033774433628239
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.6000000000000001,
+        "k": 0.12115276586285884,
+        "tau_s": 2.154434690031884
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 1
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 564
+      },
+      "extrapolation_weight": {
+        "numerator": 564,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 2,
+      "lattice": [
+        16,
+        9,
+        8
+      ],
+      "parameter_bits": [
+        4603579539098121012,
+        4603240339910440989,
+        4616911982862754295
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.6000000000000001,
+        "k": 0.562341325190349,
+        "tau_s": 4.641588833612778
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 1
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 564
+      },
+      "extrapolation_weight": {
+        "numerator": 564,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 2,
+      "lattice": [
+        19,
+        24,
+        4
+      ],
+      "parameter_bits": [
+        4604255079042226586,
+        4621819117588971520,
+        4612033774433628239
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.675,
+        "k": 10.0,
+        "tau_s": 2.154434690031884
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 3
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 477
+      },
+      "extrapolation_weight": {
+        "numerator": 477,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 2,
+      "lattice": [
+        20,
+        8,
+        23
+      ],
+      "parameter_bits": [
+        4604480259023595111,
+        4602033163014492146,
+        4635508682532499725
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.7000000000000001,
+        "k": 0.46415888336127786,
+        "tau_s": 82.54041852680184
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 5
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 543
+      },
+      "extrapolation_weight": {
+        "numerator": 543,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 2,
+      "lattice": [
+        22,
+        18,
+        28
+      ],
+      "parameter_bits": [
+        4604930618986332160,
+        4614303235046005587,
+        4641784259741757310
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.75,
+        "k": 3.1622776601683795,
+        "tau_s": 215.44346900318845
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 7
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 459
+      },
+      "extrapolation_weight": {
+        "numerator": 459,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 2,
+      "lattice": [
+        24,
+        7,
+        24
+      ],
+      "parameter_bits": [
+        4605380978949069210,
+        4600573272585127098,
+        4636737291354636288
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.8,
+        "k": 0.38311868495572876,
+        "tau_s": 100.0
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 5
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 543
+      },
+      "extrapolation_weight": {
+        "numerator": 543,
+        "denominator": 2
+      }
+    },
+    {
+      "family": "shot_noise",
+      "level": 2,
+      "lattice": [
+        24,
+        24,
+        7
+      ],
+      "parameter_bits": [
+        4605380978949069210,
+        4621819117588971520,
+        4615809484634043880
+      ],
+      "cell": {
+        "family": "shot_noise",
+        "m": 0.8,
+        "k": 10.0,
+        "tau_s": 3.8311868495572874
+      },
+      "stratum": {
+        "family": "shot_noise",
+        "level": 2,
+        "region": 3
+      },
+      "kind": "probability",
+      "quick": false,
+      "seeds": [
+        201,
+        202,
+        203,
+        204
+      ],
+      "inclusion_probability": {
+        "numerator": 2,
+        "denominator": 477
+      },
+      "extrapolation_weight": {
+        "numerator": 477,
+        "denominator": 2
       }
     }
   ],
-  "plan_sha256": "81b5325fc18758c77b033b68ffe086a0f807b7d9b3d81321cb751d2609ae932d"
+  "plan_sha256": "40f626ba85ef83934cd9ea0d77509bd4b5dad0cb3b27bf2db63488f5f413ee21"
 }

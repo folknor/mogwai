@@ -109,6 +109,16 @@ skip = [
     # Run them by name: `brokkr test -p mogwai-cli parity12a_observed
     # --timeout 279` and `... parity12a_generated_seed_N --timeout 279`.
     "parity12a_",
+    # The 12b brick E envelope gates, both `#[ignore]`d at the source for a
+    # COST reason: the closed-form conformance cross-check walks 12 cells by
+    # 2,000 simulated exposures (spec ceiling 900 s), and the fidelity gate
+    # runs 32 real candidate walks against 32 idealized months per probe cell
+    # at two grid steps. Both outlive the 20-second watchdog by design. Run
+    # them by name:
+    # `brokkr test -p mogwai-lab the_envelope_matches_the_closed_forms_where_they_are_exact --timeout 279`
+    # `brokkr test -p mogwai-lab the_envelope_simulator_is_faithful_to_the_candidate_walks --timeout 279`.
+    "the_envelope_matches_the_closed_forms_where_they_are_exact",
+    "the_envelope_simulator_is_faithful_to_the_candidate_walks",
     # Protocol 12b brick N3's two pins, both `#[ignore]`d at the source and
     # both unrunnable in this lane for reasons the lane cannot fix.
     #
@@ -270,6 +280,17 @@ features = ["hotpath"]
 [mogwai.targets.stage_a_batch]
 package = "mogwai-lab"
 example = "stage_a_batch_bench"
+
+# One predictive-envelope replicate month, per spec 9.7.
+#
+# The unit the envelope budgets are derived from: an evaluation is 500 * (1 + K)
+# months and nothing else, so a per-month price multiplies out to every K tier.
+# Carries NO registered features - its canonical output is a wall and a unit
+# price, and an instrumented build would measure the profiler instead. Argv is
+# `<family> [months]`.
+[mogwai.targets.envelope_evaluation]
+package = "mogwai-lab"
+example = "envelope_evaluation_bench"
 
 # NOT REGISTERED: `fill_walk_bench`, also an example target in `mogwai-data`.
 # It is a criterion harness that parses `--bench` itself - that is what lets it

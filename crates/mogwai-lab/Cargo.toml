@@ -29,6 +29,9 @@ mogwai-server.workspace = true
 
 serde.workspace = true
 serde_json.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+rand_distr.workspace = true
 zrip.workspace = true
 sha2.workspace = true
 rust_decimal.workspace = true
@@ -57,6 +60,12 @@ required-features = ["hotpath"]
 
 [[example]]
 name = "stage_a_batch_bench"
+
+# No `required-features`: its canonical output is a WALL and a per-month unit
+# price, which an instrumented build would distort. `--hotpath` on this target
+# is opt-in through the call site's own `--features`.
+[[example]]
+name = "envelope_evaluation_bench"
 
 [lints]
 workspace = true

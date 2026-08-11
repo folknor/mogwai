@@ -717,9 +717,7 @@ fn screen_accumulator_matches_the_generic_reduced_surface_exactly() {
         generic
             .push_parent(index, ts, 0, 0, false)
             .expect("generic parent");
-        screen
-            .push_parent(index, ts)
-            .expect("screen parent");
+        screen.push_parent(index, ts).expect("screen parent");
         generic.push_print(ts, 0);
         screen.push_print(ts);
     }
