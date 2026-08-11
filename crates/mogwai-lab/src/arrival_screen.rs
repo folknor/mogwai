@@ -338,7 +338,17 @@ pub struct SeedWalk {
     /// A1-A4 verdicts read - so nothing reads it.
     #[serde(default)]
     pub prints: u64,
-    pub realized_mean_gap_s: f64,
+    /// The realized mean parent gap, or `None` when the walk measured fewer
+    /// than two parents or refused before it could.
+    ///
+    /// `Option` rather than a NaN sentinel, and the distinction is not
+    /// cosmetic: NaN serializes to JSON `null` and will NOT deserialize back
+    /// into an `f64`, so a cached refused walk was unreadable and took the
+    /// whole run down with `invalid type: null, expected f64`. A sentinel that
+    /// cannot survive its own cache round trip is worse than no sentinel.
+    /// Since the 2026-08-11 amendment retired A4's mean-gap limb this value
+    /// gates nothing and is reported only.
+    pub realized_mean_gap_s: Option<f64>,
     pub refusal: Option<ScreenRefusal>,
     pub cost_s: f64,
 }
@@ -929,7 +939,7 @@ struct Projected {
     sessions: Vec<Value>,
     parents: u64,
     prints: u64,
-    realized_mean_gap_s: f64,
+    realized_mean_gap_s: Option<f64>,
 }
 
 /// The screen's cumulative work size for one process, in the two units a
@@ -1391,7 +1401,7 @@ fn project_seed_under(
                 sessions: Vec::new(),
                 parents: 0,
                 prints: 0,
-                realized_mean_gap_s: f64::NAN,
+                realized_mean_gap_s: None,
                 refusal: Some(refusal),
                 cost_s: started.elapsed().as_secs_f64(),
             }
@@ -1690,9 +1700,7 @@ fn project_stream(
     let realized_mean_gap_s = first
         .zip(last)
         .filter(|_| parents >= 2)
-        .map_or(f64::NAN, |(a, b)| {
-            (b - a) as f64 / ((parents - 1) as f64 * 1e9)
-        });
+        .map(|(a, b)| (b - a) as f64 / ((parents - 1) as f64 * 1e9));
     Ok(Projected {
         projection,
         #[cfg(test)]
@@ -1742,7 +1750,7 @@ fn composition_loss(observed: &CountMarginal, generated: &CountMarginal) -> LabR
 }
 
 #[cfg(test)]
-fn gap_within_tolerance(_ctx: &ScreenContext, _realized_s: f64) -> bool {
+fn gap_within_tolerance(_ctx: &ScreenContext, _realized_s: Option<f64>) -> bool {
     true
 }
 
@@ -2452,7 +2460,7 @@ fn verdict_from_walks_legacy(
                 variant: "mean_gap".into(),
                 clock_ns: 0,
                 detail: format!(
-                    "realized {} against declared {}",
+                    "realized {:?} against declared {}",
                     walk.realized_mean_gap_s, ctx.profile.scalars.mean_event_duration_s
                 ),
                 family: None,
@@ -3344,7 +3352,7 @@ mod tests {
         assert_eq!(projected.parents, 0);
         assert_eq!(projected.prints, 0);
         assert!(projected.sessions.is_empty());
-        assert!(projected.realized_mean_gap_s.is_nan());
+        assert!(projected.realized_mean_gap_s.is_none());
     }
 
     #[test]
@@ -3531,17 +3539,20 @@ mod tests {
             "warmup and lookahead are not measured"
         );
         assert!(
-            (projected.realized_mean_gap_s - 180.0).abs() < 1e-9,
-            "{}",
+            projected
+                .realized_mean_gap_s
+                .is_some_and(|gap| (gap - 180.0).abs() < 1e-9),
+            "{:?}",
             projected.realized_mean_gap_s
         );
 
-        // Fewer than two measured parents remains a NaN diagnostic. The
-        // amended A4 has no mean-gap limb, so it is not a refusal.
+        // Fewer than two measured parents leaves the gap UNMEASURED rather
+        // than substituting a number for it. The amended A4 has no mean-gap
+        // limb, so it is not a refusal either.
         let mut lonely = Scripted::of(vec![(start, 1), (end + MINUTE_NS, 1)]);
         let one = project_stream(&mut lonely, start, end, 0, 1).expect("a clean projection");
         assert_eq!(one.parents, 1);
-        assert!(one.realized_mean_gap_s.is_nan());
+        assert!(one.realized_mean_gap_s.is_none());
     }
 
     #[test]
@@ -3707,7 +3718,7 @@ mod tests {
             sessions,
             parents: 2,
             prints: 0,
-            realized_mean_gap_s: ctx.profile.scalars.mean_event_duration_s,
+            realized_mean_gap_s: Some(ctx.profile.scalars.mean_event_duration_s),
             refusal: None,
             cost_s: 0.0,
         }
@@ -3762,7 +3773,7 @@ mod tests {
         assert_typed_verdict_matches_legacy(&ctx, &cell, &[distorted]);
 
         let mut gap = perfect;
-        gap.realized_mean_gap_s *= 2.0;
+        gap.realized_mean_gap_s = gap.realized_mean_gap_s.map(|seconds| seconds * 2.0);
         assert_typed_verdict_matches_legacy(&ctx, &cell, &[gap]);
     }
 
@@ -3963,7 +3974,7 @@ mod tests {
             sessions: Vec::new(),
             parents: 0,
             prints: 0,
-            realized_mean_gap_s: f64::NAN,
+            realized_mean_gap_s: None,
             refusal: Some(ScreenRefusal {
                 variant: "intensity_ceiling".into(),
                 clock_ns: 1_234_567,
@@ -4007,7 +4018,7 @@ mod tests {
         let mut four = coarse;
         for seed in [203_u64, 204] {
             let mut bad = perfect_walk(&ctx, seed, observed.clone());
-            bad.realized_mean_gap_s = ctx.profile.scalars.mean_event_duration_s * 2.0;
+            bad.realized_mean_gap_s = Some(ctx.profile.scalars.mean_event_duration_s * 2.0);
             four.push(bad);
         }
         let refined = verdict_from_walks(&ctx, &cell, &four).expect("a verdict");
@@ -4162,6 +4173,49 @@ mod tests {
                 "seed {seed} block2"
             );
         }
+    }
+
+    /// A REFUSED walk is cached like any other product, so it has to survive
+    /// the round trip. It did not: `realized_mean_gap_s` was an `f64` carrying
+    /// NaN for "not measured", NaN serializes to JSON `null`, and `null` will
+    /// not deserialize back into an `f64` - so the first run to read a cached
+    /// refusal died with `invalid type: null, expected f64` before evaluating
+    /// a single cell. The field is an `Option` now and this pins it.
+    #[test]
+    fn a_cached_refused_walk_survives_its_own_round_trip() {
+        let refused = SeedWalk {
+            seed: 201,
+            projection: ScreenReduced::default(),
+            #[cfg(test)]
+            sessions: Vec::new(),
+            parents: 0,
+            prints: 0,
+            realized_mean_gap_s: None,
+            refusal: Some(ScreenRefusal {
+                variant: "intensity_ceiling".into(),
+                clock_ns: 1_783_696_315_000_000_000,
+                detail: "IntensityCeiling".into(),
+                family: Some(Family::LogOuCox),
+                canonical_params: None,
+                seed: Some(201),
+            }),
+            cost_s: 1.5,
+        };
+        let encoded = serde_json::to_string(&refused).expect("a refused walk serializes");
+        let decoded: SeedWalk =
+            serde_json::from_str(&encoded).expect("and deserializes back, which is the whole bug");
+        assert_eq!(decoded.seed, 201);
+        assert!(decoded.realized_mean_gap_s.is_none());
+        assert!(decoded.refusal.is_some());
+
+        // The measured case round-trips too, so the fix did not trade one
+        // direction for the other.
+        let mut measured = refused;
+        measured.realized_mean_gap_s = Some(0.0608);
+        measured.refusal = None;
+        let encoded = serde_json::to_string(&measured).expect("serializes");
+        let decoded: SeedWalk = serde_json::from_str(&encoded).expect("deserializes");
+        assert_eq!(decoded.realized_mean_gap_s, Some(0.0608));
     }
 
     #[test]
