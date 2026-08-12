@@ -227,9 +227,10 @@ fn observed_statistics_with_bootstrap(
 fn observed_traded_hours(sessions: &[Value]) -> anyhow::Result<Vec<i64>> {
     let first = sessions.first().ok_or_else(|| anyhow!("no observed sessions"))?;
     let block2 = first["block2"].as_object().ok_or_else(|| anyhow!("block2 is absent"))?;
-    let mut hours = block2.iter().filter_map(|(hour, windows)| {
-        windows["1"]["count_hist"].is_object().then(|| hour.parse::<i64>()).transpose()
-    }).collect::<Result<Vec<_>, _>>()?;
+    let mut hours = block2.iter()
+        .filter(|(_, windows)| windows["1"]["count_hist"].is_object())
+        .map(|(hour, _)| hour.parse::<i64>())
+        .collect::<Result<Vec<_>, _>>()?;
     hours.sort_unstable();
     if hours.len() != 23 { bail!("ordinary session has {} traded UTC endpoint hours, not 23", hours.len()); }
     Ok(hours)
