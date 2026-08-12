@@ -982,7 +982,10 @@ fn permutation_nulls(
     permutation_seed: u64,
 ) -> anyhow::Result<Value> {
     let base = residuals(sessions, &vec![1; sessions.len()]);
-    let observed = point["leading_eigenvalue"].as_f64().unwrap();
+    // A refused leading eigenvalue (degenerate hour, failed eigensolve)
+    // propagates: its p-value is null with the reason, while the
+    // consecutive-covariance nulls still run - the panels are independent.
+    let observed = point["leading_eigenvalue"].as_f64();
     let observed_c = &point["consecutive_session_covariance"];
     let mut eig_ge = 0;
     let mut c_ge: BTreeMap<(String, usize), u64> = BTreeMap::new();
@@ -1009,7 +1012,9 @@ fn permutation_nulls(
             }
         }
         let corr = corr_matrix(&r, &vec![1; sessions.len()])?;
-        if leading(&corr).0 >= observed {
+        if let Some(obs) = observed
+            && leading(&corr).0 >= obs
+        {
             eig_ge += 1
         }
         let pc = consecutive(sessions, &r)?;
@@ -1051,18 +1056,32 @@ fn permutation_nulls(
             json!({"hour_p_values":hs,"pooled_p_value":pooled}),
         );
     }
-    Ok(
-        json!({"leading_eigenvalue_p_value":(1+eig_ge)as f64/(REPS+1)as f64,"consecutive_session_covariance":cb}),
-    )
+    let eig_p = if observed.is_some() {
+        json!((1 + eig_ge) as f64 / (REPS + 1) as f64)
+    } else {
+        json!({"value": null, "reason": "propagated: the leading eigenvalue refused"})
+    };
+    Ok(json!({"leading_eigenvalue_p_value": eig_p, "consecutive_session_covariance": cb}))
 }
 
 fn leave_one_out(sessions: &[SessionSuff], point: &Value) -> anyhow::Result<Value> {
-    let full = point["leading_loading"]
-        .as_array()
-        .unwrap()
+    // Propagation: no full-sample loading means the stability sweep has no
+    // reference to compare against, so it refuses with the reason.
+    let Some(loading) = point["leading_loading"].as_array() else {
+        return Ok(
+            json!({"value": null, "reason": "propagated: the full-sample leading loading refused"}),
+        );
+    };
+    let full = loading
         .iter()
-        .map(|x| x.as_f64().unwrap())
-        .collect::<Vec<_>>();
+        .map(serde_json::Value::as_f64)
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default();
+    if full.is_empty() {
+        return Ok(
+            json!({"value": null, "reason": "propagated: the full-sample leading loading refused"}),
+        );
+    }
     let mut rows = Vec::new();
     for omit in 0..sessions.len() {
         let kept = sessions
