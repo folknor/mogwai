@@ -14,17 +14,17 @@ SDK: the SDK is not packaged for Debian and PEP 668 blocks a system pip, and
 analysis/ is stdlib-only by convention. Metadata calls are not billed, so this
 is safe to run repeatedly.
 
-    python3 analysis/databento_price.py info      # dataset range, schemas, raw JSON
-    python3 analysis/databento_price.py resolve   # symbology, incl. the 2011/2016 zero
-    python3 analysis/databento_price.py price     # the cost matrix
-    python3 analysis/databento_price.py plan      # total the recommended basket
-    python3 analysis/databento_price.py cache     # what the response cache holds
+    python3 analysis/databento_price.py info     # range, schemas, raw JSON
+    python3 analysis/databento_price.py resolve  # symbology, 2011/2016 zero
+    python3 analysis/databento_price.py price    # the cost matrix
+    python3 analysis/databento_price.py plan     # total the basket
+    python3 analysis/databento_price.py cache    # what the cache holds
 
 Every successful response is cached to analysis/databento_cache.json, keyed by
 endpoint and parameters, so a re-run of a phase is free and offline. A full
 price sweep is several hundred round trips at roughly a second each; without a
-cache, changing one window meant re-fetching all of them, and a Ctrl-C threw the
-whole sweep away. Errors are never cached, so a transient failure does not
+cache, changing one window meant re-fetching all of them, and a Ctrl-C threw
+the whole sweep away. Errors are never cached, so a transient failure does not
 become a permanent one. Pass --refresh to bypass and overwrite.
 
 The key is read from research/databento.key (research/ is gitignored) or from
@@ -52,14 +52,17 @@ CME_TZ = ZoneInfo("America/Chicago")
 
 
 def session_bounds_utc(start_date, end_date):
-    """Sessions [start_date, end_date) as Central time, returned as UTC instants."""
+    """Sessions [start_date, end_date) as Central time, as UTC instants."""
     first = dt.date.fromisoformat(start_date)
     last = dt.date.fromisoformat(end_date)
     open_ct = dt.datetime.combine(
         first - dt.timedelta(days=1), dt.time(17, 0), tzinfo=CME_TZ)
     close_ct = dt.datetime.combine(
         last - dt.timedelta(days=1), dt.time(16, 0), tzinfo=CME_TZ)
-    to_utc = lambda x: x.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+    def to_utc(x):
+        return x.astimezone(dt.UTC).strftime("%Y-%m-%dT%H:%M:%S")
+
     return to_utc(open_ct), to_utc(close_ct)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -77,8 +80,8 @@ SCOPES = {
     "parent": ("NQ.FUT,ES.FUT,CL.FUT,GC.FUT", "parent"),
     "continuous": ("NQ.c.0,ES.c.0,CL.c.0,GC.c.0", "continuous"),
     # The micros did not list until May 2019, so they cannot appear in any
-    # drift probe before then. MNQ against NQ is the useful pairing: same index,
-    # same 0.25 tick, one tenth the notional, different participant mix, so a
+    # drift probe before then. MNQ against NQ is the useful pairing: same
+    # index, same 0.25 tick, a tenth the notional, different participants, so a
     # difference in their fitted constants is about the contract rather than
     # about the market.
     "micros": ("MNQ.c.0,MES.c.0", "continuous"),
@@ -101,8 +104,8 @@ SCOPES = {
     "mnqv": ("MNQ.v.0", "continuous"),
     # GC alone. Not a preset target, but the only cheap way to get a SECOND
     # tick-size-to-price ratio: NQ and MNQ share the 0.25 tick and the same
-    # index, so they cannot between them test whether a derived zero_change_frac
-    # generalises. GC's 0.1 tick at a different price level can.
+    # index, so they cannot between them test whether a derived
+    # zero_change_frac generalises. GC's 0.1 tick at another price level can.
     "gcv": ("GC.v.0", "continuous"),
     "equity": ("NQ.c.0,ES.c.0,MNQ.c.0,MES.c.0", "continuous"),
 }
@@ -122,25 +125,30 @@ SCOPES = {
 # GC roll jumps and unnormalised short sessions, and neither survives.
 #
 # Part-month slices avoid the quarterly roll. Third Fridays are 2024-09-20,
-# 2026-03-20 and 2026-06-19, so a slice that merely sits late in the month still
-# straddles expiry; these end before it instead.
+# 2026-03-20 and 2026-06-19, so a slice that merely sits late in the month
+# still straddles expiry; these end before it instead.
 WINDOWS = [
-    ("2020-03.full", "2020-03-01", "2020-04-01", "extreme stress, 2x current-era max"),
+    ("2020-03.full", "2020-03-01", "2020-04-01",
+     "extreme stress, 2x current-era max"),
     ("2020-03.2wk", "2020-03-09", "2020-03-23", "the dislocation itself"),
     ("2024-05.full", "2024-05-01", "2024-06-01", "calmest current-era, p0"),
     ("2024-05.2wk", "2024-05-06", "2024-05-20", "no index roll"),
     ("2024-11.full", "2024-11-01", "2024-12-01", "p40"),
     ("2024-11.2wk", "2024-11-04", "2024-11-18", "no index roll"),
     ("2024-09.full", "2024-09-01", "2024-10-01", "p60"),
-    ("2024-09.2wk", "2024-09-03", "2024-09-17", "ends before the 09-20 expiry"),
+    ("2024-09.2wk", "2024-09-03", "2024-09-17",
+     "ends before the 09-20 expiry"),
     ("2025-11.full", "2025-11-01", "2025-12-01", "p80"),
     ("2025-11.2wk", "2025-11-03", "2025-11-17", "no index roll"),
-    ("2025-04.full", "2025-04-01", "2025-05-01", "current-era NQ stress, p100"),
+    ("2025-04.full", "2025-04-01", "2025-05-01",
+     "current-era NQ stress, p100"),
     ("2025-04.2wk", "2025-04-07", "2025-04-21", "no index roll"),
     ("2026-03.full", "2026-03-01", "2026-04-01", "recent high-vol, p90"),
-    ("2026-03.2wk", "2026-03-02", "2026-03-16", "ends before the 03-20 expiry"),
+    ("2026-03.2wk", "2026-03-02", "2026-03-16",
+     "ends before the 03-20 expiry"),
     ("2026-06.full", "2026-06-01", "2026-07-01", "most recent"),
-    ("2026-06.3wk", "2026-06-22", "2026-07-13", "post-expiry, day-of-week repeats"),
+    ("2026-06.3wk", "2026-06-22", "2026-07-13",
+     "post-expiry, day-of-week repeats"),
     ("2011-08.full", "2011-08-01", "2011-09-01", "drift probe, pre-micro era"),
     ("2011-08.2wk", "2011-08-01", "2011-08-15", "drift probe, pre-micro era"),
     ("2016-01.full", "2016-01-01", "2016-02-01", "drift probe, pre-micro era"),
@@ -150,8 +158,10 @@ WINDOWS = [
     # contiguous recent ones. No stratum labels: recency IS the selection.
     ("2026-04.full", "2026-04-01", "2026-05-01", "contiguous recent"),
     ("2026-05.full", "2026-05-01", "2026-06-01", "contiguous recent"),
-    ("2026-07.full", "2026-07-01", "2026-08-01", "contiguous recent, newest complete"),
-    ("2026-07.2wk", "2026-07-06", "2026-07-20", "paired test, post 06-19 expiry, no roll"),
+    ("2026-07.full", "2026-07-01", "2026-08-01",
+     "contiguous recent, newest complete"),
+    ("2026-07.2wk", "2026-07-06", "2026-07-20",
+     "paired test, post 06-19 expiry, no roll"),
 ]
 
 SCHEMAS = ["trades", "tbbo", "definition", "statistics"]
@@ -170,9 +180,8 @@ def api_key():
             with open(KEY_FILE) as fh:
                 key = fh.read().strip()
         if not key:
-            raise SystemExit(
-                "no API key: write it to research/databento.key or set DATABENTO_API_KEY"
-            )
+            raise SystemExit("no API key: write it to research/databento.key "
+                             "or set DATABENTO_API_KEY")
         _KEY = key
     return _KEY
 
@@ -214,7 +223,7 @@ def cache_store(key, value):
     """Write through immediately. A sweep is minutes long and interrupting it
     is normal, so batching the flush to exit would lose exactly the work the
     cache exists to preserve."""
-    cache()[key] = {"fetched": dt.datetime.now(dt.timezone.utc).isoformat(),
+    cache()[key] = {"fetched": dt.datetime.now(dt.UTC).isoformat(),
                     "body": value}
     tmp = CACHE_FILE + ".tmp"
     with open(tmp, "w") as fh:
@@ -223,12 +232,34 @@ def cache_store(key, value):
     os.replace(tmp, CACHE_FILE)
 
 
+class RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    """urllib follows redirects by default AND keeps the request's headers, so
+    validating the original URL alone would not stop the auth header - which IS
+    the key - from following a server redirect to an arbitrary host. Every
+    authenticated request goes through OPENER, which refuses redirects
+    outright; the vendor API serves directly.
+
+    Shared with databento_download, which imports OPENER from here rather than
+    building a second one, so the two cannot drift apart."""
+
+    # msg is unused but structural: this overrides urllib's
+    # HTTPRedirectHandler.redirect_request and must keep its exact signature.
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ARG002
+        raise urllib.error.HTTPError(
+            req.full_url, code,
+            "redirect to %r refused; the auth header follows no redirect"
+            % newurl, headers, fp)
+
+
+OPENER = urllib.request.build_opener(RefuseRedirect)
+
+
 def request(endpoint, params=None, raw=False):
     """GET an endpoint. Basic auth with the key as username, empty password.
 
-    Successful responses are served from and written to the disk cache. Failures
-    are returned but NOT cached, so a network blip does not freeze into a
-    permanent wrong answer for a window."""
+    Successful responses are served from and written to the disk cache.
+    Failures are returned but NOT cached, so a network blip does not freeze
+    into a permanent wrong answer for a window."""
     global CACHE_HITS, CACHE_MISSES
     key = cache_key(endpoint, params, raw)
     if not REFRESH and key in cache():
@@ -238,10 +269,15 @@ def request(endpoint, params=None, raw=False):
     url = "%s/%s" % (BASE, endpoint)
     if params:
         url = "%s?%s" % (url, urllib.parse.urlencode(params))
-    token = base64.b64encode(("%s:" % api_key()).encode("ascii")).decode("ascii")
-    req = urllib.request.Request(url, headers={"Authorization": "Basic %s" % token})
+    token = base64.b64encode(
+        ("%s:" % api_key()).encode("ascii")).decode("ascii")
+    # S310: url is built from the BASE constant plus url-encoded params, never
+    # from vendor or user input, and OPENER refuses redirects, so no response
+    # can steer the key-bearing auth header onto another scheme or host.
+    req = urllib.request.Request(  # noqa: S310
+        url, headers={"Authorization": "Basic %s" % token})
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with OPENER.open(req, timeout=60) as resp:
             body = resp.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         # Databento echoes an invalid Basic-auth username back in the error
@@ -281,7 +317,8 @@ def query(scope, window, schema):
 
 def measure(scope, window, schema):
     params = query(scope, window, schema)
-    cost = request("metadata.get_cost", dict(params, mode="historical-streaming"))
+    cost = request("metadata.get_cost",
+                   dict(params, mode="historical-streaming"))
     count = request("metadata.get_record_count", params)
     return cost, count
 
@@ -321,8 +358,8 @@ def phase_info():
 
 
 def phase_resolve():
-    """The 2011/2016 windows quoted at zero. If symbology fails to resolve there
-    but succeeds in 2025, the zero was an empty match, not free data."""
+    """The 2011/2016 windows quoted at zero. If symbology fails to resolve
+    there but succeeds in 2025, the zero was an empty match, not free data."""
     probes = [("2011-08", "2011-08-01", "2011-08-31"),
               ("2016-01", "2016-01-01", "2016-01-31"),
               ("2025-04", "2025-04-01", "2025-04-30")]
@@ -352,15 +389,17 @@ def phase_price():
             ", ".join(unknown), ", ".join(sorted(SCOPES))))
     for scope in scopes:
         print("=" * 78)
-        print("scope: %s  symbols=%s  stype_in=%s" % (scope, SCOPES[scope][0], SCOPES[scope][1]))
-        print("%-16s %-12s %12s %16s" % ("window", "schema", "cost", "records"))
+        print("scope: %s  symbols=%s  stype_in=%s"
+              % (scope, SCOPES[scope][0], SCOPES[scope][1]))
+        print("%-16s %-12s %12s %16s"
+              % ("window", "schema", "cost", "records"))
         for window in WINDOWS:
             for schema in schemas:
                 cost, count = measure(scope, window, schema)
                 dollars, records = as_number(cost), as_number(count)
-                # A zero cost, a zero record count and a failed parse are three
-                # different things and the whole point of this script is to keep
-                # them apart. Flags accumulate rather than overwrite.
+                # A zero cost, a zero record count and a failed parse are
+                # three different things and the whole point of this script
+                # is to keep them apart. Flags accumulate, never overwrite.
                 flags = []
                 if records == 0:
                     flags.append("EMPTY, not free")
@@ -372,19 +411,19 @@ def phase_price():
                 print("%-16s %-12s %12s %16s%s" % (
                     window[0], schema,
                     "n/a" if dollars is None else "%.2f" % dollars,
-                    "n/a" if records is None else "{:,}".format(int(records)),
+                    "n/a" if records is None else f"{int(records):,}",
                     flag,
                 ))
 
 
-# The basket recommended from the bar-derived stratification. Schema per window
-# reflects where spread behaviour is the open question (calm, stress, and the
-# 2020 dislocation get TBBO; the rest get trades).
-# Priced against scope "nq". Narrowing to the one instrument that actually needs
-# a preset buys FULL months across every stratum plus TBBO on three of them,
-# where the four- and six-symbol scopes could only afford part-months. TBBO goes
-# where spread behaviour is the open question: the calm baseline, the current-era
-# stress peak, and the 2020 dislocation.
+# The basket recommended from the bar-derived stratification. Schema per
+# window reflects where spread behaviour is the open question (calm, stress,
+# and the 2020 dislocation get TBBO; the rest get trades).
+# Priced against scope "nq". Narrowing to the one instrument that actually
+# needs a preset buys FULL months across every stratum plus TBBO on three of
+# them, where the four- and six-symbol scopes could only afford part-months.
+# TBBO goes where spread behaviour is the open question: the calm baseline,
+# the current-era stress peak, and the 2020 dislocation.
 PLAN = [
     ("2024-05.full", "tbbo"),    # p0, calmest current-era
     ("2024-09.full", "trades"),  # p60
@@ -398,12 +437,12 @@ PLAN = [
 ]
 
 # The alternative argued on review: buy SPREAD everywhere rather than length
-# everywhere. Ten sessions already exhausts the precision available for a CV, a
-# lag-1 ACF or a log-size sigma, while the fill band is not fitted at all and
-# only TBBO can fit it, so length is the cheaper thing to give up.
+# everywhere. Ten sessions already exhausts the precision available for a CV,
+# a lag-1 ACF or a log-size sigma, while the fill band is not fitted at all
+# and only TBBO can fit it, so length is the cheaper thing to give up.
 #
-# Two windows stay full months on purpose. The abs-return ACF tail at lag 50 and
-# the GARCH persistence term are the one target family where sample LENGTH is
+# Two windows stay full months on purpose. The abs-return ACF tail at lag 50
+# and the GARCH persistence term are the one target family where LENGTH is
 # the binding constraint rather than sample count, so the calm anchor and the
 # stress anchor keep their full spans and everything else shortens.
 DEPTH_PLAN = [
@@ -419,13 +458,13 @@ DEPTH_PLAN = [
 
 # The contract-versus-market question on its own, to be priced against scope
 # "pairv" so both legs are the same instants and the same volume ranking. This
-# is the test whose answer decides whether an NQ-fitted preset is legitimate for
-# MNQ at all, so it is worth knowing its price in isolation from the basket it
-# would otherwise be bought after.
+# is the test whose answer decides whether an NQ-fitted preset is legitimate
+# for MNQ at all, so it is worth knowing its price in isolation from the
+# basket it would otherwise be bought after.
 PAIR_PLAN = [("2024-05.2wk", "trades")]
 
-# A second tick grid, priced on its own. Two windows so the ratio is measured at
-# two different volatilities rather than at one point.
+# A second tick grid, priced on its own. Two windows so the ratio is measured
+# at two different volatilities rather than at one point.
 GRID_PLAN = [("2024-05.2wk", "trades"), ("2025-04.2wk", "trades")]
 
 # The replacement design, 2026-08-05, after the sampling-frame FAIL rejected
@@ -491,7 +530,8 @@ def phase_plan():
     by_name = {w[0]: w for w in WINDOWS}
     total = 0.0
     print("scope: %s   plan: %s" % (scope, variant))
-    print("%-16s %-10s %12s %16s  %s" % ("window", "schema", "cost", "records", "why"))
+    print("%-16s %-10s %12s %16s  %s"
+          % ("window", "schema", "cost", "records", "why"))
     failures = []
     total_bytes = 0.0
     for name, schema in plan:
@@ -513,7 +553,7 @@ def phase_plan():
         print("%-16s %-10s %12s %16s %10s  %s" % (
             name, schema,
             "n/a" if dollars is None else "%.2f" % dollars,
-            "n/a" if records is None else "{:,}".format(int(records)),
+            "n/a" if records is None else f"{int(records):,}",
             "n/a" if size is None else "%.2f GB" % (size / 1e9),
             window[3],
         ))
@@ -539,10 +579,12 @@ def phase_plan():
                 extras += dollars
     print()
     if failures:
-        print("REFUSING TO TOTAL: %d row(s) did not return a usable answer" % len(failures))
+        print("REFUSING TO TOTAL: %d row(s) did not return a usable answer"
+              % len(failures))
         for line in failures:
             print("   ", line)
-        print("partial sum was %.2f; treat it as a LOWER BOUND, not a quote" % (total + extras))
+        print("partial sum was %.2f; treat it as a LOWER BOUND, not a quote"
+              % (total + extras))
         return
     print("windows %.2f  definition+statistics %.2f" % (total, extras))
     print("total %.2f of %.2f budget, headroom %.2f" % (
@@ -575,8 +617,9 @@ def phase_cache():
 
 
 def main():
-    # Line-buffer stdout: piped to a file this is otherwise 8 KB block-buffered,
-    # so a long sweep looks wedged for minutes before the first row appears.
+    # Line-buffer stdout: piped to a file this is otherwise 8 KB
+    # block-buffered, so a long sweep looks wedged for minutes before the
+    # first row appears.
     sys.stdout.reconfigure(line_buffering=True)
     global REFRESH
     if "--refresh" in sys.argv:
@@ -586,8 +629,8 @@ def main():
     phases = {"info": phase_info, "resolve": phase_resolve,
               "price": phase_price, "plan": phase_plan, "cache": phase_cache}
     if phase not in phases:
-        raise SystemExit(
-            "usage: databento_price.py [info|resolve|price|plan|cache] [scope] [--refresh]")
+        raise SystemExit("usage: databento_price.py "
+                         "[info|resolve|price|plan|cache] [scope] [--refresh]")
     phases[phase]()
     if phase != "cache" and (CACHE_HITS or CACHE_MISSES):
         print("\n[cache] %d hit(s), %d fetch(es)%s" % (

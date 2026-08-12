@@ -1,0 +1,56 @@
+# Ruff config for the Python in this Rust-first workspace: analysis/ (the
+# offline fingerprint fitting and the Databento purchase tooling) and
+# scripts/. There is no packaging here, so the config lives at the root as
+# ruff.toml rather than in a pyproject.
+#
+# The lint set is chosen to catch DEFECTS, not to restyle a working corpus.
+# Rules that would rewrite the house style of thousands of committed lines
+# are off by name, each with its reason.
+
+line-length = 79
+target-version = "py314"
+
+[lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "B",     # bugbear: real footguns (mutable defaults, bare raise, ...)
+    "C4",    # comprehension misuse
+    "SIM",   # simplifiable constructs
+    "PIE",   # misc lints
+    "RUF",   # ruff's own, incl. unused-noqa
+    "UP",    # pyupgrade
+    "S",     # bandit: this tooling handles an API key and buys data
+    "ARG",   # unused arguments: catches a parameter orphaned by a refactor
+    "EXE",   # shebang / executable-bit consistency
+    "DTZ",   # naive datetimes. This project has already paid for a UTC trap:
+             # Databento's date-only bounds are UTC and clip the CME 17:00
+             # Central boundary, DST included. A naive now() in the pricing
+             # or purchase path is that same bug class.
+    "ISC",   # implicit string concatenation: a missing comma in a table of
+             # refusal messages or whitelist entries silently fuses two
+             # entries into one.
+]
+
+ignore = [
+    # Percent formatting is the house style throughout analysis/ - every
+    # message, every refusal reason. 114 hits in the downloader alone.
+    # Converting is a large diff through money-touching code for no
+    # behavioral gain.
+    "UP031",
+    # The documented invocation is `python3 -u analysis/<script>.py`; the
+    # shebangs are informational, the files are not chmod +x.
+    "EXE001",
+    # assert is how the analysis scripts state invariants; they are not run
+    # under -O.
+    "S101",
+]
+
+[lint.per-file-ignores]
+# The downloader's selftest drives fixture fetchers, spy posts and stub
+# readers whose signatures must match the production callables they stand in
+# for, so their unused parameters are structural rather than orphaned: 56 of
+# the 58 ARG hits in analysis/ are this file's fixtures. Scoped to this file
+# alone so ARG keeps catching genuinely orphaned parameters elsewhere.
+"analysis/databento_download.py" = ["ARG001", "ARG002", "ARG005"]

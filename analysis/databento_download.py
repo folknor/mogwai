@@ -71,7 +71,7 @@ import urllib.request
 from compression import zstd  # stdlib from Python 3.14
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import databento_price as dp  # noqa: E402  (SCOPES, WINDOWS, PLANS, bounds)
+import databento_price as dp  # SCOPES, WINDOWS, PLANS, session_bounds_utc
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LEDGER_FILE = os.path.join(ROOT, "analysis", "databento-jobs.json")
@@ -162,21 +162,13 @@ def _auth_header():
     return "Basic %s" % token.decode("ascii")
 
 
-class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
-    """urllib follows redirects by default AND keeps the request's headers,
-    so validating the original URL alone would not stop the auth header -
-    which IS the key - from following a server redirect to an arbitrary
-    host. Every authenticated request in this file goes through an opener
-    that refuses redirects outright; the vendor API serves directly."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise urllib.error.HTTPError(
-            req.full_url, code,
-            "redirect to %r refused; the auth header follows no redirect"
-            % newurl, headers, fp)
-
-
-_OPENER = urllib.request.build_opener(_RefuseRedirect)
+# The redirect-refusing opener lives in databento_price, which has the same
+# problem for the same reason: urllib keeps the auth header - which IS the key
+# - across a server redirect. ONE implementation, imported rather than copied,
+# so a fix to one is a fix to both. The selftest exercises it through these
+# names.
+_RefuseRedirect = dp.RefuseRedirect
+_OPENER = dp.OPENER
 
 
 def http_json(endpoint, params=None, post_data=None):
@@ -192,7 +184,11 @@ def http_json(endpoint, params=None, post_data=None):
             {k: str(v) for k, v in post_data.items()}).encode("ascii")
     elif params:
         url = "%s?%s" % (url, urllib.parse.urlencode(params))
-    req = urllib.request.Request(
+    # S310: the URL is built from dp.BASE, a module constant, plus a
+    # url-encoded endpoint and params - never from vendor or user input - and
+    # _OPENER refuses redirects, so no response can steer the auth header
+    # onto another scheme or host.
+    req = urllib.request.Request(  # noqa: S310
         url, data=body, headers={"Authorization": _auth_header()})
     try:
         with _OPENER.open(req, timeout=HTTP_TIMEOUT) as resp:
@@ -200,13 +196,14 @@ def http_json(endpoint, params=None, post_data=None):
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:400]
         detail = detail.replace(dp.api_key(), "<REDACTED-KEY>")
-        raise Refusal("%s returned HTTP %s: %s" % (endpoint, exc.code, detail))
+        raise Refusal("%s returned HTTP %s: %s"
+                      % (endpoint, exc.code, detail)) from exc
     except urllib.error.URLError as exc:
-        raise Refusal("%s unreachable: %s" % (endpoint, exc.reason))
+        raise Refusal("%s unreachable: %s" % (endpoint, exc.reason)) from exc
     try:
         return json.loads(text)
-    except json.JSONDecodeError:
-        raise Refusal("%s returned unparseable JSON" % endpoint)
+    except json.JSONDecodeError as exc:
+        raise Refusal("%s returned unparseable JSON" % endpoint) from exc
 
 
 def fresh_quote(scope, window, schema):
@@ -214,8 +211,8 @@ def fresh_quote(scope, window, schema):
     query and mode parameter as databento_price.measure() so the number is
     comparable with the plan-time baseline."""
     params = dp.query(scope, window, schema)
-    value = dp.as_number(
-        http_json("metadata.get_cost", dict(params, mode="historical-streaming")))
+    value = dp.as_number(http_json(
+        "metadata.get_cost", dict(params, mode="historical-streaming")))
     if value is None or value < 0:
         raise Refusal("live quote for %s/%s/%s unreadable" % (
             scope, window[0], schema))
@@ -240,8 +237,8 @@ def planned_quote(scope, window, schema, now=None):
     except ValueError:
         return None
     if fetched.tzinfo is None:
-        fetched = fetched.replace(tzinfo=dt.timezone.utc)
-    now = now if now is not None else dt.datetime.now(dt.timezone.utc)
+        fetched = fetched.replace(tzinfo=dt.UTC)
+    now = now if now is not None else dt.datetime.now(dt.UTC)
     if (now - fetched).total_seconds() > BASELINE_MAX_AGE_DAYS * 86400:
         return None
     return dp.as_number(entry["body"])
@@ -270,13 +267,16 @@ def acquire_buy_lock(path=LOCK_FILE):
 
     The caller must keep the returned handle alive; closing it releases the
     lock."""
-    handle = open(path, "w")
+    # Not a context manager on purpose: the lock must outlive this function
+    # and is released by process death, so a `with` would drop it here.
+    handle = open(path, "w")  # noqa: SIM115
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+    except OSError as exc:
         handle.close()
         raise Refusal("another databento_download run holds %s; concurrent "
-                      "buys could each submit the same purchase" % path)
+                      "buys could each submit the same purchase" % path
+                      ) from exc
     return handle
 
 
@@ -292,7 +292,8 @@ def load_ledger(path=LEDGER_FILE):
             data = json.load(fh)
     except (json.JSONDecodeError, OSError) as exc:
         raise Refusal("ledger %s unreadable (%s); fix it by hand, it is the "
-                      "spend record and will not be discarded" % (path, exc))
+                      "spend record and will not be discarded"
+                      % (path, exc)) from exc
     if data.get("_version") != LEDGER_VERSION:
         raise Refusal("ledger %s has version %r, expected %d" % (
             path, data.get("_version"), LEDGER_VERSION))
@@ -372,10 +373,12 @@ def submission_verdict(confirm, max_dollars, ledger_entry, live, planned):
                        % BASELINE_MAX_AGE_DAYS)
     if not (isinstance(planned, (int, float)) and math.isfinite(planned)) \
             or planned <= 0:
-        return False, "plan-time quote %r is not a usable baseline" % (planned,)
+        return False, ("plan-time quote %r is not a usable baseline"
+                       % (planned,))
     if live > planned * (1.0 + DRIFT_LIMIT):
-        return False, "live quote %.2f drifted more than %d%% above the " \
-            "plan-time quote %.2f" % (live, int(DRIFT_LIMIT * 100), planned)
+        return False, ("live quote %.2f drifted more than %d%% above the "
+                       "plan-time quote %.2f"
+                       % (live, int(DRIFT_LIMIT * 100), planned))
     return True, "ok: %.2f within budget and within drift of %.2f" % (
         live, planned)
 
@@ -411,18 +414,13 @@ def submit_gated(scope, window, schema, confirm, max_dollars, ledger_entry,
     if stype_in == "raw_symbol":
         # The staged purchase is continuous-symbology by design; the
         # whole-book scope exists only for pricing comparison.
-        raise Refusal("%s uses raw_symbol; refusing a whole-book purchase" % scope)
+        raise Refusal("%s uses raw_symbol; refusing a whole-book purchase"
+                      % scope)
     start, end = dp.session_bounds_utc(window[1], window[2])
     # POST body per the SDK's submit_job(); see the ENCODING block comment for
     # the provenance of every key.
-    data = dict(SUBMIT_DEFAULTS, **{
-        "dataset": dp.DATASET,
-        "start": start,
-        "end": end,
-        "symbols": symbols,
-        "schema": schema,
-        "stype_in": stype_in,
-    })
+    data = dict(SUBMIT_DEFAULTS, dataset=dp.DATASET, start=start, end=end,
+                symbols=symbols, schema=schema, stype_in=stype_in)
     if before_post is not None:
         before_post(live)
     job = post("batch.submit_job", post_data=data)
@@ -471,7 +469,7 @@ def pending_clear_verdict(entry, now=None):
     requires the intent to have aged past RECONCILE_CLEAR_MIN_AGE_S and at
     least RECONCILE_CLEAR_CONFIRMATIONS successful listings that each found
     no matching job."""
-    now = now if now is not None else dt.datetime.now(dt.timezone.utc)
+    now = now if now is not None else dt.datetime.now(dt.UTC)
     stamp = _parse_ts(entry.get("intent_at"))
     if stamp is None:
         return False, "no readable intent_at; resolve the ledger by hand"
@@ -509,7 +507,7 @@ def _parse_ts(value):
     except (TypeError, ValueError):
         return None
     if stamp.tzinfo is None:
-        stamp = stamp.replace(tzinfo=dt.timezone.utc)
+        stamp = stamp.replace(tzinfo=dt.UTC)
     return stamp
 
 
@@ -659,7 +657,7 @@ def parse_file_manifest(entries):
             https_url = entry["urls"]["https"]
         except (KeyError, TypeError, ValueError) as exc:
             raise Refusal("file manifest entry unparseable (%s): %r" % (
-                exc, entry))
+                exc, entry)) from exc
         # The filename is vendor input that becomes a path under the landing
         # directory. Anything but a plain basename - absolute, dotted, or
         # separator-bearing - could write outside it; a duplicate would
@@ -713,7 +711,10 @@ def urllib_fetch(url, offset):
     headers = {"Authorization": _auth_header()}
     if offset > 0:
         headers["Range"] = "bytes=%d-" % offset
-    req = urllib.request.Request(url, headers=headers)
+    # S310: url is vendor input, which is exactly why parse_file_manifest
+    # admits only https on databento.com before any URL reaches here, and why
+    # _OPENER refuses redirects. The scheme check is upstream, not absent.
+    req = urllib.request.Request(url, headers=headers)  # noqa: S310
     resp = _OPENER.open(req, timeout=HTTP_TIMEOUT)
     return resp.status, resp
 
@@ -861,7 +862,8 @@ def download_job_files(files, dest_dir, fetch=urllib_fetch,
             fetch, info["url"], dest, info["size"], info["sha256"],
             retries=retries, sleep=sleep)
         if ok:
-            print("  OK   %s (%.2f MB)" % (info["filename"], info["size"] / 1e6))
+            print("  OK   %s (%.2f MB)"
+                  % (info["filename"], info["size"] / 1e6))
             verified[info["filename"]] = detail
         else:
             print("  FAIL %s: %s" % (info["filename"], detail))
@@ -970,9 +972,11 @@ def authorize_buy(scope, variant, jobs, verdict_path=PAIR_VERDICT_FILE):
                       "must be ANALYZED and judged, delivery alone unlocks "
                       "nothing" % verdict_path)
     try:
-        verdict = json.loads(open(verdict_path).read())
+        with open(verdict_path) as fh:
+            verdict = json.load(fh)
     except (json.JSONDecodeError, OSError) as exc:
-        raise Refusal("stage locked: pair verdict unreadable (%s)" % exc)
+        raise Refusal(
+            "stage locked: pair verdict unreadable (%s)" % exc) from exc
     # Structural validation before any lookup: valid JSON that is not an
     # object, or a verdict value that is not a string, must fail closed with
     # a named reason rather than raise on .get or on set membership.
@@ -1167,7 +1171,7 @@ def mode_buy(args):
             entry.update({
                 "job_id": match["id"],
                 "state": match.get("state", "queued"),
-                "reconciled_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "reconciled_at": dt.datetime.now(dt.UTC).isoformat(),
                 # The intent's quote stands in for the submit-time quote so
                 # mode_status's spend total stays honest: this job WAS
                 # bought, at approximately this price.
@@ -1180,7 +1184,7 @@ def mode_buy(args):
         # No match THIS listing. Record the confirmation and clear only when
         # the pure verdict says the intent has aged past vendor-lag doubt.
         entry.setdefault("no_match_listings", []).append(
-            dt.datetime.now(dt.timezone.utc).isoformat())
+            dt.datetime.now(dt.UTC).isoformat())
         save_ledger(jobs)
         ok, reason = pending_clear_verdict(entry)
         if ok:
@@ -1242,7 +1246,7 @@ def mode_buy(args):
                     jobs[_key] = {
                         "state": "submitting",
                         "intent_at":
-                            dt.datetime.now(dt.timezone.utc).isoformat(),
+                            dt.datetime.now(dt.UTC).isoformat(),
                         "scope": args.scope,
                         "window": _window[0],
                         "schema": _schema,
@@ -1271,7 +1275,7 @@ def mode_buy(args):
                     "job_id": job["id"],
                     "state": job.get("state", "queued"),
                     "submitted_at":
-                        dt.datetime.now(dt.timezone.utc).isoformat(),
+                        dt.datetime.now(dt.UTC).isoformat(),
                     "live_quote_at_submit": live,
                     "planned_quote": planned_quote(args.scope, window,
                                                    schema),
@@ -1435,9 +1439,14 @@ def selftest():
                      post=seq_post,
                      before_post=lambda live: refused_sequence.append(
                          "intent"))
+        intent_refused = False
     except Refusal:
-        pass
-    check("a refusal never writes an intent", refused_sequence == [])
+        intent_refused = True
+    # Both halves matter: an empty refused_sequence proves nothing unless the
+    # call actually refused. Without the first conjunct a submit_gated that
+    # stopped raising would still pass this check.
+    check("a refusal never writes an intent",
+          intent_refused and refused_sequence == [])
     try:
         submit_gated("book", window, "trades", True, 10.0, entry,
                      post=spy_post)
@@ -1634,7 +1643,7 @@ def selftest():
     check("a missing intent timestamp refuses reconciliation", refused)
 
     print("no-match intents cannot clear inside the vendor-lag window")
-    verdict_now = dt.datetime(2026, 8, 5, 12, 30, tzinfo=dt.timezone.utc)
+    verdict_now = dt.datetime(2026, 8, 5, 12, 30, tzinfo=dt.UTC)
     recent = {"intent_at": "2026-08-05T12:25:00+00:00",
               "no_match_listings": ["a", "b", "c"]}
     ok, reason = pending_clear_verdict(recent, now=verdict_now)
@@ -1883,8 +1892,8 @@ def selftest():
     try:
         dp.cache()[quote_key] = {"fetched": "2026-08-01T00:00:00+00:00",
                                  "body": 24.06}
-        fresh_now = dt.datetime(2026, 8, 5, tzinfo=dt.timezone.utc)
-        stale_now = dt.datetime(2026, 9, 1, tzinfo=dt.timezone.utc)
+        fresh_now = dt.datetime(2026, 8, 5, tzinfo=dt.UTC)
+        stale_now = dt.datetime(2026, 9, 1, tzinfo=dt.UTC)
         check("a fresh baseline is read",
               planned_quote("pairv", window, "trades", now=fresh_now) == 24.06)
         check("a stale baseline is treated as absent",
