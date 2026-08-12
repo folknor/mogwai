@@ -43,6 +43,8 @@ pub enum StageMCommand {
     ReverifyAmendment2(BackcheckArgs),
     /// Run Amendment 4's September-October mechanical schedule gate.
     ScheduleEquivalence(BackcheckArgs),
+    /// Promote the already-passed Amendment 3 July re-bless.
+    PromoteJuly(BackcheckArgs),
     /// Run Tier 1b from completed per-month slow-geometry artifacts.
     Exchangeability(ExchangeabilityArgs),
     /// Run the preregistered Tier 1b calendar-only power analysis.
@@ -134,10 +136,40 @@ pub fn run(args: StageMArgs) -> anyhow::Result<()> {
         StageMCommand::Backcheck(x) => run_backcheck(&x),
         StageMCommand::ReverifyAmendment2(x) => run_amendment2_reverification(&x),
         StageMCommand::ScheduleEquivalence(x) => run_schedule_equivalence(&x),
+        StageMCommand::PromoteJuly(x) => run_promote_july(&x),
         StageMCommand::Exchangeability(x) => run_exchangeability(&x),
         StageMCommand::Power(x) => run_power(&x),
         StageMCommand::Summarize(x) => run_summarize(&x),
     }
+}
+
+fn run_promote_july(args: &BackcheckArgs) -> anyhow::Result<()> {
+    let ladder_path = args.output_root.join("amendment2-reverification.json");
+    let ladder = read_json(&ladder_path)?;
+    let july = ladder["reports"].as_array().and_then(|x| x.iter().find(|r| r["month"] == JULY))
+        .ok_or_else(|| anyhow!("Amendment 3 ladder has no July report"))?;
+    if july["passed"] != true { bail!("the recorded Amendment 3 July gate did not pass"); }
+    let dir = args.output_root.join(JULY.to_string());
+    let original = PathBuf::from("analysis/out/slow-geometry.json");
+    let candidate = dir.join("slow-geometry.amendment2.json");
+    let promoted = dir.join("slow-geometry.recomputed.json");
+    std::fs::copy(&candidate, &promoted)?;
+    let original_hash = mogwai_lab::ledger::sha256_file(&original).map_err(|e| anyhow!(e.to_string()))?;
+    let promoted_hash = mogwai_lab::ledger::sha256_file(&promoted).map_err(|e| anyhow!(e.to_string()))?;
+    let implementing_commit = String::from_utf8(std::process::Command::new("git").args(["rev-parse", "HEAD"]).output()?.stdout)?.trim().to_string();
+    let record = json!({
+        "outcome":"completed","status":"superseded_as_stage_m_reference","month":JULY,
+        "original":{"artifact":original,"sha256":original_hash,"historical_status":"completed signed UTC-coordinate measurement"},
+        "reblessed":{"artifact":promoted,"sha256":promoted_hash,"reference_status":"canonical Stage M session-local July reference"},
+        "authority":{"amendment":"notes/stage-m-preregistration.md Amendment 3, signed 2026-08-12","implementing_commit":implementing_commit},
+        "complete_old_to_new_comparison":july["complete_old_to_new_comparison"],
+        "enumerated_22_input_deltas":july["input_gate"]["authorized_differences"],
+        "three_way_attribution":july["three_way_attribution"],
+        "gate_record":ladder_path
+    });
+    write_json_atomic(&dir.join("amendment3-july-supersession.json"), &record).map_err(|e| anyhow!(e.to_string()))?;
+    println!("Amendment 3 July re-bless promoted -> {}", promoted.display());
+    Ok(())
 }
 
 fn run_schedule_equivalence(args: &BackcheckArgs) -> anyhow::Result<()> {
