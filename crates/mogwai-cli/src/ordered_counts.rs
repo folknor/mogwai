@@ -157,7 +157,7 @@ fn finish(
         EXCLUDED_ENDPOINT_HOUR.store(*close_hours.first().unwrap(), Ordering::Relaxed);
     }
     rows.sort_by_key(|r| (r.session_date.clone(), r.segment_index, r.window_start_ns));
-    if !config.sequence.exists() {
+    if !config.require_july_backcheck || !config.sequence.exists() {
         write_sequence(&config.sequence, rows)?;
     }
     let sequence_sha256 =
