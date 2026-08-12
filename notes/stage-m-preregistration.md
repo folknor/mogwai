@@ -677,6 +677,78 @@ passes:
    included).
 4. MARCH runs only after 1 through 3 pass; then April.
 
+## Amendment 3, 2026-08-12: the exact-close second, and the July re-bless
+
+SIGNED 2026-08-12 by codex session
+019ff606-1f16-7800-88ee-e52f083fac70, first submission.
+
+RESULT-AWARE, disclosed first: this amendment was ruled after the
+Amendment 2 July gate stopped and the cause was attributed with data -
+the enumerated 22-cell input-delta pattern and the approximate S(2)
+movement (about 2.7e-6) were known. No winter or March slow-geometry
+value existed in any coordinate system.
+
+WHAT WAS DISPROVED: Amendment 2 stated that the min clause "preserves
+the inherited endpoint attribution". It does not, at exactly one
+second per session: the EXACT-CLOSE endpoint second is a scheduled,
+populated second inside the trading session whose prior omission
+resulted only from its endpoint mapping into excluded UTC hour 21.
+The July gate stop was therefore correct and the discrepancy is
+neither operation order nor implementation defect - it is the signed
+formula being MORE correct than the inherited behavior.
+
+THE RULING: the signed mapping STANDS. Preserving the omission would
+convert an accidental coordinate artifact into a permanent
+measurement rule merely to retain byte identity, against the standing
+re-bless discipline. July is RE-BLESSED under session-local
+coordinates as the Stage M reference.
+
+THE REVISED JULY GATE, frozen:
+
+- The 506 session-hour cells align one-to-one under the UTC-to-local
+  bijection.
+- Exactly the 22 local-hour-22 cells, one per July session, may
+  differ AT THE INPUT LEVEL, and each permitted difference must equal
+  exactly the scheduled exact-close one-second window: exposure 2700
+  to 2701, parent delta equal to that window's recorded parent count.
+- No other cell, exposure, parent total, session identity or stratum
+  assignment may differ.
+- The complete moved reduction is still compared, and every changed
+  value, pair count, support status, refusal, permutation exceedance
+  count and p-value is RECORDED.
+- The Amendment 2 numeric diagnostic no longer adjudicates these
+  causally authorized changes; it remains applicable to any
+  difference claimed to arise only from coordinate permutation or
+  eigensolver operation order.
+- THE THREE-WAY ATTRIBUTION REGRESSION: (1) the original UTC
+  reduction; (2) the session-local reduction with exact-close seconds
+  TEMPORARILY EXCLUDED, comparison only - run 2 must reproduce the
+  original moved reduction under Amendment 2's equality rules, which
+  isolates the coordinate permutation; (3) the signed session-local
+  reduction including them - the difference between runs 2 and 3
+  must arise solely from the enumerated 22 seconds. Any downstream
+  difference not mechanically attributable to the 22 authorized
+  input deltas STOPS the amendment.
+- The comparison harness's key-alignment defect (a structural
+  mismatch presented as a value comparison) is fixed BEFORE this
+  gate runs again; a structural mismatch is not a valid regression
+  result even when it reports zero numeric differences.
+- The resulting July artifact is re-blessed as the Stage M
+  session-local reference BEFORE September onward proceeds.
+
+THE SUPERSESSION RECORD, preserved in the re-bless artifact: the
+original artifact and hash; the re-blessed artifact and hash; the
+Amendment 3 authority and implementing commit; the complete
+old-to-new comparison; the enumerated 22 input deltas; the three-way
+attribution result; and the explicit status that the original July
+artifact remains the historical result of the signed UTC-coordinate
+measurement, superseded as the Stage M reference by the session-local
+artifact. The slow-geometry preregistration's RESULT text is NOT
+rewritten: its quoted S(2) = -4.9303 and p = 0.0215 accurately report
+the original measurement at their displayed precision. Stage M
+combined reporting and Tier 1b use ONLY the re-blessed session-local
+July artifact.
+
 ## What Stage M may NOT do
 
 - No candidate generator runs. The ONLY generator runs are the 24
