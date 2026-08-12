@@ -76,6 +76,11 @@ investigations, the hardcoded-value inventory.
   staging, immutable data roles, seal ledger, gate shapes, outcome and
   amendment rules. Each stage writes its own dated preregistration under it.
   Signed by codex session 019ff4db.
+- **`stage-m-preregistration.md`** - Stage M frozen and signed (same session,
+  four rounds): the per-month measurements bound by reference, the
+  calendar-adjusted exchangeability test with its pre-read power analysis,
+  and the Tier 2 projection feasibility program with its numeric admission
+  hurdle. Runs once the design months are delivered and sealed.
 - **`count-curve-preregistration.md`**, **`ordered-counts-preregistration.md`**,
   **`slow-geometry-preregistration.md`** - the three post-12b measurements the
   successor contract binds as established evidence, each carrying its RESULT.
