@@ -21,6 +21,9 @@ use crate::slow_geometry::{self, SlowGeometryRun};
 
 const JULY: u64 = 202_607;
 const REPS: usize = 2_000;
+const POWER_RUNS: usize = 500;
+const POWER_COMPONENT_KEY: u64 = 1;
+const POWER_ALPHA: f64 = 0.05;
 
 #[derive(Args)]
 pub struct StageMArgs {
@@ -36,6 +39,8 @@ pub enum StageMCommand {
     Backcheck(BackcheckArgs),
     /// Run Tier 1b from completed per-month slow-geometry artifacts.
     Exchangeability(ExchangeabilityArgs),
+    /// Run the preregistered Tier 1b calendar-only power analysis.
+    Power(PowerArgs),
     /// Summarize numeric per-month statistics with and without July.
     Summarize(SummarizeArgs),
 }
@@ -73,6 +78,21 @@ pub struct ExchangeabilityArgs {
 }
 
 #[derive(Args)]
+pub struct PowerArgs {
+    #[arg(long, default_value = "analysis/databento-calendar.json")]
+    calendar: PathBuf,
+    #[arg(
+        long,
+        default_value = "analysis/out/stage-m/202607/slow-geometry.recomputed.json"
+    )]
+    july_scores: PathBuf,
+    #[arg(long, default_value = "analysis/out/slow-geometry.json")]
+    july_scores_alternate: PathBuf,
+    #[arg(long, default_value = "analysis/out/stage-m/power.json")]
+    output: PathBuf,
+}
+
+#[derive(Args)]
 pub struct SummarizeArgs {
     /// JSON array of per-month artifact paths of one artifact kind.
     #[arg(long)]
@@ -86,8 +106,244 @@ pub fn run(args: StageMArgs) -> anyhow::Result<()> {
         StageMCommand::Month(x) => run_month(x),
         StageMCommand::Backcheck(x) => run_backcheck(&x),
         StageMCommand::Exchangeability(x) => run_exchangeability(&x),
+        StageMCommand::Power(x) => run_power(&x),
         StageMCommand::Summarize(x) => run_summarize(&x),
     }
+}
+
+fn run_power(args: &PowerArgs) -> anyhow::Result<()> {
+    let calendar = read_json(&args.calendar)?;
+    let mut populations = Vec::new();
+    let months = calendar["months"]
+        .as_object()
+        .ok_or_else(|| anyhow!("calendar artifact has no months object"))?;
+    for (month_text, value) in months {
+        if value["role"] != "new-design" {
+            continue;
+        }
+        let month = month_text.replace('-', "").parse::<u64>()?;
+        let dates = value["dates"]
+            .as_object()
+            .ok_or_else(|| anyhow!("calendar month {month_text} has no dates"))?;
+        let mut days = Vec::new();
+        for (date, row) in dates {
+            match row["grade"].as_str() {
+                Some("full_session" | "half_session") => {
+                    days.push(mogwai_lab::session::days_from_iso(date));
+                }
+                Some("closure") => {}
+                Some(grade) => bail!("calendar date {date} has unknown grade {grade}"),
+                None => bail!("calendar date {date} has no grade"),
+            }
+        }
+        days.sort_unstable();
+        if days.is_empty() {
+            bail!("calendar month {month_text} has no scheduled sessions");
+        }
+        populations.push((month, days));
+    }
+    populations.sort_by_key(|x| x.0);
+    if populations.len() < 5 {
+        bail!("calendar supplies fewer than five new-design months");
+    }
+
+    let july = read_json(&args.july_scores)?;
+    let alternate = read_json(&args.july_scores_alternate)?;
+    let july_rows = july["detail"]["cross_fitted_factor"]["scores"]
+        .as_array()
+        .ok_or_else(|| anyhow!("canonical July artifact has no cross-fitted scores"))?;
+    let alternate_rows = alternate["detail"]["cross_fitted_factor"]["scores"]
+        .as_array()
+        .ok_or_else(|| anyhow!("alternate July artifact has no cross-fitted scores"))?;
+    if alternate_rows != july_rows {
+        bail!("the two candidate July score sources disagree");
+    }
+    let july_values = july_rows
+        .iter()
+        .map(|row| {
+            row["score"]
+                .as_f64()
+                .ok_or_else(|| anyhow!("July score is not finite"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    if july_values.len() < 2 {
+        bail!("July has fewer than two scores");
+    }
+    let july_mean = july_values.iter().sum::<f64>() / july_values.len() as f64;
+    let july_variance = july_values
+        .iter()
+        .map(|x| (x - july_mean) * (x - july_mean))
+        .sum::<f64>()
+        / (july_values.len() - 1) as f64;
+    if !july_variance.is_finite() || july_variance <= 0.0 {
+        bail!("July sample score variance is not positive and finite");
+    }
+
+    let rhos = [0.3, 0.5, 0.7, 0.9];
+    let lambdas = [0.25, 0.5, 0.75];
+    let mut surface = Vec::new();
+    for (lambda_index, lambda) in lambdas.into_iter().enumerate() {
+        for (rho_index, rho) in rhos.into_iter().enumerate() {
+            let mut rejected = 0usize;
+            for simulation_index in 0..POWER_RUNS {
+                let simulation_seed = tuple_mix(
+                    STAGE_M_SEED,
+                    &[
+                        POWER_COMPONENT_KEY,
+                        rho_index as u64,
+                        lambda_index as u64,
+                        simulation_index as u64,
+                    ],
+                );
+                let simulated = simulate_scores(
+                    &populations,
+                    july_variance,
+                    rho,
+                    lambda,
+                    simulation_seed,
+                );
+                let p_value = exchangeability_p_value(&simulated)?;
+                rejected += usize::from(p_value <= POWER_ALPHA);
+            }
+            let power = rejected as f64 / POWER_RUNS as f64;
+            let (low, high) = wilson_95(rejected, POWER_RUNS);
+            surface.push(json!({
+                "rho":rho,"lambda":lambda,"simulations":POWER_RUNS,
+                "rejections":rejected,"power":power,
+                "binomial_95_percent_interval":{"method":"Wilson score, two-sided, z=1.959963984540054","low":low,"high":high}
+            }));
+        }
+    }
+    let minimum_rho = lambdas
+        .into_iter()
+        .map(|lambda| {
+            let found = surface.iter().find_map(|cell| {
+                (cell["lambda"].as_f64() == Some(lambda)
+                    && cell["power"].as_f64().is_some_and(|x| x >= 0.8))
+                .then(|| cell["rho"].as_f64().unwrap())
+            });
+            json!({"lambda":lambda,"minimum_rho_reaching_80_percent_power":found})
+        })
+        .collect::<Vec<_>>();
+    let focal_power = surface
+        .iter()
+        .find(|cell| cell["rho"] == 0.5 && cell["lambda"] == 0.5)
+        .and_then(|cell| cell["power"].as_f64())
+        .expect("focal cell exists");
+    let artifact = json!({
+        "outcome":"completed",
+        "contract":"notes/stage-m-preregistration.md Tier 1b",
+        "declared_simplification":"scalar scores only; factor directions and cross-fitting are not simulated; this calibrates sensitivity to score-level persistence, not the full pipeline",
+        "population":{
+            "calendar":args.calendar,
+            "role":"new-design",
+            "months":populations.iter().map(|(month,days)|json!({"month":month,"scheduled_sessions":days.len()})).collect::<Vec<_>>(),
+            "session_grade_treatment":"closures contribute no session; full_session and half_session each contribute one scheduled trading session",
+            "index":"trading-session index within each month; calendar gaps add no decay"
+        },
+        "calibration":{
+            "canonical_july_score_source":args.july_scores,
+            "alternate_candidate_source":args.july_scores_alternate,
+            "candidate_sources_equal":true,
+            "choice":"the Stage M recomputation is canonical because it is the method backcheck output; equality with the original committed source is required",
+            "score_count":july_values.len(),"sample_score_variance":july_variance,"sample_variance_denominator":"n-1"
+        },
+        "simulation_law":{
+            "process":"Gaussian AR(1) factor over trading-session index, stationary initialization independently per month, plus independent Gaussian noise",
+            "total_variance":july_variance,"factor_shares":lambdas,"persistence":rhos,
+            "weekday_effects":"none","simulations_per_cell":POWER_RUNS
+        },
+        "test":{
+            "replicates":REPS,"rejection_rule":"p_value <= 0.05",
+            "p_value":"(1 + null max absolute month-equal statistics at least observed) / (1 + 2000)",
+            "implementation_choice":"the preregistration specifies the p-value but not an alpha; the conventional two-sided 0.05 level is declared here before results"
+        },
+        "seed_derivation":{
+            "implementation_choice":"the preregistration did not name simulation-draw seeds",
+            "simulation":"tuple_mix(STAGE_M_SEED, [1, rho_index, lambda_index, simulation_index]); reserved component key 1 distinguishes power draws from Tier 1b permutation pseudo-month key 0",
+            "month":"tuple_mix(simulation_seed, [month]); each month has its own draw stream, making draws independent of month and cell iteration order",
+            "normal_draw":"Box-Muller from consecutive splitmix64 states",
+            "stage_m_seed":STAGE_M_SEED,"reserved_component_key":POWER_COMPONENT_KEY
+        },
+        "interval_implementation_choice":"the preregistration requires a binomial 95 percent interval but names no construction; two-sided Wilson score intervals are used",
+        "surface":surface,"minimum_rho_by_lambda":minimum_rho,
+        "predeclared_interpretation":{
+            "cell":{"rho":0.5,"lambda":0.5,"power":focal_power},
+            "rule":"if power is below 50 percent, Tier 1b still runs but non-rejection is uninformative and may not be cited as evidence against persistence; power above 50 percent is not thereby adequate",
+            "outcome":if focal_power < 0.5 {"below_50_percent_non_rejection_uninformative"} else {"at_or_above_50_percent_not_thereby_adequate"}
+        }
+    });
+    write_json_atomic(&args.output, &artifact).map_err(|e| anyhow!(e.to_string()))
+}
+
+fn simulate_scores(
+    populations: &[(u64, Vec<i64>)],
+    total_variance: f64,
+    rho: f64,
+    lambda: f64,
+    simulation_seed: u64,
+) -> Vec<MonthScores> {
+    let factor_variance = lambda * total_variance;
+    let noise_sd = ((1.0 - lambda) * total_variance).sqrt();
+    let innovation_sd = (factor_variance * (1.0 - rho * rho)).sqrt();
+    populations
+        .iter()
+        .map(|(month, dates)| {
+            let mut normal = NormalStream::new(tuple_mix(simulation_seed, &[*month]));
+            let mut factor = factor_variance.sqrt() * normal.draw();
+            let mut scores = Vec::with_capacity(dates.len());
+            for i in 0..dates.len() {
+                if i > 0 {
+                    factor = rho.mul_add(factor, innovation_sd * normal.draw());
+                }
+                scores.push(factor + noise_sd * normal.draw());
+            }
+            MonthScores {
+                month: *month,
+                dates: dates.clone(),
+                weekdays: dates
+                    .iter()
+                    .map(|day| (day + 3).rem_euclid(7) as usize)
+                    .collect(),
+                scores,
+            }
+        })
+        .collect()
+}
+
+struct NormalStream {
+    state: u64,
+    spare: Option<f64>,
+}
+
+impl NormalStream {
+    fn new(state: u64) -> Self {
+        Self { state, spare: None }
+    }
+
+    fn draw(&mut self) -> f64 {
+        if let Some(x) = self.spare.take() {
+            return x;
+        }
+        self.state = splitmix64(self.state);
+        let u1 = ((self.state >> 11) as f64 + 0.5) * (1.0 / (1u64 << 53) as f64);
+        self.state = splitmix64(self.state);
+        let u2 = ((self.state >> 11) as f64 + 0.5) * (1.0 / (1u64 << 53) as f64);
+        let radius = (-2.0 * u1.ln()).sqrt();
+        let angle = std::f64::consts::TAU * u2;
+        self.spare = Some(radius * angle.sin());
+        radius * angle.cos()
+    }
+}
+
+fn wilson_95(successes: usize, runs: usize) -> (f64, f64) {
+    let z = 1.959_963_984_540_054;
+    let n = runs as f64;
+    let p = successes as f64 / n;
+    let denominator = 1.0 + z * z / n;
+    let center = (p + z * z / (2.0 * n)) / denominator;
+    let half = z * (p.mul_add(1.0 - p, z * z / (4.0 * n)) / n).sqrt() / denominator;
+    (center - half, center + half)
 }
 
 fn run_summarize(args: &SummarizeArgs) -> anyhow::Result<()> {
@@ -443,6 +699,23 @@ fn run_exchangeability(args: &ExchangeabilityArgs) -> anyhow::Result<()> {
 fn exchangeability_test(months: &[MonthScores]) -> anyhow::Result<Value> {
     let observed = pooled_bins(months);
     let observed_max = supported_max(&observed)?;
+    let (exceed, p_value) = exchangeability_null(months, observed_max)?;
+    Ok(json!({
+        "months":months.iter().map(|m|m.month).collect::<Vec<_>>(),
+        "observed":observed,"max_abs_month_equal":observed_max,
+        "null_exceedance_count":exceed,"p_value":p_value
+    }))
+}
+
+fn exchangeability_p_value(months: &[MonthScores]) -> anyhow::Result<f64> {
+    let observed_max = supported_max(&pooled_bins(months))?;
+    exchangeability_null(months, observed_max).map(|x| x.1)
+}
+
+fn exchangeability_null(
+    months: &[MonthScores],
+    observed_max: f64,
+) -> anyhow::Result<(usize, f64)> {
     let mut exceed = 0;
     for rep in 0..REPS {
         let mut permuted = months.to_vec();
@@ -470,11 +743,10 @@ fn exchangeability_test(months: &[MonthScores]) -> anyhow::Result<Value> {
             exceed += 1;
         }
     }
-    Ok(json!({
-        "months":months.iter().map(|m|m.month).collect::<Vec<_>>(),
-        "observed":observed,"max_abs_month_equal":observed_max,
-        "null_exceedance_count":exceed,"p_value":(1.0+exceed as f64)/(1.0+REPS as f64)
-    }))
+    Ok((
+        exceed,
+        (1.0 + exceed as f64) / (1.0 + REPS as f64),
+    ))
 }
 
 fn pooled_bins(months: &[MonthScores]) -> Value {
@@ -563,5 +835,26 @@ mod tests {
         assert_eq!(parse_month("202508"), Ok(202_508));
         assert!(parse_month("8").is_err());
         assert!(parse_month("202513").is_err());
+    }
+
+    #[test]
+    fn power_draws_are_deterministic_and_month_order_independent() {
+        let a = vec![(202_509, vec![1, 2, 3]), (202_510, vec![4, 5, 6])];
+        let b = vec![(202_510, vec![4, 5, 6]), (202_509, vec![1, 2, 3])];
+        let seed = tuple_mix(STAGE_M_SEED, &[POWER_COMPONENT_KEY, 1, 1, 7]);
+        let first = simulate_scores(&a, 2.0, 0.5, 0.5, seed);
+        let again = simulate_scores(&a, 2.0, 0.5, 0.5, seed);
+        let reordered = simulate_scores(&b, 2.0, 0.5, 0.5, seed);
+        assert_eq!(first[0].scores, again[0].scores);
+        assert_eq!(first[0].scores, reordered[1].scores);
+        assert_eq!(first[1].scores, reordered[0].scores);
+    }
+
+    #[test]
+    fn wilson_interval_contains_observed_power() {
+        let (low, high) = wilson_95(250, 500);
+        assert!(low < 0.5 && high > 0.5);
+        assert!(wilson_95(0, 500).0.abs() < f64::EPSILON);
+        assert!((wilson_95(500, 500).1 - 1.0).abs() < f64::EPSILON);
     }
 }
