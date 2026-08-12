@@ -33,6 +33,7 @@ the DATABENTO_API_KEY environment variable. Never commit it.
 
 import base64
 import datetime as dt
+import fcntl
 import json
 import os
 import sys
@@ -68,6 +69,7 @@ def session_bounds_utc(start_date, end_date):
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KEY_FILE = os.path.join(ROOT, "research", "databento.key")
 CACHE_FILE = os.path.join(ROOT, "analysis", "databento_cache.json")
+CACHE_LOCK_FILE = CACHE_FILE + ".lock"
 CACHE_VERSION = 1
 
 BASE = "https://hist.databento.com/v0"
@@ -192,21 +194,27 @@ CACHE_HITS = 0
 CACHE_MISSES = 0
 
 
+def read_cache_file():
+    """The cache entries currently on disk, or {} when absent, corrupt or
+    stale-versioned. Discarding is right here and fatal would be wrong: the
+    file holds nothing that cannot be re-fetched for free."""
+    if not os.path.exists(CACHE_FILE):
+        return {}
+    try:
+        with open(CACHE_FILE) as fh:
+            loaded = json.load(fh)
+    except (json.JSONDecodeError, OSError, AttributeError):
+        return {}
+    if loaded.get("_version") != CACHE_VERSION:
+        return {}
+    return loaded.get("entries", {})
+
+
 def cache():
-    """The on-disk response cache, loaded once. A corrupt or stale-versioned
-    file is discarded rather than fatal: it holds nothing that cannot be
-    re-fetched for free."""
+    """The on-disk response cache, loaded once into memory."""
     global _CACHE
     if _CACHE is None:
-        _CACHE = {}
-        if os.path.exists(CACHE_FILE):
-            try:
-                with open(CACHE_FILE) as fh:
-                    loaded = json.load(fh)
-                if loaded.get("_version") == CACHE_VERSION:
-                    _CACHE = loaded.get("entries", {})
-            except (json.JSONDecodeError, OSError, AttributeError):
-                pass
+        _CACHE = read_cache_file()
     return _CACHE
 
 
@@ -222,14 +230,38 @@ def cache_key(endpoint, params, raw):
 def cache_store(key, value):
     """Write through immediately. A sweep is minutes long and interrupting it
     is normal, so batching the flush to exit would lose exactly the work the
-    cache exists to preserve."""
-    cache()[key] = {"fetched": dt.datetime.now(dt.UTC).isoformat(),
-                    "body": value}
-    tmp = CACHE_FILE + ".tmp"
-    with open(tmp, "w") as fh:
-        json.dump({"_version": CACHE_VERSION, "entries": _CACHE}, fh,
-                  indent=1, sort_keys=True)
-    os.replace(tmp, CACHE_FILE)
+    cache exists to preserve.
+
+    The write is a locked read-modify-write of exactly ONE key. Two
+    concurrent sweeps each hold a private _CACHE loaded at start, so neither
+    a whole-file dump nor a whole-snapshot merge is safe. Dumping this
+    process's snapshot discards every key the other fetched since. Merging
+    the whole snapshot over disk keeps those keys but REVERTS values: a
+    stale in-memory copy of a key another process has since refreshed would
+    be written back over the newer one. Only the entry this call just
+    produced is known to be current, so only that entry is written.
+
+    Reverting a refresh is the worse failure. These entries are the drift
+    baselines databento_download.submission_verdict reads, and --refresh is
+    how a stale one gets renewed; silently restoring the superseded value
+    either ages the baseline past BASELINE_MAX_AGE_DAYS into a refusal, or
+    presents a superseded price as the current baseline for the drift
+    comparison."""
+    entry = {"fetched": dt.datetime.now(dt.UTC).isoformat(), "body": value}
+    cache()[key] = entry
+    with open(CACHE_LOCK_FILE, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        merged = read_cache_file()
+        merged[key] = entry
+        # Adopt what other writers have landed since this process loaded.
+        _CACHE.update(merged)
+        tmp = CACHE_FILE + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump({"_version": CACHE_VERSION, "entries": merged}, fh,
+                      indent=1, sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, CACHE_FILE)
 
 
 class RefuseRedirect(urllib.request.HTTPRedirectHandler):

@@ -30,9 +30,10 @@ scripts/probe-warmup.log
 /analysis/bars/
 /analysis/targets/
 
-# The buy-lock beside the committed job ledger: kernel-held runtime state,
-# empty, never content.
+# The buy-lock beside the committed job ledger, and the write-lock beside the
+# committed response cache: kernel-held runtime state, empty, never content.
 /analysis/databento-jobs.json.lock
+/analysis/databento_cache.json.lock
 .agents
 .brokkr
 .claude
