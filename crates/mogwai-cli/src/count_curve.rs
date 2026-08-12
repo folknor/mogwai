@@ -401,15 +401,30 @@ fn nearest_rank(
 }
 
 fn uncertainty_json(point: &Estimates, reps: &[Estimates]) -> anyhow::Result<Value> {
+    // A null point (Fano over a zero-mean hour) or a null replicate is a
+    // frozen REFUSAL, never an error: the statistic reports null with the
+    // finite-replicate count, and uncertainty is never computed over the
+    // surviving subset.
     let field = |name: &str,
                  point: Option<f64>,
                  values: Vec<Option<f64>>|
      -> anyhow::Result<(String, Value)> {
-        let point = point.ok_or_else(|| anyhow!("{name} point estimate is null"))?;
-        let mut xs = values
-            .into_iter()
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| anyhow!("{name} bootstrap estimate is null"))?;
+        let Some(point) = point else {
+            return Ok((
+                name.into(),
+                json!({"point": null, "standard_error": null, "p2_5": null, "p97_5": null,
+                       "reason": "point estimate refused under the frozen null rules"}),
+            ));
+        };
+        let finite = values.iter().flatten().count();
+        let Some(mut xs) = values.into_iter().collect::<Option<Vec<_>>>() else {
+            return Ok((
+                name.into(),
+                json!({"point": point, "standard_error": null, "p2_5": null, "p97_5": null,
+                       "finite_replicates": finite,
+                       "reason": "a bootstrap replicate refused; uncertainty is null rather than a surviving-subset estimate"}),
+            ));
+        };
         let mean = xs.iter().sum::<f64>() / xs.len() as f64;
         let se = (xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / 1999.0).sqrt();
         xs.sort_by(f64::total_cmp);
