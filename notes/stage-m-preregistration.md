@@ -577,6 +577,106 @@ transition. Stage F must decide how calendar phase enters the
 successor mechanism and its gates, and must not treat March's
 surviving post-transition scores as representing the whole month.
 
+## Amendment 2, 2026-08-12: session-local coordinates for the slow-geometry reduction
+
+SIGNED 2026-08-12 by codex session
+019ff606-1f16-7800-88ee-e52f083fac70 after one refusal round (the
+Amendment 1 supersession, the executable diagnostic denominator, the
+complete moved-object re-verification list). The diagnostic bounds
+were explicitly accepted as written.
+
+RESULT-AWARENESS, disclosed first: this amendment was ruled after the
+support pattern was known (September 17 scores, October 23, and
+November through February at ZERO scores - every standard-time
+session refuses on the unpopulated UTC hour-22 cell) and after
+September and October score VALUES were exposed. It is blind to every
+winter score value: none has ever been computed in any coordinate
+system.
+
+THE DEFECT: the slow-geometry hour set is a daylight-time UTC hour
+set. In standard time the CME 17:00 Central open maps to UTC 23:00,
+so the whole winter season refuses and Tier 1b silently becomes a
+daylight-only estimand - half the design population excluded for
+deterministic clock labeling. Amendment 1 cannot reach this: the
+refusals are held-out, not training.
+
+SUPERSESSION: Amendment 2 explicitly OVERTURNS Amendment 1's scope
+conclusions - the claims that November is not recovered, that only
+March's complete-session portion is recovered, and that the residual
+DST effect is narrow were drawn before the season-wide support
+pattern was known and no longer stand. Amendment 1's COMPLETE-CASE
+TRAINING RULE, its 12-session floor, its per-fold records and its
+Stage F DST-finding obligation all REMAIN IN FORCE unchanged; only
+its conclusions about which months the program recovers are
+superseded by this amendment's coordinate repair.
+
+THE REPAIR, ruled option (ii): one GLOBAL session-local coordinate
+system for the slow-geometry reduction - a coordinate repair, not a
+month selection, preserving a common 23-coordinate factor object
+across seasons. Frozen:
+
+```text
+q          = floor((window_end_ns - scheduled_session_open_ns) / 3600 s)
+local_hour = min(q, 22)
+```
+
+The min preserves the inherited endpoint attribution while assigning
+the exact-close endpoint to the final coordinate. An implementation
+may instead map each inherited UTC endpoint-hour cell to its
+scheduled-open-relative coordinate, PROVIDED it states and tests
+exact equivalence to the formula. The coordinate set is always 0..22
+in CANONICAL ASCENDING ORDER, frozen. LOCAL HOUR 22 is the partial,
+halt-containing stratum formerly labeled UTC hour 20 in
+daylight-time months; every amended artifact and later document
+names it local hour 22 or the partial/halt stratum, never hour 20
+without qualification.
+
+SCOPE: this amendment changes the coordinates of the slow-geometry
+reduction ONLY - the residual field it consumes, the cross-fitted
+factor, scores, loadings, z_star, C_star, C, D and their pair
+strata. The stratum formerly keyed on UTC hour 20 is the LOCAL-22
+stratum. Panel A, Panel B and the count curve remain on their
+inherited UTC endpoint-hour coordinates unless separately amended.
+
+BYTE IDENTITY IS NOT ASSUMED: reordering matrix columns can change
+the Jacobi eigensolver's operation order, and mathematical
+invariance is not byte identity. Exact equality is REQUIRED WHERE
+ACHIEVED; if eigensolver ordering alone moves floating-point values,
+that fact is recorded and agreement is judged under this separately
+frozen, executable diagnostic - for scalar values a and b:
+
+```text
+abs(a - b) <= max(1e-9, 1e-12 * max(abs(a), abs(b)))
+```
+
+applied ELEMENTWISE to vectors and matrices after the frozen
+coordinate permutation and sign alignment, reported per statistic.
+Nulls, support counts, refusal identities, permutation exceedance
+counts and p-values derived from identical integer counts require
+EXACT equality. Any discrepancy beyond the bound, or any discrepancy
+not attributable to operation order, STOPS the amendment.
+
+RE-VERIFICATION, in order, March running only after every check
+passes:
+
+1. JULY: exact equality of the reconstructed session-hour parent
+   totals, exposures, log rates and residuals under the explicit
+   UTC-to-local bijection; then THE ENTIRE MOVED REDUCTION - scores,
+   loadings (after applying the same coordinate permutation), z_star,
+   S(g), C, C_star, both D strata, pair counts, supported-bin
+   counts, refusal records, stratum assignments, permutation
+   exceedance count and p-value - exact where achieved, else the
+   frozen diagnostic above.
+2. SEPTEMBER and OCTOBER: the same old-versus-new comparison over
+   the same complete object list; their scores are already exposed,
+   so any change is REPORTED as a correction, never treated as new
+   evidence.
+3. NOVEMBER through FEBRUARY: verified to produce complete
+   local-coordinate cells and scores subject to the unchanged
+   refusal rules (Amendment 1's complete-case training and floor
+   included).
+4. MARCH runs only after 1 through 3 pass; then April.
+
 ## What Stage M may NOT do
 
 - No candidate generator runs. The ONLY generator runs are the 24
