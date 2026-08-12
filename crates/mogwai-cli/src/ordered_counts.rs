@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, anyhow, bail};
 use mogwai_lab::aggregate::artifact::write_json_atomic;
@@ -141,6 +142,20 @@ fn finish(
     observed: &Value,
     rows: &mut [OrderedCount],
 ) -> anyhow::Result<()> {
+    if config.month == 202_607 {
+        EXCLUDED_ENDPOINT_HOUR.store(21, Ordering::Relaxed);
+    } else {
+        let frame = mogwai_lab::session::ScheduleFrame::stage_m(Path::new("analysis/tz-america-chicago-2026c.json"))
+            .map_err(|e| anyhow!("loading the Stage M schedule frame: {e}"))?;
+        let close_hours = rows.iter().map(|row| frame.bounds(&row.session_date))
+            .collect::<Result<Vec<_>, _>>().map_err(|e| anyhow!(e.to_string()))?
+            .into_iter().map(|bounds| (bounds.close_ns / 3_600_000_000_000) % 24)
+            .collect::<std::collections::BTreeSet<_>>();
+        if close_hours.len() != 1 {
+            bail!("ordered panels recorded refusal: mixed UTC close-hour coordinates {close_hours:?} cannot form the frozen common 23-hour matrix");
+        }
+        EXCLUDED_ENDPOINT_HOUR.store(*close_hours.first().unwrap(), Ordering::Relaxed);
+    }
     rows.sort_by_key(|r| (r.session_date.clone(), r.segment_index, r.window_start_ns));
     if !config.sequence.exists() {
         write_sequence(&config.sequence, rows)?;
@@ -1184,8 +1199,11 @@ fn mean(x: &[f64]) -> f64 {
     x.iter().sum::<f64>() / x.len() as f64
 }
 fn hour_values() -> Vec<u64> {
-    (0..24).filter(|h| *h != 21).collect()
+    let excluded = EXCLUDED_ENDPOINT_HOUR.load(Ordering::Relaxed);
+    (0..24).filter(|h| *h != excluded).collect()
 }
+
+static EXCLUDED_ENDPOINT_HOUR: AtomicU64 = AtomicU64::new(21);
 
 #[cfg(test)]
 mod tests {

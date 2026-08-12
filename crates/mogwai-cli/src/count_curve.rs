@@ -208,7 +208,7 @@ fn observed_statistics_with_bootstrap(
     mults: &[Vec<i64>],
 ) -> anyhow::Result<Value> {
     let mut out = serde_json::Map::new();
-    for hour in traded_hours() {
+    for hour in observed_traded_hours(sessions)? {
         let mut windows = serde_json::Map::new();
         for &window in CURVE_WINDOWS {
             let point = estimates(sessions, None, hour, window)?;
@@ -222,6 +222,17 @@ fn observed_statistics_with_bootstrap(
         out.insert(hour.to_string(), Value::Object(windows));
     }
     Ok(Value::Object(out))
+}
+
+fn observed_traded_hours(sessions: &[Value]) -> anyhow::Result<Vec<i64>> {
+    let first = sessions.first().ok_or_else(|| anyhow!("no observed sessions"))?;
+    let block2 = first["block2"].as_object().ok_or_else(|| anyhow!("block2 is absent"))?;
+    let mut hours = block2.iter().filter_map(|(hour, windows)| {
+        windows["1"]["count_hist"].is_object().then(|| hour.parse::<i64>()).transpose()
+    }).collect::<Result<Vec<_>, _>>()?;
+    hours.sort_unstable();
+    if hours.len() != 23 { bail!("ordinary session has {} traded UTC endpoint hours, not 23", hours.len()); }
+    Ok(hours)
 }
 
 pub struct CountCurveMonthRun {
@@ -309,7 +320,7 @@ fn estimates(
             continue;
         }
         let cell = &session["block2"][hour.to_string()][window.to_string()];
-        let hist = histogram(cell)?;
+        let hist = histogram(cell).with_context(|| format!("session {idx}, hour {hour}, window {window}"))?;
         let (n, mean, var) = moments(&hist)?;
         for (&count, &occurrences) in &hist {
             *pooled.entry(count).or_default() += occurrences * u64::try_from(weight)?;
