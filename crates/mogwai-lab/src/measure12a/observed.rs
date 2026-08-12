@@ -78,7 +78,9 @@ where
     I: IntoIterator<Item = LabResult<Row>>,
 {
     let usable_set: std::collections::BTreeSet<&str> = usable.iter().map(String::as_str).collect();
-    let mut minutes = frame.map_or_else(MinuteFieldsCache::new, |x| MinuteFieldsCache::with_frame(x.clone()));
+    let mut minutes = frame.map_or_else(MinuteFieldsCache::new, |x| {
+        MinuteFieldsCache::with_frame(x.clone())
+    });
     let mut records: Vec<serde_json::Value> = Vec::new();
     let mut state: Option<SessionAcc> = None;
     let mut current: Option<OpenParent> = None;
@@ -107,10 +109,17 @@ where
                 frame.session_segment_at(ts)?
             } else {
                 session_segment_at(ts, UTC_OFFSET_MINUTES)
-            }.ok_or_else(|| LabError::refusal(format!("row at {ts} maps to no open segment")))?;
+            }
+            .ok_or_else(|| LabError::refusal(format!("row at {ts} maps to no open segment")))?;
             let offset_minutes = if let Some(frame) = &frame {
-                frame.offset_at_utc_s(i64::try_from(ts / 1_000_000_000).map_err(|_| LabError::refusal("timestamp exceeds i64 seconds"))?)? as i32 / 60
-            } else { UTC_OFFSET_MINUTES };
+                frame.offset_at_utc_s(
+                    i64::try_from(ts / 1_000_000_000)
+                        .map_err(|_| LabError::refusal("timestamp exceeds i64 seconds"))?,
+                )? as i32
+                    / 60
+            } else {
+                UTC_OFFSET_MINUTES
+            };
             state = Some(SessionAcc::new_with_count_windows(
                 session,
                 &seg,

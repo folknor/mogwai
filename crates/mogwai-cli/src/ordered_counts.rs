@@ -145,14 +145,22 @@ fn finish(
     if config.month == 202_607 {
         EXCLUDED_ENDPOINT_HOUR.store(21, Ordering::Relaxed);
     } else {
-        let frame = mogwai_lab::session::ScheduleFrame::stage_m(Path::new("analysis/tz-america-chicago-2026c.json"))
-            .map_err(|e| anyhow!("loading the Stage M schedule frame: {e}"))?;
-        let close_hours = rows.iter().map(|row| frame.bounds(&row.session_date))
-            .collect::<Result<Vec<_>, _>>().map_err(|e| anyhow!(e.to_string()))?
-            .into_iter().map(|bounds| (bounds.close_ns / 3_600_000_000_000) % 24)
+        let frame = mogwai_lab::session::ScheduleFrame::stage_m(Path::new(
+            "analysis/tz-america-chicago-2026c.json",
+        ))
+        .map_err(|e| anyhow!("loading the Stage M schedule frame: {e}"))?;
+        let close_hours = rows
+            .iter()
+            .map(|row| frame.bounds(&row.session_date))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow!(e.to_string()))?
+            .into_iter()
+            .map(|bounds| (bounds.close_ns / 3_600_000_000_000) % 24)
             .collect::<std::collections::BTreeSet<_>>();
         if close_hours.len() != 1 {
-            bail!("ordered panels recorded refusal: mixed UTC close-hour coordinates {close_hours:?} cannot form the frozen common 23-hour matrix");
+            bail!(
+                "ordered panels recorded refusal: mixed UTC close-hour coordinates {close_hours:?} cannot form the frozen common 23-hour matrix"
+            );
         }
         EXCLUDED_ENDPOINT_HOUR.store(*close_hours.first().unwrap(), Ordering::Relaxed);
     }

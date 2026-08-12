@@ -537,11 +537,17 @@ pub(crate) fn run_observed_with_count_windows_ordered(
         .map(|v| v.as_str().unwrap_or_default().to_string())
         .collect::<Vec<_>>();
     let files = data_files(corpus).map_err(|e| anyhow!("listing the corpus: {e}"))?;
-    let frame = mogwai_lab::session::ScheduleFrame::stage_m(Path::new("analysis/tz-america-chicago-2026c.json"))
-        .map_err(|e| anyhow!("loading the Stage M schedule frame: {e}"))?;
-    let (per_session, ordered) =
-        observed::observe_with_count_windows_ordered_frame(parse_stream(files), &usable, windows, Some(&frame))
-            .map_err(|e| anyhow!("the Stage M observed pass refused: {e}"))?;
+    let frame = mogwai_lab::session::ScheduleFrame::stage_m(Path::new(
+        "analysis/tz-america-chicago-2026c.json",
+    ))
+    .map_err(|e| anyhow!("loading the Stage M schedule frame: {e}"))?;
+    let (per_session, ordered) = observed::observe_with_count_windows_ordered_frame(
+        parse_stream(files),
+        &usable,
+        windows,
+        Some(&frame),
+    )
+    .map_err(|e| anyhow!("the Stage M observed pass refused: {e}"))?;
     Ok((
         serde_json::json!({"binding":{"month":month,"preflight_artifact_hash":preflight_hash,"file_hashes":hashes,"schedule_frame":preflight["schedule_frame"]},"per_session":per_session}),
         ordered,

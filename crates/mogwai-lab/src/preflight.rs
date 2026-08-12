@@ -152,7 +152,10 @@ pub fn run_month_preflight(
         }
     }
     let frame = ScheduleFrame::stage_m(Path::new("analysis/tz-america-chicago-2026c.json"))?;
-    let per_session_bounds = inventory.iter().map(|(date, _)| frame.bounds(date)).collect::<LabResult<Vec<_>>>()?;
+    let per_session_bounds = inventory
+        .iter()
+        .map(|(date, _)| frame.bounds(date))
+        .collect::<LabResult<Vec<_>>>()?;
     let schedule_record = ScheduleFrameRecord {
         rule: "Stage M Amendment 4 DST-aware America/Chicago civil-boundary conversion".to_string(),
         timezone_authority: "analysis/tz-america-chicago-2026c.json".to_string(),
@@ -177,7 +180,10 @@ pub fn run_month_preflight(
     )
 }
 
-#[expect(clippy::too_many_arguments, reason = "the July parity path keeps its explicit frozen inputs")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the July parity path keeps its explicit frozen inputs"
+)]
 fn run_preflight_with_inventory(
     directory: &Path,
     hashes: BTreeMap<String, String>,
@@ -206,7 +212,9 @@ fn run_preflight_with_inventory(
     let mut parent_total: u64 = 0;
     let mut parent_valid_quote: u64 = 0;
     let mut prev_key: Option<(i64, char)> = None;
-    let mut minute_cache = schedule.as_ref().map_or_else(MinuteFieldsCache::new, |x| MinuteFieldsCache::with_frame(x.0.clone()));
+    let mut minute_cache = schedule.as_ref().map_or_else(MinuteFieldsCache::new, |x| {
+        MinuteFieldsCache::with_frame(x.0.clone())
+    });
 
     for row in parse_stream(data_files(directory)?) {
         let row = row?;
