@@ -483,8 +483,12 @@ fn run_summarize(args: &SummarizeArgs) -> anyhow::Result<()> {
             .as_str()
             .ok_or_else(|| anyhow!("manifest paths must be strings"))?;
         let v = read_json(path)?;
+        // Completed artifacts carry binding.month; a recorded refusal (for
+        // example March's mixed-frame panel refusal) carries month at the
+        // top level. Both are summary rows - a refusal is a result.
         let month = v["binding"]["month"]
             .as_u64()
+            .or_else(|| v["month"].as_u64())
             .ok_or_else(|| anyhow!("{path} has no month"))?;
         let mut flat = BTreeMap::new();
         flatten_numeric("", &v, &mut flat);
