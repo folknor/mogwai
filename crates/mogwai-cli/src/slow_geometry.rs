@@ -29,8 +29,8 @@ const INPUT_SHA256: &str = "33aaf2c11d70a68c2ef91da88b69ad01dc9dd8ec1f3cbb0f9324
 const PERM_SEED: u64 = 5_177_340_928_461_523_719;
 const REPS: usize = 2_000;
 const MIN_PAIRS: usize = 8;
-const HOURS: [u64; 23] = [
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 23,
+const LOCAL_HOURS: [u64; 23] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
 ];
 const EDGES: [f64; 10] = [
     1.0,
@@ -48,7 +48,7 @@ const EDGES: [f64; 10] = [
 #[derive(Clone, Serialize)]
 struct Cell {
     session_date: String,
-    hour: u64,
+    local_hour: u64,
     parents: u64,
     exposure_s: u64,
     timestamp_ns: u64,
@@ -59,7 +59,7 @@ struct Cell {
 #[derive(Serialize)]
 struct Exclusion {
     session_date: String,
-    hour: u64,
+    local_hour: u64,
     reason: &'static str,
 }
 
@@ -82,7 +82,7 @@ struct Score {
 
 #[derive(Clone, Serialize)]
 struct Loading {
-    hour: u64,
+    local_hour: u64,
     value: f64,
 }
 
@@ -107,6 +107,7 @@ pub struct SlowGeometryRun {
     pub input: PathBuf,
     pub output: PathBuf,
     pub expected_sha256: String,
+    pub exclude_exact_close_for_comparison: bool,
 }
 
 impl SlowGeometryRun {
@@ -116,6 +117,7 @@ impl SlowGeometryRun {
             input: INPUT.into(),
             output: OUTPUT.into(),
             expected_sha256: INPUT_SHA256.into(),
+            exclude_exact_close_for_comparison: false,
         }
     }
 }
@@ -137,7 +139,8 @@ pub fn run_with(config: &SlowGeometryRun) -> anyhow::Result<()> {
     }
 
     let rows = read_sequence(&config.input)?;
-    let (cells, exclusions, dates) = construct_cells(&rows)?;
+    let (cells, exclusions, dates) =
+        construct_cells(&rows, config.exclude_exact_close_for_comparison)?;
     let (scores, refusals) = cross_fit(&cells, &exclusions, &dates);
     let score_stat = score_statistic(&scores, &dates, config.month);
     let elapsed = elapsed_statistics(&cells, None, Field::Residual);
@@ -151,11 +154,13 @@ pub fn run_with(config: &SlowGeometryRun) -> anyhow::Result<()> {
         "completed"
     };
     let detail = json!({
-        "residual_matrix": {"construction":"log(parents/exposure_s), centered on per-hour mean of logs", "cells":cells, "excluded_cells":exclusions},
-        "statistic_1":{"cells_used":cells.iter().map(|c|json!({"session_date":c.session_date,"hour":c.hour})).collect::<Vec<_>>(),"result":score_stat},
+        "coordinate_system":{"name":"session_local_hour","coordinates":LOCAL_HOURS,"mapping":"min(floor((window_end_ns - scheduled_session_open_ns) / 3600 s), 22)","scheduled_session_open":"minimum window_start_ns for the session's segment_index 0","partial_halt_stratum":"local_hour_22"},
+        "comparison_mode":{"exact_close_seconds_excluded":config.exclude_exact_close_for_comparison},
+        "residual_matrix": {"construction":"log(parents/exposure_s), centered on per-local-hour mean of logs", "cells":cells, "excluded_cells":exclusions},
+        "statistic_1":{"cells_used":cells.iter().map(|c|json!({"session_date":c.session_date,"local_hour":c.local_hour})).collect::<Vec<_>>(),"result":score_stat},
         "cross_fitted_factor":{"normalization":"unit_euclidean_length", "sign_rule":"positive_loading_sum; exact tie uses lowest-numbered-hour positive", "scores":scores, "refusals":refusals},
-        "statistic_2":{"units":"log_rate_squared", "cells_used":cells.iter().map(|c|json!({"session_date":c.session_date,"hour":c.hour})).collect::<Vec<_>>(), "covariance":elapsed, "boundary_contrasts":boundary_contrasts},
-        "statistic_3":{"units":"standardized_squared", "recomputed_statistic":"elapsed_separation_covariance_only", "cells_used":cells.iter().filter(|c|scores.iter().any(|s|s.session_date==c.session_date)).map(|c|json!({"session_date":c.session_date,"hour":c.hour})).collect::<Vec<_>>(), "covariance":residualized, "boundary_contrasts":residualized_contrasts},
+        "statistic_2":{"units":"log_rate_squared", "cells_used":cells.iter().map(|c|json!({"session_date":c.session_date,"local_hour":c.local_hour})).collect::<Vec<_>>(), "covariance":elapsed, "boundary_contrasts":boundary_contrasts},
+        "statistic_3":{"units":"standardized_squared", "recomputed_statistic":"elapsed_separation_covariance_only", "cells_used":cells.iter().filter(|c|scores.iter().any(|s|s.session_date==c.session_date)).map(|c|json!({"session_date":c.session_date,"local_hour":c.local_hour})).collect::<Vec<_>>(), "covariance":residualized, "boundary_contrasts":residualized_contrasts},
         "uncertainty":{"score_autocovariance":"shared-permutation max statistic", "elapsed_covariance":"descriptive point estimates plus pair counts", "boundary_contrasts":"descriptive point estimates plus pair counts", "factor":"point estimates only", "bootstrap":false}
     });
     let mut artifact = base(outcome, &actual, &commit, detail);
@@ -188,6 +193,7 @@ fn read_sequence(path: &Path) -> anyhow::Result<Vec<OrderedCount>> {
 
 fn construct_cells(
     rows: &[OrderedCount],
+    exclude_exact_close_for_comparison: bool,
 ) -> anyhow::Result<(Vec<Cell>, Vec<Exclusion>, Vec<String>)> {
     let mut dates = rows
         .iter()
@@ -195,21 +201,32 @@ fn construct_cells(
         .collect::<Vec<_>>();
     dates.sort();
     dates.dedup();
+    let opens = rows.iter().filter(|r| r.segment_index == 0).fold(BTreeMap::new(), |mut out: BTreeMap<String, u64>, row| {
+        out.entry(row.session_date.clone()).and_modify(|x| *x = (*x).min(row.window_start_ns)).or_insert(row.window_start_ns);
+        out
+    });
     let mut grouped: BTreeMap<(String, u64), Vec<&OrderedCount>> = BTreeMap::new();
     for row in rows {
+        let open = opens.get(&row.session_date).ok_or_else(|| anyhow!("session {} has no segment 0 scheduled open", row.session_date))?;
+        let exact_close = row.window_end_ns == open + 23 * 3_600_000_000_000
+            && row.window_start_ns + 1_000_000_000 == row.window_end_ns;
+        if exclude_exact_close_for_comparison && exact_close {
+            continue;
+        }
+        let local_hour = ((row.window_end_ns - open) / 3_600_000_000_000).min(22);
         grouped
-            .entry((row.session_date.clone(), row.endpoint_hour))
+            .entry((row.session_date.clone(), local_hour))
             .or_default()
             .push(row);
     }
     let mut raw = Vec::new();
     let mut excluded = Vec::new();
     for date in &dates {
-        for &hour in &HOURS {
+        for &hour in &LOCAL_HOURS {
             let Some(xs) = grouped.get(&(date.clone(), hour)) else {
                 excluded.push(Exclusion {
                     session_date: date.clone(),
-                    hour,
+                    local_hour: hour,
                     reason: "missing_cell",
                 });
                 continue;
@@ -222,7 +239,7 @@ fn construct_cells(
             if exposure_ns == 0 {
                 excluded.push(Exclusion {
                     session_date: date.clone(),
-                    hour,
+                    local_hour: hour,
                     reason: "zero_exposure",
                 });
                 continue;
@@ -230,7 +247,7 @@ fn construct_cells(
             if parents == 0 {
                 excluded.push(Exclusion {
                     session_date: date.clone(),
-                    hour,
+                    local_hour: hour,
                     reason: "zero_parents",
                 });
                 continue;
@@ -254,7 +271,7 @@ fn construct_cells(
         }
     }
     let mut means = BTreeMap::new();
-    for &hour in &HOURS {
+    for &hour in &LOCAL_HOURS {
         let x = raw
             .iter()
             .filter(|x| x.1 == hour)
@@ -268,7 +285,7 @@ fn construct_cells(
         .into_iter()
         .map(|x| Cell {
             session_date: x.0,
-            hour: x.1,
+            local_hour: x.1,
             parents: x.2,
             exposure_s: x.3,
             timestamp_ns: x.4,
@@ -286,7 +303,7 @@ fn cross_fit(
 ) -> (Vec<Score>, Vec<Refusal>) {
     let map = cells
         .iter()
-        .map(|c| ((c.session_date.clone(), c.hour), c.residual))
+        .map(|c| ((c.session_date.clone(), c.local_hour), c.residual))
         .collect::<BTreeMap<_, _>>();
     let mut scores = Vec::new();
     let mut refusals = Vec::new();
@@ -294,7 +311,7 @@ fn cross_fit(
         if let Some(x) = exclusions.iter().find(|x| &x.session_date == held) {
             refusals.push(Refusal {
                 session_date: held.clone(),
-                reason: format!("excluded_cell_hour_{}:{}", x.hour, x.reason),
+                reason: format!("excluded_cell_local_hour_{}:{}", x.local_hour, x.reason),
             });
             continue;
         }
@@ -305,7 +322,7 @@ fn cross_fit(
         let (train, dropped): (Vec<_>, Vec<_>) = dates
             .iter()
             .filter(|d| *d != held)
-            .partition(|d| HOURS.iter().all(|h| map.contains_key(&((**d).clone(), *h))));
+            .partition(|d| LOCAL_HOURS.iter().all(|h| map.contains_key(&((**d).clone(), *h))));
         if train.len() < 12 {
             refusals.push(Refusal {
                 session_date: held.clone(),
@@ -320,7 +337,7 @@ fn cross_fit(
         let mut mu = Vec::new();
         let mut sigma = Vec::new();
         let mut refused = None;
-        for &h in &HOURS {
+        for &h in &LOCAL_HOURS {
             let x = train
                 .iter()
                 .filter_map(|d| map.get(&((**d).clone(), h)))
@@ -329,7 +346,7 @@ fn cross_fit(
             let m = mean(&x);
             let sd = (x.iter().map(|v| (v - m).powi(2)).sum::<f64>() / x.len() as f64).sqrt();
             if sd == 0.0 {
-                refused = Some(format!("zero_training_variance_hour_{h}"));
+                refused = Some(format!("zero_training_variance_local_hour_{h}"));
                 break;
             }
             mu.push(m);
@@ -345,16 +362,16 @@ fn cross_fit(
         let ztrain = train
             .iter()
             .map(|d| {
-                HOURS
+                LOCAL_HOURS
                     .iter()
                     .enumerate()
                     .map(|(i, h)| (map[&((**d).clone(), *h)] - mu[i]) / sigma[i])
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        let corr = (0..HOURS.len())
+        let corr = (0..LOCAL_HOURS.len())
             .map(|i| {
-                (0..HOURS.len())
+                (0..LOCAL_HOURS.len())
                     .map(|j| ztrain.iter().map(|z| z[i] * z[j]).sum::<f64>() / ztrain.len() as f64)
                     .collect()
             })
@@ -381,7 +398,7 @@ fn cross_fit(
         } else {
             "already_positive_loading_sum"
         };
-        let z = HOURS
+        let z = LOCAL_HOURS
             .iter()
             .enumerate()
             .map(|(i, h)| (map[&(held.clone(), *h)] - mu[i]) / sigma[i])
@@ -394,10 +411,10 @@ fn cross_fit(
             sign_alignment: alignment,
             loading_sum_before_alignment: before,
             score: f,
-            loading: HOURS
+            loading: LOCAL_HOURS
                 .iter()
                 .zip(v)
-                .map(|(h, value)| Loading { hour: *h, value })
+                .map(|(h, value)| Loading { local_hour: *h, value })
                 .collect(),
             training_dropped: dropped.iter().map(|d| (*d).clone()).collect(),
             training_count: train.len(),
@@ -562,15 +579,15 @@ fn elapsed_statistics(cells: &[Cell], scores: Option<&[Score]>, field: Field) ->
                 .find(|k| sep >= EDGES[*k] && sep < EDGES[*k + 1])
                 .unwrap();
             let class = usize::from(a.session_date != b.session_date);
-            let stratum = usize::from(a.hour == 20 || b.hour == 20);
+            let stratum = usize::from(a.local_hour == 22 || b.local_hour == 22);
             let product = match field {
                 Field::Residual => a.residual * b.residual,
                 Field::Standardized => {
                     let m = score_map.as_ref().unwrap();
                     let sa = m[&a.session_date];
                     let sb = m[&b.session_date];
-                    let ai = HOURS.iter().position(|h| *h == a.hour).unwrap();
-                    let bj = HOURS.iter().position(|h| *h == b.hour).unwrap();
+                    let ai = LOCAL_HOURS.iter().position(|h| *h == a.local_hour).unwrap();
+                    let bj = LOCAL_HOURS.iter().position(|h| *h == b.local_hour).unwrap();
                     sa.z_star[ai] * sb.z_star[bj]
                 }
             };
@@ -580,13 +597,13 @@ fn elapsed_statistics(cells: &[Cell], scores: Option<&[Score]>, field: Field) ->
     let names = [
         "[1,2)", "[2,3)", "[3,6)", "[6,12)", "[12,24)", "[24,48)", "[48,72)", "[72,96)", "[96,inf)",
     ];
-    Value::Array((0..9).map(|bi|json!({"bin_hours":names[bi],"WITHIN":{"ordinary":estimate(&bins[bi][0][0]),"hour20":estimate(&bins[bi][0][1])},"CROSS":{"ordinary":estimate(&bins[bi][1][0]),"hour20":estimate(&bins[bi][1][1])}})).collect())
+    Value::Array((0..9).map(|bi|json!({"bin_hours":names[bi],"WITHIN":{"ordinary":estimate(&bins[bi][0][0]),"local_hour_22":estimate(&bins[bi][0][1])},"CROSS":{"ordinary":estimate(&bins[bi][1][0]),"local_hour_22":estimate(&bins[bi][1][1])}})).collect())
 }
 fn estimate(x: &[f64]) -> Value {
     json!({"pair_count":x.len(),"value":if x.len()>=MIN_PAIRS{Some(mean(x))}else{None},"reason":if x.len()<MIN_PAIRS{Some("fewer_than_8_pairs")}else{None}})
 }
 fn contrasts(c: &Value) -> Value {
-    Value::Array(c.as_array().unwrap().iter().map(|b|{let calc=|s:&str|{let w=&b["WITHIN"][s];let x=&b["CROSS"][s];let value=match(w["value"].as_f64(),x["value"].as_f64()){(Some(a),Some(z))=>Some(a-z),_=>None};json!({"within_pair_count":w["pair_count"],"cross_pair_count":x["pair_count"],"value":value,"reason":if value.is_none(){Some("one_or_both_classes_below_support")}else{None}})};json!({"bin_hours":b["bin_hours"],"D_ordinary":calc("ordinary"),"D_hour20":calc("hour20")})}).collect())
+    Value::Array(c.as_array().unwrap().iter().map(|b|{let calc=|s:&str|{let w=&b["WITHIN"][s];let x=&b["CROSS"][s];let value=match(w["value"].as_f64(),x["value"].as_f64()){(Some(a),Some(z))=>Some(a-z),_=>None};json!({"within_pair_count":w["pair_count"],"cross_pair_count":x["pair_count"],"value":value,"reason":if value.is_none(){Some("one_or_both_classes_below_support")}else{None}})};json!({"bin_hours":b["bin_hours"],"D_ordinary":calc("ordinary"),"D_local_hour_22":calc("local_hour_22")})}).collect())
 }
 
 fn civil_day(s: &str) -> i64 {

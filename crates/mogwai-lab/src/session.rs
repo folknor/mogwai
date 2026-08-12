@@ -14,6 +14,11 @@
 //! implementations agree over a wide timestamp sweep.
 
 use std::collections::HashMap;
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
+use crate::error::{LabError, LabResult};
 
 use crate::subcontract::{
     HALT_END_LOCAL_MIN, HALT_START_LOCAL_MIN, PARENT_COUNT_BIN_EDGES, PARENT_COUNT_BIN_NAMES,
@@ -23,6 +28,180 @@ use crate::subcontract::{
 
 const NS_PER_DAY: i128 = 86_400_000_000_000;
 const NS_PER_MIN: i128 = 60_000_000_000;
+const NS_PER_SEC: i128 = 1_000_000_000;
+pub const STAGE_M_TZ_AUTHORITY_SHA256: &str =
+    "afe9024d96f492ad6ae821455cb60ff4127b2312acb0bd164003f95c127739bc";
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SessionBounds {
+    pub session: String,
+    pub open_ns: u64,
+    pub halt_start_ns: u64,
+    pub halt_end_ns: u64,
+    pub close_ns: u64,
+    pub scheduled_open_seconds: i64,
+}
+
+#[derive(Clone, Debug)]
+pub enum ScheduleFrame {
+    JulyFixed,
+    Chicago2026c(TzAuthority),
+}
+
+#[derive(Clone, Debug)]
+pub struct TzAuthority {
+    transitions: Vec<Transition>,
+    standard_offset_s: i64,
+    daylight_offset_s: i64,
+    pub artifact_path: String,
+    pub artifact_sha256: String,
+}
+
+#[derive(Clone, Debug)]
+struct Transition {
+    utc_s: i64,
+    before_s: i64,
+    after_s: i64,
+}
+
+#[derive(Deserialize)]
+struct AuthorityFile {
+    zone: String,
+    tzdb_release: String,
+    standard_offset_s: i64,
+    daylight_offset_s: i64,
+    transitions: Vec<AuthorityTransition>,
+}
+
+#[derive(Deserialize)]
+struct AuthorityTransition {
+    utc_instant: String,
+    offset_before_s: i64,
+    offset_after_s: i64,
+}
+
+impl ScheduleFrame {
+    pub fn stage_m(path: &Path) -> LabResult<Self> {
+        let bytes = std::fs::read(path)?;
+        let hash = crate::ledger::sha256_bytes(&bytes);
+        if hash != STAGE_M_TZ_AUTHORITY_SHA256 {
+            return Err(LabError::refusal(format!(
+                "timezone authority hash mismatch: expected {STAGE_M_TZ_AUTHORITY_SHA256}, got {hash}"
+            )));
+        }
+        let raw: AuthorityFile = serde_json::from_slice(&bytes)?;
+        if raw.zone != "America/Chicago" || raw.tzdb_release != "2026c" {
+            return Err(LabError::refusal("timezone authority identity mismatch"));
+        }
+        if raw.standard_offset_s != -21_600 || raw.daylight_offset_s != -18_000
+            || raw.transitions.len() != 14
+        {
+            return Err(LabError::refusal("timezone authority shape mismatch"));
+        }
+        let transitions = raw.transitions.into_iter().map(|t| Ok(Transition {
+            utc_s: parse_utc_second(&t.utc_instant)?,
+            before_s: t.offset_before_s,
+            after_s: t.offset_after_s,
+        })).collect::<LabResult<Vec<_>>>()?;
+        if transitions.iter().any(|t| ![-21_600, -18_000].contains(&t.before_s)
+            || ![-21_600, -18_000].contains(&t.after_s)) {
+            return Err(LabError::refusal("timezone authority carries an unpermitted offset"));
+        }
+        Ok(Self::Chicago2026c(TzAuthority {
+            transitions,
+            standard_offset_s: raw.standard_offset_s,
+            daylight_offset_s: raw.daylight_offset_s,
+            artifact_path: path.display().to_string(),
+            artifact_sha256: hash,
+        }))
+    }
+
+    pub(crate) fn offset_at_utc_s(&self, utc_s: i64) -> LabResult<i64> {
+        match self {
+            Self::JulyFixed => Ok(i64::from(crate::subcontract::UTC_OFFSET_MINUTES) * 60),
+            Self::Chicago2026c(tz) => {
+                let mut offset = tz.transitions.first().ok_or_else(|| LabError::refusal("timezone authority has no transitions"))?.before_s;
+                for transition in &tz.transitions {
+                    if utc_s < transition.utc_s { break; }
+                    offset = transition.after_s;
+                }
+                Ok(offset)
+            }
+        }
+    }
+
+    fn civil_to_utc_s(&self, day: i64, minute: i32) -> LabResult<i64> {
+        let local_s = day * 86_400 + i64::from(minute) * 60;
+        let candidates: &[i64] = match self {
+            Self::JulyFixed => &[ -18_000 ],
+            Self::Chicago2026c(tz) => &[tz.standard_offset_s, tz.daylight_offset_s],
+        };
+        let mut valid = candidates.iter().copied().map(|offset| local_s - offset)
+            .filter(|utc| self.offset_at_utc_s(*utc).is_ok_and(|offset| *utc + offset == local_s))
+            .collect::<Vec<_>>();
+        valid.sort_unstable();
+        valid.dedup();
+        match valid.as_slice() {
+            [utc] => Ok(*utc),
+            [] => Err(LabError::refusal(format!("nonexistent civil instant at day {day}, minute {minute}"))),
+            _ => Err(LabError::refusal(format!("ambiguous civil instant at day {day}, minute {minute}"))),
+        }
+    }
+
+    pub fn bounds(&self, session: &str) -> LabResult<SessionBounds> {
+        let day = days_from_iso(session);
+        let open = self.civil_to_utc_s(day - 1, SESSION_OPEN_LOCAL_MIN)?;
+        let halt_start = self.civil_to_utc_s(day, HALT_START_LOCAL_MIN)?;
+        let halt_end = self.civil_to_utc_s(day, HALT_END_LOCAL_MIN)?;
+        let close = self.civil_to_utc_s(day, SESSION_CLOSE_LOCAL_MIN)?;
+        if !(open < halt_start && halt_start < halt_end && halt_end < close) {
+            return Err(LabError::refusal(format!("session {session} UTC bounds are not strictly increasing")));
+        }
+        if halt_end - halt_start != 900 {
+            return Err(LabError::refusal(format!("session {session} halt is not 15 minutes")));
+        }
+        let exposure = (halt_start - open) + (close - halt_end);
+        if exposure != 81_900 {
+            return Err(LabError::refusal(format!("session {session} scheduled exposure is {exposure}, not 81900 seconds")));
+        }
+        Ok(SessionBounds { session: session.to_string(), open_ns: to_ns(open)?, halt_start_ns: to_ns(halt_start)?, halt_end_ns: to_ns(halt_end)?, close_ns: to_ns(close)?, scheduled_open_seconds: exposure })
+    }
+
+    pub fn session_segment_at(&self, ts_ns: u64) -> LabResult<Option<SessionSegment>> {
+        let utc_s = i64::try_from(ts_ns / 1_000_000_000).map_err(|_| LabError::refusal("timestamp exceeds i64 seconds"))?;
+        let offset_s = self.offset_at_utc_s(utc_s)?;
+        let local_s = utc_s + offset_s;
+        let day = local_s.div_euclid(86_400);
+        let minute = local_s.rem_euclid(86_400) / 60;
+        let trade_day = if minute >= i64::from(SESSION_OPEN_LOCAL_MIN) { day + 1 } else { day };
+        let label = format_trade_date(trade_day);
+        let bounds = self.bounds(&label)?;
+        let segment = if ts_ns >= bounds.open_ns && ts_ns < bounds.halt_start_ns {
+            Some(("overnight", bounds.open_ns, bounds.halt_start_ns))
+        } else if ts_ns >= bounds.halt_end_ns && ts_ns <= bounds.close_ns {
+            Some(("post_halt", bounds.halt_end_ns, bounds.close_ns))
+        } else { None };
+        Ok(segment.map(|(name, origin, end)| SessionSegment { session_start_ns: bounds.open_ns, session_end_ns: bounds.close_ns, segment_origin_ns: origin, segment_end_ns: end, trade_day, segment: name }))
+    }
+}
+
+fn to_ns(seconds: i64) -> LabResult<u64> {
+    u64::try_from(i128::from(seconds) * NS_PER_SEC).map_err(|_| LabError::refusal("session boundary is outside u64 nanoseconds"))
+}
+
+fn parse_utc_second(text: &str) -> LabResult<i64> {
+    let body = text.strip_suffix('Z').ok_or_else(|| LabError::refusal("timezone transition is not UTC"))?;
+    let (date, time) = body.split_once('T').ok_or_else(|| LabError::refusal("invalid timezone transition"))?;
+    let mut d = date.split('-');
+    let year = d.next().and_then(|x| x.parse().ok()).ok_or_else(|| LabError::refusal("invalid transition year"))?;
+    let month = d.next().and_then(|x| x.parse().ok()).ok_or_else(|| LabError::refusal("invalid transition month"))?;
+    let day = d.next().and_then(|x| x.parse().ok()).ok_or_else(|| LabError::refusal("invalid transition day"))?;
+    let mut t = time.split(':');
+    let hour: i64 = t.next().and_then(|x| x.parse().ok()).ok_or_else(|| LabError::refusal("invalid transition hour"))?;
+    let minute: i64 = t.next().and_then(|x| x.parse().ok()).ok_or_else(|| LabError::refusal("invalid transition minute"))?;
+    let second: i64 = t.next().and_then(|x| x.parse().ok()).ok_or_else(|| LabError::refusal("invalid transition second"))?;
+    Ok(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second)
+}
 
 /// The calendar boundaries of the session/segment a timestamp falls in, as
 /// UTC epoch-ns instants, plus the trade-date civil day (days since the
@@ -265,6 +444,7 @@ pub type MinuteFields = (Option<String>, Option<&'static str>, i32);
 #[derive(Default)]
 pub struct MinuteFieldsCache {
     memo: HashMap<i64, MinuteFields>,
+    frame: Option<ScheduleFrame>,
 }
 
 impl MinuteFieldsCache {
@@ -272,13 +452,26 @@ impl MinuteFieldsCache {
         Self::default()
     }
 
+    pub fn with_frame(frame: ScheduleFrame) -> Self {
+        Self { memo: HashMap::new(), frame: Some(frame) }
+    }
+
     pub fn minute_fields(&mut self, ts_ns: u64) -> MinuteFields {
         let key = (ts_ns / 60_000_000_000) as i64;
         if let Some(hit) = self.memo.get(&key) {
             return hit.clone();
         }
-        let (session, segment) = assign_session(ts_ns);
-        let offset_ns = i128::from(crate::subcontract::UTC_OFFSET_MINUTES) * NS_PER_MIN;
+        let (session, segment, offset_minutes) = if let Some(frame) = &self.frame {
+            let seg = frame.session_segment_at(ts_ns).expect("a validated Stage M timezone frame");
+            let pair = seg.map_or((None, None), |s| (Some(format_trade_date(s.trade_day)), Some(s.segment)));
+            let utc_s = i64::try_from(ts_ns / 1_000_000_000).expect("timestamp seconds fit i64");
+            let offset = frame.offset_at_utc_s(utc_s).expect("a validated Stage M timezone frame") / 60;
+            (pair.0, pair.1, offset as i32)
+        } else {
+            let pair = assign_session(ts_ns);
+            (pair.0, pair.1, crate::subcontract::UTC_OFFSET_MINUTES)
+        };
+        let offset_ns = i128::from(offset_minutes) * NS_PER_MIN;
         let local = i128::from(ts_ns) + offset_ns;
         let local_hour = (local.rem_euclid(NS_PER_DAY) / NS_PER_MIN / 60) as i32;
         let value = (session, segment, local_hour);
@@ -301,6 +494,28 @@ mod tests {
     #[test]
     fn session_date_int_strips_dashes() {
         assert_eq!(session_date_int("2026-07-01"), 20_260_701);
+    }
+
+    #[test]
+    fn amendment4_authority_derives_daylight_standard_and_transition_sessions() {
+        let authority = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../analysis/tz-america-chicago-2026c.json");
+        let frame = ScheduleFrame::stage_m(&authority)
+            .expect("frozen authority");
+        let september = frame.bounds("2025-09-15").unwrap();
+        let november = frame.bounds("2025-11-03").unwrap();
+        let before = frame.bounds("2026-03-06").unwrap();
+        let after = frame.bounds("2026-03-09").unwrap();
+        assert_eq!(september.open_ns, ScheduleFrame::JulyFixed.bounds("2025-09-15").unwrap().open_ns);
+        assert_eq!(november.open_ns - ScheduleFrame::JulyFixed.bounds("2025-11-03").unwrap().open_ns, 3_600_000_000_000);
+        assert_eq!(before.scheduled_open_seconds, 81_900);
+        assert_eq!(after.scheduled_open_seconds, 81_900);
+        assert_eq!(after.open_ns + 71 * 3_600_000_000_000, before.open_ns + 72 * 3_600_000_000_000);
+    }
+
+    #[test]
+    fn amendment4_authority_refuses_a_hash_mismatch() {
+        let path = Path::new("Cargo.toml");
+        assert!(ScheduleFrame::stage_m(path).unwrap_err().to_string().contains("hash mismatch"));
     }
 
     #[test]

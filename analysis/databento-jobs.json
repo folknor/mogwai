@@ -1,6 +1,25 @@
 {
  "_version": 1,
  "jobs": {
+  "esv|2025-08.covered|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "files": {
+    "condition.json": "8967ee91e9eee911e7d0cd27ff48cd5a0362b306b0369344c2cb59475d6f8d59",
+    "glbx-mdp3-20250812-20250831.mbp-1.csv.zst": "0e0a0f2b73beba21941dc28e8a9f3430e77cabd6c06b23162c8adf83ea451a06",
+    "manifest.json": "3479bc09d543b64dc6d9718ce9788f37bb38901bf321b54bf6b7b795ee477918",
+    "metadata.json": "d9b19035e7b214179538d6b051fbeaaf60c50058394fea0f870ff8c335e73f7a"
+   },
+   "job_id": "GLBX-20260812-ARJ6G4M7V3",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "esv",
+   "split_duration": "month",
+   "state": "downloaded",
+   "submitted_at": "2026-08-12T12:46:48.134533+00:00",
+   "window": "2025-08.covered"
+  },
   "esv|2025-08.covered|tbbo": {
    "compression": "zstd",
    "encoding": "csv",
@@ -19,6 +38,19 @@
    "state": "downloaded",
    "submitted_at": "2026-08-12T10:11:22.102613+00:00",
    "window": "2025-08.covered"
+  },
+  "esv|2025-09.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-EP4EUTRH7L",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "esv",
+   "split_duration": "month",
+   "state": "queued",
+   "submitted_at": "2026-08-12T12:52:45.233445+00:00",
+   "window": "2025-09.manifest"
   },
   "esv|2025-09.manifest|tbbo": {
    "compression": "zstd",
@@ -40,6 +72,19 @@
    "submitted_at": "2026-08-12T11:05:05.422220+00:00",
    "window": "2025-09.manifest"
   },
+  "esv|2025-10.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-RGK3FE5CGM",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "esv",
+   "split_duration": "month",
+   "state": "queued",
+   "submitted_at": "2026-08-12T12:52:20.658682+00:00",
+   "window": "2025-10.manifest"
+  },
   "esv|2025-10.manifest|tbbo": {
    "compression": "zstd",
    "encoding": "csv",
@@ -60,6 +105,19 @@
    "submitted_at": "2026-08-12T11:04:22.318916+00:00",
    "window": "2025-10.manifest"
   },
+  "esv|2025-11.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-3YP8TLD6U9",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "esv",
+   "split_duration": "month",
+   "state": "queued",
+   "submitted_at": "2026-08-12T12:51:58.614932+00:00",
+   "window": "2025-11.manifest"
+  },
   "esv|2025-11.manifest|tbbo": {
    "compression": "zstd",
    "encoding": "csv",
@@ -78,6 +136,19 @@
    "state": "downloaded",
    "submitted_at": "2026-08-12T11:02:45.332753+00:00",
    "window": "2025-11.manifest"
+  },
+  "esv|2025-12.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-AGHJP9F7PY",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "esv",
+   "split_duration": "month",
+   "state": "queued",
+   "submitted_at": "2026-08-12T12:51:25.146258+00:00",
+   "window": "2025-12.manifest"
   },
   "esv|2025-12.manifest|tbbo": {
    "compression": "zstd",
@@ -99,6 +170,19 @@
    "submitted_at": "2026-08-12T11:01:39.935380+00:00",
    "window": "2025-12.manifest"
   },
+  "esv|2026-01.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-C99859FLES",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "esv",
+   "split_duration": "month",
+   "state": "queued",
+   "submitted_at": "2026-08-12T12:50:47.250809+00:00",
+   "window": "2026-01.manifest"
+  },
   "esv|2026-01.manifest|tbbo": {
    "compression": "zstd",
    "encoding": "csv",
@@ -117,6 +201,19 @@
    "state": "downloaded",
    "submitted_at": "2026-08-12T11:00:27.740125+00:00",
    "window": "2026-01.manifest"
+  },
+  "esv|2026-02.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-TJR6XKD5A4",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "esv",
+   "split_duration": "month",
+   "state": "queued",
+   "submitted_at": "2026-08-12T12:50:05.968203+00:00",
+   "window": "2026-02.manifest"
   },
   "esv|2026-02.manifest|tbbo": {
    "compression": "zstd",
@@ -137,6 +234,25 @@
    "submitted_at": "2026-08-12T10:59:45.644622+00:00",
    "window": "2026-02.manifest"
   },
+  "esv|2026-03.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "files": {
+    "condition.json": "87373a60c481ac7beb4fbb729ad9721273f0fe62a48d8c9c37fc061b2e026071",
+    "glbx-mdp3-20260301-20260331.mbp-1.csv.zst": "daf295e1f4d09c212328dad9f96178e962c64eef445d3238f736e971259e99c7",
+    "manifest.json": "28cf5c82ee2194861f21960d08cf9ee28504f41f0c47138cb58b370d53605cc8",
+    "metadata.json": "4ca3e76d51b4a7f5b615161ce8fbeea8d8a94e8df1a99fd40445433018853dd6"
+   },
+   "job_id": "GLBX-20260812-SW9CLX6EYG",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "esv",
+   "split_duration": "month",
+   "state": "downloaded",
+   "submitted_at": "2026-08-12T12:49:43.248761+00:00",
+   "window": "2026-03.manifest"
+  },
   "esv|2026-03.manifest|tbbo": {
    "compression": "zstd",
    "encoding": "csv",
@@ -155,6 +271,26 @@
    "state": "downloaded",
    "submitted_at": "2026-08-12T10:47:51.141577+00:00",
    "window": "2026-03.manifest"
+  },
+  "esv|2026-04.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "files": {
+    "condition.json": "713cfdd9ebe16d503251d1361126c61d53b7b52108f149b11f04c831bedc92fb",
+    "glbx-mdp3-20260331.mbp-1.csv.zst": "0b78e86176561ad12a90479b227b74c80b7f4a91d71ca200749a9168188ad4b9",
+    "glbx-mdp3-20260401-20260430.mbp-1.csv.zst": "49f873de84a120f528bd35b4ddde45a0bc23cafd3ca67ebd60f0c0d25fa619e7",
+    "manifest.json": "74ac6a1732460e1e3caf3dea0be7b90a8c7eeb81f0ace843dc7f87918bc55125",
+    "metadata.json": "f5a5fc7c6bcc046ac648fe0e0b9a5ec7e19ca34b47f717e389eae2803fd025a4"
+   },
+   "job_id": "GLBX-20260812-QEGKAL8R4K",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "esv",
+   "split_duration": "month",
+   "state": "downloaded",
+   "submitted_at": "2026-08-12T12:48:52.398183+00:00",
+   "window": "2026-04.manifest"
   },
   "esv|2026-04.manifest|tbbo": {
    "compression": "zstd",
@@ -176,6 +312,19 @@
    "submitted_at": "2026-08-12T10:47:25.026975+00:00",
    "window": "2026-04.manifest"
   },
+  "esv|2026-05.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-JXM6F88CHT",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "esv",
+   "split_duration": "month",
+   "state": "processing",
+   "submitted_at": "2026-08-12T12:48:24.996273+00:00",
+   "window": "2026-05.manifest"
+  },
   "esv|2026-05.manifest|tbbo": {
    "compression": "zstd",
    "encoding": "csv",
@@ -195,6 +344,19 @@
    "state": "downloaded",
    "submitted_at": "2026-08-12T10:42:21.759933+00:00",
    "window": "2026-05.manifest"
+  },
+  "esv|2026-06.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-JRLP865SN6",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "esv",
+   "split_duration": "month",
+   "state": "processing",
+   "submitted_at": "2026-08-12T12:47:49.385359+00:00",
+   "window": "2026-06.manifest"
   },
   "esv|2026-06.manifest|tbbo": {
    "compression": "zstd",
@@ -216,6 +378,26 @@
    "submitted_at": "2026-08-12T10:30:22.865984+00:00",
    "window": "2026-06.manifest"
   },
+  "esv|2026-07.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "files": {
+    "condition.json": "a03f5a6bf12fcb42d4d78856bddc48c59152fcdd9663eec9439a89ebef81405e",
+    "glbx-mdp3-20260630.mbp-1.csv.zst": "73ae9e8f6f1b0c3261ef32925830b8ded9782c66f4a8fc33ab247770f3b1888a",
+    "glbx-mdp3-20260701-20260731.mbp-1.csv.zst": "e592aa630070361b5fb431a8263296946515185b006d47c45340cea5b53c548d",
+    "manifest.json": "1644704e1fd70be208801d088b09aff56ce84c10631297e3de0194a912b19c33",
+    "metadata.json": "576d7e258f1306dbf5616aef524a0427f7b6c814aee256cef354585b395bc331"
+   },
+   "job_id": "GLBX-20260812-HEJPDQMDCB",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "esv",
+   "split_duration": "month",
+   "state": "downloaded",
+   "submitted_at": "2026-08-12T11:24:20.790548+00:00",
+   "window": "2026-07.manifest"
+  },
   "esv|2026-07.manifest|tbbo": {
    "compression": "zstd",
    "encoding": "csv",
@@ -236,6 +418,19 @@
    "submitted_at": "2026-08-12T10:18:06.841225+00:00",
    "window": "2026-07.manifest"
   },
+  "esv|2026-08.partial|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-NTP6HBTUTM",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "esv",
+   "split_duration": "month",
+   "state": "queued",
+   "submitted_at": "2026-08-12T12:53:17.123900+00:00",
+   "window": "2026-08.partial"
+  },
   "esv|2026-08.partial|tbbo": {
    "compression": "zstd",
    "encoding": "csv",
@@ -255,6 +450,25 @@
    "submitted_at": "2026-08-12T11:06:02.404283+00:00",
    "window": "2026-08.partial"
   },
+  "mesv|2025-08.covered|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "files": {
+    "condition.json": "8967ee91e9eee911e7d0cd27ff48cd5a0362b306b0369344c2cb59475d6f8d59",
+    "glbx-mdp3-20250812-20250831.mbp-1.csv.zst": "8e51316a530f36dc34a58544de67177a67cdbfef07656b062ad03a297f0fd4c7",
+    "manifest.json": "90b7934092122c7550115dc13ced4d3d7d38cc96e0521713df038218c14ddf93",
+    "metadata.json": "5d67fdb39a2324711caba9d31261702ca8ae0f9f8f74b482de30f1451f62f087"
+   },
+   "job_id": "GLBX-20260812-5WYA5KH5XL",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mesv",
+   "split_duration": "month",
+   "state": "downloaded",
+   "submitted_at": "2026-08-12T12:46:59.230617+00:00",
+   "window": "2025-08.covered"
+  },
   "mesv|2025-08.covered|tbbo": {
    "compression": "zstd",
    "encoding": "csv",
@@ -273,6 +487,19 @@
    "state": "downloaded",
    "submitted_at": "2026-08-12T10:14:45.560894+00:00",
    "window": "2025-08.covered"
+  },
+  "mesv|2025-09.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-TDQUPCMN3Q",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mesv",
+   "split_duration": "month",
+   "state": "queued",
+   "submitted_at": "2026-08-12T12:52:55.358156+00:00",
+   "window": "2025-09.manifest"
   },
   "mesv|2025-09.manifest|tbbo": {
    "compression": "zstd",
@@ -294,6 +521,19 @@
    "submitted_at": "2026-08-12T11:05:18.198478+00:00",
    "window": "2025-09.manifest"
   },
+  "mesv|2025-10.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-FGHKHN9NH5",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mesv",
+   "split_duration": "month",
+   "state": "queued",
+   "submitted_at": "2026-08-12T12:52:28.925615+00:00",
+   "window": "2025-10.manifest"
+  },
   "mesv|2025-10.manifest|tbbo": {
    "compression": "zstd",
    "encoding": "csv",
@@ -314,6 +554,19 @@
    "submitted_at": "2026-08-12T11:04:34.001198+00:00",
    "window": "2025-10.manifest"
   },
+  "mesv|2025-11.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-C8LYFPT899",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mesv",
+   "split_duration": "month",
+   "state": "queued",
+   "submitted_at": "2026-08-12T12:52:05.455065+00:00",
+   "window": "2025-11.manifest"
+  },
   "mesv|2025-11.manifest|tbbo": {
    "compression": "zstd",
    "encoding": "csv",
@@ -332,6 +585,19 @@
    "state": "downloaded",
    "submitted_at": "2026-08-12T11:03:13.775845+00:00",
    "window": "2025-11.manifest"
+  },
+  "mesv|2025-12.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-RW9XMPVP9V",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mesv",
+   "split_duration": "month",
+   "state": "queued",
+   "submitted_at": "2026-08-12T12:51:39.592053+00:00",
+   "window": "2025-12.manifest"
   },
   "mesv|2025-12.manifest|tbbo": {
    "compression": "zstd",
@@ -353,6 +619,19 @@
    "submitted_at": "2026-08-12T11:02:09.553541+00:00",
    "window": "2025-12.manifest"
   },
+  "mesv|2026-01.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-5A6FXUU3AG",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mesv",
+   "split_duration": "month",
+   "state": "queued",
+   "submitted_at": "2026-08-12T12:50:53.556810+00:00",
+   "window": "2026-01.manifest"
+  },
   "mesv|2026-01.manifest|tbbo": {
    "compression": "zstd",
    "encoding": "csv",
@@ -371,6 +650,19 @@
    "state": "downloaded",
    "submitted_at": "2026-08-12T11:00:49.135276+00:00",
    "window": "2026-01.manifest"
+  },
+  "mesv|2026-02.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-K3Y397XL34",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mesv",
+   "split_duration": "month",
+   "state": "queued",
+   "submitted_at": "2026-08-12T12:50:14.611607+00:00",
+   "window": "2026-02.manifest"
   },
   "mesv|2026-02.manifest|tbbo": {
    "compression": "zstd",
@@ -391,6 +683,25 @@
    "submitted_at": "2026-08-12T10:59:54.295942+00:00",
    "window": "2026-02.manifest"
   },
+  "mesv|2026-03.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "files": {
+    "condition.json": "87373a60c481ac7beb4fbb729ad9721273f0fe62a48d8c9c37fc061b2e026071",
+    "glbx-mdp3-20260301-20260331.mbp-1.csv.zst": "a80ccd1c0d62d93271bd93cf6422ff69be4fc443404238d065765700c06e88ca",
+    "manifest.json": "2ca4f6bddf4fc71a8e800ee0482d63c278a9f9c829321981bc7349b383c6d12a",
+    "metadata.json": "0139545f4ae62463abf3d674e0453aee91f5afede3904c30e849442e292a373f"
+   },
+   "job_id": "GLBX-20260812-EBGHKERC4N",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mesv",
+   "split_duration": "month",
+   "state": "downloaded",
+   "submitted_at": "2026-08-12T12:49:50.993805+00:00",
+   "window": "2026-03.manifest"
+  },
   "mesv|2026-03.manifest|tbbo": {
    "files": {
     "condition.json": "87373a60c481ac7beb4fbb729ad9721273f0fe62a48d8c9c37fc061b2e026071",
@@ -407,6 +718,26 @@
    "scope": "mesv",
    "state": "downloaded",
    "window": "2026-03.manifest"
+  },
+  "mesv|2026-04.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "files": {
+    "condition.json": "713cfdd9ebe16d503251d1361126c61d53b7b52108f149b11f04c831bedc92fb",
+    "glbx-mdp3-20260331.mbp-1.csv.zst": "ea4aad91bff328d39e56d6a50c5d5cf2ae6812a0ac09f1184487502988e229c6",
+    "glbx-mdp3-20260401-20260430.mbp-1.csv.zst": "5d22c33d386e22f077c86afd4b7e611151f96afde2adef3722263943d3a4a217",
+    "manifest.json": "24913f36ee91186b6d9a3dcb43e33b1ca4863f4195ac5a9dc2611945d9992398",
+    "metadata.json": "92ef618e8f07672eed6b1703ca7111b5fba34757f3a5bb4d3d65d893801902b2"
+   },
+   "job_id": "GLBX-20260812-F4TF4H9UKW",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mesv",
+   "split_duration": "month",
+   "state": "downloaded",
+   "submitted_at": "2026-08-12T12:49:13.182262+00:00",
+   "window": "2026-04.manifest"
   },
   "mesv|2026-04.manifest|tbbo": {
    "compression": "zstd",
@@ -428,6 +759,19 @@
    "submitted_at": "2026-08-12T10:47:38.669731+00:00",
    "window": "2026-04.manifest"
   },
+  "mesv|2026-05.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-RS8BRJ4HNT",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mesv",
+   "split_duration": "month",
+   "state": "processing",
+   "submitted_at": "2026-08-12T12:48:38.088269+00:00",
+   "window": "2026-05.manifest"
+  },
   "mesv|2026-05.manifest|tbbo": {
    "compression": "zstd",
    "encoding": "csv",
@@ -447,6 +791,19 @@
    "state": "downloaded",
    "submitted_at": "2026-08-12T10:45:27.123021+00:00",
    "window": "2026-05.manifest"
+  },
+  "mesv|2026-06.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-4VMQ5943NB",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mesv",
+   "split_duration": "month",
+   "state": "processing",
+   "submitted_at": "2026-08-12T12:48:02.906886+00:00",
+   "window": "2026-06.manifest"
   },
   "mesv|2026-06.manifest|tbbo": {
    "compression": "zstd",
@@ -468,6 +825,26 @@
    "submitted_at": "2026-08-12T10:33:24.232139+00:00",
    "window": "2026-06.manifest"
   },
+  "mesv|2026-07.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "files": {
+    "condition.json": "a03f5a6bf12fcb42d4d78856bddc48c59152fcdd9663eec9439a89ebef81405e",
+    "glbx-mdp3-20260630.mbp-1.csv.zst": "07812d7f0a00798e3b74e938996407d9f0083e0b078cc74c8a8f4da8490c7802",
+    "glbx-mdp3-20260701-20260731.mbp-1.csv.zst": "5d3f1db09cf452f216b0e60e60d746d60e680df328322c87e8d5ebf4806373d2",
+    "manifest.json": "585b16851709f1199e2411b3fb4ccbc18335d143dcf91bf44cbbcebbb112fa58",
+    "metadata.json": "4f20e15ff109181c7a727dda6dbef1b19659d5f259d01a4859eefdbee535a7c6"
+   },
+   "job_id": "GLBX-20260812-9SYGXH6QKC",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mesv",
+   "split_duration": "month",
+   "state": "downloaded",
+   "submitted_at": "2026-08-12T11:24:56.676372+00:00",
+   "window": "2026-07.manifest"
+  },
   "mesv|2026-07.manifest|tbbo": {
    "compression": "zstd",
    "encoding": "csv",
@@ -488,6 +865,19 @@
    "submitted_at": "2026-08-12T10:21:16.080507+00:00",
    "window": "2026-07.manifest"
   },
+  "mesv|2026-08.partial|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-VFCS4DDW5T",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mesv",
+   "split_duration": "month",
+   "state": "queued",
+   "submitted_at": "2026-08-12T12:53:30.710375+00:00",
+   "window": "2026-08.partial"
+  },
   "mesv|2026-08.partial|tbbo": {
    "compression": "zstd",
    "encoding": "csv",
@@ -507,6 +897,19 @@
    "submitted_at": "2026-08-12T11:06:14.789895+00:00",
    "window": "2026-08.partial"
   },
+  "mnqv|2025-08.covered|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-GYGAY73PFU",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mnqv",
+   "split_duration": "month",
+   "state": "processing",
+   "submitted_at": "2026-08-12T12:47:13.782739+00:00",
+   "window": "2025-08.covered"
+  },
   "mnqv|2025-08.covered|tbbo": {
    "compression": "zstd",
    "encoding": "csv",
@@ -525,6 +928,19 @@
    "state": "downloaded",
    "submitted_at": "2026-08-12T10:16:14.985998+00:00",
    "window": "2025-08.covered"
+  },
+  "mnqv|2025-09.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-A5ED97GQYY",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mnqv",
+   "split_duration": "month",
+   "state": "queued",
+   "submitted_at": "2026-08-12T12:53:01.541744+00:00",
+   "window": "2025-09.manifest"
   },
   "mnqv|2025-09.manifest|tbbo": {
    "compression": "zstd",
@@ -546,6 +962,19 @@
    "submitted_at": "2026-08-12T11:05:53.840612+00:00",
    "window": "2025-09.manifest"
   },
+  "mnqv|2025-10.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-HUPTV46GJ6",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mnqv",
+   "split_duration": "month",
+   "state": "queued",
+   "submitted_at": "2026-08-12T12:52:36.778525+00:00",
+   "window": "2025-10.manifest"
+  },
   "mnqv|2025-10.manifest|tbbo": {
    "compression": "zstd",
    "encoding": "csv",
@@ -566,6 +995,19 @@
    "submitted_at": "2026-08-12T11:04:47.619148+00:00",
    "window": "2025-10.manifest"
   },
+  "mnqv|2025-11.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-EW9A86SV64",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mnqv",
+   "split_duration": "month",
+   "state": "queued",
+   "submitted_at": "2026-08-12T12:52:14.952944+00:00",
+   "window": "2025-11.manifest"
+  },
   "mnqv|2025-11.manifest|tbbo": {
    "compression": "zstd",
    "encoding": "csv",
@@ -584,6 +1026,19 @@
    "state": "downloaded",
    "submitted_at": "2026-08-12T11:03:54.011806+00:00",
    "window": "2025-11.manifest"
+  },
+  "mnqv|2025-12.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-F385KQQH6K",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mnqv",
+   "split_duration": "month",
+   "state": "queued",
+   "submitted_at": "2026-08-12T12:51:49.877787+00:00",
+   "window": "2025-12.manifest"
   },
   "mnqv|2025-12.manifest|tbbo": {
    "compression": "zstd",
@@ -605,6 +1060,19 @@
    "submitted_at": "2026-08-12T11:02:31.243236+00:00",
    "window": "2025-12.manifest"
   },
+  "mnqv|2026-01.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-9FPUJYCFMX",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mnqv",
+   "split_duration": "month",
+   "state": "queued",
+   "submitted_at": "2026-08-12T12:51:12.306790+00:00",
+   "window": "2026-01.manifest"
+  },
   "mnqv|2026-01.manifest|tbbo": {
    "compression": "zstd",
    "encoding": "csv",
@@ -623,6 +1091,19 @@
    "state": "downloaded",
    "submitted_at": "2026-08-12T10:03:27.515879+00:00",
    "window": "2026-01.manifest"
+  },
+  "mnqv|2026-02.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-U6MFY7HXM4",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mnqv",
+   "split_duration": "month",
+   "state": "queued",
+   "submitted_at": "2026-08-12T12:50:27.539598+00:00",
+   "window": "2026-02.manifest"
   },
   "mnqv|2026-02.manifest|tbbo": {
    "compression": "zstd",
@@ -643,6 +1124,19 @@
    "submitted_at": "2026-08-12T11:00:05.895792+00:00",
    "window": "2026-02.manifest"
   },
+  "mnqv|2026-03.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-6BRDBPWTV8",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mnqv",
+   "split_duration": "month",
+   "state": "done",
+   "submitted_at": "2026-08-12T12:49:57.389451+00:00",
+   "window": "2026-03.manifest"
+  },
   "mnqv|2026-03.manifest|tbbo": {
    "compression": "zstd",
    "encoding": "csv",
@@ -661,6 +1155,19 @@
    "state": "downloaded",
    "submitted_at": "2026-08-12T10:59:17.088830+00:00",
    "window": "2026-03.manifest"
+  },
+  "mnqv|2026-04.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-TSFKX4TXDD",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mnqv",
+   "split_duration": "month",
+   "state": "processing",
+   "submitted_at": "2026-08-12T12:49:35.151257+00:00",
+   "window": "2026-04.manifest"
   },
   "mnqv|2026-04.manifest|tbbo": {
    "compression": "zstd",
@@ -682,6 +1189,19 @@
    "submitted_at": "2026-08-12T10:47:43.931676+00:00",
    "window": "2026-04.manifest"
   },
+  "mnqv|2026-05.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-H3GQET6NH8",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mnqv",
+   "split_duration": "month",
+   "state": "processing",
+   "submitted_at": "2026-08-12T12:48:46.562076+00:00",
+   "window": "2026-05.manifest"
+  },
   "mnqv|2026-05.manifest|tbbo": {
    "compression": "zstd",
    "encoding": "csv",
@@ -701,6 +1221,19 @@
    "state": "downloaded",
    "submitted_at": "2026-08-12T10:47:00.437418+00:00",
    "window": "2026-05.manifest"
+  },
+  "mnqv|2026-06.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-WYU5YVXU3W",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mnqv",
+   "split_duration": "month",
+   "state": "processing",
+   "submitted_at": "2026-08-12T12:48:11.041010+00:00",
+   "window": "2026-06.manifest"
   },
   "mnqv|2026-06.manifest|tbbo": {
    "compression": "zstd",
@@ -742,6 +1275,26 @@
    "submitted_at": "2026-08-05T12:44:31.110428+00:00",
    "window": "2026-07.full"
   },
+  "mnqv|2026-07.manifest|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "files": {
+    "condition.json": "a03f5a6bf12fcb42d4d78856bddc48c59152fcdd9663eec9439a89ebef81405e",
+    "glbx-mdp3-20260630.mbp-1.csv.zst": "f63b91a6ebc862c2fdd2e89a9c36a2aa7c4b6a2d5dfdb2f29cb1cc9a2d4f9def",
+    "glbx-mdp3-20260701-20260731.mbp-1.csv.zst": "990327c7991d81a5040257a20f91256f6f6d55e2932401f784fb126dd19082a9",
+    "manifest.json": "4e0c76f4b0f413e21338513f75e1fcf978b1a361e009f2b13c8c9aed69969444",
+    "metadata.json": "4078fad297688da9a87c390250a634b34610d2b56153a27637307677fd2df1ea"
+   },
+   "job_id": "GLBX-20260812-QHNSDPMV9M",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mnqv",
+   "split_duration": "month",
+   "state": "downloaded",
+   "submitted_at": "2026-08-12T11:25:18.543885+00:00",
+   "window": "2026-07.manifest"
+  },
   "mnqv|2026-07.manifest|tbbo": {
    "compression": "zstd",
    "encoding": "csv",
@@ -761,6 +1314,19 @@
    "state": "downloaded",
    "submitted_at": "2026-08-12T10:24:21.576690+00:00",
    "window": "2026-07.manifest"
+  },
+  "mnqv|2026-08.partial|mbp-1": {
+   "compression": "zstd",
+   "encoding": "csv",
+   "job_id": "GLBX-20260812-HUWFFFJXFW",
+   "live_quote_at_submit": 0.0,
+   "planned_quote": null,
+   "schema": "mbp-1",
+   "scope": "mnqv",
+   "split_duration": "month",
+   "state": "queued",
+   "submitted_at": "2026-08-12T12:53:45.931990+00:00",
+   "window": "2026-08.partial"
   },
   "mnqv|2026-08.partial|tbbo": {
    "compression": "zstd",

@@ -4,7 +4,7 @@
 //! Stage M Tier 1 orchestration. Each corpus month is deliberately one
 //! invocation and one artifact directory.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow, bail};
@@ -39,6 +39,10 @@ pub enum StageMCommand {
     Month(MonthArgs),
     /// Recompute July Tier 1a under every original seed path.
     Backcheck(BackcheckArgs),
+    /// Run the signed Amendment 2 slow-geometry re-verification ladder.
+    ReverifyAmendment2(BackcheckArgs),
+    /// Run Amendment 4's September-October mechanical schedule gate.
+    ScheduleEquivalence(BackcheckArgs),
     /// Run Tier 1b from completed per-month slow-geometry artifacts.
     Exchangeability(ExchangeabilityArgs),
     /// Run the preregistered Tier 1b calendar-only power analysis.
@@ -128,10 +132,46 @@ pub fn run(args: StageMArgs) -> anyhow::Result<()> {
         StageMCommand::Preflight(x) => run_preflight(x),
         StageMCommand::Month(x) => run_month(x),
         StageMCommand::Backcheck(x) => run_backcheck(&x),
+        StageMCommand::ReverifyAmendment2(x) => run_amendment2_reverification(&x),
+        StageMCommand::ScheduleEquivalence(x) => run_schedule_equivalence(&x),
         StageMCommand::Exchangeability(x) => run_exchangeability(&x),
         StageMCommand::Power(x) => run_power(&x),
         StageMCommand::Summarize(x) => run_summarize(&x),
     }
+}
+
+fn run_schedule_equivalence(args: &BackcheckArgs) -> anyhow::Result<()> {
+    let frame = mogwai_lab::session::ScheduleFrame::stage_m(Path::new("analysis/tz-america-chicago-2026c.json"))
+        .map_err(|e| anyhow!("Amendment 4 authority refused: {e}"))?;
+    let fixed = mogwai_lab::session::ScheduleFrame::JulyFixed;
+    let mut months = Vec::new();
+    let mut all_identical = true;
+    for month in [202_509_u64, 202_510] {
+        let preflight = read_json(args.output_root.join(month.to_string()).join("preflight.json"))?;
+        let sessions = preflight["sessions"].as_object().ok_or_else(|| anyhow!("{month} preflight has no session inventory"))?;
+        let mut comparisons = Vec::new();
+        for session in sessions.keys() {
+            let old = fixed.bounds(session).map_err(|e| anyhow!("old bound for {session}: {e}"))?;
+            let new = frame.bounds(session).map_err(|e| anyhow!("new bound for {session}: {e}"))?;
+            let identical = old.open_ns == new.open_ns && old.halt_start_ns == new.halt_start_ns
+                && old.halt_end_ns == new.halt_end_ns && old.close_ns == new.close_ns;
+            all_identical &= identical;
+            comparisons.push(json!({"session":session,"identical":identical,"measured_frame":old,"amendment4_frame":new}));
+        }
+        months.push(json!({"month":month,"identical":comparisons.iter().all(|x|x["identical"]==true),"sessions":comparisons}));
+    }
+    let artifact = json!({
+        "outcome":if all_identical {"completed"} else {"stopped_nonidentity"},
+        "amendment":"Stage M Amendment 4",
+        "authority":{"artifact":"analysis/tz-america-chicago-2026c.json","sha256":mogwai_lab::session::STAGE_M_TZ_AUTHORITY_SHA256},
+        "rule":"September and October derived Amendment 4 bounds must be identical to their original fixed UTC-5 measurement frame",
+        "months":months
+    });
+    let output = args.output_root.join("amendment4-schedule-equivalence.json");
+    write_json_atomic(&output, &artifact).map_err(|e| anyhow!(e.to_string()))?;
+    if !all_identical { bail!("Amendment 4 September-October schedule equivalence gate failed"); }
+    println!("Amendment 4 September-October schedule equivalence PASS -> {}", output.display());
+    Ok(())
 }
 
 fn run_preflight(args: PreflightArgs) -> anyhow::Result<()> {
@@ -143,6 +183,9 @@ fn run_preflight(args: PreflightArgs) -> anyhow::Result<()> {
             .join(args.month.to_string())
             .join("preflight.json")
     });
+    if matches!(args.month, 202_511 | 202_512 | 202_601 | 202_602 | 202_603) {
+        snapshot_superseded(&output, &args.output_root.join(args.month.to_string()))?;
+    }
     let artifact = mogwai_lab::preflight::run_month_preflight(
         args.month,
         &args.corpus,
@@ -482,6 +525,12 @@ fn run_month(args: MonthArgs) -> anyhow::Result<()> {
     let sequence_path = dir.join("ordered-counts.jsonl");
     let panels_path = dir.join("ordered-counts-panels.json");
     let slow_path = dir.join("slow-geometry.json");
+    let affected = matches!(args.month, 202_511 | 202_512 | 202_601 | 202_602 | 202_603);
+    if affected {
+        for path in [&count_path, &sequence_path, &panels_path, &slow_path] {
+            snapshot_superseded(path, &dir)?;
+        }
+    }
 
     let count_config = CountCurveMonthRun {
         month: args.month,
@@ -491,6 +540,7 @@ fn run_month(args: MonthArgs) -> anyhow::Result<()> {
         output: count_path,
     };
     let pass = run_observed_with_count_windows_ordered(
+        args.month,
         &args.corpus,
         &args.ledger,
         &preflight,
@@ -536,7 +586,56 @@ fn run_month(args: MonthArgs) -> anyhow::Result<()> {
         input: sequence_path,
         output: slow_path,
         expected_sha256: hash,
-    })
+        exclude_exact_close_for_comparison: false,
+    })?;
+    if affected { write_amendment4_invalidation(args.month, &dir)?; }
+    Ok(())
+}
+
+fn snapshot_superseded(path: &Path, month_dir: &Path) -> anyhow::Result<()> {
+    if !path.exists() { return Ok(()); }
+    let archive = month_dir.join("superseded-invalid-schedule-frame");
+    std::fs::create_dir_all(&archive)?;
+    let destination = archive.join(path.file_name().ok_or_else(|| anyhow!("artifact has no filename"))?);
+    if !destination.exists() { std::fs::copy(path, destination)?; }
+    Ok(())
+}
+
+fn write_amendment4_invalidation(month: u64, dir: &Path) -> anyhow::Result<()> {
+    let archive = dir.join("superseded-invalid-schedule-frame");
+    let old_preflight = read_json(archive.join("preflight.json"))?;
+    let new_preflight = read_json(dir.join("preflight.json"))?;
+    let artifact_names = ["preflight.json", "count-curve.json", "ordered-counts.jsonl", "ordered-counts-panels.json", "slow-geometry.json"];
+    let mut artifacts = Vec::new();
+    for name in artifact_names {
+        let old = archive.join(name);
+        let replacement = dir.join(name);
+        if !old.exists() || !replacement.exists() { bail!("missing supersession pair for {month} {name}"); }
+        let old_hash = mogwai_lab::ledger::sha256_file(&old).map_err(|e| anyhow!(e.to_string()))?;
+        let replacement_hash = mogwai_lab::ledger::sha256_file(&replacement).map_err(|e| anyhow!(e.to_string()))?;
+        let former_outcome = if name.ends_with(".json") { read_json(&old).ok().and_then(|x| x["outcome"].as_str().map(str::to_string)).unwrap_or_else(|| "completed".to_string()) } else { "completed".to_string() };
+        artifacts.push(json!({"artifact":old,"sha256":old_hash,"former_outcome":former_outcome,"status":"superseded_invalid_schedule_frame","replacement":replacement,"replacement_sha256":replacement_hash}));
+    }
+    let fixed = mogwai_lab::session::ScheduleFrame::JulyFixed;
+    let old_bounds = old_preflight["sessions"].as_object().ok_or_else(|| anyhow!("old preflight has no sessions"))?.keys()
+        .map(|date| fixed.bounds(date).map_err(|e| anyhow!(e.to_string()))).collect::<anyhow::Result<Vec<_>>>()?;
+    let implementing_commit = String::from_utf8(std::process::Command::new("git").args(["rev-parse", "HEAD"]).output()?.stdout)?.trim().to_string();
+    let record = json!({
+        "outcome":"completed",
+        "status":"superseded_invalid_schedule_frame",
+        "former_completed_outcomes_preserved":true,
+        "month":month,
+        "defect":"the fixed UTC-5 July subcontract scheduled a dead pre-open hour and excluded the real final trading hour in standard time",
+        "affected_months":[202511,202512,202601,202602,202603],
+        "authority":{"amendment":"notes/stage-m-preregistration.md Amendment 4, signed 2026-08-12","timezone_artifact":"analysis/tz-america-chicago-2026c.json","timezone_sha256":mogwai_lab::session::STAGE_M_TZ_AUTHORITY_SHA256,"implementing_commit":implementing_commit},
+        "artifacts":artifacts,
+        "population_diagnostics":{
+            "old":{"outside_session_rows":old_preflight["rows_outside_declared_sessions"],"scheduled_exposure_seconds":old_bounds.iter().map(|x|x.scheduled_open_seconds).sum::<i64>(),"usable_sessions":old_preflight["usable_sessions"].as_array().map_or(0,Vec::len),"per_session_bounds":old_bounds},
+            "new":{"outside_session_rows":new_preflight["rows_outside_declared_sessions"],"scheduled_exposure_seconds":new_preflight["schedule_frame"]["scheduled_exposure_seconds"],"usable_sessions":new_preflight["usable_sessions"].as_array().map_or(0,Vec::len),"per_session_bounds":new_preflight["schedule_frame"]["per_session_bounds"]}
+        },
+        "calendar_inventory":"analysis/databento-calendar.json is graded per DATE from record counts and is schedule-independent; preflight inventory derivation is unaffected"
+    });
+    write_json_atomic(&dir.join("amendment4-invalidation.json"), &record).map_err(|e| anyhow!(e.to_string()))
 }
 
 fn usable_count(path: &Path) -> anyhow::Result<usize> {
@@ -571,6 +670,7 @@ fn run_backcheck(args: &BackcheckArgs) -> anyhow::Result<()> {
         input: sequence,
         output: slow.clone(),
         expected_sha256: sequence_hash,
+        exclude_exact_close_for_comparison: false,
     })?;
 
     // Stage M Amendment 1 added per-fold training provenance to every score
@@ -683,6 +783,279 @@ fn run_backcheck(args: &BackcheckArgs) -> anyhow::Result<()> {
     } else {
         bail!("method_mismatch")
     }
+}
+
+fn run_amendment2_reverification(args: &BackcheckArgs) -> anyhow::Result<()> {
+    let months = [JULY, 202_509, 202_510, 202_511, 202_512, 202_601, 202_602];
+    let mut reports = Vec::new();
+    let mut candidates = Vec::new();
+    for month in months {
+        let (sequence, old_path, candidate) = if month == JULY {
+            (
+                PathBuf::from("analysis/out/ordered-counts.jsonl"),
+                PathBuf::from("analysis/out/slow-geometry.json"),
+                args.output_root.join(month.to_string()).join("slow-geometry.amendment2.json"),
+            )
+        } else {
+            let dir = args.output_root.join(month.to_string());
+            (dir.join("ordered-counts.jsonl"), dir.join("slow-geometry.json"), dir.join("slow-geometry.amendment2.json"))
+        };
+        let hash = mogwai_lab::ledger::sha256_file(&sequence).map_err(|e| anyhow!(e.to_string()))?;
+        slow_geometry::run_with(&SlowGeometryRun { month, input: sequence.clone(), output: candidate.clone(), expected_sha256: hash.clone(), exclude_exact_close_for_comparison: false })?;
+        let old = read_json(&old_path)?;
+        let new = read_json(&candidate)?;
+        let report = if month == JULY {
+            let excluded = args.output_root.join(month.to_string()).join("slow-geometry.exact-close-excluded.json");
+            slow_geometry::run_with(&SlowGeometryRun { month, input: sequence.clone(), output: excluded.clone(), expected_sha256: hash, exclude_exact_close_for_comparison: true })?;
+            let run2 = read_json(&excluded)?;
+            compare_amendment3_july(&old, &run2, &new, &sequence)?
+        } else if month <= 202_510 {
+            compare_amendment2_month(month, &old, &new)
+        } else {
+            verify_winter_month(month, &new)
+        };
+        let passed = report["passed"].as_bool().unwrap_or(false);
+        reports.push(report);
+        candidates.push((month, candidate, old_path));
+        if !passed {
+            let artifact = json!({"outcome":"stopped","amendment":"Stage M Amendment 3","reports":reports});
+            write_json_atomic(&args.output_root.join("amendment2-reverification.json"), &artifact).map_err(|e| anyhow!(e.to_string()))?;
+            bail!("Amendment 3 re-verification stopped at {month}");
+        }
+    }
+    for (_, candidate, destination) in &candidates {
+        std::fs::rename(candidate, destination)?;
+    }
+    let artifact = json!({
+        "outcome":"completed",
+        "amendment":"Stage M Amendment 3",
+        "diagnostic":"abs(a-b) <= max(1e-9, 1e-12 * max(abs(a), abs(b)))",
+        "reports":reports,
+        "promoted_months":candidates.iter().map(|x|x.0).collect::<Vec<_>>()
+    });
+    write_json_atomic(&args.output_root.join("amendment2-reverification.json"), &artifact).map_err(|e| anyhow!(e.to_string()))?;
+    Ok(())
+}
+
+fn compare_amendment2_month(month: u64, old: &Value, new: &Value) -> Value {
+    let groups = [
+        ("parent_totals", "/detail/residual_matrix/cells", Some(["parents", "exposure_s", "log_rate", "residual"].as_slice())),
+        ("scores_and_loadings", "/detail/cross_fitted_factor", None),
+        ("S_g", "/detail/statistic_1/result/bins", None),
+        ("C", "/detail/statistic_2/covariance", None),
+        ("C_star", "/detail/statistic_3/covariance", None),
+        ("D", "/detail/statistic_2/boundary_contrasts", None),
+        ("D_star", "/detail/statistic_3/boundary_contrasts", None),
+        ("pair_and_supported_bin_counts", "/detail/statistic_1/result", None),
+        ("stratum_assignments", "/detail/statistic_2/cells_used", None),
+        ("permutation", "/detail/statistic_1/result/permutation", None),
+    ];
+    let mut comparisons = Vec::new();
+    let mut passed = true;
+    for (name, pointer, fields) in groups {
+        let mut a = normalize_utc_slow_value(old.pointer(pointer).unwrap_or(&Value::Null).clone());
+        let mut b = new.pointer(pointer).unwrap_or(&Value::Null).clone();
+        if let Some(fields) = fields {
+            retain_cell_fields(&mut a, fields);
+            retain_cell_fields(&mut b, fields);
+        }
+        if name == "scores_and_loadings" {
+            strip_amendment1_training_provenance(&mut a);
+            strip_amendment1_training_provenance(&mut b);
+        }
+        let exact = a == b;
+        let mut differences = Vec::new();
+        collect_differences("$", &a, &b, &mut differences);
+        let numeric_differences = differences.iter().filter(|x| x["kind"] == "numeric").count();
+        let diagnostic_differences = differences.iter().filter(|x| x["within_diagnostic"] == true).count();
+        let structural_differences = differences.iter().filter(|x| x["kind"] == "structural").count();
+        let diagnostic = structural_differences == 0 && differences.iter().all(|x| x["kind"] == "numeric" && x["within_diagnostic"] == true);
+        // Integer and other non-floating leaves already make `diagnostic`
+        // false when they differ. Mixed objects may use the diagnostic for
+        // their floating statistics while their counts remain exact.
+        let integer_exact_required = name == "permutation";
+        let ok = exact || (diagnostic && !integer_exact_required);
+        passed &= ok;
+        comparisons.push(json!({"statistic":name,"exact":exact,"diagnostic_passed":diagnostic,"numeric_differences":numeric_differences,"structural_differences":structural_differences,"differences_within_diagnostic":diagnostic_differences,"differences":differences,"comparison":if exact{"exact"}else if ok{"frozen_diagnostic"}else{"failed"}}));
+    }
+    let corrections = month == 202_509 || month == 202_510;
+    if corrections {
+        passed = comparisons.iter().all(|x| x["structural_differences"] == 0);
+    }
+    json!({"month":month,"phase":if month==JULY{"July bijection and moved reduction"}else{"exposed-score correction comparison"},"passed":passed,"changes_are_corrections":corrections,"correction_value_count":if corrections {comparisons.iter().map(|x|x["differences"].as_array().map_or(0, Vec::len)).sum::<usize>()} else {0},"comparisons":comparisons})
+}
+
+fn strip_amendment1_training_provenance(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.remove("training_dropped");
+            map.remove("training_count");
+            map.remove("training_retained");
+            for child in map.values_mut() { strip_amendment1_training_provenance(child); }
+        }
+        Value::Array(items) => for child in items { strip_amendment1_training_provenance(child); },
+        _ => {}
+    }
+}
+
+fn compare_amendment3_july(old: &Value, excluded: &Value, signed: &Value, sequence: &Path) -> anyhow::Result<Value> {
+    let coordinate_only = compare_amendment2_month(JULY, old, excluded);
+    let signed_comparison = compare_amendment2_month(JULY, old, signed);
+    let input_gate = verify_july_input_gate(old, excluded, signed, sequence)?;
+    let passed = coordinate_only["passed"] == true && input_gate["passed"] == true;
+    Ok(json!({
+        "month":JULY,
+        "phase":"Amendment 3 revised July gate and three-way attribution",
+        "passed":passed,
+        "input_gate":input_gate,
+        "three_way_attribution":{
+            "run_1":"original UTC reduction",
+            "run_2":"session-local reduction with exact-close seconds excluded",
+            "run_3":"signed session-local reduction",
+            "run_1_to_run_2":coordinate_only,
+            "run_2_to_run_3_attribution":"same deterministic reduction binary and input, differing only by the mechanically enumerated exact-close row filter",
+            "attributable_solely_to_enumerated_seconds":input_gate["passed"]
+        },
+        "complete_old_to_new_comparison":signed_comparison
+    }))
+}
+
+fn verify_july_input_gate(old: &Value, excluded: &Value, signed: &Value, sequence: &Path) -> anyhow::Result<Value> {
+    let old_cells = normalized_cells(old)?;
+    let excluded_cells = cells_by_key(excluded)?;
+    let signed_cells = cells_by_key(signed)?;
+    let rows = std::fs::read_to_string(sequence)?;
+    let mut exact_close_parents = BTreeMap::new();
+    let mut opens = BTreeMap::<String, u64>::new();
+    let parsed = rows.lines().map(serde_json::from_str::<Value>).collect::<Result<Vec<_>, _>>()?;
+    for row in &parsed {
+        if row["segment_index"] == 0 {
+            let date = row["session_date"].as_str().unwrap().to_string();
+            let start = row["window_start_ns"].as_u64().unwrap();
+            opens.entry(date).and_modify(|x| *x = (*x).min(start)).or_insert(start);
+        }
+    }
+    for row in &parsed {
+        let date = row["session_date"].as_str().unwrap();
+        let start = row["window_start_ns"].as_u64().unwrap();
+        let end = row["window_end_ns"].as_u64().unwrap();
+        if end == opens[date] + 23 * 3_600_000_000_000 && start + 1_000_000_000 == end {
+            exact_close_parents.insert(date.to_string(), row["parent_count"].as_u64().unwrap());
+        }
+    }
+    let aligned = old_cells.len() == 506 && old_cells.keys().eq(excluded_cells.keys()) && old_cells.keys().eq(signed_cells.keys());
+    let mut deltas = Vec::new();
+    let mut unauthorized = Vec::new();
+    for (key, old_cell) in &old_cells {
+        let Some(run2) = excluded_cells.get(key) else { continue };
+        let Some(run3) = signed_cells.get(key) else { continue };
+        if old_cell != run2 {
+            unauthorized.push(json!({"key":{"session_date":key.0,"local_hour":key.1},"reason":"run_2_does_not_reproduce_aligned_run_1","run_1":old_cell,"run_2":run2}));
+        }
+        if run2 != run3 {
+            let parent_delta = run3["parents"].as_u64().unwrap() - run2["parents"].as_u64().unwrap();
+            let exposure_before = run2["exposure_s"].as_u64().unwrap();
+            let exposure_after = run3["exposure_s"].as_u64().unwrap();
+            let recorded = exact_close_parents.get(&key.0).copied();
+            let authorized = key.1 == 22 && exposure_before == 2700 && exposure_after == 2701 && recorded == Some(parent_delta);
+            let delta = json!({"session_date":key.0,"local_hour":key.1,"exposure_s":{"old":exposure_before,"new":exposure_after,"delta":exposure_after-exposure_before},"parents":{"old":run2["parents"],"new":run3["parents"],"delta":parent_delta},"exact_close_window_recorded_parent_count":recorded,"authorized":authorized});
+            if !authorized { unauthorized.push(delta.clone()); }
+            deltas.push(delta);
+        }
+    }
+    let passed = aligned && exact_close_parents.len() == 22 && deltas.len() == 22 && unauthorized.is_empty();
+    Ok(json!({"passed":passed,"aligned_cell_count":if aligned {506} else {0},"expected_aligned_cell_count":506,"enumerated_exact_close_seconds":exact_close_parents.len(),"differing_input_cells":deltas.len(),"expected_differing_input_cells":22,"deltas":deltas,"unauthorized_differences":unauthorized}))
+}
+
+fn normalized_cells(artifact: &Value) -> anyhow::Result<BTreeMap<(String, u64), Value>> {
+    let cells = normalize_utc_slow_value(artifact.pointer("/detail/residual_matrix/cells").ok_or_else(|| anyhow!("missing cells"))?.clone());
+    cells_by_key_value(&cells)
+}
+
+fn cells_by_key(artifact: &Value) -> anyhow::Result<BTreeMap<(String, u64), Value>> {
+    cells_by_key_value(artifact.pointer("/detail/residual_matrix/cells").ok_or_else(|| anyhow!("missing cells"))?)
+}
+
+fn cells_by_key_value(cells: &Value) -> anyhow::Result<BTreeMap<(String, u64), Value>> {
+    cells.as_array().ok_or_else(|| anyhow!("cells are not an array"))?.iter().map(|cell| {
+        let key = (cell["session_date"].as_str().ok_or_else(|| anyhow!("cell missing session_date"))?.to_string(), cell["local_hour"].as_u64().ok_or_else(|| anyhow!("cell missing local_hour"))?);
+        let mut input = cell.clone();
+        input.as_object_mut().unwrap().retain(|k, _| matches!(k.as_str(), "session_date" | "local_hour" | "parents" | "exposure_s"));
+        Ok((key, input))
+    }).collect()
+}
+
+fn normalize_utc_slow_value(mut value: Value) -> Value {
+    fn visit(value: &mut Value) {
+        match value {
+            Value::Object(map) => {
+                if let Some(v) = map.remove("hour") {
+                    let old = v.as_u64().unwrap();
+                    map.insert("local_hour".into(), json!(match old { 22 => 0, 23 => 1, x => x + 2 }));
+                }
+                if let Some(v) = map.remove("hour20") { map.insert("local_hour_22".into(), v); }
+                if let Some(v) = map.remove("D_hour20") { map.insert("D_local_hour_22".into(), v); }
+                for v in map.values_mut() { visit(v); }
+            }
+            Value::Array(items) => {
+                for item in items.iter_mut() { visit(item); }
+                if items.iter().all(|x| x.get("local_hour").and_then(Value::as_u64).is_some()) {
+                    items.sort_by_key(|x| (x.get("session_date").and_then(Value::as_str).unwrap_or("" ).to_string(), x["local_hour"].as_u64().unwrap()));
+                }
+            }
+            _ => {}
+        }
+    }
+    visit(&mut value);
+    value
+}
+
+fn retain_cell_fields(value: &mut Value, fields: &[&str]) {
+    if let Some(items) = value.as_array_mut() {
+        for item in items {
+            if let Some(map) = item.as_object_mut() {
+                map.retain(|key, _| key == "session_date" || key == "local_hour" || fields.contains(&key.as_str()));
+            }
+        }
+    }
+}
+
+fn collect_differences(path: &str, a: &Value, b: &Value, out: &mut Vec<Value>) {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) if x.is_f64() || y.is_f64() => {
+            if x == y { return; }
+            let (x, y) = (x.as_f64().unwrap(), y.as_f64().unwrap());
+            let ok = (x-y).abs() <= 1e-9_f64.max(1e-12 * x.abs().max(y.abs()));
+            out.push(json!({"path":path,"kind":"numeric","old":x,"new":y,"absolute_difference":(x-y).abs(),"within_diagnostic":ok}));
+        }
+        (Value::Array(x), Value::Array(y)) => {
+            if x.len() != y.len() { out.push(json!({"path":path,"kind":"structural","old_length":x.len(),"new_length":y.len()})); }
+            for (i, (x, y)) in x.iter().zip(y).enumerate() { collect_differences(&format!("{path}[{i}]"), x, y, out); }
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            let keys = x.keys().chain(y.keys()).collect::<BTreeSet<_>>();
+            for key in keys {
+                match (x.get(key), y.get(key)) {
+                    (Some(x), Some(y)) => collect_differences(&format!("{path}.{key}"), x, y, out),
+                    (old, new) => out.push(json!({"path":format!("{path}.{key}"),"kind":"structural","old":old,"new":new})),
+                }
+            }
+        }
+        _ if a != b => out.push(json!({"path":path,"kind":"value","old":a,"new":b})),
+        _ => {}
+    }
+}
+
+fn verify_winter_month(month: u64, artifact: &Value) -> Value {
+    let cells = artifact.pointer("/detail/residual_matrix/cells").and_then(Value::as_array);
+    let scores = artifact.pointer("/detail/cross_fitted_factor/scores").and_then(Value::as_array);
+    let complete = cells.is_some_and(|xs| {
+        let mut per = BTreeMap::<&str, usize>::new();
+        for x in xs { *per.entry(x["session_date"].as_str().unwrap_or("")).or_default() += 1; }
+        !per.is_empty() && per.values().all(|n| *n == 23)
+    });
+    let scored = scores.is_some_and(|xs| !xs.is_empty());
+    json!({"month":month,"phase":"winter completeness and scoring","passed":complete&&scored,"complete_local_coordinate_cells":complete,"score_count":scores.map_or(0,Vec::len),"refusal_rules":"Amendment 1 complete-case training with floor 12"})
 }
 
 fn check(name: &str, kind: &str, old: &Value, new: &Value) -> Value {

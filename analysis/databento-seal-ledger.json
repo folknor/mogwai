@@ -820,6 +820,173 @@
   }
  },
  "deliveries": {
+  "mbp1-preservation|GLBX.MDP3|MNQ|2026-07|mbp-1|condition.json": {
+   "assignment_id": "mbp1-preservation|GLBX.MDP3|MNQ|2026-07",
+   "coverage_checked_at": "2026-08-12T11:25:18.543885+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T12:44:33.284050+00:00",
+   "delivery_id": "mbp1-preservation|GLBX.MDP3|MNQ|2026-07|mbp-1|condition.json",
+   "delivery_job": "GLBX-20260812-QHNSDPMV9M",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "condition.json",
+   "schema": "mbp-1",
+   "sha256": "a03f5a6bf12fcb42d4d78856bddc48c59152fcdd9663eec9439a89ebef81405e",
+   "vendor_object": "condition.json"
+  },
+  "mbp1-preservation|GLBX.MDP3|MNQ|2026-07|mbp-1|glbx-mdp3-20260630.mbp-1.csv.zst": {
+   "assignment_id": "mbp1-preservation|GLBX.MDP3|MNQ|2026-07",
+   "coverage_checked_at": "2026-08-12T11:25:18.543885+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T12:44:33.284050+00:00",
+   "delivery_id": "mbp1-preservation|GLBX.MDP3|MNQ|2026-07|mbp-1|glbx-mdp3-20260630.mbp-1.csv.zst",
+   "delivery_job": "GLBX-20260812-QHNSDPMV9M",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "glbx-mdp3-20260630.mbp-1.csv.zst",
+   "schema": "mbp-1",
+   "sha256": "f63b91a6ebc862c2fdd2e89a9c36a2aa7c4b6a2d5dfdb2f29cb1cc9a2d4f9def",
+   "vendor_object": "glbx-mdp3-20260630.mbp-1.csv.zst"
+  },
+  "mbp1-preservation|GLBX.MDP3|MNQ|2026-07|mbp-1|glbx-mdp3-20260701-20260731.mbp-1.csv.zst": {
+   "assignment_id": "mbp1-preservation|GLBX.MDP3|MNQ|2026-07",
+   "coverage_checked_at": "2026-08-12T11:25:18.543885+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T12:44:33.284050+00:00",
+   "delivery_id": "mbp1-preservation|GLBX.MDP3|MNQ|2026-07|mbp-1|glbx-mdp3-20260701-20260731.mbp-1.csv.zst",
+   "delivery_job": "GLBX-20260812-QHNSDPMV9M",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "glbx-mdp3-20260701-20260731.mbp-1.csv.zst",
+   "schema": "mbp-1",
+   "sha256": "990327c7991d81a5040257a20f91256f6f6d55e2932401f784fb126dd19082a9",
+   "vendor_object": "glbx-mdp3-20260701-20260731.mbp-1.csv.zst"
+  },
+  "mbp1-preservation|GLBX.MDP3|MNQ|2026-07|mbp-1|manifest.json": {
+   "assignment_id": "mbp1-preservation|GLBX.MDP3|MNQ|2026-07",
+   "coverage_checked_at": "2026-08-12T11:25:18.543885+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T12:44:33.284050+00:00",
+   "delivery_id": "mbp1-preservation|GLBX.MDP3|MNQ|2026-07|mbp-1|manifest.json",
+   "delivery_job": "GLBX-20260812-QHNSDPMV9M",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "manifest.json",
+   "schema": "mbp-1",
+   "sha256": "4e0c76f4b0f413e21338513f75e1fcf978b1a361e009f2b13c8c9aed69969444",
+   "vendor_object": "manifest.json"
+  },
+  "mbp1-preservation|GLBX.MDP3|MNQ|2026-07|mbp-1|metadata.json": {
+   "assignment_id": "mbp1-preservation|GLBX.MDP3|MNQ|2026-07",
+   "coverage_checked_at": "2026-08-12T11:25:18.543885+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T12:44:33.284050+00:00",
+   "delivery_id": "mbp1-preservation|GLBX.MDP3|MNQ|2026-07|mbp-1|metadata.json",
+   "delivery_job": "GLBX-20260812-QHNSDPMV9M",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "metadata.json",
+   "schema": "mbp-1",
+   "sha256": "4078fad297688da9a87c390250a634b34610d2b56153a27637307677fd2df1ea",
+   "vendor_object": "metadata.json"
+  },
+  "mes-borrow|GLBX.MDP3|ES|2025-08|mbp-1|condition.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2025-08",
+   "coverage_checked_at": "2026-08-12T12:46:48.134533+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": [
+    "2025-08-12T22:00:00",
+    "2025-08-31T21:00:00"
+   ],
+   "delivered_at": "2026-08-12T12:56:40.639813+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|ES|2025-08|mbp-1|condition.json",
+   "delivery_job": "GLBX-20260812-ARJ6G4M7V3",
+   "delivery_state": "incomplete_month_delivery",
+   "edge_timestamps": [
+    {
+     "instant": "2025-08-12T22:00:00",
+     "side": "start"
+    }
+   ],
+   "filename": "condition.json",
+   "schema": "mbp-1",
+   "sha256": "8967ee91e9eee911e7d0cd27ff48cd5a0362b306b0369344c2cb59475d6f8d59",
+   "vendor_object": "condition.json"
+  },
+  "mes-borrow|GLBX.MDP3|ES|2025-08|mbp-1|glbx-mdp3-20250812-20250831.mbp-1.csv.zst": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2025-08",
+   "coverage_checked_at": "2026-08-12T12:46:48.134533+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": [
+    "2025-08-12T22:00:00",
+    "2025-08-31T21:00:00"
+   ],
+   "delivered_at": "2026-08-12T12:56:40.639813+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|ES|2025-08|mbp-1|glbx-mdp3-20250812-20250831.mbp-1.csv.zst",
+   "delivery_job": "GLBX-20260812-ARJ6G4M7V3",
+   "delivery_state": "incomplete_month_delivery",
+   "edge_timestamps": [
+    {
+     "instant": "2025-08-12T22:00:00",
+     "side": "start"
+    }
+   ],
+   "filename": "glbx-mdp3-20250812-20250831.mbp-1.csv.zst",
+   "schema": "mbp-1",
+   "sha256": "0e0a0f2b73beba21941dc28e8a9f3430e77cabd6c06b23162c8adf83ea451a06",
+   "vendor_object": "glbx-mdp3-20250812-20250831.mbp-1.csv.zst"
+  },
+  "mes-borrow|GLBX.MDP3|ES|2025-08|mbp-1|manifest.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2025-08",
+   "coverage_checked_at": "2026-08-12T12:46:48.134533+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": [
+    "2025-08-12T22:00:00",
+    "2025-08-31T21:00:00"
+   ],
+   "delivered_at": "2026-08-12T12:56:40.639813+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|ES|2025-08|mbp-1|manifest.json",
+   "delivery_job": "GLBX-20260812-ARJ6G4M7V3",
+   "delivery_state": "incomplete_month_delivery",
+   "edge_timestamps": [
+    {
+     "instant": "2025-08-12T22:00:00",
+     "side": "start"
+    }
+   ],
+   "filename": "manifest.json",
+   "schema": "mbp-1",
+   "sha256": "3479bc09d543b64dc6d9718ce9788f37bb38901bf321b54bf6b7b795ee477918",
+   "vendor_object": "manifest.json"
+  },
+  "mes-borrow|GLBX.MDP3|ES|2025-08|mbp-1|metadata.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2025-08",
+   "coverage_checked_at": "2026-08-12T12:46:48.134533+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": [
+    "2025-08-12T22:00:00",
+    "2025-08-31T21:00:00"
+   ],
+   "delivered_at": "2026-08-12T12:56:40.639813+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|ES|2025-08|mbp-1|metadata.json",
+   "delivery_job": "GLBX-20260812-ARJ6G4M7V3",
+   "delivery_state": "incomplete_month_delivery",
+   "edge_timestamps": [
+    {
+     "instant": "2025-08-12T22:00:00",
+     "side": "start"
+    }
+   ],
+   "filename": "metadata.json",
+   "schema": "mbp-1",
+   "sha256": "d9b19035e7b214179538d6b051fbeaaf60c50058394fea0f870ff8c335e73f7a",
+   "vendor_object": "metadata.json"
+  },
   "mes-borrow|GLBX.MDP3|ES|2025-08|tbbo|condition.json": {
    "assignment_id": "mes-borrow|GLBX.MDP3|ES|2025-08",
    "coverage_checked_at": "2026-08-12T10:11:22.102613+00:00",
@@ -1317,6 +1484,66 @@
    "sha256": "b812b2f5bfb7a9a4c646f44b0fd9bb35c426b302255d887ae3dc5d2bb6366c63",
    "vendor_object": "metadata.json"
   },
+  "mes-borrow|GLBX.MDP3|ES|2026-03|mbp-1|condition.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-03",
+   "coverage_checked_at": "2026-08-12T12:49:43.248761+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T13:23:39.749833+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|ES|2026-03|mbp-1|condition.json",
+   "delivery_job": "GLBX-20260812-SW9CLX6EYG",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "condition.json",
+   "schema": "mbp-1",
+   "sha256": "87373a60c481ac7beb4fbb729ad9721273f0fe62a48d8c9c37fc061b2e026071",
+   "vendor_object": "condition.json"
+  },
+  "mes-borrow|GLBX.MDP3|ES|2026-03|mbp-1|glbx-mdp3-20260301-20260331.mbp-1.csv.zst": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-03",
+   "coverage_checked_at": "2026-08-12T12:49:43.248761+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T13:23:39.749833+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|ES|2026-03|mbp-1|glbx-mdp3-20260301-20260331.mbp-1.csv.zst",
+   "delivery_job": "GLBX-20260812-SW9CLX6EYG",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "glbx-mdp3-20260301-20260331.mbp-1.csv.zst",
+   "schema": "mbp-1",
+   "sha256": "daf295e1f4d09c212328dad9f96178e962c64eef445d3238f736e971259e99c7",
+   "vendor_object": "glbx-mdp3-20260301-20260331.mbp-1.csv.zst"
+  },
+  "mes-borrow|GLBX.MDP3|ES|2026-03|mbp-1|manifest.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-03",
+   "coverage_checked_at": "2026-08-12T12:49:43.248761+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T13:23:39.749833+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|ES|2026-03|mbp-1|manifest.json",
+   "delivery_job": "GLBX-20260812-SW9CLX6EYG",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "manifest.json",
+   "schema": "mbp-1",
+   "sha256": "28cf5c82ee2194861f21960d08cf9ee28504f41f0c47138cb58b370d53605cc8",
+   "vendor_object": "manifest.json"
+  },
+  "mes-borrow|GLBX.MDP3|ES|2026-03|mbp-1|metadata.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-03",
+   "coverage_checked_at": "2026-08-12T12:49:43.248761+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T13:23:39.749833+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|ES|2026-03|mbp-1|metadata.json",
+   "delivery_job": "GLBX-20260812-SW9CLX6EYG",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "metadata.json",
+   "schema": "mbp-1",
+   "sha256": "4ca3e76d51b4a7f5b615161ce8fbeea8d8a94e8df1a99fd40445433018853dd6",
+   "vendor_object": "metadata.json"
+  },
   "mes-borrow|GLBX.MDP3|ES|2026-03|tbbo|condition.json": {
    "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-03",
    "coverage_checked_at": "2026-08-12T10:47:51.141577+00:00",
@@ -1375,6 +1602,81 @@
    "filename": "metadata.json",
    "schema": "tbbo",
    "sha256": "30030fcd8a8f2bb92faefb314149ebaec0e57a9eff9e048cfaea1157dd70fee6",
+   "vendor_object": "metadata.json"
+  },
+  "mes-borrow|GLBX.MDP3|ES|2026-04|mbp-1|condition.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-04",
+   "coverage_checked_at": "2026-08-12T12:48:52.398183+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T13:06:12.641974+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|ES|2026-04|mbp-1|condition.json",
+   "delivery_job": "GLBX-20260812-QEGKAL8R4K",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "condition.json",
+   "schema": "mbp-1",
+   "sha256": "713cfdd9ebe16d503251d1361126c61d53b7b52108f149b11f04c831bedc92fb",
+   "vendor_object": "condition.json"
+  },
+  "mes-borrow|GLBX.MDP3|ES|2026-04|mbp-1|glbx-mdp3-20260331.mbp-1.csv.zst": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-04",
+   "coverage_checked_at": "2026-08-12T12:48:52.398183+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T13:06:12.641974+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|ES|2026-04|mbp-1|glbx-mdp3-20260331.mbp-1.csv.zst",
+   "delivery_job": "GLBX-20260812-QEGKAL8R4K",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "glbx-mdp3-20260331.mbp-1.csv.zst",
+   "schema": "mbp-1",
+   "sha256": "0b78e86176561ad12a90479b227b74c80b7f4a91d71ca200749a9168188ad4b9",
+   "vendor_object": "glbx-mdp3-20260331.mbp-1.csv.zst"
+  },
+  "mes-borrow|GLBX.MDP3|ES|2026-04|mbp-1|glbx-mdp3-20260401-20260430.mbp-1.csv.zst": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-04",
+   "coverage_checked_at": "2026-08-12T12:48:52.398183+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T13:06:12.641974+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|ES|2026-04|mbp-1|glbx-mdp3-20260401-20260430.mbp-1.csv.zst",
+   "delivery_job": "GLBX-20260812-QEGKAL8R4K",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "glbx-mdp3-20260401-20260430.mbp-1.csv.zst",
+   "schema": "mbp-1",
+   "sha256": "49f873de84a120f528bd35b4ddde45a0bc23cafd3ca67ebd60f0c0d25fa619e7",
+   "vendor_object": "glbx-mdp3-20260401-20260430.mbp-1.csv.zst"
+  },
+  "mes-borrow|GLBX.MDP3|ES|2026-04|mbp-1|manifest.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-04",
+   "coverage_checked_at": "2026-08-12T12:48:52.398183+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T13:06:12.641974+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|ES|2026-04|mbp-1|manifest.json",
+   "delivery_job": "GLBX-20260812-QEGKAL8R4K",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "manifest.json",
+   "schema": "mbp-1",
+   "sha256": "74ac6a1732460e1e3caf3dea0be7b90a8c7eeb81f0ace843dc7f87918bc55125",
+   "vendor_object": "manifest.json"
+  },
+  "mes-borrow|GLBX.MDP3|ES|2026-04|mbp-1|metadata.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-04",
+   "coverage_checked_at": "2026-08-12T12:48:52.398183+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T13:06:12.641974+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|ES|2026-04|mbp-1|metadata.json",
+   "delivery_job": "GLBX-20260812-QEGKAL8R4K",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "metadata.json",
+   "schema": "mbp-1",
+   "sha256": "f5a5fc7c6bcc046ac648fe0e0b9a5ec7e19ca34b47f717e389eae2803fd025a4",
    "vendor_object": "metadata.json"
   },
   "mes-borrow|GLBX.MDP3|ES|2026-04|tbbo|condition.json": {
@@ -1602,6 +1904,81 @@
    "sha256": "c0bc0fe122d97c14a212c08ecfe8a354f575bbf80037b0473e9b96fa0de19184",
    "vendor_object": "metadata.json"
   },
+  "mes-borrow|GLBX.MDP3|ES|2026-07|mbp-1|condition.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-07",
+   "coverage_checked_at": "2026-08-12T11:24:20.790548+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T11:49:32.341212+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|ES|2026-07|mbp-1|condition.json",
+   "delivery_job": "GLBX-20260812-HEJPDQMDCB",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "condition.json",
+   "schema": "mbp-1",
+   "sha256": "a03f5a6bf12fcb42d4d78856bddc48c59152fcdd9663eec9439a89ebef81405e",
+   "vendor_object": "condition.json"
+  },
+  "mes-borrow|GLBX.MDP3|ES|2026-07|mbp-1|glbx-mdp3-20260630.mbp-1.csv.zst": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-07",
+   "coverage_checked_at": "2026-08-12T11:24:20.790548+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T11:49:32.341212+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|ES|2026-07|mbp-1|glbx-mdp3-20260630.mbp-1.csv.zst",
+   "delivery_job": "GLBX-20260812-HEJPDQMDCB",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "glbx-mdp3-20260630.mbp-1.csv.zst",
+   "schema": "mbp-1",
+   "sha256": "73ae9e8f6f1b0c3261ef32925830b8ded9782c66f4a8fc33ab247770f3b1888a",
+   "vendor_object": "glbx-mdp3-20260630.mbp-1.csv.zst"
+  },
+  "mes-borrow|GLBX.MDP3|ES|2026-07|mbp-1|glbx-mdp3-20260701-20260731.mbp-1.csv.zst": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-07",
+   "coverage_checked_at": "2026-08-12T11:24:20.790548+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T11:49:32.341212+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|ES|2026-07|mbp-1|glbx-mdp3-20260701-20260731.mbp-1.csv.zst",
+   "delivery_job": "GLBX-20260812-HEJPDQMDCB",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "glbx-mdp3-20260701-20260731.mbp-1.csv.zst",
+   "schema": "mbp-1",
+   "sha256": "e592aa630070361b5fb431a8263296946515185b006d47c45340cea5b53c548d",
+   "vendor_object": "glbx-mdp3-20260701-20260731.mbp-1.csv.zst"
+  },
+  "mes-borrow|GLBX.MDP3|ES|2026-07|mbp-1|manifest.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-07",
+   "coverage_checked_at": "2026-08-12T11:24:20.790548+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T11:49:32.341212+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|ES|2026-07|mbp-1|manifest.json",
+   "delivery_job": "GLBX-20260812-HEJPDQMDCB",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "manifest.json",
+   "schema": "mbp-1",
+   "sha256": "1644704e1fd70be208801d088b09aff56ce84c10631297e3de0194a912b19c33",
+   "vendor_object": "manifest.json"
+  },
+  "mes-borrow|GLBX.MDP3|ES|2026-07|mbp-1|metadata.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-07",
+   "coverage_checked_at": "2026-08-12T11:24:20.790548+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T11:49:32.341212+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|ES|2026-07|mbp-1|metadata.json",
+   "delivery_job": "GLBX-20260812-HEJPDQMDCB",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "metadata.json",
+   "schema": "mbp-1",
+   "sha256": "576d7e258f1306dbf5616aef524a0427f7b6c814aee256cef354585b395bc331",
+   "vendor_object": "metadata.json"
+  },
   "mes-borrow|GLBX.MDP3|ES|2026-07|tbbo|condition.json": {
    "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-07",
    "coverage_checked_at": "2026-08-12T10:18:06.841225+00:00",
@@ -1767,6 +2144,98 @@
    "filename": "metadata.json",
    "schema": "tbbo",
    "sha256": "010ce64ab5bf460b4deff4acb6d95dfb26ced75e267a5a9568afc1b16180c604",
+   "vendor_object": "metadata.json"
+  },
+  "mes-borrow|GLBX.MDP3|MES|2025-08|mbp-1|condition.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2025-08",
+   "coverage_checked_at": "2026-08-12T12:46:59.230617+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": [
+    "2025-08-12T22:00:00",
+    "2025-08-31T21:00:00"
+   ],
+   "delivered_at": "2026-08-12T12:59:21.128447+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|MES|2025-08|mbp-1|condition.json",
+   "delivery_job": "GLBX-20260812-5WYA5KH5XL",
+   "delivery_state": "incomplete_month_delivery",
+   "edge_timestamps": [
+    {
+     "instant": "2025-08-12T22:00:00",
+     "side": "start"
+    }
+   ],
+   "filename": "condition.json",
+   "schema": "mbp-1",
+   "sha256": "8967ee91e9eee911e7d0cd27ff48cd5a0362b306b0369344c2cb59475d6f8d59",
+   "vendor_object": "condition.json"
+  },
+  "mes-borrow|GLBX.MDP3|MES|2025-08|mbp-1|glbx-mdp3-20250812-20250831.mbp-1.csv.zst": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2025-08",
+   "coverage_checked_at": "2026-08-12T12:46:59.230617+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": [
+    "2025-08-12T22:00:00",
+    "2025-08-31T21:00:00"
+   ],
+   "delivered_at": "2026-08-12T12:59:21.128447+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|MES|2025-08|mbp-1|glbx-mdp3-20250812-20250831.mbp-1.csv.zst",
+   "delivery_job": "GLBX-20260812-5WYA5KH5XL",
+   "delivery_state": "incomplete_month_delivery",
+   "edge_timestamps": [
+    {
+     "instant": "2025-08-12T22:00:00",
+     "side": "start"
+    }
+   ],
+   "filename": "glbx-mdp3-20250812-20250831.mbp-1.csv.zst",
+   "schema": "mbp-1",
+   "sha256": "8e51316a530f36dc34a58544de67177a67cdbfef07656b062ad03a297f0fd4c7",
+   "vendor_object": "glbx-mdp3-20250812-20250831.mbp-1.csv.zst"
+  },
+  "mes-borrow|GLBX.MDP3|MES|2025-08|mbp-1|manifest.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2025-08",
+   "coverage_checked_at": "2026-08-12T12:46:59.230617+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": [
+    "2025-08-12T22:00:00",
+    "2025-08-31T21:00:00"
+   ],
+   "delivered_at": "2026-08-12T12:59:21.128447+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|MES|2025-08|mbp-1|manifest.json",
+   "delivery_job": "GLBX-20260812-5WYA5KH5XL",
+   "delivery_state": "incomplete_month_delivery",
+   "edge_timestamps": [
+    {
+     "instant": "2025-08-12T22:00:00",
+     "side": "start"
+    }
+   ],
+   "filename": "manifest.json",
+   "schema": "mbp-1",
+   "sha256": "90b7934092122c7550115dc13ced4d3d7d38cc96e0521713df038218c14ddf93",
+   "vendor_object": "manifest.json"
+  },
+  "mes-borrow|GLBX.MDP3|MES|2025-08|mbp-1|metadata.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2025-08",
+   "coverage_checked_at": "2026-08-12T12:46:59.230617+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": [
+    "2025-08-12T22:00:00",
+    "2025-08-31T21:00:00"
+   ],
+   "delivered_at": "2026-08-12T12:59:21.128447+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|MES|2025-08|mbp-1|metadata.json",
+   "delivery_job": "GLBX-20260812-5WYA5KH5XL",
+   "delivery_state": "incomplete_month_delivery",
+   "edge_timestamps": [
+    {
+     "instant": "2025-08-12T22:00:00",
+     "side": "start"
+    }
+   ],
+   "filename": "metadata.json",
+   "schema": "mbp-1",
+   "sha256": "5d67fdb39a2324711caba9d31261702ca8ae0f9f8f74b482de30f1451f62f087",
    "vendor_object": "metadata.json"
   },
   "mes-borrow|GLBX.MDP3|MES|2025-08|tbbo|condition.json": {
@@ -2266,6 +2735,66 @@
    "sha256": "6abe276cda6fdaa894ac3c1d28076e437a99d71305739e350fa99ed0516b3a95",
    "vendor_object": "metadata.json"
   },
+  "mes-borrow|GLBX.MDP3|MES|2026-03|mbp-1|condition.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2026-03",
+   "coverage_checked_at": "2026-08-12T12:49:50.993805+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T13:37:08.197987+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|MES|2026-03|mbp-1|condition.json",
+   "delivery_job": "GLBX-20260812-EBGHKERC4N",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "condition.json",
+   "schema": "mbp-1",
+   "sha256": "87373a60c481ac7beb4fbb729ad9721273f0fe62a48d8c9c37fc061b2e026071",
+   "vendor_object": "condition.json"
+  },
+  "mes-borrow|GLBX.MDP3|MES|2026-03|mbp-1|glbx-mdp3-20260301-20260331.mbp-1.csv.zst": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2026-03",
+   "coverage_checked_at": "2026-08-12T12:49:50.993805+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T13:37:08.197987+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|MES|2026-03|mbp-1|glbx-mdp3-20260301-20260331.mbp-1.csv.zst",
+   "delivery_job": "GLBX-20260812-EBGHKERC4N",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "glbx-mdp3-20260301-20260331.mbp-1.csv.zst",
+   "schema": "mbp-1",
+   "sha256": "a80ccd1c0d62d93271bd93cf6422ff69be4fc443404238d065765700c06e88ca",
+   "vendor_object": "glbx-mdp3-20260301-20260331.mbp-1.csv.zst"
+  },
+  "mes-borrow|GLBX.MDP3|MES|2026-03|mbp-1|manifest.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2026-03",
+   "coverage_checked_at": "2026-08-12T12:49:50.993805+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T13:37:08.197987+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|MES|2026-03|mbp-1|manifest.json",
+   "delivery_job": "GLBX-20260812-EBGHKERC4N",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "manifest.json",
+   "schema": "mbp-1",
+   "sha256": "2ca4f6bddf4fc71a8e800ee0482d63c278a9f9c829321981bc7349b383c6d12a",
+   "vendor_object": "manifest.json"
+  },
+  "mes-borrow|GLBX.MDP3|MES|2026-03|mbp-1|metadata.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2026-03",
+   "coverage_checked_at": "2026-08-12T12:49:50.993805+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T13:37:08.197987+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|MES|2026-03|mbp-1|metadata.json",
+   "delivery_job": "GLBX-20260812-EBGHKERC4N",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "metadata.json",
+   "schema": "mbp-1",
+   "sha256": "0139545f4ae62463abf3d674e0453aee91f5afede3904c30e849442e292a373f",
+   "vendor_object": "metadata.json"
+  },
   "mes-borrow|GLBX.MDP3|MES|2026-03|tbbo|condition.json": {
    "assignment_id": "mes-borrow|GLBX.MDP3|MES|2026-03",
    "coverage_checked_at": null,
@@ -2324,6 +2853,81 @@
    "filename": "metadata.json",
    "schema": "tbbo",
    "sha256": "af764f9c8515e0bb6587a7f92aa8aed571e38d4a349e46b8c0004ccbcac4faf5",
+   "vendor_object": "metadata.json"
+  },
+  "mes-borrow|GLBX.MDP3|MES|2026-04|mbp-1|condition.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2026-04",
+   "coverage_checked_at": "2026-08-12T12:49:13.182262+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T13:13:33.396835+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|MES|2026-04|mbp-1|condition.json",
+   "delivery_job": "GLBX-20260812-F4TF4H9UKW",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "condition.json",
+   "schema": "mbp-1",
+   "sha256": "713cfdd9ebe16d503251d1361126c61d53b7b52108f149b11f04c831bedc92fb",
+   "vendor_object": "condition.json"
+  },
+  "mes-borrow|GLBX.MDP3|MES|2026-04|mbp-1|glbx-mdp3-20260331.mbp-1.csv.zst": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2026-04",
+   "coverage_checked_at": "2026-08-12T12:49:13.182262+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T13:13:33.396835+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|MES|2026-04|mbp-1|glbx-mdp3-20260331.mbp-1.csv.zst",
+   "delivery_job": "GLBX-20260812-F4TF4H9UKW",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "glbx-mdp3-20260331.mbp-1.csv.zst",
+   "schema": "mbp-1",
+   "sha256": "ea4aad91bff328d39e56d6a50c5d5cf2ae6812a0ac09f1184487502988e229c6",
+   "vendor_object": "glbx-mdp3-20260331.mbp-1.csv.zst"
+  },
+  "mes-borrow|GLBX.MDP3|MES|2026-04|mbp-1|glbx-mdp3-20260401-20260430.mbp-1.csv.zst": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2026-04",
+   "coverage_checked_at": "2026-08-12T12:49:13.182262+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T13:13:33.396835+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|MES|2026-04|mbp-1|glbx-mdp3-20260401-20260430.mbp-1.csv.zst",
+   "delivery_job": "GLBX-20260812-F4TF4H9UKW",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "glbx-mdp3-20260401-20260430.mbp-1.csv.zst",
+   "schema": "mbp-1",
+   "sha256": "5d22c33d386e22f077c86afd4b7e611151f96afde2adef3722263943d3a4a217",
+   "vendor_object": "glbx-mdp3-20260401-20260430.mbp-1.csv.zst"
+  },
+  "mes-borrow|GLBX.MDP3|MES|2026-04|mbp-1|manifest.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2026-04",
+   "coverage_checked_at": "2026-08-12T12:49:13.182262+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T13:13:33.396835+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|MES|2026-04|mbp-1|manifest.json",
+   "delivery_job": "GLBX-20260812-F4TF4H9UKW",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "manifest.json",
+   "schema": "mbp-1",
+   "sha256": "24913f36ee91186b6d9a3dcb43e33b1ca4863f4195ac5a9dc2611945d9992398",
+   "vendor_object": "manifest.json"
+  },
+  "mes-borrow|GLBX.MDP3|MES|2026-04|mbp-1|metadata.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2026-04",
+   "coverage_checked_at": "2026-08-12T12:49:13.182262+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T13:13:33.396835+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|MES|2026-04|mbp-1|metadata.json",
+   "delivery_job": "GLBX-20260812-F4TF4H9UKW",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "metadata.json",
+   "schema": "mbp-1",
+   "sha256": "92ef618e8f07672eed6b1703ca7111b5fba34757f3a5bb4d3d65d893801902b2",
    "vendor_object": "metadata.json"
   },
   "mes-borrow|GLBX.MDP3|MES|2026-04|tbbo|condition.json": {
@@ -2549,6 +3153,81 @@
    "filename": "metadata.json",
    "schema": "tbbo",
    "sha256": "1c9c5b444a88bd1fa2cf59ba27d0e0e12263549d295419bdaffe7a98bcb35201",
+   "vendor_object": "metadata.json"
+  },
+  "mes-borrow|GLBX.MDP3|MES|2026-07|mbp-1|condition.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2026-07",
+   "coverage_checked_at": "2026-08-12T11:24:56.676372+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T11:58:45.987544+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|MES|2026-07|mbp-1|condition.json",
+   "delivery_job": "GLBX-20260812-9SYGXH6QKC",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "condition.json",
+   "schema": "mbp-1",
+   "sha256": "a03f5a6bf12fcb42d4d78856bddc48c59152fcdd9663eec9439a89ebef81405e",
+   "vendor_object": "condition.json"
+  },
+  "mes-borrow|GLBX.MDP3|MES|2026-07|mbp-1|glbx-mdp3-20260630.mbp-1.csv.zst": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2026-07",
+   "coverage_checked_at": "2026-08-12T11:24:56.676372+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T11:58:45.987544+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|MES|2026-07|mbp-1|glbx-mdp3-20260630.mbp-1.csv.zst",
+   "delivery_job": "GLBX-20260812-9SYGXH6QKC",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "glbx-mdp3-20260630.mbp-1.csv.zst",
+   "schema": "mbp-1",
+   "sha256": "07812d7f0a00798e3b74e938996407d9f0083e0b078cc74c8a8f4da8490c7802",
+   "vendor_object": "glbx-mdp3-20260630.mbp-1.csv.zst"
+  },
+  "mes-borrow|GLBX.MDP3|MES|2026-07|mbp-1|glbx-mdp3-20260701-20260731.mbp-1.csv.zst": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2026-07",
+   "coverage_checked_at": "2026-08-12T11:24:56.676372+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T11:58:45.987544+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|MES|2026-07|mbp-1|glbx-mdp3-20260701-20260731.mbp-1.csv.zst",
+   "delivery_job": "GLBX-20260812-9SYGXH6QKC",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "glbx-mdp3-20260701-20260731.mbp-1.csv.zst",
+   "schema": "mbp-1",
+   "sha256": "5d3f1db09cf452f216b0e60e60d746d60e680df328322c87e8d5ebf4806373d2",
+   "vendor_object": "glbx-mdp3-20260701-20260731.mbp-1.csv.zst"
+  },
+  "mes-borrow|GLBX.MDP3|MES|2026-07|mbp-1|manifest.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2026-07",
+   "coverage_checked_at": "2026-08-12T11:24:56.676372+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T11:58:45.987544+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|MES|2026-07|mbp-1|manifest.json",
+   "delivery_job": "GLBX-20260812-9SYGXH6QKC",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "manifest.json",
+   "schema": "mbp-1",
+   "sha256": "585b16851709f1199e2411b3fb4ccbc18335d143dcf91bf44cbbcebbb112fa58",
+   "vendor_object": "manifest.json"
+  },
+  "mes-borrow|GLBX.MDP3|MES|2026-07|mbp-1|metadata.json": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2026-07",
+   "coverage_checked_at": "2026-08-12T11:24:56.676372+00:00",
+   "coverage_quote_at_pull": 0.0,
+   "covered_interval": null,
+   "delivered_at": "2026-08-12T11:58:45.987544+00:00",
+   "delivery_id": "mes-borrow|GLBX.MDP3|MES|2026-07|mbp-1|metadata.json",
+   "delivery_job": "GLBX-20260812-9SYGXH6QKC",
+   "delivery_state": "complete",
+   "edge_timestamps": null,
+   "filename": "metadata.json",
+   "schema": "mbp-1",
+   "sha256": "4f20e15ff109181c7a727dda6dbef1b19659d5f259d01a4859eefdbee535a7c6",
    "vendor_object": "metadata.json"
   },
   "mes-borrow|GLBX.MDP3|MES|2026-07|tbbo|condition.json": {

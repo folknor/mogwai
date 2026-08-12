@@ -15,7 +15,7 @@
 
 use crate::error::{LabError, LabResult};
 use crate::measure12a::{Scope, SessionAcc};
-use crate::session::{MinuteFieldsCache, session_segment_at};
+use crate::session::{MinuteFieldsCache, ScheduleFrame, session_segment_at};
 use crate::stream::Row;
 use crate::subcontract::UTC_OFFSET_MINUTES;
 
@@ -65,8 +65,20 @@ pub fn observe_with_count_windows_ordered<I>(
 where
     I: IntoIterator<Item = LabResult<Row>>,
 {
+    observe_with_count_windows_ordered_frame(rows, usable, count_windows_s, None)
+}
+
+pub fn observe_with_count_windows_ordered_frame<I>(
+    rows: I,
+    usable: &[String],
+    count_windows_s: &'static [i64],
+    frame: Option<&ScheduleFrame>,
+) -> LabResult<(Vec<serde_json::Value>, Vec<crate::measure12a::OrderedCount>)>
+where
+    I: IntoIterator<Item = LabResult<Row>>,
+{
     let usable_set: std::collections::BTreeSet<&str> = usable.iter().map(String::as_str).collect();
-    let mut minutes = MinuteFieldsCache::new();
+    let mut minutes = frame.map_or_else(MinuteFieldsCache::new, |x| MinuteFieldsCache::with_frame(x.clone()));
     let mut records: Vec<serde_json::Value> = Vec::new();
     let mut state: Option<SessionAcc> = None;
     let mut current: Option<OpenParent> = None;
@@ -91,12 +103,18 @@ where
                 ordered.extend(done.ordered_counts()?);
                 records.push(done.close(Scope::Observed)?);
             }
-            let seg = session_segment_at(ts, UTC_OFFSET_MINUTES)
-                .ok_or_else(|| LabError::refusal(format!("row at {ts} maps to no open segment")))?;
+            let seg = if let Some(frame) = &frame {
+                frame.session_segment_at(ts)?
+            } else {
+                session_segment_at(ts, UTC_OFFSET_MINUTES)
+            }.ok_or_else(|| LabError::refusal(format!("row at {ts} maps to no open segment")))?;
+            let offset_minutes = if let Some(frame) = &frame {
+                frame.offset_at_utc_s(i64::try_from(ts / 1_000_000_000).map_err(|_| LabError::refusal("timestamp exceeds i64 seconds"))?)? as i32 / 60
+            } else { UTC_OFFSET_MINUTES };
             state = Some(SessionAcc::new_with_count_windows(
                 session,
                 &seg,
-                UTC_OFFSET_MINUTES,
+                offset_minutes,
                 count_windows_s,
             ));
         }

@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::error::{LabError, LabResult};
-use crate::session::MinuteFieldsCache;
+use crate::session::{MinuteFieldsCache, ScheduleFrame, SessionBounds};
 use crate::stream::{data_files, parse_stream};
 use crate::subcontract::{
     self, EXPECTED_FULL_SESSIONS, JOB_ID, MAX_EXCLUDED_SESSIONS, MAX_INVALID_WIDTH_SHARE,
@@ -45,10 +45,22 @@ pub struct PreflightArtifact {
     pub parents_seen: u64,
     pub valid_parent_quote_share: f64,
     pub rows_outside_declared_sessions: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule_frame: Option<ScheduleFrameRecord>,
     pub sessions: BTreeMap<String, SessionRecord>,
     /// `[label, reason]` pairs, matching the Python side's list-of-2-tuples.
     pub excluded_sessions: Vec<(String, String)>,
     pub usable_sessions: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct ScheduleFrameRecord {
+    pub rule: String,
+    pub timezone_authority: String,
+    pub timezone_authority_sha256: String,
+    pub calendar_inventory_schedule_independence: String,
+    pub scheduled_exposure_seconds: i64,
+    pub per_session_bounds: Vec<SessionBounds>,
 }
 
 #[derive(Serialize)]
@@ -82,6 +94,7 @@ pub fn run_preflight(directory: &Path, ledger_path: &Path) -> LabResult<Prefligh
         None,
         &inventory,
         true,
+        None,
         None,
     )
 }
@@ -138,6 +151,16 @@ pub fn run_month_preflight(
             }
         }
     }
+    let frame = ScheduleFrame::stage_m(Path::new("analysis/tz-america-chicago-2026c.json"))?;
+    let per_session_bounds = inventory.iter().map(|(date, _)| frame.bounds(date)).collect::<LabResult<Vec<_>>>()?;
+    let schedule_record = ScheduleFrameRecord {
+        rule: "Stage M Amendment 4 DST-aware America/Chicago civil-boundary conversion".to_string(),
+        timezone_authority: "analysis/tz-america-chicago-2026c.json".to_string(),
+        timezone_authority_sha256: crate::session::STAGE_M_TZ_AUTHORITY_SHA256.to_string(),
+        calendar_inventory_schedule_independence: "analysis/databento-calendar.json grades each DATE from record counts and is schedule-independent; its inventory derivation is unaffected by the schedule-frame correction".to_string(),
+        scheduled_exposure_seconds: per_session_bounds.iter().map(|x| x.scheduled_open_seconds).sum(),
+        per_session_bounds,
+    };
     run_preflight_with_inventory(
         directory,
         hashes,
@@ -150,9 +173,11 @@ pub fn run_month_preflight(
             calendar_artifact_hash: crate::ledger::sha256_bytes(&calendar_bytes),
             month: month_label,
         }),
+        Some((frame, schedule_record)),
     )
 }
 
+#[expect(clippy::too_many_arguments, reason = "the July parity path keeps its explicit frozen inputs")]
 fn run_preflight_with_inventory(
     directory: &Path,
     hashes: BTreeMap<String, String>,
@@ -161,6 +186,7 @@ fn run_preflight_with_inventory(
     inventory: &[(String, String)],
     enforce_july_session_floors: bool,
     inventory_provenance: Option<InventoryProvenance>,
+    schedule: Option<(ScheduleFrame, ScheduleFrameRecord)>,
 ) -> LabResult<PreflightArtifact> {
     let inventory_status: BTreeMap<&str, &str> = inventory
         .iter()
@@ -180,7 +206,7 @@ fn run_preflight_with_inventory(
     let mut parent_total: u64 = 0;
     let mut parent_valid_quote: u64 = 0;
     let mut prev_key: Option<(i64, char)> = None;
-    let mut minute_cache = MinuteFieldsCache::new();
+    let mut minute_cache = schedule.as_ref().map_or_else(MinuteFieldsCache::new, |x| MinuteFieldsCache::with_frame(x.0.clone()));
 
     for row in parse_stream(data_files(directory)?) {
         let row = row?;
@@ -312,6 +338,7 @@ fn run_preflight_with_inventory(
         parents_seen: parent_total,
         valid_parent_quote_share: quote_share,
         rows_outside_declared_sessions: outside_sessions,
+        schedule_frame: schedule.map(|x| x.1),
         sessions,
         excluded_sessions: excluded,
         usable_sessions: usable,

@@ -32,6 +32,7 @@ Usage:
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -52,7 +53,17 @@ MAX_DOLLARS = "0.01"
 # report rather than a loop to spin in.
 POLL_FIRST = 20
 POLL_MAX = 120
-POLL_TIMEOUT = 3600
+# Generous, because MBP-1 months are large and the vendor legitimately takes
+# a long time to prepare them. Exceeding it is NOT a failure - see
+# settle_wave - so this only bounds how long one invocation sits waiting.
+POLL_TIMEOUT = 24 * 3600
+
+# Refuse to keep downloading below this much free space. A wave left running
+# unattended will happily fill the root filesystem otherwise, and the
+# failure mode of a full root is much worse than a wave that stopped early:
+# the remaining plans stay owned in the ledger and resume on the next run,
+# whereas a full disk takes the machine with it.
+DISK_FLOOR_GB = 50.0
 
 EXIT_SETTLED = 0
 EXIT_FAILED = 1
@@ -100,6 +111,20 @@ def tbbo_outstanding():
                 "no ledger entry" if not entry
                 else "state %s" % entry.get("state")))
     return outstanding
+
+
+def free_gb(path=ROOT):
+    return shutil.disk_usage(path).free / 1e9
+
+
+def check_disk(floor=DISK_FLOOR_GB):
+    """Returns a refusal string when free space is below the floor."""
+    free = free_gb()
+    if free < floor:
+        return ("only %.1f GB free, below the %.1f GB floor; stopping "
+                "before the filesystem fills. Owned plans stay in the "
+                "ledger and resume on the next run" % (free, floor))
+    return None
 
 
 def run_plan(scope, plan, armed):
@@ -151,13 +176,18 @@ def settle_wave(plans, timeout=POLL_TIMEOUT):
             index, len(plans), plan,
             "settled already" if code == EXIT_SETTLED else "submitted"))
     if failures:
-        return failures
+        return failures, pending
     print("\n=== phase 2: %d plan(s) to collect" % len(pending))
     started = time.time()
     delay = POLL_FIRST
     while pending:
         still = []
         for scope, plan, month in pending:
+            low = check_disk()
+            if low:
+                print("  DISK: %s" % low)
+                failures.append("disk floor reached: %s" % low)
+                return failures, pending
             code = run_plan(scope, plan, armed=True)
             if code == EXIT_SETTLED:
                 print("  settled %s" % plan)
@@ -171,16 +201,19 @@ def settle_wave(plans, timeout=POLL_TIMEOUT):
         if failures:
             break
         if time.time() - started > timeout:
-            print("  TIMEOUT after %.0fs with %d plan(s) nonterminal" % (
+            # NOT a failure. A job the vendor is still preparing has not
+            # gone wrong; large MBP-1 months legitimately take hours. Report
+            # it as nonterminal so a re-run resumes - calling it failed
+            # would send someone hunting a defect that does not exist, and
+            # would stop a wave that only needs more patience.
+            print("  still waiting after %.0fs; %d plan(s) not yet ready" % (
                 time.time() - started, len(pending)))
-            failures.extend("%s/%s still nonterminal" % (s, p)
-                            for s, p, _m in pending)
             break
         print("  %d plan(s) nonterminal; sleeping %ds" % (len(pending),
                                                           delay))
         time.sleep(delay)
         delay = min(delay * 2, POLL_MAX)
-    return failures
+    return failures, pending
 
 
 def main():
@@ -191,6 +224,9 @@ def main():
     parser.add_argument("--only", default=None, choices=manifest_months(),
                         metavar="YYYY-MM",
                         help="restrict to exactly this manifest month")
+    parser.add_argument("--hours", type=float, default=POLL_TIMEOUT / 3600.0,
+                        help="how long ONE invocation waits before reporting "
+                             "nonterminal; exceeding it is not a failure")
     args = parser.parse_args()
     plans = wave_plans(args.schema)
     if args.only:
@@ -217,13 +253,26 @@ def main():
             if len(outstanding) > 10:
                 print("    ... and %d more" % (len(outstanding) - 10))
             raise SystemExit(1)
-    failures = settle_wave(plans)
+    print("%d plan(s), %.1f GB free, stopping below %.1f GB, waiting up to "
+          "%.1f h" % (len(plans), free_gb(), DISK_FLOOR_GB, args.hours))
+    low = check_disk()
+    if low:
+        raise SystemExit("REFUSED: %s" % low)
+    failures, pending = settle_wave(plans, timeout=args.hours * 3600.0)
     print()
     if failures:
         print("WAVE FAILED: %d" % len(failures))
         for line in failures:
             print("   ", line)
         raise SystemExit(1)
+    if pending:
+        # Exit 3, matching the downloader's own contract: nothing is wrong,
+        # the vendor is simply not finished. Re-run to continue.
+        print("WAVE NONTERMINAL: %d plan(s) still being prepared; re-run to "
+              "continue" % len(pending))
+        for scope, plan, _month in pending:
+            print("    %s/%s" % (scope, plan))
+        raise SystemExit(EXIT_NONTERMINAL)
     print("wave %s settled: %d plan(s)" % (args.schema, len(plans)))
 
 
