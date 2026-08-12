@@ -532,6 +532,126 @@ exists partially to the pull morning.
    only; the confirmation months' schedules materialize exactly once,
    mechanically, inside the blinded Stage C harness at unseal.
 
+## Amendment 2, 2026-08-12: the assignment-rooted seal ledger
+
+Recorded after the acquisition track found that the seal ledger as
+originally specified - one row per DELIVERED file - cannot represent a
+category of action the contract itself classifies as inspection.
+Amendment 1 provision 3 made the seal INFORMATION-level and named
+vendor per-date record counts an inspection channel; the authorized
+design-month calendar sweep then inspected months whose files are not
+yet delivered, and the file-keyed ledger had no row to record it
+against. The sharper corollary that forces the repair: the same sweep
+against sealed June would be genuine contamination, and the ledger
+could not record even that - the detection instrument was blind
+exactly where bytes have not landed. Nothing improper occurred; the
+audit record could not represent an authorized action and would have
+misreported a later one (`first_content_read_at` stamped on a
+delivered file for a month already inspected through another channel).
+
+NON-RESULT-DRIVEN, stated explicitly: no role, population, threshold,
+statistic or scientific consequence changes. This amendment changes
+the contract's ledger field list and record granularity, which is
+contract text - calling it an implementation correction would evade
+the amendment rule.
+
+THE STRUCTURE. The ledger is re-rooted on ASSIGNMENTS, because
+contract obligations attach at role assignment - which has existed
+since signature - not at delivery. Per-file records remain
+first-class children; they are not collapsed into month records.
+
+- ASSIGNMENTS, immutable: assignment identity; contract track (this
+  contract, the MES-borrow track, the MBP-1 preservation ledger);
+  dataset; instrument; month; role; role_assigned_at, which is the
+  CONTRACT ASSIGNMENT TIME and is never rewritten to a migration
+  date (assignment_recorded_at may differ); the authorizing
+  authority identity; a nullable supersedes reference so a future
+  contract can assign a new role to preserved bytes without erasing
+  history. Schema is NOT folded into the role: permissions derive
+  from assignment plus delivery or channel schema, preserving that a
+  new-design month's TBBO is open while its MBP-1 stays sealed.
+- DELIVERIES, append-only with controlled state progression, child of
+  an assignment: delivery identity, schema, vendor object identity,
+  content hash, delivery job, delivered_at, delivery state, covered
+  interval and edge timestamps.
+- INSPECTION EVENTS, append-only, child of an assignment: event
+  identity; nullable delivery reference - REQUIRED for a
+  delivered-file channel, FORBIDDEN for an undelivered
+  vendor-metadata channel; channel from a CLOSED VOCABULARY
+  (initially delivered-file-content, vendor-record-count, and other,
+  which requires a description and review); scope; observed_at and
+  recorded_at as SEPARATE timestamps, because retrospectively
+  discovered contamination is recorded later than it occurred;
+  authority; reading process; authorization basis and verdict;
+  artifact references by immutable identity (hashes, never only
+  paths). Multiple events per (assignment, channel) are possible.
+  An UNAUTHORIZED event must remain recordable: retrospective event
+  recording is a SEPARATE operation from prospective read
+  authorization and must not call the same guard. No deletion, and
+  no in-place conversion of an unauthorized event into an authorized
+  one.
+- DERIVED STATE, never independently editable, and not one exclusive
+  enum - spent, contaminated and inspected are different dimensions
+  and a single state machine erases history. The ledger derives at
+  least: has_any_inspection, has_unauthorized_inspection,
+  first_inspected_at, first_unauthorized_inspection_at, and the
+  scientific disposition. Per delivery, first_content_read_at is
+  DERIVED from the earliest delivered-file inspection event of that
+  delivery (or retained as a checked denormalization with exactly
+  that meaning); per assignment, first_inspected_at derives from all
+  inspection events.
+
+AUTHORITY IDENTITIES ARE IMMUTABLE SNAPSHOTS. A contract hash may
+never mean "hash the mutable file on disk": landing this amendment
+changes that hash and would make every earlier authorization appear
+invalid. The ledger records the hash of the exact signed base
+contract snapshot, the hash of each signed amendment, and the
+explicit chain of authorities applicable to each record. Existing
+assignments remain authorized by the signed base contract plus
+Amendment 1 where applicable; Amendment 2 authorizes the
+representation and the migration.
+
+THE ONE-TIME MIGRATION, authorized here: assignment roots are created
+from the immutable signed assignment table, and the already-executed
+calendar sweep is imported as inspection events from its own
+artifact. The artifact records one artifact-level generation time and
+does NOT record per-request observation timestamps, acting authority
+or reading process - so the migration must not claim to preserve
+what was never recorded. The honest import: `observed_at` is set to
+the artifact's `generated_at` and LABELED an upper-bound proxy, not
+an actual observation time; authority and reading process are either
+reconstructed from separately named evidence with that provenance
+recorded, or entered as unknown with a migration-specific reason; the
+channel and the artifact hash import as recorded. No delivery
+timestamp is borrowed and the sweep is never represented as having
+read a delivered file.
+
+FOR 2026-05 AND 2026-06 the migration records a BOUNDED AUDIT
+CONCLUSION, not a proof - enumeration of recorded channels can
+establish that no evidence of inspection was found, never that no
+unrecorded process ever occurred, which is precisely the threat model
+behind retrospective contamination recording. The frozen scope: every
+identified tool, cache, artifact, and available vendor request
+history or log is enumerated, the inventory and the result are
+recorded, and the two months remain eligible confirmation
+populations only if that exhaustive audit finds no inspection
+evidence.
+
+FROZEN CONSEQUENCES, conditions of the countersignature:
+
+- Creating assignment rows does NOT make an undelivered month part of
+  the delivered Stage M population.
+- Stage M eligibility remains complete delivered MNQ TBBO, with the
+  incomplete-delivery and minimum-population rules unchanged.
+- Authorized design-channel inspection does not imply any delivered
+  file was read.
+- Any unauthorized inspection of a sealed assignment contaminates the
+  month regardless of delivery existence.
+- A contamination record may be entered retrospectively, with
+  evidence, under separate occurrence and recording timestamps.
+- 2026-05 and 2026-06 remain eligible confirmation populations only
+  under the bounded audit conclusion above.
+
 ## Signature record
 
 SIGNED on round 3 by codex session
@@ -547,3 +667,12 @@ scope. Its countersignature attached one interpretive note on
 provision 3: before unseal, Stage C prebinds the schedule DERIVATION
 ALGORITHM and the input identity, never the resulting data-dependent
 schedule, which is derived atomically inside the blinded execution.
+
+Amendment 2 signed 2026-08-12 by codex session
+019ff53d-5b7d-77c2-b759-4d7d7834c7d6 - a FRESH reviewer session that
+took over after 019ff4db's cache went cold, grounded itself in the
+signed documents, and refused twice (the month-keyed-collapse shape
+it replaced with the assignment-rooted hierarchy; then the
+unpreservable migration fields and the overclaimed May/June proof)
+before signing. The session's response text misprinted its own
+identity; the ID here is taken from the captured session envelope.
