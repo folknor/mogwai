@@ -52,6 +52,29 @@ Subagent prompt rules:
 - Don't restate rules the agent already inherits. Subagents load the same CLAUDE.md / AGENTS.md as the main session, so the bash rules, no-cargo, no-worktrees, gremlins, etc. are already in scope. Re-listing them is noise.
 - Do pass anything learned in *this* conversation that the agent can't see: the user's framing, prior decisions, what's already been ruled out, the specific claim being audited.
 
+### Process reset, 2026-08-12 (owner ruling after the churn week)
+
+A week of consensus-gated autonomy produced 201 commits and zero tape
+improvement. The mechanism: a consensus gate between a proposer and a
+verifier-with-refusal-power converges to the verifier's utility
+function, and Codex's is never-being-wrong, which is always achievable
+by measuring more. The standing corrections:
+
+- **Codex is scoped to correctness review** - implementation review,
+  bug hunting, claims about completed work. It does NOT gate program
+  direction, scope, approach selection, or whether to build. Direction
+  belongs to the owner and the orchestrating Claude.
+- **Every demand for measurement - from anyone - must name the
+  decision the result would change.** No decision named, no
+  measurement run.
+- **A rendered chart, eyeballed by the owner, is a standing gate** for
+  any change to tape generation. It is the cheapest gate available and
+  the only one that catches what statistics cannot see.
+- **The budget is MINUTES of owner attention at real forks.** Autonomy
+  that consumes more of the owner than it saves is worse than none.
+  Do not manufacture forks; do not present menus where a
+  recommendation suffices; when the owner is depleted, park cleanly.
+
 ### Communication rules
 
 - Never use the `AskUserQuestion` tool - the harness runs in don't-ask mode and it will be denied. When you need a decision from the user, just ask in chat with the options laid out in prose.
