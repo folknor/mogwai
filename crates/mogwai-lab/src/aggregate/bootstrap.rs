@@ -13,10 +13,14 @@
 //! statistic anywhere consults a clock, a hash order or an address.
 
 use crate::kernel::splitmix64;
+use crate::kernel::tuple_mix;
 use crate::session::{civil_from_days, days_from_civil, days_from_iso};
 use crate::subcontract::{
     BOOTSTRAP_BASE_SEED, BOOTSTRAP_BLOCK_SESSIONS, BOOTSTRAP_REPLICATES, FOLD_MIN_SESSIONS,
 };
+
+/// The seed domain frozen for Stage M design months.
+pub const STAGE_M_SEED: u64 = 4_483_921_760_958_317_264;
 
 /// One replicate's session multiplicity vector.
 pub type Mult = Vec<i64>;
@@ -52,6 +56,51 @@ pub fn bootstrap_multiplicities(n_sessions: usize) -> Vec<Mult> {
         out.push(mult);
     }
     out
+}
+
+/// Stage M's month-generic extension of the circular five-session block
+/// bootstrap. July must continue to call [`bootstrap_multiplicities`]; this
+/// function is only for new-design months.
+///
+/// The original draw needs five blocks to fill July's 22-session pseudo-month.
+/// A generic month draws as many five-session blocks as are needed to fill its
+/// `n_sessions` positions, truncating the final block. The original
+/// `(replicate, block)` components remain in their frozen order after the
+/// canonical `YYYYMM` component. Stage M's tuple supplies the state advanced
+/// once by splitmix64 for each block start.
+#[must_use]
+pub fn stage_m_bootstrap_multiplicities(month: u64, n_sessions: usize) -> Vec<Mult> {
+    assert!(month != 202_607, "July uses the original bootstrap domain");
+    assert!(
+        valid_month_key(month),
+        "month must be a canonical YYYYMM key"
+    );
+    assert!(n_sessions > 0, "a bootstrap needs at least one session");
+    let blocks = n_sessions.div_ceil(BOOTSTRAP_BLOCK_SESSIONS as usize);
+    let mut out = Vec::with_capacity(BOOTSTRAP_REPLICATES as usize);
+    for rep in 0..BOOTSTRAP_REPLICATES {
+        let mut mult = vec![0i64; n_sessions];
+        let mut drawn = 0usize;
+        for block in 0..blocks as u64 {
+            let seed = tuple_mix(STAGE_M_SEED, &[month, rep as u64, block]);
+            let start = (splitmix64(seed) % n_sessions as u64) as usize;
+            for k in 0..BOOTSTRAP_BLOCK_SESSIONS as usize {
+                if drawn >= n_sessions {
+                    break;
+                }
+                mult[(start + k) % n_sessions] += 1;
+                drawn += 1;
+            }
+        }
+        out.push(mult);
+    }
+    out
+}
+
+fn valid_month_key(month: u64) -> bool {
+    let year = month / 100;
+    let month_of_year = month % 100;
+    year >= 1 && (1..=12).contains(&month_of_year)
 }
 
 /// `fold_multiplicities`: leave-one-ISO-week-out 0/1 vectors over the

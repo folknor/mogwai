@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, anyhow, bail};
@@ -94,27 +94,47 @@ enum Field {
 }
 
 pub fn run() -> anyhow::Result<()> {
+    run_with(&SlowGeometryRun::july())
+}
+
+pub struct SlowGeometryRun {
+    pub month: u64,
+    pub input: PathBuf,
+    pub output: PathBuf,
+    pub expected_sha256: String,
+}
+
+impl SlowGeometryRun {
+    fn july() -> Self {
+        Self {
+            month: 202_607,
+            input: INPUT.into(),
+            output: OUTPUT.into(),
+            expected_sha256: INPUT_SHA256.into(),
+        }
+    }
+}
+
+pub fn run_with(config: &SlowGeometryRun) -> anyhow::Result<()> {
     let actual =
-        mogwai_lab::ledger::sha256_file(Path::new(INPUT)).map_err(|e| anyhow!(e.to_string()))?;
+        mogwai_lab::ledger::sha256_file(&config.input).map_err(|e| anyhow!(e.to_string()))?;
     let commit = executing_commit()?;
-    if actual != INPUT_SHA256 {
+    if actual != config.expected_sha256 {
         let artifact = base(
             "input_mismatch",
             &actual,
             &commit,
-            json!({
-                "reason":"sequence_sha256_mismatch", "expected_sha256":INPUT_SHA256
-            }),
+            json!({"reason":"sequence_sha256_mismatch", "expected_sha256":config.expected_sha256}),
         );
-        write(&artifact)?;
+        write(&config.output, &artifact)?;
         println!("slow-geometry outcome: input_mismatch");
         return Ok(());
     }
 
-    let rows = read_sequence()?;
+    let rows = read_sequence(&config.input)?;
     let (cells, exclusions, dates) = construct_cells(&rows)?;
     let (scores, refusals) = cross_fit(&cells, &exclusions, &dates);
-    let score_stat = score_statistic(&scores, &dates);
+    let score_stat = score_statistic(&scores, &dates, config.month);
     let elapsed = elapsed_statistics(&cells, None, Field::Residual);
     let residualized = elapsed_statistics(&cells, Some(&scores), Field::Standardized);
     let boundary_contrasts = contrasts(&elapsed);
@@ -133,9 +153,12 @@ pub fn run() -> anyhow::Result<()> {
         "statistic_3":{"units":"standardized_squared", "recomputed_statistic":"elapsed_separation_covariance_only", "cells_used":cells.iter().filter(|c|scores.iter().any(|s|s.session_date==c.session_date)).map(|c|json!({"session_date":c.session_date,"hour":c.hour})).collect::<Vec<_>>(), "covariance":residualized, "boundary_contrasts":residualized_contrasts},
         "uncertainty":{"score_autocovariance":"shared-permutation max statistic", "elapsed_covariance":"descriptive point estimates plus pair counts", "boundary_contrasts":"descriptive point estimates plus pair counts", "factor":"point estimates only", "bootstrap":false}
     });
-    let artifact = base(outcome, &actual, &commit, detail);
-    write(&artifact)?;
-    println!("slow-geometry artifact -> {OUTPUT}");
+    let mut artifact = base(outcome, &actual, &commit, detail);
+    artifact["binding"]["month"] = json!(config.month);
+    artifact["binding"]["sequence_path"] = json!(config.input);
+    artifact["binding"]["expected_sequence_sha256"] = json!(config.expected_sha256);
+    write(&config.output, &artifact)?;
+    println!("slow-geometry artifact -> {}", config.output.display());
     println!("slow-geometry outcome: {outcome}");
     Ok(())
 }
@@ -151,8 +174,8 @@ fn base(outcome: &str, hash: &str, commit: &str, detail: Value) -> Value {
     })
 }
 
-fn read_sequence() -> anyhow::Result<Vec<OrderedCount>> {
-    BufReader::new(File::open(INPUT).context("opening bound ordered sequence")?)
+fn read_sequence(path: &Path) -> anyhow::Result<Vec<OrderedCount>> {
+    BufReader::new(File::open(path).context("opening bound ordered sequence")?)
         .lines()
         .map(|line| Ok(serde_json::from_str(&line?)?))
         .collect()
@@ -412,7 +435,7 @@ fn leading_eigenvector(mut a: Vec<Vec<f64>>) -> Option<Vec<f64>> {
     Some(out)
 }
 
-fn score_statistic(scores: &[Score], dates: &[String]) -> Value {
+fn score_statistic(scores: &[Score], dates: &[String], month: u64) -> Value {
     let centered = mean(&scores.iter().map(|s| s.score).collect::<Vec<_>>());
     let observed = score_bins(scores, dates, centered);
     let supported = observed
@@ -428,7 +451,14 @@ fn score_statistic(scores: &[Score], dates: &[String]) -> Value {
     let values = scores.iter().map(|s| s.score).collect::<Vec<_>>();
     for rep in 0..REPS {
         let mut perm = values.clone();
-        let mut state = tuple_mix(PERM_SEED, &[rep as u64]);
+        let mut state = if month == 202_607 {
+            tuple_mix(PERM_SEED, &[rep as u64])
+        } else {
+            tuple_mix(
+                mogwai_lab::aggregate::bootstrap::STAGE_M_SEED,
+                &[month, rep as u64],
+            )
+        };
         for i in (1..perm.len()).rev() {
             state = splitmix64(state);
             let j = (state % (i as u64 + 1)) as usize;
@@ -554,6 +584,6 @@ fn executing_commit() -> anyhow::Result<String> {
     }
     Ok(String::from_utf8(out.stdout)?.trim().into())
 }
-fn write(v: &Value) -> anyhow::Result<()> {
-    write_json_atomic(Path::new(OUTPUT), v).map_err(|e| anyhow!(e.to_string()))
+fn write(path: &Path, v: &Value) -> anyhow::Result<()> {
+    write_json_atomic(path, v).map_err(|e| anyhow!(e.to_string()))
 }

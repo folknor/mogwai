@@ -121,31 +121,52 @@ struct Manifest {
 /// dangling symlink), then a rehash of every `.csv.zst` against the ledger.
 /// Returns the verified `{filename: sha256}` map.
 pub fn verify_input(directory: &Path, ledger_path: &Path) -> LabResult<BTreeMap<String, String>> {
+    verify_input_bound(directory, ledger_path, LEDGER_KEY, Some(JOB_ID))
+}
+
+/// Month-generic ledger verification for Stage M. The caller supplies the
+/// exact seal-ledger entry key; the entry's job id is then bound to the
+/// delivered manifest rather than to July's subcontract constant.
+pub fn verify_input_entry(
+    directory: &Path,
+    ledger_path: &Path,
+    ledger_key: &str,
+) -> LabResult<BTreeMap<String, String>> {
+    verify_input_bound(directory, ledger_path, ledger_key, None)
+}
+
+fn verify_input_bound(
+    directory: &Path,
+    ledger_path: &Path,
+    ledger_key: &str,
+    expected_job: Option<&str>,
+) -> LabResult<BTreeMap<String, String>> {
     let ledger_text = std::fs::read_to_string(ledger_path)?;
     let ledger: LedgerFile = serde_json::from_str(&ledger_text)?;
     let entry = ledger
         .jobs
-        .get(LEDGER_KEY)
-        .ok_or_else(|| LabError::refusal(format!("ledger carries no entry for {LEDGER_KEY}")))?;
+        .get(ledger_key)
+        .ok_or_else(|| LabError::refusal(format!("ledger carries no entry for {ledger_key}")))?;
     if entry.state.as_deref() != Some("downloaded") {
         return Err(LabError::refusal(format!(
             "ledger entry state is {:?}, not downloaded",
             entry.state
         )));
     }
-    if entry.job_id.as_deref() != Some(JOB_ID) {
+    if expected_job.is_some_and(|job| entry.job_id.as_deref() != Some(job)) {
         return Err(LabError::refusal(format!(
-            "ledger names job {:?}, the sub-contract binds {JOB_ID}",
-            entry.job_id
+            "ledger names job {:?}, the sub-contract binds {}",
+            entry.job_id,
+            expected_job.unwrap_or_default()
         )));
     }
     let manifest_path = directory.join("manifest.json");
     let manifest_text = std::fs::read_to_string(&manifest_path)?;
     let manifest: Manifest = serde_json::from_str(&manifest_text)?;
-    if manifest.job_id.as_deref() != Some(JOB_ID) {
+    if manifest.job_id != entry.job_id {
         return Err(LabError::refusal(format!(
-            "manifest names job {:?}, not {JOB_ID}",
-            manifest.job_id
+            "manifest names job {:?}, not ledger job {:?}",
+            manifest.job_id, entry.job_id
         )));
     }
     let ledger_files = &entry.files;

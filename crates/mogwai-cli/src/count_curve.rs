@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, anyhow, bail};
@@ -196,7 +196,17 @@ fn run_full() -> anyhow::Result<()> {
 }
 
 fn observed_statistics(sessions: &[Value]) -> anyhow::Result<Value> {
-    let mults = bootstrap_multiplicities(sessions.len());
+    observed_statistics_with_bootstrap(sessions, &bootstrap_multiplicities(sessions.len()))
+}
+
+pub(crate) fn july_observed_statistics(sessions: &[Value]) -> anyhow::Result<Value> {
+    observed_statistics(sessions)
+}
+
+fn observed_statistics_with_bootstrap(
+    sessions: &[Value],
+    mults: &[Vec<i64>],
+) -> anyhow::Result<Value> {
     let mut out = serde_json::Map::new();
     for hour in traded_hours() {
         let mut windows = serde_json::Map::new();
@@ -212,6 +222,61 @@ fn observed_statistics(sessions: &[Value]) -> anyhow::Result<Value> {
         out.insert(hour.to_string(), Value::Object(windows));
     }
     Ok(Value::Object(out))
+}
+
+pub struct CountCurveMonthRun {
+    pub month: u64,
+    pub corpus: PathBuf,
+    pub ledger: PathBuf,
+    pub preflight: PathBuf,
+    pub output: PathBuf,
+}
+
+/// Run the observed Stage M count curve for exactly one new-design month.
+/// July is deliberately rejected here because its original-domain backcheck
+/// is a separate command path.
+pub fn run_month(config: &CountCurveMonthRun) -> anyhow::Result<()> {
+    if config.month == 202_607 {
+        bail!("July must use the Stage M backcheck path");
+    }
+    let observed = run_observed_with_count_windows(
+        &config.corpus,
+        &config.ledger,
+        &config.preflight,
+        CURVE_WINDOWS,
+    )?;
+    write_month_from_observed(config, &observed)
+}
+
+pub(crate) fn write_month_from_observed(
+    config: &CountCurveMonthRun,
+    observed: &Value,
+) -> anyhow::Result<()> {
+    let sessions = array_at(observed, "per_session")?;
+    let usable_sessions = sessions.len();
+    let mults = mogwai_lab::aggregate::bootstrap::stage_m_bootstrap_multiplicities(
+        config.month,
+        usable_sessions,
+    );
+    let curve = observed_statistics_with_bootstrap(sessions, &mults)?;
+    let monthly = mogwai_lab::aggregate::monthly::blocks_from_sessions(sessions)
+        .map_err(|e| anyhow!(e.to_string()))?;
+    let artifact = json!({
+        "outcome":"completed",
+        "binding": {
+            "month":config.month,
+            "observed":observed["binding"].clone(),
+            "usable_sessions":usable_sessions,
+            "thin":usable_sessions < 15,
+            "horizons_s":CURVE_WINDOWS,
+            "bootstrap_replicates":BOOTSTRAP_REPLICATES,
+            "seed_domain":{"base":mogwai_lab::aggregate::bootstrap::STAGE_M_SEED,"tuple":["YYYYMM","replicate_index","block_index"]},
+        },
+        "measure12a_observed":{"monthly":monthly},
+        "count_curve":curve,
+        "refusals":[],
+    });
+    write_artifact(&config.output, &artifact)
 }
 
 fn generated_statistics(seeds: &[(u64, Vec<Value>)]) -> anyhow::Result<Value> {

@@ -52,11 +52,25 @@ pub fn observe_with_count_windows<I>(
 where
     I: IntoIterator<Item = LabResult<Row>>,
 {
+    Ok(observe_with_count_windows_ordered(rows, usable, count_windows_s)?.0)
+}
+
+/// Stage M's single-pass observed extraction: the full 12a records with an
+/// extended count grid plus the retained ordered one-second sequence.
+pub fn observe_with_count_windows_ordered<I>(
+    rows: I,
+    usable: &[String],
+    count_windows_s: &'static [i64],
+) -> LabResult<(Vec<serde_json::Value>, Vec<crate::measure12a::OrderedCount>)>
+where
+    I: IntoIterator<Item = LabResult<Row>>,
+{
     let usable_set: std::collections::BTreeSet<&str> = usable.iter().map(String::as_str).collect();
     let mut minutes = MinuteFieldsCache::new();
     let mut records: Vec<serde_json::Value> = Vec::new();
     let mut state: Option<SessionAcc> = None;
     let mut current: Option<OpenParent> = None;
+    let mut ordered = Vec::new();
 
     for row in rows {
         let row = row?;
@@ -73,7 +87,8 @@ where
         let segment_index = u8::from(segment == "post_halt");
         if state.as_ref().is_none_or(|s| s.date != session) {
             close_parent(&mut state, current.take())?;
-            if let Some(done) = state.take() {
+            if let Some(mut done) = state.take() {
+                ordered.extend(done.ordered_counts()?);
                 records.push(done.close(Scope::Observed)?);
             }
             let seg = session_segment_at(ts, UTC_OFFSET_MINUTES)
@@ -111,7 +126,8 @@ where
         }
     }
     close_parent(&mut state, current.take())?;
-    if let Some(done) = state.take() {
+    if let Some(mut done) = state.take() {
+        ordered.extend(done.ordered_counts()?);
         records.push(done.close(Scope::Observed)?);
     }
     let got: Vec<&str> = records
@@ -125,7 +141,7 @@ where
             "measure12a session records do not match the usable set: {got:?} vs {want:?}"
         )));
     }
-    Ok(records)
+    Ok((records, ordered))
 }
 
 /// The frozen observed pass with the ordered one-second sufficient evidence

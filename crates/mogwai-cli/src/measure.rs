@@ -517,6 +517,34 @@ pub(crate) fn run_observed_with_count_windows(
     }))
 }
 
+pub(crate) fn run_observed_with_count_windows_ordered(
+    corpus: &Path,
+    ledger: &Path,
+    preflight_path: &Path,
+    windows: &'static [i64],
+    ledger_key: &str,
+) -> anyhow::Result<(Value, Vec<mogwai_lab::measure12a::OrderedCount>)> {
+    let hashes: BTreeMap<String, String> =
+        mogwai_lab::ledger::verify_input_entry(corpus, ledger, ledger_key)
+            .map_err(|e| anyhow!("verifying the delivered corpus: {e}"))?;
+    let (preflight, preflight_hash) = require_preflight(&hashes, preflight_path)
+        .map_err(|e| anyhow!("checking the preflight artifact: {e}"))?;
+    let usable = preflight["usable_sessions"]
+        .as_array()
+        .ok_or_else(|| anyhow!("preflight artifact carries no usable_sessions array"))?
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect::<Vec<_>>();
+    let files = data_files(corpus).map_err(|e| anyhow!("listing the corpus: {e}"))?;
+    let (per_session, ordered) =
+        observed::observe_with_count_windows_ordered(parse_stream(files), &usable, windows)
+            .map_err(|e| anyhow!("the Stage M observed pass refused: {e}"))?;
+    Ok((
+        serde_json::json!({"binding":{"preflight_artifact_hash":preflight_hash,"file_hashes":hashes},"per_session":per_session}),
+        ordered,
+    ))
+}
+
 pub(crate) fn run_observed_ordered(
     corpus: &Path,
     ledger: &Path,

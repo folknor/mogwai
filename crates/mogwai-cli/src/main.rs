@@ -28,7 +28,7 @@ use clap::{Args, Parser, Subcommand};
 
 use mogwai_cli::{
     arrival_control, arrival_envelope_diagnostic, arrival_screen, count_curve, fit, measure,
-    minute_range_envelope,
+    minute_range_envelope, stage_m,
 };
 use mogwai_server::{config, long_version};
 
@@ -59,6 +59,8 @@ enum Command {
     Measure(measure::MeasureArgs),
     /// The signed count-curve preregistration's generated-only Stage 0 backcheck.
     CountCurve(count_curve::CountCurveArgs),
+    /// Stage M Tier 1 per-month measurement, July backcheck and pooled test.
+    StageM(stage_m::StageMArgs),
     /// The protocol-11 session calibration fit: the observed corpus pass,
     /// the closed-form session refits, the CRN vol_scalar solve and the
     /// family probes, written as the hash-bound fit artifact.
@@ -158,6 +160,7 @@ fn main() -> anyhow::Result<()> {
         Command::Preflight(args) => preflight::run(args),
         Command::Measure(args) => measure::run(args),
         Command::CountCurve(args) => count_curve::run(&args),
+        Command::StageM(args) => stage_m::run(args),
         Command::Fit(args) => fit::run(&args),
         Command::MinuteRangeEnvelope(args) => {
             minute_range_envelope::run(args)?;

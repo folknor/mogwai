@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow, bail};
 use mogwai_lab::aggregate::artifact::write_json_atomic;
@@ -71,50 +71,122 @@ struct Tail {
 }
 
 pub fn run() -> anyhow::Result<()> {
+    run_with(&OrderedCountsRun::july())
+}
+
+pub struct OrderedCountsRun {
+    pub month: u64,
+    pub corpus: PathBuf,
+    pub ledger: PathBuf,
+    pub preflight: PathBuf,
+    pub sequence: PathBuf,
+    pub summary: PathBuf,
+    pub permutation_seed: u64,
+    pub bootstrap: Vec<Vec<i64>>,
+    pub require_july_backcheck: bool,
+}
+
+impl OrderedCountsRun {
+    fn july() -> Self {
+        Self {
+            month: 202_607,
+            corpus: CORPUS.into(),
+            ledger: LEDGER.into(),
+            preflight: PREFLIGHT.into(),
+            sequence: SEQUENCE.into(),
+            summary: SUMMARY.into(),
+            permutation_seed: PERM_SEED,
+            bootstrap: Vec::new(),
+            require_july_backcheck: true,
+        }
+    }
+}
+
+pub fn run_with(config: &OrderedCountsRun) -> anyhow::Result<()> {
     let reference: Value =
         serde_json::from_str(include_str!("../../../analysis/mnq-measure-12a.json"))?;
-    let (observed, mut rows) = if Path::new(SEQUENCE).exists() {
-        let prior: Value = serde_json::from_slice(&std::fs::read(SUMMARY)?)?;
+    let (observed, mut rows) = if config.sequence.exists() {
+        let prior: Value = if config.summary.exists() {
+            serde_json::from_slice(&std::fs::read(&config.summary)?)?
+        } else {
+            serde_json::from_str(include_str!(
+                "../../../analysis/out/ordered-counts-panels.json"
+            ))?
+        };
         (
             json!({"binding":prior["binding"]["observed"].clone()}),
-            read_sequence()?,
+            read_sequence(&config.sequence)?,
         )
     } else {
         let (observed, rows) =
-            run_observed_ordered(Path::new(CORPUS), Path::new(LEDGER), Path::new(PREFLIGHT))?;
+            run_observed_ordered(&config.corpus, &config.ledger, &config.preflight)?;
         (observed, rows)
     };
+    finish(config, &reference, &observed, &mut rows)
+}
+
+pub(crate) fn run_with_rows(
+    config: &OrderedCountsRun,
+    observed: &Value,
+    mut rows: Vec<OrderedCount>,
+) -> anyhow::Result<()> {
+    let reference: Value =
+        serde_json::from_str(include_str!("../../../analysis/mnq-measure-12a.json"))?;
+    finish(config, &reference, observed, &mut rows)
+}
+
+fn finish(
+    config: &OrderedCountsRun,
+    reference: &Value,
+    observed: &Value,
+    rows: &mut [OrderedCount],
+) -> anyhow::Result<()> {
     rows.sort_by_key(|r| (r.session_date.clone(), r.segment_index, r.window_start_ns));
-    if !Path::new(SEQUENCE).exists() {
-        write_sequence(&rows)?;
+    if !config.sequence.exists() {
+        write_sequence(&config.sequence, rows)?;
     }
     let sequence_sha256 =
-        mogwai_lab::ledger::sha256_file(Path::new(SEQUENCE)).map_err(|e| anyhow!(e.to_string()))?;
+        mogwai_lab::ledger::sha256_file(&config.sequence).map_err(|e| anyhow!(e.to_string()))?;
 
-    if let Some(mismatch) = backcheck(&rows, &reference)? {
+    if config.require_july_backcheck
+        && let Some(mismatch) = backcheck(rows, reference)?
+    {
         let out = json!({
             "binding": {"observed": observed["binding"].clone(), "sequence_sha256": sequence_sha256},
             "panel_a": {"outcome": "backcheck_mismatch"},
             "panel_b": {"outcome": "backcheck_mismatch"},
             "backcheck": {"matched": false, "first_mismatch": mismatch}
         });
-        write_json_atomic(Path::new(SUMMARY), &out).map_err(|e| anyhow!(e.to_string()))?;
+        write_json_atomic(&config.summary, &out).map_err(|e| anyhow!(e.to_string()))?;
         println!("ordered-count outcome: backcheck_mismatch");
         return Ok(());
     }
     println!("ordered-count reconstruction backcheck matched exactly");
 
-    let sessions = prepare(&rows)?;
-    let mults = bootstrap_multiplicities(sessions.len());
+    let sessions = prepare(rows)?;
+    let mults = if config.bootstrap.is_empty() {
+        bootstrap_multiplicities(sessions.len())
+    } else {
+        config.bootstrap.clone()
+    };
     let unit = vec![1_i64; sessions.len()];
     let panel_a = panel_a(&sessions, &unit, Some(&mults[..REPS]))?;
-    let panel_b = panel_b(&sessions, &unit, Some(&mults[..REPS]))?;
+    let panel_b = panel_b(
+        &sessions,
+        &unit,
+        Some(&mults[..REPS]),
+        config.month,
+        config.permutation_seed,
+    )?;
     let out = json!({
         "binding": {
             "observed": observed["binding"].clone(),
-            "sequence_path": SEQUENCE,
+            "month": config.month,
+            "usable_sessions": sessions.len(),
+            "thin": sessions.len() < 15,
+            "sequence_path": config.sequence,
             "sequence_sha256": sequence_sha256,
-            "ordered_counts_perm_seed": PERM_SEED,
+            "ordered_counts_perm_seed": config.permutation_seed,
             "permutation_replicates": REPS,
             "bootstrap_replicates": REPS
         },
@@ -122,27 +194,84 @@ pub fn run() -> anyhow::Result<()> {
         "panel_a": panel_a,
         "panel_b": panel_b
     });
-    write_json_atomic(Path::new(SUMMARY), &out).map_err(|e| anyhow!(e.to_string()))?;
-    println!("ordered-count sequence -> {SEQUENCE}");
-    println!("ordered-count panels -> {SUMMARY}");
+    write_json_atomic(&config.summary, &out).map_err(|e| anyhow!(e.to_string()))?;
+    println!("ordered-count sequence -> {}", config.sequence.display());
+    println!("ordered-count panels -> {}", config.summary.display());
     println!("ordered-count outcome: completed");
     Ok(())
 }
 
-fn read_sequence() -> anyhow::Result<Vec<OrderedCount>> {
-    BufReader::new(File::open(SEQUENCE)?)
+fn read_sequence(path: &Path) -> anyhow::Result<Vec<OrderedCount>> {
+    BufReader::new(File::open(path)?)
         .lines()
         .map(|line| Ok(serde_json::from_str(&line?)?))
         .collect()
 }
 
-fn write_sequence(rows: &[OrderedCount]) -> anyhow::Result<()> {
-    let path = Path::new(SEQUENCE);
+/// Reconstruct the per-session Block 2 count histograms needed by the count
+/// curve from the retained canonical one-second sequence.
+pub(crate) fn count_curve_sessions_from_sequence(path: &Path) -> anyhow::Result<Vec<Value>> {
+    let rows = read_sequence(path)?;
+    let mut sessions: BTreeMap<String, BTreeMap<(u64, usize), BTreeMap<u32, u64>>> =
+        BTreeMap::new();
+    let mut at = 0;
+    while at < rows.len() {
+        let end = rows[at..]
+            .iter()
+            .position(|r| {
+                r.session_date != rows[at].session_date || r.segment_index != rows[at].segment_index
+            })
+            .map_or(rows.len(), |x| at + x);
+        let seg = &rows[at..end];
+        for w in [1_usize, 5, 15, 60, 300] {
+            for chunk in seg.chunks_exact(w) {
+                let first = &chunk[0];
+                let last = &chunk[w - 1];
+                if first.window_start_ns / 3_600_000_000_000
+                    != last.window_end_ns / 3_600_000_000_000
+                {
+                    continue;
+                }
+                let count = chunk.iter().map(|r| r.parent_count).sum::<u32>();
+                *sessions
+                    .entry(first.session_date.clone())
+                    .or_default()
+                    .entry((last.endpoint_hour, w))
+                    .or_default()
+                    .entry(count)
+                    .or_default() += 1;
+            }
+        }
+        at = end;
+    }
+    Ok(sessions
+        .into_iter()
+        .map(|(date, cells)| {
+            let mut block2 = serde_json::Map::new();
+            for hour in hour_values() {
+                let mut windows = serde_json::Map::new();
+                for w in [1_usize, 5, 15, 60, 300] {
+                    let hist = cells.get(&(hour, w)).cloned().unwrap_or_default();
+                    windows.insert(w.to_string(), json!({"count_hist":hist}));
+                }
+                block2.insert(hour.to_string(), Value::Object(windows));
+            }
+            json!({"session":date,"block2":block2})
+        })
+        .collect())
+}
+
+fn write_sequence(path: &Path, rows: &[OrderedCount]) -> anyhow::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("sequence has no parent"))?;
     std::fs::create_dir_all(parent)?;
-    let staged = parent.join(".ordered-counts.jsonl.staged");
+    let staged = parent.join(format!(
+        ".{}.staged",
+        path.file_name()
+            .and_then(|x| x.to_str())
+            .unwrap_or("ordered-counts.jsonl")
+    ));
     let mut out = BufWriter::new(File::create(&staged).context("creating staged sequence")?);
     for row in rows {
         serde_json::to_writer(&mut out, row)?;
@@ -645,6 +774,8 @@ fn panel_b(
     sessions: &[SessionSuff],
     mult: &[i64],
     boot: Option<&[Vec<i64>]>,
+    month: u64,
+    permutation_seed: u64,
 ) -> anyhow::Result<Value> {
     let point = panel_b_point(sessions, mult)?;
     let uncertainty = if let Some(ms) = boot {
@@ -656,7 +787,7 @@ fn panel_b(
     } else {
         Value::Null
     };
-    let permutation = permutation_nulls(sessions, &point)?;
+    let permutation = permutation_nulls(sessions, &point, month, permutation_seed)?;
     let loo = leave_one_out(sessions, &point)?;
     Ok(
         json!({"outcome":"completed","point":point,"uncertainty":uncertainty,"permutation":permutation,"leave_one_session_out":loo}),
@@ -842,7 +973,12 @@ fn date_days(a: &str, b: &str) -> anyhow::Result<i64> {
     Ok(civil(b)? - civil(a)?)
 }
 
-fn permutation_nulls(sessions: &[SessionSuff], point: &Value) -> anyhow::Result<Value> {
+fn permutation_nulls(
+    sessions: &[SessionSuff],
+    point: &Value,
+    month: u64,
+    permutation_seed: u64,
+) -> anyhow::Result<Value> {
     let base = residuals(sessions, &vec![1; sessions.len()]);
     let observed = point["leading_eigenvalue"].as_f64().unwrap();
     let observed_c = &point["consecutive_session_covariance"];
@@ -853,7 +989,14 @@ fn permutation_nulls(sessions: &[SessionSuff], point: &Value) -> anyhow::Result<
         let mut r = base.clone();
         for h in 0..HOURS {
             let mut vals = r.iter().map(|x| x[h]).collect::<Vec<_>>();
-            let mut state = tuple_mix(PERM_SEED, &[hour_values()[h], rep as u64]);
+            let mut state = if month == 202_607 {
+                tuple_mix(permutation_seed, &[hour_values()[h], rep as u64])
+            } else {
+                tuple_mix(
+                    mogwai_lab::aggregate::bootstrap::STAGE_M_SEED,
+                    &[month, hour_values()[h], rep as u64],
+                )
+            };
             for i in (1..vals.len()).rev() {
                 state = splitmix64(state);
                 let j = state % (i as u64 + 1);

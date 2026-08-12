@@ -11,7 +11,7 @@ use serde_json::json;
 
 use super::bootstrap::{
     QuantileSupport, bootstrap_multiplicities, fold_multiplicities, iso_year_week,
-    weighted_median_votes,
+    stage_m_bootstrap_multiplicities, weighted_median_votes,
 };
 use super::context::ObsContext;
 use super::countsub::gap_closure;
@@ -47,6 +47,25 @@ fn bootstrap_multiplicities_are_the_frozen_draw() {
         }
     }
     assert_eq!(mults[0], expect);
+}
+
+#[test]
+fn stage_m_bootstrap_fills_each_month_and_is_month_separated() {
+    let a = stage_m_bootstrap_multiplicities(202_508, 27);
+    let b = stage_m_bootstrap_multiplicities(202_509, 27);
+    assert_eq!(a.len(), BOOTSTRAP_REPLICATES as usize);
+    assert!(
+        a.iter()
+            .all(|m| m.len() == 27 && m.iter().sum::<i64>() == 27)
+    );
+    assert_ne!(a[0], b[0]);
+    assert_eq!(a, stage_m_bootstrap_multiplicities(202_508, 27));
+}
+
+#[test]
+#[should_panic(expected = "July uses the original bootstrap domain")]
+fn stage_m_bootstrap_refuses_july_domain_collision() {
+    drop(stage_m_bootstrap_multiplicities(202_607, 22));
 }
 
 #[test]
