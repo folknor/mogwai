@@ -161,7 +161,11 @@ fn finish(
         println!("ordered-count outcome: backcheck_mismatch");
         return Ok(());
     }
-    println!("ordered-count reconstruction backcheck matched exactly");
+    if config.require_july_backcheck {
+        println!("ordered-count reconstruction backcheck matched exactly");
+    } else {
+        println!("ordered-count reconstruction backcheck: not applicable (design month)");
+    }
 
     let sessions = prepare(rows)?;
     let mults = if config.bootstrap.is_empty() {
@@ -190,7 +194,11 @@ fn finish(
             "permutation_replicates": REPS,
             "bootstrap_replicates": REPS
         },
-        "backcheck": {"matched": true, "horizons_s": [1, 5, 60], "fields": ["scheduled_windows", "zero_windows", "count_hist"]},
+        "backcheck": if config.require_july_backcheck {
+            json!({"matched": true, "horizons_s": [1, 5, 60], "fields": ["scheduled_windows", "zero_windows", "count_hist"]})
+        } else {
+            json!({"applicable": false, "reason": "the reconstruction backcheck compares against the committed July artifact; a design month has no committed reference"})
+        },
         "panel_a": panel_a,
         "panel_b": panel_b
     });
@@ -431,12 +439,6 @@ fn prepare(rows: &[OrderedCount]) -> anyhow::Result<Vec<SessionSuff>> {
             });
         }
         out.push(SessionSuff { date, hours, rates });
-    }
-    if out.len() != 22 {
-        bail!(
-            "ordered sequence contains {} sessions, expected 22",
-            out.len()
-        );
     }
     Ok(out)
 }

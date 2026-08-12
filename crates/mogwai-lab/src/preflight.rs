@@ -31,7 +31,11 @@ struct SessionState {
 #[derive(Serialize)]
 pub struct PreflightArtifact {
     pub job_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ledger_key: Option<String>,
     pub file_hashes: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inventory_provenance: Option<InventoryProvenance>,
     pub subcontract_hash: String,
     pub rows: u64,
     pub unsided: u64,
@@ -48,6 +52,13 @@ pub struct PreflightArtifact {
 }
 
 #[derive(Serialize)]
+pub struct InventoryProvenance {
+    pub calendar_artifact: String,
+    pub calendar_artifact_hash: String,
+    pub month: String,
+}
+
+#[derive(Serialize)]
 pub struct SessionRecord {
     pub rows: u64,
     pub invalid_books: u64,
@@ -59,10 +70,101 @@ pub struct SessionRecord {
 /// the same order as the Python reference.
 pub fn run_preflight(directory: &Path, ledger_path: &Path) -> LabResult<PreflightArtifact> {
     let hashes = crate::ledger::verify_input(directory, ledger_path)?;
-
-    let inventory_status: BTreeMap<&str, &str> = SESSION_INVENTORY
+    let inventory: Vec<(String, String)> = SESSION_INVENTORY
         .iter()
-        .map(|(label, status)| (*label, *status))
+        .map(|(date, status)| ((*date).to_string(), (*status).to_string()))
+        .collect();
+
+    run_preflight_with_inventory(
+        directory,
+        hashes,
+        JOB_ID.to_string(),
+        None,
+        &inventory,
+        true,
+        None,
+    )
+}
+
+/// Stage M's month-generic preflight. The calendar is an input artifact: its
+/// date grades become the inventory without changing the frozen 12a
+/// subcontract or its July producer.
+pub fn run_month_preflight(
+    month: u64,
+    directory: &Path,
+    ledger_path: &Path,
+    ledger_key: &str,
+    calendar_path: &Path,
+) -> LabResult<PreflightArtifact> {
+    let hashes = crate::ledger::verify_input_entry(directory, ledger_path, ledger_key)?;
+    let job_id = crate::ledger::input_entry_job_id(ledger_path, ledger_key)?;
+    let calendar_bytes = std::fs::read(calendar_path)?;
+    let calendar: Value = serde_json::from_slice(&calendar_bytes)?;
+    let month_label = format!("{:04}-{:02}", month / 100, month % 100);
+    let month_value = calendar["months"].get(&month_label).ok_or_else(|| {
+        LabError::refusal(format!("calendar artifact carries no month {month_label}"))
+    })?;
+    if month_value["role"] != "new-design" {
+        return Err(LabError::refusal(format!(
+            "calendar month {month_label} has role {:?}, not new-design",
+            month_value["role"]
+        )));
+    }
+    if !calendar["classification"].is_object() {
+        return Err(LabError::refusal(
+            "calendar artifact carries no declared classification thresholds",
+        ));
+    }
+    let dates = month_value["dates"].as_object().ok_or_else(|| {
+        LabError::refusal(format!(
+            "calendar month {month_label} carries no dates object"
+        ))
+    })?;
+    let mut inventory = Vec::new();
+    for (date, row) in dates {
+        match row["grade"].as_str() {
+            Some("full_session") => inventory.push((date.clone(), "full".to_string())),
+            Some("half_session") => inventory.push((date.clone(), "half".to_string())),
+            Some("closure") => {}
+            Some(grade) => {
+                return Err(LabError::refusal(format!(
+                    "calendar date {date} has unknown grade {grade}"
+                )));
+            }
+            None => {
+                return Err(LabError::refusal(format!(
+                    "calendar date {date} carries no grade"
+                )));
+            }
+        }
+    }
+    run_preflight_with_inventory(
+        directory,
+        hashes,
+        job_id,
+        Some(ledger_key.to_string()),
+        &inventory,
+        false,
+        Some(InventoryProvenance {
+            calendar_artifact: calendar_path.display().to_string(),
+            calendar_artifact_hash: crate::ledger::sha256_bytes(&calendar_bytes),
+            month: month_label,
+        }),
+    )
+}
+
+fn run_preflight_with_inventory(
+    directory: &Path,
+    hashes: BTreeMap<String, String>,
+    job_id: String,
+    ledger_key: Option<String>,
+    inventory: &[(String, String)],
+    enforce_july_session_floors: bool,
+    inventory_provenance: Option<InventoryProvenance>,
+) -> LabResult<PreflightArtifact> {
+    let inventory_status: BTreeMap<&str, &str> = inventory
+        .iter()
+        .map(|(label, status)| (label.as_str(), status.as_str()))
         .collect();
 
     let mut rows: u64 = 0;
@@ -144,30 +246,30 @@ pub fn run_preflight(directory: &Path, ledger_path: &Path) -> LabResult<Prefligh
 
     let mut excluded: Vec<(String, String)> = Vec::new();
     let mut usable: Vec<String> = Vec::new();
-    for (label, status) in SESSION_INVENTORY {
-        if *status != "full" {
+    for (label, status) in inventory {
+        if status != "full" {
             continue;
         }
-        match per_session.get(*label) {
-            None => excluded.push((label.to_string(), "absent".to_string())),
+        match per_session.get(label) {
+            None => excluded.push((label.clone(), "absent".to_string())),
             Some(state) if state.rows == 0 => {
-                excluded.push((label.to_string(), "absent".to_string()));
+                excluded.push((label.clone(), "absent".to_string()));
             }
             Some(state) if state.ids.len() > 1 => {
                 let mut ids: Vec<&String> = state.ids.iter().collect();
                 ids.sort();
-                excluded.push((label.to_string(), format!("impure: ids {ids:?}")));
+                excluded.push((label.clone(), format!("impure: ids {ids:?}")));
             }
-            Some(_) => usable.push(label.to_string()),
+            Some(_) => usable.push(label.clone()),
         }
     }
-    if excluded.len() > MAX_EXCLUDED_SESSIONS {
+    if enforce_july_session_floors && excluded.len() > MAX_EXCLUDED_SESSIONS {
         return Err(LabError::refusal(format!(
             "{} sessions excluded ({excluded:?}); more than {MAX_EXCLUDED_SESSIONS}",
             excluded.len()
         )));
     }
-    if usable.len() < MIN_USABLE_SESSIONS {
+    if enforce_july_session_floors && usable.len() < MIN_USABLE_SESSIONS {
         return Err(LabError::refusal(format!(
             "only {} usable sessions of the expected {EXPECTED_FULL_SESSIONS}; fewer than \
              {MIN_USABLE_SESSIONS}",
@@ -177,17 +279,17 @@ pub fn run_preflight(directory: &Path, ledger_path: &Path) -> LabResult<Prefligh
 
     let mut sessions: BTreeMap<String, SessionRecord> = BTreeMap::new();
     let usable_set: std::collections::HashSet<&str> = usable.iter().map(String::as_str).collect();
-    for (label, status) in SESSION_INVENTORY {
-        let state = per_session.get(*label);
-        let record_status = if *status != "full" {
+    for (label, status) in inventory {
+        let state = per_session.get(label);
+        let record_status = if status != "full" {
             "early_close_excluded".to_string()
-        } else if usable_set.contains(*label) {
+        } else if usable_set.contains(label.as_str()) {
             "usable".to_string()
         } else {
             "excluded".to_string()
         };
         sessions.insert(
-            label.to_string(),
+            label.clone(),
             SessionRecord {
                 rows: state.map_or(0, |s| s.rows),
                 invalid_books: state.map_or(0, |s| s.invalid_books),
@@ -197,8 +299,10 @@ pub fn run_preflight(directory: &Path, ledger_path: &Path) -> LabResult<Prefligh
     }
 
     Ok(PreflightArtifact {
-        job_id: JOB_ID.to_string(),
+        job_id,
+        ledger_key,
         file_hashes: hashes,
+        inventory_provenance,
         subcontract_hash: subcontract::subcontract_hash(),
         rows,
         unsided,

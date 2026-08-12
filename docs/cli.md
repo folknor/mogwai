@@ -222,7 +222,22 @@ and reading them as instants.
 `preflight` runs the fail-closed TBBO corpus contract check against a
 delivered corpus directory and writes a hash-bound preflight artifact -
 `--corpus`, `--ledger` (read-only) and `--out` all default to the paths
-`analysis/mnq_fit.py` used. `measure` runs the protocol-12a section-10
+`analysis/mnq_fit.py` used. This command is the frozen July parity path.
+
+For a Stage M new-design month, produce its calendar-bound inventory and then
+run Tier 1a with the matching arguments:
+
+```text
+brokkr run mogwai -- stage-m preflight --month 202509 --corpus research/market-data/databento/mnqv/2025-09.manifest.tbbo --ledger analysis/databento-jobs.json --ledger-key 'mnqv|2025-09.manifest|tbbo'
+brokkr run mogwai -- stage-m month --month 202509 --corpus research/market-data/databento/mnqv/2025-09.manifest.tbbo --ledger analysis/databento-jobs.json --ledger-key 'mnqv|2025-09.manifest|tbbo'
+```
+
+Both commands default to `analysis/out/stage-m/<YYYYMM>/preflight.json` and
+the preflight defaults to `analysis/databento-calendar.json`. Full-session
+dates are candidates, half-session dates are recorded as
+`early_close_excluded`, and closures are absent from the inventory. The
+artifact records the usable count and calendar hash; it does not apply the
+July-only 18-session floor. `measure` runs the protocol-12a section-10
 measurement gate: the live observed pass over the corpus plus the eight
 in-process attestation walks, assembled and validated into the artifact
 shape `analysis/mnq-measure-12a.json` names, and refuses outright over a

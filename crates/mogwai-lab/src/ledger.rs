@@ -113,7 +113,50 @@ struct LedgerJobEntry {
 struct Manifest {
     job_id: Option<String>,
     #[serde(default)]
-    files: BTreeMap<String, String>,
+    files: ManifestFiles,
+}
+
+/// Two delivered-manifest generations exist on disk: the July-era map of
+/// `filename -> sha256`, and the vendor-native batch list of objects whose
+/// `hash` carries a `sha256:` prefix. Both normalize to the same map.
+#[derive(Deserialize, Default)]
+#[serde(untagged)]
+enum ManifestFiles {
+    #[default]
+    #[serde(skip)]
+    Empty,
+    Map(BTreeMap<String, String>),
+    List(Vec<ManifestFileEntry>),
+}
+
+#[derive(Deserialize)]
+struct ManifestFileEntry {
+    filename: String,
+    hash: String,
+}
+
+impl ManifestFiles {
+    fn normalized(&self) -> BTreeMap<String, String> {
+        match self {
+            ManifestFiles::Empty => BTreeMap::new(),
+            ManifestFiles::Map(map) => map.clone(),
+            ManifestFiles::List(entries) => entries
+                .iter()
+                .map(|entry| {
+                    let hash = entry
+                        .hash
+                        .strip_prefix("sha256:")
+                        .unwrap_or(&entry.hash)
+                        .to_string();
+                    (entry.filename.clone(), hash)
+                })
+                .collect(),
+        }
+    }
+
+    fn is_vendor_list(&self) -> bool {
+        matches!(self, Self::List(_))
+    }
 }
 
 /// `verify_input`: ledger-entry state and job-id checks, ledger/manifest
@@ -133,6 +176,17 @@ pub fn verify_input_entry(
     ledger_key: &str,
 ) -> LabResult<BTreeMap<String, String>> {
     verify_input_bound(directory, ledger_path, ledger_key, None)
+}
+
+/// Return the job id carried by a verified ledger entry. Call this only after
+/// [`verify_input_entry`] has established the ledger/manifest binding.
+pub fn input_entry_job_id(ledger_path: &Path, ledger_key: &str) -> LabResult<String> {
+    let ledger: LedgerFile = serde_json::from_str(&std::fs::read_to_string(ledger_path)?)?;
+    ledger
+        .jobs
+        .get(ledger_key)
+        .and_then(|entry| entry.job_id.clone())
+        .ok_or_else(|| LabError::refusal(format!("ledger entry {ledger_key} carries no job id")))
 }
 
 fn verify_input_bound(
@@ -170,13 +224,16 @@ fn verify_input_bound(
         )));
     }
     let ledger_files = &entry.files;
-    let manifest_files = &manifest.files;
+    let mut manifest_files = manifest.files.normalized();
+    if manifest.files.is_vendor_list() {
+        manifest_files.insert("manifest.json".to_string(), sha256_file(&manifest_path)?);
+    }
     if ledger_files.is_empty() {
         return Err(LabError::refusal(
             "the ledger entry carries no file inventory",
         ));
     }
-    if ledger_files != manifest_files {
+    if ledger_files != &manifest_files {
         let ledger_keys: HashSet<&String> = ledger_files.keys().collect();
         let manifest_keys: HashSet<&String> = manifest_files.keys().collect();
         let only_ledger: Vec<&&String> = {

@@ -33,6 +33,8 @@ pub struct StageMArgs {
 
 #[derive(Subcommand)]
 pub enum StageMCommand {
+    /// Produce the calendar-bound preflight for one new-design month.
+    Preflight(PreflightArgs),
     /// Run one new-design month. July is reserved for `backcheck`.
     Month(MonthArgs),
     /// Recompute July Tier 1a under every original seed path.
@@ -46,6 +48,25 @@ pub enum StageMCommand {
 }
 
 #[derive(Args)]
+pub struct PreflightArgs {
+    #[arg(long, value_parser = parse_month)]
+    month: u64,
+    #[arg(long)]
+    corpus: PathBuf,
+    #[arg(long)]
+    ledger: PathBuf,
+    #[arg(long)]
+    ledger_key: String,
+    #[arg(long, default_value = "analysis/databento-calendar.json")]
+    calendar: PathBuf,
+    /// Defaults to `<output-root>/<YYYYMM>/preflight.json`.
+    #[arg(long)]
+    output: Option<PathBuf>,
+    #[arg(long, default_value = "analysis/out/stage-m")]
+    output_root: PathBuf,
+}
+
+#[derive(Args)]
 pub struct MonthArgs {
     #[arg(long, value_parser = parse_month)]
     month: u64,
@@ -56,8 +77,9 @@ pub struct MonthArgs {
     /// Exact seal-ledger job key for this month.
     #[arg(long)]
     ledger_key: String,
+    /// Defaults to `<output-root>/<YYYYMM>/preflight.json`.
     #[arg(long)]
-    preflight: PathBuf,
+    preflight: Option<PathBuf>,
     #[arg(long, default_value = "analysis/out/stage-m")]
     output_root: PathBuf,
 }
@@ -103,12 +125,46 @@ pub struct SummarizeArgs {
 
 pub fn run(args: StageMArgs) -> anyhow::Result<()> {
     match args.command {
+        StageMCommand::Preflight(x) => run_preflight(x),
         StageMCommand::Month(x) => run_month(x),
         StageMCommand::Backcheck(x) => run_backcheck(&x),
         StageMCommand::Exchangeability(x) => run_exchangeability(&x),
         StageMCommand::Power(x) => run_power(&x),
         StageMCommand::Summarize(x) => run_summarize(&x),
     }
+}
+
+fn run_preflight(args: PreflightArgs) -> anyhow::Result<()> {
+    if args.month == JULY {
+        bail!("July is frozen and must use `mogwai preflight`");
+    }
+    let output = args.output.unwrap_or_else(|| {
+        args.output_root
+            .join(args.month.to_string())
+            .join("preflight.json")
+    });
+    let artifact = mogwai_lab::preflight::run_month_preflight(
+        args.month,
+        &args.corpus,
+        &args.ledger,
+        &args.ledger_key,
+        &args.calendar,
+    )
+    .map_err(|e| anyhow!("stage-m preflight refused: {e}"))?;
+    mogwai_lab::preflight::write_json_atomic(&output, &artifact)
+        .map_err(|e| anyhow!("writing {}: {e}", output.display()))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "month": args.month,
+            "rows": artifact.rows,
+            "usable_sessions": artifact.usable_sessions.len(),
+            "excluded_sessions": artifact.excluded_sessions.len(),
+            "inventory_provenance": artifact.inventory_provenance,
+        }))?
+    );
+    println!("stage-m preflight PASS -> {}", output.display());
+    Ok(())
 }
 
 fn run_power(args: &PowerArgs) -> anyhow::Result<()> {
@@ -195,13 +251,8 @@ fn run_power(args: &PowerArgs) -> anyhow::Result<()> {
                         simulation_index as u64,
                     ],
                 );
-                let simulated = simulate_scores(
-                    &populations,
-                    july_variance,
-                    rho,
-                    lambda,
-                    simulation_seed,
-                );
+                let simulated =
+                    simulate_scores(&populations, july_variance, rho, lambda, simulation_seed);
                 let p_value = exchangeability_p_value(&simulated)?;
                 rejected += usize::from(p_value <= POWER_ALPHA);
             }
@@ -426,6 +477,7 @@ fn run_month(args: MonthArgs) -> anyhow::Result<()> {
     }
     let dir = args.output_root.join(args.month.to_string());
     std::fs::create_dir_all(&dir)?;
+    let preflight = args.preflight.unwrap_or_else(|| dir.join("preflight.json"));
     let count_path = dir.join("count-curve.json");
     let sequence_path = dir.join("ordered-counts.jsonl");
     let panels_path = dir.join("ordered-counts-panels.json");
@@ -435,13 +487,13 @@ fn run_month(args: MonthArgs) -> anyhow::Result<()> {
         month: args.month,
         corpus: args.corpus.clone(),
         ledger: args.ledger.clone(),
-        preflight: args.preflight.clone(),
+        preflight: preflight.clone(),
         output: count_path,
     };
     let pass = run_observed_with_count_windows_ordered(
         &args.corpus,
         &args.ledger,
-        &args.preflight,
+        &preflight,
         &[1, 5, 15, 60, 300],
         &args.ledger_key,
     );
@@ -461,13 +513,13 @@ fn run_month(args: MonthArgs) -> anyhow::Result<()> {
         }
     };
     count_curve::write_month_from_observed(&count_config, &observed)?;
-    let usable = usable_count(&args.preflight)?;
+    let usable = usable_count(&preflight)?;
     ordered_counts::run_with_rows(
         &OrderedCountsRun {
             month: args.month,
             corpus: args.corpus,
             ledger: args.ledger,
-            preflight: args.preflight,
+            preflight,
             sequence: sequence_path.clone(),
             summary: panels_path,
             permutation_seed: STAGE_M_SEED,
@@ -712,10 +764,7 @@ fn exchangeability_p_value(months: &[MonthScores]) -> anyhow::Result<f64> {
     exchangeability_null(months, observed_max).map(|x| x.1)
 }
 
-fn exchangeability_null(
-    months: &[MonthScores],
-    observed_max: f64,
-) -> anyhow::Result<(usize, f64)> {
+fn exchangeability_null(months: &[MonthScores], observed_max: f64) -> anyhow::Result<(usize, f64)> {
     let mut exceed = 0;
     for rep in 0..REPS {
         let mut permuted = months.to_vec();
@@ -743,10 +792,7 @@ fn exchangeability_null(
             exceed += 1;
         }
     }
-    Ok((
-        exceed,
-        (1.0 + exceed as f64) / (1.0 + REPS as f64),
-    ))
+    Ok((exceed, (1.0 + exceed as f64) / (1.0 + REPS as f64)))
 }
 
 fn pooled_bins(months: &[MonthScores]) -> Value {
