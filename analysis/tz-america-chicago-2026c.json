@@ -1,0 +1,84 @@
+{
+ "_purpose": "Stage M Amendment 4 frozen timezone authority: America/Chicago UTC offset transitions. Runtime scheduling reads THIS artifact, never the host zoneinfo.",
+ "zone": "America/Chicago",
+ "tzdb_release": "2026c",
+ "source": "host /usr/share/zoneinfo (tzdata.zi header version), extracted via Python zoneinfo with one-second bisection at each offset change by analysis/generate_tz_artifact.py",
+ "coverage_utc": {
+  "start": "2024-01-01",
+  "end": "2030-12-31"
+ },
+ "standard_offset_s": -21600,
+ "daylight_offset_s": -18000,
+ "transitions": [
+  {
+   "utc_instant": "2024-03-10T08:00:00Z",
+   "offset_before_s": -21600,
+   "offset_after_s": -18000
+  },
+  {
+   "utc_instant": "2024-11-03T07:00:00Z",
+   "offset_before_s": -18000,
+   "offset_after_s": -21600
+  },
+  {
+   "utc_instant": "2025-03-09T08:00:00Z",
+   "offset_before_s": -21600,
+   "offset_after_s": -18000
+  },
+  {
+   "utc_instant": "2025-11-02T07:00:00Z",
+   "offset_before_s": -18000,
+   "offset_after_s": -21600
+  },
+  {
+   "utc_instant": "2026-03-08T08:00:00Z",
+   "offset_before_s": -21600,
+   "offset_after_s": -18000
+  },
+  {
+   "utc_instant": "2026-11-01T07:00:00Z",
+   "offset_before_s": -18000,
+   "offset_after_s": -21600
+  },
+  {
+   "utc_instant": "2027-03-14T08:00:00Z",
+   "offset_before_s": -21600,
+   "offset_after_s": -18000
+  },
+  {
+   "utc_instant": "2027-11-07T07:00:00Z",
+   "offset_before_s": -18000,
+   "offset_after_s": -21600
+  },
+  {
+   "utc_instant": "2028-03-12T08:00:00Z",
+   "offset_before_s": -21600,
+   "offset_after_s": -18000
+  },
+  {
+   "utc_instant": "2028-11-05T07:00:00Z",
+   "offset_before_s": -18000,
+   "offset_after_s": -21600
+  },
+  {
+   "utc_instant": "2029-03-11T08:00:00Z",
+   "offset_before_s": -21600,
+   "offset_after_s": -18000
+  },
+  {
+   "utc_instant": "2029-11-04T07:00:00Z",
+   "offset_before_s": -18000,
+   "offset_after_s": -21600
+  },
+  {
+   "utc_instant": "2030-03-10T08:00:00Z",
+   "offset_before_s": -21600,
+   "offset_after_s": -18000
+  },
+  {
+   "utc_instant": "2030-11-03T07:00:00Z",
+   "offset_before_s": -18000,
+   "offset_after_s": -21600
+  }
+ ]
+}
