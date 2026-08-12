@@ -71,6 +71,11 @@ struct Score {
     loading_sum_before_alignment: f64,
     score: f64,
     loading: Vec<Loading>,
+    /// Stage M Amendment 1 per-fold record: training sessions dropped for
+    /// carrying an excluded cell, and the complete-case population retained.
+    training_dropped: Vec<String>,
+    training_count: usize,
+    training_retained: Vec<String>,
     #[serde(skip)]
     z_star: Vec<f64>,
 }
@@ -293,7 +298,25 @@ fn cross_fit(
             });
             continue;
         }
-        let train = dates.iter().filter(|d| *d != held).collect::<Vec<_>>();
+        // Stage M Amendment 1: COMPLETE-CASE TRAINING. A training session
+        // with any excluded cell is removed from the fold entirely - before
+        // every per-hour moment and the correlation - and the drop is
+        // recorded. The estimand is the complete-case training population.
+        let (train, dropped): (Vec<_>, Vec<_>) = dates
+            .iter()
+            .filter(|d| *d != held)
+            .partition(|d| HOURS.iter().all(|h| map.contains_key(&((**d).clone(), *h))));
+        if train.len() < 12 {
+            refusals.push(Refusal {
+                session_date: held.clone(),
+                reason: format!(
+                    "complete_training_below_floor: {} complete of 12 required; dropped {:?}",
+                    train.len(),
+                    dropped
+                ),
+            });
+            continue;
+        }
         let mut mu = Vec::new();
         let mut sigma = Vec::new();
         let mut refused = None;
@@ -376,6 +399,9 @@ fn cross_fit(
                 .zip(v)
                 .map(|(h, value)| Loading { hour: *h, value })
                 .collect(),
+            training_dropped: dropped.iter().map(|d| (*d).clone()).collect(),
+            training_count: train.len(),
+            training_retained: train.iter().map(|d| (*d).clone()).collect(),
             z_star,
         });
     }

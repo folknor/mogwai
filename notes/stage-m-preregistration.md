@@ -511,6 +511,72 @@ with the lock released between months; any single invocation
 projected past 20 minutes is cleared with the owner first. The
 incumbent control runs add about ten minutes.
 
+## Amendment 1, 2026-08-12: complete-case training in the cross-fit
+
+SIGNED 2026-08-12 by codex session
+019ff606-1f16-7800-88ee-e52f083fac70, the fresh reviewer that issued
+the underlying conditional ruling after the prior sessions went
+cache-cold.
+
+A REVIEWED AMENDMENT with its own signature, not an interpretation:
+the frozen slow-geometry construction uses ALL other sessions as
+training, and changing that population changes the training moments,
+correlation, loading and score. The month-generic refusal clause says
+what to do when the formula cannot apply; it does not authorize
+inventing a missing-data estimator, so this text goes through the
+amendment boundary.
+
+THE TRIGGER, disclosed: the 2026-03 Tier 1a run crashed because
+training sessions carry excluded session-hour cells. The cause is
+deterministic schedule geometry - the US daylight-saving transition
+shifts the CME schedule's UTC hours mid-month, so 2026-03 sessions
+before March 8 populate a different UTC hour set (March 2 through 6
+carry an excluded hour-22 cell). Retaining the mechanically-correct
+fold refusal would make Tier 1b systematically blind to exactly the
+calendar-phase variation Stage M exists to characterize.
+
+THE RULE, frozen:
+
+- A training session with ANY excluded cell is removed ENTIRELY from
+  that fold - before every per-hour moment and the correlation
+  matrix - so the statistics stay internally consistent over one
+  population. THE ESTIMAND CHANGES and is named honestly: the
+  cross-fit trains on the COMPLETE-CASE training population, not on
+  all other sessions.
+- The held-out complete-cell requirement is UNCHANGED: an incomplete
+  held-out session still refuses its own score.
+- At least 12 COMPLETE training sessions must remain after removing
+  the held-out session, else that held-out score refuses. TWELVE IS
+  SUPPORT-AWARE, disclosed: it was chosen with the March pattern
+  known - 18 usable sessions, five incomplete, leaving exactly 12
+  complete training sessions per fold - and is not result-driven with
+  respect to any score (none existed; the runs crashed first). Its
+  substantive basis: a majority of the nominal training population is
+  retained and only the leading direction is estimated - no
+  covariance inverse, no full-rank requirement, no secondary factor.
+  A floor below 12 needs a new stability analysis.
+- Drop identities, reasons, the resulting training count and the
+  retained training identities are recorded PER FOLD.
+- Zero-training-variance and eigensolve refusals are unchanged.
+- COMPLETED MONTHS RE-RUN under this amendment, July included as a
+  regression check: months without excluded cells must reproduce
+  their existing scores EXACTLY.
+- NOVEMBER IS NOT RECOVERED, stated against the temptation to claim
+  otherwise: 2025-11's held-out sessions themselves refuse on hour
+  22, which this amendment cannot rescue. It recovers the
+  complete-session portion of March only; the program retains a
+  narrower, honestly-recorded DST selection effect.
+- Tier 1b support rules are unchanged; a month contributes whatever
+  supported bins its scored sessions produce.
+
+THE DST FINDING, recorded now and carried into Stage F as a binding
+input: the observed target has a TWICE-YEARLY Central-time-to-UTC
+phase transition that the July-fitted generator cannot express.
+Complete-case scoring is a missing-data repair, not a model of that
+transition. Stage F must decide how calendar phase enters the
+successor mechanism and its gates, and must not treat March's
+surviving post-transition scores as representing the whole month.
+
 ## What Stage M may NOT do
 
 - No candidate generator runs. The ONLY generator runs are the 24
