@@ -104,6 +104,12 @@ SCOPES = {
     # proxy, so direct MNQ evidence is the operative path; the quote seams are
     # per-instrument and need MNQ quotes under either pair verdict.
     "mnqv": ("MNQ.v.0", "continuous"),
+    # The manifest's other two instruments, single-instrument by design: the
+    # seal ledger records one instrument per file, so a two-leg scope has no
+    # unambiguous role binding. ES and MES belong to the MES-borrow track and
+    # nothing signed here authorizes reading their content.
+    "esv": ("ES.v.0", "continuous"),
+    "mesv": ("MES.v.0", "continuous"),
     # GC alone. Not a preset target, but the only cheap way to get a SECOND
     # tick-size-to-price ratio: NQ and MNQ share the 0.25 tick and the same
     # index, so they cannot between them test whether a derived
@@ -167,6 +173,76 @@ WINDOWS = [
 ]
 
 SCHEMAS = ["trades", "tbbo", "definition", "statistics"]
+
+# ---------------------------------------------------------------------------
+# The subscription manifest
+# ---------------------------------------------------------------------------
+# notes/successor-contract.md authorizes one Databento Standard subscription
+# month and requires the manifest pulled IN FULL while it is active, because
+# the L1 lookback window rolls and the loss is irreversible. The months are
+# generated rather than hand-listed: thirteen months times three instruments
+# times two schemas is seventy-eight jobs, and a hand table that large is a
+# transcription error waiting to happen.
+#
+# TWO PARTIAL MONTHS, both recorded as incomplete_month_delivery by the seal
+# ledger under Amendment 1 provision 1:
+#   2025-08  the trailing-12 edge cuts it mid-month. The covered slice
+#            starts after the edge; the uncovered first half is NOT bought.
+#   2026-08  the dataset only exists to the pull morning.
+MANIFEST_INSTRUMENTS = {"MNQ": "mnqv", "ES": "esv", "MES": "mesv"}
+MANIFEST_SCHEMAS = ("tbbo", "mbp-1")
+
+# The covered slice of the edge month. The edge sat at roughly 2025-08-12
+# when the window was mapped; starting on the 13th keeps the request wholly
+# inside entitlement, and a nonzero quote will refuse it if that is wrong.
+MANIFEST_EDGE_MONTH = ("2025-08.covered", "2025-08-13", "2025-09-01",
+                       "manifest, entitlement-truncated covered slice")
+# The tail month, truncated by data availability rather than entitlement.
+MANIFEST_TAIL_MONTH = ("2026-08.partial", "2026-08-01", "2026-08-12",
+                       "manifest, availability-truncated partial")
+MANIFEST_FULL_MONTHS = ("2025-09", "2025-10", "2025-11", "2025-12",
+                        "2026-01", "2026-02", "2026-03", "2026-04",
+                        "2026-05", "2026-06", "2026-07")
+
+
+def _manifest_windows():
+    """Every window the manifest needs, as WINDOWS-shaped tuples."""
+    out = [MANIFEST_EDGE_MONTH, MANIFEST_TAIL_MONTH]
+    for month in MANIFEST_FULL_MONTHS:
+        year, mon = (int(x) for x in month.split("-"))
+        nxt = ("%04d-01-01" % (year + 1) if mon == 12
+               else "%04d-%02d-01" % (year, mon + 1))
+        out.append(("%s.manifest" % month, "%s-01" % month, nxt,
+                    "manifest, full month"))
+    return out
+
+
+MANIFEST_WINDOWS = _manifest_windows()
+# Manifest windows join the shared table so query, session_bounds_utc and the
+# downloader's window lookup all see them.
+WINDOWS.extend(MANIFEST_WINDOWS)
+
+
+def manifest_plan_name(instrument, month, schema):
+    return "manifest-%s-%s-%s" % (instrument.lower(), month, schema)
+
+
+def _manifest_plans():
+    """ONE PLAN PER instrument-month-schema, deliberately. A combined plan
+    would let a single armed invocation submit the entire manifest, and the
+    all-or-nothing preflight then makes one bad row abort seventy-seven good
+    ones. Single-row plans keep each job independently recoverable."""
+    plans = {}
+    for window in MANIFEST_WINDOWS:
+        month = window[0].split(".")[0]
+        for instrument in MANIFEST_INSTRUMENTS:
+            for schema in MANIFEST_SCHEMAS:
+                plans[manifest_plan_name(instrument, month, schema)] = [
+                    (window[0], schema)]
+    return plans
+
+
+MANIFEST_PLANS = _manifest_plans()
 
 
 _KEY = None
@@ -571,6 +647,7 @@ PLANS = {"basket": PLAN, "depth": DEPTH_PLAN, "pair": PAIR_PLAN,
          "grid": GRID_PLAN, "contiguous": CONTIGUOUS_PLAN,
          "paircurrent": PAIR_CURRENT_PLAN,
          "mnq07": MNQ07_PLAN, "mnq06": MNQ06_PLAN}
+PLANS.update(MANIFEST_PLANS)
 BUDGET = 125.0
 
 

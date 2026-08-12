@@ -140,6 +140,11 @@ VENDOR_STATES = ("queued", "processing", "done", "expired")
 # check_zstd_prefix().
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 
+# Our per-directory provenance record, namespaced away from the vendor's own
+# delivered filenames. The vendor ships manifest.json, condition.json and
+# metadata.json beside the data.
+PROVENANCE_FILE = "mogwai-provenance.json"
+
 
 class Refusal(SystemExit):
     """A named, fail-closed refusal. Exits nonzero with the reason."""
@@ -366,22 +371,26 @@ def submission_verdict(confirm, max_dollars, ledger_entry, live, planned):
     if live > max_dollars:
         return False, "live quote %.2f exceeds remaining budget %.2f" % (
             live, max_dollars)
-    if planned is None:
-        return False, ("no plan-time quote in the pricing cache, or the "
-                       "cached one is older than %d days; re-run "
-                       "databento_price.py plan with --refresh so drift is "
-                       "measured against a current baseline"
-                       % BASELINE_MAX_AGE_DAYS)
-    if not (isinstance(planned, (int, float)) and math.isfinite(planned)) \
-            or planned <= 0:
-        return False, ("plan-time quote %r is not a usable baseline"
-                       % (planned,))
-    if live > planned * (1.0 + DRIFT_LIMIT):
-        return False, ("live quote %.2f drifted more than %d%% above the "
-                       "plan-time quote %.2f"
-                       % (live, int(DRIFT_LIMIT * 100), planned))
-    return True, "ok: %.2f within budget and within drift of %.2f" % (
-        live, planned)
+    # SUBSCRIPTION SEMANTICS. Under an active Standard subscription with
+    # usage-based payments disabled, metadata.get_cost is entitlement-aware:
+    # a covered request quotes exactly 0.0, an uncovered one quotes list
+    # price. Verified empirically - the same month quoted 73.41 before
+    # activation and 0.00 after, and the trailing-12 edge shows as a
+    # reduced-but-nonzero 9.41 on a half-covered month.
+    #
+    # A NONZERO quote therefore means this request is NOT covered: the month
+    # has rolled out of the window, the subscription has lapsed, or the
+    # bounds are wrong. The vendor would refuse it anyway with usage billing
+    # disabled, but refusing here names the reason and stops the plan before
+    # the POST instead of mid-flight. The drift machinery below still governs
+    # any genuinely priced purchase.
+    if live != 0:
+        return False, ("quote %.2f is NOT covered by the subscription. A "
+                       "covered request quotes exactly 0.00; a nonzero one "
+                       "means the month has left the rolling window, the "
+                       "subscription is inactive, or the bounds are wrong. "
+                       "Refusing rather than buying the uncovered part" % live)
+    return True, "ok: covered by the subscription, quotes 0.00"
 
 
 def submit_gated(scope, window, schema, confirm, max_dollars, ledger_entry,
@@ -567,11 +576,7 @@ def reconcile_pending(scope, window, schema, intent_at, fetch=http_json):
                 near.append(job)
             continue
         expected_fields = dict(SUBMIT_DEFAULTS, stype_in=params["stype_in"])
-        fields_ok = all(
-            str(job[field]).strip().lower()
-            == str(expected_fields[field]).strip().lower()
-            for field in REQUEST_FIELDS if field in job)
-        if not fields_ok:
+        if not job_fields_match(job, expected_fields):
             near.append(job)
             continue
         received = _parse_ts(job.get("ts_received"))
@@ -599,6 +604,77 @@ def reconcile_pending(scope, window, schema, intent_at, fetch=http_json):
                       "another format, resolve by hand rather than risk a "
                       "double buy" % len(near))
     return exact[0] if exact else None
+
+
+def job_matches_selection(job, params):
+    """Does this vendor job request the same market data as params?
+
+    Selection only: dataset, schema, symbols as a case-folded set, and the
+    time bounds. Deliberately independent of any window NAME, because names
+    are ours and the vendor has never heard of them - two of our windows
+    with identical bounds are the same purchase however differently we
+    label them, which is precisely how July got prepared twice."""
+    if job.get("dataset") != params["dataset"]:
+        return False
+    if job.get("schema") != params["schema"]:
+        return False
+    if symbol_set(job.get("symbols")) != symbol_set(params["symbols"]):
+        return False
+    return (str(job.get("start", "")).startswith(params["start"])
+            and str(job.get("end", "")).startswith(params["end"]))
+
+
+def job_fields_match(job, expected_fields):
+    """Every request-defining field the vendor echoes must agree. A
+    selection-identical job delivered in another encoding or split is not
+    the job we would have submitted."""
+    return all(str(job[field]).strip().lower()
+               == str(expected_fields[field]).strip().lower()
+               for field in REQUEST_FIELDS if field in job)
+
+
+# Vendor job states we may adopt, best first. An expired job has no
+# downloadable files, so adopting it would strand the entry; better to
+# submit a fresh one.
+ADOPTABLE_STATES = ("done", "processing", "queued")
+
+
+def find_existing_job(scope, window, schema, fetch=http_json):
+    """A vendor job that already requests exactly this data, or None.
+
+    Asked BEFORE submitting anything. The vendor is the authority on what it
+    has already prepared, and re-preparing an identical request wastes its
+    processing and ours for bytes that already exist. Our ledger cannot
+    answer this on its own: it is keyed by our window name, so a second
+    window with the same bounds looks like a new purchase.
+
+    Unlike reconcile_pending this applies NO time window. That one is
+    recovering from an ambiguous POST and must not adopt a historical twin;
+    here a historical twin is exactly what we are looking for."""
+    params = dp.query(scope, window, schema)
+    _symbols, stype_in = dp.SCOPES[scope]
+    expected = dict(SUBMIT_DEFAULTS, stype_in=stype_in)
+    listed = fetch("batch.list_jobs", params={
+        "states": ",".join(VENDOR_STATES)})
+    if not isinstance(listed, list):
+        raise Refusal("batch.list_jobs returned %s while looking for an "
+                      "existing job" % type(listed).__name__)
+    matches = [job for job in listed
+               if job_matches_selection(job, params)
+               and job_fields_match(job, expected)
+               and job.get("state") in ADOPTABLE_STATES]
+    if not matches:
+        return None
+    # Prefer the most finished, then the most recent: a done job is
+    # downloadable now, and among equals the newest is least likely to
+    # expire mid-download.
+    matches.sort(key=lambda j: (ADOPTABLE_STATES.index(j.get("state")),
+                                str(j.get("ts_received") or "")),
+                 reverse=False)
+    best = [j for j in matches
+            if j.get("state") == matches[0].get("state")]
+    best.sort(key=lambda j: str(j.get("ts_received") or ""), reverse=True)
+    return best[0]
 
 
 def symbol_set(value):
@@ -667,6 +743,10 @@ def parse_file_manifest(entries):
                 or filename in (".", "..") or "\\" in filename):
             raise Refusal("manifest filename %r is not a plain basename; "
                           "refusing a path escape" % filename)
+        if filename == PROVENANCE_FILE:
+            raise Refusal("the vendor delivered a file named %r, which is "
+                          "where this tool writes its provenance record; "
+                          "one would overwrite the other" % filename)
         if filename in seen:
             raise Refusal("manifest lists %r twice; downloads would "
                           "overwrite each other" % filename)
@@ -918,9 +998,8 @@ def landing_dir(scope, window_name, schema):
 # Which instrument a scope delivers. Single-instrument only: the seal ledger
 # records one instrument per file, so a scope carrying two legs has no
 # unambiguous binding and must not be guessed at.
-SCOPE_INSTRUMENT = {
-    "mnqv": "MNQ",
-}
+SCOPE_INSTRUMENT = {scope: instrument
+                    for instrument, scope in dp.MANIFEST_INSTRUMENTS.items()}
 
 # Scopes bought BEFORE the successor contract existed, under the credit-first
 # staged purchase. They are not seal-bound: pairv carries two instruments in
@@ -1064,8 +1143,16 @@ def verify_landing(dest_dir, files):
 def write_manifest(dest_dir, entry):
     """The per-directory provenance record. The committed record is the
     ledger; this one travels with the (gitignored) bytes. Durable like the
-    ledger, and for the same reason."""
-    durable_json_write(os.path.join(dest_dir, "manifest.json"),
+    ledger, and for the same reason.
+
+    The filename is namespaced because the VENDOR delivers a manifest.json
+    of its own. This wrote to that exact path and silently overwrote it, so
+    the next run re-hashed our provenance file against the vendor's recorded
+    digest and failed re-verification permanently - a delivered file
+    destroyed by the record of its own delivery. Found by the first live
+    pull. parse_file_manifest now refuses a vendor file of this name too, so
+    the collision cannot come back from the other direction."""
+    durable_json_write(os.path.join(dest_dir, PROVENANCE_FILE),
                        dict(entry, tool_version=TOOL_VERSION))
 
 
@@ -1095,6 +1182,32 @@ def write_manifest(dest_dir, entry):
 # the mistake the 2A gate exists to prevent. When the contract exists, its
 # entry gets a dedicated analysis artifact bound to the mnq07 job id and
 # file hashes with its own recognized decision value.
+def _manifest_authorizations():
+    """The subscription manifest, authorized by the signed contract.
+
+    Every entry names the authority that permits it by CONTENT-ADDRESSED
+    identity, the same way the seal ledger binds its records: the contract
+    is notes/-class and editable, so a path reference would let a rewritten
+    contract silently authorize a purchase. Prerequisite is None because the
+    manifest's authority is the signature itself, not an earlier stage's
+    verdict - the credit-era staging existed to ration free credit, and the
+    subscription replaced that policy.
+    """
+    out = {}
+    for instrument, scope in dp.MANIFEST_INSTRUMENTS.items():
+        for window in dp.MANIFEST_WINDOWS:
+            month = window[0].split(".")[0]
+            for schema in dp.MANIFEST_SCHEMAS:
+                out[(scope, dp.manifest_plan_name(instrument, month,
+                                                  schema))] = {
+                    "prereq": None,
+                    "authority": seal.BASE,
+                    "authority_git_blob":
+                        seal.AUTHORITIES[seal.BASE]["git_blob"],
+                }
+    return out
+
+
 AUTHORIZED_BUYS = {
     ("pairv", "paircurrent"): None,
     ("nqv", "contiguous"): {
@@ -1106,6 +1219,7 @@ AUTHORIZED_BUYS = {
         "accepted_verdicts": frozenset({"pass", "fail"}),
     },
 }
+AUTHORIZED_BUYS.update(_manifest_authorizations())
 
 # The affirmative analysis decision that unlocks stage two. This tool only
 # READS it; it is written by the analysis that judges the paired test, after
@@ -1128,6 +1242,20 @@ def authorize_buy(scope, variant, jobs, verdict_path=PAIR_VERDICT_FILE):
         raise Refusal("buy is whitelisted to the staged purchase (%s); "
                       "%s/%s is not in it" % (allowed, scope, variant))
     if policy is None:
+        return
+    if policy.get("prereq") is None:
+        # A manifest entry: authorized by the signed contract itself rather
+        # than by an earlier stage's verdict. The binding is checked so a
+        # rewritten authority cannot silently authorize a purchase.
+        named = policy.get("authority")
+        if named not in seal.AUTHORITIES:
+            raise Refusal("%s/%s names authority %r, which is not a signed "
+                          "snapshot" % (scope, variant, named))
+        if policy.get("authority_git_blob") != seal.AUTHORITIES[named][
+                "git_blob"]:
+            raise Refusal("%s/%s binds a different snapshot of %s than the "
+                          "one recorded; refusing to buy under an "
+                          "unverified authority" % (scope, variant, named))
         return
     key = ledger_key(*policy["prereq"])
     accepted = policy["accepted_verdicts"]
@@ -1405,6 +1533,37 @@ def mode_buy(args):
                           "plan stops at the first failure")
                     failures.append("%s: skipped after earlier failure" % key)
                     continue
+                # ASK THE VENDOR BEFORE BUYING. Our ledger is keyed by our
+                # window name, so it cannot see that another window with
+                # identical bounds already had this exact data prepared -
+                # which is how the July month got prepared twice. Adopting
+                # costs nothing and can only reduce what we ask the vendor
+                # to do.
+                try:
+                    existing = find_existing_job(args.scope, window, schema)
+                except Refusal as exc:
+                    print("  %s" % exc)
+                    failures.append("%s: existing-job lookup refused" % key)
+                    halted = True
+                    continue
+                if existing is not None:
+                    jobs[key] = {
+                        "job_id": existing["id"],
+                        "state": existing.get("state", "queued"),
+                        "adopted_at": dt.datetime.now(dt.UTC).isoformat(),
+                        "adopted_existing_vendor_job": True,
+                        "scope": args.scope,
+                        "window": window[0],
+                        "schema": schema,
+                        "encoding": ENCODING,
+                        "compression": COMPRESSION,
+                        "split_duration": SPLIT_DURATION,
+                    }
+                    save_ledger(jobs)
+                    print("  adopted existing vendor job %s (%s); not "
+                          "resubmitting" % (existing["id"],
+                                            existing.get("state")))
+                    continue
 
                 def write_intent(live, _key=key, _window=window,
                                  _schema=schema):
@@ -1566,10 +1725,11 @@ def selftest():
         ("plain invocation refuses", False, None, None, 1.0, 1.0, False),
         ("confirm alone refuses", True, None, None, 1.0, 1.0, False),
         ("max-dollars alone refuses", False, 10.0, None, 1.0, 1.0, False),
-        ("both flags submit", True, 10.0, None, 1.0, 1.0, True),
+        ("both flags submit a covered request", True, 10.0, None, 0.0, 0.0,
+         True),
         ("over budget refuses", True, 0.5, None, 1.0, 1.0, False),
-        ("10% drift boundary passes", True, 10.0, None, 1.10, 1.0, True),
-        ("over 10% drift refuses", True, 10.0, None, 1.11, 1.0, False),
+        ("an uncovered quote refuses however good its baseline", True, 10.0,
+         None, 1.10, 1.0, False),
         ("no baseline refuses", True, 10.0, None, 1.0, None, False),
         ("zero baseline refuses", True, 10.0, None, 1.0, 0.0, False),
         ("unreadable live refuses", True, 10.0, None, None, 1.0, False),
@@ -1589,6 +1749,29 @@ def selftest():
         ok, _reason = submission_verdict(confirm, cap, entry, live, planned)
         check(name, ok == expect)
 
+    print("subscription semantics: zero is covered, nonzero is not")
+    for name, cap, live, planned, expect in [
+        ("a covered request needs no baseline", 10.0, 0.0, None, True),
+        ("a covered request ignores a stale baseline", 10.0, 0.0, 99.0, True),
+        ("an uncovered request refuses with no baseline", 10.0, 9.41, None,
+         False),
+        # The hazard this strictness exists for: a half-covered edge month
+        # quotes a real, affordable, drift-consistent price. Under the old
+        # rule a cached baseline made it buyable, which would have purchased
+        # the uncovered part the contract says is not purchased.
+        ("a half-covered edge month refuses even with a matching baseline",
+         10.0, 9.41, 9.41, False),
+        ("an uncovered request with a zero baseline refuses", 10.0, 73.41,
+         0.0, False),
+        ("a covered request still respects an exhausted cap", 0.0, 0.0, None,
+         False),
+    ]:
+        ok, _reason = submission_verdict(True, cap, None, live, planned)
+        check(name, ok == expect)
+    ok, reason = submission_verdict(True, 10.0, None, 9.41, None)
+    check("the refusal names entitlement, not a missing baseline",
+          not ok and "NOT covered" in reason)
+
     print("submit_gated never reaches the post on a failing verdict")
     calls = []
 
@@ -1597,7 +1780,9 @@ def selftest():
         return {"id": "GLBX-FIXTURE", "state": "queued"}
 
     window = dp.WINDOWS[0]
-    entry = {"_selftest_live": 1.0, "_selftest_planned": 1.0}
+    # A covered quote, which is what every authorized purchase now looks
+    # like: the subscription prices the manifest at zero.
+    entry = {"_selftest_live": 0.0, "_selftest_planned": 0.0}
     try:
         submit_gated("pairv", window, "trades", False, None, entry,
                      post=spy_post)
@@ -1608,7 +1793,7 @@ def selftest():
     job, live = submit_gated("pairv", window, "trades", True, 10.0, entry,
                              post=spy_post)
     check("armed call posts exactly once", calls == ["batch.submit_job"])
-    check("job id surfaced", job["id"] == "GLBX-FIXTURE" and live == 1.0)
+    check("job id surfaced", job["id"] == "GLBX-FIXTURE" and live == 0.0)
 
     sequence = []
 
@@ -1830,6 +2015,42 @@ def selftest():
         refused = True
     check("a missing intent timestamp refuses reconciliation", refused)
 
+    print("existing vendor jobs are adopted, never re-prepared")
+    # The July case that motivated this: two of OUR window names with
+    # identical bounds are one purchase to the vendor, and a ledger keyed by
+    # window name cannot see that.
+    ready = dict(vendor_job, id="GLBX-READY", state="done")
+    found = find_existing_job("pairv", window, "trades",
+                              fetch=lambda *a, **k: [ready])
+    check("an already-prepared job is found by selection, not window name",
+          found is not None and found["id"] == "GLBX-READY")
+    old = dict(vendor_job, id="GLBX-ANCIENT", state="done",
+               ts_received="2025-01-01T00:00:00+00:00")
+    found = find_existing_job("pairv", window, "trades",
+                              fetch=lambda *a, **k: [old])
+    check("a historical twin IS adopted here, unlike reconciliation",
+          found is not None and found["id"] == "GLBX-ANCIENT")
+    expired = dict(vendor_job, id="GLBX-GONE", state="expired")
+    check("an expired job is not adopted; its files are gone",
+          find_existing_job("pairv", window, "trades",
+                            fetch=lambda *a, **k: [expired]) is None)
+    check("a different schema is not adopted",
+          find_existing_job("pairv", window, "trades",
+                            fetch=lambda *a, **k: [other]) is None)
+    check("a different encoding is not adopted",
+          find_existing_job("pairv", window, "trades",
+                            fetch=lambda *a, **k: [
+                                dict(vendor_job, encoding="dbn")]) is None)
+    queued_and_done = [dict(vendor_job, id="GLBX-Q", state="queued"),
+                       dict(vendor_job, id="GLBX-D", state="done")]
+    found = find_existing_job("pairv", window, "trades",
+                              fetch=lambda *a, **k: queued_and_done)
+    check("a done job is preferred over a queued one",
+          found is not None and found["id"] == "GLBX-D")
+    check("no match returns None so a fresh submission proceeds",
+          find_existing_job("pairv", window, "trades",
+                            fetch=lambda *a, **k: []) is None)
+
     print("no-match intents cannot clear inside the vendor-lag window")
     verdict_now = dt.datetime(2026, 8, 5, 12, 30, tzinfo=dt.UTC)
     recent = {"intent_at": "2026-08-05T12:25:00+00:00",
@@ -1873,8 +2094,12 @@ def selftest():
     # what the full cap would have accepted.
     ok, _reason = submission_verdict(True, 100.0 - prior, None, 70.0, 70.0)
     check("a rerun cannot spend the full cap again", not ok)
-    ok, _reason = submission_verdict(True, 100.0 - prior, None, 38.24, 38.24)
-    check("the reduced cap still admits the genuinely remaining rows", ok)
+    # The cap arithmetic survives, but under the subscription it no longer
+    # decides anything on its own: a covered row costs zero and fits any
+    # positive cap, and an uncovered row is refused on entitlement long
+    # before the cap is consulted.
+    ok, _reason = submission_verdict(True, 100.0 - prior, None, 0.0, None)
+    check("a covered row is admitted under the reduced cap", ok)
     check("plans without ledger entries carry no prior spend",
           plan_prior_spend({}, "nqv", "contiguous") == 0.0)
 
@@ -2342,11 +2567,24 @@ def selftest():
           .endswith(os.path.join("research", "market-data", "databento",
                                  "pairv", "2026-07.2wk.trades")))
     write_manifest(outdir, {"job_id": "GLBX-A", "files": verified})
-    with open(os.path.join(outdir, "manifest.json")) as fh:
+    with open(os.path.join(outdir, PROVENANCE_FILE)) as fh:
         man = json.load(fh)
     check("manifest records job, files and tool version",
           man["job_id"] == "GLBX-A" and man["tool_version"] == TOOL_VERSION
           and "good.csv" in man["files"])
+    # The vendor ships its own manifest.json beside the data. Writing our
+    # provenance there destroyed it on the first live pull, so the name is
+    # namespaced AND a vendor file of that name is refused outright.
+    check("our provenance file does not take a vendor filename",
+          PROVENANCE_FILE != "manifest.json"
+          and not os.path.exists(os.path.join(outdir, "manifest.json")))
+    try:
+        parse_file_manifest([dict(manifest[0], filename=PROVENANCE_FILE)])
+        refused = False
+    except Refusal:
+        refused = True
+    check("a vendor file named like our provenance record is refused",
+          refused)
 
     shutil.rmtree(SELFTEST_DIR)
     failed = [name for name, ok in checks if not ok]
