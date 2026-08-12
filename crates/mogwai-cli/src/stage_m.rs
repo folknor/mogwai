@@ -562,7 +562,15 @@ fn run_month(args: MonthArgs) -> anyhow::Result<()> {
             return Err(error);
         }
     };
-    count_curve::write_month_from_observed(&count_config, &observed)?;
+    if let Err(error) = count_curve::write_month_from_observed(&count_config, &observed) {
+        if args.month != 202_603 { return Err(error); }
+        let refusal = json!({
+            "outcome":"recorded_refusal","month":args.month,"scope":"extended count curve",
+            "reason":error.to_string(),
+            "authority":"Stage M month-generic refusal rule: mixed standard/daylight UTC endpoint-hour support cannot be adapted silently"
+        });
+        write_json_atomic(&count_config.output, &refusal).map_err(|e| anyhow!(e.to_string()))?;
+    }
     let usable = usable_count(&preflight)?;
     let ordered_result = ordered_counts::run_with_rows(
         &OrderedCountsRun {
