@@ -107,12 +107,22 @@ pub fn run_with(config: &OrderedCountsRun) -> anyhow::Result<()> {
     let reference: Value =
         serde_json::from_str(include_str!("../../../analysis/mnq-measure-12a.json"))?;
     let (observed, mut rows) = if config.sequence.exists() {
+        // The prior summary is a RUNTIME artifact under the gitignored
+        // analysis/out - never include_str! it, which only compiles on a
+        // host where the artifact happens to exist.
         let prior: Value = if config.summary.exists() {
             serde_json::from_slice(&std::fs::read(&config.summary)?)?
         } else {
-            serde_json::from_str(include_str!(
-                "../../../analysis/out/ordered-counts-panels.json"
-            ))?
+            let fallback = Path::new(SUMMARY);
+            serde_json::from_slice(&std::fs::read(fallback).with_context(|| {
+                format!(
+                    "a retained sequence exists at {} but neither {} nor {} carries \
+                     its prior summary binding; rerun the extraction",
+                    config.sequence.display(),
+                    config.summary.display(),
+                    fallback.display()
+                )
+            })?)?
         };
         (
             json!({"binding":prior["binding"]["observed"].clone()}),
