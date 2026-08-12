@@ -573,6 +573,24 @@ fn run_backcheck(args: &BackcheckArgs) -> anyhow::Result<()> {
         expected_sha256: sequence_hash,
     })?;
 
+    // Stage M Amendment 1 added per-fold training provenance to every score
+    // (training_dropped, training_count, training_retained). The committed
+    // July reference predates it; the backcheck equality is on statistical
+    // content, and provenance fields are projected away on BOTH sides.
+    fn strip_amendment1_provenance(scores: &serde_json::Value) -> serde_json::Value {
+        let mut scores = scores.clone();
+        if let Some(items) = scores.as_array_mut() {
+            for item in items {
+                if let Some(map) = item.as_object_mut() {
+                    map.remove("training_dropped");
+                    map.remove("training_count");
+                    map.remove("training_retained");
+                }
+            }
+        }
+        scores
+    }
+
     let old_panels = read_json("analysis/out/ordered-counts-panels.json")?;
     let new_panels = read_json(&panels)?;
     let old_slow = read_json("analysis/out/slow-geometry.json")?;
@@ -634,8 +652,8 @@ fn run_backcheck(args: &BackcheckArgs) -> anyhow::Result<()> {
         check(
             "slow.scores",
             "point_estimate",
-            &old_slow["detail"]["cross_fitted_factor"]["scores"],
-            &new_slow["detail"]["cross_fitted_factor"]["scores"],
+            &strip_amendment1_provenance(&old_slow["detail"]["cross_fitted_factor"]["scores"]),
+            &strip_amendment1_provenance(&new_slow["detail"]["cross_fitted_factor"]["scores"]),
         ),
         check(
             "slow.S_g",
