@@ -631,7 +631,8 @@ fn write_amendment4_invalidation(month: u64, dir: &Path) -> anyhow::Result<()> {
     for name in artifact_names {
         let old = archive.join(name);
         let replacement = dir.join(name);
-        if !old.exists() || !replacement.exists() { bail!("missing supersession pair for {month} {name}"); }
+        if !old.exists() { continue; }
+        if !replacement.exists() { bail!("missing replacement for superseded {month} {name}"); }
         let old_hash = mogwai_lab::ledger::sha256_file(&old).map_err(|e| anyhow!(e.to_string()))?;
         let replacement_hash = mogwai_lab::ledger::sha256_file(&replacement).map_err(|e| anyhow!(e.to_string()))?;
         let former_outcome = if name.ends_with(".json") { read_json(&old).ok().and_then(|x| x["outcome"].as_str().map(str::to_string)).unwrap_or_else(|| "completed".to_string()) } else { "completed".to_string() };
