@@ -1007,14 +1007,24 @@ def bind_seal_records(scope, window, schema, entry):
     # was ordered. The quote keeps its own coverage_checked_at, so the
     # entitlement observation stays paired with the moment it was made.
     delivered_at = dt.datetime.now(dt.UTC).isoformat()
-    records = seal.load_ledger()
+    ledger = seal.load_ledger()
     problems = []
     bound = 0
+    # The assignment root must exist before a delivery can attach to it. It
+    # has existed since contract signature; this only records that fact if
+    # the migration has not already. Creating it does NOT make the month
+    # part of any delivered population.
+    try:
+        seal.ensure_assignment(
+            ledger, binding["instrument"], binding["month"],
+            seal.derive_track(binding["instrument"], binding["schema"]))
+    except SystemExit as exc:
+        return ["assignment root: %s" % exc]
     for filename, sha256 in sorted(files.items()):
         try:
             seal.record_delivery(
-                records, binding["instrument"], binding["month"],
-                binding["schema"], filename, dp.DATASET, sha256,
+                ledger, binding["instrument"], binding["month"],
+                binding["schema"], filename, sha256,
                 entry.get("job_id"), delivered_at,
                 delivery_state=binding["delivery_state"],
                 covered_interval=binding["covered_interval"],
@@ -1026,7 +1036,7 @@ def bind_seal_records(scope, window, schema, entry):
             problems.append("%s: %s" % (filename, exc))
     if problems:
         return problems
-    seal.save_ledger(records)
+    seal.save_ledger(ledger)
     print("  seal: %d file(s) bound as %s %s %s, role %s" % (
         bound, binding["instrument"], binding["month"], binding["schema"],
         seal.derive_role(binding["instrument"], binding["month"])))

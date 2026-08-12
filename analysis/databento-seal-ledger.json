@@ -1,0 +1,1424 @@
+{
+ "_version": 2,
+ "assignments": {
+  "mbp1-preservation|GLBX.MDP3|MNQ|2025-08": {
+   "assignment_id": "mbp1-preservation|GLBX.MDP3|MNQ|2025-08",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672268+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mbp1-preservation",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2025-08",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "new-design",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mbp1-preservation|GLBX.MDP3|MNQ|2025-09": {
+   "assignment_id": "mbp1-preservation|GLBX.MDP3|MNQ|2025-09",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672297+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mbp1-preservation",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2025-09",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "new-design",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mbp1-preservation|GLBX.MDP3|MNQ|2025-10": {
+   "assignment_id": "mbp1-preservation|GLBX.MDP3|MNQ|2025-10",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672303+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mbp1-preservation",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2025-10",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "new-design",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mbp1-preservation|GLBX.MDP3|MNQ|2025-11": {
+   "assignment_id": "mbp1-preservation|GLBX.MDP3|MNQ|2025-11",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672309+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mbp1-preservation",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2025-11",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "new-design",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mbp1-preservation|GLBX.MDP3|MNQ|2025-12": {
+   "assignment_id": "mbp1-preservation|GLBX.MDP3|MNQ|2025-12",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672315+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mbp1-preservation",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2025-12",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "new-design",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mbp1-preservation|GLBX.MDP3|MNQ|2026-01": {
+   "assignment_id": "mbp1-preservation|GLBX.MDP3|MNQ|2026-01",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672320+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mbp1-preservation",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2026-01",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "new-design",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mbp1-preservation|GLBX.MDP3|MNQ|2026-02": {
+   "assignment_id": "mbp1-preservation|GLBX.MDP3|MNQ|2026-02",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672326+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mbp1-preservation",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2026-02",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "new-design",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mbp1-preservation|GLBX.MDP3|MNQ|2026-03": {
+   "assignment_id": "mbp1-preservation|GLBX.MDP3|MNQ|2026-03",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672332+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mbp1-preservation",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2026-03",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "new-design",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mbp1-preservation|GLBX.MDP3|MNQ|2026-04": {
+   "assignment_id": "mbp1-preservation|GLBX.MDP3|MNQ|2026-04",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672337+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mbp1-preservation",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2026-04",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "new-design",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mbp1-preservation|GLBX.MDP3|MNQ|2026-05": {
+   "assignment_id": "mbp1-preservation|GLBX.MDP3|MNQ|2026-05",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672343+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mbp1-preservation",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2026-05",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "reserve-confirmation",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mbp1-preservation|GLBX.MDP3|MNQ|2026-06": {
+   "assignment_id": "mbp1-preservation|GLBX.MDP3|MNQ|2026-06",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672348+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mbp1-preservation",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2026-06",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "primary-confirmation",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mbp1-preservation|GLBX.MDP3|MNQ|2026-07": {
+   "assignment_id": "mbp1-preservation|GLBX.MDP3|MNQ|2026-07",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672354+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mbp1-preservation",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2026-07",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "spent-design",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mbp1-preservation|GLBX.MDP3|MNQ|2026-08": {
+   "assignment_id": "mbp1-preservation|GLBX.MDP3|MNQ|2026-08",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672360+00:00",
+   "authority": [
+    "successor-contract-base",
+    "successor-contract-amendment-1"
+   ],
+   "contract_track": "mbp1-preservation",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2026-08",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|ES|2025-08": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2025-08",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672292+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "ES",
+   "month": "2025-08",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|ES|2025-09": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2025-09",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672300+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "ES",
+   "month": "2025-09",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|ES|2025-10": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2025-10",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672306+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "ES",
+   "month": "2025-10",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|ES|2025-11": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2025-11",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672312+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "ES",
+   "month": "2025-11",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|ES|2025-12": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2025-12",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672318+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "ES",
+   "month": "2025-12",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|ES|2026-01": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-01",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672323+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "ES",
+   "month": "2026-01",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|ES|2026-02": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-02",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672329+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "ES",
+   "month": "2026-02",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|ES|2026-03": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-03",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672334+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "ES",
+   "month": "2026-03",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|ES|2026-04": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-04",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672339+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "ES",
+   "month": "2026-04",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|ES|2026-05": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-05",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672345+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "ES",
+   "month": "2026-05",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|ES|2026-06": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-06",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672351+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "ES",
+   "month": "2026-06",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|ES|2026-07": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-07",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672357+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "ES",
+   "month": "2026-07",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|ES|2026-08": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|ES|2026-08",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672362+00:00",
+   "authority": [
+    "successor-contract-base",
+    "successor-contract-amendment-1"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "ES",
+   "month": "2026-08",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|MES|2025-08": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2025-08",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672295+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MES",
+   "month": "2025-08",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|MES|2025-09": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2025-09",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672301+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MES",
+   "month": "2025-09",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|MES|2025-10": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2025-10",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672308+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MES",
+   "month": "2025-10",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|MES|2025-11": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2025-11",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672314+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MES",
+   "month": "2025-11",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|MES|2025-12": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2025-12",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672319+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MES",
+   "month": "2025-12",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|MES|2026-01": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2026-01",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672325+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MES",
+   "month": "2026-01",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|MES|2026-02": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2026-02",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672330+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MES",
+   "month": "2026-02",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|MES|2026-03": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2026-03",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672336+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MES",
+   "month": "2026-03",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|MES|2026-04": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2026-04",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672342+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MES",
+   "month": "2026-04",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|MES|2026-05": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2026-05",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672347+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MES",
+   "month": "2026-05",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|MES|2026-06": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2026-06",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672352+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MES",
+   "month": "2026-06",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|MES|2026-07": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2026-07",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672358+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MES",
+   "month": "2026-07",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "mes-borrow|GLBX.MDP3|MES|2026-08": {
+   "assignment_id": "mes-borrow|GLBX.MDP3|MES|2026-08",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672364+00:00",
+   "authority": [
+    "successor-contract-base",
+    "successor-contract-amendment-1"
+   ],
+   "contract_track": "mes-borrow",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MES",
+   "month": "2026-08",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "successor|GLBX.MDP3|MNQ|2025-08": {
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2025-08",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672288+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "successor",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2025-08",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "new-design",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "successor|GLBX.MDP3|MNQ|2025-09": {
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2025-09",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672298+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "successor",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2025-09",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "new-design",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "successor|GLBX.MDP3|MNQ|2025-10": {
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2025-10",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672304+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "successor",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2025-10",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "new-design",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "successor|GLBX.MDP3|MNQ|2025-11": {
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2025-11",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672311+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "successor",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2025-11",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "new-design",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "successor|GLBX.MDP3|MNQ|2025-12": {
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2025-12",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672316+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "successor",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2025-12",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "new-design",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "successor|GLBX.MDP3|MNQ|2026-01": {
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-01",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672322+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "successor",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2026-01",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "new-design",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "successor|GLBX.MDP3|MNQ|2026-02": {
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-02",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672328+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "successor",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2026-02",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "new-design",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "successor|GLBX.MDP3|MNQ|2026-03": {
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-03",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672333+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "successor",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2026-03",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "new-design",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "successor|GLBX.MDP3|MNQ|2026-04": {
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-04",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672338+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "successor",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2026-04",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "new-design",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "successor|GLBX.MDP3|MNQ|2026-05": {
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-05",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672344+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "successor",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2026-05",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "reserve-confirmation",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "successor|GLBX.MDP3|MNQ|2026-06": {
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-06",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672349+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "successor",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2026-06",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "primary-confirmation",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "successor|GLBX.MDP3|MNQ|2026-07": {
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-07",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672355+00:00",
+   "authority": [
+    "successor-contract-base"
+   ],
+   "contract_track": "successor",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2026-07",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "spent-design",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  },
+  "successor|GLBX.MDP3|MNQ|2026-08": {
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-08",
+   "assignment_recorded_at": "2026-08-12T09:52:58.672361+00:00",
+   "authority": [
+    "successor-contract-base",
+    "successor-contract-amendment-1"
+   ],
+   "contract_track": "successor",
+   "dataset": "GLBX.MDP3",
+   "instrument": "MNQ",
+   "month": "2026-08",
+   "representation_authority": "successor-contract-amendment-2",
+   "role": "unused-sealed",
+   "role_assigned_at": "2026-08-12T00:00:00+00:00",
+   "supersedes": null
+  }
+ },
+ "authorities": {
+  "successor-contract-amendment-1": {
+   "commit": "4f66f16",
+   "document": "notes/successor-contract.md",
+   "git_blob": "f9c911364708d1e2d46b2ba2bdc0b4016f02b077",
+   "scope": "partial-month delivery, 2026-08, seal channels",
+   "signatory": "codex session 019ff4db-a23c-7bc1-907f-8921b3add799",
+   "signed": "2026-08-12"
+  },
+  "successor-contract-amendment-2": {
+   "commit": "af9c6c4",
+   "document": "notes/successor-contract.md",
+   "git_blob": "7d6cf722dee692af990bdaffe6cbba472c0ede75",
+   "scope": "the assignment-rooted ledger and its one-time migration",
+   "signatory": "codex session 019ff53d-5b7d-77c2-b759-4d7d7834c7d6",
+   "signed": "2026-08-12"
+  },
+  "successor-contract-amendment-3": {
+   "commit": "426a7ad",
+   "document": "notes/successor-contract.md",
+   "git_blob": "26b8b60b577c0c85a77d50ae57240dfceb7f6232",
+   "scope": "aggregate metadata is not inspection on informational-granularity grounds, and the frozen reconstruction-closure check that adjudicates it",
+   "signatory": "codex session 019ff53d-5b7d-77c2-b759-4d7d7834c7d6",
+   "signed": "2026-08-12"
+  },
+  "successor-contract-base": {
+   "commit": "45ae167",
+   "document": "notes/successor-contract.md",
+   "git_blob": "61d1f135670a6ba6c40046d9af66ad5e9814ba6e",
+   "signatory": "codex session 019ff4db-a23c-7bc1-907f-8921b3add799",
+   "signed": "2026-08-12"
+  }
+ },
+ "deliveries": {},
+ "inspections": [
+  {
+   "artifacts": [
+    {
+     "path": "analysis/databento-calendar.json",
+     "sha256": "3b7c20b4436dde248ff9df95adfc8e4fb4deaa51ad895d35d4becf0605435bd4"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2025-09",
+   "authority": "unknown",
+   "authorization_basis": "Amendment 1 provision 3 authorizes the design-month calendar sweep over new-design months and spent-design July only; this month held an open role on the successor track at the time of the sweep. Authority and reading process are recorded as unknown because the artifact never recorded them, and the migration must not claim to preserve what was never written.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2025-09|vendor-record-count|0000",
+   "observed_at": "2026-08-12T09:03:29.243924+00:00",
+   "observed_at_basis": "upper_bound_proxy",
+   "reading_process": "unknown",
+   "recorded_at": "2026-08-12T09:52:58.672557+00:00",
+   "review": null,
+   "scope": "per-date vendor record counts for every calendar date in the month, MNQ.v.0 tbbo, via metadata.get_record_count"
+  },
+  {
+   "artifacts": [
+    {
+     "path": "analysis/databento-calendar.json",
+     "sha256": "3b7c20b4436dde248ff9df95adfc8e4fb4deaa51ad895d35d4becf0605435bd4"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2025-10",
+   "authority": "unknown",
+   "authorization_basis": "Amendment 1 provision 3 authorizes the design-month calendar sweep over new-design months and spent-design July only; this month held an open role on the successor track at the time of the sweep. Authority and reading process are recorded as unknown because the artifact never recorded them, and the migration must not claim to preserve what was never written.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2025-10|vendor-record-count|0000",
+   "observed_at": "2026-08-12T09:03:29.243924+00:00",
+   "observed_at_basis": "upper_bound_proxy",
+   "reading_process": "unknown",
+   "recorded_at": "2026-08-12T09:52:58.672565+00:00",
+   "review": null,
+   "scope": "per-date vendor record counts for every calendar date in the month, MNQ.v.0 tbbo, via metadata.get_record_count"
+  },
+  {
+   "artifacts": [
+    {
+     "path": "analysis/databento-calendar.json",
+     "sha256": "3b7c20b4436dde248ff9df95adfc8e4fb4deaa51ad895d35d4becf0605435bd4"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2025-11",
+   "authority": "unknown",
+   "authorization_basis": "Amendment 1 provision 3 authorizes the design-month calendar sweep over new-design months and spent-design July only; this month held an open role on the successor track at the time of the sweep. Authority and reading process are recorded as unknown because the artifact never recorded them, and the migration must not claim to preserve what was never written.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2025-11|vendor-record-count|0000",
+   "observed_at": "2026-08-12T09:03:29.243924+00:00",
+   "observed_at_basis": "upper_bound_proxy",
+   "reading_process": "unknown",
+   "recorded_at": "2026-08-12T09:52:58.672569+00:00",
+   "review": null,
+   "scope": "per-date vendor record counts for every calendar date in the month, MNQ.v.0 tbbo, via metadata.get_record_count"
+  },
+  {
+   "artifacts": [
+    {
+     "path": "analysis/databento-calendar.json",
+     "sha256": "3b7c20b4436dde248ff9df95adfc8e4fb4deaa51ad895d35d4becf0605435bd4"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2025-12",
+   "authority": "unknown",
+   "authorization_basis": "Amendment 1 provision 3 authorizes the design-month calendar sweep over new-design months and spent-design July only; this month held an open role on the successor track at the time of the sweep. Authority and reading process are recorded as unknown because the artifact never recorded them, and the migration must not claim to preserve what was never written.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2025-12|vendor-record-count|0000",
+   "observed_at": "2026-08-12T09:03:29.243924+00:00",
+   "observed_at_basis": "upper_bound_proxy",
+   "reading_process": "unknown",
+   "recorded_at": "2026-08-12T09:52:58.672575+00:00",
+   "review": null,
+   "scope": "per-date vendor record counts for every calendar date in the month, MNQ.v.0 tbbo, via metadata.get_record_count"
+  },
+  {
+   "artifacts": [
+    {
+     "path": "analysis/databento-calendar.json",
+     "sha256": "3b7c20b4436dde248ff9df95adfc8e4fb4deaa51ad895d35d4becf0605435bd4"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-01",
+   "authority": "unknown",
+   "authorization_basis": "Amendment 1 provision 3 authorizes the design-month calendar sweep over new-design months and spent-design July only; this month held an open role on the successor track at the time of the sweep. Authority and reading process are recorded as unknown because the artifact never recorded them, and the migration must not claim to preserve what was never written.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2026-01|vendor-record-count|0000",
+   "observed_at": "2026-08-12T09:03:29.243924+00:00",
+   "observed_at_basis": "upper_bound_proxy",
+   "reading_process": "unknown",
+   "recorded_at": "2026-08-12T09:52:58.672577+00:00",
+   "review": null,
+   "scope": "per-date vendor record counts for every calendar date in the month, MNQ.v.0 tbbo, via metadata.get_record_count"
+  },
+  {
+   "artifacts": [
+    {
+     "path": "analysis/databento-calendar.json",
+     "sha256": "3b7c20b4436dde248ff9df95adfc8e4fb4deaa51ad895d35d4becf0605435bd4"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-02",
+   "authority": "unknown",
+   "authorization_basis": "Amendment 1 provision 3 authorizes the design-month calendar sweep over new-design months and spent-design July only; this month held an open role on the successor track at the time of the sweep. Authority and reading process are recorded as unknown because the artifact never recorded them, and the migration must not claim to preserve what was never written.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2026-02|vendor-record-count|0000",
+   "observed_at": "2026-08-12T09:03:29.243924+00:00",
+   "observed_at_basis": "upper_bound_proxy",
+   "reading_process": "unknown",
+   "recorded_at": "2026-08-12T09:52:58.672579+00:00",
+   "review": null,
+   "scope": "per-date vendor record counts for every calendar date in the month, MNQ.v.0 tbbo, via metadata.get_record_count"
+  },
+  {
+   "artifacts": [
+    {
+     "path": "analysis/databento-calendar.json",
+     "sha256": "3b7c20b4436dde248ff9df95adfc8e4fb4deaa51ad895d35d4becf0605435bd4"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-03",
+   "authority": "unknown",
+   "authorization_basis": "Amendment 1 provision 3 authorizes the design-month calendar sweep over new-design months and spent-design July only; this month held an open role on the successor track at the time of the sweep. Authority and reading process are recorded as unknown because the artifact never recorded them, and the migration must not claim to preserve what was never written.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2026-03|vendor-record-count|0000",
+   "observed_at": "2026-08-12T09:03:29.243924+00:00",
+   "observed_at_basis": "upper_bound_proxy",
+   "reading_process": "unknown",
+   "recorded_at": "2026-08-12T09:52:58.672582+00:00",
+   "review": null,
+   "scope": "per-date vendor record counts for every calendar date in the month, MNQ.v.0 tbbo, via metadata.get_record_count"
+  },
+  {
+   "artifacts": [
+    {
+     "path": "analysis/databento-calendar.json",
+     "sha256": "3b7c20b4436dde248ff9df95adfc8e4fb4deaa51ad895d35d4becf0605435bd4"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-04",
+   "authority": "unknown",
+   "authorization_basis": "Amendment 1 provision 3 authorizes the design-month calendar sweep over new-design months and spent-design July only; this month held an open role on the successor track at the time of the sweep. Authority and reading process are recorded as unknown because the artifact never recorded them, and the migration must not claim to preserve what was never written.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2026-04|vendor-record-count|0000",
+   "observed_at": "2026-08-12T09:03:29.243924+00:00",
+   "observed_at_basis": "upper_bound_proxy",
+   "reading_process": "unknown",
+   "recorded_at": "2026-08-12T09:52:58.672584+00:00",
+   "review": null,
+   "scope": "per-date vendor record counts for every calendar date in the month, MNQ.v.0 tbbo, via metadata.get_record_count"
+  },
+  {
+   "artifacts": [
+    {
+     "path": "analysis/databento-calendar.json",
+     "sha256": "3b7c20b4436dde248ff9df95adfc8e4fb4deaa51ad895d35d4becf0605435bd4"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-07",
+   "authority": "unknown",
+   "authorization_basis": "Amendment 1 provision 3 authorizes the design-month calendar sweep over new-design months and spent-design July only; this month held an open role on the successor track at the time of the sweep. Authority and reading process are recorded as unknown because the artifact never recorded them, and the migration must not claim to preserve what was never written.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2026-07|vendor-record-count|0000",
+   "observed_at": "2026-08-12T09:03:29.243924+00:00",
+   "observed_at_basis": "upper_bound_proxy",
+   "reading_process": "unknown",
+   "recorded_at": "2026-08-12T09:52:58.672586+00:00",
+   "review": null,
+   "scope": "per-date vendor record counts for every calendar date in the month, MNQ.v.0 tbbo, via metadata.get_record_count"
+  },
+  {
+   "artifacts": [
+    {
+     "authority": "successor-contract-amendment-3",
+     "authority_git_blob": "26b8b60b577c0c85a77d50ae57240dfceb7f6232",
+     "cache_sha256": "6619c52d9ced83db446d81b15dc0cd8444d447a464552199476b4db4928a81fd",
+     "checker_sha256": "b335e31d39cb420b2cde5bc2d3cfebf8ead1bf8bd14631bdcf95b9210cce9ee3",
+     "closure_verdict": "no_containment"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-05",
+   "authority": "pre-contract pricing sweep, analysis/databento_price.py",
+   "authorization_basis": "Amendment 3: a whole-month aggregate record count is not inspection, on informational-granularity grounds, and the frozen reconstruction-closure check found no proper subspan of this month reconstructible from any combination of recorded requests in THIS domain. Pre-signature timing is NOT the ground; the check is.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2026-05|vendor-record-count|0000",
+   "observed_at": "2026-08-05T08:07:38.087649+00:00",
+   "observed_at_basis": "recorded",
+   "reading_process": "databento_price.measure via phase_price or phase_plan",
+   "recorded_at": "2026-08-12T09:53:04.868202+00:00",
+   "review": null,
+   "scope": "pre-contract vendor record-count request, domain symbols=NQ.v.0 schema=definition, span 30.96 days, bounds 2026-04-30T22:00:00+00:00 to 2026-05-31T21:00:00+00:00"
+  },
+  {
+   "artifacts": [
+    {
+     "authority": "successor-contract-amendment-3",
+     "authority_git_blob": "26b8b60b577c0c85a77d50ae57240dfceb7f6232",
+     "cache_sha256": "6619c52d9ced83db446d81b15dc0cd8444d447a464552199476b4db4928a81fd",
+     "checker_sha256": "b335e31d39cb420b2cde5bc2d3cfebf8ead1bf8bd14631bdcf95b9210cce9ee3",
+     "closure_verdict": "no_containment"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-05",
+   "authority": "pre-contract pricing sweep, analysis/databento_price.py",
+   "authorization_basis": "Amendment 3: a whole-month aggregate record count is not inspection, on informational-granularity grounds, and the frozen reconstruction-closure check found no proper subspan of this month reconstructible from any combination of recorded requests in THIS domain. Pre-signature timing is NOT the ground; the check is.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2026-05|vendor-record-count|0001",
+   "observed_at": "2026-08-05T08:07:56.471640+00:00",
+   "observed_at_basis": "recorded",
+   "reading_process": "databento_price.measure via phase_price or phase_plan",
+   "recorded_at": "2026-08-12T09:53:04.868215+00:00",
+   "review": null,
+   "scope": "pre-contract vendor record-count request, domain symbols=NQ.v.0 schema=statistics, span 30.96 days, bounds 2026-04-30T22:00:00+00:00 to 2026-05-31T21:00:00+00:00"
+  },
+  {
+   "artifacts": [
+    {
+     "authority": "successor-contract-amendment-3",
+     "authority_git_blob": "26b8b60b577c0c85a77d50ae57240dfceb7f6232",
+     "cache_sha256": "6619c52d9ced83db446d81b15dc0cd8444d447a464552199476b4db4928a81fd",
+     "checker_sha256": "b335e31d39cb420b2cde5bc2d3cfebf8ead1bf8bd14631bdcf95b9210cce9ee3",
+     "closure_verdict": "no_containment"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-05",
+   "authority": "pre-contract pricing sweep, analysis/databento_price.py",
+   "authorization_basis": "Amendment 3: a whole-month aggregate record count is not inspection, on informational-granularity grounds, and the frozen reconstruction-closure check found no proper subspan of this month reconstructible from any combination of recorded requests in THIS domain. Pre-signature timing is NOT the ground; the check is.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2026-05|vendor-record-count|0002",
+   "observed_at": "2026-08-05T09:13:13.071661+00:00",
+   "observed_at_basis": "recorded",
+   "reading_process": "databento_price.measure via phase_price or phase_plan",
+   "recorded_at": "2026-08-12T09:53:04.868222+00:00",
+   "review": null,
+   "scope": "pre-contract vendor record-count request, domain symbols=MNQ.v.0 schema=tbbo, span 30.96 days, bounds 2026-04-30T22:00:00+00:00 to 2026-05-31T21:00:00+00:00"
+  },
+  {
+   "artifacts": [
+    {
+     "authority": "successor-contract-amendment-3",
+     "authority_git_blob": "26b8b60b577c0c85a77d50ae57240dfceb7f6232",
+     "cache_sha256": "6619c52d9ced83db446d81b15dc0cd8444d447a464552199476b4db4928a81fd",
+     "checker_sha256": "b335e31d39cb420b2cde5bc2d3cfebf8ead1bf8bd14631bdcf95b9210cce9ee3",
+     "closure_verdict": "no_containment"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-05",
+   "authority": "pre-contract pricing sweep, analysis/databento_price.py",
+   "authorization_basis": "Amendment 3: a whole-month aggregate record count is not inspection, on informational-granularity grounds, and the frozen reconstruction-closure check found no proper subspan of this month reconstructible from any combination of recorded requests in THIS domain. Pre-signature timing is NOT the ground; the check is.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2026-05|vendor-record-count|0003",
+   "observed_at": "2026-08-05T08:06:01.863111+00:00",
+   "observed_at_basis": "recorded",
+   "reading_process": "databento_price.measure via phase_price or phase_plan",
+   "recorded_at": "2026-08-12T09:53:04.868226+00:00",
+   "review": null,
+   "scope": "pre-contract vendor record-count request, domain symbols=NQ.v.0 schema=tbbo, span 30.96 days, bounds 2026-04-30T22:00:00+00:00 to 2026-05-31T21:00:00+00:00"
+  },
+  {
+   "artifacts": [
+    {
+     "authority": "successor-contract-amendment-3",
+     "authority_git_blob": "26b8b60b577c0c85a77d50ae57240dfceb7f6232",
+     "cache_sha256": "6619c52d9ced83db446d81b15dc0cd8444d447a464552199476b4db4928a81fd",
+     "checker_sha256": "b335e31d39cb420b2cde5bc2d3cfebf8ead1bf8bd14631bdcf95b9210cce9ee3",
+     "closure_verdict": "no_containment"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-05",
+   "authority": "pre-contract pricing sweep, analysis/databento_price.py",
+   "authorization_basis": "Amendment 3: a whole-month aggregate record count is not inspection, on informational-granularity grounds, and the frozen reconstruction-closure check found no proper subspan of this month reconstructible from any combination of recorded requests in THIS domain. Pre-signature timing is NOT the ground; the check is.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2026-05|vendor-record-count|0004",
+   "observed_at": "2026-08-05T09:13:37.782796+00:00",
+   "observed_at_basis": "recorded",
+   "reading_process": "databento_price.measure via phase_price or phase_plan",
+   "recorded_at": "2026-08-12T09:53:04.868229+00:00",
+   "review": null,
+   "scope": "pre-contract vendor record-count request, domain symbols=MNQ.v.0 schema=trades, span 30.96 days, bounds 2026-04-30T22:00:00+00:00 to 2026-05-31T21:00:00+00:00"
+  },
+  {
+   "artifacts": [
+    {
+     "authority": "successor-contract-amendment-3",
+     "authority_git_blob": "26b8b60b577c0c85a77d50ae57240dfceb7f6232",
+     "cache_sha256": "6619c52d9ced83db446d81b15dc0cd8444d447a464552199476b4db4928a81fd",
+     "checker_sha256": "b335e31d39cb420b2cde5bc2d3cfebf8ead1bf8bd14631bdcf95b9210cce9ee3",
+     "closure_verdict": "no_containment"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-06",
+   "authority": "pre-contract pricing sweep, analysis/databento_price.py",
+   "authorization_basis": "Amendment 3: a whole-month aggregate record count is not inspection, on informational-granularity grounds, and the frozen reconstruction-closure check found no proper subspan of this month reconstructible from any combination of recorded requests in THIS domain. Pre-signature timing is NOT the ground; the check is.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2026-06|vendor-record-count|0000",
+   "observed_at": "2026-08-05T12:12:34.484504+00:00",
+   "observed_at_basis": "recorded",
+   "reading_process": "databento_price.measure via phase_price or phase_plan",
+   "recorded_at": "2026-08-12T09:53:04.868233+00:00",
+   "review": null,
+   "scope": "pre-contract vendor record-count request, domain symbols=MNQ.v.0 schema=definition, span 29.96 days, bounds 2026-05-31T22:00:00+00:00 to 2026-06-30T21:00:00+00:00"
+  },
+  {
+   "artifacts": [
+    {
+     "authority": "successor-contract-amendment-3",
+     "authority_git_blob": "26b8b60b577c0c85a77d50ae57240dfceb7f6232",
+     "cache_sha256": "6619c52d9ced83db446d81b15dc0cd8444d447a464552199476b4db4928a81fd",
+     "checker_sha256": "b335e31d39cb420b2cde5bc2d3cfebf8ead1bf8bd14631bdcf95b9210cce9ee3",
+     "closure_verdict": "no_containment"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-06",
+   "authority": "pre-contract pricing sweep, analysis/databento_price.py",
+   "authorization_basis": "Amendment 3: a whole-month aggregate record count is not inspection, on informational-granularity grounds, and the frozen reconstruction-closure check found no proper subspan of this month reconstructible from any combination of recorded requests in THIS domain. Pre-signature timing is NOT the ground; the check is.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2026-06|vendor-record-count|0001",
+   "observed_at": "2026-08-04T04:28:45.112063+00:00",
+   "observed_at_basis": "recorded",
+   "reading_process": "databento_price.measure via phase_price or phase_plan",
+   "recorded_at": "2026-08-12T09:53:04.868236+00:00",
+   "review": null,
+   "scope": "pre-contract vendor record-count request, domain symbols=NQ.v.0 schema=definition, span 29.96 days, bounds 2026-05-31T22:00:00+00:00 to 2026-06-30T21:00:00+00:00"
+  },
+  {
+   "artifacts": [
+    {
+     "authority": "successor-contract-amendment-3",
+     "authority_git_blob": "26b8b60b577c0c85a77d50ae57240dfceb7f6232",
+     "cache_sha256": "6619c52d9ced83db446d81b15dc0cd8444d447a464552199476b4db4928a81fd",
+     "checker_sha256": "b335e31d39cb420b2cde5bc2d3cfebf8ead1bf8bd14631bdcf95b9210cce9ee3",
+     "closure_verdict": "no_containment"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-06",
+   "authority": "pre-contract pricing sweep, analysis/databento_price.py",
+   "authorization_basis": "Amendment 3: a whole-month aggregate record count is not inspection, on informational-granularity grounds, and the frozen reconstruction-closure check found no proper subspan of this month reconstructible from any combination of recorded requests in THIS domain. Pre-signature timing is NOT the ground; the check is.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2026-06|vendor-record-count|0002",
+   "observed_at": "2026-08-05T12:12:59.569696+00:00",
+   "observed_at_basis": "recorded",
+   "reading_process": "databento_price.measure via phase_price or phase_plan",
+   "recorded_at": "2026-08-12T09:53:04.868239+00:00",
+   "review": null,
+   "scope": "pre-contract vendor record-count request, domain symbols=MNQ.v.0 schema=statistics, span 29.96 days, bounds 2026-05-31T22:00:00+00:00 to 2026-06-30T21:00:00+00:00"
+  },
+  {
+   "artifacts": [
+    {
+     "authority": "successor-contract-amendment-3",
+     "authority_git_blob": "26b8b60b577c0c85a77d50ae57240dfceb7f6232",
+     "cache_sha256": "6619c52d9ced83db446d81b15dc0cd8444d447a464552199476b4db4928a81fd",
+     "checker_sha256": "b335e31d39cb420b2cde5bc2d3cfebf8ead1bf8bd14631bdcf95b9210cce9ee3",
+     "closure_verdict": "no_containment"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-06",
+   "authority": "pre-contract pricing sweep, analysis/databento_price.py",
+   "authorization_basis": "Amendment 3: a whole-month aggregate record count is not inspection, on informational-granularity grounds, and the frozen reconstruction-closure check found no proper subspan of this month reconstructible from any combination of recorded requests in THIS domain. Pre-signature timing is NOT the ground; the check is.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2026-06|vendor-record-count|0003",
+   "observed_at": "2026-08-04T04:29:57.824192+00:00",
+   "observed_at_basis": "recorded",
+   "reading_process": "databento_price.measure via phase_price or phase_plan",
+   "recorded_at": "2026-08-12T09:53:04.868242+00:00",
+   "review": null,
+   "scope": "pre-contract vendor record-count request, domain symbols=NQ.v.0 schema=statistics, span 29.96 days, bounds 2026-05-31T22:00:00+00:00 to 2026-06-30T21:00:00+00:00"
+  },
+  {
+   "artifacts": [
+    {
+     "authority": "successor-contract-amendment-3",
+     "authority_git_blob": "26b8b60b577c0c85a77d50ae57240dfceb7f6232",
+     "cache_sha256": "6619c52d9ced83db446d81b15dc0cd8444d447a464552199476b4db4928a81fd",
+     "checker_sha256": "b335e31d39cb420b2cde5bc2d3cfebf8ead1bf8bd14631bdcf95b9210cce9ee3",
+     "closure_verdict": "no_containment"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-06",
+   "authority": "pre-contract pricing sweep, analysis/databento_price.py",
+   "authorization_basis": "Amendment 3: a whole-month aggregate record count is not inspection, on informational-granularity grounds, and the frozen reconstruction-closure check found no proper subspan of this month reconstructible from any combination of recorded requests in THIS domain. Pre-signature timing is NOT the ground; the check is.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2026-06|vendor-record-count|0004",
+   "observed_at": "2026-08-05T09:13:05.654560+00:00",
+   "observed_at_basis": "recorded",
+   "reading_process": "databento_price.measure via phase_price or phase_plan",
+   "recorded_at": "2026-08-12T09:53:04.868246+00:00",
+   "review": null,
+   "scope": "pre-contract vendor record-count request, domain symbols=MNQ.v.0 schema=tbbo, span 29.96 days, bounds 2026-05-31T22:00:00+00:00 to 2026-06-30T21:00:00+00:00"
+  },
+  {
+   "artifacts": [
+    {
+     "authority": "successor-contract-amendment-3",
+     "authority_git_blob": "26b8b60b577c0c85a77d50ae57240dfceb7f6232",
+     "cache_sha256": "6619c52d9ced83db446d81b15dc0cd8444d447a464552199476b4db4928a81fd",
+     "checker_sha256": "b335e31d39cb420b2cde5bc2d3cfebf8ead1bf8bd14631bdcf95b9210cce9ee3",
+     "closure_verdict": "no_containment"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-06",
+   "authority": "pre-contract pricing sweep, analysis/databento_price.py",
+   "authorization_basis": "Amendment 3: a whole-month aggregate record count is not inspection, on informational-granularity grounds, and the frozen reconstruction-closure check found no proper subspan of this month reconstructible from any combination of recorded requests in THIS domain. Pre-signature timing is NOT the ground; the check is.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2026-06|vendor-record-count|0005",
+   "observed_at": "2026-08-05T08:06:37.538660+00:00",
+   "observed_at_basis": "recorded",
+   "reading_process": "databento_price.measure via phase_price or phase_plan",
+   "recorded_at": "2026-08-12T09:53:04.868249+00:00",
+   "review": null,
+   "scope": "pre-contract vendor record-count request, domain symbols=NQ.v.0 schema=tbbo, span 29.96 days, bounds 2026-05-31T22:00:00+00:00 to 2026-06-30T21:00:00+00:00"
+  },
+  {
+   "artifacts": [
+    {
+     "authority": "successor-contract-amendment-3",
+     "authority_git_blob": "26b8b60b577c0c85a77d50ae57240dfceb7f6232",
+     "cache_sha256": "6619c52d9ced83db446d81b15dc0cd8444d447a464552199476b4db4928a81fd",
+     "checker_sha256": "b335e31d39cb420b2cde5bc2d3cfebf8ead1bf8bd14631bdcf95b9210cce9ee3",
+     "closure_verdict": "no_containment"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-06",
+   "authority": "pre-contract pricing sweep, analysis/databento_price.py",
+   "authorization_basis": "Amendment 3: a whole-month aggregate record count is not inspection, on informational-granularity grounds, and the frozen reconstruction-closure check found no proper subspan of this month reconstructible from any combination of recorded requests in THIS domain. Pre-signature timing is NOT the ground; the check is.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2026-06|vendor-record-count|0006",
+   "observed_at": "2026-08-05T09:13:20.532993+00:00",
+   "observed_at_basis": "recorded",
+   "reading_process": "databento_price.measure via phase_price or phase_plan",
+   "recorded_at": "2026-08-12T09:53:04.868252+00:00",
+   "review": null,
+   "scope": "pre-contract vendor record-count request, domain symbols=MNQ.v.0 schema=trades, span 29.96 days, bounds 2026-05-31T22:00:00+00:00 to 2026-06-30T21:00:00+00:00"
+  },
+  {
+   "artifacts": [
+    {
+     "authority": "successor-contract-amendment-3",
+     "authority_git_blob": "26b8b60b577c0c85a77d50ae57240dfceb7f6232",
+     "cache_sha256": "6619c52d9ced83db446d81b15dc0cd8444d447a464552199476b4db4928a81fd",
+     "checker_sha256": "b335e31d39cb420b2cde5bc2d3cfebf8ead1bf8bd14631bdcf95b9210cce9ee3",
+     "closure_verdict": "no_containment"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-06",
+   "authority": "pre-contract pricing sweep, analysis/databento_price.py",
+   "authorization_basis": "Amendment 3: a whole-month aggregate record count is not inspection, on informational-granularity grounds, and the frozen reconstruction-closure check found no proper subspan of this month reconstructible from any combination of recorded requests in THIS domain. Pre-signature timing is NOT the ground; the check is.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2026-06|vendor-record-count|0007",
+   "observed_at": "2026-08-04T04:27:22.917581+00:00",
+   "observed_at_basis": "recorded",
+   "reading_process": "databento_price.measure via phase_price or phase_plan",
+   "recorded_at": "2026-08-12T09:53:04.868256+00:00",
+   "review": null,
+   "scope": "pre-contract vendor record-count request, domain symbols=NQ.v.0 schema=trades, span 29.96 days, bounds 2026-05-31T22:00:00+00:00 to 2026-06-30T21:00:00+00:00"
+  },
+  {
+   "artifacts": [
+    {
+     "authority": "successor-contract-amendment-3",
+     "authority_git_blob": "26b8b60b577c0c85a77d50ae57240dfceb7f6232",
+     "cache_sha256": "6619c52d9ced83db446d81b15dc0cd8444d447a464552199476b4db4928a81fd",
+     "checker_sha256": "b335e31d39cb420b2cde5bc2d3cfebf8ead1bf8bd14631bdcf95b9210cce9ee3",
+     "closure_verdict": "no_containment"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-06",
+   "authority": "pre-contract pricing sweep, analysis/databento_price.py",
+   "authorization_basis": "Amendment 3: a whole-month aggregate record count is not inspection, on informational-granularity grounds, and the frozen reconstruction-closure check found no proper subspan of this month reconstructible from any combination of recorded requests in THIS domain. Pre-signature timing is NOT the ground; the check is.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2026-06|vendor-record-count|0008",
+   "observed_at": "2026-08-04T04:34:17.724383+00:00",
+   "observed_at_basis": "recorded",
+   "reading_process": "databento_price.measure via phase_price or phase_plan",
+   "recorded_at": "2026-08-12T09:53:04.868259+00:00",
+   "review": null,
+   "scope": "pre-contract vendor record-count request, domain symbols=NQ.v.0 schema=definition, span 20.96 days, bounds 2026-06-21T22:00:00+00:00 to 2026-07-12T21:00:00+00:00"
+  },
+  {
+   "artifacts": [
+    {
+     "authority": "successor-contract-amendment-3",
+     "authority_git_blob": "26b8b60b577c0c85a77d50ae57240dfceb7f6232",
+     "cache_sha256": "6619c52d9ced83db446d81b15dc0cd8444d447a464552199476b4db4928a81fd",
+     "checker_sha256": "b335e31d39cb420b2cde5bc2d3cfebf8ead1bf8bd14631bdcf95b9210cce9ee3",
+     "closure_verdict": "no_containment"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-06",
+   "authority": "pre-contract pricing sweep, analysis/databento_price.py",
+   "authorization_basis": "Amendment 3: a whole-month aggregate record count is not inspection, on informational-granularity grounds, and the frozen reconstruction-closure check found no proper subspan of this month reconstructible from any combination of recorded requests in THIS domain. Pre-signature timing is NOT the ground; the check is.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2026-06|vendor-record-count|0009",
+   "observed_at": "2026-08-04T04:34:55.283735+00:00",
+   "observed_at_basis": "recorded",
+   "reading_process": "databento_price.measure via phase_price or phase_plan",
+   "recorded_at": "2026-08-12T09:53:04.868264+00:00",
+   "review": null,
+   "scope": "pre-contract vendor record-count request, domain symbols=NQ.v.0 schema=statistics, span 20.96 days, bounds 2026-06-21T22:00:00+00:00 to 2026-07-12T21:00:00+00:00"
+  },
+  {
+   "artifacts": [
+    {
+     "authority": "successor-contract-amendment-3",
+     "authority_git_blob": "26b8b60b577c0c85a77d50ae57240dfceb7f6232",
+     "cache_sha256": "6619c52d9ced83db446d81b15dc0cd8444d447a464552199476b4db4928a81fd",
+     "checker_sha256": "b335e31d39cb420b2cde5bc2d3cfebf8ead1bf8bd14631bdcf95b9210cce9ee3",
+     "closure_verdict": "no_containment"
+    }
+   ],
+   "assignment_id": "successor|GLBX.MDP3|MNQ|2026-06",
+   "authority": "pre-contract pricing sweep, analysis/databento_price.py",
+   "authorization_basis": "Amendment 3: a whole-month aggregate record count is not inspection, on informational-granularity grounds, and the frozen reconstruction-closure check found no proper subspan of this month reconstructible from any combination of recorded requests in THIS domain. Pre-signature timing is NOT the ground; the check is.",
+   "authorization_verdict": "authorized",
+   "channel": "vendor-record-count",
+   "delivery_id": null,
+   "description": null,
+   "event_id": "successor|GLBX.MDP3|MNQ|2026-06|vendor-record-count|0010",
+   "observed_at": "2026-08-04T04:33:28.579731+00:00",
+   "observed_at_basis": "recorded",
+   "reading_process": "databento_price.measure via phase_price or phase_plan",
+   "recorded_at": "2026-08-12T09:53:04.868270+00:00",
+   "review": null,
+   "scope": "pre-contract vendor record-count request, domain symbols=NQ.v.0 schema=tbbo, span 20.96 days, bounds 2026-06-21T22:00:00+00:00 to 2026-07-12T21:00:00+00:00"
+  }
+ ],
+ "tool_version": 2
+}
