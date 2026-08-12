@@ -652,6 +652,91 @@ FROZEN CONSEQUENCES, conditions of the countersignature:
 - 2026-05 and 2026-06 remain eligible confirmation populations only
   under the bounded audit conclusion above.
 
+## Amendment 3, 2026-08-12: aggregate metadata and reconstruction closure
+
+A RESULT-AWARE INTERPRETIVE AMENDMENT, labeled honestly: the
+Amendment 2 migration audit found SIXTEEN record-count requests
+overlapping 2026-05 or 2026-06 before this question had an answer, so
+the facts were known when this text was written, and calling it
+non-result-driven would be false. Its admissibility rests on the
+safeguards at the end of this section, foremost that the reviewer and
+not the implementer froze the criterion, and that the criterion binds
+symmetrically whichever way it falls.
+
+THE FACTS. All sixteen requests are aggregate counts over 21 to 31
+day spans - single integers, zero per-date requests - made 2026-08-04
+and 05, a week before signature, by the pricing sweep, covering MNQ
+and NQ across tbbo, trades, definition and statistics.
+
+THE RULING (reviewer session 019ff53d):
+
+- A WHOLE-MONTH AGGREGATE RECORD COUNT IS NOT INSPECTION under
+  Amendment 1 provision 3. The ground is INFORMATIONAL GRANULARITY
+  alone: one aggregate scalar exposes no within-month allocation.
+- PRE-SIGNATURE TIMING DOES NOT INDEPENDENTLY EXCUSE an inspection.
+  Had these requests yielded prohibited information, the later role
+  assignment could not cleanse it.
+- THE NARROW CONSISTENCY PRINCIPLE, and only it: a channel expressly
+  exempted by the contract does not become inspection merely because
+  another non-inspection aggregate is informationally comparable to
+  it. NO general exemption follows for monotone transforms - a
+  monotone image can be injective and exactly invertible, and whether
+  an aggregate preserves, reduces or reveals information depends on
+  its resolution, formula, auxiliary knowledge and domain.
+
+THE FROZEN RECONSTRUCTION-CLOSURE CHECK, which alone adjudicates the
+sixteen and any future recorded metadata against a sealed month. Its
+input is EVERY recorded count request in the same observable domain -
+not merely requests touching the sealed month, because a request
+wholly outside it can complete an equation with an overlapping one.
+
+```text
+domain      endpoint semantics, dataset, complete symbol expression,
+            schema, stype and every parameter affecting the counted
+            population; domains are never combined merely because
+            their values correlate
+partition   time is cut at every recorded request boundary and at
+            the sealed-month boundaries, yielding atomic intervals
+vectors     each count request is an exact incidence vector over the
+            atomic intervals
+test        does the RATIONAL ROW SPAN of all recorded requests in
+            the domain contain the incidence vector of any nonempty
+            PROPER SUBSPAN of the sealed month - a subspan being ANY
+            UNION of atomic intervals wholly inside the month, not
+            only a contiguous interval, so disjoint session groups
+            cannot slip through
+witness     a containment is reported with its coefficients and the
+            derived interval set
+refusals    uncertain endpoint additivity, unresolved time-boundary
+            semantics, malformed parameters or incomplete cache
+            enumeration REFUSE the check - fail closed, never guess
+binding     the exact cache hash and the checker implementation hash
+            are bound into the verdict
+```
+
+THE SIXTEEN are recorded in the ledger as AUTHORIZED PRE-CONTRACT
+PRICING EVENTS if and only if the mechanical check independently
+reproduces the reviewer's reading of the recorded bounds (June NQ
+month totals coexisting with a June-21-to-July-12 window and July
+totals confound the June tail with the July prefix rather than
+isolating a June subspan; the MNQ June domains lack any isolating
+overlap; May has whole-month observations only). If the check finds a
+containment, the affected month is CONTAMINATED, recorded
+retrospectively under Amendment 2, WITHOUT another interpretive
+round.
+
+SAFEGUARDS, conditions of the countersignature:
+
+- The ledger remains failed closed until the check runs.
+- The reviewer, not the implementer, froze this criterion.
+- The criterion applies symmetrically whether it preserves or
+  contaminates 2026-05 and 2026-06.
+- The actual requests are adjudicated ONLY by the frozen mechanical
+  check.
+- A failure contaminates without further interpretation; a pass
+  restores eligibility but erases neither the events nor the audit
+  history.
+
 ## Signature record
 
 SIGNED on round 3 by codex session
@@ -676,3 +761,11 @@ it replaced with the assignment-rooted hierarchy; then the
 unpreservable migration fields and the overclaimed May/June proof)
 before signing. The session's response text misprinted its own
 identity; the ID here is taken from the captured session envelope.
+
+Amendment 3 signed 2026-08-12 by the same session, 019ff53d, after
+one substantive round in which it ruled the sixteen aggregate counts
+non-inspection on informational-granularity grounds, rejected the
+proposed general monotone-transform principle as unsound, required
+the closure check to range over all same-domain requests with
+subspans as arbitrary interval unions, and required the result-aware
+label in place of a false non-result-driven claim.
