@@ -564,7 +564,7 @@ fn run_month(args: MonthArgs) -> anyhow::Result<()> {
     };
     count_curve::write_month_from_observed(&count_config, &observed)?;
     let usable = usable_count(&preflight)?;
-    ordered_counts::run_with_rows(
+    let ordered_result = ordered_counts::run_with_rows(
         &OrderedCountsRun {
             month: args.month,
             corpus: args.corpus,
@@ -578,7 +578,20 @@ fn run_month(args: MonthArgs) -> anyhow::Result<()> {
         },
         &observed,
         rows,
-    )?;
+    );
+    if let Err(error) = ordered_result {
+        if args.month != 202_603 { return Err(error); }
+        let refusal = json!({
+            "outcome":"recorded_refusal",
+            "month":args.month,
+            "scope":["Panel A","Panel B"],
+            "reason":error.to_string(),
+            "authority":"Stage M month-generic refusal rule: a frozen document that cannot be applied month-generically refuses and is never adapted silently",
+            "sequence":sequence_path,
+            "sequence_sha256":mogwai_lab::ledger::sha256_file(&sequence_path).map_err(|e| anyhow!(e.to_string()))?
+        });
+        write_json_atomic(&dir.join("ordered-counts-panels.json"), &refusal).map_err(|e| anyhow!(e.to_string()))?;
+    }
     let hash =
         mogwai_lab::ledger::sha256_file(&sequence_path).map_err(|e| anyhow!(e.to_string()))?;
     slow_geometry::run_with(&SlowGeometryRun {
