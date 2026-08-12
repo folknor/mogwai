@@ -62,7 +62,8 @@ this file is for.
 
 | Track | Driven from | State |
 |---|---|---|
-| Evidence and purchase | `DATA-PURCHASE-REPORT.md` (root) | Idle. The ~30 dollar ES/MES purchase is the named next marginal dollar, owner-gated. Nothing to buy for 12b. |
+| Arrival successor | `successor-contract.md` | **LIVE, signed 2026-08-12.** The staged contract toward a plausible MNQ tape at all intervals: Stage M design measurement, Stage F freeze, Stage I implementation, Stage C single confirmation on sealed June 2026 (May 2026 reserve). Four-arm intervention study; acceptance belongs to the joint arm. Blocked on the data pull below. |
+| Evidence and purchase | `DATA-PURCHASE-REPORT.md` (root) | **ACTIVE.** Owner authorized one Databento Standard subscription month (199 USD, 2026-08-12), superseding credit-first for this purchase. The successor contract's manifest and seal ledger govern the pull; the ES/MES months ride along sealed for the MES-borrow track, which needs its own contract. |
 | Generator fidelity, protocol 12b | `protocol-12b-arrival-composition-spec.md` (its section 16.1 carries the RESULT) | **CLOSED 2026-08-11** with `no-arrival-admissible-candidate-in-frozen-search-space`. Unlike the 2026-08-10 run of the same verdict string, this one is a measurement: A4 and the A2 level limb were defective and are repaired, A2 now admits 618 cells and A1 57. A3 fails all 1,402 cells of all five families, including the right-skewed shot-noise family added for exactly that reason. TWENTY cells fail A3 and nothing else. Section 11 forbids amending A3 having seen that, so the finding is exploratory evidence for a successor, not a 12b repair. |
 | Python-to-Rust rewrite | git history (its phase records, dossier and script triage are retired) | **DONE.** Signature renewed 2026-08-08 at `c783d5f`; the Python retired to the gitignored `research/dead/`; the Rust is the reference. Nine review passes, eight refusals. What survives durably: the parity contract in `reference/architecture.md`, the version exemption in `AGENTS.md`, the two approved numerical deviations pinned by discriminating tests in the code. |
 
@@ -71,10 +72,16 @@ investigations, the hardcoded-value inventory.
 
 ## Which document drives what
 
-- **`protocol-12b-arrival-composition-spec.md`** - the contract of record for
-  the live work. Its section 0 index partitions the remaining bricks; its
-  frozen constants, gates and verdicts bind every sub-spec. Amendments go
-  through section 17, never edits.
+- **`successor-contract.md`** - the contract of record for the live work:
+  staging, immutable data roles, seal ledger, gate shapes, outcome and
+  amendment rules. Each stage writes its own dated preregistration under it.
+  Signed by codex session 019ff4db.
+- **`count-curve-preregistration.md`**, **`ordered-counts-preregistration.md`**,
+  **`slow-geometry-preregistration.md`** - the three post-12b measurements the
+  successor contract binds as established evidence, each carrying its RESULT.
+- **`protocol-12b-arrival-composition-spec.md`** - CLOSED; section 16.1 carries
+  the result the successor inherits. Its section 0 index partitions the
+  retired bricks; amendments went through section 17, never edits.
 - **`protocol-12a-measurement-spec.md`** - 12b's judge. The ladder re-runs
   unamended against it. Binding. (It cites the retired protocol-11 spec as its
   spawn point; that citation resolves to git history.)
@@ -96,21 +103,18 @@ investigations, the hardcoded-value inventory.
 
 ## What blocks what, right now
 
-1. **12b is CLOSED, and what blocks the next step is a CRITERION question
-   rather than a mechanism one.** The amended screen returned
-   `no-arrival-admissible-candidate-in-frozen-search-space` on A3, with
-   TWENTY cells failing A3 and nothing else - so the search does not lack
-   candidate mechanisms, it lacks agreement about what the sub-second
-   criterion should be, and about why parent-second occupancy misses
-   across every family at its fitted hourly rate. Section 11 forbids
-   amending A3 after seeing that, so a successor preregisters its
-   criterion BEFORE looking at which cells pass it and says openly that
-   it was designed after observing 12b. Full result: that spec's section
-   16.1. The performance round is retired to git history; its durable
+1. **The successor contract is signed and Stage M is blocked on the data
+   pull.** The owner subscribes, the manifest is pulled while every month
+   is inside the rolling L1 window, roles bind at delivery per the seal
+   ledger, and only then may a Stage M preregistration freeze and run.
+   The calendar-adjusted persistence test freezes BEFORE any design month
+   is read.
+2. **12b is CLOSED**; its full result is that spec's section 16.1, and
+   the twenty-cell A3 residue is exploratory evidence the successor may
+   read qualitatively but never derive a constant from. Stage B and the
+   protocol-13 landing never ran and never will under the frozen 12b
+   contract. The performance round is retired to git history; its durable
    measurements are in `reference/performance.md`.
-2. **Stage B and the protocol-13 landing do not run.** They were
-   conditional on a Stage A survivor and there is none under the frozen
-   contract.
 3. **Standing owner rulings that reshape the ground, 2026-08-09**: the
    bit-exactness era toward Python-era artifacts is CLOSED (re-bless instead
    of preserving CPython arithmetic; determinism per binary plus green
