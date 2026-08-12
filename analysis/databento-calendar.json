@@ -1,0 +1,1233 @@
+{
+ "_version": 1,
+ "classification": {
+  "closure_max_records": 0,
+  "grades": {
+   "closure": "records equal to closure_max_records",
+   "full_session": "every remaining date",
+   "half_session": "records below half_session_upper_fraction times the reference"
+  },
+  "half_session_upper_fraction": 0.5,
+  "method": "fraction_of_month_median_trading_session",
+  "rationale": "These boundaries decide the session population the Stage M step-0 power analysis runs over, so they are declared in the artifact rather than held as constants in analysis/databento_calendar.py, and are inspectable without reading the generating code.",
+  "reference": "median record count over the month's non-closure dates"
+ },
+ "excluded_months": {
+  "2025-08": "incomplete_month_delivery; Amendment 1 provision 1 holds the covered slice UNREAD and unavailable to Stage M unless a later reviewed amendment defines a partial-month estimand",
+  "2026-05": "role reserve-confirmation is sealed; Amendment 1 provision 3 - a per-date record count is a per-session observable and so is inspection. A sealed month's schedule materializes exactly once, mechanically, inside the blinded Stage C harness at unseal",
+  "2026-06": "role primary-confirmation is sealed; Amendment 1 provision 3 - a per-date record count is a per-session observable and so is inspection. A sealed month's schedule materializes exactly once, mechanically, inside the blinded Stage C harness at unseal",
+  "2026-08": "role unused-sealed is sealed; Amendment 1 provision 3 - a per-date record count is a per-session observable and so is inspection. A sealed month's schedule materializes exactly once, mechanically, inside the blinded Stage C harness at unseal"
+ },
+ "generated_at": "2026-08-12T09:03:29.243924+00:00",
+ "months": {
+  "2025-09": {
+   "dates": {
+    "2025-09-01": {
+     "grade": "half_session",
+     "records": 167086
+    },
+    "2025-09-02": {
+     "grade": "full_session",
+     "records": 891464
+    },
+    "2025-09-03": {
+     "grade": "full_session",
+     "records": 755035
+    },
+    "2025-09-04": {
+     "grade": "full_session",
+     "records": 642061
+    },
+    "2025-09-05": {
+     "grade": "full_session",
+     "records": 912087
+    },
+    "2025-09-06": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-09-07": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-09-08": {
+     "grade": "full_session",
+     "records": 614891
+    },
+    "2025-09-09": {
+     "grade": "full_session",
+     "records": 569600
+    },
+    "2025-09-10": {
+     "grade": "full_session",
+     "records": 653362
+    },
+    "2025-09-11": {
+     "grade": "full_session",
+     "records": 571896
+    },
+    "2025-09-12": {
+     "grade": "full_session",
+     "records": 496654
+    },
+    "2025-09-13": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-09-14": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-09-15": {
+     "grade": "half_session",
+     "records": 283593
+    },
+    "2025-09-16": {
+     "grade": "half_session",
+     "records": 135753
+    },
+    "2025-09-17": {
+     "grade": "half_session",
+     "records": 168242
+    },
+    "2025-09-18": {
+     "grade": "full_session",
+     "records": 603039
+    },
+    "2025-09-19": {
+     "grade": "full_session",
+     "records": 550814
+    },
+    "2025-09-20": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-09-21": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-09-22": {
+     "grade": "full_session",
+     "records": 514285
+    },
+    "2025-09-23": {
+     "grade": "full_session",
+     "records": 599803
+    },
+    "2025-09-24": {
+     "grade": "full_session",
+     "records": 595399
+    },
+    "2025-09-25": {
+     "grade": "full_session",
+     "records": 858141
+    },
+    "2025-09-26": {
+     "grade": "full_session",
+     "records": 777861
+    },
+    "2025-09-27": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-09-28": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-09-29": {
+     "grade": "full_session",
+     "records": 608032
+    },
+    "2025-09-30": {
+     "grade": "full_session",
+     "records": 689117
+    }
+   },
+   "median_trading_session_records": 601421.0,
+   "role": "new-design",
+   "tally": {
+    "closure": 8,
+    "full_session": 18,
+    "half_session": 4
+   },
+   "unreadable_dates": []
+  },
+  "2025-10": {
+   "dates": {
+    "2025-10-01": {
+     "grade": "full_session",
+     "records": 640007
+    },
+    "2025-10-02": {
+     "grade": "full_session",
+     "records": 614686
+    },
+    "2025-10-03": {
+     "grade": "full_session",
+     "records": 674087
+    },
+    "2025-10-04": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-10-05": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-10-06": {
+     "grade": "full_session",
+     "records": 546891
+    },
+    "2025-10-07": {
+     "grade": "full_session",
+     "records": 703539
+    },
+    "2025-10-08": {
+     "grade": "full_session",
+     "records": 548037
+    },
+    "2025-10-09": {
+     "grade": "full_session",
+     "records": 676050
+    },
+    "2025-10-10": {
+     "grade": "full_session",
+     "records": 1306837
+    },
+    "2025-10-11": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-10-12": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-10-13": {
+     "grade": "full_session",
+     "records": 1037479
+    },
+    "2025-10-14": {
+     "grade": "full_session",
+     "records": 1251478
+    },
+    "2025-10-15": {
+     "grade": "full_session",
+     "records": 1109232
+    },
+    "2025-10-16": {
+     "grade": "full_session",
+     "records": 1391224
+    },
+    "2025-10-17": {
+     "grade": "full_session",
+     "records": 1450191
+    },
+    "2025-10-18": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-10-19": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-10-20": {
+     "grade": "full_session",
+     "records": 662542
+    },
+    "2025-10-21": {
+     "grade": "full_session",
+     "records": 681363
+    },
+    "2025-10-22": {
+     "grade": "full_session",
+     "records": 1066083
+    },
+    "2025-10-23": {
+     "grade": "full_session",
+     "records": 752331
+    },
+    "2025-10-24": {
+     "grade": "full_session",
+     "records": 601273
+    },
+    "2025-10-25": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-10-26": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-10-27": {
+     "grade": "full_session",
+     "records": 491983
+    },
+    "2025-10-28": {
+     "grade": "full_session",
+     "records": 549010
+    },
+    "2025-10-29": {
+     "grade": "full_session",
+     "records": 876120
+    },
+    "2025-10-30": {
+     "grade": "full_session",
+     "records": 1136563
+    },
+    "2025-10-31": {
+     "grade": "full_session",
+     "records": 876654
+    }
+   },
+   "median_trading_session_records": 703539,
+   "role": "new-design",
+   "tally": {
+    "closure": 8,
+    "full_session": 23
+   },
+   "unreadable_dates": []
+  },
+  "2025-11": {
+   "dates": {
+    "2025-11-01": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-11-02": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-11-03": {
+     "grade": "full_session",
+     "records": 717338
+    },
+    "2025-11-04": {
+     "grade": "full_session",
+     "records": 1036665
+    },
+    "2025-11-05": {
+     "grade": "full_session",
+     "records": 923394
+    },
+    "2025-11-06": {
+     "grade": "full_session",
+     "records": 1174480
+    },
+    "2025-11-07": {
+     "grade": "full_session",
+     "records": 1336520
+    },
+    "2025-11-08": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-11-09": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-11-10": {
+     "grade": "full_session",
+     "records": 870128
+    },
+    "2025-11-11": {
+     "grade": "full_session",
+     "records": 813477
+    },
+    "2025-11-12": {
+     "grade": "full_session",
+     "records": 869185
+    },
+    "2025-11-13": {
+     "grade": "full_session",
+     "records": 1328897
+    },
+    "2025-11-14": {
+     "grade": "full_session",
+     "records": 1416464
+    },
+    "2025-11-15": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-11-16": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-11-17": {
+     "grade": "full_session",
+     "records": 1336952
+    },
+    "2025-11-18": {
+     "grade": "full_session",
+     "records": 1695615
+    },
+    "2025-11-19": {
+     "grade": "full_session",
+     "records": 1515496
+    },
+    "2025-11-20": {
+     "grade": "full_session",
+     "records": 1794919
+    },
+    "2025-11-21": {
+     "grade": "full_session",
+     "records": 1703532
+    },
+    "2025-11-22": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-11-23": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-11-24": {
+     "grade": "full_session",
+     "records": 1046299
+    },
+    "2025-11-25": {
+     "grade": "full_session",
+     "records": 1099658
+    },
+    "2025-11-26": {
+     "grade": "full_session",
+     "records": 855254
+    },
+    "2025-11-27": {
+     "grade": "half_session",
+     "records": 114888
+    },
+    "2025-11-28": {
+     "grade": "half_session",
+     "records": 184500
+    },
+    "2025-11-29": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-11-30": {
+     "grade": "closure",
+     "records": 0
+    }
+   },
+   "median_trading_session_records": 1072978.5,
+   "role": "new-design",
+   "tally": {
+    "closure": 10,
+    "full_session": 18,
+    "half_session": 2
+   },
+   "unreadable_dates": []
+  },
+  "2025-12": {
+   "dates": {
+    "2025-12-01": {
+     "grade": "full_session",
+     "records": 939607
+    },
+    "2025-12-02": {
+     "grade": "full_session",
+     "records": 931033
+    },
+    "2025-12-03": {
+     "grade": "full_session",
+     "records": 794469
+    },
+    "2025-12-04": {
+     "grade": "full_session",
+     "records": 822443
+    },
+    "2025-12-05": {
+     "grade": "full_session",
+     "records": 780158
+    },
+    "2025-12-06": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-12-07": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-12-08": {
+     "grade": "full_session",
+     "records": 702956
+    },
+    "2025-12-09": {
+     "grade": "full_session",
+     "records": 614502
+    },
+    "2025-12-10": {
+     "grade": "full_session",
+     "records": 862181
+    },
+    "2025-12-11": {
+     "grade": "full_session",
+     "records": 1011466
+    },
+    "2025-12-12": {
+     "grade": "full_session",
+     "records": 1112166
+    },
+    "2025-12-13": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-12-14": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-12-15": {
+     "grade": "full_session",
+     "records": 525841
+    },
+    "2025-12-16": {
+     "grade": "full_session",
+     "records": 341902
+    },
+    "2025-12-17": {
+     "grade": "half_session",
+     "records": 203230
+    },
+    "2025-12-18": {
+     "grade": "full_session",
+     "records": 974502
+    },
+    "2025-12-19": {
+     "grade": "full_session",
+     "records": 708122
+    },
+    "2025-12-20": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-12-21": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-12-22": {
+     "grade": "full_session",
+     "records": 516657
+    },
+    "2025-12-23": {
+     "grade": "full_session",
+     "records": 458172
+    },
+    "2025-12-24": {
+     "grade": "half_session",
+     "records": 216959
+    },
+    "2025-12-25": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-12-26": {
+     "grade": "full_session",
+     "records": 337246
+    },
+    "2025-12-27": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-12-28": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2025-12-29": {
+     "grade": "full_session",
+     "records": 552415
+    },
+    "2025-12-30": {
+     "grade": "full_session",
+     "records": 447732
+    },
+    "2025-12-31": {
+     "grade": "full_session",
+     "records": 492229
+    }
+   },
+   "median_trading_session_records": 658729.0,
+   "role": "new-design",
+   "tally": {
+    "closure": 9,
+    "full_session": 20,
+    "half_session": 2
+   },
+   "unreadable_dates": []
+  },
+  "2026-01": {
+   "dates": {
+    "2026-01-01": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-01-02": {
+     "grade": "full_session",
+     "records": 875919
+    },
+    "2026-01-03": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-01-04": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-01-05": {
+     "grade": "full_session",
+     "records": 677108
+    },
+    "2026-01-06": {
+     "grade": "full_session",
+     "records": 685782
+    },
+    "2026-01-07": {
+     "grade": "full_session",
+     "records": 706588
+    },
+    "2026-01-08": {
+     "grade": "full_session",
+     "records": 799255
+    },
+    "2026-01-09": {
+     "grade": "full_session",
+     "records": 822122
+    },
+    "2026-01-10": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-01-11": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-01-12": {
+     "grade": "full_session",
+     "records": 701070
+    },
+    "2026-01-13": {
+     "grade": "full_session",
+     "records": 927445
+    },
+    "2026-01-14": {
+     "grade": "full_session",
+     "records": 1114235
+    },
+    "2026-01-15": {
+     "grade": "full_session",
+     "records": 939326
+    },
+    "2026-01-16": {
+     "grade": "full_session",
+     "records": 778931
+    },
+    "2026-01-17": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-01-18": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-01-19": {
+     "grade": "full_session",
+     "records": 456224
+    },
+    "2026-01-20": {
+     "grade": "full_session",
+     "records": 1229332
+    },
+    "2026-01-21": {
+     "grade": "full_session",
+     "records": 1393245
+    },
+    "2026-01-22": {
+     "grade": "full_session",
+     "records": 900605
+    },
+    "2026-01-23": {
+     "grade": "full_session",
+     "records": 877046
+    },
+    "2026-01-24": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-01-25": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-01-26": {
+     "grade": "full_session",
+     "records": 776975
+    },
+    "2026-01-27": {
+     "grade": "full_session",
+     "records": 648173
+    },
+    "2026-01-28": {
+     "grade": "full_session",
+     "records": 891301
+    },
+    "2026-01-29": {
+     "grade": "full_session",
+     "records": 1308943
+    },
+    "2026-01-30": {
+     "grade": "full_session",
+     "records": 1439579
+    },
+    "2026-01-31": {
+     "grade": "closure",
+     "records": 0
+    }
+   },
+   "median_trading_session_records": 875919,
+   "role": "new-design",
+   "tally": {
+    "closure": 10,
+    "full_session": 21
+   },
+   "unreadable_dates": []
+  },
+  "2026-02": {
+   "dates": {
+    "2026-02-01": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-02-02": {
+     "grade": "full_session",
+     "records": 1132592
+    },
+    "2026-02-03": {
+     "grade": "full_session",
+     "records": 1446412
+    },
+    "2026-02-04": {
+     "grade": "full_session",
+     "records": 1519934
+    },
+    "2026-02-05": {
+     "grade": "full_session",
+     "records": 1518373
+    },
+    "2026-02-06": {
+     "grade": "full_session",
+     "records": 1175459
+    },
+    "2026-02-07": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-02-08": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-02-09": {
+     "grade": "full_session",
+     "records": 879316
+    },
+    "2026-02-10": {
+     "grade": "full_session",
+     "records": 948968
+    },
+    "2026-02-11": {
+     "grade": "full_session",
+     "records": 1088831
+    },
+    "2026-02-12": {
+     "grade": "full_session",
+     "records": 1240320
+    },
+    "2026-02-13": {
+     "grade": "full_session",
+     "records": 1384582
+    },
+    "2026-02-14": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-02-15": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-02-16": {
+     "grade": "half_session",
+     "records": 332102
+    },
+    "2026-02-17": {
+     "grade": "full_session",
+     "records": 1269956
+    },
+    "2026-02-18": {
+     "grade": "full_session",
+     "records": 931564
+    },
+    "2026-02-19": {
+     "grade": "full_session",
+     "records": 1071248
+    },
+    "2026-02-20": {
+     "grade": "full_session",
+     "records": 1203735
+    },
+    "2026-02-21": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-02-22": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-02-23": {
+     "grade": "full_session",
+     "records": 1037611
+    },
+    "2026-02-24": {
+     "grade": "full_session",
+     "records": 908656
+    },
+    "2026-02-25": {
+     "grade": "full_session",
+     "records": 727744
+    },
+    "2026-02-26": {
+     "grade": "full_session",
+     "records": 1115974
+    },
+    "2026-02-27": {
+     "grade": "full_session",
+     "records": 1076526
+    },
+    "2026-02-28": {
+     "grade": "closure",
+     "records": 0
+    }
+   },
+   "median_trading_session_records": 1102402.5,
+   "role": "new-design",
+   "tally": {
+    "closure": 8,
+    "full_session": 19,
+    "half_session": 1
+   },
+   "unreadable_dates": []
+  },
+  "2026-03": {
+   "dates": {
+    "2026-03-01": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-03-02": {
+     "grade": "full_session",
+     "records": 1249728
+    },
+    "2026-03-03": {
+     "grade": "full_session",
+     "records": 1536832
+    },
+    "2026-03-04": {
+     "grade": "full_session",
+     "records": 1215206
+    },
+    "2026-03-05": {
+     "grade": "full_session",
+     "records": 1403401
+    },
+    "2026-03-06": {
+     "grade": "full_session",
+     "records": 1415925
+    },
+    "2026-03-07": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-03-08": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-03-09": {
+     "grade": "full_session",
+     "records": 1508603
+    },
+    "2026-03-10": {
+     "grade": "full_session",
+     "records": 1281773
+    },
+    "2026-03-11": {
+     "grade": "full_session",
+     "records": 1078864
+    },
+    "2026-03-12": {
+     "grade": "full_session",
+     "records": 1174899
+    },
+    "2026-03-13": {
+     "grade": "full_session",
+     "records": 1213963
+    },
+    "2026-03-14": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-03-15": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-03-16": {
+     "grade": "half_session",
+     "records": 576816
+    },
+    "2026-03-17": {
+     "grade": "half_session",
+     "records": 203493
+    },
+    "2026-03-18": {
+     "grade": "half_session",
+     "records": 147026
+    },
+    "2026-03-19": {
+     "grade": "full_session",
+     "records": 1199081
+    },
+    "2026-03-20": {
+     "grade": "full_session",
+     "records": 1071821
+    },
+    "2026-03-21": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-03-22": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-03-23": {
+     "grade": "full_session",
+     "records": 1339480
+    },
+    "2026-03-24": {
+     "grade": "full_session",
+     "records": 1248256
+    },
+    "2026-03-25": {
+     "grade": "full_session",
+     "records": 1075988
+    },
+    "2026-03-26": {
+     "grade": "full_session",
+     "records": 1134645
+    },
+    "2026-03-27": {
+     "grade": "full_session",
+     "records": 1030487
+    },
+    "2026-03-28": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-03-29": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-03-30": {
+     "grade": "full_session",
+     "records": 1091680
+    },
+    "2026-03-31": {
+     "grade": "full_session",
+     "records": 1376363
+    }
+   },
+   "median_trading_session_records": 1206522.0,
+   "role": "new-design",
+   "tally": {
+    "closure": 9,
+    "full_session": 19,
+    "half_session": 3
+   },
+   "unreadable_dates": []
+  },
+  "2026-04": {
+   "dates": {
+    "2026-04-01": {
+     "grade": "full_session",
+     "records": 1022448
+    },
+    "2026-04-02": {
+     "grade": "full_session",
+     "records": 1216097
+    },
+    "2026-04-03": {
+     "grade": "half_session",
+     "records": 114666
+    },
+    "2026-04-04": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-04-05": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-04-06": {
+     "grade": "full_session",
+     "records": 927785
+    },
+    "2026-04-07": {
+     "grade": "full_session",
+     "records": 1238639
+    },
+    "2026-04-08": {
+     "grade": "full_session",
+     "records": 1139931
+    },
+    "2026-04-09": {
+     "grade": "full_session",
+     "records": 869136
+    },
+    "2026-04-10": {
+     "grade": "full_session",
+     "records": 758928
+    },
+    "2026-04-11": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-04-12": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-04-13": {
+     "grade": "full_session",
+     "records": 867313
+    },
+    "2026-04-14": {
+     "grade": "full_session",
+     "records": 715255
+    },
+    "2026-04-15": {
+     "grade": "full_session",
+     "records": 799147
+    },
+    "2026-04-16": {
+     "grade": "full_session",
+     "records": 916332
+    },
+    "2026-04-17": {
+     "grade": "full_session",
+     "records": 904363
+    },
+    "2026-04-18": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-04-19": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-04-20": {
+     "grade": "full_session",
+     "records": 840371
+    },
+    "2026-04-21": {
+     "grade": "full_session",
+     "records": 1032797
+    },
+    "2026-04-22": {
+     "grade": "full_session",
+     "records": 773867
+    },
+    "2026-04-23": {
+     "grade": "full_session",
+     "records": 1176360
+    },
+    "2026-04-24": {
+     "grade": "full_session",
+     "records": 939293
+    },
+    "2026-04-25": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-04-26": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-04-27": {
+     "grade": "full_session",
+     "records": 808273
+    },
+    "2026-04-28": {
+     "grade": "full_session",
+     "records": 1011650
+    },
+    "2026-04-29": {
+     "grade": "full_session",
+     "records": 907280
+    },
+    "2026-04-30": {
+     "grade": "full_session",
+     "records": 1198542
+    }
+   },
+   "median_trading_session_records": 911806.0,
+   "role": "new-design",
+   "tally": {
+    "closure": 8,
+    "full_session": 21,
+    "half_session": 1
+   },
+   "unreadable_dates": []
+  },
+  "2026-07": {
+   "dates": {
+    "2026-07-01": {
+     "grade": "full_session",
+     "records": 1470403
+    },
+    "2026-07-02": {
+     "grade": "full_session",
+     "records": 2079768
+    },
+    "2026-07-03": {
+     "grade": "half_session",
+     "records": 379388
+    },
+    "2026-07-04": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-07-05": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-07-06": {
+     "grade": "full_session",
+     "records": 1348376
+    },
+    "2026-07-07": {
+     "grade": "full_session",
+     "records": 1703748
+    },
+    "2026-07-08": {
+     "grade": "full_session",
+     "records": 1881859
+    },
+    "2026-07-09": {
+     "grade": "full_session",
+     "records": 1380584
+    },
+    "2026-07-10": {
+     "grade": "full_session",
+     "records": 1275313
+    },
+    "2026-07-11": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-07-12": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-07-13": {
+     "grade": "full_session",
+     "records": 1539517
+    },
+    "2026-07-14": {
+     "grade": "full_session",
+     "records": 1509497
+    },
+    "2026-07-15": {
+     "grade": "full_session",
+     "records": 1518065
+    },
+    "2026-07-16": {
+     "grade": "full_session",
+     "records": 1527529
+    },
+    "2026-07-17": {
+     "grade": "full_session",
+     "records": 1814656
+    },
+    "2026-07-18": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-07-19": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-07-20": {
+     "grade": "full_session",
+     "records": 1559770
+    },
+    "2026-07-21": {
+     "grade": "full_session",
+     "records": 1213995
+    },
+    "2026-07-22": {
+     "grade": "full_session",
+     "records": 1218047
+    },
+    "2026-07-23": {
+     "grade": "full_session",
+     "records": 1677794
+    },
+    "2026-07-24": {
+     "grade": "full_session",
+     "records": 1633074
+    },
+    "2026-07-25": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-07-26": {
+     "grade": "closure",
+     "records": 0
+    },
+    "2026-07-27": {
+     "grade": "full_session",
+     "records": 1654047
+    },
+    "2026-07-28": {
+     "grade": "full_session",
+     "records": 1552343
+    },
+    "2026-07-29": {
+     "grade": "full_session",
+     "records": 1956693
+    },
+    "2026-07-30": {
+     "grade": "full_session",
+     "records": 1696891
+    },
+    "2026-07-31": {
+     "grade": "full_session",
+     "records": 1595704
+    }
+   },
+   "median_trading_session_records": 1552343,
+   "role": "spent-design",
+   "tally": {
+    "closure": 8,
+    "full_session": 22,
+    "half_session": 1
+   },
+   "unreadable_dates": []
+  }
+ },
+ "source": {
+  "billing": "metadata endpoints are unbilled; no delivered file is opened",
+  "dataset": "GLBX.MDP3",
+  "endpoint": "metadata.get_record_count",
+  "schema": "tbbo",
+  "session_convention": "date D is the CME session from D-1 17:00 to D 16:00 Central, DST included, via databento_price.session_bounds_utc",
+  "stype_in": "continuous",
+  "symbols": "MNQ.v.0"
+ },
+ "sweep_complete": true,
+ "tool_version": 1
+}

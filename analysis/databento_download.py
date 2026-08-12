@@ -72,6 +72,7 @@ from compression import zstd  # stdlib from Python 3.14
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import databento_price as dp  # SCOPES, WINDOWS, PLANS, session_bounds_utc
+import databento_seal_ledger as seal  # role binding at delivery
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LEDGER_FILE = os.path.join(ROOT, "analysis", "databento-jobs.json")
@@ -722,16 +723,36 @@ def urllib_fetch(url, offset):
 def check_zstd_prefix(path):
     """Validate that the file starts a real zstd frame: magic bytes, then the
     stdlib streaming decompressor over the first chunk, which raises ZstdError
-    on a malformed header. Cheap delivery-format check, not a full decode."""
+    on a malformed header. Cheap delivery-format check, not a full decode.
+
+    This runs over SEALED archives too, which is why it materializes no
+    market data. The contract's content-read rule names decompressing, and
+    Amendment 1 provision 3 makes the operative test whether a channel yields
+    per-session observables. Reading bytes is not inspection - byte-hashing
+    reads the whole file - so the only question was the decompressed output,
+    and there now is none. What escapes this function is a well-formedness
+    verdict about the container, not a market value.
+
+    Keeping the check for sealed files is deliberate. SHA-256 already proves
+    the bytes are the ones the vendor sent, so a hash-matching file that
+    fails HERE means the vendor delivered a corrupt archive. Without this,
+    that corruption would surface only at unseal - for a confirmation month
+    at Stage C, for sealed MBP-1 possibly never - by which time the rolling
+    entitlement window has made the bytes unrecoverable."""
     with open(path, "rb") as fh:
         prefix = fh.read(CHUNK_SIZE)
     if not prefix.startswith(ZSTD_MAGIC):
         return "no zstd magic"
     try:
-        # max_length bounds the OUTPUT: the frame header is still fully
-        # parsed and a malformed one still raises, but a pathological
-        # high-ratio frame cannot balloon a 4 MB prefix into gigabytes.
-        zstd.ZstdDecompressor().decompress(prefix, 1024)
+        # max_length=0 bounds the OUTPUT to nothing while still fully parsing
+        # the frame header, so a corrupt header and a non-zstd body both
+        # still raise. Measured against max_length=1024: identical detection
+        # on both, and neither catches a truncated payload, which the size
+        # and hash checks already cover twice over. Zero is therefore free -
+        # it drops the decompressed kilobyte of market data this used to
+        # produce and discard, and rules out a pathological high-ratio frame
+        # ballooning a 4 MB prefix as well.
+        zstd.ZstdDecompressor().decompress(prefix, 0)
     except zstd.ZstdError as exc:
         return "zstd frame invalid: %s" % exc
     return None
@@ -751,6 +772,17 @@ def download_file(fetch, url, dest_path, expected_size, expected_sha256,
         # discarded and re-downloaded.
         if (os.path.getsize(dest_path) == expected_size
                 and sha256_file(dest_path) == expected_sha256):
+            # The format check runs on THIS path too. Every other promote
+            # path validates the frame, so skipping it here would exempt any
+            # file promoted before the check existed, or by an older tool
+            # version, forever - and for a sealed archive "forever" means
+            # until the entitlement window has closed and the bytes are
+            # unrecoverable, which is the whole argument for checking.
+            if dest_path.endswith(".zst"):
+                zstd_error = check_zstd_prefix(dest_path)
+                if zstd_error:
+                    return False, ("previously promoted file hash-matches "
+                                   "but %s" % zstd_error)
             return True, expected_sha256
         os.remove(dest_path)
     last_error = "not attempted"
@@ -873,6 +905,132 @@ def download_job_files(files, dest_dir, fetch=urllib_fetch,
 
 def landing_dir(scope, window_name, schema):
     return os.path.join(LANDING_ROOT, scope, "%s.%s" % (window_name, schema))
+
+
+# ---------------------------------------------------------------------------
+# Seal binding
+# ---------------------------------------------------------------------------
+# The contract assigns roles "IMMUTABLY, BEFORE ANY CONTENT READ", so binding
+# is part of DELIVERY, not a step someone performs afterwards. Every file this
+# tool lands is bound here, in the settle phase, before the job ledger records
+# it as downloaded.
+
+# Which instrument a scope delivers. Single-instrument only: the seal ledger
+# records one instrument per file, so a scope carrying two legs has no
+# unambiguous binding and must not be guessed at.
+SCOPE_INSTRUMENT = {
+    "mnqv": "MNQ",
+}
+
+# Scopes bought BEFORE the successor contract existed, under the credit-first
+# staged purchase. They are not seal-bound: pairv carries two instruments in
+# one file set, and both predate the assignment table. Naming them explicitly
+# means a NEW scope that is neither mapped nor listed here refuses, rather
+# than silently landing unsealed bytes.
+PRE_CONTRACT_SCOPES = ("pairv", "nqv")
+
+
+def seal_binding(scope, window, schema):
+    """What the seal ledger needs for this delivery, or None when the scope
+    predates the contract. Refuses a scope it can neither map nor excuse.
+
+    Completeness is derived from the window's own bounds rather than its
+    name: a window starting on the first of a month and ending on the first
+    of the next is a complete month, and anything else is a truncated
+    acquisition interval, which Amendment 1 provision 1 records as
+    incomplete_month_delivery with its interval and edge timestamps.
+
+    THE EDGE IS THE SIDE THAT ACTUALLY DEVIATES. Amendment 1 exists for one
+    observed case, 2025-08, which the entitlement window truncates at its
+    START: covered 08-12 to 09-01. Recording the end there would name
+    09-01, the month's own natural boundary, where nothing was truncated -
+    the edge that matters would appear nowhere except inside the interval.
+    A month clipped at both ends has two edges, so this is a list.
+
+    Bounds are recorded as the UTC INSTANTS session_bounds_utc produces, not
+    as plain dates. The whole intake convention turns on the 17:00 Central
+    session boundary, and a bare 2025-08-12 silently drops it."""
+    if scope in PRE_CONTRACT_SCOPES:
+        return None
+    instrument = SCOPE_INSTRUMENT.get(scope)
+    if instrument is None:
+        raise Refusal("scope %s has no seal-ledger instrument mapping and is "
+                      "not listed as pre-contract; refusing to land bytes "
+                      "whose role cannot be bound" % scope)
+    start, end = window[1], window[2]
+    first = dt.date.fromisoformat(start)
+    last = dt.date.fromisoformat(end)
+    month = "%04d-%02d" % (first.year, first.month)
+    nxt = (dt.date(first.year + 1, 1, 1) if first.month == 12
+           else dt.date(first.year, first.month + 1, 1))
+    utc_start, utc_end = dp.session_bounds_utc(start, end)
+    edges = []
+    if first.day != 1:
+        edges.append({"side": "start", "instant": utc_start})
+    if last != nxt:
+        edges.append({"side": "end", "instant": utc_end})
+    complete = not edges
+    return {
+        "instrument": instrument,
+        "month": month,
+        "schema": schema,
+        "delivery_state": (seal.DELIVERY_COMPLETE if complete
+                           else seal.DELIVERY_INCOMPLETE),
+        "covered_interval": None if complete else [utc_start, utc_end],
+        "edge_timestamps": None if complete else edges,
+    }
+
+
+def bind_seal_records(scope, window, schema, entry):
+    """Bind every delivered file of this entry to its contract role.
+
+    Idempotent: record_delivery returns the existing record for identical
+    bytes, so re-running settle over an already-downloaded entry repairs a
+    binding that a crash left unwritten rather than duplicating it. Returns
+    the named problem list, empty when every file is bound."""
+    binding = seal_binding(scope, window, schema)
+    if binding is None:
+        print("  seal: %s predates the contract, not bound" % scope)
+        return []
+    files = entry.get("files") or {}
+    if not files:
+        # Currently unreachable - parse_file_manifest refuses an empty vendor
+        # manifest and verify_landing refuses an empty file record - but the
+        # invariant belongs here rather than resting on two callers: binding
+        # zero files and reporting success would let the job ledger record a
+        # settled delivery that sealed nothing.
+        return [("no delivered files to bind; refusing to report a sealed "
+                 "delivery that bound nothing")]
+    # The DELIVERY timestamp, which is now: every file has just been
+    # downloaded and hash-verified. submitted_at can precede this by hours or
+    # days, and the contract asks when the file was delivered, not when it
+    # was ordered. The quote keeps its own coverage_checked_at, so the
+    # entitlement observation stays paired with the moment it was made.
+    delivered_at = dt.datetime.now(dt.UTC).isoformat()
+    records = seal.load_ledger()
+    problems = []
+    bound = 0
+    for filename, sha256 in sorted(files.items()):
+        try:
+            seal.record_delivery(
+                records, binding["instrument"], binding["month"],
+                binding["schema"], filename, dp.DATASET, sha256,
+                entry.get("job_id"), delivered_at,
+                delivery_state=binding["delivery_state"],
+                covered_interval=binding["covered_interval"],
+                edge_timestamps=binding["edge_timestamps"],
+                coverage_quote=entry.get("live_quote_at_submit"),
+                coverage_checked_at=entry.get("submitted_at"))
+            bound += 1
+        except SystemExit as exc:
+            problems.append("%s: %s" % (filename, exc))
+    if problems:
+        return problems
+    seal.save_ledger(records)
+    print("  seal: %d file(s) bound as %s %s %s, role %s" % (
+        bound, binding["instrument"], binding["month"], binding["schema"],
+        seal.derive_role(binding["instrument"], binding["month"])))
+    return []
 
 
 def verify_landing(dest_dir, files):
@@ -1307,6 +1465,13 @@ def mode_buy(args):
             else:
                 print("  already downloaded; %d file(s) re-verified by hash" %
                       len(entry["files"]))
+                # Idempotent, and a repair path: an entry marked downloaded
+                # by a run that died before binding would otherwise stay
+                # unsealed forever, since this branch is all it ever reaches
+                # again.
+                failures.extend("%s/%s" % (key, line) for line in
+                                bind_seal_records(args.scope, window, schema,
+                                                  entry))
             continue
         state = poll_job_state(entry["job_id"])
         entry["state"] = state
@@ -1332,8 +1497,21 @@ def mode_buy(args):
         if file_failures:
             failures.extend("%s/%s" % (key, f) for f in file_failures)
             continue
-        entry["state"] = "downloaded"
         entry["files"] = verified
+        # SEAL BEFORE the job ledger says downloaded. The contract binds
+        # roles at delivery, before any content read, and the ordering is
+        # what makes that mechanical: a crash after marking downloaded but
+        # before binding would leave bytes on disk with no role, and the
+        # only branch that entry ever reaches again is the re-verify path
+        # above. Binding first means the worst a crash leaves is a bound
+        # file the job ledger has not yet claimed, which the next run
+        # settles idempotently. A binding failure stops the entry short of
+        # downloaded entirely.
+        seal_problems = bind_seal_records(args.scope, window, schema, entry)
+        if seal_problems:
+            failures.extend("%s/%s" % (key, line) for line in seal_problems)
+            continue
+        entry["state"] = "downloaded"
         # Manifest BEFORE the ledger state: a crash between the two then
         # leaves a done-state entry that re-verifies and re-promotes next
         # run, rather than a downloaded-state entry whose promised
@@ -2056,6 +2234,22 @@ def selftest():
                                retries=1, sleep=lambda s: None)
     check("hash-valid but non-zstd delivery refused",
           not ok and "magic" in detail and not os.path.exists(fpath))
+    # The case above stops at the magic bytes and never reaches the
+    # decompressor. This one carries valid magic and a corrupt frame, so it
+    # is the only check that exercises the zero-output decompress - the
+    # difference between detecting vendor corruption in a sealed archive at
+    # delivery and discovering it years later at unseal.
+    cpath = os.path.join(SELFTEST_DIR, "corruptframe.csv.zst")
+    corrupt = ZSTD_MAGIC + b"\xff" * 64
+    csha = hashlib.sha256(corrupt).hexdigest()
+
+    def fetch_corrupt_frame(url, offset):
+        return 200, Reader(corrupt)
+
+    ok, detail = download_file(fetch_corrupt_frame, "u", cpath, len(corrupt),
+                               csha, retries=1, sleep=lambda s: None)
+    check("zstd magic with a corrupt frame refused, no output decompressed",
+          not ok and "frame invalid" in detail and not os.path.exists(cpath))
 
     print("fail closed on partial success")
     both = [
@@ -2084,6 +2278,54 @@ def selftest():
           and any("missing" in b for b in bad))
     check("verify_landing refuses an empty file record",
           verify_landing(outdir, {}) != [])
+
+    print("seal binding derives instrument, month and completeness")
+    full = ("2026-04.full", "2026-04-01", "2026-05-01", "contiguous recent")
+    binding = seal_binding("mnqv", full, "tbbo")
+    check("a full month binds MNQ, its month, and a complete delivery",
+          binding["instrument"] == "MNQ" and binding["month"] == "2026-04"
+          and binding["delivery_state"] == seal.DELIVERY_COMPLETE
+          and binding["covered_interval"] is None)
+    dec = ("2025-12.full", "2025-12-01", "2026-01-01", "year boundary")
+    check("a December window rolls the year correctly",
+          seal_binding("mnqv", dec, "tbbo")["delivery_state"]
+          == seal.DELIVERY_COMPLETE)
+    # 2025-08 is the observed Amendment 1 case and it is truncated at the
+    # START. Naming the end here would record 09-01, the month's own natural
+    # boundary, where nothing was truncated.
+    slice_window = ("2025-08.covered", "2025-08-12", "2025-09-01", "edge")
+    binding = seal_binding("mnqv", slice_window, "tbbo")
+    edges = binding["edge_timestamps"]
+    check("a start-truncated month records the START as its only edge",
+          binding["delivery_state"] == seal.DELIVERY_INCOMPLETE
+          and binding["month"] == "2025-08"
+          and len(edges) == 1 and edges[0]["side"] == "start")
+    check("the edge is a UTC instant carrying the session boundary",
+          edges[0]["instant"] == dp.session_bounds_utc(
+              "2025-08-12", "2025-09-01")[0]
+          and edges[0]["instant"].startswith("2025-08-11T"))
+    check("the covered interval is instants, not bare dates",
+          binding["covered_interval"] == list(dp.session_bounds_utc(
+              "2025-08-12", "2025-09-01")))
+    end_clipped = ("2026-08.partial", "2026-08-01", "2026-08-12", "vendor end")
+    edges = seal_binding("mnqv", end_clipped, "tbbo")["edge_timestamps"]
+    check("an end-truncated month records the END as its only edge",
+          len(edges) == 1 and edges[0]["side"] == "end")
+    fortnight = ("2026-07.2wk", "2026-07-06", "2026-07-20", "paired test")
+    binding = seal_binding("mnqv", fortnight, "tbbo")
+    check("a fortnight inside a month is incomplete, never a month",
+          binding["delivery_state"] == seal.DELIVERY_INCOMPLETE)
+    check("a month clipped at both ends records TWO edges",
+          [e["side"] for e in binding["edge_timestamps"]] == ["start", "end"])
+    check("a pre-contract scope binds nothing rather than guessing",
+          seal_binding("pairv", fortnight, "trades") is None)
+    try:
+        seal_binding("gcv", full, "tbbo")
+        refused = False
+    except Refusal:
+        refused = True
+    check("an unmapped, non-pre-contract scope refuses to land unsealed",
+          refused)
 
     print("landing layout and manifest")
     check("landing dir shape", landing_dir("pairv", "2026-07.2wk", "trades")

@@ -806,6 +806,310 @@
    "body": 11445857,
    "fetched": "2026-08-04T04:27:16.330936+00:00"
   },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-01T21%3A00%3A00&schema=tbbo&start=2025-08-31T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 167086,
+   "fetched": "2026-08-12T08:21:35.205327+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-02T21%3A00%3A00&schema=tbbo&start=2025-09-01T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 891464,
+   "fetched": "2026-08-12T08:21:36.975831+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-03T21%3A00%3A00&schema=tbbo&start=2025-09-02T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 755035,
+   "fetched": "2026-08-12T08:22:09.459068+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-04T21%3A00%3A00&schema=tbbo&start=2025-09-03T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 642061,
+   "fetched": "2026-08-12T08:22:25.605130+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-05T21%3A00%3A00&schema=tbbo&start=2025-09-04T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 912087,
+   "fetched": "2026-08-12T08:22:28.946201+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-06T21%3A00%3A00&schema=tbbo&start=2025-09-05T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:22:31.250892+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-07T21%3A00%3A00&schema=tbbo&start=2025-09-06T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:22:36.986787+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-08T21%3A00%3A00&schema=tbbo&start=2025-09-07T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 614891,
+   "fetched": "2026-08-12T08:22:37.852347+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-09T21%3A00%3A00&schema=tbbo&start=2025-09-08T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 569600,
+   "fetched": "2026-08-12T08:22:39.314461+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-10T21%3A00%3A00&schema=tbbo&start=2025-09-09T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 653362,
+   "fetched": "2026-08-12T08:22:52.309989+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-11T21%3A00%3A00&schema=tbbo&start=2025-09-10T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 571896,
+   "fetched": "2026-08-12T08:22:53.348705+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-12T21%3A00%3A00&schema=tbbo&start=2025-09-11T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 496654,
+   "fetched": "2026-08-12T08:22:58.621394+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-13T21%3A00%3A00&schema=tbbo&start=2025-09-12T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:22:59.975389+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-14T21%3A00%3A00&schema=tbbo&start=2025-09-13T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:23:01.388693+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-15T21%3A00%3A00&schema=tbbo&start=2025-09-14T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 283593,
+   "fetched": "2026-08-12T08:23:02.531780+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-16T21%3A00%3A00&schema=tbbo&start=2025-09-15T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 135753,
+   "fetched": "2026-08-12T08:23:04.422074+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-17T21%3A00%3A00&schema=tbbo&start=2025-09-16T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 168242,
+   "fetched": "2026-08-12T08:23:05.649716+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-18T21%3A00%3A00&schema=tbbo&start=2025-09-17T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 603039,
+   "fetched": "2026-08-12T08:23:07.400609+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-19T21%3A00%3A00&schema=tbbo&start=2025-09-18T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 550814,
+   "fetched": "2026-08-12T08:23:08.645773+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-20T21%3A00%3A00&schema=tbbo&start=2025-09-19T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:23:12.684186+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-21T21%3A00%3A00&schema=tbbo&start=2025-09-20T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:23:23.057226+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-22T21%3A00%3A00&schema=tbbo&start=2025-09-21T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 514285,
+   "fetched": "2026-08-12T08:23:32.086331+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-23T21%3A00%3A00&schema=tbbo&start=2025-09-22T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 599803,
+   "fetched": "2026-08-12T08:23:34.403312+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-24T21%3A00%3A00&schema=tbbo&start=2025-09-23T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 595399,
+   "fetched": "2026-08-12T08:23:37.043209+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-25T21%3A00%3A00&schema=tbbo&start=2025-09-24T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 858141,
+   "fetched": "2026-08-12T08:23:38.235811+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-26T21%3A00%3A00&schema=tbbo&start=2025-09-25T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 777861,
+   "fetched": "2026-08-12T08:23:39.659417+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-27T21%3A00%3A00&schema=tbbo&start=2025-09-26T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:23:44.161741+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-28T21%3A00%3A00&schema=tbbo&start=2025-09-27T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:23:48.504049+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-29T21%3A00%3A00&schema=tbbo&start=2025-09-28T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 608032,
+   "fetched": "2026-08-12T08:23:52.214277+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-09-30T21%3A00%3A00&schema=tbbo&start=2025-09-29T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 689117,
+   "fetched": "2026-08-12T08:23:53.844036+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-01T21%3A00%3A00&schema=tbbo&start=2025-09-30T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 640007,
+   "fetched": "2026-08-12T08:23:54.919308+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-02T21%3A00%3A00&schema=tbbo&start=2025-10-01T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 614686,
+   "fetched": "2026-08-12T08:23:59.049335+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-03T21%3A00%3A00&schema=tbbo&start=2025-10-02T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 674087,
+   "fetched": "2026-08-12T08:24:01.036395+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-04T21%3A00%3A00&schema=tbbo&start=2025-10-03T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:24:02.498025+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-05T21%3A00%3A00&schema=tbbo&start=2025-10-04T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:24:03.353094+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-06T21%3A00%3A00&schema=tbbo&start=2025-10-05T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 546891,
+   "fetched": "2026-08-12T08:24:31.445211+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-07T21%3A00%3A00&schema=tbbo&start=2025-10-06T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 703539,
+   "fetched": "2026-08-12T08:24:33.044114+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-08T21%3A00%3A00&schema=tbbo&start=2025-10-07T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 548037,
+   "fetched": "2026-08-12T08:24:38.907608+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-09T21%3A00%3A00&schema=tbbo&start=2025-10-08T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 676050,
+   "fetched": "2026-08-12T08:24:40.603780+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-10T21%3A00%3A00&schema=tbbo&start=2025-10-09T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1306837,
+   "fetched": "2026-08-12T08:24:44.207558+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-11T21%3A00%3A00&schema=tbbo&start=2025-10-10T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:24:46.367417+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-12T21%3A00%3A00&schema=tbbo&start=2025-10-11T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:25:02.431142+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-13T21%3A00%3A00&schema=tbbo&start=2025-10-12T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1037479,
+   "fetched": "2026-08-12T08:25:04.176159+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-14T21%3A00%3A00&schema=tbbo&start=2025-10-13T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1251478,
+   "fetched": "2026-08-12T08:25:06.057366+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-15T21%3A00%3A00&schema=tbbo&start=2025-10-14T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1109232,
+   "fetched": "2026-08-12T08:25:06.998599+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-16T21%3A00%3A00&schema=tbbo&start=2025-10-15T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1391224,
+   "fetched": "2026-08-12T08:25:09.061137+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-17T21%3A00%3A00&schema=tbbo&start=2025-10-16T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1450191,
+   "fetched": "2026-08-12T08:25:11.584600+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-18T21%3A00%3A00&schema=tbbo&start=2025-10-17T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:25:12.764842+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-19T21%3A00%3A00&schema=tbbo&start=2025-10-18T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:25:16.212827+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-20T21%3A00%3A00&schema=tbbo&start=2025-10-19T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 662542,
+   "fetched": "2026-08-12T08:25:18.223087+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-21T21%3A00%3A00&schema=tbbo&start=2025-10-20T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 681363,
+   "fetched": "2026-08-12T08:25:20.603334+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-22T21%3A00%3A00&schema=tbbo&start=2025-10-21T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1066083,
+   "fetched": "2026-08-12T08:25:23.517411+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-23T21%3A00%3A00&schema=tbbo&start=2025-10-22T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 752331,
+   "fetched": "2026-08-12T08:25:28.370159+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-24T21%3A00%3A00&schema=tbbo&start=2025-10-23T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 601273,
+   "fetched": "2026-08-12T08:25:29.325570+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-25T21%3A00%3A00&schema=tbbo&start=2025-10-24T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:25:31.479252+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-26T21%3A00%3A00&schema=tbbo&start=2025-10-25T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:25:48.286400+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-27T21%3A00%3A00&schema=tbbo&start=2025-10-26T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 491983,
+   "fetched": "2026-08-12T08:26:00.560146+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-28T21%3A00%3A00&schema=tbbo&start=2025-10-27T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 549010,
+   "fetched": "2026-08-12T08:26:02.488106+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-29T21%3A00%3A00&schema=tbbo&start=2025-10-28T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 876120,
+   "fetched": "2026-08-12T08:26:04.606273+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-30T21%3A00%3A00&schema=tbbo&start=2025-10-29T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1136563,
+   "fetched": "2026-08-12T08:26:12.747597+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-10-31T21%3A00%3A00&schema=tbbo&start=2025-10-30T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 876654,
+   "fetched": "2026-08-12T08:26:14.625120+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-01T21%3A00%3A00&schema=tbbo&start=2025-10-31T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:26:16.028108+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-02T22%3A00%3A00&schema=tbbo&start=2025-11-01T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:26:49.851133+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-03T22%3A00%3A00&schema=tbbo&start=2025-11-02T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 717338,
+   "fetched": "2026-08-12T08:26:57.123856+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-04T22%3A00%3A00&schema=tbbo&start=2025-11-03T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1036665,
+   "fetched": "2026-08-12T08:27:37.135262+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-05T22%3A00%3A00&schema=tbbo&start=2025-11-04T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 923394,
+   "fetched": "2026-08-12T08:28:01.104659+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-06T22%3A00%3A00&schema=tbbo&start=2025-11-05T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1174480,
+   "fetched": "2026-08-12T08:28:02.529729+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-07T22%3A00%3A00&schema=tbbo&start=2025-11-06T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1336520,
+   "fetched": "2026-08-12T08:28:10.830566+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-08T22%3A00%3A00&schema=tbbo&start=2025-11-07T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:28:27.095650+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-09T22%3A00%3A00&schema=tbbo&start=2025-11-08T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:28:34.745449+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-10T22%3A00%3A00&schema=tbbo&start=2025-11-09T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 870128,
+   "fetched": "2026-08-12T08:28:35.800973+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-11T22%3A00%3A00&schema=tbbo&start=2025-11-10T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 813477,
+   "fetched": "2026-08-12T08:28:37.177139+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-12T22%3A00%3A00&schema=tbbo&start=2025-11-11T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 869185,
+   "fetched": "2026-08-12T08:28:38.066117+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-13T22%3A00%3A00&schema=tbbo&start=2025-11-12T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1328897,
+   "fetched": "2026-08-12T08:28:42.918701+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-14T22%3A00%3A00&schema=tbbo&start=2025-11-13T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1416464,
+   "fetched": "2026-08-12T08:28:44.116336+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-15T22%3A00%3A00&schema=tbbo&start=2025-11-14T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:28:51.376903+00:00"
+  },
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-16T22%3A00%3A00&schema=definition&start=2025-11-02T23%3A00%3A00&stype_in=continuous&symbols=NQ.v.0": {
    "body": 15,
    "fetched": "2026-08-04T04:34:10.065131+00:00"
@@ -818,6 +1122,62 @@
    "body": 4409148,
    "fetched": "2026-08-04T04:33:19.540471+00:00"
   },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-16T22%3A00%3A00&schema=tbbo&start=2025-11-15T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:28:56.057081+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-17T22%3A00%3A00&schema=tbbo&start=2025-11-16T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1336952,
+   "fetched": "2026-08-12T08:28:57.610588+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-18T22%3A00%3A00&schema=tbbo&start=2025-11-17T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1695615,
+   "fetched": "2026-08-12T08:29:16.294228+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-19T22%3A00%3A00&schema=tbbo&start=2025-11-18T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1515496,
+   "fetched": "2026-08-12T08:29:18.303337+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-20T22%3A00%3A00&schema=tbbo&start=2025-11-19T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1794919,
+   "fetched": "2026-08-12T08:29:19.108060+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-21T22%3A00%3A00&schema=tbbo&start=2025-11-20T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1703532,
+   "fetched": "2026-08-12T08:29:19.922509+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-22T22%3A00%3A00&schema=tbbo&start=2025-11-21T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:29:22.888525+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-23T22%3A00%3A00&schema=tbbo&start=2025-11-22T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:29:26.036495+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-24T22%3A00%3A00&schema=tbbo&start=2025-11-23T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1046299,
+   "fetched": "2026-08-12T08:29:28.484387+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-25T22%3A00%3A00&schema=tbbo&start=2025-11-24T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1099658,
+   "fetched": "2026-08-12T08:29:31.521785+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-26T22%3A00%3A00&schema=tbbo&start=2025-11-25T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 855254,
+   "fetched": "2026-08-12T08:29:33.116437+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-27T22%3A00%3A00&schema=tbbo&start=2025-11-26T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 114888,
+   "fetched": "2026-08-12T08:29:34.850454+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-28T22%3A00%3A00&schema=tbbo&start=2025-11-27T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 184500,
+   "fetched": "2026-08-12T08:29:37.244320+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-29T22%3A00%3A00&schema=tbbo&start=2025-11-28T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:29:38.125798+00:00"
+  },
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-30T22%3A00%3A00&schema=definition&start=2025-10-31T22%3A00%3A00&stype_in=continuous&symbols=NQ.v.0": {
    "body": 29,
    "fetched": "2026-08-04T04:28:11.489561+00:00"
@@ -826,9 +1186,429 @@
    "body": 57963,
    "fetched": "2026-08-04T04:29:13.327095+00:00"
   },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-30T22%3A00%3A00&schema=tbbo&start=2025-11-29T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:29:40.051403+00:00"
+  },
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-11-30T22%3A00%3A00&schema=trades&start=2025-10-31T22%3A00%3A00&stype_in=continuous&symbols=NQ.v.0": {
    "body": 8715195,
    "fetched": "2026-08-04T04:27:08.247275+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-01T22%3A00%3A00&schema=tbbo&start=2025-11-30T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 939607,
+   "fetched": "2026-08-12T08:29:41.312335+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-02T22%3A00%3A00&schema=tbbo&start=2025-12-01T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 931033,
+   "fetched": "2026-08-12T08:29:43.530578+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-03T22%3A00%3A00&schema=tbbo&start=2025-12-02T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 794469,
+   "fetched": "2026-08-12T08:29:55.364774+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-04T22%3A00%3A00&schema=tbbo&start=2025-12-03T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 822443,
+   "fetched": "2026-08-12T08:29:58.510123+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-05T22%3A00%3A00&schema=tbbo&start=2025-12-04T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 780158,
+   "fetched": "2026-08-12T08:30:00.351737+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-06T22%3A00%3A00&schema=tbbo&start=2025-12-05T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:30:18.552152+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-07T22%3A00%3A00&schema=tbbo&start=2025-12-06T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:30:22.595466+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-08T22%3A00%3A00&schema=tbbo&start=2025-12-07T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 702956,
+   "fetched": "2026-08-12T08:30:29.413121+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-09T22%3A00%3A00&schema=tbbo&start=2025-12-08T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 614502,
+   "fetched": "2026-08-12T08:30:32.031303+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-10T22%3A00%3A00&schema=tbbo&start=2025-12-09T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 862181,
+   "fetched": "2026-08-12T08:30:45.959995+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-11T22%3A00%3A00&schema=tbbo&start=2025-12-10T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1011466,
+   "fetched": "2026-08-12T08:30:48.478132+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-12T22%3A00%3A00&schema=tbbo&start=2025-12-11T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1112166,
+   "fetched": "2026-08-12T08:30:49.497542+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-13T22%3A00%3A00&schema=tbbo&start=2025-12-12T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:30:52.796151+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-14T22%3A00%3A00&schema=tbbo&start=2025-12-13T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:30:54.724677+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-15T22%3A00%3A00&schema=tbbo&start=2025-12-14T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 525841,
+   "fetched": "2026-08-12T08:31:06.084162+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-16T22%3A00%3A00&schema=tbbo&start=2025-12-15T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 341902,
+   "fetched": "2026-08-12T08:31:09.145221+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-17T22%3A00%3A00&schema=tbbo&start=2025-12-16T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 203230,
+   "fetched": "2026-08-12T08:31:13.806619+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-18T22%3A00%3A00&schema=tbbo&start=2025-12-17T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 974502,
+   "fetched": "2026-08-12T08:31:18.051077+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-19T22%3A00%3A00&schema=tbbo&start=2025-12-18T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 708122,
+   "fetched": "2026-08-12T08:31:31.431705+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-20T22%3A00%3A00&schema=tbbo&start=2025-12-19T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:31:53.325357+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-21T22%3A00%3A00&schema=tbbo&start=2025-12-20T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:31:54.276322+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-22T22%3A00%3A00&schema=tbbo&start=2025-12-21T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 516657,
+   "fetched": "2026-08-12T08:32:09.125179+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-23T22%3A00%3A00&schema=tbbo&start=2025-12-22T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 458172,
+   "fetched": "2026-08-12T08:32:20.680196+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-24T22%3A00%3A00&schema=tbbo&start=2025-12-23T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 216959,
+   "fetched": "2026-08-12T08:32:22.440068+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-25T22%3A00%3A00&schema=tbbo&start=2025-12-24T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:32:23.843235+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-26T22%3A00%3A00&schema=tbbo&start=2025-12-25T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 337246,
+   "fetched": "2026-08-12T08:32:24.985202+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-27T22%3A00%3A00&schema=tbbo&start=2025-12-26T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:32:26.897615+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-28T22%3A00%3A00&schema=tbbo&start=2025-12-27T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:32:29.287390+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-29T22%3A00%3A00&schema=tbbo&start=2025-12-28T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 552415,
+   "fetched": "2026-08-12T08:32:47.650359+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-30T22%3A00%3A00&schema=tbbo&start=2025-12-29T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 447732,
+   "fetched": "2026-08-12T08:32:49.461416+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2025-12-31T22%3A00%3A00&schema=tbbo&start=2025-12-30T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 492229,
+   "fetched": "2026-08-12T08:32:50.101404+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-01T22%3A00%3A00&schema=tbbo&start=2025-12-31T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:32:52.802173+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-02T22%3A00%3A00&schema=tbbo&start=2026-01-01T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 875919,
+   "fetched": "2026-08-12T08:32:54.514875+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-03T22%3A00%3A00&schema=tbbo&start=2026-01-02T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:32:55.896808+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-04T22%3A00%3A00&schema=tbbo&start=2026-01-03T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:33:44.623538+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-05T22%3A00%3A00&schema=tbbo&start=2026-01-04T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 677108,
+   "fetched": "2026-08-12T08:33:47.243438+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-06T22%3A00%3A00&schema=tbbo&start=2026-01-05T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 685782,
+   "fetched": "2026-08-12T08:33:53.831973+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-07T22%3A00%3A00&schema=tbbo&start=2026-01-06T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 706588,
+   "fetched": "2026-08-12T08:33:56.046766+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-08T22%3A00%3A00&schema=tbbo&start=2026-01-07T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 799255,
+   "fetched": "2026-08-12T08:33:57.740905+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-09T22%3A00%3A00&schema=tbbo&start=2026-01-08T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 822122,
+   "fetched": "2026-08-12T08:33:59.413285+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-10T22%3A00%3A00&schema=tbbo&start=2026-01-09T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:34:01.760066+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-11T22%3A00%3A00&schema=tbbo&start=2026-01-10T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:34:04.547186+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-12T22%3A00%3A00&schema=tbbo&start=2026-01-11T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 701070,
+   "fetched": "2026-08-12T08:34:06.507824+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-13T22%3A00%3A00&schema=tbbo&start=2026-01-12T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 927445,
+   "fetched": "2026-08-12T08:34:08.337249+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-14T22%3A00%3A00&schema=tbbo&start=2026-01-13T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1114235,
+   "fetched": "2026-08-12T08:34:36.495172+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-15T22%3A00%3A00&schema=tbbo&start=2026-01-14T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 939326,
+   "fetched": "2026-08-12T08:34:43.446191+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-16T22%3A00%3A00&schema=tbbo&start=2026-01-15T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 778931,
+   "fetched": "2026-08-12T08:34:55.902008+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-17T22%3A00%3A00&schema=tbbo&start=2026-01-16T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:35:02.304442+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-18T22%3A00%3A00&schema=tbbo&start=2026-01-17T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:35:04.855642+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-19T22%3A00%3A00&schema=tbbo&start=2026-01-18T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 456224,
+   "fetched": "2026-08-12T08:35:09.880017+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-20T22%3A00%3A00&schema=tbbo&start=2026-01-19T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1229332,
+   "fetched": "2026-08-12T08:35:11.927096+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-21T22%3A00%3A00&schema=tbbo&start=2026-01-20T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1393245,
+   "fetched": "2026-08-12T08:35:13.307148+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-22T22%3A00%3A00&schema=tbbo&start=2026-01-21T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 900605,
+   "fetched": "2026-08-12T08:35:14.596746+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-23T22%3A00%3A00&schema=tbbo&start=2026-01-22T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 877046,
+   "fetched": "2026-08-12T08:35:16.354572+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-24T22%3A00%3A00&schema=tbbo&start=2026-01-23T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:35:18.235254+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-25T22%3A00%3A00&schema=tbbo&start=2026-01-24T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:35:37.855369+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-26T22%3A00%3A00&schema=tbbo&start=2026-01-25T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 776975,
+   "fetched": "2026-08-12T08:35:40.396246+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-27T22%3A00%3A00&schema=tbbo&start=2026-01-26T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 648173,
+   "fetched": "2026-08-12T08:36:06.368770+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-28T22%3A00%3A00&schema=tbbo&start=2026-01-27T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 891301,
+   "fetched": "2026-08-12T08:36:07.638827+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-29T22%3A00%3A00&schema=tbbo&start=2026-01-28T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1308943,
+   "fetched": "2026-08-12T08:36:55.737313+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-30T22%3A00%3A00&schema=tbbo&start=2026-01-29T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1439579,
+   "fetched": "2026-08-12T08:36:57.092450+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-01-31T22%3A00%3A00&schema=tbbo&start=2026-01-30T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:37:33.019199+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-01T22%3A00%3A00&schema=tbbo&start=2026-01-31T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:37:33.857586+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-02T22%3A00%3A00&schema=tbbo&start=2026-02-01T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1132592,
+   "fetched": "2026-08-12T08:37:34.976554+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-03T22%3A00%3A00&schema=tbbo&start=2026-02-02T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1446412,
+   "fetched": "2026-08-12T08:37:53.831023+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-04T22%3A00%3A00&schema=tbbo&start=2026-02-03T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1519934,
+   "fetched": "2026-08-12T08:37:56.119824+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-05T22%3A00%3A00&schema=tbbo&start=2026-02-04T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1518373,
+   "fetched": "2026-08-12T08:38:04.936112+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-06T22%3A00%3A00&schema=tbbo&start=2026-02-05T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1175459,
+   "fetched": "2026-08-12T08:38:08.738572+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-07T22%3A00%3A00&schema=tbbo&start=2026-02-06T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:38:13.750108+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-08T22%3A00%3A00&schema=tbbo&start=2026-02-07T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:38:15.231164+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-09T22%3A00%3A00&schema=tbbo&start=2026-02-08T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 879316,
+   "fetched": "2026-08-12T08:38:16.296916+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-10T22%3A00%3A00&schema=tbbo&start=2026-02-09T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 948968,
+   "fetched": "2026-08-12T08:38:17.410409+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-11T22%3A00%3A00&schema=tbbo&start=2026-02-10T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1088831,
+   "fetched": "2026-08-12T08:38:19.328706+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-12T22%3A00%3A00&schema=tbbo&start=2026-02-11T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1240320,
+   "fetched": "2026-08-12T08:38:21.660979+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-13T22%3A00%3A00&schema=tbbo&start=2026-02-12T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1384582,
+   "fetched": "2026-08-12T08:38:37.250852+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-14T22%3A00%3A00&schema=tbbo&start=2026-02-13T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:38:39.361061+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-15T22%3A00%3A00&schema=tbbo&start=2026-02-14T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:38:40.876435+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-16T22%3A00%3A00&schema=tbbo&start=2026-02-15T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 332102,
+   "fetched": "2026-08-12T08:38:54.658239+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-17T22%3A00%3A00&schema=tbbo&start=2026-02-16T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1269956,
+   "fetched": "2026-08-12T08:39:01.580189+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-18T22%3A00%3A00&schema=tbbo&start=2026-02-17T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 931564,
+   "fetched": "2026-08-12T08:39:02.939031+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-19T22%3A00%3A00&schema=tbbo&start=2026-02-18T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1071248,
+   "fetched": "2026-08-12T08:39:03.931482+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-20T22%3A00%3A00&schema=tbbo&start=2026-02-19T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1203735,
+   "fetched": "2026-08-12T08:39:06.287099+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-21T22%3A00%3A00&schema=tbbo&start=2026-02-20T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:39:07.761039+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-22T22%3A00%3A00&schema=tbbo&start=2026-02-21T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:39:10.238852+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-23T22%3A00%3A00&schema=tbbo&start=2026-02-22T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1037611,
+   "fetched": "2026-08-12T08:39:13.508042+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-24T22%3A00%3A00&schema=tbbo&start=2026-02-23T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 908656,
+   "fetched": "2026-08-12T08:39:18.205962+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-25T22%3A00%3A00&schema=tbbo&start=2026-02-24T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 727744,
+   "fetched": "2026-08-12T08:39:20.528945+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-26T22%3A00%3A00&schema=tbbo&start=2026-02-25T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1115974,
+   "fetched": "2026-08-12T08:39:22.388470+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-27T22%3A00%3A00&schema=tbbo&start=2026-02-26T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1076526,
+   "fetched": "2026-08-12T08:39:23.301417+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-02-28T22%3A00%3A00&schema=tbbo&start=2026-02-27T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:39:24.599660+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-01T22%3A00%3A00&schema=tbbo&start=2026-02-28T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:39:26.002980+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-02T22%3A00%3A00&schema=tbbo&start=2026-03-01T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1249728,
+   "fetched": "2026-08-12T08:39:27.749155+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-03T22%3A00%3A00&schema=tbbo&start=2026-03-02T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1536832,
+   "fetched": "2026-08-12T08:39:30.633324+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-04T22%3A00%3A00&schema=tbbo&start=2026-03-03T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1215206,
+   "fetched": "2026-08-12T08:39:31.496353+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-05T22%3A00%3A00&schema=tbbo&start=2026-03-04T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1403401,
+   "fetched": "2026-08-12T08:39:32.539346+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-06T22%3A00%3A00&schema=tbbo&start=2026-03-05T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1415925,
+   "fetched": "2026-08-12T08:39:34.429096+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-07T22%3A00%3A00&schema=tbbo&start=2026-03-06T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:39:42.467993+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-08T21%3A00%3A00&schema=tbbo&start=2026-03-07T23%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:39:43.636494+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-09T21%3A00%3A00&schema=tbbo&start=2026-03-08T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1508603,
+   "fetched": "2026-08-12T08:39:44.432549+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-10T21%3A00%3A00&schema=tbbo&start=2026-03-09T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1281773,
+   "fetched": "2026-08-12T08:39:47.019563+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-11T21%3A00%3A00&schema=tbbo&start=2026-03-10T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1078864,
+   "fetched": "2026-08-12T08:39:49.312862+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-12T21%3A00%3A00&schema=tbbo&start=2026-03-11T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1174899,
+   "fetched": "2026-08-12T08:39:50.242434+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-13T21%3A00%3A00&schema=tbbo&start=2026-03-12T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1213963,
+   "fetched": "2026-08-12T08:39:51.876989+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-14T21%3A00%3A00&schema=tbbo&start=2026-03-13T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:39:53.320707+00:00"
   },
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-15T21%3A00%3A00&schema=definition&start=2026-03-01T23%3A00%3A00&stype_in=continuous&symbols=NQ.v.0": {
    "body": 13,
@@ -842,6 +1622,70 @@
    "body": 4442886,
    "fetched": "2026-08-04T04:33:24.512627+00:00"
   },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-15T21%3A00%3A00&schema=tbbo&start=2026-03-14T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:40:08.291920+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-16T21%3A00%3A00&schema=tbbo&start=2026-03-15T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 576816,
+   "fetched": "2026-08-12T08:40:14.657221+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-17T21%3A00%3A00&schema=tbbo&start=2026-03-16T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 203493,
+   "fetched": "2026-08-12T08:40:21.576195+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-18T21%3A00%3A00&schema=tbbo&start=2026-03-17T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 147026,
+   "fetched": "2026-08-12T08:40:25.290741+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-19T21%3A00%3A00&schema=tbbo&start=2026-03-18T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1199081,
+   "fetched": "2026-08-12T08:40:30.065291+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-20T21%3A00%3A00&schema=tbbo&start=2026-03-19T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1071821,
+   "fetched": "2026-08-12T08:40:32.613854+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-21T21%3A00%3A00&schema=tbbo&start=2026-03-20T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:40:35.072965+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-22T21%3A00%3A00&schema=tbbo&start=2026-03-21T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:40:36.259308+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-23T21%3A00%3A00&schema=tbbo&start=2026-03-22T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1339480,
+   "fetched": "2026-08-12T08:40:37.486292+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-24T21%3A00%3A00&schema=tbbo&start=2026-03-23T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1248256,
+   "fetched": "2026-08-12T08:40:42.958518+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-25T21%3A00%3A00&schema=tbbo&start=2026-03-24T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1075988,
+   "fetched": "2026-08-12T08:40:44.603603+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-26T21%3A00%3A00&schema=tbbo&start=2026-03-25T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1134645,
+   "fetched": "2026-08-12T08:40:46.629987+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-27T21%3A00%3A00&schema=tbbo&start=2026-03-26T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1030487,
+   "fetched": "2026-08-12T08:40:48.132230+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-28T21%3A00%3A00&schema=tbbo&start=2026-03-27T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:40:51.779262+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-29T21%3A00%3A00&schema=tbbo&start=2026-03-28T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:41:16.634669+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-30T21%3A00%3A00&schema=tbbo&start=2026-03-29T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1091680,
+   "fetched": "2026-08-12T08:41:18.007582+00:00"
+  },
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-31T21%3A00%3A00&schema=definition&start=2026-02-28T23%3A00%3A00&stype_in=continuous&symbols=NQ.v.0": {
    "body": 27,
    "fetched": "2026-08-04T04:28:31.168236+00:00"
@@ -850,9 +1694,129 @@
    "body": 59512,
    "fetched": "2026-08-04T04:29:17.872927+00:00"
   },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-31T21%3A00%3A00&schema=tbbo&start=2026-03-30T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1376363,
+   "fetched": "2026-08-12T08:41:19.133386+00:00"
+  },
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-03-31T21%3A00%3A00&schema=trades&start=2026-02-28T23%3A00%3A00&stype_in=continuous&symbols=NQ.v.0": {
    "body": 8773164,
    "fetched": "2026-08-04T04:27:18.784312+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-01T21%3A00%3A00&schema=tbbo&start=2026-03-31T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1022448,
+   "fetched": "2026-08-12T08:41:20.898988+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-02T21%3A00%3A00&schema=tbbo&start=2026-04-01T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1216097,
+   "fetched": "2026-08-12T08:41:22.037712+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-03T21%3A00%3A00&schema=tbbo&start=2026-04-02T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 114666,
+   "fetched": "2026-08-12T08:41:30.442921+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-04T21%3A00%3A00&schema=tbbo&start=2026-04-03T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:41:32.219108+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-05T21%3A00%3A00&schema=tbbo&start=2026-04-04T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:41:39.865486+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-06T21%3A00%3A00&schema=tbbo&start=2026-04-05T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 927785,
+   "fetched": "2026-08-12T08:41:47.437252+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-07T21%3A00%3A00&schema=tbbo&start=2026-04-06T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1238639,
+   "fetched": "2026-08-12T08:41:49.157883+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-08T21%3A00%3A00&schema=tbbo&start=2026-04-07T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1139931,
+   "fetched": "2026-08-12T08:41:53.393305+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-09T21%3A00%3A00&schema=tbbo&start=2026-04-08T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 869136,
+   "fetched": "2026-08-12T08:42:05.874993+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-10T21%3A00%3A00&schema=tbbo&start=2026-04-09T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 758928,
+   "fetched": "2026-08-12T08:42:06.749993+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-11T21%3A00%3A00&schema=tbbo&start=2026-04-10T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:42:11.859753+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-12T21%3A00%3A00&schema=tbbo&start=2026-04-11T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:42:13.722064+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-13T21%3A00%3A00&schema=tbbo&start=2026-04-12T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 867313,
+   "fetched": "2026-08-12T08:42:15.155092+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-14T21%3A00%3A00&schema=tbbo&start=2026-04-13T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 715255,
+   "fetched": "2026-08-12T08:42:45.698207+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-15T21%3A00%3A00&schema=tbbo&start=2026-04-14T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 799147,
+   "fetched": "2026-08-12T08:42:46.933059+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-16T21%3A00%3A00&schema=tbbo&start=2026-04-15T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 916332,
+   "fetched": "2026-08-12T08:42:48.762268+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-17T21%3A00%3A00&schema=tbbo&start=2026-04-16T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 904363,
+   "fetched": "2026-08-12T08:42:50.603729+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-18T21%3A00%3A00&schema=tbbo&start=2026-04-17T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:42:51.787277+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-19T21%3A00%3A00&schema=tbbo&start=2026-04-18T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:42:54.951078+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-20T21%3A00%3A00&schema=tbbo&start=2026-04-19T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 840371,
+   "fetched": "2026-08-12T08:42:57.138417+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-21T21%3A00%3A00&schema=tbbo&start=2026-04-20T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1032797,
+   "fetched": "2026-08-12T08:43:03.812679+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-22T21%3A00%3A00&schema=tbbo&start=2026-04-21T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 773867,
+   "fetched": "2026-08-12T08:43:04.855750+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-23T21%3A00%3A00&schema=tbbo&start=2026-04-22T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1176360,
+   "fetched": "2026-08-12T08:43:06.641973+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-24T21%3A00%3A00&schema=tbbo&start=2026-04-23T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 939293,
+   "fetched": "2026-08-12T08:43:15.835245+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-25T21%3A00%3A00&schema=tbbo&start=2026-04-24T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:43:23.319560+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-26T21%3A00%3A00&schema=tbbo&start=2026-04-25T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:43:25.172732+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-27T21%3A00%3A00&schema=tbbo&start=2026-04-26T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 808273,
+   "fetched": "2026-08-12T08:43:35.891053+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-28T21%3A00%3A00&schema=tbbo&start=2026-04-27T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1011650,
+   "fetched": "2026-08-12T08:43:42.434948+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-29T21%3A00%3A00&schema=tbbo&start=2026-04-28T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 907280,
+   "fetched": "2026-08-12T08:43:48.284180+00:00"
   },
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-30T21%3A00%3A00&schema=definition&start=2026-03-31T22%3A00%3A00&stype_in=continuous&symbols=NQ.v.0": {
    "body": 27,
@@ -865,6 +1829,10 @@
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-30T21%3A00%3A00&schema=tbbo&start=2026-03-31T22%3A00%3A00&stype_in=continuous&symbols=NQ.v.0": {
    "body": 7707033,
    "fetched": "2026-08-05T08:05:41.888880+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-04-30T21%3A00%3A00&schema=tbbo&start=2026-04-29T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1198542,
+   "fetched": "2026-08-12T08:43:51.693572+00:00"
   },
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-05-31T21%3A00%3A00&schema=definition&start=2026-04-30T22%3A00%3A00&stype_in=continuous&symbols=NQ.v.0": {
    "body": 28,
@@ -918,25 +1886,69 @@
    "body": 9232203,
    "fetched": "2026-08-04T04:27:22.917581+00:00"
   },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-01T21%3A00%3A00&schema=tbbo&start=2026-06-30T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1470403,
+   "fetched": "2026-08-12T08:43:52.933606+00:00"
+  },
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-01T21%3A00%3A00&schema=trades&start=2026-06-30T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
    "body": 1470403,
    "fetched": "2026-08-12T08:10:25.572163+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-02T21%3A00%3A00&schema=tbbo&start=2026-07-01T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 2079768,
+   "fetched": "2026-08-12T08:44:11.653029+00:00"
   },
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-02T21%3A00%3A00&schema=trades&start=2026-07-01T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
    "body": 2079768,
    "fetched": "2026-08-12T08:10:32.125992+00:00"
   },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-03T21%3A00%3A00&schema=tbbo&start=2026-07-02T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 379388,
+   "fetched": "2026-08-12T08:44:22.023154+00:00"
+  },
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-03T21%3A00%3A00&schema=trades&start=2026-07-02T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
    "body": 379388,
    "fetched": "2026-08-12T08:10:33.986640+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-04T21%3A00%3A00&schema=tbbo&start=2026-07-03T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:44:23.036766+00:00"
   },
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-04T21%3A00%3A00&schema=trades&start=2026-07-03T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
    "body": 0,
    "fetched": "2026-08-12T08:10:35.264970+00:00"
   },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-05T21%3A00%3A00&schema=tbbo&start=2026-07-04T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:44:33.755318+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-06T21%3A00%3A00&schema=tbbo&start=2026-07-05T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1348376,
+   "fetched": "2026-08-12T08:44:39.081797+00:00"
+  },
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-06T21%3A00%3A00&schema=trades&start=2026-07-05T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
    "body": 1348376,
    "fetched": "2026-08-12T08:10:46.373305+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-07T21%3A00%3A00&schema=tbbo&start=2026-07-06T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1703748,
+   "fetched": "2026-08-12T08:44:43.959339+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-08T21%3A00%3A00&schema=tbbo&start=2026-07-07T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1881859,
+   "fetched": "2026-08-12T08:44:45.683748+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-09T21%3A00%3A00&schema=tbbo&start=2026-07-08T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1380584,
+   "fetched": "2026-08-12T08:44:46.751372+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-10T21%3A00%3A00&schema=tbbo&start=2026-07-09T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1275313,
+   "fetched": "2026-08-12T08:44:48.124960+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-11T21%3A00%3A00&schema=tbbo&start=2026-07-10T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:44:59.792652+00:00"
   },
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-12T21%3A00%3A00&schema=definition&start=2026-06-21T22%3A00%3A00&stype_in=continuous&symbols=NQ.v.0": {
    "body": 19,
@@ -949,6 +1961,34 @@
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-12T21%3A00%3A00&schema=tbbo&start=2026-06-21T22%3A00%3A00&stype_in=continuous&symbols=NQ.v.0": {
    "body": 5800643,
    "fetched": "2026-08-04T04:33:28.579731+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-12T21%3A00%3A00&schema=tbbo&start=2026-07-11T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:45:09.652659+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-13T21%3A00%3A00&schema=tbbo&start=2026-07-12T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1539517,
+   "fetched": "2026-08-12T08:45:11.747443+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-14T21%3A00%3A00&schema=tbbo&start=2026-07-13T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1509497,
+   "fetched": "2026-08-12T08:45:14.251606+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-15T21%3A00%3A00&schema=tbbo&start=2026-07-14T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1518065,
+   "fetched": "2026-08-12T08:45:16.141742+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-16T21%3A00%3A00&schema=tbbo&start=2026-07-15T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1527529,
+   "fetched": "2026-08-12T08:45:18.072641+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-17T21%3A00%3A00&schema=tbbo&start=2026-07-16T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1814656,
+   "fetched": "2026-08-12T08:45:19.410749+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-18T21%3A00%3A00&schema=tbbo&start=2026-07-17T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:45:21.568535+00:00"
   },
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-19T21%3A00%3A00&schema=definition&start=2026-07-05T22%3A00%3A00&stype_in=continuous&symbols=NQ.v.0%2CMNQ.v.0": {
    "body": 26,
@@ -974,6 +2014,10 @@
    "body": 15499144,
    "fetched": "2026-08-05T09:10:31.534899+00:00"
   },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-19T21%3A00%3A00&schema=tbbo&start=2026-07-18T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:45:22.828341+00:00"
+  },
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-19T21%3A00%3A00&schema=trades&start=2026-07-05T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
    "body": 15499144,
    "fetched": "2026-08-05T09:10:24.990798+00:00"
@@ -981,6 +2025,50 @@
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-19T21%3A00%3A00&schema=trades&start=2026-07-05T22%3A00%3A00&stype_in=continuous&symbols=NQ.v.0%2CMNQ.v.0": {
    "body": 19220574,
    "fetched": "2026-08-05T08:05:17.527504+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-20T21%3A00%3A00&schema=tbbo&start=2026-07-19T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1559770,
+   "fetched": "2026-08-12T08:45:23.736639+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-21T21%3A00%3A00&schema=tbbo&start=2026-07-20T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1213995,
+   "fetched": "2026-08-12T08:45:24.769008+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-22T21%3A00%3A00&schema=tbbo&start=2026-07-21T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1218047,
+   "fetched": "2026-08-12T08:45:25.755907+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-23T21%3A00%3A00&schema=tbbo&start=2026-07-22T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1677794,
+   "fetched": "2026-08-12T08:45:28.897580+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-24T21%3A00%3A00&schema=tbbo&start=2026-07-23T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1633074,
+   "fetched": "2026-08-12T08:45:29.638175+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-25T21%3A00%3A00&schema=tbbo&start=2026-07-24T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:45:39.849286+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-26T21%3A00%3A00&schema=tbbo&start=2026-07-25T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 0,
+   "fetched": "2026-08-12T08:45:40.964540+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-27T21%3A00%3A00&schema=tbbo&start=2026-07-26T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1654047,
+   "fetched": "2026-08-12T08:45:50.514630+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-28T21%3A00%3A00&schema=tbbo&start=2026-07-27T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1552343,
+   "fetched": "2026-08-12T08:45:52.181609+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-29T21%3A00%3A00&schema=tbbo&start=2026-07-28T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1956693,
+   "fetched": "2026-08-12T08:45:53.366699+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-30T21%3A00%3A00&schema=tbbo&start=2026-07-29T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1696891,
+   "fetched": "2026-08-12T08:45:57.330820+00:00"
   },
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-31T21%3A00%3A00&schema=definition&start=2026-06-30T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
    "body": 28,
@@ -1017,6 +2105,10 @@
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-31T21%3A00%3A00&schema=tbbo&start=2026-06-30T22%3A00%3A00&stype_in=continuous&symbols=NQ.v.0": {
    "body": 9099008,
    "fetched": "2026-08-05T08:07:20.193950+00:00"
+  },
+  "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-31T21%3A00%3A00&schema=tbbo&start=2026-07-30T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
+   "body": 1595704,
+   "fetched": "2026-08-12T08:45:58.865176+00:00"
   },
   "metadata.get_record_count|json|dataset=GLBX.MDP3&end=2026-07-31T21%3A00%3A00&schema=trades&start=2026-06-30T22%3A00%3A00&stype_in=continuous&symbols=MNQ.v.0": {
    "body": 35187061,

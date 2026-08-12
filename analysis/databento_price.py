@@ -195,26 +195,36 @@ CACHE_MISSES = 0
 
 
 def read_cache_file():
-    """The cache entries currently on disk, or {} when absent, corrupt or
-    stale-versioned. Discarding is right here and fatal would be wrong: the
-    file holds nothing that cannot be re-fetched for free."""
+    """The cache entries currently on disk.
+
+    Returns {} for an absent file or a valid one holding no entries, and
+    None for a file that could not be read as this version's cache. The
+    distinction matters: an empty mapping used for both outcomes makes a
+    perfectly valid empty cache indistinguishable from a corrupt one, so the
+    corruption guard in cache_store would fire forever on a file whose only
+    fault is having no entries yet."""
     if not os.path.exists(CACHE_FILE):
         return {}
     try:
         with open(CACHE_FILE) as fh:
             loaded = json.load(fh)
-    except (json.JSONDecodeError, OSError, AttributeError):
-        return {}
-    if loaded.get("_version") != CACHE_VERSION:
-        return {}
-    return loaded.get("entries", {})
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(loaded, dict) or loaded.get("_version") != CACHE_VERSION:
+        return None
+    entries = loaded.get("entries", {})
+    return entries if isinstance(entries, dict) else None
 
 
 def cache():
     """The on-disk response cache, loaded once into memory."""
     global _CACHE
     if _CACHE is None:
-        _CACHE = read_cache_file()
+        # An unreadable cache still starts an empty in-memory one: reads stay
+        # free and offline. Only the WRITE path treats unreadable as fatal,
+        # because that is where the file would be replaced.
+        loaded = read_cache_file()
+        _CACHE = {} if loaded is None else loaded
     return _CACHE
 
 
@@ -252,6 +262,21 @@ def cache_store(key, value):
     with open(CACHE_LOCK_FILE, "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         merged = read_cache_file()
+        # None means the file exists but could not be read as this version's
+        # cache. Writing then would REPLACE it with this one key, destroying
+        # every drift baseline submission_verdict reads - and a
+        # CACHE_VERSION bump would do that to the whole file at once. It
+        # fails closed, so the cost is a forced re-price rather than a wrong
+        # purchase, but re-pricing everything is not something to do
+        # silently. A valid cache holding no entries is {} and writes
+        # normally.
+        if merged is None:
+            raise SystemExit(
+                "REFUSED: %s could not be read as a version %d cache - "
+                "corrupt, or written by another CACHE_VERSION. Refusing to "
+                "overwrite it with a single entry: it holds the drift "
+                "baselines the purchase gate reads. Move it aside "
+                "deliberately to re-price." % (CACHE_FILE, CACHE_VERSION))
         merged[key] = entry
         # Adopt what other writers have landed since this process loaded.
         _CACHE.update(merged)
