@@ -489,6 +489,49 @@ untouched population, which this contract does not pre-authorize.
   correctness contract; bit-reproducibility across toolchains is not
   promised and not required.
 
+## Amendment 1, 2026-08-12: partial-month delivery and seal channels
+
+Recorded BEFORE the pull, in response to vendor entitlement metadata
+only - no market data was inspected, no population chosen for
+friendliness, no threshold or statistic moved. Prompted by the mapped
+subscription-window edge: the trailing-12 boundary slices 2025-08
+mid-month (covered back half quotes 9.41 for the rest), and 2026-08
+exists partially to the pull morning.
+
+1. INCOMPLETE MONTH DELIVERY, defined: a month whose acquisition
+   interval is truncated by a vendor entitlement or availability
+   boundary is `incomplete_month_delivery`, and is treated as an
+   UNDELIVERED FULL MONTH for every Stage M population purpose. It is
+   NOT a thin month: thinness is few usable sessions in a delivered
+   month under the 12a rule; entitlement truncation is procurement
+   absence, and admitting a slice would give it equal month weight at
+   half exposure and substitute a different calendar population after
+   signature - any short slice with 15 clean sessions could otherwise
+   masquerade as a month. The covered bytes MAY be pulled and
+   preserved (the loss is irreversible, sealed bytes are not),
+   recorded with role unchanged, delivery state, exact covered
+   interval, edge timestamp and opaque hash - and remain UNREAD and
+   unavailable to Stage M unless a later reviewed amendment defines a
+   partial-month estimand and re-runs every affected pre-content
+   calculation. 2025-08 is the recorded instance. The uncovered
+   portion is NOT purchased.
+2. 2026-08, absent from the immutable assignment table, is added by
+   this amendment: partial TBBO and partial MBP-1, role
+   `unused-sealed`, coverage end at the exact vendor timestamp,
+   content read forbidden, future use by a new signed contract only.
+3. SEAL CHANNELS, clarified after a near-miss: the seal protects
+   INFORMATION, not file handles. Any channel yielding per-session
+   observables of a sealed month - vendor metadata such as per-date
+   record counts explicitly included - is INSPECTION under the
+   content-read rule. Per-session record counts are session-level
+   activity data, the very observable the slow-confirmation
+   projection is built from. Entitlement and cost metadata, which
+   yield a price and not a per-session observable, are not
+   inspection; neither is byte-hashing. The design-month calendar
+   sweep therefore covers new-design months and spent-design July
+   only; the confirmation months' schedules materialize exactly once,
+   mechanically, inside the blinded Stage C harness at unseal.
+
 ## Signature record
 
 SIGNED on round 3 by codex session
@@ -498,3 +541,9 @@ signing verdict, verbatim: round 3 has no remaining blocking defect;
 May 2026 is accepted as the immutable reserve confirmation month; raw
 between-session Fano equivalence is correctly excluded from Stage C; a
 design-only slow repair cannot land under this contract's PASS.
+
+Amendment 1 signed same day, same session - see its section for
+scope. Its countersignature attached one interpretive note on
+provision 3: before unseal, Stage C prebinds the schedule DERIVATION
+ALGORITHM and the input identity, never the resulting data-dependent
+schedule, which is derived atomically inside the blinded execution.
