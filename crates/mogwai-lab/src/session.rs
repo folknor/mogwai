@@ -509,7 +509,7 @@ mod tests {
         assert_eq!(november.open_ns - ScheduleFrame::JulyFixed.bounds("2025-11-03").unwrap().open_ns, 3_600_000_000_000);
         assert_eq!(before.scheduled_open_seconds, 81_900);
         assert_eq!(after.scheduled_open_seconds, 81_900);
-        assert_eq!(after.open_ns + 71 * 3_600_000_000_000, before.open_ns + 72 * 3_600_000_000_000);
+        assert_eq!(after.open_ns - before.open_ns, 71 * 3_600_000_000_000);
     }
 
     #[test]
