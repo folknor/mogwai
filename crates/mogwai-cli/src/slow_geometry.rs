@@ -10,7 +10,7 @@
     reason = "the artifact constructor consumes JSON conceptually and the eigensolver mirrors indexed matrix formulas"
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -201,13 +201,23 @@ fn construct_cells(
         .collect::<Vec<_>>();
     dates.sort();
     dates.dedup();
-    let opens = rows.iter().filter(|r| r.segment_index == 0).fold(BTreeMap::new(), |mut out: BTreeMap<String, u64>, row| {
-        out.entry(row.session_date.clone()).and_modify(|x| *x = (*x).min(row.window_start_ns)).or_insert(row.window_start_ns);
-        out
-    });
+    let opens = rows.iter().filter(|r| r.segment_index == 0).fold(
+        BTreeMap::new(),
+        |mut out: BTreeMap<String, u64>, row| {
+            out.entry(row.session_date.clone())
+                .and_modify(|x| *x = (*x).min(row.window_start_ns))
+                .or_insert(row.window_start_ns);
+            out
+        },
+    );
     let mut grouped: BTreeMap<(String, u64), Vec<&OrderedCount>> = BTreeMap::new();
     for row in rows {
-        let open = opens.get(&row.session_date).ok_or_else(|| anyhow!("session {} has no segment 0 scheduled open", row.session_date))?;
+        let open = opens.get(&row.session_date).ok_or_else(|| {
+            anyhow!(
+                "session {} has no segment 0 scheduled open",
+                row.session_date
+            )
+        })?;
         let exact_close = row.window_end_ns == open + 23 * 3_600_000_000_000
             && row.window_start_ns + 1_000_000_000 == row.window_end_ns;
         if exclude_exact_close_for_comparison && exact_close {
@@ -319,10 +329,12 @@ fn cross_fit(
         // with any excluded cell is removed from the fold entirely - before
         // every per-hour moment and the correlation - and the drop is
         // recorded. The estimand is the complete-case training population.
-        let (train, dropped): (Vec<_>, Vec<_>) = dates
-            .iter()
-            .filter(|d| *d != held)
-            .partition(|d| LOCAL_HOURS.iter().all(|h| map.contains_key(&((**d).clone(), *h))));
+        let (train, dropped): (Vec<_>, Vec<_>) =
+            dates.iter().filter(|d| *d != held).partition(|d| {
+                LOCAL_HOURS
+                    .iter()
+                    .all(|h| map.contains_key(&((**d).clone(), *h)))
+            });
         if train.len() < 12 {
             refusals.push(Refusal {
                 session_date: held.clone(),
@@ -414,7 +426,10 @@ fn cross_fit(
             loading: LOCAL_HOURS
                 .iter()
                 .zip(v)
-                .map(|(h, value)| Loading { local_hour: *h, value })
+                .map(|(h, value)| Loading {
+                    local_hour: *h,
+                    value,
+                })
                 .collect(),
             training_dropped: dropped.iter().map(|d| (*d).clone()).collect(),
             training_count: train.len(),
@@ -423,6 +438,48 @@ fn cross_fit(
         });
     }
     (scores, refusals)
+}
+
+/// Recompute the amended cross-fitted score object for Tier 2 perturbations.
+/// The caller supplies the already centered session-local residual field.
+pub(crate) fn tier2_scores(rows: Vec<(String, u64, f64)>) -> BTreeMap<String, f64> {
+    let mut dates = rows.iter().map(|x| x.0.clone()).collect::<Vec<_>>();
+    dates.sort();
+    dates.dedup();
+    let cells = rows
+        .into_iter()
+        .map(|(session_date, local_hour, residual)| Cell {
+            session_date,
+            local_hour,
+            parents: 0,
+            exposure_s: 0,
+            timestamp_ns: 0,
+            log_rate: residual,
+            residual,
+        })
+        .collect::<Vec<_>>();
+    let present = cells
+        .iter()
+        .map(|c| (c.session_date.clone(), c.local_hour))
+        .collect::<BTreeSet<_>>();
+    let exclusions = dates
+        .iter()
+        .flat_map(|date| {
+            LOCAL_HOURS
+                .iter()
+                .filter(|hour| !present.contains(&(date.clone(), **hour)))
+                .map(|hour| Exclusion {
+                    session_date: date.clone(),
+                    local_hour: *hour,
+                    reason: "missing_session_local_cell",
+                })
+        })
+        .collect::<Vec<_>>();
+    cross_fit(&cells, &exclusions, &dates)
+        .0
+        .into_iter()
+        .map(|s| (s.session_date, s.score))
+        .collect()
 }
 
 fn leading_eigenvector(mut a: Vec<Vec<f64>>) -> Option<Vec<f64>> {
@@ -476,6 +533,18 @@ fn leading_eigenvector(mut a: Vec<Vec<f64>>) -> Option<Vec<f64>> {
         *x /= norm
     }
     Some(out)
+}
+
+/// Leading eigenvalue using the same Jacobi routine and failure rule as the
+/// slow-geometry cross-fit.
+pub(crate) fn tier2_leading_eigenvalue(a: Vec<Vec<f64>>) -> Option<f64> {
+    let v = leading_eigenvector(a.clone())?;
+    let av = a
+        .iter()
+        .map(|row| row.iter().zip(&v).map(|(x, y)| x * y).sum::<f64>())
+        .collect::<Vec<_>>();
+    let value = v.iter().zip(av).map(|(x, y)| x * y).sum::<f64>();
+    value.is_finite().then_some(value)
 }
 
 fn score_statistic(scores: &[Score], dates: &[String], month: u64) -> Value {
