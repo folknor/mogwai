@@ -485,6 +485,48 @@ overtaken the per-result constant. The all-fill pair is `85.18 / 19.62 = 4.34`,
 essentially linear, because there the per-fill work (ledger apply, fill record,
 message construction) swamps the matching scan.
 
+### Finding 8 close reading, 2026-08-14
+
+Host `bygg`, release, the uncommitted round-3 working tree after incremental
+order reservations and keyed book lookup. One criterion run after the final
+shape; every standard deviation is below the 5 percent usability limit.
+
+| id | mean | std dev |
+|---|---:|---:|
+| `apply_scans_50` | 1.508 us | 3.34 % |
+| `apply_scans_200` | 6.109 us | 3.90 % |
+| `apply_scans_50_all_fill` | 29.84 us | 1.23 % |
+| `apply_scans_200_all_fill` | 113.88 us | 1.31 % |
+
+The common no-fill pair now scales `6.109 / 1.508 = 4.05` across a 4x book,
+where the earlier reading was 7.72x. The all-fill pair is `113.88 / 29.84 =
+3.82`, also linear. This is the structural verdict: scan-result lookup and
+book removal no longer add a quadratic term. Do not read the absolute delta
+against the 2026-08-02 table as a clean round-3 before/after comparison;
+rounds 1 and 2 changed validation and booking work between those trees.
+
+One rejected intermediate is recorded because it exposed the consumer risk.
+The first indexed vector used shifting removal and rewrote every shifted index;
+`apply_scans_200_all_fill` rose to 434 us. Replacing that with O(1)
+`swap_remove`, while sorting all observable orderings explicitly, brought it
+to the number above. The common path also stopped allocating a temporary
+locked-balance map per funds query: it reads the cached order hold and folds
+only the position-maintenance component.
+
+What these four numbers do NOT cover, stated because the omission decided a
+design question. `fill_bench`'s `scans` engine seeds no balances, so it is an
+UNFUNDED engine and `enforce_funds` is false throughout the table above. The
+round-3 working tree originally also ran a full reconciling fold of the book
+in release whenever `enforce_funds` was set, repairing and logging on drift.
+No benchmark here would ever have seen that fold, because none of them is
+funded - and it is precisely the `O(open orders)` walk with a per-order
+string and map allocation that finding 8 existed to remove, reinstated twice
+per command and twice per sweep batch on the funded venue, which is the only
+configuration that ships. The audit pass removed it: reconciliation is now a
+`cfg!(debug_assertions)` assertion that panics, and release correctness rests
+on construction (private book storage plus three cache-aware mutators)
+instead. The table therefore stands as measured for both profiles.
+
 ### L2's accepted cost bound
 
 `scan_mapping_50 / walk_one_pass_50_scans = 31.4 / 297.0 = 0.106`. L2 accepted

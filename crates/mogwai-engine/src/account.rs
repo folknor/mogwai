@@ -49,6 +49,138 @@ pub(crate) struct Warned {
 }
 
 impl Engine {
+    pub(crate) fn rest_open(&mut self, order: crate::OpenOrder) {
+        self.add_order_reservation(&order);
+        self.open.push(order);
+    }
+
+    pub(crate) fn take_open(&mut self, pos: usize) -> crate::OpenOrder {
+        let order = self.open.remove(pos);
+        self.remove_order_reservation(&order);
+        order
+    }
+
+    pub(crate) fn refresh_open_reservation(&mut self, pos: usize, before: &crate::OpenOrder) {
+        self.remove_order_reservation(before);
+        let after = self.open[pos].clone();
+        self.add_order_reservation(&after);
+    }
+
+    fn order_reservation_entry(&self, order: &crate::OpenOrder) -> Option<(String, Decimal, bool)> {
+        let instrument = self.instruments.get(&order.submit.symbol)?;
+        let price = order.submit.price.or(order.submit.trigger_price)?;
+        let mut clipped = false;
+        let reservation =
+            self.order_reservation(&order.submit, order.leaves_qty, price, &mut clipped);
+        match reservation {
+            Reservation::None => None,
+            Reservation::Settlement(amount) => Some((
+                instrument.class.settlement_currency().to_owned(),
+                amount,
+                clipped,
+            )),
+            Reservation::Base(amount) => instrument
+                .class
+                .base_currency()
+                .map(|currency| (currency.to_owned(), amount, clipped)),
+        }
+    }
+
+    fn add_order_reservation(&mut self, order: &crate::OpenOrder) {
+        let Some((currency, amount, mut clipped)) = self.order_reservation_entry(order) else {
+            return;
+        };
+        if let Some(total) = self.order_locked.get_mut(currency.as_str()) {
+            *total = add_clamped(*total, amount, &mut clipped);
+        } else {
+            self.order_locked.insert(currency.clone(), amount);
+        }
+        if clipped {
+            self.order_locked_clipped.insert(currency);
+        }
+    }
+
+    fn remove_order_reservation(&mut self, order: &crate::OpenOrder) {
+        let Some((currency, amount, _)) = self.order_reservation_entry(order) else {
+            return;
+        };
+        if self.order_locked_clipped.contains(&currency) {
+            self.rebuild_order_locked_excluding(Some(&order.submit.client_order_id));
+            return;
+        }
+        let Some(total) = self.order_locked.get_mut(&currency) else {
+            debug_assert!(false, "reservation cache missing currency");
+            return;
+        };
+        *total = total.saturating_sub(amount);
+        if total.is_zero() {
+            self.order_locked.remove(&currency);
+        }
+    }
+
+    pub(crate) fn rebuild_order_locked_excluding(&mut self, excluded: Option<&str>) {
+        let (locked, clipped) = self.compute_order_locked(excluded);
+        self.order_locked = locked;
+        self.order_locked_clipped = clipped;
+    }
+
+    fn compute_order_locked(
+        &self,
+        excluded: Option<&str>,
+    ) -> (HashMap<String, Decimal>, HashSet<String>) {
+        let mut locked = HashMap::<String, Decimal>::new();
+        let mut clipped_currencies = HashSet::new();
+        for order in self
+            .open
+            .iter()
+            .filter(|order| excluded != Some(order.submit.client_order_id.as_str()))
+        {
+            let Some((currency, amount, mut clipped)) = self.order_reservation_entry(order) else {
+                continue;
+            };
+            let total = locked.entry(currency.clone()).or_default();
+            *total = add_clamped(*total, amount, &mut clipped);
+            if clipped {
+                clipped_currencies.insert(currency);
+            }
+        }
+        (locked, clipped_currencies)
+    }
+
+    /// Compare the fast aggregate with a fresh fold through the authoritative
+    /// order book, and PANIC on any difference.
+    ///
+    /// This is a debug-only check, called under `cfg!(debug_assertions)` at
+    /// every command and sweep boundary, and the choice is deliberate on both
+    /// halves. It panics rather than repairing because a drifted hold is a
+    /// logic defect in incremental maintenance, and a silent repair would
+    /// convert that defect into a log line nobody reads while leaving every
+    /// funds decision taken before the repair already wrong. It is debug-only
+    /// because the fold is exactly the `O(open orders)` walk with its
+    /// per-order allocation that this cache exists to remove: running it in
+    /// release would reinstate that cost per command on the funded venue,
+    /// which is the only configuration that ships.
+    ///
+    /// What holds the invariant in release is construction, not verification.
+    /// `OpenBook`'s storage is private and every mutation of a resting order's
+    /// reservation inputs goes through `rest_open`, `take_open` or
+    /// `refresh_open_reservation`. A new mutation path that bypasses those
+    /// three is the defect this design is exposed to, and the debug assertion
+    /// is what catches it: the whole test suite runs under it.
+    pub(crate) fn reconcile_order_locked(&self) {
+        let (locked, clipped) = self.compute_order_locked(None);
+        assert_eq!(
+            (&self.order_locked, &self.order_locked_clipped),
+            (&locked, &clipped),
+            "resting-order reservation cache drifted from the book"
+        );
+    }
+
+    #[cfg(all(test, debug_assertions))]
+    pub(crate) fn corrupt_order_locked_for_test(&mut self, currency: &str, amount: Decimal) {
+        self.order_locked.insert(currency.to_owned(), amount);
+    }
+
     pub(crate) fn apply_fill(&mut self, fill: &OrderFilled) {
         let previous_position = self
             .account
@@ -249,9 +381,26 @@ impl Engine {
             .balances
             .get(currency)
             .unwrap_or(&Decimal::ZERO);
-        let (locked, _) = self.locked_balances();
-        let locked = *locked.get(currency).unwrap_or(&Decimal::ZERO);
         let mut clipped = false;
+        let mut locked = *self.order_locked.get(currency).unwrap_or(&Decimal::ZERO);
+        for ((symbol, _), position) in &self.account.positions {
+            let Some(policy) = self.margin.get(symbol) else {
+                continue;
+            };
+            let Some(instrument) = self
+                .instruments
+                .get(symbol)
+                .filter(|instrument| instrument.class.is_future())
+            else {
+                continue;
+            };
+            if instrument.class.settlement_currency() == currency {
+                let reserve = policy
+                    .maintenance_per_contract
+                    .saturating_mul(position.qty.abs());
+                locked = add_clamped(locked, reserve, &mut clipped);
+            }
+        }
         sub_clamped(total, locked, &mut clipped)
     }
 
@@ -301,8 +450,12 @@ impl Engine {
     /// caller (`snapshot`, which holds `&mut self`) can warn once per key -
     /// this stays `&self` because it runs inside iteration over `self.open`.
     fn locked_balances(&self) -> (HashMap<String, Decimal>, Vec<String>) {
-        let mut locked: HashMap<String, Decimal> = HashMap::new();
-        let mut clipped_currencies = Vec::new();
+        let mut locked = self.order_locked.clone();
+        // Sorted because the source is a `HashSet`: the only consumer is the
+        // once-per-currency saturation warning, and an unordered log is a
+        // needless nondeterminism in an otherwise deterministic venue.
+        let mut clipped_currencies: Vec<_> = self.order_locked_clipped.iter().cloned().collect();
+        clipped_currencies.sort();
 
         for ((symbol, _), position) in &self.account.positions {
             let Some(policy) = self.margin.get(symbol) else {
@@ -323,46 +476,6 @@ impl Engine {
                 .saturating_mul(position.qty.abs());
             let total = locked.entry(currency).or_default();
             *total = total.saturating_add(reserve);
-        }
-
-        for order in &self.open {
-            // Defense-in-depth, unreachable through `process`: an order only
-            // rests here after `validate_submit`/`on_modify` confirmed its
-            // instrument, and none is ever removed, so the lookup always
-            // resolves on the public path. Kept as a skip (not an `.expect`)
-            // so a future direct caller with a stale open order simply omits
-            // that order's reservation rather than panicking the snapshot.
-            let Some(instrument) = self.instruments.get(&order.submit.symbol) else {
-                continue;
-            };
-            // A resting order's price is never `None`: `validate_submit`
-            // requires it for every submit (market included - see `on_submit`'s
-            // doc), and `on_modify` only ever sets it, never clears it.
-            let price = order
-                .submit
-                .price
-                .or(order.submit.trigger_price)
-                .expect("resting order carries a price or a trigger price");
-            let mut clipped = false;
-            let reserve =
-                self.order_reservation(&order.submit, order.leaves_qty, price, &mut clipped);
-            let (currency, reserve) = match reserve {
-                Reservation::None => continue,
-                Reservation::Settlement(amount) => {
-                    (instrument.class.settlement_currency().to_owned(), amount)
-                }
-                Reservation::Base(amount) => {
-                    let Some(currency) = instrument.class.base_currency().map(str::to_owned) else {
-                        continue;
-                    };
-                    (currency, amount)
-                }
-            };
-            let total = locked.entry(currency.clone()).or_default();
-            *total = add_clamped(*total, reserve, &mut clipped);
-            if clipped {
-                clipped_currencies.push(currency);
-            }
         }
 
         (locked, clipped_currencies)

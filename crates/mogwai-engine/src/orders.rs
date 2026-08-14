@@ -151,7 +151,7 @@ impl Engine {
                 venue_order_id,
                 ts_event: ts,
             }];
-            self.open.push(record);
+            self.rest_open(record);
             if let (true, Some(value)) = (touched, reading) {
                 // The synthesized hit of section 1.4: the reading's own last
                 // print, which IS a real print off the canonical tape. The
@@ -229,7 +229,7 @@ impl Engine {
                 // against the acceptance-time reading, and cancels short of its
                 // trigger rather than filling at a price the market never
                 // reached.
-                TimeInForce::Gtc => self.open.push(record),
+                TimeInForce::Gtc => self.rest_open(record),
                 TimeInForce::Ioc => {
                     out.push(ServerMessage::OrderCanceled {
                         client_order_id: record.submit.client_order_id.clone(),
@@ -405,7 +405,7 @@ impl Engine {
             }
             match record.submit.time_in_force {
                 TimeInForce::Gtc => {
-                    self.open.push(record);
+                    self.rest_open(record);
                 }
                 TimeInForce::Ioc => {
                     out.push(ServerMessage::OrderCanceled {
@@ -451,13 +451,15 @@ impl Engine {
     /// `OrderTriggered` and nothing else, and counting only fills would leave
     /// that frame unreserved.
     pub fn apply_scans(&mut self, results: &[ScanResult], ts: u64) -> (Vec<ServerMessage>, usize) {
+        if cfg!(debug_assertions) {
+            self.reconcile_order_locked();
+        }
         let mut out = Vec::new();
         let mut emitted = 0;
         for result in results {
-            let Some(pos) = self.open.iter().position(|order| {
-                order.submit.client_order_id == result.client_order_id
-                    && order.revision == result.revision
-                    && order.scanned_ns == result.from_ns
+            let Some(pos) = self.open.position(&result.client_order_id).filter(|pos| {
+                let order = &self.open[*pos];
+                order.revision == result.revision && order.scanned_ns == result.from_ns
             }) else {
                 continue;
             };
@@ -495,7 +497,7 @@ impl Engine {
             let last_qty = cap.map_or(planned_qty, |cap| planned_qty.min(cap));
             let new_leaves = leaves - last_qty;
             if cap == Some(Decimal::ZERO) {
-                let order = self.open.remove(pos);
+                let order = self.take_open(pos);
                 self.record_closed(&order, WireOrderStatus::Canceled, ts);
                 out.push(ServerMessage::OrderCanceled {
                     client_order_id: submit.client_order_id,
@@ -522,7 +524,7 @@ impl Engine {
                 true,
             ) {
                 tracing::warn!(client_order_id = %submit.client_order_id, %reason, "resting order canceled at funds check");
-                let order = self.open.remove(pos);
+                let order = self.take_open(pos);
                 self.record_closed(&order, WireOrderStatus::Canceled, ts);
                 out.push(ServerMessage::OrderCanceled {
                     client_order_id: submit.client_order_id,
@@ -546,7 +548,7 @@ impl Engine {
                 emitted += 1;
             }
             if new_leaves > Decimal::ZERO && cap.is_some_and(|cap| cap < planned_qty) {
-                let order = self.open.remove(pos);
+                let order = self.take_open(pos);
                 self.record_closed(&order, WireOrderStatus::Canceled, ts);
                 out.push(ServerMessage::OrderCanceled {
                     client_order_id: order.submit.client_order_id,
@@ -554,6 +556,7 @@ impl Engine {
                     ts_event: ts,
                 });
             } else if new_leaves > Decimal::ZERO {
+                let before = self.open[pos].clone();
                 let order = &mut self.open[pos];
                 order.leaves_qty = new_leaves;
                 order.ts_last = ts;
@@ -588,8 +591,9 @@ impl Engine {
                     order.scanned_ns = ts;
                 }
                 order.revision = order.revision.saturating_add(1);
+                self.refresh_open_reservation(pos, &before);
             } else {
-                let order = self.open.remove(pos);
+                let order = self.take_open(pos);
                 self.record_closed(&order, WireOrderStatus::Filled, ts);
             }
         }
@@ -605,6 +609,9 @@ impl Engine {
             if !drop_update {
                 out.push(ServerMessage::AccountState(self.snapshot(ts)));
             }
+        }
+        if cfg!(debug_assertions) {
+            self.reconcile_order_locked();
         }
         (out, emitted)
     }
@@ -668,7 +675,7 @@ impl Engine {
         // armed `PartialFillNext` on the way to its cancel.
         let cap = self.reduce_only_cap(&order.submit);
         if cap == Some(Decimal::ZERO) {
-            self.open.remove(pos);
+            self.take_open(pos);
             self.record_closed(&order, WireOrderStatus::Canceled, ts);
             tracing::warn!(client_order_id = %order.submit.client_order_id, "reduce-only order canceled at trigger: nothing left to reduce");
             out.push(ServerMessage::OrderCanceled {
@@ -722,7 +729,7 @@ impl Engine {
                         true,
                     ));
                 }
-                self.open.remove(pos);
+                self.take_open(pos);
                 order.leaves_qty = leaves;
                 if leaves == Decimal::ZERO {
                     self.record_closed(&order, WireOrderStatus::Filled, ts);
@@ -738,7 +745,7 @@ impl Engine {
                     });
                 } else {
                     order.resting = Resting::Inert;
-                    self.open.push(order);
+                    self.rest_open(order);
                 }
             }
             OrderType::StopLimit => {
@@ -761,11 +768,20 @@ impl Engine {
                     order.resting = Resting::Limit { fill_trigger_px };
                     order.scanned_ns = frontier;
                     order.revision = order.revision.saturating_add(1);
+                    // Writing the slot back directly would bypass the
+                    // reservation cache. Today it moves no hold - a stop-limit
+                    // becoming live changes neither `leaves_qty` nor
+                    // `submit.price`, which is what the hold derives from -
+                    // but the refresh is what keeps that a fact about this
+                    // arm's fields rather than an invariant every future edit
+                    // to it has to rediscover.
+                    let before = self.open[pos].clone();
                     self.open[pos] = order;
+                    self.refresh_open_reservation(pos, &before);
                     return out;
                 }
                 if order.submit.post_only {
-                    self.open.remove(pos);
+                    self.take_open(pos);
                     self.record_closed(&order, WireOrderStatus::Rejected, ts);
                     out.push(ServerMessage::OrderRejected {
                         client_order_id: order.submit.client_order_id,
@@ -802,7 +818,7 @@ impl Engine {
                         true,
                     ));
                 }
-                self.open.remove(pos);
+                self.take_open(pos);
                 order.leaves_qty = leaves;
                 if leaves == Decimal::ZERO {
                     self.record_closed(&order, WireOrderStatus::Filled, ts);
@@ -829,7 +845,7 @@ impl Engine {
                     };
                     order.scanned_ns = frontier;
                     order.revision = order.revision.saturating_add(1);
-                    self.open.push(order);
+                    self.rest_open(order);
                 }
             }
             OrderType::Market | OrderType::Limit => unreachable!("only conditionals trigger"),
@@ -867,7 +883,7 @@ impl Engine {
         ts: u64,
     ) -> ServerMessage {
         tracing::warn!(client_order_id = %order.submit.client_order_id, %reason, "triggered order canceled at funds check");
-        self.open.remove(pos);
+        self.take_open(pos);
         self.record_closed(order, WireOrderStatus::Canceled, ts);
         ServerMessage::OrderCanceled {
             client_order_id: order.submit.client_order_id.clone(),
@@ -1297,12 +1313,8 @@ impl Engine {
         client_order_id: ClientOrderId,
         ts: u64,
     ) -> Vec<ServerMessage> {
-        if let Some(pos) = self
-            .open
-            .iter()
-            .position(|o| o.submit.client_order_id == client_order_id)
-        {
-            let o = self.open.remove(pos);
+        if let Some(pos) = self.open.position(&client_order_id) {
+            let o = self.take_open(pos);
             self.record_closed(&o, WireOrderStatus::Canceled, ts);
             let mut out = vec![ServerMessage::OrderCanceled {
                 client_order_id,
@@ -1353,11 +1365,7 @@ impl Engine {
         ts: u64,
         reading: Option<MarketReading>,
     ) -> Vec<ServerMessage> {
-        let Some(pos) = self
-            .open
-            .iter()
-            .position(|o| o.submit.client_order_id == client_order_id)
-        else {
+        let Some(pos) = self.open.position(&client_order_id) else {
             let (reason, venue_order_id) =
                 terminal_or_unknown_reject(&self.seen_client_order_ids, &client_order_id);
             return vec![ServerMessage::OrderModifyRejected {
@@ -1648,6 +1656,7 @@ impl Engine {
             }
         }
 
+        let before = self.open[pos].clone();
         let (quantity, price, leaves_qty) = {
             let order = &mut self.open[pos];
             // Either kind of amend bumps the revision, so a trigger walk
@@ -1705,6 +1714,7 @@ impl Engine {
             order.ts_last = ts;
             (order.submit.quantity, order.submit.price, order.leaves_qty)
         };
+        self.refresh_open_reservation(pos, &before);
 
         vec![
             ServerMessage::OrderUpdated {

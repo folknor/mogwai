@@ -193,10 +193,9 @@ fn benches(c: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
-    // Two sizes per shape, not redundancy: `apply_scans` scans `open` linearly
-    // per result, so a full batch is quadratic in the resting count. 50 and 200
-    // differ by 4x, so a linear term reads as roughly 4x and a quadratic one as
-    // roughly 16x.
+    // Two sizes per shape, not redundancy: 50 and 200 differ by 4x, so a
+    // linear term reads as roughly 4x and a quadratic one as roughly 16x. This
+    // is the regression witness for keyed result lookup and O(1) book removal.
     for (name, size, fill) in [
         ("apply_scans_50", 50, false),
         ("apply_scans_200", 200, false),

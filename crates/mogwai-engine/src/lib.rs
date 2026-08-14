@@ -233,10 +233,87 @@ pub struct ScanResult {
     pub scanned_to_ns: u64,
 }
 
+/// Resting orders carry stable acceptance metadata while command and
+/// sweep-result lookups use the id index. Removal may swap slots; consumers
+/// sort by that metadata before order reaches a wire event or snapshot.
+#[derive(Debug, Default)]
+struct OpenBook {
+    orders: Vec<OpenOrder>,
+    by_client_id: HashMap<ClientOrderId, usize>,
+}
+
+impl OpenBook {
+    fn push(&mut self, order: OpenOrder) {
+        let pos = self.orders.len();
+        let replaced = self
+            .by_client_id
+            .insert(order.submit.client_order_id.clone(), pos);
+        debug_assert!(replaced.is_none(), "open client order ids are unique");
+        self.orders.push(order);
+    }
+
+    fn remove(&mut self, pos: usize) -> OpenOrder {
+        let order = self.orders.swap_remove(pos);
+        self.by_client_id.remove(&order.submit.client_order_id);
+        if pos < self.orders.len() {
+            self.by_client_id
+                .insert(self.orders[pos].submit.client_order_id.clone(), pos);
+        }
+        order
+    }
+
+    fn position(&self, client_order_id: &str) -> Option<usize> {
+        self.by_client_id.get(client_order_id).copied()
+    }
+
+    fn iter(&self) -> std::slice::Iter<'_, OpenOrder> {
+        self.orders.iter()
+    }
+
+    fn len(&self) -> usize {
+        self.orders.len()
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.orders.is_empty()
+    }
+}
+
+impl std::ops::Index<usize> for OpenBook {
+    type Output = OpenOrder;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.orders[index]
+    }
+}
+
+impl std::ops::IndexMut<usize> for OpenBook {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.orders[index]
+    }
+}
+
+impl<'a> IntoIterator for &'a OpenBook {
+    type Item = &'a OpenOrder;
+    type IntoIter = std::slice::Iter<'a, OpenOrder>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.orders.iter()
+    }
+}
+
 #[derive(Debug)]
 pub struct Engine {
     account_id: AccountId,
-    open: Vec<OpenOrder>,
+    open: OpenBook,
+    /// Aggregate resting-order reservations by currency. Position maintenance
+    /// is folded separately because position count is independent of book
+    /// depth; the hot funds path must not walk every resting order.
+    order_locked: HashMap<String, Decimal>,
+    /// A saturated aggregate cannot be decremented soundly. The next removal
+    /// rebuilds the cache from the authoritative orders instead.
+    order_locked_clipped: HashSet<String>,
     account: Account,
     /// Whether submits and amends are checked against free balance. Set once
     /// at construction: a FUNDED account (non-empty seed) is an honest cash
@@ -294,6 +371,10 @@ pub struct Engine {
 impl Engine {
     pub fn set_margin_policy(&mut self, symbol: Symbol, policy: MarginPolicy) {
         self.margin.insert(symbol, policy);
+        // Public callers may replace policy after orders already rest. Their
+        // holds still derive from `order_reservation`; rebuild the aggregate
+        // rather than teaching this setter a second margin formula.
+        self.rebuild_order_locked_excluding(None);
     }
 
     pub fn set_fee_schedule(&mut self, symbol: Symbol, schedule: FeeSchedule) {
@@ -702,7 +783,9 @@ impl Engine {
 
         Self {
             account_id: config.account_id,
-            open: Vec::new(),
+            open: OpenBook::default(),
+            order_locked: HashMap::new(),
+            order_locked_clipped: HashSet::new(),
             enforce_funds,
             account: Account {
                 balances: config.balances,
@@ -768,7 +851,10 @@ impl Engine {
         ts: u64,
         reading: Option<MarketReading>,
     ) -> Vec<ServerMessage> {
-        match msg {
+        if cfg!(debug_assertions) {
+            self.reconcile_order_locked();
+        }
+        let events = match msg {
             ClientMessage::SubmitOrder(order) => self.on_submit(order, ts, reading),
             ClientMessage::CancelOrder { client_order_id } => self.on_cancel(client_order_id, ts),
             ClientMessage::ModifyOrder {
@@ -792,7 +878,11 @@ impl Engine {
                 client_order_id.as_deref(),
                 ts,
             ))],
+        };
+        if cfg!(debug_assertions) {
+            self.reconcile_order_locked();
         }
+        events
     }
 
     /// Every resting order the tape can decide, each carrying the price the
@@ -817,6 +907,12 @@ impl Engine {
     ///   reach; they rest, are never scanned, and end only on a client cancel.
     #[must_use]
     pub fn pending_scans(&self) -> Vec<PendingScan> {
+        // The slot order is NOT stable - `OpenBook::remove` swaps - so the
+        // acceptance identity is carried alongside each scan and sorted on
+        // explicitly. It is decorated here rather than looked up inside the
+        // comparator: a comparator doing two hash lookups and two integer
+        // parses per comparison would put `O(n log n)` of both on the sweeper's
+        // hottest call.
         let mut scans: Vec<_> = self
             .open
             .iter()
@@ -826,18 +922,26 @@ impl Engine {
                     Resting::Conditional { stop_px } => (ScanKind::TriggerTouch, stop_px),
                     Resting::Inert => return None,
                 };
-                Some(PendingScan {
-                    client_order_id: order.submit.client_order_id.clone(),
-                    symbol: order.submit.symbol.clone(),
-                    side: order.submit.side,
-                    px,
-                    kind,
-                    from_ns: order.scanned_ns,
-                    revision: order.revision,
-                })
+                Some((
+                    (
+                        order.scanned_ns,
+                        order.ts_accepted,
+                        venue_order_sequence(&order.venue_order_id),
+                    ),
+                    PendingScan {
+                        client_order_id: order.submit.client_order_id.clone(),
+                        symbol: order.submit.symbol.clone(),
+                        side: order.submit.side,
+                        px,
+                        kind,
+                        from_ns: order.scanned_ns,
+                        revision: order.revision,
+                    },
+                ))
             })
             .collect();
-        scans.sort_by_key(|scan| scan.from_ns);
+        scans.sort_by_key(|(key, _)| *key);
+        let scans: Vec<PendingScan> = scans.into_iter().map(|(_, scan)| scan).collect();
         scans
     }
 
@@ -915,17 +1019,13 @@ impl Engine {
         client_order_id: &str,
         ts: u64,
     ) -> Result<(), String> {
-        let Some(pos) = self
-            .open
-            .iter()
-            .position(|o| o.submit.client_order_id == client_order_id)
-        else {
+        let Some(pos) = self.open.position(client_order_id) else {
             return Err(match self.seen_client_order_ids.get(client_order_id) {
                 Some(_) => "order already terminal (filled or canceled)".into(),
                 None => "unknown order".into(),
             });
         };
-        let order = self.open.remove(pos);
+        let order = self.take_open(pos);
         self.record_closed(&order, WireOrderStatus::Canceled, ts);
         Ok(())
     }
@@ -989,7 +1089,7 @@ impl Engine {
     }
 
     pub fn open_orders(&self) -> &[OpenOrder] {
-        &self.open
+        &self.open.orders
     }
 }
 
@@ -1023,6 +1123,12 @@ fn open_order_status(order: &OpenOrder) -> OrderStatusInfo {
         ts_accepted: order.ts_accepted,
         ts_last: order.ts_last,
     }
+}
+
+fn venue_order_sequence(id: &str) -> u64 {
+    id.strip_prefix("V-")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -3243,6 +3349,70 @@ mod tests {
         assert!(matches!(out[0], ServerMessage::OrderCanceled { .. }));
         let out = e.process(ClientMessage::SubmitOrder(order("B1", 7)), 6);
         assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+    }
+
+    // The reconciliation is a `cfg!(debug_assertions)` check, so this pins it
+    // in the profile that runs it. Without the gate the test FAILS in a
+    // release test sweep, where nothing panics by design.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "resting-order reservation cache drifted from the book")]
+    fn reservation_cache_reconciliation_catches_drift_before_a_funded_command() {
+        let mut e = funded(1_000);
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "DRIFT".into(),
+            fraction: Decimal::new(5, 1),
+        });
+        e.process(ClientMessage::SubmitOrder(order("DRIFT", 4)), 1);
+        e.corrupt_order_locked_for_test("USDT", Decimal::ZERO);
+
+        e.process(
+            ClientMessage::QueryFills {
+                request_id: "Q".into(),
+                client_order_id: None,
+            },
+            2,
+        );
+    }
+
+    #[test]
+    fn keyed_book_index_tracks_swapped_orders_and_snapshots_stay_deterministic() {
+        let mut e = funded(10_000);
+        for id in ["I1", "I2", "I3"] {
+            e.arm(Divergence::PartialFillNext {
+                client_order_id: id.into(),
+                fraction: Decimal::new(5, 1),
+            });
+            e.process(ClientMessage::SubmitOrder(order(id, 2)), 1);
+        }
+
+        e.process(
+            ClientMessage::CancelOrder {
+                client_order_id: "I1".into(),
+            },
+            2,
+        );
+        let out = e.process(
+            ClientMessage::ModifyOrder {
+                client_order_id: "I3".into(),
+                price: None,
+                quantity: Some(Decimal::from(3)),
+                trigger_price: None,
+            },
+            3,
+        );
+        updated(&out, 0);
+        let i3 = e.open.position("I3").expect("I3 remains indexed");
+        assert_eq!(e.open[i3].submit.quantity, Decimal::from(3));
+        let snapshot = e.order_status_snapshot("Q".into(), None, true, 4);
+        assert_eq!(
+            snapshot
+                .orders
+                .iter()
+                .map(|order| order.client_order_id.as_str())
+                .collect::<Vec<_>>(),
+            ["I2", "I3"]
+        );
     }
 
     #[test]

@@ -19,6 +19,19 @@ Or both. There are no exceptions.
 
 ## Open issues
 
+- GATE the hand-maintained tape-version prose the way the artifact binding
+  blocks are gated. Surfaced by the bug-hunt loop on 2026-08-14: when
+  `TAPE_PROTOCOL_VERSION` went to 13, six separate durable statements had to
+  be corrected by hand, and one of them - `reference/architecture.md` - still
+  claimed version 11, meaning the durable architecture reference had been
+  wrong about tape identity across at least two prior bumps and nobody caught
+  it. The artifact binding blocks do not have this problem, because
+  `stage_a_batch.rs` refuses a manifest whose version is not the live
+  constant and the screen artifact's test asserts the binding equals the
+  constant. The prose has no such gate, so the next bump will silently miss
+  it again. Cheap fix in the same shape: a test asserting the durable
+  documents name the live constant.
+
 - DECIDE whether the protocol-12b Stage A refinement pass should run at
   all. Deferred by the owner on 2026-08-09 rather than settled, so the
   frozen pass stands and the budgets were raised to fund it.

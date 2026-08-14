@@ -134,3 +134,111 @@ Re-blessing, verified rather than assumed:
   `reference/architecture.md` and `AGENTS.md`. `architecture.md` had been stale
   at 11 since before the loop started. Every one of them now says the
   protocol-12b MECHANISM landing takes 14.
+
+## notes/bugs-engine.md, round 3 (finding 8)
+
+Machinery introduced:
+
+- Resting orders keep vector storage and a client-id index resolves cancel,
+  modify and scan-result lookups in constant time. Removal uses `swap_remove`.
+  Wire event and snapshot orderings sort explicitly, and pending scans recover
+  acceptance order from `ts_accepted` and the numeric venue-order sequence.
+- `order_locked` incrementally aggregates only the resting-order component of
+  locked funds. `free_balance` reads that currency directly and folds the much
+  smaller position-maintenance component without allocating a map. Snapshots
+  clone the aggregate once and add position maintenance. Every cache add,
+  remove, amend refresh and reconciliation still calls
+  `Engine::order_reservation`, the single hold derivation from round 1.
+- All book mutations go through `rest_open`, `take_open` or
+  `refresh_open_reservation`. This covers ordinary rests and cancels, partial
+  leaves changes, reprices, trigger promotion and cancellation, funds-check
+  eviction, and venue-originated liquidation remainders. Replacing a public
+  margin policy rebuilds the aggregate through the same derivation.
+- A fresh full-book fold reconciles the aggregate at every command and sweep
+  boundary under `cfg!(debug_assertions)`, and PANICS on drift. A saturated
+  currency is rebuilt on removal because subtracting from `Decimal::MAX`
+  cannot recover an overflowed sum.
+
+Decisions:
+
+- The proposed combined order-plus-position cache was narrowed deliberately.
+  Position maintenance is not book-depth-dependent, while caching it would add
+  every fill and policy mutation to the silent-drift surface. The implemented
+  split removes the O(results * open-orders) funds path without taking that
+  extra invariant risk.
+- A plain unordered keyed map was rejected because internal iteration can
+  reach scan and event order. The vector plus index keeps deterministic
+  metadata explicit; O(1) swap removal is safe only because consumers sort
+  before emitting.
+- No `TAPE_PROTOCOL_VERSION` bump is owed. Tape generation, fill draws, ids and
+  event ordering are unchanged; the container swap is hidden behind explicit
+  deterministic ordering.
+
+Verification:
+
+- The drift test deliberately corrupts the cached USDT hold and proves the
+  next funded command's reconciliation panics in debug. Removing command
+  reconciliation made that test fail because no panic occurred.
+- The keyed-book test removes the first of three orders, amends the order moved
+  into its slot and verifies the deterministic query snapshot. Removing amend
+  cache refresh made it fail on the reconciliation's 200-versus-300 USDT
+  mismatch.
+
+## notes/bugs-engine.md, round 3 audit pass
+
+The cold read of the round-3 diff found no correctness bug. The audit found
+one, plus three smaller items, all fixed in the same commit.
+
+- THE RELEASE RECONCILIATION IS GONE. It reinstated the exact cost finding 8
+  removed: a full fold of the book, deriving every reservation and allocating
+  a currency `String` and a `HashMap` per order, twice per command and twice
+  per sweep batch, on any engine with `enforce_funds` set - which is every
+  funded venue, the only configuration that ships. No benchmark could see it,
+  because `fill_bench`'s `scans` engine seeds no balances and is therefore
+  unfunded; the blessed table measured a path the shipped venue does not take.
+  Reconciliation is now `cfg!(debug_assertions)`-only and PANICS rather than
+  repairing, per the standing line that an invariant wants an assert, a type
+  or a guard and not a silent verification. Release correctness rests on
+  construction: `OpenBook`'s storage is private and the three cache-aware
+  mutators are the only way to move a reservation input.
+- The drift test FAILED under `brokkr test`, which is release. Verified by
+  running it: `test did not panic as expected`. `brokkr check` runs the suite
+  in dev, so the gate was green and the hole invisible. The test now carries
+  `#[cfg(debug_assertions)]`, so the release sweep skips it instead of failing
+  it. THE GENERAL LESSON, worth carrying past this loop: a test that pins a
+  `debug_assertions` behaviour must be gated to that profile, because the two
+  brokkr entry points disagree on profile.
+- `pending_scans` sorted with a comparator that did two hash lookups and two
+  integer parses PER COMPARISON, on the sweeper's hottest call. The acceptance
+  key is now decorated once per order and `sort_by_key`ed. `venue_order_sequence`
+  is a total order in practice: every venue order id is `V-{n}` from one
+  monotonic counter, so the `u64::MAX` fallback is unreachable and no tie can
+  fall through to the unstable slot order.
+- The stop-limit not-marketable arm wrote `self.open[pos] = order` directly,
+  bypassing the cache. It moves no hold today - the arm touches `resting`,
+  `scanned_ns` and `revision`, none of which the reservation derives from -
+  so it was not a live defect, but it was the one book write not going through
+  a cache-aware helper. It now refreshes.
+- `locked_balances` handed the saturation warning an unordered `HashSet` drain.
+  Sorted.
+
+Verified rather than assumed:
+
+- Mutation sites enumerated from the code, not the claim. `self.open` is
+  written at exactly the sites above plus `rest_open` / `take_open` /
+  `refresh_open_reservation`; the two remaining `IndexMut` writes touch only
+  `scanned_ns` and `revision`. `self.instruments` is never mutated after
+  construction and `self.margin` only through `set_margin_policy`, which
+  rebuilds - so no reservation input moves behind the cache's back.
+- NO `TAPE_PROTOCOL_VERSION` BUMP IS OWED, and the reason is stronger than
+  "ordering is sorted": `mogwai-engine` does not reference the constant and
+  reaches no tape generation path at all. Fill draws are keyed by order and
+  band draw, not by sweep sequence, and venue order ids are assigned at submit.
+  14 stays reserved for protocol-12b.
+- Bite-checked both negative controls rather than trusting them. Removing the
+  amend refresh fails `keyed_book_index...` on the reconciliation assert;
+  the drift test passes in dev and does not exist in release.
+- The position fold stays out of the cache and the boundary holds. Position
+  count is bounded by instruments times position keys and is independent of
+  book depth, so `free_balance`'s remaining loop is not where the next O(N)
+  hides.
