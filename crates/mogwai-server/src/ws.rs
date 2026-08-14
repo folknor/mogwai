@@ -14,7 +14,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use mogwai_protocol::{ClientMessage, CommandClass, ServerMessage, truncate_reason};
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, mpsc};
 
 use crate::{
     admission::{CloseSpec, ExecLanes, FrameClass, HeldFrame, Outbound, OutboundFrame},
@@ -26,7 +26,9 @@ pub(crate) async fn ws_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+    ws.max_message_size(mogwai_protocol::MAX_CLIENT_MESSAGE_BYTES)
+        .max_frame_size(mogwai_protocol::MAX_CLIENT_MESSAGE_BYTES)
+        .on_upgrade(move |socket| handle_socket(socket, state))
 }
 
 fn send_admission(lanes: &ExecLanes, msg: ServerMessage) -> Result<(), CloseSpec> {
@@ -40,32 +42,18 @@ fn send_admission(lanes: &ExecLanes, msg: ServerMessage) -> Result<(), CloseSpec
         .map_err(|_| CloseSpec::overload("outbound writer is gone"))
 }
 
-async fn dispatch_command(cmd: ClientMessage, state: AppState, lanes: ExecLanes) {
+struct QueuedCommand {
+    cmd: ClientMessage,
+    _global_slot: OwnedSemaphorePermit,
+}
+
+async fn dispatch_command(cmd: ClientMessage, state: &AppState, lanes: &ExecLanes) {
     let class = CommandClass::of(&cmd);
     let act_ms = class.map_or(0, |class| state.run.act_ms(class));
-    let _connection_ticket = if act_ms > 0 {
-        lanes.reserve_act()
-    } else {
-        None
-    };
-    let _global_ticket = if act_ms > 0 {
-        Arc::clone(&state.pending_acts).try_acquire_owned().ok()
-    } else {
-        None
-    };
-    if act_ms > 0 && (_connection_ticket.is_none() || _global_ticket.is_none()) {
-        let frame = ServerMessage::AdmissionRejected {
-            subject: crate::http::admission_subject(&cmd),
-            reason: "venue pending-act capacity exhausted".into(),
-            ts_event: sim_now_ns(state.sim()),
-        };
-        drop(send_admission(&lanes, frame));
-        return;
-    }
     if act_ms > 0 {
         tokio::time::sleep(state.sim().wall_duration(sim_duration_from_millis(act_ms))).await;
     }
-    match process_order_cmd(cmd, &state, &state.run, &lanes, ActDelay::Paid).await {
+    match process_order_cmd(cmd, state, &state.run, lanes, ActDelay::Paid).await {
         OrderOutcome::Produced {
             events,
             reservation,
@@ -77,9 +65,27 @@ async fn dispatch_command(cmd: ClientMessage, state: AppState, lanes: ExecLanes)
             drop(lanes.submit_produced(reservation, Instant::now(), class, events));
         }
         OrderOutcome::NotAdmitted(frame) | OrderOutcome::Diagnostic(frame) => {
-            drop(send_admission(&lanes, frame));
+            drop(send_admission(lanes, frame));
         }
     }
+}
+
+fn spawn_command_dispatcher(
+    mut commands: mpsc::Receiver<QueuedCommand>,
+    state: AppState,
+    lanes: ExecLanes,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(QueuedCommand { cmd, _global_slot }) = commands.recv().await {
+            dispatch_command(cmd, &state, &lanes).await;
+        }
+    })
+}
+
+fn current_completion(
+    completion: &mut tokio::sync::watch::Receiver<Option<(u64, u64)>>,
+) -> Option<(u64, u64)> {
+    *completion.borrow_and_update()
 }
 
 pub(crate) fn spawn_exec_pump(
@@ -180,6 +186,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let (held_tx, held_rx) = mpsc::unbounded_channel();
     let (prio_tx, prio_rx) = mpsc::unbounded_channel();
     let lanes = ExecLanes::new(held_tx, prio_tx, build_admission_limits(&state.cfg));
+    let (command_tx, command_rx) = mpsc::channel(state.cfg.pending_command_acts);
+    let dispatcher = spawn_command_dispatcher(command_rx, state.clone(), lanes.clone());
     let writer = tokio::spawn(run_writer(sink, prio_rx, out_rx, state.clone()));
     // Venue-ORIGINATED execution output (a trigger fill nobody commanded)
     // is delivered through these lanes, so the run has to know about them for
@@ -318,29 +326,71 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         })
     });
     let mut completion = state.run.completion();
-    loop {
-        tokio::select! {
-            changed = completion.changed() => {
-                let completed = if changed.is_ok() { *completion.borrow_and_update() } else { None };
-                if let Some((sim_now_ns, elapsed_ns)) = completed {
-                    drop(out_tx.send(Outbound::Frame(OutboundFrame { payload: Arc::from(serde_json::to_string(&ServerMessage::RunComplete { sim_now_ns, elapsed_ns }).expect("RunComplete serializes")), class: FrameClass::Terminal, charge: None, slot: None })).await);
-                    drop(out_tx.send(Outbound::Close(CloseSpec { code: 1000, reason: "run complete".into() })).await);
+    let already_complete = current_completion(&mut completion);
+    if let Some((sim_now_ns, elapsed_ns)) = already_complete {
+        drop(
+            out_tx
+                .send(Outbound::Frame(OutboundFrame {
+                    payload: Arc::from(
+                        serde_json::to_string(&ServerMessage::RunComplete {
+                            sim_now_ns,
+                            elapsed_ns,
+                        })
+                        .expect("RunComplete serializes"),
+                    ),
+                    class: FrameClass::Terminal,
+                    charge: None,
+                    slot: None,
+                }))
+                .await,
+        );
+        drop(
+            out_tx
+                .send(Outbound::Close(CloseSpec {
+                    code: 1000,
+                    reason: "run complete".into(),
+                }))
+                .await,
+        );
+    } else {
+        loop {
+            tokio::select! {
+                changed = completion.changed() => {
+                    let completed = if changed.is_ok() { *completion.borrow_and_update() } else { None };
+                    if let Some((sim_now_ns, elapsed_ns)) = completed {
+                        drop(out_tx.send(Outbound::Frame(OutboundFrame { payload: Arc::from(serde_json::to_string(&ServerMessage::RunComplete { sim_now_ns, elapsed_ns }).expect("RunComplete serializes")), class: FrameClass::Terminal, charge: None, slot: None })).await);
+                        drop(out_tx.send(Outbound::Close(CloseSpec { code: 1000, reason: "run complete".into() })).await);
+                    }
+                    break;
                 }
-                break;
-            }
-            message = stream.next() => match message {
-                Some(Ok(Message::Close(_)) | Err(_)) | None => break,
-                Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMessage>(&text) {
-                    Ok(command) => { tokio::spawn(dispatch_command(command, state.clone(), lanes.clone())); }
-                    Err(err) => { drop(send_admission(&lanes, ServerMessage::ProtocolError { reason: truncate_reason(format!("invalid client frame: {err}")), ts_event: sim_now_ns(state.sim()) })); }
-                },
-                Some(Ok(_)) => {}
+                message = stream.next() => match message {
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                    Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMessage>(&text) {
+                        Ok(command) => {
+                            let subject = crate::http::admission_subject(&command);
+                            let queued = Arc::clone(&state.pending_commands)
+                                .try_acquire_owned()
+                                .ok()
+                                .map(|_global_slot| QueuedCommand { cmd: command, _global_slot });
+                            if queued.is_none_or(|queued| command_tx.try_send(queued).is_err()) {
+                                drop(send_admission(&lanes, ServerMessage::AdmissionRejected {
+                                    subject,
+                                    reason: "venue command capacity exhausted".into(),
+                                    ts_event: sim_now_ns(state.sim()),
+                                }));
+                            }
+                        }
+                        Err(err) => { drop(send_admission(&lanes, ServerMessage::ProtocolError { reason: truncate_reason(format!("invalid client frame: {err}")), ts_event: sim_now_ns(state.sim()) })); }
+                    },
+                    Some(Ok(_)) => {}
+                }
             }
         }
     }
     state.run.release_lanes(lane_id);
     feed.abort();
     pump.abort();
+    dispatcher.abort();
     if let Some(heartbeat) = heartbeat {
         heartbeat.abort();
     }
@@ -352,5 +402,32 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         .is_err()
     {
         writer.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::current_completion;
+
+    /// The differential is the point: a receiver subscribed AFTER the terminal
+    /// transition never sees a change, so a socket that only awaits
+    /// `changed()` waits forever on a run that is already over. Both halves are
+    /// asserted here, because asserting only the second would pass against the
+    /// buggy shape too.
+    #[tokio::test]
+    async fn receiver_created_after_completion_observes_terminal_state() {
+        let (tx, _keep) = tokio::sync::watch::channel(None);
+        tx.send_replace(Some((123, 45)));
+        let mut late = tx.subscribe();
+
+        let mut awaiting = tx.subscribe();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), awaiting.changed(),)
+                .await
+                .is_err(),
+            "a late receiver cannot reach the terminal state by waiting for a change"
+        );
+
+        assert_eq!(current_completion(&mut late), Some((123, 45)));
     }
 }

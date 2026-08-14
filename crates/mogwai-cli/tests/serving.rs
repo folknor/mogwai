@@ -756,3 +756,150 @@ fn post_divergence(base: &str, body: &str) -> u16 {
         .and_then(|code| code.parse().ok())
         .expect("a status line")
 }
+
+/// Commands act in socket arrival order even when their modeled act latencies
+/// differ. A cancel that arrives behind its submit must not overtake it.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn websocket_commands_cannot_overtake_each_other() {
+    let venue = spawn(&["--config", &fast_config()]);
+    assert_eq!(
+        post_divergence(
+            &venue.http_base(),
+            r#"{"type":"CommandLatency","submit_act_ms":200,"cancel_act_ms":0}"#,
+        ),
+        202
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
+        .await
+        .expect("open order socket");
+    let submit = format!(
+        r#"{{"type":"SubmitOrder","client_order_id":"ORDERED-1","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"0.01","price":"1","time_in_force":"Gtc"}}"#,
+        venue.record.symbol
+    );
+    socket
+        .send(Message::Text(submit.into()))
+        .await
+        .expect("submit");
+    socket
+        .send(Message::Text(
+            r#"{"type":"CancelOrder","client_order_id":"ORDERED-1"}"#.into(),
+        ))
+        .await
+        .expect("cancel");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut accepted = false;
+    loop {
+        let message = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .expect("ordered command result before deadline")
+            .expect("socket remains open")
+            .expect("valid websocket frame");
+        let Message::Text(text) = message else {
+            continue;
+        };
+        match serde_json::from_str::<ServerMessage>(&text) {
+            Ok(ServerMessage::OrderAccepted {
+                client_order_id, ..
+            }) if client_order_id == "ORDERED-1" => accepted = true,
+            Ok(ServerMessage::OrderCanceled {
+                client_order_id, ..
+            }) if client_order_id == "ORDERED-1" => {
+                assert!(accepted, "cancel completed before its submit");
+                break;
+            }
+            Ok(ServerMessage::OrderCancelRejected {
+                client_order_id,
+                reason,
+                ..
+            }) if client_order_id == "ORDERED-1" => {
+                panic!("cancel overtook submit and was rejected: {reason}")
+            }
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn websocket_command_work_is_bounded_without_an_act_delay() {
+    let config = format!(
+        "{}/tests/configs/command-cap.toml",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let venue = spawn(&["--config", &config]);
+    let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
+        .await
+        .expect("open order socket");
+    for index in 0..50 {
+        let command = format!(
+            r#"{{"type":"SubmitOrder","client_order_id":"CAP-{index}","symbol":"{}","side":"Buy","order_type":"Market","quantity":"0.01","time_in_force":"Gtc"}}"#,
+            venue.record.symbol
+        );
+        socket
+            .send(Message::Text(command.into()))
+            .await
+            .expect("send");
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let message = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .expect("capacity refusal before deadline")
+            .expect("socket remains open")
+            .expect("valid websocket frame");
+        let Message::Text(text) = message else {
+            continue;
+        };
+        if matches!(
+            serde_json::from_str::<ServerMessage>(&text),
+            Ok(ServerMessage::AdmissionRejected { ref reason, .. })
+                if reason == "venue command capacity exhausted"
+        ) {
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn websocket_rejects_messages_over_the_protocol_ceiling() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
+        .await
+        .expect("open socket");
+    socket
+        .send(Message::Text(
+            "x".repeat(mogwai_protocol::MAX_CLIENT_MESSAGE_BYTES + 1)
+                .into(),
+        ))
+        .await
+        .expect("send oversized message");
+    // The socket is a LIVE market-data feed, so frames the venue had already
+    // written when the oversized frame landed are still in flight and arrive
+    // first: the assertion is that the connection ENDS, not that the close is
+    // the very next frame. It must still end promptly, so the deadline is the
+    // real assertion - a venue that kept serving this connection indefinitely
+    // would time out here rather than quietly pass.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut ended = false;
+    while !ended {
+        let message = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .expect("the oversized frame ends the connection before the deadline");
+        match message {
+            Some(Ok(Message::Close(_)) | Err(_)) | None => ended = true,
+            Some(Ok(Message::Text(text))) => {
+                // Market data may precede the close. What must never appear is
+                // a protocol-level ANSWER to the oversized input: that would
+                // mean the venue reassembled and parsed it.
+                assert!(
+                    !text.contains("ProtocolError"),
+                    "the venue parsed a message over its own ceiling: {text}"
+                );
+            }
+            Some(Ok(_)) => {}
+        }
+    }
+}

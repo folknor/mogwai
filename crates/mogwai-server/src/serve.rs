@@ -287,7 +287,7 @@ async fn serve_async(
         run,
         cfg: cfg.clone(),
         profiles: Arc::clone(&profiles),
-        pending_acts: Arc::new(tokio::sync::Semaphore::new(cfg.global_pending_command_acts)),
+        pending_commands: Arc::new(tokio::sync::Semaphore::new(cfg.global_pending_command_acts)),
         market_readings,
     };
     let completing_run = Arc::clone(&state.run);

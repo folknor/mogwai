@@ -891,3 +891,142 @@ The tree in this loop routinely carries a prior stage's uncommitted work, so
 file, not the one edit under test. Revert and restore a bite check as a TEXT
 EDIT, the same way it was made. If a bite check genuinely needs a wholesale
 revert, stash or copy the file first and restore from that copy.
+
+## notes/bugs-server-transport.md, round 1 (findings 1 through 5)
+
+Classification:
+
+- Findings 1 through 5 all REPRODUCED as written. The admission subject defect
+  also closes finding 1 of `notes/bugs-protocol.md`: `AdmissionSubject` now
+  bounds every client id during serialization in the protocol crate, so even a
+  caller constructing a raw public variant cannot put an oversized subject on
+  the wire.
+- Websocket frames and reassembled messages have an explicit 64 KiB protocol
+  ceiling, replacing tungstenite's dependency defaults.
+- Every socket owns one bounded command queue and one sequential dispatcher.
+  A process-wide permit covers every queued or executing command, including
+  the ordinary zero-act-latency path. Capacity refusal is a priority-lane
+  `AdmissionRejected`; the engine never sees the refused command.
+- The dispatcher is the construction proof for arrival order. It holds each
+  command through act latency, market reading and engine processing before it
+  receives the next, so neither the blocking pool nor different act delays can
+  reorder admitted commands.
+- A completion receiver checks its current value before waiting for a change.
+  A socket upgraded after the terminal transition therefore receives
+  `RunComplete` and WS 1000 instead of waiting on a change already seen.
+
+Protocol and verification:
+
+- No `TAPE_PROTOCOL_VERSION` bump is owed. The tape worker, generator, seed
+  derivation and emitted tape bytes are untouched. Arrival order can change
+  ENGINE outcomes relative to the buggy binary, including whether a cancel
+  rejects or succeeds, but it does not change tape generation or fill draws;
+  fill draws remain keyed by order fields and seed. Version 14 stays live and
+  15 stays reserved for the protocol-12b mechanism landing.
+- The ordering negative control replaced the sequential receive with detached
+  dispatch. `websocket_commands_cannot_overtake_each_other` then failed with
+  `unknown order` when a zero-latency cancel overtook its delayed submit.
+  Removing the websocket size configuration made
+  `websocket_rejects_messages_over_the_protocol_ceiling` fail by accepting the
+  oversized payload and returning `ProtocolError`. Both production changes
+  were restored by text edit. Making the late-completion reader return no
+  current value made `receiver_created_after_completion_observes_terminal_state`
+  fail in release; that production change was likewise restored by text edit.
+- `admission_subject_serialization_bounds_raw_client_ids` constructs the public
+  enum with an id more than 10 KiB over its cap, serializes the whole refusal,
+  and verifies both the 4 KiB frame ceiling and the decoded 64-byte subject.
+  `websocket_command_work_is_bounded_without_an_act_delay` drives the original
+  unbounded configuration directly: with both command capacities set to one
+  and no armed latency, a burst receives a visible capacity refusal.
+
+## notes/bugs-server-transport.md, round 1 review and close pass
+
+A cold read of the uncommitted round-1 diff found ONE issue, and it was a
+FAILURE THIS MACHINE'S GREEN GATE DID NOT REPRODUCE. It is a test bug, not a
+production bug, and the reasoning matters more than the verdict:
+
+- `websocket_rejects_messages_over_the_protocol_ceiling` assumed the first
+  frame after an oversized send is the close. The socket is a LIVE market-data
+  feed, so a `Quote` or `Trade` the venue had already written is legitimately
+  in flight and arrives first; the reviewer saw exactly that. The production
+  path is prompt and deterministic in the only sense available: the very next
+  poll of `stream.next()` returns `Err`, the read loop breaks, teardown is
+  bounded by `CLOSE_GRACE`, and TCP guarantees only frames written BEFORE that
+  turn precede the close. There is no unbounded interval to paper over, so the
+  test drains until close, error or deadline - and the DEADLINE is now the real
+  assertion, so a venue that kept serving the connection would time out rather
+  than pass. It additionally asserts no `ProtocolError` ever appears, which is
+  the honest statement of the finding: the venue must never REASSEMBLE AND
+  PARSE a message over its own ceiling. That rewrite made the test STRONGER,
+  not more tolerant: it fails 3 of 3 with the size configuration removed, where
+  the original depended on frame interleaving to fail at all.
+- The class was checked, not just the instance. The other two new socket tests
+  already drain in a loop and ignore unrelated frames. THE STANDING RULE: a
+  test on a `/ws` socket may never assert on THE NEXT frame, because every
+  socket is attached to the tape on upgrade.
+
+Claims audited, and where they did not hold:
+
+- `websocket_command_work_is_bounded_without_an_act_delay` DID NOT PIN WHAT IT
+  CLAIMED. Its fixture set both `pending_command_acts` and
+  `global_pending_command_acts` to 1, and the refusal it observed came from the
+  process-wide semaphore: raising the per-connection queue to 4096 left the
+  test green. The fixture now leaves the global bound at its default, so the
+  refusal can only come from the socket's own queue. Bite-checked in that
+  form - it times out with the queue widened.
+- `receiver_created_after_completion_observes_terminal_state` was a near
+  tautology over `watch::Receiver::borrow_and_update`. It now asserts the
+  DIFFERENTIAL - a late receiver's `changed()` does not resolve, which is the
+  bug's whole shape - alongside the current-value read. Disclosed residual: it
+  pins the helper, not the call site. An integration test cannot reach this
+  honestly, because the venue stops accepting connections at completion, which
+  is why the round wrote a unit test in the first place.
+- The ordering test and the admission-cap test both bite. Reverting the
+  sequential receive to a detached spawn fails
+  `websocket_commands_cannot_overtake_each_other` with `cancel overtook submit
+  and was rejected: unknown order`; removing the char-boundary truncation fails
+  `admission_subject_serialization_bounds_raw_client_ids` on the 4 KiB ceiling.
+  All four bite checks ran in RELEASE and none rests on a `debug_assert`.
+
+Verified rather than accepted:
+
+- THE DISPATCHER IS DETERMINISTIC AND WEDGE-PROOF. Its total order is a
+  function of arrival alone: one socket has one read loop, `try_send` preserves
+  that order into one mpsc queue, and one task awaits each command through act
+  latency, market read and engine processing before receiving the next. Nothing
+  downstream reintroduces a choice - there is no `select!` over ready commands,
+  no map iteration and no per-command spawn left. It cannot wedge: the read
+  loop never awaits the queue (`try_send` refuses instead of blocking), so a
+  dispatcher stuck on a market read that never completes costs a visible
+  capacity refusal rather than a stalled socket, and teardown aborts it. The
+  abort is safe because `process_order_cmd` has exactly ONE await, before the
+  engine lock; `process_with_market` runs to completion under the lock, so no
+  cancellation can tear engine state.
+- THE BOUND REFUSES, IT DOES NOT DROP AND IT DOES NOT BLOCK, and the client is
+  told: a full queue or an exhausted process permit emits `AdmissionRejected`
+  with `venue command capacity exhausted` on the priority lane, and the engine
+  never sees the command. Both permits are released on the refusal path,
+  because the `QueuedCommand` carrying the permit is dropped by the failed
+  `try_send`.
+- THE NO-BUMP VERDICT HOLDS, checked rather than relayed. Command arrival order
+  reaches the ENGINE, and the engine reaches no tape generation path at all;
+  the market read clones a checkpoint source and cannot extend the live index,
+  so no ordering of reads can move a generated byte, a draw, a seed or the
+  origin. Fill draws are keyed by order fields and band draw. 14 stays live and
+  15 stays reserved for protocol-12b.
+- `bugs-protocol.md` FINDING 1 IS CLOSED and struck from that document in the
+  same commit; nothing else there was touched. Both halves of its argument are
+  now real bounds - the subject is truncated inside `Serialize`, so every wire
+  path passes it, and the inbound 64 MiB tungstenite default is replaced by
+  `MAX_CLIENT_MESSAGE_BYTES`. The finding's preferred `BoundedId` newtype was
+  NOT built: the variants stay constructible from a raw `String`, so the
+  invariant holds at serialization rather than construction. That is a weaker
+  place than the type, and a later round wanting the stronger one has the
+  finding's own sketch.
+
+Consumer-visible surface, recorded in `notes/todo.md` as three numbered limits
+with what a consumer must do about each: the 64 KiB inbound cap, the bounded
+command queue and its refusal frame, and the new HEAD-OF-LINE property - an
+armed `CommandLatency` now delays every later command on the same socket, which
+is the price of arrival order and is stated in `docs/havoc.md`.
+

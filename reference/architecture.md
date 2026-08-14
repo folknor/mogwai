@@ -7,8 +7,15 @@ tape and one engine ledger.
 
 The server exposes `/health`, `/account`, `/instruments`, `/clock`, `/trades`,
 `/quotes`, `/control/divergence`, and `/ws`. Order entry is WebSocket-only: the
-`POST /orders` carrier went with the HTTP transport profiles, leaving one
-carrier and therefore no dispatch ordering to reason about. A WebSocket is
+`POST /orders` carrier went with the HTTP transport profiles. Each socket feeds
+one bounded sequential dispatcher, so admitted commands reach the market read
+and engine in socket arrival order even when their modeled act latencies differ.
+The queue and a process-wide permit bound parsed command work before it reaches
+the blocking pool or engine mutex, and a full bound is a visible
+`AdmissionRejected` the engine never sees. Inbound frames and reassembled
+messages are capped at `MAX_CLIENT_MESSAGE_BYTES`, 64 KiB, so a dependency
+default no longer sets the venue's memory bound; an oversized frame ends the
+connection. A WebSocket is
 attached to the run tape on upgrade: clients do not subscribe or supply an
 account identity. The bounded fanout ring remains; a lagging client receives
 `FeedLagged` on the priority lane and is closed with WS 1011.

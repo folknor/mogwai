@@ -155,13 +155,11 @@ pub struct Config {
     /// `exec_held_budget_bytes`: the overload close is only reachable in a test
     /// when this can be made small.
     pub(crate) admission_lane_frames: usize,
-    /// Per-connection ceiling on order commands detached by an armed
-    /// `CommandLatency` act delay and not yet acted on. One COMMAND, not one
-    /// payload. See `admission::PENDING_ACT_SLOTS`; lowering it is how the smoke
-    /// test reaches the refusal.
+    /// Per-connection ceiling on parsed order commands waiting for the one
+    /// sequential dispatcher. One COMMAND, not one payload.
     pub(crate) pending_command_acts: usize,
-    /// Process-wide ceiling on the same across every websocket connection. See
-    /// `admission::GLOBAL_PENDING_ACT_SLOTS`.
+    /// Process-wide ceiling on queued or executing commands across every
+    /// websocket connection. See `admission::GLOBAL_PENDING_COMMAND_SLOTS`.
     pub(crate) global_pending_command_acts: usize,
     /// The one instrument this run serves. Absent, the server seeds the
     /// built-in default profile. Present, it is authoritative for
@@ -226,8 +224,8 @@ impl Default for Config {
             zero_speed_stall_ms: 5000,
             exec_held_budget_bytes: crate::admission::EXEC_HELD_BUDGET_BYTES,
             admission_lane_frames: crate::admission::ADMISSION_LANE_FRAMES,
-            pending_command_acts: crate::admission::PENDING_ACT_SLOTS,
-            global_pending_command_acts: crate::admission::GLOBAL_PENDING_ACT_SLOTS,
+            pending_command_acts: crate::admission::PENDING_COMMAND_SLOTS,
+            global_pending_command_acts: crate::admission::GLOBAL_PENDING_COMMAND_SLOTS,
             instrument: None,
             regime: None,
             balances: default_balances(),
@@ -431,7 +429,6 @@ pub(crate) fn build_admission_limits(cfg: &Config) -> AdmissionLimits {
         held_budget_bytes: cfg.exec_held_budget_bytes,
         lane_frames: cfg.admission_lane_frames,
         promise_tickets: crate::admission::ADMISSION_PROMISE_TICKETS,
-        pending_act_slots: cfg.pending_command_acts,
     }
 }
 

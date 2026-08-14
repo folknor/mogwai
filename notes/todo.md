@@ -19,6 +19,39 @@ Or both. There are no exceptions.
 
 ## Open issues
 
+- THE WEBSOCKET COMMAND CARRIER NOW HAS THREE CONSUMER-VISIBLE LIMITS (landed
+  2026-08-15). None existed before, so a client that was previously accepted
+  can now be refused.
+  1. INBOUND SIZE. A websocket frame or reassembled message larger than
+     `mogwai_protocol::MAX_CLIENT_MESSAGE_BYTES`, 64 KiB, is refused by the
+     transport and the CONNECTION ENDS - there is no per-message error frame,
+     because tungstenite cannot resynchronize a stream whose frame it declined
+     to buffer. The previous ceiling was tungstenite's 64 MiB default, which
+     also made the admission lane's memory bound fictional. A legal command is
+     a few hundred bytes, so only a pathological or corrupt sender reaches
+     this. WHAT A CONSUMER MUST DO: nothing, unless it batches - if it ever
+     needs a larger command frame, the constant is the place to raise it, and
+     raising it re-opens the memory question the cap answers.
+  2. QUEUE CAPACITY. Each socket has one bounded command queue
+     (`pending_command_acts`, default 256) feeding one sequential dispatcher,
+     and a process-wide permit (`global_pending_command_acts`, default 4096)
+     covers every queued or executing command. A full bound REFUSES rather
+     than dropping or blocking: the client receives an `AdmissionRejected`
+     naming `venue command capacity exhausted` on the priority lane, and the
+     engine never sees the command. WHAT A CONSUMER MUST DO: treat that
+     refusal as a retryable backpressure signal, not as an order rejection.
+     It cannot be silently lost, but it CAN arrive under a burst that used to
+     be accepted.
+  3. HEAD-OF-LINE ORDER. Commands from one socket are now acted on strictly
+     in arrival order, each held through its act latency, market read and
+     engine processing before the next is received. That is the point of the
+     change - a cancel could previously overtake the submit it cancelled - but
+     it means an armed `CommandLatency` now delays every LATER command on that
+     socket too. A consumer wanting concurrent in-flight commands under an
+     armed latency needs several sockets.
+  broadarrow is the known consumer and depends on this workspace; nothing here
+  can verify its build.
+
 - `mogwai_protocol::Symbol` IS NOW `Arc<str>`, NOT `String` (source-breaking,
   landed 2026-08-15). The generator allocated a fresh symbol string for every
   materialized trade and quote, which was the crate's most frequent heap

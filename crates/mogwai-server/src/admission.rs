@@ -39,7 +39,7 @@ use tokio::sync::{Semaphore, mpsc};
 pub(crate) const EXEC_HELD_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 
 /// Per-connection ceiling on QUEUED priority frames. 64 x
-/// `ADMISSION_FRAME_MAX_BYTES` = 512 KiB, a real bound.
+/// `ADMISSION_FRAME_MAX_BYTES` = 256 KiB, a real bound.
 pub(crate) const ADMISSION_LANE_FRAMES: usize = 64;
 
 /// Outstanding PROMISES of a future priority frame - one per live replay, held
@@ -53,14 +53,11 @@ pub(crate) const ADMISSION_LANE_FRAMES: usize = 64;
 /// refusal promise. Deliberately no longer tied to a wire subscribe cap: there
 /// is no wire subscribe.
 pub(crate) const ADMISSION_PROMISE_TICKETS: usize = 1;
-/// Per-connection ceiling on order commands detached by an armed act latency
-/// and not yet acted on. An armed hour-long act delay would otherwise let one
-/// connection spawn unbounded pending tasks. A pending act is one COMMAND, not
-/// a payload, so a frame count is the right unit here.
-pub(crate) const PENDING_ACT_SLOTS: usize = 256;
-/// Process-wide ceiling on websocket commands sleeping out an armed act delay.
-/// `PENDING_ACT_SLOTS` bounds one client; this bounds the run.
-pub(crate) const GLOBAL_PENDING_ACT_SLOTS: usize = 4096;
+/// Per-connection capacity of the sequential command queue.
+pub(crate) const PENDING_COMMAND_SLOTS: usize = 256;
+/// Process-wide ceiling on queued or executing websocket commands.
+/// `PENDING_COMMAND_SLOTS` bounds one client; this bounds the run across clients.
+pub(crate) const GLOBAL_PENDING_COMMAND_SLOTS: usize = 4096;
 
 /// WS 1013 "Try Again Later": the venue is refusing further work on this
 /// connection because its admission path is saturated. Deliberately not a
@@ -111,8 +108,6 @@ pub(crate) struct AdmissionLimits {
     pub(crate) held_budget_bytes: usize,
     pub(crate) lane_frames: usize,
     pub(crate) promise_tickets: usize,
-    /// Per-connection pending-act ceiling. See `PENDING_ACT_SLOTS`.
-    pub(crate) pending_act_slots: usize,
 }
 
 impl Default for AdmissionLimits {
@@ -121,7 +116,6 @@ impl Default for AdmissionLimits {
             held_budget_bytes: EXEC_HELD_BUDGET_BYTES,
             lane_frames: ADMISSION_LANE_FRAMES,
             promise_tickets: ADMISSION_PROMISE_TICKETS,
-            pending_act_slots: PENDING_ACT_SLOTS,
         }
     }
 }
@@ -376,10 +370,6 @@ pub(crate) struct ExecLanes {
     prio_tx: mpsc::UnboundedSender<Outbound>,
     prio_budget: FrameBudget,
     promise_budget: FrameBudget,
-    /// Commands this connection has detached under an armed act latency and
-    /// that have not finished acting. Accounted separately from queue depth: a
-    /// pending act holds no frame, it holds future work.
-    act_budget: FrameBudget,
 }
 
 /// The receiving halves of a detached `ExecLanes`, kept alive by its owner.
@@ -406,7 +396,6 @@ impl ExecLanes {
             held_budget: ByteBudget::new(limits.held_budget_bytes),
             prio_budget: FrameBudget::new(limits.lane_frames),
             promise_budget: FrameBudget::new(limits.promise_tickets),
-            act_budget: FrameBudget::new(limits.pending_act_slots),
         }
     }
 
@@ -474,13 +463,6 @@ impl ExecLanes {
     pub(crate) fn reserve_promise(&self) -> Option<Ticket> {
         self.promise_budget.try_ticket()
     }
-    /// Take this connection's ticket for one order command about to be detached
-    /// by an armed act latency. `None` is the visible refusal: the command is
-    /// answered with an `AdmissionRejected` and the engine never sees it.
-    pub(crate) fn reserve_act(&self) -> Option<Ticket> {
-        self.act_budget.try_ticket()
-    }
-
     /// Emit an admission frame against a queue slot. Never blocks.
     ///
     /// The slot travels with the frame and is released when the writer drops

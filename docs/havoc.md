@@ -8,6 +8,12 @@ client-originated orders. Venue-originated maintenance, including forced
 liquidation, bypasses them and leaves them armed for the next matching client
 action.
 
+An armed `CommandLatency` act delay is HEAD-OF-LINE on its socket. Each
+connection feeds one sequential dispatcher, so a delayed submit holds every
+later command from the same socket behind it - which is what stops a cancel
+from overtaking the submit it cancels. Concurrent in-flight commands under an
+armed latency need several sockets.
+
 `DelayAcks`, `CommandLatency`, `GoDark`, `StallData`, partial fills, rejects,
 duplicate fills, and blackouts keep their existing fidelity meanings. `GoDark`
 suppresses a connection's output wholesale; `StallData` suppresses market data

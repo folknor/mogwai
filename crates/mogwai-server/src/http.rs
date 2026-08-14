@@ -344,7 +344,7 @@ pub(crate) struct AppState {
     pub(crate) profiles: Arc<source::InstrumentProfiles>,
     /// Process-wide ceiling on websocket commands sleeping out an armed ACT
     /// delay. The per-connection lane bounds one client; this bounds the run.
-    pub(crate) pending_acts: Arc<tokio::sync::Semaphore>,
+    pub(crate) pending_commands: Arc<tokio::sync::Semaphore>,
     pub(crate) market_readings: Arc<crate::fills::MarketReadingCache>,
 }
 

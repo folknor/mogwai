@@ -145,7 +145,11 @@ lists them; `mogwai presets MNQ` prints one with its provenance.
 
 The replay and admission settings remain run-wide: `fanout_depth`,
 `zero_speed_stall_ms`, `exec_held_budget_bytes`, `admission_lane_frames`,
-`pending_command_acts`, and `global_pending_command_acts`. There are no
+`pending_command_acts`, and `global_pending_command_acts`.
+`pending_command_acts` bounds one socket's sequential command queue;
+`global_pending_command_acts` bounds queued or executing
+commands across the run. A full bound produces a visible `AdmissionRejected`
+without letting the engine see the command. There are no
 account, tape-cap, subscription, or transport-profile configuration keys.
 
 The built-in generator profile expresses cadence with

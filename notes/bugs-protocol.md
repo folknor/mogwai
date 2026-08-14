@@ -3,61 +3,22 @@
 Hunter: Claude Opus, single coverage. Findings are a work document, not a
 contract - they may be wrong.
 
-Cross-scope: finding 1 below is reported more fully from the server side in
-`bugs-server-transport.md` finding 1; finding 2 is corrected there by finding 6
-(the `--duration 0s` behaviour is "fall back to the config", not "run forever").
+Cross-scope: finding 2 is corrected in `bugs-server-transport.md` by its
+finding 6 (the `--duration 0s` behaviour is "fall back to the config", not "run
+forever").
 
-## 1. `AdmissionSubject` echoes an unbounded client id - `ADMISSION_FRAME_MAX_BYTES` is not a bound (high confidence)
-
-`crates/mogwai-protocol/src/messages.rs:175` claims 4096 bytes is an upper bound
-on any `EventKind::Admission` frame, and `crates/mogwai-server/src/admission.rs:43`
-builds `ADMISSION_LANE_FRAMES = 64` on top of it. That derivation only holds if
-every string in an admission frame is capped.
-
-`ExecLanes::emit_admission` truncates `reason` on `ProtocolError`,
-`AdmissionRejected` and `HavocDiagnostic` - deliberately, "rather than at each of
-the dozen call sites, which is what actually makes `ADMISSION_FRAME_MAX_BYTES`
-hold". It does not touch `AdmissionRejected.subject`, and `http::admission_subject`
-clones `client_order_id` / `request_id` verbatim:
-
-```rust
-ClientMessage::SubmitOrder(o) => AdmissionSubject::Submit {
-    client_order_id: o.client_order_id.clone(),
-},
-```
-
-Every other echo path in the same file goes through `truncate_client_id`, with a
-comment explicitly about the "8 MiB `client_order_id` into an 8 MiB
-`OrderRejected`" failure. The subject is the one that was missed.
-
-Two reachable paths:
-
-- `http.rs` `boundary_outcome`: the command is already known malformed - that is
-  how you get here with an over-length id in the first place - and if
-  `try_reserve_boundary()` fails, the refusal is an `AdmissionRejected` carrying
-  the full id. Reaching it just needs concurrent malformed submits to exhaust the
-  boundary byte budget.
-- `ws.rs` `dispatch_command`: the pending-act-capacity refusal is built from the
-  raw `cmd` before `boundary_error` ever runs, so no validation has happened at
-  all. Needs an armed `CommandLatency` plus saturated act capacity - a normal
-  havoc scenario.
-
-No inbound WS frame-size limit is configured anywhere in `mogwai-server`
-(grepped for `max_frame_size` / `max_message_size` / `WebSocketConfig` - nothing),
-so the ceiling is tungstenite's 64 MiB default message. A client can queue up to
-64 priority-lane frames of ~64 MiB each: ~4 GiB where the code claims 512 KiB.
-
-The protocol crate's own test (`admission_frames_fit_their_ceiling`) and the
-server's (`admission_reasons_are_truncated_at_the_lane`) both only vary `reason`.
-Neither samples a long subject id, which is why this survived.
-
-Fix, structurally: `AdmissionSubject` should not be constructible with an
-over-length id. Either truncate in `emit_admission` alongside `reason` (cheap,
-matches the existing "do it at the lane" argument), or - better, given pre-1.0 -
-make `AdmissionSubject`'s id fields a `BoundedId` newtype whose only constructor
-truncates, so the invariant is in the type rather than in a match arm someone can
-forget. The current design has the same invariant restated at ~6 call sites and
-enforced at 5 of them.
+Finding 1 - `AdmissionSubject` echoes an unbounded client id, so
+`ADMISSION_FRAME_MAX_BYTES` was not a bound - is CLOSED and struck, by the
+`bugs-server-transport.md` round-1 landing. `AdmissionSubject` now has a
+hand-written `Serialize` that truncates every id field to `MAX_CLIENT_ID_LEN` on
+a char boundary, so no construction path can put an oversized subject on the
+wire, and the websocket carrier caps inbound frames and reassembled messages at
+`MAX_CLIENT_MESSAGE_BYTES` rather than inheriting tungstenite's 64 MiB default.
+Both halves of the finding's arithmetic - the 4 KiB frame and the 64-frame lane
+- are therefore real bounds. The residual is cosmetic and deliberate: the
+variants remain constructible from a raw `String`, so the invariant holds at
+serialization rather than at construction, which is where every wire path
+passes.
 
 ## 2. `LaunchSpec.duration = Some(Duration::ZERO)` silently means "run forever" (high confidence)
 

@@ -16,6 +16,10 @@ use crate::{ClientOrderId, Symbol, VenueOrderId};
 pub const MAX_CLIENT_ID_LEN: usize = 64;
 /// Maximum byte length of the account identity carried by the transport.
 pub const MAX_ACCOUNT_ID_LEN: usize = 64;
+/// Maximum websocket frame and reassembled message accepted from a client.
+/// Legal command frames are only a few hundred bytes; this leaves ample room
+/// while preventing dependency defaults from setting the venue's memory bound.
+pub const MAX_CLIENT_MESSAGE_BYTES: usize = 64 * 1024;
 
 /// True only when a traded price is strictly through a resting limit.
 ///
@@ -568,7 +572,7 @@ pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
 /// `OrderRejected` but a refused cancel into `OrderCancelRejected` - flipping a
 /// live order to Rejected because its CANCEL was refused would be an invalid
 /// transition (see `ServerMessage::OrderCancelRejected`).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind")]
 pub enum AdmissionSubject {
     Submit {
@@ -593,6 +597,59 @@ pub enum AdmissionSubject {
     },
     /// A frame the venue could not decode, or could not attribute at all.
     Frame,
+}
+
+impl Serialize for AdmissionSubject {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        #[serde(tag = "kind")]
+        enum BoundedSubject<'a> {
+            Submit {
+                client_order_id: &'a str,
+            },
+            Cancel {
+                client_order_id: &'a str,
+            },
+            Modify {
+                client_order_id: &'a str,
+            },
+            Query {
+                request_id: &'a str,
+                query: QueryKind,
+            },
+            Frame,
+        }
+        fn bounded(value: &str) -> &str {
+            if value.len() <= MAX_CLIENT_ID_LEN {
+                return value;
+            }
+            let mut end = MAX_CLIENT_ID_LEN;
+            while !value.is_char_boundary(end) {
+                end -= 1;
+            }
+            &value[..end]
+        }
+        match self {
+            Self::Submit { client_order_id } => BoundedSubject::Submit {
+                client_order_id: bounded(client_order_id),
+            },
+            Self::Cancel { client_order_id } => BoundedSubject::Cancel {
+                client_order_id: bounded(client_order_id),
+            },
+            Self::Modify { client_order_id } => BoundedSubject::Modify {
+                client_order_id: bounded(client_order_id),
+            },
+            Self::Query { request_id, query } => BoundedSubject::Query {
+                request_id: bounded(request_id),
+                query: *query,
+            },
+            Self::Frame => BoundedSubject::Frame,
+        }
+        .serialize(serializer)
+    }
 }
 
 /// Which venue-truth query a refused `Query` subject refers to. Mirrors a
@@ -1099,5 +1156,27 @@ mod tests {
             "the ceiling is the next power of two above the analytic bound, not an \
              arbitrarily large number that proves nothing"
         );
+    }
+
+    #[test]
+    fn admission_subject_serialization_bounds_raw_client_ids() {
+        let frame = ServerMessage::AdmissionRejected {
+            subject: AdmissionSubject::Submit {
+                client_order_id: "x".repeat(MAX_CLIENT_ID_LEN + 10_000),
+            },
+            reason: "capacity exhausted".into(),
+            ts_event: 1,
+        };
+        let json = serde_json::to_string(&frame).expect("serialize");
+        assert!(json.len() <= ADMISSION_FRAME_MAX_BYTES);
+        let decoded: ServerMessage = serde_json::from_str(&json).expect("decode");
+        let ServerMessage::AdmissionRejected {
+            subject: AdmissionSubject::Submit { client_order_id },
+            ..
+        } = decoded
+        else {
+            panic!("wrong frame shape")
+        };
+        assert_eq!(client_order_id.len(), MAX_CLIENT_ID_LEN);
     }
 }
