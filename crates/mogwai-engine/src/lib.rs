@@ -3376,6 +3376,45 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_initial_margin_policy_cannot_drift_the_reservation_cache() {
+        // A zero hold must be NO cache entry, not an entry whose amount is
+        // zero: the reconciliation fold and the incremental remove would
+        // otherwise disagree about whether the currency KEY exists while
+        // agreeing on every amount, and the debug reconciliation would panic
+        // on states that are economically identical.
+        let mut engine = futures_engine(10_000, BreachAction::Refuse);
+        engine.set_margin_policy(
+            "MNQ".into(),
+            MarginPolicy {
+                initial_per_contract: Decimal::ZERO,
+                maintenance_per_contract: Decimal::ZERO,
+                breach_action: BreachAction::Refuse,
+            },
+        );
+        for id in ["Z1", "Z2"] {
+            let mut order =
+                order_decimal(id, Side::Buy, "MNQ", Decimal::ONE, Some(Decimal::from(100)));
+            order.order_type = OrderType::Limit;
+            engine.process(ClientMessage::SubmitOrder(order), 1);
+        }
+        engine.process(
+            ClientMessage::CancelOrder {
+                client_order_id: "Z1".into(),
+            },
+            2,
+        );
+        // The next command reconciles the aggregate against the fold over the
+        // one remaining zero-hold order; both must say "no entry".
+        engine.process(
+            ClientMessage::CancelOrder {
+                client_order_id: "Z2".into(),
+            },
+            3,
+        );
+        assert!(engine.open.is_empty());
+    }
+
+    #[test]
     fn keyed_book_index_tracks_swapped_orders_and_snapshots_stay_deterministic() {
         let mut e = funded(10_000);
         for id in ["I1", "I2", "I3"] {
@@ -3737,6 +3776,50 @@ mod tests {
         assert_eq!(filled.len(), 2);
         assert!(matches!(filled[0], ServerMessage::OrderAccepted { .. }));
         assert!(matches!(filled[1], ServerMessage::OrderFilled(_)));
+    }
+
+    #[test]
+    fn a_zero_quantity_partial_leaves_drop_next_account_update_armed() {
+        // A wire-valid `PartialFillNext` fraction flooring below one size
+        // increment on a minimum-lot order fills NOTHING, so the order merely
+        // comes to rest - exactly the carve-out that must not spend the arm,
+        // even though this path runs `on_submit`'s marketable tail rather
+        // than the not-marketable resting branch.
+        let lot = Decimal::new(1, 8);
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "Z0".into(),
+            fraction: Decimal::from_f64(0.3).unwrap(),
+        });
+        e.arm(Divergence::DropNextAccountUpdate);
+        let out = e.process(
+            ClientMessage::SubmitOrder(order_decimal(
+                "Z0",
+                Side::Buy,
+                "BTCUSDT",
+                lot,
+                Some(Decimal::from(100)),
+            )),
+            1,
+        );
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, ServerMessage::AccountState(_))),
+            "nothing filled, so the resting acceptance still owes its snapshot"
+        );
+        // Still armed; the cancel that frees the hold is what spends it.
+        let canceled = e.process(
+            ClientMessage::CancelOrder {
+                client_order_id: "Z0".into(),
+            },
+            2,
+        );
+        assert!(
+            !canceled
+                .iter()
+                .any(|event| matches!(event, ServerMessage::AccountState(_)))
+        );
+        assert!(e.armed.is_empty());
     }
 
     #[test]

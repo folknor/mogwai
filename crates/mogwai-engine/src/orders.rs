@@ -423,7 +423,14 @@ impl Engine {
 
         // Untargeted: applies to this submit's account-state snapshot. Scanned
         // for the same head-of-line-blocking reason as the duplicate divergence.
+        // Gated on an actual execution: a zero `last_qty` (a partial floored
+        // below one size increment) fills nothing, so the order either merely
+        // comes to rest - the one carve-out, an arm spent there could never
+        // reach the fill it was aimed at - or, as an IOC, cancels without ever
+        // having held anything, which moves no ledger either. Both keep the
+        // arm for the transition the author armed it against.
         let drop_update = apply_divergences
+            && last_qty > Decimal::ZERO
             && self
                 .take_armed(|d| matches!(d, Divergence::DropNextAccountUpdate))
                 .is_some();

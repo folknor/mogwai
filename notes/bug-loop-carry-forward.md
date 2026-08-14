@@ -242,3 +242,33 @@ Verified rather than assumed:
   count is bounded by instruments times position keys and is independent of
   book depth, so `free_balance`'s remaining loop is not where the next O(N)
   hides.
+
+## Close pass over the whole arc (commits 53dc693, 4b86da4, 7135148)
+
+A whole-arc review focused on the never-cold-reviewed second halves of each
+round. The reservation cache's mutation discipline, the funds checks, the
+sweep frontier handling, the id counters and the durable prose all held up.
+Two corner defects found and fixed, each pinned by a test verified to fail
+against the reverted fix:
+
+- `order_reservation_entry` now treats a ZERO hold as no cache entry at all.
+  A margin policy with `initial_per_contract` of zero made the reconciliation
+  fold insert a zero-amount currency key per zero-hold order while the
+  incremental remove deleted the key the moment its total hit zero, so
+  cancelling one of two zero-hold orders left the cache and the fold
+  disagreeing about key EXISTENCE while agreeing on every amount - a spurious
+  debug reconciliation panic on economically identical states. Release
+  behavior never differed.
+- `on_submit`'s tail consumed `DropNextAccountUpdate` even when `last_qty`
+  was zero (a `PartialFillNext` floored below one size increment on a
+  marketable limit), i.e. on an order that merely came to rest - the exact
+  carve-out the round-2 ruling and all four prose statements protect. The
+  consumption is now gated on `last_qty > 0`. The zero-qty IOC cancel also
+  stops spending the arm, matching the not-marketable IOC branch: an order
+  that never held anything moves no ledger.
+
+Residuals accepted as ruled: the submit-side commission charge stays
+observable only jointly with the fill-time check (needs distinguishable
+refusal reasons first), and the dev-vs-release profile split between the two
+brokkr entry points stands recorded above. The full engine suite was re-run
+in BOTH profiles after the fixes.

@@ -22,4 +22,10 @@ fill-only when the engine had already been spending it on any order transition
 that moved the ledger; and the version bump left five durable statements of the
 old number and the old 13 reservation standing.
 
+A close pass over the whole three-commit arc re-reviewed the halves no cold
+review had seen and fixed two corner defects: a zero initial-margin policy
+could panic the debug reservation reconciliation on key existence alone, and
+a zero-quantity partial spent `DropNextAccountUpdate` on an order that merely
+came to rest. Both are pinned by bite-checked tests.
+
 There are no open findings.

@@ -72,7 +72,7 @@ impl Engine {
         let mut clipped = false;
         let reservation =
             self.order_reservation(&order.submit, order.leaves_qty, price, &mut clipped);
-        match reservation {
+        let entry = match reservation {
             Reservation::None => None,
             Reservation::Settlement(amount) => Some((
                 instrument.class.settlement_currency().to_owned(),
@@ -83,7 +83,15 @@ impl Engine {
                 .class
                 .base_currency()
                 .map(|currency| (currency.to_owned(), amount, clipped)),
-        }
+        };
+        // A zero hold (a margin policy with `initial_per_contract` of zero)
+        // contributes nothing, so it is treated as no entry at all. Without
+        // this the incremental cache and the reconciliation fold could
+        // disagree about whether a currency KEY exists while agreeing on
+        // every amount: the fold inserts a zero entry per zero-hold order,
+        // but the incremental remove deletes a key the moment its total hits
+        // zero - a spurious debug panic on states that are economically equal.
+        entry.filter(|(_, amount, clipped)| !amount.is_zero() || *clipped)
     }
 
     fn add_order_reservation(&mut self, order: &crate::OpenOrder) {
