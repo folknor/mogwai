@@ -315,8 +315,8 @@ reads the diff from the baseline commit (`--b1-baseline-commit`, default
 `HEAD~1`) to HEAD and records whether it touched `crates/mogwai-data/`,
 `crates/mogwai-protocol/`, `crates/mogwai-server/presets/` or
 `analysis/fingerprint.json`; touching any of them, or a tape protocol version
-other than the pre-mechanism identity (13 since the fill-band decimal
-normalization; 12 was the 2026-08-09 calibration amendment), fails the
+other than the pre-mechanism identity (14 since the calendar-aware
+`ReopenGap` crossing repair; 13 was the fill-band decimal normalization), fails the
 tape-identity gate. Test-only files inside those paths
 are reported separately and do not fail it, since a `cfg(test)` module
 contributes no byte to a shipped tape.
@@ -359,5 +359,5 @@ than scheduler throughput.
 A full run requires a clean tree before reading any input and re-attests
 it immediately before serializing, exactly as `arrival-control` does. The
 command lands no generator change and moves no tape byte: the run records
-the live `TAPE_PROTOCOL_VERSION` (13 since the fill-band decimal
-normalization) in the artifact's binding block.
+the live `TAPE_PROTOCOL_VERSION` (14 since the calendar-aware `ReopenGap`
+crossing repair) in the artifact's binding block.

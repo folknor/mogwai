@@ -78,8 +78,11 @@ pub use trigger::{
 /// `100.00` used to draw different fill triggers and different slippage for
 /// economically identical orders - the band was a function of how the client
 /// wrote its JSON. Every seeded fill trigger and market-slippage offset moves.
-/// The eventual 12b MECHANISM landing therefore takes 14, not 13.
-pub const TAPE_PROTOCOL_VERSION: u32 = 13;
+///
+/// 14 makes calendar jumps part of the `ReopenGap` crossing frontier. An arm
+/// inside a scheduled closure used to be skipped forever when the clock jumped
+/// to the next open. The eventual 12b MECHANISM landing therefore takes 15.
+pub const TAPE_PROTOCOL_VERSION: u32 = 14;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.

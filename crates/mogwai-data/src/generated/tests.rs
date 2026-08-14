@@ -602,6 +602,28 @@ fn try_new_accepts_valid_input_and_surfaces_bad_input() {
             index: usize::MAX,
         }))
     );
+
+    let empty_calendar = SessionCalendar {
+        utc_offset_minutes: 0,
+        open_windows: Vec::new(),
+        settlement_minute_of_day: None,
+    };
+    assert_eq!(
+        GeneratedSource::try_new_with_session_profile(
+            GeneratorScalars::xbtusd_anchor(&fp),
+            42,
+            0,
+            &fp,
+            &fp.session_profile,
+            None,
+            SizeGrid::spot(),
+            Some(empty_calendar),
+        )
+        .err(),
+        Some(GeneratedSourceError::Calendar(CalendarError(
+            "open_windows"
+        )))
+    );
 }
 
 #[test]
@@ -1406,6 +1428,76 @@ fn a_calendar_weekend_emits_no_tick_and_reopens_exactly_on_the_boundary() {
         timestamps.into_iter().find(|ts| *ts >= sunday_reopen),
         Some(sunday_reopen)
     );
+}
+
+#[test]
+fn reopen_gap_inside_calendar_closure_is_consumed_at_the_jump() {
+    let friday_close = FIRST_SUNDAY_NS + (5 * 1_440 + 1_020) * MINUTE_NS;
+    let sunday_reopen = FIRST_SUNDAY_NS + 7 * DAY_NS + 1_080 * MINUTE_NS;
+    let halt_ns = 60 * MINUTE_NS;
+    let fp = Fingerprint::from_repo_json();
+    let mut source = GeneratedSource::new_with_session_profile(
+        GeneratorScalars::xbtusd_anchor(&fp),
+        42,
+        friday_close - 1,
+        &fp,
+        &fp.session_profile,
+        Some(MarketRegime::ReopenGap {
+            at_ts: friday_close + MINUTE_NS,
+            halt_secs: halt_ns / 1_000_000_000,
+            gap_frac: 0.05,
+        }),
+        SizeGrid::spot(),
+        Some(cme_calendar()),
+    );
+
+    assert_eq!(next_trade(&mut source).ts_event, sunday_reopen + halt_ns);
+}
+
+// The other end of the same family. Children step the clock past their parent,
+// so an arm whose instant falls INSIDE a burst was never covered by any tested
+// span: the burst's own event tested up to the parent, and the next event
+// started from the last child, already past the arm. The crossing frontier is
+// its own field precisely so those spans are contiguous, and this places an arm
+// one nanosecond after a multi-child parent - the middle of the old hole.
+#[test]
+fn a_reopen_gap_armed_inside_a_burst_still_fires() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let halt_ns = 86_400_000_000_000;
+
+    let mut clean = GeneratedSource::new(scalars.clone(), 42, 0, &fp, None);
+    let mut at_ts = None;
+    for _ in 0..512 {
+        let parent = clean.advance_parent();
+        if parent.child_count >= 2 {
+            at_ts = Some(parent.parent_ts_ns + 1);
+            break;
+        }
+    }
+    let at_ts = at_ts.expect("a multi-child parent inside 512 events");
+
+    let mut src = GeneratedSource::new(
+        scalars,
+        42,
+        0,
+        &fp,
+        Some(MarketRegime::ReopenGap {
+            at_ts,
+            halt_secs: halt_ns / 1_000_000_000,
+            gap_frac: 0.05,
+        }),
+    );
+    let mut prior_ts = 0;
+    let mut halts = 0;
+    for _ in 0..100_000 {
+        let tick = src.next_tick().expect("unbounded generated source");
+        if tick.ts_event().saturating_sub(prior_ts) >= halt_ns {
+            halts += 1;
+        }
+        prior_ts = tick.ts_event();
+    }
+    assert_eq!(halts, 1, "an arm inside a burst must still halt once");
 }
 
 #[test]

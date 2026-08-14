@@ -63,6 +63,16 @@ pub(super) const ARRIVAL_WEIBULL_MEAN: f64 = 1.0;
 // the literal against that identity. Conditioning sweep size on the state (thin
 // sweeps while quiet, fat sweeps while active) is what supplies the measured
 // mean/median spread: the child mixture alone is exponential-tailed and cannot.
+//
+// The identity above is the ABOVE-FLOOR statement, and the condition is
+// `children_mean * ARRIVAL_QUIET_CHILDREN_MULT > 1.0`. At or below that floor
+// the quiet mean would clamp to one child and these two multipliers could not
+// preserve anything, which is why `begin_event` switches to the floor-aware
+// solve there and re-derives the active parameters from the unconditional
+// targets instead. MNQ ships inside that branch; the crypto anchor at 8.49
+// sits above it. `GeneratorScalars::validate` refuses a configuration whose
+// floor-branch active solve is not expressible, so neither arithmetic can
+// silently miss the declared mean.
 pub(super) const ARRIVAL_QUIET_CHILDREN_MULT: f64 = 0.20;
 pub(super) const ARRIVAL_ACTIVE_CHILDREN_MULT: f64 = 1.430_769_230_769_230_8;
 /// Probability that a SINGLE-child event in the low bounce regime re-prints the

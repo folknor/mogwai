@@ -54,7 +54,7 @@ away from zero and floored at one contract, so no print becomes the zero
 quantity nautilus drops. `latent_size_median` is stated directly in the
 instrument's native size unit and names the continuous lognormal center before
 that grid is applied. The floor truncates its lower tail, so it is deliberately
-not called the observed size median. `TAPE_PROTOCOL_VERSION` is 13; version 5
+not called the observed size median. `TAPE_PROTOCOL_VERSION` is 14; version 5
 removed the quote-notional proxy whose value was actually arithmetic mean
 notional and made the latent size distribution explicit, and version 6 repaired
 the GARCH recursion's second moment. Version 7 added the observable top of book,
@@ -94,8 +94,10 @@ Version 13 normalizes the decimal price before it is hashed into the fill-band
 draw key, because `rust_decimal`'s serialized form carries the scale and made
 the band a function of how the client spelled its price - `100` and `100.00`
 drew different triggers and different slippage for the same order. Every
-seeded fill trigger and market-slippage offset therefore moves at 13, and the
-protocol-12b MECHANISM landing, long pencilled in for 13, now takes 14.
+seeded fill trigger and market-slippage offset therefore moves at 13. Version
+14 makes a scheduled calendar jump part of the `ReopenGap` crossing frontier,
+so an arm inside a closure cannot be skipped forever. The protocol-12b
+MECHANISM landing, long pencilled in for 13, now takes 15.
 
 Each generated parent event publishes one BBO before its first trade. The book
 has an exact positive integer-tick width and is centered, with one rounding, on

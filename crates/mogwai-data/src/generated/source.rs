@@ -74,6 +74,14 @@ pub struct GeneratedSource {
     calendar: Option<SessionCalendar>,
     tick_f64: f64,
     regime: RegimeState,
+    // The upper bound of the last instant span an armed `ReopenGap` was tested
+    // against. It is NOT `clock_ns`: children advance the clock past their
+    // parent, so starting the next test at the clock would leave the whole
+    // intra-burst span untested, and an arm inside it could never satisfy the
+    // crossing test again. Kept as its own field so the tested spans are
+    // contiguous by CONSTRUCTION rather than by every clock mutation
+    // remembering to be included.
+    reopen_frontier_ns: u64,
     pub(super) shape: SweepShape,
     pub(super) burst: SweepBurst,
     last_event_price_ticks: Option<f64>,
@@ -325,10 +333,10 @@ impl GeneratedSource {
         .expect("generated source inputs are inside fingerprint ranges")
     }
 
-    // The only fallible inputs are `scalars`/`session`, guarded by the two
-    // `?`-propagated `validate` calls at the top. The distribution constructors
-    // below (`LogNormal`/`Weibull`/`Normal`/`ChiSquared`) take compile-time
-    // constants that are always valid params, so their `expect`s cannot fire -
+    // The only fallible inputs are `scalars`/`session`/`calendar`, guarded by
+    // the `?`-propagated `validate` calls at the top. The distribution
+    // constructors below (`LogNormal`/`Weibull`/`Normal`/`ChiSquared`) take
+    // compile-time constants that are always valid params, so their `expect`s cannot fire -
     // `unwrap_in_result` is silenced here because there is no meaningful error
     // variant to map them onto, not because a failure is being swallowed.
     #[expect(
@@ -359,6 +367,11 @@ impl GeneratedSource {
                     super::fingerprint::ScalarError { field: "top_sizes" },
                 ));
             }
+        }
+        if let Some(calendar) = &calendar {
+            calendar
+                .validate()
+                .map_err(GeneratedSourceError::Calendar)?;
         }
         // Contextual, per the calendar-conditional contract. Without a calendar
         // the profile must still be the fraction/per-mean shares the legacy
@@ -460,6 +473,7 @@ impl GeneratedSource {
             size_grid,
             calendar,
             regime,
+            reopen_frontier_ns: start_ts,
             shape,
             burst: SweepBurst::empty(),
             last_event_price_ticks: None,
@@ -592,9 +606,10 @@ impl GeneratedSource {
     /// the multiplier is O(1), catastrophic when a share is near zero: the
     /// stretched gap wildly overshoots the closed window (share 1e-6 turns a
     /// ~7 s draw into ~80 days) and an extreme share saturates the f64->u64
-    /// cast at u64::MAX, pinning the clock there so every later tick carries
-    /// the same `ts_event` - breaking the strict monotonicity `monotonic_clock`
-    /// pins and the ordering `MergeSource` and `seek_to` rely on.
+    /// cast at u64::MAX, pinning the parent clock there so every later parent
+    /// carries the same `ts_event`. Parent advancement is the real invariant:
+    /// quote/first-child and sibling ties are intentional, while distinct
+    /// parents must advance until the u64 representation itself is exhausted.
     ///
     /// Here the draw is instead treated as a BUDGET of un-modulated seconds
     /// and converted to wall time by integrating the piecewise-constant
@@ -948,10 +963,21 @@ impl GeneratedSource {
         children_mult: f64,
     ) {
         let kernel = self.arrival_kernel.expect("integrated branch has kernel");
-        let pending_reopen = self
-            .regime
-            .pending_reopen()
-            .map(|(at_ts_ns, shift_ns)| PendingReopen { at_ts_ns, shift_ns });
+        // The kernel tests the crossing against its own walk start, which is the
+        // clock AFTER the previous burst's children stepped it past their
+        // parent. An arm inside that intra-burst span is still owed, so it is
+        // presented at the first instant the kernel can act on: the effective
+        // instant is the arm's own `at_ts` whenever it is genuinely ahead, and
+        // otherwise the very next nanosecond. `reopen_frontier_ns` is what
+        // guarantees a still-pending arm sits strictly after the last tested
+        // span, so this can only move an arm the walk would otherwise strand.
+        let pending_reopen =
+            self.regime
+                .pending_reopen()
+                .map(|(at_ts_ns, shift_ns)| PendingReopen {
+                    at_ts_ns: at_ts_ns.max(self.clock_ns.saturating_add(1)),
+                    shift_ns,
+                });
         let draw = match kernel.next_parent(
             self.arrival_state
                 .as_mut()
@@ -977,17 +1003,17 @@ impl GeneratedSource {
                 return;
             }
         };
-        let old_clock_ns = self.clock_ns;
         self.clock_ns = draw.parent_ts_ns;
         if draw.reopen_applied {
             let reopen = self
                 .regime
-                .take_reopen_crossed(old_clock_ns, draw.parent_ts_ns)
+                .take_reopen_crossed(self.reopen_frontier_ns, draw.parent_ts_ns)
                 .expect("arrival kernel and regime disagree about reopen crossing");
             self.vol.mid = (self.vol.mid * reopen.gap_frac.exp())
                 .max(self.tick_f64)
                 .min(MID_CEILING);
         }
+        self.reopen_frontier_ns = self.clock_ns;
         let mid = self.next_latent_mid();
         let (aggressor, book) = self.next_side_and_book(mid);
         let price_ticks = match aggressor {
@@ -1038,19 +1064,32 @@ impl GeneratedSource {
         // opens in; a trade's volatility belongs to the window it prints in. Do
         // not reorder these three lines to "tidy" them - it silently shifts which
         // session window each tick is attributed to.
-        let old_clock_ns = self.clock_ns;
         self.clock_ns = self.clock_ns.saturating_add(dt_ns);
-        if let Some(reopen) = self.regime.take_reopen_crossed(old_clock_ns, self.clock_ns) {
-            self.clock_ns = self.clock_ns.saturating_add(reopen.halt_ns);
-            self.vol.mid = (self.vol.mid * reopen.gap_frac.exp())
-                .max(self.tick_f64)
-                .min(MID_CEILING);
-        }
+        // Calendar closure is part of the clock step. Crossing consumers must
+        // see its post-jump frontier, otherwise an arm inside the skipped span
+        // is stranded forever once the frontier advances past it.
         if let Some(calendar) = &self.calendar
             && !calendar.is_open(self.clock_ns)
         {
             self.clock_ns = calendar.next_open_ns(self.clock_ns);
         }
+        if let Some(reopen) = self
+            .regime
+            .take_reopen_crossed(self.reopen_frontier_ns, self.clock_ns)
+        {
+            self.clock_ns = self.clock_ns.saturating_add(reopen.halt_ns);
+            self.vol.mid = (self.vol.mid * reopen.gap_frac.exp())
+                .max(self.tick_f64)
+                .min(MID_CEILING);
+        }
+        // An unscheduled halt can itself end inside the next scheduled close.
+        // The calendar remains authoritative over whether a tick may print.
+        if let Some(calendar) = &self.calendar
+            && !calendar.is_open(self.clock_ns)
+        {
+            self.clock_ns = calendar.next_open_ns(self.clock_ns);
+        }
+        self.reopen_frontier_ns = self.clock_ns;
         let mid = self.next_latent_mid();
         let (aggressor, fresh_book) = self.next_side_and_book(mid);
         // Sweep size is conditional on the arrival state, and the two branches

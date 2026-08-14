@@ -65,6 +65,15 @@ Or both. There are no exceptions.
   wants either a citation convention that can be checked (a symbol name a test
   can resolve) or a review habit of grepping the identifier before deleting it.
 
+  And a third time on the SAME DAY, when the bump to 14 landed. Eight durable
+  statements needed hand editing, and the reservation prose reaches further
+  than `docs/` and `reference/`: `notes/protocol-12a-measurement-spec.md`
+  states the identity the eventual 12b mechanism landing consumes in TWO
+  places, and both were still naming 13 - stale since the previous bump,
+  read by a different workstream, and invisible to any gate that only checks
+  the durable folders. Whatever gate gets built should take the set of
+  documents naming the constant from a grep, not from a hardcoded list.
+
 - DECIDE whether the protocol-12b Stage A refinement pass should run at
   all. Deferred by the owner on 2026-08-09 rather than settled, so the
   frozen pass stands and the budgets were raised to fund it.

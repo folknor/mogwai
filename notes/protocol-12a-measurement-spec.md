@@ -954,7 +954,12 @@ Confirmed by both reviewers, standing:
 - A structural mechanism that cannot preserve the legacy branch
   exactly is ineligible absent separately scoped crypto evidence.
 - The eventual MNQ generator change bumps `TAPE_PROTOCOL_VERSION` to
-  13. (AMENDED 2026-08-09 from 12, reviewed and co-signed by codex
+  15. (AMENDED 2026-08-14: the reservation has slid twice more since the
+  text below was written, and the number is the only thing that moved.
+  13 went to the fill-band decimal normalization and 14 to the
+  calendar-aware `ReopenGap` crossing repair, both landed by the bug-hunt
+  arc under the unconditional bump rule. The mechanism landing therefore
+  consumes 15. Originally AMENDED 2026-08-09 from 12, reviewed and co-signed by codex
   session 019fe781-e6dd-7172-b700-22df68b83271 under this document's own
   stopping rule, formally restarting Brick F for the amendment: the
   12b arrival-frame calibration repair changes outputs for
@@ -1415,7 +1420,10 @@ measured. Constraints binding that spec: the section-8
 instrument-resolution decision (the arrival chain is shared shape, so
 MNQ receives an instrument-resolved override with the legacy branch
 byte-preserved, no re-bless), the Brick V wall-time hard gates of
-section 1.2, and `TAPE_PROTOCOL_VERSION` 13 (AMENDED 2026-08-09 from
+section 1.2, and `TAPE_PROTOCOL_VERSION` 15 (AMENDED 2026-08-14 from
+13, per the section 8 amendment: 13 went to the fill-band decimal
+normalization and 14 to the calendar-aware `ReopenGap` crossing repair,
+so the mechanism landing consumes 15. Originally AMENDED 2026-08-09 from
 12, same coordinated amendment as section 8: identity 12 is consumed
 by the arrival-frame calibration repair). Drafting waits on codex
 review capacity (exhausted for the week of 2026-08-06); the freeze

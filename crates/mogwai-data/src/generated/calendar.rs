@@ -15,7 +15,7 @@ pub struct WeeklyWindow {
     pub end_minute: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CalendarError(pub &'static str);
 
 #[derive(Debug, Clone, Deserialize)]

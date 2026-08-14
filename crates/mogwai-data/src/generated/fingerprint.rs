@@ -730,8 +730,9 @@ pub struct ScalarError {
     pub field: &'static str,
 }
 
-/// Why a [`super::GeneratedSource`] construction can fail: either the scalar
-/// config violates a mechanism constraint or the session profile is invalid.
+/// Why a [`super::GeneratedSource`] construction can fail: the scalar config
+/// violates a mechanism constraint, the session profile is invalid, or the
+/// session calendar cannot describe a usable schedule.
 /// Returned by the fallible `GeneratedSource::try_new` /
 /// `GeneratedSource::try_new_with_session_profile` so a caller holding config
 /// that has not been pre-validated can surface the error instead of tripping
@@ -740,4 +741,5 @@ pub struct ScalarError {
 pub enum GeneratedSourceError {
     Scalar(ScalarError),
     Session(SessionProfileError),
+    Calendar(super::calendar::CalendarError),
 }

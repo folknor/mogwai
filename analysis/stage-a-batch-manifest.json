@@ -4,7 +4,7 @@
   "selection_algorithm_version": 1,
   "anchor_rule_version": 1,
   "measurement_sha256": "60d755e8b76794f6c9e4f2092eca45662d24b17d168cfbe95443e505f773d253",
-  "tape_protocol_version": 13,
+  "tape_protocol_version": 14,
   "arrival_kernel_version": 3,
   "selection_seeds": {
     "anchor": 4705772638496239665,
@@ -5632,5 +5632,5 @@
       }
     }
   ],
-  "plan_sha256": "9e70ab4bca82fb8a9046d11c6bb59f75531c1ae0ff408407ce82d066d1757d23"
+  "plan_sha256": "e55f6c086f27c859f1638be3fc5a95a42b56cd15c93f635c9cf0f7b5e89f4b8c"
 }
