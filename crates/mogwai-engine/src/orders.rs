@@ -36,8 +36,15 @@ impl Engine {
         apply_divergences: bool,
     ) -> Vec<ServerMessage> {
         if self.oms_type == mogwai_protocol::OmsType::Hedging && order.position_id.is_none() {
-            self.seq = self.seq.saturating_add(1);
-            order.position_id = Some(format!("{}-{}", order.symbol, self.seq));
+            if order.reduce_only {
+                return vec![ServerMessage::OrderRejected {
+                    client_order_id: order.client_order_id,
+                    reason: "hedging reduce-only order requires a position_id".into(),
+                    ts_event: ts,
+                }];
+            }
+            self.position_seq = self.position_seq.saturating_add(1);
+            order.position_id = Some(format!("{}-{}", order.symbol, self.position_seq));
         }
         if let Err(reason) = self.validate_submit(&order, ts, apply_divergences) {
             return vec![ServerMessage::OrderRejected {
@@ -117,7 +124,7 @@ impl Engine {
             order.order_type,
             OrderType::StopMarket | OrderType::StopLimit
         ) {
-            let venue_order_id = self.next_id("V");
+            let venue_order_id = self.next_venue_order_id();
             self.seen_client_order_ids
                 .insert(order.client_order_id.clone(), venue_order_id.clone());
             let stop_px = order
@@ -193,7 +200,7 @@ impl Engine {
                     ts_event: ts,
                 }];
             }
-            let venue_order_id = self.next_id("V");
+            let venue_order_id = self.next_venue_order_id();
             self.seen_client_order_ids
                 .insert(order.client_order_id.clone(), venue_order_id.clone());
             let mut out = vec![ServerMessage::OrderAccepted {
@@ -288,7 +295,7 @@ impl Engine {
         // while a duplicate of an accepted id is caught in `validate_submit`.
         // The venue id rides along so a cancel/modify that arrives after this
         // order has gone terminal can still name it on the reject.
-        let venue_order_id = self.next_id("V");
+        let venue_order_id = self.next_venue_order_id();
         self.seen_client_order_ids
             .insert(order.client_order_id.clone(), venue_order_id.clone());
 
@@ -557,18 +564,29 @@ impl Engine {
                 // would leak open on precisely the orders it most has to hold.
                 // Each tranche has to be traded through on its own, and gets a
                 // fresh queue position while it waits.
-                order.band_draw = order.band_draw.saturating_add(1);
-                order.resting = Resting::Limit {
-                    fill_trigger_px: draw_trigger(
-                        self.fill_seed,
-                        &order.submit,
-                        order.submit.price.expect("validated limit carries a price"),
-                        self.instruments[&order.submit.symbol].price_increment,
-                        order.band_ticks,
-                        order.band_draw,
-                    ),
-                };
-                order.scanned_ns = ts;
+                //
+                // A zero-quantity result - a `PartialFillNext` floored below one
+                // size increment - opened no tranche, so it must touch neither
+                // the draw nor the frontier. Resetting `scanned_ns` to `ts`
+                // there would discard the span between where a truncated drain
+                // budget actually reached and `ts`, skipping prints no pass
+                // would ever look at again. Only a real execution earns the
+                // reset, because only a real execution starts covering from
+                // here.
+                if last_qty > Decimal::ZERO {
+                    order.band_draw = order.band_draw.saturating_add(1);
+                    order.resting = Resting::Limit {
+                        fill_trigger_px: draw_trigger(
+                            self.fill_seed,
+                            &order.submit,
+                            order.submit.price.expect("validated limit carries a price"),
+                            self.instruments[&order.submit.symbol].price_increment,
+                            order.band_ticks,
+                            order.band_draw,
+                        ),
+                    };
+                    order.scanned_ns = ts;
+                }
                 order.revision = order.revision.saturating_add(1);
             } else {
                 let order = self.open.remove(pos);
@@ -909,12 +927,11 @@ impl Engine {
         apply_divergences: bool,
     ) -> Vec<ServerMessage> {
         // `FeeSurcharge` is a client-armed divergence, so a venue-originated
-        // order (liquidation) neither pays it nor advances its window: reading
-        // the multiplier here is the only place the window expires, and
-        // expiring it against an order the client never sent would spend the
-        // arm on venue maintenance.
+        // order (liquidation) does not pay it. The window is read purely from
+        // `ts`; booking a later fill must not erase its answer for an earlier
+        // replayed timestamp.
         let surcharge = if apply_divergences {
-            self.fee_surcharge_multiplier(ts)
+            self.fee_surcharge_multiplier_at(ts)
         } else {
             Decimal::ONE
         };
@@ -924,7 +941,7 @@ impl Engine {
         let fill = OrderFilled {
             client_order_id: order.client_order_id.clone(),
             venue_order_id: venue_order_id.clone(),
-            trade_id: self.next_id("T"),
+            trade_id: self.next_trade_id(),
             symbol: order.symbol.clone(),
             position_id: order.position_id.clone(),
             side: order.side,
@@ -1011,6 +1028,9 @@ impl Engine {
     ) -> Result<(), String> {
         if order.client_order_id.trim().is_empty() {
             return Err("empty client_order_id".into());
+        }
+        if apply_divergences && order.client_order_id.starts_with("LQ-") {
+            return Err("client_order_id uses reserved liquidation prefix".into());
         }
 
         // "Duplicate" means an id already ACCEPTED (the map is populated only on
@@ -1284,14 +1304,25 @@ impl Engine {
         {
             let o = self.open.remove(pos);
             self.record_closed(&o, WireOrderStatus::Canceled, ts);
-            vec![
-                ServerMessage::OrderCanceled {
-                    client_order_id,
-                    venue_order_id: o.venue_order_id,
-                    ts_event: ts,
-                },
-                ServerMessage::AccountState(self.snapshot(ts)),
-            ]
+            let mut out = vec![ServerMessage::OrderCanceled {
+                client_order_id,
+                venue_order_id: o.venue_order_id,
+                ts_event: ts,
+            }];
+            // A cancel takes the order OFF the book and gives its hold back, so
+            // the snapshot it owes is exactly the account movement
+            // `DropNextAccountUpdate` exists to hide - suppressing it leaves the
+            // client overstating `locked`, which is the drift the arm is for.
+            // The arm is spent on transitions, not on fills specifically; the
+            // one carve-out is an order merely COMING TO REST, which `on_submit`
+            // holds open for the fill the author is aiming at.
+            if self
+                .take_armed(|d| matches!(d, Divergence::DropNextAccountUpdate))
+                .is_none()
+            {
+                out.push(ServerMessage::AccountState(self.snapshot(ts)));
+            }
+            out
         } else {
             // The order is not resting, so there is nothing to cancel: it is
             // either unknown or already terminal (the no-book engine fills a
@@ -1713,7 +1744,7 @@ fn draw_key(fill_seed: u64, order: &SubmitOrder, price: Decimal, band_draw: u32)
         Side::Buy => 0,
         Side::Sell => 1,
     }]);
-    feed(&price.serialize());
+    feed(&price.normalize().serialize());
     feed(&band_draw.to_le_bytes());
     hash
 }

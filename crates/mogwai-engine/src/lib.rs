@@ -277,7 +277,10 @@ pub struct Engine {
     fills: Vec<OrderFilled>,
     /// Armed divergences, consumed as their trigger fires.
     armed: VecDeque<Divergence>,
-    seq: u64,
+    venue_order_seq: u64,
+    trade_seq: u64,
+    position_seq: u64,
+    liquidation_seq: u64,
     warned: Warned,
     fill_seed: u64,
     margin: HashMap<Symbol, MarginPolicy>,
@@ -325,21 +328,6 @@ impl Engine {
 
     pub fn clear_fee_surcharge(&mut self) {
         self.fee_surcharge = None;
-    }
-
-    pub(crate) fn fee_surcharge_multiplier(&mut self, ts: u64) -> Decimal {
-        let Some(window) = self.fee_surcharge else {
-            return Decimal::ONE;
-        };
-        if ts >= window.end_ns {
-            self.fee_surcharge = None;
-            return Decimal::ONE;
-        }
-        if ts >= window.start_ns {
-            window.mult
-        } else {
-            Decimal::ONE
-        }
     }
 
     pub(crate) fn fee_surcharge_multiplier_at(&self, ts: u64) -> Decimal {
@@ -566,9 +554,9 @@ impl Engine {
         }
         let mut originated = 0;
         for (symbol, position_id, qty, mark) in liquidate {
-            self.seq = self.seq.saturating_add(1);
+            self.liquidation_seq = self.liquidation_seq.saturating_add(1);
             let order = SubmitOrder {
-                client_order_id: format!("LQ-{}-{}", symbol, self.seq),
+                client_order_id: format!("LQ-{}-{}", symbol, self.liquidation_seq),
                 symbol,
                 position_id,
                 side: if qty > Decimal::ZERO {
@@ -725,7 +713,10 @@ impl Engine {
             closed: HashMap::new(),
             fills: Vec::new(),
             armed: VecDeque::new(),
-            seq: 0,
+            venue_order_seq: 0,
+            trade_seq: 0,
+            position_seq: 0,
+            liquidation_seq: 0,
             warned: Warned::default(),
             fill_seed: config.fill_seed,
             margin: HashMap::new(),
@@ -744,9 +735,14 @@ impl Engine {
     }
 
     /// Monotonic id source; the server stamps real timestamps.
-    fn next_id(&mut self, prefix: &str) -> String {
-        self.seq += 1;
-        format!("{prefix}-{}", self.seq)
+    fn next_venue_order_id(&mut self) -> String {
+        self.venue_order_seq = self.venue_order_seq.saturating_add(1);
+        format!("V-{}", self.venue_order_seq)
+    }
+
+    fn next_trade_id(&mut self) -> String {
+        self.trade_seq = self.trade_seq.saturating_add(1);
+        format!("T-{}", self.trade_seq)
     }
 
     /// Process one client message, emitting the resulting execution events.
@@ -5382,5 +5378,240 @@ mod tests {
         assert!(
             matches!(out.as_slice(), [ServerMessage::OrderRejected { reason, .. }] if reason.contains("insufficient USDT"))
         );
+    }
+
+    #[test]
+    fn decimal_scale_does_not_change_the_fill_draw() {
+        let order = limit_order("scale-stable", 1);
+        assert_eq!(
+            crate::orders::draw_offset(42, &order, Decimal::from(100), 200, 0),
+            crate::orders::draw_offset(42, &order, Decimal::new(10_000, 2), 200, 0)
+        );
+    }
+
+    #[test]
+    fn id_namespaces_advance_independently_and_saturate() {
+        let mut e = Engine::new();
+        e.venue_order_seq = u64::MAX;
+        let first = e.process(ClientMessage::SubmitOrder(order("ID-1", 1)), 1);
+        let accepted = first.iter().find_map(|event| match event {
+            ServerMessage::OrderAccepted { venue_order_id, .. } => Some(venue_order_id),
+            _ => None,
+        });
+        let filled = first.iter().find_map(|event| match event {
+            ServerMessage::OrderFilled(fill) => Some(fill),
+            _ => None,
+        });
+        assert_eq!(accepted.map(String::as_str), Some("V-18446744073709551615"));
+        assert_eq!(filled.map(|fill| fill.trade_id.as_str()), Some("T-1"));
+
+        let mut hedged = Engine::new();
+        hedged.set_oms_type(mogwai_protocol::OmsType::Hedging);
+        let events = hedged.process(ClientMessage::SubmitOrder(order("ID-2", 1)), 1);
+        let fill = events
+            .iter()
+            .find_map(|event| match event {
+                ServerMessage::OrderFilled(fill) => Some(fill),
+                _ => None,
+            })
+            .expect("hedging submit fills");
+        assert_eq!(fill.venue_order_id, "V-1");
+        assert_eq!(fill.trade_id, "T-1");
+        assert_eq!(fill.position_id.as_deref(), Some("BTCUSDT-1"));
+    }
+
+    #[test]
+    fn client_cannot_claim_the_liquidation_order_namespace() {
+        let out = Engine::new().process(ClientMessage::SubmitOrder(order("LQ-MNQ-1", 1)), 1);
+        assert_eq!(
+            reject_reason(&out),
+            "client_order_id uses reserved liquidation prefix"
+        );
+    }
+
+    #[test]
+    fn cancel_consumes_drop_next_account_update() {
+        let mut e = banded(1);
+        e.process(ClientMessage::SubmitOrder(limit_order("cancel-drop", 1)), 1);
+        e.arm(Divergence::DropNextAccountUpdate);
+        let canceled = e.process(
+            ClientMessage::CancelOrder {
+                client_order_id: "cancel-drop".into(),
+            },
+            2,
+        );
+        assert!(matches!(
+            canceled.as_slice(),
+            [ServerMessage::OrderCanceled { .. }]
+        ));
+        assert!(e.armed.is_empty());
+    }
+
+    #[test]
+    fn hedging_reduce_only_without_position_id_is_rejected() {
+        let mut e = Engine::new();
+        e.set_oms_type(mogwai_protocol::OmsType::Hedging);
+        let mut reduce = order("hedge-reduce", 1);
+        reduce.reduce_only = true;
+        let out = e.process(ClientMessage::SubmitOrder(reduce), 1);
+        assert_eq!(
+            reject_reason(&out),
+            "hedging reduce-only order requires a position_id"
+        );
+        assert!(e.open_orders().is_empty());
+    }
+
+    #[test]
+    fn surcharge_window_is_a_pure_function_of_fill_timestamp() {
+        let mut engine = futures_engine(20_000, BreachAction::Refuse);
+        engine.set_fee_schedule(
+            "MNQ".into(),
+            FeeSchedule {
+                maker: FeeRate::PerContract {
+                    amount: Decimal::ONE,
+                },
+                taker: FeeRate::PerContract {
+                    amount: Decimal::ONE,
+                },
+            },
+        );
+        engine.arm_fee_surcharge(Decimal::from(3), 10, 1);
+        assert_eq!(
+            future_fill(&mut engine, "AFTER", 1, 21_000, 10_000_001).commission,
+            Decimal::ONE
+        );
+        assert_eq!(
+            future_fill(&mut engine, "REPLAY", 1, 21_000, 2).commission,
+            Decimal::from(3)
+        );
+    }
+
+    #[test]
+    fn zero_quantity_sweep_does_not_redraw_the_fill_band() {
+        let mut e = banded(42);
+        let lot = Decimal::new(1, 8);
+        let resting = order_decimal(
+            "zero-redraw",
+            Side::Buy,
+            "BTCUSDT",
+            lot,
+            Some(Decimal::from(100)),
+        );
+        let resting = SubmitOrder {
+            order_type: OrderType::Limit,
+            ..resting
+        };
+        e.process(ClientMessage::SubmitOrder(resting), 1);
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "zero-redraw".into(),
+            fraction: Decimal::new(3, 1),
+        });
+        let scan = e.pending_scans().remove(0);
+        let (events, _) = e.apply_scans(&[result(&scan, true, 2)], 2);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_)))
+        );
+        assert_eq!(e.open[0].band_draw, 0);
+        assert_eq!(e.open[0].leaves_qty, lot);
+    }
+
+    /// A drain budget can end a walk short of the pass's `ts`. When the pass
+    /// then executes nothing, the frontier must stay where the walk REACHED:
+    /// pulling it forward to `ts` would retire a span no pass ever scanned, and
+    /// the prints in it could never fill the order.
+    #[test]
+    fn zero_quantity_sweep_keeps_the_truncated_scan_frontier() {
+        let mut e = banded(42);
+        let lot = Decimal::new(1, 8);
+        let resting = order_decimal(
+            "zero-frontier",
+            Side::Buy,
+            "BTCUSDT",
+            lot,
+            Some(Decimal::from(100)),
+        );
+        let resting = SubmitOrder {
+            order_type: OrderType::Limit,
+            ..resting
+        };
+        e.process(ClientMessage::SubmitOrder(resting), 1);
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "zero-frontier".into(),
+            fraction: Decimal::new(3, 1),
+        });
+        let scan = e.pending_scans().remove(0);
+        // The walk was planned toward 9 but the budget stopped it at 4.
+        let (events, _) = e.apply_scans(&[result(&scan, true, 4)], 9);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_)))
+        );
+        assert_eq!(e.open[0].scanned_ns, 4);
+        assert_eq!(e.open[0].leaves_qty, lot);
+    }
+
+    /// The counterpart: a REAL execution opens a new tranche, which covers from
+    /// `ts` by construction, so the frontier does jump forward there.
+    #[test]
+    fn a_partial_execution_resets_the_scan_frontier_to_the_pass_time() {
+        let mut e = banded(42);
+        let resting = order_decimal(
+            "partial-frontier",
+            Side::Buy,
+            "BTCUSDT",
+            Decimal::from(10),
+            Some(Decimal::from(100)),
+        );
+        let resting = SubmitOrder {
+            order_type: OrderType::Limit,
+            ..resting
+        };
+        e.process(ClientMessage::SubmitOrder(resting), 1);
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "partial-frontier".into(),
+            fraction: Decimal::new(3, 1),
+        });
+        let scan = e.pending_scans().remove(0);
+        let (events, _) = e.apply_scans(&[result(&scan, true, 4)], 9);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_)))
+        );
+        assert_eq!(e.open[0].scanned_ns, 9);
+        assert_eq!(e.open[0].band_draw, 1);
+    }
+
+    /// The `DropNextAccountUpdate` carve-out that survives the widening: an
+    /// order COMING TO REST reserves funds, but must not spend an arm the
+    /// author pointed at the fill it has not had yet.
+    #[test]
+    fn a_resting_acceptance_leaves_drop_next_account_update_armed() {
+        let mut e = banded(1);
+        e.arm(Divergence::DropNextAccountUpdate);
+        let accepted = e.process(ClientMessage::SubmitOrder(limit_order("rest-keeps", 1)), 1);
+        assert!(
+            accepted
+                .iter()
+                .any(|event| matches!(event, ServerMessage::AccountState(_))),
+            "a resting acceptance still owes its snapshot"
+        );
+        // Still armed, and the later cancel is what spends it.
+        let canceled = e.process(
+            ClientMessage::CancelOrder {
+                client_order_id: "rest-keeps".into(),
+            },
+            2,
+        );
+        assert!(
+            !canceled
+                .iter()
+                .any(|event| matches!(event, ServerMessage::AccountState(_))),
+            "the cancel that frees the hold is where the arm lands"
+        );
+        assert!(e.armed.is_empty());
     }
 }

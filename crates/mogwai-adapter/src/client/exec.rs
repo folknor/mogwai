@@ -791,7 +791,8 @@ impl ExecutionClient for MogwaiExecutionClient {
         // nautilus, which calls connect again), NOT on the transport's own
         // internal reconnect - the lifecycle reattach replays WS commands only.
         // A pushed account update lost to a blackout spanning an internal
-        // reconnect therefore stays lost until the next fill-driven snapshot,
+        // reconnect therefore stays lost until the next snapshot any order
+        // transition pushes,
         // deliberately; see the reattach comment in lifecycle.rs for why
         // auto-healing it would undo an armed divergence.
         //

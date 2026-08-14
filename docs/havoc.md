@@ -24,9 +24,19 @@ while leaving sweep shape unchanged.
 `FeeSurcharge { mult, window_ms }` multiplies the configured maker or taker
 charge for fills inside one simulated-time window. The multiplier is restricted
 to `(0, 100]`, the duration to one hour, and a later arm replaces the earlier
-window outright. It expires lazily on the first client fill at or after its
-end, so it does not depend on wall time or a background timer. A
-venue-originated fill neither pays the surcharge nor expires its window.
+window outright. Whether it applies is a pure function of simulated time, so a
+later fill cannot erase the window for a replayed earlier timestamp. A
+venue-originated fill does not pay the surcharge.
+
+`DropNextAccountUpdate` swallows the next account snapshot that follows an
+order EXECUTING or LEAVING THE BOOK - a fill, a cancel that frees a resting
+order's hold, a funds-check eviction during a sweep, a stop trigger that booked
+any of these. It is deliberately NOT spent on an order JOINING the book, even
+though the reservation that joining takes does move `locked`: acceptance
+necessarily precedes the fill, so an arm consumed there could never reach the
+event a scenario author aimed it at. That one carve-out is the whole of the
+asymmetry - everywhere else the question is whether an order's state actually
+transitioned, not whether the transition was a fill.
 
 A planned run completion is not havoc: it emits `RunComplete` and closes
 normally. That announcement is exempt from both suppression windows - a venue
@@ -50,7 +60,7 @@ carved out and no new arm exists for the trigger itself.
 | `RejectNextSubmit` | The submit. The conditional never exists, so nothing can trigger. |
 | `PartialFillNext` | The fill the trigger produces, never the trigger itself. An untriggered stop consumes no arm - only a fill targets one by client order id. |
 | `DuplicateNextFill` | The fill event only. `OrderTriggered` is never duplicated - it is not a fill, and a duplicated trigger has no client FSM transition to land on. |
-| `DropNextAccountUpdate` | The account snapshot that follows the triggered fill, on the same rule as any other fill. A trigger that rests with no fill emits no snapshot and consumes no arm. |
+| `DropNextAccountUpdate` | The account snapshot that follows the triggered fill, or the cancel a trigger's funds check produced, on the same rule as anywhere else. A trigger that only comes to rest still emits its snapshot, and consumes no arm. |
 | `CommandLatency` submit act/ack | The submit only. There is no trigger-act or trigger-ack knob - the trigger is venue-internal with no client command behind it, and the sweep interval already bounds how late it can fire. |
 | `DelayAcks` / `GoDark` / `StallData` | Transport, unchanged. `OrderTriggered` classifies as execution, so `DelayAcks` holds it and `GoDark` drops it; `StallData` never touches it. |
 | `CancelOpenOrderSilently` | An untriggered conditional is a resting order, so it works today's way - the venue silently kills the protective leg and only a `QueryOrders` poll reveals it. A silent cancel racing a trigger in the same sweep pass leaves the order canceled: the cancel takes the lock first and removes the order, so the in-flight trigger fails its lookup and is dropped. |

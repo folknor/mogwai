@@ -14,6 +14,11 @@ way `seed` or `speed` does.
   one; a fill reports the id the venue actually booked it against, which
   under hedging may not be the id the client sent.
 
+A hedging reduce-only order must name the `position_id` it reduces. Without
+one, "reduce whatever I have" is ambiguous when several independent or
+opposing positions exist, so the venue rejects the submit instead of assigning
+a fresh position id that cannot refer to an existing position.
+
 Set it in your run config:
 
 ```toml

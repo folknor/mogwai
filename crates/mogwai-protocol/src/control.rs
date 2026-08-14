@@ -56,7 +56,12 @@ pub enum Divergence {
     },
     /// Emit the next fill event twice.
     DuplicateNextFill,
-    /// Swallow the next fill-driven account-state update (induce account drift).
+    /// Swallow the next account-state update that follows an order executing or
+    /// leaving the book (induce account drift). A fill qualifies, and so does a
+    /// cancel freeing a resting order's hold, a funds-check eviction, and a stop
+    /// trigger that booked either. An order merely COMING TO REST does not,
+    /// even though its reservation moves `locked`: acceptance always precedes
+    /// the fill, so an arm spent there could never reach what it was aimed at.
     DropNextAccountUpdate,
     /// Stop sending anything for `ms` (simulate a venue blackout), bounded
     /// by `MAX_DIVERGENCE_MS`. Frames produced during the window are

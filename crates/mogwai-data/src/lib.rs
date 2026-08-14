@@ -68,11 +68,18 @@ pub use trigger::{
 /// comparable only if their venues report the same value. `AGENTS.md` carries
 /// the obligation to bump this for every tape-determinism change.
 ///
-/// 12 is the protocol-12b arrival-frame calibration repair (integrated
+/// 12 was the protocol-12b arrival-frame calibration repair (integrated
 /// families take the bare mean): it changes outputs for `(config, seed)`
 /// pairs already expressible under 11, even though no shipped preset declares
-/// the arrival seam. The eventual 12b mechanism landing takes 13.
-pub const TAPE_PROTOCOL_VERSION: u32 = 12;
+/// the arrival seam.
+///
+/// 13 normalizes the decimal price before it is hashed into the fill-band draw
+/// key. `rust_decimal`'s serialized form carries the scale, so `100` and
+/// `100.00` used to draw different fill triggers and different slippage for
+/// economically identical orders - the band was a function of how the client
+/// wrote its JSON. Every seeded fill trigger and market-slippage offset moves.
+/// The eventual 12b MECHANISM landing therefore takes 14, not 13.
+pub const TAPE_PROTOCOL_VERSION: u32 = 13;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.

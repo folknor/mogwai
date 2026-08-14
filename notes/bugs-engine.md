@@ -12,24 +12,17 @@ instrument (that guard is real, but `Engine::set_margin_policy` is public and
 bypasses it). Two further defects found while reviewing that work - a venue
 liquidation paying and expiring a client-armed `FeeSurcharge`, and an amend
 whose funded-account check omitted commission - were fixed in the same pass.
-Findings 7 through 9 below are untouched.
+Round 2 landed finding 7 and every bullet of finding 9. Finding 7 forced a
+`TAPE_PROTOCOL_VERSION` bump from 12 to 13, so the protocol-12b mechanism
+landing now takes 14. Reviewing that pass turned up three more defects, fixed
+with it: a zero-quantity sweep pulled its scan frontier forward to the pass
+time and could retire a span a truncated drain budget never walked; the
+`DropNextAccountUpdate` doc comment and `docs/havoc.md` both defined the arm as
+fill-only when the engine had already been spending it on any order transition
+that moved the ledger; and the version bump left five durable statements of the
+old number and the old 13 reservation standing.
 
-## 7. `draw_key` hashes `Decimal::serialize()`, which is scale-sensitive - the RNG is a function of the client's decimal formatting
-
-`orders.rs::draw_key` feeds `price.serialize()` into FNV-1a. `rust_decimal`'s
-serialized form carries the scale, so `100` and `100.00` hash differently. Meanwhile
-`on_increment` uses `checked_div(...).fract() == 0`, which is scale-insensitive, so
-both forms validate identically.
-
-Two economically identical orders differing only in trailing zeros therefore draw
-different fill triggers and different market slippage. For a project with a
-`TAPE_PROTOCOL_VERSION` discipline and an explicit determinism-sensitive-replay
-posture, "the fill band depends on how the client wrote its JSON" is a real
-replay-fidelity hazard: a client library that normalizes scale differently across
-versions silently changes every fill in the run.
-
-Fix: normalize before hashing (`price.normalize().serialize()`, or hash the mantissa
-at a fixed scale derived from the instrument's `price_increment`).
+Finding 8 below is the only finding left for round 3.
 
 ## 8. Structural: the funds path is O(open orders) per fill decision, and every command does three full book passes
 
@@ -57,41 +50,6 @@ leaves_qty changes, price changes), with the current full walk kept only as a
 and removes the allocation storm. `open` should be an
 `IndexMap`/`HashMap<ClientOrderId, OpenOrder>` so lookups stop being linear. Given
 pre-1.0, do both together rather than patch around them.
-
-## 9. Smaller items
-
-- `next_id` uses `self.seq += 1` - a plain `+=` on `u64` while every other `seq`
-  bump in the crate is `saturating_add`. Panics in debug on overflow. Cosmetic in
-  practice, but it is an inconsistency in a crate that otherwise audits every
-  arithmetic op.
-- `seq` is one counter shared across four namespaces: venue ids (`V-n`), trade ids
-  (`T-n`), hedging position ids (`symbol-n`), and liquidation client order ids
-  (`LQ-symbol-n`). Nothing collides today, but a client that submits a
-  `client_order_id` of literally `LQ-MNQZ5-7` can pre-empt a future liquidation
-  order's id (which would then be rejected as a duplicate by `validate_submit`,
-  leaving the position un-liquidated). Cheap adversarial input, cheap fix: separate
-  counters, or a reserved prefix rejected at the door.
-- `on_cancel` emits `AccountState` unconditionally and never consults
-  `DropNextAccountUpdate`, while `on_submit` and `apply_scans` both do. A cancel
-  frees a reservation, so it does move `locked` - the divergence arguably applies
-  and is inconsistently skipped.
-- Reduce-only under `OmsType::Hedging`: `on_submit` auto-assigns a fresh
-  `position_id` to any submit lacking one before validation. A reduce-only order
-  submitted without a position id therefore gets a brand-new key, `reduce_only_cap`
-  returns 0, and the order is instantly canceled. That may be intended, but it is
-  not documented anywhere found, and it is a sharp edge for a client that reasonably
-  expects "reduce whatever I have."
-- `fee_surcharge_multiplier` expires lazily on `&mut self` inside `commit_fill`.
-  With no fills, the window never clears; and it assumes `ts` is monotonic - a
-  replay that rewinds `ts` after the window has been cleared cannot re-arm it. Given
-  the determinism posture, expiry should be a pure function of `ts` with no
-  mutation.
-- `apply_scans` re-draws a trigger on a zero-quantity fill. When `plan_fill` floors a
-  `PartialFillNext` below one size increment, `last_qty == 0`, no fill is emitted,
-  but the `else if new_leaves > 0` arm still bumps `band_draw` and redraws
-  `fill_trigger_px`. The order's queue position is re-rolled for free by a divergence
-  that produced nothing. Small, but it is the band leaking in the direction the sweep
-  comment says it must not.
 
 ## Confidence summary
 
