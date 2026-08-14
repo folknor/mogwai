@@ -3,165 +3,16 @@
 Hunter: Claude Opus, single coverage. Findings are a work document, not a
 contract - they may be wrong.
 
-## 1. `mark_px` defaults to zero, so every fresh or flipped futures position reports a catastrophic phantom unrealized P&L - and can trigger a spurious margin breach
-
-`crates/mogwai-engine/src/account.rs`, `next_position`.
-
-Three of the four branches that construct a `PositionState` set
-`mark_px: Decimal::ZERO`:
-
-- new position (`current.qty == 0`) -> `mark_px: ZERO`
-- flat close -> `ZERO` (harmless, entry is removed)
-- flip (`delta_abs > current_abs`) -> `ZERO`, discarding an already-marked
-  position's mark
-
-Only `mark()` and `settle()` ever write a real `mark_px` (confirmed by grep -
-nothing else in the workspace touches it). So between a fill and the next mark
-tick:
-
-```rust
-unrealized_pnl = (mark_px - avg_px) * qty * multiplier
-               = (0 - 20_000) * 1 * 2 = -40_000
-```
-
-Consequences:
-
-- Wire lie. `Engine::positions()` is called by `snapshot()`, which is emitted on
-  the same `on_submit` that created the position. The very `AccountState`
-  acknowledging a futures fill reports a fabricated loss of the full notional. A
-  nautilus consumer sees it.
-- Spurious breach. `apply_margin_breaches` computes
-  `breached = total + unrealized < maintenance` where `unrealized` folds
-  `unrealized_pnl` over every symbol settling in that currency - including symbols
-  not in this `marks` batch and therefore still unmarked. So a `mark()` call for
-  symbol A can liquidate or refuse symbol B purely because B has never been marked.
-  Under `BreachAction::Liquidate` this originates a real venue order against a real
-  position on a fabricated number.
-- The flip case is worse because it destroys correct state: a long that flips short
-  zeroes its mark even though the position has been marked for hours.
-
-Fix: `mark_px` should initialize to the fill price (`px`) on the new-position and
-flip branches, and the flip branch should carry `current.mark_px` forward.
-Confidence: high. This is the single clearest silent-wrongness in the account
-arithmetic.
-
-## 2. `account.rs` documents "commission is always zero on this venue" - the fee engine has since been wired, and the funds checks were never updated
-
-`crates/mogwai-engine/src/account.rs`, `apply_fill`:
-
-> "`fill.commission` is always `Decimal::ZERO` on this venue: mogwai models
-> execution DIVERGENCES (partials, rejects, delays, drops), not fees, so no
-> commission source exists and none is wired."
-
-This is false. `Engine::set_fee_schedule` exists, `mogwai-server/src/run.rs` calls
-it from config, `FeeRate::{BasisPoints, PerContract}` are implemented, `commit_fill`
-computes a real commission, and `Divergence::FeeSurcharge` multiplies it. The
-default config even ships a `PerContract` schedule.
-
-The load-bearing consequence is that no funds check accounts for commission:
-
-- `validate_submit` requires `notional` (spot buy) or `initial_per_contract * qty`
-  (futures).
-- `validate_fill_funds` requires `qty * fill_px` or the same margin - never
-  `+ commission`.
-- `apply_fill` then books `spend = notional + commission`.
-
-So a spot buy that exactly exhausts the free balance passes both gates and drives
-the quote balance negative by the commission. The `enforce_funds` doc comment on
-`Engine` says exactly why that matters: "the ledger goes negative and a nautilus
-cash-account consumer refuses every snapshot after it, silently desyncing." The
-venue can enter that state by design, on a funded account, on a legal order.
-
-Related, smaller: `commit_fill`'s bps path does
-`def.notional(...).unwrap_or(Decimal::MAX).saturating_mul(rate).checked_div(10_000).unwrap_or(Decimal::MAX)`
-- an overflowing notional silently books a commission of `Decimal::MAX`, with none
-of the `warn_saturated` discipline the rest of the ledger is careful about.
-
-## 3. Venue-originated liquidation orders consume client-armed divergences
-
-`crates/mogwai-engine/src/lib.rs`, `apply_margin_breaches` -> `on_submit`.
-
-A liquidation submit goes through the ordinary `on_submit`, which unconditionally
-scans the armed queue:
-
-- `take_armed(RejectNextSubmit)` fires on the liquidation order. The liquidation is
-  rejected, the position is not closed, the breach does not clear, and the client's
-  armed reject is spent on an order it never sent. The next client submit goes
-  through cleanly and the scenario's whole premise is broken.
-- `commit_fill` consumes `DuplicateNextFill`; the tail of `on_submit` consumes
-  `DropNextAccountUpdate`. Both are untargeted and both get stolen by the venue's
-  own order.
-
-`DropNextAccountUpdate` is doubly pointless here: `mark()`/`settle()` do
-`events.retain(|e| !matches!(AccountState))` and then push a snapshot
-unconditionally, so the arm is consumed and has no effect at all.
-
-Venue-originated orders should bypass the divergence seam entirely (a flag on the
-submit path, or a separate internal entry point). Confidence: high on the reading;
-no scenario was run to observe it.
-
-## 4. `post_only` is unenforceable through `on_modify`
-
-`on_submit` rejects a `post_only` order that is marketable on arrival, and
-`on_trigger` rejects a `post_only` stop-limit that would take liquidity. `on_modify`
-has no marketability gate. A client submits a resting post-only limit far from the
-market (accepted), then amends the price through the market. The amend redraws the
-trigger, sets `scanned_ns = ts`, and the order fills on the next sweep as
-`LiquiditySide::Maker` - at maker fees, from a price the venue would have refused at
-submit.
-
-This is a straightforward invariant claim the code fails to hold. It is also
-economically material now that fees are wired: taker-to-maker is a fee arbitrage the
-client controls.
-
-## 5. A price amend converts a resting market remainder into a live limit
-
-`on_modify`, the price branch:
-
-```rust
-if !matches!(order.resting, Resting::Conditional { .. }) {
-    order.resting = Resting::Limit { fill_trigger_px: draw_trigger(...) };
-    order.scanned_ns = ts;
-}
-```
-
-`Resting::Inert` is not `Conditional`, so it falls into this arm. Reachable path: a
-`Market`/GTC order cut short by an armed `PartialFillNext` leaves an `Inert`
-remainder in `self.open` (documented at `pending_scans`: "a market remainder ...
-rests, is never scanned, and ends only on a client cancel"). A
-`ModifyOrder { price }` then makes it a scannable limit while `submit.order_type`
-stays `Market`.
-
-`on_modify` explicitly guards the analogous case for `StopMarket` ("StopMarket order
-must not carry a price") but not for `Market`. The `Inert` arm should be excluded
-from the promotion, or a plain-`Market` price amend should be rejected the same way.
-
-## 6. `held_for` and `locked_balances` disagree for any non-future symbol carrying a margin policy
-
-`orders.rs::held_for` checks `self.margin.get(symbol)` before it looks at the
-instrument class:
-
-```rust
-if let Some(policy) = self.margin.get(&order.symbol) {
-    return policy.initial_per_contract.saturating_mul(leaves);
-}
-match order.side { Side::Buy => leaves * price, Side::Sell => leaves }
-```
-
-`account.rs::locked_balances` gates the open-order loop on
-`instrument.class.is_future()` first, and only then consults the margin map. So for
-a spot symbol with a margin policy configured, the actual reservation is
-`leaves * price` while `held_for` hands `validate_fill_funds` a margin-shaped
-add-back. The funds check then compares against a number that is not the hold it is
-trying to cancel out - under- or over-rejecting depending on the ratio.
-
-(The positions loop in `locked_balances` has the opposite asymmetry: it reserves
-maintenance margin for a spot position too, ungated on class.)
-
-Whether this is currently reachable depends on whether the server config rejects
-`margin` on a non-futures instrument; not chased down. Either way the two functions
-should derive the hold from one shared helper rather than reimplementing the branch
-order twice.
+Round 1 landed findings 1 through 6, each with a regression test verified to
+fail against the reverted production change. Finding 6 was closed by making
+`held_for` and `locked_balances` derive from one `Engine::order_reservation`,
+which consults the instrument class before the margin map, rather than by
+resting on the server-config guard that rejects a margin table on a spot
+instrument (that guard is real, but `Engine::set_margin_policy` is public and
+bypasses it). Two further defects found while reviewing that work - a venue
+liquidation paying and expiring a client-armed `FeeSurcharge`, and an amend
+whose funded-account check omitted commission - were fixed in the same pass.
+Findings 7 through 9 below are untouched.
 
 ## 7. `draw_key` hashes `Decimal::serialize()`, which is scale-sensitive - the RNG is a function of the client's decimal formatting
 
@@ -244,8 +95,6 @@ pre-1.0, do both together rather than patch around them.
 
 ## Confidence summary
 
-Findings 1, 2, 3, 4, 5 the hunter is confident are real defects from the code as
-written; 1 and 2 are the ones to fix first. Finding 6 is a definite inconsistency
-whose reachability depends on server config validation not verified. Finding 7 rests
+Findings 1 through 6 were confirmed and are landed. Finding 7 rests
 on `rust_decimal`'s `serialize` being scale-preserving, which it is. Finding 8 is a
 design judgment, not a bug - but it is the item with the largest payoff.

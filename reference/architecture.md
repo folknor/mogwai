@@ -37,8 +37,8 @@ same print (filling at once if already marketable, resting with a fresh band
 otherwise - it does not manufacture a fill through a gapped print). Reduce-only
 and post-only are first-class wire flags: reduce-only clamps every fill to the
 position it would close and cancels the order once that position is gone;
-post-only rejects an order, at submit or at trigger, that would take liquidity
-rather than filling it. Trailing stops and two-leg brackets are refused by
+post-only rejects an order, at submit, at a price amend or at trigger, that
+would take liquidity rather than filling it. Trailing stops and two-leg brackets are refused by
 name; the venue models neither trailing state nor order linkage. No order book
 exists: orders never interact, so self-trade within one account is impossible
 rather than prevented, and every fill is judged only against the tape.
@@ -175,7 +175,12 @@ closure whole rather than emitting inside it, and a consumer can know about it
 in advance. `ReopenGap` remains havoc and remains unscheduled. Fees are a
 per-instrument maker/taker schedule; liquidity side is decided where the fill
 is produced, so a resting limit the sweep fills is a maker fill even though the
-same order would have been a taker fill had it been marketable on arrival.
+same order would have been a taker fill had it been marketable on arrival. A
+funded account must cover the fee as well as the notional or the margin: the
+submit check, the amend check and the fill check all add commission to the
+requirement, the first two against the worse of the two rates since which side
+the order provides is not known until it fills. A venue-originated liquidation
+is charged the configured schedule but never a client-armed `FeeSurcharge`.
 
 Margin and fees are treated here as instrument identity, which is not how
 markets work: real schedules vary by account tier and real CME margin varies by

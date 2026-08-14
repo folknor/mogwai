@@ -342,6 +342,16 @@ impl Engine {
         }
     }
 
+    pub(crate) fn fee_surcharge_multiplier_at(&self, ts: u64) -> Decimal {
+        self.fee_surcharge.map_or(Decimal::ONE, |window| {
+            if ts >= window.start_ns && ts < window.end_ns {
+                window.mult
+            } else {
+                Decimal::ONE
+            }
+        })
+    }
+
     #[must_use]
     pub fn futures_mark_symbols(&self) -> Vec<Symbol> {
         let mut symbols: Vec<_> = self
@@ -574,7 +584,7 @@ impl Engine {
                 reduce_only: true,
                 post_only: false,
             };
-            events.extend(self.on_submit(
+            events.extend(self.on_submit_from(
                 order,
                 ts,
                 Some(MarketReading {
@@ -588,6 +598,7 @@ impl Engine {
                     // slippage.
                     band_ticks: self.liquidation_band_ticks,
                 }),
+                false,
             ));
             originated += 1;
         }
@@ -1421,6 +1432,34 @@ mod tests {
     }
 
     #[test]
+    fn a_post_only_reprice_that_would_take_liquidity_is_rejected() {
+        let mut e = banded(15);
+        let mut resting = limit_order("post-amend", 1);
+        resting.price = Some(Decimal::from(90));
+        resting.post_only = true;
+        let accepted =
+            e.process_with_market(ClientMessage::SubmitOrder(resting), 10, Some(reading(0)));
+        assert!(matches!(accepted[0], ServerMessage::OrderAccepted { .. }));
+
+        let out = e.process_with_market(
+            ClientMessage::ModifyOrder {
+                client_order_id: "post-amend".into(),
+                price: Some(Decimal::from(100)),
+                quantity: None,
+                trigger_price: None,
+            },
+            11,
+            Some(reading(0)),
+        );
+        assert!(matches!(
+            &out[0],
+            ServerMessage::OrderModifyRejected { reason, .. }
+                if reason == "post-only order would take liquidity"
+        ));
+        assert_eq!(e.open_orders()[0].submit.price, Some(Decimal::from(90)));
+    }
+
+    #[test]
     fn a_reduce_only_order_rests_while_flat_on_a_funded_account() {
         // The admission exemption: a protective sell-stop placed while flat
         // holds no base, so the funded-sell check must not refuse it and it must
@@ -2013,6 +2052,27 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_futures_position_is_marked_at_its_fill_price() {
+        let mut engine = futures_engine(10_000, BreachAction::Refuse);
+        fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
+        let position = &engine.account_snapshot(2).positions[0];
+        assert_eq!(position.mark_px, Decimal::from(21_000));
+        assert_eq!(position.unrealized_pnl, Decimal::ZERO);
+    }
+
+    #[test]
+    fn flipping_a_futures_position_preserves_its_last_mark() {
+        let mut engine = futures_engine(10_000, BreachAction::Refuse);
+        fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
+        engine.mark(&[("MNQ".into(), Decimal::from(21_100))], 2);
+        fill_future(&mut engine, "F-2", Side::Sell, 2, 21_050);
+        let position = &engine.account_snapshot(3).positions[0];
+        assert_eq!(position.quantity, -Decimal::ONE);
+        assert_eq!(position.avg_px, Decimal::from(21_050));
+        assert_eq!(position.mark_px, Decimal::from(21_100));
+    }
+
+    #[test]
     fn a_resting_futures_order_reserves_margin_not_notional() {
         for side in [Side::Buy, Side::Sell] {
             let mut engine = futures_engine(50_000, BreachAction::Refuse);
@@ -2199,6 +2259,189 @@ mod tests {
     }
 
     #[test]
+    fn a_liquidation_bypasses_and_preserves_client_armed_divergences() {
+        let mut engine = futures_engine(3_000, BreachAction::Liquidate);
+        fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
+        engine.arm(Divergence::RejectNextSubmit {
+            reason: "client scenario".into(),
+        });
+        engine.arm(Divergence::DuplicateNextFill);
+        engine.arm(Divergence::DropNextAccountUpdate);
+
+        let outcome = engine.mark(&[("MNQ".into(), Decimal::from(20_000))], 2);
+        assert_eq!(outcome.originated_orders, 1);
+        assert_eq!(
+            outcome
+                .events
+                .iter()
+                .filter(|event| matches!(event, ServerMessage::OrderFilled(_)))
+                .count(),
+            1,
+            "the venue fill is neither rejected nor duplicated"
+        );
+        assert!(matches!(
+            outcome.events.last(),
+            Some(ServerMessage::AccountState(_))
+        ));
+        engine.mark(&[("MNQ".into(), Decimal::from(20_000))], 3);
+
+        let mut client_order = mnq_order("CLIENT-1", Side::Buy, 1, 20_000);
+        client_order.reduce_only = true;
+        let rejected = engine.process(ClientMessage::SubmitOrder(client_order), 4);
+        assert_eq!(reject_reason(&rejected), "client scenario");
+
+        engine
+            .account
+            .balances
+            .insert("USD".into(), Decimal::from(10_000));
+        let filled = engine.process_with_market(
+            ClientMessage::SubmitOrder(mnq_order("CLIENT-2", Side::Buy, 1, 20_000)),
+            5,
+            Some(MarketReading {
+                last_px: Decimal::from(20_000),
+                ts_ns: 5,
+                band_ticks: 0,
+            }),
+        );
+        assert_eq!(
+            filled
+                .iter()
+                .filter(|event| matches!(event, ServerMessage::OrderFilled(_)))
+                .count(),
+            2
+        );
+        assert!(
+            !filled
+                .iter()
+                .any(|event| matches!(event, ServerMessage::AccountState(_)))
+        );
+    }
+
+    #[test]
+    fn a_liquidation_neither_pays_nor_spends_an_armed_fee_surcharge() {
+        // `FeeSurcharge` is client-armed havoc. A venue-originated liquidation
+        // must not be charged it (a large enough multiplier would fail the
+        // liquidation's own funds check and leave the breached position open),
+        // and must not expire its window either - the arm belongs to the next
+        // client fill.
+        let mut engine = futures_engine(3_000, BreachAction::Liquidate);
+        engine.set_fee_schedule(
+            "MNQ".into(),
+            FeeSchedule {
+                maker: FeeRate::PerContract {
+                    amount: Decimal::ONE,
+                },
+                taker: FeeRate::PerContract {
+                    amount: Decimal::ONE,
+                },
+            },
+        );
+        fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
+        engine.arm_fee_surcharge(Decimal::from(5_000), 1_000, 0);
+
+        let outcome = engine.mark(&[("MNQ".into(), Decimal::from(20_000))], 2);
+        assert_eq!(outcome.originated_orders, 1);
+        let liquidation = outcome
+            .events
+            .iter()
+            .find_map(|event| match event {
+                ServerMessage::OrderFilled(fill) => Some(fill),
+                _ => None,
+            })
+            .expect("the liquidation fills rather than failing its funds check");
+        assert_eq!(liquidation.commission, Decimal::ONE);
+
+        // The window is still armed and still un-expired: the next CLIENT fill
+        // pays the surcharge the liquidation walked past.
+        engine
+            .account
+            .balances
+            .insert("USD".into(), Decimal::from(100_000));
+        engine.mark(&[("MNQ".into(), Decimal::from(20_000))], 3);
+        let fill = future_fill(&mut engine, "CLIENT-1", 1, 21_000, 4);
+        assert_eq!(fill.commission, Decimal::from(5_000));
+    }
+
+    #[test]
+    fn a_spot_symbol_carrying_a_margin_policy_still_reserves_notional() {
+        // `held_for` and `locked_balances` derive from one `order_reservation`,
+        // so a margin policy attached to a SPOT symbol - which server config
+        // refuses at boot, but the public `set_margin_policy` cannot - changes
+        // neither the account's hold nor the add-back the funds check makes
+        // against it. Reading the margin map first would hand the fill check a
+        // 1-unit add-back against a 50-unit hold and cancel a fully funded
+        // order.
+        let mut engine = funded(50);
+        engine.set_margin_policy(
+            "BTCUSDT".into(),
+            MarginPolicy {
+                initial_per_contract: Decimal::ONE,
+                maintenance_per_contract: Decimal::ONE,
+                breach_action: BreachAction::Refuse,
+            },
+        );
+        let mut resting = order_with("HOLD", Side::Buy, "BTCUSDT", 1, Some(Decimal::from(50)));
+        resting.order_type = OrderType::Limit;
+        let out =
+            engine.process_with_market(ClientMessage::SubmitOrder(resting), 1, Some(reading(0)));
+        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        assert_eq!(
+            balance(&engine.account_snapshot(2), "USDT").locked,
+            Decimal::from(50)
+        );
+
+        let scan = engine.pending_scans().remove(0);
+        let (events, emitted) = engine.apply_scans(&[result(&scan, true, 20)], 20);
+        assert_eq!(emitted, 1, "the funded order fills rather than canceling");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_)))
+        );
+    }
+
+    #[test]
+    fn an_amend_must_fund_the_commission_its_fill_will_be_charged() {
+        // The amended requirement carries commission exactly as the submit
+        // requirement does. Without it the amend is admitted and the fill-time
+        // check then cancels the order.
+        let mut engine = funded(101);
+        engine.set_fee_schedule(
+            "BTCUSDT".into(),
+            FeeSchedule {
+                maker: FeeRate::PerContract {
+                    amount: Decimal::ONE,
+                },
+                taker: FeeRate::PerContract {
+                    amount: Decimal::ONE,
+                },
+            },
+        );
+        let mut resting = order_with("R1", Side::Buy, "BTCUSDT", 1, Some(Decimal::from(50)));
+        resting.order_type = OrderType::Limit;
+        let out =
+            engine.process_with_market(ClientMessage::SubmitOrder(resting), 1, Some(reading(0)));
+        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+
+        // 2 @ 50 is 100 of notional plus 2 of commission. Free is 51 and the
+        // order's own hold is 50, so 101 covers the notional but not the fee.
+        let out = engine.process(
+            ClientMessage::ModifyOrder {
+                client_order_id: "R1".into(),
+                price: None,
+                quantity: Some(Decimal::from(2)),
+                trigger_price: None,
+            },
+            2,
+        );
+        let [ServerMessage::OrderModifyRejected { reason, .. }] = &out[..] else {
+            panic!("expected one modify reject, got {out:?}")
+        };
+        assert_eq!(reason, "insufficient USDT balance");
+        assert_eq!(engine.open_orders()[0].leaves_qty, Decimal::ONE);
+    }
+
+    #[test]
     fn per_contract_fees_ignore_price_and_scale_with_contracts() {
         let mut engine = futures_engine(20_000, BreachAction::Refuse);
         engine.set_fee_schedule(
@@ -2214,6 +2457,102 @@ mod tests {
         );
         let fill = future_fill(&mut engine, "FEE-1", 4, 21_000, 1);
         assert_eq!(fill.commission, Decimal::ONE);
+    }
+
+    #[test]
+    fn a_spot_buy_must_fund_its_commission_as_well_as_its_notional() {
+        let mut engine = funded(100);
+        engine.set_fee_schedule(
+            "BTCUSDT".into(),
+            FeeSchedule {
+                maker: FeeRate::PerContract {
+                    amount: Decimal::ONE,
+                },
+                taker: FeeRate::PerContract {
+                    amount: Decimal::ONE,
+                },
+            },
+        );
+        let out = engine.process(ClientMessage::SubmitOrder(order("FEE", 1)), 1);
+        assert_eq!(reject_reason(&out), "insufficient USDT balance");
+        assert_eq!(
+            balance(&engine.account_snapshot(2), "USDT").total,
+            Decimal::from(100)
+        );
+
+        // The door check, not just the fill check: a limit that RESTS never
+        // reaches `validate_fill_funds`, so only `validate_submit` can refuse
+        // it. 50 of notional plus 1 of fee against a 50 balance.
+        let mut engine = funded(50);
+        engine.set_fee_schedule(
+            "BTCUSDT".into(),
+            FeeSchedule {
+                maker: FeeRate::PerContract {
+                    amount: Decimal::ONE,
+                },
+                taker: FeeRate::PerContract {
+                    amount: Decimal::ONE,
+                },
+            },
+        );
+        let mut resting = order_with("FEE-REST", Side::Buy, "BTCUSDT", 1, Some(Decimal::from(50)));
+        resting.order_type = OrderType::Limit;
+        let out =
+            engine.process_with_market(ClientMessage::SubmitOrder(resting), 3, Some(reading(0)));
+        assert_eq!(reject_reason(&out), "insufficient USDT balance");
+        assert!(engine.open_orders().is_empty());
+    }
+
+    #[test]
+    fn a_spot_sell_cannot_charge_more_commission_than_proceeds_and_cash_cover() {
+        let mut engine = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            balances: HashMap::from([
+                ("BTC".to_string(), Decimal::ONE),
+                ("USDT".to_string(), Decimal::ZERO),
+            ]),
+            fill_seed: 0,
+        });
+        engine.set_fee_schedule(
+            "BTCUSDT".into(),
+            FeeSchedule {
+                maker: FeeRate::PerContract {
+                    amount: Decimal::from(101),
+                },
+                taker: FeeRate::PerContract {
+                    amount: Decimal::from(101),
+                },
+            },
+        );
+        let sell = order_with(
+            "FEE-SELL",
+            Side::Sell,
+            "BTCUSDT",
+            1,
+            Some(Decimal::from(100)),
+        );
+        let out = engine.process(ClientMessage::SubmitOrder(sell), 1);
+        assert_eq!(reject_reason(&out), "insufficient USDT balance");
+        assert_eq!(
+            balance(&engine.account_snapshot(2), "USDT").total,
+            Decimal::ZERO
+        );
+
+        // And at the door: a sell limit above the market rests, so the fill
+        // check never runs and only `validate_submit` can refuse it.
+        let mut resting = order_with(
+            "FEE-SELL-REST",
+            Side::Sell,
+            "BTCUSDT",
+            1,
+            Some(Decimal::from(100)),
+        );
+        resting.order_type = OrderType::Limit;
+        let out =
+            engine.process_with_market(ClientMessage::SubmitOrder(resting), 3, Some(reading(0)));
+        assert_eq!(reject_reason(&out), "insufficient USDT balance");
+        assert!(engine.open_orders().is_empty());
     }
 
     #[test]
@@ -3877,7 +4216,11 @@ mod tests {
             client_order_id: "O1".into(),
             fraction: Decimal::from_f64(0.3).unwrap(),
         });
-        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        e.process_with_market(
+            ClientMessage::SubmitOrder(limit_order("O1", 10)),
+            1,
+            Some(reading(0)),
+        );
 
         let out = e.process(
             ClientMessage::ModifyOrder {
@@ -3901,6 +4244,34 @@ mod tests {
         let usdt = balance(account(&out, 1), "USDT");
         assert_eq!(usdt.locked, Decimal::from(1400));
         assert_eq!(usdt.free, Decimal::from(-1700));
+    }
+
+    #[test]
+    fn a_price_amend_cannot_activate_an_inert_market_remainder() {
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "MARKET-REST".into(),
+            fraction: Decimal::from_f64(0.3).unwrap(),
+        });
+        e.process(ClientMessage::SubmitOrder(order("MARKET-REST", 10)), 1);
+        assert!(matches!(e.open[0].resting, Resting::Inert));
+
+        let out = e.process(
+            ClientMessage::ModifyOrder {
+                client_order_id: "MARKET-REST".into(),
+                price: Some(Decimal::from(200)),
+                quantity: None,
+                trigger_price: None,
+            },
+            2,
+        );
+        assert!(matches!(
+            &out[0],
+            ServerMessage::OrderModifyRejected { reason, .. }
+                if reason == "Market order must not carry a price amend"
+        ));
+        assert!(matches!(e.open[0].resting, Resting::Inert));
+        assert!(e.pending_scans().is_empty());
     }
 
     #[test]
@@ -4012,7 +4383,11 @@ mod tests {
             client_order_id: "O1".into(),
             fraction: Decimal::from_f64(0.3).unwrap(),
         });
-        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        e.process_with_market(
+            ClientMessage::SubmitOrder(limit_order("O1", 10)),
+            1,
+            Some(reading(0)),
+        );
 
         let out = e.process(
             ClientMessage::ModifyOrder {
@@ -4076,7 +4451,11 @@ mod tests {
             client_order_id: "O1".into(),
             fraction: Decimal::from_f64(0.3).unwrap(),
         });
-        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        e.process_with_market(
+            ClientMessage::SubmitOrder(limit_order("O1", 10)),
+            1,
+            Some(reading(0)),
+        );
 
         e.arm(Divergence::DropNextAccountUpdate);
         let modified = e.process(
@@ -4188,7 +4567,11 @@ mod tests {
             client_order_id: "O1".into(),
             fraction: Decimal::from_f64(0.3).unwrap(),
         });
-        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        e.process_with_market(
+            ClientMessage::SubmitOrder(limit_order("O1", 10)),
+            1,
+            Some(reading(0)),
+        );
         e.process(
             ClientMessage::ModifyOrder {
                 client_order_id: "O1".into(),

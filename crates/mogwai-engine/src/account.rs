@@ -7,10 +7,22 @@
 
 use std::collections::{HashMap, HashSet};
 
-use mogwai_protocol::{AccountState, Balance, OrderFilled, Side, Symbol};
+use mogwai_protocol::{AccountState, Balance, OrderFilled, Side, SubmitOrder, Symbol};
 use rust_decimal::Decimal;
 
 use crate::Engine;
+
+/// What one resting order holds, and in which of the instrument's two
+/// currencies. Returned by `Engine::order_reservation`, the single derivation
+/// both the account snapshot and the order-path funds checks read.
+pub(crate) enum Reservation {
+    /// Nothing is held: a reduce-only order, or a future with no margin policy.
+    None,
+    /// Settlement (quote) cash: futures initial margin, or a spot buy notional.
+    Settlement(Decimal),
+    /// Base currency: a spot sell delivering what it already holds.
+    Base(Decimal),
+}
 
 #[derive(Debug, Default)]
 pub(crate) struct Account {
@@ -102,14 +114,10 @@ impl Engine {
             return;
         };
         let quote = instrument.class.settlement_currency().to_owned();
-        // `fill.commission` is always `Decimal::ZERO` on this venue: mogwai
-        // models execution DIVERGENCES (partials, rejects, delays, drops), not
-        // fees, so no commission source exists and none is wired. The
-        // direction-aware handling below (a buy's cost ADDS commission to the
-        // quote spend, a sell's proceeds SUBTRACT it) is kept anyway because
-        // `OrderFilled` carries the field on the wire: if a future config or
-        // divergence ever populates a non-zero commission, the ledger math is
-        // already correct rather than silently dropping or mis-signing the fee.
+        // Fees are charged in the settlement currency. A buy adds commission
+        // to its quote spend; a sell subtracts commission from its proceeds.
+        // The order path includes the same charge in its funded-account checks
+        // before this ledger mutation can run.
 
         // This fill's own notional is representable (`validate_submit` /
         // `on_modify` checked `quantity * price`, and `last_qty <= quantity`),
@@ -247,6 +255,47 @@ impl Engine {
         sub_clamped(total, locked, &mut clipped)
     }
 
+    /// The reservation ONE resting order contributes, as a currency kind and
+    /// an amount. The single authority on the shape of an open order's hold:
+    /// `locked_balances` folds it into the account totals and `held_for` adds
+    /// the same number back before a funds check, so the two cannot disagree
+    /// about branch order. A future posts initial margin in settlement cash on
+    /// either side (and needs a margin policy to post anything at all); a spot
+    /// buy reserves quote notional, a spot sell reserves base quantity. The
+    /// instrument CLASS is consulted before the margin map, so a margin policy
+    /// configured against a spot symbol - which server config rejects at boot,
+    /// but the public `set_margin_policy` cannot - moves neither number.
+    pub(crate) fn order_reservation(
+        &self,
+        submit: &SubmitOrder,
+        leaves: Decimal,
+        price: Decimal,
+        clipped: &mut bool,
+    ) -> Reservation {
+        if submit.reduce_only {
+            return Reservation::None;
+        }
+        let Some(instrument) = self.instruments.get(&submit.symbol) else {
+            return Reservation::None;
+        };
+        if instrument.class.is_future() {
+            return match self.margin.get(&submit.symbol) {
+                Some(policy) => {
+                    Reservation::Settlement(policy.initial_per_contract.saturating_mul(leaves))
+                }
+                None => Reservation::None,
+            };
+        }
+        match submit.side {
+            // One order's `leaves * price` is representable (submit and modify
+            // both `checked_mul` the full notional), but the SUM across all
+            // resting buys is unbounded - saturate instead of letting `*`
+            // panic.
+            Side::Buy => Reservation::Settlement(mul_clamped(leaves, price, clipped)),
+            Side::Sell => Reservation::Base(leaves),
+        }
+    }
+
     /// Sums the per-order reservations. Returns the locked totals plus the
     /// currencies whose accumulation clipped at the Decimal boundary, so the
     /// caller (`snapshot`, which holds `&mut self`) can warn once per key -
@@ -262,6 +311,12 @@ impl Engine {
             let Some(instrument) = self.instruments.get(symbol) else {
                 continue;
             };
+            // Only a future posts maintenance collateral. The class is checked
+            // here for the same reason `order_reservation` checks it: a margin
+            // policy attached to a spot symbol must move no number.
+            if !instrument.class.is_future() {
+                continue;
+            }
             let currency = instrument.class.settlement_currency().to_owned();
             let reserve = policy
                 .maintenance_per_contract
@@ -271,9 +326,6 @@ impl Engine {
         }
 
         for order in &self.open {
-            if order.submit.reduce_only {
-                continue;
-            }
             // Defense-in-depth, unreachable through `process`: an order only
             // rests here after `validate_submit`/`on_modify` confirmed its
             // instrument, and none is ever removed, so the lookup always
@@ -283,52 +335,33 @@ impl Engine {
             let Some(instrument) = self.instruments.get(&order.submit.symbol) else {
                 continue;
             };
-
-            if instrument.class.is_future() {
-                if let Some(policy) = self.margin.get(&order.submit.symbol) {
-                    let reserve = policy.initial_per_contract.saturating_mul(order.leaves_qty);
-                    let currency = instrument.class.settlement_currency().to_owned();
-                    let total = locked.entry(currency.clone()).or_default();
-                    *total = total.saturating_add(reserve);
+            // A resting order's price is never `None`: `validate_submit`
+            // requires it for every submit (market included - see `on_submit`'s
+            // doc), and `on_modify` only ever sets it, never clears it.
+            let price = order
+                .submit
+                .price
+                .or(order.submit.trigger_price)
+                .expect("resting order carries a price or a trigger price");
+            let mut clipped = false;
+            let reserve =
+                self.order_reservation(&order.submit, order.leaves_qty, price, &mut clipped);
+            let (currency, reserve) = match reserve {
+                Reservation::None => continue,
+                Reservation::Settlement(amount) => {
+                    (instrument.class.settlement_currency().to_owned(), amount)
                 }
-                continue;
-            }
-
-            match order.submit.side {
-                Side::Buy => {
-                    // A resting order's price is never `None`: `validate_submit`
-                    // requires it for every submit (market included - see
-                    // `on_submit`'s doc), and `on_modify` only ever sets it,
-                    // never clears it.
-                    let price = order
-                        .submit
-                        .price
-                        .or(order.submit.trigger_price)
-                        .expect("resting order carries a price or a trigger price");
-                    // One order's `leaves_qty * price` is representable
-                    // (submit and modify both `checked_mul` the full
-                    // notional), but the SUM across all resting buys is
-                    // unbounded - saturate instead of letting `+=` panic.
-                    let mut clipped = false;
-                    let reserve = mul_clamped(order.leaves_qty, price, &mut clipped);
-                    let currency = instrument.class.settlement_currency().to_owned();
-                    let total = locked.entry(currency.clone()).or_default();
-                    *total = add_clamped(*total, reserve, &mut clipped);
-                    if clipped {
-                        clipped_currencies.push(currency);
-                    }
-                }
-                Side::Sell => {
-                    let mut clipped = false;
+                Reservation::Base(amount) => {
                     let Some(currency) = instrument.class.base_currency().map(str::to_owned) else {
                         continue;
                     };
-                    let total = locked.entry(currency.clone()).or_default();
-                    *total = add_clamped(*total, order.leaves_qty, &mut clipped);
-                    if clipped {
-                        clipped_currencies.push(currency);
-                    }
+                    (currency, amount)
                 }
+            };
+            let total = locked.entry(currency.clone()).or_default();
+            *total = add_clamped(*total, reserve, &mut clipped);
+            if clipped {
+                clipped_currencies.push(currency);
             }
         }
 
@@ -372,7 +405,7 @@ fn next_position(
         return PositionState {
             qty: delta,
             avg_px: px,
-            mark_px: Decimal::ZERO,
+            mark_px: px,
         };
     }
 
@@ -427,7 +460,7 @@ fn next_position(
         PositionState {
             qty,
             avg_px: px,
-            mark_px: Decimal::ZERO,
+            mark_px: current.mark_px,
         }
     }
 }

@@ -21,15 +21,25 @@ use crate::{Engine, MarketReading, OpenOrder, Resting, ScanResult};
 impl Engine {
     pub(crate) fn on_submit(
         &mut self,
+        order: SubmitOrder,
+        ts: u64,
+        reading: Option<MarketReading>,
+    ) -> Vec<ServerMessage> {
+        self.on_submit_from(order, ts, reading, true)
+    }
+
+    pub(crate) fn on_submit_from(
+        &mut self,
         mut order: SubmitOrder,
         ts: u64,
         reading: Option<MarketReading>,
+        apply_divergences: bool,
     ) -> Vec<ServerMessage> {
         if self.oms_type == mogwai_protocol::OmsType::Hedging && order.position_id.is_none() {
             self.seq = self.seq.saturating_add(1);
             order.position_id = Some(format!("{}-{}", order.symbol, self.seq));
         }
-        if let Err(reason) = self.validate_submit(&order) {
+        if let Err(reason) = self.validate_submit(&order, ts, apply_divergences) {
             return vec![ServerMessage::OrderRejected {
                 client_order_id: order.client_order_id,
                 reason,
@@ -39,8 +49,9 @@ impl Engine {
 
         // Divergence: reject the next submit outright. `RejectNextSubmit`
         // carries no target, so it applies to whatever submit arrives next.
-        if let Some(Divergence::RejectNextSubmit { reason }) =
-            self.take_armed(|d| matches!(d, Divergence::RejectNextSubmit { .. }))
+        if apply_divergences
+            && let Some(Divergence::RejectNextSubmit { reason }) =
+                self.take_armed(|d| matches!(d, Divergence::RejectNextSubmit { .. }))
         {
             return vec![ServerMessage::OrderRejected {
                 client_order_id: order.client_order_id,
@@ -83,8 +94,15 @@ impl Engine {
             stated_px
         };
         if !order.reduce_only
-            && let Err(reason) =
-                self.validate_fill_funds(&order, order.quantity, fill_px, Decimal::ZERO)
+            && let Err(reason) = self.validate_fill_funds(
+                &order,
+                order.quantity,
+                fill_px,
+                Decimal::ZERO,
+                LiquiditySide::Taker,
+                ts,
+                apply_divergences,
+            )
         {
             return vec![ServerMessage::OrderRejected {
                 client_order_id: order.client_order_id,
@@ -168,7 +186,7 @@ impl Engine {
                 // rather than stay armed to ambush a resubmit of the same id.
                 // Short of its trigger is still now-or-never, so the rejection
                 // follows immediately.
-                let _ = self.plan_fill(&order, order.quantity);
+                let _ = self.plan_fill(&order, order.quantity, apply_divergences);
                 return vec![ServerMessage::OrderRejected {
                     client_order_id: order.client_order_id,
                     reason: "fill-or-kill could not fill at its trigger".into(),
@@ -232,14 +250,22 @@ impl Engine {
         // correctly spent rather than left armed to ambush a later resubmit of
         // the same id. `plan_fill` needs no venue id precisely so this ordering
         // survives: a rejected FOK must not burn its client order id.
-        let planned_qty = self.plan_fill(&order, order.quantity);
+        let planned_qty = self.plan_fill(&order, order.quantity, apply_divergences);
         let cap = self.reduce_only_cap(&order);
         let last_qty = cap.map_or(planned_qty, |cap| planned_qty.min(cap));
         let leaves_qty = order.quantity - last_qty;
 
         if order.reduce_only
             && last_qty > Decimal::ZERO
-            && let Err(reason) = self.validate_fill_funds(&order, last_qty, fill_px, Decimal::ZERO)
+            && let Err(reason) = self.validate_fill_funds(
+                &order,
+                last_qty,
+                fill_px,
+                Decimal::ZERO,
+                LiquiditySide::Taker,
+                ts,
+                apply_divergences,
+            )
         {
             return vec![ServerMessage::OrderRejected {
                 client_order_id: order.client_order_id,
@@ -315,6 +341,7 @@ impl Engine {
                 fill_px,
                 LiquiditySide::Taker,
                 ts,
+                apply_divergences,
             );
             out.extend(fill);
         }
@@ -389,9 +416,10 @@ impl Engine {
 
         // Untargeted: applies to this submit's account-state snapshot. Scanned
         // for the same head-of-line-blocking reason as the duplicate divergence.
-        let drop_update = self
-            .take_armed(|d| matches!(d, Divergence::DropNextAccountUpdate))
-            .is_some();
+        let drop_update = apply_divergences
+            && self
+                .take_armed(|d| matches!(d, Divergence::DropNextAccountUpdate))
+                .is_some();
         if !drop_update {
             out.push(ServerMessage::AccountState(self.snapshot(ts)));
         }
@@ -455,7 +483,7 @@ impl Engine {
             // Sized off the LEAVES, never `submit.quantity`: a swept order may
             // already be partly filled or have been amended, and multiplying a
             // partial-fill fraction by the original quantity would over-fill.
-            let planned_qty = self.plan_fill(&submit, leaves);
+            let planned_qty = self.plan_fill(&submit, leaves, true);
             let cap = self.reduce_only_cap(&submit);
             let last_qty = cap.map_or(planned_qty, |cap| planned_qty.min(cap));
             let new_leaves = leaves - last_qty;
@@ -477,7 +505,15 @@ impl Engine {
             // hold subtracted; adding it back is what keeps a fully funded
             // order from failing its own fill against its own reservation.
             let held = self.held_for(&submit, leaves, fill_px);
-            if let Err(reason) = self.validate_fill_funds(&submit, last_qty, fill_px, held) {
+            if let Err(reason) = self.validate_fill_funds(
+                &submit,
+                last_qty,
+                fill_px,
+                held,
+                LiquiditySide::Maker,
+                ts,
+                true,
+            ) {
                 tracing::warn!(client_order_id = %submit.client_order_id, %reason, "resting order canceled at funds check");
                 let order = self.open.remove(pos);
                 self.record_closed(&order, WireOrderStatus::Canceled, ts);
@@ -498,6 +534,7 @@ impl Engine {
                     fill_px,
                     LiquiditySide::Maker,
                     ts,
+                    true,
                 ));
                 emitted += 1;
             }
@@ -639,12 +676,18 @@ impl Engine {
                     order.band_ticks,
                     order.band_draw.saturating_add(1),
                 );
-                let planned = self.plan_fill(&order.submit, order.leaves_qty);
+                let planned = self.plan_fill(&order.submit, order.leaves_qty, true);
                 let fill_qty = cap.map_or(planned, |cap| planned.min(cap));
                 let held = self.held_for(&order.submit, order.leaves_qty, risk_px(&order.submit));
-                if let Err(reason) =
-                    self.validate_fill_funds(&order.submit, fill_qty, fill_px, held)
-                {
+                if let Err(reason) = self.validate_fill_funds(
+                    &order.submit,
+                    fill_qty,
+                    fill_px,
+                    held,
+                    LiquiditySide::Taker,
+                    ts,
+                    true,
+                ) {
                     out.push(self.cancel_triggered(pos, &order, &reason, ts));
                     return out;
                 }
@@ -658,6 +701,7 @@ impl Engine {
                         fill_px,
                         LiquiditySide::Taker,
                         ts,
+                        true,
                     ));
                 }
                 self.open.remove(pos);
@@ -712,11 +756,18 @@ impl Engine {
                     });
                     return out;
                 }
-                let planned = self.plan_fill(&order.submit, order.leaves_qty);
+                let planned = self.plan_fill(&order.submit, order.leaves_qty, true);
                 let fill_qty = cap.map_or(planned, |cap| planned.min(cap));
                 let held = self.held_for(&order.submit, order.leaves_qty, stated);
-                if let Err(reason) = self.validate_fill_funds(&order.submit, fill_qty, stated, held)
-                {
+                if let Err(reason) = self.validate_fill_funds(
+                    &order.submit,
+                    fill_qty,
+                    stated,
+                    held,
+                    LiquiditySide::Taker,
+                    ts,
+                    true,
+                ) {
                     out.push(self.cancel_triggered(pos, &order, &reason, ts));
                     return out;
                 }
@@ -730,6 +781,7 @@ impl Engine {
                         stated,
                         LiquiditySide::Taker,
                         ts,
+                        true,
                     ));
                 }
                 self.open.remove(pos);
@@ -768,18 +820,20 @@ impl Engine {
     }
 
     /// The reservation this order itself already contributes to
-    /// `locked_balances`, which `validate_fill_funds` adds back before it
-    /// compares. Zero for a reduce-only order, which reserves nothing.
+    /// `locked_balances` IN THE SETTLEMENT CURRENCY, which
+    /// `validate_fill_funds` adds back before it compares. Zero for a
+    /// reduce-only order (which reserves nothing) and zero for a spot sell
+    /// (whose hold is base currency, and whose settlement-side check is about
+    /// commission rather than the hold). Derived from the same
+    /// `order_reservation` the snapshot folds, so the add-back can never be a
+    /// different shape from the hold it is canceling.
     fn held_for(&self, order: &SubmitOrder, leaves: Decimal, price: Decimal) -> Decimal {
-        if order.reduce_only {
-            return Decimal::ZERO;
-        }
-        if let Some(policy) = self.margin.get(&order.symbol) {
-            return policy.initial_per_contract.saturating_mul(leaves);
-        }
-        match order.side {
-            Side::Buy => leaves * price,
-            Side::Sell => leaves,
+        let mut clipped = false;
+        match self.order_reservation(order, leaves, price, &mut clipped) {
+            crate::account::Reservation::Settlement(amount) => amount,
+            crate::account::Reservation::None | crate::account::Reservation::Base(_) => {
+                Decimal::ZERO
+            }
         }
     }
 
@@ -809,8 +863,17 @@ impl Engine {
     /// `remaining` (the order's leaves, not its original quantity). Mutates no
     /// ledger and needs no venue id, so `on_submit` can judge FOK against its
     /// answer while a rejected FOK still leaves its client order id unreserved.
-    fn plan_fill(&mut self, order: &SubmitOrder, remaining: Decimal) -> Decimal {
-        let fraction = self.fill_fraction(order);
+    fn plan_fill(
+        &mut self,
+        order: &SubmitOrder,
+        remaining: Decimal,
+        apply_divergences: bool,
+    ) -> Decimal {
+        let fraction = if apply_divergences {
+            self.fill_fraction(order)
+        } else {
+            Decimal::ONE
+        };
         // `validate_submit` already confirmed the instrument exists; a missing
         // entry here would mean `Decimal::ZERO`, which `floor_to_increment`
         // treats as "not a grid" and passes the raw fraction through.
@@ -843,28 +906,20 @@ impl Engine {
         fill_px: Decimal,
         liquidity_side: LiquiditySide,
         ts: u64,
+        apply_divergences: bool,
     ) -> Vec<ServerMessage> {
-        let surcharge = self.fee_surcharge_multiplier(ts);
+        // `FeeSurcharge` is a client-armed divergence, so a venue-originated
+        // order (liquidation) neither pays it nor advances its window: reading
+        // the multiplier here is the only place the window expires, and
+        // expiring it against an order the client never sent would spend the
+        // arm on venue maintenance.
+        let surcharge = if apply_divergences {
+            self.fee_surcharge_multiplier(ts)
+        } else {
+            Decimal::ONE
+        };
+        let commission = self.commission_for(order, last_qty, fill_px, liquidity_side, surcharge);
         let def = &self.instruments[&order.symbol];
-        let commission = self
-            .fees
-            .get(&order.symbol)
-            .map_or(Decimal::ZERO, |schedule| {
-                let rate = match liquidity_side {
-                    LiquiditySide::Maker => schedule.maker,
-                    LiquiditySide::Taker => schedule.taker,
-                };
-                match rate {
-                    crate::FeeRate::BasisPoints { rate } => def
-                        .notional(last_qty, fill_px)
-                        .unwrap_or(Decimal::MAX)
-                        .saturating_mul(rate)
-                        .checked_div(Decimal::from(10_000))
-                        .unwrap_or(Decimal::MAX),
-                    crate::FeeRate::PerContract { amount } => amount.saturating_mul(last_qty),
-                }
-            })
-            .saturating_mul(surcharge);
         let commission_currency = def.class.settlement_currency().to_owned();
         let fill = OrderFilled {
             client_order_id: order.client_order_id.clone(),
@@ -890,9 +945,10 @@ impl Engine {
         // Untargeted: applies to the fill just produced. Scanned (not peeked at
         // `front()`) so a non-matching targeted `PartialFillNext` parked ahead
         // of it in the queue cannot block it - see `take_armed`.
-        let duplicate = self
-            .take_armed(|d| matches!(d, Divergence::DuplicateNextFill))
-            .is_some();
+        let duplicate = apply_divergences
+            && self
+                .take_armed(|d| matches!(d, Divergence::DuplicateNextFill))
+                .is_some();
         let mut out = Vec::new();
         if duplicate {
             out.push(ServerMessage::OrderFilled(fill.clone()));
@@ -901,7 +957,58 @@ impl Engine {
         out
     }
 
-    fn validate_submit(&self, order: &SubmitOrder) -> Result<(), String> {
+    fn commission_for(
+        &self,
+        order: &SubmitOrder,
+        qty: Decimal,
+        px: Decimal,
+        liquidity_side: LiquiditySide,
+        surcharge: Decimal,
+    ) -> Decimal {
+        let def = &self.instruments[&order.symbol];
+        self.fees
+            .get(&order.symbol)
+            .map_or(Decimal::ZERO, |schedule| {
+                let rate = match liquidity_side {
+                    LiquiditySide::Maker => schedule.maker,
+                    LiquiditySide::Taker => schedule.taker,
+                };
+                match rate {
+                    crate::FeeRate::BasisPoints { rate } => def
+                        .notional(qty, px)
+                        .unwrap_or(Decimal::MAX)
+                        .saturating_mul(rate)
+                        .checked_div(Decimal::from(10_000))
+                        .unwrap_or(Decimal::MAX),
+                    crate::FeeRate::PerContract { amount } => amount.saturating_mul(qty),
+                }
+            })
+            .saturating_mul(surcharge)
+    }
+
+    fn maximum_commission(
+        &self,
+        order: &SubmitOrder,
+        qty: Decimal,
+        px: Decimal,
+        ts: u64,
+        apply_divergences: bool,
+    ) -> Decimal {
+        let surcharge = if apply_divergences {
+            self.fee_surcharge_multiplier_at(ts)
+        } else {
+            Decimal::ONE
+        };
+        self.commission_for(order, qty, px, LiquiditySide::Maker, surcharge)
+            .max(self.commission_for(order, qty, px, LiquiditySide::Taker, surcharge))
+    }
+
+    fn validate_submit(
+        &self,
+        order: &SubmitOrder,
+        ts: u64,
+        apply_divergences: bool,
+    ) -> Result<(), String> {
         if order.client_order_id.trim().is_empty() {
             return Err("empty client_order_id".into());
         }
@@ -1005,15 +1112,37 @@ impl Engine {
                     .margin
                     .get(&order.symbol)
                     .ok_or_else(|| "cash-settled futures require the margin ledger".to_string())?;
-                let required = policy.initial_per_contract.saturating_mul(order.quantity);
+                let commission =
+                    self.maximum_commission(order, order.quantity, price, ts, apply_divergences);
+                let required = policy
+                    .initial_per_contract
+                    .saturating_mul(order.quantity)
+                    .saturating_add(commission);
                 let currency = instrument.class.settlement_currency();
                 if self.free_balance(currency) < required {
                     return Err(format!("insufficient {currency} balance"));
                 }
                 return Ok(());
             }
+            if order.side == Side::Sell {
+                let currency = instrument.class.settlement_currency();
+                let commission =
+                    self.maximum_commission(order, order.quantity, price, ts, apply_divergences);
+                if self.free_balance(currency).saturating_add(notional) < commission {
+                    return Err(format!("insufficient {currency} balance"));
+                }
+            }
             let (currency, required) = match order.side {
-                Side::Buy => (instrument.class.settlement_currency(), notional),
+                Side::Buy => (
+                    instrument.class.settlement_currency(),
+                    notional.saturating_add(self.maximum_commission(
+                        order,
+                        order.quantity,
+                        price,
+                        ts,
+                        apply_divergences,
+                    )),
+                ),
                 Side::Sell => (
                     instrument.class.base_currency().ok_or_else(|| {
                         "cash-settled futures require the margin ledger".to_string()
@@ -1035,42 +1164,91 @@ impl Engine {
     /// slipped buy could overdraw an account that validator had passed. A limit
     /// fills at its own price, so for one this is the same question twice and
     /// answers it the same way.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the funds question carries the complete prospective execution"
+    )]
     fn validate_fill_funds(
         &self,
         order: &SubmitOrder,
         qty: Decimal,
         fill_px: Decimal,
         held: Decimal,
+        liquidity_side: LiquiditySide,
+        ts: u64,
+        apply_divergences: bool,
     ) -> Result<(), String> {
         if !self.enforce_funds {
             return Ok(());
         }
         let instrument = &self.instruments[&order.symbol];
-        // Spot keeps its exact pre-futures rule: a sell delivers base it
-        // already holds, so only a buy is checked here, reduce-only included.
-        // A future posts collateral on either side, and a reduce-only futures
-        // fill RELEASES collateral rather than posting it, so it is exempt -
-        // which mirrors `locked_balances` and `validate_submit`, both of which
-        // skip reduce-only outright.
-        if instrument.class.is_future() {
-            if order.reduce_only {
-                return Ok(());
+        // A spot sell normally pays commission from its quote proceeds, but a
+        // configured per-unit fee can exceed those proceeds. Check that case
+        // explicitly so even an extreme legal schedule cannot overdraw the
+        // settlement balance. A future pays fees from settlement cash on
+        // either side. A reduce-only future releases maintenance collateral,
+        // and that release is included below when checking whether its
+        // commission is payable.
+        let commission = self.commission_for(
+            order,
+            qty,
+            fill_px,
+            liquidity_side,
+            // A venue-originated order pays no client-armed `FeeSurcharge`,
+            // so checking it against one could cancel a forced liquidation
+            // and leave the breached position open.
+            if apply_divergences {
+                self.fee_surcharge_multiplier_at(ts)
+            } else {
+                Decimal::ONE
+            },
+        );
+        if !instrument.class.is_future() && order.side == Side::Sell {
+            let proceeds = qty
+                .checked_mul(fill_px)
+                .ok_or_else(|| "order notional exceeds maximum representable value".to_string())?;
+            let currency = instrument.class.settlement_currency();
+            if self.free_balance(currency).saturating_add(proceeds) < commission {
+                return Err(format!("insufficient {currency} balance"));
             }
-        } else if order.side == Side::Sell {
             return Ok(());
         }
-        let required = if instrument.class.is_future() {
-            self.margin
+        let (required, released) = if instrument.class.is_future() {
+            let policy = self
+                .margin
                 .get(&order.symbol)
-                .ok_or_else(|| "cash-settled futures require the margin ledger".to_string())?
-                .initial_per_contract
-                .saturating_mul(qty)
+                .ok_or_else(|| "cash-settled futures require the margin ledger".to_string())?;
+            if order.reduce_only {
+                (
+                    commission,
+                    policy.maintenance_per_contract.saturating_mul(qty),
+                )
+            } else {
+                (
+                    policy
+                        .initial_per_contract
+                        .saturating_mul(qty)
+                        .saturating_add(commission),
+                    Decimal::ZERO,
+                )
+            }
         } else {
-            qty.checked_mul(fill_px)
-                .ok_or_else(|| "order notional exceeds maximum representable value".to_string())?
+            (
+                qty.checked_mul(fill_px)
+                    .ok_or_else(|| {
+                        "order notional exceeds maximum representable value".to_string()
+                    })?
+                    .saturating_add(commission),
+                Decimal::ZERO,
+            )
         };
         let currency = instrument.class.settlement_currency();
-        if self.free_balance(currency).saturating_add(held) < required {
+        if self
+            .free_balance(currency)
+            .saturating_add(held)
+            .saturating_add(released)
+            < required
+        {
             return Err(format!("insufficient {currency} balance"));
         }
         Ok(())
@@ -1192,13 +1370,23 @@ impl Engine {
             }];
         }
 
-        // A `StopMarket` carries no price by construction (the venue would
-        // never consult one), so an amend must not be able to give it one.
-        if price.is_some() && self.open[pos].submit.order_type == OrderType::StopMarket {
+        // Neither kind of market order has a live limit price. A plain Market
+        // can remain open only as an inert partial-fill remainder, and giving
+        // that remainder a price must not turn it into a scannable limit.
+        if price.is_some()
+            && matches!(
+                self.open[pos].submit.order_type,
+                OrderType::Market | OrderType::StopMarket
+            )
+        {
             return vec![ServerMessage::OrderModifyRejected {
                 client_order_id,
                 venue_order_id: Some(venue_order_id),
-                reason: "StopMarket order must not carry a price".into(),
+                reason: if self.open[pos].submit.order_type == OrderType::StopMarket {
+                    "StopMarket order must not carry a price".into()
+                } else {
+                    "Market order must not carry a price amend".into()
+                },
                 ts_event: ts,
             }];
         }
@@ -1273,6 +1461,32 @@ impl Engine {
             }];
         }
 
+        if let Some(new_price) = price
+            && order.submit.post_only
+            && matches!(order.resting, Resting::Limit { .. })
+        {
+            let band_draw = order.band_draw.saturating_add(1);
+            let band_ticks = reading.map_or(order.band_ticks, |value| value.band_ticks);
+            let trigger = draw_trigger(
+                self.fill_seed,
+                &order.submit,
+                new_price,
+                instrument.price_increment,
+                band_ticks,
+                band_draw,
+            );
+            if reading
+                .is_some_and(|value| trades_through(order.submit.side, trigger, value.last_px))
+            {
+                return vec![ServerMessage::OrderModifyRejected {
+                    client_order_id,
+                    venue_order_id: Some(venue_order_id),
+                    reason: "post-only order would take liquidity".into(),
+                    ts_event: ts,
+                }];
+            }
+        }
+
         // The price this order's reservation, notional and funds check are
         // taken against AFTER the amend - `risk_px` under amendment. For a
         // price-less `StopMarket` that is its trigger, new or existing, which
@@ -1320,6 +1534,30 @@ impl Engine {
             if self.enforce_funds && !self.open[pos].submit.reduce_only {
                 let order = &self.open[pos];
                 let new_leaves = new_total - filled;
+                // The amended fill will be charged commission just like a
+                // fresh submit, so the amended requirement carries it too -
+                // the worse of the maker and taker rate, because which side
+                // the order ends up providing is not known until it fills.
+                // Without this an amend is admitted that the fill-time check
+                // then cancels.
+                let commission =
+                    self.maximum_commission(&order.submit, new_leaves, effective_price, ts, true);
+                // A spot sell reserves BASE, but pays its fee out of the
+                // quote proceeds, so its commission is checked against the
+                // settlement balance separately - the same split
+                // `validate_submit` makes.
+                if !instrument.class.is_future() && order.submit.side == Side::Sell {
+                    let settlement = instrument.class.settlement_currency();
+                    let proceeds = new_leaves.saturating_mul(effective_price);
+                    if self.free_balance(settlement).saturating_add(proceeds) < commission {
+                        return vec![ServerMessage::OrderModifyRejected {
+                            client_order_id,
+                            venue_order_id: Some(venue_order_id),
+                            reason: format!("insufficient {settlement} balance"),
+                            ts_event: ts,
+                        }];
+                    }
+                }
                 // A future posts collateral, not notional, and it posts the
                 // same collateral on either side. Comparing an amended futures
                 // order against `new_leaves * price` would reject every amend
@@ -1336,7 +1574,10 @@ impl Engine {
                     (
                         instrument.class.settlement_currency(),
                         policy.initial_per_contract.saturating_mul(order.leaves_qty),
-                        policy.initial_per_contract.saturating_mul(new_leaves),
+                        policy
+                            .initial_per_contract
+                            .saturating_mul(new_leaves)
+                            .saturating_add(commission),
                     )
                 } else {
                     match order.submit.side {
@@ -1349,7 +1590,7 @@ impl Engine {
                             (
                                 instrument.class.settlement_currency(),
                                 order.leaves_qty * old_price,
-                                new_leaves * effective_price,
+                                (new_leaves * effective_price).saturating_add(commission),
                             )
                         }
                         Side::Sell => {

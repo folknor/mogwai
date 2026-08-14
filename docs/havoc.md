@@ -3,7 +3,10 @@
 Havoc is armed against the one run, not against an account or subscription.
 Order-path divergences operate on the run ledger; data-path divergences operate
 on the run's single tape and its connected sockets. Admission and execution
-lanes remain connection-local memory bounds.
+lanes remain connection-local memory bounds. Order-path arms apply only to
+client-originated orders. Venue-originated maintenance, including forced
+liquidation, bypasses them and leaves them armed for the next matching client
+action.
 
 `DelayAcks`, `CommandLatency`, `GoDark`, `StallData`, partial fills, rejects,
 duplicate fills, and blackouts keep their existing fidelity meanings. `GoDark`
@@ -21,8 +24,9 @@ while leaving sweep shape unchanged.
 `FeeSurcharge { mult, window_ms }` multiplies the configured maker or taker
 charge for fills inside one simulated-time window. The multiplier is restricted
 to `(0, 100]`, the duration to one hour, and a later arm replaces the earlier
-window outright. It expires lazily on the first fill at or after its end, so it
-does not depend on wall time or a background timer.
+window outright. It expires lazily on the first client fill at or after its
+end, so it does not depend on wall time or a background timer. A
+venue-originated fill neither pays the surcharge nor expires its window.
 
 A planned run completion is not havoc: it emits `RunComplete` and closes
 normally. That announcement is exempt from both suppression windows - a venue
