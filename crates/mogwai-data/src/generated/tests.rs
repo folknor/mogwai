@@ -231,6 +231,61 @@ fn last_trade_through(source: &mut GeneratedSource, target: u64) -> Option<Decim
     last
 }
 
+/// The FENCE half of the walk-back recovery above. A `FlowSurge` control
+/// boundary stops the walk-back - resuming earlier and replaying across the
+/// arm would answer from a different tape - so when the boundary snapshot
+/// itself consumed the last print before a target, NO resumable snapshot can
+/// re-emit it. The snapshot's own state still carries that print, and
+/// `last_trade_price` is how the server's lookup recovers it instead of
+/// refusing forever: a permanent refusal at a settlement instant would freeze
+/// the sweep's settlement frontier for the rest of the run.
+#[test]
+fn a_fenced_control_boundary_still_answers_for_the_print_it_consumed() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let origin = GeneratedSource::new(scalars, 4242, 1_000, &fp, None);
+    // Spacing far wider than the walk below, so the chain is exactly the
+    // origin plus the arm boundary and the partition can only land on the pin.
+    let mut index = CheckpointIndex::new(origin, 1 << 20, 10_000_000);
+    // Advance until the lead has printed a trade AND its next tick lands
+    // strictly later than one nanosecond past the frontier, so a target of
+    // frontier plus one is guaranteed an empty residual.
+    let mut last_trade = None;
+    loop {
+        if let TickEvent::Trade(trade) = index.next_tick().expect("infinite tape") {
+            last_trade = Some(trade.price);
+        }
+        if last_trade.is_some() {
+            let mut peek = index.frontier_source();
+            let next_ts = peek.next_tick().expect("infinite tape").ts_event();
+            if next_ts > index.frontier_ns() + 1 {
+                break;
+            }
+        }
+    }
+    let arm_at = index.frontier_ns();
+    index.arm_flow_surge(arm_at, 60_000, 8.0, 3.0);
+    let target = arm_at + 1;
+
+    let (mut fenced, exhausted) = index
+        .try_source_before_target(target, 0)
+        .expect("a reachable target");
+    assert!(
+        exhausted,
+        "the arm boundary must be the earliest snapshot the walk-back may use"
+    );
+    let boundary_price = fenced.last_trade_price();
+    assert_eq!(
+        last_trade_through(&mut fenced, target),
+        None,
+        "the fixture must exercise a residual the boundary snapshot already ate"
+    );
+    assert_eq!(
+        boundary_price, last_trade,
+        "the boundary snapshot must answer for the print it consumed"
+    );
+}
+
 /// Coarsening drops every other snapshot, which is correctness-preserving for
 /// an ordinary one and NOT for a `FlowSurge` control boundary: the surge lives
 /// in the generator, so a target between an arm and the next ordinary snapshot

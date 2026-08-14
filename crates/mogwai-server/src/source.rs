@@ -353,6 +353,15 @@ pub(crate) fn materialize_warmup(
 /// read", and the sweeper's settlement frontier refuses to retire a span on it,
 /// so answering `None` where a print exists would stall the frontier forever
 /// rather than merely losing one reading.
+///
+/// The walk-back is FENCED at a `FlowSurge` control boundary (resuming earlier
+/// and replaying across the arm would answer from a different tape), so the
+/// fence itself needs its own recovery: when the earliest permitted snapshot's
+/// residual holds no print, the print the reader wants is one that snapshot
+/// CONSUMED, and the snapshot still knows it. `last_trade_price` is that
+/// answer. Without it, a settlement instant landing between an arm and the
+/// next trade would be unpriceable forever and would freeze the settlement
+/// frontier for the rest of the run.
 pub(crate) fn last_trade_at_or_before(
     symbol: &str,
     ts: u64,
@@ -363,6 +372,15 @@ pub(crate) fn last_trade_at_or_before(
     let mut back = 0usize;
     loop {
         let (mut source, exhausted) = locked(index).try_source_before_target(ts, back)?;
+        // Captured BEFORE draining: it is the resume point's own last consumed
+        // print, whose ts is at most the snapshot clock and therefore strictly
+        // before `ts` (the partition is strict). Only consulted when the chain
+        // is exhausted and the residual held nothing.
+        let fence_price = if exhausted {
+            source.last_trade_price()
+        } else {
+            None
+        };
         let mut last = None;
         let mut drained = 0usize;
         while let Some(tick) = source.next_tick() {
@@ -379,7 +397,7 @@ pub(crate) fn last_trade_at_or_before(
             last = Some(trade.price);
         }
         if last.is_some() || exhausted {
-            return last;
+            return last.or(fence_price);
         }
         budget = budget.saturating_sub(drained);
         if budget == 0 {

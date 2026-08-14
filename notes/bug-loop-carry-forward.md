@@ -537,3 +537,70 @@ New machinery later rounds must not break:
 - `fills::test_profiles` is the single boot tape every in-crate server test
   shares. The chain is process-global, so a second one is a named failure
   rather than a silent no-op.
+
+## Close pass over the server-tape arc (commits af5434f, 4410e4f)
+
+A whole-arc review of both rounds, weighted toward the never-cold-reviewed
+second half of each commit. The frontier machinery, the canonical FlowSurge
+change, the pinned-snapshot design, the no-bump verdicts and the durable prose
+all held up under enumeration. ONE liveness defect found and fixed - a fifth
+frontier door, the inverse shape of the previous four:
+
+- THE WALK-BACK FENCE COULD STALL THE SETTLEMENT FRONTIER FOREVER. The fence
+  at a `FlowSurge` control boundary is correct (crossing it replays the span
+  unsurged), but it had no recovery: a settlement instant landing between a
+  boundary pin's clock and the pin's next trade has its last print CONSUMED by
+  the pin, unreachable from any resumable snapshot. `last_trade_at_or_before`
+  then answered `None` for that instant deterministically, every pass, forever
+  - the exact permanent stall its own comment named as the thing to avoid.
+  Where rounds 1 through 4 of this defect advanced a watermark past
+  unperformed work, this one wedged the watermark so no settlement could ever
+  book again. The recovery is `GeneratedSource::last_trade_price`: the
+  boundary snapshot's own walk state carries the print it consumed (mid-burst
+  it is `burst.price_ticks`, at a boundary `last_event_price_ticks`),
+  materialized through the exact `next_child` arithmetic, consuming no draw.
+  The server lookup consults it only when the chain reports itself exhausted
+  and the residual held nothing.
+  `a_fenced_control_boundary_still_answers_for_the_print_it_consumed` pins the
+  fence flag, the empty residual and the recovered price together.
+
+Verified rather than accepted, each against the code and not the claim:
+
+- Every frontier: `last_swept_ns` is assigned at exactly one site through
+  `frontier_after`, whose `read` argument is the success of both reading
+  halves; a partial settlement answer cannot reach it because `read_marks`
+  collects into an `Option`. Scan frontiers advance only off a completed walk
+  (`walked == None` skips the symbol), and the engine re-validates revisions.
+  Settlement spans are start-exclusive, end-inclusive, so a held watermark
+  re-asks its instants and an advanced one never double-books them.
+- The no-bump verdicts, both rounds. An unarmed run never constructs a
+  `SurgeWindow`; pinning, coarsening and the walk-back select only WHICH
+  already-walked snapshot a clone resumes from; the stride and the compact
+  seek are pinned draw-identical by goldens. The close pass's own fix is a
+  read-only accessor. 14 stays reserved for protocol-12b.
+- The pinned-snapshot memory bound. `coarsen`'s overflow tail removes index 1
+  regardless of pin, so `MAX_CHECKPOINTS` is a hard ceiling and the disclosed
+  residual (a run arming more than ~4096 surges loses replay fidelity for its
+  most ancient windows, arm and clear each costing one pin) is accurately
+  stated. `k` doubles only when the every-other pass removed something, so pin
+  pressure cannot inflate the residual drain. `since_snapshot` can never
+  exceed `k`, so the parent-skip arithmetic cannot underflow.
+- `bugs-data.md` finding 1's closure is honest. In the same pass its findings
+  2 and 4 were reconciled with what this arc actually landed: every
+  `BoundedSeek` reference is gone and the trait doc's bound is now real
+  (finding 2 closed), and the compact `seek_to` plus the 8,192 stride resolve
+  finding 4's drain half, leaving only the per-tick `symbol` clone open.
+- The fill-golden `is_multiple_of` removal is benign: `ACCEPT_STRIDE_NS` and
+  `SWEEP_INTERVAL_NS` are both one second, so each sweep step maps to a unique
+  order index and no duplicate submits are possible.
+
+Residuals accepted as ruled: the FlowSurge alive-check race (the arm lands on
+the canonical tape while only the feed stops - observable, bounded, disclosed),
+the jointly-observable commission checks, and the dev/release profile split
+(no test in this arc rests on `debug_assert`). One weakness noted, not fixed:
+`swept_batch_max_bytes`'s five-frame originated bound has no worst-case pinning
+test of its own; the engine's cascade test bounds a real cascade under the
+tighter four-frame helper, so the server's wider reservation is safe but
+unpinned. `docs/havoc.md`'s conditional-order table now says the sweep walks
+the CANONICAL tape (which per-subscription regimes never touch) rather than
+the "clean" tape, matching the FlowSurge paragraph above it.

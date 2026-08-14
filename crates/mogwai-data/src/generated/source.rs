@@ -486,6 +486,37 @@ impl GeneratedSource {
         self.clock_ns
     }
 
+    /// The price of the last TRADE this walk has emitted, or `None` for a walk
+    /// that has printed nothing yet. Mid-burst it is the current sweep's latest
+    /// child print; at a parent boundary it is the completed event's final
+    /// print. Both are state the walk already carries - no draw is consumed and
+    /// nothing about the stream moves.
+    ///
+    /// It exists for the checkpoint walk-back's FENCE case: a `FlowSurge`
+    /// control-boundary snapshot may have CONSUMED the last print at or before
+    /// a reader's target, and resuming any earlier snapshot would replay across
+    /// the arm and answer from a different tape. The snapshot itself still
+    /// knows that print, and this is how it says so. Without it, a settlement
+    /// instant landing between a control boundary and the next trade is
+    /// unpriceable forever and the sweep frontier stalls permanently.
+    #[must_use]
+    pub fn last_trade_price(&self) -> Option<Decimal> {
+        let price_ticks = if self.burst.emitted > 0 {
+            // `step_child` leaves `burst.price_ticks` at the price of the child
+            // it just drew, so between ticks this IS the latest print. A
+            // completed burst keeps `emitted > 0` until the next parent begins,
+            // where it agrees with `last_event_price_ticks` by construction.
+            Some(self.burst.price_ticks)
+        } else {
+            self.last_event_price_ticks
+        };
+        // The exact materialization `next_child` performs, so the answer is
+        // byte-identical to the print a replay would have re-emitted.
+        price_ticks.map(|ticks| {
+            decimal_from_f64(ticks * self.tick_f64).round_dp(self.scalars.price_decimals)
+        })
+    }
+
     #[cfg(test)]
     pub(super) fn arrival_mult_for_test(&self, clock_ns: u64) -> f64 {
         self.session.arrival_mult(clock_ns)

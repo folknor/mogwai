@@ -243,16 +243,19 @@ impl CheckpointIndex {
     }
 
     /// The same positioning, but `back` snapshots EARLIER than the strict
-    /// partition point, and reporting whether the result is the origin.
+    /// partition point, and reporting whether the result is the EARLIEST
+    /// snapshot the walk-back may use - the origin, or the nearest `FlowSurge`
+    /// control boundary when one fences the retreat.
     ///
     /// A positioned source only re-emits ticks the resume point had not yet
     /// consumed, so a reader recovering state the snapshot itself consumed - the
     /// last trade price at or before `target`, say - can find nothing to read
     /// even though the answer exists. That reader is not wrong to have asked,
     /// and must not be told "no such print": it walks back until it finds one or
-    /// until the origin, which has consumed nothing and therefore re-emits the
-    /// whole tape. Returning the origin flag is what lets the caller stop
-    /// without guessing at the chain's length.
+    /// until it hits the floor. Returning the floor flag is what lets the caller
+    /// stop without guessing at the chain's length; a FENCED caller then reads
+    /// the consumed print off the boundary snapshot's own state
+    /// (`GeneratedSource::last_trade_price`) rather than being refused forever.
     pub fn try_source_before_target(
         &mut self,
         target: u64,

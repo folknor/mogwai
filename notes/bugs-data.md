@@ -24,23 +24,16 @@ Residual, bounded and documented rather than open: a run that arms more than
 so replay fidelity for the most ancient surge windows is what gives way rather
 than the bound.
 
-## 2. `BoundedSeek` does not exist, and the docs that make the unbounded seek "safe" cite it
+## 2. CLOSED (`bugs-server-tape.md` rounds 1 and 2, findings 2 and 8)
 
-`TickSource::seek_to` (`lib.rs`) is an unbounded drain and its own doc says callers
-of an infinite source "must wrap it with their own bound (the server's checkpointed
-seek does this)". `checkpoint.rs` twice names `BoundedSeek` as the caller-side cap
-that makes a short frontier safe. `reference/performance.md` calls it "the
-server-private `BoundedSeek` wrapper".
-
-`BoundedSeek` is not defined anywhere in the repo. Grep finds only those three doc
-comments plus a fourth dangling reference in `crates/mogwai-server/src/fills.rs`. It
-was deleted and the doc comments that justify an unbounded loop were left standing.
-The remaining bound is the HTTP-layer `start > sim_now` / `start < data_origin`
-refusal, which is a different mechanism at a different layer and does not cover
-`fills.rs` or any future in-process caller.
-
-Either restore the wrapper or rewrite the four comments and the trait doc to say
-what actually bounds it. Right now the crate documents a safety net that is gone.
+All four dangling `BoundedSeek` references are gone from the tree (the two in
+`checkpoint.rs`, `reference/performance.md`, and `fills.rs`), and the safety
+mechanism the docs now describe actually exists: `try_source_at_or_before`
+REFUSES a target its capped extension did not reach, before any downstream seek
+begins, so no unbounded `seek_to` can be entered against an unreachable target.
+The server's last-print fallback additionally shares the sweep drain ceiling.
+The `TickSource::seek_to` trait doc's "the server's checkpointed seek does
+this" is now a true statement about that refusal boundary.
 
 ## 3. An armed `ReopenGap` is silently swallowed when the crossing lands in a calendar-closed window
 
@@ -65,25 +58,19 @@ reproduced one layer down by the calendar. Nothing warns. Fix: run the crossing 
 against the post-jump clock, or test the closed interval
 `[old_clock, post_jump_clock]`.
 
-## 4. `MergeSource::starting_at` drains up to `CHECKPOINT_K` = 4,194,304 generator steps per request
+## 4. `symbol: String` is cloned per materialized tick
 
-`build_history_source` hands `MergeSource::starting_at` a checkpoint clone and a
-`start`, and the trait-default `seek_to` drains one tick at a time. The checkpoint
-grid spacing is 4.19M ticks, so the expected per-request residual is ~2M ticks and
-the worst case 4.19M (8.4M+ after one `coarsen`). Every `/trades` page and every fill
-sweep pays this. Each of those ticks allocates: `next_child` does
-`symbol: self.scalars.symbol.clone()` and builds two `Decimal`s that are thrown away
-by `seek_to`.
+MOSTLY CLOSED by `bugs-server-tape.md` rounds 1 and 2 (findings 3 and 4a): the
+checkpoint stride is 8,192 again (not 4,194,304), so the per-request residual is
+bounded by thousands of ticks rather than millions, and `GeneratedSource` now
+overrides `seek_to` to skip whole parents through `advance_parent` without
+materializing protocol objects, with a continuation golden pinning identical
+draws. `CheckpointIndex::extend_toward` uses the same compact step.
 
-Two independent wins here, both structural:
-
-- Add a real `skip_to` on `GeneratedSource` that advances state without materializing
-  `TradeTick`/`QuoteTick`. `advance_parent`/`ParentSummary` already prove the
-  advancement/materialization split works and is byte-identical; `seek_to` is the
-  caller that most needs it and does not use it. This is a straight several-x cut on
-  every history and fill path.
-- `symbol: String` cloned per tick should be `Arc<str>`. At ~50 prints per simulated
-  second plus multi-million-tick drains this is the crate's dominant allocation.
+What remains open is the allocation on the ticks that ARE materialized:
+`next_child` does `symbol: self.scalars.symbol.clone()` per tick, and an
+`Arc<str>` (or interned symbol) would remove the crate's most frequent heap
+allocation on the feed and history paths.
 
 ## 5. `low_intensity_gap_ns` doc claims a strict-monotonicity invariant no test holds
 
@@ -174,4 +161,3 @@ generator), two markdown files, and untracked `analysis/` Python.
   its `Vec`, three distribution objects, three 24/7-element arrays). The mutable walk
   state is a few hundred bytes; everything else should sit behind one `Arc` shared by
   the lead and all snapshots.
-- `crates/mogwai-server/src/fills.rs` also references the nonexistent `BoundedSeek`.
