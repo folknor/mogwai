@@ -281,9 +281,6 @@ async fn serve_async(
     sweeper::spawn_fill_sweeper(sweeper::FillSweep {
         run: Arc::clone(&run),
         profiles: Arc::clone(&profiles),
-        market_readings: Arc::clone(&market_readings),
-        fill_band_vol_mult: cfg.fill_band_vol_mult,
-        fill_band_max_ticks: cfg.fill_band_max_ticks,
         interval_ms: cfg.fill_sweep_interval_ms,
     });
     let state = AppState {

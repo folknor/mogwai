@@ -26,15 +26,10 @@ pub(crate) struct Tape {
     tx: broadcast::Sender<TapeFrame>,
     last_quote: Mutex<Option<TapeFrame>>,
     cancel: Arc<AtomicBool>,
-    control: mpsc::Sender<FlowSurgeArm>,
+    alive: AtomicBool,
+    symbol: String,
+    profiles: Arc<source::InstrumentProfiles>,
     fault: Mutex<Option<TickFault>>,
-}
-struct FlowSurgeArm {
-    start_ns: u64,
-    duration_ms: u64,
-    rate_mult: f64,
-    children_mult: f64,
-    clear: bool,
 }
 pub(crate) struct TapeSpawn {
     pub(crate) profiles: Arc<source::InstrumentProfiles>,
@@ -46,13 +41,18 @@ pub(crate) struct TapeSpawn {
 }
 impl Tape {
     pub(crate) fn start(symbol: String, spawn: TapeSpawn) -> Arc<Self> {
+        assert!(
+            source::activate_live(&symbol, &spawn.profiles),
+            "validated run symbol must own a tape index"
+        );
         let (tx, _) = broadcast::channel(spawn.fanout_depth);
-        let (control, controls) = mpsc::channel();
         let tape = Arc::new(Self {
             tx,
             last_quote: Mutex::new(None),
             cancel: Arc::new(AtomicBool::new(false)),
-            control,
+            alive: AtomicBool::new(true),
+            symbol: symbol.clone(),
+            profiles: Arc::clone(&spawn.profiles),
             fault: Mutex::new(None),
         });
         let worker = Arc::clone(&tape);
@@ -60,24 +60,18 @@ impl Tape {
             let wall_anchor = now_ns();
             let instant_anchor = Instant::now();
             let now = spawn.sim.sim_ns(wall_anchor);
-            let Some(mut source) = source::build_live_source(&symbol, &spawn.profiles, now) else {
+            if source::build_history_source(&symbol, Some(now), &spawn.profiles).is_none() {
+                tracing::error!(symbol, "tape source could not be positioned");
+                worker.alive.store(false, Ordering::Release);
                 return;
-            };
+            }
             while !worker.cancel.load(Ordering::Relaxed) {
-                while let Ok(arm) = controls.try_recv() {
-                    if arm.clear {
-                        source.clear_flow_surge();
-                    } else {
-                        source.arm_flow_surge(
-                            arm.start_ns,
-                            arm.duration_ms,
-                            arm.rate_mult,
-                            arm.children_mult,
-                        );
-                    }
-                }
-                let Some(tick) = source.next_tick() else {
-                    if let Some(fault) = source.fault() {
+                let Some((tick, fault)) = source::next_live_tick(&symbol, &spawn.profiles) else {
+                    tracing::error!(symbol, "canonical tape source disappeared");
+                    break;
+                };
+                let Some(tick) = tick else {
+                    if let Some(fault) = fault {
                         *worker
                             .fault
                             .lock()
@@ -116,6 +110,7 @@ impl Tape {
                 };
                 worker.publish(frame, is_quote);
             }
+            worker.alive.store(false, Ordering::Release);
         });
         tape
     }
@@ -154,23 +149,28 @@ impl Tape {
         duration_ms: u64,
         rate_mult: f64,
         children_mult: f64,
-    ) {
-        drop(self.control.send(FlowSurgeArm {
+    ) -> Result<(), ()> {
+        if !self.alive.load(Ordering::Acquire) {
+            return Err(());
+        }
+        source::arm_flow_surge(
+            &self.symbol,
+            &self.profiles,
             start_ns,
             duration_ms,
             rate_mult,
             children_mult,
-            clear: false,
-        }));
+        )
+        .then_some(())
+        .ok_or(())
     }
-    pub(crate) fn clear_flow_surge(&self) {
-        drop(self.control.send(FlowSurgeArm {
-            start_ns: 0,
-            duration_ms: 0,
-            rate_mult: 1.0,
-            children_mult: 1.0,
-            clear: true,
-        }));
+    pub(crate) fn clear_flow_surge(&self) -> Result<(), ()> {
+        if !self.alive.load(Ordering::Acquire) {
+            return Err(());
+        }
+        source::clear_flow_surge(&self.symbol, &self.profiles)
+            .then_some(())
+            .ok_or(())
     }
     pub(crate) fn fault(&self) -> Option<TickFault> {
         *self
@@ -262,7 +262,9 @@ mod snapshot_tests {
             tx,
             last_quote: Mutex::new(None),
             cancel: Arc::new(AtomicBool::new(false)),
-            control: mpsc::channel().0,
+            alive: AtomicBool::new(true),
+            symbol: "BTCUSDT".to_owned(),
+            profiles: Arc::new(source::InstrumentProfiles::defaults()),
             fault: Mutex::new(None),
         });
         tape.publish(
@@ -314,7 +316,9 @@ mod snapshot_tests {
             tx,
             last_quote: Mutex::new(None),
             cancel: Arc::new(AtomicBool::new(false)),
-            control: mpsc::channel().0,
+            alive: AtomicBool::new(true),
+            symbol: "BTCUSDT".to_owned(),
+            profiles: Arc::new(source::InstrumentProfiles::defaults()),
             fault: Mutex::new(None),
         };
         tape.publish(
@@ -337,5 +341,21 @@ mod snapshot_tests {
         assert_eq!(snapshot.payload.as_ref(), "quote");
         assert_eq!(trade.payload.as_ref(), "trade");
         assert!(snapshot.ts_event <= trade.ts_event);
+    }
+
+    #[test]
+    fn a_stopped_tape_refuses_flow_controls() {
+        let (tx, _) = broadcast::channel(1);
+        let tape = Tape {
+            tx,
+            last_quote: Mutex::new(None),
+            cancel: Arc::new(AtomicBool::new(true)),
+            alive: AtomicBool::new(false),
+            symbol: "BTCUSDT".to_owned(),
+            profiles: Arc::new(source::InstrumentProfiles::defaults()),
+            fault: Mutex::new(None),
+        };
+        assert!(tape.arm_flow_surge(0, 1, 2.0, 2.0).is_err());
+        assert!(tape.clear_flow_surge().is_err());
     }
 }

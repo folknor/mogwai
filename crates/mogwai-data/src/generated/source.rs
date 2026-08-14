@@ -819,9 +819,34 @@ impl TickSource for GeneratedSource {
     fn fault(&self) -> Option<TickFault> {
         self.fault
     }
+
+    fn seek_to(&mut self, start_ts: u64) -> Option<TickEvent> {
+        loop {
+            if self.pending_quote.is_none() && self.burst.remaining == 0 {
+                let mut advanced = self.clone();
+                let parent = advanced.advance_parent();
+                let parent_end = parent.parent_ts_ns.saturating_add(
+                    u64::from(parent.child_count.saturating_sub(1))
+                        .saturating_mul(parent.child_stride_ns),
+                );
+                if parent_end < start_ts {
+                    *self = advanced;
+                    continue;
+                }
+            }
+            let tick = self.next_tick()?;
+            if tick.ts_event() >= start_ts {
+                return Some(tick);
+            }
+        }
+    }
 }
 
 impl GeneratedSource {
+    pub(super) fn at_parent_boundary(&self) -> bool {
+        self.pending_quote.is_none() && self.burst.remaining == 0
+    }
+
     /// Advance exactly one parent and all of its children without constructing
     /// protocol objects.
     ///

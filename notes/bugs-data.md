@@ -7,34 +7,22 @@ Cross-scope: findings 1 and 2 are extended from the server side in
 `bugs-server-tape.md` findings 6 and 2. The `BoundedSeek` finding was reported
 independently by both hunters.
 
-## 1. `FlowSurge` forks the realization: broadcast tape and fill/history tape diverge
+## 1. CLOSED (`bugs-server-tape.md` round 2 plus its review pass)
 
-`GeneratedSource::arm_flow_surge` (`crates/mogwai-data/src/generated/source.rs`)
-stores a `SurgeWindow` in per-instance state, and `begin_event` divides the drawn
-gap by `rate_mult` and scales `children_mean` by `children_mult`. Both are
-RNG-consuming path changes.
+`FlowSurge` is no longer per-clone state that only the tape worker sees. The
+paced feed advances `CheckpointIndex`'s own lead, arming goes through the index
+under its lock, and the arm and the clear each retain a PINNED control-boundary
+snapshot, so every target after an arm resolves to a snapshot that carries the
+surge and replays it. `coarsen` is forbidden from dropping a pinned snapshot,
+and the last-print walk-back is fenced at one, so neither the memory ceiling nor
+a lookup retry can reopen the fork. `checkpoint_flow_surge_is_visible_to_canonical_and_history_walks`
+pins it through `try_source_at_or_before`, i.e. through the path a history
+request actually takes, and fails when the boundary snapshot is removed.
 
-The surge is armed on exactly one instance: the tape worker's live source
-(`crates/mogwai-server/src/tape.rs`), which is a `CheckpointIndex` clone. The
-index's `lead` and every stored snapshot never see it. So from the instant an
-operator arms a `FlowSurge`:
-
-- subscribers receive the surged tape,
-- `fills.rs` (`build_history_source` -> `source_at_or_before` -> replay) evaluates
-  triggers against the unsurged tape,
-- `/trades` and `/quotes` serve the unsurged tape.
-
-The engine therefore fills orders against prints the client never saw, and the
-client sees prints the fill model never scanned. This breaks the crate's headline
-invariant ("one realization, same seed plus anchor yields the same stream") in the
-one scenario the venue exists to exercise. `CheckpointIndex`'s doc claims "the
-realization is preserved byte-for-byte"; that is false whenever a surge is armed.
-
-Structural fix, not a patch: surge must not be per-source mutable state. Either it
-belongs in the immutable construction inputs of the realization (so the index is
-rebuilt/forked and all consumers agree), or `arm_flow_surge`/`clear_flow_surge` come
-off `TickSource` entirely and the surge becomes a property of the shared index that
-every clone inherits. Confidence: high on the mechanism; not run.
+Residual, bounded and documented rather than open: a run that arms more than
+`MAX_CHECKPOINTS` surges drops its OLDEST boundaries to keep the memory ceiling,
+so replay fidelity for the most ancient surge windows is what gives way rather
+than the bound.
 
 ## 2. `BoundedSeek` does not exist, and the docs that make the unbounded seek "safe" cite it
 

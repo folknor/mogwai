@@ -110,6 +110,7 @@ struct Report {
     pairing_id: String,
     projection: String,
     parent_events_per_combination: usize,
+    surged_configuration: &'static str,
     entries: Vec<Reading>,
 }
 
@@ -349,6 +350,7 @@ fn serialize(
         pairing_id: pairing.to_owned(),
         projection: projection.into(),
         parent_events_per_combination: parents,
+        surged_configuration: "maximum multipliers from the measurement start through u64::MAX",
         entries,
     })
     .with_context(|| format!("serializing the protocol-{version} report"))
@@ -543,6 +545,10 @@ impl SecondBins {
 }
 
 fn child_run_bins(parent: ParentSummary, end_ns: Option<u64>, mut add: impl FnMut(u64, u64)) {
+    assert!(
+        parent.child_stride_ns > 0,
+        "parent child stride must be positive"
+    );
     let mut ts = parent.parent_ts_ns;
     let mut remaining = u64::from(parent.child_count);
     while remaining > 0 && end_ns.is_none_or(|end| ts < end) {

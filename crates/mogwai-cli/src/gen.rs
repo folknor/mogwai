@@ -987,7 +987,7 @@ mod tests {
             fp,
             &profile.session,
             None,
-            mogwai_data::SizeGrid::spot(),
+            mogwai_data::SizeGrid::from_def(&profile.def),
             profile.calendar.clone(),
         );
 

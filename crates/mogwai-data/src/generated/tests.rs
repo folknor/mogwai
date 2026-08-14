@@ -56,6 +56,212 @@ fn compact_parent_advancement_matches_wire_frames_and_continuation() {
     }
 }
 
+#[test]
+fn compact_seek_is_wire_identical_and_preserves_continuation() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let mut compact = GeneratedSource::new(scalars.clone(), 4242, 1_000, &fp, None);
+    let mut wire = GeneratedSource::new(scalars, 4242, 1_000, &fp, None);
+    let target = 60_000_000_000;
+
+    let compact_head = compact.seek_to(target).expect("infinite compact tape");
+    let wire_head = loop {
+        let tick = wire.next_tick().expect("infinite wire tape");
+        if tick.ts_event() >= target {
+            break tick;
+        }
+    };
+    assert_eq!(format!("{compact_head:?}"), format!("{wire_head:?}"));
+    for _ in 0..1_000 {
+        assert_eq!(
+            format!("{:?}", compact.next_tick()),
+            format!("{:?}", wire.next_tick())
+        );
+    }
+}
+
+/// An armed `FlowSurge` moves the CANONICAL tape, so a history read placed
+/// inside the surge window must replay the surged prints, not the clean ones the
+/// index would have drawn. That is what closes the realization fork: the
+/// subscribed feed, `/trades`, the volatility reading and the trigger scans are
+/// all this one walk.
+///
+/// The read goes through `try_source_at_or_before` deliberately. Comparing two
+/// clones of the lead proves only that the lead is surged, which was never in
+/// doubt; the fork lived in the checkpoint chain, and the chain is what a
+/// history request actually resumes from.
+#[test]
+fn checkpoint_flow_surge_is_visible_to_canonical_and_history_walks() {
+    let fp = Fingerprint::from_repo_json();
+    let source = GeneratedSource::new(GeneratorScalars::xbtusd_anchor(&fp), 4242, 1_000, &fp, None);
+    let mut index = CheckpointIndex::new(source, 8_192, 1_000_000);
+    index.extend_toward(30_000_000_000);
+    let arm_at = index.frontier_ns();
+    let mut clean = index.frontier_source();
+    index.arm_flow_surge(arm_at, 600_000, 10.0, 4.0);
+
+    let mut canonical = Vec::with_capacity(10_000);
+    let mut diverged = false;
+    for _ in 0..10_000 {
+        let tick = index.next_tick().expect("infinite tape");
+        diverged |= format!("{tick:?}") != format!("{:?}", clean.next_tick());
+        canonical.push((tick.ts_event(), format!("{tick:?}")));
+    }
+    assert!(diverged, "the fixture must exercise the armed surge");
+
+    // A history read landing well inside the surge window, resumed off the
+    // chain exactly as `build_history_source` does it.
+    // A probe whose `ts_event` is UNIQUE in the sequence. A parent's quote and
+    // its first child legitimately share an instant, so seeking to a shared one
+    // lands on whichever of the pair comes first and the comparison below would
+    // be about tie order rather than about which tape was replayed.
+    let probe = (5_000..canonical.len() - 200)
+        .find(|&i| canonical[i].0 != canonical[i - 1].0 && canonical[i].0 != canonical[i + 1].0)
+        .expect("an unshared instant in the surged window");
+    let target = canonical[probe].0;
+    let mut resumed = index
+        .try_source_at_or_before(target)
+        .expect("a reached target");
+    assert!(resumed.clock_ns() < target, "resume is strictly before");
+    let mut tick = resumed.next_tick().expect("infinite tape");
+    while tick.ts_event() < target {
+        tick = resumed.next_tick().expect("infinite tape");
+    }
+    for expected in &canonical[probe..probe + 200] {
+        assert_eq!(
+            (tick.ts_event(), format!("{tick:?}")),
+            *expected,
+            "a history read inside the surge window replayed a different tape"
+        );
+        tick = resumed.next_tick().expect("infinite tape");
+    }
+}
+
+#[test]
+fn live_history_cannot_advance_the_paced_frontier() {
+    let fp = Fingerprint::from_repo_json();
+    let source = GeneratedSource::new(GeneratorScalars::xbtusd_anchor(&fp), 4242, 1_000, &fp, None);
+    let mut index = CheckpointIndex::new(source, 8_192, 1_000_000);
+    index.extend_toward(1_000_000_000);
+    index.activate_live();
+    let frontier = index.frontier_ns();
+    assert!(
+        index
+            .try_source_at_or_before(frontier.saturating_add(10_000_000_000))
+            .is_none()
+    );
+    assert_eq!(index.frontier_ns(), frontier);
+}
+
+/// A positioned source resumes AFTER the tick its checkpoint last consumed, so
+/// a reader hunting the last PRINT at or before a target can find an empty
+/// residual even though the print exists - the checkpoint ate it. That is not a
+/// hypothetical: the sweep's futures marks and its settlement prices are read
+/// through exactly this lookup, and a missing settlement mark used to retire the
+/// instant silently. The walk-back is the recovery.
+#[test]
+fn a_checkpoint_that_consumed_the_last_print_still_answers_for_it() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    // A trade whose SUCCESSOR prints strictly later than one nanosecond after
+    // it, so a target one nanosecond past it is answered by that trade and by
+    // nothing in the residual. The end of a parent's child run is the ordinary
+    // case; searching for it rather than hardcoding an instant keeps the
+    // fixture honest if the cadence moves.
+    let mut probe = GeneratedSource::new(scalars.clone(), 4242, 1_000, &fp, None);
+    let mut previous: Option<(u64, Decimal)> = None;
+    let (trade_ts, trade_px) = loop {
+        let tick = probe.next_tick().expect("infinite tape");
+        if let Some((ts, px)) = previous
+            && tick.ts_event() > ts + 1
+        {
+            break (ts, px);
+        }
+        previous = match tick {
+            TickEvent::Trade(trade) => Some((trade.ts_event, trade.price)),
+            TickEvent::Quote(_) => None,
+        };
+    };
+    let target = trade_ts + 1;
+
+    // k = 1 puts a checkpoint on every tick, so the strict partition lands
+    // exactly on the trade and the residual is guaranteed to be empty. The
+    // server's K of 8192 hits the same shape whenever a checkpoint or a
+    // `FlowSurge` control boundary happens to land there.
+    let origin = GeneratedSource::new(scalars, 4242, 1_000, &fp, None);
+    let mut index = CheckpointIndex::new(origin, 1, 10_000_000);
+
+    let (mut resumed, exhausted) = index
+        .try_source_before_target(target, 0)
+        .expect("a reachable target");
+    assert!(
+        !exhausted,
+        "the partition point must not be the origin here"
+    );
+    assert_eq!(
+        last_trade_through(&mut resumed, target),
+        None,
+        "the fixture must exercise a residual the checkpoint already ate"
+    );
+
+    let (mut walked_back, _) = index
+        .try_source_before_target(target, 1)
+        .expect("a reachable target");
+    assert_eq!(
+        last_trade_through(&mut walked_back, target),
+        Some(trade_px),
+        "walking back one snapshot must recover the consumed print"
+    );
+}
+
+fn last_trade_through(source: &mut GeneratedSource, target: u64) -> Option<Decimal> {
+    let mut last = None;
+    for _ in 0..10_000 {
+        let Some(tick) = source.next_tick() else {
+            break;
+        };
+        let TickEvent::Trade(trade) = tick else {
+            continue;
+        };
+        if trade.ts_event > target {
+            break;
+        }
+        last = Some(trade.price);
+    }
+    last
+}
+
+/// Coarsening drops every other snapshot, which is correctness-preserving for
+/// an ordinary one and NOT for a `FlowSurge` control boundary: the surge lives
+/// in the generator, so a target between an arm and the next ordinary snapshot
+/// can only be replayed correctly from the boundary itself. Dropping it would
+/// reopen the realization fork that arming on the canonical tape closed.
+#[test]
+fn coarsening_retains_flow_surge_control_boundaries() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let origin = GeneratedSource::new(scalars, 11, 1_000, &fp, None);
+    let mut index = CheckpointIndex::new(origin, 1, 10_000_000);
+
+    for _ in 0..64 {
+        index.next_tick().expect("infinite tape");
+    }
+    let arm_at = index.frontier_ns();
+    index.arm_flow_surge(arm_at, 60_000, 8.0, 3.0);
+    assert_eq!(index.pinned_count(), 2, "the origin and the arm boundary");
+
+    // Past MAX_CHECKPOINTS at k = 1, so coarsen must have run at least once.
+    for _ in 0..MAX_CHECKPOINTS + 500 {
+        index.next_tick().expect("infinite tape");
+    }
+    assert!(index.checkpoint_count() <= MAX_CHECKPOINTS);
+    assert_eq!(
+        index.pinned_count(),
+        2,
+        "coarsening may not drop a control boundary"
+    );
+}
+
 const DRAW: usize = 2_000_000;
 // PARENT EVENTS, not prints. The day-of-week assertions below need at least a
 // full week of simulated tape and want several, so this is denominated in SIM

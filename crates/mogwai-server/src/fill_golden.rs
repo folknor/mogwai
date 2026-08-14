@@ -251,7 +251,7 @@ fn run_scenario(band_vol_mult: f64, profiles: &InstrumentProfiles) -> Vec<Cell> 
     let mut samples: HashMap<u32, Vec<(u64, u64, Side)>> = HashMap::new();
     for ts in (ORIGIN..=ORIGIN + HORIZON_NS).step_by(SWEEP_INTERVAL_NS as usize) {
         let i = ((ts - ORIGIN) / ACCEPT_STRIDE_NS) as usize;
-        if i < total && (ts - ORIGIN).is_multiple_of(ACCEPT_STRIDE_NS) {
+        if i < total {
             let offset_ticks = OFFSETS[i % OFFSETS.len()];
             let side = if i.is_multiple_of(2) {
                 Side::Buy
@@ -349,7 +349,7 @@ fn run_scenario(band_vol_mult: f64, profiles: &InstrumentProfiles) -> Vec<Cell> 
                 offset_ticks,
                 samples: ORDERS_PER_OFFSET,
                 filled,
-                censored: ORDERS_PER_OFFSET - filled,
+                censored: ORDERS_PER_OFFSET.saturating_sub(filled),
                 buy_filled: values
                     .iter()
                     .filter(|(_, _, side)| *side == Side::Buy)

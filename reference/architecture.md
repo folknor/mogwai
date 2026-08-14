@@ -27,6 +27,8 @@ market order slips the same way, adverse to its side, off the same seeded
 band. The trailing-volatility reading is cached once per symbol and fill-sweep
 interval, using the interval's simulated-time floor, so a command burst shares
 one coherent coarse band instead of repeating the full 300-second synthesis.
+Sweep marks and settlement prices are separate exact-instant last-print reads;
+the coarse band cache never supplies unrealized P&L.
 A conditional (`StopMarket`/`StopLimit`) rests untriggered until the
 same sweep walks a print that TOUCHES its stop price - the mirror-image
 predicate, since a stop holds no queue position and every real venue fires one

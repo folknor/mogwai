@@ -397,3 +397,143 @@ profile membership. It now uses a fully resolvable second symbol, so the
 refusal can only come from the run index owning its identity. No new test rests
 on a `debug_assert`, so none of them vanish under `brokkr test`'s release
 profile.
+
+## notes/bugs-server-tape.md, round 2 (findings 4a, 6 through 10)
+
+Classification:
+
+- Finding 4a REPRODUCED. `GeneratedSource::seek_to` now skips whole parents
+  through `advance_parent` when the complete parent precedes the target, then
+  materializes only the boundary parent. `CheckpointIndex::extend_toward`
+  uses the same compact step whenever it does not cross a checkpoint or its
+  extension budget. The continuation golden proves identical subsequent ticks.
+- Finding 6 REPRODUCED. The paced feed now advances the checkpoint index's
+  canonical lead, and FlowSurge is armed on that lead synchronously. Feed,
+  history and trigger scans derive from one state. This closes finding 1 of
+  `notes/bugs-data.md` outright.
+- Finding 7 REPRODUCED IN ALTERED FORM. The lossy channel and unconditional
+  acceptance were live. Control now mutates the canonical source synchronously,
+  a stopped worker refuses it, and HTTP reports 503. The closure-delay proposal
+  was stale because the worker had already drawn the tick it was pacing.
+- Finding 8 REPRODUCED. The last-print fallback now shares the sweep drain
+  ceiling and refuses rather than walking without a bound.
+- Finding 9 REPRODUCED. Admission sizes swept fills at four frames and
+  venue-originated submits at five. A whole-batch refusal uses
+  `AdmissionSubject::Frame`, so it does not blame an unrelated first order.
+- Finding 10's fill-golden condition, underflow and CLI size-grid mismatch
+  REPRODUCED and were fixed. The extra parent advance was DEAD as a correctness
+  issue. The permanent maximum-surge fixture REPRODUCED and is now explicit in
+  report metadata. The zero-stride risk REPRODUCED as a latent invariant and is
+  checked before arithmetic. The unresolvable-symbol exit was DEAD in the serve
+  path because validation and warmup resolve the symbol before worker spawn;
+  the impossible exit now logs. The stale futures mark REPRODUCED and now uses
+  an exact-instant last-print read rather than the coarse volatility cache.
+
+Machinery introduced:
+
+- The checkpoint index is the single mutable run-tape frontier. Do not restore
+  a private paced clone or a fire-and-forget FlowSurge channel. Pacing calls
+  `activate_live` before worker spawn; after that, history may clone the lead
+  but cannot extend it and steal unpublished frames.
+- `swept_batch_max_bytes` keeps venue-originated submit width separate from
+  ordinary swept-fill width.
+- Mark price and volatility-band freshness are intentionally separate. Marks
+  are exact at the sweep instant; only acceptance-time volatility stays cached.
+
+Protocol ruling:
+
+- No `TAPE_PROTOCOL_VERSION` bump is owed. Compact seeking consumes identical
+  draws and emits identical ticks, as pinned by the continuation golden.
+  FlowSurge changes only the operator-requested realization; no baseline byte,
+  seed derivation, draw law or origin moved. Version 14 remains reserved for
+  the protocol-12b mechanism landing.
+
+## notes/bugs-server-tape.md, round 2 review and close pass
+
+A cold read of the round-2 diff found ONE correctness defect, and the audit
+found that one of the round's own tests did not bite. The document ends empty
+of open findings; nothing was deleted that is not resolved.
+
+- THE FRONTIER ADVANCED PAST WORK NOBODY DID, AGAIN. This is the FOURTH time in
+  the arc and the SECOND in this document. Round 1 closed the error-path door
+  with `frontier_after`; round 2 opened a different one.
+  `try_source_at_or_before` resumes AFTER the tick its checkpoint last consumed,
+  so `last_trade_at_or_before` - which round 2 made the SOLE source of ordinary
+  marks and settlement prices - can return `None` for a `ts` sitting between a
+  checkpoint and the next trade even though the print exists. The sweeper's
+  `filter_map` then dropped the missing settlement mark while `last_swept_ns`
+  advanced over its instant, retiring that settlement permanently. Two fixes,
+  and the second is the structural one:
+  - `CheckpointIndex::try_source_before_target` takes a walk-back count and
+    reports when it has reached the earliest snapshot it may use.
+    `last_trade_at_or_before` resumes progressively earlier snapshots, doubling
+    the step, until it finds the print or runs out of chain. `None` now means
+    "the tape could not be read", which is what its callers already assumed.
+  - The reading phase is the named `read_marks`, and it collects settlement
+    prices into an `Option` rather than filtering. An unreadable ordinary mark
+    is still dropped - one pass of stale unrealized P and L, asked again in
+    five milliseconds - while an unreadable settlement price refuses the WHOLE
+    read, so `frontier_after` sees `read == false` and leaves the span owed.
+    THE RULE, now stated twice in the sweeper's own comments: a watermark may
+    only move over work whose success the same expression checked, and a lookup
+    that legitimately returns nothing is exactly as dangerous as a panic.
+- The walk-back is FENCED at a `FlowSurge` control boundary. Resuming earlier
+  than an arm and replaying across it would regenerate the span unsurged, which
+  is the fork the round closed; the origin is pinned, so an index that never
+  armed a surge walks back as far as it likes.
+- COARSENING COULD HAVE REOPENED THE FORK. `checkpoint_control_boundary`
+  retains a snapshot per arm and clear, and `coarsen`'s every-other rule would
+  drop the odd-indexed ones - after which a target between an arm and the next
+  ordinary snapshot resolves to a PRE-ARM snapshot and replays a different
+  tape. Boundary snapshots are now pinned and exempt; `k` doubles only when the
+  every-other pass actually removed something, so pin pressure cannot inflate
+  the residual drain, and a run arming more than `MAX_CHECKPOINTS` surges drops
+  its OLDEST boundaries rather than its memory ceiling.
+- `bugs-data.md` FINDING 1 IS CLOSED, verified rather than relayed, and struck
+  from that document in the same commit. Nothing else in it was touched.
+
+Claims audited, and where they did not hold:
+
+- `checkpoint_flow_surge_is_visible_to_canonical_and_history_walks` DID NOT
+  BITE as round 2 wrote it. It compared two `frontier_source` clones, which is
+  the lead against itself: it proved the lead is surged, which was never in
+  question, and said nothing about the checkpoint chain, where the fork
+  actually lived. It now reads through `try_source_at_or_before` at an instant
+  well inside the surge window and compares against the canonical sequence.
+  Verified to FAIL when the boundary snapshot is removed. The probe instant is
+  chosen to be unshared, because a parent's quote and its first child print at
+  the same `ts_event` and a seek to a shared instant compares tie order rather
+  than tape identity.
+- `live_history_cannot_advance_the_paced_frontier` bites: removing the `live`
+  guard makes it fail its `None` assertion.
+- FINDING 7 IS CLOSED BY CONSTRUCTION, not by verification. There is no channel
+  and no deferral left: `arm_flow_surge` mutates the canonical index inside the
+  request's own call path, so a `202` means armed and a dead worker is a `503`.
+  The stale-window-across-a-closure half of the finding disappears with the
+  channel. Residual, small and disclosed: the `alive` check races a worker
+  dying immediately after it, in which case the arm still lands on the
+  canonical tape and only the feed stops.
+- THE NO-BUMP VERDICT HOLDS. FlowSurge moving the canonical tape sounds close
+  to moving a generated byte and is not: it is an operator-armed runtime
+  request, so the unarmed tape for a given seed and config is untouched.
+  Pinning and the walk-back decide only WHICH already-walked snapshot a clone
+  resumes from, which `coarsen`'s own contract already covers. The compact
+  seek was checked rather than accepted: it advances through `advance_parent`,
+  the primitive `compact_parent_advancement_matches_wire_frames_and_continuation`
+  already pins, and the new continuation golden shows an identical head and
+  1000 identical successors. Version 14 remains reserved for protocol-12b.
+- Every finding 10 bullet was re-checked against the code. All are fixed or
+  genuinely dead; none needed reopening or a move to `notes/todo.md`.
+
+New machinery later rounds must not break:
+
+- The `Snapshot` record and the pin exemption in `coarsen`. Any future
+  per-source mutable state a control arms owes a pinned boundary, or history
+  replays the span without it.
+- `read_marks` is the sweep's ONE reading phase and the only place the
+  ordinary-versus-settlement failure asymmetry is expressed. Do not inline it
+  back into the loop, and do not turn its settlement map-and-collect into a
+  `filter_map`.
+- `fills::test_profiles` is the single boot tape every in-crate server test
+  shares. The chain is process-global, so a second one is a named failure
+  rather than a silent no-op.

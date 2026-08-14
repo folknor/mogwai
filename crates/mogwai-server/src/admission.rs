@@ -443,9 +443,16 @@ impl ExecLanes {
     /// fills plus the single `AccountState` that follows them. The sweep is
     /// venue-originated, so there is no command to size against - the shape and
     /// the batch width are the whole input.
-    pub(crate) fn reserve_swept(&self, shape: &BookShape, orders: usize) -> Option<Reservation> {
+    pub(crate) fn reserve_swept(
+        &self,
+        shape: &BookShape,
+        swept: usize,
+        originated: usize,
+    ) -> Option<Reservation> {
         self.held_budget
-            .try_reserve(mogwai_protocol::sizing::swept_fill_max_bytes(shape, orders))
+            .try_reserve(mogwai_protocol::sizing::swept_batch_max_bytes(
+                shape, swept, originated,
+            ))
     }
 
     /// Reserve capacity for a protocol-boundary refusal, whose worst case is a

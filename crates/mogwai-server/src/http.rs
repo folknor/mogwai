@@ -495,12 +495,21 @@ pub(crate) async fn arm_divergence(
             children_mult,
             duration_ms,
         } => {
-            run.tape.arm_flow_surge(
-                sim_now_ns(state.sim()),
-                duration_ms,
-                rate_mult,
-                children_mult,
-            );
+            if run
+                .tape
+                .arm_flow_surge(
+                    sim_now_ns(state.sim()),
+                    duration_ms,
+                    rate_mult,
+                    children_mult,
+                )
+                .is_err()
+            {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "tape control unavailable".to_owned(),
+                );
+            }
         }
         Divergence::FeeSurcharge { mult, window_ms } => {
             run.engine
@@ -535,7 +544,12 @@ pub(crate) async fn arm_divergence(
             run.delay_ms.store(0, Ordering::Relaxed);
             run.dark_until_ns.store(0, Ordering::Relaxed);
             run.stall_until_ns.store(0, Ordering::Relaxed);
-            run.tape.clear_flow_surge();
+            if run.tape.clear_flow_surge().is_err() {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "tape control unavailable".to_owned(),
+                );
+            }
             run.engine.lock().await.clear_fee_surcharge();
             // All six `CommandLatency` fields go with them. This clears what the
             // venue will do to commands it has NOT started acting on yet, and it

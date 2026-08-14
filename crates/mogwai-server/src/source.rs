@@ -212,12 +212,57 @@ fn locked(
 }
 
 /// The live tape's source, positioned at sim-now.
+#[cfg(test)]
 pub(crate) fn build_live_source(
     symbol: &str,
     profiles: &InstrumentProfiles,
     sim_now: u64,
 ) -> Option<Box<dyn TickSource>> {
     build_history_source(symbol, Some(sim_now), profiles)
+}
+
+/// Advance the one canonical run tape. The paced feed, checkpoint history,
+/// fill scans and mark reads all branch from this same frontier.
+pub(crate) fn next_live_tick(
+    symbol: &str,
+    profiles: &InstrumentProfiles,
+) -> Option<(Option<TickEvent>, Option<mogwai_data::TickFault>)> {
+    let index = index(symbol, profiles)?;
+    let mut index = locked(index);
+    let tick = index.next_tick();
+    let fault = tick.is_none().then(|| index.fault()).flatten();
+    Some((tick, fault))
+}
+
+pub(crate) fn activate_live(symbol: &str, profiles: &InstrumentProfiles) -> bool {
+    let Some(index) = index(symbol, profiles) else {
+        return false;
+    };
+    locked(index).activate_live();
+    true
+}
+
+pub(crate) fn arm_flow_surge(
+    symbol: &str,
+    profiles: &InstrumentProfiles,
+    start_ns: u64,
+    duration_ms: u64,
+    rate_mult: f64,
+    children_mult: f64,
+) -> bool {
+    let Some(index) = index(symbol, profiles) else {
+        return false;
+    };
+    locked(index).arm_flow_surge(start_ns, duration_ms, rate_mult, children_mult);
+    true
+}
+
+pub(crate) fn clear_flow_surge(symbol: &str, profiles: &InstrumentProfiles) -> bool {
+    let Some(index) = index(symbol, profiles) else {
+        return false;
+    };
+    locked(index).clear_flow_surge();
+    true
 }
 
 /// A source positioned at `start`, RESUMED from the run's checkpoint chain
@@ -295,22 +340,51 @@ pub(crate) fn materialize_warmup(
 /// The last trade printed at or before `ts`. Positioned from the chain at a
 /// checkpoint no later than `ts` and walked forward only the residual, so this
 /// costs the same whether `ts` is one second or one day into the run.
+///
+/// The WALK-BACK is not an optimization to remove. A positioned source resumes
+/// AFTER the tick its checkpoint last consumed, so the residual covers only
+/// `(checkpoint clock, ts]`. When the last print at or before `ts` fell on or
+/// before that clock - `ts` sitting between a parent's final trade and the next
+/// parent is the easy case, and a `FlowSurge` control boundary snapshots at an
+/// arbitrary instant - the residual contains no trade at all and the honest
+/// answer is not `None`. Resuming progressively earlier snapshots recovers it,
+/// doubling the step so the retry count is logarithmic in the chain rather than
+/// one walk per checkpoint. Callers treat `None` as "the tape could not be
+/// read", and the sweeper's settlement frontier refuses to retire a span on it,
+/// so answering `None` where a print exists would stall the frontier forever
+/// rather than merely losing one reading.
 pub(crate) fn last_trade_at_or_before(
     symbol: &str,
     ts: u64,
     profiles: &InstrumentProfiles,
 ) -> Option<Decimal> {
     let index = index(symbol, profiles)?;
-    let mut source = locked(index).try_source_at_or_before(ts)?;
-    let mut last = None;
-    while let Some(tick) = source.next_tick() {
-        let TickEvent::Trade(trade) = tick else {
-            continue;
-        };
-        if trade.ts_event > ts {
-            break;
+    let mut budget = crate::fills::SWEEP_DRAIN_BUDGET;
+    let mut back = 0usize;
+    loop {
+        let (mut source, exhausted) = locked(index).try_source_before_target(ts, back)?;
+        let mut last = None;
+        let mut drained = 0usize;
+        while let Some(tick) = source.next_tick() {
+            if drained >= budget {
+                return None;
+            }
+            drained += 1;
+            let TickEvent::Trade(trade) = tick else {
+                continue;
+            };
+            if trade.ts_event > ts {
+                break;
+            }
+            last = Some(trade.price);
         }
-        last = Some(trade.price);
+        if last.is_some() || exhausted {
+            return last;
+        }
+        budget = budget.saturating_sub(drained);
+        if budget == 0 {
+            return None;
+        }
+        back = back.saturating_mul(2).max(1);
     }
-    last
 }

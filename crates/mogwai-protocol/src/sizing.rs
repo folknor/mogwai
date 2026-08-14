@@ -122,6 +122,21 @@ pub fn swept_fill_max_bytes(shape: &BookShape, orders: usize) -> usize {
         })
 }
 
+/// Sweep bound with venue-originated submits separated from ordinary swept
+/// orders. A liquidation submit can add `OrderAccepted` to the four-frame
+/// sweep shape, so counting it as an ordinary fill is not a valid bound.
+#[must_use]
+pub fn swept_batch_max_bytes(shape: &BookShape, swept: usize, originated: usize) -> usize {
+    swept * 4 * ORDER_EVENT_MAX_BYTES
+        + originated * 5 * ORDER_EVENT_MAX_BYTES
+        + account_state_max_bytes(&BookShape {
+            balances: shape.balances + 2 * (swept + originated),
+            positions: shape.positions + swept + originated,
+            margins: shape.margins + swept + originated,
+            ..*shape
+        })
+}
+
 /// Upper bound on the total serialized bytes `Engine::process` can produce for
 /// `cmd` against a book of `shape`. The worst cases are enumerated from the
 /// engine's own branches and pinned by

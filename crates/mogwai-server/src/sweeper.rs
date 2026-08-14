@@ -40,9 +40,6 @@ pub(crate) const MIN_SWEEP_WALL: Duration = Duration::from_millis(5);
 pub(crate) struct FillSweep {
     pub(crate) run: Arc<Run>,
     pub(crate) profiles: Arc<InstrumentProfiles>,
-    pub(crate) market_readings: Arc<fills::MarketReadingCache>,
-    pub(crate) fill_band_vol_mult: f64,
-    pub(crate) fill_band_max_ticks: u32,
     pub(crate) interval_ms: u64,
 }
 
@@ -121,43 +118,20 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 })
                 .collect();
             let profiles = Arc::clone(&sweep.profiles);
-            let market_readings = Arc::clone(&sweep.market_readings);
-            let mult = sweep.fill_band_vol_mult;
-            let max_ticks = sweep.fill_band_max_ticks;
-            let interval_ms = sweep.interval_ms;
-            let reads = run_blocking(move || {
-                let marks: Vec<_> = symbols
-                    .iter()
-                    .filter_map(|symbol| {
-                        market_readings
-                            .read(symbol, to_ns, &profiles, mult, max_ticks, interval_ms)
-                            .map(|reading| (symbol.clone(), reading.last_px))
-                            .or_else(|| {
-                                fills::read_last(symbol, to_ns, &profiles)
-                                    .map(|px| (symbol.clone(), px))
-                            })
-                    })
-                    .collect();
-                let settlement_marks: Vec<_> = settlements
-                    .iter()
-                    .filter_map(|(symbol, instant)| {
-                        fills::read_last(symbol, *instant, &profiles)
-                            .map(|px| (symbol.clone(), *instant, px))
-                    })
-                    .collect();
-                (marks, settlement_marks)
-            });
+            let reads = run_blocking(move || read_marks(&symbols, &settlements, to_ns, &profiles));
             let reads = tokio::select! {
-                reads = reads => reads,
+                reads = reads => reads.flatten(),
                 _ = completion.changed() => break,
             };
             last_swept_ns = frontier_after(last_swept_ns, to_ns, reads.is_some());
             let Some((marks, settlement_marks)) = reads else {
-                // The reading task died. Abandoning the whole pass is the only
-                // safe response: the scan results are re-derivable (the engine
-                // still holds every pending scan at its unadvanced `from_ns`),
-                // while the settlement instants this interval crossed exist
-                // nowhere but in the span `last_swept_ns..to_ns`.
+                // The reading task died, or one of this span's settlement
+                // instants had no readable price. Abandoning the whole pass is
+                // the only safe response either way: the scan results are
+                // re-derivable (the engine still holds every pending scan at
+                // its unadvanced `from_ns`), while the settlement instants this
+                // interval crossed exist nowhere but in the span
+                // `last_swept_ns..to_ns`.
                 continue;
             };
             let mut engine = sweep.run.engine.lock().await;
@@ -173,6 +147,50 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
     })
 }
 
+type MarkReads = (
+    Vec<(mogwai_protocol::Symbol, rust_decimal::Decimal)>,
+    Vec<(mogwai_protocol::Symbol, u64, rust_decimal::Decimal)>,
+);
+
+/// Every tape price one sweep pass needs: the futures marks at `to_ns` and the
+/// price at each settlement instant the pass crossed.
+///
+/// Both are EXACT-INSTANT last-print reads rather than `MarketReadingCache`
+/// lookups. That cache buckets by fill-sweep interval, which is a defensible
+/// coarseness for a volatility band and is not one for a mark price: unrealized
+/// P and L and the margin evaluation that follows it would freeze for every pass
+/// sharing a bucket, which under an accelerated clock is several of them.
+///
+/// The two halves fail DIFFERENTLY, and that asymmetry is the point. An
+/// unreadable ordinary mark costs one pass of unrealized P and L freshness and
+/// is asked again five milliseconds later, so it is dropped. An unreadable
+/// SETTLEMENT price cannot be asked again: `last_swept_ns` is about to move past
+/// its instant and nothing looks further back, so the whole read is refused and
+/// the caller leaves the watermark where it stands. A `filter_map` here - which
+/// is what this was - loses that instant permanently and silently, the same
+/// defect shape the round-1 error path had, arriving through a lookup that
+/// legitimately returns nothing instead of through a panic.
+fn read_marks(
+    symbols: &[mogwai_protocol::Symbol],
+    settlements: &[(mogwai_protocol::Symbol, u64)],
+    to_ns: u64,
+    profiles: &InstrumentProfiles,
+) -> Option<MarkReads> {
+    let marks: Vec<_> = symbols
+        .iter()
+        .filter_map(|symbol| {
+            fills::read_last(symbol, to_ns, profiles).map(|px| (symbol.clone(), px))
+        })
+        .collect();
+    let settlement_marks: Option<Vec<_>> = settlements
+        .iter()
+        .map(|(symbol, instant)| {
+            fills::read_last(symbol, *instant, profiles).map(|px| (symbol.clone(), *instant, px))
+        })
+        .collect();
+    Some((marks, settlement_marks?))
+}
+
 /// Where the settlement frontier stands after a pass.
 ///
 /// `last_swept_ns` is a WATERMARK, and the only record that a span is still
@@ -182,6 +200,15 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
 /// Advancing it on a failed reading pass - which is what treating the failure
 /// as an empty result does - retires every settlement instant the span crossed
 /// without anyone having priced them, permanently and silently.
+///
+/// `read` is therefore the success of BOTH halves: the reading task surviving,
+/// and every settlement instant in the span having yielded a price. A partial
+/// settlement answer never reaches here, because `read_marks` collects its
+/// settlement prices into an `Option` rather than filtering the unreadable ones
+/// away. That is the load-bearing part: two rounds of this bug hunt have now
+/// advanced a frontier past work nobody did, first through an error path and
+/// then through a lookup that legitimately returned nothing, so the guard sits
+/// where neither door can bypass it.
 fn frontier_after(last_swept_ns: u64, to_ns: u64, read: bool) -> u64 {
     if read { to_ns } else { last_swept_ns }
 }
@@ -252,26 +279,10 @@ fn deliver(
     originated: usize,
     ts: u64,
 ) {
-    let subject = events.iter().find_map(|event| match event {
-        ServerMessage::OrderFilled(fill) => Some(AdmissionSubject::Submit {
-            client_order_id: fill.client_order_id.clone(),
-        }),
-        ServerMessage::OrderTriggered {
-            client_order_id, ..
-        }
-        | ServerMessage::OrderCanceled {
-            client_order_id, ..
-        }
-        | ServerMessage::OrderRejected {
-            client_order_id, ..
-        } => Some(AdmissionSubject::Submit {
-            client_order_id: client_order_id.clone(),
-        }),
-        _ => None,
-    });
+    let subject = (!events.is_empty()).then_some(AdmissionSubject::Frame);
     let mut closed = Vec::new();
     for (id, lane) in run.bound_lanes() {
-        let Some(reservation) = lane.reserve_swept(shape, emitted + originated) else {
+        let Some(reservation) = lane.reserve_swept(shape, emitted, originated) else {
             if refuse(&lane, subject.clone(), ts).is_err() {
                 closed.push(id);
             }
@@ -383,6 +394,52 @@ mod tests {
             frontier_after(start, crossed_to, true),
             crossed_to,
             "a pass that did read its prices advances normally"
+        );
+    }
+
+    /// The settlement half of the frontier guard, at the layer that decides it.
+    ///
+    /// An unreadable ORDINARY mark is dropped and the pass proceeds; an
+    /// unreadable SETTLEMENT price refuses the whole read, which is what makes
+    /// `frontier_after` leave the span owed. Before this, `read_marks` filtered
+    /// both alike, so a settlement instant whose price could not be read was
+    /// retired by a watermark that then never looked back at it.
+    #[test]
+    fn an_unreadable_settlement_price_refuses_the_whole_read() {
+        let profiles = crate::fills::test_profiles();
+        let readable = crate::source::TAPE_ORIGIN_NS + 86_400_000_000_000;
+        let known: mogwai_protocol::Symbol = "BTCUSDT".into();
+        let unknown: mogwai_protocol::Symbol = "NOT-A-SYMBOL".into();
+
+        let (marks, settlement_marks) = read_marks(
+            std::slice::from_ref(&known),
+            &[(known.clone(), readable)],
+            readable,
+            &profiles,
+        )
+        .expect("a readable pair answers");
+        assert_eq!(marks.len(), 1);
+        assert_eq!(settlement_marks.len(), 1);
+
+        let (marks, settlement_marks) = read_marks(
+            &[known.clone(), unknown.clone()],
+            &[(known.clone(), readable)],
+            readable,
+            &profiles,
+        )
+        .expect("an unreadable ordinary mark is dropped, not fatal");
+        assert_eq!(marks.len(), 1);
+        assert_eq!(settlement_marks.len(), 1);
+
+        assert!(
+            read_marks(
+                std::slice::from_ref(&known),
+                &[(known.clone(), readable), (unknown, readable)],
+                readable,
+                &profiles,
+            )
+            .is_none(),
+            "one unreadable settlement price refuses the pass"
         );
     }
 

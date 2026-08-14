@@ -133,12 +133,12 @@ impl MarketReadingCache {
 /// `from_ns` may differ (orders rest at different instants); the walk starts at
 /// the EARLIEST and each scan judges only ticks after its own bound.
 ///
-/// The clean tape, not a regime'd realization: an armed `MarketRegime` is
+/// The canonical tape, not a per-subscription regime'd realization: an armed `MarketRegime` is
 /// per-subscription (`TapeKey` carries it) while an order belongs to an
 /// account, so there is no single regime an order could be gated under. A
 /// scenario that arms a drought silences its own DATA feed and leaves its fills
-/// on the venue's canonical tape - the same property the acceptance-time reading
-/// already has.
+/// on the venue's canonical tape. `FlowSurge` is different: it mutates that
+/// canonical tape, so subscribed prints, history and trigger decisions agree.
 ///
 /// Composed from the same `build_history_source` the `/trades` cursor pages
 /// through, so the prints deciding a fill are the prints the client can fetch
@@ -247,14 +247,31 @@ pub(crate) fn read_market(
 
 /// The last print at or before `ts`, with no volatility reading attached.
 ///
-/// Kept as a narrow fallback for exactly one caller: a price-less MARKET submit
-/// still has to be stamped with a price for the protocol's own validator, and
+/// Two callers, both wanting a PRICE rather than a band. A price-less MARKET
+/// submit has to be stamped with a price for the protocol's own validator, and
 /// `read_market` legitimately refuses (a cold estimator, a truncated walk) at
-/// instants where a last print does exist. It is NOT a second answer to "what
-/// is the market" that fill decisions may consult - every one of those goes
-/// through `read_market`.
+/// instants where a last print does exist. The fill sweeper's futures mark and
+/// settlement prices come through here too, and for a different reason: those
+/// feed unrealized P&L and margin, which is not a coarse scale, so they are read
+/// at the exact instant instead of from `MarketReadingCache`'s per-interval
+/// bucket. It is NOT a second answer to "what is the market" that FILL
+/// decisions may consult - every one of those goes through `read_market`.
 pub(crate) fn read_last(symbol: &str, ts: u64, profiles: &InstrumentProfiles) -> Option<Decimal> {
     source::last_trade_at_or_before(symbol, ts, profiles)
+}
+
+/// The one deterministic profile set every in-crate test reaching the run tape
+/// shares. Lives outside the test module because the sweeper's tests need the
+/// same tape, and the checkpoint chain is process-global: two different boot
+/// tapes in one binary would be a silent no-op, which `set_boot_for_test`
+/// converts into a named failure.
+#[cfg(test)]
+pub(crate) fn test_profiles() -> InstrumentProfiles {
+    source::set_boot_for_test(source::BootTape {
+        seeds: mogwai_protocol::RunSeeds::from_run_seed(42),
+        regime: None,
+    });
+    InstrumentProfiles::defaults()
 }
 
 #[cfg(test)]
@@ -268,11 +285,7 @@ mod tests {
     const TEST_ORIGIN: u64 = source::TAPE_ORIGIN_NS + 86_400_000_000_000;
 
     fn profiles() -> InstrumentProfiles {
-        source::set_boot_for_test(source::BootTape {
-            seeds: mogwai_protocol::RunSeeds::from_run_seed(42),
-            regime: None,
-        });
-        InstrumentProfiles::defaults()
+        super::test_profiles()
     }
 
     fn tape(start: u64) -> Box<dyn TickSource> {

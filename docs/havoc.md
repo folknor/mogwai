@@ -16,8 +16,13 @@ distinguishable from a dead venue.
 
 `FlowSurge { rate_mult, children_mult, duration_ms }` acts on the live tape at
 parent boundaries. It divides parent gaps and increases sweep size for an
-absolute simulated-time window. Historical checkpoint reads remain clean, so
-seeking back across a live surge intentionally does not replay the havoc.
+absolute simulated-time window. It mutates the run's canonical checkpointed
+tape, so the subscribed feed, history reads, volatility readings and trigger
+scans all observe the same prints, and a later replay of the surged span
+reproduces it rather than the clean tape the venue would otherwise have drawn.
+A control request is applied synchronously, so a `202` means the surge is armed;
+if the tape worker has stopped the arm is refused with `503` instead of being
+accepted and dropped.
 `LiquidityDrought` remains the inverse rate control: it stretches parent gaps
 while leaving sweep shape unchanged.
 
