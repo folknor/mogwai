@@ -59,8 +59,18 @@ impl Tape {
         thread::spawn(move || {
             let wall_anchor = now_ns();
             let instant_anchor = Instant::now();
-            let now = spawn.sim.sim_ns(wall_anchor);
-            if source::build_history_source(&symbol, Some(now), &spawn.profiles).is_none() {
+            // A POSITIONABILITY PROBE, and its target is the tape ORIGIN rather
+            // than the simulated now. The worker owns the canonical lead once
+            // `activate_live` has run, and a live index refuses to extend for a
+            // reader - so probing at the simulated now asks whether the frontier
+            // already covers an instant the worker itself has not yet reached.
+            // Whether it does is an accident of how far past `run_start_ns` the
+            // warmup walk happened to overshoot, which for a zero-warmup venue
+            // is not at all: the probe then refused on every boot, the worker
+            // returned before publishing a single frame, and the venue served an
+            // empty tape and exited 0. The origin is checkpoint zero and is
+            // always reachable, so a refusal here means what the message says.
+            if source::build_history_source(&symbol, None, &spawn.profiles).is_none() {
                 tracing::error!(symbol, "tape source could not be positioned");
                 worker.alive.store(false, Ordering::Release);
                 return;

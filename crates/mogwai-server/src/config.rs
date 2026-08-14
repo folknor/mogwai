@@ -861,7 +861,7 @@ impl ConfiguredInstrument {
     /// The wire/engine-facing definition this table describes.
     pub(crate) fn def(&self) -> InstrumentDef {
         InstrumentDef {
-            symbol: self.symbol.clone(),
+            symbol: std::sync::Arc::clone(&self.symbol),
             class: match &self.class {
                 ConfiguredClass::Spot { base, quote } => InstrumentClass::Spot {
                     base: base.clone(),
@@ -914,7 +914,7 @@ fn profile_from_configured(
     let mut scalars = configured.generator.clone().unwrap_or_else(|| {
         mogwai_data::GeneratorScalars::from_fingerprint_medians(&def.symbol, fp)
     });
-    scalars.symbol = def.symbol.clone();
+    scalars.symbol = def.symbol.to_string();
     if configured.generator.is_none() {
         scalars.modal_tick = def.price_increment;
         scalars.price_decimals = u32::from(def.price_precision);
@@ -966,7 +966,7 @@ fn profile_from_configured(
             code = diagnostic.code,
             field = diagnostic.field,
             corpus = diagnostic.corpus,
-            symbol = def.symbol,
+            symbol = %def.symbol,
             "generator scalar sits outside its empirical corpus range"
         );
     }
@@ -974,7 +974,7 @@ fn profile_from_configured(
         tracing::warn!(
             code = diagnostic.code,
             field = diagnostic.field,
-            symbol = def.symbol,
+            symbol = %def.symbol,
             "generator size grid hides almost all latent size variation"
         );
     }
@@ -1826,7 +1826,7 @@ mod tests {
         // interchangeability, so nothing here claims transfer validity.
         let mnq = profile_from_preset("MNQ").unwrap();
         let mes = profile_from_preset("MES").unwrap();
-        assert_eq!(mes.def.symbol, "MES");
+        assert_eq!(mes.def.symbol.as_ref(), "MES");
         assert_eq!(mes.scalars.symbol, "MES");
         assert_eq!(mes.scalars.start_price, Decimal::from(6000));
         assert_eq!(mes.def.class.multiplier(), Decimal::from(5));

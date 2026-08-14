@@ -145,7 +145,7 @@ impl MogwaiDataClient {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("instrument mutex poisoned"))?;
             if !instruments.is_empty() && !instruments.contains_key(&symbol) {
-                let served: Vec<&str> = instruments.keys().map(String::as_str).collect();
+                let served: Vec<&str> = instruments.keys().map(AsRef::as_ref).collect();
                 tracing::error!(
                     %symbol,
                     served = ?served,
@@ -205,7 +205,7 @@ impl MogwaiDataClient {
             .quote_delivery
             .lock()
             .map_err(|_| anyhow::anyhow!("quote delivery mutex poisoned"))?;
-        self.subscribe_symbol(symbol.to_owned(), SubKind::Quotes, start_ts)?;
+        self.subscribe_symbol(symbol.into(), SubKind::Quotes, start_ts)?;
         let cached = self
             .subs
             .lock()
@@ -1212,7 +1212,9 @@ fn retain_quote(
     quote: &mogwai_protocol::QuoteTick,
 ) -> bool {
     let mut states = lock_recover(subs, "subscriptions");
-    let state = states.entry(quote.symbol.clone()).or_default();
+    let state = states
+        .entry(std::sync::Arc::clone(&quote.symbol))
+        .or_default();
     state.cached_quote = Some(quote.clone());
     state.quotes > 0
 }
@@ -1694,7 +1696,7 @@ mod quote_cache_tests {
             .instruments
             .lock()
             .unwrap()
-            .insert(def.symbol.clone(), def);
+            .insert(std::sync::Arc::clone(&def.symbol), def);
         assert!(!retain_quote(&client.subs, &quote_for("BTCUSDT", 1)));
 
         let subscribed = Arc::new(std::sync::Barrier::new(2));

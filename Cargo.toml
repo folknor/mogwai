@@ -16,7 +16,7 @@ mogwai-data = { path = "crates/mogwai-data" }
 mogwai-server = { path = "crates/mogwai-server" }
 mogwai-lab = { path = "crates/mogwai-lab" }
 
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 # `float_roundtrip` is NOT optional dressing here. serde_json's default float
 # parser is a fast approximation that can land one ULP off the correctly
 # rounded value: `from_str("12.344540150041679")` produces a different f64

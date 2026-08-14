@@ -80,10 +80,10 @@ fn scans(size: usize, fill: bool) -> (Engine, Vec<ScanResult>) {
     (engine, results)
 }
 
-fn futures_book(size: usize) -> (Engine, Vec<(String, Decimal)>) {
+fn futures_book(size: usize) -> (Engine, Vec<(mogwai_protocol::Symbol, Decimal)>) {
     let instruments: Vec<_> = (0..size)
         .map(|index| InstrumentDef {
-            symbol: format!("F{index}"),
+            symbol: format!("F{index}").into(),
             class: InstrumentClass::Future {
                 underlying: format!("U{index}"),
                 settlement_currency: "USD".into(),
@@ -108,11 +108,11 @@ fn futures_book(size: usize) -> (Engine, Vec<(String, Decimal)>) {
         breach_action: BreachAction::Refuse,
     };
     for index in 0..size {
-        let symbol = format!("F{index}");
-        engine.set_margin_policy(symbol.clone(), policy);
+        let symbol: mogwai_protocol::Symbol = format!("F{index}").into();
+        engine.set_margin_policy(std::sync::Arc::clone(&symbol), policy);
         let submit = SubmitOrder {
             client_order_id: format!("OPEN-{index}"),
-            symbol: symbol.clone(),
+            symbol: std::sync::Arc::clone(&symbol),
             position_id: None,
             side: Side::Buy,
             order_type: OrderType::Market,
@@ -134,7 +134,7 @@ fn futures_book(size: usize) -> (Engine, Vec<(String, Decimal)>) {
         );
     }
     let marks = (0..size)
-        .map(|index| (format!("F{index}"), Decimal::from(21_001)))
+        .map(|index| (format!("F{index}").into(), Decimal::from(21_001)))
         .collect();
     (engine, marks)
 }

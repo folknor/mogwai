@@ -267,7 +267,7 @@ pub(crate) fn cache_instruments(
 ) {
     let mut cache = lock_recover(instruments, "instrument");
     for def in defs {
-        cache.insert(def.symbol.clone(), def);
+        cache.insert(std::sync::Arc::clone(&def.symbol), def);
     }
 }
 
@@ -541,8 +541,8 @@ pub(crate) fn capped_limit(limit: Option<std::num::NonZeroUsize>) -> usize {
 pub(crate) fn join_url(base: &str, path: &str) -> String {
     format!("{}/{}", base.trim_end_matches('/'), path)
 }
-pub(crate) fn symbol_from_instrument(instrument_id: InstrumentId) -> String {
-    instrument_id.symbol.to_string()
+pub(crate) fn symbol_from_instrument(instrument_id: InstrumentId) -> mogwai_protocol::Symbol {
+    instrument_id.symbol.as_str().into()
 }
 /// Maps an optional request bound onto the u64 nanosecond axis, SATURATING
 /// out-of-range datetimes at the axis bounds instead of dropping them to

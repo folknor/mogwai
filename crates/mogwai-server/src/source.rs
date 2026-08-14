@@ -46,7 +46,7 @@ impl InstrumentProfile {
         fees: Option<crate::config::ConfiguredFees>,
         calendar: Option<mogwai_data::SessionCalendar>,
     ) -> Self {
-        scalars.symbol = def.symbol.clone();
+        scalars.symbol = def.symbol.to_string();
         Self {
             def,
             scalars,
@@ -74,7 +74,7 @@ impl InstrumentProfiles {
         Self {
             by_symbol: profiles
                 .into_iter()
-                .map(|profile| (profile.def.symbol.clone(), profile))
+                .map(|profile| (std::sync::Arc::clone(&profile.def.symbol), profile))
                 .collect(),
         }
     }
@@ -190,17 +190,17 @@ pub(crate) fn set_boot_for_test(boot: BootTape) {
 fn index(symbol: &str, profiles: &InstrumentProfiles) -> Option<&'static Mutex<CheckpointIndex>> {
     let profile = profiles.get(symbol)?;
     if let Some(existing) = INDEX.get() {
-        return (existing.symbol == symbol).then_some(&existing.checkpoints);
+        return (existing.symbol.as_ref() == symbol).then_some(&existing.checkpoints);
     }
     let run_index = INDEX.get_or_init(|| RunIndex {
-        symbol: profile.def.symbol.clone(),
+        symbol: std::sync::Arc::clone(&profile.def.symbol),
         checkpoints: Mutex::new(CheckpointIndex::new(
             generator(profile),
             CHECKPOINT_K,
             MAX_EXTEND_TICKS,
         )),
     });
-    (run_index.symbol == symbol).then_some(&run_index.checkpoints)
+    (run_index.symbol.as_ref() == symbol).then_some(&run_index.checkpoints)
 }
 
 fn locked(

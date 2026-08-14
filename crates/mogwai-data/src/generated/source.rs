@@ -9,6 +9,8 @@
 //! pinned golden sequence that must be re-blessed with any intentional walk
 //! mechanism change.
 
+use std::sync::Arc;
+
 use mogwai_protocol::{
     AggressorSide, InstrumentDef, MarketRegime, QuoteTick, TradeTick, decimal_to_f64,
 };
@@ -48,7 +50,8 @@ use super::session::SessionModulator;
 /// why the generator holds `ChaCha12Rng` directly).
 #[derive(Clone)]
 pub struct GeneratedSource {
-    scalars: GeneratorScalars,
+    scalars: Arc<GeneratorScalars>,
+    symbol: Arc<str>,
     rng: ChaCha12Rng,
     pub(super) clock_ns: u64,
     arrival: ArrivalClock,
@@ -71,7 +74,7 @@ pub struct GeneratedSource {
     size_dist: LogNormal<f64>,
     pub(super) size_median: f64,
     size_grid: SizeGrid,
-    calendar: Option<SessionCalendar>,
+    calendar: Option<Arc<SessionCalendar>>,
     tick_f64: f64,
     regime: RegimeState,
     // The upper bound of the last instant span an armed `ReopenGap` was tested
@@ -203,6 +206,16 @@ struct SurgeWindow {
 }
 
 impl GeneratedSource {
+    #[cfg(test)]
+    pub(super) fn shares_immutable_config_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.scalars, &other.scalars)
+            && match (&self.calendar, &other.calendar) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+
     #[must_use]
     pub fn new(
         scalars: GeneratorScalars,
@@ -427,9 +440,11 @@ impl GeneratedSource {
             start_ts,
         );
         let trade_bounce_ticks = scalars.trade_displacement_ticks.ticks();
+        let symbol = Arc::from(scalars.symbol.as_str());
         Ok(Self {
             tick_f64: decimal_to_f64(scalars.modal_tick),
-            scalars,
+            scalars: Arc::new(scalars),
+            symbol,
             rng: ChaCha12Rng::seed_from_u64(seed),
             clock_ns: start_ts,
             arrival: ArrivalClock {
@@ -471,7 +486,7 @@ impl GeneratedSource {
             size_dist,
             size_median,
             size_grid,
-            calendar,
+            calendar: calendar.map(Arc::new),
             regime,
             reopen_frontier_ns: start_ts,
             shape,
@@ -1027,11 +1042,11 @@ impl GeneratedSource {
         }
         .max(1.0);
         self.pending_quote = materialize_quote.then(|| QuoteTick {
-            symbol: self.scalars.symbol.clone(),
+            symbol: Arc::clone(&self.symbol),
             bid_px: book.bid_price(self.tick_f64, self.scalars.price_decimals),
             ask_px: book.ask_price(self.tick_f64, self.scalars.price_decimals),
-            bid_sz: book.sizes.bid,
-            ask_sz: book.sizes.ask,
+            bid_sz: book.bid_size,
+            ask_sz: book.ask_size,
             ts_event: self.clock_ns,
         });
         self.last_book = Some(book);
@@ -1228,11 +1243,11 @@ impl GeneratedSource {
             normal_price_ticks
         };
         self.pending_quote = materialize_quote.then(|| QuoteTick {
-            symbol: self.scalars.symbol.clone(),
+            symbol: Arc::clone(&self.symbol),
             bid_px: book.bid_price(self.tick_f64, self.scalars.price_decimals),
             ask_px: book.ask_price(self.tick_f64, self.scalars.price_decimals),
-            bid_sz: book.sizes.bid,
-            ask_sz: book.sizes.ask,
+            bid_sz: book.bid_size,
+            ask_sz: book.ask_size,
             ts_event: self.clock_ns,
         });
         self.last_book = Some(book);
@@ -1287,7 +1302,7 @@ impl GeneratedSource {
     fn next_child(&mut self) -> TradeTick {
         let draw = self.step_child();
         TradeTick {
-            symbol: self.scalars.symbol.clone(),
+            symbol: Arc::clone(&self.symbol),
             price: decimal_from_f64(draw.price_ticks * self.tick_f64)
                 .round_dp(self.scalars.price_decimals),
             size: self.materialize_size(draw.size),

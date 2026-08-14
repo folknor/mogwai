@@ -890,7 +890,7 @@ mod tests {
         assert_eq!(profiles.len(), PRESETS.len());
         for preset in PRESETS {
             let profile = &profiles[preset];
-            assert_eq!(profile.def.symbol, preset);
+            assert_eq!(profile.def.symbol.as_ref(), preset);
             assert_eq!(profile.scalars.symbol, preset);
             assert_eq!(profile.scalars.modal_tick, profile.def.price_increment);
         }

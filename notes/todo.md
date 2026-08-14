@@ -19,6 +19,23 @@ Or both. There are no exceptions.
 
 ## Open issues
 
+- `mogwai_protocol::Symbol` IS NOW `Arc<str>`, NOT `String` (source-breaking,
+  landed 2026-08-15). The generator allocated a fresh symbol string for every
+  materialized trade and quote, which was the crate's most frequent heap
+  allocation, so the alias changed and one interned value is now shared by the
+  generator, every emitted tick, the engine's position and margin keys, the
+  server's profile map and the adapter's instrument and subscription caches.
+  WHAT A CONSUMER MUST DO: nothing on the wire - the JSON is byte-identical,
+  because serde's `rc` support serializes an `Arc<str>` as its inner string and
+  the protocol's exact-equality frame table pins that. But the Rust type moved,
+  so code that builds a `TradeTick`, `QuoteTick`, `SubmitOrder`, `InstrumentDef`
+  or any other wire struct in Rust needs `"BTCUSDT".into()` where it wrote
+  `.to_string()`, `symbol.as_ref()` where it compared against a `&str`, and
+  `Arc::clone` where it cloned. A `String` field of its own (`ReadyRecord`'s
+  `symbol`, `GeneratorScalars::symbol`) is unchanged and still needs
+  `.to_string()` at the boundary. broadarrow is the known consumer and depends
+  on this workspace; nothing here can verify its build.
+
 - SERVE N INSTRUMENTS FROM ONE VENUE (consumer ask, broadarrow, recorded
   2026-08-14). broadarrow can now ATTACH to an operator-owned `mogwai serve`
   (its scenario names the ReadyRecord's addr plus run_seed, and the run-seed

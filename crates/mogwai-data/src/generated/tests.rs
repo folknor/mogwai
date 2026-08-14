@@ -27,6 +27,19 @@ fn next_trade(source: &mut GeneratedSource) -> mogwai_protocol::TradeTick {
 }
 
 #[test]
+fn clones_share_immutable_config_and_emitted_symbol_storage() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let mut source = GeneratedSource::new(scalars, 4242, 1_000, &fp, None);
+    let mut clone = source.clone();
+    assert!(source.shares_immutable_config_with(&clone));
+
+    let left = next_trade(&mut source);
+    let right = next_trade(&mut clone);
+    assert!(std::sync::Arc::ptr_eq(&left.symbol, &right.symbol));
+}
+
+#[test]
 fn compact_parent_advancement_matches_wire_frames_and_continuation() {
     let fp = Fingerprint::from_repo_json();
     let scalars = GeneratorScalars::xbtusd_anchor(&fp);
@@ -2045,7 +2058,7 @@ fn assert_run_seed_dwell_is_bounded_with_draw(run_seed: u64, draw: usize) {
     let fp = Fingerprint::from_repo_json();
     let def = mogwai_protocol::default_instruments()
         .into_iter()
-        .find(|def| def.symbol == "BTCUSDT")
+        .find(|def| def.symbol.as_ref() == "BTCUSDT")
         .expect("the default instrument set carries BTCUSDT");
     let mut scalars = GeneratorScalars::from_fingerprint_medians(&def.symbol, &fp);
     scalars.modal_tick = def.price_increment;
@@ -3977,12 +3990,14 @@ fn repeat_compatibility_uses_the_frozen_governing_book() {
     let frozen = PublishedBook {
         bid_ticks: 100.0,
         ask_ticks: 101.0,
-        sizes: TopOfBookSizes::uncalibrated(Decimal::ONE),
+        bid_size: Decimal::ONE,
+        ask_size: Decimal::ONE,
     };
     let fresh = PublishedBook {
         bid_ticks: 105.0,
         ask_ticks: 106.0,
-        sizes: TopOfBookSizes::uncalibrated(Decimal::ONE),
+        bid_size: Decimal::ONE,
+        ask_size: Decimal::ONE,
     };
     let previous_sweep_last = 104.0;
     assert!(repeat_is_compatible(
@@ -4053,7 +4068,8 @@ fn realized_displacement_changes_only_at_the_grid_boundaries() {
     let book = PublishedBook {
         bid_ticks: 100.0,
         ask_ticks: 101.0,
-        sizes: TopOfBookSizes::uncalibrated(Decimal::ONE),
+        bid_size: Decimal::ONE,
+        ask_size: Decimal::ONE,
     };
     let mid = book_mid_ticks(&book);
     for displacement in [0.01, 0.25, 0.49, 0.5] {

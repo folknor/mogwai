@@ -244,7 +244,7 @@ fn run_scenario(band_vol_mult: f64, profiles: &InstrumentProfiles) -> Vec<Cell> 
     });
     let increment = default_instruments()
         .into_iter()
-        .find(|instrument| instrument.symbol == SYMBOL)
+        .find(|instrument| instrument.symbol.as_ref() == SYMBOL)
         .expect("BTCUSDT exists")
         .price_increment;
     let mut meta = HashMap::new();

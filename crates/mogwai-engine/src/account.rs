@@ -194,7 +194,7 @@ impl Engine {
             .account
             .positions
             .get(&(
-                fill.symbol.clone(),
+                std::sync::Arc::clone(&fill.symbol),
                 self.position_key_id(fill.position_id.as_ref()),
             ))
             .cloned()
@@ -298,7 +298,7 @@ impl Engine {
             .account
             .positions
             .get(&(
-                fill.symbol.clone(),
+                std::sync::Arc::clone(&fill.symbol),
                 self.position_key_id(fill.position_id.as_ref()),
             ))
             .cloned()
@@ -311,13 +311,13 @@ impl Engine {
         }
         if next.qty == Decimal::ZERO {
             self.account.positions.remove(&(
-                fill.symbol.clone(),
+                std::sync::Arc::clone(&fill.symbol),
                 self.position_key_id(fill.position_id.as_ref()),
             ));
         } else {
             self.account.positions.insert(
                 (
-                    fill.symbol.clone(),
+                    std::sync::Arc::clone(&fill.symbol),
                     self.position_key_id(fill.position_id.as_ref()),
                 ),
                 next,

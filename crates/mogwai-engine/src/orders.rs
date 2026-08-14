@@ -637,7 +637,7 @@ impl Engine {
             .account
             .positions
             .get(&(
-                order.symbol.clone(),
+                std::sync::Arc::clone(&order.symbol),
                 self.position_key_id(order.position_id.as_ref()),
             ))
             .map_or(Decimal::ZERO, |state| state.qty);
@@ -965,7 +965,7 @@ impl Engine {
             client_order_id: order.client_order_id.clone(),
             venue_order_id: venue_order_id.clone(),
             trade_id: self.next_trade_id(),
-            symbol: order.symbol.clone(),
+            symbol: std::sync::Arc::clone(&order.symbol),
             position_id: order.position_id.clone(),
             side: order.side,
             last_qty,
@@ -1909,7 +1909,7 @@ fn fill_quantity(order: &SubmitOrder, fill_fraction: Decimal, size_increment: De
         return aligned;
     }
 
-    let symbol = order.symbol.as_str();
+    let symbol = order.symbol.as_ref();
     if candidate > Decimal::ZERO {
         // The fraction was a valid positive partial, but `quantity * fraction`
         // is smaller than one size increment: on a minimum-lot order the grid

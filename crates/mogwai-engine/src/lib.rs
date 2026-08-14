@@ -449,7 +449,7 @@ impl Engine {
         self.account
             .positions
             .iter()
-            .filter(|((position_symbol, _), _)| position_symbol == symbol)
+            .filter(|((position_symbol, _), _)| position_symbol.as_ref() == symbol)
             .fold(Decimal::ZERO, |sum, (_, position)| {
                 let value = position
                     .mark_px
@@ -540,7 +540,7 @@ impl Engine {
             .filter_map(|(symbol, (initial, maintenance))| {
                 let def = self.instruments.get(symbol)?;
                 Some(mogwai_protocol::PostedMargin {
-                    symbol: symbol.clone(),
+                    symbol: std::sync::Arc::clone(symbol),
                     currency: def.class.settlement_currency().to_owned(),
                     initial,
                     maintenance,
@@ -610,7 +610,7 @@ impl Engine {
                     self.margin_breached.insert(symbol);
                 }
                 (true, BreachAction::Liquidate) => {
-                    self.margin_breached.insert(symbol.clone());
+                    self.margin_breached.insert(std::sync::Arc::clone(&symbol));
                     // One order per open POSITION, not one per symbol: under
                     // hedging a symbol carries several, and closing only the
                     // first leaves the account still breached after the
@@ -619,7 +619,7 @@ impl Engine {
                         for (key, position) in &self.account.positions {
                             if key.0 == symbol {
                                 liquidate.push((
-                                    symbol.clone(),
+                                    std::sync::Arc::clone(&symbol),
                                     key.1.clone(),
                                     position.qty,
                                     *mark,
@@ -778,7 +778,7 @@ impl Engine {
         let instruments = config
             .instruments
             .into_iter()
-            .map(|instrument| (instrument.symbol.clone(), instrument))
+            .map(|instrument| (std::sync::Arc::clone(&instrument.symbol), instrument))
             .collect();
 
         Self {
@@ -930,7 +930,7 @@ impl Engine {
                     ),
                     PendingScan {
                         client_order_id: order.submit.client_order_id.clone(),
-                        symbol: order.submit.symbol.clone(),
+                        symbol: std::sync::Arc::clone(&order.submit.symbol),
                         side: order.submit.side,
                         px,
                         kind,
@@ -1057,7 +1057,7 @@ impl Engine {
             .positions
             .iter()
             .map(|((symbol, position_id), state)| Position {
-                symbol: symbol.clone(),
+                symbol: std::sync::Arc::clone(symbol),
                 position_id: position_id.clone(),
                 quantity: state.qty,
                 avg_px: state.avg_px,
@@ -1101,7 +1101,7 @@ fn open_order_status(order: &OpenOrder) -> OrderStatusInfo {
     OrderStatusInfo {
         client_order_id: order.submit.client_order_id.clone(),
         venue_order_id: order.venue_order_id.clone(),
-        symbol: order.submit.symbol.clone(),
+        symbol: std::sync::Arc::clone(&order.submit.symbol),
         position_id: order.submit.position_id.clone(),
         side: order.submit.side,
         order_type: order.submit.order_type,
@@ -2355,7 +2355,7 @@ mod tests {
                 .account
                 .positions
                 .keys()
-                .any(|(symbol, _)| symbol == "MNQ")
+                .any(|(symbol, _)| symbol.as_ref() == "MNQ")
         );
         assert_eq!(outcome.originated_orders, 1);
     }
@@ -3513,7 +3513,7 @@ mod tests {
         state
             .positions
             .iter()
-            .find(|position| position.symbol == symbol)
+            .find(|position| position.symbol.as_ref() == symbol)
             .unwrap()
     }
 

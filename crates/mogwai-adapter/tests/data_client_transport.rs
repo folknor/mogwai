@@ -299,7 +299,7 @@ async fn trade_history_pages_without_duplicates_at_the_seam() {
     let mut first = Vec::with_capacity(mogwai_protocol::MAX_HISTORY_LIMIT);
     for ts in 1..=mogwai_protocol::MAX_HISTORY_LIMIT as u64 {
         first.push(mogwai_protocol::TradeTick {
-            symbol: "BTCUSDT".to_string(),
+            symbol: "BTCUSDT".into(),
             price: rust_decimal::Decimal::new(10_000, 2),
             size: rust_decimal::Decimal::ONE,
             aggressor: mogwai_protocol::AggressorSide::Buyer,
@@ -307,7 +307,7 @@ async fn trade_history_pages_without_duplicates_at_the_seam() {
         });
     }
     let second = vec![mogwai_protocol::TradeTick {
-        symbol: "BTCUSDT".to_string(),
+        symbol: "BTCUSDT".into(),
         price: rust_decimal::Decimal::new(10_100, 2),
         size: rust_decimal::Decimal::ONE,
         aggressor: mogwai_protocol::AggressorSide::Seller,

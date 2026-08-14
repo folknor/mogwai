@@ -145,7 +145,7 @@ pub(crate) fn nautilus_order_status(status: WireOrderStatus) -> OrderStatus {
 }
 
 pub(crate) fn instrument_id(def: &InstrumentDef) -> InstrumentId {
-    InstrumentId::new(NautilusSymbol::from(def.symbol.as_str()), *MOGWAI_VENUE)
+    InstrumentId::new(NautilusSymbol::from(def.symbol.as_ref()), *MOGWAI_VENUE)
 }
 
 /// Builds the synthetic nautilus `TradeId` for a wire trade.
@@ -248,7 +248,7 @@ pub(crate) fn instrument_any(
                 Currency::from_str(quote).with_context(|| format!("unknown quote {quote}"))?;
             let pair = CurrencyPair::new(
                 id,
-                NautilusSymbol::from(def.symbol.as_str()),
+                NautilusSymbol::from(def.symbol.as_ref()),
                 base,
                 quote,
                 def.price_precision,
@@ -291,7 +291,7 @@ pub(crate) fn instrument_any(
             };
             let contract = FuturesContract::new_checked(
                 id,
-                NautilusSymbol::from(def.symbol.as_str()),
+                NautilusSymbol::from(def.symbol.as_ref()),
                 asset_class,
                 Some(ustr::Ustr::from("MOGWAI")),
                 ustr::Ustr::from(underlying),

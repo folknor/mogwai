@@ -1005,7 +1005,7 @@ mod tests {
         // CME instrument generated WITHOUT its calendar prints continuously,
         // which is what this command used to do.
         let profile = resolve_profile("MNQ").expect("MNQ resolves from the embedded preset");
-        assert_eq!(profile.def.symbol, "MNQ");
+        assert_eq!(profile.def.symbol.as_ref(), "MNQ");
         assert_eq!(profile.def.price_increment, Decimal::new(25, 2));
         let calendar = profile
             .calendar
@@ -2135,7 +2135,7 @@ mod tests {
         let one = Decimal::ONE;
         let quote = |ts: u64, level: i64| {
             TickEvent::Quote(mogwai_protocol::QuoteTick {
-                symbol: "MNQ".to_string(),
+                symbol: "MNQ".into(),
                 bid_px: px(level - 1),
                 ask_px: px(level + 1),
                 bid_sz: one,
@@ -2145,7 +2145,7 @@ mod tests {
         };
         let trade = |ts: u64, level: i64| {
             TickEvent::Trade(TradeTick {
-                symbol: "MNQ".to_string(),
+                symbol: "MNQ".into(),
                 price: px(level),
                 size: one,
                 aggressor: AggressorSide::Buyer,

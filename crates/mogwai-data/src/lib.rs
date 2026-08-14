@@ -22,7 +22,7 @@
 //!   fractional). Files reach multiple GB, so it streams one buffered line at a
 //!   time - O(1) memory.
 //!
-//! [`MergeSource`] k-way merges several single-symbol sources into one
+//! [`MergeSource`] linearly k-way merges several single-symbol sources into one
 //! time-ordered stream, and [`MemorySource`] backs tests and the wiring skeleton.
 //!
 //! [`scan_triggers`] and [`vol_reading`] are the two bounded tape walks behind
@@ -43,7 +43,7 @@ use std::{
     str::FromStr,
 };
 
-use mogwai_protocol::{AggressorSide, QuoteTick, TradeTick};
+use mogwai_protocol::{AggressorSide, QuoteTick, Symbol, TradeTick};
 use rust_decimal::Decimal;
 
 pub use bars::{BarAcc, fold_trade, window_close_ns};
@@ -189,7 +189,7 @@ impl Permutation for Identity {}
 pub struct TickRuleAggressor {
     /// Per-symbol carried state: the last trade price and the last non-neutral
     /// aggressor side inferred for it (used to resolve unchanged-price ticks).
-    state: std::collections::HashMap<String, (Decimal, AggressorSide)>,
+    state: std::collections::HashMap<Symbol, (Decimal, AggressorSide)>,
 }
 
 impl TickRuleAggressor {
@@ -203,23 +203,30 @@ impl Permutation for TickRuleAggressor {
         let TickEvent::Trade(mut trade) = tick else {
             return tick;
         };
-        let aggressor = match self.state.get(&trade.symbol) {
-            None => AggressorSide::NoAggressor,
-            Some(&(prior_price, prior_side)) => {
+        let aggressor = match self.state.get_mut(&trade.symbol) {
+            None => {
+                self.state.insert(
+                    std::sync::Arc::clone(&trade.symbol),
+                    (trade.price, AggressorSide::NoAggressor),
+                );
+                AggressorSide::NoAggressor
+            }
+            Some((prior_price, prior_side)) => {
                 use std::cmp::Ordering;
-                match trade.price.cmp(&prior_price) {
+                let resolved = match trade.price.cmp(prior_price) {
                     Ordering::Greater => AggressorSide::Buyer,
                     Ordering::Less => AggressorSide::Seller,
-                    Ordering::Equal => prior_side,
-                }
+                    Ordering::Equal => *prior_side,
+                };
+                *prior_price = trade.price;
+                *prior_side = resolved;
+                resolved
             }
         };
         trade.aggressor = aggressor;
         // Carry forward this trade's price; carry forward a *resolved* side so an
         // unchanged-price run after a neutral first trade stays neutral until a
         // real uptick/downtick establishes direction.
-        self.state
-            .insert(trade.symbol.clone(), (trade.price, aggressor));
         TickEvent::Trade(trade)
     }
 }
@@ -282,7 +289,7 @@ pub fn parse_kraken_line(symbol: &str, line: &str) -> Option<TradeTick> {
         return None;
     }
     Some(TradeTick {
-        symbol: symbol.to_string(),
+        symbol: symbol.into(),
         price,
         size,
         aggressor: AggressorSide::NoAggressor,
@@ -425,8 +432,10 @@ impl TickSource for MemorySource {
 
 /// Merges several already-time-ordered sources into one time-ordered stream.
 ///
-/// Each input file is sorted ascending, so a heap of per-source heads yields a
-/// global ordering with one buffered tick per source.
+/// Each input file is sorted ascending. A linear scan of the per-source heads
+/// yields a global ordering with one buffered tick per source. Production uses
+/// one source; the offline CSV intake may merge several. Equal timestamps are
+/// resolved by source index.
 pub struct MergeSource {
     sources: Vec<Box<dyn TickSource>>,
     heads: Vec<Option<TickEvent>>,
@@ -630,7 +639,7 @@ mod tests {
     #[test]
     fn parses_kraken_trade_line() {
         let t = parse_kraken_line("XBTUSD", "1743439968,4.8000000,2.63045\n").unwrap();
-        assert_eq!(t.symbol, "XBTUSD");
+        assert_eq!(t.symbol.as_ref(), "XBTUSD");
         assert_eq!(t.price, Decimal::from_str("4.8000000").unwrap());
         assert_eq!(t.size, Decimal::from_str("2.63045").unwrap());
         assert_eq!(t.aggressor, AggressorSide::NoAggressor);
@@ -707,6 +716,27 @@ mod tests {
         );
     }
 
+    /// The merge's tie rule is DOCUMENTED, so it is pinned rather than left to
+    /// `min_by_key`'s first-minimum guarantee being remembered by the next
+    /// reader. Equal timestamps come out in source-index order, which is what
+    /// makes a multi-source offline merge deterministic across runs.
+    #[test]
+    fn merge_breaks_timestamp_ties_by_source_index() {
+        let a = Box::new(MemorySource::new(vec![trade("A", 10), trade("A", 10)]));
+        let b = Box::new(MemorySource::new(vec![trade("B", 10)]));
+        let c = Box::new(MemorySource::new(vec![trade("C", 10)]));
+        let mut m = MergeSource::new(vec![b, a, c]);
+        let mut seen = Vec::new();
+        while let Some(TickEvent::Trade(tt)) = m.next_tick() {
+            seen.push(tt.symbol);
+        }
+        assert_eq!(
+            seen,
+            vec!["B".into(), "A".into(), "A".into(), "C".into()],
+            "source 0 first, then source 1's whole tie run, then source 2"
+        );
+    }
+
     #[test]
     fn seek_to_skips_prefix_and_returns_first_in_window() {
         let mut src = MemorySource::new(vec![
@@ -745,6 +775,24 @@ mod tests {
         let mut perm = TickRuleAggressor::new();
         let out = perm.apply(trade_at("XBTUSD", 10, 100));
         assert_eq!(aggressor_of(&out), AggressorSide::NoAggressor);
+    }
+
+    #[test]
+    fn tick_rule_reuses_the_trade_symbol_allocation() {
+        let symbol: Symbol = "XBTUSD".into();
+        let tick = TickEvent::Trade(TradeTick {
+            symbol: std::sync::Arc::clone(&symbol),
+            price: Decimal::from(100),
+            size: Decimal::ONE,
+            aggressor: AggressorSide::NoAggressor,
+            ts_event: 10,
+        });
+        let mut perm = TickRuleAggressor::new();
+        let TickEvent::Trade(out) = perm.apply(tick) else {
+            unreachable!()
+        };
+        assert!(std::sync::Arc::ptr_eq(&symbol, &out.symbol));
+        assert_eq!(std::sync::Arc::strong_count(&symbol), 3);
     }
 
     #[test]

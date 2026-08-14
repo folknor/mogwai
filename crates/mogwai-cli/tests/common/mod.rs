@@ -144,6 +144,15 @@ pub fn fast_config() -> String {
     format!("{}/tests/configs/fast.toml", env!("CARGO_MANIFEST_DIR"))
 }
 
+/// A venue that materializes NO warmup, so its tape worker starts with the
+/// canonical frontier sitting exactly at the tape origin.
+pub fn no_warmup_config() -> String {
+    format!(
+        "{}/tests/configs/no-warmup.toml",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
 /// A venue whose tape is paced, so a suppression window is observable as
 /// silence rather than drowned in an unpaced backlog.
 pub fn paced_config() -> String {

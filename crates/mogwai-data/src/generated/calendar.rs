@@ -8,6 +8,11 @@ const MINUTES_PER_WEEK: i128 = 10_080;
 const NS_PER_MINUTE: u64 = 60_000_000_000;
 const UNIX_EPOCH_LOCAL_WEEK_MINUTE: i128 = 4 * MINUTES_PER_DAY;
 
+#[cfg(test)]
+thread_local! {
+    static SETTLEMENT_CANDIDATES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WeeklyWindow {
@@ -106,20 +111,27 @@ impl SessionCalendar {
         if to_ns <= from_ns {
             return Vec::new();
         }
-        let mut result = Vec::new();
         let first_minute = from_ns / NS_PER_MINUTE + 1;
         let last_minute = to_ns / NS_PER_MINUTE;
-        for utc_minute in first_minute..=last_minute {
-            let local = (i128::from(utc_minute)
-                + i128::from(self.utc_offset_minutes)
-                + UNIX_EPOCH_LOCAL_WEEK_MINUTE)
-                .rem_euclid(MINUTES_PER_WEEK);
-            if local.rem_euclid(MINUTES_PER_DAY) == i128::from(target) {
-                let instant = utc_minute.saturating_mul(NS_PER_MINUTE);
-                if instant > from_ns && instant <= to_ns && self.is_open(instant) {
-                    result.push(instant);
-                }
+        let local_offset = i128::from(self.utc_offset_minutes) + UNIX_EPOCH_LOCAL_WEEK_MINUTE;
+        let target_utc_day_minute = (i128::from(target) - local_offset).rem_euclid(MINUTES_PER_DAY);
+        let first_remainder = i128::from(first_minute).rem_euclid(MINUTES_PER_DAY);
+        let delta = (target_utc_day_minute - first_remainder).rem_euclid(MINUTES_PER_DAY);
+        let Ok(mut utc_minute) = u64::try_from(i128::from(first_minute) + delta) else {
+            return Vec::new();
+        };
+        let mut result = Vec::new();
+        while utc_minute <= last_minute {
+            #[cfg(test)]
+            SETTLEMENT_CANDIDATES.update(|count| count + 1);
+            let instant = utc_minute.saturating_mul(NS_PER_MINUTE);
+            if instant > from_ns && instant <= to_ns && self.is_open(instant) {
+                result.push(instant);
             }
+            let Some(next) = utc_minute.checked_add(MINUTES_PER_DAY as u64) else {
+                break;
+            };
+            utc_minute = next;
         }
         result
     }
@@ -181,5 +193,28 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair[1] - pair[0] == 86_400_000_000_000)
         );
+    }
+
+    #[test]
+    fn settlement_day_step_respects_local_offset_and_open_filter() {
+        SETTLEMENT_CANDIDATES.set(0);
+        let value = SessionCalendar {
+            utc_offset_minutes: 90,
+            open_windows: vec![WeeklyWindow {
+                start_minute: 0,
+                end_minute: 10_079,
+            }],
+            settlement_minute_of_day: Some(120),
+        };
+        value.validate().unwrap();
+        let day_ns = 86_400_000_000_000;
+        let expected_first = 30 * NS_PER_MINUTE;
+        assert_eq!(
+            value.settlement_instants(0, 10 * day_ns),
+            (0..10)
+                .map(|day| expected_first + day * day_ns)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(SETTLEMENT_CANDIDATES.get(), 10);
     }
 }

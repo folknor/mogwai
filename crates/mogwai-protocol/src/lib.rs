@@ -48,7 +48,7 @@ pub use messages::{
 pub use ready::ReadyRecord;
 pub use seeds::RunSeeds;
 
-pub type Symbol = String;
+pub type Symbol = std::sync::Arc<str>;
 /// Client-assigned order id (nautilus `ClientOrderId`).
 pub type ClientOrderId = String;
 /// Venue-assigned order id (mogwai-assigned `VenueOrderId`).

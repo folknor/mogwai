@@ -84,7 +84,7 @@ impl Run {
         account_id: mogwai_protocol::AccountId,
         fault_tx: std::sync::mpsc::Sender<mogwai_data::TickFault>,
     ) -> Arc<Self> {
-        let symbol = instrument.symbol.clone();
+        let symbol = std::sync::Arc::clone(&instrument.symbol);
         let margin = profiles
             .get(&instrument.symbol)
             .and_then(|profile| profile.margin.clone());
@@ -92,7 +92,7 @@ impl Run {
             .get(&instrument.symbol)
             .and_then(|profile| profile.fees.clone());
         let tape = Tape::start(
-            symbol,
+            symbol.to_string(),
             TapeSpawn {
                 profiles,
                 sim,
@@ -113,7 +113,7 @@ impl Run {
         engine.set_liquidation_band_ticks(fill_band_max_ticks);
         if let Some(margin) = margin {
             engine.set_margin_policy(
-                instrument.symbol.clone(),
+                std::sync::Arc::clone(&instrument.symbol),
                 mogwai_engine::MarginPolicy {
                     initial_per_contract: margin.initial_per_contract,
                     maintenance_per_contract: margin.maintenance_per_contract,
@@ -136,7 +136,7 @@ impl Run {
                 }
             };
             engine.set_fee_schedule(
-                instrument.symbol.clone(),
+                std::sync::Arc::clone(&instrument.symbol),
                 mogwai_engine::FeeSchedule {
                     maker: convert(fees.maker),
                     taker: convert(fees.taker),

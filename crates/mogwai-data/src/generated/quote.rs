@@ -119,7 +119,8 @@ impl Default for TradeDisplacement {
 pub struct PublishedBook {
     pub bid_ticks: f64,
     pub ask_ticks: f64,
-    pub sizes: TopOfBookSizes,
+    pub bid_size: Decimal,
+    pub ask_size: Decimal,
 }
 
 #[must_use]
@@ -133,7 +134,8 @@ pub fn place_book(
     PublishedBook {
         bid_ticks,
         ask_ticks: bid_ticks + width_ticks,
-        sizes: sizes.clone(),
+        bid_size: sizes.bid,
+        ask_size: sizes.ask,
     }
 }
 
@@ -171,6 +173,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn published_book_carries_values_without_calibration_metadata() {
+        assert_eq!(std::mem::size_of::<PublishedBook>(), 48);
+        assert!(
+            std::mem::size_of::<PublishedBook>()
+                < 2 * std::mem::size_of::<f64>() + std::mem::size_of::<TopOfBookSizes>()
+        );
+        let sizes = TopOfBookSizes {
+            bid: Decimal::from(2),
+            ask: Decimal::from(3),
+            provenance: CalibrationProvenance::Fitted {
+                corpus: "large fitted corpus identity".repeat(100),
+            },
+        };
+        let book = place_book(100.0, &QuotedWidth::default(), &sizes);
+        assert_eq!((book.bid_size, book.ask_size), (sizes.bid, sizes.ask));
     }
 
     #[test]

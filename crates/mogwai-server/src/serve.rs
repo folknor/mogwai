@@ -190,7 +190,7 @@ async fn serve_async(
         fill_seed = seeds.fill,
         "run seeds fixed"
     );
-    let warm_symbol = instrument.symbol.clone();
+    let warm_symbol = Arc::clone(&instrument.symbol);
     let warm_profiles = Arc::clone(&profiles);
     let warm_boot = source::BootTape {
         seeds,
@@ -326,7 +326,7 @@ async fn serve_async(
         version: mogwai_protocol::ReadyRecord::VERSION,
         addr: bound_addr,
         pid: std::process::id(),
-        symbol: instrument.symbol.clone(),
+        symbol: instrument.symbol.to_string(),
         run_seed: seeds.run,
         data_origin_ns,
         run_start_ns,

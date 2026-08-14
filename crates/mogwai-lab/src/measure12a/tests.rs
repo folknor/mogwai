@@ -30,7 +30,7 @@ fn px(level: i64) -> Decimal {
 
 fn quote(ts: u64, level: i64) -> QuoteTick {
     QuoteTick {
-        symbol: "MNQ".to_string(),
+        symbol: "MNQ".into(),
         bid_px: px(level - 1),
         ask_px: px(level + 1),
         bid_sz: Decimal::ONE,
@@ -41,7 +41,7 @@ fn quote(ts: u64, level: i64) -> QuoteTick {
 
 fn trade(ts: u64, level: i64) -> TradeTick {
     TradeTick {
-        symbol: "MNQ".to_string(),
+        symbol: "MNQ".into(),
         price: px(level),
         size: Decimal::ONE,
         aggressor: AggressorSide::Buyer,

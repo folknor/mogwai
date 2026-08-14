@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026 folknor
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# A venue with NO warmup at all. This is the boot shape whose tape worker used
+# to refuse to start: the worker probed positioning at the simulated now while
+# the live index refuses to extend for a reader, so whether the probe succeeded
+# depended entirely on how far past the run start the warmup walk had already
+# overshot. With no warmup there is no overshoot, the probe refused, and the
+# venue served an empty tape while exiting 0.
+
+seed = 42
+
+# The whole point of this file. Nothing is materialized before the run starts.
+warmup_ns = 0
+
+# Unpaced, so a frame arrives without waiting out a real inter-trade gap.
+speed = 0.0
+
+[balances]
+USDT = "100000"
+
+[instrument]
+preset = "BTCUSDT"

@@ -174,7 +174,40 @@ async fn a_connection_receives_the_tape_without_asking() {
         if let Message::Text(text) = message
             && let Ok(ServerMessage::Trade(trade)) = serde_json::from_str(&text)
         {
-            assert_eq!(trade.symbol, venue.record.symbol);
+            assert_eq!(trade.symbol.as_ref(), venue.record.symbol);
+            return;
+        }
+    }
+}
+
+/// A venue declaring NO warmup still publishes its tape. The worker's opening
+/// positioning probe used to target the simulated now, which a live index will
+/// not extend to reach, so the probe's success rested on the warmup walk having
+/// overshot the run start far enough to cover the boot latency. With
+/// `warmup_ns = 0` there is no overshoot: the worker returned before its first
+/// frame, `/health` reported a dead tape, and the venue exited 0 having served
+/// nothing. Reverting the probe to the tape origin makes this test time out on
+/// the first frame.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_venue_without_warmup_still_publishes_its_tape() {
+    let venue = spawn(&["--config", &common::no_warmup_config()]);
+    let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
+        .await
+        .expect("open a socket");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let message = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .expect("a zero-warmup venue still pushes its tape")
+            .expect("the socket stays open")
+            .expect("a well-formed frame");
+        if let Message::Text(text) = message
+            && let Ok(ServerMessage::Trade(trade)) = serde_json::from_str(&text)
+        {
+            assert_eq!(trade.symbol.as_ref(), venue.record.symbol);
+            assert_eq!(venue.record.warmup_ns, 0, "the fixture declares no warmup");
             return;
         }
     }

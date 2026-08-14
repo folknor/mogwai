@@ -732,3 +732,146 @@ Verified rather than accepted:
   amended to 15, `notes/bugs-engine.md`'s present-tense "now takes 14" is
   corrected, and `notes/todo.md`'s prose-gate item records that the gate must
   find its document set by grep rather than by a hardcoded list of folders.
+
+## notes/bugs-data.md, round 2 and document close
+
+Classification:
+
+- Finding 4 REPRODUCED. `mogwai_protocol::Symbol` is now `Arc<str>`, with
+  serde's `rc` support, and `GeneratedSource` owns one interned value shared by
+  every materialized trade and quote. The wire JSON is unchanged. The type
+  change was followed through engine, server, adapter, CLI and tests rather
+  than stopped at the generator. `TickRuleAggressor` keys directly on the same
+  `Symbol`, so its state keeps a reference-counted clone rather than allocating
+  another string.
+- Finding 8 REPRODUCED AS FALSE DOCUMENTATION, but its deletion proposal was
+  rejected. `MergeSource` is still the real multi-symbol merge for the reusable
+  offline CSV intake, latches child faults, preserves deterministic source-index
+  ties, and provides the inclusive one-tick buffer for production history.
+  Production k=1 does not erase those contracts. Its documentation now says it
+  performs a linear head scan and names both usage shapes; no heap is claimed.
+- Finding 9 IS DEAD and was deleted rather than acted on. Its version-9 and
+  zero-Rust-change premises describe an old tree. This round's own verdict is
+  also no bump: ownership, settlement lookup complexity and runtime metadata
+  layout change no draw, seed, event value, event ordering or tape origin.
+  Version 14 remains live and 15 remains reserved for the protocol-12b
+  mechanism.
+- The settlement bullet REPRODUCED IN ALTERED FORM. The old loop did not call
+  `is_open` every minute as claimed, but it did compute civil-time modulo for
+  every minute. It now solves the first UTC settlement minute once and advances
+  by 1,440 minutes. The offset test counts 10 candidates over 10 days; restoring
+  the minute scan makes it count 14,400 and fail.
+- The `PublishedBook` provenance bullet REPRODUCED conditionally. Shipped
+  presets remain uncalibrated, but a fitted provenance string was cloned into
+  every placed book and compatible repeat. Runtime books now copy only bid and
+  ask decimal values. Calibration provenance remains on config. A fitted-corpus
+  test pins the separation and the 48-byte runtime shape.
+- The `SweepShape::new` bullet IS DEAD AS WRITTEN. `new` performs no logarithms;
+  the two logarithms are in `next_count`. Caching the invariant denominator was
+  implemented and measured on `arrival_walk`; identical work stayed at 300 ms
+  before and after, so the unmeasured micro-optimization was reverted.
+- The checkpoint bullet REPRODUCED IN ALTERED FORM. `CHECKPOINT_K` is 8,192,
+  but `MAX_CHECKPOINTS` is still 4,096, not 8,192. Pinned control snapshots are
+  included inside that hard cap and can displace old pins; they do not grow it.
+  The committed warmup retains roughly 520 clones. `GeneratorScalars`, the
+  calendar and the emitted symbol allocation are now shared across the lead and
+  snapshots. Positioning measured 202.27 us before and 199.80 us after, which
+  criterion called no detectable throughput change; the retained result is the
+  eliminated heap duplication, not a wall-clock claim.
+
+Verification:
+
+- `clones_share_immutable_config_and_emitted_symbol_storage` fails when the
+  three materialization sites are reverted to allocate fresh `Arc<str>` values.
+- `settlement_day_step_respects_local_offset_and_open_filter` fails at 14,400
+  candidates versus 10 when the minute scan is restored. Both negative controls
+  were run in release, not left behind a debug assertion.
+- `published_book_carries_values_without_calibration_metadata` and
+  `tick_rule_reuses_the_trade_symbol_allocation` pass in both release sweeps.
+
+## notes/bugs-data.md, round 2 audit and document close
+
+The round's classifications all held. The audit found NO defect in the round's
+own work and ONE PRE-EXISTING defect that the round's mandatory `--gate` run
+surfaced, which had shipped red through exactly the ignored-test gap the
+project rules warn about.
+
+- THE TAPE WORKER REFUSED TO START ON A ZERO-WARMUP VENUE. `Tape::start`'s
+  worker opens with a positioning probe, and it targeted the SIMULATED NOW -
+  a few milliseconds of boot latency past `run_start_ns`. `activate_live` has
+  already run by then, and a live index will not extend for a reader, so the
+  probe asks whether the frontier ALREADY covers an instant the worker itself
+  has not reached. Whether it did was an accident of how far the warmup walk
+  had overshot `run_start_ns`: with a five-minute warmup the next tick usually
+  sits a second or more past it and the probe passed, while with `warmup_ns`
+  of 0 there is no overshoot at all and the probe refused on EVERY boot. The
+  worker then returned before publishing one frame and the venue served an
+  empty tape and exited 0. The probe now targets the tape ORIGIN, which is
+  checkpoint zero and always reachable, so a refusal there means what its
+  message says. Note the shape: the probe's positioned source is DISCARDED -
+  the worker reads through `next_live_tick` - so this was a liveness check
+  whose target had drifted into a race with the thing it was checking.
+- The gate's two failures were both this. `a_faulted_venue_exits_nonzero...`
+  failed deterministically because the fault fixture declares `warmup_ns = 0`,
+  so it never reached the fault at all, and
+  `a_short_accelerated_run_is_not_over_before_it_is_ready` failed one run in
+  three because a loaded host stretches boot latency past the accelerated
+  warmup's overshoot. Both were confirmed PRE-EXISTING by running them against
+  the round's base commit, and both are green after the fix; the flaky one
+  passed 10 of 10.
+- `a_venue_without_warmup_still_publishes_its_tape` and the `no-warmup.toml`
+  fixture pin the boot shape directly rather than through the fault fixture's
+  side door. Bite-checked: restoring the simulated-now target makes it fail
+  because the venue is gone by the time the socket opens.
+
+Verified rather than accepted:
+
+- THE WIRE FORM DID NOT MOVE, and it is pinned rather than argued. `Symbol` is
+  a serde `rc` `Arc<str>`, whose impls forward to the inner `str`, and
+  `messages.rs` carries an EXACT-EQUALITY frame table that both serializes a
+  `QuoteTick` to a literal JSON string and re-serializes the decode. That test
+  is untouched by the diff and green, so the JSON a nautilus consumer parses is
+  byte-identical. `Arc<str>` is `Send + Sync` exactly as `String` was, so no
+  thread-boundary obligation changed; the cost that did change is that a symbol
+  clone is now an atomic increment rather than a heap copy.
+- NO `TAPE_PROTOCOL_VERSION` BUMP IS OWED, and the exact-equality artifacts are
+  the argument rather than a reading of the diff. No committed artifact under
+  `analysis/` or `crates/mogwai-server/tests/golden/` is modified by this round,
+  and the goldens that bind them - the fill golden, the arrival transcripts and
+  the checkpoint continuation golden - are green. A change that moved a draw,
+  a seed derivation, an emitted value or the tape origin could not leave all of
+  them untouched and passing. The three changed values are structural: an
+  `Arc<str>` symbol carries the same characters, `PublishedBook` drops metadata
+  the generator never read (only `sizes.bid` and `sizes.ask` ever reached a
+  quote), and the settlement day-step returns the same instant set because
+  `MINUTES_PER_WEEK` is a whole multiple of `MINUTES_PER_DAY`, so the old
+  per-minute civil-time predicate matches exactly one minute per day - the one
+  the new arithmetic solves for directly. 14 stays live, 15 stays reserved for
+  protocol-12b.
+- THE `MergeSource` PROSE IS TRUE, checked claim by claim against the code
+  rather than against the round's report. The scan is a linear `min_by_key`
+  over per-source heads; `latch_fault` really does latch a child fault and
+  blank every head; `starting_at` seeks each child and BUFFERS the returned
+  tick, which is the inclusive-start contract `source.rs` relies on. Only the
+  tie rule was asserted without a test - `min_by_key` returning the first
+  minimum is a documented guarantee, but the doc now states the behaviour, so
+  `merge_breaks_timestamp_ties_by_source_index` pins it with three sources and
+  a tie run.
+- THE `Arc<str>` REFACTOR EARNS ITS BLAST RADIUS ON STRUCTURAL GROUNDS ONLY,
+  and `reference/performance.md` says so in those words. The measurements found
+  no throughput win (300 ms unchanged; a 0.38 percent positioning point
+  estimate criterion called undetectable), and the durable record states the
+  retained result as eliminated heap duplication rather than a wall. It is kept
+  because the reported defect WAS an allocation defect and the fix removes the
+  crate's most frequent allocation from the feed, history and key paths at no
+  measured cost - not because it made anything faster.
+- Both of the round's negative controls bite, checked by reverting the
+  production change and observing the named failure in RELEASE. Reverting
+  `next_child`'s shared symbol fails
+  `clones_share_immutable_config_and_emitted_symbol_storage` on its `ptr_eq`;
+  restoring the minute scan fails the settlement test on the instant list
+  itself, not only on the candidate count.
+
+Consumer-visible surface, recorded in `notes/todo.md`: `mogwai_protocol::Symbol`
+is no longer `String`, which is a source-breaking change for anything
+constructing wire types by hand. broadarrow is the known consumer.

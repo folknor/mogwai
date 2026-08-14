@@ -945,3 +945,28 @@ walk is, and it is untouched by checkpoint spacing. So a 53x positioning win
 shows up here as roughly 3 ms. Re-scoping the reading window remains the lever
 that would move this number materially, and remains unapplied because it moves
 the estimator's identity and re-blesses the fill golden.
+
+## 2026-08-15 data ownership and micro-optimization audit
+
+Host `bygg`, release, current working tree against commit `0352f64`. The
+registered `arrival_walk` surface ran five identical 6,000,000-parent,
+50,914,229-child walks before and after the proposed cached geometric
+denominator. Both read 300 ms externally. Baseline UUID `307adca9` records
+300 / 300 / 301 / 301 / 300 ms; the changed dirty-tree run read 300 ms. The
+cache therefore did not earn its landing and was reverted.
+
+Checkpoint `source_positioning` measured 202.27 us before and 199.80 us after
+sharing `GeneratorScalars` and `SessionCalendar` across generator clones.
+Criterion reported no detectable change: 0.38% point estimate, p = 0.05, with
+a 0.02% to 0.76% interval. The change is retained for allocation identity, not
+claimed as a throughput win: one symbol string and one calendar window vector
+now back the lead plus every retained snapshot, instead of one heap copy per
+clone. The committed warmup retains roughly 520 snapshots and the hard cap
+remains 4,096, including pinned control boundaries.
+
+The per-event ownership reductions are pinned directly instead of inferred
+from a wall dominated by stochastic generation. `PublishedBook` is 48 bytes
+and contains only two tick prices and two decimal sizes; fitted corpus metadata
+stays in `GeneratorScalars`. Materialized trade and quote symbols share one
+`Arc<str>` allocation with the generator, and `TickRuleAggressor` retains that
+same allocation as its key. Their JSON representation is unchanged.

@@ -29,7 +29,8 @@ use super::source::GeneratedSource;
 /// unbounded per-`k`-ticks growth. 4096 keeps coarsening rare (the first only
 /// after `4096 * k` ticks, ~34M ticks at the server's K of 8192) so the
 /// residual drain stays at the base `k` for any realistic run, while capping
-/// worst-case memory at a few tens of MB.
+/// worst-case mutable-state memory. Immutable generator scalars and the session
+/// calendar are shared by the lead and every snapshot.
 pub(super) const MAX_CHECKPOINTS: usize = 4096;
 
 /// One retained walk state.
@@ -48,8 +49,8 @@ struct Snapshot {
 
 pub struct CheckpointIndex {
     /// A generator advanced to the frontier; cloned to extend the chain and to
-    /// hand out positioned sources. Carries the immutable config every snapshot
-    /// shares.
+    /// hand out positioned sources. Immutable config is reference-counted by
+    /// `GeneratedSource`, so cloning the lead copies only mutable walk state.
     lead: GeneratedSource,
     /// Snapshots in ascending `clock_ns`; `[0]` is the origin (pre-first-tick).
     checkpoints: Vec<Snapshot>,

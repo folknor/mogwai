@@ -680,12 +680,12 @@ async fn market_reading(
     ts: u64,
 ) -> (ClientMessage, Option<mogwai_engine::MarketReading>) {
     let symbol = match &msg {
-        ClientMessage::SubmitOrder(order) => Some(order.symbol.clone()),
+        ClientMessage::SubmitOrder(order) => Some(std::sync::Arc::clone(&order.symbol)),
         // A run is one instrument (`Run::instrument`), so an amend's symbol is
         // the run's own. Looking it up through the engine would mean taking the
         // execution lock on the command path to learn something already known.
         ClientMessage::ModifyOrder { price: Some(_), .. } => {
-            Some(state.run.instrument.symbol.clone())
+            Some(std::sync::Arc::clone(&state.run.instrument.symbol))
         }
         _ => None,
     };

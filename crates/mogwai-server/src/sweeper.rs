@@ -71,7 +71,10 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
             let scans = { sweep.run.engine.lock().await.pending_scans() };
             let mut groups: HashMap<String, Vec<_>> = HashMap::new();
             for scan in scans {
-                groups.entry(scan.symbol.clone()).or_default().push(scan);
+                groups
+                    .entry(scan.symbol.to_string())
+                    .or_default()
+                    .push(scan);
             }
             let mut results = Vec::new();
             for (symbol, scans) in groups {
@@ -114,7 +117,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 .flat_map(|(symbol, instants)| {
                     instants
                         .into_iter()
-                        .map(move |instant| (symbol.clone(), instant))
+                        .map(move |instant| (std::sync::Arc::clone(symbol), instant))
                 })
                 .collect();
             let profiles = Arc::clone(&sweep.profiles);
@@ -179,13 +182,14 @@ fn read_marks(
     let marks: Vec<_> = symbols
         .iter()
         .filter_map(|symbol| {
-            fills::read_last(symbol, to_ns, profiles).map(|px| (symbol.clone(), px))
+            fills::read_last(symbol, to_ns, profiles).map(|px| (std::sync::Arc::clone(symbol), px))
         })
         .collect();
     let settlement_marks: Option<Vec<_>> = settlements
         .iter()
         .map(|(symbol, instant)| {
-            fills::read_last(symbol, *instant, profiles).map(|px| (symbol.clone(), *instant, px))
+            fills::read_last(symbol, *instant, profiles)
+                .map(|px| (std::sync::Arc::clone(symbol), *instant, px))
         })
         .collect();
     Some((marks, settlement_marks?))
@@ -413,7 +417,7 @@ mod tests {
 
         let (marks, settlement_marks) = read_marks(
             std::slice::from_ref(&known),
-            &[(known.clone(), readable)],
+            &[(std::sync::Arc::clone(&known), readable)],
             readable,
             &profiles,
         )
@@ -422,8 +426,11 @@ mod tests {
         assert_eq!(settlement_marks.len(), 1);
 
         let (marks, settlement_marks) = read_marks(
-            &[known.clone(), unknown.clone()],
-            &[(known.clone(), readable)],
+            &[
+                std::sync::Arc::clone(&known),
+                std::sync::Arc::clone(&unknown),
+            ],
+            &[(std::sync::Arc::clone(&known), readable)],
             readable,
             &profiles,
         )
@@ -434,7 +441,10 @@ mod tests {
         assert!(
             read_marks(
                 std::slice::from_ref(&known),
-                &[(known.clone(), readable), (unknown, readable)],
+                &[
+                    (std::sync::Arc::clone(&known), readable),
+                    (unknown, readable)
+                ],
                 readable,
                 &profiles,
             )
