@@ -869,9 +869,25 @@ Verified rather than accepted:
   production change and observing the named failure in RELEASE. Reverting
   `next_child`'s shared symbol fails
   `clones_share_immutable_config_and_emitted_symbol_storage` on its `ptr_eq`;
-  restoring the minute scan fails the settlement test on the instant list
-  itself, not only on the candidate count.
+  restoring the minute scan fails the settlement test on its candidate
+  counter (14,400 versus 10). The instant list is the SAME under both
+  arithmetics - that identity is the no-bump argument - so the counter is
+  the only assertion that can bite, which is why the test carries one.
 
 Consumer-visible surface, recorded in `notes/todo.md`: `mogwai_protocol::Symbol`
 is no longer `String`, which is a source-breaking change for anything
 constructing wire types by hand. broadarrow is the known consumer.
+
+## Standing process note: never undo a bite-check revert with git
+
+A bite check reverts a production change, confirms the test fails, and restores
+it. TWICE in this loop an agent restored it with `git checkout -- <path>` and
+destroyed the whole file back to HEAD, wiping uncommitted work an EARLIER stage
+had left in the tree. Both times the work was reconstructed and verified, and
+both times it was luck rather than process.
+
+The tree in this loop routinely carries a prior stage's uncommitted work, so
+`git checkout -- <path>` is never the right undo: it discards everything in the
+file, not the one edit under test. Revert and restore a bite check as a TEXT
+EDIT, the same way it was made. If a bite check genuinely needs a wholesale
+revert, stash or copy the file first and restore from that copy.

@@ -588,9 +588,9 @@ table so historical fixtures remain auditable.
 
 `arrival-solve` with its `--cost-probe` mode, the seam declaration in
 `presets/mnq.toml`, `presets emit --omit`, the legacy byte-identity
-procedure, confirmation, `TAPE_PROTOCOL_VERSION = 13` (renumbered by
-the 2026-08-09 calibration amendment; 12 is consumed by the frame
-repair), and
+procedure, confirmation, `TAPE_PROTOCOL_VERSION = 15` (AMENDED
+2026-08-15 from 13: identities 13 and 14 were consumed by the
+engine-arc and data-arc bug-fix bumps; 12 by the frame repair), and
 `analysis/mnq-arrival-selection.json`.
 
 - Binding sections: 10 (gates, ordered selection, confirmation), 9.4
@@ -627,8 +627,10 @@ The landing closes with exactly one of:
 
 - `mechanism-landed` - a candidate family and parameter point passes
   every hard gate of section 10, the generator change lands
-  instrument-resolved with `TAPE_PROTOCOL_VERSION` at 13 (renumbered
-  2026-08-09; identity 12 is the frame repair's), and the
+  instrument-resolved with `TAPE_PROTOCOL_VERSION` at 15 (AMENDED
+  2026-08-15 from 13: identities 13 and 14 were consumed by the
+  engine-arc and data-arc bug-fix bumps; 12 is the frame repair's),
+  and the
   unamended 12a ladder re-runs against the repaired tape. The ladder
   verdict is recorded, not required to be any particular value.
 - `negative-control-passed` - the deterministic hourly re-centring of
@@ -679,10 +681,14 @@ closes the frozen run rather than returning to tuning.
    preserved BYTE for BYTE with no re-bless of the crypto tapes, and a
    mechanism that cannot preserve the legacy branch exactly is
    ineligible.
-4. `TAPE_PROTOCOL_VERSION` moves in TWO steps (renumbered 2026-08-09):
-   11 to 12 at the calibration-repair landing, which changes outputs
-   for already-expressible integrated configurations, and 12 to 13 at
-   the Brick S mechanism landing. No other commit moves it.
+4. `TAPE_PROTOCOL_VERSION` moves in TWO steps (renumbered 2026-08-09;
+   AMENDED 2026-08-15): 11 to 12 at the calibration-repair landing,
+   which changes outputs for already-expressible integrated
+   configurations, and to 15 at the Brick S mechanism landing.
+   "No other commit moves it" is superseded by the unconditional bump
+   rule: the engine-arc and data-arc bug fixes consumed 13 and 14, so
+   the mechanism landing takes whatever the live reservation is at
+   landing time (15 as of this amendment).
 
 12a section 1.2 also inherits a two-sided minute-range body gate here:
 the p99 minute-range statistic gets a LOWER acceptance bound from the
@@ -3171,8 +3177,9 @@ byte-identical branch; the capped joint solve over every Stage A
 survivor in loss order; the
 confirmation run; the grid-sensitivity re-run; the selected mechanism
 and parameters in `presets/mnq.toml` with full provenance;
-`TAPE_PROTOCOL_VERSION = 13` (renumbered 2026-08-09; identity 12 is
-the frame repair's); and
+`TAPE_PROTOCOL_VERSION = 15` (AMENDED 2026-08-15 from 13: identities
+13 and 14 were consumed by the engine-arc and data-arc bug-fix bumps;
+12 is the frame repair's); and
 `analysis/mnq-arrival-selection.json`.
 
 Legacy byte identity, exact procedure. Revision 2's command was
