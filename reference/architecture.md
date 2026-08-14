@@ -247,7 +247,13 @@ p90 16. `0.005` is still the smallest multiplier satisfying the median rule, so
 neither the band nor the fill golden's banded half needed to move.
 
 Reading the market at a submit is correspondingly more expensive: the walk costs
-about 12.6 ms, so acceptance-time readings are memoized per symbol per
+about 9.8 ms as of 2026-08-14 (median over 100 distinct buckets, release, host
+`bygg`, measured by the ignored `read_market_latency_stays_within_submit_budget`
+instrument, versus the 12.6 ms recorded before the checkpoint stride was
+repaired). The residual replay is now a small part of that: the 300 s
+volatility window is the walk, which is why cutting checkpoint positioning by
+53x moved this number by only a few milliseconds. So acceptance-time readings
+are memoized per symbol per
 fill-sweep interval and a submit sees a reading that may be up to one interval
 stale. A market order therefore fills at or beyond the market as of that
 reading, not as of the fill instant.

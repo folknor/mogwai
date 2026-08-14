@@ -19,6 +19,27 @@ Or both. There are no exceptions.
 
 ## Open issues
 
+- SERVE N INSTRUMENTS FROM ONE VENUE (consumer ask, broadarrow, recorded
+  2026-08-14). broadarrow can now ATTACH to an operator-owned `mogwai serve`
+  (its scenario names the ReadyRecord's addr plus run_seed, and the run-seed
+  identity check refuses a wrong venue), and multi-account already lets N
+  attached runs each bring their own `?account=` ledger. The end state the
+  consumer is driving toward: one durable venue, an orchestrator handing ~50
+  concurrent strategy-search workers the attach details - and that wants
+  instrument BREADTH, because today one venue serves exactly one instrument,
+  so 50 attached runs are 50 accounts on one tape, and a second symbol costs
+  a second venue plus per-venue bookkeeping. The config's instrument table
+  and per-symbol presets (MNQ, MES, BTCUSDT) already exist; the real work is
+  per-instrument tape generation and subscriptions, per-instrument fill
+  bands, margin/settlement across a mixed book - and the intake rule stands:
+  each admitted instrument owes a realistic tape (corpus, measure, fit,
+  preset), not an alias. Consumer-side note: broadarrow's
+  `run_prep::mogwai_facts` deliberately refuses a `/instruments` answer of
+  anything but exactly one instrument, so a venue that starts serving many
+  BREAKS its build loudly (their designed break point, their half to close by
+  selecting on the strategy's frontmatter symbol); the ReadyRecord's singular
+  `symbol` field needs a schema decision at the same time.
+
 - GATE the hand-maintained tape-version prose the way the artifact binding
   blocks are gated. Surfaced by the bug-hunt loop on 2026-08-14: when
   `TAPE_PROTOCOL_VERSION` went to 13, six separate durable statements had to
@@ -31,6 +52,18 @@ Or both. There are no exceptions.
   constant. The prose has no such gate, so the next bump will silently miss
   it again. Cheap fix in the same shape: a test asserting the durable
   documents name the live constant.
+
+  The same class hit again on 2026-08-14, and NOT only for the version
+  constant, which is the part that makes a narrow version-only gate a partial
+  fix. `reference/architecture.md` carried a 12.6 ms market-reading cost that a
+  stride change had superseded; `checkpoint.rs` argued its safety from a
+  `BoundedSeek` type that had been deleted from the tree, in three separate
+  comments; `tick_composition_ratios.rs` claimed to decide `CHECKPOINT_K`,
+  which stopped being true when that constant became a latency tradeoff rather
+  than a reach ceiling. A gate on a named constant catches the first kind. The
+  general kind - durable prose asserting a measured number or a live type -
+  wants either a citation convention that can be checked (a symbol name a test
+  can resolve) or a review habit of grepping the identifier before deleting it.
 
 - DECIDE whether the protocol-12b Stage A refinement pass should run at
   all. Deferred by the owner on 2026-08-09 rather than settled, so the
@@ -328,8 +361,13 @@ Or both. There are no exceptions.
   the question and add a direct assertion that a banded trigger differs from its
   stated price, which is cheap but proves much less.
 
-- RE-SCOPE the acceptance-time market reading, or accept 12.6 ms inside a
-  submit. Measured 2026-08-03 by `read_market_latency_stays_within_submit_budget`
+- RE-SCOPE the acceptance-time market reading, or accept 9.8 ms inside a
+  submit. Re-measured 2026-08-14 after the checkpoint stride repair: miss median
+  9.782 ms, p99 9.987 ms, hit 0.096 ms, on host `bygg` in release. The stride
+  repair cut checkpoint positioning by 53x and moved this by under 3 ms, which
+  settles where the cost lives: the 300 s `VOL_WINDOW_NS` walk, not the restore.
+  Everything below still stands with 12.6 read as 9.8. Originally measured
+  2026-08-03 by `read_market_latency_stays_within_submit_budget`
   after that instrument was corrected to time the cache MISS rather than a
   warmed hit. The cadence landing applied lever two of that gate's own
   KEEP/REVERT rule (memoize per symbol per sweep interval, `MarketReadingCache`)

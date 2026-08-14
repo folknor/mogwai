@@ -31,16 +31,15 @@ const SPAN_NS: u64 = 1_000_000_000;
 const BUDGET: usize = 1_434_000_000;
 /// Mirrors the server's checkpoint spacing (`source::CHECKPOINT_K`), so the
 /// positioning benchmark restores from the same grid and pays the same residual
-/// drain the sweeper does. Note the stride exceeds `BENCH_SEEK_TICKS` at this
-/// value as it did at the old one, so the restore is from the origin snapshot
-/// and the residual is the whole bench walk either way.
-const CHECKPOINT_K: usize = 4_194_304;
+/// drain the sweeper does.
+const CHECKPOINT_K: usize = 8_192;
 /// This BENCH's own walk length. It has no server counterpart: the server's
 /// per-request seek budget (`MAX_HISTORY_SEEK_TICKS`) died with the lazy
 /// history path, because a declared warmup is materialized eagerly and a
 /// request below the floor is refused by name rather than served short. What
 /// remains here is simply how far this benchmark walks.
-const BENCH_SEEK_TICKS: usize = 190_000;
+const BENCH_SEEK_TICKS: usize = 1_000_000;
+const POSITION_TARGET_NS: u64 = ORIGIN + 3_600_000_000_000;
 
 fn source() -> GeneratedSource {
     let fp = Fingerprint::from_repo_json();
@@ -129,7 +128,7 @@ fn benches(c: &mut Criterion) {
         CHECKPOINT_K,
         BENCH_SEEK_TICKS,
     ));
-    let target = ORIGIN + SPAN_NS;
+    let target = POSITION_TARGET_NS;
     // Prime the index so the timed region measures a steady-state restore rather
     // than the one-off from-origin extension, which is what the server pays after
     // its first pass on a symbol.

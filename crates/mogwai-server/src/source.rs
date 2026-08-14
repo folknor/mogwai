@@ -125,16 +125,12 @@ fn generator(profile: &InstrumentProfile) -> GeneratedSource {
 /// seek BUDGET that used to cap it: there is no `MAX_HISTORY_SEEK_TICKS` any
 /// more and no request is served short because it ran out of walk. A request
 /// below the floor is refused by name instead, which is the whole point.
-/// Protocol 8's composition measurement raised the stride to 4,194,304 ticks
-/// (twice the worst measured 8/7 p99.9 expansion of the prior 1,048,576
-/// stride); protocol 10's raised it to 16,777,216 against the fitted MNQ
-/// cadence's 1.6x peak-density expansion; protocol 11's session refit
-/// redistributes arrivals across hours (measured 11/10 p99.9 ratio
-/// 1.09375), and the standing headroom rule - prior times ratio times two,
-/// rounded up to a power of two - lands here; see
-/// `reference/performance.md`. This budget is denominated in ticks per
-/// simulated second.
-pub(crate) const CHECKPOINT_K: usize = 67_108_864;
+/// The stride is a latency/memory tradeoff, not a reach budget. Reach and
+/// refusal ceilings are sized separately below. At 8,192 ticks the initial
+/// grid bounds an ordinary restore to a few milliseconds while the hard
+/// `MAX_CHECKPOINTS` cap still bounds retained generator clones; exceptionally
+/// long runs coarsen the grid as documented by `CheckpointIndex`.
+pub(crate) const CHECKPOINT_K: usize = 8_192;
 
 /// Runaway backstop on a SINGLE extension while the global index lock is held.
 /// This retains the original one-billion-tick safety purpose: a nonsensical
@@ -155,7 +151,12 @@ const MAX_WARMUP_MATERIALIZATION_TICKS: usize = 1_335_079_000_000;
 /// The run's one checkpoint chain, over the run's one realization. Process
 /// global because the run is: one instrument, one regime, one origin for the
 /// life of the process, so there is nothing left to key it by.
-static INDEX: OnceLock<Mutex<CheckpointIndex>> = OnceLock::new();
+struct RunIndex {
+    symbol: Symbol,
+    checkpoints: Mutex<CheckpointIndex>,
+}
+
+static INDEX: OnceLock<RunIndex> = OnceLock::new();
 
 /// Everything that fixes WHICH tape this process serves: the run's derived
 /// seeds and the regime it was launched with. Boot config now rather than a
@@ -187,16 +188,19 @@ pub(crate) fn set_boot_for_test(boot: BootTape) {
 
 /// The run's chain, rooted at the fixed tape origin and reused thereafter.
 fn index(symbol: &str, profiles: &InstrumentProfiles) -> Option<&'static Mutex<CheckpointIndex>> {
-    if let Some(existing) = INDEX.get() {
-        return Some(existing);
-    }
     let profile = profiles.get(symbol)?;
-    let origin = generator(profile);
-    Some(
-        INDEX.get_or_init(|| {
-            Mutex::new(CheckpointIndex::new(origin, CHECKPOINT_K, MAX_EXTEND_TICKS))
-        }),
-    )
+    if let Some(existing) = INDEX.get() {
+        return (existing.symbol == symbol).then_some(&existing.checkpoints);
+    }
+    let run_index = INDEX.get_or_init(|| RunIndex {
+        symbol: profile.def.symbol.clone(),
+        checkpoints: Mutex::new(CheckpointIndex::new(
+            generator(profile),
+            CHECKPOINT_K,
+            MAX_EXTEND_TICKS,
+        )),
+    });
+    (run_index.symbol == symbol).then_some(&run_index.checkpoints)
 }
 
 fn locked(
@@ -239,7 +243,7 @@ pub(crate) fn build_history_source(
     profiles: &InstrumentProfiles,
 ) -> Option<Box<dyn TickSource>> {
     let index = index(symbol, profiles)?;
-    let positioned = locked(index).source_at_or_before(start.unwrap_or(TAPE_ORIGIN_NS));
+    let positioned = locked(index).try_source_at_or_before(start.unwrap_or(TAPE_ORIGIN_NS))?;
     Some(Box::new(MergeSource::starting_at(
         vec![Box::new(positioned)],
         start,
@@ -297,7 +301,7 @@ pub(crate) fn last_trade_at_or_before(
     profiles: &InstrumentProfiles,
 ) -> Option<Decimal> {
     let index = index(symbol, profiles)?;
-    let mut source = locked(index).source_at_or_before(ts);
+    let mut source = locked(index).try_source_at_or_before(ts)?;
     let mut last = None;
     while let Some(tick) = source.next_tick() {
         let TickEvent::Trade(trade) = tick else {

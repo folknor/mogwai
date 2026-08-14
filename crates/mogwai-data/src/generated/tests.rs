@@ -620,11 +620,7 @@ fn checkpoint_extension_is_capped() {
     let first_frontier = index.frontier_ns();
     assert_eq!(index.extend_toward(unreachable_target), cap);
     assert!(index.frontier_ns() > first_frontier);
-    let positioned = index.source_at_or_before(unreachable_target);
-    assert!(
-        positioned.clock_ns() < unreachable_target,
-        "a target past the extension cap must not be reached in one call"
-    );
+    assert!(index.try_source_at_or_before(unreachable_target).is_none());
     // Three bounded calls were made, so at most `3 * cap / K` interior
     // snapshots were taken beyond the origin.
     assert!(

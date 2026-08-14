@@ -6,134 +6,50 @@ Scope: `source.rs`, `tape.rs`, `gen.rs`, `fills.rs`, `fill_golden.rs`,
 Hunter: Claude Opus, single coverage. Findings are a work document, not a
 contract - they may be wrong.
 
-Cross-scope: findings 2 and 6 confirm and extend `bugs-data.md` findings 2 and 1.
+Cross-scope, for whoever picks up `bugs-data.md`: finding 6 here confirms and
+extends its finding 1. Its finding 2 (`BoundedSeek` cited by docs that do not
+have it) is CLOSED by round 1 here - the identifier is gone from the tree and
+`try_source_at_or_before` is the real refusal. Its finding 4 quotes
+`CHECKPOINT_K` as 4,194,304; round 1 set it to 8,192, so that finding's
+arithmetic is stale even where its shape survives, and what survives of it is
+restated as 4a below.
 
-## 1. The sweeper runs two blocking tape walks directly on a tokio worker (confirmed, high)
+Findings 1 through 5 were closed in round 1. Finding 4 was closed only in part,
+and what it left open is restored below as finding 4a rather than carried in a
+commit message nobody will read again.
 
-`sweeper.rs`. Phase two and three of every pass call, inline in the async task:
+## 4a. Every skipped tick of a checkpoint walk is fully materialized
 
-- `sweep.market_readings.read(...)` - on a cache miss, `fills::read_market` -
-  checkpoint restore plus a 300 s window walk. The crate's own instrument
-  (`fills.rs`) measures this at ~12.6 ms median.
-- `fills::read_last(symbol, to_ns, ...)` - `source::last_trade_at_or_before` -
-  checkpoint restore plus a residual replay bounded only by `CHECKPOINT_K` =
-  4,194,304 ticks (~1.4 s at the documented 2.9M ticks/s).
-- The same `read_last` again per settlement instant.
+The RESIDUAL of finding 4, separated out because it is independent of the
+FlowSurge ruling that fenced the rest. Finding 4 proposed one live forward walk
+publishing a print ring and an incremental volatility estimator; that rewrite
+decides how the live wire and the fill-deciding tape relate, which is finding 6,
+so it stays deferred. This part decides nothing of the sort.
 
-`fills.rs` states as contract, twice: "Synchronous and CPU-bound; callers run it on
-`spawn_blocking`." `sweeper.rs` repeats it: "the tape walk ... runs OFF the engine
-lock and on `spawn_blocking` or it stalls both order entry and a runtime worker."
-Only the `scan_triggers` call honours it. The mark/settlement half does not.
+`GeneratedSource` does not override `TickSource::seek_to`, so the trait default
+loops `next_tick`. Both places that skip ticks therefore pay full materialization
+for every one of them:
 
-Failure scenario: a futures run at the default 100 ms interval stalls a runtime
-worker for tens of ms every pass, and up to ~1.4 s whenever `read_last`'s residual is
-long (right after boot, or after any period with no history reads to advance the
-shared lead). Under acceleration `MIN_SWEEP_WALL` puts the pass every 5 ms wall, so
-the worker is essentially never released. This also holds the process-global `INDEX`
-mutex for the extend portion, so `/trades`, `/quotes` and submits queue behind it.
+- `CheckpointIndex::extend_toward` walks the lead with `next_tick`. The boot
+  warmup is exactly this walk - 4,288,935 ticks on the committed default config,
+  measured at 2.9M ticks/s.
+- the residual replay after a restore, through `MergeSource::starting_at`'s
+  default `seek_to`.
 
-Additionally `MarketReadingCache::read` uses `.expect("market reading cache
-poisoned")` where every other lock site in the crate uses `PoisonError::into_inner`.
-One panic inside `read_market` converts a transient fault into a permanently wedged
-submit and sweep path.
+Each skipped tick allocates a `Symbol` String and constructs two `Decimal`s that
+are immediately discarded. `GeneratedSource::advance_parent` already advances
+without materializing, and `tick_composition.rs` demonstrates it agrees with the
+wire walk, so a `seek_to` override that advances whole parents and materializes
+only the tail parent is the shape of the fix.
 
-## 2. `BoundedSeek` is gone and nothing replaced it - the hang guard is now fictional
+Round 1 shrank `CHECKPOINT_K` from 67,108,864 to 8,192, which cut the number of
+ticks a restore replays by 53x. It did not make a skipped tick cheaper, and it
+does not touch the warmup walk at all, which is where the multiple is largest.
 
-`BoundedSeek` exists nowhere in the repo. Three durable comments still claim it is
-load-bearing:
-
-- `fills.rs` - "`BoundedSeek` caps only its `seek_to`; its `next_tick` delegates
-  uncapped..."
-- `checkpoint.rs` - "A target past this bound leaves the frontier short; the caller's
-  own `BoundedSeek` then caps too and the seek yields an empty page instead of
-  hanging."
-- `checkpoint.rs` again, and `reference/performance.md`.
-
-That second one is now false and it is the safety argument for `MAX_EXTEND_TICKS`.
-Actual path today: `build_history_source` -> `source_at_or_before(start)` ->
-`extend_toward` walks at most `1<<30` ticks and returns a checkpoint short of `start`
--> `MergeSource::starting_at` calls the trait-default `seek_to`, which loops
-`next_tick` until `ts_event >= start`. `GeneratedSource::next_tick` never returns
-`None`. So a target more than 2^30 ticks past the frontier is an infinite loop, not
-an empty page.
-
-Reachability: `/trades` and `/quotes` clamp `start <= sim_now`, which is the only
-reason this is currently latent. It becomes live if (a) the shared lead falls more
-than 2^30 ticks behind sim-now - nothing advances the lead except history/fill reads,
-since the tape worker walks an independent clone - or (b) any future caller passes an
-unclamped instant. The hang would consume a `spawn_blocking` thread permanently, one
-per request.
-
-`checkpoint.rs` also still says "~34M ticks at the server's K = 8192". K is
-4,194,304, 512x larger.
-
-## 3. `CHECKPOINT_K`'s stated rationale is incoherent, and the constant is now the dominant cost driver
-
-`source.rs` justifies raising the stride to 4,194,304 by pointing at "budget
-ceilings" and p99.9 expansion, while the same comment says the per-request seek
-budget no longer exists. But the stride's only cost function is the residual replay:
-a larger K means every restore replays more ticks. There is nothing left that the
-large K buys. It is what makes `read_market` cost 12.6 ms per miss and `read_last`
-cost up to 1.4 s. The comment reasons about a budget as if it were still capping the
-residual, when in fact the residual is now unbounded-in-practice latency paid by the
-submit path and the sweeper.
-
-Worse, the residual replay goes through `MergeSource::starting_at`'s default
-`seek_to`, which calls `next_tick` - and `GeneratedSource` does not override
-`seek_to`. So every skipped tick materializes a full `TradeTick`/`QuoteTick`: a
-`Symbol` String clone, two `Decimal`s, an `Option<QuoteTick>` shuffle - all
-discarded. `GeneratedSource::advance_parent` exists precisely to advance without
-materializing, and `tick_composition.rs` proves it is bit-identical to the wire walk.
-A `seek_to` override on `GeneratedSource` that uses `advance_parent` for whole parents
-and only materializes the tail parent would cut the restore cost by a large multiple,
-for a few dozen lines. This is the single highest-leverage fix in scope.
-
-## 4. Structural: the fill path re-synthesizes a tape the process is already walking
-
-Right now the process runs the realization at least twice over: the tape worker walks
-a live clone forward for the wire, and every 100 ms the sweeper restores a checkpoint
-and re-walks the same span for triggers, plus another 300 s for volatility, plus
-another residual for the last print. `/trades` restores again. Submits restore again.
-
-The right architecture, and the hunter would take the rewrite: make the tape worker
-the single forward walk and have it publish, alongside the broadcast frames, (a) a
-running last-print cell, (b) an incrementally maintained `VOL_WINDOW_NS` estimator,
-and (c) a bounded ring of recent prints covering at least one sweep interval plus a
-slack factor. Then:
-
-- `read_last` becomes an atomic load. `read_market` becomes an O(1) read of a
-  maintained estimator. `scan_triggers` reads the ring for the ordinary case
-  (`from_ns` inside the ring, which is the case for every resting order the sweeper
-  has already seen once) and falls back to the checkpoint chain only for a cold order.
-- The `MarketReadingCache` bucketing hack disappears entirely, and with it the
-  documented behaviour cost in `fills.rs` - that submits are decided against "a
-  reading NO OBSERVER CAN NAME". You get the exact per-submit reading back for free.
-- The `spawn_blocking` fleet, the global `INDEX` mutex contention, and the 12.6 ms
-  submit tax all go away.
-- `CHECKPOINT_K` can then be sized purely for cold `/trades` paging, where a small K
-  is strictly better.
-
-The checkpoint chain stays for what it is actually good at (arbitrary historical
-seeks); it stops being on the hot fill path.
-
-## 5. `index()` validates the symbol only on the first call - wrong-symbol tape
-
-`source.rs`:
-
-```rust
-if let Some(existing) = INDEX.get() { return Some(existing); }
-let profile = profiles.get(symbol)?;
-```
-
-After the chain is initialized (i.e. always, post-warmup), any symbol string returns
-the venue's one index. So `build_history_source("NOT-A-SYMBOL", ...)` returns a source
-over BTCUSDT's realization, and `last_trade_at_or_before("NOT-A-SYMBOL", ts, ...)`
-returns BTCUSDT's price. `/trades?symbol=GARBAGE` therefore returns a 200 with
-BTCUSDT-labelled ticks instead of an empty page or a 400. `read_market` accidentally
-survives this only because it does a second `profiles.get(symbol)?` for the
-increment. `fills::scan_triggers` does not - it will happily walk the wrong tape for a
-scan whose symbol is not the venue's. One venue per run makes this mostly unreachable
-today, but it is a soundness hole dressed as an early return, and the fix is one line.
+Cost check before doing it: this changes no emitted tick, but it does change the
+generator's execution path, and anything that moves a draw ordering owes a
+`TAPE_PROTOCOL_VERSION` bump. A `seek_to` that reuses `advance_parent` must be
+proven to consume the identical draws, by golden, before it lands.
 
 ## 6. FlowSurge: the live wire permanently forks from the tape everything else reads
 

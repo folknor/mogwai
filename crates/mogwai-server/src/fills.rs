@@ -15,9 +15,9 @@ use std::sync::Mutex;
 use crate::source::{self, InstrumentProfiles};
 
 /// Ticks one sweep pass may drain per symbol before it reports where it got to
-/// and stops. `BoundedSeek` caps only its `seek_to`; its `next_tick` delegates
-/// uncapped and `GeneratedSource` never ends, so the drain needs its own budget
-/// or a far-from-market order walks forever.
+/// and stops. Positioning refuses a target the checkpoint extension cap did
+/// not reach, but once positioned `GeneratedSource` never ends, so the drain
+/// needs its own budget or a far-from-market order walks forever.
 ///
 /// The original 5,000,000 cap covered ordinary multi-hour gaps of roughly
 /// 700,000 ticks. Protocol 7 raised it to 282,000,000 on the REQUIRED-REACH
@@ -99,7 +99,10 @@ impl MarketReadingCache {
         let width_ns = interval_ms.saturating_mul(1_000_000).max(1);
         let bucket_ns = ts / width_ns * width_ns;
         let mult_bits = mult.to_bits();
-        let mut entry = self.entry.lock().expect("market reading cache poisoned");
+        let mut entry = self
+            .entry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(cached) = entry.as_ref()
             && cached.symbol == symbol
             && cached.bucket_ns == bucket_ns
@@ -258,7 +261,7 @@ pub(crate) fn read_last(symbol: &str, ts: u64, profiles: &InstrumentProfiles) ->
 mod tests {
     use mogwai_data::{TickEvent, TickSource};
     use mogwai_engine::PendingScan;
-    use mogwai_protocol::Side;
+    use mogwai_protocol::{InstrumentClass, InstrumentDef, Side};
 
     use super::*;
 
@@ -433,6 +436,58 @@ mod tests {
             read_last("BTCUSDT", before_second, &profiles()),
             Some(ticks[0].1)
         );
+    }
+
+    #[test]
+    fn initialized_run_index_refuses_every_other_symbol() {
+        // The second symbol is FULLY RESOLVABLE - a real def, real scalars, a
+        // real session profile - so the refusal below can only come from the
+        // run index owning its symbol. Testing it with a symbol the profile
+        // table does not carry would pass against a `profiles.get` lookup that
+        // never looked at the initialized run at all.
+        let profiles = source::InstrumentProfiles::from_profiles(vec![
+            profiles().get("BTCUSDT").expect("shipped preset").clone(),
+            source::InstrumentProfile::new(
+                InstrumentDef {
+                    symbol: "SECOND".into(),
+                    class: InstrumentClass::Spot {
+                        base: "SEC".into(),
+                        quote: "USDT".into(),
+                    },
+                    price_precision: 2,
+                    size_precision: 8,
+                    price_increment: Decimal::new(1, 2),
+                    size_increment: Decimal::new(1, 8),
+                },
+                mogwai_data::GeneratorScalars::from_fingerprint_medians(
+                    "BTCUSDT",
+                    source::fingerprint(),
+                ),
+                source::fingerprint().session_profile.clone(),
+                None,
+                None,
+                None,
+            ),
+        ]);
+        assert!(source::build_history_source("BTCUSDT", Some(TEST_ORIGIN), &profiles).is_some());
+        assert!(
+            source::build_history_source("SECOND", Some(TEST_ORIGIN), &profiles).is_none(),
+            "the run index serves the symbol it was initialized on and no other"
+        );
+        assert!(
+            source::build_history_source("NOT-A-SYMBOL", Some(TEST_ORIGIN), &profiles).is_none()
+        );
+    }
+
+    #[test]
+    fn market_reading_cache_recovers_after_a_poisoned_lock() {
+        let cache = MarketReadingCache::default();
+        let poisoned = std::panic::catch_unwind(|| {
+            let _guard = cache.entry.lock().unwrap();
+            panic!("poison cache for test");
+        });
+        assert!(poisoned.is_err());
+        let _ = cache.read("BTCUSDT", TEST_ORIGIN, &profiles(), 0.005, 200, 100);
     }
 
     #[test]
@@ -616,8 +671,7 @@ mod tests {
 
         // The refusal census above walks every instant; the band table walks a
         // STRIDED SUBSET of them, once per multiplier. Each walk pays a
-        // checkpoint restore whose residual is bounded by `CHECKPOINT_K`
-        // (1,048,576 ticks after protocol 7), so a full cross product
+        // checkpoint restore whose residual is bounded by `CHECKPOINT_K`, so a full cross product
         // costs more than the per-test budget allows. A quantile of a band
         // scale does not need 128 points; a refusal RATE against a 1% threshold
         // does, which is why only one of the two was thinned.
@@ -697,12 +751,12 @@ mod tests {
         println!("read_market median={median:?} p99={p99:?} cached={warm:?}");
         // MEASURED STATE, stated rather than assumed: at the raw-fill cadence a
         // 300 s window carries ~15,000 prints and a positioning restore replays
-        // up to `CHECKPOINT_K` ticks, so a MISS costs ~12.6 ms median - the
-        // 5 ms budget above is met on the HIT path only (~0.13 ms). Lever two
-        // of the KEEP/REVERT rule (`MarketReadingCache`) has been applied; lever
-        // one (re-scoping the reading, e.g. a shorter `VOL_WINDOW_NS`) has NOT,
-        // and it is deliberately out of scope for the cadence landing because it
-        // moves the estimator's identity and re-blesses the fill golden.
+        // up to `CHECKPOINT_K` ticks. The stride is deliberately small enough
+        // that this residual, rather than an old density-sized checkpoint
+        // interval, can satisfy the miss-path budget. The memo remains useful
+        // for command bursts and gives the hit path its own stricter gate.
+        // Measured 2026-08-14 on host `bygg`: miss median 9.78 ms, p99 9.99 ms,
+        // hit 0.096 ms. The window walk, not the restore, is what remains.
         //
         // So the two paths are gated separately and honestly: the hit path
         // against the original 5 ms budget, the miss path against a regression

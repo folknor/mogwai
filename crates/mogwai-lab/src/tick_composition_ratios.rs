@@ -4,12 +4,23 @@
 //! `analysis/tick_composition_ratios.py`: the BBO budget sizing policy.
 //!
 //! Pairs protocol composition fixtures and applies the budget policy that
-//! decides FOUR SHIPPED CONSTANTS - `CHECKPOINT_K`, the sweep drain budget, the
-//! warmup materialization ceiling and `fanout_depth`. It is an independent
-//! estimator, not a report generator: the resize rule in [`compare`] (worst
-//! p999 ratio, two-times headroom, power-of-two or next-million rounding, then
-//! the larger of that and the required reach) is the decision procedure those
-//! constants come from.
+//! decides the shipped REACH ceilings - the sweep drain budget, the extend
+//! ceiling, the warmup materialization ceiling and `fanout_depth`. It is an
+//! independent estimator, not a report generator: the resize rule in
+//! [`compare`] (worst p999 ratio, two-times headroom, power-of-two or
+//! next-million rounding, then the larger of that and the required reach) is
+//! the decision procedure those constants come from.
+//!
+//! `checkpoint_k` is still computed and reported, but it is NO LONGER a
+//! constant this policy decides. Checkpoint spacing bounds a residual REPLAY,
+//! not a reach: the index extends as far as it is asked to either way, and a
+//! wider stride buys only fewer retained generator clones at the cost of a
+//! longer restore. Sizing it by tick density therefore grew it to 67,108,864
+//! and made an ordinary one-hour positioning cost 115.85 ms. It is now the
+//! latency/memory tradeoff it always was, chosen in `mogwai-server`'s
+//! `source::CHECKPOINT_K` and measured in `reference/performance.md`. The
+//! proposal here is advisory, and the baselines below stay as the historical
+//! record of what the policy proposed when it did decide it.
 //!
 //! ITS OWN SUBCOMMAND, deliberately, rather than a `--report` mode on
 //! `tick-composition`. That command MEASURES a tape and this one BLESSES the
@@ -66,6 +77,9 @@ pub enum Acceptance {
 /// mode's resize has landed.
 #[derive(Clone, Copy, Debug)]
 pub struct Baseline {
+    /// Historical only, and the proposal derived from it is advisory: the
+    /// shipped checkpoint stride is a latency/memory tradeoff rather than a
+    /// reach ceiling. See the module header.
     pub checkpoint_k: f64,
     pub sweep_drain_budget: f64,
     pub max_extend_ticks: f64,

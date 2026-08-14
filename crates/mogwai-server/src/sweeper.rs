@@ -103,26 +103,6 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 }
             }
             let symbols = { sweep.run.engine.lock().await.futures_mark_symbols() };
-            let marks: Vec<_> = symbols
-                .iter()
-                .filter_map(|symbol| {
-                    sweep
-                        .market_readings
-                        .read(
-                            symbol,
-                            to_ns,
-                            &sweep.profiles,
-                            sweep.fill_band_vol_mult,
-                            sweep.fill_band_max_ticks,
-                            sweep.interval_ms,
-                        )
-                        .map(|reading| (symbol.clone(), reading.last_px))
-                        .or_else(|| {
-                            fills::read_last(symbol, to_ns, &sweep.profiles)
-                                .map(|px| (symbol.clone(), px))
-                        })
-                })
-                .collect();
             let settlements: Vec<_> = symbols
                 .iter()
                 .filter_map(|symbol| {
@@ -140,25 +120,83 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                         .map(move |instant| (symbol.clone(), instant))
                 })
                 .collect();
-            let settlement_marks: Vec<_> = settlements
-                .iter()
-                .filter_map(|(symbol, instant)| {
-                    fills::read_last(symbol, *instant, &sweep.profiles)
-                        .map(|px| (symbol.clone(), *instant, px))
-                })
-                .collect();
+            let profiles = Arc::clone(&sweep.profiles);
+            let market_readings = Arc::clone(&sweep.market_readings);
+            let mult = sweep.fill_band_vol_mult;
+            let max_ticks = sweep.fill_band_max_ticks;
+            let interval_ms = sweep.interval_ms;
+            let reads = run_blocking(move || {
+                let marks: Vec<_> = symbols
+                    .iter()
+                    .filter_map(|symbol| {
+                        market_readings
+                            .read(symbol, to_ns, &profiles, mult, max_ticks, interval_ms)
+                            .map(|reading| (symbol.clone(), reading.last_px))
+                            .or_else(|| {
+                                fills::read_last(symbol, to_ns, &profiles)
+                                    .map(|px| (symbol.clone(), px))
+                            })
+                    })
+                    .collect();
+                let settlement_marks: Vec<_> = settlements
+                    .iter()
+                    .filter_map(|(symbol, instant)| {
+                        fills::read_last(symbol, *instant, &profiles)
+                            .map(|px| (symbol.clone(), *instant, px))
+                    })
+                    .collect();
+                (marks, settlement_marks)
+            });
+            let reads = tokio::select! {
+                reads = reads => reads,
+                _ = completion.changed() => break,
+            };
+            last_swept_ns = frontier_after(last_swept_ns, to_ns, reads.is_some());
+            let Some((marks, settlement_marks)) = reads else {
+                // The reading task died. Abandoning the whole pass is the only
+                // safe response: the scan results are re-derivable (the engine
+                // still holds every pending scan at its unadvanced `from_ns`),
+                // while the settlement instants this interval crossed exist
+                // nowhere but in the span `last_swept_ns..to_ns`.
+                continue;
+            };
             let mut engine = sweep.run.engine.lock().await;
             let (events, emitted, originated) =
                 apply_engine_pass(&mut engine, &results, settlement_marks, &marks, to_ns);
             let shape = engine.book_shape();
             drop(engine);
-            last_swept_ns = to_ns;
             if events.is_empty() {
                 continue;
             }
             deliver(&sweep.run, &shape, &events, emitted, originated, to_ns);
         }
     })
+}
+
+/// Where the settlement frontier stands after a pass.
+///
+/// `last_swept_ns` is a WATERMARK, and the only record that a span is still
+/// owed settlement: the next pass asks the calendar for the instants inside
+/// `last_swept_ns..to_ns` and nothing ever looks further back than that. So it
+/// may only move over a span whose settlement prices were actually read.
+/// Advancing it on a failed reading pass - which is what treating the failure
+/// as an empty result does - retires every settlement instant the span crossed
+/// without anyone having priced them, permanently and silently.
+fn frontier_after(last_swept_ns: u64, to_ns: u64, read: bool) -> u64 {
+    if read { to_ns } else { last_swept_ns }
+}
+
+async fn run_blocking<F, T>(work: F) -> Option<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "fill sweep market-reading task failed");
+        })
+        .ok()
 }
 
 fn apply_engine_pass(
@@ -287,6 +325,66 @@ mod tests {
         SubmitOrder, TimeInForce, WireAssetClass,
     };
     use rust_decimal::Decimal;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_market_walk_does_not_occupy_the_runtime_worker() {
+        let runtime_thread = std::thread::current().id();
+        let walk = run_blocking(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            std::thread::current().id()
+        });
+        tokio::pin!(walk);
+        tokio::select! {
+            biased;
+            () = tokio::time::sleep(Duration::from_millis(5)) => {}
+            _ = &mut walk => panic!("blocking walk occupied the runtime worker"),
+        };
+        let walked_thread = walk.await.unwrap();
+        assert_ne!(walked_thread, runtime_thread);
+    }
+
+    #[test]
+    fn an_unread_pass_leaves_its_settlement_span_owed() {
+        let calendar = mogwai_data::SessionCalendar {
+            utc_offset_minutes: 0,
+            // Wraps the week, so every minute but the epoch-week's first is
+            // open and the settlement crossing below cannot be a closure.
+            open_windows: vec![mogwai_data::WeeklyWindow {
+                start_minute: 1,
+                end_minute: 0,
+            }],
+            settlement_minute_of_day: Some(960),
+        };
+        calendar.validate().expect("a valid always-open calendar");
+        let start = 0u64;
+        let week_ns = 7 * 86_400_000_000_000u64;
+        let instant = calendar.settlement_instants(start, week_ns)[0];
+        // The pass that crossed the settlement and failed to read a price for
+        // it, then the pass after it.
+        let crossed_to = instant + 60_000_000_000;
+        let next_to = crossed_to + 60_000_000_000;
+
+        let held = frontier_after(start, crossed_to, false);
+        assert_eq!(held, start, "an unread pass may not move the watermark");
+        assert!(
+            calendar
+                .settlement_instants(held, next_to)
+                .contains(&instant),
+            "the held watermark must leave the settlement to the next pass"
+        );
+        // Stated so the assertion above cannot be read as vacuous: the span is
+        // the ONLY record, so an advanced watermark loses the instant outright.
+        assert!(
+            !calendar
+                .settlement_instants(crossed_to, next_to)
+                .contains(&instant)
+        );
+        assert_eq!(
+            frontier_after(start, crossed_to, true),
+            crossed_to,
+            "a pass that did read its prices advances normally"
+        );
+    }
 
     fn engine_with_position() -> mogwai_engine::Engine {
         let def = InstrumentDef {

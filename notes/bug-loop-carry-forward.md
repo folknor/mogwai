@@ -272,3 +272,128 @@ observable only jointly with the fill-time check (needs distinguishable
 refusal reasons first), and the dev-vs-release profile split between the two
 brokkr entry points stands recorded above. The full engine suite was re-run
 in BOTH profiles after the fixes.
+
+## notes/bugs-server-tape.md, round 1 (findings 1 through 5)
+
+Classification:
+
+- Finding 1 REPRODUCED. Trigger walks were offloaded, but futures mark and
+  settlement reads still ran inline on a Tokio worker. The whole mark and
+  settlement read phase now runs as one blocking job. Completion races that
+  job and exits without booking late results; the blocking job itself may
+  finish after cancellation, as Tokio cannot cancel a running blocking task.
+  `MarketReadingCache` also recovers a poisoned lock like the other server
+  mutexes.
+- Finding 2 REPRODUCED IN ALTERED FORM. `BoundedSeek` was still gone and the
+  checkpoint stride had grown to 67,108,864. `CheckpointIndex` now exposes a
+  fallible positioning operation and refuses a target its bounded extension
+  did not reach. The infallible API panics loudly instead of returning a short
+  source that a downstream unbounded seek can walk forever. Server history,
+  fill and last-print paths use the fallible operation.
+- Finding 3 REPRODUCED IN ALTERED FORM. The density-derived checkpoint stride
+  was 67,108,864, not the report's 4,194,304. Density continues to size the
+  separate reach and drain ceilings; checkpoint spacing is 8,192 again and is
+  documented as the latency/memory tradeoff it actually is. A reshaped
+  one-hour `source_positioning` benchmark measured 115.85 ms at 67,108,864 and
+  2.184 ms at 8,192, a 53.0x reduction.
+- Finding 4 REPRODUCED AS A STRUCTURAL OBSERVATION, NOT AS AN INDEPENDENT
+  CORRECTNESS DEFECT. The paced worker and canonical indexed source still walk
+  separate clones. Combining them in this round would silently decide finding
+  6, because the paced clone carries FlowSurge while history and fills are
+  deliberately canonical in the current architecture. The actionable costs
+  named by finding 4 were the inline worker stalls and oversized residual,
+  fixed by findings 1 and 3. No shared live ring was introduced ahead of the
+  fenced FlowSurge ruling.
+- Finding 5 REPRODUCED. The process-global index now owns its symbol and
+  refuses every other configured or unknown symbol after initialization.
+
+Machinery introduced:
+
+- `CheckpointIndex::try_source_at_or_before` is the refusal boundary for a
+  capped extension. Do not replace it in server paths with the infallible
+  wrapper or a bare default `seek_to`.
+- The process-global checkpoint chain is a `RunIndex` carrying both symbol and
+  checkpoints. Profile membership alone is insufficient after initialization:
+  a config may know several symbols while one process still serves one tape.
+- `run_blocking` is the sweeper's CPU boundary for mark and settlement tape
+  reads. Run completion is selected while awaiting it so no result is applied
+  after completion.
+
+Verification and protocol ruling:
+
+- Negative controls were exercised. Making `run_blocking` execute its closure
+  inline fails `blocking_market_walk_does_not_occupy_the_runtime_worker`.
+  Restoring the symbol-less global makes
+  `initialized_run_index_refuses_every_other_symbol` fail. Restoring the old
+  cache poison behavior makes `market_reading_cache_recovers_after_a_poisoned_lock`
+  fail. Removing the short-frontier refusal makes the capped-extension gate
+  fail its `None` assertion.
+- No `TAPE_PROTOCOL_VERSION` bump is owed. Snapshot frequency and restore
+  refusal do not change generator state, draws, emitted ticks, seed derivation,
+  or tape origin. Version 14 remains reserved for the protocol-12b mechanism
+  landing, and no artifact was re-blessed.
+
+## notes/bugs-server-tape.md, round 1 review and close pass
+
+A cold read of the round-1 diff plus an audit of its claims. The classification
+above holds. One correctness defect was INTRODUCED by the round and is fixed
+here, and the finding-4 close was too soft and has been reopened in part.
+
+- THE SWEEP FRONTIER ADVANCED PAST WORK NOBODY DID. Moving the mark and
+  settlement reads onto a blocking task made them fallible, and the failure was
+  converted into a pair of empty vectors; the pass then applied empty marks and
+  set `last_swept_ns = to_ns` anyway. `last_swept_ns` is the ONLY record that a
+  span is owed settlement - the next pass asks the calendar for the instants in
+  `last_swept_ns..to_ns` and nothing looks further back - so a panicking reader
+  permanently and silently skipped every settlement its interval crossed. The
+  loop now abandons the pass without moving the watermark, through
+  `frontier_after`, whose whole job is to be the one place that decision is
+  made. Scan results are safe to drop with it: the engine still holds every
+  pending scan at its unadvanced `from_ns`. THIS IS THE THIRD TIME IN THE ARC
+  that a frontier advanced past unperformed work; treat any watermark
+  assignment that is not guarded by the success of the work it covers as a
+  defect on sight.
+- FINDING 4 IS REOPENED IN PART, as finding 4a in the document. The deferral
+  of the live-ring rewrite is correct and belongs to fenced finding 6. But
+  finding 4's other half - `GeneratedSource` has no `seek_to` override, so the
+  trait default materializes a `Symbol` String and two `Decimal`s for every
+  tick it skips - is independent of FlowSurge entirely, and shrinking
+  `CHECKPOINT_K` did not touch it. It also governs the boot warmup walk, which
+  is `extend_toward` and is not a restore at all. `advance_parent` is the
+  mechanism; a golden proving the draw sequence is unmoved is the price.
+- THE NO-BUMP VERDICT HOLDS, verified rather than accepted. `CHECKPOINT_K` is
+  read at exactly one site, `CheckpointIndex::new`, and the index only decides
+  WHICH already-walked snapshot a clone resumes from. `coarsen`'s own contract
+  is that dropping snapshots lengthens the residual and never changes emitted
+  ticks, and `checkpoint_resume_is_byte_identical` pins that. No seed, draw or
+  origin reads the constant. A stride change is free.
+- The 53x claim is properly recorded, and `reference/performance.md` now also
+  carries what it bought the SUBMIT path, which is much less: the market
+  reading went 12.6 ms to 9.782 ms median, because the 300 s volatility window
+  walk, not the restore, is the cost. `reference/architecture.md` and
+  `notes/todo.md` carried the 12.6 ms figure and are corrected.
+
+Durable prose corrected in the same pass, all of it in the class the
+`notes/todo.md` prose-gate item describes:
+
+- `checkpoint.rs`'s `extend_toward` still argued its safety from the deleted
+  `BoundedSeek`; that was the third of the three comments finding 2 named and
+  the round fixed only two. The identifier now appears nowhere in the tree.
+- `tick_composition_ratios.rs` claimed to decide FOUR shipped constants
+  including `CHECKPOINT_K`. It decides the three reach ceilings plus
+  `fanout_depth`. Checkpoint spacing bounds a residual replay, not a reach,
+  which is exactly why sizing it by tick density grew it to 67,108,864. The
+  `Baseline::checkpoint_k` field stays as historical data with its proposal
+  marked advisory.
+
+Bite-checked rather than trusted, each by reverting the production change and
+observing the named failure: the bounded-seek refusal
+(`checkpoint_extension_is_capped`), the run-symbol refusal
+(`initialized_run_index_refuses_every_other_symbol`) and the new frontier test
+(`an_unread_pass_leaves_its_settlement_span_owed`). The symbol test was
+REWRITTEN first: it asked for `MES`, which the shipped profile table does not
+carry, so it would have passed against an implementation that only checked
+profile membership. It now uses a fully resolvable second symbol, so the
+refusal can only come from the run index owning its identity. No new test rests
+on a `debug_assert`, so none of them vanish under `brokkr test`'s release
+profile.

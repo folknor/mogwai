@@ -27,9 +27,9 @@ use super::source::GeneratedSource;
 /// spacing, so the index's memory is bounded by `MAX_CHECKPOINTS` generator
 /// clones regardless of how long an accelerated session runs - closing the
 /// unbounded per-`k`-ticks growth. 4096 keeps coarsening rare (the first only
-/// after `4096 * k` ticks, ~34M ticks at the server's K = 8192) so the residual
-/// drain stays at the base `k` for any realistic run, while capping worst-case
-/// memory at a few tens of MB.
+/// after `4096 * k` ticks, ~34M ticks at the server's K of 8192) so the
+/// residual drain stays at the base `k` for any realistic run, while capping
+/// worst-case memory at a few tens of MB.
 pub(super) const MAX_CHECKPOINTS: usize = 4096;
 
 pub struct CheckpointIndex {
@@ -49,10 +49,10 @@ pub struct CheckpointIndex {
     /// far-future window), and `GeneratedSource::next_tick` never ends - so an
     /// uncapped `extend_toward` would spin the path-dependent walk indefinitely
     /// while holding the shared index mutex. A target past this bound leaves the
-    /// frontier short; the caller's own `BoundedSeek` then caps too and the seek
-    /// yields an empty page instead of hanging. Sized to the same budget as the
-    /// from-origin cap, so every legitimate target (warmup, live sim-now, a
-    /// poll's modest per-step delta) sits far inside it.
+    /// frontier short; `try_source_at_or_before` reports that refusal instead of
+    /// handing a caller a source which could then seek forever. Sized to the
+    /// same budget as the from-origin cap, so every legitimate target (warmup,
+    /// live sim-now, a poll's modest per-step delta) sits far inside it.
     max_extend: usize,
 }
 
@@ -78,7 +78,9 @@ impl CheckpointIndex {
     /// snapshotting every `k` ticks. Monotonic: a later, further target only does
     /// the new delta, so the from-origin walk is paid once across all seeks. The
     /// walk is bounded by `max_extend` per call (the runaway backstop); a target
-    /// beyond that leaves the lead short and the caller's seek caps the rest.
+    /// beyond that leaves the lead short, which `try_source_at_or_before`
+    /// REFUSES rather than papering over. Nothing caps the seek downstream of a
+    /// positioned source, so handing one out short is what would hang.
     pub fn extend_toward(&mut self, target: u64) -> usize {
         let mut walked = 0usize;
         while self.lead.clock_ns() < target {
@@ -114,9 +116,8 @@ impl CheckpointIndex {
     /// resumes up to the new, larger `k` ticks before the target), it never
     /// changes which ticks are emitted. The origin (index 0) is always retained
     /// as the pre-first-tick fallback. The residual drain stays bounded by the
-    /// caller's `BoundedSeek`; `k` grows only logarithmically in session length
-    /// (a doubling costs `MAX_CHECKPOINTS * k` more ticks), so it never
-    /// realistically approaches that cap.
+    /// coarsened `k` grows only logarithmically in session length (a doubling
+    /// costs `MAX_CHECKPOINTS * k` more ticks).
     fn coarsen(&mut self) {
         let mut idx = 0usize;
         self.checkpoints.retain(|_| {
@@ -131,8 +132,11 @@ impl CheckpointIndex {
     /// `target` (or the origin when nothing is). The caller drains it forward to
     /// the exact target (< K ticks) via the normal seek; the returned source is
     /// an independent clone, so the shared index is untouched by that replay.
-    pub fn source_at_or_before(&mut self, target: u64) -> GeneratedSource {
+    pub fn try_source_at_or_before(&mut self, target: u64) -> Option<GeneratedSource> {
         self.extend_toward(target);
+        if self.lead.clock_ns() < target {
+            return None;
+        }
         // Strictly-before partition (`<`, not `<=`): a checkpoint's `clock_ns`
         // is the `ts_event` of the last tick it has ALREADY consumed, so a
         // checkpoint whose `clock_ns` EQUALS the target has the boundary tick
@@ -155,7 +159,14 @@ impl CheckpointIndex {
             .checkpoints
             .partition_point(|c| c.clock_ns() < target)
             .saturating_sub(1);
-        self.checkpoints[idx].clone()
+        Some(self.checkpoints[idx].clone())
+    }
+
+    /// Position at a reachable target, panicking rather than returning a
+    /// short source that an unbounded downstream seek could walk forever.
+    pub fn source_at_or_before(&mut self, target: u64) -> GeneratedSource {
+        self.try_source_at_or_before(target)
+            .expect("checkpoint extension cap left target unreachable")
     }
 
     /// Number of snapshots held (origin included). For tests and the measurement.

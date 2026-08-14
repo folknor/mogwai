@@ -545,9 +545,10 @@ reunite the two crates.
 
 It is built from `mogwai-data` and so omits one ingredient of the server's
 `build_history_source`: the `InstrumentProfiles` lookup, a constant-time table
-read outside any loop. It also omits the server-private `BoundedSeek` wrapper,
-whose cost is one counter comparison per drained tick. So this number is close
-to, but strictly below, the sweeper's true per-pass fixed cost.
+read outside any loop. Positioning now refuses a target that the checkpoint
+extension cap did not reach, before constructing the merge and entering its
+unbounded source seek. So this number is close to the sweeper's true per-pass
+fixed cost.
 
 ## 2026-08-02 raw-fill cadence L2
 
@@ -896,3 +897,51 @@ operational signal must not scale with refusal ceilings.
 Regenerate with
 `brokkr run mogwai -- tick-composition --out analysis/tick-composition-protocol-11.json`,
 then `mogwai tick-composition-ratios compare --mode independent_10_11`.
+
+## 2026-08-14 checkpoint restore stride repair
+
+Host `bygg`, release, current working tree. The `source_positioning` criterion
+case was reshaped to a one-hour target so both compared strides reach an
+interior checkpoint. Its former one-second target preceded the first checkpoint
+and therefore could not price checkpoint spacing.
+
+| checkpoint stride | mean | std dev / mean |
+|---:|---:|---:|
+| 67,108,864 | 115.85 ms | 0.1% |
+| 8,192 | 2.184 ms | 0.1% |
+
+The smaller stride cuts the measured steady-state positioning cost by 53.0x on
+the identical target. This changes only snapshot frequency and residual replay.
+Generated ticks, draws, seeds, and tape origin are unchanged, so no
+`TAPE_PROTOCOL_VERSION` bump or artifact re-bless is owed.
+
+### What that buys the submit path, which is less than the ratio suggests
+
+Same host and tree, from the ignored latency instrument
+`read_market_latency_stays_within_submit_budget` in `fills.rs`, run through
+`brokkr test -p mogwai-server read_market_latency_stays_within_submit_budget`.
+100 reads, each in its own memo bucket so none is served from the entry the
+previous one left:
+
+The "previously recorded" column is the number `architecture.md` and the
+instrument's own comment carried, not a re-measurement on this host and tree, so
+read the pair as a level check rather than a controlled delta.
+
+| path | previously recorded | this run |
+|---|---:|---:|
+| miss, median | 12.6 ms | 9.782 ms |
+| miss, p99 | not recorded | 9.987 ms |
+| hit | ~0.13 ms | 0.096 ms |
+
+The memory side of the same tradeoff, stated because the stride buys latency
+with it: the committed default config warms 4,288,935 ticks, so the boot log's
+retained-checkpoint count goes from tens to roughly 520 generator clones.
+`MAX_CHECKPOINTS` of 4096 is still the hard ceiling, and coarsening only starts
+past about 34M ticks - eight days of sim time at that cadence - so an ordinary
+run keeps the base stride.
+
+Positioning was never the whole of a market reading: the 300 s `VOL_WINDOW_NS`
+walk is, and it is untouched by checkpoint spacing. So a 53x positioning win
+shows up here as roughly 3 ms. Re-scoping the reading window remains the lever
+that would move this number materially, and remains unapplied because it moves
+the estimator's identity and re-blesses the fill golden.
