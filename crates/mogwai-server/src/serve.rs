@@ -176,7 +176,6 @@ async fn serve_async(
     let run_start_ns = source::TAPE_ORIGIN_NS.saturating_add(cfg.warmup_ns);
     tracing::info!(
         run_seed = seeds.run,
-        tape_seed = seeds.tape,
         fill_seed = seeds.fill,
         "run seeds fixed"
     );

@@ -25,14 +25,17 @@ start. The WebSocket feed does not have this boundary issue because connection
 setup sends the current BBO snapshot before later tape frames.
 
 `seed` (absent means a fresh `u64` is drawn at launch, capped at `i64::MAX` so
-it round-trips through TOML) is the run's single source of randomness; the
-tape generator's stream and the fill band's stream both derive from it by
-domain-separated derivation, and nothing else in a run is random. The tape's
-origin is the fixed constant `TAPE_ORIGIN_NS = 0`; the run proper begins one
-`warmup_ns` later on the same axis, so a run is a pure function of `(seed,
-config)` for a given build and fingerprint. There is no wall-clock input to a
-run's identity left: the only clock key is `speed`, which paces delivery
-against wall time but never decides which tick is served. `speed = 0.0` is
+it round-trips through TOML) is the run's single source of randomness. The fill
+band has one run-level stream, while every requested symbol gets its own tape
+path derived from the seed and label. Two symbols therefore have genuinely
+different tapes even when they resolve to the same shape. Nothing else in a run
+is random. The tape's origin is the fixed constant `TAPE_ORIGIN_NS = 0`; the
+run proper begins one `warmup_ns` later on the same axis, so a run is a pure
+function of `(seed, config)` for a given build and fingerprint, and one served
+symbol's tape is a pure function of `(seed, config, label)`. There is no
+wall-clock input to a run's identity left: the only clock key is `speed`,
+which paces delivery against wall time but never decides which tick is
+served. `speed = 0.0` is
 unpaced delivery, not a stopped clock - the underlying sim time still advances
 at wall rate. `server_heartbeat_ms` sets the server-originated liveness
 cadence; zero disables it.

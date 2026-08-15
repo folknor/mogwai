@@ -95,8 +95,10 @@ through 3 and 5 landed (preset selection by symbol lookup with BTCUSDT the
 designated default, config overlays split from the boot symbol,
 `InstrumentDef` derived with the second default knob bundle deleted, and
 `/trades`/`/quotes` refusing an unserved symbol with a 400 naming the served
-symbol); their detail is git history, not this file. Numbering is left as it
-was assigned so the cross-references below (piece 4, piece 13) still resolve:
+symbol); their detail is git history, not this file. Piece 8 (seed
+derivation gains a symbol dimension) has also landed 2026-08-15; detail is
+git history. Numbering is left as it was assigned so the cross-references
+below (piece 4, piece 13) still resolve:
 
 4. RULED AND CONSUMED. The boot-ordering decision - warmup moves, or a boot
    symbol survives slice 1 - was ruled by the owner 2026-08-15: slice 1
@@ -113,9 +115,6 @@ lazy engine registration); detail is git history, not this file.
 6. The `/ws` symbol carrier - a NEW mechanism, not a modification: no
    subscribe path exists, its absence is byte-level pinned, and admission
    tickets derive from it.
-8. Seed derivation gains a symbol dimension: the tape-determinism change,
-   owing the `TAPE_PROTOCOL_VERSION` bump sequenced around 12b's
-   reservation.
 9. The boatyard: sharing key (resolved bundle + speed + generator-level
    havoc), first subscriber places, later ones join where the boat is,
    empty boat winds down - bundled with its open mechanics (idle-river
@@ -142,7 +141,7 @@ CROSS-CUTTING:
     writing WITH the code, per the standing item below.
 
 Piece 4 (and the guard question inside 13) is a decision before code; the
-highest-risk pieces are 6, 8, and 9 with 10. Broadarrow's item 4
+highest-risk pieces are 6 and 9 with 10. Broadarrow's item 4
 (consuming the multi-instrument venue) is excluded - it is theirs, and
 their build breaking loudly when piece 13 lands is the designed handoff.
 
@@ -228,13 +227,9 @@ their build breaking loudly when piece 13 lands is the designed handoff.
   derived through one resolution path; items 5, 7 and 8 landed with piece 7
   2026-08-15 - lazy engine registration, the keyed `Rivers` registry replacing
   `RunIndex`/`BOOT`, and `build_instrument_profiles` returning every configured
-  shape instead of collapsing with `.next()` - detail is git history,
+  shape instead of collapsing with `.next()`; item 4, seed derivation gains a
+  symbol dimension, landed with piece 8 2026-08-15 - detail is git history,
   numbering left as assigned):
-  4. SEED DERIVATION GAINS A SYMBOL DIMENSION. `RunSeeds` is run to tape and
-     fill with no symbol term, so without this every symbol generates a
-     byte-identical tape. This is a tape-determinism change and OWES A
-     `TAPE_PROTOCOL_VERSION` BUMP; 15 is reserved for the 12b mechanism landing,
-     so it needs sequencing rather than discovering at commit time.
   NOT ON THE LIST, corrected 2026-08-15: THE SWEEPER IS ALREADY SYMBOL-KEYED and
   slice 1 needs to touch none of it. It groups pending scans into a map by symbol
   and walks once per symbol, and marks and settlements look each symbol up in

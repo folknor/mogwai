@@ -60,6 +60,30 @@
 //!
 //! # Why the committed artifact was last re-blessed
 //!
+//! The tape root became per-river at `TAPE_PROTOCOL_VERSION` 17. A river's
+//! generator seed is now derived from the run seed AND the requested symbol
+//! label rather than from the run seed alone, so this harness - which renders
+//! through a real `Rivers` at `GOLDEN_RUN_SEED` on BTCUSDT - walks a different
+//! tape than it did at 16. Nothing about the band, the predicate, the frontier
+//! or the scenario moved: the fill stream is still run-level and its vectors in
+//! `mogwai-protocol`'s `derived_streams_differ_and_are_stable` are unchanged,
+//! which is the evidence that only the TAPE under the harness moved.
+//!
+//! The artifact therefore moved in NO predicted direction, and it must not be
+//! read as one - it is a fresh draw, not the same draw under a repair. Six
+//! cells go from 5 filled to 4 - the 1, 30 and 100 tick rungs in both
+//! scenarios - which at 5 samples per cell is one order apiece and
+//! well inside the 20-percentage-point resolution this coverage buys. What was
+//! checked before accepting it is the structure and the properties, all of them
+//! machine-asserted in `assert_shape` before any write: same schema, same
+//! origin, sweep, horizon, order count and stride, same ten cells at the same
+//! offsets, both sides still participating at the nearest rung, a majority of
+//! the nearest rung still filling, and the pathwise `unbanded >= banded`
+//! ordering intact at every rung. The banded half also remains byte-identical
+//! to the unbanded half, for the resolution reason set out below.
+//!
+//! # Why the committed artifact was re-blessed before that
+//!
 //! The GARCH recursion was repaired. Its innovation is now standardized to unit
 //! variance, which is what `GarchVol::new`'s `a0` derivation always assumed; the
 //! raw Student-t(4) it was fed instead has variance 2, so the true second-moment
@@ -87,7 +111,7 @@
 //! Only the p90 moved, from 7 to 8, which is why the durable comments quoting it
 //! were updated with this landing.
 //!
-//! # Why the committed artifact was re-blessed before that
+//! # Why the committed artifact was re-blessed before both of those
 //!
 //! The banded scenario runs at `Config::default().fill_band_vol_mult`, and that
 //! default moved from `0.5` to `0.005` when the fill band was re-calibrated for

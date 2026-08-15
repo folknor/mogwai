@@ -45,7 +45,8 @@ readiness and exited before anyone could connect. There is no `--seed` flag: a
 reproduced path is a written-down act, so the seed is overridden through the
 config file's `seed` key alone; when absent, one is drawn at launch and
 reported back in the readiness record's `run_seed`, the value that with the
-config, the fingerprint and `version_string` reproduces the served path.
+config, the fingerprint and `version_string` reproduces every served path; the
+requested symbol label is the fifth input that selects one path from the run.
 
 `mogwai --version` prints semver, build hash, build time and the tape
 generation process's version (`mogwai_data::TAPE_PROTOCOL_VERSION`) on one
@@ -331,9 +332,11 @@ reads the diff from the baseline commit (`--b1-baseline-commit`, default
 `HEAD~1`) to HEAD and records whether it touched `crates/mogwai-data/`,
 `crates/mogwai-protocol/`, `crates/mogwai-server/presets/` or
 `analysis/fingerprint.json`; touching any of them, or a tape protocol version
-other than the accepted identity (16 since the shipped BTCUSDT preset replaced
-the retired built-in default bundle; 14 was the calendar-aware `ReopenGap`
-crossing repair), fails the
+other than the accepted identity (17 since each server river took a tape root
+keyed by the requested symbol label, which moves no offline tape because no
+offline command seeds through `RunSeeds`; 16 was the shipped BTCUSDT preset
+replacing the retired built-in default bundle, and 14 the calendar-aware
+`ReopenGap` crossing repair), fails the
 tape-identity gate. Test-only files inside those paths
 are reported separately and do not fail it, since a `cfg(test)` module
 contributes no byte to a shipped tape.

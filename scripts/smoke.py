@@ -160,7 +160,9 @@ class Venue:
     def stop(self) -> int:
         if self.child.poll() is None:
             self.child.terminate()
-        return self.child.wait(timeout=15)
+        status = self.child.wait(timeout=15)
+        self._drain.join(timeout=5)
+        return status
 
     def __enter__(self) -> "Venue":
         return self
@@ -338,6 +340,18 @@ def check_common(venue: Venue) -> None:
             raise AssertionError(f"a window {label} was served instead of refused")
         except urllib.error.HTTPError as err:
             assert err.code == 400, f"a window {label} must be a 400, got {err.code}"
+
+
+def check_seed_logs(venue: Venue) -> None:
+    """The run root and its one materialized river are independently logged."""
+    seed_lines = [line for line in venue.stderr_lines if "run seeds fixed" in line]
+    assert len(seed_lines) == 1, f"expected one run-seed line, got {seed_lines}"
+    assert "run_seed" in seed_lines[0] and "fill_seed" in seed_lines[0], seed_lines[0]
+    assert "tape_seed" not in seed_lines[0], seed_lines[0]
+
+    river_lines = [line for line in venue.stderr_lines if "river materialized" in line]
+    assert len(river_lines) == 1, f"expected one materialized river, got {river_lines}"
+    assert venue.symbol in river_lines[0] and "tape_seed" in river_lines[0], river_lines[0]
 
 
 # --------------------------------------------------------------------------
@@ -989,6 +1003,8 @@ def main() -> None:
         detail = MODES[parsed.mode](venue)
         if parsed.duration:
             detail = f"{detail}; {mode_duration(venue, parsed.duration)}"
+
+    check_seed_logs(venue)
 
     print(f"PASS [{parsed.mode}] {venue.addr}: {detail}")
 

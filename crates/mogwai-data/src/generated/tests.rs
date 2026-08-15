@@ -2078,7 +2078,7 @@ fn assert_run_seed_dwell_is_bounded_with_draw(run_seed: u64, draw: usize) {
     let mut scalars = GeneratorScalars::from_fingerprint_medians(&def.symbol, &fp);
     scalars.modal_tick = def.price_increment;
     scalars.price_decimals = u32::from(def.price_precision);
-    let seed = mogwai_protocol::RunSeeds::from_run_seed(run_seed).tape;
+    let seed = mogwai_protocol::RunSeeds::from_run_seed(run_seed).tape_for("BTCUSDT");
     let mut src = GeneratedSource::new(scalars.clone(), seed, 0, &fp, None);
     let measured = measure(&mut src, &scalars, draw);
     assert_dwell_is_bounded(&measured, &scalars, &fp);

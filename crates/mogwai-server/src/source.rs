@@ -117,10 +117,10 @@ impl InstrumentProfiles {
             .ok_or_else(|| anyhow::anyhow!("boot symbol {named} has no configured shape"))
     }
 }
-fn generator(profile: &InstrumentProfile, identity: TapeIdentity) -> GeneratedSource {
+fn generator(label: &str, profile: &InstrumentProfile, identity: TapeIdentity) -> GeneratedSource {
     GeneratedSource::new_with_session_profile(
         profile.scalars.clone(),
-        identity.seeds.tape,
+        identity.seeds.tape_for(label),
         TAPE_ORIGIN_NS,
         fingerprint(),
         &profile.session,
@@ -240,6 +240,9 @@ impl Rivers {
     fn river(&self, symbol: &str) -> Option<Arc<River>> {
         let profile = self.profiles.get(symbol)?;
         let key = RiverKey::for_symbol(&profile.def.symbol);
+        // Derived inside the closure, not ahead of the lock: `river` is called
+        // once per live tick and the seed is read once per river lifetime.
+        let mut materialized: Option<u64> = None;
         let mut rivers = self
             .rivers
             .lock()
@@ -247,9 +250,10 @@ impl Rivers {
         // Creation under the registry mutex makes concurrent first readers
         // share exactly one chain.
         let river = Arc::clone(rivers.entry(key).or_insert_with(|| {
+            materialized = Some(self.identity.seeds.tape_for(symbol));
             Arc::new(River {
                 checkpoints: Mutex::new(CheckpointIndex::new(
-                    generator(profile, self.identity),
+                    generator(symbol, profile, self.identity),
                     CHECKPOINT_K,
                     MAX_EXTEND_TICKS,
                 )),
@@ -257,6 +261,12 @@ impl Rivers {
         }));
         // Lock ordering is registry then release, river. Never hold both.
         drop(rivers);
+        // After the drop: a `tracing` call runs arbitrary subscriber work, and
+        // this closure body would run it inside the registry critical section
+        // that every first reader of every symbol contends on.
+        if let Some(tape_seed) = materialized {
+            tracing::info!(symbol, tape_seed, "river materialized");
+        }
         Some(river)
     }
     #[cfg(test)]
@@ -574,15 +584,7 @@ mod river_tests {
     }
 
     /// A second configured shape is realized under its OWN def, on its OWN
-    /// chain, locked independently of the boot river's.
-    ///
-    /// NOT the price-grid assertion the spec named: neither `price_increment`
-    /// nor - for two spot shapes - `SizeGrid::from_def` quantizes anything the
-    /// generator emits, so under piece 8's still-pending symbol term the two
-    /// realizations are numerically identical and no per-print assertion can
-    /// separate them. What CAN be asserted is what the registry actually
-    /// promises: a distinct chain, stamped with the shape's own symbol, whose
-    /// frontier moves independently.
+    /// chain and tape path, locked independently of the boot river's.
     #[test]
     fn a_second_river_is_realized_under_its_own_def_and_chain() {
         let rivers = crate::fills::test_rivers_with_a_second_symbol();
@@ -592,24 +594,41 @@ mod river_tests {
             !Arc::ptr_eq(&boot, &second),
             "one chain per configured shape"
         );
-        let History::Source(mut source) = rivers
+        let History::Source(mut boot_source) = rivers
+            .history_source("BTCUSDT", Some(TAPE_ORIGIN_NS))
+            .expect("boot river history")
+        else {
+            panic!("the boot symbol is configured");
+        };
+        let boot_prints: Vec<_> = std::iter::from_fn(|| boot_source.next_tick())
+            .filter_map(|tick| match tick {
+                TickEvent::Trade(trade) => Some((trade.ts_event, trade.price)),
+                _ => None,
+            })
+            .take(32)
+            .collect();
+        assert_eq!(boot_prints.len(), 32, "the boot river prints");
+        let History::Source(mut second_source) = rivers
             .history_source("SECOND", Some(TAPE_ORIGIN_NS))
             .expect("second river history")
         else {
             panic!("the second symbol is configured");
         };
-        let mut trades = 0usize;
-        while trades < 32 {
-            let Some(tick) = source.next_tick() else {
-                break;
-            };
-            let TickEvent::Trade(trade) = tick else {
-                continue;
-            };
-            assert_eq!(trade.symbol.as_ref(), "SECOND");
-            trades += 1;
-        }
-        assert_eq!(trades, 32, "the second river prints");
+        let second_prints: Vec<_> = std::iter::from_fn(|| second_source.next_tick())
+            .filter_map(|tick| match tick {
+                TickEvent::Trade(trade) => {
+                    assert_eq!(trade.symbol.as_ref(), "SECOND");
+                    Some((trade.ts_event, trade.price))
+                }
+                _ => None,
+            })
+            .take(32)
+            .collect();
+        assert_eq!(second_prints.len(), 32, "the second river prints");
+        assert_ne!(
+            boot_prints, second_prints,
+            "symbol labels select distinct tapes"
+        );
         // Materializing the second river leaves the boot river where it was:
         // the chains advance independently, which is the whole point of keying
         // them.

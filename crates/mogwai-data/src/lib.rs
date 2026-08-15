@@ -92,7 +92,13 @@ pub use trigger::{
 /// the bump is taken anyway because the tape's ORIGIN changed and the rule is
 /// unconditional. The committed fill golden re-renders unchanged, which is the
 /// evidence for that claim.
-pub const TAPE_PROTOCOL_VERSION: u32 = 16;
+///
+/// 17 gives every river its own tape root keyed by the requested symbol label.
+/// Every server-generated tape moves, including a single-symbol run. Offline
+/// `mogwai-lab` and `mogwai-cli` generation does not move because those paths
+/// pass literal or command-line seeds directly to `GeneratedSource`; none uses
+/// `RunSeeds`. The arrival-mechanism reservation remains 15.
+pub const TAPE_PROTOCOL_VERSION: u32 = 17;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.

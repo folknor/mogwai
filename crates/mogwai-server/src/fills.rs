@@ -331,37 +331,21 @@ fn rivers_over(profiles: InstrumentProfiles) -> std::sync::Arc<source::Rivers> {
 /// point: a registry test run against a symbol the profile table does not carry
 /// would pass against a `profiles.get` lookup that never keyed a chain at all.
 ///
-/// Under piece 8's still-pending symbol term in seed derivation the two shapes
-/// draw the SAME numbers, and neither `price_increment` nor a spot
-/// `SizeGrid::from_def` re-quantizes them, so the two realizations differ only
-/// in the symbol stamped on each print. What a test can assert here is the
-/// registry's own promise - a distinct chain per shape - not a distinct tape.
+/// Both profiles come out of `config::profile_for_symbol`, which resolves an
+/// unnamed symbol onto the default bundle and stamps the REQUESTED label onto
+/// the def, so the two differ in nothing but that label - identical scalars,
+/// identical session profile. Hand-building the second shape instead, as this
+/// fixture once did, left its `top_sizes` and precision quietly different and
+/// would have made a distinct-prints assertion prove nothing about seeding.
+/// Verified by reverting `generator`'s label to `""` as a text edit: the two
+/// rivers' first 32 prints then come out EQUAL, so
+/// `a_second_river_is_realized_under_its_own_def_and_chain` is observing the
+/// symbol term in seed derivation and nothing else.
 #[cfg(test)]
 pub(crate) fn test_rivers_with_a_second_symbol() -> std::sync::Arc<source::Rivers> {
-    use mogwai_protocol::{InstrumentClass, InstrumentDef};
     rivers_over(InstrumentProfiles::from_profiles(vec![
         crate::config::profile_for_symbol("BTCUSDT").expect("BTCUSDT preset must resolve"),
-        source::InstrumentProfile::new(
-            InstrumentDef {
-                symbol: "SECOND".into(),
-                class: InstrumentClass::Spot {
-                    base: "SEC".into(),
-                    quote: "USDT".into(),
-                },
-                price_precision: 2,
-                size_precision: 8,
-                price_increment: Decimal::new(1, 2),
-                size_increment: Decimal::new(1, 8),
-            },
-            mogwai_data::GeneratorScalars::from_fingerprint_medians(
-                "BTCUSDT",
-                source::fingerprint(),
-            ),
-            source::fingerprint().session_profile.clone(),
-            None,
-            None,
-            None,
-        ),
+        crate::config::profile_for_symbol("SECOND").expect("SECOND must resolve through default"),
     ]))
 }
 

@@ -1166,7 +1166,7 @@ mod tests {
         let manifest = parse_manifest(bytes).expect("committed manifest validates");
         assert_eq!(
             manifest.plan_sha256,
-            "d6562d8b2536acb5c6f1b321a60ec6e45d15f1aa30cb067f95387d91ce4f769d"
+            "9f8a99ec0eafd5a6142d1a6b80d7e4affe31afce51d499c1c67f1656b116a97c"
         );
         assert_eq!(
             manifest.plan_sha256,

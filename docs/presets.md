@@ -133,4 +133,6 @@ always-open, USDT-settled knobs under its own name. BTCUSDT is the default
 because it makes no calendar or margin claim about an unfitted symbol, its
 settlement currency is funded by the shipped balances, and its dynamics were
 fitted from trade-level archives. Name a futures preset explicitly when a
-future-shaped bundle is required.
+future-shaped bundle is required. The unmatched symbol wears the default
+preset's shape, never its tape path, because its requested label enters the
+seed derivation.
