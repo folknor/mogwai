@@ -17,6 +17,71 @@ comment in the code, or (b) added to an existing or new ../reference/ document.
 
 Or both. There are no exceptions.
 
+## The grand design, and mogwai's place in it
+
+Recorded 2026-08-15 with the owner, after walking the whole toolchain. This
+is the context every item below serves. A mogwai developer does not need to
+operate the other tools, but must know what mogwai is FOR, because several
+design decisions only make sense against it.
+
+THE ECOSYSTEM. One human runs a handful of orchestrator agents. Each
+orchestrator deals a batch of `wyrd` assignments - deterministic,
+stratified strategy-design slates (a behavioral thesis plus rarity-weighted
+entry/exit/sizing components, with replication pairing across the batch) -
+and launches on the order of 20-50 subagents, one slate each. Each subagent
+authors ONE Pine strategy: it consults the Pine oracle, lints, hand-rolls
+its dealt components as libraries, then establishes its EDGE on real
+historical data through piners (backtest, optimize, Monte Carlo,
+walkforward), passes the broadarrow backtest parity witness, and finally
+FORWARD TESTS through broadarrow against mogwai. The goal per strategy:
+minimum drawdown, roughly 20-50 dollars of income per day, reported as a
+scope-qualified claim ("works during $session on $symbol under $conditions")
+back to the orchestrator. The claim pipeline - collecting results,
+adjudicating replication pairs, deciding what deploys - is the ORCHESTRATOR'S
+job, human plus Claude, deliberately not software. Nothing in mogwai should
+grow toward owning it.
+
+MOGWAI'S ROLE, stated exactly. Mogwai is the ONLY forward-test venue the
+ecosystem has, and the only model of venue timing either project has. What a
+mogwai forward run validates is EXECUTION ROBUSTNESS: resting-order and
+conditional-order timing, fills under havoc, survival of the messy live
+path - the things a bar-close backtest structurally cannot see (wyrd's own
+doctrine: resting-order exits are validated in forward, against an
+accelerated synthetic tape). The EDGE was established upstream on real
+history; dollars earned on an exogenous synthetic tape are a statement about
+the fitted distribution of worlds, not about next month's market. Keep those
+two claims distinct in anything mogwai reports or documents. The
+distribution is also the point: one seed is one path, and a claim wants many
+seeds - which is why fire-and-forget, seed-reproducible instances and cheap
+tape identity matter more than any single run.
+
+WHAT MOGWAI MUST BECOME for this to work, which is what the items below
+build:
+
+1. SERVE ANY SYMBOL, symbol-as-label, total resolution, many boats on many
+   rivers - the settled-design items below. The venue must never be the
+   reason a dealt strategy cannot be forward tested.
+2. REALISTIC TAPES ACROSS SESSION CLASSES. The wyrd doctrine holds session
+   structure to be the one non-fractal thing bars do not normalize away, so
+   a session-bound thesis forward-tested against the wrong session class
+   tests a DIFFERENT claim. The envisioned preset set is on the order of
+   five, spanning three classes: 24/7 crypto (BTCUSDT, a perp like
+   ETHUSDT.P), CME futures with genuine closure (MNQ, plus another such as
+   MGC), and cash-equity hours (AAPL). The segment-sampler track (see
+   `notes/README.md`) is what makes session-composable tapes; the intake
+   sequence makes each preset honest; neither ever gates serving.
+3. THE DATA SPIGOT IS `dbnget` (Databento). The account already holds about
+   twelve months of MNQ/ES/MES tbbo plus mbp-1 server-side, re-fetchable by
+   job id at no new cost. The missing session classes are cheap: a year of
+   AAPL trades quoted at about 10 dollars list, a year of continuous MGC
+   tbbo at about 2, and the subscription zeroes covered pulls. Corpus
+   acquisition is never the bottleneck; fitting effort is.
+
+The 200-agent end-state paragraph in the PROBLEM STATEMENTS block below and
+the settled premises it records (always accelerated, no restart, single-
+instrument strategies, one MOGWAI venue, resource cost shapes nothing) are
+this design's mogwai-side constraints and still hold unchanged.
+
 ## Open issues
 
 - NAUTILUS HAS NO CHANNEL FOR A DECLARED FEED GAP, so mogwai's `FeedLagged`
@@ -74,30 +139,297 @@ Or both. There are no exceptions.
   frame as a reconcile-and-distrust-the-window signal. broadarrow is the known
   consumer.
 
-- SERVE N INSTRUMENTS FROM ONE VENUE (consumer ask, broadarrow, recorded
-  2026-08-14). broadarrow can now ATTACH to an operator-owned `mogwai serve`
-  (its scenario names the ReadyRecord's addr plus run_seed, and the run-seed
-  identity check refuses a wrong venue), and multi-account already lets N
-  attached runs each bring their own `?account=` ledger. The end state the
-  consumer is driving toward: one durable venue, an orchestrator handing ~50
-  concurrent strategy-search workers the attach details - and that wants
-  instrument BREADTH, because today one venue serves exactly one instrument,
-  so 50 attached runs are 50 accounts on one tape, and a second symbol costs
-  a second venue plus per-venue bookkeeping. The config's instrument table
-  and per-symbol presets (MNQ, MES, BTCUSDT) already exist; the real work is
-  per-instrument tape generation and subscriptions, per-instrument fill
-  bands, margin/settlement across a mixed book - and the intake rule stands:
-  each admitted instrument owes a realistic tape (corpus, measure, fit,
-  preset), not an alias. Consumer-side note: broadarrow's
-  `run_prep::mogwai_facts` deliberately refuses a `/instruments` answer of
-  anything but exactly one instrument, so a venue that starts serving many
-  BREAKS its build loudly (their designed break point, their half to close by
-  selecting on the strategy's frontmatter symbol); the ReadyRecord's singular
-  `symbol` field needs a schema decision at the same time.
-  PRIORITY CHANGED 2026-08-15: broadarrow's half of the route to that end state
-  has LANDED, so this is no longer one consumer ask among many - it is the sole
-  remaining blocker. See the consumer-context section below for the four-item
-  decomposition and everything else broadarrow's todo records about this venue.
+- THE SYMBOL IS A REQUEST PARAMETER, NOT AN IDENTITY THE VENUE OWNS. Converged
+  with the owner 2026-08-15, and it supersedes every earlier framing of this
+  item, including "serve N instruments from one venue", which described the
+  wrong shape of work.
+  THE MODEL. A client asks for a symbol. Mogwai accepts ANY STRING and serves a
+  tape for it. Nothing is admitted, declared, registered or added; the symbol is
+  transient, ephemeral, and inconsequential to the machinery. If the string
+  HAPPENS TO MATCH a preset, that preset supplies the tape knobs. If it does not,
+  the default knobs are used. A preset is nothing but a NAMED BUNDLE of knobs a
+  user could set by hand, carrying no authority and conferring no status.
+  THE PRECEDENCE, all three layers over the same knob set:
+  default knobs < preset knobs, if the requested symbol names one < knobs the
+  operator set explicitly. So `FOOBAR` configured with MNQ's values IS an
+  MNQ-shaped tape called FOOBAR, and nothing distinguishes them; `MNQ` with two
+  knobs set gets the preset for the rest and the operator's values for those two.
+  WHAT THIS MAKES THE WORK. Mostly DELETION of a singular assumption, plus one
+  new mechanism. What already exists and is shaped right: the preset resolution
+  machinery with nesting (MES over MNQ), an override layer and provenance
+  validation; `Engine::build` taking `instruments: Vec`; margin and fees keyed by
+  symbol; `InstrumentProfiles` as a map; `/trades` and `/quotes` taking `symbol`.
+  What has to change:
+  1. PRESET SELECTION MOVES FROM A CONFIG KEY TO A SYMBOL LOOKUP. Today an
+     operator writes `instrument.preset = "MNQ"`. The resolution machinery is
+     already built; only its trigger changes.
+  2. CONFIG STOPS DECLARING THE INSTRUMENT. `Config.instrument` is one
+     `ConfiguredInstrument` table whose own doc says "the one instrument this
+     run serves", and `a_config_naming_two_instruments_fails_to_parse` pins that
+     `[[instrument]]` is refused. That test pins the assumption being removed.
+     Config becomes default knobs plus per-symbol overrides.
+  3. `InstrumentDef` BECOMES DERIVED, a function of symbol and config resolving
+     through preset-or-default, rather than a config entry. The grid, class,
+     currencies and multiplier follow from it, and so does order validation.
+  4. SEED DERIVATION GAINS A SYMBOL DIMENSION. `RunSeeds` is run to tape and
+     fill with no symbol term, so without this every symbol generates a
+     byte-identical tape. This is a tape-determinism change and OWES A
+     `TAPE_PROTOCOL_VERSION` BUMP; 15 is reserved for the 12b mechanism landing,
+     so it needs sequencing rather than discovering at commit time.
+  5. ENGINE REGISTRATION BECOMES LAZY, instruments appearing as symbols are
+     first asked for.
+  6. A `/ws` SYMBOL CARRIER HAS TO BE CREATED, because THERE IS NO SUBSCRIPTION
+     PATH AT ALL. Surveyed 2026-08-15. `handle_socket` attaches every socket to
+     `state.run.tape` UNCONDITIONALLY on upgrade; there is no subscribe frame to
+     validate and nowhere to bind a symbol. `mogwai-protocol` pins the absence
+     with a byte-level test asserting `Subscribe` and `Unsubscribe` FAIL to
+     deserialize, and `admission.rs` derives
+     `ADMISSION_PROMISE_TICKETS = 1` from "one connection owns one unconditional
+     replay - it is attached to the run's single tape on upgrade, with no
+     subscribe frame". The only request-carried symbol in the serving path today
+     is `HistoryQuery.symbol` on `/trades` and `/quotes`. This is the largest gap
+     between the settled model and the code and it is not a modification, it is
+     a new carrier - a query parameter on the upgrade, or keeping the symbol in
+     boot config for slice 1.
+  7. THE PROCESS-GLOBAL RUN INDEX IS THE TRUE PIN. `source::RunIndex` is a
+     `static OnceLock` holding ONE symbol and ONE `CheckpointIndex`, and `index`
+     returns `None` for any other symbol. Strongly enforced: a test builds a
+     FULLY RESOLVABLE second profile and asserts it is still refused, with a
+     comment noting an unknown symbol would have passed vacuously. Everything
+     downstream then fails SILENTLY - `build_history_source`, `next_live_tick`,
+     `scan_triggers`, `read_market` all return `None` with no error and no log.
+     Its doc comment, "Process global because the run is: one instrument, one
+     regime, one origin ... nothing left to key it by", is the sentence slice 2
+     deletes. `BOOT` is the same shape and carries `RunSeeds` with no symbol
+     term, which is item 4 above.
+  8. `serve.rs` COLLAPSES THE PROFILE SET WITH `.next()`, effectively the
+     alphabetically first profile. MERELY ASSUMED - nothing asserts the map has
+     one entry - and everything after inherits from it, including
+     `refuse_unfunded_settlement`, `materialize_warmup`, `Run::new` and
+     `ReadyRecord.symbol`.
+  NOT ON THE LIST, corrected 2026-08-15: THE SWEEPER IS ALREADY SYMBOL-KEYED and
+  slice 1 needs to touch none of it. It groups pending scans into a map by symbol
+  and walks once per symbol, and marks and settlements look each symbol up in
+  `profiles`. An earlier draft called this the lowest-confidence item and the
+  likeliest place a hidden assumption would bite; the survey found the opposite.
+  What DOES remain single-symbol in the fill path is slice-2 work: the
+  `MarketReadingCache` is correctly symbol-KEYED but holds ONE entry behind one
+  mutex held across the walk, so two symbols thrash it and serialize on unrelated
+  work; and `last_swept_ns` is one process-wide settlement watermark, all-or-
+  nothing by deliberate design and pinned by tests, which is safe but couples
+  liveness - one symbol whose settlement price is permanently unreadable freezes
+  every other symbol's settlement frontier.
+  SEQUENCING, two slices that fail differently. SLICE 1, symbol selects the
+  preset, still one symbol per run: proves the lookup, the derived
+  `InstrumentDef` and the default-shape path, with no concurrency and no version
+  bump. SLICE 2, many tapes at once: lifecycle, fanout topology and the seed
+  dimension, where the bump and the real risk live.
+  THE SLICE 1 ORDERING PROBLEM, and it is structural rather than a detail:
+  `INDEX` is initialized inside `materialize_warmup` AT BOOT, from config, BEFORE
+  ANY REQUEST EXISTS. If the symbol arrives per-request, either warmup moves or a
+  boot symbol must still be chosen up front. Decide this before writing code.
+  ALSO SLICE 1: `/trades` and `/quotes` return an EMPTY 200 for an unknown
+  symbol, while the same handler goes to considerable length to refuse an
+  off-tape window with a loud 400 precisely so an impossible request stays
+  distinguishable from "no trades happened". Under total resolution that `None`
+  path changes meaning entirely - decide whether it becomes unreachable or a 400.
+  CONSUMER-SIDE, unchanged and still theirs: `run_prep::mogwai_facts` refuses a
+  `/instruments` answer of anything but exactly one instrument, so a venue
+  serving many BREAKS their build loudly by design, closed on their side by
+  selecting on the strategy's frontmatter symbol.
+  PRIORITY: broadarrow has landed both of its halves of the route to the
+  strategy-search end state, so this is the sole remaining blocker rather than
+  one ask among many. See the consumer-context section below.
+
+- THE RIVER AND THE BOAT: how N tapes are shared. SETTLED with the owner
+  2026-08-15; this was open question 1 and is now the design. The metaphor is
+  the owner's and is kept because it makes the distinction that the earlier
+  drafts kept losing.
+  A RIVER is a deterministic path, fully determined by seed, symbol and the
+  resolved knob bundle INCLUDING COMPOSITION. It exists whether or not anyone is
+  on it. A BOAT is a materialization of a river, and it has a POSITION. Mogwai
+  is neither - it is the BOATYARD, running many boats on many rivers.
+  SHARING. The first subscriber places a boat. Every later subscriber whose
+  request resolves to the same sharing key JUMPS INTO THAT BOAT rather than
+  launching another. When the boat empties it is wound down.
+  THE SHARING KEY is the river identity PLUS speed PLUS generator-level havoc.
+  Speed is not part of river identity - it changes pacing, never a single value -
+  but one boat paces once, so a speed-1 and a speed-100 subscriber cannot share
+  despite seeing identical water. Composition is IN the key: two agents asking
+  for MNQ want different rivers if one wants the Asia loop and the other wants
+  post-lunch, so the key is the resolved bundle and never the symbol string.
+  PASSENGERS CANNOT SEE EACH OTHER, and the reason sharing is sound at all is
+  that NOBODY'S WAKE CHANGES THE RIVER. The tape is EXOGENOUS - generated, never
+  order-driven. This is load-bearing and easy to destroy by accident: if mogwai
+  ever modelled market impact, passengers would become visible to one another
+  through the water and sharing would break instantly. The visible consequence,
+  which is a CONTRACT rather than a limitation: there is no queue competition,
+  so fifty agents submitting the same buy at the same instant all get the same
+  fill and their aggregate moves nothing. Believed already explicit elsewhere;
+  VERIFY against the tree rather than from memory before relying on that.
+  HAVOC SPLITS ALONG THE SAME LINE. `VolStorm`, `FlowSurge` and
+  `LiquidityDrought` reach the generator, so they FORK THE RIVER - that agent
+  needs its own water, not merely its own boat. Drop, duplicate, reorder and
+  latency are applied at the socket, so they are the passenger's own EYESIGHT:
+  same river, same boat, blurry glasses, no isolation needed. Since forward
+  testers overwhelmingly want transport havoc, sharing is the common case rather
+  than the exotic one.
+  ONE CLOCK PER BOAT, not one per run. A boat launches at its river's origin and
+  walks forward; it never seeks. The objection that a client would see two
+  symbols at different simulated times is void, because STRATEGIES ARE
+  SINGLE-INSTRUMENT by settled premise, so no observer ever holds two clocks.
+  This also deletes the catch-up burst a late-anchored worker performs against
+  an already-advancing clock. What it DOES implicate is every run-level
+  singleton that assumes one notion of now: the engine stamping order events,
+  `/clock`, `AccountState` timestamps, `run_duration_ns` completion, and the
+  derived `sim_epoch_ns`. None looks hard; all of them are scattered.
+  WHERE THE BOAT IS PLACED. A client may ask for a DURATION or for infinite, and
+  MAY NOT ask for a start or end time. If a matching river is already running,
+  the subscriber joins the boat WHERE IT IS. If none is, a boat is placed at the
+  river's origin.
+  WHETHER JOINING MID-STREAM IS SANE IS A PROPERTY OF THE COMPOSITION, not a
+  venue rule, and it is the user's choice. A looping session footprint - Asia,
+  10:30 to lunch, post-lunch to close, BTCUSD Monday to Friday on infinite loop -
+  is HOMOGENEOUS by construction, so every point in the loop is the same kind of
+  moment and joining anywhere is fine. These are what get requested
+  overwhelmingly, and the segment-sampler track is what builds them. A
+  full-calendar linear tape with real overnight structure and NY-open bursts is
+  NOT homogeneous, and nobody joins one mid-stream; they request a fresh river.
+  An earlier draft of this bullet argued from that second kind that mid-stream
+  placement was hazardous in general. That was arguing from a tape model the
+  segment sampler is replacing, and it does not generalize.
+  STILL OPEN under this design, mechanics rather than concept: whether anything
+  retires an idle river beyond the empty-boat rule, N pacing threads against one
+  multiplexing scheduler, and one ring per boat against one shared ring with
+  filtering - the last matters because N rings at the current `fanout_depth` is
+  N times an already-large eager allocation. Passenger IDENTITY, and the
+  teardown race it implies, is NOT open: the owner ruled the existing code
+  already answers it.
+
+- SYMBOL RESOLUTION IS TOTAL, AND THE DEFAULT PRESET IS THE SHAPE CONTRACT.
+  Settled 2026-08-15. A requested symbol resolves in three steps and step three
+  never fails:
+  1. Knobs the operator explicitly configured for that symbol win.
+  2. Otherwise, a preset whose NAME MATCHES the symbol supplies the shape - this
+     is the `MNQ` case, where asking for MNQ gets the MNQ preset with no config
+     saying so.
+  3. Otherwise, the DESIGNATED DEFAULT TAPE PRESET supplies the shape and the
+     result is labelled with the requested symbol - the `FOOBAR` case.
+  The default tape is ITSELF ONE OF THE PRESETS, not an invented fallback shape,
+  and it is explicit about currency, price grid and class like any other. Which
+  preset it will be is undecided - BTCUSD, BTCUSDT or BTCUSDT.P - and the choice
+  changes nothing structural.
+  THE SYMBOL NEVER CONTRIBUTES A CURRENCY. It is a label. Currencies, class,
+  grid, multiplier and margin come from the resolved shape, so `FOOBAR` is the
+  default preset's shape wearing a different name. An earlier draft here
+  reasoned that an arbitrary string had no derivable quote currency, invented a
+  default shape to supply one, and then proposed making it a FUTURE so that
+  spot-sell base reservations would not make arbitrary symbols unshortable.
+  All of that followed from the false premise and is void.
+  CONSEQUENCE WORTH STATING WHERE THE DESIGNATION IS MADE: the default preset
+  stops being merely the tape you get when you do not pick one and becomes the
+  SHAPE CONTRACT for every unnamed symbol. Swapping it for tape reasons silently
+  moves the currency, grid and class of every unmatched symbol, and therefore
+  what the funding check below demands of the ledger.
+
+- FUNDING: CLOSED, and it stays a BOOT check. Settled 2026-08-15; this was open
+  question 1. The set of reachable shapes IS closed at boot - every shape the
+  operator explicitly configured, plus the default tape preset - so the set of
+  currencies the venue can ever require is known before the first connection.
+  An arbitrary symbol does not open that set, because it contributes no
+  currency.
+  So: a shape whose settlement or quote currency has NO LEDGER LINE is a
+  CONFIGURATION ERROR and refuses at BOOT. A funds rejection at RUNTIME then
+  means DEPLETION and only depletion. Collapsing the two would make a typo look
+  like a trading outcome and waste an agent's whole run, which is the reason to
+  keep them apart.
+  Two dead ends recorded so they are not re-walked. The concern that this had to
+  move to order time came from believing the currency set was runtime-discovered;
+  it is not. And "the operator will just see it on their first order" is wrong
+  for the mismatch case: an unfunded currency is knowable with no order at all,
+  and only genuine depletion needs an order to discover. A user funds their
+  ledger deliberately - nobody sets it to zero - so the case worth catching is
+  incongruence, not absence.
+  ONE LINE TO CONFIRM WHEN IN THERE, not a decision: that the runtime funds
+  rejection NAMES THE CURRENCY, so a depletion reads as "no USD" rather than
+  "insufficient balance".
+
+- EVERY DECISION IN THIS BLOCK OWES `reference/` AND `docs/` PROSE, and that is
+  not a tidy-up at the end. These notes carry no truth guarantee and nothing
+  durable may cite them, so a design that lands with its reasoning only here
+  leaves a user blind to it: the symbol being a label rather than an identity,
+  the three-step resolution and its total third step, the sharing key and what
+  forks a river, one clock per boat, the exogeneity that makes sharing sound and
+  the no-queue-competition contract that follows, and the boot-versus-runtime
+  split on funding. `docs/presets.md` and `docs/config.md` are where a user
+  looks; `reference/architecture.md` is where the why belongs. Write the prose
+  with the code that implements each decision, not in a documentation pass
+  afterwards.
+
+- `/instruments` RETURNS THE RESOLVED CONFIGURATION. Settled 2026-08-15. Not the
+  servable set, which is unbounded and cannot be enumerated; not the presets;
+  not the materialized rivers. It reports the shapes THE OPERATOR CONFIGURED for
+  this venue, resolved through preset inheritance and overrides. Finite, known
+  at boot, honest, and it gives nautilus's `request_instruments` and
+  `subscribe_instruments` a real answer where an unbounded set has none.
+  The framing that made this hard was treating the answer as a claim about what
+  is SERVABLE. It is a claim about what is CONFIGURED. A symbol that is servable
+  but unconfigured is a property of the generator, not an omission from the
+  endpoint, and a client only ever uses the entry it cares about.
+  WHAT THE CONSUMERS ACTUALLY DO, which is why this fits. `mogwai-adapter`
+  already wants a lookup rather than a list: `fetch_instruments` GETs the list
+  and `cache_instruments` immediately folds it into a
+  `HashMap<Symbol, InstrumentDef>`, everything downstream calls
+  `instrument_def(instruments, symbol)`, and `ensure_instrument` is
+  check-cache-else-refetch-everything-else-error. It fetches a list only because
+  that is the endpoint that exists. `scripts/smoke.py` asserts the list has
+  exactly one entry matching the readiness symbol, and both assertions die with
+  this model. broadarrow's `run_prep::mogwai_facts` refuses anything but exactly
+  one, by their design.
+  ADAPTER CHANGE THIS FORCES, ours: `client/data.rs` refuses a subscription when
+  the symbol is absent from its seeded set, listing what is served. That guard
+  is right for a typo and wrong for a servable-but-unconfigured symbol, where
+  the adapter would refuse on a venue's behalf that would happily serve.
+
+- FOUR STALE COMMENTS in the serving path, found by the 2026-08-15 survey. Same
+  family as the `BoundedSeek` comments the bug loop found and as the gate item
+  below: durable prose asserting a live type or a measured fact that has moved.
+  Cheap to fix, and each one currently justifies real code with a false premise.
+  - `config.rs` says a checkout with no `[instrument]` table builds
+    `InstrumentProfiles::defaults()` "which carries all three shipped presets
+    while `serve` picks the first". False - `defaults()` builds exactly ONE
+    BTCUSDT def from fingerprint medians and never opens a preset file. The
+    function it justifies, `refuse_unfunded_settlement`, is still correct.
+  - `fills.rs` justifies behaviour by saying an armed `MarketRegime` is
+    per-subscription because `TapeKey` carries it. `TapeKey` no longer exists
+    anywhere in the tree and `regime` is boot config. The conclusion holds, the
+    stated reason does not.
+  - `http.rs` says "other symbols' requests do not queue here at all", which
+    cannot be true when there are no other symbols and a process-global index
+    would serialize them anyway. Two further sites there still name a
+    `current_price` function that is gone.
+  - UNRESOLVED rather than stale: `bounded_quotes` filters on `start` while
+    `bounded_trades` does not. `MergeSource::starting_at` is documented to make
+    `start` inclusive-and-not-earlier, so the extra guard is either redundant or
+    compensating for something trades does not compensate for. Nobody has read
+    `MergeSource` closely enough to say which.
+
+- STILL OPEN, both surfaced 2026-08-15 and neither answered.
+  1. IS SUBSCRIBING TO AN UNCONFIGURED SYMBOL A SUPPORTED SESSION, or merely a
+     property of the tape machinery nobody exercises? If supported, the adapter
+     guard above must go and a client needs a way to resolve an unlisted
+     symbol's shape. If not, "accept any string" is true of the generator and
+     not of a client session, which is coherent but must be STATED so the two
+     do not read as contradictory.
+  2. `ReadyRecord` UNDER PER-BOAT CLOCKS. `symbol` is the named problem - a
+     venue has no symbol under this model, so the field can only lie, and
+     dropping it bumps `ReadyRecord::VERSION` to 6. Attach does not need it:
+     broadarrow keys on endpoint plus `run_seed`, which remain correct venue
+     identity. But the record also carries `data_origin_ns`, `run_start_ns` and
+     `warmup_ns`, and with one clock per boat those are properties of a RIVER
+     rather than of the venue, so the schema question is wider than the one
+     field. Unresolved knock-on: `run_seed` plus config reproduces a VENUE,
+     while a specific river's path also depends on when its boat was placed.
 
 - GATE the hand-maintained tape-version prose the way the artifact binding
   blocks are gated. Surfaced by the bug-hunt loop on 2026-08-14: when
@@ -220,44 +552,34 @@ Or both. There are no exceptions.
   model, undocumented, and a consumer keying on "my fills arrive here" will be
   wrong. Decide whether it is a contract to state or a filter to add.
 
-- BOUND AND DISCLOSE the observation gap: a client can be filled against tape
-  it has not yet received, and nothing bounds how far. ESTABLISHED 2026-08-15,
-  not a hypothesis. CONTENT coherence is enforced and is not the issue - once
-  live, a reader cannot advance the canonical lead past the tape worker
-  (`checkpoint.rs`), so published tape, history, sweeps and market readings are
-  all the same deterministic realization. What is absent is OBSERVATION
-  coherence. Two gaps compose:
-  1. The worker advances the canonical lead, THEN paces, THEN publishes, so the
-     lead can sit one `TickEvent` ahead of the broadcast. One frame - but one
-     tick is unbounded in SIM time, because the fitted arrival process dwells
-     and the calendar closes, so no useful time bound follows from it.
-  2. Publication to client observation is bounded by nothing at all: the feed
-     task drains into a 256-frame channel, the writer can block, the kernel
-     buffers, no acknowledgement or observed-market cursor flows back, and no
-     send deadline exists. `FeedLagged` bounds ring CONSUMPTION in frames and
-     says nothing about what the peer has read.
-  So `engine pricing frontier <= canonical lead <= publication frontier + 1
-  tick`, while `engine frontier - client-observed frontier` has no finite time
-  bound.
-  WHAT IS NOT WRONG, and the reason this is a bound-and-disclose item rather
-  than a redesign: a venue SHOULD price against its own book rather than
-  against what a client has managed to read, which is what every real exchange
-  does, and the market reading is filtered to `<= sim-now`, so the engine never
-  prices from tape that has not yet HAPPENED. This is ordinary feed latency in
-  kind. What is wrong is the MAGNITUDE and the silence about it.
-  WHY ACCELERATION MAKES IT BITE: at speed 100 a 10 ms wall delay is a full
-  simulated SECOND of tape the strategy never saw, so acceleration multiplies
-  the unobserved window in sim time by exactly the speed factor. Forward tests
-  are always accelerated by standing ruling, so every forward test carries an
-  inflated and undisclosed effective latency.
-  WHY IT BEARS ON SERVING N INSTRUMENTS: one tape worker per symbol means one
-  pre-publication window and one independently accumulating backlog per symbol,
-  so the divergence becomes per-instrument and independently variable.
-  The invariant nothing enforces, if it is ever wanted: an execution decision
-  may use only market state already delivered on the affected client's feed.
-  Adopting it is a large change and arguably LESS realistic than the current
-  behaviour; measuring the gap and stating it in `reference/` is the cheap move
-  and is what is actually owed.
+- STATE IN `reference/` what acceleration costs a client that stops reading.
+  Small doc task, NOT a defect and NOT a measurement - an earlier version of
+  this bullet called it an unbounded venue coherence gap, which overstated it.
+  THE VENUE IS COHERENT. Once live, no reader can advance the canonical lead
+  past the tape worker (`checkpoint.rs`), so published tape, history, sweeps and
+  market readings are one deterministic realization. The worker does advance the
+  lead before pacing and publishing, but during that pace it is sleeping until
+  THAT TICK's own wall deadline, so the unpublished tick is in the FUTURE of
+  sim-now, and market readings are filtered to `<= sim-now`. The engine cannot
+  price from it. That window cannot bite.
+  So the only way a client sees a market older than the one it is filled against
+  is that it HAS NOT DRAINED ITS SOCKET. Everything the engine can price from was
+  already published; unread frames are the client's own backlog. Every real venue
+  behaves this way, and `FeedLagged` is the signal for it.
+  WHAT IS ACTUALLY WORTH WRITING DOWN is the acceleration multiplier: at speed
+  100, every 10 ms the consumer spends NOT reading - aggregating bars, evaluating
+  a strategy - is a simulated SECOND of tape it never saw. Forward tests are
+  always accelerated by standing ruling, so an accelerated run is systematically
+  further behind the tape than a real one would be, in proportion to the speed
+  factor and to how long the consumer thinks between reads. That is a property of
+  accelerating past the consumer, not a venue defect, and a reader of forward
+  results should know it.
+  Under N instruments it is the consumer's read budget that splits N ways, which
+  is the honest way to state the multi-instrument consequence.
+  NO MEASUREMENT IS OWED. The source already says the backlog is unbounded, and a
+  number for one host on one day would change nothing. The trigger that would
+  give a measurement a decision to serve: a forward result somebody doubts, where
+  the question becomes whether that specific run was valid.
 
 - PROBLEM STATEMENTS. **This was the solvable set of problems believed to get
   mogwai to the end state the user needs.** That was a claim rather than an

@@ -102,9 +102,11 @@ visible without you having to diff two TOML files.
   trade-level archives. (ETHUSDT and SOLUSDT presets shipped for a while as
   thin overrides of this one, restating only the symbol and base currency -
   identical generator paths, so a tape differing from BTCUSDT's only in the
-  symbol identity, at a BTC price level; they were retired 2026-08-09 - an
-  instrument that owes a realistic tape owes a corpus, a measurement and a
-  fit, and these had a preset only.)
+  symbol identity, at a BTC price level. They were retired 2026-08-09 because
+  they added identity-only rows to the measurement oracle while contributing no
+  distinct dynamics. That retirement says nothing about which symbols the venue
+  may serve: a symbol with no preset is served the default tape, and no fit is
+  a precondition of being served.)
 
 A preset can itself be built as an override of another preset (MES over
 MNQ); that nesting is internal to how the presets are authored; from the

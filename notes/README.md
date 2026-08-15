@@ -27,7 +27,15 @@ and then FORWARD-TESTING it against mogwai, accelerated, fire-and-forget,
 one venue instance per run, reproducible by seed. Resource cost is
 explicitly not a design input. The settled premises behind that (always
 accelerated, no restart or resume, single-instrument strategies, one MOGWAI
-venue) are recorded in `todo.md`'s PROBLEM STATEMENTS block.
+venue) are recorded in `todo.md`'s PROBLEM STATEMENTS block. The full
+ecosystem those agents run in - who deals the strategies, where edge is
+established, what a mogwai forward run does and does not validate - is
+`todo.md`'s grand-design section (recorded 2026-08-15). The consequence
+that lands HERE, on the tape work: the tapes must span SESSION CLASSES
+(24/7 crypto, CME futures with closure, cash-equity hours, on the order of
+five presets), because a session-bound strategy forward-tested against the
+wrong session class tests a different claim. The segment-sampler track is
+what buys that; `dbnget` is the data spigot for each class's corpus.
 
 WHY THE TAPES: a backtest optimizes against the one path that actually
 happened, so its edge is always suspect of being memorized. A fitted
@@ -35,8 +43,13 @@ generative tape supplies unlimited counterfactual months drawn from the same
 measured process - a DISTRIBUTION of realistic worlds, a fresh path per
 seed, each reproducible and bindable to a claim. Every un-fitted quantity is
 a direction in which the sampled worlds silently stop resembling the real
-one, which is why realism is a measured, gated property and why fake tapes
-(the ETH/SOL aliases) get cut rather than kept.
+one, which is why realism is a measured property and why a preset states its
+provenance. It is NOT why a symbol gets served: the venue serves any symbol,
+using a preset where one exists and the default tape where none does. The
+line that used to sit here said fake tapes get cut rather than kept, citing
+the retired ETH and SOL presets - that was an invention, and the retirement it
+leaned on was a measurement-scope ruling about the oracle's rows. See
+`AGENTS.md`.
 
 WHY THE PRESET KNOBS: the generator's end state is pure instrument-agnostic
 method, with every instrument-specific fact living in a preset as a named,

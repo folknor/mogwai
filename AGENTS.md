@@ -14,19 +14,31 @@ depends on the published nautilus crates to ship the
 `ExecutionClient`/`DataClient` pair a host constructs to drive the `MOGWAI`
 venue over this workspace's native JSON-over-WS protocol.
 
-The INSTRUMENT SET IS OPEN. The three shipped presets - MNQ, MES and
-BTCUSDT - are the
-current state, not the end state - whatever gets traded next, the venue owes
-it a realistic tape, which means a corpus, a measurement, a fit and a preset
-for that symbol. (ETHUSDT and SOLUSDT shipped for a while as BTCUSDT aliases -
-identical generator paths, tapes differing only in the symbol identity - and
-were retired 2026-08-09 by owner ruling; MES remains a stated stopgap
-borrowing the MNQ fit.) The offline toolbox (`mogwai-lab` and what survives in
-`analysis/`) is therefore reusable intake machinery, not one instrument's
-history: treat a component as spent only when its QUESTION cannot recur, and
-keep per-instrument knowledge in config or a preset rather than hardcoded in
-the method. See the architecture note on the intake sequence for what this
-binds.
+The INSTRUMENT SET IS OPEN, and THE VENUE DOES NOT GATE ON IT. A symbol
+arrives and is served: if a tuned preset exists for that symbol, the preset
+drives the tape; if none exists, the DEFAULT tape is served under that symbol.
+Nothing refuses a symbol for wanting a fit, and no intake work is a
+precondition of serving one. The three shipped presets - MNQ, MES and
+BTCUSDT - are the current state, not the end state.
+
+The intake sequence - corpus, measurement, fit, preset - is therefore how a
+symbol's tape gets BETTER, never a gate on whether it can be served at all.
+Do not read it as an admission rule: earlier prose here and in `docs/presets.md`
+claimed that every instrument owes a corpus, a measurement and a fit before the
+venue serves it, and that claim was invented. It was back-derived from a
+2026-08-09 owner ruling that retired the ETHUSDT and SOLUSDT presets, which was
+a narrow measurement-scope amendment - those presets added identity-only rows to
+the measurement oracle while contributing no distinct dynamics, so the oracle
+lost nothing by dropping them. The record is that ruling in
+`notes/protocol-12b-arrival-composition-spec.md`, and it ruled on what the
+oracle measures, not on what the venue may serve.
+
+The offline toolbox (`mogwai-lab` and what survives in `analysis/`) is
+reusable intake machinery, not one instrument's history: treat a component as
+spent only when its QUESTION cannot recur, and keep per-instrument knowledge
+in config or a preset rather than hardcoded in the method. MES remains a
+stated stopgap borrowing the MNQ fit. See the architecture note on the intake
+sequence for what this binds.
 
 ## Workspace
 
