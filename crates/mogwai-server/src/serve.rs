@@ -15,9 +15,7 @@ use axum::{
 };
 
 use crate::{
-    config::{
-        Config, build_instrument_profiles, build_run_clock, now_ns, refuse_unfunded_settlement,
-    },
+    config::{Config, build_instrument_profiles, build_run_clock, now_ns},
     http::{self, AppState, account, arm_divergence, clock, instruments, quotes, trades},
     long_version,
     ws::ws_upgrade,
@@ -176,8 +174,6 @@ async fn serve_async(
         .into_iter()
         .next()
         .ok_or_else(|| anyhow::anyhow!("no instrument configured"))?;
-    refuse_unfunded_settlement(&cfg, &instrument)?;
-
     let seeds = mogwai_protocol::RunSeeds::from_run_seed(
         cfg.seed.unwrap_or_else(|| rand::random::<u64>() >> 1),
     );

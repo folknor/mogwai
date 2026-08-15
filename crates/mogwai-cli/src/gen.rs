@@ -81,7 +81,8 @@ pub(crate) struct GenArgs {
     /// symbol, through the server's REAL `Config::load` and profile
     /// construction - the same path a served config takes - so a scratch
     /// profile with candidate scalars is expressible without touching
-    /// committed presets. The file must carry exactly one `[instrument]`.
+    /// committed presets. The file must carry `[instrument]` defaults or a
+    /// `[symbols.*]` overlay matching its boot symbol.
     /// Mutually exclusive with an explicit --symbol.
     #[arg(long, value_name = "PATH", conflicts_with = "symbol")]
     config: Option<PathBuf>,
@@ -541,10 +542,10 @@ fn profile_from_config(
 ) -> anyhow::Result<mogwai_server::source::InstrumentProfile> {
     let cfg = mogwai_server::config::Config::load(Some(path.to_path_buf()))
         .with_context(|| format!("loading --config {}", path.display()))?;
-    if cfg.instrument.is_none() {
+    if cfg.boot_symbol_carries_no_knobs() {
         bail!(
-            "--config {} carries no [instrument] table; it would resolve to the default preset \
-             and ignore every scratch scalar, so a scratch profile must configure one",
+            "--config {} carries no [instrument] or matching [symbols.*] knobs for its boot \
+             symbol; it would ignore every scratch scalar, so a scratch profile must configure one",
             path.display()
         );
     }
@@ -1229,7 +1230,10 @@ mod tests {
         // SAME loading path a served config takes. A config that merely
         // names the MNQ preset must therefore resolve to exactly the profile
         // the embedded preset resolves to.
-        let path = scratch_config("plain-mnq.toml", "[instrument]\npreset = \"MNQ\"\n");
+        let path = scratch_config(
+            "plain-mnq.toml",
+            "[instrument]\npreset = \"MNQ\"\n[balances]\n",
+        );
         let from_config = profile_from_config(&path).expect("config profile");
         let from_preset =
             mogwai_server::config::profile_from_preset("MNQ").expect("preset profile");
@@ -1254,6 +1258,16 @@ mod tests {
         let err = profile_from_config(&no_instrument)
             .expect_err("a config without an instrument must refuse");
         assert!(format!("{err}").contains("[instrument]"), "{err}");
+    }
+
+    #[test]
+    fn a_scratch_config_whose_only_knobs_are_for_another_symbol_is_refused() {
+        let path = scratch_config(
+            "wrong-symbol.toml",
+            "[symbols.MNQ]\nprice_increment = \"0.25\"\n",
+        );
+        let error = profile_from_config(&path).unwrap_err().to_string();
+        assert!(error.contains("boot symbol"), "{error}");
     }
 
     /// Run a short summary over the profile a scratch config resolves.
@@ -1285,8 +1299,9 @@ mod tests {
         // declared one-contract median (the 4.3 finding), so its pair of
         // configs also raises the median to 40 and differs only in the frac.
         const WINDOW_NS: u64 = 30 * 60 * 1_000_000_000;
-        let mnq =
-            |over: &str| format!("[instrument]\npreset = \"MNQ\"\n[instrument.override]\n{over}\n");
+        let mnq = |over: &str| {
+            format!("[instrument]\npreset = \"MNQ\"\n[instrument.override]\n{over}\n[balances]\n")
+        };
         let baseline = summary_json_for(&mnq(""), "base-mnq.toml", WINDOW_NS);
         let mnq_cases: &[(&str, &str)] = &[
             (

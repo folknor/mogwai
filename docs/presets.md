@@ -30,21 +30,23 @@ are.
 
 ## Selecting a bundle in your config
 
-Name the symbol. If its name matches a shipped preset, case-insensitively, that
+Name the boot symbol at top level. If its name matches a shipped preset, case-insensitively, that
 preset supplies the whole bundle.
 
 ```toml
-[instrument]
 symbol = "MNQ"
 ```
 
-That is a complete table. Resolution uses this precedence: an explicit
-`preset`, then a preset matching the symbol, then the BTCUSDT default. An
-explicit preset remains useful for serving one bundle under another name:
+That is a complete config. Resolution uses this precedence: a preset bundle,
+then default `[instrument]` knobs, then matching `[symbols.<SYM>]` knobs. A
+per-symbol `preset` beats a default preset key, which beats a preset matching
+the symbol, which beats the BTCUSDT default. An explicit preset remains useful
+for serving one bundle under another name:
 
 ```toml
-[instrument]
 symbol = "FOOBAR"
+
+[symbols.FOOBAR]
 preset = "MNQ"
 ```
 
@@ -75,6 +77,10 @@ Two rules, both enforced at boot with a message that names the problem:
 Every override is logged at startup with both the preset's value and the
 value you supplied, so a run's log makes the deviation from the preset
 visible without you having to diff two TOML files.
+
+A preset is a named knob bundle, not an admission record. Every symbol is
+servable: an unmatched symbol resolves through the BTCUSDT default under its
+own name. Presets improve a symbol's tape; they do not authorize the symbol.
 
 ## What the shipped presets are
 

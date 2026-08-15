@@ -307,6 +307,13 @@ operator overlay: an explicit preset, a matching preset, or the BTCUSDT default
 bundle. No second hardcoded default bundle exists, and no symbol is refused for
 wanting a fit. The three shipped presets - MNQ, MES and BTCUSDT - are the
 current state, not the end state. The intake sequence makes a tape better:
+
+Config declares no instrument. It supplies a default knob overlay and optional
+case-insensitive per-symbol overlays for total symbol resolution. The top-level
+boot symbol is a slice-1 lifecycle artifact while one run still serves one
+symbol; slice 2 moves that symbol to each request and retains the boot value as
+the default for a request that carries none.
+
 survey what cheap data exists, decide whether a paid corpus is worth buying
 and which windows of it, buy, preflight, measure, characterize, fit, ship a
 preset with its provenance. The offline toolbox is that sequence made

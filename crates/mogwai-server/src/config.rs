@@ -25,10 +25,9 @@ use crate::source;
 // used to fall through to the field default silently, so the operator ran with a
 // value they never set (S20). `default` (missing keys keep built-in defaults) and
 // `deny` (unknown keys are rejected) are orthogonal and compose. The
-// `[instrument]` table's own keys are guarded one step later, by
+// Instrument overlay keys are guarded one step later, by
 // `deny_unknown_fields` on `ConfiguredInstrument`, which sees the RESOLVED
-// table; `[[instrument]]` still fails to parse here, because an array of
-// tables does not deserialize into `Option<toml::Table>`.
+// table.
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Simulated duration of one venue run. Zero means the launcher owns
@@ -164,12 +163,17 @@ pub struct Config {
     /// Process-wide ceiling on queued or executing commands across every
     /// websocket connection. See `admission::GLOBAL_PENDING_COMMAND_SLOTS`.
     pub(crate) global_pending_command_acts: usize,
-    /// The operator's instrument table exactly as written, unresolved and
-    /// unvalidated. `build_instrument_profiles` resolves it against the symbol
-    /// and validates the derived profile. A table, not a list: this slice still
-    /// boots exactly one instrument.
+    /// The one symbol this run serves. Absent, the default bundle's own symbol
+    /// stands. This boot key becomes a request default when symbols move to the
+    /// request in slice 2.
+    pub symbol: Option<String>,
+    /// Operator knobs applied to every resolved symbol, exactly as written.
     #[serde(rename = "instrument")]
     pub instrument: Option<toml::Table>,
+    /// Operator knobs applied to individual symbols, exactly as written. Same
+    /// overlay shape as `instrument`, including its own `preset` and `override`
+    /// sub-table, and applied after it. Keyed case-insensitively.
+    pub symbols: HashMap<String, toml::Table>,
     /// Market regime for this run's tape. Formerly the one knob a consumer
     /// picked for itself per subscription; with no subscriptions left it is
     /// boot config, chosen by whoever launches the run. Absent means the
@@ -241,7 +245,9 @@ impl Default for Config {
             admission_lane_frames: crate::admission::ADMISSION_LANE_FRAMES,
             pending_command_acts: crate::admission::PENDING_COMMAND_SLOTS,
             global_pending_command_acts: crate::admission::GLOBAL_PENDING_COMMAND_SLOTS,
+            symbol: None,
             instrument: None,
+            symbols: HashMap::new(),
             regime: None,
             balances: default_balances(),
         }
@@ -268,9 +274,8 @@ fn default_balances() -> HashMap<String, Decimal> {
 /// instead: funds are unenforced, and the first buy books a negative quote
 /// leg a nautilus cash consumer will refuse to apply.
 ///
-/// It takes THE instrument the run serves, not an unresolved config table.
-/// Checking anything other than the derived definition could refuse boot over
-/// a currency no order in the run could ever quote.
+/// It takes a configured shape's derived definition, not an unresolved config
+/// table. Every explicitly configured shape is checked before the run boots.
 pub(crate) fn refuse_unfunded_settlement(cfg: &Config, def: &InstrumentDef) -> anyhow::Result<()> {
     if cfg.balances.is_empty() {
         tracing::warn!(
@@ -280,10 +285,8 @@ pub(crate) fn refuse_unfunded_settlement(cfg: &Config, def: &InstrumentDef) -> a
         );
         return Ok(());
     }
-    // A hard boot error rather than a warning: with ONE instrument per run, an
-    // unfunded quote currency means every buy in the whole run rejects for
-    // insufficient balance. That is a misconfigured run, not a caution, and it
-    // is cheaper to refuse at boot than to discover it minutes in.
+    // A hard boot error rather than a warning: an explicitly configured shape
+    // that cannot buy is a misconfiguration, not a trading outcome.
     let currency = def.class.settlement_currency();
     if !cfg.balances.contains_key(currency) {
         anyhow::bail!(
@@ -449,17 +452,36 @@ pub(crate) fn build_admission_limits(cfg: &Config) -> AdmissionLimits {
 impl Config {
     /// The boot symbol the operator named, if any. Absent, the chosen bundle's
     /// own symbol stands, which is what makes a no-config run BTCUSDT.
-    pub(crate) fn instrument_symbol(&self) -> Option<&str> {
-        self.instrument
-            .as_ref()
-            .and_then(|table| table.get("symbol"))
-            .and_then(toml::Value::as_str)
+    pub fn boot_symbol(&self) -> Option<&str> {
+        self.symbol.as_deref()
     }
 
-    /// The operator's `[instrument]` overlay as written; empty when the config
-    /// carries no such table, which is the legal no-config case.
-    pub(crate) fn instrument_table(&self) -> toml::Table {
-        self.instrument.clone().unwrap_or_default()
+    /// True when no operator knobs apply to the boot symbol.
+    pub fn boot_symbol_carries_no_knobs(&self) -> bool {
+        self.overlays_for(self.boot_symbol()).is_empty()
+    }
+
+    /// Default knobs followed by the matching symbol-specific knobs, each
+    /// paired with the config path it came from so a resolution error or an
+    /// addition log can name the table the operator wrote. Empty tables are
+    /// omitted and symbol matching is ASCII case-insensitive. This is the ONE
+    /// spelling of which overlays a symbol resolves through: the boot guard
+    /// and the resolution itself both ask it, so they cannot drift.
+    pub(crate) fn overlays_for(&self, symbol: Option<&str>) -> Vec<(String, toml::Table)> {
+        let mut overlays = Vec::new();
+        if let Some(table) = self.instrument.clone().filter(|table| !table.is_empty()) {
+            overlays.push(("instrument".to_owned(), table));
+        }
+        if let Some(symbol) = symbol
+            && let Some((key, table)) = self
+                .symbols
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(symbol))
+                .filter(|(_, table)| !table.is_empty())
+        {
+            overlays.push((format!("symbols.{key}"), table.clone()));
+        }
+        overlays
     }
 
     /// Load run config from a TOML file. `path` is the parsed `--config <path>`
@@ -487,6 +509,7 @@ impl Config {
         validate_admission_limits(&cfg)?;
         validate_fill_band(&cfg)?;
         validate_speed(&cfg)?;
+        validate_symbol_keys(&cfg)?;
         // Unlike every neighbouring count knob, 0 is not "unbounded" here:
         // `broadcast::channel(0)` panics, so the key is named in a load error
         // rather than crashing the first subscribe.
@@ -759,44 +782,83 @@ fn base_bundle(
     effective_preset(bundle_name(symbol, operator_preset))
 }
 
+/// Resolves anonymous overlays - the outermost is the `[instrument]` default
+/// table and any further one a per-symbol table whose key is not known here.
+/// `Config`-driven resolution goes through `overlays_for`, which carries the
+/// real path of each table.
 fn resolve_instrument(
     symbol: Option<&str>,
-    mut operator: toml::Table,
+    overlays: Vec<toml::Table>,
+) -> anyhow::Result<toml::Table> {
+    let named = overlays
+        .into_iter()
+        .enumerate()
+        .map(|(index, overlay)| {
+            let source = if index == 0 {
+                "instrument"
+            } else {
+                "symbols.*"
+            };
+            (source.to_owned(), overlay)
+        })
+        .collect();
+    resolve_instrument_named(symbol, named)
+}
+
+fn resolve_instrument_named(
+    symbol: Option<&str>,
+    overlays: Vec<(String, toml::Table)>,
 ) -> anyhow::Result<toml::Table> {
     // The pre-class shape was seven flat fields. `deny_unknown_fields` would
     // refuse it anyway, but with a bare "unknown field `base`" that names
     // neither the replacement nor the shape it takes. Refuse it here instead,
     // where the message can say what to write.
-    for removed in ["base", "quote"] {
-        if operator.contains_key(removed) {
+    let mut prepared = Vec::with_capacity(overlays.len());
+    let mut operator_preset = None;
+    for (source, mut overlay) in overlays {
+        for removed in ["base", "quote"] {
+            if overlay.contains_key(removed) {
+                anyhow::bail!(
+                    "{source}.{removed} was replaced by the [{source}.class] table; write \
+                     kind = \"spot\" with base and quote under [{source}.class]"
+                );
+            }
+        }
+        if overlay.contains_key("symbol") {
             anyhow::bail!(
-                "instrument.{removed} was replaced by the [instrument.class] table; write \
-                 kind = \"spot\" with base and quote under [instrument.class]"
+                "{source}.symbol was replaced by the top-level symbol key; the [instrument] \
+                 and [symbols.*] tables carry knobs, not an instrument"
             );
         }
+        if let Some(value) = overlay.remove("preset") {
+            operator_preset = Some(
+                value
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("{source}.preset must be a string"))?
+                    .to_owned(),
+            );
+        }
+        prepared.push((source, overlay));
     }
-    let operator_preset = operator.remove("preset");
-    let operator_preset = operator_preset
-        .as_ref()
-        .map(|value| {
-            value
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("instrument.preset must be a string"))
-        })
-        .transpose()?;
-    let requested_symbol = operator
-        .get("symbol")
-        .map(|value| {
-            value
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("instrument.symbol must be a string"))
-        })
-        .transpose()?
-        .or(symbol)
-        .map(str::to_owned);
-    operator.remove("symbol");
-    let bundle = bundle_name(requested_symbol.as_deref(), operator_preset);
-    let (mut merged, _provenance) = base_bundle(requested_symbol.as_deref(), operator_preset)?;
+    let requested_symbol = symbol.map(str::to_owned);
+    let bundle = bundle_name(symbol, operator_preset.as_deref());
+    let (mut merged, _provenance) = base_bundle(symbol, operator_preset.as_deref())?;
+    for (source, overlay) in prepared {
+        apply_overlay(&mut merged, overlay, bundle, symbol, &source)?;
+    }
+    if let Some(symbol) = requested_symbol {
+        merged.insert("symbol".into(), toml::Value::String(symbol));
+    }
+    Ok(merged)
+}
+
+fn apply_overlay(
+    merged: &mut toml::Table,
+    mut operator: toml::Table,
+    bundle: &str,
+    requested: Option<&str>,
+    source: &str,
+) -> anyhow::Result<()> {
     let overrides = operator
         .remove("override")
         .and_then(|value| value.as_table().cloned())
@@ -817,7 +879,7 @@ fn resolve_instrument(
                 .insert("arrival".to_string(), value);
             continue;
         }
-        replace_dotted_for_bundle(&mut merged, &path, value, bundle)?;
+        replace_dotted_for_bundle(merged, &path, value, bundle)?;
     }
     // A top-level key is the operator's explicit choice. It REPLACES a knob the
     // bundle sets, and where the bundle sets no such key it ADDS one: the
@@ -831,16 +893,13 @@ fn resolve_instrument(
     // as under `[instrument.override]`, and keeps the strict guard.
     for (path, value) in operator {
         if path.contains('.') || merged.contains_key(&path) {
-            replace_dotted_for_bundle(&mut merged, &path, value, bundle)?;
+            replace_dotted_for_bundle(merged, &path, value, bundle)?;
         } else {
-            tracing::info!(path, override_value = %value, bundle, "instrument bundle addition");
+            tracing::info!(path, override_value = %value, bundle, symbol = requested, overlay = source, "instrument bundle addition");
             merged.insert(path, value);
         }
     }
-    if let Some(symbol) = requested_symbol {
-        merged.insert("symbol".into(), toml::Value::String(symbol));
-    }
-    Ok(merged)
+    Ok(())
 }
 
 fn replace_dotted_for_bundle(
@@ -993,9 +1052,52 @@ impl ConfiguredInstrument {
     }
 }
 
+/// Resolves and validates EVERY shape this config can reach - the one it boots
+/// and every `[symbols.*]` table, funding included - then returns only the boot
+/// profile. The non-boot profiles are dropped: the point is the refusal. A
+/// typo or an unfunded settlement currency under a table the run does not boot
+/// would otherwise survive startup and surface as a runtime rejection that
+/// looks like a trading outcome, which the funding ruling forbids.
 pub fn build_instrument_profiles(cfg: &Config) -> anyhow::Result<source::InstrumentProfiles> {
-    let profile = profile_for_config(cfg.instrument_symbol(), cfg.instrument_table())?;
+    validate_symbol_keys(cfg)?;
+    // The boot shape leads. With no `symbol` key that is `None`, which resolves
+    // the default bundle, so the default shape is swept exactly when it is the
+    // shape the run can reach. Configured keys follow in a stable order, so a
+    // config with two bad tables always names the same one first.
+    let mut configured: Vec<&str> = cfg
+        .symbols
+        .keys()
+        .map(String::as_str)
+        .filter(|key| {
+            cfg.boot_symbol()
+                .is_none_or(|boot| !key.eq_ignore_ascii_case(boot))
+        })
+        .collect();
+    configured.sort_unstable();
+    let mut boot = None;
+    for symbol in std::iter::once(cfg.boot_symbol()).chain(configured.into_iter().map(Some)) {
+        let named = symbol.unwrap_or(DEFAULT_PRESET);
+        let profile = profile_for(cfg, symbol)
+            .with_context(|| format!("configured symbol {named} is invalid"))?;
+        refuse_unfunded_settlement(cfg, &profile.def)
+            .with_context(|| format!("configured symbol {named} cannot be funded"))?;
+        boot.get_or_insert(profile);
+    }
+    let profile = boot.expect("the boot shape is always swept");
     Ok(source::InstrumentProfiles::from_profiles(vec![profile]))
+}
+
+fn validate_symbol_keys(cfg: &Config) -> anyhow::Result<()> {
+    let mut normalized = HashMap::<String, &str>::new();
+    for key in cfg.symbols.keys() {
+        let folded = key.to_ascii_uppercase();
+        if let Some(previous) = normalized.insert(folded, key) {
+            anyhow::bail!(
+                "symbols tables {previous:?} and {key:?} differ only in case; symbol table keys must be unique case-insensitively"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// One validated [`source::InstrumentProfile`] from a deserialized
@@ -1124,15 +1226,30 @@ pub fn profile_from_preset(name: &str) -> anyhow::Result<source::InstrumentProfi
 /// symbol strings: an unmatched symbol uses the default bundle under its own
 /// name.
 pub fn profile_for_symbol(symbol: &str) -> anyhow::Result<source::InstrumentProfile> {
-    profile_for_config(Some(symbol), toml::Table::new())
+    profile_for_config(Some(symbol), Vec::new())
 }
 
-/// The validated profile selected by a boot symbol and operator overlay.
+/// The validated profile a symbol resolves to under this config. This is the
+/// seam slice 2 needs: when the symbol arrives per request, the server calls it
+/// with the requested symbol and nothing else changes.
+pub fn profile_for(
+    cfg: &Config,
+    symbol: Option<&str>,
+) -> anyhow::Result<source::InstrumentProfile> {
+    let merged = resolve_instrument_named(symbol, cfg.overlays_for(symbol))?;
+    profile_from_merged(merged)
+}
+
+/// The validated profile selected by a symbol and ordered operator overlays.
 pub fn profile_for_config(
     symbol: Option<&str>,
-    operator: toml::Table,
+    overlays: Vec<toml::Table>,
 ) -> anyhow::Result<source::InstrumentProfile> {
-    let merged = resolve_instrument(symbol, operator)?;
+    let merged = resolve_instrument(symbol, overlays)?;
+    profile_from_merged(merged)
+}
+
+fn profile_from_merged(merged: toml::Table) -> anyhow::Result<source::InstrumentProfile> {
     let configured: ConfiguredInstrument = merged
         .try_into()
         .context("the resolved [instrument] table is not a valid instrument")?;
@@ -1470,19 +1587,6 @@ mod tests {
         assert!(err.to_string().contains("sim_epoch_ns"), "{err}");
     }
 
-    /// A run serves ONE instrument, so `[instrument]` is a table. A file
-    /// carrying the old `[[instrument]]` list must fail loudly at parse rather
-    /// than silently serving whichever entry happened to sort first.
-    #[test]
-    fn a_config_naming_two_instruments_fails_to_parse() {
-        let two = "\n[[instrument]]\nsymbol = \"BTCUSDT\"\n[[instrument]]\nsymbol = \"ETHUSDT\"\n";
-        let err = toml::from_str::<Config>(two).expect_err("a list of instruments is refused");
-        assert!(
-            err.to_string().contains("instrument"),
-            "the parse error names the offending key: {err}"
-        );
-    }
-
     /// With one instrument per run, an unfunded quote currency means every buy
     /// in the whole run rejects for insufficient balance. That is a
     /// misconfigured run, so it fails BOOT rather than warning.
@@ -1566,9 +1670,8 @@ mod tests {
         // field `base`", which names neither the replacement table nor its
         // shape, and asserting on THAT would pass no matter what we told the
         // operator.
-        let table: toml::Table =
-            toml::from_str("symbol = \"BTCUSDT\"\nbase = \"BTC\"\nquote = \"USDT\"\n").unwrap();
-        let message = resolve_instrument(None, table)
+        let table: toml::Table = toml::from_str("base = \"BTC\"\nquote = \"USDT\"\n").unwrap();
+        let message = resolve_instrument(None, vec![table])
             .expect_err("the removed flat class shape must refuse")
             .to_string();
         assert!(message.contains("instrument.class"), "{message}");
@@ -1582,7 +1685,7 @@ mod tests {
             let (_, provenance) = effective_preset(name).unwrap();
             let table =
                 toml::Table::from_iter([("preset".into(), toml::Value::String(name.into()))]);
-            let resolved = resolve_instrument(None, table).unwrap();
+            let resolved = resolve_instrument(None, vec![table]).unwrap();
             let configured: ConfiguredInstrument = toml::Value::Table(resolved).try_into().unwrap();
             validate_instrument_def(&configured.def()).unwrap();
             validate_instrument_options(&configured, &configured.def()).unwrap();
@@ -1616,8 +1719,8 @@ mod tests {
 
     #[test]
     fn an_operator_preset_beats_a_matching_symbol() {
-        let operator = toml::from_str("symbol = \"MNQ\"\npreset = \"BTCUSDT\"").unwrap();
-        let resolved = profile_for_config(Some("MNQ"), operator).unwrap();
+        let operator = toml::from_str("preset = \"BTCUSDT\"").unwrap();
+        let resolved = profile_for_config(Some("MNQ"), vec![operator]).unwrap();
         assert_eq!(resolved.def.symbol.as_ref(), "MNQ");
         assert!(matches!(resolved.def.class, InstrumentClass::Spot { .. }));
     }
@@ -1625,10 +1728,10 @@ mod tests {
     #[test]
     fn a_top_level_key_overrides_the_resolved_bundle() {
         let operator = toml::from_str(
-            "symbol = \"MNQ\"\nmargin = { initial_per_contract = \"2100\", maintenance_per_contract = \"1800\", breach_action = \"liquidate\" }",
+            "margin = { initial_per_contract = \"2100\", maintenance_per_contract = \"1800\", breach_action = \"liquidate\" }",
         )
         .unwrap();
-        let resolved = profile_for_config(Some("MNQ"), operator).unwrap();
+        let resolved = profile_for_config(Some("MNQ"), vec![operator]).unwrap();
         assert_eq!(
             resolved.margin.unwrap().initial_per_contract,
             Decimal::from(2100)
@@ -1641,19 +1744,19 @@ mod tests {
         // a fee schedule out of every operator's reach. `tests/configs/fees.toml`
         // is exactly this shape and drives the smoke test's fees arm.
         let operator = toml::from_str(
-            "symbol = \"MNQ\"\n[fees.maker]\nbasis = \"per_contract\"\namount = \"0.20\"\n\
+            "[fees.maker]\nbasis = \"per_contract\"\namount = \"0.20\"\n\
              [fees.taker]\nbasis = \"per_contract\"\namount = \"0.25\"\n",
         )
         .unwrap();
         let resolved =
-            profile_for_config(Some("MNQ"), operator).expect("a fee schedule is addable");
+            profile_for_config(Some("MNQ"), vec![operator]).expect("a fee schedule is addable");
         assert!(resolved.fees.is_some());
     }
 
     #[test]
     fn a_top_level_key_that_is_not_a_field_is_still_refused() {
-        let operator = toml::from_str("symbol = \"MNQ\"\nprice_precison = 3").unwrap();
-        let error = profile_for_config(Some("MNQ"), operator)
+        let operator = toml::from_str("price_precison = 3").unwrap();
+        let error = profile_for_config(Some("MNQ"), vec![operator])
             .expect_err("a typo at the top level must not boot");
         assert!(
             format!("{error:#}").contains("price_precison"),
@@ -1663,26 +1766,24 @@ mod tests {
 
     #[test]
     fn a_top_level_override_of_a_coupled_key_must_state_both() {
-        let lone = toml::from_str("symbol = \"MNQ\"\nprice_precision = 3").unwrap();
-        let error = profile_for_config(Some("MNQ"), lone).unwrap_err();
+        let lone = toml::from_str("price_precision = 3").unwrap();
+        let error = profile_for_config(Some("MNQ"), vec![lone]).unwrap_err();
         assert!(
             error
                 .to_string()
                 .contains("generator.price_decimals must equal price_precision"),
             "{error}"
         );
-        let paired = toml::from_str(
-            "symbol = \"MNQ\"\nprice_precision = 3\n[override]\n\"generator.price_decimals\" = 3",
-        )
-        .unwrap();
-        profile_for_config(Some("MNQ"), paired).expect("both coupled halves boot");
+        let paired =
+            toml::from_str("price_precision = 3\n[override]\n\"generator.price_decimals\" = 3")
+                .unwrap();
+        profile_for_config(Some("MNQ"), vec![paired]).expect("both coupled halves boot");
     }
 
     #[test]
     fn an_override_path_the_bundle_does_not_set_is_still_refused() {
-        let operator =
-            toml::from_str("symbol = \"FOOBAR\"\n[override]\n\"class.typo\" = \"x\"").unwrap();
-        let error = profile_for_config(Some("FOOBAR"), operator).unwrap_err();
+        let operator = toml::from_str("[override]\n\"class.typo\" = \"x\"").unwrap();
+        let error = profile_for_config(Some("FOOBAR"), vec![operator]).unwrap_err();
         let message = error.to_string();
         assert!(message.contains("class.typo"), "{message}");
         assert!(message.contains(DEFAULT_PRESET), "{message}");
@@ -1690,8 +1791,8 @@ mod tests {
 
     #[test]
     fn an_explicit_unknown_preset_is_still_an_error() {
-        let explicit = toml::from_str("symbol = \"MNQ\"\npreset = \"NOPE\"").unwrap();
-        assert!(profile_for_config(Some("MNQ"), explicit).is_err());
+        let explicit = toml::from_str("preset = \"NOPE\"").unwrap();
+        assert!(profile_for_config(Some("MNQ"), vec![explicit]).is_err());
         profile_for_symbol("NOPE").expect("an unmatched symbol is legal");
     }
 
@@ -1702,6 +1803,150 @@ mod tests {
         assert_eq!(resolved.def.symbol.as_ref(), "mnq");
         assert_eq!(resolved.def.class, preset.def.class);
         assert_eq!(resolved.scalars.modal_tick, preset.scalars.modal_tick);
+    }
+
+    #[test]
+    fn a_boot_symbol_at_top_level_selects_its_preset() {
+        let cfg: Config = toml::from_str("symbol = \"MNQ\"").unwrap();
+        assert_eq!(
+            profile_for(&cfg, cfg.boot_symbol()).unwrap().def,
+            profile_from_preset("MNQ").unwrap().def
+        );
+    }
+
+    #[test]
+    fn default_knobs_apply_to_an_unmatched_symbol() {
+        let cfg: Config =
+            toml::from_str("symbol = \"FOOBAR\"\n[instrument]\nprice_increment = \"0.02\"\n")
+                .unwrap();
+        let profile = profile_for(&cfg, cfg.boot_symbol()).unwrap();
+        assert_eq!(profile.def.symbol.as_ref(), "FOOBAR");
+        assert_eq!(profile.def.price_increment, Decimal::new(2, 2));
+    }
+
+    #[test]
+    fn per_symbol_knobs_beat_default_knobs() {
+        let cfg: Config = toml::from_str(
+            "symbol = \"MNQ\"\n[instrument]\nprice_increment = \"0.50\"\n[symbols.MNQ]\nprice_increment = \"0.25\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            profile_for(&cfg, cfg.boot_symbol())
+                .unwrap()
+                .def
+                .price_increment,
+            Decimal::new(25, 2)
+        );
+    }
+
+    #[test]
+    fn a_per_symbol_preset_beats_the_default_preset_key() {
+        let cfg: Config = toml::from_str(
+            "symbol = \"X\"\n[instrument]\npreset = \"MNQ\"\n[symbols.X]\npreset = \"MES\"\n",
+        )
+        .unwrap();
+        let profile = profile_for(&cfg, cfg.boot_symbol()).unwrap();
+        assert_eq!(profile.def.symbol.as_ref(), "X");
+        assert_eq!(
+            profile.def.class,
+            profile_from_preset("MES").unwrap().def.class
+        );
+    }
+
+    #[test]
+    fn a_config_carrying_two_symbol_tables_parses_and_resolves_both() {
+        let cfg: Config = toml::from_str(
+            "[symbols.MNQ]\nmargin = { initial_per_contract = \"2100\", maintenance_per_contract = \"1800\", breach_action = \"liquidate\" }\n[symbols.BTCUSDT]\nprice_increment = \"0.02\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            profile_for(&cfg, Some("MNQ"))
+                .unwrap()
+                .margin
+                .unwrap()
+                .initial_per_contract,
+            Decimal::from(2100)
+        );
+        assert_eq!(
+            profile_for(&cfg, Some("BTCUSDT"))
+                .unwrap()
+                .def
+                .price_increment,
+            Decimal::new(2, 2)
+        );
+    }
+
+    #[test]
+    fn a_typo_in_a_per_symbol_override_is_still_refused() {
+        let cfg: Config =
+            toml::from_str("[symbols.MNQ.override]\n\"class.typo\" = \"x\"\n").unwrap();
+        let error = profile_for(&cfg, Some("MNQ")).unwrap_err().to_string();
+        assert!(
+            error.contains("class.typo") && error.contains("MNQ"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_lowercase_boot_symbol_finds_its_uppercase_symbols_table() {
+        let cfg: Config = toml::from_str(
+            "symbol = \"mnq\"\n[symbols.MNQ]\nmargin = { initial_per_contract = \"2100\", maintenance_per_contract = \"1800\", breach_action = \"liquidate\" }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            profile_for(&cfg, cfg.boot_symbol())
+                .unwrap()
+                .margin
+                .unwrap()
+                .initial_per_contract,
+            Decimal::from(2100)
+        );
+    }
+
+    #[test]
+    fn two_symbol_tables_differing_only_in_case_are_refused() {
+        let cfg: Config = toml::from_str(
+            "[balances]\n[symbols.mnq]\npreset = \"MNQ\"\n[symbols.MNQ]\npreset = \"MES\"\n",
+        )
+        .unwrap();
+        let error = build_instrument_profiles(&cfg).unwrap_err().to_string();
+        assert!(error.contains("mnq") && error.contains("MNQ"), "{error}");
+    }
+
+    #[test]
+    fn an_invalid_non_boot_symbol_table_refuses_at_boot() {
+        let cfg: Config = toml::from_str(
+            "symbol = \"MNQ\"\n[balances]\nUSD = \"1\"\n[symbols.X.override]\n\"class.typo\" = \"x\"\n",
+        )
+        .unwrap();
+        let error = format!("{:#}", build_instrument_profiles(&cfg).unwrap_err());
+        assert!(error.contains("configured symbol X"), "{error}");
+        assert!(error.contains("class.typo"), "{error}");
+    }
+
+    #[test]
+    fn an_unfunded_non_boot_symbol_refuses_at_boot() {
+        let cfg: Config = toml::from_str(
+            "symbol = \"BTCUSDT\"\n[balances]\nUSDT = \"1\"\n[symbols.X]\npreset = \"MNQ\"\n",
+        )
+        .unwrap();
+        let error = format!("{:#}", build_instrument_profiles(&cfg).unwrap_err());
+        assert!(
+            error.contains("configured symbol X cannot be funded"),
+            "{error}"
+        );
+        assert!(error.contains("unfunded"), "{error}");
+    }
+
+    /// The boot shape's own funding is checked by the boot sweep. `serve` used
+    /// to ask this separately over the single built def; the sweep replaced
+    /// that call, so it has to cover the boot shape whether or not the symbol
+    /// also has a `[symbols.*]` table.
+    #[test]
+    fn an_unfunded_boot_symbol_refuses_at_boot() {
+        let cfg: Config = toml::from_str("symbol = \"MNQ\"\n[balances]\nUSDT = \"1\"\n").unwrap();
+        let error = format!("{:#}", build_instrument_profiles(&cfg).unwrap_err());
+        assert!(error.contains("unfunded"), "{error}");
     }
 
     #[test]
@@ -1886,13 +2131,16 @@ mod tests {
     }
 
     #[test]
-    fn a_top_level_symbol_replaces_the_preset_symbol() {
+    fn an_instrument_table_naming_a_symbol_is_refused() {
         let table = toml::Table::from_iter([
             ("preset".into(), toml::Value::String("MNQ".into())),
             ("symbol".into(), toml::Value::String("MNQ".into())),
         ]);
-        let resolved = resolve_instrument(None, table).unwrap();
-        assert_eq!(resolved["symbol"].as_str(), Some("MNQ"));
+        let error = resolve_instrument(None, vec![table]).unwrap_err();
+        assert!(
+            error.to_string().contains("top-level symbol key"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1900,7 +2148,7 @@ mod tests {
         let table: toml::Table =
             toml::from_str("preset = \"MNQ\"\n[override]\n\"class.typo\" = \"x\"\n").unwrap();
         assert!(
-            resolve_instrument(None, table)
+            resolve_instrument(None, vec![table])
                 .unwrap_err()
                 .to_string()
                 .contains("class.typo")
@@ -1912,7 +2160,7 @@ mod tests {
         let table: toml::Table =
             toml::from_str("preset = \"MNQ\"\n[override]\n\"class.multiplier\" = \"3\"\n").unwrap();
         let configured: ConfiguredInstrument =
-            toml::Value::Table(resolve_instrument(None, table).unwrap())
+            toml::Value::Table(resolve_instrument(None, vec![table]).unwrap())
                 .try_into()
                 .unwrap();
         assert_eq!(configured.def().class.multiplier(), Decimal::from(3));
@@ -2170,7 +2418,7 @@ mod tests {
     fn the_mnq_preset_reads_two_dollars_per_point_and_fifty_cents_per_tick() {
         let table = toml::Table::from_iter([("preset".into(), toml::Value::String("MNQ".into()))]);
         let configured: ConfiguredInstrument =
-            toml::Value::Table(resolve_instrument(None, table).unwrap())
+            toml::Value::Table(resolve_instrument(None, vec![table]).unwrap())
                 .try_into()
                 .unwrap();
         let def = configured.def();

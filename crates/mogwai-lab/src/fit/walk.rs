@@ -132,6 +132,11 @@ pub fn scratch_config_text(overrides: &Overrides) -> String {
             }
         }
     }
+    // An EMPTY balances table: the offline walk builds a profile and never
+    // books a trade, so it has nothing to fund. Without it the boot funding
+    // sweep would refuse this MNQ scratch config against the default USDT-only
+    // balances, over a currency no order here could ever quote.
+    lines.push("[balances]".to_string());
     lines.join("\n") + "\n"
 }
 
@@ -319,10 +324,10 @@ pub fn run_summary_walk(
 pub fn profile_from_config(path: &Path) -> LabResult<mogwai_server::source::InstrumentProfile> {
     let cfg = mogwai_server::config::Config::load(Some(path.to_path_buf()))
         .map_err(|e| LabError::refusal(format!("loading scratch config: {e}")))?;
-    if cfg.instrument.is_none() {
+    if cfg.boot_symbol_carries_no_knobs() {
         return Err(LabError::refusal(
-            "the scratch config carries no [instrument] table; it would resolve to the \
-             default preset and ignore every scratch scalar",
+            "the scratch config carries no [instrument] or matching [symbols.*] knobs for its \
+             boot symbol; it would ignore every scratch scalar",
         ));
     }
     let profiles = mogwai_server::config::build_instrument_profiles(&cfg)
@@ -377,6 +382,17 @@ mod tests {
         let text = scratch_config_text(&ov);
         assert!(text.starts_with("[instrument]\npreset = \"MNQ\"\n[instrument.override]\n"));
         assert!(text.contains("\"a.b\" = [1.0]\n\"z.b\" = 2.0"));
+    }
+
+    #[test]
+    fn a_scratch_config_whose_only_knobs_are_for_another_symbol_is_refused() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/walk-wrong-symbol.toml"
+        ));
+        std::fs::write(&path, "[symbols.MNQ]\nprice_increment = \"0.25\"\n").unwrap();
+        let error = profile_from_config(&path).unwrap_err().to_string();
+        assert!(error.contains("boot symbol"), "{error}");
     }
 
     #[test]

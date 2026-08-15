@@ -31,19 +31,23 @@ admission_lane_frames = 64
 pending_command_acts = 256
 global_pending_command_acts = 4096
 
-# The symbol selects a matching preset, or the BTCUSDT default when unmatched.
-# An explicit preset and then operator overrides take precedence. This slice
-# boots one symbol, so this is a table and not a list.
-# [instrument]
+# The boot symbol selects a matching preset, or the BTCUSDT default when
+# unmatched. This slice still boots one symbol.
 # symbol = "FOOBAR"
+# Default knobs apply to every resolved symbol.
+# [instrument]
+# preset = "MNQ"
+# Per-symbol knobs apply after the defaults.
+# [symbols.MNQ]
+# preset = "MNQ"
 
 # Market regime for this run. Formerly per-subscription, the one knob a
 # consumer picked for itself; with no subscriptions it is boot config chosen by
 # whoever launches the run. Omitted, the generator's baseline applies.
 # [regime]
 
-# Initial funding. The quote currency of the configured instrument MUST appear
-# here, or boot is refused: with one instrument per run, an unfunded quote means
-# every buy in the run rejects for insufficient balance.
+# Initial funding. The quote currency of the symbol this run serves MUST appear
+# here, or boot is refused: an unfunded quote means every buy rejects for
+# insufficient balance.
 [balances]
 USDT = "1000000"

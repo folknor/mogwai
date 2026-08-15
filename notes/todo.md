@@ -90,15 +90,13 @@ A piece is a unit one agent could own or one coherent landing, with its
 decisions. The detail for each lives in the design bullets under Open
 issues; this is the inventory, not the spec.
 
-SLICE 1 - symbol selects the preset, still one symbol per run. Pieces 1 and 3
-landed (preset selection by symbol lookup with BTCUSDT the designated
-default, and `InstrumentDef` derived with the second default knob bundle
-deleted); their detail is git history, not this file. Numbering is left as
+SLICE 1 - symbol selects the preset, still one symbol per run. Pieces 1 through 3
+landed (preset selection by symbol lookup with BTCUSDT the designated default,
+config overlays split from the boot symbol, and `InstrumentDef` derived with
+the second default knob bundle deleted); their detail is git history, not this file. Numbering is left as
 it was assigned so the cross-references below (piece 4, piece 5, piece 13)
 still resolve:
 
-2. Config stops declaring the instrument: default knobs plus per-symbol
-   overrides; the two-instruments-refused parse pin is deliberately removed.
 4. The boot-ordering DECISION and its consequence: `INDEX` initializes in
    `materialize_warmup` at boot, before any request - either warmup moves
    or a boot symbol survives slice 1. RULED by the owner 2026-08-15: slice 1
@@ -230,15 +228,10 @@ their build breaking loudly when piece 13 lands is the designed handoff.
   machinery with nesting (MES over MNQ), an override layer and provenance
   validation; `Engine::build` taking `instruments: Vec`; margin and fees keyed by
   symbol; `InstrumentProfiles` as a map; `/trades` and `/quotes` taking `symbol`.
-  What has to change (items 1 and 3 landed in slice 1 - symbol-lookup preset
-  selection with an explicit `instrument.preset` staying higher-precedence,
-  and `InstrumentDef` derived through one resolution path - detail is git
+  What has to change (items 1 through 3 landed in slice 1 - symbol-lookup preset
+  selection, config overlays split from the boot symbol, and `InstrumentDef`
+  derived through one resolution path - detail is git
   history, numbering left as assigned):
-  2. CONFIG STOPS DECLARING THE INSTRUMENT. `Config.instrument` is one
-     `ConfiguredInstrument` table whose own doc says "the one instrument this
-     run serves", and `a_config_naming_two_instruments_fails_to_parse` pins that
-     `[[instrument]]` is refused. That test pins the assumption being removed.
-     Config becomes default knobs plus per-symbol overrides.
   4. SEED DERIVATION GAINS A SYMBOL DIMENSION. `RunSeeds` is run to tape and
      fill with no symbol term, so without this every symbol generates a
      byte-identical tape. This is a tape-determinism change and OWES A

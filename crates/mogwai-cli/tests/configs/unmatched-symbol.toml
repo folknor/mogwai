@@ -4,6 +4,4 @@
 seed = 42
 warmup_ns = 300000000000
 speed = 0.0
-
-[instrument]
 symbol = "FOOBAR"

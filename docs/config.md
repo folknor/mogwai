@@ -58,9 +58,21 @@ is how often the run re-checks its resting limits against the tape; the sweep
 is the only thing that ever fills a resting limit or delivers a market order's
 slipped fill unsolicited, so boot refuses a zero interval.
 
-One optional `[instrument]` table overlays the symbol-resolved bundle. Omitting
-it resolves the BTCUSDT default preset. `[[instrument]]` is not accepted. `[regime]`
-selects the single run-wide market regime. `[balances]` funds the one ledger.
+Instrument resolution has three layers: a preset bundle, default knobs from
+`[instrument]`, then knobs from the matching `[symbols.<SYM>]` table. The
+top-level `symbol` is the one symbol this slice boots; if absent, the default
+bundle's BTCUSDT symbol stands. An explicit per-symbol `preset` beats a default
+`[instrument]` preset, which beats a preset matching the symbol, which beats the
+BTCUSDT default. Symbol-table lookup is ASCII case-insensitive, and boot refuses
+two table keys that differ only in case. `[instrument].symbol` is refused:
+overlays carry knobs, while the top-level key carries the boot symbol.
+
+Boot resolves and validates every shape the config can reach - the one it
+serves and every `[symbols.*]` shape - funding currencies included. A malformed
+or unfunded table refuses startup even when the run would never serve it, so a
+typo cannot wait to surface as a runtime rejection.
+
+`[regime]` selects the single run-wide market regime. `[balances]` funds the one ledger.
 `oms_type` is `netting` (the default) or `hedging`; the venue serves both and
 refuses a client over neither, and `/health` reports the run's choice.
 
@@ -81,22 +93,23 @@ load costs a line.
 
 ## The instrument class
 
-`[instrument]` may be as small as a symbol. That symbol selects a matching
-shipped preset or the BTCUSDT default, and the derived definition supplies the
-class, precision and increments. Top-level keys are logged explicit choices:
+The top-level `symbol` may be the only instrument-facing key. It selects a
+matching shipped preset or the BTCUSDT default, and the derived definition
+supplies the class, precision and increments. Overlay keys are logged explicit choices:
 they replace a knob the bundle sets, or add an optional section - `fees`,
 `margin`, `calendar` - it leaves out. Top-level `base` and `quote` remain
 invalid.
 
 ```toml
-[instrument]
 symbol = "BTCUSDT"
+
+[symbols.BTCUSDT]
 price_precision = 2
 size_precision = 8
 price_increment = "0.01"
 size_increment = "0.00000001"
 
-[instrument.class]
+[symbols.BTCUSDT.class]
 kind = "spot"
 base = "BTC"
 quote = "USDT"
@@ -113,6 +126,12 @@ it is `price_increment * multiplier`, so a config cannot contradict itself.
 spot and `settlement_currency` for a future.
 
 ## Margin, fees and the calendar
+
+Every nested overlay form below is also legal under a symbol table: for
+example, `[symbols.MNQ.margin]`, `[symbols.MNQ.fees.maker]`,
+`[symbols.MNQ.calendar]`, `[symbols.MNQ.session]`, and
+`[symbols.MNQ.override]`. The symbol-specific form applies after the matching
+`[instrument.*]` default form.
 
 `[instrument.margin]` is mandatory on a future and refused on a spot pair. It
 takes `initial_per_contract`, `maintenance_per_contract` (positive, and no
@@ -145,9 +164,9 @@ open, which is the crypto case and the default.
 ## Presets
 
 The symbol selects a matching committed preset, or BTCUSDT when unmatched.
-An explicit `preset = "MNQ"` takes precedence and serves that bundle under the
-requested symbol. Top-level keys are legal replacements or additions;
-`[instrument.override]` reaches dotted paths such as
+An explicit `preset = "MNQ"` in either overlay takes precedence and serves that
+bundle under the requested symbol. Top-level overlay keys are legal replacements or additions;
+`[instrument.override]` or `[symbols.<SYM>.override]` reaches dotted paths such as
 `"class.multiplier" = "3"`. Overriding a dotted path the bundle does not set
 refuses boot. Each override is logged with both values. Every preset carries a `[provenance]` map with one
 entry per knob it sets - `fitted`, `derived` or `declared` with a rationale -
