@@ -213,13 +213,26 @@ impl Default for Config {
             // fanout ring is EAGERLY ALLOCATED state proportional to this
             // depth, and the existing depth still holds about 0.466 wall
             // seconds at the protocol-11 worst measured p99.9 rate against
-            // the 0.114s the protocol-10 resize was justified over. The
-            // rejected capacity also deterministically breaks the
-            // accept-before-fill invariant of
-            // a_banded_limit_fills_from_the_run_sweep (5 of 5 against 5 of
-            // 5 at this value) - an unresolved serving finding recorded in
-            // notes/todo.md. A surge-exposed run should still size this
-            // deliberately rather than inherit the default.
+            // the 0.114s the protocol-10 resize was justified over. A
+            // surge-exposed run should still size this deliberately rather
+            // than inherit the default.
+            //
+            // The rejected capacity also fails
+            // a_banded_limit_fills_from_the_run_sweep 5 of 5 against 5 of 5
+            // here, which was recorded for nine days as the rejected depth
+            // "deterministically breaking the accept-before-fill invariant".
+            // That reading is FALSE, measured 2026-08-15: the accept arrives
+            // first, correctly attributed and correctly stamped, and the fill
+            // TIES it because both are emitted in one engine batch. The order
+            // never rests. Raising the depth perturbs boot timing, at speed
+            // 100 a small wall shift is a large sim shift, and the test's
+            // fixed 2.01 of price headroom goes stale, so its limit is
+            // marketable on arrival and fills as a Taker. Ordering,
+            // attribution and stamping are all intact under a capacity chosen
+            // to break them; the depth is a timing perturbation and not a
+            // participant. Do not re-derive a serving defect from this test
+            // failing - it reports an ordering violation for a premise
+            // failure, which is its own defect, tracked in notes/todo.md.
             fanout_depth: 4_194_304,
             zero_speed_stall_ms: 5000,
             exec_held_budget_bytes: crate::admission::EXEC_HELD_BUDGET_BYTES,

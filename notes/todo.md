@@ -74,134 +74,6 @@ Or both. There are no exceptions.
   frame as a reconcile-and-distrust-the-window signal. broadarrow is the known
   consumer.
 
-- `mogwai_adapter::UNSET_ACCOUNT_ID` IS GONE, REPLACED BY `DEFAULT_ACCOUNT_ID`
-  (source-breaking, landed 2026-08-15). Both client configs default their
-  `account_id` to `MOGWAI-001` again and `validate_account_id` now checks only
-  the wire charset. The refusal it replaced was defending an invariant the
-  venue does not have: one venue is one run is one LEDGER, divergences arm
-  against the RUN and reach every open connection, and no socket URL, query
-  string or frame carries an account identity, so the data and execution legs
-  cannot bind different slots. WHAT A CONSUMER MUST DO: stop importing
-  `UNSET_ACCOUNT_ID`; a config that omits `account_id` now validates instead of
-  failing, and the label is local Nautilus metadata only. broadarrow is the
-  known consumer and nothing here can verify its build.
-
-- `mogwai_protocol::AccountId` NOW HAS A PRIVATE FIELD (source-breaking,
-  landed 2026-08-15). Its serialized form is unchanged, but construction as
-  `AccountId(raw_string)` no longer compiles and deserialization now enforces
-  the same length and character invariant as `AccountId::parse`. WHAT A
-  CONSUMER MUST DO: construct it with `AccountId::parse` and handle the returned
-  `AccountIdError`; do not recreate the tuple wrapper locally. broadarrow is
-  the known consumer and depends on this workspace; nothing here can verify its
-  build.
-
-- `POST /control/divergence` NOW REFUSES THREE PAYLOADS IT USED TO ACCEPT
-  (landed 2026-08-15). `validate_divergence` in `mogwai-protocol` is the
-  authoritative arming guard, and it had holes the HTTP handler was quietly
-  papering over.
-  1. `PartialFillNext.client_order_id` and `CancelOpenOrderSilently.client_order_id`
-     must now be VALID SUBMIT IDS, not merely non-blank: the same
-     `validate_client_order_id` every `SubmitOrder` passes. An over-length id, or
-     one carrying a character a submit could not carry, is refused with `400`
-     where it was previously armed. It could never have matched an order - no
-     submit can carry such an id - so it sat in the armed queue forever as a
-     dead entry. WHAT A CONSUMER MUST DO: arm the id it will actually submit.
-  2. `RejectNextSubmit.reason` longer than `MAX_REASON_LEN`, 512 bytes, is
-     refused with `400`. The handler used to TRUNCATE it silently and arm the
-     shortened prose, so a scenario asserting on its own reason text saw a
-     different string than it sent. WHAT A CONSUMER MUST DO: cap the reason, or
-     let the refusal tell it the reason was too long instead of the venue
-     rewriting it. Independently, the engine now truncates at the ECHO, so the
-     order-event byte reservation holds even for the in-process `Engine::arm`
-     API, which reaches no validator.
-  broadarrow is the known consumer and depends on this workspace; nothing here
-  can verify its build.
-
-- THE SHIPPED LAUNCHER NOW BOUNDS THE READINESS LINE (landed 2026-08-15). A
-  venue whose first stdout line exceeds 4,096 bytes, newline included, is
-  refused with `LaunchError::Malformed` and only a valid UTF-8 prefix of that
-  line is retained in the message. The read itself stops one byte past the
-  ceiling, so a child writing gigabytes without a newline can no longer OOM its
-  launcher. A conforming `ReadyRecord` is a few hundred bytes. WHAT A CONSUMER
-  MUST DO: nothing, unless it ships a venue binary of its own that prints
-  something larger first.
-
-- THE WEBSOCKET COMMAND CARRIER NOW HAS THREE CONSUMER-VISIBLE LIMITS (landed
-  2026-08-15). None existed before, so a client that was previously accepted
-  can now be refused.
-  1. INBOUND SIZE. A websocket frame or reassembled message larger than
-     `mogwai_protocol::MAX_CLIENT_MESSAGE_BYTES`, 64 KiB, is refused by the
-     transport and the CONNECTION ENDS - there is no per-message error frame,
-     because tungstenite cannot resynchronize a stream whose frame it declined
-     to buffer. The previous ceiling was tungstenite's 64 MiB default, which
-     also made the admission lane's memory bound fictional. A legal command is
-     a few hundred bytes, so only a pathological or corrupt sender reaches
-     this. WHAT A CONSUMER MUST DO: nothing, unless it batches - if it ever
-     needs a larger command frame, the constant is the place to raise it, and
-     raising it re-opens the memory question the cap answers.
-  2. QUEUE CAPACITY. Each socket has one bounded command queue
-     (`pending_command_acts`, default 256) feeding one sequential dispatcher,
-     and a process-wide permit (`global_pending_command_acts`, default 4096)
-     covers every queued or executing command. A full bound REFUSES rather
-     than dropping or blocking: the client receives an `AdmissionRejected`
-     naming `venue command capacity exhausted` on the priority lane, and the
-     engine never sees the command. WHAT A CONSUMER MUST DO: treat that
-     refusal as a retryable backpressure signal, not as an order rejection.
-     It cannot be silently lost, but it CAN arrive under a burst that used to
-     be accepted.
-  3. HEAD-OF-LINE ORDER. Commands from one socket are now acted on strictly
-     in arrival order, each held through its act latency, market read and
-     engine processing before the next is received. That is the point of the
-     change - a cancel could previously overtake the submit it cancelled - but
-     it means an armed `CommandLatency` now delays every LATER command on that
-     socket too. A consumer wanting concurrent in-flight commands under an
-     armed latency needs several sockets.
-  broadarrow is the known consumer and depends on this workspace; nothing here
-  can verify its build.
-
-- THE HISTORY ENDPOINTS NOW REFUSE UNDER CONCURRENCY (landed 2026-08-15).
-  `/trades` and `/quotes` admit four concurrent syntheses per run; a fifth
-  receives `503` with `history request capacity exhausted` and no body of
-  ticks. Previously every request was accepted, so an adapter paging history
-  from several tasks at once can now see a refusal where it never did. The slot
-  is held until the response has been WRITTEN, not until synthesis finishes, so
-  a slow reader occupies its slot for as long as it takes the bytes. WHAT A
-  CONSUMER MUST DO: treat `503` on these two routes as retryable backpressure,
-  not as "no data" and not as a fatal transport error - and read the response
-  promptly, because a stalled reader is what makes the other three slots
-  scarce. The adapter's own paging is sequential per client, so a single
-  client reaches this only by running several data clients against one venue.
-  broadarrow is the known consumer and depends on this workspace; nothing here
-  can verify its build.
-
-- A VENUE THAT CANNOT DRAIN NOW EXITS NONZERO (landed 2026-08-15). Completion
-  or a signal stops the accept loop and drains live connections for up to the
-  shutdown grace; expiring that grace used to log a warning and exit 0, which
-  made an abandoned connection indistinguishable from a clean teardown. It is
-  now an error and a nonzero status. WHAT A CONSUMER MUST DO: close its `/ws`
-  sockets when it observes `RunComplete` rather than waiting to be dropped, and
-  not treat a nonzero venue exit as a harness bug without reading stderr - the
-  message names the grace. A launcher that asserted a zero exit at end of run
-  may start failing on a run it previously called clean, and the fix belongs on
-  the client's teardown, not on the assertion.
-
-- `mogwai_protocol::Symbol` IS NOW `Arc<str>`, NOT `String` (source-breaking,
-  landed 2026-08-15). The generator allocated a fresh symbol string for every
-  materialized trade and quote, which was the crate's most frequent heap
-  allocation, so the alias changed and one interned value is now shared by the
-  generator, every emitted tick, the engine's position and margin keys, the
-  server's profile map and the adapter's instrument and subscription caches.
-  WHAT A CONSUMER MUST DO: nothing on the wire - the JSON is byte-identical,
-  because serde's `rc` support serializes an `Arc<str>` as its inner string and
-  the protocol's exact-equality frame table pins that. But the Rust type moved,
-  so code that builds a `TradeTick`, `QuoteTick`, `SubmitOrder`, `InstrumentDef`
-  or any other wire struct in Rust needs `"BTCUSDT".into()` where it wrote
-  `.to_string()`, `symbol.as_ref()` where it compared against a `&str`, and
-  `Arc::clone` where it cloned. A `String` field of its own (`ReadyRecord`'s
-  `symbol`, `GeneratorScalars::symbol`) is unchanged and still needs
-  `.to_string()` at the boundary. broadarrow is the known consumer and depends
-  on this workspace; nothing here can verify its build.
-
 - SERVE N INSTRUMENTS FROM ONE VENUE (consumer ask, broadarrow, recorded
   2026-08-14). broadarrow can now ATTACH to an operator-owned `mogwai serve`
   (its scenario names the ReadyRecord's addr plus run_seed, and the run-seed
@@ -222,6 +94,10 @@ Or both. There are no exceptions.
   BREAKS its build loudly (their designed break point, their half to close by
   selecting on the strategy's frontmatter symbol); the ReadyRecord's singular
   `symbol` field needs a schema decision at the same time.
+  PRIORITY CHANGED 2026-08-15: broadarrow's half of the route to that end state
+  has LANDED, so this is no longer one consumer ask among many - it is the sole
+  remaining blocker. See the consumer-context section below for the four-item
+  decomposition and everything else broadarrow's todo records about this venue.
 
 - GATE the hand-maintained tape-version prose the way the artifact binding
   blocks are gated. Surfaced by the bug-hunt loop on 2026-08-14: when
@@ -301,31 +177,87 @@ Or both. There are no exceptions.
   section 17 amendment through review, not an edit, so it is recorded
   here rather than taken.
 
-- INVESTIGATE the fanout-capacity accept-before-fill failure. A CORRECTNESS
-  investigation, not capacity tuning: with `fanout_depth = 16_777_216`,
-  `a_banded_limit_fills_from_the_run_sweep` fails DETERMINISTICALLY - the
-  fill reaches the socket without a prior `OrderAccepted` satisfying
-  `fill.ts_event > accepted_ts` - and passes just as deterministically at
-  the shipped 4,194,304. Exact reproduction, measured 2026-08-06 on the
-  protocol-11 landing tree: `tests/configs/band.toml` (default BTCUSDT
-  venue, speed 100), the other three protocol-11 ceiling resizes present
-  in BOTH trees, and
-  `brokkr test -p mogwai-server a_banded_limit_fills_from_the_run_sweep -N 5`
-  reading 0 of 5 passing at 16,777,216 against 5 of 5 at 4,194,304.
-  The assertion CANNOT yet distinguish wire reordering (the fill frame
-  arriving before `OrderAccepted`) from timestamp inversion -
-  `accepted_ts.is_some_and(..)` fails identically for both - so the first
-  diagnostic must capture separately: whether `OrderAccepted` arrived
-  before the fill; both timestamps when both exist; the sweep pass's
-  `to_ns`; the run-clock anchor and the tape-worker anchor; and the
-  broadcast-channel construction duration (or RSS) if the eager
-  allocation is to be blamed rather than estimated. Ring depth is not
-  consulted after construction at nonzero speed, so the suspected channel
-  is the allocation shifting boot phase relative to the anchored run
-  clock - suspected, not established. The shipped default carries the
-  reviewed protocol-11 policy exception and is pinned by
-  `the_fanout_default_carries_the_protocol_11_exception`; this item is
-  about the latent serving defect the rejected capacity exposes.
+- DE-FRAGILIZE `a_banded_limit_fills_from_the_run_sweep`, which bets a fixed
+  2.01 of price headroom against sim-time drift and misreports the failure
+  when it loses. The old fanout-capacity "accept-before-fill" item that stood
+  here is CLOSED as FALSE, diagnosed 2026-08-15; what the venue actually does
+  is recorded at the `fanout_depth` default in `mogwai-server/src/config.rs`,
+  which is where it belongs.
+  The test anchors on the last historical print, submits a buy limit 2.01
+  below it, and requires the order to REST and be swept. Nothing enforces the
+  premise: when the market falls 2.01 between the anchor read and the submit
+  landing, the limit is marketable on arrival, fills as a Taker in the
+  accept's own engine batch, and the strict `fill.ts_event > accepted_ts`
+  fails on a TIE. The message then blames ordering, which is what sent a
+  reader hunting a serving defect for nine days. At speed 100 a small wall
+  shift is a large sim shift, so this is reachable by any timing perturbation.
+  Three fixes, none taken: assert the premise directly (a swept fill is
+  `Maker`, an immediate one `Taker`, so the liquidity side names the case
+  exactly); re-read the anchor immediately before submitting; or widen the
+  offset beyond plausible drift. The first is the honest one - it turns a
+  wrong answer into a clear statement that the order never rested.
+  Its wildcard match arm also swallows every frame it does not name,
+  including `AdmissionRejected`, `ProtocolError` and `FeedLagged`, so a
+  refusal or a lag is invisible to it.
+
+- TWO STRUCTURAL OBSERVATIONS from that diagnosis, neither with a known
+  reproduction, both worth a decision before the serving path grows.
+  (a) PUBLICATION ORDER IS NOT MUTATION ORDER. `dispatch_command` releases the
+  engine lock inside `process_order_cmd` and only afterwards calls
+  `lanes.submit_produced`, so between an order becoming visible to the sweeper
+  and its `OrderAccepted` reaching the connection's outbound sequence there is
+  a window in which a sweep can commit a causally dependent fill first. The
+  engine mutex establishes mutation order and not publication order. The
+  invariant it wants: for every connection, execution-event publication
+  preserves the causal order of committed engine transitions, so if B can
+  occur only because A committed, A's complete batch is committed to that
+  connection's stream before B's. LATENT - the test above was its only cited
+  evidence and does not in fact show it, so nothing currently demonstrates the
+  window is reachable.
+  (b) SWEEP BATCHES REACH EVERY BOUND LANE with no submitting-connection
+  ownership check, so a socket receives `OrderFilled` for orders another
+  connection submitted. Intentional under the one-ledger multi-connection
+  model, undocumented, and a consumer keying on "my fills arrive here" will be
+  wrong. Decide whether it is a contract to state or a filter to add.
+
+- BOUND AND DISCLOSE the observation gap: a client can be filled against tape
+  it has not yet received, and nothing bounds how far. ESTABLISHED 2026-08-15,
+  not a hypothesis. CONTENT coherence is enforced and is not the issue - once
+  live, a reader cannot advance the canonical lead past the tape worker
+  (`checkpoint.rs`), so published tape, history, sweeps and market readings are
+  all the same deterministic realization. What is absent is OBSERVATION
+  coherence. Two gaps compose:
+  1. The worker advances the canonical lead, THEN paces, THEN publishes, so the
+     lead can sit one `TickEvent` ahead of the broadcast. One frame - but one
+     tick is unbounded in SIM time, because the fitted arrival process dwells
+     and the calendar closes, so no useful time bound follows from it.
+  2. Publication to client observation is bounded by nothing at all: the feed
+     task drains into a 256-frame channel, the writer can block, the kernel
+     buffers, no acknowledgement or observed-market cursor flows back, and no
+     send deadline exists. `FeedLagged` bounds ring CONSUMPTION in frames and
+     says nothing about what the peer has read.
+  So `engine pricing frontier <= canonical lead <= publication frontier + 1
+  tick`, while `engine frontier - client-observed frontier` has no finite time
+  bound.
+  WHAT IS NOT WRONG, and the reason this is a bound-and-disclose item rather
+  than a redesign: a venue SHOULD price against its own book rather than
+  against what a client has managed to read, which is what every real exchange
+  does, and the market reading is filtered to `<= sim-now`, so the engine never
+  prices from tape that has not yet HAPPENED. This is ordinary feed latency in
+  kind. What is wrong is the MAGNITUDE and the silence about it.
+  WHY ACCELERATION MAKES IT BITE: at speed 100 a 10 ms wall delay is a full
+  simulated SECOND of tape the strategy never saw, so acceleration multiplies
+  the unobserved window in sim time by exactly the speed factor. Forward tests
+  are always accelerated by standing ruling, so every forward test carries an
+  inflated and undisclosed effective latency.
+  WHY IT BEARS ON SERVING N INSTRUMENTS: one tape worker per symbol means one
+  pre-publication window and one independently accumulating backlog per symbol,
+  so the divergence becomes per-instrument and independently variable.
+  The invariant nothing enforces, if it is ever wanted: an execution decision
+  may use only market state already delivered on the affected client's feed.
+  Adopting it is a large change and arguably LESS realistic than the current
+  behaviour; measuring the gap and stating it in `reference/` is the cheap move
+  and is what is actually owed.
 
 - PROBLEM STATEMENTS. **This was the solvable set of problems believed to get
   mogwai to the end state the user needs.** That was a claim rather than an
@@ -725,6 +657,166 @@ Or both. There are no exceptions.
   watching for child exit sees nothing during that window. Not a defect - the
   drain is deliberate - but it is the mechanism behind the item above, and worth
   keeping in view before anyone shortens or lengthens the grace.
+
+## Consumer context: every MOGWAI item in broadarrow's todo
+
+Copied 2026-08-15 from the sibling checkout `../broadarrow/notes/todo.md`. Our
+file carried exactly one of these (serve N instruments) and carried it without
+the fact that reprioritizes it, so the rest were invisible from this side.
+
+CONSUMER CLAIMS, NOT VERIFIED VENUE TRUTH. Every statement below is
+broadarrow's, written from its side of the wire and dated to when they wrote it.
+Where one asserts something about this venue's behaviour, treat it as a LEAD to
+check against the source - the same standing rule the hardcoded-value inventory
+carries, and for the same reason. Several may already have been overtaken by a
+mogwai landing.
+
+### MOGWAI is the test venue, by decision (broadarrow, 2026-08-14)
+
+They stopped shopping for a third-party paper venue. Every owed forward run that
+was blocked on "which venue" is now a MOGWAI question. The eliminations, which
+are theirs to own but explain why the load lands here: Kraken streams no futures
+bars at all (`subscribe_bars` is a silent `Ok(())` for futures, so a demo that
+loaded instruments cleanly would subscribe successfully-looking and receive zero
+bars forever), Kraken demo futures is their ONLY server-side paper account,
+Bybit spot's wallet position reports invent phantom positions on every cached
+pair sharing a base currency, and keyless Kraken spot is a local sandbox fill
+sim with no venue book.
+
+A consequence they state plainly and we should not argue with: REAL-VENUE FILL
+TIMING NOW HAS NO PROVING GROUND in that project, and they accept it as a
+boundary rather than a pending choice, on the grounds that MOGWAI's havoc knobs
+model latency and adversarial sequencing DELIBERATELY where a paper venue
+supplied one vendor's incidental timing. That is a compliment with an
+obligation attached: the havoc surface is now the only model of venue timing
+either project has.
+
+### The strategy-search end state, and the four items on the route
+
+Adjudicated with the owner 2026-08-14. One human starts N orchestrator agents;
+each ensures the shared broadarrow daemon is up, starts ONE durable
+`mogwai serve`, mints per-subagent account TOMLs, and launches ~50 subagents
+writing and forward-testing Pine strategies against the attached venue.
+
+Four work items. TWO ARE BROADARROW'S AND BOTH HAVE LANDED:
+
+- Item 1, carry the scenario path on the deploy wire and in the durable
+  topology. Landed: `accounts` gained `mogwai_scenario` and `deployment_mode`
+  columns.
+- Item 2, convert `ba forward` from an embedded daemon to a thin-client deploy.
+  Landed: forward is now an ordinary detached fleet member.
+
+Their summary of the result is the line that matters here: "With 1 and 2 landed
+the scenario WORKS - N orchestrators, ~50 subagents each, every run attached to
+one durable `mogwai serve`, all one fleet. On one instrument. Items 3 and 4 buy
+breadth, not function."
+
+- Item 3, SERVE N INSTRUMENTS FROM ONE VENUE. Ours, and they call it the largest
+  of the four in real engineering.
+- Item 4, consume the multi-instrument venue. Theirs, and it is a DESIGNED break
+  point rather than an accident: `run_prep::mogwai_facts` refuses a
+  `/instruments` answer of anything but exactly one instrument, precisely so a
+  relaxed mogwai breaks their build loudly instead of having broadarrow pick an
+  instrument arbitrarily. Closing it means selecting by the strategy's
+  frontmatter symbol (the `MOGWAI:<symbol>` identity that already must match),
+  per-worker rather than per-venue, after which the readiness record's `symbol`
+  field needs its one-venue-one-symbol meaning reconciled. They expect their
+  adapter's subscription and warmup paths, already per-instrument-id, to mostly
+  follow.
+
+So the sequencing is: item 3 lands here, their build breaks by design, item 4
+lands there.
+
+### The `RejectNextCancel` ask, stated as a MOGWAI-repo item
+
+Their acknowledgement-sequencing landing (2026-08-12) closed a real live-path
+defect: a rejected cancel with its replacement already published leaves two live
+orders where the script rests one. NOTHING AT ANY VENUE CAN CURRENTLY PROVOKE
+THAT SHAPE, because `control::Divergence` has `RejectNextSubmit` and no
+cancel-rejection member. The defect is pinned only by in-process tests driving
+the bridge callback directly.
+
+Three scenario files ship UNRUN in their `examples/mogwai`, with what a hand-run
+established about each - useful to us because each names a venue behaviour:
+
+- `ack-delay.toml` reaches staging, but MOGWAI rejects the cancel as `unknown
+  order`, so it produces `OrderCancelRejected` rather than the resume it was
+  meant to witness.
+- `ack-famine.toml` correctly produces `CommandAckTimeout`.
+- `ack-dark.toml`: `GoDark` drops the startup mass-status query, so their worker
+  never becomes ready and never reaches command sequencing at all.
+
+The third is worth a look from this side regardless of the ask: an armed
+`GoDark` swallowing the startup query means a client can never complete boot,
+which may be correct-by-design (it is a blackout) or may be an arm that is
+too broad to be useful.
+
+### Runs owed against MOGWAI, all stageable today
+
+These are theirs to run, not ours to build, but each is a venue exercise that
+would surface mogwai defects, and several have been owed for weeks.
+
+- THE RESTART RUN, the realized-PnL baseline, legs 1 to 3. Serve durably, trade
+  to a non-zero realized figure, SIGKILL the worker, re-run against the same
+  `[attach]` scenario, verify the carried baseline, the brake mark, and no
+  duplicate booking. Leg 3 is load-bearing and rests on a verdict reached BY
+  READING the dependency rather than by observing a reconciliation, and it
+  landed as an explicit operator override of its own gate - a known-unrun
+  verification on a capital bound.
+- `go_live` RESTART DE-DUPLICATION: kill a non-flat worker with orders resting
+  at the durable venue, restart, verify the batch de-duplicates against the
+  surviving book.
+- THE FUTURES RUN. Their static wiring landed (they take the served instrument
+  from `/instruments` as authority, admit cash-settled linear futures, refuse a
+  `leverage` key they used to drop silently, and size percent/cash orders by
+  `price * multiplier`). What is owed is a forward run against a
+  futures-configured venue (`preset = "MNQ"`) proving warmup, fed fills, a
+  resting stop triggering on the multiplied instrument, a settlement-currency
+  commission actually charged, and the brakes marking in that currency.
+- THE CONDITIONAL HALF of the fed-fill path. At their 2026-07-31 QA runs mogwai
+  filled everything immediately at the order's own price (measured 56 accepted /
+  56 filled / 0 resting for a protective limit 20 percent away) and refused
+  `StopMarket` outright. That incapacity is gone - the fill model
+  penetration-gates resting limits and serves both conditionals first class - so
+  what remains is a fed fill from an order that GENUINELY RESTED and then filled
+  at venue timing, ideally under havoc.
+- FLIP PLUS PYRAMID PLUS PARTIAL in one bar, end to end.
+- GATE B, the anchored-warmup overlap drop. Their in-tree `handoff.rs` suite
+  covers BINANCE, KRAKEN and BYBIT but NOT MOGWAI, and is a consistency test
+  rather than ground truth.
+- THE POLL-HEAL END-TO-END TEST, the payoff of our order-status query surface.
+  External QA (2026-08-14) settled that their open-order poll DETECTED a
+  silently-cancelled resting order every time and REACTED never; root cause was
+  theirs (a dep default) and is fixed. What they still owe is the heal
+  assertion, and it drives our control plane directly: rest a far-from-market
+  limit, POST `CancelOpenOrderSilently`, assert the local order converges to
+  Canceled within the retry ladder's bound. Their fixture notes that still
+  hold: carry NO protective exits, and census the whole rotated log family.
+
+### Landings they consumed with no mogwai change needed
+
+Recorded so we do not go looking for owed work that is already closed.
+CONDITIONAL ORDERS needed no broadarrow change at all - the old denial was our
+own adapter's `wire_order_type` refusal, which moved with the venue, so
+`strategy.exit(stop = ...)` trades end to end. THE FILL MODEL replacement is
+reconciled into their `reference/mogwai.md`. THE ATTACH CAPABILITY landed
+entirely on their side; they state explicitly that no mogwai-side change was
+needed. Trailing stops remain the one refused shape, by our ruling and theirs.
+
+### Tape sparsity, settled on both sides
+
+Their warmup could not always be satisfied from a window holding no trades, and
+the mechanism turned out to be ours and correct: the fitted ACD arrival process
+is persistent and heavy-tailed, so a short historical window can legitimately
+hold zero trades and `/trades` correctly answers `200 []`. Their "fresh server"
+correlation was a proxy - a deterministically seeded generator puts every boot of
+a pinned epoch on the SAME stretch of tape, so a config whose epoch lands in a
+drought reproduces per-config rather than intermittently. Both sides shipped
+diagnosis improvements. What stays open is THEIR policy question, not our
+mechanism: a legitimately empty window still costs them a fatal halt, and one of
+the two things that would help is blocked on the same nautilus gap as our
+`FeedLagged` item - an empty historical response carries no feed identity, so it
+cannot be attributed.
 
 ## Notes / gotchas
 
