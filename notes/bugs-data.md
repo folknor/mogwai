@@ -12,4 +12,5 @@ bullet was dead as written and its proposed denominator cache measured no
 improvement, so nothing was kept from it.
 
 The per-round classifications, machinery, no-bump verdicts and bite checks are
-in `notes/bug-loop-carry-forward.md`. No open finding remains.
+in the git history of the retired `notes/bug-loop-carry-forward.md`; the
+loop's durable lessons live in `AGENTS.md`. No open finding remains.

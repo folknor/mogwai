@@ -4,8 +4,9 @@ Hunter: Claude Opus, single coverage. Findings are a work document, not a
 contract - they may be wrong.
 
 THE DOCUMENT IS EXHAUSTED: no open findings remain. What each one became is
-recorded below, and the machinery is carried forward in
-`notes/bug-loop-carry-forward.md`. The disposition lines exist so a later reader
+recorded below, and the machinery is recorded in the git history of the
+retired `notes/bug-loop-carry-forward.md` (the loop's durable lessons live in
+`AGENTS.md`). The disposition lines exist so a later reader
 can tell a CLOSED finding from a DELETED one.
 
 ## Disposition

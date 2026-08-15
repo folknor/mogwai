@@ -173,6 +173,52 @@ constraint on new or optimized code:
   1.98) and `target-cpu` SIMD are sanctioned wherever a serial recursion does
   not forbid reordering, with the re-bless and gate re-runs they imply.
 
+### Standing lessons from the 2026-08 bug-hunt loop
+
+The seven-document loop closed with zero open findings. Its round-by-round
+carry-forward document is retired; what recurred enough to bind future work is
+kept here. Two DEFECT FAMILIES accounted for most of the serious finds:
+
+- THE FRONTIER FAMILY, five instances. A watermark, cursor or frontier may
+  only advance over work whose success the same expression checked. A lookup
+  that legitimately returns nothing is exactly as dangerous as a panic, and
+  the inverse failure - a fence with no recovery that wedges the watermark
+  forever - is the same family. Treat any watermark assignment not guarded by
+  the success of the work it covers as a defect on sight. The adapter's
+  history pagination states the cursor form of the rule: a timestamp-only
+  cursor may advance onto an instant only once every row at that instant has
+  been seen.
+- THE GUARD-SCOPE FAMILY, three instances. A permit, lock or guard whose
+  scope ends before the work it protects is the frontier defect in reverse,
+  and it is visible by asking WHAT IS STILL RESIDENT when the guard drops. A
+  guard is not scoped to the work by being alive while the work runs - it
+  must be OWNED by the task doing the work, because the awaiting future can
+  be dropped first (hyper drops handler futures on client disconnect; a
+  running blocking task cannot be cancelled).
+
+Test and process rules the loop paid for, nine non-biting tests among them:
+
+- BITE-CHECK EVERY NEW REGRESSION TEST: revert the production fix as a TEXT
+  EDIT, observe the named failure, restore it as a text edit. Never restore
+  with `git checkout -- <path>` - the tree routinely carries other uncommitted
+  work in the same file, and that command destroyed it twice.
+- THE PROFILE SPLIT BITES: `brokkr check` runs tests in dev, `brokkr test`
+  in release. A test pinning `debug_assertions` behaviour must be gated
+  `#[cfg(debug_assertions)]` or the release sweep fails it; a test whose bite
+  depends on optimization must be checked in release.
+- AUDIT THE SEAM ITSELF: a test double must be verified against the real
+  endpoint's semantics, not against what the test needs. A stub that replays
+  queued responses whatever the client asked for is blind by construction;
+  serve real semantics and record the requests so tests can assert the
+  request sequence too.
+- A test observing only an ERROR cannot distinguish a bound from a check
+  performed after the damage; assert on the resource the finding named.
+- A test on a `/ws` socket may never assert on THE NEXT frame: every socket
+  is attached to the live tape on upgrade, so drain to a deadline.
+- A consensus review gate converges to the verifier's utility function; a
+  clean cold review was followed by a serious find in a later pass four
+  times. A green review is evidence, not proof.
+
 ### Reading vs depending on nautilus_trader and broadarrow
 
 The broadarrow adapter (and any spec or implementation that touches the nautilus

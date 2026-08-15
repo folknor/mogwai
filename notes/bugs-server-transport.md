@@ -15,5 +15,6 @@ invariant held at serialization instead, and that decision plus its residual is
 recorded in `notes/bugs-protocol.md` where finding 1 is struck.
 
 What each round landed, what it declined and why, and every bite check, is in
-`notes/bug-loop-carry-forward.md`. Nothing here is open; do not re-open a
+the git history of the retired `notes/bug-loop-carry-forward.md`; the loop's
+durable lessons live in `AGENTS.md`. Nothing here is open; do not re-open a
 finding from this file's git history without re-reading that record first.
