@@ -1274,16 +1274,8 @@ fn controls(args: &ControlsArgs) -> anyhow::Result<()> {
         bail!("incumbent rotation requires eight design months")
     }
     std::fs::create_dir_all(&args.output)?;
-    let profile = mogwai_server::source::InstrumentProfiles::defaults()
-        .get("MNQ")
-        .cloned()
-        .map_or_else(
-            || {
-                mogwai_server::config::profile_from_preset("MNQ")
-                    .map_err(|e| anyhow!(e.to_string()))
-            },
-            Ok,
-        )?;
+    let profile =
+        mogwai_server::config::profile_from_preset("MNQ").map_err(|e| anyhow!(e.to_string()))?;
     let frame = mogwai_lab::session::ScheduleFrame::stage_m(Path::new(
         "analysis/tz-america-chicago-2026c.json",
     ))

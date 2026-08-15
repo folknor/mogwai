@@ -1151,7 +1151,9 @@ mod calendar_tests {
             seeds: mogwai_protocol::RunSeeds::from_run_seed(42),
             regime: None,
         });
-        source::InstrumentProfiles::defaults()
+        source::InstrumentProfiles::from_profiles(vec![
+            crate::config::profile_for_symbol("BTCUSDT").expect("BTCUSDT preset must resolve"),
+        ])
     }
 
     #[test]

@@ -274,7 +274,9 @@ mod snapshot_tests {
             cancel: Arc::new(AtomicBool::new(false)),
             alive: AtomicBool::new(true),
             symbol: "BTCUSDT".to_owned(),
-            profiles: Arc::new(source::InstrumentProfiles::defaults()),
+            profiles: Arc::new(source::InstrumentProfiles::from_profiles(vec![
+                crate::config::profile_for_symbol("BTCUSDT").expect("BTCUSDT preset must resolve"),
+            ])),
             fault: Mutex::new(None),
         });
         tape.publish(
@@ -328,7 +330,9 @@ mod snapshot_tests {
             cancel: Arc::new(AtomicBool::new(false)),
             alive: AtomicBool::new(true),
             symbol: "BTCUSDT".to_owned(),
-            profiles: Arc::new(source::InstrumentProfiles::defaults()),
+            profiles: Arc::new(source::InstrumentProfiles::from_profiles(vec![
+                crate::config::profile_for_symbol("BTCUSDT").expect("BTCUSDT preset must resolve"),
+            ])),
             fault: Mutex::new(None),
         };
         tape.publish(
@@ -362,7 +366,9 @@ mod snapshot_tests {
             cancel: Arc::new(AtomicBool::new(true)),
             alive: AtomicBool::new(false),
             symbol: "BTCUSDT".to_owned(),
-            profiles: Arc::new(source::InstrumentProfiles::defaults()),
+            profiles: Arc::new(source::InstrumentProfiles::from_profiles(vec![
+                crate::config::profile_for_symbol("BTCUSDT").expect("BTCUSDT preset must resolve"),
+            ])),
             fault: Mutex::new(None),
         };
         assert!(tape.arm_flow_surge(0, 1, 2.0, 2.0).is_err());

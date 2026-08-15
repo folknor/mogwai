@@ -8,7 +8,7 @@ use mogwai_data::{
     CheckpointIndex, Fingerprint, GeneratedSource, GeneratorScalars, MergeSource, SessionProfile,
     SizeGrid, TickSource,
 };
-use mogwai_protocol::{InstrumentDef, MarketRegime, RunSeeds, Symbol, default_instruments};
+use mogwai_protocol::{InstrumentDef, MarketRegime, RunSeeds, Symbol};
 use rust_decimal::Decimal;
 use std::{
     collections::HashMap,
@@ -62,14 +62,6 @@ pub struct InstrumentProfiles {
     by_symbol: HashMap<Symbol, InstrumentProfile>,
 }
 impl InstrumentProfiles {
-    pub fn defaults() -> Self {
-        Self::from_profiles(
-            default_instruments()
-                .into_iter()
-                .map(|def| default_profile(def, fingerprint()))
-                .collect(),
-        )
-    }
     pub fn from_profiles(profiles: Vec<InstrumentProfile>) -> Self {
         Self {
             by_symbol: profiles
@@ -90,14 +82,6 @@ impl InstrumentProfiles {
         defs.sort_by(|a, b| a.symbol.cmp(&b.symbol));
         defs
     }
-}
-fn default_profile(def: InstrumentDef, fp: &Fingerprint) -> InstrumentProfile {
-    let mut scalars = GeneratorScalars::from_fingerprint_medians(&def.symbol, fp);
-    scalars.modal_tick = def.price_increment;
-    scalars.price_decimals = u32::from(def.price_precision);
-    scalars.top_sizes =
-        mogwai_data::TopOfBookSizes::uncalibrated(SizeGrid::from_def(&def).min_size);
-    InstrumentProfile::new(def, scalars, fp.session_profile.clone(), None, None, None)
 }
 fn generator(profile: &InstrumentProfile) -> GeneratedSource {
     let boot = *BOOT

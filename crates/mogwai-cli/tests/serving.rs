@@ -17,6 +17,42 @@ use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
+async fn a_symbol_no_preset_covers_is_served_under_the_default_bundle() {
+    let config = format!(
+        "{}/tests/configs/unmatched-symbol.toml",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let venue = spawn(&["--config", &config]);
+    let (status, body) = http_get(&venue.http_base(), "/instruments");
+    assert_eq!(status, 200, "{body}");
+    let defs: Vec<mogwai_protocol::InstrumentDef> = serde_json::from_str(&body).unwrap();
+    assert_eq!(defs.len(), 1);
+    let def = &defs[0];
+    assert_eq!(def.symbol.as_ref(), "FOOBAR");
+    let preset = mogwai_server::config::profile_from_preset("BTCUSDT").unwrap();
+    assert_eq!(def.class, preset.def.class);
+    assert_eq!(def.price_precision, preset.def.price_precision);
+    assert_eq!(def.size_precision, preset.def.size_precision);
+    assert_eq!(def.price_increment, preset.def.price_increment);
+    assert_eq!(def.size_increment, preset.def.size_increment);
+
+    let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
+        .await
+        .expect("connect websocket");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while let Ok(Some(Ok(message))) = tokio::time::timeout_at(deadline, socket.next()).await {
+        if let Message::Text(text) = message
+            && let Ok(ServerMessage::Trade(trade)) = serde_json::from_str(&text)
+        {
+            assert_eq!(trade.symbol.as_ref(), "FOOBAR");
+            return;
+        }
+    }
+    panic!("no FOOBAR trade arrived before the deadline");
+}
+
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
 async fn binary_client_frames_receive_a_protocol_error() {
     let venue = spawn(&["--config", &fast_config()]);
     let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())

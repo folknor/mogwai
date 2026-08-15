@@ -310,8 +310,8 @@ pub fn control_walk(
 /// This is the SECOND copy of the 12b section 8 exposure contract (the first is
 /// `run_final_walk`, which lives in `mogwai-cli` and is therefore unreachable
 /// from this crate). Every element is matched deliberately: the MNQ profile
-/// resolved through `InstrumentProfiles::defaults()` with the preset as the
-/// fallback, `calendar.utc_offset_minutes` as the accumulator's hour offset,
+/// resolved through the shipped MNQ preset, with
+/// `calendar.utc_offset_minutes` as the accumulator's hour offset,
 /// `scalars.modal_tick` as its tick size, the vol trace enabled before the
 /// loop, the walk starting at `window_start - warmup` and the half-open
 /// measured window. The scratch `[instrument.override]` curve is the ONLY
@@ -330,8 +330,8 @@ pub fn control_generated_pass(
         );
     }
     // Section 2.7: the shipped-curve pass resolves MNQ exactly as
-    // `mogwai_cli::measure::run_final_walk` does - `InstrumentProfiles::defaults()`
-    // with the preset as the fallback - and the scratch `[instrument.override]`
+    // `mogwai_cli::measure::run_final_walk` does, through the shipped MNQ
+    // preset, and the scratch `[instrument.override]`
     // is the ONE difference the corrected-curve pass introduces.
     let profile = if overrides.is_empty() {
         default_mnq_profile()?
@@ -388,14 +388,10 @@ pub fn control_generated_pass(
     acc.finish()
 }
 
-/// MNQ as `mogwai_cli::measure::run_final_walk` resolves it: the shipped
-/// profile table first, the preset file as the fallback.
+/// MNQ as `mogwai_cli::measure::run_final_walk` resolves it: the shipped preset.
 fn default_mnq_profile() -> LabResult<InstrumentProfile> {
-    match mogwai_server::source::InstrumentProfiles::defaults().get("MNQ") {
-        Some(p) => Ok(p.clone()),
-        None => mogwai_server::config::profile_from_preset("MNQ")
-            .map_err(|e| LabError::refusal(format!("resolving the MNQ preset: {e}"))),
-    }
+    mogwai_server::config::profile_from_preset("MNQ")
+        .map_err(|e| LabError::refusal(format!("resolving the MNQ preset: {e}")))
 }
 
 /// One gate's verdict, in the artifact's own shape.

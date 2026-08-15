@@ -237,7 +237,9 @@ mod tests {
     use super::*;
 
     fn run(started_ns: u64, warmup_ns: u64, run_duration_ns: Option<u64>) -> Arc<Run> {
-        let profiles = Arc::new(source::InstrumentProfiles::defaults());
+        let profiles = Arc::new(source::InstrumentProfiles::from_profiles(vec![
+            crate::config::profile_for_symbol("BTCUSDT").expect("BTCUSDT preset must resolve"),
+        ]));
         let instrument = profiles
             .instrument_defs()
             .into_iter()

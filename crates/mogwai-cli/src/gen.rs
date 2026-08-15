@@ -27,7 +27,7 @@ use mogwai_protocol::{
 };
 use rust_decimal::Decimal;
 
-use mogwai_server::source::{InstrumentProfiles, fingerprint};
+use mogwai_server::source::fingerprint;
 
 // The summary accumulator moved to `mogwai_lab::summary` at phase 3b so the
 // protocol-11 fit driver can drive it in-process. This CLI surface is
@@ -534,8 +534,8 @@ fn resolve_profile_for(args: &GenArgs) -> anyhow::Result<mogwai_server::source::
 /// One instrument profile from an operator config file, through the SAME
 /// `Config::load` and instrument-profile construction a served run boots
 /// with, so a scratch config exercises exactly the shipped validation and
-/// defaulting. The config must configure an instrument: the built-in default
-/// venue would silently ignore every scratch scalar.
+/// defaulting. The config must configure an instrument: an absent table
+/// resolves to DEFAULT_PRESET and would silently ignore every scratch scalar.
 fn profile_from_config(
     path: &std::path::Path,
 ) -> anyhow::Result<mogwai_server::source::InstrumentProfile> {
@@ -543,7 +543,8 @@ fn profile_from_config(
         .with_context(|| format!("loading --config {}", path.display()))?;
     if cfg.instrument.is_none() {
         bail!(
-            "--config {} carries no [instrument] table; a scratch profile must configure one",
+            "--config {} carries no [instrument] table; it would resolve to the default preset \
+             and ignore every scratch scalar, so a scratch profile must configure one",
             path.display()
         );
     }
@@ -561,16 +562,11 @@ fn profile_from_config(
         .clone())
 }
 
-/// A named symbol: a built-in venue symbol first, then an embedded preset.
-/// Checking the venue first keeps `--symbol BTCUSDT` byte-identical to what
-/// it produced before presets were reachable here.
+/// Every symbol resolves through the shipped preset registry. An unmatched
+/// string uses the default bundle under its own symbol, and BTCUSDT renders the
+/// fitted BTCUSDT preset.
 fn resolve_profile(symbol: &str) -> anyhow::Result<mogwai_server::source::InstrumentProfile> {
-    if let Some(profile) = InstrumentProfiles::defaults().get(symbol) {
-        return Ok(profile.clone());
-    }
-    mogwai_server::config::profile_from_preset(symbol).with_context(|| {
-        format!("unknown symbol {symbol}: not a built-in venue symbol and not an embedded preset")
-    })
+    mogwai_server::config::profile_for_symbol(symbol)
 }
 
 fn aggressor_word(side: AggressorSide) -> &'static str {
@@ -978,7 +974,10 @@ mod tests {
         let mut cli_source = build_source(&args, &profile, args.start).expect("cli source");
 
         let fp = fingerprint();
-        let profiles = InstrumentProfiles::defaults();
+        let profiles = mogwai_server::source::InstrumentProfiles::from_profiles(vec![
+            mogwai_server::config::profile_for_symbol("BTCUSDT")
+                .expect("BTCUSDT preset must resolve"),
+        ]);
         let profile = profiles.get("BTCUSDT").expect("BTCUSDT profile");
         let mut direct_source = mogwai_data::GeneratedSource::new_with_session_profile(
             profile.scalars.clone(),
@@ -1034,13 +1033,13 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_symbol_names_both_places_it_was_looked_for() {
-        let err = resolve_profile("NOPE").expect_err("NOPE is neither venue nor preset");
-        let text = format!("{err}");
-        assert!(
-            text.contains("NOPE"),
-            "message should name the symbol: {text}"
-        );
+    fn an_unknown_symbol_resolves_through_the_default_bundle() {
+        let profile = resolve_profile("NOPE").expect("symbol resolution is total");
+        assert_eq!(profile.def.symbol.as_ref(), "NOPE");
+        assert!(matches!(
+            profile.def.class,
+            mogwai_protocol::InstrumentClass::Spot { .. }
+        ));
     }
 
     #[test]

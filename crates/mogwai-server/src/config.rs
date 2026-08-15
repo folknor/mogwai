@@ -24,8 +24,11 @@ use crate::source;
 // promise literally true for top-level knobs: a typo'd key (`warmup_n = 0`)
 // used to fall through to the field default silently, so the operator ran with a
 // value they never set (S20). `default` (missing keys keep built-in defaults) and
-// `deny` (unknown keys are rejected) are orthogonal and compose. Each
-// `[[instrument]]` table is guarded the same way, by `ConfiguredInstrument`.
+// `deny` (unknown keys are rejected) are orthogonal and compose. The
+// `[instrument]` table's own keys are guarded one step later, by
+// `deny_unknown_fields` on `ConfiguredInstrument`, which sees the RESOLVED
+// table; `[[instrument]]` still fails to parse here, because an array of
+// tables does not deserialize into `Option<toml::Table>`.
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Simulated duration of one venue run. Zero means the launcher owns
@@ -161,13 +164,12 @@ pub struct Config {
     /// Process-wide ceiling on queued or executing commands across every
     /// websocket connection. See `admission::GLOBAL_PENDING_COMMAND_SLOTS`.
     pub(crate) global_pending_command_acts: usize,
-    /// The one instrument this run serves. Absent, the server seeds the
-    /// built-in default profile. Present, it is authoritative for
-    /// `/instruments`, order validation, and data generation. A table, not a
-    /// list: a run serves exactly one instrument, so `[[instrument]]` fails to
-    /// parse rather than silently serving whichever entry sorted first.
+    /// The operator's instrument table exactly as written, unresolved and
+    /// unvalidated. `build_instrument_profiles` resolves it against the symbol
+    /// and validates the derived profile. A table, not a list: this slice still
+    /// boots exactly one instrument.
     #[serde(rename = "instrument")]
-    pub instrument: Option<ConfiguredInstrument>,
+    pub instrument: Option<toml::Table>,
     /// Market regime for this run's tape. Formerly the one knob a consumer
     /// picked for itself per subscription; with no subscriptions left it is
     /// boot config, chosen by whoever launches the run. Absent means the
@@ -266,11 +268,9 @@ fn default_balances() -> HashMap<String, Decimal> {
 /// instead: funds are unenforced, and the first buy books a negative quote
 /// leg a nautilus cash consumer will refuse to apply.
 ///
-/// It takes THE instrument the run serves, not the profile table. Those are
-/// not always the same set: a checkout with no `[instrument]` table builds
-/// `InstrumentProfiles::defaults()`, which carries all three shipped presets
-/// while `serve` picks the first and serves only that one. Checking the whole
-/// table refused boot over a currency no order in the run could ever quote.
+/// It takes THE instrument the run serves, not an unresolved config table.
+/// Checking anything other than the derived definition could refuse boot over
+/// a currency no order in the run could ever quote.
 pub(crate) fn refuse_unfunded_settlement(cfg: &Config, def: &InstrumentDef) -> anyhow::Result<()> {
     if cfg.balances.is_empty() {
         tracing::warn!(
@@ -447,6 +447,21 @@ pub(crate) fn build_admission_limits(cfg: &Config) -> AdmissionLimits {
 }
 
 impl Config {
+    /// The boot symbol the operator named, if any. Absent, the chosen bundle's
+    /// own symbol stands, which is what makes a no-config run BTCUSDT.
+    pub(crate) fn instrument_symbol(&self) -> Option<&str> {
+        self.instrument
+            .as_ref()
+            .and_then(|table| table.get("symbol"))
+            .and_then(toml::Value::as_str)
+    }
+
+    /// The operator's `[instrument]` overlay as written; empty when the config
+    /// carries no such table, which is the legal no-config case.
+    pub(crate) fn instrument_table(&self) -> toml::Table {
+        self.instrument.clone().unwrap_or_default()
+    }
+
     /// Load run config from a TOML file. `path` is the parsed `--config <path>`
     /// argument when passed; omission uses built-in defaults. A requested file
     /// must exist and parse - consulting a cwd-relative `mogwai.toml` would
@@ -458,21 +473,15 @@ impl Config {
         let cfg: Self = match path {
             Some(path) => {
                 let text = std::fs::read_to_string(path)?;
-                let mut raw: toml::Table = toml::from_str(&text)?;
-                if let Some(instrument) = raw
-                    .get_mut("instrument")
-                    .and_then(toml::Value::as_table_mut)
-                {
-                    *instrument = resolve_instrument_table(instrument.clone())?;
-                }
+                let raw: toml::Table = toml::from_str(&text)?;
                 toml::Value::Table(raw).try_into()?
             }
             None => Self::default(),
         };
-        // Validate here, not at the call site, so a validated `Config` is the
-        // only kind `load` ever hands out - a future second consumer cannot
-        // forget the check. (The clock and instrument validations stay with
-        // their builders: they need boot-time inputs this loader lacks.)
+        // Validate every knob this type owns here. The clock and resolved
+        // instrument validations stay with their builders because they need
+        // boot-time inputs; `build_instrument_profiles` owns symbol resolution
+        // and validation of the operator's raw instrument table.
         validate_balances(&cfg)?;
         validate_account_id(&cfg)?;
         validate_admission_limits(&cfg)?;
@@ -497,13 +506,27 @@ fn validate_speed(cfg: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The preset every unmatched symbol is served under. It is spot, makes no
+/// calendar claim about an unfitted symbol, settles in the funded USDT default,
+/// and was fitted from trade-level archives.
+pub const DEFAULT_PRESET: &str = "BTCUSDT";
+
+/// The shipped presets. The one spelling of the registry: name, text.
+const PRESETS: [(&str, &str); 3] = [
+    ("MNQ", include_str!("../presets/mnq.toml")),
+    ("MES", include_str!("../presets/mes.toml")),
+    ("BTCUSDT", include_str!("../presets/btcusdt.toml")),
+];
+
+pub fn preset_names() -> [&'static str; 3] {
+    PRESETS.map(|(name, _)| name)
+}
+
 fn preset_text(name: &str) -> Option<&'static str> {
-    match name.to_ascii_uppercase().as_str() {
-        "MNQ" => Some(include_str!("../presets/mnq.toml")),
-        "MES" => Some(include_str!("../presets/mes.toml")),
-        "BTCUSDT" => Some(include_str!("../presets/btcusdt.toml")),
-        _ => None,
-    }
+    let name = name.to_ascii_uppercase();
+    PRESETS
+        .iter()
+        .find_map(|(candidate, text)| (*candidate == name).then_some(*text))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -718,7 +741,28 @@ pub fn preset_document(name: &str) -> Option<&'static str> {
     preset_text(name)
 }
 
-fn resolve_instrument_table(mut operator: toml::Table) -> anyhow::Result<toml::Table> {
+/// The preset a symbol and an operator choice select, by the three-step
+/// precedence: the operator's explicit `preset`, then a preset whose name
+/// matches the symbol, then [`DEFAULT_PRESET`]. TOTAL over symbol strings.
+/// This is the ONE spelling of the precedence; `base_bundle` and every message
+/// naming the chosen bundle read it from here so the two cannot disagree.
+fn bundle_name<'a>(symbol: Option<&'a str>, operator_preset: Option<&'a str>) -> &'a str {
+    operator_preset
+        .or_else(|| symbol.filter(|symbol| preset_text(symbol).is_some()))
+        .unwrap_or(DEFAULT_PRESET)
+}
+
+fn base_bundle(
+    symbol: Option<&str>,
+    operator_preset: Option<&str>,
+) -> anyhow::Result<(toml::Table, toml::Table)> {
+    effective_preset(bundle_name(symbol, operator_preset))
+}
+
+fn resolve_instrument(
+    symbol: Option<&str>,
+    mut operator: toml::Table,
+) -> anyhow::Result<toml::Table> {
     // The pre-class shape was seven flat fields. `deny_unknown_fields` would
     // refuse it anyway, but with a bare "unknown field `base`" that names
     // neither the replacement nor the shape it takes. Refuse it here instead,
@@ -731,21 +775,32 @@ fn resolve_instrument_table(mut operator: toml::Table) -> anyhow::Result<toml::T
             );
         }
     }
-    let Some(name) = operator.remove("preset") else {
-        return Ok(operator);
-    };
-    let name = name
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("instrument.preset must be a string"))?;
-    let (mut merged, _) = effective_preset(name)?;
+    let operator_preset = operator.remove("preset");
+    let operator_preset = operator_preset
+        .as_ref()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("instrument.preset must be a string"))
+        })
+        .transpose()?;
+    let requested_symbol = operator
+        .get("symbol")
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("instrument.symbol must be a string"))
+        })
+        .transpose()?
+        .or(symbol)
+        .map(str::to_owned);
+    operator.remove("symbol");
+    let bundle = bundle_name(requested_symbol.as_deref(), operator_preset);
+    let (mut merged, _provenance) = base_bundle(requested_symbol.as_deref(), operator_preset)?;
     let overrides = operator
         .remove("override")
         .and_then(|value| value.as_table().cloned())
         .unwrap_or_default();
-    if !operator.is_empty() {
-        let key = operator.keys().next().unwrap();
-        anyhow::bail!("preset key {key} must be stated under instrument.override");
-    }
     for (path, value) in overrides {
         // Protocol-12b's arrival seam is intentionally absent from every
         // shipped preset until Brick S.  It is nevertheless a valid
@@ -762,9 +817,41 @@ fn resolve_instrument_table(mut operator: toml::Table) -> anyhow::Result<toml::T
                 .insert("arrival".to_string(), value);
             continue;
         }
-        replace_dotted(&mut merged, &path, value)?;
+        replace_dotted_for_bundle(&mut merged, &path, value, bundle)?;
+    }
+    // A top-level key is the operator's explicit choice. It REPLACES a knob the
+    // bundle sets, and where the bundle sets no such key it ADDS one: the
+    // optional sections (`margin`, `fees`, `calendar`) are absent from most
+    // bundles, and no shipped preset sets `fees` at all, so the
+    // must-already-exist rule would make them unreachable from every config.
+    // The typo guard survives without it - `deny_unknown_fields` on
+    // `ConfiguredInstrument` refuses any key that is not a field, and a knob
+    // that contradicts the bundle's class (a margin table over spot) is refused
+    // by `validate_instrument_options`. A key spelled with a dot is a PATH,
+    // as under `[instrument.override]`, and keeps the strict guard.
+    for (path, value) in operator {
+        if path.contains('.') || merged.contains_key(&path) {
+            replace_dotted_for_bundle(&mut merged, &path, value, bundle)?;
+        } else {
+            tracing::info!(path, override_value = %value, bundle, "instrument bundle addition");
+            merged.insert(path, value);
+        }
+    }
+    if let Some(symbol) = requested_symbol {
+        merged.insert("symbol".into(), toml::Value::String(symbol));
     }
     Ok(merged)
+}
+
+fn replace_dotted_for_bundle(
+    table: &mut toml::Table,
+    path: &str,
+    value: toml::Value,
+    bundle_name: &str,
+) -> anyhow::Result<()> {
+    replace_dotted(table, path, value).map_err(|error| {
+        anyhow::anyhow!("{error}; chosen bundle {bundle_name} does not include that knob")
+    })
 }
 
 fn replace_dotted(table: &mut toml::Table, path: &str, value: toml::Value) -> anyhow::Result<()> {
@@ -907,13 +994,8 @@ impl ConfiguredInstrument {
 }
 
 pub fn build_instrument_profiles(cfg: &Config) -> anyhow::Result<source::InstrumentProfiles> {
-    let Some(configured) = &cfg.instrument else {
-        return Ok(source::InstrumentProfiles::defaults());
-    };
-    let fp = mogwai_data::Fingerprint::from_repo_json();
-    Ok(source::InstrumentProfiles::from_profiles(vec![
-        profile_from_configured(configured, &fp)?,
-    ]))
+    let profile = profile_for_config(cfg.instrument_symbol(), cfg.instrument_table())?;
+    Ok(source::InstrumentProfiles::from_profiles(vec![profile]))
 }
 
 /// One validated [`source::InstrumentProfile`] from a deserialized
@@ -1034,6 +1116,26 @@ pub fn profile_from_preset(name: &str) -> anyhow::Result<source::InstrumentProfi
     let configured: ConfiguredInstrument = merged
         .try_into()
         .with_context(|| format!("preset {name} does not deserialize as an instrument"))?;
+    let fp = mogwai_data::Fingerprint::from_repo_json();
+    profile_from_configured(&configured, &fp)
+}
+
+/// The profile a symbol resolves to without an operator overlay. Total over
+/// symbol strings: an unmatched symbol uses the default bundle under its own
+/// name.
+pub fn profile_for_symbol(symbol: &str) -> anyhow::Result<source::InstrumentProfile> {
+    profile_for_config(Some(symbol), toml::Table::new())
+}
+
+/// The validated profile selected by a boot symbol and operator overlay.
+pub fn profile_for_config(
+    symbol: Option<&str>,
+    operator: toml::Table,
+) -> anyhow::Result<source::InstrumentProfile> {
+    let merged = resolve_instrument(symbol, operator)?;
+    let configured: ConfiguredInstrument = merged
+        .try_into()
+        .context("the resolved [instrument] table is not a valid instrument")?;
     let fp = mogwai_data::Fingerprint::from_repo_json();
     profile_from_configured(&configured, &fp)
 }
@@ -1312,10 +1414,7 @@ mod tests {
     }
 
     fn future_configured() -> ConfiguredInstrument {
-        let profile = source::InstrumentProfiles::defaults()
-            .get("BTCUSDT")
-            .expect("default profile")
-            .clone();
+        let profile = profile_for_symbol("BTCUSDT").expect("BTCUSDT preset must resolve");
         ConfiguredInstrument {
             symbol: "MNQ".into(),
             class: ConfiguredClass::Future {
@@ -1469,7 +1568,7 @@ mod tests {
         // operator.
         let table: toml::Table =
             toml::from_str("symbol = \"BTCUSDT\"\nbase = \"BTC\"\nquote = \"USDT\"\n").unwrap();
-        let message = resolve_instrument_table(table)
+        let message = resolve_instrument(None, table)
             .expect_err("the removed flat class shape must refuse")
             .to_string();
         assert!(message.contains("instrument.class"), "{message}");
@@ -1483,13 +1582,142 @@ mod tests {
             let (_, provenance) = effective_preset(name).unwrap();
             let table =
                 toml::Table::from_iter([("preset".into(), toml::Value::String(name.into()))]);
-            let resolved = resolve_instrument_table(table).unwrap();
+            let resolved = resolve_instrument(None, table).unwrap();
             let configured: ConfiguredInstrument = toml::Value::Table(resolved).try_into().unwrap();
             validate_instrument_def(&configured.def()).unwrap();
             validate_instrument_options(&configured, &configured.def()).unwrap();
             let profile = profile_from_configured(&configured, &fp).unwrap();
             assert_preset_diagnostics(name, &profile, &fp, &provenance).unwrap();
         }
+    }
+
+    #[test]
+    fn an_unmatched_symbol_resolves_through_the_default_preset() {
+        let resolved = profile_for_symbol("FOOBAR").expect("unmatched symbols are total");
+        let default = profile_from_preset(DEFAULT_PRESET).expect("default preset resolves");
+        assert_eq!(resolved.def.symbol.as_ref(), "FOOBAR");
+        assert_eq!(resolved.def.class, default.def.class);
+        assert_eq!(resolved.def.price_precision, default.def.price_precision);
+        assert_eq!(resolved.def.size_precision, default.def.size_precision);
+        assert_eq!(resolved.def.price_increment, default.def.price_increment);
+        assert_eq!(resolved.def.size_increment, default.def.size_increment);
+    }
+
+    #[test]
+    fn a_symbol_naming_a_preset_selects_it() {
+        let resolved = profile_for_symbol("MNQ").unwrap();
+        let preset = profile_from_preset("MNQ").unwrap();
+        assert_eq!(resolved.def, preset.def);
+        assert_eq!(
+            format!("{:?}", resolved.scalars),
+            format!("{:?}", preset.scalars)
+        );
+    }
+
+    #[test]
+    fn an_operator_preset_beats_a_matching_symbol() {
+        let operator = toml::from_str("symbol = \"MNQ\"\npreset = \"BTCUSDT\"").unwrap();
+        let resolved = profile_for_config(Some("MNQ"), operator).unwrap();
+        assert_eq!(resolved.def.symbol.as_ref(), "MNQ");
+        assert!(matches!(resolved.def.class, InstrumentClass::Spot { .. }));
+    }
+
+    #[test]
+    fn a_top_level_key_overrides_the_resolved_bundle() {
+        let operator = toml::from_str(
+            "symbol = \"MNQ\"\nmargin = { initial_per_contract = \"2100\", maintenance_per_contract = \"1800\", breach_action = \"liquidate\" }",
+        )
+        .unwrap();
+        let resolved = profile_for_config(Some("MNQ"), operator).unwrap();
+        assert_eq!(
+            resolved.margin.unwrap().initial_per_contract,
+            Decimal::from(2100)
+        );
+    }
+
+    #[test]
+    fn a_top_level_optional_section_the_bundle_lacks_is_added() {
+        // No shipped preset sets `fees`, so a must-already-exist rule would put
+        // a fee schedule out of every operator's reach. `tests/configs/fees.toml`
+        // is exactly this shape and drives the smoke test's fees arm.
+        let operator = toml::from_str(
+            "symbol = \"MNQ\"\n[fees.maker]\nbasis = \"per_contract\"\namount = \"0.20\"\n\
+             [fees.taker]\nbasis = \"per_contract\"\namount = \"0.25\"\n",
+        )
+        .unwrap();
+        let resolved =
+            profile_for_config(Some("MNQ"), operator).expect("a fee schedule is addable");
+        assert!(resolved.fees.is_some());
+    }
+
+    #[test]
+    fn a_top_level_key_that_is_not_a_field_is_still_refused() {
+        let operator = toml::from_str("symbol = \"MNQ\"\nprice_precison = 3").unwrap();
+        let error = profile_for_config(Some("MNQ"), operator)
+            .expect_err("a typo at the top level must not boot");
+        assert!(
+            format!("{error:#}").contains("price_precison"),
+            "the refusal must name the key: {error:#}"
+        );
+    }
+
+    #[test]
+    fn a_top_level_override_of_a_coupled_key_must_state_both() {
+        let lone = toml::from_str("symbol = \"MNQ\"\nprice_precision = 3").unwrap();
+        let error = profile_for_config(Some("MNQ"), lone).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("generator.price_decimals must equal price_precision"),
+            "{error}"
+        );
+        let paired = toml::from_str(
+            "symbol = \"MNQ\"\nprice_precision = 3\n[override]\n\"generator.price_decimals\" = 3",
+        )
+        .unwrap();
+        profile_for_config(Some("MNQ"), paired).expect("both coupled halves boot");
+    }
+
+    #[test]
+    fn an_override_path_the_bundle_does_not_set_is_still_refused() {
+        let operator =
+            toml::from_str("symbol = \"FOOBAR\"\n[override]\n\"class.typo\" = \"x\"").unwrap();
+        let error = profile_for_config(Some("FOOBAR"), operator).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("class.typo"), "{message}");
+        assert!(message.contains(DEFAULT_PRESET), "{message}");
+    }
+
+    #[test]
+    fn an_explicit_unknown_preset_is_still_an_error() {
+        let explicit = toml::from_str("symbol = \"MNQ\"\npreset = \"NOPE\"").unwrap();
+        assert!(profile_for_config(Some("MNQ"), explicit).is_err());
+        profile_for_symbol("NOPE").expect("an unmatched symbol is legal");
+    }
+
+    #[test]
+    fn a_lowercase_symbol_matches_its_preset() {
+        let resolved = profile_for_symbol("mnq").unwrap();
+        let preset = profile_from_preset("MNQ").unwrap();
+        assert_eq!(resolved.def.symbol.as_ref(), "mnq");
+        assert_eq!(resolved.def.class, preset.def.class);
+        assert_eq!(resolved.scalars.modal_tick, preset.scalars.modal_tick);
+    }
+
+    #[test]
+    fn a_no_config_run_serves_the_default_preset() {
+        let profiles = build_instrument_profiles(&Config::default()).unwrap();
+        let resolved = profiles.get(DEFAULT_PRESET).expect("one default profile");
+        let preset = profile_from_preset(DEFAULT_PRESET).unwrap();
+        assert_eq!(resolved.def, preset.def);
+        assert_eq!(
+            format!("{:?}", resolved.scalars),
+            format!("{:?}", preset.scalars)
+        );
+        assert_eq!(
+            format!("{:?}", resolved.session),
+            format!("{:?}", preset.session)
+        );
     }
 
     #[test]
@@ -1658,17 +1886,13 @@ mod tests {
     }
 
     #[test]
-    fn a_preset_key_restated_at_the_top_level_refuses_boot() {
+    fn a_top_level_symbol_replaces_the_preset_symbol() {
         let table = toml::Table::from_iter([
             ("preset".into(), toml::Value::String("MNQ".into())),
             ("symbol".into(), toml::Value::String("MNQ".into())),
         ]);
-        assert!(
-            resolve_instrument_table(table)
-                .unwrap_err()
-                .to_string()
-                .contains("override")
-        );
+        let resolved = resolve_instrument(None, table).unwrap();
+        assert_eq!(resolved["symbol"].as_str(), Some("MNQ"));
     }
 
     #[test]
@@ -1676,7 +1900,7 @@ mod tests {
         let table: toml::Table =
             toml::from_str("preset = \"MNQ\"\n[override]\n\"class.typo\" = \"x\"\n").unwrap();
         assert!(
-            resolve_instrument_table(table)
+            resolve_instrument(None, table)
                 .unwrap_err()
                 .to_string()
                 .contains("class.typo")
@@ -1688,7 +1912,7 @@ mod tests {
         let table: toml::Table =
             toml::from_str("preset = \"MNQ\"\n[override]\n\"class.multiplier\" = \"3\"\n").unwrap();
         let configured: ConfiguredInstrument =
-            toml::Value::Table(resolve_instrument_table(table).unwrap())
+            toml::Value::Table(resolve_instrument(None, table).unwrap())
                 .try_into()
                 .unwrap();
         assert_eq!(configured.def().class.multiplier(), Decimal::from(3));
@@ -1946,7 +2170,7 @@ mod tests {
     fn the_mnq_preset_reads_two_dollars_per_point_and_fifty_cents_per_tick() {
         let table = toml::Table::from_iter([("preset".into(), toml::Value::String("MNQ".into()))]);
         let configured: ConfiguredInstrument =
-            toml::Value::Table(resolve_instrument_table(table).unwrap())
+            toml::Value::Table(resolve_instrument(None, table).unwrap())
                 .try_into()
                 .unwrap();
         let def = configured.def();

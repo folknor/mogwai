@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2026 folknor
+# SPDX-License-Identifier: AGPL-3.0-only
+
+seed = 42
+warmup_ns = 300000000000
+speed = 0.0
+
+[instrument]
+symbol = "FOOBAR"

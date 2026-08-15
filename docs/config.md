@@ -58,8 +58,8 @@ is how often the run re-checks its resting limits against the tape; the sweep
 is the only thing that ever fills a resting limit or delivers a market order's
 slipped fill unsolicited, so boot refuses a zero interval.
 
-One optional `[instrument]` table defines the run instrument. Omitting it uses
-the built-in BTCUSDT profile. `[[instrument]]` is not accepted. `[regime]`
+One optional `[instrument]` table overlays the symbol-resolved bundle. Omitting
+it resolves the BTCUSDT default preset. `[[instrument]]` is not accepted. `[regime]`
 selects the single run-wide market regime. `[balances]` funds the one ledger.
 `oms_type` is `netting` (the default) or `hedging`; the venue serves both and
 refuses a client over neither, and `/health` reports the run's choice.
@@ -81,10 +81,12 @@ load costs a line.
 
 ## The instrument class
 
-`[instrument]` carries five shape fields - `symbol`, `price_precision`,
-`size_precision`, `price_increment`, `size_increment` - plus a REQUIRED
-`[instrument.class]` sub-table naming the class. Top-level `base` and `quote`
-were replaced by that table and now refuse boot with a message naming it.
+`[instrument]` may be as small as a symbol. That symbol selects a matching
+shipped preset or the BTCUSDT default, and the derived definition supplies the
+class, precision and increments. Top-level keys are logged explicit choices:
+they replace a knob the bundle sets, or add an optional section - `fees`,
+`margin`, `calendar` - it leaves out. Top-level `base` and `quote` remain
+invalid.
 
 ```toml
 [instrument]
@@ -142,12 +144,12 @@ open, which is the crypto case and the default.
 
 ## Presets
 
-`preset = "MNQ"` inside `[instrument]` merges a committed, embedded preset -
-`MNQ`, `MES`, `BTCUSDT`. Every other key must then be
-stated under `[instrument.override]` as a dotted path
-(`"class.multiplier" = "3"`); restating one at the top level refuses boot, and
-so does overriding a path the preset does not set. Each override is logged at
-boot with both values. Every preset carries a `[provenance]` map with one
+The symbol selects a matching committed preset, or BTCUSDT when unmatched.
+An explicit `preset = "MNQ"` takes precedence and serves that bundle under the
+requested symbol. Top-level keys are legal replacements or additions;
+`[instrument.override]` reaches dotted paths such as
+`"class.multiplier" = "3"`. Overriding a dotted path the bundle does not set
+refuses boot. Each override is logged with both values. Every preset carries a `[provenance]` map with one
 entry per knob it sets - `fitted`, `derived` or `declared` with a rationale -
 and boot refuses a preset that leaves any knob undeclared. `mogwai presets`
 lists them; `mogwai presets MNQ` prints one with its provenance.

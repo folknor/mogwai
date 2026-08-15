@@ -162,9 +162,11 @@ const FROZEN_PATHS: [&str; 4] = [
 ];
 
 /// B1's supporting check: `git diff --name-only <parent>..HEAD` touches none of
-/// the frozen paths, and `TAPE_PROTOCOL_VERSION` is still the pre-mechanism
-/// identity (14 since the calendar-aware `ReopenGap` crossing repair; 13 was
-/// the fill-band decimal normalization). Recorded ALONGSIDE
+/// the frozen paths, and `TAPE_PROTOCOL_VERSION` is the accepted baseline 16.
+/// B1 is re-baselined from 14 to 16 because slice 1 retired the second default
+/// knob bundle and bumped the constant under the unconditional rule; the
+/// committed fill golden re-rendered unchanged, so no tape byte moved and the
+/// baseline this check defends still holds. Recorded ALONGSIDE
 /// the per-symbol byte comparisons and never substituted for them - it is a much
 /// weaker statement than tape identity, since a generator change outside those
 /// paths would pass it - but it is ANDed into B1's verdict rather than merely
@@ -200,7 +202,7 @@ fn b1_supporting_check(baseline_commit: &str) -> anyhow::Result<Value> {
     // moved and can disagree with this reasoning.
     let (non_shipping, shipping): (Vec<&str>, Vec<&str>) =
         frozen.iter().partition(|p| is_non_shipping(p));
-    let version_ok = mogwai_data::TAPE_PROTOCOL_VERSION == 14;
+    let version_ok = mogwai_data::TAPE_PROTOCOL_VERSION == 16;
     Ok(json!({
         "command": format!("git diff --name-only {range}"),
         "baseline_commit": baseline_commit,

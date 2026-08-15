@@ -594,13 +594,7 @@ pub(crate) fn run_final_walk_with_count_windows(
     seed: u64,
     windows: &'static [i64],
 ) -> anyhow::Result<Value> {
-    let profile = mogwai_server::source::InstrumentProfiles::defaults()
-        .get("MNQ")
-        .cloned()
-        .map_or_else(
-            || mogwai_server::config::profile_from_preset("MNQ").map_err(|e| anyhow!("{e}")),
-            Ok,
-        )?;
+    let profile = mogwai_server::config::profile_from_preset("MNQ").map_err(|e| anyhow!("{e}"))?;
     let calendar = profile
         .calendar
         .as_ref()

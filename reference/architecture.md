@@ -61,7 +61,7 @@ away from zero and floored at one contract, so no print becomes the zero
 quantity nautilus drops. `latent_size_median` is stated directly in the
 instrument's native size unit and names the continuous lognormal center before
 that grid is applied. The floor truncates its lower tail, so it is deliberately
-not called the observed size median. `TAPE_PROTOCOL_VERSION` is 14; version 5
+not called the observed size median. `TAPE_PROTOCOL_VERSION` is 16; version 5
 removed the quote-notional proxy whose value was actually arithmetic mean
 notional and made the latent size distribution explicit, and version 6 repaired
 the GARCH recursion's second moment. Version 7 added the observable top of book,
@@ -301,11 +301,12 @@ depends on `mogwai-lab` for the pieces that need no server preset resolution
 `mogwai-server` for the generated side of measurement.
 
 THE INSTRUMENT SET IS OPEN, and that is why `mogwai-lab` is a library rather
-than a folder of scripts. The three shipped presets - MNQ, MES and BTCUSDT -
-are the current state, not the end state: whatever a strategy needs to trade next -
-another future, a basket of individual equities - the venue owes it a
-realistic tape, and a realistic tape means a corpus, a measurement, a fit and
-a preset for that symbol. So every instrument walks the same intake sequence:
+than a folder of scripts. A symbol is a request string, never an admission
+identity. `InstrumentDef` is derived through one path from the symbol and the
+operator overlay: an explicit preset, a matching preset, or the BTCUSDT default
+bundle. No second hardcoded default bundle exists, and no symbol is refused for
+wanting a fit. The three shipped presets - MNQ, MES and BTCUSDT - are the
+current state, not the end state. The intake sequence makes a tape better:
 survey what cheap data exists, decide whether a paid corpus is worth buying
 and which windows of it, buy, preflight, measure, characterize, fit, ship a
 preset with its provenance. The offline toolbox is that sequence made

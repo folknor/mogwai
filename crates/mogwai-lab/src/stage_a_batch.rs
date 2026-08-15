@@ -1039,9 +1039,10 @@ pub fn validate_manifest(manifest: &BatchManifest) -> LabResult<()> {
     }
     let expected_hash = manifest_hash(manifest)?;
     if manifest.plan_sha256 != expected_hash {
-        return Err(LabError::refusal(
-            "manifest plan hash does not match its contents",
-        ));
+        return Err(LabError::refusal(format!(
+            "manifest plan hash does not match its contents: expected {expected_hash}, got {}",
+            manifest.plan_sha256
+        )));
     }
     Ok(())
 }
@@ -1165,7 +1166,7 @@ mod tests {
         let manifest = parse_manifest(bytes).expect("committed manifest validates");
         assert_eq!(
             manifest.plan_sha256,
-            "e55f6c086f27c859f1638be3fc5a95a42b56cd15c93f635c9cf0f7b5e89f4b8c"
+            "d6562d8b2536acb5c6f1b321a60ec6e45d15f1aa30cb067f95387d91ce4f769d"
         );
         assert_eq!(
             manifest.plan_sha256,

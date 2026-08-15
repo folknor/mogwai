@@ -45,7 +45,6 @@ const VOL_WINDOW_SECS: u64 = 300;
 const WARMUP_SECS: u64 = 86_400;
 const WALL_HORIZON_SECS: u64 = 600;
 const MAX_MEASURED_SPEED: u64 = 10;
-const PRESETS: [&str; 3] = ["MNQ", "MES", "BTCUSDT"];
 
 /// `mogwai tick-composition` arguments. Writes the paired BBO composition
 /// fixtures the budget constants are derived from.
@@ -250,7 +249,7 @@ fn humanize(elapsed: Duration) -> String {
 /// scalar defaulting, the size grid, the session profile and the calendar are
 /// the venue's own rather than this command's idea of them.
 fn resolve_profiles() -> anyhow::Result<BTreeMap<&'static str, InstrumentProfile>> {
-    PRESETS
+    mogwai_server::config::preset_names()
         .into_iter()
         .map(|preset| {
             let profile = mogwai_server::config::profile_from_preset(preset)
@@ -264,7 +263,7 @@ fn tasks() -> Vec<Task> {
     (1..=8_u64)
         .flat_map(|seed| {
             MODES.into_iter().flat_map(move |mode| {
-                PRESETS
+                mogwai_server::config::preset_names()
                     .into_iter()
                     .map(move |preset| Task { preset, seed, mode })
             })
@@ -847,7 +846,7 @@ mod tests {
         let profiles = resolve_profiles().expect("every measured preset resolves");
         let fp = fingerprint();
         let start_ns = peak_hour_ns();
-        for preset in PRESETS {
+        for preset in mogwai_server::config::preset_names() {
             for mode in MODES {
                 let mut compact = build_source(&profiles[preset], 17, start_ns, fp);
                 let mut wire = compact.clone();
@@ -887,8 +886,8 @@ mod tests {
     #[test]
     fn every_measured_preset_resolves_through_the_boot_path() {
         let profiles = resolve_profiles().expect("every measured preset resolves");
-        assert_eq!(profiles.len(), PRESETS.len());
-        for preset in PRESETS {
+        assert_eq!(profiles.len(), mogwai_server::config::preset_names().len());
+        for preset in mogwai_server::config::preset_names() {
             let profile = &profiles[preset];
             assert_eq!(profile.def.symbol.as_ref(), preset);
             assert_eq!(profile.scalars.symbol, preset);
@@ -935,7 +934,7 @@ mod tests {
         let start_ns = peak_hour_ns();
         let fanout_span = WALL_HORIZON_SECS * MAX_MEASURED_SPEED;
         let fanout_end_ns = start_ns.saturating_add(fanout_span * 1_000_000_000);
-        for preset in PRESETS {
+        for preset in mogwai_server::config::preset_names() {
             let mut source = build_source(&profiles[preset], 1, start_ns, fingerprint());
             let first = source
                 .next_tick()

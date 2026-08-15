@@ -140,15 +140,8 @@ fn run_final_walk(seed: u64) -> serde_json::Value {
     use mogwai_data::{TickEvent, TickSource};
     use mogwai_lab::subcontract::{FINAL_LENGTH, FINAL_START_NS, SUMMARY_WARMUP};
 
-    // The same resolution order `gen.rs`'s `resolve_profile` uses: a built-in
-    // venue symbol first, then an embedded preset.
-    let profile = mogwai_server::source::InstrumentProfiles::defaults()
-        .get("MNQ")
-        .cloned()
-        .unwrap_or_else(|| {
-            mogwai_server::config::profile_from_preset("MNQ")
-                .expect("the committed MNQ preset resolves")
-        });
+    let profile = mogwai_server::config::profile_from_preset("MNQ")
+        .expect("the committed MNQ preset resolves");
     let calendar = profile
         .calendar
         .as_ref()

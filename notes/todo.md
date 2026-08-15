@@ -82,6 +82,77 @@ the settled premises it records (always accelerated, no restart, single-
 instrument strategies, one MOGWAI venue, resource cost shapes nothing) are
 this design's mogwai-side constraints and still hold unchanged.
 
+## Landing the grand design: fourteen pieces
+
+Counted 2026-08-15 from the settled-design items below, EXCLUDING tape
+realism (the segment-sampler and preset-fitting track, which is separate).
+A piece is a unit one agent could own or one coherent landing, with its
+decisions. The detail for each lives in the design bullets under Open
+issues; this is the inventory, not the spec.
+
+SLICE 1 - symbol selects the preset, still one symbol per run. Pieces 1 and 3
+landed (preset selection by symbol lookup with BTCUSDT the designated
+default, and `InstrumentDef` derived with the second default knob bundle
+deleted); their detail is git history, not this file. Numbering is left as
+it was assigned so the cross-references below (piece 4, piece 5, piece 13)
+still resolve:
+
+2. Config stops declaring the instrument: default knobs plus per-symbol
+   overrides; the two-instruments-refused parse pin is deliberately removed.
+4. The boot-ordering DECISION and its consequence: `INDEX` initializes in
+   `materialize_warmup` at boot, before any request - either warmup moves
+   or a boot symbol survives slice 1. RULED by the owner 2026-08-15: slice 1
+   KEEPS A BOOT SYMBOL - config still names the one symbol the run serves,
+   warmup and `INDEX` initialize from it unchanged, and what changes is that
+   the symbol resolves through preset-or-default instead of requiring a
+   preset key. Moving warmup is slice-2 work.
+5. `/trades` and `/quotes` unknown-symbol semantics DECISION: under total
+   resolution the empty-200 path changes meaning - unreachable or 400.
+   RULED by the owner 2026-08-15: a 400 NAMING THE SERVED SYMBOL. In slice 1
+   the run still serves one symbol, so unknown stays reachable and must stay
+   loudly distinguishable from no-trades-happened, the same principle the
+   off-tape-window 400 defends. Unreachability is a slice-2 question.
+
+SLICE 2 - many boats on many rivers:
+
+6. The `/ws` symbol carrier - a NEW mechanism, not a modification: no
+   subscribe path exists, its absence is byte-level pinned, and admission
+   tickets derive from it.
+7. Kill the process-global singletons: `RunIndex`, `BOOT`, the `.next()`
+   collapse in `serve.rs`; per-river keyed state, lazy engine registration.
+8. Seed derivation gains a symbol dimension: the tape-determinism change,
+   owing the `TAPE_PROTOCOL_VERSION` bump sequenced around 12b's
+   reservation.
+9. The boatyard: sharing key (resolved bundle + speed + generator-level
+   havoc), first subscriber places, later ones join where the boat is,
+   empty boat winds down - bundled with its open mechanics (idle-river
+   retirement, pacing threads vs one scheduler, per-boat rings vs one
+   filtered ring at the current `fanout_depth`).
+10. One clock per boat: every run-level singleton assuming one now -
+    engine event stamps, `/clock`, `AccountState` timestamps,
+    `run_duration_ns` completion, derived `sim_epoch_ns`. None hard, all
+    scattered.
+11. Fill-path de-singling: `MarketReadingCache`'s one entry behind one
+    mutex, and the process-wide `last_swept_ns` watermark coupling
+    settlement liveness across symbols.
+12. `ReadyRecord` under per-boat clocks: drop `symbol` (VERSION 6) and
+    decide what the origin/start/warmup fields mean as river properties;
+    the seed-reproduces-a-venue-not-a-boat-placement knock-on.
+
+CROSS-CUTTING:
+
+13. The consumer surface as one landing: `/instruments` returns the
+    resolved configuration, the adapter's subscription guard resolves with
+    the unconfigured-symbol-session question, and the runtime funds
+    rejection names its currency.
+14. The durable prose: every decision above owes `reference/` and `docs/`
+    writing WITH the code, per the standing item below.
+
+Pieces 4 and 5 (and the guard question inside 13) are decisions before
+code; the highest-risk pieces are 6, 8, and 9 with 10. Broadarrow's item 4
+(consuming the multi-instrument venue) is excluded - it is theirs, and
+their build breaking loudly when piece 13 lands is the designed handoff.
+
 ## Open issues
 
 - NAUTILUS HAS NO CHANNEL FOR A DECLARED FEED GAP, so mogwai's `FeedLagged`
@@ -159,18 +230,15 @@ this design's mogwai-side constraints and still hold unchanged.
   machinery with nesting (MES over MNQ), an override layer and provenance
   validation; `Engine::build` taking `instruments: Vec`; margin and fees keyed by
   symbol; `InstrumentProfiles` as a map; `/trades` and `/quotes` taking `symbol`.
-  What has to change:
-  1. PRESET SELECTION MOVES FROM A CONFIG KEY TO A SYMBOL LOOKUP. Today an
-     operator writes `instrument.preset = "MNQ"`. The resolution machinery is
-     already built; only its trigger changes.
+  What has to change (items 1 and 3 landed in slice 1 - symbol-lookup preset
+  selection with an explicit `instrument.preset` staying higher-precedence,
+  and `InstrumentDef` derived through one resolution path - detail is git
+  history, numbering left as assigned):
   2. CONFIG STOPS DECLARING THE INSTRUMENT. `Config.instrument` is one
      `ConfiguredInstrument` table whose own doc says "the one instrument this
      run serves", and `a_config_naming_two_instruments_fails_to_parse` pins that
      `[[instrument]]` is refused. That test pins the assumption being removed.
      Config becomes default knobs plus per-symbol overrides.
-  3. `InstrumentDef` BECOMES DERIVED, a function of symbol and config resolving
-     through preset-or-default, rather than a config entry. The grid, class,
-     currencies and multiplier follow from it, and so does order validation.
   4. SEED DERIVATION GAINS A SYMBOL DIMENSION. `RunSeeds` is run to tape and
      fill with no symbol term, so without this every symbol generates a
      byte-identical tape. This is a tape-determinism change and OWES A
@@ -227,12 +295,16 @@ this design's mogwai-side constraints and still hold unchanged.
   THE SLICE 1 ORDERING PROBLEM, and it is structural rather than a detail:
   `INDEX` is initialized inside `materialize_warmup` AT BOOT, from config, BEFORE
   ANY REQUEST EXISTS. If the symbol arrives per-request, either warmup moves or a
-  boot symbol must still be chosen up front. Decide this before writing code.
+  boot symbol must still be chosen up front. RULED 2026-08-15: slice 1 keeps
+  a boot symbol in config; warmup and `INDEX` initialize from it unchanged;
+  moving warmup is slice-2 work. See piece 4 of the fourteen-piece inventory.
   ALSO SLICE 1: `/trades` and `/quotes` return an EMPTY 200 for an unknown
   symbol, while the same handler goes to considerable length to refuse an
   off-tape window with a loud 400 precisely so an impossible request stays
   distinguishable from "no trades happened". Under total resolution that `None`
-  path changes meaning entirely - decide whether it becomes unreachable or a 400.
+  path changes meaning entirely - RULED 2026-08-15: in slice 1 an unknown
+  symbol is a 400 naming the served symbol; unreachability is a slice-2
+  question. See piece 5 of the fourteen-piece inventory.
   CONSUMER-SIDE, unchanged and still theirs: `run_prep::mogwai_facts` refuses a
   `/instruments` answer of anything but exactly one instrument, so a venue
   serving many BREAKS their build loudly by design, closed on their side by
@@ -391,15 +463,12 @@ this design's mogwai-side constraints and still hold unchanged.
   is right for a typo and wrong for a servable-but-unconfigured symbol, where
   the adapter would refuse on a venue's behalf that would happily serve.
 
-- FOUR STALE COMMENTS in the serving path, found by the 2026-08-15 survey. Same
-  family as the `BoundedSeek` comments the bug loop found and as the gate item
-  below: durable prose asserting a live type or a measured fact that has moved.
-  Cheap to fix, and each one currently justifies real code with a false premise.
-  - `config.rs` says a checkout with no `[instrument]` table builds
-    `InstrumentProfiles::defaults()` "which carries all three shipped presets
-    while `serve` picks the first". False - `defaults()` builds exactly ONE
-    BTCUSDT def from fingerprint medians and never opens a preset file. The
-    function it justifies, `refuse_unfunded_settlement`, is still correct.
+- THREE STALE COMMENTS in the serving path, found by the 2026-08-15 survey
+  (a fourth, in `config.rs`'s `refuse_unfunded_settlement`, was fixed with
+  slice 1). Same family as the `BoundedSeek` comments the bug loop found and
+  as the gate item below: durable prose asserting a live type or a measured
+  fact that has moved. Cheap to fix, and each one currently justifies real
+  code with a false premise.
   - `fills.rs` justifies behaviour by saying an armed `MarketRegime` is
     per-subscription because `TapeKey` carries it. `TapeKey` no longer exists
     anywhere in the tree and `regime` is boot config. The conclusion holds, the
@@ -759,6 +828,16 @@ this design's mogwai-side constraints and still hold unchanged.
   Also relevant and not a problem statement: `reference/glossary.md` defines the
   identity chain the code builds - now just run, tape and ledger, since the
   lifecycle landing collapsed account, session and subscription out of it.
+
+- `scripts/smoke.py` DEFAULT MODE IS FLAKY on the first market frame. Observed
+  2026-08-15 during the slice-1 review pass: one run failed with "the first
+  market frame must be the BBO snapshot, got Trade" and the immediate rerun
+  passed, on a tree whose default tape was byte-identical to the committed
+  one, so it is pre-existing and unrelated to that landing. It is the "never
+  assert on THE NEXT frame" family applied to the launcher contract script:
+  either the assertion needs a drain-to-deadline, or snapshot-first is a real
+  wire contract the server must uphold and the race is a server defect.
+  Decide which before patching the script.
 
 - GTD / `expire_time` on the wire, with a time-driven expiry pass on the
   sweeper. Refused today for limits and conditionals alike - the conditional-

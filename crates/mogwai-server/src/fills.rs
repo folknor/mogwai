@@ -271,7 +271,9 @@ pub(crate) fn test_profiles() -> InstrumentProfiles {
         seeds: mogwai_protocol::RunSeeds::from_run_seed(42),
         regime: None,
     });
-    InstrumentProfiles::defaults()
+    InstrumentProfiles::from_profiles(vec![
+        crate::config::profile_for_symbol("BTCUSDT").expect("BTCUSDT preset must resolve"),
+    ])
 }
 
 #[cfg(test)]

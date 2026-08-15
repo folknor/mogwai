@@ -15,6 +15,13 @@
 //! functions, which is the whole point. A golden computed by a hand-rolled tape
 //! loop would certify nothing but itself.
 //!
+//! The instrument is the SHIPPED BTCUSDT PRESET, resolved through the same
+//! `config::profile_for_symbol` path a run boots with, rather than the retired
+//! median-derived built-in default. That preset declares no generator or
+//! session table, so its scalars are the fingerprint medians the retired
+//! bundle forced and the committed artifact did not move when the default
+//! bundle changed - which is the evidence behind that claim.
+//!
 //! `GeneratedSource` is deterministic given the committed fingerprint, the fixed
 //! origin and the fixed order population, so every value in the artifact is an
 //! integer and the comparison is exact: any change to the fingerprint, the
@@ -152,7 +159,6 @@ use mogwai_data::TickEvent;
 use mogwai_engine::{Engine, EngineConfig, ScanResult};
 use mogwai_protocol::{
     AccountId, ClientMessage, OrderType, RunSeeds, ServerMessage, Side, SubmitOrder, TimeInForce,
-    default_instruments,
 };
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -227,6 +233,11 @@ fn golden_path() -> PathBuf {
 }
 
 fn run_scenario(band_vol_mult: f64, profiles: &InstrumentProfiles) -> Vec<Cell> {
+    let def = profiles
+        .get(SYMBOL)
+        .expect("resolved BTCUSDT profile exists")
+        .def
+        .clone();
     let total = OFFSETS.len() * ORDERS_PER_OFFSET;
     // The last acceptance must leave every order at least half the horizon in
     // which to fill, so a later edit to the population, the stride or the
@@ -238,15 +249,11 @@ fn run_scenario(band_vol_mult: f64, profiles: &InstrumentProfiles) -> Vec<Cell> 
     );
     let mut engine = Engine::build(EngineConfig {
         account_id: AccountId::parse("GOLDEN").expect("static account"),
-        instruments: default_instruments(),
+        instruments: vec![def.clone()],
         balances: HashMap::new(),
         fill_seed: RunSeeds::from_run_seed(GOLDEN_RUN_SEED).fill,
     });
-    let increment = default_instruments()
-        .into_iter()
-        .find(|instrument| instrument.symbol.as_ref() == SYMBOL)
-        .expect("BTCUSDT exists")
-        .price_increment;
+    let increment = def.price_increment;
     let mut meta = HashMap::new();
     let mut samples: HashMap<u32, Vec<(u64, u64, Side)>> = HashMap::new();
     for ts in (ORIGIN..=ORIGIN + HORIZON_NS).step_by(SWEEP_INTERVAL_NS as usize) {
@@ -393,7 +400,10 @@ fn record_fills(
 }
 
 fn render() -> String {
-    let profiles = InstrumentProfiles::defaults();
+    let profiles = InstrumentProfiles::from_profiles(vec![
+        crate::config::profile_for_symbol("BTCUSDT")
+            .expect("BTCUSDT preset must resolve for the fill golden"),
+    ]);
     let golden = Golden {
         schema: 2,
         symbol: SYMBOL,

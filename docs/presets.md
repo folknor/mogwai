@@ -1,9 +1,8 @@
 # Choosing an instrument preset
 
-An operator who wants MNQ, MES or BTCUSDT does not have to
-hand-write an `[instrument]` table. Three presets ship inside the `mogwai`
+An operator names a symbol and mogwai resolves its tape knobs. Three presets ship inside the `mogwai`
 binary - no data directory, no network fetch, nothing outside the executable
-itself - and a config selects one by name.
+itself.
 
 ## Listing and inspecting presets
 
@@ -29,19 +28,25 @@ they come from nowhere at all. A preset is not a claim that every number in it
 is equally trustworthy, and the provenance map is how you find out which ones
 are.
 
-## Selecting a preset in your config
+## Selecting a bundle in your config
 
-Put `preset = "MNQ"` inside your `[instrument]` table. Nothing else goes in
-that table directly - the preset supplies the whole instrument definition.
+Name the symbol. If its name matches a shipped preset, case-insensitively, that
+preset supplies the whole bundle.
 
 ```toml
 [instrument]
-preset = "MNQ"
+symbol = "MNQ"
 ```
 
-That's a complete, valid `[instrument]` table. Boot merges the preset's
-knobs in and validates the result exactly as if you had written every field
-by hand.
+That is a complete table. Resolution uses this precedence: an explicit
+`preset`, then a preset matching the symbol, then the BTCUSDT default. An
+explicit preset remains useful for serving one bundle under another name:
+
+```toml
+[instrument]
+symbol = "FOOBAR"
+preset = "MNQ"
+```
 
 ## Overriding a knob
 
@@ -53,17 +58,19 @@ use `[instrument.override]` with dotted paths:
 preset = "MNQ"
 
 [instrument.override]
-symbol = "MNQZ6"
-"class.multiplier" = "2"
+"class.multiplier" = "3"
 ```
 
 Two rules, both enforced at boot with a message that names the problem:
 
-- A key set both by the preset and restated at the top level of
-  `[instrument]` refuses boot. `[instrument.override]` is the only sanctioned
-  place to differ from a preset - there is no silent-last-writer-wins.
-- Overriding a path the preset does not set also refuses boot, so a typo in
-  the override table is caught rather than silently ignored.
+- A top-level key in `[instrument]` is a legal explicit choice, logged with
+  both values. It replaces the knob the bundle sets, or adds an optional
+  section - `fees`, `margin`, `calendar` - the bundle leaves out. A key that is
+  not an instrument field refuses boot by name. `[instrument.override]` is
+  still the only way to reach a dotted path.
+- Overriding a DOTTED path the bundle does not set refuses boot, so a typo in
+  the override table is caught rather than silently ignored. The message names
+  the bundle that was chosen.
 
 Every override is logged at startup with both the preset's value and the
 value you supplied, so a run's log makes the deviation from the preset
@@ -113,12 +120,11 @@ MNQ); that nesting is internal to how the presets are authored; from the
 operator's config, `preset = "MES"` behaves identically to any other preset
 name.
 
-## Inventing your own instrument
+## Serving a symbol without a preset
 
-Presets are a convenience, not a requirement. Skip `preset` entirely and
-write the full `[instrument]` table - `[instrument.class]`, and for a future
-`[instrument.margin]`, plus optionally `[instrument.fees]` and
-`[instrument.calendar]` - to model an instrument no preset covers (MCL, AAPL,
-or any other bundle of the same knobs). See `docs/config.md` for the
-complete field-by-field surface; this guide covers only the preset mechanism
-that sits on top of it.
+Every string is served. An unmatched symbol gets the BTCUSDT preset's spot,
+always-open, USDT-settled knobs under its own name. BTCUSDT is the default
+because it makes no calendar or margin claim about an unfitted symbol, its
+settlement currency is funded by the shipped balances, and its dynamics were
+fitted from trade-level archives. Name a futures preset explicitly when a
+future-shaped bundle is required.

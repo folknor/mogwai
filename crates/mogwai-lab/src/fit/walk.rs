@@ -321,7 +321,8 @@ pub fn profile_from_config(path: &Path) -> LabResult<mogwai_server::source::Inst
         .map_err(|e| LabError::refusal(format!("loading scratch config: {e}")))?;
     if cfg.instrument.is_none() {
         return Err(LabError::refusal(
-            "the scratch config carries no [instrument] table",
+            "the scratch config carries no [instrument] table; it would resolve to the \
+             default preset and ignore every scratch scalar",
         ));
     }
     let profiles = mogwai_server::config::build_instrument_profiles(&cfg)
