@@ -803,15 +803,21 @@ pub(crate) async fn trades(
     // runtime's worker pool.
     //
     // Serialization runs on the SAME blocking task as the synthesis, and the
-    // admission permit is handed to the response body rather than dropped
-    // here: see `HistoryPage`.
-    let body = match tokio::task::spawn_blocking(move || {
-        serde_json::to_vec(&bounded_trades(&symbol, start, end, limit, &profiles))
+    // admission permit RIDES that task rather than staying a handler local:
+    // hyper drops this handler future the moment the client disconnects, but a
+    // running blocking task cannot be cancelled, so a permit left out here
+    // would be released while the synthesis it admitted was still resident -
+    // the exact scope-ends-before-the-work defect `HistoryPage` closes on the
+    // response side. The closure hands the slot back with the bytes; on the
+    // error and panic paths it drops inside the task, after the work ends.
+    let (history_slot, body) = match tokio::task::spawn_blocking(move || {
+        let body = serde_json::to_vec(&bounded_trades(&symbol, start, end, limit, &profiles));
+        (history_slot, body)
     })
     .await
     {
-        Ok(Ok(body)) => body,
-        Ok(Err(e)) => {
+        Ok((slot, Ok(body))) => (slot, body),
+        Ok((_slot, Err(e))) => {
             tracing::error!(%e, "trade history serialization failed");
             return Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()));
         }
@@ -839,18 +845,24 @@ pub(crate) async fn quotes(
         return Err((StatusCode::BAD_REQUEST, body));
     }
     let end = Some(end.map_or(sim_now, |end| end.min(sim_now)));
-    let body = tokio::task::spawn_blocking(move || {
-        serde_json::to_vec(&bounded_quotes(&symbol, start, end, limit, &profiles))
+    // The permit rides the blocking task for the same reason as `/trades`: a
+    // client disconnect drops this future, and only the closure outlives that.
+    let (history_slot, body) = match tokio::task::spawn_blocking(move || {
+        let body = serde_json::to_vec(&bounded_quotes(&symbol, start, end, limit, &profiles));
+        (history_slot, body)
     })
     .await
-    .map_err(|e| {
-        tracing::error!(%e, "quote history synthesis task failed");
-        (StatusCode::INTERNAL_SERVER_ERROR, String::new())
-    })?
-    .map_err(|e| {
-        tracing::error!(%e, "quote history serialization failed");
-        (StatusCode::INTERNAL_SERVER_ERROR, String::new())
-    })?;
+    {
+        Ok((slot, Ok(body))) => (slot, body),
+        Ok((_slot, Err(e))) => {
+            tracing::error!(%e, "quote history serialization failed");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()));
+        }
+        Err(e) => {
+            tracing::error!(%e, "quote history synthesis task failed");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()));
+        }
+    };
     Ok(history_page(history_slot, body))
 }
 
@@ -878,6 +890,13 @@ pub(crate) const MAX_CONCURRENT_HISTORY_REQUESTS: usize = 4;
 /// serialization happens on the synthesis's own blocking task and the permit
 /// travels with the finished bytes: it is released when hyper drops this body,
 /// which is after the response has been written.
+///
+/// The permit's OTHER end is guarded too: it is moved INTO the blocking
+/// closure, not merely awaited past, because a client disconnect drops the
+/// handler future while the blocking task keeps running to completion. A
+/// permit held by the dropped future would readmit a new synthesis while the
+/// orphaned one was still resident; one held by the closure returns only when
+/// the work it admitted actually ends.
 struct HistoryPage {
     _slot: tokio::sync::OwnedSemaphorePermit,
     body: Option<axum::body::Bytes>,

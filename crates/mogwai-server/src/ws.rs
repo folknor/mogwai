@@ -44,7 +44,11 @@ fn send_admission(lanes: &ExecLanes, msg: ServerMessage) -> Result<(), CloseSpec
 
 struct QueuedCommand {
     cmd: ClientMessage,
-    _global_slot: OwnedSemaphorePermit,
+    /// The process-wide command slot, deliberately NOT underscore-prefixed:
+    /// the dispatcher drops it EXPLICITLY after the command has been acted on,
+    /// so an edit that releases it early has to delete a visible `drop`, not
+    /// merely rename a binding in a destructure pattern.
+    global_slot: OwnedSemaphorePermit,
 }
 
 async fn dispatch_command(cmd: ClientMessage, state: &AppState, lanes: &ExecLanes) {
@@ -76,14 +80,15 @@ fn spawn_command_dispatcher(
     lanes: ExecLanes,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        // Binding the permit is load-bearing, and the name is why it survives:
-        // `_global_slot` lives to the end of the loop body, so the process-wide
-        // slot is returned only after the command has been ACTED ON. A bare `_`
-        // pattern would drop it at the destructure and let a new command in
-        // while this one was still in the engine - the bound would count
-        // acceptances rather than work in flight.
-        while let Some(QueuedCommand { cmd, _global_slot }) = commands.recv().await {
-            dispatch_command(cmd, &state, &lanes).await;
+        // The permit's scope is the correctness property: the process-wide
+        // slot may return only after the command has been ACTED ON, or the
+        // bound counts acceptances rather than work in flight. The drop is
+        // therefore EXPLICIT, sequenced after the awaited dispatch, rather
+        // than left to a destructure binding whose lifetime an underscore
+        // pattern would silently end early.
+        while let Some(queued) = commands.recv().await {
+            dispatch_command(queued.cmd, &state, &lanes).await;
+            drop(queued.global_slot);
         }
     })
 }
@@ -377,7 +382,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             let queued = Arc::clone(&state.pending_commands)
                                 .try_acquire_owned()
                                 .ok()
-                                .map(|_global_slot| QueuedCommand { cmd: command, _global_slot });
+                                .map(|global_slot| QueuedCommand { cmd: command, global_slot });
                             if queued.is_none_or(|queued| command_tx.try_send(queued).is_err()) {
                                 drop(send_admission(&lanes, ServerMessage::AdmissionRejected {
                                     subject,

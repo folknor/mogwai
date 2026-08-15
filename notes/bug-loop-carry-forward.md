@@ -1170,3 +1170,95 @@ bytes are written), and the NONZERO exit when connections do not drain within
 the shutdown grace (close sockets on `RunComplete` rather than waiting to be
 dropped). `docs/cli.md` carries the exit-code change and `docs/config.md` the
 admission gate.
+
+## Close pass over the server-transport arc (commits 437f3a6, 55936a2)
+
+A whole-arc review weighted toward the never-cold-reviewed second halves of
+both rounds: the rewritten tests, the streaming `HistoryPage` body, the
+`LaunchSpec::duration` semantics and the deletions. The sequential dispatcher,
+the completion read, the `AdmissionSubject` bound, the duration tri-state, the
+no-bump verdicts, the `bugs-protocol` strikes and the durable prose all held
+up under enumeration. ONE correctness gap found and fixed, the SEVENTH member
+of the guard-scope family and the second inside the same history gate:
+
+- THE HISTORY PERMIT DID NOT SURVIVE A CLIENT DISCONNECT. Round 2 made the
+  permit outlive the RESPONSE, but on the way there it was still a handler
+  local across the `spawn_blocking` await - and hyper DROPS the handler future
+  the moment the client disconnects, while a running blocking task cannot be
+  cancelled. So a client that requested and immediately hung up released the
+  slot while its orphaned synthesis and multi-megabyte serialization were
+  still resident; repeated, that accumulates unbounded orphaned syntheses,
+  which is exactly what the four-slot ceiling advertises as impossible. The
+  permit now rides INSIDE the blocking closure and is handed back with the
+  finished bytes: on success it flows into `HistoryPage` as before, and on
+  error, panic or a dropped handler it is released only when the blocking
+  work actually ends. The lesson sharpens the standing rule: a guard is not
+  scoped to the work by being ALIVE while the work runs - it must be OWNED by
+  the task doing the work, because the awaiting future can die first.
+- THE COMMAND PERMIT'S NAME-HELD LIFETIME WAS HARDENED. Round 2 disclosed that
+  `while let Some(QueuedCommand { cmd, _global_slot })` kept the process-wide
+  slot alive for the loop body only because the binding was named rather than
+  `_`. The dispatcher now moves the whole `QueuedCommand` in and drops
+  `queued.global_slot` EXPLICITLY after the awaited dispatch, so releasing it
+  early requires deleting a visible `drop`, not renaming a pattern binding.
+  Behaviorally identical; the correctness property moved from a naming
+  convention into sequenced code.
+
+Verified rather than accepted, each against the code:
+
+- THE DISPATCHER'S ORDER AND TEARDOWN. One read loop, `try_send` into one
+  bounded mpsc, one task awaiting each command to completion: total order is a
+  function of arrival alone. The teardown `abort()` is safe because every
+  await in `dispatch_command`/`process_order_cmd` precedes the engine
+  mutation, and `process_with_market` runs synchronously under the lock with
+  no await between mutation and the (synchronous) lane submit - a cancellation
+  cannot tear engine state, only lose frames a closed socket could not receive
+  anyway. Refusal paths return both permits: a failed `try_send` drops the
+  `QueuedCommand` inside the closure, permit and all.
+- HISTORY CANNOT STALL A COMMAND. `build_history_source` takes the per-symbol
+  index mutex for the positioning step only (bounded by the 8,192 stride) and
+  the up-to-50,000-tick synthesis walks a private clone; the gate caps history
+  at four of the blocking pool's 512 threads.
+- THE 10.3/41 MB MEASUREMENT IS REAL. `worst_case_history_page_bytes` re-run
+  in release reproduced 4,400,000 + 5,900,001 bytes for `/quotes` and
+  3,200,000 + 5,050,001 for `/trades`, exactly the figures in the constant's
+  doc, `docs/config.md` and `reference/performance.md`. No stale 28 MiB
+  statement survives outside this file's own historical round-2 record.
+- BOTH `bugs-protocol` STRIKES ARE HONEST. Finding 1: the truncation lives in
+  the protocol crate's `Serialize`, so every wire path passes it, and the
+  64 KiB inbound cap is set on the upgrade; the declined `BoundedId` newtype
+  is recorded as the residual. Finding 2: `LaunchSpec::duration` documents the
+  `Some(ZERO)` meaning at the protocol layer, `serve_argv` preserves `0s`, and
+  `resolve_run_duration` pins both directions server-side.
+- THE NO-BUMP VERDICTS HOLD, including round 1's admission that engine command
+  outcomes can differ from the buggy reordered binary: the engine reaches no
+  tape generation path, the market read clones a checkpoint source and cannot
+  extend the live index, and fill draws are keyed by order fields and band
+  draw - determinism per binary is the contract and the tape bytes are
+  untouched. 14 stays live, 15 stays reserved for protocol-12b.
+- THE DELETIONS. `ActDelay` was a single-variant marker enum, never armable -
+  `CommandLatency` in `control.rs` is untouched and the identifier appears
+  nowhere. `refuse_unfunded_settlement`'s narrowing is the disclosed behaviour
+  change (defaults carry three presets, serve serves the first) and its test
+  covers the served-instrument form.
+
+Verification of this pass: `brokkr fmt` and `brokkr check --gate` green (902 +
+416 tests), and the four socket-backed transport tests - command ordering,
+capacity refusal, size ceiling, binary frames - each passed 5 of 5 repeated
+runs.
+
+Residuals accepted as ruled: the history-concurrency test pins `admit_history`
+rather than the call site; the late-completion test pins the helper because a
+completed venue accepts no connections; `AdmissionSubject` stays constructible
+from a raw `String` with the bound at serialization; the drain-grace bail can
+shadow a tape-fault message when both occur (the fault already killed every
+connection, so the drain succeeds in practice); and the `HistoryPage` permit
+is released when hyper drops the body, which can precede the final socket
+flush by whatever hyper has buffered - the dominant residency (vector plus
+JSON during serde) is bounded, kernel-side buffering is not claimed to be.
+One warning for anyone filtering tests: `brokkr test -p mogwai-server` with a
+narrow filter LIES for the global-index tests -
+`run::tests::the_history_floor_is_the_fixed_tape_origin` fails 5 of 5 in
+isolation because the process-global chain is booted by `fills::test_profiles`
+elsewhere in the suite. Pre-existing, green in the full gate; run the crate's
+suite whole or include the `fills` tests in the filter.
