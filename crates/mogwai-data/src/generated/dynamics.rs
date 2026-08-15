@@ -45,6 +45,11 @@ impl SweepShape {
     /// every sweep at one child. Refusing to go below `1 + f64::EPSILON` keeps
     /// the inverse CDF well formed; at the committed scalars the quiet-state
     /// mean is 1.70, so the clamp never binds on the shipped tape.
+    ///
+    /// Caching the `children_mean - 1.0` denominator across calls was proposed
+    /// in the 2026-08 hunt and MEASURED NO IMPROVEMENT - the caller rescales the
+    /// mean per sweep, so the cache would miss on nearly every call. Do not
+    /// re-propose it without a measurement naming the decision it changes.
     pub(super) fn new(children_mean: f64, single_frac: f64, levels_mean: f64) -> Self {
         let children_mean = children_mean.max(1.0 + f64::EPSILON);
         let (q, m) = if single_frac < 1.0 / children_mean {

@@ -609,6 +609,18 @@ pub enum AdmissionSubject {
     Frame,
 }
 
+/// Hand-written so every embedded id is truncated to `MAX_CLIENT_ID_LEN` on a
+/// char boundary. Without it the derived impl would echo a client-supplied id
+/// of any length, which makes `ADMISSION_FRAME_MAX_BYTES` - and therefore the
+/// priority lane's frame-count memory bound - fictional.
+///
+/// THE INVARIANT IS HELD AT SERIALIZATION, NOT AT CONSTRUCTION, deliberately.
+/// Making the variants unconstructible from a raw `String` was proposed in the
+/// 2026-08 hunt and DECLINED: the subject is built at many refusal sites from
+/// ids the venue has already refused, so a fallible constructor would put an
+/// error path inside error handling. The residual is disclosed rather than
+/// fixed - an in-memory `AdmissionSubject` may hold an over-length id, and only
+/// what reaches the wire is bounded.
 impl Serialize for AdmissionSubject {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

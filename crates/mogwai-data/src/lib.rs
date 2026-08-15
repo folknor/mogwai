@@ -434,8 +434,27 @@ impl TickSource for MemorySource {
 ///
 /// Each input file is sorted ascending. A linear scan of the per-source heads
 /// yields a global ordering with one buffered tick per source. Production uses
-/// one source; the offline CSV intake may merge several. Equal timestamps are
-/// resolved by source index.
+/// one source; the offline CSV intake may merge several.
+///
+/// FOUR BEHAVIOURS HERE ARE CONTRACTS, not incidental implementation, and a
+/// 2026-08 proposal to delete this type as redundant was rejected on exactly
+/// that ground - production running one source makes the merge look like dead
+/// weight, but the offline intake path depends on all four:
+///
+/// - THE MERGE ITSELF: the emitted stream is globally time-ordered across
+///   sources, not merely per-source ordered.
+/// - THE INDEX TIE-BREAK: equal timestamps resolve by source index, so a merge
+///   over the same inputs in the same order is deterministic rather than
+///   arbitrary.
+/// - FAULT LATCHING: a child fault is absorbed once and made terminal
+///   ([`Self::latch_fault`] clears every head), so a faulted merge yields
+///   `None` forever instead of silently continuing on the surviving sources
+///   and presenting a hole as a legitimate end of stream.
+/// - THE INCLUSIVE ONE-TICK SEEK BUFFER: [`Self::starting_at`] seeks each child
+///   and RETAINS the first tick at or after `start_ts` as that child's head, so
+///   a tick landing exactly on the seek instant is emitted rather than
+///   consumed by the positioning. [`TickSource::seek_to`]'s `>= start_ts` is
+///   the other half of that contract.
 pub struct MergeSource {
     sources: Vec<Box<dyn TickSource>>,
     heads: Vec<Option<TickEvent>>,

@@ -23,6 +23,15 @@ pub struct RunSeeds {
 // not alias one another's streams. Little-endian is the one free choice in "the
 // ASCII of a name", so the hex is written out beside each constant and the
 // derivation is pinned by `derived_streams_differ_and_are_stable`.
+//
+// `tape != fill` HOLDS FOR EVERY RUN SEED, not just the three the test samples,
+// and the argument is structural rather than empirical: splitmix64 is a
+// bijection on u64 (an alternating chain of xor-shifts and odd multiplies, each
+// invertible), and `run ^ DOMAIN_TAPE != run ^ DOMAIN_FILL` for all `run`
+// because the two domains differ. A bijection maps distinct inputs to distinct
+// outputs, so the two streams cannot collide at any seed. The test's `assert_ne`
+// samples that claim; it does not establish it. Recorded because a reader
+// meeting three sampled assertions reasonably suspects an unproven collision.
 const DOMAIN_TAPE: u64 = u64::from_le_bytes(*b"tape_gen"); // 0x6e65675f65706174
 const DOMAIN_FILL: u64 = u64::from_le_bytes(*b"fill_bnd"); // 0x646e625f6c6c6966
 
