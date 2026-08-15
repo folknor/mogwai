@@ -296,6 +296,12 @@ pub(crate) fn instrument_any(
             multiplier,
             asset_class,
         } => {
+            anyhow::ensure!(
+                def.size_precision == 0 && def.size_increment == Decimal::ONE,
+                "futures require whole-contract sizing, got size_precision={} size_increment={}",
+                def.size_precision,
+                def.size_increment
+            );
             let currency = Currency::from_str(settlement_currency)
                 .with_context(|| format!("unknown settlement currency {settlement_currency}"))?;
             let asset_class = match asset_class {
@@ -379,6 +385,25 @@ mod tests {
         assert_eq!(contract.lot_size.to_string(), "1");
         assert_eq!(contract.size_increment.to_string(), "1");
         assert!(!contract.expiration_ns.to_rfc3339().is_empty());
+    }
+
+    #[test]
+    fn a_fractional_future_definition_is_refused_before_publication() {
+        let def = InstrumentDef {
+            symbol: "MNQ".into(),
+            class: InstrumentClass::Future {
+                underlying: "NQ".into(),
+                settlement_currency: "USD".into(),
+                multiplier: Decimal::new(25, 1),
+                asset_class: WireAssetClass::Index,
+            },
+            price_precision: 2,
+            size_precision: 1,
+            price_increment: Decimal::new(25, 2),
+            size_increment: Decimal::new(1, 1),
+        };
+        let error = instrument_any(&def, UnixNanos::from(7)).unwrap_err();
+        assert!(error.to_string().contains("whole-contract sizing"));
     }
 
     #[test]

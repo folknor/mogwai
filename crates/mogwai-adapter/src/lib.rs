@@ -21,7 +21,7 @@ mod lifecycle;
 
 pub use client::{MogwaiDataClient, MogwaiExecutionClient};
 pub use clock::{MogwaiClock, mogwai_clock_factory};
-pub use config::{MogwaiDataClientConfig, MogwaiExecClientConfig, UNSET_ACCOUNT_ID};
+pub use config::{DEFAULT_ACCOUNT_ID, MogwaiDataClientConfig, MogwaiExecClientConfig};
 pub use factories::{MogwaiDataClientFactory, MogwaiExecutionClientFactory};
 
 /// Launching a venue and learning its endpoint.

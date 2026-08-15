@@ -166,6 +166,51 @@ async fn mass_status_reports_all_three_sets_over_ws() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn mass_status_pairs_an_open_orders_fill_outside_the_lookback() {
+    let fixture = fixture().await;
+    // An older fill on the SAME open order, ahead of the fixture's own in the
+    // venue's ordering. A zero-minute lookback puts both outside the window.
+    fixture
+        .state
+        .venue_fills
+        .lock()
+        .expect("venue fills mutex")
+        .insert(0, venue_fill_row("O-1", "V-1", "T-0", Decimal::ONE, 5));
+    let mass = fixture
+        .client
+        .generate_mass_status(Some(0))
+        .await
+        .expect("mass status")
+        .expect("mass status is served");
+    assert!(
+        mass.order_reports()
+            .contains_key(&VenueOrderId::from("V-1")),
+        "the open order must be reported"
+    );
+    let all_fills = mass.fill_reports();
+    let fills = all_fills
+        .get(&VenueOrderId::from("V-1"))
+        .expect("an open order's fills are reported");
+    // Both halves of the finding: the fills survive the lookback at all, and
+    // they arrive in the venue's own order, so pairing them yields the venue's
+    // average price rather than a reversed one.
+    assert_eq!(
+        fills
+            .iter()
+            .map(|report| report.trade_id.to_string())
+            .collect::<Vec<_>>(),
+        vec!["T-0".to_string(), "T-1".to_string()]
+    );
+    assert!(
+        fills
+            .iter()
+            .all(|report| report.last_px.as_decimal() == Decimal::from(100)),
+        "fill prices must reach the host; the order report carries no avg_px"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn connecting_twice_replaces_the_execution_socket() {
     let mut fixture = fixture().await;
     fixture.client.connect().await.unwrap();

@@ -80,6 +80,11 @@ pub struct StubState {
     pub ws_trades: Mutex<Vec<String>>,
     /// Optional body served by `/quotes`.
     pub quotes_body: Mutex<Option<String>>,
+    /// The `/quotes` twin of [`StubState::trades_tape`]: a sorted quote tape
+    /// served with the real inclusive-`start` cursor semantics.
+    pub quotes_tape: Mutex<Option<Vec<mogwai_protocol::QuoteTick>>>,
+    /// The `start` query value of each `/quotes` request, in arrival order.
+    pub quotes_starts: Mutex<Vec<Option<u64>>>,
     /// Execution frames the WS leg pushes after a client `SubmitOrder`.
     pub ws_exec_frames: Mutex<Vec<String>>,
     /// Execution frames the WS leg pushes after a client `ModifyOrder`. The
@@ -105,6 +110,14 @@ pub struct StubState {
     pub trades_body: Mutex<Option<String>>,
     /// Optional successive `/trades` bodies for pagination tests.
     pub trades_pages: Mutex<VecDeque<String>>,
+    /// A `ts_event`-sorted trade tape served with REAL cursor semantics: the
+    /// handler honours the inclusive `start` bound and the `limit`, exactly as
+    /// `GET /trades` does. `trades_pages` cannot detect a lost row, because it
+    /// replays queued bodies whatever the client asked for; a cursor that skips
+    /// a timestamp group is only observable against a tape.
+    pub trades_tape: Mutex<Option<Vec<mogwai_protocol::TradeTick>>>,
+    /// The `start` query value of each `/trades` request, in arrival order.
+    pub trades_starts: Mutex<Vec<Option<u64>>>,
     /// When true, `GET /trades` answers `500`, modelling a venue that refuses
     /// the history fetch. The request generators must still emit a (empty)
     /// response rather than leaving the nautilus request unresolved.
@@ -236,8 +249,32 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
             .lock()
             .expect("http request times mutex")
             .push(Instant::now());
+        let start = query_value(path, "start").and_then(|value| value.parse::<u64>().ok());
+        state
+            .trades_starts
+            .lock()
+            .expect("trades starts mutex")
+            .push(start);
+        let tape = state.trades_tape.lock().expect("trades tape mutex").clone();
         if state.fail_trades.load(Ordering::Relaxed) {
             respond_json(stream, "500 Internal Server Error", "").await;
+        } else if let Some(tape) = tape {
+            let limit = query_value(path, "limit")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(usize::MAX);
+            let end = query_value(path, "end").and_then(|value| value.parse::<u64>().ok());
+            let rows = tape
+                .into_iter()
+                .filter(|trade| start.is_none_or(|start| trade.ts_event >= start))
+                .filter(|trade| end.is_none_or(|end| trade.ts_event <= end))
+                .take(limit)
+                .collect::<Vec<_>>();
+            respond_json(
+                stream,
+                "200 OK",
+                &serde_json::to_string(&rows).expect("tape page json"),
+            )
+            .await;
         } else {
             let body = state
                 .trades_pages
@@ -249,13 +286,39 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
             respond_json(stream, "200 OK", &body).await;
         }
     } else if path.starts_with("/quotes") {
-        let body = state
-            .quotes_body
+        let start = query_value(path, "start").and_then(|value| value.parse::<u64>().ok());
+        state
+            .quotes_starts
             .lock()
-            .expect("quotes body mutex")
-            .clone()
-            .unwrap_or_else(|| "[]".to_string());
-        respond_json(stream, "200 OK", &body).await;
+            .expect("quotes starts mutex")
+            .push(start);
+        let tape = state.quotes_tape.lock().expect("quotes tape mutex").clone();
+        if let Some(tape) = tape {
+            let limit = query_value(path, "limit")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(usize::MAX);
+            let end = query_value(path, "end").and_then(|value| value.parse::<u64>().ok());
+            let rows = tape
+                .into_iter()
+                .filter(|quote| start.is_none_or(|start| quote.ts_event >= start))
+                .filter(|quote| end.is_none_or(|end| quote.ts_event <= end))
+                .take(limit)
+                .collect::<Vec<_>>();
+            respond_json(
+                stream,
+                "200 OK",
+                &serde_json::to_string(&rows).expect("quote tape page json"),
+            )
+            .await;
+        } else {
+            let body = state
+                .quotes_body
+                .lock()
+                .expect("quotes body mutex")
+                .clone()
+                .unwrap_or_else(|| "[]".to_string());
+            respond_json(stream, "200 OK", &body).await;
+        }
     } else if path.starts_with("/control/divergence") {
         state.control_hits.fetch_add(1, Ordering::Relaxed);
         state
@@ -308,6 +371,19 @@ pub fn content_length(head: &str) -> usize {
         })
         .and_then(|value| value.trim().parse().ok())
         .unwrap_or(0)
+}
+
+/// Reads one query-string parameter out of a request target. The adapter
+/// percent-encodes nothing in the history query (symbol, start, end and limit
+/// are all alphanumeric), so a plain split is sufficient and keeps the stub
+/// free of a URL dependency.
+pub fn query_value(path: &str, key: &str) -> Option<String> {
+    path.split_once('?')?
+        .1
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(name, _)| *name == key)
+        .map(|(_, value)| value.to_string())
 }
 
 /// Writes a one-shot `Connection: close` JSON response with the given status.

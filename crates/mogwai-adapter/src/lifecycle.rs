@@ -363,7 +363,7 @@ pub(crate) async fn run_ws_connection<
     DisconnectFut,
 >(
     config: WsConnectionConfig,
-    mut cmd_rx: UnboundedReceiver<Cmd>,
+    mut cmd_rx: Option<UnboundedReceiver<Cmd>>,
     serialize: Serialize,
     on_connect: OnConnect,
     mut handler: Handler,
@@ -524,7 +524,7 @@ pub(crate) async fn run_ws_connection<
         loop {
             let action = tokio::select! {
                 msg = in_rx.recv() => WsAction::Inbound(msg.flatten()),
-                cmd = cmd_rx.recv(), if !commands_closed => WsAction::Command(cmd),
+                cmd = recv_command(&mut cmd_rx), if !commands_closed => WsAction::Command(cmd),
                 () = heartbeat_tick(&mut heartbeat), if heartbeat.is_some() => WsAction::Heartbeat,
                 () = idle_tick(&mut idle_sleep), if idle_sleep.is_some() => WsAction::Idle,
             };
@@ -666,6 +666,13 @@ pub(crate) async fn run_ws_connection<
         if backoff_or_exhausted(&policy, &mut attempt, &mut rng, label).await {
             return;
         }
+    }
+}
+
+async fn recv_command<Cmd>(rx: &mut Option<UnboundedReceiver<Cmd>>) -> Option<Cmd> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -1005,7 +1012,7 @@ mod tests {
                 label: "test",
                 identity: None,
             },
-            cmd_rx,
+            Some(cmd_rx),
             |cmd: ClientMessage| cmd,
             Vec::new,
             |_msg: ServerMessage| async {},

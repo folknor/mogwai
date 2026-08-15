@@ -20,7 +20,7 @@ use std::{
 use anyhow::{Context, ensure};
 use async_trait::async_trait;
 use mogwai_data::{BarAcc, fold_trade};
-use mogwai_protocol::{ClientMessage, InstrumentDef, ServerMessage, SimClock, Symbol, TradeTick};
+use mogwai_protocol::{InstrumentDef, ServerMessage, SimClock, Symbol, TradeTick};
 use nautilus_common::{
     clients::DataClient,
     live::{get_data_event_sender, get_runtime},
@@ -71,8 +71,8 @@ pub struct MogwaiDataClient {
     /// Earliest `ts_event` the venue can serve. `None` means the clock fetch
     /// failed; `Some(0)` is the real fixed tape floor.
     data_origin_ns: Option<u64>,
-    ws_cmd: Option<UnboundedSender<WsCommand>>,
     instruments: Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
+    missing_instrument_warnings: Arc<Mutex<std::collections::HashSet<String>>>,
     subs: Arc<Mutex<HashMap<Symbol, SubState>>>,
     quote_delivery: Arc<Mutex<()>>,
     bars: Arc<Mutex<HashMap<BarType, BarSubState>>>,
@@ -112,8 +112,8 @@ impl MogwaiDataClient {
             http,
             sim: SimClock::identity(),
             data_origin_ns: None,
-            ws_cmd: None,
             instruments: Arc::new(Mutex::new(HashMap::new())),
+            missing_instrument_warnings: Arc::new(Mutex::new(std::collections::HashSet::new())),
             subs: Arc::new(Mutex::new(HashMap::new())),
             quote_delivery: Arc::new(Mutex::new(())),
             bars: Arc::new(Mutex::new(HashMap::new())),
@@ -325,7 +325,6 @@ impl DataClient for MogwaiDataClient {
     }
 
     fn stop(&mut self) -> anyhow::Result<()> {
-        self.ws_cmd = None;
         abort_tasks(&self.task_handles);
         self.retire_connected_flag();
         // Emit any completed-but-withheld bar windows before the drain tasks are
@@ -366,7 +365,6 @@ impl DataClient for MogwaiDataClient {
         // A client owns exactly one transport generation. Retire every task
         // and sender from the previous generation before doing any async setup,
         // so a second connect cannot leave two readers sharing `connected`.
-        self.ws_cmd = None;
         abort_tasks(&self.task_handles);
         self.retire_connected_flag();
         let http_base_url = self.config.http_base_url();
@@ -392,14 +390,12 @@ impl DataClient for MogwaiDataClient {
         // the same config object but only applies its client-side transport half.
         let client_havoc = client_havoc(&self.config.havoc);
 
-        // `ws_url` already carries the `/ws` path and the account query; do not
-        // join a path onto it (see its comment).
+        // `ws_url` already carries the `/ws` path.
         let ws_url = self.config.ws_url();
-        let (cmd_tx, cmd_rx) = unbounded_channel::<WsCommand>();
-        self.ws_cmd = Some(cmd_tx);
 
         let connected = Arc::clone(&self.connected);
         let instruments = Arc::clone(&self.instruments);
+        let missing_instrument_warnings = Arc::clone(&self.missing_instrument_warnings);
         let subs = Arc::clone(&self.subs);
         let quote_delivery = Arc::clone(&self.quote_delivery);
         let bars = Arc::clone(&self.bars);
@@ -416,12 +412,22 @@ impl DataClient for MogwaiDataClient {
         let pump_handle = spawn_latency_pump(deliver_rx, move |msg| {
             let sink = sink.clone();
             let instruments = Arc::clone(&instruments);
+            let missing_instrument_warnings = Arc::clone(&missing_instrument_warnings);
             let subs = Arc::clone(&subs);
             let quote_delivery = Arc::clone(&quote_delivery);
             let bars = Arc::clone(&bars);
             async move {
-                handle_market_message(msg, &sink, &instruments, &subs, &quote_delivery, &bars, sim)
-                    .await;
+                handle_market_message(
+                    msg,
+                    &sink,
+                    &instruments,
+                    &missing_instrument_warnings,
+                    &subs,
+                    &quote_delivery,
+                    &bars,
+                    sim,
+                )
+                .await;
             }
         });
         track_task(&self.task_handles, pump_handle);
@@ -448,8 +454,8 @@ impl DataClient for MogwaiDataClient {
                     label: "data",
                     identity,
                 },
-                cmd_rx,
-                ws_command_to_client_message,
+                None::<tokio::sync::mpsc::UnboundedReceiver<std::convert::Infallible>>,
+                |never| match never {},
                 // The venue pushes the one run's tape unbidden, so a reattach
                 // has no subscribe frames to replay: subscription state is
                 // satisfied locally in this client and never reaches the wire.
@@ -483,7 +489,6 @@ impl DataClient for MogwaiDataClient {
         if let Err(err) = wait_connected(&self.connected, &ws_url).await {
             abort_tasks(&self.task_handles);
             self.retire_connected_flag();
-            self.ws_cmd = None;
             return Err(err);
         }
         Ok(())
@@ -825,7 +830,7 @@ impl DataClient for MogwaiDataClient {
                     }
                 };
                 let limit = request.limit.map(std::num::NonZeroUsize::get);
-                let quotes = match fetch_quotes_windowed(
+                let (quotes, truncated) = match fetch_quotes_windowed(
                     &http,
                     &http_quota,
                     &base,
@@ -837,6 +842,9 @@ impl DataClient for MogwaiDataClient {
                         break 'quotes Vec::new();
                     }
                 };
+                if truncated {
+                    tracing::warn!(%symbol, "quote history truncated (limit reached or same-ts wedge)");
+                }
                 quotes.into_iter().take(limit.unwrap_or(usize::MAX)).filter_map(|quote| {
                     convert::quote_tick(
                         &quote,
@@ -1149,20 +1157,12 @@ struct BarSubState {
     active: Option<BarAcc>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-enum WsCommand {}
-
-/// Maps an outbound `WsCommand` to the mogwai wire `ClientMessage` the writer
-/// task serializes. Kept as a named function so the subscribe-variant wiring is
-/// unit-testable without a live socket.
-#[allow(clippy::needless_pass_by_value)]
-fn ws_command_to_client_message(cmd: WsCommand) -> ClientMessage {
-    match cmd {}
-}
+#[allow(clippy::too_many_arguments)]
 async fn handle_market_message(
     msg: ServerMessage,
     sink: &UnboundedSender<DataEvent>,
     instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
+    missing_instrument_warnings: &Arc<Mutex<std::collections::HashSet<String>>>,
     subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
     quote_delivery: &Arc<Mutex<()>>,
     bars: &Arc<Mutex<HashMap<BarType, BarSubState>>>,
@@ -1170,10 +1170,26 @@ async fn handle_market_message(
 ) {
     match msg {
         ServerMessage::Trade(trade) => {
-            emit_trade(&trade, sink, instruments, subs, bars, sim);
+            emit_trade(
+                &trade,
+                sink,
+                instruments,
+                missing_instrument_warnings,
+                subs,
+                bars,
+                sim,
+            );
         }
         ServerMessage::Quote(quote) => {
-            handle_quote_message(&quote, sink, instruments, subs, quote_delivery, sim);
+            handle_quote_message(
+                &quote,
+                sink,
+                instruments,
+                missing_instrument_warnings,
+                subs,
+                quote_delivery,
+                sim,
+            );
         }
         ServerMessage::Heartbeat { .. } => {
             tracing::trace!("ignoring server heartbeat on data path");
@@ -1240,6 +1256,7 @@ fn handle_quote_message(
     quote: &mogwai_protocol::QuoteTick,
     sink: &UnboundedSender<DataEvent>,
     instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
+    missing_instrument_warnings: &Arc<Mutex<std::collections::HashSet<String>>>,
     subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
     quote_delivery: &Arc<Mutex<()>>,
     sim: SimClock,
@@ -1249,7 +1266,7 @@ fn handle_quote_message(
         return;
     }
     let Some(def) = instrument_def(instruments, &quote.symbol) else {
-        warn_missing_instrument_once(&quote.symbol);
+        warn_missing_instrument_once(missing_instrument_warnings, &quote.symbol);
         return;
     };
     emit_quote(quote, sink, &def, sim);
@@ -1260,6 +1277,22 @@ fn retain_quote(
     quote: &mogwai_protocol::QuoteTick,
 ) -> bool {
     let mut states = lock_recover(subs, "subscriptions");
+    // A pre-subscription BBO must survive until the local subscription is
+    // activated, but an arbitrary wire symbol must not grow this map forever.
+    // One run serves one configured instrument, so more than this many orphan
+    // symbols is malformed input and is dropped without allocating a row.
+    //
+    // The bound counts ORPHANS ONLY - rows no subscription refers to - so a
+    // client with many live subscriptions cannot crowd itself out of the
+    // pre-subscription cache. Nothing here evicts: an existing row is always
+    // updated, so a symbol that once got a cache row can never lose it to a
+    // flood of junk symbols arriving after it.
+    const MAX_ORPHAN_QUOTE_SYMBOLS: usize = 64;
+    let orphans = states.values().filter(|state| state.total() == 0).count();
+    if !states.contains_key(&quote.symbol) && orphans >= MAX_ORPHAN_QUOTE_SYMBOLS {
+        tracing::warn!(symbol = %quote.symbol, "dropping quote: orphan quote cache is full");
+        return false;
+    }
     let state = states
         .entry(std::sync::Arc::clone(&quote.symbol))
         .or_default();
@@ -1298,12 +1331,13 @@ fn emit_trade(
     trade: &TradeTick,
     sink: &UnboundedSender<DataEvent>,
     instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
+    missing_instrument_warnings: &Arc<Mutex<std::collections::HashSet<String>>>,
     subs: &Arc<Mutex<HashMap<Symbol, SubState>>>,
     bars: &Arc<Mutex<HashMap<BarType, BarSubState>>>,
     sim: SimClock,
 ) {
     let Some(def) = instrument_def(instruments, &trade.symbol) else {
-        warn_missing_instrument_once(&trade.symbol);
+        warn_missing_instrument_once(missing_instrument_warnings, &trade.symbol);
         return;
     };
     // Advance this subscription's resume cursor to just past the delivered tick.
@@ -1592,20 +1626,52 @@ async fn fetch_trades_windowed(
         )
         .await?;
         let full = page.len() == page_limit;
-        let next = page.last().map(|trade| trade.ts_event.saturating_add(1));
+        if !full {
+            // A short page is the end of the window: every row at every
+            // timestamp it contains has been disclosed.
+            out.extend(page);
+            let stopped = stop(&out);
+            return Ok((out, stopped));
+        }
+        // A full page may have been cut inside a timestamp, so its final
+        // timestamp group is not known to be complete. The cursor is
+        // timestamp-only, so the only advance that cannot lose a row is one
+        // onto a timestamp whose rows have all been seen: keep the complete
+        // prefix, drop the trailing group, and re-request from that group's
+        // own timestamp, which the endpoint's start bound includes.
+        let mut page = page;
+        let group_start = final_ts_group_start(&page, |trade| trade.ts_event);
+        if group_start == 0 {
+            // The whole page shares one timestamp, so there is no complete
+            // prefix and no advance that discloses the rest. Stop visibly.
+            out.extend(page);
+            return Ok((out, true));
+        }
+        let group_ts = page[group_start].ts_event;
+        page.truncate(group_start);
         out.extend(page);
         if stop(&out) {
             return Ok((out, true));
         }
-        if !full {
-            return Ok((out, false));
-        }
-        let Some(next) = next else {
-            return Ok((out, false));
-        };
-        start = Some(UnixNanos::from(next));
+        start = Some(UnixNanos::from(group_ts));
     }
     Ok((out, true))
+}
+
+/// Index at which the final `ts_event` group of an ascending page begins, or
+/// `page.len()` for an empty page. A full page's trailing group is the only
+/// part a timestamp-only cursor cannot prove complete, so this is where the
+/// windowed fetchers cut before advancing.
+fn final_ts_group_start<T>(page: &[T], ts_of: impl Fn(&T) -> u64) -> usize {
+    let Some(last) = page.last() else {
+        return 0;
+    };
+    let last_ts = ts_of(last);
+    let mut idx = page.len();
+    while idx > 0 && ts_of(&page[idx - 1]) == last_ts {
+        idx -= 1;
+    }
+    idx
 }
 
 struct QuoteFetch<'a> {
@@ -1645,7 +1711,7 @@ async fn fetch_quotes_windowed(
     quota: &HttpQuota,
     base: &str,
     fetch: QuoteFetch<'_>,
-) -> anyhow::Result<Vec<mogwai_protocol::QuoteTick>> {
+) -> anyhow::Result<(Vec<mogwai_protocol::QuoteTick>, bool)> {
     let ceiling = fetch.limit.map_or(MAX_TRADES_PER_REQUEST, |limit| {
         limit.get().min(MAX_TRADES_PER_REQUEST)
     });
@@ -1654,7 +1720,7 @@ async fn fetch_quotes_windowed(
     for _ in 0..MAX_TRADE_PAGES {
         let remaining = ceiling.saturating_sub(out.len());
         if remaining == 0 {
-            break;
+            return Ok((out, true));
         }
         let page_limit = remaining.min(mogwai_protocol::MAX_HISTORY_LIMIT);
         let page = fetch_quotes(
@@ -1670,15 +1736,24 @@ async fn fetch_quotes_windowed(
         )
         .await?;
         let full = page.len() == page_limit;
-        let next = page.last().map(|quote| quote.ts_event.saturating_add(1));
-        out.extend(page);
         if !full {
-            break;
+            out.extend(page);
+            return Ok((out, false));
         }
-        let Some(next) = next else { break };
-        start = Some(UnixNanos::from(next));
+        // Same invariant as the trade path: only advance onto a timestamp
+        // whose rows have all been seen. See `final_ts_group_start`.
+        let mut page = page;
+        let group_start = final_ts_group_start(&page, |quote| quote.ts_event);
+        if group_start == 0 {
+            out.extend(page);
+            return Ok((out, true));
+        }
+        let group_ts = page[group_start].ts_event;
+        page.truncate(group_start);
+        out.extend(page);
+        start = Some(UnixNanos::from(group_ts));
     }
-    Ok(out)
+    Ok((out, true))
 }
 fn bar_span_reached(trades: &[TradeTick], interval: u64, limit: Option<usize>) -> bool {
     match (trades.first(), trades.last(), limit) {
@@ -1751,6 +1826,15 @@ mod quote_cache_tests {
     }
 
     #[test]
+    fn orphan_quote_cache_is_bounded() {
+        let subs = Arc::new(Mutex::new(HashMap::new()));
+        for i in 0..100 {
+            retain_quote(&subs, &quote_for(&format!("S{i}"), i));
+        }
+        assert_eq!(lock_recover(&subs, "test").len(), 64);
+    }
+
+    #[test]
     fn a_live_quote_cannot_overtake_the_replayed_book() {
         let config = MogwaiDataClientConfig {
             account_id: nautilus_model::identifiers::AccountId::from("MOGWAI-001"),
@@ -1772,6 +1856,7 @@ mod quote_cache_tests {
         let release = Arc::new(std::sync::Barrier::new(2));
         let publisher_started = Arc::new(std::sync::Barrier::new(2));
         let live_instruments = Arc::clone(&client.instruments);
+        let live_warnings = Arc::clone(&client.missing_instrument_warnings);
         let live_subs = Arc::clone(&client.subs);
         let live_delivery = Arc::clone(&client.quote_delivery);
         std::thread::scope(|scope| {
@@ -1793,6 +1878,7 @@ mod quote_cache_tests {
                     &quote_for("BTCUSDT", 2),
                     &sink_tx,
                     &live_instruments,
+                    &live_warnings,
                     &live_subs,
                     &live_delivery,
                     SimClock::identity(),

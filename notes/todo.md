@@ -40,13 +40,51 @@ Or both. There are no exceptions.
   quiet market from a dropped one. On the execution socket the same drop can
   take order events, leaving the nautilus order state disagreeing with venue
   truth until something calls the reconciliation generators.
+  WHY THE EXECUTION SOCKET CANNOT SELF-HEAL, which is the part that is NOT
+  inherited from the market-data case. `ExecutionEvent` does carry a
+  `Report(ExecutionReport)` variant, so a client CAN push a report at the
+  engine without waiting to be asked - the missing channel is not the emitter.
+  What is missing is a truthful report to push. Every truthful order, fill and
+  position set in this adapter comes from an ASYNCHRONOUS venue-truth query
+  (`QueryOrders` / `QueryFills` over the same socket, or `GET /account`), and
+  the frame translator that sees `FeedLagged` runs as `handler(msg).await`
+  INSIDE the reader's own frame loop (`lifecycle.rs`): the reply to a query
+  issued there can only be read by the loop that is awaiting the handler, so
+  it deadlocks by construction. Spawning the query off the handler is
+  unavailable too - the client owns `Rc<RefCell<Cache>>` through
+  `ExecutionClientCore` and is `!Send`, so it cannot be moved into a task, and
+  the reader task holds no `&self`. Fabricating a report from the local mirror
+  would be the exact falsehood the venue-truth move (AE10) removed: the mirror
+  is built from the very frames the venue just said it dropped.
   LOCAL MITIGATION SHIPPED: both message translators log at ERROR with the
-  skipped count and the simulated instant, in the words a host can alert on.
-  THE UPSTREAM HALF: a first-class data-gap event - a `DataEvent` variant, or
-  a `DataClient` health/degradation callback the engine surfaces - so a
-  consumer can react rather than grep. Until that exists, a host driving
-  MOGWAI should treat an ERROR from `mogwai-adapter` mentioning a feed gap as a
-  reconcile-and-distrust-the-window signal. broadarrow is the known consumer.
+  skipped count and the simulated instant, in the words a host can alert on,
+  and the execution socket's whole-batch admission refusal
+  (`AdmissionSubject::Frame`, an outbound batch the venue discarded) logs at
+  ERROR with the same reconcile wording.
+  THE UPSTREAM HALF, stated as what nautilus would have to ship: (1) a
+  degradation signal on the DATA side - a `DataEvent` variant or a
+  `DataClient` health callback the engine surfaces - so a gap is an event
+  rather than a log line; and (2) on the EXECUTION side, a client-initiated
+  reconciliation request the ExecutionEngine services on the client's behalf -
+  something like a `RequestReconciliation` message, or an `ExecutionClient`
+  callback the engine polls - so the adapter can say "my mirror is suspect,
+  re-run mass status" without owning an async handle to itself. Either one
+  alone closes half of this. Until they exist, a host driving MOGWAI should
+  treat an ERROR from `mogwai-adapter` mentioning a feed gap or a refused
+  frame as a reconcile-and-distrust-the-window signal. broadarrow is the known
+  consumer.
+
+- `mogwai_adapter::UNSET_ACCOUNT_ID` IS GONE, REPLACED BY `DEFAULT_ACCOUNT_ID`
+  (source-breaking, landed 2026-08-15). Both client configs default their
+  `account_id` to `MOGWAI-001` again and `validate_account_id` now checks only
+  the wire charset. The refusal it replaced was defending an invariant the
+  venue does not have: one venue is one run is one LEDGER, divergences arm
+  against the RUN and reach every open connection, and no socket URL, query
+  string or frame carries an account identity, so the data and execution legs
+  cannot bind different slots. WHAT A CONSUMER MUST DO: stop importing
+  `UNSET_ACCOUNT_ID`; a config that omits `account_id` now validates instead of
+  failing, and the label is local Nautilus metadata only. broadarrow is the
+  known consumer and nothing here can verify its build.
 
 - `mogwai_protocol::AccountId` NOW HAS A PRIVATE FIELD (source-breaking,
   landed 2026-08-15). Its serialized form is unchanged, but construction as
@@ -891,11 +929,8 @@ Inline literals (no named const):
   are reported as distinct categories: no usable answer is a transport failure,
   a well-formed answer carrying no `run_seed` is version skew.
 - `MOGWAI_VENUE_STR = "MOGWAI"` (correctly single-sourced).
-- Default `TraderId` `MOGWAI-001` in the exec config. `AccountId` no longer
-  defaults to it on either config: both carry the `UNSET_ACCOUNT_ID` placeholder
-  (`MOGWAI-UNSET`) and `validate_account_id` refuses a config that still states
-  it, so an omitted account fails loudly instead of silently binding a slot.
-  `TEST_ACCOUNT_ID` keeps `MOGWAI-001` for in-crate fixtures.
+- Default `TraderId` and local Nautilus `AccountId` labels are `MOGWAI-001`.
+  The account label is not sent to the one-ledger venue.
 - Timeout consts: `ACCOUNT_REGISTRATION_TIMEOUT 5s`, `ACCOUNT_REGISTRATION_POLL
   10ms`, `MIN_WALL_REQUEST_TIMEOUT_SECS 1` (flagged in its own comment as the
   tightest cap on usable sim speed). `wait_connected` re-hardcodes an

@@ -1575,3 +1575,105 @@ execution socket means the venue dropped a whole outbound batch, and the
 adapter only logs it. Recovery exists (the venue-truth report generators) but
 nothing here triggers it. Same shape as the `FeedLagged` ruling above and
 covered by the same `notes/todo.md` entry.
+
+## notes/bugs-adapter.md, round 2 close
+
+- Mass status now includes every historical fill belonging to an open order,
+  even when the fill predates the reconciliation lookback. This gives Nautilus
+  the fill price and identity needed to pair a partially filled market
+  remainder without relying on a nonexistent order-report `avg_px`.
+- Timestamp-only history pagination no longer advances past rows it has not
+  seen. The rule is stated once and applied on both paths: a cursor may only
+  advance onto a timestamp whose rows have ALL been disclosed. See the review
+  and close pass below, which replaced this round's page-wide check.
+- `account_id` is explicitly a local Nautilus label. Both configs default it to
+  `MOGWAI-001`; validation checks syntax only, and the stale account-query and
+  server-slot documentation is gone.
+- The execution mirror dropped its unused quantity, price, filled quantity,
+  average price and acceptance timestamp. The unchecked fill accumulator and
+  its dead notional arithmetic disappeared with those fields.
+- Futures instrument conversion refuses any definition that is not precision
+  zero with a one-contract increment. This matches both Mogwai's binding config
+  contract and Nautilus 0.61's `FuturesContract::new_checked`, which constructs
+  whole-contract sizing unconditionally.
+- The data socket now uses a no-command lifecycle path, with no uninhabited
+  command enum, sender or receiver. Pre-subscription quote retention is capped
+  at 64 orphan symbols, and missing-instrument warning deduplication belongs to
+  each data client rather than the process.
+- Execution feed gaps remain blocked on Nautilus. `ExecutionEventEmitter` can
+  publish a report but the synchronous frame handler cannot truthfully build
+  one without asynchronous venue queries, and the client API exposes no
+  request-reconciliation callback. The ERROR-level local mitigation and the
+  standalone cross-repo item in `notes/todo.md` stand.
+- No tape protocol bump is owed. All changes are inside `mogwai-adapter`, its
+  tests and prose; no generator, draw, seed, fingerprint or tape origin is
+  reachable. Version 14 remains live and 15 remains reserved.
+
+## notes/bugs-adapter.md, round 2 review and close pass - THE LOOP ENDS HERE
+
+The cold read found ONE correctness issue and it was the loop's recurring
+disease in its purest form: a boundary that silently loses data, fixed for the
+degenerate shape of the boundary and still losing data in the ordinary one.
+That, plus four smaller corrections, closes the document and the arc.
+
+- THE PAGINATION FIX ONLY COVERED THE DEGENERATE PAGE. `same_ts_wedge` fired
+  only when a full page's FIRST and LAST timestamps matched, so a page of
+  49,999 rows at instant A plus one row at instant B advanced to B + 1 and
+  every remaining row at B vanished - finding 8's exact loss, in the shape a
+  real tape actually produces. Replaced by the INVARIANT rather than another
+  special case: a timestamp-only cursor may advance onto an instant only once
+  every row at that instant has been seen, so a full page keeps its complete
+  PREFIX, drops its trailing timestamp group, and re-requests from that
+  group's own instant (the endpoint's start bound is inclusive, which
+  `MergeSource::starting_at` buffers). The degenerate page has no complete
+  prefix and so is the ONLY case that still reports truncation. Both paths use
+  one helper, `final_ts_group_start`. Progress is structural: a page with two
+  distinct timestamps has `group_ts` strictly greater than its own first row,
+  so the cursor cannot stall, and the page cap still bounds the loop.
+- THE STUB COULD NOT HAVE CAUGHT IT. `trades_pages` replays queued bodies
+  whatever the client asks for, so no assertion against it can observe a
+  skipped cursor - the round's own regression, and the older seam test, were
+  both blind by construction. `StubState` now carries `trades_tape` and
+  `quotes_tape`, served with the REAL inclusive-`start`, `end` and `limit`
+  semantics, plus `trades_starts` / `quotes_starts` recording each requested
+  cursor. The three pagination tests run against tapes and assert both the row
+  set and the cursor sequence. Do not add another page-queue pagination test.
+- MASS STATUS ASKS FOR FILLS ONCE, NOT TWICE. The round issued a second full
+  `QueryFills` and APPENDED the older fills after the recent ones, so a
+  partially filled order's group reached nautilus out of chronological order.
+  It is now one unbounded query filtered locally, which preserves the venue's
+  own ordering and halves the round trips. The test pins the trade-id sequence,
+  not just the count.
+- A REFUSED EXECUTION FRAME LOGS AT ERROR, matching the `FeedLagged` arm it
+  shares a cause with. The two are the same event class - order events the
+  host will never see - and one of them was `warn!`.
+- FINDING 12 STANDS CLOSED BY DISCLOSURE, but the argument is now the
+  EXECUTION socket's own rather than inherited. `ExecutionEvent::Report` does
+  exist, so the emitter is not what is missing; what is missing is a truthful
+  report. Every truthful set here comes from an async venue query, and the
+  translator runs as `handler(msg).await` INSIDE the reader's frame loop, so a
+  query issued there waits on a reply only that blocked loop can read. Nor can
+  it be spawned: the client owns `Rc<RefCell<Cache>>` through
+  `ExecutionClientCore` and is `!Send`. Rebuilding from the local mirror would
+  assert as truth the frames the venue just said it dropped. The `notes/todo.md`
+  entry now names both halves nautilus would have to ship - a data-side
+  degradation event AND an execution-side client-initiated reconciliation
+  request.
+- Two bounded-state corrections. The orphan quote cap counts ORPHANS ONLY, so
+  live subscriptions cannot crowd a client out of its own pre-subscription
+  cache, and nothing ever evicts, so a symbol that has a row keeps it. The
+  per-client missing-instrument warn set is capped at 256 symbols and, past the
+  cap, warns on every miss rather than growing - the loud direction for a
+  diagnostic.
+
+Bite checks, each reverted and restored as a TEXT EDIT: the trade split-group
+test fails 50,000 versus 50,002 against the old advance, the quote split-group
+test fails identically, `mass_status_pairs_an_open_orders_fill_outside_the_lookback`
+fails on "an open order's fills are reported" when the carve-out is dropped,
+and the futures refusal fails on `unwrap_err` - which also proved the finding's
+premise live, since nautilus happily built a `size_precision: 0` contract from
+a `size_precision: 1` definition.
+
+Consumer-visible, recorded in `notes/todo.md`: `UNSET_ACCOUNT_ID` is gone and
+`account_id` no longer refuses a default, because the venue has one ledger and
+carries no account identity on the wire.

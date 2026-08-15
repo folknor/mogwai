@@ -12,27 +12,14 @@ use nautilus_model::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Placeholder both configs default their `account_id` to, and which `validate`
-/// refuses.
-///
-/// `account_id` is the one field of these configs that has no defensible
-/// default: it names WHICH server-side account slot the socket binds to, and
-/// the data and execution legs of one venue session must bind the SAME slot or
-/// the server-owned divergence windows (`StallData`, `GoDark`, the delay
-/// atomics), which live on that slot and are armed only from the execution leg,
-/// silently miss the data feed entirely. A default that looked like a real
-/// account (`MOGWAI-001`) made an omitted `account_id` indistinguishable from a
-/// deliberate one, so a consumer that forgot the field got a working data
-/// socket on the wrong account and no diagnostic anywhere. Defaulting to a value
-/// that is syntactically legal - so `Default`, `#[serde(default)]` and every
-/// partial-config deserialization keep working - but semantically refused turns
-/// that omission into a create-time error naming the field.
-pub const UNSET_ACCOUNT_ID: &str = "MOGWAI-UNSET";
+/// Default local Nautilus account label. Mogwai has one ledger per run and
+/// carries no account identity on the wire.
+pub const DEFAULT_ACCOUNT_ID: &str = "MOGWAI-001";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MogwaiDataClientConfig {
-    /// Account whose websocket session this data client is bound to.
+    /// Local Nautilus account label attached to client metadata.
     pub account_id: AccountId,
     /// Base URL of the running mogwai-server.
     ///
@@ -56,7 +43,7 @@ pub struct MogwaiDataClientConfig {
 impl Default for MogwaiDataClientConfig {
     fn default() -> Self {
         Self {
-            account_id: AccountId::from(UNSET_ACCOUNT_ID),
+            account_id: AccountId::from(DEFAULT_ACCOUNT_ID),
             base_url: String::new(),
             havoc: None,
             expected_run_seed: None,
@@ -73,9 +60,6 @@ impl MogwaiDataClientConfig {
     /// wrong fails as a connect timeout inside the reconnect loop rather than as
     /// anything that names the cause.
     ///
-    /// Pair it with [`MogwaiExecClientConfig::for_addr`] and the SAME
-    /// `account_id`: the two clients are two objects speaking for one account,
-    /// and nothing on the wire will notice if they disagree.
     #[must_use]
     pub fn for_addr(addr: std::net::SocketAddr, account_id: AccountId) -> Self {
         Self {
@@ -132,13 +116,6 @@ impl MogwaiDataClientConfig {
     /// exists to rule out.
     #[must_use]
     pub fn ws_url(&self) -> String {
-        // The PATH goes on before the query string, which is the whole reason
-        // this builds the socket URL rather than returning a base for a caller
-        // to append to. Appending `/ws` to a value already ending in
-        // `?account=...` yields `ws://host?account=X/ws`, whose account is the
-        // literal `X/ws` and whose path is `/` - a URL the venue rejects, and
-        // which fails as a connect timeout inside the reconnect loop rather
-        // than as anything that names the cause.
         format!("{}/ws", self.base_url.trim().trim_end_matches('/'))
     }
 
@@ -198,7 +175,7 @@ impl Default for MogwaiExecClientConfig {
     fn default() -> Self {
         Self {
             trader_id: TraderId::from("MOGWAI-001"),
-            account_id: AccountId::from(UNSET_ACCOUNT_ID),
+            account_id: AccountId::from(DEFAULT_ACCOUNT_ID),
             base_url: String::new(),
             account_type: AccountType::Cash,
             oms_type: default_oms_type(),
@@ -211,10 +188,8 @@ impl Default for MogwaiExecClientConfig {
 impl MogwaiExecClientConfig {
     /// Build a config for the address a launched venue reported.
     ///
-    /// See [`MogwaiDataClientConfig::for_addr`]; pass the same `account_id` to
-    /// both, because the pair speaks for one account and the venue has one
-    /// ledger regardless of what either client believes. Prefer
-    /// [`Self::for_run`] when the readiness record is in hand.
+    /// See [`MogwaiDataClientConfig::for_addr`]. Prefer [`Self::for_run`] when
+    /// the readiness record is in hand.
     ///
     /// Leaves `account_type` at `Cash`. A futures run wants
     /// `AccountType::Margin` - the venue posts and reports margin either way,
@@ -287,13 +262,6 @@ impl MogwaiExecClientConfig {
     /// the trim matters (a padded URL passes validation but never connects).
     #[must_use]
     pub fn ws_url(&self) -> String {
-        // The PATH goes on before the query string, which is the whole reason
-        // this builds the socket URL rather than returning a base for a caller
-        // to append to. Appending `/ws` to a value already ending in
-        // `?account=...` yields `ws://host?account=X/ws`, whose account is the
-        // literal `X/ws` and whose path is `/` - a URL the venue rejects, and
-        // which fails as a connect timeout inside the reconnect loop rather
-        // than as anything that names the cause.
         format!("{}/ws", self.base_url.trim().trim_end_matches('/'))
     }
 
@@ -343,27 +311,9 @@ fn validate_base_url(base_url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Validates the account this client's socket binds to: it must be legal to the
-/// venue's own charset, and it must not still be the `UNSET_ACCOUNT_ID`
-/// placeholder.
-///
-/// The placeholder check is the whole point of the placeholder. The data and
-/// execution legs of one venue session must bind the same server account slot -
-/// the divergence windows live on the slot and only the execution leg arms them,
-/// so a data leg on a different slot streams straight through every armed
-/// `StallData` and `GoDark`. There is nothing in a single config that can detect
-/// that mismatch, and nothing on the wire that reports it: the venue happily
-/// auto-creates whatever account a socket names. Refusing the value a config
-/// carries when nobody set it is the one place the omission is knowable, so it
-/// is refused here, before any socket is opened.
+/// Validates the local Nautilus account label against mogwai's wire-safe
+/// charset. The label is not sent to the one-ledger venue.
 fn validate_account_id(account_id: &AccountId) -> anyhow::Result<()> {
-    ensure!(
-        account_id.as_ref() != UNSET_ACCOUNT_ID,
-        "account_id is still the {UNSET_ACCOUNT_ID} placeholder - set it to the \
-         account this client binds to on the venue. The data and execution \
-         clients of one venue session must be given the SAME account_id, or \
-         server-armed divergence windows will miss the market-data feed"
-    );
     mogwai_protocol::AccountId::parse(account_id.as_ref())?;
     Ok(())
 }
@@ -412,4 +362,24 @@ fn validate_havoc(havoc: &Option<HavocSpec>) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_account_label_is_valid_because_it_is_local_only() {
+        let data = MogwaiDataClientConfig {
+            base_url: "ws://127.0.0.1:1".into(),
+            ..MogwaiDataClientConfig::default()
+        };
+        data.validate().unwrap();
+
+        let exec = MogwaiExecClientConfig {
+            base_url: "ws://127.0.0.1:1".into(),
+            ..MogwaiExecClientConfig::default()
+        };
+        exec.validate().unwrap();
+    }
 }

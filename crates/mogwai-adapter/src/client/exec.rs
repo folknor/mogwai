@@ -873,8 +873,7 @@ impl ExecutionClient for MogwaiExecutionClient {
         }
         let client_havoc = client_havoc(&self.config.havoc);
 
-        // `ws_url` already carries the `/ws` path and the account query; do not
-        // join a path onto it (see its comment).
+        // `ws_url` already carries the `/ws` path.
         let ws_url = self.config.ws_url();
         let (cmd_tx, cmd_rx) = unbounded_channel::<ExecWsCommand>();
         self.ws_cmd = Some(cmd_tx);
@@ -922,7 +921,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                     label: "exec",
                     identity,
                 },
-                cmd_rx,
+                Some(cmd_rx),
                 exec_command_to_client_message,
                 Vec::new,
                 move |server_msg| {
@@ -1044,12 +1043,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                     order_side: cmd.order_init.order_side,
                     order_type: cmd.order_init.order_type,
                     status: OrderStatus::Submitted,
-                    quantity: cmd.order_init.quantity.as_decimal(),
-                    price: cmd.order_init.price.map(|p| p.as_decimal()),
-                    filled_qty: Decimal::ZERO,
-                    avg_px: None,
                     venue_order_id: None,
-                    ts_accepted: cmd.ts_init,
                     ts_last: cmd.ts_init,
                     seen_trades: std::collections::HashSet::new(),
                 },
@@ -1388,18 +1382,36 @@ impl ExecutionClient for MogwaiExecutionClient {
                 None,
             ))
             .await?;
-        let fill_reports = self
+        let open_venue_order_ids: std::collections::HashSet<_> = order_reports
+            .iter()
+            .map(|report| report.venue_order_id)
+            .collect();
+        // The lookback is asked UNBOUNDED and narrowed here rather than being
+        // pushed into the generator, for two reasons. An order report carries
+        // no `avg_px`, so a partially filled OPEN order can only be paired from
+        // its own fills, including the ones older than the lookback - dropping
+        // those makes the host reconcile a wrong average price. And a single
+        // pass keeps every fill of an order in the venue's own chronological
+        // order; appending the older ones after the recent ones would hand
+        // nautilus a group it has to re-sort.
+        let fill_reports: Vec<_> = self
             .generate_fill_reports(GenerateFillReports::new(
                 UUID4::new(),
                 ts_init,
                 None,
                 None,
-                start,
+                None,
                 None,
                 None,
                 None,
             ))
-            .await?;
+            .await?
+            .into_iter()
+            .filter(|report| {
+                open_venue_order_ids.contains(&report.venue_order_id)
+                    || in_time_range(report.ts_event, start, None)
+            })
+            .collect();
         let position_reports = self
             .generate_position_status_reports(&GeneratePositionStatusReports::new(
                 UUID4::new(),
@@ -1691,19 +1703,14 @@ struct OrderRecord {
     order_side: OrderSide,
     order_type: OrderType,
     status: OrderStatus,
-    quantity: Decimal,
-    price: Option<Decimal>,
-    filled_qty: Decimal,
-    avg_px: Option<Decimal>,
     venue_order_id: Option<VenueOrderId>,
-    ts_accepted: UnixNanos,
     ts_last: UnixNanos,
     /// `trade_id`s already applied to this order's reconciliation mirror. The
     /// duplicate-fill divergence (`DuplicateNextFill`) and client-side
     /// `duplicate_prob` deliberately deliver the same `OrderFilled` twice; the
     /// duplicate wire event is forwarded downstream (the intended divergence),
     /// but it must not double-apply to the mirror, so the second sighting of a
-    /// `trade_id` skips the filled_qty/avg_px/fills mutation.
+    /// `trade_id` skips the mirror status mutation.
     seen_trades: std::collections::HashSet<TradeId>,
 }
 
@@ -1749,7 +1756,6 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 if !stale {
                     record.status = OrderStatus::Accepted;
                     record.venue_order_id = Some(venue_order_id);
-                    record.ts_accepted = UnixNanos::from(ts_event);
                     // Forward-only, matching the fill handler (F11): a non-terminal
                     // Accepted reordered behind an event that already advanced the
                     // record must not walk ts_last backward and perturb the
@@ -1992,21 +1998,12 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 let stale = record.status.is_closed();
                 if !stale {
                     record.venue_order_id = Some(venue_order_id);
-                    record.quantity = quantity;
-                    record.price = price;
-                    // The venue's `leaves_qty` is authoritative for the remaining
-                    // size after the amend. Reconcile `filled_qty` so the mirror
-                    // invariant `quantity - filled_qty == leaves_qty` holds even
-                    // after a downsizing amend (which the bare `quantity` overwrite
-                    // used to leave stale, drifting from the venue). Clamp at zero
-                    // so a `leaves_qty` exceeding the new total cannot push
-                    // `filled_qty` negative.
-                    record.filled_qty = (quantity - leaves_qty).max(Decimal::ZERO);
+                    let filled_qty = (quantity - leaves_qty).max(Decimal::ZERO);
                     // An amend never reverses an in-progress fill: an order with a
                     // non-zero filled_qty stays PARTIALLY_FILLED (or flips to FILLED
                     // when the amend leaves nothing outstanding) so the mirror does
                     // not report Accepted alongside a non-zero filled_qty.
-                    record.status = if record.filled_qty.is_zero() {
+                    record.status = if filled_qty.is_zero() {
                         if record.status == OrderStatus::Triggered { OrderStatus::Triggered } else { OrderStatus::Accepted }
                     } else if leaves_qty.is_zero() {
                         OrderStatus::Filled
@@ -2247,7 +2244,17 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 );
             }
             mogwai_protocol::AdmissionSubject::Frame => {
-                tracing::warn!(?subject, %reason, "venue refused request admission");
+                // A whole outbound BATCH the venue discarded, so the events it
+                // carried are simply gone. Same severity and same wording as
+                // the FeedLagged arm below, and for the same reason: the
+                // mirror may now disagree with venue truth and only a host-
+                // driven reconciliation can settle it. Nothing here can
+                // trigger that; see the cross-repo item in notes/todo.md.
+                tracing::error!(
+                    ?subject,
+                    %reason,
+                    "venue refused a whole execution frame; order events may be missing and the mirror should be reconciled against venue truth"
+                );
             }
         },
         ServerMessage::FeedLagged {
@@ -2258,8 +2265,16 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
             // the EXECUTION socket can have taken order events with it, so
             // the nautilus order state may now disagree with venue truth.
             // Recovery exists - the venue-truth report generators re-derive
-            // the order, fill and position sets - but nothing here triggers
-            // it, so the log is what tells a host to reconcile.
+            // the order, fill and position sets - but it cannot be triggered
+            // FROM HERE, and that is structural rather than an omission: this
+            // translator runs as `handler(msg).await` inside the reader's own
+            // frame loop, so a venue-truth query issued here would wait for a
+            // reply only this blocked loop can read, and the client is `!Send`
+            // (it owns an `Rc<RefCell<Cache>>` through `ExecutionClientCore`)
+            // so the query cannot be spawned off either. Rebuilding a report
+            // from the local mirror would assert as truth the very frames the
+            // venue just said it dropped. The log is therefore what tells a
+            // host to reconcile; the upstream half is in notes/todo.md.
             tracing::error!(
                 skipped,
                 sim_now_ns,
@@ -2356,8 +2371,8 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
     };
     // A repeated `trade_id` for this order is a duplicate fill: the duplicate
     // OrderFilled wire event is still forwarded below (the intended divergence),
-    // but the reconciliation mirror (filled_qty/avg_px/fills) must apply each
-    // economic fill exactly once, so the second sighting skips the mutation.
+    // but the reconciliation mirror must apply each economic fill exactly once,
+    // so the second sighting skips the mutation.
     // The duplicate flag guards only the mirror mutation inside the closure;
     // the wire event is forwarded either way (the intended divergence), and
     // fill REPORTS now come from the venue-truth QueryFills rather than any
@@ -2368,9 +2383,8 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
             // Terminal-state guard (see the OrderAccepted arm): a partial fill
             // transposed behind the cancel (or the final fill) that ended the
             // order must still book its economics - money moved at the venue,
-            // so filled_qty/avg_px/the fill record are real - but must not
-            // regress the terminal status back to PartiallyFilled and re-open
-            // a closed order in the reconciliation mirror.
+            // but must not regress the terminal status back to PartiallyFilled
+            // and re-open a closed order in the reconciliation mirror.
             if !record.status.is_closed() {
                 record.status = if fill.leaves_qty.is_zero() {
                     OrderStatus::Filled
@@ -2379,22 +2393,6 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
                 };
             }
             record.venue_order_id = Some(venue_order_id);
-            let previous_notional = record
-                .avg_px
-                .unwrap_or(Decimal::ZERO)
-                .checked_mul(record.filled_qty)
-                .unwrap_or(Decimal::ZERO);
-            record.filled_qty += fill.last_qty;
-            let total_notional = previous_notional
-                .checked_add(
-                    fill.last_px
-                        .checked_mul(fill.last_qty)
-                        .unwrap_or(Decimal::ZERO),
-                )
-                .unwrap_or(previous_notional);
-            if !record.filled_qty.is_zero() {
-                record.avg_px = total_notional.checked_div(record.filled_qty);
-            }
             // A reordered fill carries an OLDER ts_event than the event that
             // already advanced the record; only ever move ts_last forward so
             // the mirror's in_time_range filtering does not walk backward.

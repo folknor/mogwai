@@ -165,15 +165,26 @@ pub(crate) fn instrument_def(
 /// no HTTP handle to re-seed, so it can only surface the miss - the poll path,
 /// which does have async/HTTP context, self-heals via `ensure_instrument`. The
 /// dedup keeps a per-trade warn from flooding the log for a genuinely-missing
-/// symbol; it is process-global, which is acceptable for a diagnostic that only
-/// wants to fire on the transition into the black-holed state.
-pub(crate) fn warn_missing_instrument_once(symbol: &str) {
-    static WARNED: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> =
-        std::sync::OnceLock::new();
-    let mut warned = lock_recover(
-        WARNED.get_or_init(|| Mutex::new(std::collections::HashSet::new())),
-        "missing-instrument warn set",
-    );
+/// symbol. The set belongs to one data client, so another venue client still
+/// reports its own first miss.
+pub(crate) fn warn_missing_instrument_once(
+    warned: &Arc<Mutex<std::collections::HashSet<String>>>,
+    symbol: &str,
+) {
+    let mut warned = lock_recover(warned, "missing-instrument warn set");
+    // The set is keyed by an arbitrary WIRE symbol, so it is bounded for the
+    // same reason the orphan quote cache is: a venue emitting endless distinct
+    // unknown symbols must not grow adapter state without limit. Past the
+    // ceiling the dedup stops recording and every further miss warns, which is
+    // the loud direction to fail in for a diagnostic.
+    const MAX_WARNED_SYMBOLS: usize = 256;
+    if warned.len() >= MAX_WARNED_SYMBOLS && !warned.contains(symbol) {
+        tracing::warn!(
+            %symbol,
+            "no instrument def for a streamed symbol, and the warn dedup set is full"
+        );
+        return;
+    }
     if warned.insert(symbol.to_string()) {
         tracing::warn!(
             %symbol,
