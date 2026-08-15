@@ -105,6 +105,13 @@ the process is still alive. A consumer watching for child exit sees nothing
 during that window, and a client that only knows where to dial cannot tell its
 own run from whatever answers there next.
 
+A venue whose live connections do NOT drain within that grace exits NONZERO. It
+used to log a warning and exit 0, which made an abandoned connection
+indistinguishable from a clean teardown to a launcher inspecting exit status. A
+client that holds `/ws` open past the venue's completion is what produces it, so
+a consumer that wants a clean exit closes its sockets when it sees `RunComplete`
+rather than waiting to be dropped.
+
 The readiness record already carries `run_seed`, so a launcher can bind its
 clients to the run it started rather than to the address it landed on. The
 nautilus adapter does this through `MogwaiDataClientConfig::for_run` /

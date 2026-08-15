@@ -252,10 +252,13 @@ fn default_balances() -> HashMap<String, Decimal> {
 /// deliberately unfunded account gets one warning stating the consequence
 /// instead: funds are unenforced, and the first buy books a negative quote
 /// leg a nautilus cash consumer will refuse to apply.
-pub(crate) fn refuse_unfunded_settlement(
-    cfg: &Config,
-    defs: &[InstrumentDef],
-) -> anyhow::Result<()> {
+///
+/// It takes THE instrument the run serves, not the profile table. Those are
+/// not always the same set: a checkout with no `[instrument]` table builds
+/// `InstrumentProfiles::defaults()`, which carries all three shipped presets
+/// while `serve` picks the first and serves only that one. Checking the whole
+/// table refused boot over a currency no order in the run could ever quote.
+pub(crate) fn refuse_unfunded_settlement(cfg: &Config, def: &InstrumentDef) -> anyhow::Result<()> {
     if cfg.balances.is_empty() {
         tracing::warn!(
             "account is UNFUNDED (empty balances table): funds checks are off, and the \
@@ -268,17 +271,15 @@ pub(crate) fn refuse_unfunded_settlement(
     // unfunded quote currency means every buy in the whole run rejects for
     // insufficient balance. That is a misconfigured run, not a caution, and it
     // is cheaper to refuse at boot than to discover it minutes in.
-    for def in defs {
-        let currency = def.class.settlement_currency();
-        if !cfg.balances.contains_key(currency) {
-            anyhow::bail!(
-                "instrument {} quote currency {} is unfunded; every buy in this run \
-                 would be rejected for insufficient balance - add {} to [balances]",
-                def.symbol,
-                currency,
-                currency
-            );
-        }
+    let currency = def.class.settlement_currency();
+    if !cfg.balances.contains_key(currency) {
+        anyhow::bail!(
+            "instrument {} quote currency {} is unfunded; every buy in this run \
+             would be rejected for insufficient balance - add {} to [balances]",
+            def.symbol,
+            currency,
+            currency
+        );
     }
     Ok(())
 }
@@ -463,6 +464,7 @@ impl Config {
         validate_account_id(&cfg)?;
         validate_admission_limits(&cfg)?;
         validate_fill_band(&cfg)?;
+        validate_speed(&cfg)?;
         // Unlike every neighbouring count knob, 0 is not "unbounded" here:
         // `broadcast::channel(0)` panics, so the key is named in a load error
         // rather than crashing the first subscribe.
@@ -473,6 +475,13 @@ impl Config {
         }
         Ok(cfg)
     }
+}
+
+fn validate_speed(cfg: &Config) -> anyhow::Result<()> {
+    if !cfg.speed.is_finite() || cfg.speed < 0.0 {
+        anyhow::bail!("speed must be finite and non-negative");
+    }
+    Ok(())
 }
 
 fn preset_text(name: &str) -> Option<&'static str> {
@@ -1212,9 +1221,7 @@ pub(crate) fn window_until_ns(now: u64, ms: u64) -> u64 {
 /// decides only when a tick is delivered. `speed == 0.0` is unpaced delivery,
 /// but the axis advances at wall rate for deadlines, sweeps and volatility.
 pub(crate) fn build_run_clock(cfg: &Config, boot_wall_ns: u64) -> anyhow::Result<SimClock> {
-    if !cfg.speed.is_finite() || cfg.speed < 0.0 {
-        anyhow::bail!("speed must be finite and non-negative");
-    }
+    validate_speed(cfg)?;
     Ok(SimClock {
         sim_epoch_ns: source::TAPE_ORIGIN_NS.saturating_add(cfg.warmup_ns),
         wall_anchor_ns: boot_wall_ns,
@@ -1243,6 +1250,17 @@ mod tests {
     #[test]
     fn the_fanout_default_carries_the_protocol_11_exception() {
         assert_eq!(Config::default().fanout_depth, 4_194_304);
+    }
+
+    #[test]
+    fn invalid_speed_is_rejected_by_load_time_validation() {
+        let mut cfg = Config {
+            speed: f64::NAN,
+            ..Config::default()
+        };
+        assert!(validate_speed(&cfg).is_err());
+        cfg.speed = -1.0;
+        assert!(validate_speed(&cfg).is_err());
     }
 
     /// The venue reported a bare `MOGWAI` for one release, which is a legal
@@ -1364,10 +1382,10 @@ mod tests {
         };
         let defs = mogwai_protocol::default_instruments();
         let err =
-            refuse_unfunded_settlement(&cfg, &defs).expect_err("an unfunded quote refuses boot");
+            refuse_unfunded_settlement(&cfg, &defs[0]).expect_err("an unfunded quote refuses boot");
         assert!(err.to_string().contains("unfunded"), "{err}");
 
-        refuse_unfunded_settlement(&Config::default(), &defs)
+        refuse_unfunded_settlement(&Config::default(), &defs[0])
             .expect("the shipped defaults fund their own quote currency");
     }
 
@@ -1380,7 +1398,7 @@ mod tests {
             balances: HashMap::new(),
             ..Config::default()
         };
-        refuse_unfunded_settlement(&cfg, &mogwai_protocol::default_instruments())
+        refuse_unfunded_settlement(&cfg, &mogwai_protocol::default_instruments()[0])
             .expect("an explicitly unfunded run is allowed");
     }
 
@@ -1399,7 +1417,7 @@ mod tests {
             balances: HashMap::from([("EUR".into(), Decimal::ONE)]),
             ..Config::default()
         };
-        let err = refuse_unfunded_settlement(&cfg, &[configured.def()])
+        let err = refuse_unfunded_settlement(&cfg, &configured.def())
             .expect_err("unfunded settlement must refuse");
         assert!(err.to_string().contains("USD"), "{err}");
     }

@@ -3,9 +3,22 @@
 Hunter: Claude Opus, single coverage. Findings are a work document, not a
 contract - they may be wrong.
 
-Cross-scope: finding 2 is corrected in `bugs-server-transport.md` by its
-finding 6 (the `--duration 0s` behaviour is "fall back to the config", not "run
-forever").
+Finding 2 - `LaunchSpec.duration = Some(Duration::ZERO)` silently means "run
+forever" - is CLOSED and struck, by the `bugs-server-transport.md` round-2
+landing of its finding 6. The defect had two layers and both are closed. At the
+SERVER layer the behaviour was neither of the two the finding weighed: a
+`.filter()` fighting an `.or_else()` made `--duration 0s` fall back to the
+config duration, so a launcher landing on zero got a TEN-MINUTE run under
+`run.toml`, not an unbounded one. Duration resolution is now three-state
+(`Option<Option<u64>>`), an explicit zero overrides a finite config to
+indefinite, and `resolve_run_duration`'s test pins both directions. At the
+PROTOCOL layer, which is where the finding actually lives and where a fix one
+level up would not have reached, `LaunchSpec::duration` now DOCUMENTS the
+meaning rather than refusing it: `None` leaves the config alone, `Some(ZERO)`
+overrides it to no declared completion, and only a positive value declares one.
+Refusing zero was rejected as the closure, because `--duration 0s` is a
+documented spelling of "run until the launcher ends it" and the venue must be
+able to be told it.
 
 Finding 1 - `AdmissionSubject` echoes an unbounded client id, so
 `ADMISSION_FRAME_MAX_BYTES` was not a bound - is CLOSED and struck, by the
@@ -19,25 +32,6 @@ Both halves of the finding's arithmetic - the 4 KiB frame and the 64-frame lane
 variants remain constructible from a raw `String`, so the invariant holds at
 serialization rather than at construction, which is where every wire path
 passes.
-
-## 2. `LaunchSpec.duration = Some(Duration::ZERO)` silently means "run forever" (high confidence)
-
-`format_duration(Duration::ZERO)` yields `"0s"`, pinned by a test.
-`mogwai-server/src/main.rs` does `.filter(|ns| *ns != 0)`, so `--duration 0s`
-decodes to `None` = no declared completion. The server comment even says "Zero
-means the same thing here as it does in the config file: NO declared completion."
-
-So a launcher that computes a duration and lands on zero gets an unbounded run
-instead of an immediate one, with no error anywhere. `LaunchSpec::duration` is
-documented as "overriding the config's run duration. Typed, so a malformed
-duration is impossible" - the type-safety claim is exactly what makes this trap
-invisible. `launch` refuses `ready_timeout: ZERO` with a named error
-(`ZeroReadyTimeout`); `duration: ZERO` deserves the same treatment, or the doc
-must say it means "no duration".
-
-See `bugs-server-transport.md` finding 6: the server-side reading is that
-`--duration 0s` actually falls back to the config value, which is a third
-behaviour and matches neither doc.
 
 ## 3. `validate_divergence` is not the authoritative guard it claims to be (medium)
 

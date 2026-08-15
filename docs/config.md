@@ -30,6 +30,15 @@ unpaced delivery, not a stopped clock - the underlying sim time still advances
 at wall rate. `server_heartbeat_ms` sets the server-originated liveness
 cadence; zero disables it.
 
+History synthesis is admitted fail-fast at four concurrent `/trades` or
+`/quotes` requests per run. A fifth request receives `503` with `history
+request capacity exhausted`; it is not queued ahead of order-entry market
+readings on the runtime's blocking pool. A slot is held until the response has
+been written, not merely until synthesis finishes, so the ceiling bounds
+resident response bytes as well as CPU - near 41 MB across four full pages.
+A client that pages history concurrently should retry a `503` rather than
+treat it as fatal.
+
 The fill band is `fill_band_vol_mult` and `fill_band_max_ticks`. Every resting
 limit draws a trigger price uniformly from `0 ..= band_ticks` ticks away from
 its stated price, where `band_ticks` is `fill_band_vol_mult` times the tape's

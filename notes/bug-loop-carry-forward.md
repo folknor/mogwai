@@ -1030,3 +1030,143 @@ command queue and its refusal frame, and the new HEAD-OF-LINE property - an
 armed `CommandLatency` now delays every later command on the same socket, which
 is the price of arrival order and is stated in `docs/havoc.md`.
 
+## notes/bugs-server-transport.md, round 2
+
+- Finding 6 REPRODUCED. Duration resolution now carries three states, so an
+  explicit indefinite override beats a finite config. This ALSO CLOSES finding
+  2 of `notes/bugs-protocol.md`: `LaunchSpec` already preserved zero in argv,
+  and the server now gives it the documented meaning.
+- Finding 7 was DEAD. Round 1 had already corrected the admission-lane comment
+  to 256 KiB.
+- Finding 8 REPRODUCED. `/quotes` now refuses below the tape origin exactly as
+  `/trades` does. No tape protocol bump is owed: this only changes an HTTP
+  refusal outside the tape and moves no byte, draw, seed, origin or generated
+  event. Version 15 remains reserved for protocol-12b.
+- Finding 9 REPRODUCED IN ALTERED FORM. Checkpoint positioning still shares one
+  per-run lock, but round 1's 8,192-tick stride means it covers only the short
+  positioning step, not 50,000-tick response synthesis. The live wedge was
+  uncapped history work sharing Tokio's blocking pool with command readings. A
+  four-request fail-fast gate caps worst-case response construction near 28 MiB
+  and prevents pool saturation; excess requests receive 503. Admission cost
+  measured 22 to 23 ns over five release runs of one million iterations.
+- Speed validation REPRODUCED and moved into `Config::load`, before warmup.
+  Unsigned duration and cadence fields did not receive arbitrary ceilings:
+  zero is meaningful, warmup already has a synthesis cap, and a zero unpaced
+  stall is an intentional immediate release used by a socket fixture.
+- Binary-frame silence REPRODUCED. Binary frames now receive a priority-lane
+  `ProtocolError`. Forced-drain success REPRODUCED; exhausting the five-second
+  grace now returns an error and exits nonzero.
+- Signal completion was reviewed and DECLINED. `RunComplete` means declared
+  simulated duration elapsed; a launcher signal is an interrupted or
+  undeclared run. Publishing completion would erase that distinction.
+- The single-instrument settlement loop and websocket-only `ActDelay` marker
+  both REPRODUCED as dead generality and were removed.
+- The rewrite proposal was already BUILT by round 1: one bounded sequential
+  dispatcher, no per-command spawn, refusal on capacity, and serialization-time
+  subject truncation. This round retained that design unchanged.
+
+Bite checks: restoring two-state duration fallback failed the new test with
+the configured 600 seconds instead of `None`; restoring binary silence failed
+the socket test at its ten-second deadline, while restored code passed 5 of 5;
+restoring a 512-request history ceiling failed the pinned-cap test; disabling
+the quote origin-floor branch failed its artificial-nonzero-origin test.
+
+## notes/bugs-server-transport.md, round 2 review and document close
+
+A cold read of the round-2 diff found ONE correctness defect, and it was the
+family this whole loop keeps meeting: A GUARD RELEASED BEFORE THE WORK IT
+GUARDS IS FINISHED. Where five earlier instances advanced a watermark past
+work nobody performed, this one returned a capacity slot while the work it
+admitted was still resident.
+
+- THE HISTORY BOUND DID NOT BOUND ANYTHING. The permit was a handler local and
+  the handler returned `Json(Vec<Tick>)`. Axum serializes a returned `Json`
+  value AFTER the handler future resolves, so all four permits were released
+  while four multi-megabyte responses were still being built - readmitting four
+  more requests, and with them unbounded accumulation of exactly the buffers
+  the ceiling advertised as capped. Fixed by making the permit outlive the
+  RESPONSE, not the handler: serialization moved onto the synthesis's own
+  blocking task, and `HistoryPage` is a one-shot body stream owning both the
+  finished bytes and the permit, so the slot returns when hyper drops the body.
+  THE RULE, and it generalizes past this loop: a permit, lock or guard whose
+  scope ends before the work it protects is the same defect as a watermark
+  advanced past unperformed work, and both are visible by asking WHAT IS STILL
+  RESIDENT when the guard drops.
+- THE 28 MiB FIGURE WAS INVENTED and is replaced by a measurement.
+  `worst_case_history_page_bytes` is a release-mode instrument over a full
+  `MAX_HISTORY_LIMIT` page: `/quotes` is 4.40 MB of vector plus 5.90 MB of
+  JSON, `/trades` 3.20 MB plus 5.05 MB. Vector and bytes are resident together
+  while serde runs, so an admitted quote page peaks near 10.3 MB and the four
+  slots near 41 MB. `reference/performance.md`, `docs/config.md` and the
+  constant's own doc all carry that number now, and the doc comment says which
+  test derives it.
+- THE OTHER GUARDS IN THIS ARC WERE ENUMERATED, not assumed. Round 1's
+  process-wide command permit is CORRECT and its correctness rests on a
+  variable NAME: `while let Some(QueuedCommand { cmd, _global_slot })` binds
+  the permit for the whole loop body, so it is returned after
+  `dispatch_command` has been awaited to completion. A bare `_` pattern would
+  drop it at the destructure and reduce the bound to counting acceptances. That
+  is now stated in a comment at the site, because nothing else would catch it.
+  The per-connection queue slot is the mpsc capacity itself, released on
+  `recv`, which is deliberate and unchanged: it bounds what is QUEUED while the
+  process permit bounds what is IN FLIGHT.
+- A HISTORY REQUEST CANNOT STALL A COMMAND, checked rather than reasoned about.
+  The per-symbol index mutex is taken by `build_history_source` for
+  `try_source_at_or_before` ONLY - the positioning step, bounded by round 1's
+  8,192-tick stride - and released before the up-to-50,000-tick synthesis,
+  which walks a private clone. So the worst a command's `market_reading` waits
+  behind is four positioning steps, not four page syntheses. The blocking-pool
+  half is what the gate closes: four of Tokio's 512 blocking threads, so
+  history can no longer crowd out command market readings there either.
+
+Verified rather than relayed:
+
+- `bugs-protocol.md` FINDING 2 IS GENUINELY CLOSED and struck from that
+  document in the same commit; nothing else there was touched. It was checked
+  at the layer that owns it rather than accepted from the server fix. The
+  server's three-state resolution gives `--duration 0s` the meaning
+  `docs/cli.md` always claimed, and `LaunchSpec::duration` - the protocol type
+  the finding actually names - now DOCUMENTS that `Some(ZERO)` is an explicit
+  indefinite override rather than "end immediately" and rather than a typed
+  guarantee that hides it. Refusing zero was considered and rejected: `0s` is a
+  documented spelling the venue must be able to be told.
+- THE DELETIONS ARE SOUND, but one of them is a behaviour change the finding
+  mis-stated. `ActDelay` was a single-variant marker enum in `http.rs`, never a
+  divergence and never armable by a scenario author - command latency is
+  `CommandLatency` in `control.rs` and is untouched. The identifier now appears
+  in no crate and no document. `refuse_unfunded_settlement` is the behaviour
+  change: `instrument_defs()` is NOT always one element, because a checkout
+  with no `[instrument]` table builds all three shipped presets while `serve`
+  picks the first and serves only it. Checking the whole table could refuse
+  boot over a currency no order in the run could quote; the check now takes THE
+  served instrument, and the function's doc states that distinction rather than
+  repeating the finding's "always one element".
+- No `TAPE_PROTOCOL_VERSION` bump. Response framing, an admission gate, a
+  duration resolution, an exit code and a `ProtocolError` frame reach no
+  generator, draw, seed or origin. 14 live, 15 reserved for protocol-12b.
+
+Bite checks, each by reverting the production change as a TEXT EDIT and
+observing the named failure in RELEASE:
+
+- `a_history_page_holds_its_slot_until_its_body_is_written` fails on its first
+  assertion when `history_page` drops the permit at handler exit - which is
+  precisely the shipped-round behaviour, so it is a regression test for the
+  defect above and not a tautology.
+- `history_concurrency_refuses_instead_of_queueing` was REWRITTEN because it
+  did not bite: it built its own semaphore and asserted tokio's behaviour, so
+  no change to the server could have failed it. It now drives `admit_history`,
+  the one decision both handlers make, and fails when the cap is widened to
+  512. Disclosed residual: it pins the decision, not that a handler still calls
+  it; no in-crate test can build an `AppState` cheaply enough for the call
+  site.
+- `quote_history_refuses_below_a_nonzero_origin` fails when the origin-floor
+  branch is disabled, and `an_explicit_zero_duration_overrides_a_finite_config`
+  fails when duration resolution is flattened back to two states.
+
+Consumer-visible surface, recorded in `notes/todo.md` as two entries with what
+a consumer must do about each: the `503` on `/trades` and `/quotes` under
+concurrency (retryable backpressure, and a slow reader holds its slot until the
+bytes are written), and the NONZERO exit when connections do not drain within
+the shutdown grace (close sockets on `RunComplete` rather than waiting to be
+dropped). `docs/cli.md` carries the exit-code change and `docs/config.md` the
+admission gate.

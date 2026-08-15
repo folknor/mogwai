@@ -152,15 +152,13 @@ pub fn serve(
 ) -> anyhow::Result<()> {
     arm_parent_death_signal(launcher_pid)?;
     init_stderr_logging()?;
-    // Zero means the same thing here as it does in the config file: NO declared
-    // completion. It used to mean the opposite on this path only - a venue that
-    // announced readiness and completed before anyone could connect - so
-    // `run_duration_ns = 0` ran forever while `--duration 0s` was dead on
-    // arrival, and a launcher passing a zero it had defaulted saw a connection
-    // refused against a port that had been alive a moment earlier.
-    let duration_ns = duration
-        .map(|duration| u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX))
-        .filter(|ns| *ns != 0);
+    // The outer option records whether the CLI flag was present. The inner
+    // option preserves its meaning: zero is an explicit indefinite override,
+    // while a positive value is a declared completion.
+    let duration_ns = duration.map(|duration| {
+        let ns = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+        (ns != 0).then_some(ns)
+    });
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
@@ -169,16 +167,16 @@ pub fn serve(
 
 async fn serve_async(
     config: Option<PathBuf>,
-    duration_override_ns: Option<u64>,
+    duration_override_ns: Option<Option<u64>>,
 ) -> anyhow::Result<()> {
     let cfg = Config::load(config)?;
     let profiles = Arc::new(build_instrument_profiles(&cfg)?);
-    refuse_unfunded_settlement(&cfg, &profiles.instrument_defs())?;
     let instrument = profiles
         .instrument_defs()
         .into_iter()
         .next()
         .ok_or_else(|| anyhow::anyhow!("no instrument configured"))?;
+    refuse_unfunded_settlement(&cfg, &instrument)?;
 
     let seeds = mogwai_protocol::RunSeeds::from_run_seed(
         cfg.seed.unwrap_or_else(|| rand::random::<u64>() >> 1),
@@ -243,8 +241,7 @@ async fn serve_async(
         data_origin_ns,
         "eager warmup materialized"
     );
-    let run_duration_ns =
-        duration_override_ns.or_else(|| (cfg.run_duration_ns != 0).then_some(cfg.run_duration_ns));
+    let run_duration_ns = resolve_run_duration(duration_override_ns, cfg.run_duration_ns);
     // Construct this before Tape::start: a source can fault immediately on its
     // first walk, so a later shutdown channel would lose the terminal signal.
     let (fault_tx, fault_rx) = std::sync::mpsc::channel();
@@ -288,6 +285,9 @@ async fn serve_async(
         cfg: cfg.clone(),
         profiles: Arc::clone(&profiles),
         pending_commands: Arc::new(tokio::sync::Semaphore::new(cfg.global_pending_command_acts)),
+        history_requests: Arc::new(tokio::sync::Semaphore::new(
+            http::MAX_CONCURRENT_HISTORY_REQUESTS,
+        )),
         market_readings,
     };
     let completing_run = Arc::clone(&state.run);
@@ -365,6 +365,8 @@ async fn serve_async(
     let terminal_fault_for_shutdown = Arc::clone(&terminal_fault);
     serve_until_drained(listener, app, async move {
         tokio::select! {
+            // A signal means the launcher ended the run, not that its declared
+            // simulated duration completed. Do not publish a false RunComplete.
             _ = shutdown_signal() => {},
             _ = stop_rx.changed() => {},
             received = &mut fault_shutdown_rx => {
@@ -382,6 +384,10 @@ async fn serve_async(
         anyhow::bail!("tape source fault: {fault:?}");
     }
     Ok(())
+}
+
+fn resolve_run_duration(override_ns: Option<Option<u64>>, configured_ns: u64) -> Option<u64> {
+    override_ns.unwrap_or_else(|| (configured_ns != 0).then_some(configured_ns))
 }
 
 /// How long a completed or signalled venue waits for its live connections to
@@ -413,7 +419,10 @@ async fn serve_until_drained(
             // so this never bounds the run itself.
             grace_rx.await.ok();
             tokio::time::sleep(SHUTDOWN_GRACE).await;
-        } => tracing::warn!(grace_ms = SHUTDOWN_GRACE.as_millis(), "connections did not drain within the shutdown grace; exiting anyway"),
+        } => anyhow::bail!(
+            "connections did not drain within the {} ms shutdown grace",
+            SHUTDOWN_GRACE.as_millis()
+        ),
     }
     Ok(())
 }
@@ -453,5 +462,14 @@ mod tests {
         let addr: SocketAddr = BIND_ADDR.parse().expect("BIND_ADDR is a literal addr");
         assert!(addr.ip().is_loopback(), "{addr}");
         assert_eq!(addr.port(), 0, "{addr}");
+    }
+
+    #[test]
+    fn an_explicit_zero_duration_overrides_a_finite_config() {
+        assert_eq!(resolve_run_duration(Some(None), 600_000_000_000), None);
+        assert_eq!(
+            resolve_run_duration(None, 600_000_000_000),
+            Some(600_000_000_000)
+        );
     }
 }

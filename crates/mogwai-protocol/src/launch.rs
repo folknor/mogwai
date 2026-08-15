@@ -123,6 +123,14 @@ pub struct LaunchSpec {
     /// malformed duration is impossible rather than a boot failure the caller
     /// can only report generically. This is SIM time, which under acceleration
     /// is not wall time.
+    ///
+    /// `Duration::ZERO` is NOT "end immediately" and is not refused: it renders
+    /// as `--duration 0s`, which the venue reads as an explicit NO DECLARED
+    /// COMPLETION that overrides a finite `run_duration_ns` in the config. A
+    /// launcher computing a duration that lands on zero therefore gets a run
+    /// bounded only by its own lifetime. Say so rather than assume it: `None`
+    /// leaves the config's duration alone, `Some(ZERO)` overrides it to
+    /// indefinite, and only a positive value declares a completion.
     pub duration: Option<Duration>,
     /// Bound on the readiness read. Unset means [`DEFAULT_READY_TIMEOUT`].
     pub ready_timeout: Option<Duration>,
@@ -761,6 +769,16 @@ mod tests {
                 OsString::from("30s"),
             ]
         );
+    }
+
+    #[test]
+    fn zero_duration_is_preserved_as_an_explicit_cli_override() {
+        let argv = serve_argv(&LaunchSpec {
+            config: Some(PathBuf::from("/venue/finite.toml")),
+            duration: Some(Duration::ZERO),
+            ..LaunchSpec::default()
+        });
+        assert_eq!(argv.last(), Some(&OsString::from("0s")));
     }
 
     /// A bound no venue can meet is refused before anything is spawned, rather

@@ -52,6 +52,32 @@ Or both. There are no exceptions.
   broadarrow is the known consumer and depends on this workspace; nothing here
   can verify its build.
 
+- THE HISTORY ENDPOINTS NOW REFUSE UNDER CONCURRENCY (landed 2026-08-15).
+  `/trades` and `/quotes` admit four concurrent syntheses per run; a fifth
+  receives `503` with `history request capacity exhausted` and no body of
+  ticks. Previously every request was accepted, so an adapter paging history
+  from several tasks at once can now see a refusal where it never did. The slot
+  is held until the response has been WRITTEN, not until synthesis finishes, so
+  a slow reader occupies its slot for as long as it takes the bytes. WHAT A
+  CONSUMER MUST DO: treat `503` on these two routes as retryable backpressure,
+  not as "no data" and not as a fatal transport error - and read the response
+  promptly, because a stalled reader is what makes the other three slots
+  scarce. The adapter's own paging is sequential per client, so a single
+  client reaches this only by running several data clients against one venue.
+  broadarrow is the known consumer and depends on this workspace; nothing here
+  can verify its build.
+
+- A VENUE THAT CANNOT DRAIN NOW EXITS NONZERO (landed 2026-08-15). Completion
+  or a signal stops the accept loop and drains live connections for up to the
+  shutdown grace; expiring that grace used to log a warning and exit 0, which
+  made an abandoned connection indistinguishable from a clean teardown. It is
+  now an error and a nonzero status. WHAT A CONSUMER MUST DO: close its `/ws`
+  sockets when it observes `RunComplete` rather than waiting to be dropped, and
+  not treat a nonzero venue exit as a harness bug without reading stderr - the
+  message names the grace. A launcher that asserted a zero exit at end of run
+  may start failing on a run it previously called clean, and the fix belongs on
+  the client's teardown, not on the assertion.
+
 - `mogwai_protocol::Symbol` IS NOW `Arc<str>`, NOT `String` (source-breaking,
   landed 2026-08-15). The generator allocated a fresh symbol string for every
   materialized trade and quote, which was the crate's most frequent heap

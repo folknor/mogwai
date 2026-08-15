@@ -16,6 +16,33 @@ use mogwai_protocol::{ServerMessage, TradeTick};
 use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn binary_client_frames_receive_a_protocol_error() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
+        .await
+        .expect("connect websocket");
+    socket
+        .send(Message::Binary(
+            br#"{"type":"query_orders"}"#.to_vec().into(),
+        ))
+        .await
+        .expect("send binary frame");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while let Ok(Some(Ok(message))) = tokio::time::timeout_at(deadline, socket.next()).await {
+        if let Message::Text(text) = message
+            && let Ok(ServerMessage::ProtocolError { reason, .. }) =
+                serde_json::from_str::<ServerMessage>(&text)
+        {
+            assert!(reason.contains("binary client frames are unsupported"));
+            return;
+        }
+    }
+    panic!("no ProtocolError arrived before the liveness deadline");
+}
+
+#[tokio::test]
 #[ignore = "binds a loopback listener and samples paced delivery"]
 async fn tape_lateness_under_acceleration() {
     let venue = spawn(&["--config", &accelerated_config()]);

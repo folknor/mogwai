@@ -19,7 +19,7 @@ use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use crate::{
     admission::{CloseSpec, ExecLanes, FrameClass, HeldFrame, Outbound, OutboundFrame},
     config::{build_admission_limits, sim_duration_from_millis, sim_now_ns},
-    http::{ActDelay, AppState, OrderOutcome, process_order_cmd},
+    http::{AppState, OrderOutcome, process_order_cmd},
 };
 
 pub(crate) async fn ws_upgrade(
@@ -53,7 +53,7 @@ async fn dispatch_command(cmd: ClientMessage, state: &AppState, lanes: &ExecLane
     if act_ms > 0 {
         tokio::time::sleep(state.sim().wall_duration(sim_duration_from_millis(act_ms))).await;
     }
-    match process_order_cmd(cmd, state, &state.run, lanes, ActDelay::Paid).await {
+    match process_order_cmd(cmd, state, &state.run, lanes).await {
         OrderOutcome::Produced {
             events,
             reservation,
@@ -76,6 +76,12 @@ fn spawn_command_dispatcher(
     lanes: ExecLanes,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        // Binding the permit is load-bearing, and the name is why it survives:
+        // `_global_slot` lives to the end of the loop body, so the process-wide
+        // slot is returned only after the command has been ACTED ON. A bare `_`
+        // pattern would drop it at the destructure and let a new command in
+        // while this one was still in the engine - the bound would count
+        // acceptances rather than work in flight.
         while let Some(QueuedCommand { cmd, _global_slot }) = commands.recv().await {
             dispatch_command(cmd, &state, &lanes).await;
         }
@@ -382,6 +388,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         }
                         Err(err) => { drop(send_admission(&lanes, ServerMessage::ProtocolError { reason: truncate_reason(format!("invalid client frame: {err}")), ts_event: sim_now_ns(state.sim()) })); }
                     },
+                    Some(Ok(Message::Binary(_))) => {
+                        drop(send_admission(&lanes, ServerMessage::ProtocolError {
+                            reason: "binary client frames are unsupported; send JSON text".into(),
+                            ts_event: sim_now_ns(state.sim()),
+                        }));
+                    }
                     Some(Ok(_)) => {}
                 }
             }

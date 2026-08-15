@@ -215,7 +215,6 @@ pub(crate) async fn process_order_cmd(
     state: &AppState,
     run: &Arc<Run>,
     lanes: &ExecLanes,
-    _act_delay: ActDelay,
 ) -> OrderOutcome {
     // Sampled at entry for the boundary rejections below: they return before
     // any price synthesis, so entry-time is when they logically occur.
@@ -345,6 +344,7 @@ pub(crate) struct AppState {
     /// Process-wide ceiling on websocket commands sleeping out an armed ACT
     /// delay. The per-connection lane bounds one client; this bounds the run.
     pub(crate) pending_commands: Arc<tokio::sync::Semaphore>,
+    pub(crate) history_requests: Arc<tokio::sync::Semaphore>,
     pub(crate) market_readings: Arc<crate::fills::MarketReadingCache>,
 }
 
@@ -408,14 +408,6 @@ impl AppState {
     pub(crate) fn sim(&self) -> SimClock {
         self.run.sim
     }
-}
-
-/// Marker proving the websocket dispatcher has served any ACT delay off its
-/// read loop before it invokes the common command gate.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum ActDelay {
-    /// The caller already slept it off the websocket read loop, or there was none.
-    Paid,
 }
 
 /// Control plane: arm a divergence to fire on its next trigger. It is armed
@@ -734,7 +726,8 @@ pub(crate) struct HistoryQuery {
 pub(crate) async fn trades(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
-) -> Result<Json<Vec<TradeTick>>, (StatusCode, String)> {
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    let history_slot = admit_history(&state.history_requests)?;
     // No `regime` parameter: the market regime is boot config for the whole run
     // now, so history and the live tape are the same realization by
     // construction rather than by a client remembering to ask for the same one.
@@ -808,49 +801,256 @@ pub(crate) async fn trades(
     // effective `end`. Run it on a blocking thread rather than inline on the
     // tokio worker, so a burst of `/trades` requests cannot stall the async
     // runtime's worker pool.
-    let ticks = match tokio::task::spawn_blocking(move || {
-        bounded_trades(&symbol, start, end, limit, &profiles)
+    //
+    // Serialization runs on the SAME blocking task as the synthesis, and the
+    // admission permit is handed to the response body rather than dropped
+    // here: see `HistoryPage`.
+    let body = match tokio::task::spawn_blocking(move || {
+        serde_json::to_vec(&bounded_trades(&symbol, start, end, limit, &profiles))
     })
     .await
     {
-        Ok(ticks) => ticks,
+        Ok(Ok(body)) => body,
+        Ok(Err(e)) => {
+            tracing::error!(%e, "trade history serialization failed");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()));
+        }
         Err(e) => {
             tracing::error!(%e, "history synthesis task failed");
             return Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()));
         }
     };
-    Ok(Json(ticks))
+    Ok(history_page(history_slot, body))
 }
 
 pub(crate) async fn quotes(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
-) -> Result<Json<Vec<QuoteTick>>, (StatusCode, String)> {
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    let history_slot = admit_history(&state.history_requests)?;
     let limit = normalize_limit(query.limit);
     let profiles = Arc::clone(&state.profiles);
+    let data_origin = source::TAPE_ORIGIN_NS;
     let sim_now = sim_now_ns(state.sim());
     let HistoryQuery {
         symbol, start, end, ..
     } = query;
-    if let Some(start) = start
-        && start > sim_now
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!(
-                "requested start {start} exceeds sim-now {sim_now}; the tape cannot serve past the clock"
-            ),
-        ));
+    if let Some(body) = history_start_refusal(start, data_origin, sim_now) {
+        return Err((StatusCode::BAD_REQUEST, body));
     }
     let end = Some(end.map_or(sim_now, |end| end.min(sim_now)));
-    let ticks =
-        tokio::task::spawn_blocking(move || bounded_quotes(&symbol, start, end, limit, &profiles))
+    let body = tokio::task::spawn_blocking(move || {
+        serde_json::to_vec(&bounded_quotes(&symbol, start, end, limit, &profiles))
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!(%e, "quote history synthesis task failed");
+        (StatusCode::INTERNAL_SERVER_ERROR, String::new())
+    })?
+    .map_err(|e| {
+        tracing::error!(%e, "quote history serialization failed");
+        (StatusCode::INTERNAL_SERVER_ERROR, String::new())
+    })?;
+    Ok(history_page(history_slot, body))
+}
+
+/// How many `/trades` or `/quotes` syntheses may be in flight at once. A fifth
+/// request is REFUSED rather than queued, so history can neither fill Tokio's
+/// blocking pool ahead of order-entry market readings nor accumulate response
+/// buffers without a ceiling.
+///
+/// The memory bound this buys is MEASURED rather than asserted, by
+/// `worst_case_history_page_bytes` and recorded in `reference/performance.md`:
+/// a full `/quotes` page is 4.40 MB of `QuoteTick` vector and 5.90 MB of JSON
+/// resident together while it serializes, so four of them peak near 41 MB.
+/// `/trades` is narrower at 3.20 MB plus 5.05 MB. The number is a bound only
+/// because the permit outlives BOTH halves, which is what `HistoryPage` is
+/// for.
+pub(crate) const MAX_CONCURRENT_HISTORY_REQUESTS: usize = 4;
+
+/// A serialized history page that owns its admission permit.
+///
+/// The permit cannot simply be a handler local. Axum serializes a returned
+/// `Json` value AFTER the handler future resolves, so a permit dropped at the
+/// end of the handler is released while multi-megabyte responses are still
+/// being built - four completed syntheses would readmit four more while their
+/// bytes were still resident, and the ceiling above would bound nothing. So
+/// serialization happens on the synthesis's own blocking task and the permit
+/// travels with the finished bytes: it is released when hyper drops this body,
+/// which is after the response has been written.
+struct HistoryPage {
+    _slot: tokio::sync::OwnedSemaphorePermit,
+    body: Option<axum::body::Bytes>,
+}
+
+impl futures_util::Stream for HistoryPage {
+    type Item = Result<axum::body::Bytes, std::convert::Infallible>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::task::Poll::Ready(self.get_mut().body.take().map(Ok))
+    }
+}
+
+fn history_page(
+    slot: tokio::sync::OwnedSemaphorePermit,
+    body: Vec<u8>,
+) -> axum::response::Response {
+    let length = body.len();
+    let mut response = axum::response::Response::new(axum::body::Body::from_stream(HistoryPage {
+        _slot: slot,
+        body: Some(axum::body::Bytes::from(body)),
+    }));
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    // A streamed body advertises no size, so without this hyper falls back to
+    // chunked transfer encoding - which is legal HTTP and which the crate's own
+    // raw-socket test client does not implement. The length is known exactly
+    // here (the whole page is already serialized), so state it and keep the
+    // response byte-shaped exactly as the `Json` it replaced.
+    headers.insert(
+        axum::http::header::CONTENT_LENGTH,
+        axum::http::HeaderValue::from(length),
+    );
+    response
+}
+
+/// The one admission decision both history endpoints make, so the cap and its
+/// refusal cannot drift apart between `/trades` and `/quotes`. Fail-fast by
+/// construction: `try_acquire_owned` never waits, so an over-capacity request
+/// is answered immediately rather than queued behind four syntheses.
+fn admit_history(
+    gate: &Arc<tokio::sync::Semaphore>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, (StatusCode, String)> {
+    Arc::clone(gate).try_acquire_owned().map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "history request capacity exhausted".to_owned(),
+        )
+    })
+}
+
+fn history_start_refusal(start: Option<u64>, data_origin: u64, sim_now: u64) -> Option<String> {
+    let start = start?;
+    if start < data_origin {
+        return Some(format!(
+            "requested start {start} precedes data_origin_ns {data_origin}; the tape cannot serve before its origin"
+        ));
+    }
+    (start > sim_now).then(|| {
+        format!(
+            "requested start {start} exceeds sim-now {sim_now}; the tape cannot serve past the clock"
+        )
+    })
+}
+
+#[cfg(test)]
+mod history_admission_tests {
+    use super::*;
+
+    /// Drives the endpoints' own admission decision rather than a semaphore of
+    /// its own: `admit_history` is what both handlers call, so widening the cap
+    /// or turning the refusal into a wait is visible here. Disclosed residual -
+    /// this pins the decision, not that a handler still makes it; the handlers
+    /// call it on their first line, and no in-crate test can build an
+    /// `AppState` cheaply enough to prove the call site.
+    #[test]
+    fn history_concurrency_refuses_instead_of_queueing() {
+        assert_eq!(MAX_CONCURRENT_HISTORY_REQUESTS, 4);
+        let gate = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_HISTORY_REQUESTS));
+        let held = (0..MAX_CONCURRENT_HISTORY_REQUESTS)
+            .map(|_| admit_history(&gate).expect("slot"))
+            .collect::<Vec<_>>();
+        let (status, reason) = admit_history(&gate).expect_err("the fifth request is refused");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(reason, "history request capacity exhausted");
+        drop(held);
+        assert!(admit_history(&gate).is_ok(), "a returned slot is reusable");
+    }
+
+    #[test]
+    fn quote_history_refuses_below_a_nonzero_origin() {
+        let refusal = history_start_refusal(Some(9), 10, 20).expect("off-tape refusal");
+        assert!(refusal.contains("precedes data_origin_ns 10"));
+        assert!(history_start_refusal(Some(10), 10, 20).is_none());
+    }
+
+    /// The bound is only real if the slot outlives the RESPONSE, not the
+    /// handler. Reverting `history_page` to drop the permit at handler exit
+    /// makes the second assertion read one permit early.
+    #[tokio::test]
+    async fn a_history_page_holds_its_slot_until_its_body_is_written() {
+        let gate = Arc::new(tokio::sync::Semaphore::new(1));
+        let slot = Arc::clone(&gate).try_acquire_owned().expect("slot");
+        let response = history_page(slot, b"[]".to_vec());
+        assert_eq!(gate.available_permits(), 0, "the slot is held by the page");
+        let body = axum::body::to_bytes(response.into_body(), 64)
             .await
-            .map_err(|e| {
-                tracing::error!(%e, "quote history synthesis task failed");
-                (StatusCode::INTERNAL_SERVER_ERROR, String::new())
-            })?;
-    Ok(Json(ticks))
+            .expect("collect the page body");
+        assert_eq!(&body[..], b"[]");
+        assert_eq!(
+            gate.available_permits(),
+            1,
+            "the slot returns only once the body is gone"
+        );
+    }
+
+    /// The worst-case resident cost of one admitted page, which is what
+    /// `MAX_CONCURRENT_HISTORY_REQUESTS` multiplies. `/quotes` is the wider
+    /// endpoint: four decimals against the trade's two.
+    #[test]
+    #[ignore = "measurement instrument"]
+    fn worst_case_history_page_bytes() {
+        let symbol = mogwai_protocol::Symbol::from("MNQZ5");
+        let quotes = (0..MAX_HISTORY_LIMIT)
+            .map(|i| QuoteTick {
+                symbol: Arc::clone(&symbol),
+                bid_px: rust_decimal::Decimal::new(2_100_025 + i as i64, 2),
+                ask_px: rust_decimal::Decimal::new(2_100_050 + i as i64, 2),
+                bid_sz: rust_decimal::Decimal::new(37, 0),
+                ask_sz: rust_decimal::Decimal::new(42, 0),
+                ts_event: 1_700_000_000_000_000_000 + i as u64,
+            })
+            .collect::<Vec<_>>();
+        let trades = (0..MAX_HISTORY_LIMIT)
+            .map(|i| TradeTick {
+                symbol: Arc::clone(&symbol),
+                price: rust_decimal::Decimal::new(2_100_025 + i as i64, 2),
+                size: rust_decimal::Decimal::new(37, 0),
+                aggressor: mogwai_protocol::AggressorSide::Buyer,
+                ts_event: 1_700_000_000_000_000_000 + i as u64,
+            })
+            .collect::<Vec<_>>();
+        eprintln!(
+            "quote_vec_bytes={} quote_json_bytes={} trade_vec_bytes={} trade_json_bytes={}",
+            quotes.len() * std::mem::size_of::<QuoteTick>(),
+            serde_json::to_vec(&quotes).expect("serialize quotes").len(),
+            trades.len() * std::mem::size_of::<TradeTick>(),
+            serde_json::to_vec(&trades).expect("serialize trades").len(),
+        );
+    }
+
+    #[test]
+    #[ignore = "measurement instrument"]
+    fn history_admission_overhead() {
+        const ITERATIONS: usize = 1_000_000;
+        let gate = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_HISTORY_REQUESTS));
+        let started = std::time::Instant::now();
+        for _ in 0..ITERATIONS {
+            drop(Arc::clone(&gate).try_acquire_owned().expect("slot"));
+        }
+        let elapsed = started.elapsed();
+        eprintln!(
+            "iterations={ITERATIONS} elapsed_ns={} ns_per_admission={}",
+            elapsed.as_nanos(),
+            elapsed.as_nanos() / ITERATIONS as u128
+        );
+    }
 }
 
 /// The single owner of `/trades` page-size policy: a missing `limit` requests a
