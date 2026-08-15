@@ -27,6 +27,26 @@ fn history_is_served_for_a_configured_symbol_that_is_not_the_boot_river() {
 
 #[test]
 #[ignore = "binds a loopback listener"]
+fn a_pulled_account_snapshot_is_labeled_venue_clock() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let (status, body) = http_get(&venue.http_base(), "/account");
+    assert_eq!(status, 200, "account answers: {body}");
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(value["clock"], "venue");
+    for field in ["account_id", "balances", "positions", "ts_event"] {
+        assert!(
+            value.get(field).is_some(),
+            "flattened field {field} is missing: {body}"
+        );
+    }
+    assert!(
+        value.get("account").is_none(),
+        "account payload must remain flat: {body}"
+    );
+}
+
+#[test]
+#[ignore = "binds a loopback listener"]
 fn instruments_reports_every_configured_shape() {
     let venue = spawn(&["--config", &two_symbols_config()]);
     let (status, body) = http_get(&venue.http_base(), "/instruments");
@@ -85,6 +105,67 @@ async fn a_ws_upgrade_for_a_configured_non_boot_symbol_is_served() {
         }
     }
     panic!("configured non-boot river produced no named market frame");
+}
+
+/// A boated river answers history only as far as ITS BOAT has published, never
+/// as far as the venue clock has run. A boat placed `T` after boot sits
+/// `T * speed` behind that clock permanently, so the venue clock is a
+/// look-ahead oracle for every river but the boot one - which is why this test
+/// must use a SECOND symbol: the boot river carries a boat from boot and lags
+/// by nothing, so a boot-symbol test would pass under both ceilings.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn history_is_bounded_by_the_rivers_own_boat_not_the_venue_clock() {
+    let venue = spawn(&["--config", &two_symbols_config()]);
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let (socket, _) =
+        tokio_tungstenite::connect_async(format!("{}?symbol=MNQ&speed=1", venue.ws_url()))
+            .await
+            .expect("place the second river late");
+
+    let (_, boat) = http_get(&venue.http_base(), "/clock?symbol=MNQ");
+    let boat: mogwai_protocol::ServerClock = serde_json::from_str(&boat).unwrap();
+    let (_, venue_clock) = http_get(&venue.http_base(), "/clock");
+    let venue_clock: mogwai_protocol::ServerClock = serde_json::from_str(&venue_clock).unwrap();
+    assert!(
+        venue_clock.server_now_ns > boat.server_now_ns,
+        "the test must construct a late boat"
+    );
+
+    // START-ANCHORED, deliberately: an unanchored request breaks at `limit`
+    // from the history source's default position, so it can fill its page with
+    // old rows and never reach either ceiling. Anchored one nanosecond above
+    // the boat but far below the venue clock, the two ceilings give different
+    // answers and only one of them can be right.
+    let start = boat.server_now_ns.saturating_add(1);
+    assert!(
+        start < venue_clock.server_now_ns,
+        "the anchor must sit between the two ceilings"
+    );
+    let (status, body) = http_get(
+        &venue.http_base(),
+        &format!("/trades?symbol=MNQ&start={start}&limit=5"),
+    );
+    assert_eq!(
+        status, 400,
+        "history admitted a start beyond the boat: {body}"
+    );
+
+    // And the ceiling did not collapse onto nothing: a start BELOW what the
+    // boat published is still served. A test asserting only the refusal cannot
+    // tell a correct bound from one that refuses everything.
+    let (status, body) = http_get(
+        &venue.http_base(),
+        &format!(
+            "/trades?symbol=MNQ&start={}&limit=5",
+            venue.record.data_origin_ns
+        ),
+    );
+    assert_eq!(
+        status, 200,
+        "history below the boat is still served: {body}"
+    );
+    drop(socket);
 }
 
 #[tokio::test]
@@ -1222,6 +1303,87 @@ fn a_generator_arm_on_an_unboated_river_is_accepted() {
         r#"{"type":"FlowSurge","symbol":"MNQ","rate_mult":2.0,"children_mult":2.0,"duration_ms":1000}"#,
     );
     assert_eq!(status, 202, "an unboated river accepts the arm: {body}");
+    // The ack names the armed span, because an operator otherwise cannot see
+    // WHAT was armed against WHICH origin: the window opens at the river's
+    // origin, so the boat placed afterwards gets the whole span rather than a
+    // window already closed in its past.
+    assert!(
+        body.contains("1000") && body.contains("MNQ"),
+        "the ack names the armed span and river: {body}"
+    );
+}
+
+/// `CancelOpenOrderSilently` takes its clock from the TARGETED ORDER: the id
+/// already determines the order, hence its symbol and its river. A request that
+/// also supplies a `symbol` may not disagree - the venue refuses rather than
+/// silently preferring one of two answers - and an id naming no resting order
+/// still gets the engine's own diagnosis.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_silent_cancel_naming_the_wrong_symbol_is_refused() {
+    let venue = spawn(&["--config", &two_symbols_config()]);
+    let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
+        .await
+        .expect("open order socket");
+    let submit = format!(
+        r#"{{"type":"SubmitOrder","client_order_id":"SILENT-1","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"0.01","price":"1","time_in_force":"Gtc"}}"#,
+        venue.record.symbol
+    );
+    socket
+        .send(Message::Text(submit.into()))
+        .await
+        .expect("submit");
+
+    // A `/ws` socket is attached to the live tape on upgrade, so the accept is
+    // drained for, never asserted on as the NEXT frame.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut resting = false;
+    while !resting {
+        let message = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .expect("the submit is acknowledged before the deadline")
+            .expect("the socket stays open")
+            .expect("a well-formed frame");
+        if let Message::Text(text) = message {
+            resting = text.contains("SILENT-1") && text.contains("OrderAccepted");
+        }
+    }
+
+    let (status, body) = post_divergence_body(
+        &venue.http_base(),
+        r#"{"type":"CancelOpenOrderSilently","symbol":"MNQ","client_order_id":"SILENT-1"}"#,
+    );
+    assert_eq!(status, 400, "a mismatched symbol is refused: {body}");
+    assert!(
+        body.contains("MNQ"),
+        "the refusal names the request: {body}"
+    );
+    assert!(
+        body.contains(&*venue.record.symbol),
+        "the refusal names the order's own river: {body}"
+    );
+
+    // The order is untouched by the refusal, and the matching request lands.
+    let (status, body) = post_divergence_body(
+        &venue.http_base(),
+        &format!(
+            r#"{{"type":"CancelOpenOrderSilently","symbol":"{}","client_order_id":"SILENT-1"}}"#,
+            venue.record.symbol
+        ),
+    );
+    assert_eq!(status, 202, "the matching symbol is accepted: {body}");
+
+    // And an id naming nothing resting keeps the engine's own diagnosis rather
+    // than a flattened "unknown order".
+    let (status, body) = post_divergence_body(
+        &venue.http_base(),
+        r#"{"type":"CancelOpenOrderSilently","client_order_id":"SILENT-1"}"#,
+    );
+    assert_eq!(status, 404, "an already-cancelled order is refused: {body}");
+    assert!(
+        body.contains("terminal"),
+        "the refusal distinguishes terminal from unknown: {body}"
+    );
 }
 
 /// `/clock` answers for the named river's boat, and LABELS the venue-clock

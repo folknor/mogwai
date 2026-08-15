@@ -193,6 +193,19 @@ fn spawn_command_dispatcher(
     })
 }
 
+/// Re-stamp the venue's completion on THIS socket's clock.
+///
+/// The venue deadline is a venue property and is measured on the venue clock -
+/// there is no boat to ask when the last passenger has left. But the frame goes
+/// to a socket whose every other stamp is its boat's, so the venue instant is
+/// the SIGNAL and this is the conversion. `elapsed_ns` is how much tape THIS
+/// passenger's boat covered, which is the only elapsed number meaningful to the
+/// reader; a boat placed after the deadline covered none, hence the clamp.
+fn completion_on_boat_clock(boat_sim: mogwai_protocol::SimClock) -> (u64, u64) {
+    let now = sim_now_ns(boat_sim);
+    (now, now.saturating_sub(boat_sim.sim_epoch_ns))
+}
+
 fn current_completion(
     completion: &mut tokio::sync::watch::Receiver<Option<(u64, u64)>>,
 ) -> Option<(u64, u64)> {
@@ -262,21 +275,10 @@ async fn run_writer(
                 // `FrameClass`. Everything else is gated - `GoDark` wholesale,
                 // `StallData` on market data alone.
                 if frame.class != FrameClass::Terminal {
-                    if now
-                        < state
-                            .run
-                            .dark_until_ns
-                            .load(std::sync::atomic::Ordering::Relaxed)
-                    {
+                    if state.run.dark.open_at(sim, now) {
                         continue;
                     }
-                    if frame.class == FrameClass::MarketData
-                        && now
-                            < state
-                                .run
-                                .stall_until_ns
-                                .load(std::sync::atomic::Ordering::Relaxed)
-                    {
+                    if frame.class == FrameClass::MarketData && state.run.stall.open_at(sim, now) {
                         continue;
                     }
                 }
@@ -452,7 +454,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SocketSessio
         .duration_ms
         .map(|ms| tokio::time::sleep(boat_sim.wall_duration(sim_duration_from_millis(ms))));
     tokio::pin!(duration);
-    if let Some((sim_now_ns, elapsed_ns)) = already_complete {
+    // The venue's own `(sim_now_ns, elapsed_ns)` pair is deliberately DISCARDED
+    // here and below: only the fact of completion crosses, the numbers are
+    // re-derived on this socket's boat clock.
+    if already_complete.is_some() {
+        let (sim_now_ns, elapsed_ns) = completion_on_boat_clock(boat_sim);
         drop(
             out_tx
                 .send(Outbound::Frame(OutboundFrame {
@@ -482,7 +488,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SocketSessio
             tokio::select! {
                 changed = completion.changed() => {
                     let completed = if changed.is_ok() { *completion.borrow_and_update() } else { None };
-                    if let Some((sim_now_ns, elapsed_ns)) = completed {
+                    if completed.is_some() {
+                        let (sim_now_ns, elapsed_ns) = completion_on_boat_clock(boat_sim);
                         drop(out_tx.send(Outbound::Frame(OutboundFrame { payload: Arc::from(serde_json::to_string(&ServerMessage::RunComplete { sim_now_ns, elapsed_ns }).expect("RunComplete serializes")), class: FrameClass::Terminal, charge: None, slot: None })).await);
                         drop(out_tx.send(Outbound::Close(CloseSpec { code: 1000, reason: "run complete".into() })).await);
                     }

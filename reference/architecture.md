@@ -80,12 +80,19 @@ The last ticket removes the seat, cancels the worker and joins it away from the
 registry mutex. Rivers and their bounded checkpoint sets remain for process
 life so later history does not depend on eviction timing.
 
+The venue also retains a wall-to-sim reference, but it is not a seated boat's
+clock. It bounds history for a boatless river, drives the venue deadline, and
+stamps the venue-scoped pulled account ledger. A seated river instead answers
+only through the instant its own boat has published.
+
 Each boat has its own settlement watermark and its own ring. Market water is
 exogenous: orders never move it and there is no queue competition. Fifty agents
 submitting the same buy against the same water receive the same fill without
 changing one another's result. Generator-level havoc belongs to river identity
 and cannot mutate a seated boat; transport havoc remains a property of what a
-passenger sees.
+passenger sees. A timed havoc window carries a wall arming instant and a
+simulated span rather than one boat's absolute deadline, and every passenger
+judges it on its own clock.
 
 An instrument is a bundle of knobs, not one fixed shape. Two classes are
 selectable: a spot currency pair, and a cash-settled continuous future with a

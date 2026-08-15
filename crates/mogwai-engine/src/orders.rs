@@ -464,7 +464,23 @@ impl Engine {
     /// are not the only bytes: a stop-limit that triggers and rests writes an
     /// `OrderTriggered` and nothing else, and counting only fills would leave
     /// that frame unreserved.
+    ///
+    /// Runs on the IDENTITY clock; the sweeper calls `apply_scans_on_clock`
+    /// with the swept boat's.
     pub fn apply_scans(&mut self, results: &[ScanResult], ts: u64) -> (Vec<ServerMessage>, usize) {
+        self.apply_scans_on_clock(results, ts, mogwai_protocol::SimClock::identity())
+    }
+
+    /// As `apply_scans`, on the clock of the boat whose sweep produced these
+    /// results. The sweeper walks one boat at a time and every `ts` here was
+    /// sampled on that boat, so the fee surcharge is judged on it.
+    pub fn apply_scans_on_clock(
+        &mut self,
+        results: &[ScanResult],
+        ts: u64,
+        sim: mogwai_protocol::SimClock,
+    ) -> (Vec<ServerMessage>, usize) {
+        self.event_sim = sim;
         if cfg!(debug_assertions) {
             self.reconcile_order_locked();
         }
@@ -961,7 +977,7 @@ impl Engine {
         // `ts`; booking a later fill must not erase its answer for an earlier
         // replayed timestamp.
         let surcharge = if apply_divergences {
-            self.fee_surcharge_multiplier_at(ts)
+            self.fee_surcharge_multiplier_for(self.event_sim, ts)
         } else {
             Decimal::ONE
         };
@@ -1042,7 +1058,7 @@ impl Engine {
         apply_divergences: bool,
     ) -> Decimal {
         let surcharge = if apply_divergences {
-            self.fee_surcharge_multiplier_at(ts)
+            self.fee_surcharge_multiplier_for(self.event_sim, ts)
         } else {
             Decimal::ONE
         };
@@ -1248,7 +1264,7 @@ impl Engine {
             // so checking it against one could cancel a forced liquidation
             // and leave the breached position open.
             if apply_divergences {
-                self.fee_surcharge_multiplier_at(ts)
+                self.fee_surcharge_multiplier_for(self.event_sim, ts)
             } else {
                 Decimal::ONE
             },

@@ -113,17 +113,16 @@ SLICE 2 - many boats on many rivers. Piece 7 landed 2026-08-15 (the keyed
 lazy engine registration); detail is git history, not this file. Pieces 6
 and 9 (the `/ws` symbol carrier, taken wholesale, and the boatyard - sharing
 key, placement/join/wind-down, and its open mechanics) have also landed
-2026-08-15; detail is git history, not this file. Numbering is left as it
-was assigned so the cross-references below (piece 10, piece 13) still
-resolve:
+2026-08-15; detail is git history, not this file. Piece 10 (one clock per
+boat) has also landed, 2026-08-16; detail is git history, not this file.
+Numbering is left as it was assigned so the cross-references below (piece
+11, piece 13) still resolve:
 
-10. One clock per boat: every run-level singleton assuming one now -
-    engine event stamps, `/clock`, `AccountState` timestamps,
-    `run_duration_ns` completion, derived `sim_epoch_ns`. None hard, all
-    scattered.
 11. Fill-path de-singling: `MarketReadingCache`'s one entry behind one
-    mutex, and the process-wide `last_swept_ns` watermark coupling
-    settlement liveness across symbols.
+    mutex. `last_swept_ns` already lives on the boat (piece 9), not the
+    process, so this is narrower than it once was - the sentence here used
+    to call it "the process-wide `last_swept_ns` watermark coupling
+    settlement liveness across symbols" and that framing is stale.
 12. `ReadyRecord` under per-boat clocks: drop `symbol` (VERSION 6) and
     decide what the origin/start/warmup fields mean as river properties;
     the seed-reproduces-a-venue-not-a-boat-placement knock-on.
@@ -138,7 +137,7 @@ CROSS-CUTTING:
     writing WITH the code, per the standing item below.
 
 Piece 4 (and the guard question inside 13) is a decision before code; pieces
-6 and 9 were the highest-risk and have landed, leaving 10 as the next.
+6, 9 and 10 were the highest-risk and have landed, leaving 11 as the next.
 Broadarrow's item 4
 (consuming the multi-instrument venue) is excluded - it is theirs, and
 their build breaking loudly when piece 13 lands is the designed handoff.
@@ -236,10 +235,11 @@ their build breaking loudly when piece 13 lands is the designed handoff.
   What DOES remain single-symbol in the fill path is slice-2 work: the
   `MarketReadingCache` is correctly symbol-KEYED but holds ONE entry behind one
   mutex held across the walk, so two symbols thrash it and serialize on unrelated
-  work; and `last_swept_ns` is one process-wide settlement watermark, all-or-
-  nothing by deliberate design and pinned by tests, which is safe but couples
-  liveness - one symbol whose settlement price is permanently unreadable freezes
-  every other symbol's settlement frontier.
+  work. `last_swept_ns` no longer describes this - piece 9 moved the sweep
+  watermark onto the boat (`Boat::last_swept_ns`) and piece 10 confirmed it,
+  so settlement liveness is per boat, not process-wide; this paragraph's
+  earlier claim that it was one all-or-nothing watermark coupling every
+  symbol's settlement frontier is stale.
   SEQUENCING, two slices that fail differently. SLICE 1, symbol selects the
   preset, still one symbol per run: proves the lookup, the derived
   `InstrumentDef` and the default-shape path, with no concurrency and no version
@@ -297,10 +297,7 @@ their build breaking loudly when piece 13 lands is the designed handoff.
   symbols at different simulated times is void, because STRATEGIES ARE
   SINGLE-INSTRUMENT by settled premise, so no observer ever holds two clocks.
   This also deletes the catch-up burst a late-anchored worker performs against
-  an already-advancing clock. What it DOES implicate is every run-level
-  singleton that assumes one notion of now: the engine stamping order events,
-  `/clock`, `AccountState` timestamps, `run_duration_ns` completion, and the
-  derived `sim_epoch_ns`. None looks hard; all of them are scattered.
+  an already-advancing clock.
   WHERE THE BOAT IS PLACED. A client may ask for a DURATION or for infinite, and
   MAY NOT ask for a start or end time. If a matching river is already running,
   the subscriber joins the boat WHERE IT IS. If none is, a boat is placed at the
@@ -337,7 +334,19 @@ their build breaking loudly when piece 13 lands is the designed handoff.
   someone boards that river again. It cannot be swept without a boat - there is
   no clock to sample a `to_ns` from - so the honest fixes are either to keep the
   venue clock as the sweep instant for boatless rivers or to refuse to leave
-  orders resting on a river nobody is carrying. Neither is piece 9's.
+  orders resting on a river nobody is carrying. Neither is piece 9's, and piece
+  10 (below) left it explicitly untouched too.
+  LANDED in piece 10, 2026-08-16: every remaining run-level singleton that
+  assumed one notion of now - engine event stamps, `/clock`, the history
+  ceilings on `/trades` and `/quotes`, the pulled `/account` snapshot, the
+  `RunComplete` stamps, and the fill sweeper's cadence - now resolves through
+  a boated river's own boat clock, with a labeled venue clock kept for the
+  answers that have no boat (a boatless river, the venue deadline, the
+  venue-scoped account ledger). Detail is git history; the durable statement
+  is `reference/clock.md`, `reference/architecture.md`, `docs/havoc.md` and
+  `docs/cli.md`. Piece 11 (`MarketReadingCache`, the settlement watermark)
+  and piece 12 (`ReadyRecord` under per-boat clocks) are unaffected and remain
+  open; the boatless-river sweep gap above is explicitly still open too.
 
 - SYMBOL RESOLUTION IS TOTAL, AND THE DEFAULT PRESET IS THE SHAPE CONTRACT.
   Settled 2026-08-15. A requested symbol resolves in three steps and step three
@@ -423,13 +432,6 @@ their build breaking loudly when piece 13 lands is the designed handoff.
   the symbol is absent from its seeded set, listing what is served. That guard
   is right for a typo and wrong for a servable-but-unconfigured symbol, where
   the adapter would refuse on a venue's behalf that would happily serve.
-
-- UNRESOLVED, surfaced by the 2026-08-15 survey and not a stale-comment matter:
-  `bounded_quotes` filters on `start` while `bounded_trades` does not.
-  `MergeSource::starting_at` is documented to make `start`
-  inclusive-and-not-earlier, so the extra guard is either redundant or
-  compensating for something trades does not compensate for. Nobody has read
-  `MergeSource` closely enough to say which.
 
 - STILL OPEN, both surfaced 2026-08-15 and neither answered.
   1. IS SUBSCRIBING TO AN UNCONFIGURED SYMBOL A SUPPORTED SESSION, or merely a
@@ -804,6 +806,25 @@ their build breaking loudly when piece 13 lands is the designed handoff.
   observation only; if it recurs, the fix direction is the same family as
   the smoke snapshot item below - assert on the divergence window's own
   clock, not on wall-time arrival order.
+
+- THREE SOCKET-LEVEL CLOCK TESTS deliberately not built at the piece-10
+  landing, 2026-08-16: an armed stall window lasting its declared span on a
+  late boat, a window armed before boarding still opening, and two boats
+  swept at their own cadence. Each rule is pinned at unit level (the
+  HavocWindow suite, the sweeper schedule tests); the socket forms are
+  latency-bounded assertions judged more likely to land as flakes than
+  gates, per the standing lessons on wall-clock socket tests. If a
+  socket-level demonstration is ever wanted, design it on the divergence
+  window's own clock rather than wall arrival order.
+
+- UNRESOLVED, restored 2026-08-16 after an erroneous close: `bounded_quotes`
+  filters each quote on `start` (`quote.ts_event >= start`) while
+  `bounded_trades` does not, and both now read the same
+  `rivers.history_source(symbol, start)`. `MergeSource::starting_at` is
+  documented to make `start` inclusive-and-not-earlier, so the extra guard is
+  either redundant or compensating for something trades does not compensate
+  for. Nobody has read `MergeSource` closely enough to say which; verified
+  still present in the code at the piece-10 landing.
 
 - GTD / `expire_time` on the wire, with a time-driven expiry pass on the
   sweeper. Refused today for limits and conditionals alike - the conditional-

@@ -18,6 +18,7 @@
 //! only a sweep pass ever walks the span a trigger is waiting on.
 
 use std::{
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -26,9 +27,6 @@ use mogwai_engine::ScanResult;
 use mogwai_protocol::{AdmissionSubject, ServerMessage};
 
 use crate::{admission::ExecLanes, config::sim_now_ns, fills, run::Run, source::Rivers};
-
-#[cfg(test)]
-use std::collections::HashMap;
 
 /// Wall floor under the converted sweep interval. Under an accelerated clock
 /// `wall_duration` shrinks linearly while the per-pass fixed cost (checkpoint
@@ -51,25 +49,54 @@ pub(crate) struct FillSweep {
 pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut completion = sweep.run.completion();
+        // EARLIEST-DEADLINE SCHEDULE, one task. The sweep interval is SIMULATED
+        // milliseconds, so it converts through a clock before it becomes a wall
+        // sleep - and since `/ws?speed=` landed, the boats on one venue no
+        // longer share a speed, so there is no single conversion. Each boat
+        // therefore carries its own next-due instant and the task sleeps to the
+        // EARLIEST of them. Deliberately not one task per boat: N tasks contend
+        // the single engine lock and multiply the completion fan-out, to buy
+        // cadence granularity that settlement correctness does not rest on
+        // (per-boat `to_ns` and per-boat `last_swept_ns` already carry that).
+        //
+        // Keyed by `BoatKey`, not by the `Arc`'s address: an address is reused
+        // after the last ticket drops a boat, so a newly seated boat could
+        // inherit a departed one's due instant.
+        let mut next_due: HashMap<crate::boatyard::BoatKey, (Arc<crate::boatyard::Boat>, Instant)> =
+            HashMap::new();
         // Labelled because the per-boat body below breaks on completion: an
         // unlabelled break there would leave only the boat loop and the
         // sweeper would keep walking a completed run forever.
         'passes: loop {
-            // The interval is SIMULATED milliseconds, so it is converted
-            // through a clock before it becomes a wall sleep. The venue clock
-            // and not a boat's: this pass is run-wide, every boat on it shares
-            // the configured speed, and a boatless venue must still tick.
-            let wall = sweep
+            // Re-derived every pass: boats appear and leave under this task. A
+            // boat seated mid-pass is due immediately on the next one, which is
+            // the latency it had under the old shared cadence too.
+            let now = Instant::now();
+            let boats = sweep.run.boatyard.boats();
+            let seated: HashSet<_> = boats.iter().map(|boat| boat.key()).collect();
+            next_due.retain(|key, _| seated.contains(key));
+            for boat in boats {
+                next_due.entry(boat.key()).or_insert((boat, now));
+            }
+            // A boatless venue has nothing to sweep, but the loop must still
+            // tick to observe completion, so it falls back to the venue clock's
+            // conversion.
+            let venue_wall = sweep
                 .run
                 .sim
                 .wall_duration(crate::config::sim_duration_from_millis(sweep.interval_ms))
                 .max(MIN_SWEEP_WALL);
+            let deadline = next_due
+                .values()
+                .map(|(_, due)| *due)
+                .min()
+                .unwrap_or(now + venue_wall);
             // A completed run stops walking the tape at once rather than one
             // interval late: the completion sequence is already announcing
             // itself on every socket, and a fill booked after that would be a
             // fill nobody is listening for.
             tokio::select! {
-                () = tokio::time::sleep(wall) => {}
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {}
                 _ = completion.changed() => break 'passes,
             }
             // One acquisition, so the scans and the mark symbols this pass
@@ -78,7 +105,24 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 let engine = sweep.run.engine.lock().await;
                 (engine.pending_scans(), engine.futures_mark_symbols())
             };
-            for boat in sweep.run.boatyard.boats() {
+            // Only the boats whose own converted interval has elapsed, each
+            // re-armed on ITS clock and floored at `MIN_SWEEP_WALL` as before.
+            let now = Instant::now();
+            let due_boats: Vec<_> = next_due
+                .values_mut()
+                .filter(|(_, due)| *due <= now)
+                .map(|(boat, due)| {
+                    *due = now
+                        + boat
+                            .sim
+                            .wall_duration(crate::config::sim_duration_from_millis(
+                                sweep.interval_ms,
+                            ))
+                            .max(MIN_SWEEP_WALL);
+                    Arc::clone(boat)
+                })
+                .collect();
+            for boat in due_boats {
                 let symbol = boat.symbol().to_owned();
                 let to_ns = sim_now_ns(boat.sim);
                 let boat_scans: Vec<_> = scans
@@ -158,8 +202,14 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     continue;
                 };
                 let mut engine = sweep.run.engine.lock().await;
-                let (events, emitted, originated) =
-                    apply_engine_pass(&mut engine, &results, settlement_marks, &marks, to_ns);
+                let (events, emitted, originated) = apply_engine_pass_on_clock(
+                    &mut engine,
+                    &results,
+                    settlement_marks,
+                    &marks,
+                    to_ns,
+                    boat.sim,
+                );
                 let shape = engine.book_shape();
                 drop(engine);
                 if events.is_empty() {
@@ -251,6 +301,7 @@ where
         .ok()
 }
 
+#[cfg(test)]
 fn apply_engine_pass(
     engine: &mut mogwai_engine::Engine,
     results: &[ScanResult],
@@ -258,7 +309,29 @@ fn apply_engine_pass(
     marks: &[(mogwai_protocol::Symbol, rust_decimal::Decimal)],
     to_ns: u64,
 ) -> (Vec<ServerMessage>, usize, usize) {
-    let (mut events, emitted) = engine.apply_scans(results, to_ns);
+    apply_engine_pass_on_clock(
+        engine,
+        results,
+        settlement_marks,
+        marks,
+        to_ns,
+        mogwai_protocol::SimClock {
+            sim_epoch_ns: 0,
+            wall_anchor_ns: 0,
+            speed: 1.0,
+        },
+    )
+}
+
+fn apply_engine_pass_on_clock(
+    engine: &mut mogwai_engine::Engine,
+    results: &[ScanResult],
+    settlement_marks: Vec<(mogwai_protocol::Symbol, u64, rust_decimal::Decimal)>,
+    marks: &[(mogwai_protocol::Symbol, rust_decimal::Decimal)],
+    to_ns: u64,
+    sim: mogwai_protocol::SimClock,
+) -> (Vec<ServerMessage>, usize, usize) {
+    let (mut events, emitted) = engine.apply_scans_on_clock(results, to_ns, sim);
     let mut originated = 0;
     for (symbol, instant, px) in settlement_marks {
         let settled = engine.settle(&[(symbol, px)], instant);

@@ -1432,11 +1432,6 @@ pub(crate) fn sim_duration_from_millis(ms: u64) -> u64 {
     ms.saturating_mul(1_000_000)
 }
 
-/// Convert a millisecond window into an absolute sim-time unix-ns deadline.
-pub(crate) fn window_until_ns(now: u64, ms: u64) -> u64 {
-    now.saturating_add(ms.saturating_mul(1_000_000))
-}
-
 /// The run's clock. The epoch is fixed by config alone, while the wall anchor
 /// decides only when a tick is delivered. `speed == 0.0` is unpaced delivery,
 /// but the axis advances at wall rate for deadlines, sweeps and volatility.

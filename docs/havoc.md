@@ -33,12 +33,21 @@ supported. Transport controls such as `GoDark`, `StallData`, `DelayAcks` and
 `LiquidityDrought` remains the inverse rate control: it stretches parent gaps
 while leaving sweep shape unchanged.
 
+Every timed havoc window, including transport windows and `FeeSurcharge`, is
+measured in simulated milliseconds on the receiving passenger's clock. A
+passenger that boards after the arm receives the full declared span from its
+own boarding instant, not the remainder of a venue-clock interval.
+
 `FeeSurcharge { mult, window_ms }` multiplies the configured maker or taker
 charge for fills inside one simulated-time window. The multiplier is restricted
 to `(0, 100]`, the duration to one hour, and a later arm replaces the earlier
 window outright. Whether it applies is a pure function of simulated time, so a
 later fill cannot erase the window for a replayed earlier timestamp. A
 venue-originated fill does not pay the surcharge.
+
+`CancelOpenOrderSilently` takes its clock and symbol from the targeted resting
+order. If the control request also supplies `symbol`, a mismatch is refused
+with HTTP 400 rather than using the supplied symbol to choose a clock.
 
 `DropNextAccountUpdate` swallows the next account snapshot that follows an
 order EXECUTING or LEAVING THE BOOK - a fill, a cancel that frees a resting

@@ -27,7 +27,7 @@ use mogwai_protocol::{
 use serde::{Deserialize, Serialize};
 
 use crate::admission::{ExecLanes, Reservation};
-use crate::config::{Config, sim_duration_from_millis, sim_now_ns, window_until_ns};
+use crate::config::{Config, now_ns, sim_duration_from_millis, sim_now_ns};
 use crate::run::Run;
 use crate::source;
 
@@ -379,7 +379,7 @@ pub(crate) async fn process_order_cmd(
             ts_event: ts,
         });
     };
-    let events = engine.process_with_market(order_cmd, ts, market_px);
+    let events = engine.process_with_market_on_clock(order_cmd, ts, market_px, sim);
     drop(engine);
     OrderOutcome::Produced {
         events,
@@ -479,8 +479,61 @@ pub(crate) async fn health(State(state): State<AppState>) -> Json<Health> {
 }
 
 impl AppState {
-    pub(crate) fn sim(&self) -> SimClock {
+    /// The venue's one wall-to-sim reference. The only callers left are the
+    /// answers no boat can give: a boatless river, the venue deadline, and the
+    /// venue-scoped account ledger. Anything about a symbol calls `river_now`.
+    pub(crate) fn venue_sim(&self) -> SimClock {
         self.run.sim
+    }
+
+    /// How far a request about `symbol` may be answered, and on whose clock.
+    ///
+    /// Async because it AWAITS an in-flight placement rather than falling
+    /// through to the venue clock. A request racing a boarding would otherwise
+    /// receive a well-formed answer off a clock strictly ahead of the boat that
+    /// is about to be seated - invisible precisely because it is well-formed.
+    pub(crate) async fn river_now(&self, symbol: &str) -> RiverNow {
+        if let Some(boat) = self
+            .run
+            .boatyard
+            .boat_for_symbol_awaiting_placement(symbol)
+            .await
+        {
+            RiverNow {
+                ns: boat.published_ns.load(Ordering::Acquire),
+                sim: boat.sim,
+                from_boat: true,
+            }
+        } else {
+            RiverNow::venue(self.venue_sim())
+        }
+    }
+}
+
+/// How a river's now was resolved, and on what clock.
+///
+/// A boated river answers with what its boat has PUBLISHED; a boatless river
+/// answers with the venue clock, which is the only ceiling water nobody is
+/// carrying has. Never the boat's affine projection: a boat is deliberately
+/// behind its own map, and a ceiling above the published tape is a look-ahead.
+pub(crate) struct RiverNow {
+    /// The ceiling a request about this symbol may be answered as of.
+    pub(crate) ns: u64,
+    /// The clock that instant lives on - the boat's when boated, the venue's
+    /// otherwise. `/clock` renders this whole value.
+    pub(crate) sim: SimClock,
+    /// True when `sim` is a boat's. Renders as `ServerClock::boat_clock`.
+    pub(crate) from_boat: bool,
+}
+
+impl RiverNow {
+    /// The venue's own answer, for the questions that name no river at all.
+    pub(crate) fn venue(sim: SimClock) -> Self {
+        Self {
+            ns: sim_now_ns(sim),
+            sim,
+            from_boat: false,
+        }
     }
 }
 
@@ -526,23 +579,22 @@ pub(crate) async fn arm_divergence(
             run.modify_ack_ms.store(modify_ack_ms, Ordering::Relaxed);
             run.cancel_ack_ms.store(cancel_ack_ms, Ordering::Relaxed);
         }
-        // GoDark/StallData windows are STORE-not-extend (S18): each arm overwrites
-        // the absolute deadline with `now + ms`, so re-arming with a SMALLER `ms`
+        // GoDark/StallData windows are STORE-not-extend (S18): each arm replaces
+        // the whole armed span under one lock, so re-arming with a SMALLER `ms`
         // shortens an in-flight blackout rather than lengthening it. This is
         // deliberate - re-arming sets the window, it does not accumulate - and lets
         // a test cut a window short by re-posting a small one; an operator wanting a
         // longer window re-arms with the longer `ms`.
+        //
+        // The window is stored CLOCK-NEUTRALLY, as a wall arming instant plus a
+        // simulated span, because the armer cannot know who will read it: a
+        // passenger may board afterwards, and every reader judges the span on
+        // its own boat clock.
         Divergence::GoDark { ms } => {
-            run.dark_until_ns.store(
-                window_until_ns(sim_now_ns(state.sim()), ms),
-                Ordering::Relaxed,
-            );
+            run.dark.arm(now_ns(), sim_duration_from_millis(ms));
         }
         Divergence::StallData { ms } => {
-            run.stall_until_ns.store(
-                window_until_ns(sim_now_ns(state.sim()), ms),
-                Ordering::Relaxed,
-            );
+            run.stall.arm(now_ns(), sim_duration_from_millis(ms));
         }
         Divergence::FlowSurge {
             rate_mult,
@@ -572,9 +624,18 @@ pub(crate) async fn arm_divergence(
                     ),
                 );
             }
+            // The late-boarder rule, collapsed to its only reachable case. This
+            // arm is refused above unless the river is BOATLESS, and every boat
+            // placed on a river anchors `sim_epoch_ns` at the yard's origin,
+            // which is `run.started_ns`. So the instant a future boat would open
+            // this window at IS the run origin, and stamping it here is the same
+            // answer `HavocWindow::open_at` computes for the transport windows.
+            // Stamping `sim_now_ns(venue_sim)` instead - what this used to do -
+            // put the window in that boat's far future, where it could never be
+            // entered at all.
             if !state.rivers.arm_flow_surge(
                 symbol,
-                sim_now_ns(state.sim()),
+                run.started_ns,
                 duration_ms,
                 rate_mult,
                 children_mult,
@@ -584,12 +645,22 @@ pub(crate) async fn arm_divergence(
                     format!("symbol {symbol} has no configured shape"),
                 );
             }
+            // Named in the ack so an operator can see WHICH span was armed and
+            // against which origin, rather than inferring it from a bare 202.
+            return (
+                StatusCode::ACCEPTED,
+                format!(
+                    "armed a {duration_ms} ms simulated surge on {symbol}, opening at the river origin {origin}",
+                    origin = run.started_ns
+                ),
+            );
         }
         Divergence::FeeSurcharge { mult, window_ms } => {
-            run.engine
-                .lock()
-                .await
-                .arm_fee_surcharge(mult, window_ms, sim_now_ns(state.sim()));
+            run.engine.lock().await.arm_fee_surcharge(
+                mult,
+                now_ns(),
+                sim_duration_from_millis(window_ms),
+            );
         }
         // Immediate book action, not an armed trigger: cancel the resting
         // order right now, silently (no lifecycle event - that lost event IS
@@ -597,7 +668,38 @@ pub(crate) async fn arm_divergence(
         // miss - unknown id, or already terminal - is refused with a 404 so
         // a scenario cannot believe it armed a fault that never happened.
         Divergence::CancelOpenOrderSilently { client_order_id } => {
-            let ts = sim_now_ns(state.sim());
+            // The clock comes from the TARGETED ORDER, never from a request
+            // field: `client_order_id` already determines the order, hence its
+            // symbol and its river, and a request-supplied `symbol` can disagree
+            // with it. A mismatch is refused rather than silently preferred
+            // either way.
+            let Some(order_symbol) = run.engine.lock().await.open_order_symbol(&client_order_id)
+            else {
+                // No resting order carries this id. Let the engine say WHY -
+                // unknown id and already-terminal are different diagnoses, and
+                // this arm must not flatten them into one message. The clock
+                // handed in is irrelevant: this call can only fail.
+                let reason = run
+                    .engine
+                    .lock()
+                    .await
+                    .cancel_open_order_silently(&client_order_id, sim_now_ns(state.venue_sim()))
+                    .err()
+                    .unwrap_or_else(|| "unknown order".to_owned());
+                tracing::warn!(%client_order_id, reason, "refusing silent cancel");
+                return (StatusCode::NOT_FOUND, reason);
+            };
+            if let Some(request_symbol) = request.symbol.as_deref()
+                && request_symbol != order_symbol.as_ref()
+            {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "silent cancel names symbol {request_symbol}, but order {client_order_id} rests on {order_symbol}"
+                    ),
+                );
+            }
+            let ts = state.river_now(&order_symbol).await.ns;
             if let Err(reason) = run
                 .engine
                 .lock()
@@ -610,11 +712,9 @@ pub(crate) async fn arm_divergence(
             tracing::info!(%client_order_id, "silently canceled resting order server-side");
         }
         Divergence::ClearDivergences => {
-            // Lift both server-owned temporal windows. `0` is the
-            // cleared sentinel: `delay_ms == 0` skips the exec pump's delay sleep,
-            // and `now_ns() < 0` is never true so the dark and data-stall
-            // guards are off. There is no backlog to replay because gated
-            // frames are dropped.
+            // Lift both server-owned temporal windows. `None` is the cleared
+            // state and is closed on every reader clock. There is no backlog
+            // to replay because gated frames are dropped.
             // The generator half is decided BEFORE anything is lifted: a
             // refused control must be a no-op, and returning here after the
             // stores below would leave the transport windows cleared under a
@@ -643,8 +743,8 @@ pub(crate) async fn arm_divergence(
                     .collect(),
             };
             run.delay_ms.store(0, Ordering::Relaxed);
-            run.dark_until_ns.store(0, Ordering::Relaxed);
-            run.stall_until_ns.store(0, Ordering::Relaxed);
+            run.dark.clear();
+            run.stall.clear();
             for symbol in clearing {
                 state.rivers.clear_flow_surge(&symbol);
             }
@@ -711,10 +811,33 @@ pub(crate) async fn arm_divergence(
 /// Every shape this run configured, sorted by symbol, each of them servable for
 /// history.
 ///
-/// A websocket upgrade may still only name the boot symbol or omit it: history
-/// is river-keyed now, but exactly one paced boat is placed, at boot.
+/// Websocket upgrades place paced boats on demand for any served symbol.
 pub(crate) async fn instruments(State(state): State<AppState>) -> Json<Vec<InstrumentDef>> {
     Json(state.rivers.profiles().instrument_defs())
+}
+
+/// The HTTP shape of a PULLED account snapshot.
+///
+/// `AccountState` itself is UNCHANGED - it is also the pushed frame's payload,
+/// and the pushed path is per-boat and already correct. The label is added by
+/// this response only, and `serde(flatten)` keeps every existing field at the
+/// same position in the object, so a consumer that ignores unknown fields
+/// (`mogwai-adapter`'s `client/shared.rs` among them) parses it unchanged.
+#[derive(Serialize)]
+pub(crate) struct AccountSnapshot {
+    /// Always `"venue"` today. Present so a consumer can never mistake the
+    /// `ts_event` here for boat time.
+    clock: ClockAxis,
+    #[serde(flatten)]
+    account: AccountState,
+}
+
+/// Which axis a timestamp lives on. The sibling of `ServerClock::boat_clock`,
+/// and the reason a venue stamp is honest rather than a look-ahead in disguise.
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ClockAxis {
+    Venue,
 }
 
 /// Pull route for the venue's current account snapshot.
@@ -723,10 +846,20 @@ pub(crate) async fn instruments(State(state): State<AppState>) -> Json<Vec<Instr
 /// event. An adapter pulls this once on connect so the bridge's account row
 /// exists before the first order is worked, rather than learning the account
 /// only when the first fill's `AccountState` arrives.
-pub(crate) async fn account(State(state): State<AppState>) -> Json<AccountState> {
-    let ts = sim_now_ns(state.sim());
+///
+/// STAMPED ON THE VENUE CLOCK, deliberately. The ledger is venue-scoped - one
+/// engine serving every river - so there is no boat axis to put it on: stamp
+/// from the boot boat and a push from a later-placed boat on another river is
+/// AHEAD of the pull; stamp from the newest boat and it is behind. No choice
+/// can keep a cross-clock monotonicity promise, so the answer keeps the venue
+/// stamp and says so, and a consumer orders pulls against pushes BY SEQUENCE.
+pub(crate) async fn account(State(state): State<AppState>) -> Json<AccountSnapshot> {
+    let ts = sim_now_ns(state.venue_sim());
     let mut engine = state.run.engine.lock().await;
-    Json(engine.account_snapshot(ts))
+    Json(AccountSnapshot {
+        clock: ClockAxis::Venue,
+        account: engine.account_snapshot(ts),
+    })
 }
 
 #[derive(Default, Deserialize)]
@@ -752,21 +885,17 @@ pub(crate) async fn clock(
     // mid-run is deliberately behind its own clock's projection, and a client
     // pacing against a projection the feed has not reached would ask for water
     // that has not been delivered. With no boat the two coincide.
-    let boat = query
-        .symbol
-        .as_deref()
-        .and_then(|symbol| state.run.boatyard.boat_for_symbol(symbol));
-    let sim = boat.as_ref().map_or_else(|| state.sim(), |boat| boat.sim);
-    let server_now_ns = boat.as_ref().map_or_else(
-        || sim_now_ns(sim),
-        |boat| boat.published_ns.load(Ordering::Acquire),
-    );
+    let now = if let Some(symbol) = query.symbol.as_deref() {
+        state.river_now(symbol).await
+    } else {
+        RiverNow::venue(state.venue_sim())
+    };
     Json(ServerClock {
-        sim,
-        server_now_ns,
+        sim: now.sim,
+        server_now_ns: now.ns,
         data_origin_ns: state.run.data_origin_ns(),
         warmup_ns: state.run.warmup_ns,
-        boat_clock: boat.is_some(),
+        boat_clock: now.from_boat,
     })
 }
 
@@ -867,33 +996,40 @@ pub(crate) async fn trades(
     let limit = normalize_limit(query.limit);
     let rivers = Arc::clone(&state.rivers);
     let data_origin = source::TAPE_ORIGIN_NS;
-    let sim_now = sim_now_ns(state.sim());
     let HistoryQuery {
         symbol, start, end, ..
     } = query;
     if let Some(body) = unserved_symbol_refusal(&symbol, rivers.profiles()) {
         return Err((StatusCode::BAD_REQUEST, body));
     }
-    if let Some(body) = history_start_refusal(start, data_origin, sim_now) {
+    // The ceiling is the NAMED RIVER's now, not the venue's.
+    let river_now = state.river_now(&symbol).await.ns;
+    if let Some(body) = history_start_refusal(start, data_origin, river_now) {
         return Err((StatusCode::BAD_REQUEST, body));
     }
 
-    // An explicit `end` past the clock is CLAMPED rather than refused, and that
-    // asymmetry with the `start` refusal above is deliberate. A start past
-    // sim-now asks for a window that lies entirely in the future and can only
-    // be a caller error; an end past sim-now is the ordinary "give me
-    // everything up to now" request, which a consumer writes by stamping its
-    // OWN clock - a hair ahead of the venue's under any skew or acceleration.
-    // Refusing that would fail every honest warmup fetch to prevent nothing:
-    // the clamp serves exactly the data that exists and no more, so nothing is
-    // silently short about it.
+    // An explicit `end` past the ceiling is CLAMPED rather than refused, and
+    // that asymmetry with the `start` refusal above is deliberate. A start past
+    // the ceiling asks for a window that lies entirely beyond what this river
+    // has produced and can only be a caller error; an end past it is the
+    // ordinary "give me everything up to now" request, which a consumer writes
+    // by stamping a clock of its own.
     //
-    // Clamp the served tail at sim-now for the same reason: an `end` past the
-    // clock - or a no-`end` request, which otherwise grinds out the full
-    // `limit` however far into the future that lands - must not stream ticks
-    // stamped ahead of the clock. The bound is inclusive, so a tick landing
-    // exactly at sim-now is still served.
-    let end = Some(end.map_or(sim_now, |end| end.min(sim_now)));
+    // That gap is NOT a hair. The ceiling here is the river's own now - what
+    // its boat has PUBLISHED - and a boat placed `T` wall-nanoseconds after
+    // boot sits `T * speed` simulated nanoseconds behind the venue clock,
+    // permanently and by construction. So a client that reads `/clock` with no
+    // `?symbol=` and passes that instant as `end` is routinely far ahead of
+    // this answer, and refusing it would fail every honest warmup fetch to
+    // prevent nothing: the clamp serves exactly the data that exists and no
+    // more, so nothing is silently short about it. A client that needs to know
+    // where the tail actually is reads `/clock?symbol=`.
+    //
+    // Clamping the served tail also stops a no-`end` request - which otherwise
+    // grinds out the full `limit` however far past the ceiling that lands -
+    // from streaming ticks the river has not published. The bound is
+    // inclusive, so a tick landing exactly at the ceiling is still served.
+    let end = Some(end.map_or(river_now, |end| end.min(river_now)));
 
     // Synthesizing up to `MAX_HISTORY_LIMIT` ticks is pure CPU work against the
     // generator (the source never blocks on IO), and `next_tick` never returns
@@ -950,19 +1086,20 @@ pub(crate) async fn quotes(
     let limit = normalize_limit(query.limit);
     let rivers = Arc::clone(&state.rivers);
     let data_origin = source::TAPE_ORIGIN_NS;
-    let sim_now = sim_now_ns(state.sim());
     let HistoryQuery {
         symbol, start, end, ..
     } = query;
     if let Some(body) = unserved_symbol_refusal(&symbol, rivers.profiles()) {
         return Err((StatusCode::BAD_REQUEST, body));
     }
-    if let Some(body) = history_start_refusal(start, data_origin, sim_now) {
+    // The ceiling is the NAMED RIVER's now, not the venue's.
+    let river_now = state.river_now(&symbol).await.ns;
+    if let Some(body) = history_start_refusal(start, data_origin, river_now) {
         return Err((StatusCode::BAD_REQUEST, body));
     }
     // A future start is impossible, while a future end is the ordinary
     // caller-clock spelling of "everything through now", so clamp the latter.
-    let end = Some(end.map_or(sim_now, |end| end.min(sim_now)));
+    let end = Some(end.map_or(river_now, |end| end.min(river_now)));
     // The permit rides the blocking task for the same reason as `/trades`: a
     // client disconnect drops this future, and only the closure outlives that.
     let named = truncated_symbol(&symbol);
@@ -1186,11 +1323,13 @@ pub(crate) fn resolve_socket_symbol(
 /// that impossible request distinct from "no trades happened". With today's
 /// zero origin that lower branch is unreachable for a `u64`, but it remains
 /// tied to the constant the handlers read so moving the origin makes it live.
-/// A start beyond `sim_now` is likewise impossible without a look-ahead leak.
-/// An end beyond the clock is instead clamped at each handler's call site:
-/// callers commonly mean "everything through now" and may stamp their own
-/// slightly leading clock.
-fn history_start_refusal(start: Option<u64>, data_origin: u64, sim_now: u64) -> Option<String> {
+/// A start beyond `river_now` is likewise impossible without a look-ahead leak.
+/// `river_now` is the NAMED RIVER's ceiling, not the venue's: for a seated
+/// river it is what its boat published, and only a boatless river answers with
+/// venue sim-now. An end beyond the ceiling is instead clamped at each
+/// handler's call site: callers commonly mean "everything through now" and
+/// stamp a clock of their own that leads this one.
+fn history_start_refusal(start: Option<u64>, data_origin: u64, river_now: u64) -> Option<String> {
     let start = start?;
     if start < data_origin {
         tracing::warn!(start, data_origin, "refusing off-tape history window");
@@ -1198,10 +1337,10 @@ fn history_start_refusal(start: Option<u64>, data_origin: u64, sim_now: u64) -> 
             "requested start {start} precedes data_origin_ns {data_origin}; the tape cannot serve before its origin"
         ));
     }
-    (start > sim_now).then(|| {
-        tracing::warn!(start, sim_now, "refusing future history window");
+    (start > river_now).then(|| {
+        tracing::warn!(start, river_now, "refusing future history window");
         format!(
-            "requested start {start} exceeds sim-now {sim_now}; the tape cannot serve past the clock"
+            "requested start {start} exceeds this river's now {river_now} - what its boat has published, or venue sim-now if it carries none; the tape cannot serve past the clock"
         )
     })
 }

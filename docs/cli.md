@@ -22,9 +22,21 @@ optional; omitting it binds the socket to the run's boot symbol for compatibilit
 with older clients. A socket owns exactly one river. A supplied symbol is 1 to
 32 ASCII letters, digits, dot, dash, or underscore, and matching is case exact.
 Malformed or unserved symbols are refused with HTTP 400 before the upgrade.
-For now only the symbol this run booted is accepted. That is a temporary
-restriction until run state is keyed per river, not the venue's final symbol
-model.
+Any configured symbol is accepted. The first passenger places its river's boat
+and later passengers at the same speed share it.
+
+The history endpoints `GET /trades` and `GET /quotes` are bounded by the named
+river's now. For a seated river that is the last instant its boat published;
+for a boatless river it is the venue clock. An omitted or future `end` is
+clamped to that ceiling, and a `start` above it is refused with HTTP 400. A
+client must therefore read `/clock?symbol=<symbol>` before constructing a
+history window. Using boatless `/clock` as the `start` for a seated river can
+be ahead of that river and is refused.
+
+`GET /account` returns the venue-wide ledger. Its `ts_event` is venue time and
+the top-level `clock` field is `"venue"`. Pushed account events are stamped on
+their boat clocks, so consumers order pulls against pushes by protocol
+sequence, never by comparing timestamps across those axes.
 
 There is no flag for this and nothing to opt into. The record used to be gated
 behind `--ready-fd <FD>`, which took an unvalidated fd number: a number naming

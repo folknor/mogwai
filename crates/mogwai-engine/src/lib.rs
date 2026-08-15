@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use mogwai_protocol::{
     AccountId, AccountState, ClientMessage, ClientOrderId, FillSnapshot, Hit, InstrumentDef,
     OrderFilled, OrderStatusInfo, OrderStatusSnapshot, OrderType, Position, ScanKind,
-    ServerMessage, Side, SubmitOrder, Symbol, TimeInForce, VenueOrderId, WireOrderStatus,
+    ServerMessage, Side, SimClock, SubmitOrder, Symbol, TimeInForce, VenueOrderId, WireOrderStatus,
     control::Divergence, default_instruments,
 };
 use rust_decimal::Decimal;
@@ -163,8 +163,8 @@ pub struct FeeSchedule {
 #[derive(Debug, Clone, Copy)]
 struct FeeSurchargeWindow {
     mult: Decimal,
-    start_ns: u64,
-    end_ns: u64,
+    wall_armed_ns: u64,
+    sim_span_ns: u64,
 }
 
 /// What the venue read off its own clean tape at the instant a command arrived.
@@ -365,6 +365,23 @@ pub struct Engine {
     margin_breached: HashSet<Symbol>,
     liquidation_band_ticks: u32,
     fee_surcharge: Option<FeeSurchargeWindow>,
+    /// The clock of the boat whose pass is currently being processed.
+    ///
+    /// The engine is venue-wide but every pass through it belongs to exactly
+    /// ONE boat, and the fee surcharge is the only state that must be judged on
+    /// that boat's axis. Carrying it as one field set at each pass entry
+    /// (`process_with_market_on_clock`, `apply_scans_on_clock`) rather than as
+    /// a parameter threaded through the fill-booking helpers is a deliberate
+    /// narrowing: those helpers are reached from a dozen places and none of the
+    /// others has any business knowing a clock.
+    ///
+    /// THE INVARIANT THAT KEEPS IT HONEST: every entry point that can book a
+    /// fill sets this first. `settle` and `mark` do not, because they are only
+    /// ever called inside a pass that already did, and their venue-originated
+    /// fills pay no surcharge. A new entry point that books fills owes an
+    /// assignment here; without one it silently bills on the previous pass's
+    /// boat.
+    event_sim: SimClock,
     oms_type: mogwai_protocol::OmsType,
 }
 
@@ -410,11 +427,16 @@ impl Engine {
         }
     }
 
-    pub fn arm_fee_surcharge(&mut self, mult: Decimal, window_ms: u64, now_ns: u64) {
+    /// Arm the surcharge for a SIMULATED span, stamped at a WALL instant.
+    ///
+    /// Deliberately not an absolute `start..end` on one sim axis: the venue has
+    /// no single such axis, and an interval on boat A's axis applied verbatim
+    /// to boat B's orders fires for the wrong span or never.
+    pub fn arm_fee_surcharge(&mut self, mult: Decimal, wall_armed_ns: u64, sim_span_ns: u64) {
         self.fee_surcharge = Some(FeeSurchargeWindow {
             mult,
-            start_ns: now_ns,
-            end_ns: now_ns.saturating_add(window_ms.saturating_mul(1_000_000)),
+            wall_armed_ns,
+            sim_span_ns,
         });
     }
 
@@ -422,14 +444,36 @@ impl Engine {
         self.fee_surcharge = None;
     }
 
-    pub(crate) fn fee_surcharge_multiplier_at(&self, ts: u64) -> Decimal {
+    /// Whether `ts` - a timestamp sampled on `sim` - falls inside the armed
+    /// surcharge window, judged ON `sim`.
+    ///
+    /// The window names no axis of its own: it is a wall arming instant plus a
+    /// simulated span, so one arm means the same number of simulated
+    /// milliseconds to a slow boat and a fast one. The LATE-BOARDER RULE opens
+    /// it at `max(sim.sim_ns(armed), sim.sim_epoch_ns)`, so a boat whose anchor
+    /// is later than the arm gets the full span from its own epoch instead of a
+    /// window that already closed in its past.
+    pub(crate) fn fee_surcharge_multiplier_for(&self, sim: SimClock, ts: u64) -> Decimal {
         self.fee_surcharge.map_or(Decimal::ONE, |window| {
-            if ts >= window.start_ns && ts < window.end_ns {
+            let opening = sim.sim_ns(window.wall_armed_ns).max(sim.sim_epoch_ns);
+            if ts >= opening && ts < opening.saturating_add(window.sim_span_ns) {
                 window.mult
             } else {
                 Decimal::ONE
             }
         })
+    }
+
+    /// The river a RESTING order belongs to, so a control targeting that order
+    /// by id can resolve the clock its timestamps live on. `None` for an id
+    /// that is unknown or already terminal - exactly the ids
+    /// `cancel_open_order_silently` refuses, and resolved through the SAME
+    /// index so the two can never disagree about what is open.
+    #[must_use]
+    pub fn open_order_symbol(&self, client_order_id: &str) -> Option<Symbol> {
+        self.open
+            .position(client_order_id)
+            .map(|pos| std::sync::Arc::clone(&self.open[pos].submit.symbol))
     }
 
     #[must_use]
@@ -818,6 +862,7 @@ impl Engine {
             margin_breached: HashSet::new(),
             liquidation_band_ticks: DEFAULT_LIQUIDATION_BAND_TICKS,
             fee_surcharge: None,
+            event_sim: SimClock::identity(),
             oms_type: mogwai_protocol::OmsType::Netting,
         }
     }
@@ -856,12 +901,31 @@ impl Engine {
     /// has a defined behaviour without one: a limit rests untriggerable until a
     /// later walk has evidence, an amend keeps the band it had, and a market
     /// order fills unslipped at its stated price.
+    ///
+    /// Runs on the IDENTITY clock, which makes it a tests-and-benches
+    /// convenience rather than a serving path: an armed fee surcharge is then
+    /// judged with simulated time equal to wall time. The server calls
+    /// `process_with_market_on_clock` with the commanding socket's boat clock.
     pub fn process_with_market(
         &mut self,
         msg: ClientMessage,
         ts: u64,
         reading: Option<MarketReading>,
     ) -> Vec<ServerMessage> {
+        self.process_with_market_on_clock(msg, ts, reading, SimClock::identity())
+    }
+
+    /// As `process_with_market`, on the clock of the boat this pass belongs to.
+    /// Every timestamp the pass produces was sampled on that clock, so the fee
+    /// surcharge is judged on it too.
+    pub fn process_with_market_on_clock(
+        &mut self,
+        msg: ClientMessage,
+        ts: u64,
+        reading: Option<MarketReading>,
+        sim: SimClock,
+    ) -> Vec<ServerMessage> {
+        self.event_sim = sim;
         if cfg!(debug_assertions) {
             self.reconcile_order_locked();
         }
@@ -2450,7 +2514,7 @@ mod tests {
             },
         );
         fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
-        engine.arm_fee_surcharge(Decimal::from(5_000), 1_000, 0);
+        engine.arm_fee_surcharge(Decimal::from(5_000), 0, 1_000_000_000);
 
         let outcome = engine.mark(&[("MNQ".into(), Decimal::from(20_000))], 2);
         assert_eq!(outcome.originated_orders, 1);
@@ -2696,7 +2760,7 @@ mod tests {
                 },
             },
         );
-        engine.arm_fee_surcharge(Decimal::from(3), 10, 1);
+        engine.arm_fee_surcharge(Decimal::from(3), 1, 10_000_000);
         assert_eq!(
             future_fill(&mut engine, "FEE-1", 1, 21_000, 2).commission,
             Decimal::from(3)
@@ -2721,12 +2785,41 @@ mod tests {
                 },
             },
         );
-        engine.arm_fee_surcharge(Decimal::from(2), 100, 1);
-        engine.arm_fee_surcharge(Decimal::from(4), 100, 2);
+        engine.arm_fee_surcharge(Decimal::from(2), 1, 100_000_000);
+        engine.arm_fee_surcharge(Decimal::from(4), 2, 100_000_000);
         assert_eq!(
             future_fill(&mut engine, "FEE-1", 1, 21_000, 3).commission,
             Decimal::from(4)
         );
+    }
+
+    #[test]
+    fn a_surcharge_armed_once_spans_equal_sim_time_for_two_order_clocks() {
+        let mut engine = funded(1);
+        engine.arm_fee_surcharge(Decimal::from(3), 100, 1_000);
+        for sim in [
+            SimClock {
+                sim_epoch_ns: 10_000,
+                wall_anchor_ns: 0,
+                speed: 1.0,
+            },
+            SimClock {
+                sim_epoch_ns: 20_000,
+                wall_anchor_ns: 50,
+                speed: 10.0,
+            },
+        ] {
+            engine.event_sim = sim;
+            let opening = sim.sim_ns(100).max(sim.sim_epoch_ns);
+            assert_eq!(
+                engine.fee_surcharge_multiplier_for(sim, opening + 999),
+                Decimal::from(3)
+            );
+            assert_eq!(
+                engine.fee_surcharge_multiplier_for(sim, opening + 1_000),
+                Decimal::ONE
+            );
+        }
     }
 
     #[test]
@@ -5739,7 +5832,7 @@ mod tests {
                 },
             },
         );
-        engine.arm_fee_surcharge(Decimal::from(3), 10, 1);
+        engine.arm_fee_surcharge(Decimal::from(3), 1, 10_000_000);
         assert_eq!(
             future_fill(&mut engine, "AFTER", 1, 21_000, 10_000_001).commission,
             Decimal::ONE

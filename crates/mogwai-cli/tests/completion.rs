@@ -12,7 +12,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::{Venue, accelerated_config, fast_config, http_get, spawn};
+use common::{Venue, accelerated_config, fast_config, http_get, spawn, two_symbols_config};
 use futures_util::StreamExt;
 use mogwai_protocol::{
     ServerMessage,
@@ -202,6 +202,39 @@ async fn run_complete_reaches_every_open_socket() {
     );
     assert!(left.1 && right.1, "both sockets were closed with WS 1000");
 
+    assert_eq!(venue.wait_for_exit(Duration::from_secs(20)).code, Some(0));
+}
+
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn run_complete_is_stamped_on_the_receiving_sockets_clock() {
+    let mut venue = spawn(&["--config", &two_symbols_config(), "--duration", "2s"]);
+    let (mut boot, _) = tokio_tungstenite::connect_async(format!(
+        "{}?symbol={}",
+        venue.ws_url(),
+        venue.record.symbol
+    ))
+    .await
+    .expect("join the boot river");
+    let (mut second, _) =
+        tokio_tungstenite::connect_async(format!("{}?symbol=MNQ&speed=1", venue.ws_url()))
+            .await
+            .expect("place a slower second river");
+
+    let (left, right) = tokio::join!(
+        drain_to_completion(&mut boot, Duration::from_secs(30)),
+        drain_to_completion(&mut second, Duration::from_secs(30)),
+    );
+    let left = left.0.expect("boot boat receives completion");
+    let right = right.0.expect("second boat receives completion");
+    assert_ne!(
+        left.0, right.0,
+        "each socket must receive its own boat instant"
+    );
+    assert_ne!(
+        left.1, right.1,
+        "each socket must receive its own covered span"
+    );
     assert_eq!(venue.wait_for_exit(Duration::from_secs(20)).code, Some(0));
 }
 

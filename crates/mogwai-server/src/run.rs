@@ -15,10 +15,83 @@ use tokio::sync::{Mutex as AsyncMutex, watch};
 
 use crate::{admission::ExecLanes, boatyard::Boatyard, source};
 
+/// A havoc window, armed at a WALL instant for a SIMULATED span, judged on
+/// whatever clock the reader owns.
+///
+/// Stored as `(wall_armed_ns, sim_span_ns)` rather than as an absolute sim
+/// deadline because the venue has no single sim axis to express a deadline on:
+/// the same window must mean `ms` simulated milliseconds to a passenger on a
+/// fast boat and to one on a slow one. The armer cannot know who will read it
+/// either - a passenger may board afterwards - so the window carries no clock
+/// and every reader opens it on its own.
+///
+/// Behind a `Mutex`, not two atomics. Arming is a cold path - an operator
+/// control - and two independent `AtomicU64`s are a TORN READ: a concurrent
+/// reader can pair the new wall instant with the old span, and a clear can race
+/// a re-arm and erase the new span. The single `AtomicU64` this replaces was
+/// tear-free by construction, so an atomic pair would be a regression
+/// introduced by the fix. No packed encoding either: two independent nanosecond
+/// quantities do not fit one u64 without a range limit nobody can audit later.
+pub(crate) struct HavocWindow(Mutex<Option<ArmedSpan>>);
+
+#[derive(Clone, Copy)]
+struct ArmedSpan {
+    wall_armed_ns: u64,
+    sim_span_ns: u64,
+}
+
+impl HavocWindow {
+    pub(crate) fn new() -> Self {
+        Self(Mutex::new(None))
+    }
+
+    /// STORE, not extend: the whole span is replaced under the lock, so
+    /// re-arming with a shorter span shortens an in-flight window.
+    pub(crate) fn arm(&self, wall_armed_ns: u64, sim_span_ns: u64) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ArmedSpan {
+            wall_armed_ns,
+            sim_span_ns,
+        });
+    }
+
+    /// The cleared state, which is closed on EVERY reader's clock - the
+    /// property the old `0` deadline sentinel had, now expressed as absence.
+    pub(crate) fn clear(&self) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    /// Judged on the reader's own clock.
+    ///
+    /// THE LATE-BOARDER RULE: the opening instant is
+    /// `max(sim.sim_ns(wall_armed_ns), sim.sim_epoch_ns)`. Projecting the
+    /// arming instant through the clock of a boat anchored LATER than the arm
+    /// would put the window in that boat's past, where it never opens - arm a
+    /// blackout, connect 50 ms later, and the blackout silently does not
+    /// happen. Such a reader instead treats its own epoch as the opening and
+    /// consumes the FULL span.
+    pub(crate) fn open_at(&self, sim: SimClock, sim_at_ns: u64) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some_and(|span| {
+                let opening = sim.sim_ns(span.wall_armed_ns).max(sim.sim_epoch_ns);
+                sim_at_ns >= opening && sim_at_ns < opening.saturating_add(span.sim_span_ns)
+            })
+    }
+}
+
 pub(crate) struct Run {
-    /// The shape this run placed its one paced boat on. Every configured shape
-    /// has a river in `rivers` and is servable for history; only this one has a
-    /// live tape, which is why a `/ws` upgrade may still bind nothing else.
+    /// The shape this run placed its BOOT boat on, and the river a `/ws`
+    /// upgrade binds when it names no symbol. Every configured shape has a
+    /// river in `rivers`, is servable for history, and gets a boat of its own
+    /// when a passenger boards it; this one is only distinguished by carrying
+    /// a boat from boot, and therefore by never lagging the venue clock.
     pub(crate) boot_symbol: Symbol,
     /// Every configured river, created on first use and keyed independently, so
     /// two symbols never serialize on each other's checkpoint chain.
@@ -28,9 +101,13 @@ pub(crate) struct Run {
     pub(crate) seeds: RunSeeds,
     pub(crate) boatyard: Arc<Boatyard>,
     boot_ticket: Mutex<Option<crate::boatyard::Ticket>>,
-    /// The run clock. Owned HERE rather than beside the router state: a run has
-    /// one clock, and a second copy in the HTTP state is a second thing that
-    /// could be re-anchored independently of the tape it dates.
+    /// The VENUE clock, and not the now of any seated river. It is the venue's
+    /// one wall-to-sim reference, kept for the three answers no boat can give:
+    /// a boatless river's history ceiling, the venue deadline, and the
+    /// venue-scoped account ledger. Owned HERE rather than beside the router
+    /// state: a run has one such clock, and a second copy in the HTTP state is
+    /// a second thing that could be re-anchored independently of the tape it
+    /// dates.
     pub(crate) sim: SimClock,
     /// Sim instant at which the run began serving live, set after warmup was
     /// materialized. The epoch every duration is measured from.
@@ -48,8 +125,8 @@ pub(crate) struct Run {
     pub(crate) submit_ack_ms: AtomicU64,
     pub(crate) modify_ack_ms: AtomicU64,
     pub(crate) cancel_ack_ms: AtomicU64,
-    pub(crate) dark_until_ns: AtomicU64,
-    pub(crate) stall_until_ns: AtomicU64,
+    pub(crate) dark: HavocWindow,
+    pub(crate) stall: HavocWindow,
     complete_tx: watch::Sender<Option<(u64, u64)>>,
     /// Every live connection's outbound lanes, so venue-ORIGINATED output - a
     /// trigger fill nobody commanded - reaches all of them. This is what
@@ -119,8 +196,8 @@ impl Run {
             submit_ack_ms: AtomicU64::new(0),
             modify_ack_ms: AtomicU64::new(0),
             cancel_ack_ms: AtomicU64::new(0),
-            dark_until_ns: AtomicU64::new(0),
-            stall_until_ns: AtomicU64::new(0),
+            dark: HavocWindow::new(),
+            stall: HavocWindow::new(),
             complete_tx,
             lanes: Mutex::new(Vec::new()),
             next_lane_id: AtomicU64::new(0),
@@ -248,6 +325,78 @@ impl Run {
             CommandClass::Modify => self.modify_ack_ms.load(Ordering::Relaxed),
             CommandClass::Cancel => self.cancel_ack_ms.load(Ordering::Relaxed),
         }
+    }
+}
+
+#[cfg(test)]
+mod havoc_window_tests {
+    use super::HavocWindow;
+    use mogwai_protocol::SimClock;
+    use std::sync::Arc;
+
+    fn sim(anchor: u64, speed: f64) -> SimClock {
+        SimClock {
+            sim_epoch_ns: 1_000,
+            wall_anchor_ns: anchor,
+            speed,
+        }
+    }
+
+    #[test]
+    fn arming_replaces_rather_than_extends() {
+        let window = HavocWindow::new();
+        window.arm(10, 100);
+        window.arm(20, 5);
+        assert!(window.open_at(sim(0, 1.0), 1_022));
+        assert!(!window.open_at(sim(0, 1.0), 1_026));
+    }
+
+    #[test]
+    fn a_cleared_window_is_open_for_no_clock() {
+        let window = HavocWindow::new();
+        window.arm(10, 100);
+        window.clear();
+        assert!(!window.open_at(sim(0, 1.0), 1_010));
+    }
+
+    #[test]
+    fn the_same_window_spans_equal_sim_time_on_two_different_speeds() {
+        let window = HavocWindow::new();
+        window.arm(10, 100);
+        let slow = sim(0, 1.0);
+        let fast = sim(0, 10.0);
+        let slow_open = slow.sim_ns(10);
+        let fast_open = fast.sim_ns(10);
+        assert!(window.open_at(slow, slow_open + 99));
+        assert!(window.open_at(fast, fast_open + 99));
+        assert!(!window.open_at(slow, slow_open + 100));
+        assert!(!window.open_at(fast, fast_open + 100));
+    }
+
+    #[test]
+    fn a_reader_anchored_after_the_arm_opens_at_its_own_epoch() {
+        let window = HavocWindow::new();
+        window.arm(10, 100);
+        let late = sim(20, 5.0);
+        assert!(window.open_at(late, late.sim_epoch_ns));
+        assert!(!window.open_at(late, late.sim_epoch_ns + 100));
+    }
+
+    #[test]
+    fn concurrent_arm_clear_and_read_never_observe_a_torn_span() {
+        let window = Arc::new(HavocWindow::new());
+        let writer = Arc::clone(&window);
+        let handle = std::thread::spawn(move || {
+            for i in 0..10_000 {
+                writer.arm(i, i.saturating_add(1));
+                writer.clear();
+            }
+        });
+        let clock = sim(0, 1.0);
+        for i in 0..10_000 {
+            let _ = window.open_at(clock, clock.sim_epoch_ns.saturating_add(i));
+        }
+        handle.join().unwrap();
     }
 }
 
