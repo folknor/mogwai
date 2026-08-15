@@ -19,6 +19,35 @@ Or both. There are no exceptions.
 
 ## Open issues
 
+- NAUTILUS HAS NO CHANNEL FOR A DECLARED FEED GAP, so mogwai's `FeedLagged`
+  can only reach a host as a log line. CROSS-REPO, and written for a reader who
+  has not seen the bug loop.
+  The MOGWAI venue tells a client, explicitly and with a count, when it dropped
+  market-data or execution frames for that client: `ServerMessage::FeedLagged`
+  carries `skipped` and `sim_now_ns`. That is a strictly better signal than
+  most real venues give, and the adapter has nowhere to put it. Nautilus's
+  `DataEvent` enum (`common/src/messages/mod.rs`) is `Response`, `Data`,
+  `Instrument`, `FundingRate`, `InstrumentStatus`, `OptionGreeks` and an
+  optional DeFi variant - none of them means "the stream you are aggregating
+  has a hole". The client itself is handed to the host boxed as
+  `dyn DataClient`, so an adapter-owned counter or health accessor is
+  unreachable, and `is_connected` is true throughout because the socket never
+  broke. Fabricating an `InstrumentStatus` would report a venue halt that did
+  not happen, and tearing the socket down to force a visible failure would turn
+  a recoverable gap into an outage.
+  WHY IT MATTERS HERE: bar aggregation over the missing span is silently wrong,
+  and the polling cursor resumes past it, so a strategy cannot distinguish a
+  quiet market from a dropped one. On the execution socket the same drop can
+  take order events, leaving the nautilus order state disagreeing with venue
+  truth until something calls the reconciliation generators.
+  LOCAL MITIGATION SHIPPED: both message translators log at ERROR with the
+  skipped count and the simulated instant, in the words a host can alert on.
+  THE UPSTREAM HALF: a first-class data-gap event - a `DataEvent` variant, or
+  a `DataClient` health/degradation callback the engine surfaces - so a
+  consumer can react rather than grep. Until that exists, a host driving
+  MOGWAI should treat an ERROR from `mogwai-adapter` mentioning a feed gap as a
+  reconcile-and-distrust-the-window signal. broadarrow is the known consumer.
+
 - `mogwai_protocol::AccountId` NOW HAS A PRIVATE FIELD (source-breaking,
   landed 2026-08-15). Its serialized form is unchanged, but construction as
   `AccountId(raw_string)` no longer compiles and deserialization now enforces

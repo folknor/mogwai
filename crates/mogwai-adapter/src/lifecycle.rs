@@ -24,6 +24,32 @@ use tokio::{
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+/// A socket generation owns its split reader and writer tasks. Dropping the
+/// outer connection future must cancel them too; dropping a bare JoinHandle
+/// detaches the task and leaks both socket halves.
+struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+
+impl AbortOnDrop {
+    fn new(handle: tokio::task::JoinHandle<()>) -> Self {
+        Self(Some(handle))
+    }
+
+    async fn abort_and_join(mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+            drop(handle.await);
+        }
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.0 {
+            handle.abort();
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ReconnectPolicy {
     initial_ms: u64,
@@ -444,22 +470,22 @@ pub(crate) async fn run_ws_connection<
         connected.store(true, Ordering::Relaxed);
         let (mut writer, mut reader) = ws.split();
         let (out_tx, mut out_rx) = unbounded_channel::<Message>();
-        let writer_handle = tokio::spawn(async move {
+        let writer_handle = AbortOnDrop::new(tokio::spawn(async move {
             while let Some(msg) = out_rx.recv().await {
                 if writer.send(msg).await.is_err() {
                     break;
                 }
             }
-        });
+        }));
         let (in_tx, mut in_rx) = unbounded_channel();
-        let reader_handle = tokio::spawn(async move {
+        let reader_handle = AbortOnDrop::new(tokio::spawn(async move {
             while let Some(msg) = reader.next().await {
                 if in_tx.send(Some(msg)).is_err() {
                     return;
                 }
             }
             drop(in_tx.send(None));
-        });
+        }));
 
         // Reattach state is WS commands only - resubscribes on the data socket,
         // nothing on the exec socket. In particular the execution client does
@@ -615,10 +641,8 @@ pub(crate) async fn run_ws_connection<
         // tasks (D.12). Without the join an in-flight writer send could still be
         // racing the teardown. A `JoinError` here is expected - the task was
         // just aborted - so it is intentionally ignored.
-        writer_handle.abort();
-        reader_handle.abort();
-        drop(writer_handle.await);
-        drop(reader_handle.await);
+        writer_handle.abort_and_join().await;
+        reader_handle.abort_and_join().await;
         on_disconnect().await;
         connected.store(false, Ordering::Relaxed);
         if run_complete {

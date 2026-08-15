@@ -260,6 +260,22 @@ impl MogwaiExecutionClient {
         })
     }
 
+    /// Retires the current transport generation's connectivity flag by
+    /// REPLACING the shared cell, not by storing `false` into it.
+    ///
+    /// `abort_tasks` is not synchronous: cancellation is delivered at the
+    /// aborted task's next await point, so a reader caught between
+    /// `connect_async(..).await` returning and its first select can still run
+    /// `connected.store(true)` AFTER the caller has stored `false`. That
+    /// leaves a stopped client reporting itself connected, and a subsequent
+    /// `wait_connected` returning success for a socket that never opened.
+    /// Swapping the `Arc` means the retired reader writes to a cell nobody
+    /// reads: the drop timing of the old generation stops being a
+    /// correctness property.
+    fn retire_connected_flag(&mut self) {
+        self.connected = Arc::new(AtomicBool::new(false));
+    }
+
     /// The status this client's reconciliation mirror currently holds for one
     /// order, or `None` if the mirror does not know it.
     ///
@@ -390,6 +406,7 @@ impl VenueQuery {
         let request_id = UUID4::new().to_string();
         let reply_rx = self.register_ws_query(
             |pending, tx| drop(pending.orders.insert(request_id.clone(), tx)),
+            |pending| drop(pending.orders.remove(&request_id)),
             ExecWsCommand::QueryOrders {
                 request_id: request_id.clone(),
                 client_order_id,
@@ -406,6 +423,7 @@ impl VenueQuery {
         let request_id = UUID4::new().to_string();
         let reply_rx = self.register_ws_query(
             |pending, tx| drop(pending.fills.insert(request_id.clone(), tx)),
+            |pending| drop(pending.fills.remove(&request_id)),
             ExecWsCommand::QueryFills {
                 request_id: request_id.clone(),
                 client_order_id,
@@ -423,6 +441,7 @@ impl VenueQuery {
     fn register_ws_query<T>(
         &self,
         register: impl FnOnce(&mut PendingQueries, tokio::sync::oneshot::Sender<T>),
+        unregister: impl FnOnce(&mut PendingQueries),
         cmd: ExecWsCommand,
     ) -> anyhow::Result<tokio::sync::oneshot::Receiver<T>> {
         let tx = self
@@ -434,8 +453,10 @@ impl VenueQuery {
             &mut lock_recover(&self.pending, "pending queries"),
             reply_tx,
         );
-        tx.send(cmd)
-            .context("send execution websocket query command")?;
+        if tx.send(cmd).is_err() {
+            unregister(&mut lock_recover(&self.pending, "pending queries"));
+            anyhow::bail!("send execution websocket query command: channel closed");
+        }
         Ok(reply_rx)
     }
 
@@ -510,9 +531,18 @@ fn order_status_report_from_info(
     };
     let quantity = convert_qty(info.quantity, "quantity")?;
     let filled = convert_qty(info.filled_qty, "filled_qty")?;
+    let instrument_id = convert::instrument_id(&def)
+        .map_err(|err| {
+            tracing::warn!(
+                order = %info.client_order_id,
+                error = %err,
+                "dropping order status report: unrepresentable instrument symbol"
+            );
+        })
+        .ok()?;
     let mut report = OrderStatusReport::new(
         account_id,
-        convert::instrument_id(&def),
+        instrument_id,
         Some(client_order_id),
         venue_order_id,
         convert::nautilus_side(info.side),
@@ -552,6 +582,19 @@ fn order_status_report_from_info(
     }
     if let Some(ts) = info.ts_triggered {
         report = report.with_ts_triggered(UnixNanos::from(ts));
+    }
+    if let Some(position_id) = &info.position_id {
+        let position_id = PositionId::new_checked(position_id)
+            .map_err(|err| {
+                tracing::warn!(
+                    order = %info.client_order_id,
+                    field = "position_id",
+                    error = %err,
+                    "dropping order status report: unrepresentable venue position id"
+                );
+            })
+            .ok()?;
+        report = report.with_venue_position_id(position_id);
     }
     Some(
         report
@@ -625,11 +668,18 @@ fn fill_report_from_wire(
         .position_id
         .as_deref()
         .and_then(|id| PositionId::new_checked(id).ok());
+    let instrument_id = match convert::instrument_id(&def) {
+        Ok(id) => id,
+        Err(err) => {
+            warn_drop("symbol", &err);
+            return None;
+        }
+    };
     // Taker unconditionally: the wire carries no maker/taker flag (see the
     // fill event handler's identical, deliberately lossy mapping).
     Some(FillReport::new(
         account_id,
-        convert::instrument_id(&def),
+        instrument_id,
         venue_order_id,
         trade_id,
         convert::nautilus_side(fill.side),
@@ -708,13 +758,9 @@ impl ExecutionClient for MogwaiExecutionClient {
     }
 
     fn stop(&mut self) -> anyhow::Result<()> {
-        if self.core.is_stopped() {
-            return Ok(());
-        }
-
-        self.connected.store(false, Ordering::Relaxed);
         self.ws_cmd = None;
         abort_tasks(&self.task_handles);
+        self.retire_connected_flag();
         // Drop every in-flight query waiter's sender so a report generator
         // blocked on a reply over the now-dead socket errors out immediately
         // (oneshot RecvError) instead of waiting out its full timeout.
@@ -746,6 +792,17 @@ impl ExecutionClient for MogwaiExecutionClient {
     }
 
     async fn connect(&mut self) -> anyhow::Result<()> {
+        // A client owns exactly one transport generation. This cleanup is
+        // unconditional and independent of the component started flag: hosts
+        // may connect without calling start, and reconnect after stop.
+        self.ws_cmd = None;
+        abort_tasks(&self.task_handles);
+        self.retire_connected_flag();
+        {
+            let mut pending = lock_recover(&self.pending, "pending queries");
+            pending.orders.clear();
+            pending.fills.clear();
+        }
         let http_base_url = self.config.http_base_url();
         // The execution client rides only the affine map; the tape boundary in
         // the envelope is the data client's concern.
@@ -893,9 +950,8 @@ impl ExecutionClient for MogwaiExecutionClient {
         // just-spawned reader and clear the stale handle/ws_cmd so a retry does
         // not orphan the first task racing on the shared `connected` flag.
         if let Err(err) = wait_connected(&self.connected, &ws_url).await {
-            if let Some(handle) = lock_recover(&self.task_handles, "task handles").pop() {
-                handle.abort();
-            }
+            abort_tasks(&self.task_handles);
+            self.retire_connected_flag();
             self.ws_cmd = None;
             return Err(err);
         }
@@ -1266,9 +1322,18 @@ impl ExecutionClient for MogwaiExecutionClient {
                         );
                     })
                     .ok()?;
+                let instrument_id = convert::instrument_id(&def)
+                    .map_err(|err| {
+                        tracing::warn!(
+                            symbol = %position.symbol,
+                            error = %err,
+                            "dropping position report: unrepresentable instrument symbol"
+                        );
+                    })
+                    .ok()?;
                 Some(PositionStatusReport::new(
                     self.core.account_id,
-                    convert::instrument_id(&def),
+                    instrument_id,
                     position_side(position.quantity),
                     quantity,
                     ts_event,
@@ -2185,10 +2250,25 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 tracing::warn!(?subject, %reason, "venue refused request admission");
             }
         },
-        // Subscription diagnostics are handled by the data client.
+        ServerMessage::FeedLagged {
+            skipped,
+            sim_now_ns,
+        } => {
+            // ERROR for the same reason as the data client's arm: a drop on
+            // the EXECUTION socket can have taken order events with it, so
+            // the nautilus order state may now disagree with venue truth.
+            // Recovery exists - the venue-truth report generators re-derive
+            // the order, fill and position sets - but nothing here triggers
+            // it, so the log is what tells a host to reconcile.
+            tracing::error!(
+                skipped,
+                sim_now_ns,
+                "venue dropped frames on the execution socket; order events may be missing and the mirror should be reconciled against venue truth"
+            );
+        }
+        // Market data is handled by the data client.
         ServerMessage::Trade(_)
         | ServerMessage::Quote(_)
-        | ServerMessage::FeedLagged { .. }
         | ServerMessage::HavocDiagnostic { .. }
         // A clean venue completion is a transport concern.  The reader owns
         // reconnect policy; the execution event translator has no event to
@@ -2475,7 +2555,12 @@ fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext
             let currency = Currency::from_str(&margin.currency).ok()?;
             let initial = convert::money(margin.initial, currency).ok()?;
             let maintenance = convert::money(margin.maintenance, currency).ok()?;
-            let instrument_id = instruments.get(&margin.symbol).map(convert::instrument_id);
+            // A margin row whose symbol cannot form an instrument id keeps the
+            // balance and drops only the attribution, which is what the
+            // absent-def case already does.
+            let instrument_id = instruments
+                .get(&margin.symbol)
+                .and_then(|def| convert::instrument_id(def).ok());
             match MarginBalance::new_checked(initial, maintenance, instrument_id) {
                 Ok(balance) => Some(balance),
                 Err(err) => {
@@ -2588,4 +2673,38 @@ fn position_side(quantity: Decimal) -> PositionSideSpecified {
 
 fn in_time_range(ts: UnixNanos, start: Option<UnixNanos>, end: Option<UnixNanos>) -> bool {
     start.is_none_or(|start| ts >= start) && end.is_none_or(|end| ts <= end)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_query_send_unregisters_its_waiter() {
+        let (ws_tx, ws_rx) = unbounded_channel();
+        drop(ws_rx);
+        let pending = Arc::new(Mutex::new(PendingQueries::default()));
+        let query = VenueQuery {
+            ws_cmd: Some(ws_tx),
+            pending: Arc::clone(&pending),
+            timeout_secs: 1,
+        };
+        let request_id = "Q-1".to_string();
+
+        let result = query.register_ws_query::<OrderStatusSnapshot>(
+            |pending, tx| drop(pending.orders.insert(request_id.clone(), tx)),
+            |pending| drop(pending.orders.remove(&request_id)),
+            ExecWsCommand::QueryOrders {
+                request_id: request_id.clone(),
+                client_order_id: None,
+                open_only: false,
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(
+            lock_recover(&pending, "pending queries").orders.is_empty(),
+            "send failure must not retain a waiter"
+        );
+    }
 }

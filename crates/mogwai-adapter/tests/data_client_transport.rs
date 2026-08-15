@@ -174,6 +174,29 @@ async fn subscribe_and_request_drive_data_events() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn connecting_twice_replaces_the_data_socket() {
+    let state = Arc::new(StubState::default());
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (sink_tx, _sink_rx) = unbounded_channel::<DataEvent>();
+    replace_data_event_sender(sink_tx);
+    let mut client = data_client(base_url);
+    client.start().unwrap();
+    client.connect().await.unwrap();
+    client.connect().await.unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while state.active_ws.load(std::sync::atomic::Ordering::Relaxed) != 1 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "old data socket remained active"
+        );
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(state.ws_hits.load(std::sync::atomic::Ordering::Relaxed), 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn a_host_subscribing_quotes_after_connect_receives_the_book_immediately() {
     let state = Arc::new(StubState::default());
     state.ws_trades.lock().expect("ws frames mutex").push(

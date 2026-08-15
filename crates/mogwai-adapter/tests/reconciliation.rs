@@ -166,6 +166,41 @@ async fn mass_status_reports_all_three_sets_over_ws() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn connecting_twice_replaces_the_execution_socket() {
+    let mut fixture = fixture().await;
+    fixture.client.connect().await.unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while fixture.state.active_ws.load(Ordering::Relaxed) != 1 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "old execution socket remained active"
+        );
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(fixture.state.ws_hits.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn reconnect_after_stop_can_be_stopped_again() {
+    let mut fixture = fixture().await;
+    fixture.client.stop().unwrap();
+    fixture.client.connect().await.unwrap();
+    fixture.client.stop().unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while fixture.state.active_ws.load(Ordering::Relaxed) != 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "stop after reconnect left the execution socket active"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn mass_status_reports_all_three_sets_over_the_single_ws_transport() {
     let fixture = fixture().await;
     let mass = fixture
@@ -242,6 +277,22 @@ async fn a_venue_assigned_position_id_reaches_the_nautilus_fill_report() {
     assert_eq!(
         reports[0].venue_position_id,
         Some(PositionId::from("MNQ-7"))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn a_venue_assigned_position_id_reaches_the_order_status_report() {
+    let fixture = fixture().await;
+    fixture.state.venue_orders.lock().unwrap()[0].position_id = Some("BTCUSDT-7".into());
+    let reports = fixture
+        .client
+        .generate_order_status_reports(&order_reports_cmd())
+        .await
+        .unwrap();
+    assert_eq!(
+        reports[0].venue_position_id,
+        Some(PositionId::from("BTCUSDT-7"))
     );
 }
 

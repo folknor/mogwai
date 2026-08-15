@@ -144,8 +144,20 @@ pub(crate) fn nautilus_order_status(status: WireOrderStatus) -> OrderStatus {
     }
 }
 
-pub(crate) fn instrument_id(def: &InstrumentDef) -> InstrumentId {
-    InstrumentId::new(NautilusSymbol::from(def.symbol.as_ref()), *MOGWAI_VENUE)
+/// Builds the nautilus `InstrumentId` for a wire instrument definition.
+///
+/// Fallible for the same reason as [`price`] and [`quantity`]: nautilus's
+/// `Symbol::new` and the `From<&str>`/`From<String>` impls that wrap it
+/// `assert!`-panic on an empty or all-whitespace string, and
+/// `mogwai_protocol::Symbol` is an unvalidated `Arc<str>` straight off the
+/// wire. Every caller here runs inside a spawned reader, poll or report task
+/// with no supervisor, so an empty `symbol` field from a hostile or buggy
+/// venue would take the whole task down rather than dropping one frame.
+pub(crate) fn instrument_id(def: &InstrumentDef) -> anyhow::Result<InstrumentId> {
+    let symbol = NautilusSymbol::new_checked(def.symbol.as_ref())
+        .map_err(|err| anyhow::anyhow!("{err}"))
+        .context("convert instrument symbol")?;
+    Ok(InstrumentId::new(symbol, *MOGWAI_VENUE))
 }
 
 /// Builds the synthetic nautilus `TradeId` for a wire trade.
@@ -240,15 +252,18 @@ pub(crate) fn instrument_any(
     def: &InstrumentDef,
     ts_init: UnixNanos,
 ) -> anyhow::Result<InstrumentAny> {
-    let id = instrument_id(def);
+    let id = instrument_id(def)?;
+    // `id.symbol` is the already-validated symbol; reusing it keeps the
+    // panicking `From<&str>` impl off this path entirely.
+    let symbol = id.symbol;
     match &def.class {
         InstrumentClass::Spot { base, quote } => {
             let base = Currency::from_str(base).with_context(|| format!("unknown base {base}"))?;
             let quote =
                 Currency::from_str(quote).with_context(|| format!("unknown quote {quote}"))?;
-            let pair = CurrencyPair::new(
+            let pair = CurrencyPair::new_checked(
                 id,
-                NautilusSymbol::from(def.symbol.as_ref()),
+                symbol,
                 base,
                 quote,
                 def.price_precision,
@@ -271,7 +286,8 @@ pub(crate) fn instrument_any(
                 None,
                 UnixNanos::from(0),
                 ts_init,
-            );
+            )
+            .context("convert spot currency pair")?;
             Ok(InstrumentAny::CurrencyPair(pair))
         }
         InstrumentClass::Future {
@@ -291,7 +307,7 @@ pub(crate) fn instrument_any(
             };
             let contract = FuturesContract::new_checked(
                 id,
-                NautilusSymbol::from(def.symbol.as_ref()),
+                symbol,
                 asset_class,
                 Some(ustr::Ustr::from("MOGWAI")),
                 ustr::Ustr::from(underlying),
@@ -366,6 +382,42 @@ mod tests {
     }
 
     #[test]
+    fn a_spot_def_with_a_zero_increment_is_refused_not_panicked() {
+        let mut def = def();
+        def.price_increment = Decimal::ZERO;
+
+        let err = instrument_any(&def, UnixNanos::from(7))
+            .expect_err("a zero tick cannot build a currency pair");
+
+        assert!(
+            err.to_string().contains("convert spot currency pair"),
+            "wire refusal must name the failed instrument conversion: {err:#}"
+        );
+    }
+
+    #[test]
+    fn an_empty_wire_symbol_is_refused_not_panicked() {
+        // `mogwai_protocol::Symbol` is an unvalidated `Arc<str>`, so a hostile
+        // or buggy venue can put an empty or all-whitespace symbol on the
+        // wire. Nautilus's `Symbol::new` (and the `From<&str>` impl wrapping
+        // it) assert past that, which would down the unsupervised reader.
+        for hostile in ["", "   "] {
+            let mut def = def();
+            def.symbol = hostile.into();
+
+            let err = instrument_id(&def).expect_err("an empty symbol has no instrument id");
+            assert!(
+                err.to_string().contains("convert instrument symbol"),
+                "refusal must name the failed conversion: {err:#}"
+            );
+            assert!(
+                instrument_any(&def, UnixNanos::from(7)).is_err(),
+                "instrument_any must refuse the same symbol"
+            );
+        }
+    }
+
+    #[test]
     fn trade_conversion_uses_instrument_precision_and_ts_trade_id() {
         let def = def();
         let trade = mogwai_protocol::TradeTick {
@@ -376,8 +428,13 @@ mod tests {
             ts_event: 42,
         };
 
-        let tick = trade_tick(&trade, instrument_id(&def), &def, UnixNanos::from(7))
-            .expect("well-formed trade converts");
+        let tick = trade_tick(
+            &trade,
+            instrument_id(&def).expect("symbol converts"),
+            &def,
+            UnixNanos::from(7),
+        )
+        .expect("well-formed trade converts");
 
         assert_eq!(tick.price.precision, 2);
         assert_eq!(tick.size.precision, 8);
@@ -406,8 +463,13 @@ mod tests {
             ts_event: u64::MAX,
         };
 
-        let tick = trade_tick(&trade, instrument_id(&def), &def, UnixNanos::from(0))
-            .expect("realistic trade converts without tripping the id cap");
+        let tick = trade_tick(
+            &trade,
+            instrument_id(&def).expect("symbol converts"),
+            &def,
+            UnixNanos::from(0),
+        )
+        .expect("realistic trade converts without tripping the id cap");
 
         assert!(
             tick.trade_id.to_string().len() <= 36,
@@ -423,7 +485,7 @@ mod tests {
         // the adapter's own PollCursor is built to tolerate. Folding in
         // price/size/aggressor must keep two such trades distinct.
         let def = def();
-        let id = instrument_id(&def);
+        let id = instrument_id(&def).expect("symbol converts");
         let first = mogwai_protocol::TradeTick {
             symbol: "BTCUSDT".into(),
             price: Decimal::new(10_000, 2),
@@ -485,7 +547,12 @@ mod tests {
             ts_event: 42,
         };
 
-        let err = trade_tick(&trade, instrument_id(&def), &def, UnixNanos::from(0));
+        let err = trade_tick(
+            &trade,
+            instrument_id(&def).expect("symbol converts"),
+            &def,
+            UnixNanos::from(0),
+        );
         assert!(err.is_err(), "zero-size trade must be rejected, not panic");
     }
 
@@ -504,7 +571,12 @@ mod tests {
             ts_event: 42,
         };
 
-        let err = trade_tick(&trade, instrument_id(&def), &def, UnixNanos::from(0));
+        let err = trade_tick(
+            &trade,
+            instrument_id(&def).expect("symbol converts"),
+            &def,
+            UnixNanos::from(0),
+        );
         assert!(
             err.is_err(),
             "rounds-to-zero size must be rejected, not panic"

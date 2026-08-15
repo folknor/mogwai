@@ -138,6 +138,8 @@ pub struct StubState {
     pub trades_hits: AtomicUsize,
     /// Count of WS `/ws` upgrades (the polling profile must never open one).
     pub ws_hits: AtomicUsize,
+    /// Number of upgraded sockets whose handler is still alive.
+    pub active_ws: AtomicUsize,
     /// When true, `serve_ws` drops the connection before completing the upgrade,
     /// modelling a venue that refuses the socket. The handshake is still counted
     /// so the attempt-cap test can pin the count.
@@ -349,6 +351,15 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
         return;
     }
     drop(stream.flush().await);
+
+    struct ActiveWs(Arc<StubState>);
+    impl Drop for ActiveWs {
+        fn drop(&mut self) {
+            self.0.active_ws.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+    state.active_ws.fetch_add(1, Ordering::Relaxed);
+    let _active = ActiveWs(Arc::clone(&state));
 
     let mut ws = tokio_tungstenite::WebSocketStream::from_raw_socket(
         stream,

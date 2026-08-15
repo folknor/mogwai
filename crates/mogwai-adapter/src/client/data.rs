@@ -39,7 +39,7 @@ use nautilus_core::{Params, UnixNanos};
 use nautilus_model::{
     data::{Bar, BarType, Data, bar::get_bar_interval_ns},
     enums::BarAggregation,
-    identifiers::{ClientId, Venue},
+    identifiers::{ClientId, InstrumentId, Venue},
 };
 use nautilus_network::http::HttpClient;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
@@ -119,6 +119,22 @@ impl MogwaiDataClient {
             bars: Arc::new(Mutex::new(HashMap::new())),
             task_handles: Arc::new(Mutex::new(Vec::new())),
         })
+    }
+
+    /// Retires the current transport generation's connectivity flag by
+    /// REPLACING the shared cell, not by storing `false` into it.
+    ///
+    /// `abort_tasks` is not synchronous: cancellation is delivered at the
+    /// aborted task's next await point, so a reader caught between
+    /// `connect_async(..).await` returning and its first select can still run
+    /// `connected.store(true)` AFTER the caller has stored `false`. That
+    /// leaves a dead client reporting itself connected, and a subsequent
+    /// `wait_connected` returning success for a socket that never opened.
+    /// Swapping the `Arc` means the retired reader writes to a cell nobody
+    /// reads: the drop timing of the old generation stops being a
+    /// correctness property.
+    fn retire_connected_flag(&mut self) {
+        self.connected = Arc::new(AtomicBool::new(false));
     }
 
     fn subscribe_symbol(
@@ -309,9 +325,9 @@ impl DataClient for MogwaiDataClient {
     }
 
     fn stop(&mut self) -> anyhow::Result<()> {
-        self.connected.store(false, Ordering::Relaxed);
         self.ws_cmd = None;
         abort_tasks(&self.task_handles);
+        self.retire_connected_flag();
         // Emit any completed-but-withheld bar windows before the drain tasks are
         // gone and `reset` clears the table (AD19). Done after abort so no drain
         // task races a fresh trade into the same window; the shared bar mutex
@@ -347,6 +363,12 @@ impl DataClient for MogwaiDataClient {
 
     async fn connect(&mut self) -> anyhow::Result<()> {
         let sink = self.sink()?;
+        // A client owns exactly one transport generation. Retire every task
+        // and sender from the previous generation before doing any async setup,
+        // so a second connect cannot leave two readers sharing `connected`.
+        self.ws_cmd = None;
+        abort_tasks(&self.task_handles);
+        self.retire_connected_flag();
         let http_base_url = self.config.http_base_url();
         let (server, floor_known) = fetch_clock_or_identity(&self.http, &http_base_url).await;
         let sim = server.sim;
@@ -459,9 +481,8 @@ impl DataClient for MogwaiDataClient {
         // first. Abort the task and clear the stale handle and ws_cmd before
         // propagating, leaving the client cleanly disconnected for retry.
         if let Err(err) = wait_connected(&self.connected, &ws_url).await {
-            if let Some(handle) = lock_recover(&self.task_handles, "task handles").pop() {
-                handle.abort();
-            }
+            abort_tasks(&self.task_handles);
+            self.retire_connected_flag();
             self.ws_cmd = None;
             return Err(err);
         }
@@ -1175,6 +1196,33 @@ async fn handle_market_message(
                 "venue reported a protocol error on the data path; the reason is the venue's own diagnosis"
             );
         }
+        ServerMessage::FeedLagged {
+            skipped,
+            sim_now_ns,
+        } => {
+            // ERROR, not warn, and the level is a RULING rather than taste.
+            // `FeedLagged` is the venue declaring that this client's tape has
+            // a hole: bars aggregate wrong, a `PollCursor` resumes past the
+            // missing span, and nothing downstream can tell the difference
+            // between a quiet market and a dropped one. The standing
+            // preference is an assert, a type or a guard over a verification,
+            // and none of the three is available HERE: nautilus's `DataEvent`
+            // carries no gap or degradation variant (`Response`, `Data`,
+            // `Instrument`, `FundingRate`, `InstrumentStatus`, `OptionGreeks`
+            // only), the client is handed to the host as a `dyn DataClient`
+            // with no downcast, and fabricating an `InstrumentStatus` would
+            // report a venue halt that did not happen. Refusing - tearing the
+            // socket down - would turn a recoverable gap into a total outage
+            // and invent a policy the venue did not ask for. So the loudest
+            // honest channel is the log, at the level a host alerts on. The
+            // real fix is a declared feed-gap event upstream; see the
+            // cross-repo entry in `notes/todo.md`.
+            tracing::error!(
+                skipped,
+                sim_now_ns,
+                "venue dropped market-data frames for this client; the feed has a visible gap and downstream aggregation is wrong for the missing span"
+            );
+        }
         ServerMessage::RunComplete {
             sim_now_ns,
             elapsed_ns,
@@ -1225,7 +1273,17 @@ fn emit_quote(
     def: &InstrumentDef,
     sim: SimClock,
 ) {
-    let id = convert::instrument_id(def);
+    let id = match convert::instrument_id(def) {
+        Ok(id) => id,
+        Err(err) => {
+            tracing::warn!(
+                symbol = %quote.symbol,
+                error = %err,
+                "dropping quote: unrepresentable instrument symbol"
+            );
+            return;
+        }
+    };
     match convert::quote_tick(quote, id, def, now_unix_nanos(sim)) {
         Ok(tick) => drop(sink.send(DataEvent::Data(Data::Quote(tick)))),
         Err(err) => tracing::warn!(
@@ -1258,7 +1316,17 @@ fn emit_trade(
     // requested instant because this only moves the cursor forward.
     advance_sub_start_ts(subs, &trade.symbol, trade.ts_event);
     let state = sub_state(subs, &trade.symbol);
-    let id = convert::instrument_id(&def);
+    let id = match convert::instrument_id(&def) {
+        Ok(id) => id,
+        Err(err) => {
+            tracing::warn!(
+                symbol = %trade.symbol,
+                error = %err,
+                "dropping trade: unrepresentable instrument symbol"
+            );
+            return;
+        }
+    };
     if state.as_ref().is_some_and(|s| s.trades > 0) {
         match convert::trade_tick(trade, id, &def, now_unix_nanos(sim)) {
             Ok(tick) => drop(sink.send(DataEvent::Data(Data::Trade(tick)))),
@@ -1271,12 +1339,13 @@ fn emit_trade(
         }
     }
     if state.as_ref().is_some_and(|s| s.bars > 0) {
-        emit_live_bars(trade, &def, sink, bars, sim);
+        emit_live_bars(trade, id, &def, sink, bars, sim);
     }
 }
 
 fn emit_live_bars(
     trade: &mogwai_protocol::TradeTick,
+    id: InstrumentId,
     def: &InstrumentDef,
     sink: &UnboundedSender<DataEvent>,
     bars: &Arc<Mutex<HashMap<BarType, BarSubState>>>,
@@ -1286,7 +1355,7 @@ fn emit_live_bars(
     {
         let mut bars = lock_recover(bars, "bar");
         for (bar_type, state) in bars.iter_mut() {
-            if bar_type.instrument_id() != convert::instrument_id(def) || state.refs == 0 {
+            if bar_type.instrument_id() != id || state.refs == 0 {
                 continue;
             }
             if let Some(bar) = update_bar_state(*bar_type, state, trade, def, sim) {
