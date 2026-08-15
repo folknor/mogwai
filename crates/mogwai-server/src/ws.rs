@@ -152,10 +152,10 @@ async fn dispatch_command(
     state: &AppState,
     lanes: &ExecLanes,
     symbol: &mogwai_protocol::Symbol,
-    sim: mogwai_protocol::SimClock,
+    boat: &Arc<crate::boatyard::Boat>,
 ) {
     let class = CommandClass::of(&cmd);
-    match process_order_cmd(cmd, state, &state.run, lanes, symbol, sim).await {
+    match process_order_cmd(cmd, state, &state.run, lanes, symbol, boat).await {
         OrderOutcome::Produced {
             events,
             reservation,
@@ -177,7 +177,7 @@ fn spawn_command_dispatcher(
     state: AppState,
     lanes: ExecLanes,
     symbol: mogwai_protocol::Symbol,
-    sim: mogwai_protocol::SimClock,
+    boat: Arc<crate::boatyard::Boat>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // The permit's scope is the correctness property: the process-wide
@@ -187,7 +187,7 @@ fn spawn_command_dispatcher(
         // than left to a destructure binding whose lifetime an underscore
         // pattern would silently end early.
         while let Some(queued) = commands.recv().await {
-            dispatch_command(queued.cmd, &state, &lanes, &symbol, sim).await;
+            dispatch_command(queued.cmd, &state, &lanes, &symbol, &boat).await;
             drop(queued.global_slot);
         }
     })
@@ -308,7 +308,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SocketSessio
         state.clone(),
         lanes.clone(),
         Arc::clone(&session.symbol),
-        boat_sim,
+        Arc::clone(session.ticket.boat()),
     );
     let writer = tokio::spawn(run_writer(sink, prio_rx, out_rx, state.clone(), boat_sim));
     // Venue-ORIGINATED execution output (a trigger fill nobody commanded)

@@ -19,7 +19,7 @@ use crate::{
     http::{self, AppState, account, arm_divergence, clock, instruments, quotes, trades},
     long_version,
     ws::ws_upgrade,
-    {fills, run, source, sweeper},
+    {run, source, sweeper},
 };
 
 /// Raw fills the generator synthesizes per wall second, used only to project
@@ -279,7 +279,6 @@ async fn serve_async(
     // when a sweep pass walks the tape it is waiting on. Spawned
     // unconditionally, because there is no configuration in which limits do not
     // rest.
-    let market_readings = Arc::new(fills::MarketReadingCache::default());
     sweeper::spawn_fill_sweeper(sweeper::FillSweep {
         run: Arc::clone(&run),
         rivers: Arc::clone(&rivers),
@@ -293,7 +292,6 @@ async fn serve_async(
         history_requests: Arc::new(tokio::sync::Semaphore::new(
             http::MAX_CONCURRENT_HISTORY_REQUESTS,
         )),
-        market_readings,
     };
     let completing_run = Arc::clone(&state.run);
     let (fault_shutdown_tx, mut fault_shutdown_rx) = tokio::sync::oneshot::channel();

@@ -229,8 +229,9 @@ pub(crate) async fn process_order_cmd(
     run: &Arc<Run>,
     lanes: &ExecLanes,
     socket_symbol: &mogwai_protocol::Symbol,
-    sim: SimClock,
+    boat: &Arc<crate::boatyard::Boat>,
 ) -> OrderOutcome {
+    let sim = boat.sim;
     // Sampled at entry for the boundary rejections below: they return before
     // any price synthesis, so entry-time is when they logically occur.
     let ts = sim_now_ns(sim);
@@ -304,7 +305,7 @@ pub(crate) async fn process_order_cmd(
     // tape as it was when the command arrived - the exact staleness the act
     // delay is placed above the reading to avoid.
     let ts = sim_now_ns(sim);
-    let (order_cmd, market_px) = market_reading(order_cmd, state, ts, socket_symbol).await;
+    let (order_cmd, market_px) = market_reading(order_cmd, state, boat, ts, socket_symbol).await;
     // Re-sample after the market-price synthesis, which for a price-less MARKET
     // order may block ~100 ms on the checkpoint mutex and seek (S16). The
     // synthesis-failure reject and the engine events below all occur now.
@@ -415,7 +416,6 @@ pub(crate) struct AppState {
     /// delay. The per-connection lane bounds one client; this bounds the run.
     pub(crate) pending_commands: Arc<tokio::sync::Semaphore>,
     pub(crate) history_requests: Arc<tokio::sync::Semaphore>,
-    pub(crate) market_readings: Arc<crate::fills::MarketReadingCache>,
 }
 
 #[derive(Serialize)]
@@ -931,29 +931,42 @@ pub(crate) async fn clock(
 async fn market_reading(
     msg: ClientMessage,
     state: &AppState,
+    boat: &Arc<crate::boatyard::Boat>,
     ts: u64,
     socket_symbol: &mogwai_protocol::Symbol,
 ) -> (ClientMessage, Option<mogwai_engine::MarketReading>) {
-    let symbol = match &msg {
-        ClientMessage::SubmitOrder(order) => Some(std::sync::Arc::clone(&order.symbol)),
+    // Whether this command needs a reading at all. WHICH river it is read for
+    // is never in question: a submit's wire symbol was already refused unless
+    // it equals the socket's, an amend names no symbol at all, and the socket's
+    // symbol is the one its boat was boarded on. Both the memoized walk and the
+    // `read_last` fallback below therefore take the boat's own river, so the
+    // two cannot name different rivers even if that resolution ever changes.
+    let needs_reading = match &msg {
+        ClientMessage::SubmitOrder(order) => {
+            debug_assert_eq!(order.symbol.as_ref(), boat.symbol());
+            true
+        }
         // An amend names no symbol on the wire, so it resolves to the river
         // this socket is bound to.
         ClientMessage::ModifyOrder { price: Some(_), .. } => {
-            Some(std::sync::Arc::clone(socket_symbol))
+            debug_assert_eq!(socket_symbol.as_ref(), boat.symbol());
+            true
         }
-        _ => None,
+        _ => false,
     };
-    if let Some(symbol) = symbol {
+    if needs_reading {
         let rivers = Arc::clone(&state.rivers);
         let mult = state.cfg.fill_band_vol_mult;
         let max_ticks = state.cfg.fill_band_max_ticks;
         let interval_ms = state.cfg.fill_sweep_interval_ms;
-        let cache = Arc::clone(&state.market_readings);
+        let boat = Arc::clone(boat);
         let (reading, last_px) = tokio::task::spawn_blocking(move || {
-            let reading = cache.read(&symbol, ts, &rivers, mult, max_ticks, interval_ms);
+            let reading = boat
+                .market_readings
+                .read(ts, &rivers, mult, max_ticks, interval_ms);
             let last_px = reading
                 .map(|value| value.last_px)
-                .or_else(|| crate::fills::read_last(&symbol, ts, &rivers));
+                .or_else(|| crate::fills::read_last(boat.symbol(), ts, &rivers));
             (reading, last_px)
         })
         .await

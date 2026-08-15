@@ -113,16 +113,15 @@ SLICE 2 - many boats on many rivers. Piece 7 landed 2026-08-15 (the keyed
 lazy engine registration); detail is git history, not this file. Pieces 6
 and 9 (the `/ws` symbol carrier, taken wholesale, and the boatyard - sharing
 key, placement/join/wind-down, and its open mechanics) have also landed
-2026-08-15; detail is git history, not this file. Piece 10 (one clock per
-boat) has also landed, 2026-08-16; detail is git history, not this file.
+2026-08-15; detail is git history, not this file. Pieces 10 (one clock per
+boat) and 11 (fill-path de-singling) have also landed, 2026-08-16; detail is
+git history, not this file.
 Numbering is left as it was assigned so the cross-references below (piece
 11, piece 13) still resolve:
 
-11. Fill-path de-singling: `MarketReadingCache`'s one entry behind one
-    mutex. `last_swept_ns` already lives on the boat (piece 9), not the
-    process, so this is narrower than it once was - the sentence here used
-    to call it "the process-wide `last_swept_ns` watermark coupling
-    settlement liveness across symbols" and that framing is stale.
+11. LANDED. Fill-path de-singling moved `MarketReadingCache` onto the boat, so
+    each river retains its own memo and unrelated walks take unrelated locks.
+    `last_swept_ns` already lives on the boat (piece 9). Detail is git history.
 12. `ReadyRecord` under per-boat clocks: drop `symbol` (VERSION 6) and
     decide what the origin/start/warmup fields mean as river properties;
     the seed-reproduces-a-venue-not-a-boat-placement knock-on.
@@ -137,7 +136,7 @@ CROSS-CUTTING:
     writing WITH the code, per the standing item below.
 
 Piece 4 (and the guard question inside 13) is a decision before code; pieces
-6, 9 and 10 were the highest-risk and have landed, leaving 11 as the next.
+6, 9, 10 and 11 were the highest-risk and have landed, leaving 12 as the next.
 Broadarrow's item 4
 (consuming the multi-instrument venue) is excluded - it is theirs, and
 their build breaking loudly when piece 13 lands is the designed handoff.
@@ -232,10 +231,10 @@ their build breaking loudly when piece 13 lands is the designed handoff.
   and walks once per symbol, and marks and settlements look each symbol up in
   `profiles`. An earlier draft called this the lowest-confidence item and the
   likeliest place a hidden assumption would bite; the survey found the opposite.
-  What DOES remain single-symbol in the fill path is slice-2 work: the
-  `MarketReadingCache` is correctly symbol-KEYED but holds ONE entry behind one
-  mutex held across the walk, so two symbols thrash it and serialize on unrelated
-  work. `last_swept_ns` no longer describes this - piece 9 moved the sweep
+  LANDED in piece 11, 2026-08-16: the fill path no longer retains this
+  single-symbol seam. Each boat owns its river's `MarketReadingCache`, so two
+  symbols neither evict one another nor serialize their unrelated walks.
+  `last_swept_ns` no longer describes this - piece 9 moved the sweep
   watermark onto the boat (`Boat::last_swept_ns`) and piece 10 confirmed it,
   so settlement liveness is per boat, not process-wide; this paragraph's
   earlier claim that it was one all-or-nothing watermark coupling every
@@ -344,9 +343,9 @@ their build breaking loudly when piece 13 lands is the designed handoff.
   answers that have no boat (a boatless river, the venue deadline, the
   venue-scoped account ledger). Detail is git history; the durable statement
   is `reference/clock.md`, `reference/architecture.md`, `docs/havoc.md` and
-  `docs/cli.md`. Piece 11 (`MarketReadingCache`, the settlement watermark)
-  and piece 12 (`ReadyRecord` under per-boat clocks) are unaffected and remain
-  open; the boatless-river sweep gap above is explicitly still open too.
+  `docs/cli.md`. Piece 11 has since moved `MarketReadingCache` onto each boat;
+  piece 12 (`ReadyRecord` under per-boat clocks) remains open, and the
+  boatless-river sweep gap above is explicitly still open too.
 
 - SYMBOL RESOLUTION IS TOTAL, AND THE DEFAULT PRESET IS THE SHAPE CONTRACT.
   Settled 2026-08-15. A requested symbol resolves in three steps and step three

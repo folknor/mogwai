@@ -2,8 +2,8 @@
 
 Mogwai is a one-run fake venue. A direct launcher starts one foreground process
 and receives a versioned readiness record through an inherited file descriptor.
-The process binds one endpoint, owns one configured instrument, one generated
-tape and one engine ledger.
+The process binds one endpoint and owns an open set of configured instruments,
+generated river tapes, and one engine ledger.
 
 The server exposes `/health`, `/account`, `/instruments`, `/clock`, `/trades`,
 `/quotes`, `/control/divergence`, and `/ws`. Order entry is WebSocket-only: the
@@ -21,12 +21,11 @@ bytes exist, an unserved river can be refused as HTTP 400 rather than an
 ambiguous WebSocket close, and one connection still owns exactly one replay. A
 frame carrier would permit multiple replays and create an unbound interval
 before the first frame. The query carrier is the seam where river-keyed state,
-boat placement, and per-boat clocks attach. River-keyed state has landed: every
-configured shape owns a lazily created checkpoint chain, keyed and locked
-independently, and is servable through history. Boat placement has not, so
-exactly one paced tape is placed at boot and socket resolution still accepts
-only the run's boot symbol; clients do not send subscribe frames or an account
-identity. The bounded fanout
+boat placement, and per-boat clocks attach. `handle_socket` resolves the query
+symbol, ensures its instrument exists, resolves its `RiverKey`, and boards a
+boat on that river. Every configured shape owns a lazily created checkpoint
+chain, keyed and locked independently, and is servable through history. Clients
+do not send subscribe frames or an account identity. The bounded fanout
 ring remains; a lagging client receives
 `FeedLagged` on the priority lane and is closed with WS 1011.
 
@@ -71,6 +70,16 @@ rather than prevented, and every fill is judged only against the tape.
 Live pacing is owned by the boatyard. A river is deterministic checkpointed
 water keyed by symbol and its resolved bundle digest. A boat is one positioned
 cursor, one OS pacing thread, one clock and one broadcast ring on that river.
+A boat's per-river state is:
+
+- `sim`, its affine simulated clock;
+- `tape`, its paced broadcast source;
+- `published_ns`, the history frontier visible to passengers;
+- `last_swept_ns`, its settlement watermark; and
+- `market_readings`, its acceptance-time reading memo.
+
+The memo belongs here because its bucket is a function of the boat's clock and
+the walk it saves is a walk of this river only.
 A passenger owns an uncloneable ticket for one websocket connection. The first
 passenger places the boat at the river's fixed warmup origin; later passengers
 with the same speed join it mid-stream. Speed is quantized to micro-multiples
@@ -360,11 +369,11 @@ bundle. No second hardcoded default bundle exists, and no symbol is refused for
 wanting a fit. The three shipped presets - MNQ, MES and BTCUSDT - are the
 current state, not the end state. The intake sequence makes a tape better:
 
-Config declares no instrument. It supplies a default knob overlay and optional
-case-insensitive per-symbol overlays for total symbol resolution. The top-level
-boot symbol is a slice-1 lifecycle artifact while one run still serves one
-symbol; slice 2 moves that symbol to each request and retains the boot value as
-the default for a request that carries none.
+Config declares no closed instrument set. It supplies a default knob overlay
+and optional case-insensitive per-symbol overlays for total symbol resolution.
+The top-level boot symbol selects the eagerly warmed boot river and remains the
+default for a request that carries no symbol; other request symbols materialize
+and board their own rivers in the same run.
 
 survey what cheap data exists, decide whether a paid corpus is worth buying
 and which windows of it, buy, preflight, measure, characterize, fit, ship a

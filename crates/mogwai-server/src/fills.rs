@@ -72,16 +72,24 @@ const SWEEP_DRAIN_WARN_TICKS: usize = 2_500_000;
 /// the exact per-fill statement is recoverable only by putting the reading
 /// instant on `OrderFilled` or by dropping this bucketing.
 ///
-/// The lock is held ACROSS the walk deliberately: two callers landing in the
-/// same bucket then pay for one walk rather than two, which is the whole point.
+/// One boat owns one memo for its river. The bucket is a function of that
+/// boat's clock, and the walk it saves is a walk of that river only. The lock
+/// is held ACROSS the walk deliberately: two passengers landing in the same
+/// bucket then pay for one walk rather than two, which is the whole point.
 /// Callers already run this on `spawn_blocking`.
-#[derive(Default)]
 pub(crate) struct MarketReadingCache {
+    /// The one river this memo is allowed to hold a reading for. Set at
+    /// construction, never compared per read: it is the cache's identity, not
+    /// a per-entry tag. Binding it here rather than taking it per read makes
+    /// mis-keying unrepresentable instead of merely unreachable, and saves the
+    /// owned symbol a miss used to allocate.
+    symbol: String,
     entry: Mutex<Option<CachedMarketReading>>,
+    #[cfg(test)]
+    walks: std::sync::atomic::AtomicU64,
 }
 
 struct CachedMarketReading {
-    symbol: String,
     bucket_ns: u64,
     mult_bits: u64,
     max_ticks: u32,
@@ -89,9 +97,17 @@ struct CachedMarketReading {
 }
 
 impl MarketReadingCache {
+    pub(crate) fn for_symbol(symbol: &str) -> Self {
+        Self {
+            symbol: symbol.to_owned(),
+            entry: Mutex::new(None),
+            #[cfg(test)]
+            walks: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
     pub(crate) fn read(
         &self,
-        symbol: &str,
         ts: u64,
         rivers: &source::Rivers,
         mult: f64,
@@ -106,22 +122,39 @@ impl MarketReadingCache {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(cached) = entry.as_ref()
-            && cached.symbol == symbol
             && cached.bucket_ns == bucket_ns
             && cached.mult_bits == mult_bits
             && cached.max_ticks == max_ticks
         {
             return cached.reading;
         }
-        let reading = read_market(symbol, bucket_ns, rivers, mult, max_ticks);
+        #[cfg(test)]
+        self.walks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let reading = read_market(&self.symbol, bucket_ns, rivers, mult, max_ticks);
         *entry = Some(CachedMarketReading {
-            symbol: symbol.to_owned(),
             bucket_ns,
             mult_bits,
             max_ticks,
             reading,
         });
         reading
+    }
+
+    /// Walks actually performed. The memo's hit/miss split is invisible in the
+    /// returned value - a hit and a miss return the same reading - so this is
+    /// the only way a test can gate the memo without timing it. The increment
+    /// happens INSIDE the entry lock, on the same critical section that
+    /// performs the walk, and this reader takes that lock too, so a concurrent
+    /// reader cannot observe a count that disagrees with the number of
+    /// `read_market` calls made.
+    #[cfg(test)]
+    pub(crate) fn walks(&self) -> u64 {
+        let _entry = self
+            .entry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.walks.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -548,13 +581,13 @@ mod tests {
 
     #[test]
     fn market_reading_cache_recovers_after_a_poisoned_lock() {
-        let cache = MarketReadingCache::default();
+        let cache = MarketReadingCache::for_symbol("BTCUSDT");
         let poisoned = std::panic::catch_unwind(|| {
             let _guard = cache.entry.lock().unwrap();
             panic!("poison cache for test");
         });
         assert!(poisoned.is_err());
-        let _ = cache.read("BTCUSDT", TEST_ORIGIN, &profiles(), 0.005, 200, 100);
+        let _ = cache.read(TEST_ORIGIN, &profiles(), 0.005, 200, 100);
     }
 
     #[test]
@@ -793,7 +826,7 @@ mod tests {
         const INTERVAL_MS: u64 = 100;
         let profiles = profiles();
         let base_ts = TEST_ORIGIN + 3_600_000_000_000;
-        let cache = MarketReadingCache::default();
+        let cache = MarketReadingCache::for_symbol("BTCUSDT");
         // The MISS path is what a submit pays, and it is the only thing worth
         // gating: a hit is a mutex acquisition and a struct copy. Every sample
         // therefore lands in its OWN bucket, so none of them can be served from
@@ -803,14 +836,14 @@ mod tests {
         for k in 0..100_u64 {
             let ts = base_ts + k * INTERVAL_MS * 1_000_000;
             let started = std::time::Instant::now();
-            let _ = cache.read("BTCUSDT", ts, &profiles, 0.005, 200, INTERVAL_MS);
+            let _ = cache.read(ts, &profiles, 0.005, 200, INTERVAL_MS);
             samples.push(started.elapsed());
         }
         // The hit path, reported next to it so the memo's value is visible
         // rather than assumed. Not gated - it cannot regress past the miss.
         let warm_started = std::time::Instant::now();
         for _ in 0..100 {
-            let _ = cache.read("BTCUSDT", base_ts, &profiles, 0.005, 200, INTERVAL_MS);
+            let _ = cache.read(base_ts, &profiles, 0.005, 200, INTERVAL_MS);
         }
         let warm = warm_started.elapsed() / 100;
         samples.sort_unstable();

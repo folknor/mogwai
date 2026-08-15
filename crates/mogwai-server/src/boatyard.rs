@@ -42,6 +42,12 @@ pub(crate) struct Boat {
     pub(crate) tape: Arc<Tape>,
     pub(crate) published_ns: Arc<AtomicU64>,
     pub(crate) last_swept_ns: AtomicU64,
+    /// This river's acceptance-time market reading, memoized per sweep-interval
+    /// bucket on THIS boat's clock. Per boat because the bucket is a function
+    /// of the boat's clock and the walk it saves is a walk of this river only:
+    /// a run-level memo held one entry, so two symbols evicted each other into
+    /// a guaranteed miss and then serialized on the walk behind one mutex.
+    pub(crate) market_readings: crate::fills::MarketReadingCache,
     worker: Mutex<Option<JoinHandle<()>>>,
     cancel: Arc<AtomicBool>,
 }
@@ -193,6 +199,7 @@ impl Boatyard {
                 tape,
                 published_ns,
                 last_swept_ns: AtomicU64::new(self.origin_ns),
+                market_readings: crate::fills::MarketReadingCache::for_symbol(req.river.symbol()),
                 worker: Mutex::new(Some(worker)),
                 cancel,
             })
@@ -372,6 +379,105 @@ mod tests {
             Boatyard::new(rivers, 64, 10, fault_tx, crate::source::TAPE_ORIGIN_NS),
             key,
         )
+    }
+
+    fn two_symbol_yard() -> (Arc<Boatyard>, RiverKey, RiverKey) {
+        let rivers = crate::fills::test_rivers_with_a_second_symbol();
+        let first = rivers.resolve_key(rivers.resolve_profile("BTCUSDT").unwrap());
+        let second = rivers.resolve_key(rivers.resolve_profile("SECOND").unwrap());
+        let (fault_tx, _fault_rx) = mpsc::channel();
+        (
+            Boatyard::new(
+                Arc::clone(&rivers),
+                64,
+                10,
+                fault_tx,
+                crate::source::TAPE_ORIGIN_NS,
+            ),
+            first,
+            second,
+        )
+    }
+
+    /// A regression fence, not a discovery instrument: with the memo a field of
+    /// `Boat`, "two boats do not evict each other" is a type-level fact, and
+    /// what this guards is someone re-introducing sharing. The defect it names
+    /// - a run-level one-entry memo that two symbols alternately evicted, each
+    /// submit then paying a full window walk behind one global mutex - has no
+    /// production expression left, so it was reproduced by injection: one
+    /// `MarketReadingCache` read four times with an alternating guard field
+    /// reports FOUR walks where the two per-boat memos report one each.
+    #[tokio::test]
+    async fn two_boats_do_not_evict_each_other_s_market_reading() {
+        let (yard, first, second) = two_symbol_yard();
+        let first = yard
+            .board(&BoardRequest {
+                river: first,
+                speed: 1.0,
+            })
+            .await
+            .unwrap();
+        let second = yard
+            .board(&BoardRequest {
+                river: second,
+                speed: 1.0,
+            })
+            .await
+            .unwrap();
+        // NOT the yard's origin: a 300 s window walk backwards from
+        // `TAPE_ORIGIN_NS` has no tape behind it, so the reads would memoize a
+        // refusal and the counters would pass while proving nothing about the
+        // walk they saved. Hence the `is_some` assertion too.
+        let ts = crate::source::TAPE_ORIGIN_NS + 86_400_000_000_000;
+        for boat in [first.boat(), second.boat(), first.boat(), second.boat()] {
+            assert!(
+                boat.market_readings
+                    .read(ts, &yard.rivers, 0.005, 200, 100)
+                    .is_some()
+            );
+        }
+        assert_eq!(first.boat().market_readings.walks(), 1);
+        assert_eq!(second.boat().market_readings.walks(), 1);
+    }
+
+    /// The half the eviction fence cannot see: a memo that never caches at all
+    /// also reports one walk per boat there. Same late-instant discipline, and
+    /// the base is floored onto a bucket boundary so `base + 1` is in the same
+    /// bucket and `base + one interval` is in the next by construction rather
+    /// than by the current value of `TAPE_ORIGIN_NS`.
+    #[tokio::test]
+    async fn one_boat_pays_for_one_walk_per_bucket() {
+        const INTERVAL_MS: u64 = 100;
+        const BUCKET_NS: u64 = INTERVAL_MS * 1_000_000;
+        let (yard, river) = yard();
+        let ticket = yard
+            .board(&BoardRequest { river, speed: 1.0 })
+            .await
+            .unwrap();
+        let base = (crate::source::TAPE_ORIGIN_NS + 86_400_000_000_000) / BUCKET_NS * BUCKET_NS;
+        assert!(
+            ticket
+                .boat()
+                .market_readings
+                .read(base, &yard.rivers, 0.005, 200, INTERVAL_MS)
+                .is_some()
+        );
+        assert!(
+            ticket
+                .boat()
+                .market_readings
+                .read(base + 1, &yard.rivers, 0.005, 200, INTERVAL_MS)
+                .is_some()
+        );
+        assert_eq!(ticket.boat().market_readings.walks(), 1);
+        assert!(
+            ticket
+                .boat()
+                .market_readings
+                .read(base + BUCKET_NS, &yard.rivers, 0.005, 200, INTERVAL_MS,)
+                .is_some()
+        );
+        assert_eq!(ticket.boat().market_readings.walks(), 2);
     }
 
     #[tokio::test]
