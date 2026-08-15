@@ -101,18 +101,18 @@ was assigned so the cross-references below (piece 4, piece 13) still resolve:
 4. RULED AND CONSUMED. The boot-ordering decision - warmup moves, or a boot
    symbol survives slice 1 - was ruled by the owner 2026-08-15: slice 1
    keeps a boot symbol, and that is the landed state (the top-level
-   `symbol` key; warmup and `INDEX` still initialize from it at boot).
-   What survives is the slice-2 half only: moving warmup and `INDEX` off
-   the boot symbol so a river can materialize per request, which is
-   pieces 6 and 7's work, not a separate decision.
+   `symbol` key; warmup initializes the boot river at boot). Piece 7 has
+   since landed the other half: rivers now materialize per request off a
+   keyed registry rather than off `INDEX`/`BOOT`. What survives is piece
+   6's half - the `/ws` symbol carrier is still boot-symbol-only.
 
-SLICE 2 - many boats on many rivers:
+SLICE 2 - many boats on many rivers. Piece 7 landed 2026-08-15 (the keyed
+`Rivers` registry replacing `RunIndex`/`BOOT`, plural instrument profiles,
+lazy engine registration); detail is git history, not this file.
 
 6. The `/ws` symbol carrier - a NEW mechanism, not a modification: no
    subscribe path exists, its absence is byte-level pinned, and admission
    tickets derive from it.
-7. Kill the process-global singletons: `RunIndex`, `BOOT`, the `.next()`
-   collapse in `serve.rs`; per-river keyed state, lazy engine registration.
 8. Seed derivation gains a symbol dimension: the tape-determinism change,
    owing the `TAPE_PROTOCOL_VERSION` bump sequenced around 12b's
    reservation.
@@ -225,31 +225,16 @@ their build breaking loudly when piece 13 lands is the designed handoff.
   symbol; `InstrumentProfiles` as a map; `/trades` and `/quotes` taking `symbol`.
   What has to change (items 1 through 3 landed in slice 1 - symbol-lookup preset
   selection, config overlays split from the boot symbol, and `InstrumentDef`
-  derived through one resolution path - detail is git
-  history, numbering left as assigned):
+  derived through one resolution path; items 5, 7 and 8 landed with piece 7
+  2026-08-15 - lazy engine registration, the keyed `Rivers` registry replacing
+  `RunIndex`/`BOOT`, and `build_instrument_profiles` returning every configured
+  shape instead of collapsing with `.next()` - detail is git history,
+  numbering left as assigned):
   4. SEED DERIVATION GAINS A SYMBOL DIMENSION. `RunSeeds` is run to tape and
      fill with no symbol term, so without this every symbol generates a
      byte-identical tape. This is a tape-determinism change and OWES A
      `TAPE_PROTOCOL_VERSION` BUMP; 15 is reserved for the 12b mechanism landing,
      so it needs sequencing rather than discovering at commit time.
-  5. ENGINE REGISTRATION BECOMES LAZY, instruments appearing as symbols are
-     first asked for.
-  7. THE PROCESS-GLOBAL RUN INDEX IS THE TRUE PIN. `source::RunIndex` is a
-     `static OnceLock` holding ONE symbol and ONE `CheckpointIndex`, and `index`
-     returns `None` for any other symbol. Strongly enforced: a test builds a
-     FULLY RESOLVABLE second profile and asserts it is still refused, with a
-     comment noting an unknown symbol would have passed vacuously. Everything
-     downstream then fails SILENTLY - `build_history_source`, `next_live_tick`,
-     `scan_triggers`, `read_market` all return `None` with no error and no log.
-     Its doc comment, "Process global because the run is: one instrument, one
-     regime, one origin ... nothing left to key it by", is the sentence slice 2
-     deletes. `BOOT` is the same shape and carries `RunSeeds` with no symbol
-     term, which is item 4 above.
-  8. `serve.rs` COLLAPSES THE PROFILE SET WITH `.next()`, effectively the
-     alphabetically first profile. MERELY ASSUMED - nothing asserts the map has
-     one entry - and everything after inherits from it, including
-     `refuse_unfunded_settlement`, `materialize_warmup`, `Run::new` and
-     `ReadyRecord.symbol`.
   NOT ON THE LIST, corrected 2026-08-15: THE SWEEPER IS ALREADY SYMBOL-KEYED and
   slice 1 needs to touch none of it. It groups pending scans into a map by symbol
   and walks once per symbol, and marks and settlements look each symbol up in
@@ -431,25 +416,12 @@ their build breaking loudly when piece 13 lands is the designed handoff.
   is right for a typo and wrong for a servable-but-unconfigured symbol, where
   the adapter would refuse on a venue's behalf that would happily serve.
 
-- THREE STALE COMMENTS in the serving path, found by the 2026-08-15 survey
-  (a fourth, in `config.rs`'s `refuse_unfunded_settlement`, was fixed with
-  slice 1). Same family as the `BoundedSeek` comments the bug loop found and
-  as the gate item below: durable prose asserting a live type or a measured
-  fact that has moved. Cheap to fix, and each one currently justifies real
-  code with a false premise.
-  - `fills.rs` justifies behaviour by saying an armed `MarketRegime` is
-    per-subscription because `TapeKey` carries it. `TapeKey` no longer exists
-    anywhere in the tree and `regime` is boot config. The conclusion holds, the
-    stated reason does not.
-  - `http.rs` says "other symbols' requests do not queue here at all", which
-    cannot be true when there are no other symbols and a process-global index
-    would serialize them anyway. Two further sites there still name a
-    `current_price` function that is gone.
-  - UNRESOLVED rather than stale: `bounded_quotes` filters on `start` while
-    `bounded_trades` does not. `MergeSource::starting_at` is documented to make
-    `start` inclusive-and-not-earlier, so the extra guard is either redundant or
-    compensating for something trades does not compensate for. Nobody has read
-    `MergeSource` closely enough to say which.
+- UNRESOLVED, surfaced by the 2026-08-15 survey and not a stale-comment matter:
+  `bounded_quotes` filters on `start` while `bounded_trades` does not.
+  `MergeSource::starting_at` is documented to make `start`
+  inclusive-and-not-earlier, so the extra guard is either redundant or
+  compensating for something trades does not compensate for. Nobody has read
+  `MergeSource` closely enough to say which.
 
 - STILL OPEN, both surfaced 2026-08-15 and neither answered.
   1. IS SUBSCRIBING TO AN UNCONFIGURED SYMBOL A SUPPORTED SESSION, or merely a
@@ -809,6 +781,16 @@ their build breaking loudly when piece 13 lands is the designed handoff.
   day, at the piece-5 landing gate: identical failure text, identical
   pass-on-immediate-rerun, again on a tree whose tape generation was
   untouched. Two hits in one day says the race is not rare.
+
+- `an_armed_divergence_reaches_every_connection` FLAKED ONCE at the piece-7
+  landing gate, 2026-08-15: "market data generated after an armed StallData
+  window arrived", in a full `--gate` sweep under machine load, then passed
+  3 of 3 focused runs and the full gate rerun on the identical tree (only a
+  doc comment differed from the prior green gate). Wall-clock window
+  assertion on a socket test, so load can stretch the stall boundary. One
+  observation only; if it recurs, the fix direction is the same family as
+  the smoke snapshot item below - assert on the divergence window's own
+  clock, not on wall-time arrival order.
 
 - GTD / `expire_time` on the wire, with a time-driven expiry pass on the
   sweeper. Refused today for limits and conditionals alike - the conditional-

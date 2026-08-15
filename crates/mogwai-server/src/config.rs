@@ -107,7 +107,7 @@ pub struct Config {
     /// Simulated history generated eagerly at boot, in nanoseconds.
     /// `data_origin = run_start_ns - warmup_ns` is the earliest instant the
     /// tape can serve, and the whole span is MATERIALIZED before the readiness
-    /// record is written (see `source::materialize_warmup`) rather than merely
+    /// record is written (see `Rivers::ensure_reach`) rather than merely
     /// permitted. A request below the floor is refused loudly rather than
     /// served short, so this default need not be exact - 24h covers a day's
     /// warmup. Formerly `backfill_horizon_ns`, which bounded what a client was
@@ -163,7 +163,7 @@ pub struct Config {
     /// Process-wide ceiling on queued or executing commands across every
     /// websocket connection. See `admission::GLOBAL_PENDING_COMMAND_SLOTS`.
     pub(crate) global_pending_command_acts: usize,
-    /// The one symbol this run serves. Absent, the default bundle's own symbol
+    /// The symbol whose river receives the run's paced tape. Absent, the default bundle's symbol
     /// stands. This boot key becomes a request default when symbols move to the
     /// request in slice 2.
     pub symbol: Option<String>,
@@ -1074,17 +1074,16 @@ pub fn build_instrument_profiles(cfg: &Config) -> anyhow::Result<source::Instrum
         })
         .collect();
     configured.sort_unstable();
-    let mut boot = None;
+    let mut resolved = Vec::new();
     for symbol in std::iter::once(cfg.boot_symbol()).chain(configured.into_iter().map(Some)) {
         let named = symbol.unwrap_or(DEFAULT_PRESET);
         let profile = profile_for(cfg, symbol)
             .with_context(|| format!("configured symbol {named} is invalid"))?;
         refuse_unfunded_settlement(cfg, &profile.def)
             .with_context(|| format!("configured symbol {named} cannot be funded"))?;
-        boot.get_or_insert(profile);
+        resolved.push(profile);
     }
-    let profile = boot.expect("the boot shape is always swept");
-    Ok(source::InstrumentProfiles::from_profiles(vec![profile]))
+    Ok(source::InstrumentProfiles::from_profiles(resolved))
 }
 
 fn validate_symbol_keys(cfg: &Config) -> anyhow::Result<()> {
@@ -1587,9 +1586,10 @@ mod tests {
         assert!(err.to_string().contains("sim_epoch_ns"), "{err}");
     }
 
-    /// With one instrument per run, an unfunded quote currency means every buy
-    /// in the whole run rejects for insufficient balance. That is a
-    /// misconfigured run, so it fails BOOT rather than warning.
+    /// An unfunded quote currency means every buy in that shape rejects for
+    /// insufficient balance for the whole run. That is a misconfigured run, so
+    /// it fails BOOT rather than warning - and it is checked for every
+    /// configured shape, not only the one the boot river carries.
     #[test]
     fn an_unfunded_quote_currency_refuses_boot() {
         let cfg = Config {
@@ -2424,5 +2424,34 @@ mod tests {
         let def = configured.def();
         assert_eq!(def.class.multiplier(), Decimal::from(2));
         assert_eq!(def.tick_value(), Decimal::new(50, 2));
+    }
+
+    #[test]
+    fn a_boot_symbol_that_is_not_first_alphabetically_is_the_one_readied() {
+        let cfg: Config = toml::from_str("symbol = \"MNQ\"\n[balances]\nUSD = \"100000\"\nUSDT = \"100000\"\n[symbols.BTCUSDT]\npreset = \"BTCUSDT\"\n").unwrap();
+        let profiles = build_instrument_profiles(&cfg).unwrap();
+        assert_eq!(profiles.instrument_defs().len(), 2);
+        assert_eq!(
+            profiles
+                .boot_symbol_def(cfg.boot_symbol())
+                .unwrap()
+                .symbol
+                .as_ref(),
+            "MNQ"
+        );
+    }
+
+    #[test]
+    fn an_unset_boot_symbol_resolves_the_default_shape_among_several() {
+        let cfg: Config = toml::from_str(
+            "[balances]\nUSD = \"100000\"\nUSDT = \"100000\"\n[symbols.MNQ]\npreset = \"MNQ\"\n",
+        )
+        .unwrap();
+        let profiles = build_instrument_profiles(&cfg).unwrap();
+        assert_eq!(profiles.instrument_defs().len(), 2);
+        assert_eq!(
+            profiles.boot_symbol_def(None).unwrap().symbol.as_ref(),
+            "BTCUSDT"
+        );
     }
 }

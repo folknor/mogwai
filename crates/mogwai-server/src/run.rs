@@ -1,8 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! State owned by one venue process.  There are deliberately no keys or
-//! lookup methods here: a process is one instrument, one ledger, and one tape.
+//! State owned by one venue process: one ledger and one paced boat over many rivers.
 
 use std::sync::{
     Arc, Mutex,
@@ -10,7 +9,7 @@ use std::sync::{
 };
 
 use mogwai_engine::{Engine, EngineConfig};
-use mogwai_protocol::{CommandClass, InstrumentDef, RunSeeds, SimClock};
+use mogwai_protocol::{CommandClass, InstrumentDef, RunSeeds, SimClock, Symbol};
 use rust_decimal::Decimal;
 use tokio::sync::{Mutex as AsyncMutex, watch};
 
@@ -21,10 +20,13 @@ use crate::{
 };
 
 pub(crate) struct Run {
-    /// The single instrument. Its CONTENT is owned by
-    /// `notes/problem-instrument-model.md`; this struct fixes only that there
-    /// is exactly one of it.
-    pub(crate) instrument: InstrumentDef,
+    /// The shape this run placed its one paced boat on. Every configured shape
+    /// has a river in `rivers` and is servable for history; only this one has a
+    /// live tape, which is why a `/ws` upgrade may still bind nothing else.
+    pub(crate) boot_symbol: Symbol,
+    /// Every configured river, created on first use and keyed independently, so
+    /// two symbols never serialize on each other's checkpoint chain.
+    pub(crate) rivers: Arc<source::Rivers>,
     pub(crate) oms_type: mogwai_protocol::OmsType,
     pub(crate) engine: AsyncMutex<Engine>,
     pub(crate) seeds: RunSeeds,
@@ -69,7 +71,7 @@ impl Run {
     )]
     pub(crate) fn new(
         instrument: InstrumentDef,
-        profiles: Arc<source::InstrumentProfiles>,
+        rivers: Arc<source::Rivers>,
         balances: std::collections::HashMap<String, Decimal>,
         sim: SimClock,
         started_ns: u64,
@@ -85,16 +87,10 @@ impl Run {
         fault_tx: std::sync::mpsc::Sender<mogwai_data::TickFault>,
     ) -> Arc<Self> {
         let symbol = std::sync::Arc::clone(&instrument.symbol);
-        let margin = profiles
-            .get(&instrument.symbol)
-            .and_then(|profile| profile.margin.clone());
-        let fees = profiles
-            .get(&instrument.symbol)
-            .and_then(|profile| profile.fees.clone());
         let tape = Tape::start(
             symbol.to_string(),
             TapeSpawn {
-                profiles,
+                rivers: Arc::clone(&rivers),
                 sim,
                 speed,
                 fanout_depth,
@@ -105,47 +101,18 @@ impl Run {
         let (complete_tx, _) = watch::channel(None);
         let mut engine = Engine::build(EngineConfig {
             account_id,
-            instruments: vec![instrument.clone()],
+            instruments: Vec::new(),
             balances,
             fill_seed: seeds.fill,
         });
         engine.set_oms_type(oms_type);
         engine.set_liquidation_band_ticks(fill_band_max_ticks);
-        if let Some(margin) = margin {
-            engine.set_margin_policy(
-                std::sync::Arc::clone(&instrument.symbol),
-                mogwai_engine::MarginPolicy {
-                    initial_per_contract: margin.initial_per_contract,
-                    maintenance_per_contract: margin.maintenance_per_contract,
-                    breach_action: match margin.breach_action {
-                        crate::config::BreachAction::Refuse => mogwai_engine::BreachAction::Refuse,
-                        crate::config::BreachAction::Liquidate => {
-                            mogwai_engine::BreachAction::Liquidate
-                        }
-                    },
-                },
-            );
-        }
-        if let Some(fees) = fees {
-            let convert = |rate: crate::config::FeeRate| match rate {
-                crate::config::FeeRate::BasisPoints { rate } => {
-                    mogwai_engine::FeeRate::BasisPoints { rate }
-                }
-                crate::config::FeeRate::PerContract { amount } => {
-                    mogwai_engine::FeeRate::PerContract { amount }
-                }
-            };
-            engine.set_fee_schedule(
-                std::sync::Arc::clone(&instrument.symbol),
-                mogwai_engine::FeeSchedule {
-                    maker: convert(fees.maker),
-                    taker: convert(fees.taker),
-                },
-            );
-        }
+        // The engine starts EMPTY. An instrument becomes tradable when a socket
+        // binds its symbol or an order names it, through `ensure_instrument`.
         Arc::new(Self {
             engine: AsyncMutex::new(engine),
-            instrument,
+            boot_symbol: instrument.symbol,
+            rivers,
             oms_type,
             seeds,
             tape,
@@ -166,6 +133,59 @@ impl Run {
             lanes: Mutex::new(Vec::new()),
             next_lane_id: AtomicU64::new(0),
         })
+    }
+
+    /// Make `symbol` tradable on this run's engine: register the def and install
+    /// the margin policy and fee schedule from its profile. Called when a socket
+    /// binds a symbol and before an order for it is admitted. `false` means no
+    /// profile resolves it, and the caller lets the engine produce its own
+    /// unknown-instrument rejection rather than inventing a second wording.
+    ///
+    /// This is the ONE path from a profile to engine policy - `Run::new` no
+    /// longer has a copy - and the installs are guarded on the registration
+    /// having been NEW, so re-binding a symbol a client is already trading never
+    /// resets its configuration.
+    pub(crate) async fn ensure_instrument(&self, symbol: &str) -> bool {
+        let Some(profile) = self.rivers.profiles().get(symbol).cloned() else {
+            return false;
+        };
+        let mut engine = self.engine.lock().await;
+        if !engine.ensure_instrument(profile.def.clone()) {
+            return true;
+        }
+        if let Some(margin) = profile.margin {
+            engine.set_margin_policy(
+                Arc::clone(&profile.def.symbol),
+                mogwai_engine::MarginPolicy {
+                    initial_per_contract: margin.initial_per_contract,
+                    maintenance_per_contract: margin.maintenance_per_contract,
+                    breach_action: match margin.breach_action {
+                        crate::config::BreachAction::Refuse => mogwai_engine::BreachAction::Refuse,
+                        crate::config::BreachAction::Liquidate => {
+                            mogwai_engine::BreachAction::Liquidate
+                        }
+                    },
+                },
+            );
+        }
+        if let Some(fees) = profile.fees {
+            let convert = |rate: crate::config::FeeRate| match rate {
+                crate::config::FeeRate::BasisPoints { rate } => {
+                    mogwai_engine::FeeRate::BasisPoints { rate }
+                }
+                crate::config::FeeRate::PerContract { amount } => {
+                    mogwai_engine::FeeRate::PerContract { amount }
+                }
+            };
+            engine.set_fee_schedule(
+                Arc::clone(&profile.def.symbol),
+                mogwai_engine::FeeSchedule {
+                    maker: convert(fees.maker),
+                    taker: convert(fees.taker),
+                },
+            );
+        }
+        true
     }
 
     /// Enrol one connection's lanes for venue-originated output. The returned
@@ -247,7 +267,13 @@ mod tests {
             .expect("default instrument");
         Run::new(
             instrument,
-            profiles,
+            source::Rivers::new(
+                source::TapeIdentity {
+                    seeds: RunSeeds::from_run_seed(42),
+                    regime: None,
+                },
+                profiles,
+            ),
             std::collections::HashMap::new(),
             SimClock::identity(),
             started_ns,

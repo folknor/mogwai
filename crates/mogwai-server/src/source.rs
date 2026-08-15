@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Deterministic sources for the one eagerly warmed run tape.
+//! Deterministic, lazily materialized rivers owned by one serving process.
 
 use mogwai_data::TickEvent;
 use mogwai_data::{
@@ -12,7 +12,7 @@ use mogwai_protocol::{InstrumentDef, MarketRegime, RunSeeds, Symbol};
 use rust_decimal::Decimal;
 use std::{
     collections::HashMap,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 pub fn fingerprint() -> &'static Fingerprint {
@@ -60,10 +60,21 @@ impl InstrumentProfile {
 #[derive(Debug, Clone)]
 pub struct InstrumentProfiles {
     by_symbol: HashMap<Symbol, InstrumentProfile>,
+    /// The symbol of the FIRST profile handed to `from_profiles`, which
+    /// `build_instrument_profiles` sweeps from the config's boot shape. Kept
+    /// because the boot shape is not recoverable from the map: the config's
+    /// top-level `symbol` may be absent, and an absent one does NOT mean
+    /// `DEFAULT_PRESET` - `[instrument] preset = "MNQ"` with no top-level symbol
+    /// resolves a shape whose symbol is MNQ, and looking up BTCUSDT would then
+    /// refuse a config that boots perfectly well.
+    boot: Option<Symbol>,
 }
 impl InstrumentProfiles {
     pub fn from_profiles(profiles: Vec<InstrumentProfile>) -> Self {
         Self {
+            boot: profiles
+                .first()
+                .map(|profile| std::sync::Arc::clone(&profile.def.symbol)),
             by_symbol: profiles
                 .into_iter()
                 .map(|profile| (std::sync::Arc::clone(&profile.def.symbol), profile))
@@ -90,18 +101,30 @@ impl InstrumentProfiles {
         defs.sort_by(|a, b| a.symbol.cmp(&b.symbol));
         defs
     }
+    /// The def of the shape this run boots its paced tape on, resolved BY NAME.
+    ///
+    /// Not "the sole entry": once profiles are plural there need not be one, and
+    /// a sole-entry rule would silently pick the wrong shape for a config with a
+    /// top-level `symbol` plus a `[symbols.*]` table. An absent `symbol` falls
+    /// back to the shape the sweep resolved FIRST, which is exactly what the
+    /// config's own defaulting produced for a `None` symbol.
+    pub fn boot_symbol_def(&self, symbol: Option<&str>) -> anyhow::Result<InstrumentDef> {
+        let named = symbol
+            .or(self.boot.as_deref())
+            .unwrap_or(crate::config::DEFAULT_PRESET);
+        self.get(named)
+            .map(|profile| profile.def.clone())
+            .ok_or_else(|| anyhow::anyhow!("boot symbol {named} has no configured shape"))
+    }
 }
-fn generator(profile: &InstrumentProfile) -> GeneratedSource {
-    let boot = *BOOT
-        .get()
-        .expect("warmup fixes the run tape before it is read");
+fn generator(profile: &InstrumentProfile, identity: TapeIdentity) -> GeneratedSource {
     GeneratedSource::new_with_session_profile(
         profile.scalars.clone(),
-        boot.seeds.tape,
+        identity.seeds.tape,
         TAPE_ORIGIN_NS,
         fingerprint(),
         &profile.session,
-        boot.regime,
+        identity.regime,
         SizeGrid::from_def(&profile.def),
         profile.calendar.clone(),
     )
@@ -124,208 +147,255 @@ fn generator(profile: &InstrumentProfile) -> GeneratedSource {
 /// long runs coarsen the grid as documented by `CheckpointIndex`.
 pub(crate) const CHECKPOINT_K: usize = 8_192;
 
-/// Runaway backstop on a SINGLE extension while the global index lock is held.
+/// Runaway backstop on a SINGLE extension while one river lock is held.
 /// This retains the original one-billion-tick safety purpose: a nonsensical
 /// far-future request cannot turn one lock acquisition into the
 /// 667-billion-tick warmup reach bound below.
 const MAX_EXTEND_TICKS: usize = 1 << 30;
 
-/// Total legitimate boot reach admitted across lock-releasing extension
-/// chunks. Protocol 10's headroom rule set 667,299,000,000 against its
+/// Per-acquisition reach admitted across lock-releasing extension chunks.
+/// Protocol 10's headroom rule set 667,299,000,000 against its
 /// measured 2.055x warmup-reach expansion; protocol 11's session refit
 /// measures an 11/10 ratio of 1.00036, and the standing rule - prior times
 /// ratio times two, next-million rounding, then the larger of that and the
 /// 81,123,436,742-frame required reach - lands here. Keeping it separate
 /// from `MAX_EXTEND_TICKS` prevents a reach requirement from silently
-/// disabling the per-lock runaway backstop.
+/// disabling the per-lock runaway backstop. There is no absolute per-river
+/// cap: later calls pay only their new monotonic delta, and an absolute fence
+/// would wedge history for a sufficiently long run.
 const MAX_WARMUP_MATERIALIZATION_TICKS: usize = 1_335_079_000_000;
 
-/// The run's one checkpoint chain, over the run's one realization. Process
-/// global because the run is: one instrument, one regime, one origin for the
-/// life of the process, so there is nothing left to key it by.
-struct RunIndex {
-    symbol: Symbol,
-    checkpoints: Mutex<CheckpointIndex>,
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct RiverKey(Symbol);
+impl RiverKey {
+    pub(crate) fn for_symbol(symbol: &Symbol) -> Self {
+        Self(Arc::clone(symbol))
+    }
+    #[expect(dead_code, reason = "piece 9 widens and inspects the river key")]
+    pub(crate) fn symbol(&self) -> &str {
+        &self.0
+    }
 }
 
-static INDEX: OnceLock<RunIndex> = OnceLock::new();
-
-/// Everything that fixes WHICH tape this process serves: the run's derived
-/// seeds and the regime it was launched with. Boot config now rather than a
-/// per-subscription choice, so the whole process shares one realization. One
-/// struct rather than two globals, because both are set at the same instant by
-/// the same caller and read by the same function.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct BootTape {
+pub(crate) struct TapeIdentity {
     pub(crate) seeds: RunSeeds,
     pub(crate) regime: Option<MarketRegime>,
 }
 
-static BOOT: OnceLock<BootTape> = OnceLock::new();
-
-/// Installs the boot tape for an in-crate test, or ASSERTS that the one already
-/// installed is identical. The checkpoint chain is process-global, so whichever
-/// test touches it first would otherwise fix the tape seed for every later test
-/// in the binary and turn this into a silent no-op. Every in-crate test that
-/// reaches the chain goes through here with the same `BootTape`, so a future
-/// test wanting a different one fails immediately and by name.
-#[cfg(test)]
-pub(crate) fn set_boot_for_test(boot: BootTape) {
-    let installed = *BOOT.get_or_init(|| boot);
-    assert_eq!(
-        installed, boot,
-        "boot tape collision: installed {installed:?}, requested {boot:?}"
-    );
+pub(crate) struct River {
+    checkpoints: Mutex<CheckpointIndex>,
 }
 
-/// The run's chain, rooted at the fixed tape origin and reused thereafter.
-fn index(symbol: &str, profiles: &InstrumentProfiles) -> Option<&'static Mutex<CheckpointIndex>> {
-    let profile = profiles.get(symbol)?;
-    if let Some(existing) = INDEX.get() {
-        return (existing.symbol.as_ref() == symbol).then_some(&existing.checkpoints);
-    }
-    let run_index = INDEX.get_or_init(|| RunIndex {
-        symbol: std::sync::Arc::clone(&profile.def.symbol),
-        checkpoints: Mutex::new(CheckpointIndex::new(
-            generator(profile),
-            CHECKPOINT_K,
-            MAX_EXTEND_TICKS,
-        )),
-    });
-    (run_index.symbol.as_ref() == symbol).then_some(&run_index.checkpoints)
+pub(crate) struct Rivers {
+    identity: TapeIdentity,
+    profiles: Arc<InstrumentProfiles>,
+    rivers: Mutex<HashMap<RiverKey, Arc<River>>>,
 }
 
-fn locked(
-    index: &'static Mutex<CheckpointIndex>,
-) -> std::sync::MutexGuard<'static, CheckpointIndex> {
+fn locked(index: &Mutex<CheckpointIndex>) -> std::sync::MutexGuard<'_, CheckpointIndex> {
     index
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// The live tape's source, positioned at sim-now.
+pub(crate) enum History {
+    Unconfigured,
+    Source(Box<dyn TickSource>),
+}
+
+/// Test-only convenience: the `Option` shape the in-crate tests assert on,
+/// collapsing "no such symbol" and "the reach failed" the way no production
+/// caller may.
 #[cfg(test)]
-pub(crate) fn build_live_source(
-    symbol: &str,
-    profiles: &InstrumentProfiles,
-    sim_now: u64,
-) -> Option<Box<dyn TickSource>> {
-    build_history_source(symbol, Some(sim_now), profiles)
-}
-
-/// Advance the one canonical run tape. The paced feed, checkpoint history,
-/// fill scans and mark reads all branch from this same frontier.
-pub(crate) fn next_live_tick(
-    symbol: &str,
-    profiles: &InstrumentProfiles,
-) -> Option<(Option<TickEvent>, Option<mogwai_data::TickFault>)> {
-    let index = index(symbol, profiles)?;
-    let mut index = locked(index);
-    let tick = index.next_tick();
-    let fault = tick.is_none().then(|| index.fault()).flatten();
-    Some((tick, fault))
-}
-
-pub(crate) fn activate_live(symbol: &str, profiles: &InstrumentProfiles) -> bool {
-    let Some(index) = index(symbol, profiles) else {
-        return false;
-    };
-    locked(index).activate_live();
-    true
-}
-
-pub(crate) fn arm_flow_surge(
-    symbol: &str,
-    profiles: &InstrumentProfiles,
-    start_ns: u64,
-    duration_ms: u64,
-    rate_mult: f64,
-    children_mult: f64,
-) -> bool {
-    let Some(index) = index(symbol, profiles) else {
-        return false;
-    };
-    locked(index).arm_flow_surge(start_ns, duration_ms, rate_mult, children_mult);
-    true
-}
-
-pub(crate) fn clear_flow_surge(symbol: &str, profiles: &InstrumentProfiles) -> bool {
-    let Some(index) = index(symbol, profiles) else {
-        return false;
-    };
-    locked(index).clear_flow_surge();
-    true
-}
-
-/// A source positioned at `start`, RESUMED from the run's checkpoint chain
-/// rather than re-walked from the origin. `None` means the tape origin, which
-/// is checkpoint zero and therefore free.
-///
-/// The `MergeSource` around a ONE-element vector is not a leftover from the
-/// multi-symbol era and must not be "simplified" away. `TickSource::seek_to`
-/// CONSUMES the tick it returns, so something has to hold that first in-window
-/// tick until the stream is read; `MergeSource`'s per-source head buffer is what
-/// does it. Unwrapping this to the bare source silently drops the tick at
-/// exactly `start` - a one-tick-late history window that no type would catch.
-/// Replacing it means writing an equivalent one-tick pushback, which is the same
-/// object with a narrower name.
-///
-/// That `start` is INCLUSIVE is relied on rather than incidental: the fill
-/// sweeper passes `from_ns + 1` precisely to get a window that excludes the
-/// instant it already processed, which only works if the tick at the requested
-/// instant is emitted.
 pub(crate) fn build_history_source(
     symbol: &str,
     start: Option<u64>,
-    profiles: &InstrumentProfiles,
+    rivers: &Rivers,
 ) -> Option<Box<dyn TickSource>> {
-    let index = index(symbol, profiles)?;
-    let positioned = locked(index).try_source_at_or_before(start.unwrap_or(TAPE_ORIGIN_NS))?;
-    Some(Box::new(MergeSource::starting_at(
-        vec![Box::new(positioned)],
-        start,
-    )))
+    match rivers.history_source(symbol, start).ok()? {
+        History::Source(source) => Some(source),
+        History::Unconfigured => None,
+    }
 }
 
-/// Generate and HOLD `warmup_ns` of tape ending at `run_start_ns`, before the
-/// readiness record is written.
-///
-/// Holding it is what the checkpoint chain does: once this returns, every
-/// instant in `[TAPE_ORIGIN_NS, run_start_ns]` is reachable by a resume plus a
-/// bounded residual replay, so a history request for the earliest servable
-/// instant is ANSWERED rather than refused or silently served short. Returns
-/// the number of snapshots retained, for the boot log.
-pub(crate) fn materialize_warmup(
-    symbol: &str,
-    profiles: &InstrumentProfiles,
-    boot: BootTape,
-    run_start_ns: u64,
-) -> anyhow::Result<usize> {
-    // `OnceLock::set` hands BACK the rejected value on failure, not the stored
-    // one, so the installed tape is read separately or the message would name
-    // the wrong seed.
-    if BOOT.set(boot).is_err() {
-        anyhow::bail!("boot tape was already fixed as {:?}", BOOT.get());
+impl Rivers {
+    pub(crate) fn new(identity: TapeIdentity, profiles: Arc<InstrumentProfiles>) -> Arc<Self> {
+        Arc::new(Self {
+            identity,
+            profiles,
+            rivers: Mutex::new(HashMap::new()),
+        })
     }
-    let Some(index) = index(symbol, profiles) else {
-        anyhow::bail!("configured warmup symbol {symbol} has no source");
-    };
+    pub(crate) fn profiles(&self) -> &InstrumentProfiles {
+        &self.profiles
+    }
+    #[expect(
+        dead_code,
+        reason = "registry identity is part of the owned handle contract"
+    )]
+    pub(crate) fn identity(&self) -> TapeIdentity {
+        self.identity
+    }
+    fn river(&self, symbol: &str) -> Option<Arc<River>> {
+        let profile = self.profiles.get(symbol)?;
+        let key = RiverKey::for_symbol(&profile.def.symbol);
+        let mut rivers = self
+            .rivers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Creation under the registry mutex makes concurrent first readers
+        // share exactly one chain.
+        let river = Arc::clone(rivers.entry(key).or_insert_with(|| {
+            Arc::new(River {
+                checkpoints: Mutex::new(CheckpointIndex::new(
+                    generator(profile, self.identity),
+                    CHECKPOINT_K,
+                    MAX_EXTEND_TICKS,
+                )),
+            })
+        }));
+        // Lock ordering is registry then release, river. Never hold both.
+        drop(rivers);
+        Some(river)
+    }
+    #[cfg(test)]
+    pub(crate) fn river_handle_for_test(&self, symbol: &str) -> Option<Arc<River>> {
+        self.river(symbol)
+    }
+
+    pub(crate) fn next_live_tick(
+        &self,
+        symbol: &str,
+    ) -> Option<(Option<TickEvent>, Option<mogwai_data::TickFault>)> {
+        let river = self.river(symbol)?;
+        let mut index = locked(&river.checkpoints);
+        let tick = index.next_tick();
+        let fault = tick.is_none().then(|| index.fault()).flatten();
+        Some((tick, fault))
+    }
+
+    pub(crate) fn activate_live(&self, symbol: &str) -> bool {
+        let Some(river) = self.river(symbol) else {
+            return false;
+        };
+        locked(&river.checkpoints).activate_live();
+        true
+    }
+
+    pub(crate) fn arm_flow_surge(
+        &self,
+        symbol: &str,
+        start_ns: u64,
+        duration_ms: u64,
+        rate_mult: f64,
+        children_mult: f64,
+    ) -> bool {
+        let Some(river) = self.river(symbol) else {
+            return false;
+        };
+        locked(&river.checkpoints).arm_flow_surge(start_ns, duration_ms, rate_mult, children_mult);
+        true
+    }
+
+    pub(crate) fn clear_flow_surge(&self, symbol: &str) -> bool {
+        let Some(river) = self.river(symbol) else {
+            return false;
+        };
+        locked(&river.checkpoints).clear_flow_surge();
+        true
+    }
+
+    /// A source positioned at `start`, RESUMED from the run's checkpoint chain
+    /// rather than re-walked from the origin. `None` means the tape origin, which
+    /// is checkpoint zero and therefore free.
+    ///
+    /// The `MergeSource` around a ONE-element vector is not a leftover from the
+    /// multi-symbol era and must not be "simplified" away. `TickSource::seek_to`
+    /// CONSUMES the tick it returns, so something has to hold that first in-window
+    /// tick until the stream is read; `MergeSource`'s per-source head buffer is what
+    /// does it. Unwrapping this to the bare source silently drops the tick at
+    /// exactly `start` - a one-tick-late history window that no type would catch.
+    /// Replacing it means writing an equivalent one-tick pushback, which is the same
+    /// object with a narrower name.
+    ///
+    /// That `start` is INCLUSIVE is relied on rather than incidental: the fill
+    /// sweeper passes `from_ns + 1` precisely to get a window that excludes the
+    /// instant it already processed, which only works if the tick at the requested
+    /// instant is emitted.
+    pub(crate) fn history_source(
+        &self,
+        symbol: &str,
+        start: Option<u64>,
+    ) -> anyhow::Result<History> {
+        let target = start.unwrap_or(TAPE_ORIGIN_NS);
+        let Some(river) = self.river(symbol) else {
+            return Ok(History::Unconfigured);
+        };
+        reach_river(&river, target)?;
+        let Some(positioned) = locked(&river.checkpoints).try_source_at_or_before(target) else {
+            anyhow::bail!("river {symbol} cannot reach {target}");
+        };
+        Ok(History::Source(Box::new(MergeSource::starting_at(
+            vec![Box::new(positioned)],
+            start,
+        ))))
+    }
+
+    /// Generate and HOLD every instant up to `target_ns` on this river, so that
+    /// each is reachable by a resume plus a bounded residual replay rather than
+    /// refused or silently served short. Returns the number of snapshots
+    /// retained, which is what the boot log reports for the warmup call.
+    ///
+    /// FIRST-TOUCH COST IS REAL. `serve.rs` pays this once at boot for the boot
+    /// river; every other river is cold until something reads it, and that first
+    /// distant history request pays the whole walk from `TAPE_ORIGIN_NS`
+    /// synchronously, holding that river's mutex, and allocates up to
+    /// `MAX_CHECKPOINTS` generator clones for it. Later requests on the same
+    /// river pay only their new monotonic delta. Nothing pre-warms a non-boot
+    /// river: doing so would multiply time-to-readiness by the number of
+    /// configured shapes for a capability most runs never touch.
+    pub(crate) fn ensure_reach(&self, symbol: &str, target_ns: u64) -> anyhow::Result<usize> {
+        let river = self
+            .river(symbol)
+            .ok_or_else(|| anyhow::anyhow!("symbol {symbol} has no configured shape"))?;
+        reach_river(&river, target_ns)
+    }
+}
+
+fn reach_river(river: &River, target_ns: u64) -> anyhow::Result<usize> {
+    reach_river_within(river, target_ns, MAX_WARMUP_MATERIALIZATION_TICKS)
+}
+
+/// Taking `&River` rather than a symbol is not a style choice: it makes it
+/// impossible to re-enter the registry lock from a path that may already hold a
+/// river lock, which is rule 2 of the registry's lock ordering.
+///
+/// `ceiling` is a parameter only so the tests can drive the refusal at a
+/// reachable size; every production caller passes
+/// `MAX_WARMUP_MATERIALIZATION_TICKS`.
+fn reach_river_within(river: &River, target_ns: u64, ceiling: usize) -> anyhow::Result<usize> {
     let mut walked_total = 0usize;
     loop {
         let (walked, frontier_ns, checkpoints) = {
-            let mut guard = locked(index);
-            let walked = guard.extend_toward(run_start_ns);
-            (walked, guard.frontier_ns(), guard.checkpoint_count())
+            let mut guard = locked(&river.checkpoints);
+            let extended = guard.extend_toward_unless_live(target_ns);
+            (extended, guard.frontier_ns(), guard.checkpoint_count())
+        };
+        let Some(walked) = walked else {
+            // The paced worker owns this river's lead. Not an error: report what
+            // is already reachable and let positioning refuse if it is short.
+            return Ok(checkpoints);
         };
         walked_total = walked_total.saturating_add(walked);
         anyhow::ensure!(
-            walked_total <= MAX_WARMUP_MATERIALIZATION_TICKS,
-            "warmup generation exceeded its measured {MAX_WARMUP_MATERIALIZATION_TICKS}-tick reach ceiling"
+            walked_total <= ceiling,
+            "river generation exceeded its measured {ceiling}-tick per-call reach ceiling"
         );
-        if frontier_ns >= run_start_ns {
+        if frontier_ns >= target_ns {
             return Ok(checkpoints);
         }
-        anyhow::ensure!(walked > 0, "warmup generator stopped before the run start");
+        anyhow::ensure!(walked > 0, "generator stopped before {target_ns}");
     }
 }
 
@@ -354,47 +424,211 @@ pub(crate) fn materialize_warmup(
 /// answer. Without it, a settlement instant landing between an arm and the
 /// next trade would be unpriceable forever and would freeze the settlement
 /// frontier for the rest of the run.
-pub(crate) fn last_trade_at_or_before(
-    symbol: &str,
-    ts: u64,
-    profiles: &InstrumentProfiles,
-) -> Option<Decimal> {
-    let index = index(symbol, profiles)?;
-    let mut budget = crate::fills::SWEEP_DRAIN_BUDGET;
-    let mut back = 0usize;
-    loop {
-        let (mut source, exhausted) = locked(index).try_source_before_target(ts, back)?;
-        // Captured BEFORE draining: it is the resume point's own last consumed
-        // print, whose ts is at most the snapshot clock and therefore strictly
-        // before `ts` (the partition is strict). Only consulted when the chain
-        // is exhausted and the residual held nothing.
-        let fence_price = if exhausted {
-            source.last_trade_price()
-        } else {
-            None
+impl Rivers {
+    pub(crate) fn last_trade_at_or_before(
+        &self,
+        symbol: &str,
+        ts: u64,
+    ) -> anyhow::Result<Option<Decimal>> {
+        let Some(river) = self.river(symbol) else {
+            return Ok(None);
         };
-        let mut last = None;
-        let mut drained = 0usize;
-        while let Some(tick) = source.next_tick() {
-            if drained >= budget {
-                return None;
+        reach_river(&river, ts)?;
+        let mut budget = crate::fills::SWEEP_DRAIN_BUDGET;
+        let mut back = 0usize;
+        loop {
+            let Some((mut source, exhausted)) =
+                locked(&river.checkpoints).try_source_before_target(ts, back)
+            else {
+                return Ok(None);
+            };
+            // Captured BEFORE draining: it is the resume point's own last consumed
+            // print, whose ts is at most the snapshot clock and therefore strictly
+            // before `ts` (the partition is strict). Only consulted when the chain
+            // is exhausted and the residual held nothing.
+            let fence_price = if exhausted {
+                source.last_trade_price()
+            } else {
+                None
+            };
+            let mut last = None;
+            let mut drained = 0usize;
+            while let Some(tick) = source.next_tick() {
+                if drained >= budget {
+                    return Ok(None);
+                }
+                drained += 1;
+                let TickEvent::Trade(trade) = tick else {
+                    continue;
+                };
+                if trade.ts_event > ts {
+                    break;
+                }
+                last = Some(trade.price);
             }
-            drained += 1;
+            if last.is_some() || exhausted {
+                return Ok(last.or(fence_price));
+            }
+            budget = budget.saturating_sub(drained);
+            if budget == 0 {
+                return Ok(None);
+            }
+            back = back.saturating_mul(2).max(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod river_tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_first_readers_share_one_river() {
+        let rivers = crate::fills::test_rivers();
+        // COLLECT the spawns before joining any of them: chaining `.map(spawn)`
+        // straight into `.map(join)` is lazy, so each thread would be joined
+        // before the next is spawned and the contention this test exists to
+        // exercise would never happen.
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let rivers = Arc::clone(&rivers);
+                std::thread::spawn(move || rivers.river_handle_for_test("BTCUSDT").unwrap())
+            })
+            .collect();
+        let handles: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        assert!(handles.iter().all(|river| Arc::ptr_eq(&handles[0], river)));
+    }
+
+    #[test]
+    fn the_live_river_is_not_extended_by_a_reader() {
+        let rivers = crate::fills::test_rivers();
+        let river = rivers.river_handle_for_test("BTCUSDT").unwrap();
+        let before = locked(&river.checkpoints).frontier_ns();
+        assert!(rivers.activate_live("BTCUSDT"));
+        assert!(
+            rivers
+                .history_source("BTCUSDT", Some(before.saturating_add(86_400_000_000_000)))
+                .is_err()
+        );
+        assert_eq!(locked(&river.checkpoints).frontier_ns(), before);
+    }
+
+    /// The race the sequential test above CANNOT catch, and the reason
+    /// `extend_toward_unless_live` exists rather than an `is_live` accessor a
+    /// caller consults before extending.
+    #[test]
+    fn activation_racing_a_cold_reach_never_moves_the_live_frontier() {
+        for _ in 0..16 {
+            let rivers = crate::fills::test_rivers();
+            let river = rivers.river_handle_for_test("BTCUSDT").unwrap();
+            let reader = {
+                let rivers = Arc::clone(&rivers);
+                std::thread::spawn(move || {
+                    // Either verdict is legal; what may never happen is a walk
+                    // that lands AFTER the activation.
+                    drop(rivers.history_source("BTCUSDT", Some(3_600_000_000_000)));
+                })
+            };
+            let activator = {
+                let rivers = Arc::clone(&rivers);
+                let river = Arc::clone(&river);
+                std::thread::spawn(move || {
+                    assert!(rivers.activate_live("BTCUSDT"));
+                    locked(&river.checkpoints).frontier_ns()
+                })
+            };
+            reader.join().unwrap();
+            let at_activation = activator.join().unwrap();
+            // Whether the reader won the race or lost it, nothing may have
+            // extended the frontier AFTER the paced worker took the lead.
+            assert_eq!(locked(&river.checkpoints).frontier_ns(), at_activation);
+        }
+    }
+
+    /// A river nothing warmed answers an instant a long way from the origin.
+    ///
+    /// This does NOT bite on removing the `reach_river` call in
+    /// `history_source`: `CheckpointIndex::try_source_before_target` extends a
+    /// non-live index itself, and `MAX_EXTEND_TICKS` is far above any distance a
+    /// test can walk, so positioning alone would answer here too. What the
+    /// explicit reach adds is the ceiling, the named error on a stopped
+    /// generator, and the atomic live check - all covered by the tests around
+    /// this one. What this test pins is the capability: no boot warmup ran for
+    /// this river and it answers anyway.
+    #[test]
+    fn a_cold_river_reaches_an_instant_far_past_the_origin() {
+        let rivers = crate::fills::test_rivers();
+        let reached = rivers
+            .ensure_reach("BTCUSDT", 3_600_000_000_000)
+            .expect("a cold river materializes on demand");
+        assert!(reached > 0, "the walk retained checkpoints");
+        assert!(matches!(
+            rivers
+                .history_source("BTCUSDT", Some(3_600_000_000_000))
+                .expect("cold history"),
+            History::Source(_)
+        ));
+    }
+
+    /// A second configured shape is realized under its OWN def, on its OWN
+    /// chain, locked independently of the boot river's.
+    ///
+    /// NOT the price-grid assertion the spec named: neither `price_increment`
+    /// nor - for two spot shapes - `SizeGrid::from_def` quantizes anything the
+    /// generator emits, so under piece 8's still-pending symbol term the two
+    /// realizations are numerically identical and no per-print assertion can
+    /// separate them. What CAN be asserted is what the registry actually
+    /// promises: a distinct chain, stamped with the shape's own symbol, whose
+    /// frontier moves independently.
+    #[test]
+    fn a_second_river_is_realized_under_its_own_def_and_chain() {
+        let rivers = crate::fills::test_rivers_with_a_second_symbol();
+        let boot = rivers.river_handle_for_test("BTCUSDT").unwrap();
+        let second = rivers.river_handle_for_test("SECOND").unwrap();
+        assert!(
+            !Arc::ptr_eq(&boot, &second),
+            "one chain per configured shape"
+        );
+        let History::Source(mut source) = rivers
+            .history_source("SECOND", Some(TAPE_ORIGIN_NS))
+            .expect("second river history")
+        else {
+            panic!("the second symbol is configured");
+        };
+        let mut trades = 0usize;
+        while trades < 32 {
+            let Some(tick) = source.next_tick() else {
+                break;
+            };
             let TickEvent::Trade(trade) = tick else {
                 continue;
             };
-            if trade.ts_event > ts {
-                break;
-            }
-            last = Some(trade.price);
+            assert_eq!(trade.symbol.as_ref(), "SECOND");
+            trades += 1;
         }
-        if last.is_some() || exhausted {
-            return last.or(fence_price);
-        }
-        budget = budget.saturating_sub(drained);
-        if budget == 0 {
-            return None;
-        }
-        back = back.saturating_mul(2).max(1);
+        assert_eq!(trades, 32, "the second river prints");
+        // Materializing the second river leaves the boot river where it was:
+        // the chains advance independently, which is the whole point of keying
+        // them.
+        rivers
+            .ensure_reach("SECOND", 600_000_000_000)
+            .expect("second river materializes");
+        assert!(locked(&second.checkpoints).frontier_ns() >= 600_000_000_000);
+        assert_eq!(locked(&boot.checkpoints).frontier_ns(), TAPE_ORIGIN_NS);
+    }
+
+    /// A blown reach ceiling is an ERROR, never an empty window: swallowing it
+    /// would leave `/trades` answering `200 []`, indistinguishable from a window
+    /// nothing traded in.
+    #[test]
+    fn a_reach_failure_is_an_error_not_an_empty_window() {
+        let rivers = crate::fills::test_rivers();
+        let river = rivers.river_handle_for_test("BTCUSDT").unwrap();
+        let error = reach_river_within(&river, 3_600_000_000_000, 16)
+            .expect_err("16 ticks cannot reach an hour of tape");
+        assert!(format!("{error}").contains("reach ceiling"));
     }
 }

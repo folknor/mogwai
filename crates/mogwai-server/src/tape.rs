@@ -28,11 +28,11 @@ pub(crate) struct Tape {
     cancel: Arc<AtomicBool>,
     alive: AtomicBool,
     symbol: String,
-    profiles: Arc<source::InstrumentProfiles>,
+    rivers: Arc<source::Rivers>,
     fault: Mutex<Option<TickFault>>,
 }
 pub(crate) struct TapeSpawn {
-    pub(crate) profiles: Arc<source::InstrumentProfiles>,
+    pub(crate) rivers: Arc<source::Rivers>,
     pub(crate) sim: SimClock,
     pub(crate) speed: f64,
     pub(crate) fanout_depth: usize,
@@ -42,7 +42,7 @@ pub(crate) struct TapeSpawn {
 impl Tape {
     pub(crate) fn start(symbol: String, spawn: TapeSpawn) -> Arc<Self> {
         assert!(
-            source::activate_live(&symbol, &spawn.profiles),
+            spawn.rivers.activate_live(&symbol),
             "validated run symbol must own a tape index"
         );
         let (tx, _) = broadcast::channel(spawn.fanout_depth);
@@ -52,7 +52,7 @@ impl Tape {
             cancel: Arc::new(AtomicBool::new(false)),
             alive: AtomicBool::new(true),
             symbol: symbol.clone(),
-            profiles: Arc::clone(&spawn.profiles),
+            rivers: Arc::clone(&spawn.rivers),
             fault: Mutex::new(None),
         });
         let worker = Arc::clone(&tape);
@@ -70,13 +70,16 @@ impl Tape {
             // returned before publishing a single frame, and the venue served an
             // empty tape and exited 0. The origin is checkpoint zero and is
             // always reachable, so a refusal here means what the message says.
-            if source::build_history_source(&symbol, None, &spawn.profiles).is_none() {
+            if !matches!(
+                spawn.rivers.history_source(&symbol, None),
+                Ok(source::History::Source(_))
+            ) {
                 tracing::error!(symbol, "tape source could not be positioned");
                 worker.alive.store(false, Ordering::Release);
                 return;
             }
             while !worker.cancel.load(Ordering::Relaxed) {
-                let Some((tick, fault)) = source::next_live_tick(&symbol, &spawn.profiles) else {
+                let Some((tick, fault)) = spawn.rivers.next_live_tick(&symbol) else {
                     tracing::error!(symbol, "canonical tape source disappeared");
                     break;
                 };
@@ -163,22 +166,23 @@ impl Tape {
         if !self.alive.load(Ordering::Acquire) {
             return Err(());
         }
-        source::arm_flow_surge(
-            &self.symbol,
-            &self.profiles,
-            start_ns,
-            duration_ms,
-            rate_mult,
-            children_mult,
-        )
-        .then_some(())
-        .ok_or(())
+        self.rivers
+            .arm_flow_surge(
+                &self.symbol,
+                start_ns,
+                duration_ms,
+                rate_mult,
+                children_mult,
+            )
+            .then_some(())
+            .ok_or(())
     }
     pub(crate) fn clear_flow_surge(&self) -> Result<(), ()> {
         if !self.alive.load(Ordering::Acquire) {
             return Err(());
         }
-        source::clear_flow_surge(&self.symbol, &self.profiles)
+        self.rivers
+            .clear_flow_surge(&self.symbol)
             .then_some(())
             .ok_or(())
     }
@@ -274,9 +278,7 @@ mod snapshot_tests {
             cancel: Arc::new(AtomicBool::new(false)),
             alive: AtomicBool::new(true),
             symbol: "BTCUSDT".to_owned(),
-            profiles: Arc::new(source::InstrumentProfiles::from_profiles(vec![
-                crate::config::profile_for_symbol("BTCUSDT").expect("BTCUSDT preset must resolve"),
-            ])),
+            rivers: crate::fills::test_rivers(),
             fault: Mutex::new(None),
         });
         tape.publish(
@@ -330,9 +332,7 @@ mod snapshot_tests {
             cancel: Arc::new(AtomicBool::new(false)),
             alive: AtomicBool::new(true),
             symbol: "BTCUSDT".to_owned(),
-            profiles: Arc::new(source::InstrumentProfiles::from_profiles(vec![
-                crate::config::profile_for_symbol("BTCUSDT").expect("BTCUSDT preset must resolve"),
-            ])),
+            rivers: crate::fills::test_rivers(),
             fault: Mutex::new(None),
         };
         tape.publish(
@@ -366,9 +366,7 @@ mod snapshot_tests {
             cancel: Arc::new(AtomicBool::new(true)),
             alive: AtomicBool::new(false),
             symbol: "BTCUSDT".to_owned(),
-            profiles: Arc::new(source::InstrumentProfiles::from_profiles(vec![
-                crate::config::profile_for_symbol("BTCUSDT").expect("BTCUSDT preset must resolve"),
-            ])),
+            rivers: crate::fills::test_rivers(),
             fault: Mutex::new(None),
         };
         assert!(tape.arm_flow_surge(0, 1, 2.0, 2.0).is_err());

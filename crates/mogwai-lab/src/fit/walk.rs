@@ -332,13 +332,9 @@ pub fn profile_from_config(path: &Path) -> LabResult<mogwai_server::source::Inst
     }
     let profiles = mogwai_server::config::build_instrument_profiles(&cfg)
         .map_err(|e| LabError::refusal(format!("building instrument profiles: {e}")))?;
-    let defs = profiles.instrument_defs();
-    let [def] = defs.as_slice() else {
-        return Err(LabError::refusal(format!(
-            "the scratch config resolved {} instruments, expected exactly one",
-            defs.len()
-        )));
-    };
+    let def = profiles
+        .boot_symbol_def(cfg.boot_symbol())
+        .map_err(|e| LabError::refusal(format!("resolving boot shape: {e}")))?;
     Ok(profiles
         .get(&def.symbol)
         .expect("just listed this symbol")
@@ -348,6 +344,25 @@ pub fn profile_from_config(path: &Path) -> LabResult<mogwai_server::source::Inst
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scratch config that reaches a second shape used to bail with "expected
+    /// exactly one"; profiles are plural now and the boot shape resolves by
+    /// name. The absent top-level `symbol` is the point: `scratch_config_text`
+    /// writes none, so the boot shape is the one `[instrument] preset` names.
+    #[test]
+    fn a_scratch_config_with_a_second_symbol_table_still_resolves_its_boot_shape() {
+        let dir = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/walk-scratch-configs"
+        ));
+        std::fs::create_dir_all(&dir).expect("creating the scratch dir");
+        let path = dir.join("two-symbol-scratch.toml");
+        let mut text = scratch_config_text(&Overrides::new());
+        text.push_str("\n[symbols.ES]\npreset = \"MNQ\"\n");
+        std::fs::write(&path, text).expect("writing the scratch config");
+        let profile = profile_from_config(&path).expect("boot shape resolves by name");
+        assert_eq!(profile.def.symbol.as_ref(), "MNQ");
+    }
 
     /// The Python's key derivation, pinned on a small hand-checkable set.
     /// The live proof is the parity gate, which resolves every one of the

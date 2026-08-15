@@ -26,9 +26,7 @@ use std::{
 use mogwai_engine::ScanResult;
 use mogwai_protocol::{AdmissionSubject, ServerMessage};
 
-use crate::{
-    admission::ExecLanes, config::sim_now_ns, fills, run::Run, source::InstrumentProfiles,
-};
+use crate::{admission::ExecLanes, config::sim_now_ns, fills, run::Run, source::Rivers};
 
 /// Wall floor under the converted sweep interval. Under an accelerated clock
 /// `wall_duration` shrinks linearly while the per-pass fixed cost (checkpoint
@@ -39,7 +37,7 @@ pub(crate) const MIN_SWEEP_WALL: Duration = Duration::from_millis(5);
 
 pub(crate) struct FillSweep {
     pub(crate) run: Arc<Run>,
-    pub(crate) profiles: Arc<InstrumentProfiles>,
+    pub(crate) rivers: Arc<Rivers>,
     pub(crate) interval_ms: u64,
 }
 
@@ -78,10 +76,10 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
             }
             let mut results = Vec::new();
             for (symbol, scans) in groups {
-                let profiles = Arc::clone(&sweep.profiles);
+                let rivers = Arc::clone(&sweep.rivers);
                 let scans_for_walk = scans.clone();
                 let walked = tokio::task::spawn_blocking(move || {
-                    fills::scan_triggers(&symbol, &scans_for_walk, to_ns, &profiles)
+                    fills::scan_triggers(&symbol, &scans_for_walk, to_ns, &rivers)
                 })
                 .await
                 .ok()
@@ -107,7 +105,8 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 .iter()
                 .filter_map(|symbol| {
                     sweep
-                        .profiles
+                        .rivers
+                        .profiles()
                         .get(symbol)
                         .and_then(|profile| profile.calendar.as_ref())
                         .map(|calendar| {
@@ -120,8 +119,8 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                         .map(move |instant| (std::sync::Arc::clone(symbol), instant))
                 })
                 .collect();
-            let profiles = Arc::clone(&sweep.profiles);
-            let reads = run_blocking(move || read_marks(&symbols, &settlements, to_ns, &profiles));
+            let rivers = Arc::clone(&sweep.rivers);
+            let reads = run_blocking(move || read_marks(&symbols, &settlements, to_ns, &rivers));
             let reads = tokio::select! {
                 reads = reads => reads.flatten(),
                 _ = completion.changed() => break,
@@ -177,18 +176,18 @@ fn read_marks(
     symbols: &[mogwai_protocol::Symbol],
     settlements: &[(mogwai_protocol::Symbol, u64)],
     to_ns: u64,
-    profiles: &InstrumentProfiles,
+    rivers: &Rivers,
 ) -> Option<MarkReads> {
     let marks: Vec<_> = symbols
         .iter()
         .filter_map(|symbol| {
-            fills::read_last(symbol, to_ns, profiles).map(|px| (std::sync::Arc::clone(symbol), px))
+            fills::read_last(symbol, to_ns, rivers).map(|px| (std::sync::Arc::clone(symbol), px))
         })
         .collect();
     let settlement_marks: Option<Vec<_>> = settlements
         .iter()
         .map(|(symbol, instant)| {
-            fills::read_last(symbol, *instant, profiles)
+            fills::read_last(symbol, *instant, rivers)
                 .map(|px| (std::sync::Arc::clone(symbol), *instant, px))
         })
         .collect();
@@ -410,7 +409,7 @@ mod tests {
     /// retired by a watermark that then never looked back at it.
     #[test]
     fn an_unreadable_settlement_price_refuses_the_whole_read() {
-        let profiles = crate::fills::test_profiles();
+        let profiles = crate::fills::test_rivers();
         let readable = crate::source::TAPE_ORIGIN_NS + 86_400_000_000_000;
         let known: mogwai_protocol::Symbol = "BTCUSDT".into();
         let unknown: mogwai_protocol::Symbol = "NOT-A-SYMBOL".into();

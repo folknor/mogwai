@@ -21,9 +21,12 @@ bytes exist, an unserved river can be refused as HTTP 400 rather than an
 ambiguous WebSocket close, and one connection still owns exactly one replay. A
 frame carrier would permit multiple replays and create an unbound interval
 before the first frame. The query carrier is the seam where river-keyed state,
-boat placement, and per-boat clocks attach. Until that state lands, resolution
-accepts only the run's boot symbol and the socket attaches to that run tape;
-clients do not send subscribe frames or an account identity. The bounded fanout
+boat placement, and per-boat clocks attach. River-keyed state has landed: every
+configured shape owns a lazily created checkpoint chain, keyed and locked
+independently, and is servable through history. Boat placement has not, so
+exactly one paced tape is placed at boot and socket resolution still accepts
+only the run's boot symbol; clients do not send subscribe frames or an account
+identity. The bounded fanout
 ring remains; a lagging client receives
 `FeedLagged` on the priority lane and is closed with WS 1011.
 

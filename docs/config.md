@@ -67,15 +67,19 @@ slipped fill unsolicited, so boot refuses a zero interval.
 
 Instrument resolution has three layers: a preset bundle, default knobs from
 `[instrument]`, then knobs from the matching `[symbols.<SYM>]` table. The
-top-level `symbol` is the one symbol this slice boots; if absent, the default
+top-level `symbol` selects the river receiving the live paced tape; if absent, the default
 bundle's BTCUSDT symbol stands. An explicit per-symbol `preset` beats a default
 `[instrument]` preset, which beats a preset matching the symbol, which beats the
 BTCUSDT default. Symbol-table lookup is ASCII case-insensitive, and boot refuses
 two table keys that differ only in case. `[instrument].symbol` is refused:
 overlays carry knobs, while the top-level key carries the boot symbol.
 
-Boot resolves and validates every shape the config can reach - the one it
-serves and every `[symbols.*]` shape - funding currencies included. A malformed
+Boot resolves and validates every shape the config can reach, funding
+currencies included. Every configured shape is reported by `/instruments` and
+is servable through history; only the boot shape has a live paced tape. The
+first history request for another cold river synchronously materializes its
+checkpoint chain through the requested instant, so it can be slow and allocate
+up to that river's checkpoint ceiling. A malformed
 or unfunded table refuses startup even when the run would never serve it, so a
 typo cannot wait to surface as a runtime rejection.
 

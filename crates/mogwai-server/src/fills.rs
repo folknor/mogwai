@@ -12,7 +12,9 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use std::sync::Mutex;
 
-use crate::source::{self, InstrumentProfiles};
+use crate::source;
+#[cfg(test)]
+use crate::source::InstrumentProfiles;
 
 /// Ticks one sweep pass may drain per symbol before it reports where it got to
 /// and stops. Positioning refuses a target the checkpoint extension cap did
@@ -91,7 +93,7 @@ impl MarketReadingCache {
         &self,
         symbol: &str,
         ts: u64,
-        profiles: &InstrumentProfiles,
+        rivers: &source::Rivers,
         mult: f64,
         max_ticks: u32,
         interval_ms: u64,
@@ -111,7 +113,7 @@ impl MarketReadingCache {
         {
             return cached.reading;
         }
-        let reading = read_market(symbol, bucket_ns, profiles, mult, max_ticks);
+        let reading = read_market(symbol, bucket_ns, rivers, mult, max_ticks);
         *entry = Some(CachedMarketReading {
             symbol: symbol.to_owned(),
             bucket_ns,
@@ -120,6 +122,29 @@ impl MarketReadingCache {
             reading,
         });
         reading
+    }
+}
+
+/// A history source positioned at `start`, or `None` with the reason recorded.
+///
+/// The sweep paths have nothing useful to do with a synthesis failure - they
+/// leave their frontier unadvanced and retry next pass - but "nothing useful to
+/// do" must not become silence, which is the failure mode the river registry
+/// exists to delete. An unconfigured symbol is the ordinary `None` and needs no
+/// log; a genuine `Err` is logged at `warn` naming the symbol.
+fn history_or_warn(
+    rivers: &source::Rivers,
+    symbol: &str,
+    start: u64,
+    what: &'static str,
+) -> Option<Box<dyn mogwai_data::TickSource>> {
+    match rivers.history_source(symbol, Some(start)) {
+        Ok(source::History::Source(source)) => Some(source),
+        Ok(source::History::Unconfigured) => None,
+        Err(error) => {
+            tracing::warn!(symbol, %error, "{what}");
+            None
+        }
     }
 }
 
@@ -133,14 +158,11 @@ impl MarketReadingCache {
 /// `from_ns` may differ (orders rest at different instants); the walk starts at
 /// the EARLIEST and each scan judges only ticks after its own bound.
 ///
-/// The canonical tape, not a per-subscription regime'd realization: an armed `MarketRegime` is
-/// per-subscription (`TapeKey` carries it) while an order belongs to an
-/// account, so there is no single regime an order could be gated under. A
-/// scenario that arms a drought silences its own DATA feed and leaves its fills
-/// on the venue's canonical tape. `FlowSurge` is different: it mutates that
-/// canonical tape, so subscribed prints, history and trigger decisions agree.
+/// The canonical river realization. A run-level `MarketRegime` fixes its tape
+/// identity, while `FlowSurge` mutates the live river so subscribed prints,
+/// history and trigger decisions agree.
 ///
-/// Composed from the same `build_history_source` the `/trades` cursor pages
+/// Composed from the same `Rivers::history_source` the `/trades` cursor pages
 /// through, so the prints deciding a fill are the prints the client can fetch
 /// and check. `None` when the positioning seek could not reach the earliest
 /// bound; the caller then leaves every frontier unadvanced rather than treating
@@ -160,21 +182,25 @@ pub(crate) fn scan_triggers(
     symbol: &str,
     scans: &[PendingScan],
     to_ns: u64,
-    profiles: &InstrumentProfiles,
+    rivers: &source::Rivers,
 ) -> Option<Walk> {
-    scan_triggers_with_budget(symbol, scans, to_ns, profiles, SWEEP_DRAIN_BUDGET)
+    scan_triggers_with_budget(symbol, scans, to_ns, rivers, SWEEP_DRAIN_BUDGET)
 }
 
 fn scan_triggers_with_budget(
     symbol: &str,
     scans: &[PendingScan],
     to_ns: u64,
-    profiles: &InstrumentProfiles,
+    rivers: &source::Rivers,
     budget: usize,
 ) -> Option<Walk> {
     let earliest = scans.iter().map(|scan| scan.from_ns).min()?;
-    let mut source =
-        source::build_history_source(symbol, Some(earliest.saturating_add(1)), profiles)?;
+    let mut source = history_or_warn(
+        rivers,
+        symbol,
+        earliest.saturating_add(1),
+        "fill scan could not read its river",
+    )?;
     let mapped: Vec<_> = scans
         .iter()
         .map(|scan| TriggerScan {
@@ -222,15 +248,24 @@ fn scan_triggers_with_budget(
 pub(crate) fn read_market(
     symbol: &str,
     ts: u64,
-    profiles: &InstrumentProfiles,
+    rivers: &source::Rivers,
     mult: f64,
     max_ticks: u32,
 ) -> Option<MarketReading> {
     let from_ns = ts.saturating_sub(VOL_WINDOW_NS);
-    let mut source =
-        source::build_history_source(symbol, Some(from_ns.saturating_add(1)), profiles)?;
+    let mut source = history_or_warn(
+        rivers,
+        symbol,
+        from_ns.saturating_add(1),
+        "market reading could not read its river",
+    )?;
     let reading = mogwai_data::vol_reading(source.as_mut(), from_ns, ts, SWEEP_DRAIN_BUDGET)?;
-    let increment = profiles.get(symbol)?.def.price_increment.to_f64()?;
+    let increment = rivers
+        .profiles()
+        .get(symbol)?
+        .def
+        .price_increment
+        .to_f64()?;
     let last_px = reading.last_px.to_f64()?;
     let raw = mult * reading.horizon_return * last_px / increment;
     let ticks = if !raw.is_finite() || raw < 0.0 {
@@ -256,43 +291,102 @@ pub(crate) fn read_market(
 /// at the exact instant instead of from `MarketReadingCache`'s per-interval
 /// bucket. It is NOT a second answer to "what is the market" that FILL
 /// decisions may consult - every one of those goes through `read_market`.
-pub(crate) fn read_last(symbol: &str, ts: u64, profiles: &InstrumentProfiles) -> Option<Decimal> {
-    source::last_trade_at_or_before(symbol, ts, profiles)
+pub(crate) fn read_last(symbol: &str, ts: u64, rivers: &source::Rivers) -> Option<Decimal> {
+    rivers
+        .last_trade_at_or_before(symbol, ts)
+        .unwrap_or_else(|error| {
+            tracing::warn!(symbol, %error, "last-price reading could not read its river");
+            None
+        })
 }
 
 /// The one deterministic profile set every in-crate test reaching the run tape
 /// shares. Lives outside the test module because the sweeper's tests need the
-/// same tape, and the checkpoint chain is process-global: two different boot
-/// tapes in one binary would be a silent no-op, which `set_boot_for_test`
-/// converts into a named failure.
+/// same tape. Tests needing another identity construct another registry.
 #[cfg(test)]
 pub(crate) fn test_profiles() -> InstrumentProfiles {
-    source::set_boot_for_test(source::BootTape {
-        seeds: mogwai_protocol::RunSeeds::from_run_seed(42),
-        regime: None,
-    });
     InstrumentProfiles::from_profiles(vec![
         crate::config::profile_for_symbol("BTCUSDT").expect("BTCUSDT preset must resolve"),
     ])
 }
 
 #[cfg(test)]
+pub(crate) fn test_rivers() -> std::sync::Arc<source::Rivers> {
+    rivers_over(test_profiles())
+}
+
+#[cfg(test)]
+fn rivers_over(profiles: InstrumentProfiles) -> std::sync::Arc<source::Rivers> {
+    source::Rivers::new(
+        source::TapeIdentity {
+            seeds: mogwai_protocol::RunSeeds::from_run_seed(42),
+            regime: None,
+        },
+        std::sync::Arc::new(profiles),
+    )
+}
+
+/// The shipped BTCUSDT shape plus a SECOND spot shape that is FULLY RESOLVABLE -
+/// a real def, real scalars, a real session profile. Fully resolvable is the
+/// point: a registry test run against a symbol the profile table does not carry
+/// would pass against a `profiles.get` lookup that never keyed a chain at all.
+///
+/// Under piece 8's still-pending symbol term in seed derivation the two shapes
+/// draw the SAME numbers, and neither `price_increment` nor a spot
+/// `SizeGrid::from_def` re-quantizes them, so the two realizations differ only
+/// in the symbol stamped on each print. What a test can assert here is the
+/// registry's own promise - a distinct chain per shape - not a distinct tape.
+#[cfg(test)]
+pub(crate) fn test_rivers_with_a_second_symbol() -> std::sync::Arc<source::Rivers> {
+    use mogwai_protocol::{InstrumentClass, InstrumentDef};
+    rivers_over(InstrumentProfiles::from_profiles(vec![
+        crate::config::profile_for_symbol("BTCUSDT").expect("BTCUSDT preset must resolve"),
+        source::InstrumentProfile::new(
+            InstrumentDef {
+                symbol: "SECOND".into(),
+                class: InstrumentClass::Spot {
+                    base: "SEC".into(),
+                    quote: "USDT".into(),
+                },
+                price_precision: 2,
+                size_precision: 8,
+                price_increment: Decimal::new(1, 2),
+                size_increment: Decimal::new(1, 8),
+            },
+            mogwai_data::GeneratorScalars::from_fingerprint_medians(
+                "BTCUSDT",
+                source::fingerprint(),
+            ),
+            source::fingerprint().session_profile.clone(),
+            None,
+            None,
+            None,
+        ),
+    ]))
+}
+
+#[cfg(test)]
 mod tests {
     use mogwai_data::{TickEvent, TickSource};
     use mogwai_engine::PendingScan;
-    use mogwai_protocol::{InstrumentClass, InstrumentDef, Side};
+    use mogwai_protocol::Side;
 
     use super::*;
 
     const TEST_ORIGIN: u64 = source::TAPE_ORIGIN_NS + 86_400_000_000_000;
 
-    fn profiles() -> InstrumentProfiles {
-        super::test_profiles()
+    fn profiles() -> std::sync::Arc<source::Rivers> {
+        super::test_rivers()
     }
 
     fn tape(start: u64) -> Box<dyn TickSource> {
-        source::build_history_source("BTCUSDT", Some(start), &profiles())
-            .expect("configured deterministic BTC tape")
+        let source::History::Source(tape) = profiles()
+            .history_source("BTCUSDT", Some(start))
+            .expect("history")
+        else {
+            panic!("configured deterministic BTC tape")
+        };
+        tape
     }
 
     fn trades(start: u64, count: usize) -> Vec<(u64, Decimal)> {
@@ -454,44 +548,18 @@ mod tests {
     }
 
     #[test]
-    fn initialized_run_index_refuses_every_other_symbol() {
-        // The second symbol is FULLY RESOLVABLE - a real def, real scalars, a
-        // real session profile - so the refusal below can only come from the
-        // run index owning its symbol. Testing it with a symbol the profile
-        // table does not carry would pass against a `profiles.get` lookup that
-        // never looked at the initialized run at all.
-        let profiles = source::InstrumentProfiles::from_profiles(vec![
-            profiles().get("BTCUSDT").expect("shipped preset").clone(),
-            source::InstrumentProfile::new(
-                InstrumentDef {
-                    symbol: "SECOND".into(),
-                    class: InstrumentClass::Spot {
-                        base: "SEC".into(),
-                        quote: "USDT".into(),
-                    },
-                    price_precision: 2,
-                    size_precision: 8,
-                    price_increment: Decimal::new(1, 2),
-                    size_increment: Decimal::new(1, 8),
-                },
-                mogwai_data::GeneratorScalars::from_fingerprint_medians(
-                    "BTCUSDT",
-                    source::fingerprint(),
-                ),
-                source::fingerprint().session_profile.clone(),
-                None,
-                None,
-                None,
-            ),
-        ]);
-        assert!(source::build_history_source("BTCUSDT", Some(TEST_ORIGIN), &profiles).is_some());
+    fn every_configured_symbol_gets_its_own_chain() {
+        // Both configured shapes answer, and each answers from its OWN chain -
+        // the fixture's second symbol is fully resolvable, so a pass here means
+        // the registry really keyed a river rather than a lookup vacuously
+        // succeeding. A symbol no profile resolves still answers nothing.
+        let rivers = super::test_rivers_with_a_second_symbol();
+        assert!(source::build_history_source("BTCUSDT", Some(TEST_ORIGIN), &rivers).is_some());
         assert!(
-            source::build_history_source("SECOND", Some(TEST_ORIGIN), &profiles).is_none(),
-            "the run index serves the symbol it was initialized on and no other"
+            source::build_history_source("SECOND", Some(TEST_ORIGIN), &rivers).is_some(),
+            "each configured symbol owns a distinct river"
         );
-        assert!(
-            source::build_history_source("NOT-A-SYMBOL", Some(TEST_ORIGIN), &profiles).is_none()
-        );
+        assert!(source::build_history_source("NOT-A-SYMBOL", Some(TEST_ORIGIN), &rivers).is_none());
     }
 
     #[test]
@@ -613,6 +681,7 @@ mod tests {
         const MULTIPLIERS: [f64; 7] = [0.001, 0.002, 0.005, 0.01, 0.1, 0.5, 1.0];
         let profiles = profiles();
         let increment = profiles
+            .profiles()
             .get("BTCUSDT")
             .expect("BTCUSDT profile")
             .def

@@ -232,8 +232,9 @@ fn golden_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/fill_distribution.json")
 }
 
-fn run_scenario(band_vol_mult: f64, profiles: &InstrumentProfiles) -> Vec<Cell> {
+fn run_scenario(band_vol_mult: f64, profiles: &crate::source::Rivers) -> Vec<Cell> {
     let def = profiles
+        .profiles()
         .get(SYMBOL)
         .expect("resolved BTCUSDT profile exists")
         .def
@@ -274,8 +275,11 @@ fn run_scenario(band_vol_mult: f64, profiles: &InstrumentProfiles) -> Vec<Cell> 
             // no order is ever marketable on arrival either way.
             let market = fills::read_last(SYMBOL, ts, profiles)
                 .or_else(|| {
-                    let mut tape =
-                        crate::source::build_history_source(SYMBOL, Some(ORIGIN), profiles)?;
+                    let crate::source::History::Source(mut tape) =
+                        profiles.history_source(SYMBOL, Some(ORIGIN)).ok()?
+                    else {
+                        return None;
+                    };
                     // The tape's first PRINT, not its first FRAME. Protocol 7
                     // opens every parent burst with a quote, so reading one tick
                     // and giving up on a non-trade returned None for the
@@ -400,10 +404,17 @@ fn record_fills(
 }
 
 fn render() -> String {
-    let profiles = InstrumentProfiles::from_profiles(vec![
+    let profiles = std::sync::Arc::new(InstrumentProfiles::from_profiles(vec![
         crate::config::profile_for_symbol("BTCUSDT")
             .expect("BTCUSDT preset must resolve for the fill golden"),
-    ]);
+    ]));
+    let profiles = crate::source::Rivers::new(
+        crate::source::TapeIdentity {
+            seeds: RunSeeds::from_run_seed(GOLDEN_RUN_SEED),
+            regime: None,
+        },
+        profiles,
+    );
     let golden = Golden {
         schema: 2,
         symbol: SYMBOL,
@@ -555,10 +566,6 @@ fn describe_mismatch(rendered: &str, expected: &str) -> String {
 
 #[test]
 fn fill_distribution_matches_the_golden() {
-    crate::source::set_boot_for_test(crate::source::BootTape {
-        seeds: RunSeeds::from_run_seed(GOLDEN_RUN_SEED),
-        regime: None,
-    });
     let rendered = render();
     assert_shape(&rendered);
     let path = golden_path();

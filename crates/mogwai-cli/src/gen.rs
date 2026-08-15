@@ -550,13 +550,7 @@ fn profile_from_config(
         );
     }
     let profiles = mogwai_server::config::build_instrument_profiles(&cfg)?;
-    let defs = profiles.instrument_defs();
-    let [def] = defs.as_slice() else {
-        bail!(
-            "--config resolved {} instruments, expected exactly one",
-            defs.len()
-        );
-    };
+    let def = profiles.boot_symbol_def(cfg.boot_symbol())?;
     Ok(profiles
         .get(&def.symbol)
         .expect("just listed this symbol")
@@ -1222,6 +1216,21 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, body).expect("writing the scratch config");
         path
+    }
+
+    /// A config carrying a second `[symbols.*]` table used to bail with
+    /// "resolved N instruments, expected exactly one"; profiles are plural now,
+    /// so the boot shape is resolved by NAME instead of by count. The MNQ case
+    /// additionally pins that an ABSENT top-level `symbol` resolves the shape
+    /// the default `[instrument] preset` names, not `DEFAULT_PRESET`.
+    #[test]
+    fn a_scratch_config_with_a_second_symbol_table_still_resolves_its_boot_shape() {
+        let path = scratch_config(
+            "two-symbol-mnq.toml",
+            "[instrument]\npreset = \"MNQ\"\n[balances]\n[symbols.BTCUSDT]\npreset = \"BTCUSDT\"\n",
+        );
+        let profile = profile_from_config(&path).expect("boot shape resolves by name");
+        assert_eq!(profile.def.symbol.as_ref(), "MNQ");
     }
 
     #[test]

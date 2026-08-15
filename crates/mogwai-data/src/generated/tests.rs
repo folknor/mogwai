@@ -151,6 +151,21 @@ fn checkpoint_flow_surge_is_visible_to_canonical_and_history_walks() {
 }
 
 #[test]
+fn a_live_index_refuses_to_be_extended() {
+    let fp = Fingerprint::from_repo_json();
+    let source = GeneratedSource::new(GeneratorScalars::xbtusd_anchor(&fp), 4242, 1_000, &fp, None);
+    let mut index = CheckpointIndex::new(source, 8_192, 1_000_000);
+    assert!(index.extend_toward_unless_live(1_000_000).is_some());
+    index.activate_live();
+    let before = index.frontier_ns();
+    assert_eq!(
+        index.extend_toward_unless_live(before.saturating_add(1_000_000_000)),
+        None
+    );
+    assert_eq!(index.frontier_ns(), before);
+}
+
+#[test]
 fn live_history_cannot_advance_the_paced_frontier() {
     let fp = Fingerprint::from_repo_json();
     let source = GeneratedSource::new(GeneratorScalars::xbtusd_anchor(&fp), 4242, 1_000, &fp, None);

@@ -194,6 +194,13 @@ impl CheckpointIndex {
         walked
     }
 
+    /// Walk toward `target`, unless the paced worker owns the lead.
+    /// The check and extension share one mutable borrow so a reader cannot
+    /// observe a cold index and then extend it after live activation.
+    pub fn extend_toward_unless_live(&mut self, target: u64) -> Option<usize> {
+        (!self.live).then(|| self.extend_toward(target))
+    }
+
     /// Halve the snapshot count once it exceeds `MAX_CHECKPOINTS` by dropping
     /// every other checkpoint and doubling the spacing `k`. This is what makes
     /// the index's memory a HARD ceiling (`MAX_CHECKPOINTS` generator clones)

@@ -1,7 +1,7 @@
 # mogwai glossary
 
-- **Run**: one foreground mogwai process, one instrument, one tape and one
-  ledger. A run may declare a simulated duration.
+- **Run**: one foreground mogwai process, one ledger, one paced tape and many
+  keyed rivers. A run may declare a simulated duration.
 - **Tape**: the run-owned generated market-data sequence. It is warmed before
   readiness and broadcast to every connected WebSocket.
 - **Ledger**: the single `mogwai-engine` instance owned by the run. HTTP and

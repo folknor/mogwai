@@ -73,12 +73,15 @@ pub(crate) async fn ws_upgrade(
 ) -> Response {
     let symbol = match resolve_socket_symbol(
         query.symbol.as_deref(),
-        &state.run.instrument.symbol,
-        &state.profiles,
+        &state.run.boot_symbol,
+        state.rivers.profiles(),
     ) {
         Ok(symbol) => symbol,
         Err(body) => return (StatusCode::BAD_REQUEST, body).into_response(),
     };
+    if !state.run.ensure_instrument(&symbol).await {
+        return (StatusCode::BAD_REQUEST, "symbol has no configured shape").into_response();
+    }
     let session = SocketSession { symbol };
     ws.max_message_size(mogwai_protocol::MAX_CLIENT_MESSAGE_BYTES)
         .max_frame_size(mogwai_protocol::MAX_CLIENT_MESSAGE_BYTES)

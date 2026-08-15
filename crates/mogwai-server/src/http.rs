@@ -259,6 +259,14 @@ pub(crate) async fn process_order_cmd(
             reservation,
         };
     }
+    // Register the symbol lazily, BEFORE the act delay and any market reading.
+    // A `false` here means no profile resolves the symbol; fall through rather
+    // than short-circuit, so an unconfigured symbol still meets the engine's
+    // existing unknown-instrument rejection with its existing wording instead of
+    // a second one invented here.
+    if let ClientMessage::SubmitOrder(order) = &order_cmd {
+        let _configured = run.ensure_instrument(&order.symbol).await;
+    }
     // The venue's ACT delay sits BETWEEN the protocol boundary and the market
     // price stamp. After the boundary, because a malformed command is refused
     // by the protocol and a refusal is not a venue act - and the same reason
@@ -288,7 +296,7 @@ pub(crate) async fn process_order_cmd(
     // synthesis-failure reject and the engine events below all occur now.
     let ts = sim_now_ns(state.sim());
     // A MARKET order still price-less after the stamp, for a symbol this venue
-    // DOES list, means `current_price` failed (most likely the synthesis task
+    // DOES list, means market price synthesis failed (most likely the task
     // itself died).
     // Reject it here with the honest story - the client correctly sent no price
     // (nautilus never stamps a market order), so letting the engine's "submit
@@ -299,7 +307,7 @@ pub(crate) async fn process_order_cmd(
     if let ClientMessage::SubmitOrder(order) = &order_cmd
         && order.order_type == OrderType::Market
         && order.price.is_none()
-        && state.profiles.get(&order.symbol).is_some()
+        && state.rivers.profiles().get(&order.symbol).is_some()
     {
         tracing::warn!(
             symbol = %order.symbol,
@@ -324,7 +332,8 @@ pub(crate) async fn process_order_cmd(
     }
     if let ClientMessage::SubmitOrder(order) = &order_cmd
         && let Some(calendar) = state
-            .profiles
+            .rivers
+            .profiles()
             .get(&order.symbol)
             .and_then(|profile| profile.calendar.as_ref())
         && reject_while_closed(calendar, ts, order, market_px)
@@ -387,7 +396,7 @@ fn reject_while_closed(
 pub(crate) struct AppState {
     pub(crate) run: Arc<Run>,
     pub(crate) cfg: Config,
-    pub(crate) profiles: Arc<source::InstrumentProfiles>,
+    pub(crate) rivers: Arc<source::Rivers>,
     /// Process-wide ceiling on websocket commands sleeping out an armed ACT
     /// delay. The per-connection lane bounds one client; this bounds the run.
     pub(crate) pending_commands: Arc<tokio::sync::Semaphore>,
@@ -636,12 +645,13 @@ pub(crate) async fn arm_divergence(
     (StatusCode::ACCEPTED, String::new())
 }
 
-/// The instrument table for this run's one currently available river.
+/// Every shape this run configured, sorted by symbol, each of them servable for
+/// history.
 ///
-/// A websocket upgrade may name this symbol or omit it to take the default;
-/// until river-keyed run state lands, no second symbol is accepted.
+/// A websocket upgrade may still only name the boot symbol or omit it: history
+/// is river-keyed now, but exactly one paced boat is placed, at boot.
 pub(crate) async fn instruments(State(state): State<AppState>) -> Json<Vec<InstrumentDef>> {
-    Json(vec![state.run.instrument.clone()])
+    Json(state.rivers.profiles().instrument_defs())
 }
 
 /// Pull route for the venue's current account snapshot.
@@ -682,8 +692,8 @@ pub(crate) async fn clock(State(state): State<AppState>) -> Json<ServerClock> {
 /// A wire MARKET order carries no price (mirroring Nautilus, which never stamps
 /// one), but the engine has no book of its own, so a price-less market order is
 /// additionally STAMPED here with the last print at or before `ts`. That is the
-/// same number the reading carries; the separate `source::current_price` path
-/// this replaced returned the first tick at or AFTER sim-now, which is a
+/// same number the reading carries; the former separate price path returned
+/// the first tick at or AFTER sim-now, which is a
 /// look-ahead, and keeping two sources of "what is the market" is how they drift
 /// apart. `fills::read_last` is consulted only when `read_market` refuses
 /// outright, since the protocol still requires a price on the wire.
@@ -696,9 +706,10 @@ pub(crate) async fn clock(State(state): State<AppState>) -> Json<ServerClock> {
 /// `/trades` pushes the identical synthesis onto `spawn_blocking` rather than
 /// running it inline on the tokio worker; this does the same, so a burst of price-less market
 /// orders cannot stall the runtime's worker pool or serialize behind a seeked
-/// `/trades` request (or vice versa) any longer than the symbol's shared
-/// index itself requires - other symbols' requests do not queue here at all
-/// (S13).
+/// `/trades` request (or vice versa) any longer than the symbol's own river
+/// lock requires. Since the registry keys one lock per river, contention is
+/// per symbol by construction: another symbol's requests take another
+/// river's lock and do not queue here at all (S13).
 async fn market_reading(
     msg: ClientMessage,
     state: &AppState,
@@ -715,16 +726,16 @@ async fn market_reading(
         _ => None,
     };
     if let Some(symbol) = symbol {
-        let profiles = Arc::clone(&state.profiles);
+        let rivers = Arc::clone(&state.rivers);
         let mult = state.cfg.fill_band_vol_mult;
         let max_ticks = state.cfg.fill_band_max_ticks;
         let interval_ms = state.cfg.fill_sweep_interval_ms;
         let cache = Arc::clone(&state.market_readings);
         let (reading, last_px) = tokio::task::spawn_blocking(move || {
-            let reading = cache.read(&symbol, ts, &profiles, mult, max_ticks, interval_ms);
+            let reading = cache.read(&symbol, ts, &rivers, mult, max_ticks, interval_ms);
             let last_px = reading
                 .map(|value| value.last_px)
-                .or_else(|| crate::fills::read_last(&symbol, ts, &profiles));
+                .or_else(|| crate::fills::read_last(&symbol, ts, &rivers));
             (reading, last_px)
         })
         .await
@@ -765,13 +776,13 @@ pub(crate) async fn trades(
     // now, so history and the live tape are the same realization by
     // construction rather than by a client remembering to ask for the same one.
     let limit = normalize_limit(query.limit);
-    let profiles = Arc::clone(&state.profiles);
+    let rivers = Arc::clone(&state.rivers);
     let data_origin = source::TAPE_ORIGIN_NS;
     let sim_now = sim_now_ns(state.sim());
     let HistoryQuery {
         symbol, start, end, ..
     } = query;
-    if let Some(body) = unserved_symbol_refusal(&symbol, &profiles) {
+    if let Some(body) = unserved_symbol_refusal(&symbol, rivers.profiles()) {
         return Err((StatusCode::BAD_REQUEST, body));
     }
     if let Some(body) = history_start_refusal(start, data_origin, sim_now) {
@@ -810,20 +821,33 @@ pub(crate) async fn trades(
     // the exact scope-ends-before-the-work defect `HistoryPage` closes on the
     // response side. The closure hands the slot back with the bytes; on the
     // error and panic paths it drops inside the task, after the work ends.
+    // Echoed back on the failure paths below, since the handler's own copy is
+    // moved into the blocking task.
+    let named = truncated_symbol(&symbol);
     let (history_slot, body) = match tokio::task::spawn_blocking(move || {
-        let body = serde_json::to_vec(&bounded_trades(&symbol, start, end, limit, &profiles));
+        let body = bounded_trades(&symbol, start, end, limit, &rivers)
+            .and_then(|rows| serde_json::to_vec(&rows).map_err(Into::into));
         (history_slot, body)
     })
     .await
     {
         Ok((slot, Ok(body))) => (slot, body),
+        // A synthesis failure is NOT an empty window. Naming the symbol and the
+        // window here is what keeps a blown reach or a stopped generator
+        // distinguishable from a span nothing traded in.
         Ok((_slot, Err(e))) => {
-            tracing::error!(%e, "trade history serialization failed");
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()));
+            tracing::error!(%e, symbol = %named, "trade history could not be produced");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                history_failure_body(&named, start, end),
+            ));
         }
         Err(e) => {
-            tracing::error!(%e, "history synthesis task failed");
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()));
+            tracing::error!(%e, symbol = %named, "history synthesis task failed");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                history_failure_body(&named, start, end),
+            ));
         }
     };
     Ok(history_page(history_slot, body))
@@ -835,13 +859,13 @@ pub(crate) async fn quotes(
 ) -> Result<axum::response::Response, (StatusCode, String)> {
     let history_slot = admit_history(&state.history_requests)?;
     let limit = normalize_limit(query.limit);
-    let profiles = Arc::clone(&state.profiles);
+    let rivers = Arc::clone(&state.rivers);
     let data_origin = source::TAPE_ORIGIN_NS;
     let sim_now = sim_now_ns(state.sim());
     let HistoryQuery {
         symbol, start, end, ..
     } = query;
-    if let Some(body) = unserved_symbol_refusal(&symbol, &profiles) {
+    if let Some(body) = unserved_symbol_refusal(&symbol, rivers.profiles()) {
         return Err((StatusCode::BAD_REQUEST, body));
     }
     if let Some(body) = history_start_refusal(start, data_origin, sim_now) {
@@ -852,20 +876,28 @@ pub(crate) async fn quotes(
     let end = Some(end.map_or(sim_now, |end| end.min(sim_now)));
     // The permit rides the blocking task for the same reason as `/trades`: a
     // client disconnect drops this future, and only the closure outlives that.
+    let named = truncated_symbol(&symbol);
     let (history_slot, body) = match tokio::task::spawn_blocking(move || {
-        let body = serde_json::to_vec(&bounded_quotes(&symbol, start, end, limit, &profiles));
+        let body = bounded_quotes(&symbol, start, end, limit, &rivers)
+            .and_then(|rows| serde_json::to_vec(&rows).map_err(Into::into));
         (history_slot, body)
     })
     .await
     {
         Ok((slot, Ok(body))) => (slot, body),
         Ok((_slot, Err(e))) => {
-            tracing::error!(%e, "quote history serialization failed");
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()));
+            tracing::error!(%e, symbol = %named, "quote history could not be produced");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                history_failure_body(&named, start, end),
+            ));
         }
         Err(e) => {
-            tracing::error!(%e, "quote history synthesis task failed");
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()));
+            tracing::error!(%e, symbol = %named, "quote history synthesis task failed");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                history_failure_body(&named, start, end),
+            ));
         }
     };
     Ok(history_page(history_slot, body))
@@ -974,6 +1006,21 @@ fn admit_history(
 /// parameter, and it is why the guard must never be a case-insensitive or
 /// otherwise looser comparison: a guard that admits what the synthesis
 /// misses restores the silent empty page.
+/// A caller-supplied symbol cut to what any log line or body may echo.
+fn truncated_symbol(symbol: &str) -> String {
+    symbol.chars().take(MAX_ECHOED_SYMBOL).collect()
+}
+
+/// The 500 body for a history request the venue could not synthesize. Names the
+/// symbol and the window so an operator can tell it from `200 []`.
+fn history_failure_body(symbol: &str, start: Option<u64>, end: Option<u64>) -> String {
+    let start = start.unwrap_or(source::TAPE_ORIGIN_NS);
+    match end {
+        Some(end) => format!("history for {symbol} over [{start}, {end}] could not be synthesized"),
+        None => format!("history for {symbol} from {start} could not be synthesized"),
+    }
+}
+
 pub(crate) fn unserved_symbol_refusal(
     symbol: &str,
     profiles: &source::InstrumentProfiles,
@@ -1003,15 +1050,12 @@ const MAX_ECHOED_SYMBOL: usize = 64;
 /// The symbol one `/ws` upgrade binds to, or the refusal body explaining why
 /// this run cannot serve it.
 ///
-/// TOTAL resolution is the model, and it is NOT reachable yet: `source::RunIndex`
-/// is a process-global holding one symbol, so a second symbol would resolve to a
-/// profile and then read `None` from every index lookup - silently, with no
-/// error and no log. Until run state is keyed per river, a symbol this run did
-/// not boot is refused HERE, loudly, rather than served as a permanently empty
-/// tape. That is a COMPATIBILITY RESTRICTION, not the settled model.
+/// Configured symbols resolve to keyed rivers. A websocket still needs the one
+/// paced boat placed at boot, so a configured non-boot river is refused here
+/// until the boatyard can place a live tape for it.
 ///
 /// Takes `bound: &Symbol` and not `&Run` deliberately: it reads exactly
-/// `run.instrument.symbol`, and taking the whole run would make the unit tests
+/// `run.boot_symbol`, and taking the whole run would make the unit tests
 /// below impossible to write without spawning a tape.
 ///
 /// The charset rule is stated on the DECODED value, which is the whole of it
@@ -1042,13 +1086,9 @@ pub(crate) fn resolve_socket_symbol(
     if requested == bound.as_ref() {
         return Ok(Arc::clone(bound));
     }
-    // `unserved_symbol_refusal` cannot answer `None` here TODAY -
-    // `build_instrument_profiles` keeps only the boot profile, so a symbol that
-    // failed the comparison above also misses `get`. Do not rely on that: the
-    // change that makes the profile map plural makes this arm live, and a
-    // `Result` has nothing to put in its `Err` if the body is missing. The
-    // fallback names what the socket CAN bind rather than listing symbols it
-    // provably cannot.
+    // A configured non-boot symbol has history but no paced boat yet. The
+    // fallback names the boat this socket can bind rather than claiming that
+    // the configured river is unserved.
     Err(unserved_symbol_refusal(requested, profiles).unwrap_or_else(|| {
         let echoed: String = requested.chars().take(MAX_ECHOED_SYMBOL).collect();
         format!(
@@ -1329,14 +1369,14 @@ pub(crate) fn bounded_trades(
     start: Option<u64>,
     end: Option<u64>,
     limit: usize,
-    profiles: &source::InstrumentProfiles,
-) -> Vec<TradeTick> {
+    rivers: &source::Rivers,
+) -> anyhow::Result<Vec<TradeTick>> {
     if limit == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
-    let Some(mut merged) = source::build_history_source(symbol, start, profiles) else {
-        return Vec::new();
+    let source::History::Source(mut merged) = rivers.history_source(symbol, start)? else {
+        return Ok(Vec::new());
     };
     let mut out = Vec::new();
 
@@ -1356,7 +1396,7 @@ pub(crate) fn bounded_trades(
         }
     }
 
-    out
+    Ok(out)
 }
 
 pub(crate) fn bounded_quotes(
@@ -1364,13 +1404,13 @@ pub(crate) fn bounded_quotes(
     start: Option<u64>,
     end: Option<u64>,
     limit: usize,
-    profiles: &source::InstrumentProfiles,
-) -> Vec<QuoteTick> {
+    rivers: &source::Rivers,
+) -> anyhow::Result<Vec<QuoteTick>> {
     if limit == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    let Some(mut merged) = source::build_history_source(symbol, start, profiles) else {
-        return Vec::new();
+    let source::History::Source(mut merged) = rivers.history_source(symbol, start)? else {
+        return Ok(Vec::new());
     };
     let mut out = Vec::new();
     while let Some(tick) = merged.next_tick() {
@@ -1389,7 +1429,7 @@ pub(crate) fn bounded_quotes(
             break;
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1399,20 +1439,14 @@ mod calendar_tests {
     use mogwai_protocol::{Side, SubmitOrder, TimeInForce};
     use rust_decimal::Decimal;
 
-    fn generated_profiles() -> source::InstrumentProfiles {
-        source::set_boot_for_test(source::BootTape {
-            seeds: mogwai_protocol::RunSeeds::from_run_seed(42),
-            regime: None,
-        });
-        source::InstrumentProfiles::from_profiles(vec![
-            crate::config::profile_for_symbol("BTCUSDT").expect("BTCUSDT preset must resolve"),
-        ])
+    fn generated_profiles() -> std::sync::Arc<source::Rivers> {
+        crate::fills::test_rivers()
     }
 
     #[test]
     fn bounded_quotes_respects_the_window_and_the_limit() {
         let profiles = generated_profiles();
-        let first = bounded_quotes("BTCUSDT", Some(0), None, 4, &profiles);
+        let first = bounded_quotes("BTCUSDT", Some(0), None, 4, &profiles).unwrap();
         assert_eq!(first.len(), 4);
         assert!(
             first
@@ -1421,7 +1455,7 @@ mod calendar_tests {
         );
         let start = first[1].ts_event;
         let end = first[2].ts_event;
-        let bounded = bounded_quotes("BTCUSDT", Some(start), Some(end), 10, &profiles);
+        let bounded = bounded_quotes("BTCUSDT", Some(start), Some(end), 10, &profiles).unwrap();
         assert!(!bounded.is_empty());
         assert!(
             bounded
@@ -1433,8 +1467,13 @@ mod calendar_tests {
     #[test]
     fn bounded_quotes_reproduce_the_live_quote_sequence() {
         let profiles = generated_profiles();
-        let history = bounded_quotes("BTCUSDT", Some(0), None, 100, &profiles);
-        let mut live = source::build_live_source("BTCUSDT", &profiles, 0).unwrap();
+        let history = bounded_quotes("BTCUSDT", Some(0), None, 100, &profiles).unwrap();
+        let source::History::Source(mut live) = profiles
+            .history_source("BTCUSDT", Some(source::TAPE_ORIGIN_NS))
+            .expect("live source")
+        else {
+            panic!("BTCUSDT is configured");
+        };
         let mut live_quotes = Vec::new();
         while live_quotes.len() < history.len() {
             if let TickEvent::Quote(quote) = live.next_tick().unwrap() {
@@ -1449,7 +1488,11 @@ mod calendar_tests {
 
     #[test]
     fn the_quotes_route_is_no_longer_empty() {
-        assert!(!bounded_quotes("BTCUSDT", Some(0), None, 1, &generated_profiles()).is_empty());
+        assert!(
+            !bounded_quotes("BTCUSDT", Some(0), None, 1, &generated_profiles())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

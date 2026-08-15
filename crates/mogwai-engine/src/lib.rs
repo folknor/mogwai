@@ -369,6 +369,17 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Register an unseen instrument without disturbing existing venue state.
+    pub fn ensure_instrument(&mut self, def: InstrumentDef) -> bool {
+        match self.instruments.entry(std::sync::Arc::clone(&def.symbol)) {
+            std::collections::hash_map::Entry::Occupied(_) => false,
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(def);
+                true
+            }
+        }
+    }
+
     pub fn set_margin_policy(&mut self, symbol: Symbol, policy: MarginPolicy) {
         self.margin.insert(symbol, policy);
         // Public callers may replace policy after orders already rest. Their
@@ -5866,5 +5877,42 @@ mod tests {
             "the cancel that frees the hold is where the arm lands"
         );
         assert!(e.armed.is_empty());
+    }
+
+    #[test]
+    fn ensure_instrument_is_idempotent_and_preserves_policy() {
+        let def = default_instruments().remove(0);
+        let symbol = std::sync::Arc::clone(&def.symbol);
+        let mut engine = Engine::build(EngineConfig {
+            account_id: AccountId::parse("SIM-001").unwrap(),
+            instruments: Vec::new(),
+            balances: HashMap::new(),
+            fill_seed: 1,
+        });
+        assert!(engine.ensure_instrument(def.clone()));
+        let margin = MarginPolicy {
+            initial_per_contract: Decimal::ONE,
+            maintenance_per_contract: Decimal::ONE,
+            breach_action: BreachAction::Refuse,
+        };
+        let fees = FeeSchedule {
+            maker: FeeRate::BasisPoints { rate: Decimal::ONE },
+            taker: FeeRate::BasisPoints { rate: Decimal::ONE },
+        };
+        engine.set_margin_policy(std::sync::Arc::clone(&symbol), margin);
+        engine.set_fee_schedule(std::sync::Arc::clone(&symbol), fees);
+        assert!(!engine.ensure_instrument(def));
+        let kept_margin = engine.margin.get(&symbol).unwrap();
+        assert_eq!(
+            kept_margin.initial_per_contract,
+            margin.initial_per_contract
+        );
+        assert_eq!(
+            kept_margin.maintenance_per_contract,
+            margin.maintenance_per_contract
+        );
+        let kept_fees = engine.fees.get(&symbol).unwrap();
+        assert!(matches!(kept_fees.maker, FeeRate::BasisPoints { rate } if rate == Decimal::ONE));
+        assert!(matches!(kept_fees.taker, FeeRate::BasisPoints { rate } if rate == Decimal::ONE));
     }
 }

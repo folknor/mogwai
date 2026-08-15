@@ -169,11 +169,7 @@ async fn serve_async(
 ) -> anyhow::Result<()> {
     let cfg = Config::load(config)?;
     let profiles = Arc::new(build_instrument_profiles(&cfg)?);
-    let instrument = profiles
-        .instrument_defs()
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("no instrument configured"))?;
+    let instrument = profiles.boot_symbol_def(cfg.boot_symbol())?;
     let seeds = mogwai_protocol::RunSeeds::from_run_seed(
         cfg.seed.unwrap_or_else(|| rand::random::<u64>() >> 1),
     );
@@ -185,11 +181,13 @@ async fn serve_async(
         "run seeds fixed"
     );
     let warm_symbol = Arc::clone(&instrument.symbol);
-    let warm_profiles = Arc::clone(&profiles);
-    let warm_boot = source::BootTape {
-        seeds,
-        regime: cfg.regime,
-    };
+    let rivers = source::Rivers::new(
+        source::TapeIdentity {
+            seeds,
+            regime: cfg.regime,
+        },
+        Arc::clone(&profiles),
+    );
     // Boot projections. Both are advisory - warmup length and ring depth are
     // the operator's call - but an extreme warmup must fail LOUDLY rather than
     // look like a hung boot, and a ring sized for the old cadence is a
@@ -224,10 +222,10 @@ async fn serve_async(
             );
         }
     }
-    let checkpoints = tokio::task::spawn_blocking(move || {
-        source::materialize_warmup(&warm_symbol, &warm_profiles, warm_boot, run_start_ns)
-    })
-    .await??;
+    let warm_rivers = Arc::clone(&rivers);
+    let checkpoints =
+        tokio::task::spawn_blocking(move || warm_rivers.ensure_reach(&warm_symbol, run_start_ns))
+            .await??;
     let sim = build_run_clock(&cfg, now_ns())?;
     let data_origin_ns = source::TAPE_ORIGIN_NS;
     tracing::info!(
@@ -243,7 +241,7 @@ async fn serve_async(
     let (fault_tx, fault_rx) = std::sync::mpsc::channel();
     let run = run::Run::new(
         instrument.clone(),
-        Arc::clone(&profiles),
+        Arc::clone(&rivers),
         cfg.balances.clone(),
         sim,
         run_start_ns,
@@ -273,13 +271,13 @@ async fn serve_async(
     let market_readings = Arc::new(fills::MarketReadingCache::default());
     sweeper::spawn_fill_sweeper(sweeper::FillSweep {
         run: Arc::clone(&run),
-        profiles: Arc::clone(&profiles),
+        rivers: Arc::clone(&rivers),
         interval_ms: cfg.fill_sweep_interval_ms,
     });
     let state = AppState {
         run,
         cfg: cfg.clone(),
-        profiles: Arc::clone(&profiles),
+        rivers: Arc::clone(&rivers),
         pending_commands: Arc::new(tokio::sync::Semaphore::new(cfg.global_pending_command_acts)),
         history_requests: Arc::new(tokio::sync::Semaphore::new(
             http::MAX_CONCURRENT_HISTORY_REQUESTS,

@@ -9,11 +9,36 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    accelerated_config, band_config, fast_config, http_get, paced_config, spawn, tiny_fanout_config,
+    accelerated_config, band_config, fast_config, http_get, paced_config, spawn,
+    tiny_fanout_config, two_symbols_config,
 };
 use futures_util::{SinkExt, StreamExt};
 use mogwai_protocol::{ServerMessage, TradeTick};
 use tokio_tungstenite::tungstenite::Message;
+
+#[test]
+#[ignore = "binds a loopback listener"]
+fn history_is_served_for_a_configured_symbol_that_is_not_the_boot_river() {
+    let venue = spawn(&["--config", &two_symbols_config()]);
+    let (status, body) = http_get(&venue.http_base(), "/trades?symbol=MNQ&start=0&limit=5");
+    assert_eq!(status, 200, "configured cold history is served: {body}");
+    assert!(body.contains("MNQ"));
+}
+
+#[test]
+#[ignore = "binds a loopback listener"]
+fn instruments_reports_every_configured_shape() {
+    let venue = spawn(&["--config", &two_symbols_config()]);
+    let (status, body) = http_get(&venue.http_base(), "/instruments");
+    assert_eq!(status, 200, "instrument list answers: {body}");
+    let defs: Vec<mogwai_protocol::InstrumentDef> = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        defs.iter()
+            .map(|def| def.symbol.as_ref())
+            .collect::<Vec<_>>(),
+        ["BTCUSDT", "MNQ"]
+    );
+}
 
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
@@ -41,6 +66,25 @@ async fn ws_upgrade_refuses_an_unserved_symbol_with_400() {
         }
     }
     panic!("the named boot river produced no frames");
+}
+
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_ws_upgrade_for_a_configured_non_boot_symbol_is_refused_naming_the_boat() {
+    let venue = spawn(&["--config", &two_symbols_config()]);
+    let error = tokio_tungstenite::connect_async(venue.ws_url_for("MNQ"))
+        .await
+        .expect_err("non-boot river has no boat");
+    match error {
+        tokio_tungstenite::tungstenite::Error::Http(response) => {
+            assert_eq!(response.status(), 400);
+            let body = response.body().as_ref().expect("refusal body");
+            let body = String::from_utf8_lossy(body);
+            assert!(body.contains("configured but is not the river this run booted"));
+            assert!(body.contains("BTCUSDT"));
+        }
+        other => panic!("expected HTTP refusal, got {other}"),
+    }
 }
 
 #[tokio::test]
