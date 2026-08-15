@@ -743,8 +743,9 @@ impl DataClient for MogwaiDataClient {
                     Ok(result) => result,
                     Err(err) => {
                         // Surface the failure instead of the old silent `if let Ok`
-                        // drop: a server 422 (off-tape) or any fetch error must be
-                        // visible, not mistaken for "no trades in the window".
+                        // drop: a server 400 (an off-tape window, or a symbol the
+                        // run does not serve) or any fetch error must be visible,
+                        // not mistaken for "no trades in the window".
                         tracing::error!(%symbol, error = %err, "request_trades: trade fetch failed (the server may have refused an off-tape window); answering with an empty trade response so the request resolves");
                         break 'trades Vec::new();
                     }

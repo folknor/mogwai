@@ -223,6 +223,10 @@ that model rather than adding out-of-sample market evidence. A declared
 duration starts at `run_start_ns`, not boot. At its deadline the server
 announces `RunComplete`, closes WebSockets normally, drains, and exits zero.
 
+The history endpoints refuse rather than return an empty page on all three
+impossible-request axes: before the tape origin, past the current clock, or a
+symbol not served by this run.
+
 The protocol crate owns every JSON type shared by server and adapter. The
 adapter uses WebSocket streaming only; `/trades` remains a request endpoint,
 which is how history and warmup are fetched.

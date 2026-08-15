@@ -90,26 +90,21 @@ A piece is a unit one agent could own or one coherent landing, with its
 decisions. The detail for each lives in the design bullets under Open
 issues; this is the inventory, not the spec.
 
-SLICE 1 - symbol selects the preset, still one symbol per run. Pieces 1 through 3
-landed (preset selection by symbol lookup with BTCUSDT the designated default,
-config overlays split from the boot symbol, and `InstrumentDef` derived with
-the second default knob bundle deleted); their detail is git history, not this file. Numbering is left as
-it was assigned so the cross-references below (piece 4, piece 5, piece 13)
-still resolve:
+SLICE 1 - symbol selects the preset, still one symbol per run. Pieces 1
+through 3 and 5 landed (preset selection by symbol lookup with BTCUSDT the
+designated default, config overlays split from the boot symbol,
+`InstrumentDef` derived with the second default knob bundle deleted, and
+`/trades`/`/quotes` refusing an unserved symbol with a 400 naming the served
+symbol); their detail is git history, not this file. Numbering is left as it
+was assigned so the cross-references below (piece 4, piece 13) still resolve:
 
-4. The boot-ordering DECISION and its consequence: `INDEX` initializes in
-   `materialize_warmup` at boot, before any request - either warmup moves
-   or a boot symbol survives slice 1. RULED by the owner 2026-08-15: slice 1
-   KEEPS A BOOT SYMBOL - config still names the one symbol the run serves,
-   warmup and `INDEX` initialize from it unchanged, and what changes is that
-   the symbol resolves through preset-or-default instead of requiring a
-   preset key. Moving warmup is slice-2 work.
-5. `/trades` and `/quotes` unknown-symbol semantics DECISION: under total
-   resolution the empty-200 path changes meaning - unreachable or 400.
-   RULED by the owner 2026-08-15: a 400 NAMING THE SERVED SYMBOL. In slice 1
-   the run still serves one symbol, so unknown stays reachable and must stay
-   loudly distinguishable from no-trades-happened, the same principle the
-   off-tape-window 400 defends. Unreachability is a slice-2 question.
+4. RULED AND CONSUMED. The boot-ordering decision - warmup moves, or a boot
+   symbol survives slice 1 - was ruled by the owner 2026-08-15: slice 1
+   keeps a boot symbol, and that is the landed state (the top-level
+   `symbol` key; warmup and `INDEX` still initialize from it at boot).
+   What survives is the slice-2 half only: moving warmup and `INDEX` off
+   the boot symbol so a river can materialize per request, which is
+   pieces 6 and 7's work, not a separate decision.
 
 SLICE 2 - many boats on many rivers:
 
@@ -146,8 +141,8 @@ CROSS-CUTTING:
 14. The durable prose: every decision above owes `reference/` and `docs/`
     writing WITH the code, per the standing item below.
 
-Pieces 4 and 5 (and the guard question inside 13) are decisions before
-code; the highest-risk pieces are 6, 8, and 9 with 10. Broadarrow's item 4
+Piece 4 (and the guard question inside 13) is a decision before code; the
+highest-risk pieces are 6, 8, and 9 with 10. Broadarrow's item 4
 (consuming the multi-instrument venue) is excluded - it is theirs, and
 their build breaking loudly when piece 13 lands is the designed handoff.
 
@@ -291,13 +286,6 @@ their build breaking loudly when piece 13 lands is the designed handoff.
   boot symbol must still be chosen up front. RULED 2026-08-15: slice 1 keeps
   a boot symbol in config; warmup and `INDEX` initialize from it unchanged;
   moving warmup is slice-2 work. See piece 4 of the fourteen-piece inventory.
-  ALSO SLICE 1: `/trades` and `/quotes` return an EMPTY 200 for an unknown
-  symbol, while the same handler goes to considerable length to refuse an
-  off-tape window with a loud 400 precisely so an impossible request stays
-  distinguishable from "no trades happened". Under total resolution that `None`
-  path changes meaning entirely - RULED 2026-08-15: in slice 1 an unknown
-  symbol is a 400 naming the served symbol; unreachability is a slice-2
-  question. See piece 5 of the fourteen-piece inventory.
   CONSUMER-SIDE, unchanged and still theirs: `run_prep::mogwai_facts` refuses a
   `/instruments` answer of anything but exactly one instrument, so a venue
   serving many BREAKS their build loudly by design, closed on their side by
@@ -830,7 +818,10 @@ their build breaking loudly when piece 13 lands is the designed handoff.
   assert on THE NEXT frame" family applied to the launcher contract script:
   either the assertion needs a drain-to-deadline, or snapshot-first is a real
   wire contract the server must uphold and the race is a server defect.
-  Decide which before patching the script.
+  Decide which before patching the script. SECOND OCCURRENCE later the same
+  day, at the piece-5 landing gate: identical failure text, identical
+  pass-on-immediate-rerun, again on a tree whose tape generation was
+  untouched. Two hits in one day says the race is not rare.
 
 - GTD / `expire_time` on the wire, with a time-driven expiry pass on the
   sweeper. Refused today for limits and conditionals alike - the conditional-

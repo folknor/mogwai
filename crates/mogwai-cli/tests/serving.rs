@@ -184,6 +184,45 @@ fn trades_after_sim_now_are_refused_with_400() {
     assert_eq!(status, 200, "a future end is clamped, not refused: {body}");
 }
 
+#[test]
+#[ignore = "binds a loopback listener"]
+fn history_for_an_unserved_symbol_is_refused_with_400() {
+    let venue = spawn(&["--config", &fast_config()]);
+    for endpoint in ["trades", "quotes"] {
+        let (status, body) = http_get(
+            &venue.http_base(),
+            &format!("/{endpoint}?symbol=NOT-A-SYMBOL&start=0&limit=5"),
+        );
+        assert_eq!(status, 400, "an unserved symbol is refused: {body}");
+        assert!(
+            body.contains("NOT-A-SYMBOL"),
+            "the refusal names the request: {body}"
+        );
+        assert!(
+            body.contains(&venue.record.symbol),
+            "the refusal names the served symbol: {body}"
+        );
+    }
+
+    let lowercase = venue.record.symbol.to_lowercase();
+    if lowercase != venue.record.symbol {
+        let (status, body) = http_get(
+            &venue.http_base(),
+            &format!("/trades?symbol={lowercase}&start=0&limit=5"),
+        );
+        assert_eq!(status, 400, "history symbol matching is case-exact: {body}");
+    }
+
+    let (status, body) = http_get(
+        &venue.http_base(),
+        &format!("/trades?symbol={}&start=0&limit=5", venue.record.symbol),
+    );
+    assert_eq!(
+        status, 200,
+        "the run's served symbol remains servable: {body}"
+    );
+}
+
 /// What proves the warmup was MATERIALIZED rather than merely declared: a
 /// request for the earliest servable instant, issued the moment the readiness
 /// line arrives, returns data instead of a refusal or an empty page.

@@ -320,6 +320,14 @@ def check_common(venue: Venue) -> None:
     warm = venue.http(f"/trades?symbol={venue.symbol}&start={floor}&limit=20")
     assert warm, "the earliest servable instant returned no trades"
 
+    try:
+        venue.http(f"/trades?symbol=NOT-A-SYMBOL&start={floor}&limit=5")
+        raise AssertionError("an unserved history symbol was served instead of refused")
+    except urllib.error.HTTPError as err:
+        assert err.code == 400, (
+            f"an unserved history symbol must be a 400, got {err.code}"
+        )
+
     # And the two boundaries are refused by name rather than served short.
     for start, label in (
         (floor - 1, "before the floor"),

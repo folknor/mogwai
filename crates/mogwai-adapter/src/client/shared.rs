@@ -579,10 +579,11 @@ pub(crate) fn date_to_unix_nanos(date: Option<chrono::DateTime<chrono::Utc>>) ->
 }
 /// Refuse an off-tape warmup BEFORE spending a round trip on it. A `start`
 /// below the published `data_origin` can never be served (the tape begins at the
-/// origin), so a fetch would come back an empty `200` the warmup cannot tell
-/// from "no trades happened" - or, post-Landing-2, a server `422`. Failing here,
-/// naming both the requested start and the floor, turns that into a loud,
-/// surfaced error at the request boundary instead of a silent doomed fetch.
+/// origin), so the round trip can only end in a server `400` - or, against a
+/// venue that does not refuse, an empty `200` the warmup cannot tell from "no
+/// trades happened". Failing here, naming both the requested start and the
+/// floor, turns that into a loud, surfaced error at the request boundary
+/// instead of a silent doomed fetch.
 ///
 /// `data_origin == 0` is the "floor unknown" sentinel (the `/clock` fetch failed
 /// and the client fell back to identity): the check is skipped so the server's

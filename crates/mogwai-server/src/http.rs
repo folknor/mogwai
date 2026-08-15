@@ -724,43 +724,10 @@ pub(crate) async fn trades(
     let HistoryQuery {
         symbol, start, end, ..
     } = query;
-
-    // Analytic refuse of an off-tape window: a `start` before the data origin can
-    // never be served (the tape begins at `data_origin`), so reject it LOUDLY with
-    // the floor named rather than draining the seek cap and returning an empty
-    // `200` the warmup cannot distinguish from "no trades happened". `None` means
-    // "from origin" and is served; degenerate windows (start > end, limit 0) flow
-    // through to `bounded_trades` unchanged.
-    //
-    // With `TAPE_ORIGIN_NS` fixed at zero this branch is currently unreachable -
-    // no `u64` start is below it - and it is kept rather than deleted because
-    // the floor is a constant this handler reads, not a literal it hardcodes:
-    // move the origin off zero and the refusal is live again, with its message
-    // and its status already agreed with the adapter's `ensure_on_tape` guard.
-    if let Some(start) = start
-        && start < data_origin
-    {
-        let body = format!(
-            "requested start {start} precedes data_origin_ns {data_origin}; the tape cannot serve before its origin"
-        );
-        tracing::warn!(start, data_origin, "refusing off-tape trades window");
+    if let Some(body) = history_symbol_refusal(&symbol, &profiles) {
         return Err((StatusCode::BAD_REQUEST, body));
     }
-
-    // The symmetric ceiling: tape past sim-now does not exist yet. Every
-    // legitimate window lives in `[data_origin, sim_now]` by construction, and
-    // the generator is deterministic, so serving a future `start` would extend
-    // the shared index past the clock and hand the client tomorrow's tape - a
-    // look-ahead leak no real venue can produce. Refused with the same loud
-    // `400` as the origin floor, so "you asked for data that cannot exist yet"
-    // stays distinguishable from "no trades happened".
-    if let Some(start) = start
-        && start > sim_now
-    {
-        let body = format!(
-            "requested start {start} exceeds sim-now {sim_now}; the tape cannot serve past the clock"
-        );
-        tracing::warn!(start, sim_now, "refusing future trades window");
+    if let Some(body) = history_start_refusal(start, data_origin, sim_now) {
         return Err((StatusCode::BAD_REQUEST, body));
     }
 
@@ -827,9 +794,14 @@ pub(crate) async fn quotes(
     let HistoryQuery {
         symbol, start, end, ..
     } = query;
+    if let Some(body) = history_symbol_refusal(&symbol, &profiles) {
+        return Err((StatusCode::BAD_REQUEST, body));
+    }
     if let Some(body) = history_start_refusal(start, data_origin, sim_now) {
         return Err((StatusCode::BAD_REQUEST, body));
     }
+    // A future start is impossible, while a future end is the ordinary
+    // caller-clock spelling of "everything through now", so clamp the latter.
     let end = Some(end.map_or(sim_now, |end| end.min(sim_now)));
     // The permit rides the blocking task for the same reason as `/trades`: a
     // client disconnect drops this future, and only the closure outlives that.
@@ -940,14 +912,54 @@ fn admit_history(
     })
 }
 
+/// The one unknown-symbol decision both history endpoints make.
+///
+/// `Some(body)` is a `400`. The predicate is `InstrumentProfiles::get` - the
+/// exact lookup `bounded_trades` and `bounded_quotes` perform three frames
+/// down - hoisted so the miss is a named refusal instead of an empty `200`
+/// the caller cannot tell from "no trades happened". That is the same
+/// principle as `history_start_refusal` below, applied to the other
+/// parameter, and it is why the guard must never be a case-insensitive or
+/// otherwise looser comparison: a guard that admits what the synthesis
+/// misses restores the silent empty page.
+fn history_symbol_refusal(symbol: &str, profiles: &source::InstrumentProfiles) -> Option<String> {
+    if profiles.get(symbol).is_some() {
+        return None;
+    }
+    // Echo the request back TRUNCATED, for the reason `truncate_client_id`
+    // exists on the order path: neither a refusal body nor a log line may
+    // become an amplifier for an arbitrarily long caller-supplied string. The
+    // cap is far above any symbol a run can serve, so it only ever shortens a
+    // request that was going to be refused anyway.
+    const MAX_ECHOED_SYMBOL: usize = 64;
+    let echoed: String = symbol.chars().take(MAX_ECHOED_SYMBOL).collect();
+    tracing::warn!(symbol = %echoed, "refusing unserved history symbol");
+    let served = profiles.served_symbols().join(", ");
+    Some(format!(
+        "requested symbol {echoed} is not served by this run; this run serves {served}"
+    ))
+}
+
+/// Refuse a history start outside the tape that exists now.
+///
+/// A start before `data_origin` can never be served, so naming the floor keeps
+/// that impossible request distinct from "no trades happened". With today's
+/// zero origin that lower branch is unreachable for a `u64`, but it remains
+/// tied to the constant the handlers read so moving the origin makes it live.
+/// A start beyond `sim_now` is likewise impossible without a look-ahead leak.
+/// An end beyond the clock is instead clamped at each handler's call site:
+/// callers commonly mean "everything through now" and may stamp their own
+/// slightly leading clock.
 fn history_start_refusal(start: Option<u64>, data_origin: u64, sim_now: u64) -> Option<String> {
     let start = start?;
     if start < data_origin {
+        tracing::warn!(start, data_origin, "refusing off-tape history window");
         return Some(format!(
             "requested start {start} precedes data_origin_ns {data_origin}; the tape cannot serve before its origin"
         ));
     }
     (start > sim_now).then(|| {
+        tracing::warn!(start, sim_now, "refusing future history window");
         format!(
             "requested start {start} exceeds sim-now {sim_now}; the tape cannot serve past the clock"
         )
@@ -983,6 +995,54 @@ mod history_admission_tests {
         let refusal = history_start_refusal(Some(9), 10, 20).expect("off-tape refusal");
         assert!(refusal.contains("precedes data_origin_ns 10"));
         assert!(history_start_refusal(Some(10), 10, 20).is_none());
+    }
+
+    fn refusal_profiles(symbols: &[&str]) -> source::InstrumentProfiles {
+        source::InstrumentProfiles::from_profiles(
+            symbols
+                .iter()
+                .map(|symbol| {
+                    crate::config::profile_for_symbol(symbol)
+                        .unwrap_or_else(|error| panic!("{symbol} profile must resolve: {error}"))
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn history_symbol_refusal_uses_the_synthesis_lookup() {
+        let profiles = refusal_profiles(&["BTCUSDT"]);
+        assert!(history_symbol_refusal("BTCUSDT", &profiles).is_none());
+
+        let body = history_symbol_refusal("NOT-A-SYMBOL", &profiles)
+            .expect("an unserved symbol must be refused");
+        assert!(body.contains("NOT-A-SYMBOL"));
+        assert!(body.contains("BTCUSDT"));
+        assert!(
+            history_symbol_refusal("btcusdt", &profiles).is_some(),
+            "the guard must stay as case-exact as synthesis"
+        );
+        assert_eq!(profiles.served_symbols(), ["BTCUSDT"]);
+    }
+
+    #[test]
+    fn served_symbols_are_sorted_for_deterministic_refusals() {
+        let profiles = refusal_profiles(&["MNQ", "BTCUSDT"]);
+        assert_eq!(profiles.served_symbols(), ["BTCUSDT", "MNQ"]);
+    }
+
+    /// The refusal echoes the request, so the echo is capped: an unbounded
+    /// query string must not become an unbounded response body or log line.
+    #[test]
+    fn a_refusal_truncates_an_absurd_requested_symbol() {
+        let profiles = refusal_profiles(&["BTCUSDT"]);
+        let body = history_symbol_refusal(&"X".repeat(4096), &profiles)
+            .expect("an unserved symbol must be refused");
+        assert!(body.contains(&"X".repeat(64)), "the echo survives: {body}");
+        assert!(
+            !body.contains(&"X".repeat(65)),
+            "the echo is capped: {body}"
+        );
     }
 
     /// The bound is only real if the slot outlives the RESPONSE, not the

@@ -73,6 +73,14 @@ impl InstrumentProfiles {
     pub fn get(&self, symbol: &str) -> Option<&InstrumentProfile> {
         self.by_symbol.get(symbol)
     }
+    /// Every symbol this run can synthesize, sorted, for refusal messages that
+    /// must name what IS servable. Sorted because a refusal body is read by a
+    /// human and diffed by a test; `HashMap` order is neither.
+    pub fn served_symbols(&self) -> Vec<&str> {
+        let mut symbols: Vec<_> = self.by_symbol.keys().map(|symbol| &**symbol).collect();
+        symbols.sort_unstable();
+        symbols
+    }
     pub fn instrument_defs(&self) -> Vec<InstrumentDef> {
         let mut defs: Vec<_> = self
             .by_symbol
