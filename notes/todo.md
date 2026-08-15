@@ -19,6 +19,46 @@ Or both. There are no exceptions.
 
 ## Open issues
 
+- `mogwai_protocol::AccountId` NOW HAS A PRIVATE FIELD (source-breaking,
+  landed 2026-08-15). Its serialized form is unchanged, but construction as
+  `AccountId(raw_string)` no longer compiles and deserialization now enforces
+  the same length and character invariant as `AccountId::parse`. WHAT A
+  CONSUMER MUST DO: construct it with `AccountId::parse` and handle the returned
+  `AccountIdError`; do not recreate the tuple wrapper locally. broadarrow is
+  the known consumer and depends on this workspace; nothing here can verify its
+  build.
+
+- `POST /control/divergence` NOW REFUSES THREE PAYLOADS IT USED TO ACCEPT
+  (landed 2026-08-15). `validate_divergence` in `mogwai-protocol` is the
+  authoritative arming guard, and it had holes the HTTP handler was quietly
+  papering over.
+  1. `PartialFillNext.client_order_id` and `CancelOpenOrderSilently.client_order_id`
+     must now be VALID SUBMIT IDS, not merely non-blank: the same
+     `validate_client_order_id` every `SubmitOrder` passes. An over-length id, or
+     one carrying a character a submit could not carry, is refused with `400`
+     where it was previously armed. It could never have matched an order - no
+     submit can carry such an id - so it sat in the armed queue forever as a
+     dead entry. WHAT A CONSUMER MUST DO: arm the id it will actually submit.
+  2. `RejectNextSubmit.reason` longer than `MAX_REASON_LEN`, 512 bytes, is
+     refused with `400`. The handler used to TRUNCATE it silently and arm the
+     shortened prose, so a scenario asserting on its own reason text saw a
+     different string than it sent. WHAT A CONSUMER MUST DO: cap the reason, or
+     let the refusal tell it the reason was too long instead of the venue
+     rewriting it. Independently, the engine now truncates at the ECHO, so the
+     order-event byte reservation holds even for the in-process `Engine::arm`
+     API, which reaches no validator.
+  broadarrow is the known consumer and depends on this workspace; nothing here
+  can verify its build.
+
+- THE SHIPPED LAUNCHER NOW BOUNDS THE READINESS LINE (landed 2026-08-15). A
+  venue whose first stdout line exceeds 4,096 bytes, newline included, is
+  refused with `LaunchError::Malformed` and only a valid UTF-8 prefix of that
+  line is retained in the message. The read itself stops one byte past the
+  ceiling, so a child writing gigabytes without a newline can no longer OOM its
+  launcher. A conforming `ReadyRecord` is a few hundred bytes. WHAT A CONSUMER
+  MUST DO: nothing, unless it ships a venue binary of its own that prints
+  something larger first.
+
 - THE WEBSOCKET COMMAND CARRIER NOW HAS THREE CONSUMER-VISIBLE LIMITS (landed
   2026-08-15). None existed before, so a client that was previously accepted
   can now be refused.

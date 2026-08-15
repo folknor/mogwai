@@ -292,6 +292,18 @@ example = "stage_a_batch_bench"
 package = "mogwai-lab"
 example = "envelope_evaluation_bench"
 
+# The per-frame cost of the wire decoder, over one representative `Trade`.
+#
+# Registered so the tag-decode table in `reference/performance.md` is
+# re-runnable rather than a number someone once printed. Carries NO features
+# and the profiler MODES do not apply: it wraps the global allocator itself to
+# count allocator calls per frame, which `--alloc` would displace, and its
+# per-frame cost is nanoseconds, which `--hotpath` would dominate. Argv is an
+# optional iteration count, default 2,000,000.
+[mogwai.targets.tag_decode_probe]
+package = "mogwai-protocol"
+example = "tag_decode_probe"
+
 # NOT REGISTERED: `fill_walk_bench`, also an example target in `mogwai-data`.
 # It is a criterion harness that parses `--bench` itself - that is what lets it
 # live in an example target at all - so it would collide with the mode flag.

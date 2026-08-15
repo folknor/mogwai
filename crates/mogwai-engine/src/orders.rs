@@ -62,7 +62,14 @@ impl Engine {
         {
             return vec![ServerMessage::OrderRejected {
                 client_order_id: order.client_order_id,
-                reason,
+                // `validate_divergence` refuses an over-length reason at every
+                // WIRE arming path, but `Engine::arm` is a public in-process
+                // API that reaches no validator, so the reservation sized
+                // against `MAX_REASON_LEN` cannot rest on the caller alone.
+                // Truncating at the ECHO closes it by construction for every
+                // arming path there will ever be, and an already-valid reason
+                // passes through untouched.
+                reason: mogwai_protocol::truncate_reason(reason),
                 ts_event: ts,
             }];
         }

@@ -993,3 +993,37 @@ and contains only two tick prices and two decimal sizes; fitted corpus metadata
 stays in `GeneratorScalars`. Materialized trade and quote symbols share one
 `Arc<str>` allocation with the generator, and `TickRuleAggressor` retains that
 same allocation as its key. Their JSON representation is unchanged.
+
+## 2026-08-15 wire tag decode probe
+
+Host `bygg`, release, current working tree. The registered `tag_decode_probe`
+target decoded the same representative `Trade` frame 2,000,000 times per arm and
+counted allocator calls through its own wrapping global allocator. Re-run it
+with `brokkr mogwai tag_decode_probe` (an optional argv is the iteration count),
+or `brokkr run --release tag_decode_probe` for a bare run that stores no row.
+
+| decoder | ns / frame | allocations / frame |
+|---|---:|---:|
+| serde internally tagged enum | 219 | 4 |
+| identical payload fields as a plain untagged struct | 103 | 2 |
+| tag probe plus direct market payload, LANDED | 224 | 2 |
+| tag probe, noncanonical escaped tag | 245 | 4 |
+
+READ THIS AS AN ALLOCATION RESULT, NOT A THROUGHPUT ONE. The landed decoder is
+5 ns per frame SLOWER than the internally tagged enum it replaces, because
+probing the tag is a second pass over the same bytes; the plain-struct row is
+the idealized single-parse floor and is not reachable on a tagged wire without
+changing the wire. What the change buys is two fewer allocator calls per market
+frame on the adapter's per-tick path, which is what the reported defect actually
+was. It is kept on that ground alone.
+
+The escaped-tag row is the `Cow` fallback in the probe: when the JSON tag
+carries a `\uXXXX` escape, serde_json cannot borrow it, so the probe owns a
+`String` and the frame costs its two allocations back. The server never emits
+that spelling; the row exists to show the fallback is a bounded cost rather than
+a refusal, which is what a borrowed `&str` probe would have been.
+
+An earlier measurement of the same arms on a busier host read 244 / 121 / 245
+and is superseded here. The earlier plain-struct arm also carried an extra
+`trade_id` field that `TradeTick` does not have; the probe now asserts field
+parity between its arms.

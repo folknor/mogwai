@@ -17,5 +17,12 @@ tracing = { workspace = true, features = ["log"] }
 
 [dev-dependencies]
 
+# The wire-decode cost probe behind `reference/performance.md`'s tag-decode
+# table. No `required-features`: it counts allocator calls with its own
+# wrapping global allocator, so an instrumented build would measure the
+# profiler's allocator instead of serde's.
+[[example]]
+name = "tag_decode_probe"
+
 [lints]
 workspace = true

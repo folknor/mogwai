@@ -91,9 +91,9 @@ pub struct Hit {
 
 /// A venue account identity. Kept deliberately small and log-safe because it
 /// is accepted at every stateful transport boundary.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
-pub struct AccountId(pub String);
+pub struct AccountId(String);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccountIdError {
@@ -136,6 +136,16 @@ impl AccountId {
     }
 }
 
+impl<'de> Deserialize<'de> for AccountId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Maximum byte length of a symbol on the wire, same reasoning as
 /// `MAX_CLIENT_ID_LEN`.
 pub const MAX_SYMBOL_LEN: usize = 32;
@@ -167,7 +177,7 @@ pub const JSON_ESCAPE_FACTOR: usize = 6;
 /// Upper bound on the serialized bytes of any `EventKind::Admission` frame -
 /// `AdmissionRejected` and `ProtocolError`, since both ride the server's
 /// priority lane. `AdmissionRejected` is the widest: one capped client id, one
-/// capped reason, one capped symbol and its fixed envelope. This bound is
+/// capped reason and its fixed envelope. This bound is
 /// what makes the priority lane's FRAME count a memory bound, so every
 /// `ProtocolError` construction site must route its reason through
 /// `truncate_reason`.
@@ -839,7 +849,50 @@ pub enum ServerMessage {
     },
 }
 
+/// Probe of the internally tagged discriminator, used to pick a payload decoder
+/// without buffering the frame.
+///
+/// The tag is a `Cow`, not a `&str`, and that is load-bearing rather than
+/// stylistic: serde_json can only hand out a BORROWED string when the JSON
+/// scalar contains no escape sequence, so a borrowed probe would refuse
+/// a tag written with a `\uXXXX` escape - a valid, if noncanonical, spelling that
+/// the fully general enum decoder accepts. Refusing it would narrow what this
+/// crate decodes relative to what it documents, on the one type both ends
+/// serialize against. `#[serde(borrow)]` keeps the zero-copy path for the
+/// canonical unescaped spelling the server emits and falls back to an owned
+/// `String` only for an escaped one.
+#[derive(Deserialize)]
+struct TagProbe<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: std::borrow::Cow<'a, str>,
+}
+
 impl ServerMessage {
+    /// Decode a server frame without serde's internally-tagged content buffer
+    /// on the market-data hot path. The small tag probe borrows from `json`,
+    /// then the selected payload struct streams directly from the same bytes.
+    /// Cold execution and control variants retain serde's fully general
+    /// order-independent decoder.
+    ///
+    /// Accepts exactly what `serde_json::from_str::<ServerMessage>` accepts;
+    /// see [`TagProbe`] for the escape case that makes that non-obvious.
+    pub fn from_json_str(json: &str) -> serde_json::Result<Self> {
+        match serde_json::from_str::<TagProbe<'_>>(json)?.kind.as_ref() {
+            "Trade" => serde_json::from_str(json).map(Self::Trade),
+            "Quote" => serde_json::from_str(json).map(Self::Quote),
+            _ => serde_json::from_str(json),
+        }
+    }
+
+    /// Byte-slice twin of [`Self::from_json_str`].
+    pub fn from_json_slice(json: &[u8]) -> serde_json::Result<Self> {
+        match serde_json::from_slice::<TagProbe<'_>>(json)?.kind.as_ref() {
+            "Trade" => serde_json::from_slice(json).map(Self::Trade),
+            "Quote" => serde_json::from_slice(json).map(Self::Quote),
+            _ => serde_json::from_slice(json),
+        }
+    }
+
     /// The single source of truth for how each wire variant is classified into
     /// the exec / fill / data buckets that both ends key their havoc off.
     ///
@@ -1060,6 +1113,19 @@ mod tests {
                 r#"{"type":"Quote","symbol":"BTCUSDT","bid_px":"99","ask_px":"100","bid_sz":"2","ask_sz":"3","ts_event":7}"#,
             ),
             (
+                // The other half of the tag-probe fast path. Both hot variants
+                // belong in this table, because it is the only thing proving
+                // the direct payload decoders produce byte-identical frames.
+                ServerMessage::Trade(TradeTick {
+                    symbol: "BTCUSDT".into(),
+                    price: Decimal::from(99),
+                    size: Decimal::from(2),
+                    aggressor: AggressorSide::Buyer,
+                    ts_event: 11,
+                }),
+                r#"{"type":"Trade","symbol":"BTCUSDT","price":"99","size":"2","aggressor":"Buyer","ts_event":11}"#,
+            ),
+            (
                 ServerMessage::RunComplete {
                     sim_now_ns: 123,
                     elapsed_ns: 45,
@@ -1098,8 +1164,82 @@ mod tests {
         for (frame, expected) in server_frames {
             let json = serde_json::to_string(&frame).expect("serialize");
             assert_eq!(json, expected);
-            let decoded: ServerMessage = serde_json::from_str(&json).expect("decode");
+            let decoded = ServerMessage::from_json_str(&json).expect("decode");
             assert_eq!(serde_json::to_string(&decoded).expect("re-serialize"), json);
+            let decoded = ServerMessage::from_json_slice(json.as_bytes()).expect("decode bytes");
+            assert_eq!(serde_json::to_string(&decoded).expect("re-serialize"), json);
+        }
+    }
+
+    /// The tag-probe decoders must accept EXACTLY what the fully general
+    /// internally tagged decoder accepts. A JSON string may spell any character
+    /// as a `\uXXXX` escape, so `"type"` carrying an escaped tag is a valid
+    /// frame from a noncanonical but conforming peer. A probe deserialized as
+    /// a borrowed `&str` refuses those outright, which would make the public
+    /// helpers narrower than the type they decode - a silent compatibility
+    /// regression rather than a visible one.
+    #[test]
+    fn tag_probe_accepts_escaped_tags_exactly_as_the_general_decoder_does() {
+        // Rewrite a canonical frame's tag so its FIRST character is spelled as
+        // a JSON `\uXXXX` escape. Built rather than written literally so the
+        // escape introducer - ASCII 92 - cannot be lost to a source-level
+        // escape of its own.
+        let escape_tag = |canonical: &str, tag: &str| {
+            let mut chars = tag.chars();
+            let first = chars.next().expect("tag is non-empty") as u32;
+            let escaped = format!("{}u{:04X}{}", char::from(92), first, chars.as_str());
+            let rewritten = canonical.replacen(&format!("\"{tag}\""), &format!("\"{escaped}\""), 1);
+            assert_ne!(rewritten, canonical, "the tag rewrite must actually apply");
+            rewritten
+        };
+
+        let canonical_frames = [
+            // Hot fast-path variants, which the probe dispatches directly.
+            (
+                "Trade",
+                r#"{"type":"Trade","symbol":"BTCUSDT","price":"99","size":"2","aggressor":"Buyer","ts_event":11}"#,
+            ),
+            (
+                "Quote",
+                r#"{"type":"Quote","symbol":"BTCUSDT","bid_px":"99","ask_px":"100","bid_sz":"2","ask_sz":"3","ts_event":7}"#,
+            ),
+            // A cold variant, which reaches the general decoder through the
+            // probe's fallback arm and must survive the same escape.
+            ("Heartbeat", r#"{"type":"Heartbeat","ts_event":1}"#),
+        ];
+        for (tag, canonical) in canonical_frames {
+            let wire = escape_tag(canonical, tag);
+            let wire = wire.as_str();
+            // The general decoder is the reference: it accepts these today.
+            let reference = serde_json::from_str::<ServerMessage>(wire).expect("general decode");
+            assert_eq!(
+                serde_json::to_string(&reference).expect("re-serialize"),
+                canonical
+            );
+
+            for decoded in [
+                ServerMessage::from_json_str(wire).expect("escaped tag, str"),
+                ServerMessage::from_json_slice(wire.as_bytes()).expect("escaped tag, slice"),
+            ] {
+                assert_eq!(
+                    serde_json::to_string(&decoded).expect("re-serialize"),
+                    canonical
+                );
+            }
+        }
+
+        // Symmetry: what the general decoder refuses, the helpers refuse too.
+        for bad in [
+            r#"{"type":"Nonesuch"}"#,
+            r#"{"symbol":"BTCUSDT"}"#,
+            r#"{"type":"Trade","symbol":"BTCUSDT"}"#,
+        ] {
+            assert!(serde_json::from_str::<ServerMessage>(bad).is_err(), "{bad}");
+            assert!(ServerMessage::from_json_str(bad).is_err(), "{bad}");
+            assert!(
+                ServerMessage::from_json_slice(bad.as_bytes()).is_err(),
+                "{bad}"
+            );
         }
     }
 
@@ -1108,8 +1248,8 @@ mod tests {
     ///
     /// The old bound was 8192, sized by a list of `MAX_SUBSCRIPTION_ISSUES_LISTED`
     /// rows. With `SubscriptionIssues` retired the widest admission frame is a
-    /// single `AdmissionRejected` - one capped client id, one capped reason,
-    /// one capped symbol, plus a fixed envelope - so the bound was recomputed
+    /// single `AdmissionRejected` - one capped client id, one capped reason
+    /// plus a fixed envelope - so the bound was recomputed
     /// from those caps and rounded up to the next power of two. This test is
     /// the recomputation, run.
     #[test]
@@ -1145,8 +1285,8 @@ mod tests {
 
         // The analytic bound the constant is derived FROM, so the constant is
         // not merely large enough for the case above by luck.
-        let analytic = JSON_ESCAPE_FACTOR * (MAX_CLIENT_ID_LEN + MAX_REASON_LEN + MAX_SYMBOL_LEN)
-            + ADMISSION_ENVELOPE_BYTES;
+        let analytic =
+            JSON_ESCAPE_FACTOR * (MAX_CLIENT_ID_LEN + MAX_REASON_LEN) + ADMISSION_ENVELOPE_BYTES;
         assert!(
             analytic <= ADMISSION_FRAME_MAX_BYTES,
             "the analytic worst case is {analytic} bytes, over the {ADMISSION_FRAME_MAX_BYTES} ceiling"

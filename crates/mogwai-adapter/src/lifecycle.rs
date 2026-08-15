@@ -530,7 +530,7 @@ pub(crate) async fn run_ws_connection<
                             // while the idle clock was just reset, so the
                             // connection looks healthy while data silently drops
                             // (D.5).
-                            match serde_json::from_str::<ServerMessage>(&text) {
+                            match ServerMessage::from_json_str(&text) {
                                 Ok(server_msg) => {
                                     run_complete |=
                                         matches!(server_msg, ServerMessage::RunComplete { .. });
@@ -549,7 +549,7 @@ pub(crate) async fn run_ws_connection<
                             // Connection proven; same as the Text arm above.
                             attempt = 0;
                             reset_idle(&mut idle_sleep, conn.idle_timeout_ms, sim);
-                            match serde_json::from_slice::<ServerMessage>(&bytes) {
+                            match ServerMessage::from_json_slice(&bytes) {
                                 Ok(server_msg) => {
                                     run_complete |=
                                         matches!(server_msg, ServerMessage::RunComplete { .. });

@@ -236,18 +236,16 @@ pub fn validate_market_regime(regime: &MarketRegime) -> Result<(), &'static str>
 /// API-boundary guard for an armed divergence, mirroring `validate_conn_havoc`
 /// and `validate_market_regime` in style and message convention.
 ///
-/// `PartialFillNext.client_order_id` must be non-blank (the same trim-based
-/// emptiness the engine applies to a submitted order's id): the engine rejects
-/// every submit whose id trims to empty, so a partial targeting a blank id can
-/// never match an order - it would sit in the armed queue forever as a dead
-/// entry, and no API flushes engine-side single-shots.
+/// The client-order-id targets must pass `validate_client_order_id`: the engine
+/// rejects every submit carrying an invalid id, so an invalid target can never
+/// match an order and would sit in the armed queue forever as a dead entry.
 /// `PartialFillNext.fraction` must lie in the half-open `(0, 1]`: a fill must
 /// move some quantity (`> 0`) and cannot exceed the order (`<= 1`).
 /// `DelayAcks.ms`, `GoDark.ms`, and `StallData.ms` are bounded by
 /// `MAX_DIVERGENCE_MS` so a control-plane request cannot arm an effectively
 /// permanent window.
-/// `ClearDivergences` and the engine-side single-shot variants are otherwise
-/// unconstrained.
+/// `RejectNextSubmit.reason` is capped here because the engine echoes it into an
+/// order event whose reservation is derived from `MAX_REASON_LEN`.
 ///
 /// The engine also applies a defensive runtime clamp (a `fraction > 1` becomes a
 /// full fill, a `fraction <= 0` becomes a full fill with a warning), but that is
@@ -260,8 +258,10 @@ pub fn validate_divergence(div: &control::Divergence) -> Result<(), &'static str
             fraction,
         } => {
             if client_order_id.trim().is_empty() {
-                return Err("PartialFillNext client_order_id must be non-empty");
+                return Err("PartialFillNext client_order_id is invalid");
             }
+            crate::validate_client_order_id(client_order_id)
+                .map_err(|_| "PartialFillNext client_order_id is invalid")?;
             if *fraction <= Decimal::ZERO || *fraction > Decimal::ONE {
                 return Err("PartialFillNext fraction must be in (0, 1]");
             }
@@ -329,12 +329,19 @@ pub fn validate_divergence(div: &control::Divergence) -> Result<(), &'static str
         }
         control::Divergence::CancelOpenOrderSilently { client_order_id } => {
             if client_order_id.trim().is_empty() {
-                return Err("CancelOpenOrderSilently client_order_id must be non-empty");
+                return Err("CancelOpenOrderSilently client_order_id is invalid");
+            }
+            crate::validate_client_order_id(client_order_id)
+                .map_err(|_| "CancelOpenOrderSilently client_order_id is invalid")?;
+            Ok(())
+        }
+        control::Divergence::RejectNextSubmit { reason } => {
+            if reason.len() > crate::MAX_REASON_LEN {
+                return Err("RejectNextSubmit reason exceeds MAX_REASON_LEN");
             }
             Ok(())
         }
-        control::Divergence::RejectNextSubmit { .. }
-        | control::Divergence::DuplicateNextFill
+        control::Divergence::DuplicateNextFill
         | control::Divergence::DropNextAccountUpdate
         | control::Divergence::ClearDivergences => Ok(()),
     }
@@ -962,19 +969,42 @@ mod tests {
                     client_order_id: blank.into(),
                     fraction: Decimal::new(5, 1),
                 }),
-                Err("PartialFillNext client_order_id must be non-empty")
+                Err("PartialFillNext client_order_id is invalid")
             );
         }
 
-        // A real id stays valid; trim-based means only ALL-whitespace rejects,
-        // so an id with inner whitespace passes too.
-        for ok in ["O-1", "O 1"] {
+        // A real, submit-valid id stays valid.
+        for ok in ["O-1", "O_1"] {
             validate_divergence(&control::Divergence::PartialFillNext {
                 client_order_id: ok.into(),
                 fraction: Decimal::new(5, 1),
             })
             .expect("non-blank target id is valid");
         }
+    }
+
+    #[test]
+    fn validate_divergence_rejects_unmatchable_targets_and_oversized_reason() {
+        let oversized_id = "X".repeat(crate::MAX_CLIENT_ID_LEN + 1);
+        assert_eq!(
+            validate_divergence(&control::Divergence::PartialFillNext {
+                client_order_id: oversized_id.clone(),
+                fraction: Decimal::ONE,
+            }),
+            Err("PartialFillNext client_order_id is invalid")
+        );
+        assert_eq!(
+            validate_divergence(&control::Divergence::CancelOpenOrderSilently {
+                client_order_id: oversized_id,
+            }),
+            Err("CancelOpenOrderSilently client_order_id is invalid")
+        );
+        assert_eq!(
+            validate_divergence(&control::Divergence::RejectNextSubmit {
+                reason: "R".repeat(crate::MAX_REASON_LEN + 1),
+            }),
+            Err("RejectNextSubmit reason exceeds MAX_REASON_LEN")
+        );
     }
 
     #[test]

@@ -3,146 +3,62 @@
 Hunter: Claude Opus, single coverage. Findings are a work document, not a
 contract - they may be wrong.
 
-Finding 2 - `LaunchSpec.duration = Some(Duration::ZERO)` silently means "run
-forever" - is CLOSED and struck, by the `bugs-server-transport.md` round-2
-landing of its finding 6. The defect had two layers and both are closed. At the
-SERVER layer the behaviour was neither of the two the finding weighed: a
-`.filter()` fighting an `.or_else()` made `--duration 0s` fall back to the
-config duration, so a launcher landing on zero got a TEN-MINUTE run under
-`run.toml`, not an unbounded one. Duration resolution is now three-state
-(`Option<Option<u64>>`), an explicit zero overrides a finite config to
-indefinite, and `resolve_run_duration`'s test pins both directions. At the
-PROTOCOL layer, which is where the finding actually lives and where a fix one
-level up would not have reached, `LaunchSpec::duration` now DOCUMENTS the
-meaning rather than refusing it: `None` leaves the config alone, `Some(ZERO)`
-overrides it to no declared completion, and only a positive value declares one.
-Refusing zero was rejected as the closure, because `--duration 0s` is a
-documented spelling of "run until the launcher ends it" and the venue must be
-able to be told it.
+THE DOCUMENT IS EXHAUSTED: no open findings remain. What each one became is
+recorded below, and the machinery is carried forward in
+`notes/bug-loop-carry-forward.md`. The disposition lines exist so a later reader
+can tell a CLOSED finding from a DELETED one.
 
-Finding 1 - `AdmissionSubject` echoes an unbounded client id, so
-`ADMISSION_FRAME_MAX_BYTES` was not a bound - is CLOSED and struck, by the
-`bugs-server-transport.md` round-1 landing. `AdmissionSubject` now has a
-hand-written `Serialize` that truncates every id field to `MAX_CLIENT_ID_LEN` on
-a char boundary, so no construction path can put an oversized subject on the
-wire, and the websocket carrier caps inbound frames and reassembled messages at
-`MAX_CLIENT_MESSAGE_BYTES` rather than inheriting tungstenite's 64 MiB default.
-Both halves of the finding's arithmetic - the 4 KiB frame and the 64-frame lane
-- are therefore real bounds. The residual is cosmetic and deliberate: the
-variants remain constructible from a raw `String`, so the invariant holds at
-serialization rather than at construction, which is where every wire path
-passes.
+## Disposition
 
-## 3. `validate_divergence` is not the authoritative guard it claims to be (medium)
-
-Its doc says it "is the authoritative guard that rejects the misconfiguration
-early". Two gaps:
-
-- `PartialFillNext.client_order_id` and `CancelOpenOrderSilently.client_order_id`
-  are length-unchecked. The blank-id check exists precisely because "a partial
-  targeting a blank id can never match an order - it would sit in the armed queue
-  forever as a dead entry, and no API flushes engine-side single-shots." An id
-  longer than `MAX_CLIENT_ID_LEN` has exactly the same property:
-  `validate_client_order_id` rejects every submit that could carry it, so the arm
-  is permanently inert. The stated reasoning applies and the check is missing.
-  Add `validate_client_order_id` to both arms.
-- `RejectNextSubmit.reason` is unbounded here. It happens to be safe because
-  `http.rs` truncates at the arming boundary, but that means the protocol crate's
-  "authoritative guard" is not the thing enforcing the invariant
-  `ORDER_EVENT_MAX_BYTES` depends on. If a second arming path is ever added (the
-  adapter relaying `HavocSpec.server`, a config-loaded divergence list), it
-  bypasses the truncation and voids the order-event reservation. The truncation
-  belongs in `validate_divergence`'s crate, not in one HTTP handler.
-
-## 4. `read_ready` has no line-length bound (medium, adversarial)
-
-`launch.rs`: `BufReader::read_line(&mut line)` on the child's stdout, unbounded. A
-venue binary that is wrong (or a `LaunchSpec::binary` pointed at something
-hostile) writing gigabytes with no newline OOMs the launcher process. The module
-doc goes to length about the ready read being unbounded in time and bounding it;
-the size dimension is unaddressed. `ReadyRecord` has a known small shape - cap it
-(a few KiB) with `take()` and report `Malformed`.
-
-Relatedly, `LaunchError::Malformed { line }` embeds the raw untrusted line in a
-`Display` message with no cap.
-
-## 5. Stale / wrong derivations in `sizing.rs` (low, but it is the file whose whole job is being right)
-
-The constants are numerically safe today; the derivations the module doc insists
-on ("every constant below carries a field-by-field derivation from the struct it
-bounds") have drifted from the structs:
-
-- `ORDER_EVENT_MAX_BYTES` enumerates `OrderFilled`'s fields and charges
-  `3 * MAX_CLIENT_ID_LEN`. `OrderFilled` carries four id-shaped strings -
-  `client_order_id`, `venue_order_id`, `trade_id`, and `position_id` (which is
-  client-supplied and capped at `MAX_CLIENT_ID_LEN` by `validate_submit_order`).
-  `position_id` is not in the enumeration. It survives only because the same
-  constant charges an unused `MAX_REASON_LEN` (`ESC * 512 = 3072`) that
-  `OrderFilled` has no field for. `FILL_ROW_MAX_BYTES` right below it charges 4 -
-  the two disagree about the same struct.
-- `POSITION_ROW_MAX_BYTES` says "`symbol`, `quantity`, `avg_px` - two decimals...
-  rounded to 128" and the constant is `256 + ESC * (SYMBOL + CLIENT_ID)`.
-  `Position` now also has `position_id`, `mark_px` and `unrealized_pnl`. The
-  comment describes a struct that no longer exists.
-- `ADMISSION_FRAME_MAX_BYTES`' derivation charges a `MAX_SYMBOL_LEN`;
-  `AdmissionRejected` has no symbol field.
-
-Since the argument is "a finite test matrix samples an upper bound, it cannot
-prove one", a derivation that no longer matches the struct is the only thing
-standing between the code and an unproven bound.
-
-## 6. `AccountId`'s invariant is bypassable (low)
-
-`pub struct AccountId(pub String)` with a public field and a `parse` that enforces
-length and charset. `account_state_max_bytes` charges `ESC * MAX_ACCOUNT_ID_LEN` on
-the strength of that cap. Nothing prevents `AccountId(giant_string)`. Today every
-construction goes through `parse` (checked across server, engine and adapter), so
-this is latent, not live. Make the field private; the `serde(transparent)`
-`Deserialize` derive is also a hole - it will happily decode an over-length id
-straight past `parse`.
-
-## 7. Every wire frame pays serde's internally-tagged buffering (perf, structural)
-
-Both `ClientMessage` and `ServerMessage` are `#[serde(tag = "type")]`. serde's
-internally-tagged deserialization cannot stream: it buffers the entire object into
-`serde::__private::de::Content` (a `Vec` of owned keys and values) to find the tag,
-then replays it into the variant. That is a full allocating intermediate
-representation per frame.
-
-This is on the hottest path in the system: the adapter deserializes one
-`ServerMessage` per trade tick, and the venue is meant to run accelerated. If the
-tick path ever shows up in a profile, this is where the time is. Options, roughly
-in increasing payoff: hand-write `Deserialize` for `ServerMessage` peeking the tag
-off a `RawValue` map (keeps the wire byte-identical, which matters because several
-tests pin exact JSON text), or move to a binary framing entirely. Not profiled -
-this flags the structural cause, not a measured number.
-
-Two smaller adjacent smells: `TradeTick.symbol` is a `String` allocated and
-serialized per tick on a venue that serves exactly one instrument; and outbound
-frames are serialized individually into `Arc<str>` rather than batched.
-
-## 8. Seed derivation lives outside the crate its versioning rule names (low, process)
-
-`AGENTS.md` states that "seed derivation" is a tape-protocol-affecting change that
-MUST bump `mogwai_data::TAPE_PROTOCOL_VERSION`. `RunSeeds::from_run_seed` and
-`DOMAIN_TAPE` live in `mogwai-protocol/src/seeds.rs`, which has no reference to
-that rule or that constant - and `mogwai-protocol` does not depend on
-`mogwai-data`, so no compiler or test can connect them. `seeds.rs` should carry
-the pointer in a comment at minimum; the golden test
-`derived_streams_differ_and_are_stable` pins the values but says nothing about the
-version bump.
-
-## 9. Reproducibility gap in the shipped launcher (low, design)
-
-`ReadyRecord.run_seed` is documented as "the value that, with the config,
-fingerprint and `version_string`, reproduces this path", and `launch` logs it
-specifically so a consumer cannot lose it. But `LaunchSpec` has no `seed` field and
-`mogwai serve` has no `--seed` flag (only `--config`, `--duration`,
-`--launcher-pid`) - the seed is config-file-only. So a launcher that observes an
-interesting `run_seed` cannot feed it back through the shipped launcher without
-authoring a TOML file itself. Either `LaunchSpec` grows a `seed: Option<u64>` and
-`serve` a `--seed`, or the reproducibility story should say "write it into a
-config".
+- 1, `AdmissionSubject` echoes an unbounded client id. CLOSED by the
+  `bugs-server-transport.md` round-1 landing: `AdmissionSubject` has a
+  hand-written `Serialize` that truncates every id to `MAX_CLIENT_ID_LEN` on a
+  char boundary, and the websocket carrier caps inbound frames and reassembled
+  messages at `MAX_CLIENT_MESSAGE_BYTES`. Disclosed residual, unchanged: the
+  variants stay constructible from a raw `String`, so the invariant holds at
+  serialization rather than at construction.
+- 2, `LaunchSpec.duration = Some(Duration::ZERO)` silently means "run forever".
+  CLOSED by the `bugs-server-transport.md` round-2 landing. Server-side
+  duration resolution is three-state and an explicit zero overrides a finite
+  config to indefinite; `LaunchSpec::duration` DOCUMENTS that meaning at the
+  protocol layer. Refusing zero was considered and rejected: `--duration 0s` is
+  a documented spelling of "run until the launcher ends it".
+- 3, `validate_divergence` is not the authoritative guard it claims to be.
+  CLOSED. Both single-shot client-order-id targets now pass
+  `validate_client_order_id`, and `RejectNextSubmit.reason` is refused above
+  `MAX_REASON_LEN` in the protocol crate. The HTTP handler's post-validation
+  truncation is deleted, so there is no second, quieter spelling of the rule.
+  The engine additionally truncates the reason at the ECHO, because
+  `Engine::arm` is a public in-process API that reaches no validator.
+- 4, `read_ready` has no line-length bound. CLOSED. The readiness read is
+  capped at one byte past a 4,096-byte ceiling by taking the CHILD stream, and
+  the refusal retains only a valid UTF-8 prefix.
+- 5, stale derivations in `sizing.rs`. CLOSED. `ORDER_EVENT_MAX_BYTES` is now
+  the maximum of two derivations - a maximal `OrderFilled` and a maximal
+  reason-bearing rejection - each matching its struct field for field, and both
+  are pinned by a constructed worst-case domination test rather than argued.
+  `Position` lists all six fields; the admission derivation no longer charges a
+  symbol `AdmissionRejected` does not have.
+- 6, `AccountId`'s invariant is bypassable. CLOSED BY CONSTRUCTION. The field is
+  private, `parse` is the only constructor, there is no `From` impl, and the
+  derived `Deserialize` is replaced by one that routes through `parse`.
+- 7, every wire frame pays serde's internally-tagged buffering. CLOSED AS AN
+  ALLOCATION FIX, NOT A THROUGHPUT ONE. The measured numbers and the plain
+  statement that the landed decoder is marginally SLOWER are in
+  `reference/performance.md`. Its two adjacent smells: the per-tick `Symbol`
+  allocation was closed separately by `bugs-data.md` round 2 (`Arc<str>`), and
+  outbound batching remains unaddressed and unmeasured - not carried as an open
+  finding because no measurement names a decision it would change.
+- 8, seed derivation lives outside the crate its versioning rule names. CLOSED
+  as documentation. The derivation stays in `mogwai-protocol` to preserve the
+  workspace dependency direction and now carries the pointer to the downstream
+  `TAPE_PROTOCOL_VERSION` obligation.
+- 9, reproducibility gap in the shipped launcher. DEAD, verified against the
+  source rather than the claim. `docs/cli.md` states the decided contract:
+  there is deliberately no `--seed` flag because a reproduced path is a written
+  act, so the seed is overridden through the config file's `seed` key alone.
+  Commit `a6f57760` is what decided it. The finding proposed adding a second
+  spelling of something already ruled on.
 
 ## Checked and found sound
 

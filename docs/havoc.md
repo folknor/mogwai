@@ -59,6 +59,12 @@ There is no deliverability refusal any more. It existed to reject divergences an
 HTTP transport profile could not carry, and with the profiles gone every
 divergence is deliverable over the one websocket carrier.
 
+The protocol validator is the arming boundary for divergence payloads.
+Single-shot client-order-id targets must be valid submit ids, so an unmatchable
+arm cannot remain queued forever. `RejectNextSubmit.reason` is refused above
+`MAX_REASON_LEN`; the engine echoes it into an order event whose byte reservation
+depends on that cap.
+
 ## Havoc against a conditional order
 
 A conditional (`StopMarket`/`StopLimit`) has three lifecycle points a plain

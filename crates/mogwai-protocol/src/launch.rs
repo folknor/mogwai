@@ -71,6 +71,9 @@ pub const DEFAULT_BINARY: &str = "mogwai";
 /// failure.
 pub const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Maximum readiness record bytes, including its trailing newline.
+const READY_LINE_MAX_BYTES: u64 = 4096;
+
 /// How many stderr lines are retained to explain a boot failure.
 const STDERR_RING: usize = 64;
 
@@ -672,14 +675,34 @@ fn own_venue(
 ///
 /// The stderr for a `NoRecord` is attached by the caller, which is the only
 /// party that knows how long the drain has had to deliver it.
-fn read_ready(stdout: std::process::ChildStdout) -> Result<ReadyRecord, LaunchError> {
-    let mut line = String::new();
-    let read = BufReader::new(stdout)
-        .read_line(&mut line)
+fn read_ready(stdout: impl std::io::Read) -> Result<ReadyRecord, LaunchError> {
+    let mut bytes = Vec::new();
+    // The `take` wraps the CHILD's stream, not the `BufReader` around it. That
+    // ordering is the whole bound: wrapping the other way still lets the
+    // buffer pull a full chunk past the ceiling from a hostile writer, and
+    // leaves the refusal below as the only evidence a cap exists - which a
+    // test cannot tell apart from no cap at all.
+    let read = BufReader::new(stdout.take(READY_LINE_MAX_BYTES + 1))
+        .read_until(b'\n', &mut bytes)
         .map_err(LaunchError::Read)?;
     if read == 0 {
         return Err(LaunchError::NoRecord { stderr: Vec::new() });
     }
+    if u64::try_from(read).unwrap_or(u64::MAX) > READY_LINE_MAX_BYTES {
+        let prefix = &bytes[..READY_LINE_MAX_BYTES as usize];
+        let valid = std::str::from_utf8(prefix).map_or_else(
+            |error| &prefix[..error.valid_up_to()],
+            |valid| valid.as_bytes(),
+        );
+        return Err(LaunchError::Malformed {
+            line: String::from_utf8_lossy(valid).into_owned(),
+            source: format!("readiness line exceeds {READY_LINE_MAX_BYTES} bytes"),
+        });
+    }
+
+    let line = String::from_utf8(bytes).map_err(|source| {
+        LaunchError::Read(std::io::Error::new(std::io::ErrorKind::InvalidData, source))
+    })?;
 
     parse_ready(&line)
 }
@@ -876,6 +899,57 @@ mod tests {
         let record = parse_ready(&record_json(ReadyRecord::VERSION)).expect("current schema");
         assert_eq!(record.addr.port(), 41235);
         assert_eq!(record.symbol, "BTCUSDT");
+    }
+
+    /// A reader that reports how many bytes it was actually asked to hand over.
+    /// The refusal message alone cannot distinguish a bounded read from an
+    /// unbounded one that truncates afterwards, and the finding is about the
+    /// unbounded READ, so the byte count is the assertion that matters.
+    struct CountingReader<'a> {
+        inner: std::io::Cursor<Vec<u8>>,
+        delivered: &'a std::cell::Cell<usize>,
+    }
+
+    impl std::io::Read for CountingReader<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = std::io::Read::read(&mut self.inner, buf)?;
+            self.delivered.set(self.delivered.get() + n);
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn the_readiness_line_is_size_bounded() {
+        for (hostile, expected_prefix_len) in [
+            // A hostile venue writing 100 KB with no newline at all.
+            ("x".repeat(READY_LINE_MAX_BYTES as usize + 100_000), 4096),
+            // The same, in a 3-byte character: the ceiling falls mid-character,
+            // so the retained prefix must stop at the last COMPLETE one.
+            ("\u{20ac}".repeat(2_000), 4095),
+        ] {
+            let source_len = hostile.len();
+            let delivered = std::cell::Cell::new(0);
+            let reader = CountingReader {
+                inner: std::io::Cursor::new(hostile.into_bytes()),
+                delivered: &delivered,
+            };
+            let error =
+                read_ready(reader).expect_err("a line over the readiness ceiling must be refused");
+            let display_len = error.to_string().len();
+            let LaunchError::Malformed { line, source } = error else {
+                panic!("wrong refusal: {error:?}")
+            };
+            assert_eq!(line.len(), expected_prefix_len);
+            assert!(source.contains("exceeds 4096 bytes"), "{source}");
+            assert!(display_len < READY_LINE_MAX_BYTES as usize + 200);
+            // The bound itself: one byte past the ceiling is enough to know the
+            // record is too long, and nothing beyond it is ever pulled in.
+            assert!(
+                delivered.get() as u64 <= READY_LINE_MAX_BYTES + 1,
+                "read {} of {source_len} bytes; the ceiling is {READY_LINE_MAX_BYTES}",
+                delivered.get()
+            );
+        }
     }
 
     /// The version guard runs before any other field is trusted, and lives

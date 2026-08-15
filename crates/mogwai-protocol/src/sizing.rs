@@ -16,7 +16,7 @@
 //! costs a connection some budget while under-reserving voids the bound.
 use crate::{
     ClientMessage, JSON_ESCAPE_FACTOR, MAX_ACCOUNT_ID_LEN, MAX_CLIENT_ID_LEN, MAX_CURRENCY_LEN,
-    MAX_REASON_LEN, MAX_SYMBOL_LEN,
+    MAX_SYMBOL_LEN,
 };
 
 /// The engine-state facts a reservation must know to bound a command's output.
@@ -38,25 +38,36 @@ const ESC: usize = JSON_ESCAPE_FACTOR;
 /// Any single order-lifecycle frame (`OrderAccepted`, `OrderRejected`,
 /// `OrderCanceled`, `OrderUpdated`, `OrderFilled`, the two modify/cancel
 /// rejections). Widest shape is `OrderFilled`: `type`, `client_order_id`,
-/// `venue_order_id`, `trade_id`, `symbol`, `side`, `last_qty`, `last_px`,
-/// `leaves_qty`, `commission`, `ts_event`. The fixed addend covers ~150 bytes
+/// `venue_order_id`, `trade_id`, `position_id`, `symbol`, `side`, `last_qty`,
+/// `last_px`, `leaves_qty`, `commission`, `currency`, `liquidity`, `ts_event`.
+/// The fixed addend covers ~190 bytes
 /// of key names, quotes, colons, commas and braces, four `Decimal`s at their
 /// widest serialized form (~33 bytes each, 132), a u64 at 20, a `Side`
 /// spelling at 5, and the server-generated `trade_id` and its key (~35) - about
-/// 350, rounded to 512. Charged separately: two client-id-shaped strings (the
-/// client id, and the venue id which is server-generated and shorter), one
-/// symbol and one reason.
-pub const ORDER_EVENT_MAX_BYTES: usize =
-    576 + ESC * (3 * MAX_CLIENT_ID_LEN + MAX_SYMBOL_LEN + MAX_REASON_LEN + MAX_CURRENCY_LEN);
+/// 390, rounded to 576. Charged separately: four id-shaped strings, one symbol
+/// and one currency.
+const ORDER_FILLED_MAX_BYTES: usize =
+    576 + ESC * (4 * MAX_CLIENT_ID_LEN + MAX_SYMBOL_LEN + MAX_CURRENCY_LEN);
+
+/// Widest reason-bearing lifecycle frame: client id, optional venue id, capped
+/// reason, timestamp and about 100 bytes of envelope, rounded to 192.
+const ORDER_REJECTION_MAX_BYTES: usize =
+    192 + ESC * (2 * MAX_CLIENT_ID_LEN + crate::MAX_REASON_LEN);
+
+pub const ORDER_EVENT_MAX_BYTES: usize = if ORDER_FILLED_MAX_BYTES > ORDER_REJECTION_MAX_BYTES {
+    ORDER_FILLED_MAX_BYTES
+} else {
+    ORDER_REJECTION_MAX_BYTES
+};
 
 /// One `Balance` row inside `AccountState`: `currency`, `total`, `free`,
 /// `locked` - three decimals at ~32 bytes plus ~60 bytes of key names,
 /// punctuation and the enclosing braces, rounded to 192.
 pub const BALANCE_ROW_MAX_BYTES: usize = 192 + ESC * MAX_CURRENCY_LEN;
 
-/// One `Position` row inside `AccountState`: `symbol`, `quantity`,
-/// `avg_px` - two decimals at ~32 bytes plus key names and punctuation,
-/// rounded to 128.
+/// One `Position` row inside `AccountState`: `symbol`, `position_id`,
+/// `quantity`, `avg_px`, `mark_px`, `unrealized_pnl` - four decimals at about
+/// 32 bytes plus key names and punctuation, rounded to 256.
 pub const POSITION_ROW_MAX_BYTES: usize = 256 + ESC * (MAX_SYMBOL_LEN + MAX_CLIENT_ID_LEN);
 
 pub const MARGIN_ROW_MAX_BYTES: usize = 192 + ESC * (MAX_SYMBOL_LEN + MAX_CURRENCY_LEN);
@@ -207,5 +218,67 @@ mod tests {
             account_state_max_bytes(&shape) >= serde_json::to_vec(&state).unwrap().len(),
             "account snapshot bound must dominate its wire bytes"
         );
+    }
+
+    /// Finding 5's corrected derivations, RUN rather than argued. The module
+    /// doc's whole claim is that every constant carries a field-by-field
+    /// derivation from the struct it bounds, and both halves of
+    /// `ORDER_EVENT_MAX_BYTES` had drifted from theirs - `OrderFilled` grew
+    /// `position_id`, `commission_currency` and `liquidity_side` while the
+    /// derivation still charged an unused `MAX_REASON_LEN` that happened to
+    /// cover them. Constructing both maximal frames is what keeps a future
+    /// field addition from silently voiding the reservation instead of failing
+    /// here.
+    ///
+    /// Every string is filled with U+0001, which JSON escapes to six bytes -
+    /// the worst case `JSON_ESCAPE_FACTOR` charges for. A validated id can
+    /// never contain it; the bound must hold for what the TYPE can carry.
+    #[test]
+    fn order_event_bound_covers_both_maximal_lifecycle_frames() {
+        use crate::{
+            LiquiditySide, MAX_CLIENT_ID_LEN, MAX_CURRENCY_LEN, MAX_REASON_LEN, MAX_SYMBOL_LEN,
+            OrderFilled, ServerMessage, Side,
+        };
+        use rust_decimal::Decimal;
+
+        let worst = |len: usize| char::from(1).to_string().repeat(len);
+
+        let filled = ServerMessage::OrderFilled(OrderFilled {
+            client_order_id: worst(MAX_CLIENT_ID_LEN),
+            venue_order_id: worst(MAX_CLIENT_ID_LEN),
+            trade_id: worst(MAX_CLIENT_ID_LEN),
+            symbol: worst(MAX_SYMBOL_LEN).into(),
+            position_id: Some(worst(MAX_CLIENT_ID_LEN)),
+            side: Side::Sell,
+            last_qty: Decimal::MIN,
+            last_px: Decimal::MIN,
+            leaves_qty: Decimal::MIN,
+            commission: Decimal::MIN,
+            commission_currency: worst(MAX_CURRENCY_LEN),
+            liquidity_side: LiquiditySide::Maker,
+            ts_event: u64::MAX,
+        });
+        let rejected = ServerMessage::OrderRejected {
+            client_order_id: worst(MAX_CLIENT_ID_LEN),
+            reason: worst(MAX_REASON_LEN),
+            ts_event: u64::MAX,
+        };
+
+        for (label, frame) in [("OrderFilled", &filled), ("OrderRejected", &rejected)] {
+            let bytes = serde_json::to_vec(frame).unwrap().len();
+            assert!(
+                ORDER_EVENT_MAX_BYTES >= bytes,
+                "{label} reservation {ORDER_EVENT_MAX_BYTES} must dominate {bytes} wire bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn account_id_deserialization_enforces_the_type_invariant() {
+        let oversized = serde_json::to_string(&"Z".repeat(MAX_ACCOUNT_ID_LEN + 1)).unwrap();
+        assert!(serde_json::from_str::<AccountId>(&oversized).is_err());
+        assert!(serde_json::from_str::<AccountId>(r#""illegal value""#).is_err());
+        let valid: AccountId = serde_json::from_str(r#""MOGWAI-001""#).unwrap();
+        assert_eq!(valid.as_str(), "MOGWAI-001");
     }
 }

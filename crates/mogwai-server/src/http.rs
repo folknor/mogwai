@@ -15,9 +15,8 @@ use mogwai_engine::MAX_ARMED_DIVERGENCES;
 use mogwai_protocol::{
     AccountState, AdmissionSubject, ClientMessage, DEFAULT_HISTORY_LIMIT, InstrumentDef,
     MAX_HISTORY_LIMIT, OrderType, QuoteTick, ServerClock, ServerMessage, SimClock, TradeTick,
-    control::Divergence, trades_through, truncate_client_id, truncate_reason,
-    validate_client_order_id, validate_divergence, validate_modify_order, validate_request_id,
-    validate_submit_order,
+    control::Divergence, trades_through, truncate_client_id, validate_client_order_id,
+    validate_divergence, validate_modify_order, validate_request_id, validate_submit_order,
 };
 use serde::{Deserialize, Serialize};
 
@@ -429,19 +428,6 @@ pub(crate) async fn arm_divergence(
     // `PartialFillNext.fraction` outside `(0, 1]`) is rejected before it is
     // stored into server state or armed on the engine, rather than surfacing
     // as a degenerate fill downstream.
-    // The operator-supplied reject reason is truncated HERE, at the arming
-    // boundary, before the divergence is stored: the engine echoes it verbatim
-    // into `OrderRejected.reason`, so an uncapped one would make a produced
-    // frame exceed the reservation sized against `ORDER_EVENT_MAX_BYTES` and
-    // void the whole size model. Truncating at the boundary means the engine can
-    // only ever echo an already-bounded string, and no engine change is needed.
-    // Documented alongside the control in docs/havoc.md.
-    let div = match div {
-        Divergence::RejectNextSubmit { reason } => Divergence::RejectNextSubmit {
-            reason: truncate_reason(reason),
-        },
-        other => other,
-    };
     match div {
         Divergence::DelayAcks { ms } => {
             run.delay_ms.store(ms, Ordering::Relaxed);
