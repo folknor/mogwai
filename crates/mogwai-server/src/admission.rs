@@ -48,10 +48,9 @@ pub(crate) const ADMISSION_LANE_FRAMES: usize = 64;
 /// any actual refusal would leave a connection whose priority lane is
 /// completely empty unable to state why it is closing.
 ///
-/// One connection owns one unconditional replay - it is attached to the run's
-/// single tape on upgrade, with no subscribe frame - hence exactly one future
-/// refusal promise. Deliberately no longer tied to a wire subscribe cap: there
-/// is no wire subscribe.
+/// One connection owns one unconditional replay, for the one river named on
+/// its upgrade, hence exactly one future refusal promise. Deliberately no
+/// longer tied to a wire subscribe cap: there is no wire subscribe.
 pub(crate) const ADMISSION_PROMISE_TICKETS: usize = 1;
 /// Per-connection capacity of the sequential command queue.
 pub(crate) const PENDING_COMMAND_SLOTS: usize = 256;

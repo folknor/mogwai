@@ -17,6 +17,15 @@ rest - and that is the only thing it ever writes there. Logs go to stderr, so
 the two never interleave. A launcher captures stdout and reads a line; a human
 sees the same line in the terminal.
 
+The WebSocket endpoint is `GET /ws?symbol=<symbol>`. The query parameter is
+optional; omitting it binds the socket to the run's boot symbol for compatibility
+with older clients. A socket owns exactly one river. A supplied symbol is 1 to
+32 ASCII letters, digits, dot, dash, or underscore, and matching is case exact.
+Malformed or unserved symbols are refused with HTTP 400 before the upgrade.
+For now only the symbol this run booted is accepted. That is a temporary
+restriction until run state is keyed per river, not the venue's final symbol
+model.
+
 There is no flag for this and nothing to opt into. The record used to be gated
 behind `--ready-fd <FD>`, which took an unvalidated fd number: a number naming
 some other inherited fd wrote the record into whatever that was and then closed

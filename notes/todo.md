@@ -234,19 +234,6 @@ their build breaking loudly when piece 13 lands is the designed handoff.
      so it needs sequencing rather than discovering at commit time.
   5. ENGINE REGISTRATION BECOMES LAZY, instruments appearing as symbols are
      first asked for.
-  6. A `/ws` SYMBOL CARRIER HAS TO BE CREATED, because THERE IS NO SUBSCRIPTION
-     PATH AT ALL. Surveyed 2026-08-15. `handle_socket` attaches every socket to
-     `state.run.tape` UNCONDITIONALLY on upgrade; there is no subscribe frame to
-     validate and nowhere to bind a symbol. `mogwai-protocol` pins the absence
-     with a byte-level test asserting `Subscribe` and `Unsubscribe` FAIL to
-     deserialize, and `admission.rs` derives
-     `ADMISSION_PROMISE_TICKETS = 1` from "one connection owns one unconditional
-     replay - it is attached to the run's single tape on upgrade, with no
-     subscribe frame". The only request-carried symbol in the serving path today
-     is `HistoryQuery.symbol` on `/trades` and `/quotes`. This is the largest gap
-     between the settled model and the code and it is not a modification, it is
-     a new carrier - a query parameter on the upgrade, or keeping the symbol in
-     boot config for slice 1.
   7. THE PROCESS-GLOBAL RUN INDEX IS THE TRUE PIN. `source::RunIndex` is a
      `static OnceLock` holding ONE symbol and ONE `CheckpointIndex`, and `index`
      returns `None` for any other symbol. Strongly enforced: a test builds a

@@ -26,6 +26,10 @@ pub struct MogwaiDataClientConfig {
     /// Later data handlers derive the `/ws` market-data path from this value.
     /// The skeleton stores and validates the URL without opening a transport.
     pub base_url: String,
+    /// River named on the websocket upgrade. `None` takes the server's boot
+    /// symbol for compatibility with clients predating the carrier.
+    #[serde(default)]
+    pub symbol: Option<String>,
     /// Havoc to arm on connect. `None` is a clean adapter.
     #[serde(default)]
     pub havoc: Option<HavocSpec>,
@@ -45,6 +49,7 @@ impl Default for MogwaiDataClientConfig {
         Self {
             account_id: AccountId::from(DEFAULT_ACCOUNT_ID),
             base_url: String::new(),
+            symbol: None,
             havoc: None,
             expected_run_seed: None,
         }
@@ -65,6 +70,7 @@ impl MogwaiDataClientConfig {
         Self {
             account_id,
             base_url: format!("ws://{addr}"),
+            symbol: None,
             havoc: None,
             expected_run_seed: None,
         }
@@ -82,6 +88,7 @@ impl MogwaiDataClientConfig {
     pub fn for_run(record: &mogwai_protocol::ReadyRecord, account_id: AccountId) -> Self {
         Self {
             expected_run_seed: Some(record.run_seed),
+            symbol: Some(record.symbol.clone()),
             ..Self::for_addr(record.addr, account_id)
         }
     }
@@ -104,6 +111,7 @@ impl MogwaiDataClientConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         validate_base_url(&self.base_url)?;
         validate_account_id(&self.account_id)?;
+        validate_symbol(self.symbol.as_deref())?;
         validate_havoc(&self.havoc)
     }
 
@@ -114,9 +122,17 @@ impl MogwaiDataClientConfig {
     /// padded ws URL silently inside the reconnect loop - the exact
     /// never-connects-with-no-diagnostic failure mode (D.4) the validator
     /// exists to rule out.
+    ///
+    /// A configured `symbol` is appended raw and needs no percent encoding:
+    /// `validate` refuses every byte outside the wire alphabet first. An absent
+    /// symbol takes the server's boot river.
     #[must_use]
     pub fn ws_url(&self) -> String {
-        format!("{}/ws", self.base_url.trim().trim_end_matches('/'))
+        let base = self.base_url.trim().trim_end_matches('/');
+        self.symbol.as_ref().map_or_else(
+            || format!("{base}/ws"),
+            |symbol| format!("{base}/ws?symbol={symbol}"),
+        )
     }
 
     /// Derives the HTTP base URL from the configured ws/wss `base_url`.
@@ -145,6 +161,9 @@ pub struct MogwaiExecClientConfig {
     pub account_id: AccountId,
     /// Base URL of the running mogwai-server.
     pub base_url: String,
+    /// River named on the websocket upgrade. `None` takes the server default.
+    #[serde(default)]
+    pub symbol: Option<String>,
     /// Account type reported to nautilus.
     pub account_type: AccountType,
     /// Order-management-system type the venue presents to nautilus. Defaults to
@@ -177,6 +196,7 @@ impl Default for MogwaiExecClientConfig {
             trader_id: TraderId::from("MOGWAI-001"),
             account_id: AccountId::from(DEFAULT_ACCOUNT_ID),
             base_url: String::new(),
+            symbol: None,
             account_type: AccountType::Cash,
             oms_type: default_oms_type(),
             havoc: None,
@@ -210,6 +230,7 @@ impl MogwaiExecClientConfig {
     pub fn for_run(record: &mogwai_protocol::ReadyRecord, account_id: AccountId) -> Self {
         Self {
             expected_run_seed: Some(record.run_seed),
+            symbol: Some(record.symbol.clone()),
             ..Self::for_addr(record.addr, account_id)
         }
     }
@@ -254,15 +275,21 @@ impl MogwaiExecClientConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         validate_base_url(&self.base_url)?;
         validate_account_id(&self.account_id)?;
+        validate_symbol(self.symbol.as_deref())?;
         validate_havoc(&self.havoc)
     }
 
     /// Returns the ws/wss URL to hand to the transport, trimmed of
     /// surrounding whitespace. See `MogwaiDataClientConfig::ws_url` for why
-    /// the trim matters (a padded URL passes validation but never connects).
+    /// the trim matters (a padded URL passes validation but never connects),
+    /// and for why a configured symbol is appended without encoding.
     #[must_use]
     pub fn ws_url(&self) -> String {
-        format!("{}/ws", self.base_url.trim().trim_end_matches('/'))
+        let base = self.base_url.trim().trim_end_matches('/');
+        self.symbol.as_ref().map_or_else(
+            || format!("{base}/ws"),
+            |symbol| format!("{base}/ws?symbol={symbol}"),
+        )
     }
 
     /// Derives the HTTP base URL from the configured ws/wss `base_url`.
@@ -273,6 +300,21 @@ impl MogwaiExecClientConfig {
     pub fn http_base_url(&self) -> String {
         http_base_url(&self.base_url)
     }
+}
+
+/// Refuse a symbol the `/ws` URL cannot carry.
+///
+/// The URL is built by CONCATENATION, so an illegal symbol must fail at config
+/// validation rather than as an unreadable `400` from inside the reconnect
+/// loop. The rule is `mogwai_protocol::validate_wire_symbol`, the one the
+/// server judges the decoded value by, so the two ends cannot drift.
+fn validate_symbol(symbol: Option<&str>) -> anyhow::Result<()> {
+    if let Some(symbol) = symbol
+        && let Err(reason) = mogwai_protocol::validate_wire_symbol(symbol)
+    {
+        anyhow::bail!("symbol {symbol:?} cannot be carried directly in a websocket URL: {reason}");
+    }
+    Ok(())
 }
 
 impl ClientConfig for MogwaiExecClientConfig {
@@ -368,6 +410,21 @@ fn validate_havoc(havoc: &Option<HavocSpec>) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    fn ready_record() -> mogwai_protocol::ReadyRecord {
+        mogwai_protocol::ReadyRecord {
+            version: mogwai_protocol::ReadyRecord::VERSION,
+            addr: "127.0.0.1:1234".parse().expect("address"),
+            pid: 1,
+            symbol: "MNQ".into(),
+            run_seed: 7,
+            data_origin_ns: 0,
+            run_start_ns: 0,
+            run_duration_ns: Some(1_000_000_000),
+            warmup_ns: 0,
+            version_string: "test".into(),
+        }
+    }
+
     #[test]
     fn default_account_label_is_valid_because_it_is_local_only() {
         let data = MogwaiDataClientConfig {
@@ -381,5 +438,59 @@ mod tests {
             ..MogwaiExecClientConfig::default()
         };
         exec.validate().unwrap();
+    }
+
+    #[test]
+    fn ws_url_appends_a_configured_symbol() {
+        let config = MogwaiDataClientConfig {
+            base_url: "ws://127.0.0.1:1".into(),
+            symbol: Some("MNQ".into()),
+            ..MogwaiDataClientConfig::default()
+        };
+        assert_eq!(config.ws_url(), "ws://127.0.0.1:1/ws?symbol=MNQ");
+    }
+
+    #[test]
+    fn ws_url_omits_an_absent_symbol() {
+        let config = MogwaiExecClientConfig {
+            base_url: "ws://127.0.0.1:1".into(),
+            ..MogwaiExecClientConfig::default()
+        };
+        assert_eq!(config.ws_url(), "ws://127.0.0.1:1/ws");
+    }
+
+    #[test]
+    fn for_run_carries_the_records_symbol() {
+        let record = ready_record();
+        let data = MogwaiDataClientConfig::for_run(&record, AccountId::from(DEFAULT_ACCOUNT_ID));
+        let exec = MogwaiExecClientConfig::for_run(&record, AccountId::from(DEFAULT_ACCOUNT_ID));
+        assert_eq!(data.symbol.as_deref(), Some("MNQ"));
+        assert_eq!(exec.symbol.as_deref(), Some("MNQ"));
+    }
+
+    #[test]
+    fn validate_refuses_a_symbol_needing_percent_encoding() {
+        let config = MogwaiDataClientConfig {
+            base_url: "ws://127.0.0.1:1".into(),
+            symbol: Some("MN Q".into()),
+            ..MogwaiDataClientConfig::default()
+        };
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("carried directly")
+        );
+    }
+
+    #[test]
+    fn ws_url_keeps_trimming_a_padded_base_url_with_a_symbol_set() {
+        let config = MogwaiExecClientConfig {
+            base_url: "  ws://127.0.0.1:1/  ".into(),
+            symbol: Some("MNQ".into()),
+            ..MogwaiExecClientConfig::default()
+        };
+        assert_eq!(config.ws_url(), "ws://127.0.0.1:1/ws?symbol=MNQ");
     }
 }

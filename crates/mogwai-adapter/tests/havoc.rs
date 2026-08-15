@@ -62,6 +62,7 @@ async fn subscribed_data_client(
     let config = MogwaiDataClientConfig {
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
+        symbol: None,
         havoc,
         expected_run_seed: None,
     };
@@ -117,6 +118,7 @@ async fn connect_data_client(
         // refuses, so no socket binds an account nobody chose.
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
+        symbol: None,
         havoc,
         expected_run_seed: None,
     };
@@ -237,6 +239,7 @@ async fn submit_stop_exec_client(
     let config = MogwaiExecClientConfig {
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
+        symbol: None,
         havoc: Some(havoc),
         ..MogwaiExecClientConfig::default()
     };
@@ -331,6 +334,7 @@ async fn ships_server_havoc() {
     let data_config = MogwaiDataClientConfig {
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
+        symbol: None,
         havoc: Some(havoc),
         expected_run_seed: None,
     };
@@ -531,6 +535,7 @@ async fn a_venue_serving_another_run_is_refused_terminally() {
     let config = MogwaiDataClientConfig {
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
+        symbol: None,
         havoc: None,
         // Bound to a run this stub is not serving.
         expected_run_seed: Some(7),
@@ -573,6 +578,7 @@ async fn an_unanswerable_identity_probe_does_not_refuse() {
     let config = MogwaiDataClientConfig {
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
+        symbol: None,
         havoc: None,
         expected_run_seed: Some(7),
     };
@@ -606,6 +612,7 @@ async fn conn_reconnect_respects_max_attempts() {
     let config = MogwaiDataClientConfig {
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
+        symbol: None,
         havoc: Some(conn_havoc(ConnHavoc {
             reconnect_max_attempts: Some(3),
             reconnect_delay_initial_ms: 30,

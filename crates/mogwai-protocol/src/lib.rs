@@ -43,7 +43,7 @@ pub use messages::{
     OrderStatusInfo, OrderStatusSnapshot, OrderType, Position, PostedMargin, QueryKind, QuoteTick,
     ScanKind, ServerMessage, Side, SubmitOrder, TimeInForce, TradeTick, WireOrderStatus,
     touches_trigger, trades_through, truncate_client_id, truncate_reason, validate_client_order_id,
-    validate_modify_order, validate_request_id, validate_submit_order,
+    validate_modify_order, validate_request_id, validate_submit_order, validate_wire_symbol,
 };
 pub use ready::ReadyRecord;
 pub use seeds::RunSeeds;

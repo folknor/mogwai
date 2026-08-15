@@ -15,9 +15,16 @@ the blocking pool or engine mutex, and a full bound is a visible
 `AdmissionRejected` the engine never sees. Inbound frames and reassembled
 messages are capped at `MAX_CLIENT_MESSAGE_BYTES`, 64 KiB, so a dependency
 default no longer sets the venue's memory bound; an oversized frame ends the
-connection. A WebSocket is
-attached to the run tape on upgrade: clients do not subscribe or supply an
-account identity. The bounded fanout ring remains; a lagging client receives
+connection. A WebSocket names its one river with the optional, case-exact
+`symbol` query parameter on the upgrade. The key is known before any tasks or
+bytes exist, an unserved river can be refused as HTTP 400 rather than an
+ambiguous WebSocket close, and one connection still owns exactly one replay. A
+frame carrier would permit multiple replays and create an unbound interval
+before the first frame. The query carrier is the seam where river-keyed state,
+boat placement, and per-boat clocks attach. Until that state lands, resolution
+accepts only the run's boot symbol and the socket attaches to that run tape;
+clients do not send subscribe frames or an account identity. The bounded fanout
+ring remains; a lagging client receives
 `FeedLagged` on the priority lane and is closed with WS 1011.
 
 Execution output that no command asked for reaches every open socket. The

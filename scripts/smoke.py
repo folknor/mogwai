@@ -177,13 +177,13 @@ class Venue:
 
 
 class WsClient:
-    def __init__(self, addr: str, timeout: float = 30.0) -> None:
+    def __init__(self, addr: str, symbol: str, timeout: float = 30.0) -> None:
         host, port = addr.rsplit(":", 1)
         self.sock = socket.create_connection((host, int(port)), timeout=timeout)
         self.sock.settimeout(timeout)
         key = base64.b64encode(os.urandom(16)).decode()
         handshake = (
-            f"GET /ws HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\n"
+            f"GET /ws?symbol={symbol} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\n"
             f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\n"
             "Sec-WebSocket-Version: 13\r\n\r\n"
         )
@@ -346,7 +346,7 @@ def check_common(venue: Venue) -> None:
 
 
 def mode_default(venue: Venue) -> str:
-    ws = WsClient(venue.addr)
+    ws = WsClient(venue.addr, venue.symbol)
     try:
         # No Subscribe frame is sent, and none exists to send: the venue pushes
         # the run's one tape on upgrade.
@@ -435,7 +435,7 @@ def mode_default(venue: Venue) -> str:
 
 
 def mode_futures(venue: Venue) -> str:
-    ws = WsClient(venue.addr)
+    ws = WsClient(venue.addr, venue.symbol)
     try:
         trade = ws.until(lambda frame: frame.get("type") == "Trade")
         assert trade and Decimal(trade["size"]) >= 1
@@ -458,7 +458,7 @@ def mode_futures(venue: Venue) -> str:
 
 
 def mode_fees(venue: Venue) -> str:
-    ws = WsClient(venue.addr)
+    ws = WsClient(venue.addr, venue.symbol)
     try:
         assert ws.until(lambda frame: frame.get("type") == "Trade")
         ws.send(order("FEES-1", venue.symbol, quantity="1"))
@@ -476,7 +476,7 @@ def mode_fees(venue: Venue) -> str:
 
 
 def mode_heartbeat(venue: Venue) -> str:
-    ws = WsClient(venue.addr)
+    ws = WsClient(venue.addr, venue.symbol)
     try:
         beats = 0
         deadline = time.monotonic() + 20
@@ -496,7 +496,7 @@ def mode_accelerated(venue: Venue) -> str:
     clock = venue.http("/clock")
     assert clock["sim"]["speed"] > 1.0, f"the accelerated venue reports {clock['sim']}"
 
-    ws = WsClient(venue.addr)
+    ws = WsClient(venue.addr, venue.symbol)
     try:
         started = time.monotonic()
         first = ws.until(lambda frame: frame.get("type") == "Trade")
@@ -523,7 +523,7 @@ def mode_accelerated(venue: Venue) -> str:
 
 
 def mode_admission(venue: Venue) -> str:
-    ws = WsClient(venue.addr)
+    ws = WsClient(venue.addr, venue.symbol)
     try:
         # A shrunk held-lane budget puts the refusal a few orders away instead
         # of twelve thousand. What is under test is the REFUSAL, which is the
@@ -556,7 +556,7 @@ def mode_command_latency(venue: Venue) -> str:
     )
     assert armed == 202, f"arming refused with {armed}"
 
-    ws = WsClient(venue.addr)
+    ws = WsClient(venue.addr, venue.symbol)
     try:
         started = time.monotonic()
         ws.send(order("LATENCY-1", venue.symbol))
@@ -584,7 +584,7 @@ def mode_band(venue: Venue) -> str:
     assert anchor, "no anchor print"
     price = float(anchor[-1]["price"])
 
-    ws = WsClient(venue.addr)
+    ws = WsClient(venue.addr, venue.symbol)
     try:
         ws.send(
             order(
@@ -656,7 +656,7 @@ def mode_band_swept(venue: Venue) -> str:
     generous and the submit is retried at a fresh anchor price rather than
     asserting that one draw of the generator must cooperate.
     """
-    ws = WsClient(venue.addr)
+    ws = WsClient(venue.addr, venue.symbol)
     try:
         for attempt in range(3):
             client_order_id = f"BAND-SWEPT-{attempt}"
@@ -775,7 +775,7 @@ def mode_stop(venue: Venue) -> str:
     # flat; the observed range is what carries it in every ordinary case.
     offset = max(2 * (max(prices) - min(prices)), Decimal("0.10"))
 
-    ws = WsClient(venue.addr)
+    ws = WsClient(venue.addr, venue.symbol)
     try:
         # The loop exists for ONE residual case: a stop already through its
         # trigger at the acceptance instant proves triggering and adverse
@@ -924,7 +924,7 @@ def mode_stop(venue: Venue) -> str:
 
 def mode_duration(venue: Venue, duration: str) -> str:
     """The declared-duration path: announced completion, then exit 0."""
-    ws = WsClient(venue.addr)
+    ws = WsClient(venue.addr, venue.symbol)
     try:
         completion = ws.until(
             lambda frame: frame.get("type") == "RunComplete", timeout=180

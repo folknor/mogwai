@@ -53,6 +53,10 @@ impl Venue {
         format!("{}/ws", self.inner.base_url())
     }
 
+    pub fn ws_url_for(&self, symbol: &str) -> String {
+        format!("{}/ws?symbol={symbol}", self.inner.base_url())
+    }
+
     /// Waits for exit, failing the test if the venue outlives `timeout`.
     pub fn wait_for_exit(&mut self, timeout: Duration) -> VenueExit {
         let deadline = Instant::now() + timeout;

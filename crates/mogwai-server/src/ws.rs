@@ -7,10 +7,11 @@ use std::{sync::Arc, time::Instant};
 
 use axum::{
     extract::{
-        State,
+        Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    response::IntoResponse,
+    http::StatusCode,
+    response::{IntoResponse, Response},
 };
 use futures_util::{SinkExt, StreamExt};
 use mogwai_protocol::{ClientMessage, CommandClass, ServerMessage, truncate_reason};
@@ -19,16 +20,69 @@ use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use crate::{
     admission::{CloseSpec, ExecLanes, FrameClass, HeldFrame, Outbound, OutboundFrame},
     config::{build_admission_limits, sim_duration_from_millis, sim_now_ns},
-    http::{AppState, OrderOutcome, process_order_cmd},
+    http::{AppState, OrderOutcome, process_order_cmd, resolve_socket_symbol},
 };
 
+/// The upgrade's query string, exactly as the client wrote it.
+///
+/// `deny_unknown_fields` is a WIRE-COMPATIBILITY decision, taken knowingly:
+/// later pieces add `speed` and `duration_ms` here, and until they do, a client
+/// that sends one is REFUSED rather than silently served a different river than
+/// it asked for. The price is that ANY unrecognized key is a `400`, including
+/// one an unrelated client, proxy or tracing layer appends, and including a
+/// future key added before its handling lands. That is accepted:
+/// accepted-and-ignored is the failure mode this carrier exists to prevent, and
+/// the venue's clients are its own. Relaxing it later is a wire change that owes
+/// its own reasoning, not a tidy-up.
+///
+/// A repeated `symbol` key is NOT an error - `serde_urlencoded` keeps the last
+/// occurrence - so the last one wins and is then validated like any other.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SocketQuery {
+    /// Absent means "the run's boot symbol", which is what every client that
+    /// predates this carrier sends.
+    #[serde(default)]
+    symbol: Option<String>,
+}
+
+/// What one connection is bound to, decided before the upgrade completes and
+/// owned by the socket for its whole life.
+///
+/// One field today. It exists as a struct rather than a bare `Symbol` because
+/// boat placement and the per-boat clock attach here, and because every
+/// downstream signature then changes exactly once.
+#[derive(Debug, Clone)]
+pub(crate) struct SocketSession {
+    pub(crate) symbol: mogwai_protocol::Symbol,
+}
+
+/// Bind one socket to one river, or refuse before the 101.
+///
+/// A refusal is a STATUS, not a close code: an unserved symbol on `/trades` is
+/// a `400` naming what is served, and a WebSocket close after a successful
+/// upgrade is the "looks like an outage" ambiguity `CLOSE_VENUE_FAULT` fights.
+/// Returning here spawns no task, allocates no lane and opens no socket.
+///
+/// The extractor order is CONVENTION matching the other handlers, not a
+/// constraint: all three are `FromRequestParts`, so any order compiles.
 pub(crate) async fn ws_upgrade(
     ws: WebSocketUpgrade,
+    Query(query): Query<SocketQuery>,
     State(state): State<AppState>,
-) -> impl IntoResponse {
+) -> Response {
+    let symbol = match resolve_socket_symbol(
+        query.symbol.as_deref(),
+        &state.run.instrument.symbol,
+        &state.profiles,
+    ) {
+        Ok(symbol) => symbol,
+        Err(body) => return (StatusCode::BAD_REQUEST, body).into_response(),
+    };
+    let session = SocketSession { symbol };
     ws.max_message_size(mogwai_protocol::MAX_CLIENT_MESSAGE_BYTES)
         .max_frame_size(mogwai_protocol::MAX_CLIENT_MESSAGE_BYTES)
-        .on_upgrade(move |socket| handle_socket(socket, state))
+        .on_upgrade(move |socket| handle_socket(socket, state, session))
 }
 
 fn send_admission(lanes: &ExecLanes, msg: ServerMessage) -> Result<(), CloseSpec> {
@@ -51,13 +105,14 @@ struct QueuedCommand {
     global_slot: OwnedSemaphorePermit,
 }
 
-async fn dispatch_command(cmd: ClientMessage, state: &AppState, lanes: &ExecLanes) {
+async fn dispatch_command(
+    cmd: ClientMessage,
+    state: &AppState,
+    lanes: &ExecLanes,
+    session: &SocketSession,
+) {
     let class = CommandClass::of(&cmd);
-    let act_ms = class.map_or(0, |class| state.run.act_ms(class));
-    if act_ms > 0 {
-        tokio::time::sleep(state.sim().wall_duration(sim_duration_from_millis(act_ms))).await;
-    }
-    match process_order_cmd(cmd, state, &state.run, lanes).await {
+    match process_order_cmd(cmd, state, &state.run, lanes, &session.symbol).await {
         OrderOutcome::Produced {
             events,
             reservation,
@@ -78,6 +133,7 @@ fn spawn_command_dispatcher(
     mut commands: mpsc::Receiver<QueuedCommand>,
     state: AppState,
     lanes: ExecLanes,
+    session: SocketSession,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // The permit's scope is the correctness property: the process-wide
@@ -87,7 +143,7 @@ fn spawn_command_dispatcher(
         // than left to a destructure binding whose lifetime an underscore
         // pattern would silently end early.
         while let Some(queued) = commands.recv().await {
-            dispatch_command(queued.cmd, &state, &lanes).await;
+            dispatch_command(queued.cmd, &state, &lanes, &session).await;
             drop(queued.global_slot);
         }
     })
@@ -191,14 +247,16 @@ async fn run_writer(
     }
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState) {
+async fn handle_socket(socket: WebSocket, state: AppState, session: SocketSession) {
+    tracing::info!(symbol = %session.symbol, "socket bound to river");
     let (sink, mut stream) = socket.split();
     let (out_tx, out_rx) = mpsc::channel(256);
     let (held_tx, held_rx) = mpsc::unbounded_channel();
     let (prio_tx, prio_rx) = mpsc::unbounded_channel();
     let lanes = ExecLanes::new(held_tx, prio_tx, build_admission_limits(&state.cfg));
     let (command_tx, command_rx) = mpsc::channel(state.cfg.pending_command_acts);
-    let dispatcher = spawn_command_dispatcher(command_rx, state.clone(), lanes.clone());
+    let dispatcher =
+        spawn_command_dispatcher(command_rx, state.clone(), lanes.clone(), session.clone());
     let writer = tokio::spawn(run_writer(sink, prio_rx, out_rx, state.clone()));
     // Venue-ORIGINATED execution output (a trigger fill nobody commanded)
     // is delivered through these lanes, so the run has to know about them for
@@ -206,6 +264,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let lane_id = state.run.bind_lanes(lanes.clone());
     let pump = spawn_exec_pump(held_rx, Arc::clone(&state.run), state.sim(), out_tx.clone());
     let feed = {
+        // Resolution admits only the run tape's river today. Piece 9 replaces
+        // this expression with a boatyard lookup keyed by the session.
         let (mut tape, snapshot) = state.run.tape.subscribe_with_snapshot();
         let out_tx = out_tx.clone();
         let feed_state = state.clone();

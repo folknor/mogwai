@@ -17,6 +17,92 @@ use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
+async fn ws_upgrade_refuses_an_unserved_symbol_with_400() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let error = tokio_tungstenite::connect_async(venue.ws_url_for("NOT-A-SYMBOL-HERE"))
+        .await
+        .expect_err("the HTTP upgrade must be refused");
+    match error {
+        tokio_tungstenite::tungstenite::Error::Http(response) => {
+            assert_eq!(response.status(), 400, "no upgrade occurred: {response:?}");
+        }
+        other => panic!("expected an HTTP refusal before upgrade, got {other}"),
+    }
+
+    let (mut socket, response) =
+        tokio_tungstenite::connect_async(venue.ws_url_for(&venue.record.symbol))
+            .await
+            .expect("the boot river upgrades");
+    assert_eq!(response.status(), 101);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while let Ok(Some(Ok(message))) = tokio::time::timeout_at(deadline, socket.next()).await {
+        if matches!(message, Message::Text(_)) {
+            return;
+        }
+    }
+    panic!("the named boot river produced no frames");
+}
+
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn an_order_for_another_symbol_is_refused_on_a_bound_socket() {
+    let venue = spawn(&["--config", &fast_config()]);
+    // A minute of modeled submit-act latency, which this venue's sim clock
+    // realizes one-for-one in wall time. The mismatch is refused at the
+    // protocol boundary, ABOVE that sleep and above the market reading,
+    // calendar lookup and engine lock it fronts - so the refusal must land in
+    // seconds. This is the assertion that a mismatched order drives no
+    // symbol-dependent work: a check placed lower could not answer for a
+    // minute, and the deadline below is far short of one.
+    assert_eq!(
+        post_divergence(
+            &venue.http_base(),
+            r#"{"type":"CommandLatency","submit_act_ms":60000}"#,
+        ),
+        202,
+        "the act latency is armed"
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url_for(&venue.record.symbol))
+        .await
+        .expect("bind the boot river");
+    let submit = r#"{"type":"SubmitOrder","client_order_id":"WRONG-RIVER","symbol":"MES","side":"Buy","order_type":"Limit","quantity":"1","price":"1","time_in_force":"Gtc"}"#;
+    socket
+        .send(Message::Text(submit.into()))
+        .await
+        .expect("send mismatched order");
+
+    // Well under the armed 60 s act latency, and generous next to the live tape
+    // frames this drains past.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while let Ok(Some(Ok(message))) = tokio::time::timeout_at(deadline, socket.next()).await {
+        let Message::Text(text) = message else {
+            continue;
+        };
+        match serde_json::from_str::<ServerMessage>(&text) {
+            Ok(ServerMessage::OrderRejected {
+                client_order_id,
+                reason,
+                ..
+            }) if client_order_id == "WRONG-RIVER" => {
+                assert!(reason.contains("does not match the symbol this connection is bound to"));
+                return;
+            }
+            Ok(ServerMessage::AdmissionRejected { .. }) => {
+                panic!("a symbol mismatch was mislabeled as capacity")
+            }
+            Ok(ServerMessage::OrderAccepted {
+                client_order_id, ..
+            }) if client_order_id == "WRONG-RIVER" => {
+                panic!("the mismatched order reached the engine")
+            }
+            _ => {}
+        }
+    }
+    panic!("no mismatch OrderRejected arrived");
+}
+
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
 async fn a_symbol_no_preset_covers_is_served_under_the_default_bundle() {
     let config = format!(
         "{}/tests/configs/unmatched-symbol.toml",

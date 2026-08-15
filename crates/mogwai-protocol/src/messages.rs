@@ -150,6 +150,23 @@ impl<'de> Deserialize<'de> for AccountId {
 /// `MAX_CLIENT_ID_LEN`.
 pub const MAX_SYMBOL_LEN: usize = 32;
 
+/// Validate a symbol that is carried directly in a URL query string.
+///
+/// The accepted alphabet needs no percent encoding and is shared by the
+/// adapter constructing the URL and the server validating its decoded value.
+pub fn validate_wire_symbol(symbol: &str) -> Result<(), &'static str> {
+    if symbol.is_empty() || symbol.len() > MAX_SYMBOL_LEN {
+        return Err("symbols are 1 to 32 characters");
+    }
+    if !symbol
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return Err("symbols use only ASCII letters, digits, dot, dash or underscore");
+    }
+    Ok(())
+}
+
 /// Maximum byte length of a server-generated `reason` string. Constructors
 /// truncate to this on a char boundary rather than rejecting: a reason is
 /// diagnostic prose, and a truncated diagnostic is still truthful about what
@@ -1050,6 +1067,40 @@ pub struct QuoteTick {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one alphabet both ends judge a URL-carried symbol by. Written here
+    /// rather than only at the two call sites because a drift in this function
+    /// is a client that builds a URL the server then refuses.
+    #[test]
+    fn wire_symbols_are_the_url_safe_alphabet() {
+        for legal in [
+            "MNQ",
+            "BTCUSDT",
+            "ES.c.0",
+            "a-b_c",
+            &"X".repeat(MAX_SYMBOL_LEN),
+        ] {
+            assert!(validate_wire_symbol(legal).is_ok(), "{legal} is legal");
+        }
+        for illegal in [
+            "",
+            " ",
+            " MNQ",
+            "MNQ ",
+            "MN Q",
+            "MNQ/1",
+            "MNQ%20",
+            "MNQ?symbol=X",
+            "MNQ&speed=2",
+            "MNQ\u{00e9}",
+            &"X".repeat(MAX_SYMBOL_LEN + 1),
+        ] {
+            assert!(
+                validate_wire_symbol(illegal).is_err(),
+                "{illegal:?} must be refused"
+            );
+        }
+    }
 
     /// The post-subscription-retirement wire surface, pinned by BYTE form.
     ///

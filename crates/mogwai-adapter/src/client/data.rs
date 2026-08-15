@@ -143,6 +143,20 @@ impl MogwaiDataClient {
         kind: SubKind,
         start_ts: Option<u64>,
     ) -> anyhow::Result<()> {
+        // The subscription symbol is derived from the nautilus `instrument_id`,
+        // while `config.symbol` is what the socket named on its upgrade - two
+        // sources of truth for one fact. Unreconciled, a host subscribing ES on
+        // a socket bound to MNQ would receive MNQ ticks relabelled ES by
+        // nautilus, silently, with no frame and no log. So they must agree
+        // case-exactly, matching the server's own comparison. An absent
+        // `config.symbol` takes the server default and applies no check, which
+        // is the pre-carrier behaviour unchanged.
+        if let Some(bound) = self.config.symbol.as_deref() {
+            ensure!(
+                symbol.as_ref() == bound,
+                "subscription symbol {symbol} does not match the symbol this connection is bound to ({bound})"
+            );
+        }
         // The subscription is satisfied LOCALLY. Nautilus still calls
         // subscribe/unsubscribe and this client must still implement them, but
         // the venue serves one run's one tape and pushes it unbidden, so there
@@ -1813,6 +1827,33 @@ mod quote_cache_tests {
             ask_sz: Decimal::ONE,
             ts_event,
         }
+    }
+
+    fn client_bound_to(symbol: Option<&str>) -> MogwaiDataClient {
+        let config = MogwaiDataClientConfig {
+            account_id: nautilus_model::identifiers::AccountId::from("MOGWAI-001"),
+            base_url: "ws://127.0.0.1:1".into(),
+            symbol: symbol.map(str::to_owned),
+            ..MogwaiDataClientConfig::default()
+        };
+        MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client")
+    }
+
+    #[test]
+    fn subscribe_refuses_an_instrument_outside_the_bound_symbol() {
+        let client = client_bound_to(Some("MNQ"));
+        let error = client
+            .subscribe_symbol(Arc::from("MES"), SubKind::Trades, None)
+            .expect_err("subscription must match the socket river");
+        assert!(error.to_string().contains("bound to (MNQ)"), "{error}");
+    }
+
+    #[test]
+    fn subscribe_without_a_config_symbol_keeps_the_server_default_behavior() {
+        let client = client_bound_to(None);
+        client
+            .subscribe_symbol(Arc::from("MES"), SubKind::Trades, None)
+            .expect("an absent binding applies no client-side check");
     }
 
     #[test]
